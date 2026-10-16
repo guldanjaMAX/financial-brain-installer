@@ -9,6 +9,7 @@ import { dirname, join, resolve, win32 } from "node:path";
 import { test, mock } from "node:test";
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
+import { classifyLedgerQuestion } from "../worker/src/lib/ledger-question.js";
 import * as workspace from "../operations/claude-workspace.mjs";
 import * as cli from "../brain.mjs";
 import { reviewedSkillContent } from "../operations/claude-skill.mjs";
@@ -23,8 +24,8 @@ const ACCOUNT_HEADING = "## My accounts (fill in once, after the owner confirms)
 const SAVE_HEADING = "## Financial Brain: at the end of a working session";
 const hashes = {
   "answer-contract-v1.md": "09f579cfd5a6fbbbb87af184779126c4c0381ac7351b145adc91c14de625dcba",
-  "money-rules-v2.md": "a7b1fef5818ba27c5db9c7236e50f024ddf812494d6591fe7b41f7d47040cffd",
-  "money-rules-v2-windows.md": "f1af893b702318671f4dcaa4ef64e468386c95561547521266b956c5b6693de7",
+  "money-rules-v3.md": "2e3d803ca7bd9648683732bd30cd83d41d2b587320282b616b4d9f9931347995",
+  "money-rules-v3-windows.md": "24a95478214c67e8afb4af974e8d7c481f36dae5f1f1478b5721327950e6acb3",
 };
 const options = { brainCliPath: resolve("/fixture/brain.mjs"), nodePath: process.execPath };
 const count = (text, part) => text.split(part).length - 1;
@@ -58,9 +59,10 @@ test("a: verbatim inputs, platform control, assistant substitution and one sessi
   assert.equal(workspace.CODEX_WORKSPACE_MARKER, CODEX);
   for (const platformName of ["darwin", "linux", "win32"]) {
     const text = workspace.renderOwnerRulesSection({ platformName });
-    const inner = moneyInner(platformName === "win32" ? "money-rules-v2-windows.md" : "money-rules-v2.md");
+    const inner = moneyInner(platformName === "win32" ? "money-rules-v3-windows.md" : "money-rules-v3.md");
     assert.equal(text, `${BEGIN}\n${template("answer-contract-v1.md")}\n${inner}${END}\n`);
-    assert.equal(text.includes("ls -d ~/.financial-brain-v0.4."), platformName !== "win32");
+    assert.equal(text.includes("ls -d ~/.financial-brain-v0.4."), false);
+    assert.equal(text.includes("{{BRAIN_ASK_COMMAND}}"), platformName !== "win32");
     const codex = workspace.renderOwnerRulesSection({ platformName, assistant: "codex" });
     assert.equal(codex, text.replace("in this CLAUDE.md", "in this AGENTS.md"));
     assert.equal(count(codex, "in this AGENTS.md"), 1);
@@ -132,6 +134,12 @@ for (const [assistant, filename, marker, write] of writers) {
       writeFileSync(target, bytes);
       assert.ok(readFileSync(target, "utf8").startsWith(marker), "managed-file decision reached");
       const result = write(manifest, { ...options, existingOnly });
+      if (bad.includes("owner account note without a mask")) {
+        assert.equal(result.status, "written");
+        assert.ok(readFileSync(target, "utf8").includes("owner account note without a mask"));
+        assert.equal(write(manifest, { ...options, existingOnly }).status, "verified");
+        continue;
+      }
       assert.equal(result.status, "preserved_damaged_section");
       assert.equal(result.changed, false);
       assert.equal(result.workspace, root);
@@ -205,10 +213,10 @@ test("g: session folder classifier uses cloud precedence, platform case and path
   ];
   for (const [path, kind] of risky) assert.deepEqual(workspace.classifySessionFolder(`${home}/${path}`, { home, platform: "darwin", brainFolder }), { kind });
   for (const folder of [brainFolder, `${brainFolder}/sub`, `${home}/work`, home, `${home}/Desktop-other`]) {
-    assert.equal(workspace.classifySessionFolder(folder, { home, platform: "darwin", brainFolder }), null);
+    assert.deepEqual(workspace.classifySessionFolder(folder, { home, platform: "darwin", brainFolder }), folder.startsWith(brainFolder) ? null : { kind: "outside" });
   }
   assert.equal(workspace.classifySessionFolder(`${home}/Desktop/Brain/sub`, { home, platform: "darwin", brainFolder: `${home}/Desktop/Brain` }), null);
-  assert.equal(workspace.classifySessionFolder(`${home}/desktop/x`, { home, platform: "linux", brainFolder }), null);
+  assert.deepEqual(workspace.classifySessionFolder(`${home}/desktop/x`, { home, platform: "linux", brainFolder }), { kind: "outside" });
   const windows = { home: "C:\\Users\\o", platform: "win32", brainFolder: "C:\\Users\\o\\Financial Brain" };
   for (const [folder, kind] of [["OneDrive\\Desktop", "synced"], ["OneDrive - Business\\x", "synced"], ["Downloads", "downloads"]]) {
     assert.deepEqual(workspace.classifySessionFolder(win32.join(windows.home, folder), windows), { kind });
@@ -306,7 +314,7 @@ async function update(t, { wired = ["Codex"], risky = false, createGuide = false
     client: { slug: "fixture" }, brain: { version: "0.4.7", domain: "brain.example.invalid" },
     infrastructure: { cloudflare: { account_id: "a".repeat(32), auth_profile: `financial-brain-${"b".repeat(24)}`, storage: "d1", d1_database_id: "11111111-2222-4333-8444-555555555555" } },
   }));
-  if (createGuide) for (const [, file, marker] of writers) writeFileSync(join(brainFolder, file), `${marker}\n# Earlier guide\n`);
+  if (createGuide) for (const [agent, file, marker] of writers.filter(([agent]) => createGuide !== "claude" || agent === "claude")) writeFileSync(join(brainFolder, file), `${marker}\n# Earlier guide\n`);
   const result = await cli.cmdUpdate(manifest, {
     lifecycleLockHeld: true, home: root, platform: "darwin",
     sessionFolder: join(root, risky ? "Desktop" : "work"),
@@ -332,7 +340,7 @@ async function update(t, { wired = ["Codex"], risky = false, createGuide = false
   return { root: brainFolder, writes, finish, messages };
 }
 
-test("f/g: update refresh is gated on assistant proof, skips missing AGENTS, and only risky closing gains one line", async (t) => {
+test("f/g: update refresh is gated on assistant proof, skips missing AGENTS, and outside-folder closing loads the rules", async (t) => {
   const missing = await update(t);
   assert.deepEqual(missing.writes.map(([agent]) => agent), ["codex"]);
   assert.equal(missing.writes[0][1].existingOnly, true);
@@ -346,8 +354,10 @@ test("f/g: update refresh is gated on assistant proof, skips missing AGENTS, and
   const unchangedClosing = `Done. Your Brain is now on version ${version} and passed its checks.\n` +
     "One last step: quit Claude Code (and Codex, if you use it) and open it again, so it connects to the updated Brain.\n" +
     "In Claude Code type /exit, then claude --continue.\nThen ask: check my Brain.";
-  assert.deepEqual(missing.finish, [unchangedClosing]);
-  assert.deepEqual(control.finish, [unchangedClosing + `\nNext time, open Claude Code (or Codex) in your Financial Brain folder, ${cli.displayPathForTesting(control.root, process.cwd())}. This conversation runs in your Desktop folder, which can be tidied away or synced.`]);
+  const outsideClosing = (folder) => unchangedClosing.replace("In Claude Code type /exit, then claude --continue.",
+    `In Claude Code type /exit, then open a terminal in your Financial Brain folder and run: cd ${JSON.stringify(folder)} && claude. For Codex, open that same folder. The answer rules load there.`);
+  assert.deepEqual(missing.finish, [outsideClosing(missing.root)]);
+  assert.deepEqual(control.finish, [outsideClosing(control.root) + `\nNext time, open Claude Code (or Codex) in your Financial Brain folder, ${cli.displayPathForTesting(control.root, process.cwd())}. This conversation runs in your Desktop folder, which can be tidied away or synced.`]);
   const unverified = await update(t, { wired: [], createGuide: true });
   assert.equal(unverified.writes.length, 0);
   assert.equal(readFileSync(join(unverified.root, "AGENTS.md"), "utf8"), `${CODEX}\n# Earlier guide\n`);
@@ -371,7 +381,7 @@ test("i: skill insertion is exact, bounded and inert under Windows command rende
 
 test("renderer validates kit markers, placeholder and the single Codex substitution with valid controls", () => {
   const originalRead = fs.readFileSync;
-  const valid = template("money-rules-v2.md");
+  const valid = template("money-rules-v3.md");
   const lines = valid.split("\n");
   const begin = lines[0], end = lines.at(-2);
   const invalid = [
@@ -384,7 +394,7 @@ test("renderer validates kit markers, placeholder and the single Codex substitut
   for (const text of invalid) {
     let reads = 0;
     const replacement = mock.method(fs, "readFileSync", (path, ...args) => {
-      if (String(path).endsWith("/money-rules-v2.md")) { reads++; return text; }
+      if (String(path).endsWith("/money-rules-v3.md")) { reads++; return text; }
       return originalRead(path, ...args);
     });
     syncBuiltinESMExports();
@@ -513,4 +523,134 @@ test("merge retains the rendered section's final newline when the older END had 
   assert.equal(renders, 1, "replacement reached the renderer");
   assert.equal(workspace.mergeOwnerRules(`${old}\n`, render).content, expected);
   assert.equal(renders, 2);
+});
+
+for (const [assistant, filename, marker, write] of writers) test(`R7 short masks and owner prose survive refresh (${assistant})`, t => {
+  const { root, manifest } = fixture(t);
+  const notes = ["- ****1 = personal checking", "- ****12 = business checking", "- ****123 = personal savings", "- ****1234 = personal card", "* ****5678 = owner label", "Confirmed by the owner on 2026-10-15."];
+  const target = join(root, filename);
+  writeFileSync(target, `${marker}\n${workspace.renderOwnerRulesSection({ assistant })}`.replace(PLACEHOLDER, notes.join("\n")));
+  assert.ok(readFileSync(target, "utf8").includes(notes[1]), "refresh receives the owner's short mask");
+  assert.equal(write(manifest, options).status, "written");
+  const bytes = readFileSync(target, "utf8");
+  for (const note of notes) assert.equal(count(bytes, note), 1);
+  assert.equal(write(manifest, options).status, "verified");
+});
+
+test("R2/R5 installed money rules use the Brain lead and preserve the parser menu", () => {
+  for (const platformName of ["darwin", "win32"]) {
+    const rules = workspace.renderOwnerRulesSection({ platformName });
+    assert.match(rules, /Financial Brain 0\.4\.17/);
+    assert.match(rules, /Never subtract.*already left out/);
+    assert.match(rules, /Note:/);
+    assert.match(rules, /What was my profit <period>\?/);
+    assert.match(rules, /including loan proceeds/);
+    assert.match(rules, /brain_search.*first.*email/i);
+    assert.match(rules, /stale.*broken.*paused/);
+    assert.match(rules, /## My accounts/);
+    assert.match(rules, /Confidence: N%/);
+  }
+});
+
+test("R6 verified Codex update creates missing guide only beside managed Claude", async t => {
+  const result = await update(t, { createGuide: "claude" });
+  assert.equal(result.writes.length, 1, "verified Codex reached its writer");
+  assert.ok(existsSync(join(result.root, "AGENTS.md")));
+  assert.ok(readFileSync(join(result.root, "AGENTS.md"), "utf8").includes(BEGIN));
+  const unverified = await update(t, { createGuide: "claude", wired: [] });
+  assert.equal(unverified.writes.length, 0);
+  assert.equal(existsSync(join(unverified.root, "AGENTS.md")), false);
+  const unowned = await update(t);
+  assert.equal(unowned.writes.length, 1);
+  assert.equal(existsSync(join(unowned.root, "AGENTS.md")), false);
+});
+
+test("R8 ordinary folders and home get the rules-loading nudge", async t => {
+  const result = await update(t);
+  assert.match(result.finish[0], /cd .*Financial Brain.*&& claude/);
+  assert.match(result.finish[0], /answer rules load there/);
+  assert.doesNotMatch(result.finish[0], /tidied away or synced|claude --continue/);
+  const setupResult = await setup(t, ["Claude Code"]);
+  assert.match(setupResult.output, /answer rules load there/);
+  assert.deepEqual(workspace.classifySessionFolder("/owner", { home: "/owner", brainFolder: "/owner/Financial Brain" }), { kind: "outside" });
+  assert.equal(workspace.classifySessionFolder("/owner/Financial Brain/sub", { home: "/owner", brainFolder: "/owner/Financial Brain" }), null);
+});
+
+test("m6/m11 workspace fallback uses the exact installed invocation and manifest", t => {
+  const { root } = fixture(t);
+  const folder = join(root, "custom-folder"); mkdirSync(folder);
+  const manifest = join(folder, "custom.manifest.json");
+  workspace.writeClaudeWorkspaceGuide(manifest, options);
+  const text = readFileSync(join(folder, "CLAUDE.md"), "utf8");
+  const fallback = text.split("## If brain_think gives no answer")[1].split("## Hard rules")[0];
+  assert.ok(fallback.includes(`${JSON.stringify(options.nodePath)} ${JSON.stringify(options.brainCliPath)} ask ${JSON.stringify(manifest)}`));
+  assert.doesNotMatch(fallback, /ls -d|sort -V|\$HOME/);
+});
+
+test("m10 legacy kit accounts survive adding the current managed section", t => {
+  const { root, manifest } = fixture(t);
+  const target = join(root, "CLAUDE.md");
+  writeFileSync(target, `${workspace.CLAUDE_WORKSPACE_MARKER}\n${moneyInner("money-rules-v2.md").replace(PLACEHOLDER, ACCOUNTS.join("\n"))}`);
+  assert.ok(readFileSync(target, "utf8").includes(ACCOUNTS[0]));
+  assert.equal(workspace.writeClaudeWorkspaceGuide(manifest, options).status, "written");
+  for (const line of ACCOUNTS) assert.equal(count(readFileSync(target, "utf8"), line), 1);
+});
+
+test("m14 distributable Windows templates contain no internal kit header", () => {
+  for (const version of ["v2", "v3"]) {
+    const text = template(`money-rules-${version}-windows.md`);
+    assert.ok(text.includes("<!-- BEGIN Financial Brain money-question rules"));
+    assert.doesNotMatch(text, /PARTNER-TEST\.md/);
+  }
+});
+
+test("v3 menu expansions all reach the ledger parser", () => {
+  let checked = 0;
+  for (const file of ["money-rules-v3.md", "money-rules-v3-windows.md"]) {
+    const menu = template(file).split("## Template menu")[1].split("## Periods")[0];
+    for (const [, form] of menu.matchAll(/`([^`]+)`/g)) {
+      const options = form.match(/<([^<>]*\|[^<>]*)>/);
+      for (const kind of options ? options[1].split("|") : [null]) {
+        const question = (kind ? form.replace(options[0], kind) : form)
+          .replaceAll("<period>", "in September 2026").replaceAll("<N>", "2")
+          .replaceAll("<merchant>", "Fixture Store").replaceAll("<category>", "software")
+          .replaceAll("<payer>", "Fixture Client").replaceAll("<amount>", "731.29")
+          .replaceAll("<Month D, YYYY>", "September 3, 2026")
+          .replaceAll("<n>", "3").replaceAll("<YYYY>", "2026").replaceAll("NNNN", "1111");
+        assert.ok(classifyLedgerQuestion(question, { now: "2026-10-11T12:00:00Z" }).kind, question);
+        checked++;
+      }
+    }
+  }
+  assert.equal(checked, 64, "both complete menu expansions were checked");
+});
+
+test("Codex update requires a safe marker-owned sibling and current wiring proof", t => {
+  const { root, manifest } = fixture(t);
+  const sibling = join(root, "CLAUDE.md"), agents = join(root, "AGENTS.md"), source = join(root, "sibling-source");
+  writeFileSync(source, `${workspace.CLAUDE_WORKSPACE_MARKER}\n`);
+  for (const arm of ["unrelated", "symlink", "hard-link", "unverified", "verified"]) {
+    if (arm === "symlink") symlinkSync(source, sibling);
+    else if (arm === "hard-link") linkSync(source, sibling);
+    else writeFileSync(sibling, arm === "unrelated" ? "Owner instructions\n" : `${workspace.CLAUDE_WORKSPACE_MARKER}\n`);
+    assert.ok(lstatSync(sibling), "sibling ownership decision has an input");
+    const result = workspace.writeCodexWorkspaceGuide(manifest, { ...options, existingOnly: true, verifiedCodexWiring: arm !== "unverified" });
+    assert.equal(result.status, arm === "verified" ? "written" : "skipped_missing");
+    assert.equal(existsSync(agents), arm === "verified");
+    rmSync(sibling);
+  }
+});
+
+test("altering both managed markers preserves account notes and all existing bytes", t => {
+  const { root, manifest } = fixture(t);
+  const file = join(root, "CLAUDE.md");
+  const existing = `${workspace.CLAUDE_WORKSPACE_MARKER}\n${workspace.renderOwnerRulesSection({ accountLines: ACCOUNTS })}`
+    .replace(BEGIN, `${BEGIN} `).replace(END, `${END} `);
+  writeFileSync(file, existing);
+  assert.ok(existing.includes(ACCOUNTS[0]));
+  assert.equal(workspace.writeClaudeWorkspaceGuide(manifest, options).status, "preserved_damaged_section");
+  assert.equal(readFileSync(file, "utf8"), existing);
+  writeFileSync(file, existing.replace(`${BEGIN} `, BEGIN).replace(`${END} `, END));
+  assert.equal(workspace.writeClaudeWorkspaceGuide(manifest, options).status, "written");
+  for (const line of ACCOUNTS) assert.equal(count(readFileSync(file, "utf8"), line), 1);
 });

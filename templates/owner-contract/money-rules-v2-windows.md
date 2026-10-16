@@ -1,4 +1,3 @@
-This file is the Financial Brain money-question rules (v2, 2026-10-15) for Claude Code on Windows; PARTNER-TEST.md step A copies everything from the BEGIN line to the END line (not this first line) into %USERPROFILE%\.claude\CLAUDE.md.
 <!-- BEGIN Financial Brain money-question rules (added by the Financial Brain morning kit; running the kit again replaces this section and keeps your "My accounts" lines) -->
 # Money questions: translate before you ask the Brain (Financial Brain 0.4.15)
 

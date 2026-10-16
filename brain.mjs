@@ -9597,11 +9597,13 @@ async function reportFreshness(m, acct, manifestPath) {
     indexing: (s) => c.yellow(`indexing, ${s.hours_indexing ?? 0}h elapsed`),
     never_synced: () => c.red("never synced"),
     unscheduled: () => c.yellow("no refresh scheduled"),
-    manual: (s) => c.dim(s.reason || "updated when you add a file; last load date unavailable"),
+    manual: (s) => c.dim(s.reason || "kept; no refresh schedule"),
   };
   console.log(`\n  ${c.bold("freshness")}`);
   for (const s of sources) {
     console.log(`    ${s.name.padEnd(16)} ${(LABEL[s.state] || (() => s.state))(s)}`);
+    if (s.kind === "drive" && s.state === "broken" && /a new Drive refresh replaces it/.test(s.reason || ""))
+      console.log(`      Retry Drive: ${renderCliCommands(`brain ingest ${JSON.stringify(manifestPath)} --from drive`)}`);
   }
   const bad = sources.filter((s) => s.state === "stale" || s.state === "broken" || s.state === "never_synced");
   const unsched = sources.filter((s) => s.state === "unscheduled");
@@ -10458,8 +10460,10 @@ export async function cmdSources(manifestPath, options = {}) {
           ? (withheldAt ? "checked (withheld by design)" : "checked (no changes)") : null;
         console.log(
           `  ${row.name.padEnd(nameWidth)}  ${row.kind.padEnd(kindWidth)}  ${String(row.zone || "unassigned").padEnd(12)}  ` +
-            `${num(row.storage.physical_documents).padStart(9)}  ${num(row.storage.readable_documents).padStart(10)}  ${sourceFailed ? "broken" : row.receipt?.zoom?.state || checkLabel || (row.freshness.state === "manual" ? row.freshness.reason || "updated when you add a file" : row.freshness.state)}`,
+            `${num(row.storage.physical_documents).padStart(9)}  ${num(row.storage.readable_documents).padStart(10)}  ${sourceFailed ? "broken" : row.receipt?.zoom?.state || checkLabel || (row.freshness.state === "manual" ? row.freshness.reason || "kept; no refresh schedule" : row.freshness.state)}`,
         );
+        if (row.kind === "drive" && row.freshness.state === "broken" && /a new Drive refresh replaces it/.test(row.freshness.reason || ""))
+          console.log(`    Retry Drive: ${renderCliCommands(`brain ingest ${JSON.stringify(manifestPath)} --from drive`)}`);
         if (noChangeAt) {
           console.log(`    checked ${row.receipt.last_check_at}; no changes; last ingest ${row.receipt.last_successful_run_at || "never"}`);
         }
@@ -22045,7 +22049,11 @@ export async function cmdSetup(manifestPath, options = {}) {
   }
   if (wired.includes("Claude Code") || wired.includes("Codex")) {
     const label = ownerSessionFolderLabel(target, options);
-    if (label) warn(`This conversation is running in ${label}, which can be tidied away or synced. Next time, open Claude Code (or Codex) in your Financial Brain folder: ${displayPath(dirname(resolve(target)))}.`);
+    if (label) {
+      const nudge = `Open Claude Code (or Codex) in your Financial Brain folder: ${displayPath(dirname(resolve(target)))}. The answer rules load there.`;
+      if (label === "another folder") info(nudge);
+      else warn(`This conversation is running in ${label}, which can be tidied away or synced. ${nudge}`);
+    }
   }
 
   /* --- 6. the first thing worth looking at --- */
@@ -29013,10 +29021,10 @@ function ownerSessionFolderLabel(manifestPath, options) {
     platform: options.platformName ?? options.platform ?? process.platform,
     brainFolder: dirname(resolve(manifestPath)),
   });
-  return risk ? { desktop: "your Desktop folder", downloads: "your Downloads folder", synced: "a folder that syncs to the cloud" }[risk.kind] : null;
+  return risk ? { desktop: "your Desktop folder", downloads: "your Downloads folder", synced: "a folder that syncs to the cloud", outside: "another folder" }[risk.kind] : null;
 }
 
-/** Refresh a marker-owned guide, but never create or claim one on update. */
+/** Refresh managed guides; verified Codex may join a setup-owned folder. */
 function refreshWorkspaceGuideAfterUpdate(manifestPath, options, assistant) {
   const codex = assistant === "codex";
   const filename = codex ? "AGENTS.md" : "CLAUDE.md";
@@ -29033,6 +29041,7 @@ function refreshWorkspaceGuideAfterUpdate(manifestPath, options, assistant) {
       nodePath: options.nodePath || process.execPath,
       platformName: options.platformName ?? options.platform ?? process.platform,
       existingOnly: true,
+      verifiedCodexWiring: codex && options.verifiedCodexWiring === true,
     });
   } catch {
     safelyReportUpdateResult(
@@ -30715,6 +30724,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
   if (updateCodexWorkspaceGuide && ownerAgentRefreshResult?.wired?.includes("Codex")) {
     const workspaceGuideResult = refreshCodexWorkspaceGuideAfterUpdate(pin.target, {
       writeCodexWorkspaceGuide: updateCodexWorkspaceGuide,
+      verifiedCodexWiring: true,
       brainCliPath: options.brainCliPath,
       nodePath: options.nodePath,
       platformName: options.platformName ?? options.platform,
@@ -30754,9 +30764,11 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
       ...attention,
     ] : []),
     "One last step: quit Claude Code (and Codex, if you use it) and open it again, so it connects to the updated Brain.",
-    "In Claude Code type /exit, then claude --continue.",
+    sessionFolderLabel
+      ? `In Claude Code type /exit, then open a terminal in your Financial Brain folder and run: cd ${JSON.stringify(dirname(pin.target))} && claude. For Codex, open that same folder. The answer rules load there.`
+      : "In Claude Code type /exit, then claude --continue.",
     "Then ask: check my Brain.",
-    ...(sessionFolderLabel ? [
+    ...(sessionFolderLabel && sessionFolderLabel !== "another folder" ? [
       `Next time, open Claude Code (or Codex) in your Financial Brain folder, ${displayPath(dirname(pin.target))}. This conversation runs in ${sessionFolderLabel}, which can be tidied away or synced.`,
     ] : []),
   ].join("\n");

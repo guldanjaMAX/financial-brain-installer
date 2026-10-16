@@ -10,7 +10,7 @@ test.before(() => {
   mock.method(globalThis, "fetch", async () => { throw new Error("network forbidden"); });
 });
 test.after(() => mock.restoreAll());
-const newKeys = new Set(["lead", "default_exclusions", "lead_accounts", "lead_total_minor", "lead_monthly_total_minor", "flip", "measure", "net_minor", "net_label", "excluded_from_lead", "kept_reason"]);
+const newKeys = new Set(["lead_rows", "lead", "default_exclusions", "lead_accounts", "lead_total_minor", "lead_monthly_total_minor", "flip", "measure", "net_minor", "net_label", "excluded_from_lead", "kept_reason"]);
 function oldKeys(value) {
   if (Array.isArray(value)) return value.map(oldKeys);
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).filter(([key]) => !newKeys.has(key)).map(([key, item]) => [key, oldKeys(item)]));
@@ -76,7 +76,7 @@ test("a: own move leads with conditional cents, one note, then exact gross", asy
   assert.equal(note.split("$236.17").length - 1, 1);
   assert.match(note, /between your own connected accounts/);
   assert.match(note, /say "including transfers"/);
-  assert.deepEqual(body.ledger.default_exclusions, { own_transfer_pairs: 1, own_transfer_minor: 23617, withdrawal_count: 0, withdrawal_minor: 0 });
+  assert.deepEqual(body.ledger.default_exclusions, { own_transfer_pairs: 1, own_transfer_minor: 23617, withdrawal_count: 0, withdrawal_minor: 0, loan_proceeds_count: 0, loan_proceeds_minor: 0 });
   assert.equal(body.ledger.lead, "default_exclusions");
   assert.deepEqual(body.ledger.lead_accounts, head.own[Q.totals].ledger.if_own_transfers.accounts);
   assert.deepEqual(oldKeys(body.ledger), head.own[Q.totals].ledger);
@@ -177,7 +177,7 @@ test("g: proposed and confirmed category withdrawals leave income with a flip no
     const f = await fixture(t, scenario), body = await ask(f, Q.totals, "totals", 0);
     assert.equal(account(body, "1111").credits_minor, 73129);
     assert.equal(account(body, "1111", false).credits_minor, 114512);
-    assert.deepEqual(body.ledger.default_exclusions, { own_transfer_pairs: 0, own_transfer_minor: 0, withdrawal_count: 1, withdrawal_minor: 41383 });
+    assert.deepEqual(body.ledger.default_exclusions, { own_transfer_pairs: 0, own_transfer_minor: 0, withdrawal_count: 1, withdrawal_minor: 41383, loan_proceeds_count: 0, loan_proceeds_minor: 0 });
     assert.match(blocks(body, scenario, Q.totals).note, /say "including withdrawals"/);
   }
   const f = await fixture(t, "category-withdrawal"), income = await ask(f, Q.income, "merchant", 0);
@@ -274,6 +274,13 @@ test("h: a measure without a move-kind account falls through, kind change enable
 
 for (const kind of ["merchant", "category", "recurring", "largest", "deposits"]) test(`i: ${kind} leads, notes and preserves the gross view`, async t => {
   const f = await fixture(t), body = await ask(f, Q[kind], kind);
+  if (kind === "recurring") {
+    unchanged(body, "own", Q[kind]);
+    assert.equal(body.ledger.lead_monthly_total_minor, 0);
+    assert.equal(body.ledger.flip.length, 0);
+    assert.doesNotMatch(body.answer, /left out of the first figures/);
+    return;
+  }
   const { lead, note } = blocks(body, "own", Q[kind]);
   assert.match(note, /say "including transfers"/);
   assert.deepEqual(oldKeys(body.ledger), head.own[Q[kind]].ledger);
@@ -281,7 +288,11 @@ for (const kind of ["merchant", "category", "recurring", "largest", "deposits"])
     assert.equal(body.ledger.lead_total_minor, 4710);
     assert.match(lead, /\$47\.10/);
   } else if (kind === "recurring") assert.equal(body.ledger.lead_monthly_total_minor, 0);
-  else assert.equal(lead, head.own[Q[kind]].answer.split("\nAccounts:")[0]);
+  else {
+    assert.notEqual(lead, head.own[Q[kind]].answer.split("\nAccounts:")[0]);
+    assert.doesNotMatch(lead, /TRANSFER (?:TO|FROM)/);
+    assert.ok(body.ledger.lead_rows.length > 0);
+  }
   const phrases = offered(body);
   assert.equal(phrases.length, 1);
   const flipped = await ask(f, flipQuestion(Q[kind], phrases[0]), kind);
@@ -294,4 +305,68 @@ test("i: recurrence recomputes after removing a paired cadence", async t => {
   assert.equal(body.ledger.monthly_total_minor, 26330);
   assert.equal(body.ledger.lead_monthly_total_minor, 2713);
   assert.equal(body.ledger.if_own_transfers.monthly_total_minor, 2713);
+});
+
+// Review regressions use real ledger reads; the gross view is the green control.
+test("R1 lists exclude before ranking and retain the complete gross list", async t => {
+  const f = await fixture(t, "own");
+  const question = "What were my 2 largest expenses in September 2026 excluding transfers?";
+  const body = await ask(f, question, "largest");
+  const lead = body.answer.split("\nNote:")[0];
+  assert.match(lead, /Fixture Store/);
+  assert.match(lead, /Fixture Supplies/);
+  assert.doesNotMatch(lead, /TRANSFER TO/);
+  assert.match(body.answer.split("With everything counted:")[1], /TRANSFER TO/);
+  const control = await ask(f, question.replace("excluding", "including"), "largest");
+  assert.match(control.answer.split("\nAccounts:")[0], /TRANSFER TO/);
+});
+
+test("R1 deposits omit withdrawals in the lead and list them in gross", async t => {
+  const f = await fixture(t, "investment");
+  const body = await ask(f, Q.deposits, "deposits");
+  assert.match(body.answer.split("\nNote:")[0], /Fixture client deposit/);
+  assert.doesNotMatch(body.answer.split("\nNote:")[0], /TRANSFER FROM/);
+  assert.match(body.answer.split("With everything counted:")[1], /TRANSFER FROM/);
+  const control = await ask(f, flipQuestion(Q.deposits, "including withdrawals"), "deposits");
+  assert.match(control.answer.split("\nAccounts:")[0], /TRANSFER FROM/);
+});
+
+for (const kind of ["loan", "line_of_credit"]) test(`R3 ${kind} advances are not profit and their flip restores them`, async t => {
+  const f = await fixture(t, "plain");
+  const control = await ask(f, Q.profit, "totals", 0);
+  f.account("account-loan", "7777", kind);
+  f.add("advance-out", "2026-09-12", 500000, "outflow", "TRANSFER TO account 1111", null, null, "account-loan");
+  f.add("advance-in", "2026-09-12", 500000, "inflow", "TRANSFER FROM account 7777");
+  for (const measure of ["profit", "net income", "cash flow"]) {
+    const question = Q.profit.replace("profit", measure);
+    const body = await ask(f, question);
+    assert.equal(body.ledger.net_minor, control.ledger.net_minor);
+    assert.equal(account(body, "1111").credits_minor, 73129);
+    assert.equal(account(body, "7777").debits_minor, 0, "both owned legs leave the lead");
+    assert.equal(body.ledger.default_exclusions.loan_proceeds_minor, 500000);
+    assert.match(body.answer, /\$5,000\.00 in loan or line-of-credit proceeds left out/);
+    const flip = await ask(f, flipQuestion(question, "including loan proceeds"));
+    assert.equal(flip.ledger.net_minor, control.ledger.net_minor + 500000);
+    assert.equal(account(flip, "7777").debits_minor, 500000);
+  }
+});
+
+test("m1 only excluded rows contributing to this figure justify a Note", async t => {
+  const f = await fixture(t);
+  for (const question of ["How much did I spend at Fixture Store in September 2026?", "How much income came from Fixture client in September 2026?", Q.recurring]) {
+    const body = await f.ask(question);
+    assert.equal(body.ledger.transfers.length, 1, "the excluded-pair decision was reached");
+    assert.doesNotMatch(body.answer, /left out of the first figures|\nNote:/);
+    assert.deepEqual(body.ledger.flip, []);
+  }
+  const control = await ask(f);
+  assert.match(control.answer, /left out of the first figures/);
+});
+
+test("m2 unmatched category withdrawals disclose the same exclusion as the lead", async t => {
+  const f = await fixture(t, "category-withdrawal"), body = await ask(f, Q.totals, "totals", 0);
+  assert.equal(body.ledger.unmatched_transfers.length, 1);
+  assert.match(body.answer, /unmatched \(left out of the first figures as a retirement or investment withdrawal; kept in the gross figures\)/);
+  const control = await ask(f, flipQuestion(Q.totals, "including withdrawals"), "totals", 0);
+  assert.match(control.answer, /unmatched \(retained in income\/spend totals\)/);
 });

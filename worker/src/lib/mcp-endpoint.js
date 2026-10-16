@@ -64,7 +64,7 @@ const rpcError = (id, code, message, status = 200) => new Response(
 const TOOLS = [
   {
     name: "ask",
-    description: "Money and short lookups. Use ask for a balance, a payment received, money in and out, largest expenses, deposits, spend by merchant or category, transfers between the owner's own accounts, recurring charges, or a short single-fact lookup. It reads the bank ledger directly for supported money questions. Keep exact ledger amounts, account masks, dates and coverage bounds. For anything else, use search, then fetch.",
+    description: "Money and short lookups. Use ask for a balance, a payment received, money in and out, largest expenses, deposits, spend by merchant or category, transfers between the owner's own accounts, recurring charges, profit, net income, cash flow, withdrawals, loan proceeds, or a short single-fact lookup. It reads the bank ledger directly for supported money questions. Keep exact ledger amounts, account masks, dates and coverage bounds. For anything else, use search, then fetch.",
     inputSchema: {
       type: "object",
       properties: { question: { type: "string", description: "The question, in natural language." } },
@@ -73,7 +73,7 @@ const TOOLS = [
   },
   {
     name: "search",
-    description: "Default tool for questions about the owner's records. Returns ranked references as {results:[{id,title,url}]} and newest_record, the newest reliably dated matching record, or the newest unverified date when no reliable date is available. Before any status, \"latest\", or absence claim, fetch the newest matching record and rely on it or say why not. Relay any provisional coverage note and do not turn an incomplete empty result into a corpus-wide absence claim.",
+    description: "Default tool for questions about the owner's records. Returns ranked references as {results:[{id,title,url}]} and newest_record, the newest reliably dated record among the results this search returned (at most 10), or the newest unverified date when no reliable date is available. Relevance ranking can omit newer matches; re-search the subject with a recent date window before a latest claim. Before any status, \"latest\", or absence claim, fetch the newest matching record and rely on it or say why not. Relay any provisional coverage note and do not turn an incomplete empty result into a corpus-wide absence claim.",
     inputSchema: {
       type: "object",
       properties: { query: { type: "string", description: "Search terms." } },
@@ -224,10 +224,23 @@ async function runAsk(deps, args) {
     return withGuidance([answerText(thought), "", confidenceText(thought)]);
   }
   const lines = guidance.length ? [...guidance, ""] : [];
-  const refused = /^The documents do not answer/.test(thought.answer || "");
-  lines.push(refused
-    ? "I didn't find a matching record in this search. Which account, document, or date would narrow it?"
-    : answerText(thought));
+  const refused = !thought.answer || /^The documents do not answer/.test(thought.answer);
+  const results = Array.isArray(thought.results) ? thought.results : [];
+  const gaps = Array.isArray(thought.gaps) ? thought.gaps : [];
+  if (refused) {
+    if (results.length) {
+      lines.push(`I found ${results.length} ${results.length === 1 ? "record" : "records"} but none answered this directly.`);
+      for (const row of results.slice(0, 3)) {
+        const date = Number.isFinite(Date.parse(row.ts || "")) ? String(row.ts).slice(0, 10) : "date unavailable";
+        lines.push(`- ${row.title || "Untitled record"} (${date}${row.ts && row.date_reliable !== true ? "; date unverified" : ""})`);
+      }
+      lines.push("Next, search the subject with a narrower date window and read the matching records.");
+    } else if (!gaps.some(gap => ["ledger_out_of_coverage", "ledger_not_consulted"].includes(gap.type))) {
+      lines.push("I didn't find a matching record in this search. Next, search the subject in another source or a wider date window.");
+    }
+    for (const gap of gaps) if (gap.type !== "no_results" && gap.detail) lines.push(gap.detail);
+    if (gaps.some(gap => gap.type === "ledger_out_of_coverage")) lines.push("Try the last finished month if the feed covers it, or a past month ending on or before the covered-through date.");
+  } else lines.push(answerText(thought));
   const confidence = thought.confidence;
   const trust = refused
     ? (Number.isFinite(confidence?.percent)

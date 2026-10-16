@@ -254,8 +254,10 @@ PDF pages, and does everything else itself: creates the
 database and search index in your account, deploys the worker, generates and
 saves your key, checks it is alive, and connects the brain to Claude Code plus
 an installed Codex client. Successful Claude wiring writes an owner-only
-`CLAUDE.md` beside the manifest. It gives Claude the exact Brain CLI and
-manifest paths, but it does not grant whole-disk access, permission bypass, or
+`CLAUDE.md` beside the manifest; successful Codex wiring may create
+`AGENTS.md` in the same folder. Explain both local writes before setup approval.
+These guides contain answer rules, owner-approved account labels, and the exact
+Brain CLI and manifest paths. They do not grant whole-disk access, permission bypass, or
 unapproved Cloudflare changes. On macOS a standard setup declares and verifies a login-Keychain
 item before generating the key. Windows stores only DPAPI CurrentUser
 ciphertext; Linux uses an owner-only adjacent file. An existing legacy Mac

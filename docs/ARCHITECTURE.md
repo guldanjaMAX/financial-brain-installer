@@ -776,18 +776,23 @@ accounts are excluded only by the exact case-insensitive category
 `TRANSFER_IN_INVESTMENT_AND_RETIREMENT_FUNDS` (proposed or confirmed) or a pair
 from an investment or retirement account. A paired outgoing leg also leaves
 the lead when in scope. Description words never authorize withdrawal exclusion;
-"including withdrawals" restores it. The unchanged gross sentences always
+"including withdrawals" restores it. A qualifying loan or line-of-credit advance
+into a selected checking, savings or card account also leaves both in-scope
+legs out of the lead; "including loan proceeds" restores those amounts. The unchanged gross sentences always
 remain visible. Lead lines use "money in"/"money out" so clients parsing gross
 "credits"/"debits" cannot subtract twice. Existing JSON keys remain gross or,
 for `if_own_transfers`, conditional; additive lead and exclusion fields explain
-the presentation. Lists retain all rows and the transfers view keeps its
-outgoing-date semantics. Unmatched hints remain counted and visible.
+the presentation. Lists filter the lead before applying their limit and keep
+the original gross rows separately. Exclusion notes only describe rows feeding
+the requested figure, including a displayed Unsorted total. The transfers view
+keeps its outgoing-date semantics. Unmatched hints remain visible; a category-
+backed withdrawal explicitly says it was left out of the lead and kept in gross.
 Bounded profit, net income and cash flow forms route to `kind: totals`, with
 `measure`, `net_minor` and the label "cash in minus cash out, not accounting
 profit". The net sums only in-scope checking, savings and card lead figures;
 other account kinds are listed with a reason and no eligible account means
 `unsupported_question`. One supported period and fully consumed grammar are
-required. The two flip clause families are bounded and reject duplicates,
+required. The three flip clause families are bounded and reject duplicates,
 contradictions and other qualifiers. They apply to totals, largest, deposits,
 merchant, category and recurring, never balances, payments or the transfers
 view. The document path retains its existing money refusal rules.

@@ -3872,9 +3872,7 @@ function operationalFreshness(s, now) {
   if (indexingMs > INDEXING_STUCK_MS) {
     const hours = Math.floor(indexingMs / 3600000);
     const retry = String(s.kind || "").toLowerCase() === "drive"
-      ? ". Run brain ingest <manifest> --from drive; a new run replaces the stuck one. " +
-        "If the command says the Brain or Drive ingest is already running, wait for it to finish and retry. " +
-        "If that message persists after the process has stopped, ask your installer to check the local lock"
+      ? "; a new Drive refresh replaces it"
       : "";
     return {
       state: "broken",
@@ -4079,7 +4077,7 @@ function assessCoverageRows(rows, {
         source: s.name,
         days_since_ingest: days,
         expected_every_days: Math.round(expected / 86400) || null,
-        detail: `The "${s.name}" source was last read ${days} day(s) ago and is expected to refresh about every ${expected < 86400 ? `${expected / 3600} hour(s)` : `${Math.max(1, Math.round(expected / 86400))} day(s)`}. Material added since then is not in the brain, and would not show up as a missing answer.`,
+        detail: `The "${s.name}" source was last read ${refreshDuration(ageSec)} ago and is expected to refresh about every ${refreshDuration(expected)}. Material added since then is not in the brain, and would not show up as a missing answer.`,
       }));
     }
 
@@ -4096,6 +4094,12 @@ function assessCoverageRows(rows, {
     if (sourceIsStale) stale++;
   }
   return { gaps, unavailable: false, counts: { total, stale, unscheduled } };
+}
+
+// Cadence and age share units so a short refresh never reads as a fraction of an hour.
+function refreshDuration(seconds) {
+  const [unit, scale] = seconds < 3600 ? ["minute", 60] : seconds < 86400 ? ["hour", 3600] : ["day", 86400];
+  return `${Math.max(1, Math.round(seconds / scale))} ${unit}(s)`;
 }
 
 async function coverageGapAssessment(env, { now = Date.now(), allowedSources = null } = {}) {
@@ -4249,7 +4253,8 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
       } else if (!unregistered && operational.state) state = operational.state;
       else if (!unregistered && !expected) {
         state = automatable ? "unscheduled" : "manual";
-        if (s.kind === "upload") reason = `updated when you add a file; ${Number.isFinite(last) ? `last loaded ${new Date(last).toISOString().slice(0, 10)}` : "no files loaded yet"}`;
+        if (s.kind === "upload") reason = `not watched; changes only when files are loaded again; ${Number.isFinite(last) ? `last loaded ${new Date(last).toISOString().slice(0, 10)}` : "no files loaded yet"}`;
+        else reason = `no refresh scheduled; ${Number.isFinite(last) ? `last read ${new Date(last).toISOString().slice(0, 10)}` : "no read recorded"}`;
       }
       else if (!unregistered && !Number.isFinite(last)) state = "never_synced";
       else if (!unregistered && (now - last) / 1000 > expected * 1.5) state = "stale";
@@ -5022,7 +5027,8 @@ export async function sourceInventorySlice(env, {
     } else if (registered && operational.state) state = operational.state;
     else if (registered && !expectedSeconds) {
       state = automatable ? "unscheduled" : "manual";
-      if (row.kind === "upload") reason = `updated when you add a file; ${Number.isFinite(last) ? `last loaded ${new Date(last).toISOString().slice(0, 10)}` : "no files loaded yet"}`;
+      if (row.kind === "upload") reason = `not watched; changes only when files are loaded again; ${Number.isFinite(last) ? `last loaded ${new Date(last).toISOString().slice(0, 10)}` : "no files loaded yet"}`;
+      else reason = `no refresh scheduled; ${Number.isFinite(last) ? `last read ${new Date(last).toISOString().slice(0, 10)}` : "no read recorded"}`;
     }
     else if (registered && !Number.isFinite(last)) state = "never_synced";
     else if (registered && (now - last) / 1000 > expectedSeconds * 1.5) state = "stale";

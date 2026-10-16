@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   mkdtempSync,
+  realpathSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -163,7 +164,7 @@ function updateHarness(manifestPath, readUpdateBacklog, events) {
 }
 
 async function withFixture(run) {
-  const sandbox = mkdtempSync(join(tmpdir(), "brain-update-pending-"));
+  const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-update-pending-")));
   const manifestPath = join(sandbox, "brain.manifest.json");
   const original = `${JSON.stringify(fixtureManifest(), null, 2)}\n`;
   writeFileSync(manifestPath, original);
@@ -337,7 +338,7 @@ test("an empty backlog reaches the paused-deployment stage", async () => {
     assert.deepEqual(finish, [
       `Done. Your Brain is now on version ${PRODUCT_VERSION} and passed its checks.\n` +
         "One last step: quit Claude Code (and Codex, if you use it) and open it again, so it connects to the updated Brain.\n" +
-        "In Claude Code type /exit, then claude --continue.\n" +
+        `In Claude Code type /exit, then open a terminal in your Financial Brain folder and run: cd ${JSON.stringify(dirname(manifestPath))} && claude. For Codex, open that same folder. The answer rules load there.\n` +
         "Then ask: check my Brain.",
     ]);
   });
@@ -1570,7 +1571,7 @@ function v046DocumentsEnvelope(pending = 0) {
 }
 
 async function withManifest(mutate, run) {
-  const sandbox = mkdtempSync(join(tmpdir(), "brain-update-resume-"));
+  const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-update-resume-")));
   const manifestPath = join(sandbox, "brain.manifest.json");
   const manifest = fixtureManifest();
   mutate(manifest);

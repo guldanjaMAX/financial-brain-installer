@@ -742,7 +742,7 @@ const GMAIL_FAILURE_EVIDENCE_FIXTURE = {
   const folderReport = await freshnessReport(mk([folder]), { now: NOW });
   check("an unscheduled folder explains additions and its last load date",
     folderReport.sources[0]?.state === "manual" &&
-      folderReport.sources[0]?.reason === `updated when you add a file; last loaded ${daysAgo(12).slice(0, 10)}` &&
+      folderReport.sources[0]?.reason === `not watched; changes only when files are loaded again; last loaded ${daysAgo(12).slice(0, 10)}` &&
       !/stale/i.test(folderReport.sources[0]?.reason || ""), JSON.stringify(folderReport));
   const followed = await freshnessReport(mk([{ ...folder, expected_refresh_seconds: DAILY }]), { now: NOW });
   check("a followed folder retains its staleness rule", followed.sources[0]?.state === "stale", JSON.stringify(followed));
@@ -750,15 +750,14 @@ const GMAIL_FAILURE_EVIDENCE_FIXTURE = {
     last_ingest_at: daysAgo(4), expected_refresh_seconds: DAILY };
   const stuckReport = await freshnessReport(mk([stuck]), { now: NOW });
   const stuckGaps = await coverageGaps(mk([stuck]), { now: NOW });
-  const retry = renderCliCommands("brain ingest <manifest> --from drive");
   const detail = stuckGaps.find(gap => gap.type === "sync_broken")?.detail || "";
   check("stuck Drive reaches broken and names its start, elapsed time, and retry",
     stuckReport.sources[0]?.state === "broken" &&
       [stuckReport.sources[0]?.reason, detail].every(text => text &&
         text.includes(new Date(hoursAgo(9)).toISOString()) && /9 hour\(s\)/.test(text) &&
-        renderCliCommands(text).includes(retry) && /new run replaces the stuck one/i.test(text)), JSON.stringify(stuckReport));
-  check("stuck Drive explains a local busy lock and safe next step",
-    /already running|another ingest/i.test(detail) && /wait|installer/i.test(detail), detail);
+        !/brain ingest|<manifest>/.test(text) && /a new Drive refresh replaces it/i.test(text)), JSON.stringify(stuckReport));
+  check("stuck Drive gives the replacement remedy without a placeholder command or local lock homework",
+    /a new Drive refresh replaces it/i.test(detail) && !/brain ingest|<manifest>|local lock|installer/i.test(detail), detail);
 }
 
 console.log(`\nfreshness: ${ran - fail}/${ran} passed`);

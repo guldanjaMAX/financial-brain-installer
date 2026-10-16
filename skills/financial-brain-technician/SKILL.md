@@ -596,8 +596,9 @@ before approval. `brain tools` installs or updates the reviewed technician skill
 for installed Claude Code and Codex clients, records local bootstrap status, and
 may add the Brain CLI folder to the user's PATH. Fresh `brain setup` normally
 adds or updates this Brain's MCP entry in installed AI tools and may create a new
-owner-workspace `CLAUDE.md`; it does not put a literal Brain credential in those
-files. If the owner does not approve the AI-tool configuration change, run setup
+owner-workspace `CLAUDE.md` and `AGENTS.md` for Codex, containing answer rules
+and owner-approved account labels. It does not put a literal Brain credential
+in those files. If the owner does not approve the AI-tool configuration change, run setup
 with `--no-connect`. Later, show the exact read-only `brain mcp-config <manifest>`
 preview and wait for separate approval before `--apply`.
 

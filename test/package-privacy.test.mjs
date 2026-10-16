@@ -914,6 +914,8 @@ const expected = [
   "templates/owner-contract/answer-contract-v1.md",
   "templates/owner-contract/money-rules-v2-windows.md",
   "templates/owner-contract/money-rules-v2.md",
+  "templates/owner-contract/money-rules-v3-windows.md",
+  "templates/owner-contract/money-rules-v3.md",
   "worker/src/index.js",
   "worker/src/lib/answer-render.js",
   "worker/src/lib/answer-sentences.js",

@@ -111,7 +111,7 @@ export const CODEX_WORKSPACE_MARKER = "<!-- financial-brain-installer:codex-work
 const KIT_BEGIN = '<!-- BEGIN Financial Brain money-question rules (added by the Financial Brain morning kit; running the kit again replaces this section and keeps your "My accounts" lines) -->';
 const KIT_END = "<!-- END Financial Brain money-question rules -->";
 const ACCOUNT_PLACEHOLDER = "- ****NNNN = (business | personal), (checking | savings | card | loan | investment), (owner's name for it)";
-const ACCOUNT_LINE = /^- \*\*\*\*[0-9]{4} = /;
+const ACCOUNT_LINE = /^- \*\*\*\*[0-9]{1,4} = /;
 const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
 const withoutCR = (line) => line.replace(/\r$/, "");
 
@@ -119,11 +119,11 @@ function markerIndices(lines, marker) {
   return lines.flatMap((line, index) => withoutCR(line) === marker ? [index] : []);
 }
 
-export function renderOwnerRulesSection({ platformName = process.platform, assistant = "claude", accountLines = [] } = {}) {
+export function renderOwnerRulesSection({ platformName = process.platform, assistant = "claude", accountLines = [], askCommand = null } = {}) {
   const contract = readFileSync(new URL("../templates/owner-contract/answer-contract-v1.md", import.meta.url), "utf8");
   const money = readFileSync(platformName === "win32"
-    ? new URL("../templates/owner-contract/money-rules-v2-windows.md", import.meta.url)
-    : new URL("../templates/owner-contract/money-rules-v2.md", import.meta.url), "utf8");
+    ? new URL("../templates/owner-contract/money-rules-v3-windows.md", import.meta.url)
+    : new URL("../templates/owner-contract/money-rules-v3.md", import.meta.url), "utf8");
   const lines = money.split("\n");
   const begins = markerIndices(lines, KIT_BEGIN);
   const ends = markerIndices(lines, KIT_END);
@@ -134,10 +134,14 @@ export function renderOwnerRulesSection({ platformName = process.platform, assis
   if (markerIndices(inner, ACCOUNT_PLACEHOLDER).length !== 1) {
     throw new Error("the packaged money rules must have one account placeholder");
   }
-  if (!Array.isArray(accountLines) || accountLines.some((line) => typeof line !== "string" || !ACCOUNT_LINE.test(line) || CONTROL.test(line))) {
+  if (!Array.isArray(accountLines) || accountLines.some((line) => typeof line !== "string" || CONTROL.test(line) || /^<!-- (?:BEGIN|END) Financial Brain/.test(line))) {
     throw new Error("account lines are not safe to preserve in the answer rules");
   }
   let content = inner.join("\n") + "\n";
+  if (platformName !== "win32") {
+    if (content.split("{{BRAIN_ASK_COMMAND}}").length !== 2) throw new Error("the packaged money rules must have one installed ask invocation");
+    if (askCommand) content = content.replace("{{BRAIN_ASK_COMMAND}}", () => askCommand);
+  }
   if (assistant === "codex") {
     if (content.split("in this CLAUDE.md").length !== 2) {
       throw new Error("the packaged money rules must have one assistant file reference");
@@ -156,16 +160,19 @@ export function mergeOwnerRules(existingText, render) {
   const lines = rawLines.map(withoutCR);
   const damaged = () => ({ status: "damaged", content: existingText });
   if (!begins.length && !ends.length) {
+    // Altered answer markers are ambiguous. Keep every byte for safe recovery.
+    if (lines.some(line => /^\s*<!-- (?:BEGIN|END) Financial Brain answer rules/.test(line))) return damaged();
+    const accountLines = lines.filter(line => ACCOUNT_LINE.test(line));
+    if (accountLines.some(line => CONTROL.test(line))) return damaged();
     const prefix = lines.join("\n");
-    return { status: "merged", content: `${prefix}${prefix.endsWith("\n") ? "" : "\n"}\n${render({ accountLines: [] })}` };
+    return { status: "merged", content: `${prefix}${prefix.endsWith("\n") ? "" : "\n"}\n${render({ accountLines })}` };
   }
   if (begins.length !== 1 || ends.length !== 1 || begins[0] >= ends[0]) return damaged();
   const accountLines = [];
   let inAccounts = false;
   for (const line of lines.slice(begins[0] + 1, ends[0])) {
     if (line.startsWith("## ")) inAccounts = /^## My accounts(?:$|[ (])/.test(line);
-    else if (inAccounts && line.trim() && line !== ACCOUNT_PLACEHOLDER && !ACCOUNT_LINE.test(line)) return damaged();
-    if (ACCOUNT_LINE.test(line)) {
+    else if ((inAccounts && line.trim() && line !== ACCOUNT_PLACEHOLDER) || ACCOUNT_LINE.test(line)) {
       if (CONTROL.test(line)) return damaged();
       accountLines.push(line);
     }
@@ -197,12 +204,26 @@ function writeWorkspaceGuide(manifestPath, options, assistant) {
   try { stat = lstatSync(target); } catch (error) { if (error.code !== "ENOENT") throw error; }
   // lstat also sees dangling links. Neither setup nor update may replace one.
   if (stat && (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1)) return result("preserved_unsafe_existing_file");
-  // Update refreshes only a file that setup already created.
-  if (!stat && options.existingOnly === true) return result("skipped_missing");
+  // A verified Codex update can join a folder already owned by setup. A name
+  // alone, an unsafe sibling or an unverified registration grants no ownership.
+  if (!stat && options.existingOnly === true) {
+    let managedSibling = false;
+    if (assistant === "codex" && options.verifiedCodexWiring === true) {
+      const sibling = join(dirname(target), "CLAUDE.md");
+      try {
+        const siblingStat = lstatSync(sibling);
+        managedSibling = siblingStat.isFile() && !siblingStat.isSymbolicLink() && siblingStat.nlink === 1 &&
+          readFileSync(sibling, "utf8").startsWith(CLAUDE_WORKSPACE_MARKER);
+      } catch (error) { if (error.code !== "ENOENT") throw error; }
+    }
+    if (!managedSibling) return result("skipped_missing");
+  }
   const marker = assistant === "codex" ? CODEX_WORKSPACE_MARKER : CLAUDE_WORKSPACE_MARKER;
   const existing = stat ? readFileSync(target, "utf8") : "";
   if (stat && !existing.startsWith(marker)) return result("preserved_unrelated_existing_file");
-  const merged = mergeOwnerRules(existing, ({ accountLines }) => renderOwnerRulesSection({ ...options, assistant, accountLines }));
+  const { manifest, brain } = guideLocators(manifestPath, options);
+  const askCommand = `${brain} ask ${JSON.stringify(manifest)}`;
+  const merged = mergeOwnerRules(existing, ({ accountLines }) => renderOwnerRulesSection({ ...options, assistant, accountLines, askCommand }));
   if (merged.status === "damaged") return result("preserved_damaged_section");
   const guide = assistant === "codex" ? renderCodexWorkspaceGuide(manifestPath, options) : renderClaudeWorkspaceGuide(manifestPath, options);
   // The whole preamble is managed. Preserve the merged section and its suffix.
@@ -256,7 +277,6 @@ export function classifySessionFolder(folder, { home, platform = process.platfor
   const current = normalize(folder), ownerHome = normalize(home), brain = normalize(brainFolder);
   const inside = (path, root) => path === root || path.startsWith(`${root}/`);
   if (brainFolder && inside(current, brain)) return null;
-  if (home && current === ownerHome) return null;
   // Mirror the credential-folder and feed-folder guards without importing
   // their lifecycle code. Cloud risk takes precedence over Desktop/Downloads.
   const synced = [/OneDrive/i, /Dropbox/i, /Google ?Drive/i, /CloudStorage/i, /Mobile Documents/i, /[/]Box(?:[/]|$)/i];
@@ -274,5 +294,5 @@ export function classifySessionFolder(folder, { home, platform = process.platfor
     const label = kind[0].toUpperCase() + kind.slice(1);
     if (home && inside(current, normalize(`${home}/${label}`))) return { kind };
   }
-  return null;
+  return { kind: "outside" };
 }

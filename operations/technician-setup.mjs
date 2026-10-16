@@ -83,7 +83,7 @@ export const TECHNICIAN_STEPS = Object.freeze([
     id: "cloudflare",
     title: "Install the private Brain",
     dashboard_url: "https://dash.cloudflare.com/",
-    human_boundary: "The owner signs in, completes 2FA, and chooses the exact account. After Cloudflare verifies it, the installer opens that account's Workers & Pages plan page for the owner's Paid confirmation. Before any resource is created, the owner approves Cloudflare's browser consent. Normal fresh setup creates no API token. Before approval, explain that setup also adds or updates the Brain MCP entry in installed AI tools and may create a new owner-workspace CLAUDE.md. Use --no-connect if the owner declines those local config writes.",
+    human_boundary: "The owner signs in, completes 2FA, and chooses the exact account. After Cloudflare verifies it, the installer opens that account's Workers & Pages plan page for the owner's Paid confirmation. Before any resource is created, the owner approves Cloudflare's browser consent. Normal fresh setup creates no API token. Before approval, explain that setup also adds or updates the Brain MCP entry in installed AI tools and may create a new owner-workspace CLAUDE.md and AGENTS.md for Codex, with answer rules and owner-approved account labels. Use --no-connect if the owner declines those local config writes.",
     automated_proof: "The installer verifies the named browser sign-in and exact account, provisions that account, deploys, migrates, runs health checks, and either verifies the approved AI-tool wiring or records that --no-connect left it unchanged. The narrow sign-in does not claim to verify billing; the owner's account-specific dashboard confirmation is the plan proof.",
     owner_guidance: ownerGuidance({
       before_action: "Cloudflare's official sign-in will open first. After it verifies the selected account, the installer opens that exact account's Workers & Pages > Plans page. The owner confirms it says Paid before setup creates anything.",
@@ -560,6 +560,8 @@ export function technicianPlan(manifestPath, deps = {}) {
         setup_writes: [
           "Brain MCP entry for installed AI tools unless --no-connect is chosen",
           "new owner-workspace CLAUDE.md when no file already exists",
+          "new owner-workspace AGENTS.md for Codex when no file already exists",
+          "workspace guides contain answer rules and owner-approved account labels",
         ],
         mcp_opt_out: "run setup with --no-connect, then preview brain mcp-config before separately approving --apply",
         literal_brain_credential_written_to_ai_config: false,

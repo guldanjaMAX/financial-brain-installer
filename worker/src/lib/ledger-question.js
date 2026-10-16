@@ -132,15 +132,17 @@ export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
   const broad = /\b(?:money|cash|profit|bank|deposits?|expenses?|charges?|subscriptions|recurring (?:charges|subscriptions)|payment|paid|spend|spent|spending|income|revenue|credits?|debits?|transactions?|transfers?|checking|savings|loan|debt|tax|payroll|invoice|receivable|payable|came in|went out)\b|\$\s*\d/.test(q) || /\b(?:(?:my|our|account|card|bank|checking|savings|loan|current|available|outstanding)\s+balances?|balances?\s+(?:of|on|in|for|due))\b/.test(q);
   const base = { broad, kind: null };
   if (!broad) return base;
-  // Consume only these two bounded clause families. Duplicate or conflicting
+  // Consume only these bounded clause families. Duplicate or conflicting
   // clauses refuse; the remaining grammar still has to consume every word.
   // Strip before account selection so "investment withdrawals" is not a kind.
   const transfers = [...q.matchAll(/(?:,\s*)?\b(excluding|without|not counting|including) (?:my |our )?(?:own )?transfers(?: between (?:my|our) (?:own )?accounts)?\b/g)];
   const withdrawals = [...q.matchAll(/(?:,\s*)?\bincluding (?:retirement |investment )?withdrawals\b/g)];
-  if (transfers.length > 1 || withdrawals.length > 1) return base;
+  const loanProceeds = [...q.matchAll(/(?:,\s*)?\bincluding loan proceeds\b/g)];
+  if (transfers.length > 1 || withdrawals.length > 1 || loanProceeds.length > 1) return base;
   const flags = {};
   if (transfers.length) { flags.ownTransfers = transfers[0][1] === "including" ? "include" : "exclude"; q = q.replace(transfers[0][0], ""); }
   if (withdrawals.length) { flags.withdrawals = "include"; q = q.replace(withdrawals[0][0], ""); }
+  if (loanProceeds.length) { flags.loanProceeds = "include"; q = q.replace(loanProceeds[0][0], ""); }
   q = q.replace(/\s+/g, " ").trim();
   const today = ledgerDay(now);
   const maskMatches = [...q.matchAll(/(?:\*{2,}|ending(?:\s+in)?\s+|mask\s+|account\s+)(\d{1,4})\b/g)];

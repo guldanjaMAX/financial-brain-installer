@@ -556,6 +556,8 @@ test("the plan is read-only, ordered, honest about proof, and agent-readable", (
   assert.match(plan.assistance.browser_help.fresh_cloudflare_access, /no API token/i);
   assert.match(plan.assistance.local_configuration.tools_writes.join("\n"), /technician skill/i);
   assert.match(plan.assistance.local_configuration.setup_writes.join("\n"), /MCP entry/i);
+  assert.match(plan.assistance.local_configuration.setup_writes.join("\n"), /AGENTS\.md.*Codex/);
+  assert.match(plan.assistance.local_configuration.setup_writes.join("\n"), /answer rules.*owner-approved account labels/);
   assert.match(plan.assistance.local_configuration.mcp_opt_out, /--no-connect.*preview.*--apply/i);
   assert.equal(plan.assistance.local_configuration.literal_brain_credential_written_to_ai_config, false);
   assert.equal(plan.coverage.bank_connections.state, "held_outside_ordinary_onboarding");

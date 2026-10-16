@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { mkdtempSync, realpathSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
+import { renderCliCommands } from "../../operations/cli-guidance.mjs";
 import { cmdSources, dailyFreshnessRows } from "../../brain.mjs";
 import { coverageGapReport, freshnessReport, sourceInventory, sourceFreshnessCounts } from "../src/lib/store-d1.js";
 import { providerNoChangeCheckAt } from "../src/lib/source-receipt.js";
@@ -185,7 +186,7 @@ async function sourceOutput(t, fixture) {
       },
     });
     assert.ok(requests > 0, "the CLI read the real inventory route");
-    return { inventory, output: lines.join("\n") };
+    return { inventory, manifest, output: lines.join("\n") };
   } finally { console.log = original; }
 }
 
@@ -214,7 +215,7 @@ test("folder and historical wording survives inventory merging, CLI, and daily r
     }
     const reason = historical
       ? `historical: kept and searchable, not refreshed (retired by the owner on ${new Date(NOW).toISOString().slice(0, 10)})`
-      : `updated when you add a file; last loaded ${ACCEPTED.slice(0, 10)}`;
+      : `not watched; changes only when files are loaded again; last loaded ${ACCEPTED.slice(0, 10)}`;
     const read = await sourceOutput(t, fixture);
     const row = read.inventory.sources[0];
     assert.equal(row.freshness.state, "manual");
@@ -274,6 +275,11 @@ test("the named stuck Drive run is superseded when the retry opens a new run", a
   const before = await freshnessReport(fixture.env, { now: NOW });
   assert.equal(before.sources[0].state, "broken");
   assert.ok(before.sources[0].reason.includes(oldStart));
+  assert.doesNotMatch(before.sources[0].reason, /brain ingest|<manifest>|installer|local lock/);
+  assert.match(before.sources[0].reason, /a new Drive refresh replaces it/);
+  const cliRead = await sourceOutput(t, fixture);
+  assert.match(cliRead.output, /Retry Drive:/);
+  assert.ok(cliRead.output.includes(renderCliCommands(`brain ingest ${JSON.stringify(cliRead.manifest)} --from drive`)));
   await post(fixture, "/api/admin/brain/source-receipt", {
     source: "sample-drive", kind: "drive", status: "indexing", run_id: "retry-run", started_at: new Date(NOW).toISOString(),
   });
@@ -283,4 +289,34 @@ test("the named stuck Drive run is superseded when the retry opens a new run", a
   assert.equal(fixture.first("SELECT COUNT(*) AS n FROM sync_runs WHERE finished_at IS NULL").n, 1);
   const after = await freshnessReport(fixture.env, { now: NOW });
   assert.equal(after.sources[0].state, "indexing");
+});
+
+for (const [cadence, hours, expected, age] of [[60, 0.05, "1 minute(s)", "3 minute(s)"], [1200, 1, "20 minute(s)", "1 hour(s)"], [3600, 3, "1 hour(s)", "3 hour(s)"], [86400, 72, "1 day(s)", "3 day(s)"]]) {
+  test(`R9 human cadence and last-read age for ${cadence} seconds`, async t => {
+    const f = await scenario(t, { kind: "imessage", cadence, reportAfterHours: hours });
+    const gap = f.gaps.find(g => g.type === "coverage_stale");
+    assert.ok(gap, "the source reached the stale cadence decision");
+    assert.ok(gap.detail.includes(`about every ${expected}`));
+    assert.ok(gap.detail.includes(`last read ${age} ago`));
+    const control = await coverageGapReport(f.fixture.env, { now: Date.parse(FINISHED) + cadence * 1000 });
+    assert.ok(control.gaps.every(g => g.type !== "coverage_stale"));
+  });
+}
+
+for (const kind of ["imap", "iphone-backup", "imessage", "whatsapp", "microsoft", "legacy"]) test(`m5 ${kind} without a schedule has kind-neutral wording`, async t => {
+  t.mock.method(Date, "now", () => NOW);
+  const f = await createProductFixture(); t.after(() => f.close());
+  await post(f, "/api/admin/brain/source-expectation", { source: "sample-manual", kind: kind === "legacy" ? "upload" : kind, expected_refresh_seconds: null });
+  f.raw("UPDATE sources SET kind=?, last_ingest_at=?, last_complete_sweep_at=? WHERE name='sample-manual'", kind, ACCEPTED, ACCEPTED);
+  const fresh = await freshnessReport(f.env, { now: NOW });
+  const inventory = await sourceInventory(f.env, { now: NOW });
+  assert.equal(fresh.sources.length, 1);
+  assert.equal(inventory.rows.length, 1, "the source reached both report decisions");
+  for (const reason of [fresh.sources[0].reason, inventory.rows[0].freshness.reason]) {
+    assert.match(reason, /no refresh scheduled; last read 2026-07-04/);
+    assert.doesNotMatch(reason, /add a file/);
+  }
+  f.raw("UPDATE sources SET expected_refresh_seconds=86400, last_ingest_at=? WHERE name='sample-manual'", new Date(NOW).toISOString());
+  const control = await freshnessReport(f.env, { now: NOW });
+  assert.equal(control.sources[0].state, "ok");
 });

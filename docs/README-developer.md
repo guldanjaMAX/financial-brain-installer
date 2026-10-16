@@ -2141,14 +2141,18 @@ is `TRANSFER_IN_INVESTMENT_AND_RETIREMENT_FUNDS` (case-insensitive, proposed or
 confirmed), or a paired outgoing leg is in an investment or retirement account.
 Withdrawals leave the lead income figure; the paired outgoing leg also leaves
 the lead when in scope. Description words alone never exclude a row. The note
-offers "including withdrawals". Lead lines say "money in" and "money out";
+offers "including withdrawals". A qualifying loan or line-of-credit advance into
+a selected checking, savings or card account leaves both in-scope legs out of
+the lead, with "including loan proceeds" as its flip. Lead lines say "money in" and "money out";
 the unchanged gross sentences, including "credits" and "debits", follow under
 "With everything counted:". This avoids a second subtraction by clients that
-read gross lines. Lists retain their original rows. Existing JSON keys remain
+read gross lines. Lists filter before limiting their lead rows and retain their
+original gross rows. Merchant, category and recurring notes describe only the
+rows feeding that figure, including any displayed Unsorted line. Existing JSON keys remain
 gross, including `accounts`, `total_minor`, `includes_own_transfers` and
 `excluded_from_totals`; `if_own_transfers` keeps its conditional meaning.
 Additive `lead`, `default_exclusions`, `lead_accounts`, `lead_total_minor`,
-`lead_monthly_total_minor`, `flip` and per-pair `excluded_from_lead`/`kept_reason`
+`lead_rows`, `lead_monthly_total_minor`, `flip` and per-pair `excluded_from_lead`/`kept_reason`
 explain the presentation. Answers with no exclusions or kept pairs retain their
 exact text. The transfers view stays unchanged and counts each pair once by
 outgoing posting date. The 5,000-row cap includes padding and other owned

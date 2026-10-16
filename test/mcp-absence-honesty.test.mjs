@@ -28,11 +28,11 @@ const MCP = fileURLToPath(new URL("../components/brain-mcp.mjs", import.meta.url
 const ABSENCE = 'No match in this search. Say "I didn\'t find a matching record in this search", name what you searched, and name the next search you would run (another source, a wider date window, sort "newest", or a distinctive name or number). Do not turn one search into a claim that no such record exists. Do not substitute inference.';
 const NO_HITS = 'No hits in this search. This is not proof that no such record exists. Say "I didn\'t find a matching record in this search" and name the next search you would run.';
 const SCOPED_GAP = "No match in this search. This is not proof that no such record exists.";
-const REFUSAL = "I didn't find a matching record in this search. Which account, document, or date would narrow it?";
+const REFUSAL = "I didn't find a matching record in this search. Next, search the subject in another source or a wider date window.";
 const PRESERVE = "Preserve the ledger answer's exact amounts, account masks, dates, and coverage bounds.";
 const LATEST = 'Before any status, "latest", or absence claim, run one brain_search for the subject with sort "newest", read newest_record, and say "as of <record date>" for the record you relied on.';
-const MONEY = "For a money question the bank ledger answers (a balance, a payment received, money in and out, largest expenses, deposits, spend by merchant or category, transfers between the owner's own accounts, recurring charges), use brain_think: it reads the ledger directly. Keep its exact amounts, account masks, dates and coverage bounds.";
-const NEWEST_DESCRIPTION = 'Before any status, "latest", or absence claim, search the subject once with sort "newest" and check newest_record, the newest dated record among everything this search matched, not only this page.';
+const MONEY = "For a money question the bank ledger answers (a balance, a payment received, money in and out, largest expenses, deposits, spend by merchant or category, transfers between the owner's own accounts, recurring charges, profit, net income, cash flow, withdrawals, loan proceeds), use brain_think: it reads the ledger directly. Keep its exact amounts, account masks, dates and coverage bounds.";
+const NEWEST_DESCRIPTION = 'Before any status, "latest", or absence claim, search the subject once with sort "newest" and check newest_record, the newest reliably dated record among the results this search returned before pagination (at most 50), or the newest unverified date if none is reliable. Before a latest claim, re-search the subject with a recent date window; relevance ranking may omit newer matches.';
 
 function fixtureRuntime(url, profile = "") {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "mcp-honesty-")));
@@ -574,6 +574,8 @@ await test("remote descriptions and initialize route money and newest-record rea
   assert.match(ask, /For anything else, use search, then fetch\./);
   assert.match(search, /^Default tool for questions about the owner's records\./);
   assert.match(search, /newest_record/);
+  assert.match(search, /among the results this search returned/);
+  assert.match(search, /recent date window/);
   assert.match(search, /Before any status, "latest", or absence claim, fetch the newest matching record and rely on it or say why not\./);
   assert.ok(search.endsWith("Relay any provisional coverage note and do not turn an incomplete empty result into a corpus-wide absence claim."));
   const { instructions } = await rpc("initialize");
@@ -581,4 +583,26 @@ await test("remote descriptions and initialize route money and newest-record rea
   assert.match(instructions, /search, newest first, comes before any status or absence claim/);
   assert.match(instructions, /a search with no match is not proof that no record exists/i);
   assert.equal(backendCalls, 0, "metadata never reads records");
+});
+
+await test("R4 remote refused ask reports candidates with titles and dates", async () => {
+  const out = await remoteCall({ answer: "The documents do not answer the question.", results: [reliable, unreliable, datedRow("third", null, false)], citations: [], gaps: [] }, "ask");
+  assert.match(out, /I found 3 records but none answered this directly/);
+  assert.match(out, /Fixture reliable.*2026-09-15/);
+  assert.match(out, /Fixture unreliable.*2026-10-01.*unverified/i);
+  assert.doesNotMatch(out, /didn't find a matching record/);
+  assert.match(await remoteCall({ answer: "The documents do not answer the question.", results: [], citations: [], gaps: [] }, "ask"), /didn't find a matching record/);
+});
+
+await test("R4 remote refusal preserves ledger and source coverage limits", async () => {
+  for (const type of ["ledger_out_of_coverage", "ledger_not_consulted", "coverage_stale"]) {
+    const detail = "Fixture bank feed covered through 2026-10-10.";
+    const out = await remoteCall({ answer: "The documents do not answer the question.", results: [reliable], citations: [], gaps: [{ type, detail }] }, "ask");
+    assert.ok(out.includes(detail));
+    assert.match(out, /I found 1 record/);
+    if (type === "ledger_out_of_coverage") assert.match(out, /last finished month/);
+    const empty = await remoteCall({ answer: null, results: [], citations: [], gaps: [{ type, detail }] }, "ask");
+    assert.ok(empty.includes(detail), "empty synthesis still carries the real reason");
+  }
+  assert.equal(await remoteCall({ answer: "Fixture supported answer.", results: [], citations: [], gaps: [] }, "ask"), "Fixture supported answer.");
 });
