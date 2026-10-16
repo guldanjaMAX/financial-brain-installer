@@ -26624,7 +26624,7 @@ export async function existingDailySourceOwners(m, manifestPath, options = {}) {
   }
   if (platform !== "darwin") return [];
   const owned = [];
-  const schedulerOptions = options.legacySchedulerOptions || {};
+  const schedulerOptions = { platform: options.platform ?? process.platform, ...(options.legacySchedulerOptions || {}) };
   const healthy = (status) => status?.installed === true &&
     status?.definitionMatches === true && status?.loaded === true &&
     status?.interpreterPresent !== false && !status?.scheduleError;
@@ -26659,7 +26659,7 @@ async function pauseExistingOwnedSchedulers(m, manifestPath, options = {}) {
 
 async function captureExistingOwnedSchedulers(m, manifestPath, options = {}) {
   if ((options.platform ?? process.platform) !== "darwin") return [];
-  const schedulerOptions = options.legacySchedulerOptions || {};
+  const schedulerOptions = { platform: options.platform ?? process.platform, ...(options.legacySchedulerOptions || {}) };
   const snapshots = [];
   const capture = (kind, sourceKey, module, status, provider = null) => {
     if (!status?.installed) {
@@ -26702,7 +26702,7 @@ async function captureExistingOwnedSchedulers(m, manifestPath, options = {}) {
 }
 
 async function pauseCapturedOwnedSchedulers(manifestPath, snapshots, options = {}) {
-  const schedulerOptions = options.legacySchedulerOptions || {};
+  const schedulerOptions = { platform: options.platform ?? process.platform, ...(options.legacySchedulerOptions || {}) };
   const paused = [];
   try {
     for (const entry of snapshots) {
@@ -26729,7 +26729,7 @@ async function pauseCapturedOwnedSchedulers(manifestPath, snapshots, options = {
 }
 
 function restoreExistingOwnedSchedulers(manifestPath, snapshots, options = {}) {
-  const schedulerOptions = options.legacySchedulerOptions || {};
+  const schedulerOptions = { platform: options.platform ?? process.platform, ...(options.legacySchedulerOptions || {}) };
   for (const entry of [...snapshots].reverse()) {
     if (!entry.snapshot?.exists) continue;
     if (entry.kind === "drive") entry.module.restoreDriveScheduler(manifestPath, entry.snapshot, schedulerOptions);
@@ -26768,7 +26768,7 @@ async function hydrateExistingOwnedSchedulerSnapshots(snapshots, options = {}) {
 }
 
 function reconcileExistingOwnedSchedulers(m, manifestPath, snapshots, options = {}) {
-  const schedulerOptions = options.legacySchedulerOptions || {};
+  const schedulerOptions = { platform: options.platform ?? process.platform, ...(options.legacySchedulerOptions || {}) };
   for (const entry of snapshots) {
     if (!entry.snapshot?.exists || m?.corpora?.[entry.sourceKey]?.enabled !== true) continue;
     const result = entry.kind === "drive"
