@@ -22042,14 +22042,14 @@ export async function cmdSetup(manifestPath, options = {}) {
         "  no credential needs to be copied into a command."
     );
   }
+  const workspaceGuideRun = { action: "setup" };
   if (wired.includes("Claude Code")) {
     try {
-      const writeGuide = options.writeClaudeWorkspaceGuide ?? writeClaudeWorkspaceGuide;
-      const guide = writeGuide(target, {
+      const guide = writeAssistantWorkspaceGuide(target, "claude", options, {
         brainCliPath: options.brainCliPath || fileURLToPath(import.meta.url),
         nodePath: options.nodePath || process.execPath,
         platformName: options.platformName ?? options.platform ?? process.platform,
-      });
+      }, workspaceGuideRun);
       if (guide.status === "written" || guide.status === "verified") {
         ok(`Claude Code owner workspace ready at ${guide.path}`);
         info(`For Brain conversations, open Claude Code in this folder: ${displayPath(guide.workspace || dirname(guide.path))}`);
@@ -22057,7 +22057,7 @@ export async function cmdSetup(manifestPath, options = {}) {
         warn(damagedOwnerRulesWarning(guide.path));
       } else if (guide.status === "not_written") {
         warn(workspaceGuideNotWrittenWarning("CLAUDE.md", guide));
-      } else {
+      } else if (guide.status !== "kept_existing_windows_guide") {
         warn(`preserved the existing CLAUDE.md at ${guide.path}; add the Financial Brain safety guide manually`);
       }
     } catch {
@@ -22070,12 +22070,11 @@ export async function cmdSetup(manifestPath, options = {}) {
   }
   if (wired.includes("Codex")) {
     try {
-      const writeGuide = options.writeCodexWorkspaceGuide ?? writeCodexWorkspaceGuide;
-      const guide = writeGuide(target, {
+      const guide = writeAssistantWorkspaceGuide(target, "codex", options, {
         brainCliPath: options.brainCliPath || fileURLToPath(import.meta.url),
         nodePath: options.nodePath || process.execPath,
         platformName: options.platformName ?? options.platform ?? process.platform,
-      });
+      }, workspaceGuideRun);
       if (guide.status === "written" || guide.status === "verified") {
         ok(`Codex owner workspace ready at ${guide.path}`);
         info(`For Brain conversations, open Codex in this folder: ${displayPath(guide.workspace || dirname(guide.path))}`);
@@ -22083,7 +22082,7 @@ export async function cmdSetup(manifestPath, options = {}) {
         warn(damagedOwnerRulesWarning(guide.path));
       } else if (guide.status === "not_written") {
         warn(workspaceGuideNotWrittenWarning("AGENTS.md", guide));
-      } else {
+      } else if (guide.status !== "kept_existing_windows_guide") {
         warn(`preserved the existing AGENTS.md at ${guide.path}; add the Financial Brain safety guide manually`);
       }
     } catch {
@@ -28478,15 +28477,14 @@ export async function cmdLocalTools(options = {}) {
   if (handoff) {
     let guide;
     try {
-      const writeGuide = options.writeClaudeWorkspaceGuide ?? writeClaudeWorkspaceGuide;
-      guide = writeGuide(targetManifest, {
+      guide = writeAssistantWorkspaceGuide(targetManifest, "claude", options, {
         brainCliPath: cli.args[0],
         nodePath: cli.command,
         bootstrapStatusPath: bootstrapStatus.status_file,
         platformName,
         environment,
         workspaceRoot: options.claudeWorkspaceRoot,
-      });
+      }, { action: "setup" });
     } catch {
       const failure = {
         ...bootstrapStatus,
@@ -28501,16 +28499,23 @@ export async function cmdLocalTools(options = {}) {
       die("the Claude owner workspace could not be prepared safely. No existing CLAUDE.md was replaced.");
     }
     if (!["written", "verified"].includes(guide.status)) {
+      // Preservation alone does not prove that an existing guide is safe to
+      // launch. Keep the handoff's ownership gate closed without the writer.
+      const kept = guide.status === "kept_existing_windows_guide";
       bootstrapStatus = persistStatus({
         ...bootstrapStatus,
         status: "action_required",
         issue_code: "CLAUDE_WORKSPACE_COLLISION",
         retry_safe: false,
         requires_human: true,
-        next_action: "Resolve the unrelated instruction file outside the dedicated installer-owned Claude workspace, then rerun this exact handoff.",
+        next_action: kept
+          ? "Review the unchanged workspace guide before opening Claude Code manually; this Windows version cannot verify the existing guide for automatic handoff."
+          : "Resolve the unrelated instruction file outside the dedicated installer-owned Claude workspace, then rerun this exact handoff.",
         recovery: "No existing CLAUDE.md was replaced and Claude Code was not launched.",
       });
-      die("Claude Code was not launched because the dedicated handoff workspace is not exclusively installer-owned.");
+      die(kept
+        ? "Claude Code was not launched because this Windows setup kept the existing workspace guide without verifying it for automatic handoff."
+        : "Claude Code was not launched because the dedicated handoff workspace is not exclusively installer-owned.");
     }
     const windowsClaudeState = platformName === "win32"
       ? windowsClaudePathState({ environment, existsImpl: options.existsImpl })
@@ -29094,25 +29099,43 @@ function ownerSessionFolderLabel(manifestPath, options) {
   return risk ? { desktop: "your Desktop folder", downloads: "your Downloads folder", synced: "a folder that syncs to the cloud", outside: "another folder" }[risk.kind] : null;
 }
 
+function writeAssistantWorkspaceGuide(manifestPath, assistant, options, writerOptions, run = {}) {
+  const filename = assistant === "codex" ? "AGENTS.md" : "CLAUDE.md";
+  const writeGuide = assistant === "codex"
+    ? (options.writeCodexWorkspaceGuide ?? writeCodexWorkspaceGuide)
+    : (options.writeClaudeWorkspaceGuide ?? writeClaudeWorkspaceGuide);
+  const workspace = dirname(resolve(manifestPath));
+  const path = join(workspace, filename);
+  // Windows can retain the writer's lock when an editor holds the original
+  // guide open. Keep this check adjacent to the writer; a concurrent creator
+  // still needs a create-only writer mode or lock recovery in 0.4.18.
+  if (writerOptions.platformName !== "win32" || !existsSync(path)) {
+    return writeGuide(manifestPath, writerOptions);
+  }
+  if (!run.noticeShown) {
+    run.noticeShown = true;
+    safelyReportUpdateResult(run.reportInfo ?? info,
+      `On Windows, this ${run.action ?? "update"} leaves your assistant's workspace guide as it is. Refreshed answer rules arrive in the next version.`);
+  }
+  return { status: "kept_existing_windows_guide", changed: false, path, workspace };
+}
+
 /** Refresh managed guides; verified Codex may join a setup-owned folder. */
 function refreshWorkspaceGuideAfterUpdate(manifestPath, options, assistant) {
   const codex = assistant === "codex";
   const filename = codex ? "AGENTS.md" : "CLAUDE.md";
-  const writeGuide = codex
-    ? (options.writeCodexWorkspaceGuide ?? writeCodexWorkspaceGuide)
-    : (options.writeClaudeWorkspaceGuide ?? writeClaudeWorkspaceGuide);
   const reportOk = options.reportOk ?? ok;
   const reportInfo = options.reportInfo ?? info;
   const reportWarning = options.reportWarning ?? warn;
   let result;
   try {
-    result = writeGuide(manifestPath, {
+    result = writeAssistantWorkspaceGuide(manifestPath, assistant, options, {
       brainCliPath: options.brainCliPath || fileURLToPath(import.meta.url),
       nodePath: options.nodePath || process.execPath,
       platformName: options.platformName ?? options.platform ?? process.platform,
       existingOnly: true,
       verifiedCodexWiring: codex && options.verifiedCodexWiring === true,
-    });
+    }, options.workspaceGuideRun ?? { action: "update", reportInfo });
   } catch {
     safelyReportUpdateResult(
       reportWarning,
@@ -30395,10 +30418,10 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
     : (IS_MAIN ? wireAgents : null);
   const updateWorkspaceGuide = Object.hasOwn(options, "writeClaudeWorkspaceGuideAfterUpdate")
     ? options.writeClaudeWorkspaceGuideAfterUpdate
-    : (IS_MAIN ? writeClaudeWorkspaceGuide : null);
+    : IS_MAIN;
   const updateCodexWorkspaceGuide = Object.hasOwn(options, "writeCodexWorkspaceGuideAfterUpdate")
     ? options.writeCodexWorkspaceGuideAfterUpdate
-    : (IS_MAIN ? writeCodexWorkspaceGuide : null);
+    : IS_MAIN;
   const resolveUpdateAgentBaseUrl = options.resolveUpdateAgentBaseUrl ?? resolveBaseUrl;
   let updatedManifest = null;
   let updatedBaseUrl = null;
@@ -30797,25 +30820,17 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
     }
   }
 
-  // Windows may refuse the writer's final directory rename while a guide is
-  // open. Keep existing guides until a reviewed recovery protocol is available.
-  let windowsGuideNoticeShown = false;
-  const keepExistingWindowsGuide = filename => {
-    if ((options.platformName ?? options.platform ?? process.platform) !== "win32" ||
-        !existsSync(join(dirname(resolve(pin.target)), filename))) return false;
-    if (!windowsGuideNoticeShown) safelyReportUpdateResult(
-      options.reportWorkspaceGuideRefreshInfo ?? console.log,
-      "On Windows, this update leaves your assistant's workspace guide as it is. Refreshed answer rules arrive in the next version.",
-    );
-    windowsGuideNoticeShown = true;
-    return true;
+  const workspaceGuideRun = {
+    action: "update",
+    reportInfo: options.reportWorkspaceGuideRefreshInfo ?? console.log,
   };
 
   // Write-capable guidance is refreshed only after this exact Claude Code
   // registration has passed runtime, tool-list, and config readback proof.
-  if (updateWorkspaceGuide && ownerAgentRefreshResult?.wired?.includes("Claude Code") && !keepExistingWindowsGuide("CLAUDE.md")) {
+  if (updateWorkspaceGuide && ownerAgentRefreshResult?.wired?.includes("Claude Code")) {
     const workspaceGuideResult = refreshClaudeWorkspaceGuideAfterUpdate(pin.target, {
-      writeClaudeWorkspaceGuide: updateWorkspaceGuide,
+      writeClaudeWorkspaceGuide: typeof updateWorkspaceGuide === "function" ? updateWorkspaceGuide : undefined,
+      workspaceGuideRun,
       brainCliPath: options.brainCliPath,
       nodePath: options.nodePath,
       platformName: options.platformName ?? options.platform,
@@ -30828,9 +30843,10 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
     }
   }
 
-  if (updateCodexWorkspaceGuide && ownerAgentRefreshResult?.wired?.includes("Codex") && !keepExistingWindowsGuide("AGENTS.md")) {
+  if (updateCodexWorkspaceGuide && ownerAgentRefreshResult?.wired?.includes("Codex")) {
     const workspaceGuideResult = refreshCodexWorkspaceGuideAfterUpdate(pin.target, {
-      writeCodexWorkspaceGuide: updateCodexWorkspaceGuide,
+      writeCodexWorkspaceGuide: typeof updateCodexWorkspaceGuide === "function" ? updateCodexWorkspaceGuide : undefined,
+      workspaceGuideRun,
       verifiedCodexWiring: true,
       brainCliPath: options.brainCliPath,
       nodePath: options.nodePath,

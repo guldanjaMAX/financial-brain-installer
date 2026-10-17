@@ -2157,12 +2157,19 @@ inode stay there, including after success, so an editor with an open original
 file descriptor cannot lose a later edit. These local recovery directories are
 never automatically deleted. Interrupted writes likewise require explicit
 recovery; never automatically clear their lock.
-In 0.4.17, Windows updates leave existing assistant guides untouched and print
-one notice even when both assistants are connected. Setup still creates missing
-guides; verification and macOS/Linux refresh behavior are unchanged. This avoids
-the Windows open-file refusal of the final directory rename, which can retain a
-lock after publication and block later refreshes. Refreshed Windows answer rules
-are deferred to 0.4.18 with a separately reviewed recovery protocol.
+In 0.4.17, Windows setup, tools handoff and update leave existing assistant
+guides untouched without entering the writer. One notice is printed per run,
+even when both assistants are connected. Setup and tools still create missing
+guides; update retains its existing-only policy, including verified Codex
+creation beside a safely managed Claude guide. Keeping a guide is not ownership
+verification, so tools handoff requires manual review instead of automatically
+launching Claude with an existing Windows guide. macOS/Linux behavior is unchanged.
+This avoids the Windows open-file refusal of the final directory rename for
+guides present at the check. A concurrent creator between that check and the
+writer's snapshot can still leave a retained lock, with no data loss. That race
+is accepted for 0.4.17; the existence check stays immediately beside the writer
+call. Refreshed Windows answer rules are deferred to 0.4.18, whose design needs
+a create-only writer mode or separately reviewed lock recovery.
 Native Windows filesystem behavior remains a separate host/CI gate.
 Repeated writer tests inject only the native attribute probe, keeping filesystem
 identity, content, link and race checks real. A separate bounded Windows test

@@ -82,7 +82,7 @@ exact sealed package. This version bump verifies no incident.
 
 ### Known limitations
 
-- On Windows, updating leaves the assistant workspace guide unchanged in this version; setup still creates it. Refreshed answer rules for Windows arrive in 0.4.18.
+- On Windows, setup and update leave an existing assistant workspace guide unchanged in this version; setup still creates a missing guide. Refreshed answer rules for Windows arrive in 0.4.18.
 
 ### Known issues
 

@@ -282,11 +282,12 @@ async function capture(run) {
   return messages.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
 }
 async function setup(t, wired, extra = {}) {
-  const { root } = fixture(t);
+  const { root } = extra.fixtureRoot ? { root: extra.fixtureRoot } : fixture(t);
   const manifest = join(root, "Financial Brain", "brain.manifest.json");
   const events = [];
   const keyPath = join(root, "fixture-admin-key");
   writeFileSync(keyPath, "fixture-only-value", { mode: 0o600 });
+  extra.beforeSetup?.(manifest);
   const output = await capture(() => cli.cmdSetup(manifest, {
     flags: { name: "Fixture Brain", slug: "fixture-brain" },
     platform: "darwin", home: root, sessionFolder: join(root, extra.risky ? "Desktop" : "work"),
@@ -309,7 +310,7 @@ async function setup(t, wired, extra = {}) {
       writeFileSync(path, JSON.stringify(value));
     },
     cmdSecrets: async () => {}, cmdDrain: async () => {}, cmdHealth: async () => {},
-    wireAgents: async () => { events.push("wire"); return { wired, failures: [] }; },
+    wireAgents: async () => { events.push("wire"); extra.beforeWire?.(manifest); return { wired, failures: [] }; },
     backlogCount: async () => 0,
     installedManifestOptions: { home: root, stateDirectory: join(root, "installed-state") },
     ...options, ...extra,
@@ -611,7 +612,7 @@ test("atomic writer retains the pending file when closing it fails", (t) => {
   assertPrivateClean(control.root, join(control.root, "CLAUDE.md"));
 });
 
-test("both update refreshers report damage without changing bytes and refresh legacy controls", (t) => {
+for (const platformName of ["darwin", "linux"]) test(`both update refreshers report damage without changing bytes and refresh legacy controls: ${platformName}`, (t) => {
   const { root, manifest } = fixture(t);
   for (const [assistant, filename, marker, write] of writers) {
     const target = join(root, filename);
@@ -620,11 +621,11 @@ test("both update refreshers report damage without changing bytes and refresh le
     let reached = 0;
     const warnings = [], good = [];
     const refreshOptions = {
-      ...options, platformName: "win32",
+      ...options, platformName,
       [optionName]: (path, opts) => {
         reached++;
         assert.equal(opts.existingOnly, true);
-        assert.equal(opts.platformName, "win32");
+        assert.equal(opts.platformName, platformName);
         return write(path, opts);
       },
       reportWarning: (m) => warnings.push(m), reportOk: (m) => good.push(m), reportInfo: () => {},
@@ -1669,3 +1670,216 @@ test("R2 native smoke budget accepts slow startup and rejects either hung arm", 
     assert.ok(calls >= (arm === "junction" ? 2 : 1), "the requested native decision was reached");
   }
 });
+
+// CLI policy coverage is separate from the unchanged writer algorithm tests.
+const WINDOWS_SETUP_GUIDE_NOTICE = WINDOWS_GUIDE_NOTICE.replace("this update", "this setup");
+function countedGuideWriters(calls) {
+  return Object.fromEntries(writers.map(([assistant, , , writer]) => [
+    assistant === "codex" ? "writeCodexWorkspaceGuide" : "writeClaudeWorkspaceGuide",
+    (manifest, opts) => {
+      calls.push(assistant);
+      return writer(manifest, { ...opts, ownership: {
+        ...fixtureOwnership, platform: opts.platformName, pathApi, profile: dirname(manifest),
+      } });
+    },
+  ]));
+}
+function seedEarlierGuide(root, assistant) {
+  mkdirSync(root, { recursive: true });
+  const [, filename, marker] = writers.find(([name]) => name === assistant);
+  const target = join(root, filename);
+  writeFileSync(target, `${marker}\n# Earlier guide\n`);
+  fs.utimesSync(target, 1_700_000_000, 1_700_000_000);
+  return { target, bytes: readFileSync(target), mtime: statSync(target).mtimeMs, entries: readdirSync(root).sort() };
+}
+function assertGuideKept(before) {
+  assert.deepEqual(readFileSync(before.target), before.bytes);
+  assert.equal(statSync(before.target).mtimeMs, before.mtime);
+  assert.deepEqual(readdirSync(dirname(before.target)).sort(), before.entries, "no lock, staging or retained folder was created");
+}
+
+for (const platform of ["win32", "darwin", "linux"]) for (const [assistant, filename] of writers) {
+  for (const rerun of [false, true]) for (const existing of [false, true]) {
+    test(`WIN R5 setup ${rerun ? "rerun" : "first run"}: ${platform} ${assistant} existing=${existing}`, async t => {
+      const wired = [assistant === "codex" ? "Codex" : "Claude Code"];
+      const first = rerun ? await setup(t, wired, { platform }) : null;
+      const calls = [];
+      let before, decisions = 0;
+      const result = await setup(t, wired, {
+        platform, fixtureRoot: first && dirname(first.root),
+        ...countedGuideWriters(calls),
+        beforeSetup: manifest => {
+          if (!existing && existsSync(join(dirname(manifest), filename))) rmSync(join(dirname(manifest), filename));
+        },
+        beforeWire: manifest => {
+          decisions++;
+          if (existing) before = seedEarlierGuide(dirname(manifest), assistant);
+          else assert.equal(existsSync(join(dirname(manifest), filename)), false);
+        },
+      });
+      assert.equal(decisions, 1, "real setup reached successful assistant wiring");
+      const kept = platform === "win32" && existing;
+      assert.deepEqual(calls, kept ? [] : [assistant]);
+      assert.equal(count(result.output, WINDOWS_SETUP_GUIDE_NOTICE), kept ? 1 : 0);
+      if (kept) {
+        assertGuideKept(before);
+        assert.doesNotMatch(result.output, /add the Financial Brain safety guide manually|owner workspace ready/);
+      } else {
+        assert.ok(readFileSync(join(result.root, filename), "utf8").includes(BEGIN), "the real writer creates or refreshes the guide");
+      }
+    });
+  }
+}
+
+test("WIN R5 setup notice is shared by both assistants and resets on another run", async t => {
+  for (let run = 0; run < 2; run++) {
+    const calls = [], snapshots = [];
+    const result = await setup(t, ["Claude Code", "Codex"], {
+      platform: "win32", ...countedGuideWriters(calls),
+      beforeWire: manifest => {
+        seedEarlierGuide(dirname(manifest), "claude");
+        seedEarlierGuide(dirname(manifest), "codex");
+        for (const [assistant] of writers) snapshots.push(seedEarlierGuide(dirname(manifest), assistant));
+      },
+    });
+    assert.equal(snapshots.length, 2, "both connected assistants reached the guide decision");
+    assert.deepEqual(calls, []);
+    assert.equal(count(result.output, WINDOWS_SETUP_GUIDE_NOTICE), 1);
+    snapshots.forEach(assertGuideKept);
+  }
+});
+
+for (const platformName of ["win32", "darwin", "linux"]) for (const [assistant, filename] of writers) {
+  for (const existing of [false, true]) test(`WIN R5 direct update refresher: ${platformName} ${assistant} existing=${existing}`, t => {
+    const { root, manifest } = fixture(t);
+    // Existing-only update may create Codex beside an owned Claude guide.
+    if (assistant === "codex") seedEarlierGuide(root, "claude");
+    const before = existing ? seedEarlierGuide(root, assistant) : null;
+    const calls = [], notices = [];
+    const refresh = assistant === "codex" ? cli.refreshCodexWorkspaceGuideAfterUpdate : cli.refreshClaudeWorkspaceGuideAfterUpdate;
+    const result = refresh(manifest, {
+      ...options, ...countedGuideWriters(calls), platformName, verifiedCodexWiring: true,
+      reportInfo: message => notices.push(message), reportOk: () => {}, reportWarning: () => {},
+    });
+    const kept = platformName === "win32" && existing;
+    assert.deepEqual(calls, kept ? [] : [assistant]);
+    assert.deepEqual(notices, kept ? [WINDOWS_GUIDE_NOTICE] : []);
+    if (kept) {
+      assert.equal(result.status, "kept_existing_windows_guide", "the preservation decision returned an explicit kept result");
+      assert.equal(result.changed, false);
+      assertGuideKept(before);
+    } else if (!existing && assistant === "claude") {
+      assert.equal(result.status, "skipped_missing", "existing-only update policy is preserved");
+      assert.equal(existsSync(join(root, filename)), false);
+    } else {
+      assert.equal(result.status, "written");
+      assert.ok(readFileSync(join(root, filename), "utf8").includes(BEGIN));
+    }
+  });
+}
+
+for (const platformName of ["win32", "darwin", "linux"]) for (const existing of [false, true]) {
+  test(`WIN R5 real tools handoff: ${platformName} existing=${existing}`, async t => {
+    const { root, manifest } = fixture(t);
+    const before = existing ? seedEarlierGuide(root, "claude") : null;
+    const calls = [], launches = [], statuses = [], checks = [];
+    const environment = { HOME: root, USERPROFILE: "C:\\Users\\fixture", LOCALAPPDATA: "C:\\Users\\fixture\\AppData\\Local", PATH: "C:\\Users\\fixture\\.local\\bin", SystemRoot: "C:\\Windows" };
+    const executable = join(root, ".local", "bin", "claude.exe");
+    let failure;
+    const output = await capture(async () => {
+      try {
+        await cli.cmdLocalTools({
+          manifestPath: manifest, platformName, environment, handoff: true, isTTY: true,
+          writeStatus: true, setupIntent: "unsure", ...countedGuideWriters(calls),
+          persistClaudePath: () => ({ status: "verified" }), existsImpl: path => path.endsWith("claude.exe"),
+          dpapiProbe: () => ({ checked: true, passed: true, rounds: 25, cleanup_status: "clean" }),
+          statfsImpl: () => ({ bavail: 3n * 1024n * 1024n, bsize: 1024n }), getEffectiveUserId: () => 501,
+          runCommand: (command, args) => {
+            checks.push(command);
+            if (/powershell\.exe$/i.test(command)) return { ok: true, out: "BRAIN_STANDARD_USER" };
+            if (command === "npx") return { ok: true, out: "wrangler 4.131.1" };
+            if (args[0] === "--version") return { ok: true, out: "2.1.63 (Claude Code)" };
+            if (args.join(" ") === "auth status") return { ok: true, out: "fixture sign-in" };
+            throw new Error("unexpected local tool probe");
+          },
+          runClaudeDoctor: async () => ({ status: 0 }),
+          installTechnicianSkills: () => [{ root: ".claude", status: "verified" }],
+          persistCliPath: () => ({ action: "skipped" }),
+          writeBootstrapStatus: (_path, status) => { statuses.push(status); return { status }; },
+          claudeExecutable: executable,
+          launchClaude: (...args) => { launches.push(args); return { status: 0 }; },
+        });
+      } catch (error) { failure = error; }
+    });
+    assert.ok(checks.length >= 3 && statuses.length > 0, "real tools reached preflight");
+    assert.equal(statuses[0].checks.claude_doctor, "passed", "real tools completed preflight and reached handoff");
+    if (!existing) assert.equal(failure, undefined, "missing-guide handoff control completed");
+    const kept = platformName === "win32" && existing;
+    assert.deepEqual(calls, kept ? [] : ["claude"]);
+    assert.equal(count(output, WINDOWS_SETUP_GUIDE_NOTICE), kept ? 1 : 0);
+    if (kept) {
+      assertGuideKept(before);
+      assert.ok(failure, "keeping an existing guide does not grant handoff ownership");
+      assert.equal(statuses.at(-1).status, "action_required");
+      assert.equal(launches.length, 0);
+    } else {
+      assert.equal(failure, undefined);
+      assert.equal(launches.length, 1, "the missing-guide and POSIX controls reach launch");
+      assert.ok(readFileSync(join(root, "CLAUDE.md"), "utf8").includes(BEGIN));
+    }
+  });
+}
+
+test("WIN R5 every CLI writer reference is confined to the common guard", () => {
+  const source = readFileSync(new URL("../brain.mjs", import.meta.url), "utf8");
+  const start = source.indexOf("function writeAssistantWorkspaceGuide(");
+  assert.ok(start >= 0, "the shared writer decision exists");
+  const end = source.indexOf("\n}\n", start) + 3;
+  const helper = source.slice(start, end);
+  assert.equal((helper.match(/\bwriteGuide\(/g) || []).length, 1);
+  for (const name of ["writeClaudeWorkspaceGuide", "writeCodexWorkspaceGuide"]) {
+    assert.ok(helper.includes(`options.${name} ?? ${name}`), "injected and default writers share the guard");
+  }
+  const outside = (source.slice(0, start) + source.slice(end))
+    .replace(/^import \{ writeClaudeWorkspaceGuide, writeCodexWorkspaceGuide, classifySessionFolder \}.*$/m, "")
+    .replace(/\bwrite(?:Claude|Codex)WorkspaceGuide(?=\s*:)/g, "writerOption");
+  assert.doesNotMatch(outside, /\bwrite(?:Claude|Codex)WorkspaceGuide\b/, "no direct or aliased writer remains outside the guard");
+  assert.equal((outside.match(/\bwriteAssistantWorkspaceGuide\(/g) || []).length, 4, "setup twice, tools, and the shared update refresher");
+});
+
+for (const platform of ["win32", "darwin", "linux"]) {
+  test(`WIN R5 verified update delegates missing guides with existing-only policy: ${platform}`, async t => {
+    const missing = await update(t, { platform, wired: ["Claude Code", "Codex"] });
+    assert.equal(missing.finish.length, 1);
+    assert.deepEqual(missing.writes.map(([assistant]) => assistant), ["claude", "codex"], "both missing-guide decisions reach the writer");
+    for (const [, filename] of writers) assert.equal(existsSync(join(missing.root, filename)), false);
+    const control = await update(t, { platform, wired: ["Claude Code", "Codex"], createGuide: "claude" });
+    assert.equal(control.finish.length, 1);
+    assert.deepEqual(control.writes.map(([assistant]) => assistant), platform === "win32" ? ["codex"] : ["claude", "codex"]);
+    assert.ok(readFileSync(join(control.root, "AGENTS.md"), "utf8").includes(BEGIN), "verified Codex creation is the green control");
+    assert.equal(control.messages.filter(message => message === WINDOWS_GUIDE_NOTICE).length, platform === "win32" ? 1 : 0);
+  });
+}
+
+for (const [assistant, filename, marker] of writers) for (const damaged of [false, true]) {
+  test(`WIN R5 Windows preserves ${assistant} ${damaged ? "damaged" : "unrelated"} guides before inspection`, t => {
+    const { root, manifest } = fixture(t);
+    const target = join(root, filename);
+    writeFileSync(target, damaged ? `${marker}\n${BEGIN}\n` : "# Owner workspace notes\n");
+    fs.utimesSync(target, 1_700_000_000, 1_700_000_000);
+    const before = { target, bytes: readFileSync(target), mtime: statSync(target).mtimeMs, entries: readdirSync(root).sort() };
+    const calls = [], notices = [];
+    const refresh = assistant === "codex" ? cli.refreshCodexWorkspaceGuideAfterUpdate : cli.refreshClaudeWorkspaceGuideAfterUpdate;
+    const result = refresh(manifest, {
+      ...options, ...countedGuideWriters(calls), platform: "win32", reportInfo: message => notices.push(message),
+    });
+    assert.equal(result.status, "kept_existing_windows_guide", "the preservation decision is reached");
+    assert.deepEqual(calls, []);
+    assert.deepEqual(notices, [WINDOWS_GUIDE_NOTICE]);
+    assertGuideKept(before);
+    const control = refresh(manifest, { ...options, ...countedGuideWriters(calls), platform: "linux", reportInfo: () => {}, reportWarning: () => {} });
+    assert.deepEqual(calls, [assistant]);
+    assert.equal(control.status, damaged ? "preserved_damaged_section" : "preserved_unrelated_existing_file");
+    assertGuideKept(before);
+  });
+}
