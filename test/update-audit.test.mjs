@@ -7,7 +7,7 @@ import { validateIncidents, releaseBlockers, releaseAdjudication, runRegressions
   verifiedNpmCliPath, assertUndeferrableRegistered, assertEvidenceDocuments, UNDEFERRABLE_INCIDENTS,
   DEFERRAL_CAUSES, assertSourceInventoryV3ReleaseVersion,
   SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION, DEFAULT_REGRESSION_TIMEOUT_MS,
-  CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION_TIMEOUT_MS } from "../scripts/audit-updates.mjs";
+  CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION_TIMEOUT_MS, TECHNICIAN_SETUP_REGRESSION_TIMEOUT_MS } from "../scripts/audit-updates.mjs";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
 
 const cases = JSON.parse(readFileSync(new URL("../docs/update-incidents.json", import.meta.url), "utf8"));
@@ -331,8 +331,21 @@ assert.deepEqual(timeoutSelections, [
     timeout: DEFAULT_REGRESSION_TIMEOUT_MS,
   },
 ], "only the exact heavy adapter proof gets the reviewed forty-five-minute bound");
+const technicianSelections = [];
+runRegressions([{ tests: [
+  "test/technician-setup.test.mjs",
+  "test/technician-setup-extra.test.mjs",
+] }], (path, timeout) => {
+  technicianSelections.push({ path, timeout });
+  return { status: 0 };
+});
+assert.deepEqual(technicianSelections, [
+  { path: "test/technician-setup.test.mjs", timeout: TECHNICIAN_SETUP_REGRESSION_TIMEOUT_MS },
+  { path: "test/technician-setup-extra.test.mjs", timeout: DEFAULT_REGRESSION_TIMEOUT_MS },
+], "only the exact technician setup proof gets the reviewed twenty-minute bound");
 assert.equal(DEFAULT_REGRESSION_TIMEOUT_MS, 300_000);
 assert.equal(CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION_TIMEOUT_MS, 45 * 60 * 1000);
+assert.equal(TECHNICIAN_SETUP_REGRESSION_TIMEOUT_MS, 20 * 60 * 1000);
 assert.equal(runRegressions([{ tests: ["test/fixture.mjs"] }], () => ({ status: null, signal: "SIGTERM" }))[0].passed, false);
 assert.equal(runRegressions([{ tests: ["test/fixture.mjs"], testPlatform: "win32" }], () => { throw new Error("must not run on this host"); }, "darwin")[0].skipped, true);
 assert.equal(runRegressions([{ tests: ["test/fixture.mjs"] }], () => ({ status: 0, error: new Error("synthetic timeout") }))[0].passed, false);

@@ -15,14 +15,22 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 // offline profiled run completed in about thirty minutes. Give only that exact
 // proof a reviewed forty-five-minute ceiling so slower hosted runners retain a
 // bounded margin. A lookalike path does not inherit the exception.
+//
+// The technician setup proof drives the real Windows install doctor (DPAPI
+// round trips, Claude Code and Wrangler probes) and took 485 s and 648 s on
+// hosted windows-latest runners in the full chain, so the five-minute audit
+// bound killed a passing run. Give only that exact proof a twenty-minute
+// ceiling.
 export const DEFAULT_REGRESSION_TIMEOUT_MS = 300_000;
 export const CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION_TIMEOUT_MS = 45 * 60 * 1000;
-const CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION = "test/cloudflare-recovery-adapter.test.mjs";
+export const TECHNICIAN_SETUP_REGRESSION_TIMEOUT_MS = 20 * 60 * 1000;
+const REVIEWED_REGRESSION_TIMEOUTS = new Map([
+  ["test/cloudflare-recovery-adapter.test.mjs", CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION_TIMEOUT_MS],
+  ["test/technician-setup.test.mjs", TECHNICIAN_SETUP_REGRESSION_TIMEOUT_MS],
+]);
 
 function regressionTimeoutMs(path) {
-  return path === CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION
-    ? CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION_TIMEOUT_MS
-    : DEFAULT_REGRESSION_TIMEOUT_MS;
+  return REVIEWED_REGRESSION_TIMEOUTS.get(path) ?? DEFAULT_REGRESSION_TIMEOUT_MS;
 }
 
 // A RELEASE MAY DECLARE ITS SCOPE. IT MAY NOT DECLARE ITSELF EXEMPT.
