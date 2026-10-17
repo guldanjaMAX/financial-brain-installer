@@ -32,7 +32,8 @@
 
 import { accessSync, chmodSync, closeSync, constants as fsConstants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdtempSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync, writeSync, appendFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { saveUpgradeBookmark, WINDOWS_UPGRADE_BOOKMARK_ACL_TIMEOUT_MS } from "./operations/upgrade-bookmark.mjs";
+import { WINDOWS_UPGRADE_BOOKMARK_ACL_TIMEOUT_MS } from "./operations/upgrade-bookmark.mjs";
+import { saveUpgradeBookmarkBounded } from "./operations/upgrade-bookmark-process.mjs";
 import { basename, delimiter, isAbsolute, join, dirname, relative, resolve, sep, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
@@ -6676,7 +6677,7 @@ export async function cmdUpgrade(manifestPath, options = {}) {
   const verifyHealth = options.cmdHealth ?? cmdHealth;
   const verifyAcceptance = options.cmdTest ?? cmdTest;
   const commitVersion = options.commitManifestVersion ?? commitManifestVersion;
-  const persistBookmark = options.saveUpgradeBookmark ?? saveUpgradeBookmark;
+  const persistBookmark = options.saveUpgradeBookmark ?? saveUpgradeBookmarkBounded;
   const waitForVectorDrainQuiescence = options.waitForVectorDrainQuiescence ??
     ((milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)));
   let originalPin = pinUpdateManifest(manifestPath);
@@ -6808,7 +6809,7 @@ export async function cmdUpgrade(manifestPath, options = {}) {
     const startedAt = new Date().toISOString();
     let bookmarkReceiptPath = null;
     try {
-      bookmarkReceiptPath = persistBookmark({
+      bookmarkReceiptPath = await persistBookmark({
         account_id: accountId, database_id: dbId, bookmark,
         from_version: fromVersion, to_version: toVersion,
         manifest_sha256: createHash("sha256").update(originalPin.raw).digest("hex"),
@@ -6816,8 +6817,11 @@ export async function cmdUpgrade(manifestPath, options = {}) {
       assertStageFiles("D1 bookmark persistence");
       ok("D1 restore bookmark saved and verified in this computer's private upgrade-bookmarks folder");
     } catch (error) {
+      if (error?.code === "UPGRADE_BOOKMARK_TIMEOUT" || error?.code === "UPGRADE_BOOKMARK_MAC_ACL_TIMEOUT") {
+        throw Object.assign(new Fatal("update stopped because its D1 restore bookmark persistence timed out on this computer. No deployment or migration was started. Keep any incomplete recovery receipt and ask the installer to review local disk and permission checks before retrying."), { code: error.code });
+      }
       if (error?.code === "UPGRADE_BOOKMARK_ACL_TIMEOUT") {
-        die(`update stopped because its D1 restore bookmark could not be saved and verified on this computer: the Windows permission check timed out after ${WINDOWS_UPGRADE_BOOKMARK_ACL_TIMEOUT_MS / 1000} seconds. No deployment or migration was started. Ask the installer to review this computer's PowerShell startup before retrying.`);
+        throw Object.assign(new Fatal(`update stopped because its D1 restore bookmark could not be saved and verified on this computer: the Windows permission check timed out after ${WINDOWS_UPGRADE_BOOKMARK_ACL_TIMEOUT_MS / 1000} seconds. No deployment or migration was started. Ask the installer to review this computer's PowerShell startup before retrying.`), { code: error.code });
       }
       die("update stopped because its D1 restore bookmark could not be saved and verified on this computer. No deployment or migration was started.");
     }

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { cmdUpgrade, runRestartSafeMigrationStatements } from "../brain.mjs";
 import { createMigrationStatementIntentStore } from "../operations/migration-statement-intent.mjs";
+import { saveUpgradeBookmark as saveFixtureBookmark } from "../operations/upgrade-bookmark.mjs";
 
 const ALTER = "ALTER TABLE fixture_records ADD COLUMN extra TEXT";
 export function createFaultFixture(root) {
@@ -26,7 +27,7 @@ export function createFaultFixture(root) {
   return { root, manifestPath, databasePath, targetVersion };
 }
 
-export async function runFaultUpgrade(f, { fault, afterPause, bookmarkOptions = {}, saveUpgradeBookmark } = {}) {
+export async function runFaultUpgrade(f, { fault, afterPause, bookmarkOptions = {}, saveUpgradeBookmark = saveFixtureBookmark } = {}) {
   const db = new DatabaseSync(f.databasePath);
   const events = [];
   const lines = [];

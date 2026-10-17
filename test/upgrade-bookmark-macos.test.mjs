@@ -5,6 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { saveUpgradeBookmark, secureMacUpgradeBookmarkPath } from "../operations/upgrade-bookmark.mjs";
+import { installNativeTestWatchdog } from "./fixtures/native-test-watchdog.mjs";
+
+const nativeStep = installNativeTestWatchdog("macOS bookmark");
 
 const native = { skip: process.platform !== "darwin" ? "requires native macOS ACLs" : false };
 const record = {
@@ -13,8 +16,12 @@ const record = {
 };
 const now = () => new Date("2026-10-10T12:00:00.000Z");
 function run(command, args) {
-  const result = spawnSync(command, args, { env: { PATH: "/usr/bin:/bin", LC_ALL: "C" }, encoding: "utf8" });
-  assert.equal(result.status, 0, "native synthetic ACL operation completed");
+  nativeStep("fixture macOS ACL observation or mutation");
+  const result = spawnSync(command, args, {
+    env: { PATH: "/usr/bin:/bin", LC_ALL: "C" }, encoding: "utf8", timeout: 15_000, killSignal: "SIGKILL",
+  });
+  assert.equal(result.status, 0, result.error?.code === "ETIMEDOUT"
+    ? "NATIVE_TEST_TIMEOUT: fixture macOS ACL operation" : "native synthetic ACL operation completed");
   return result.stdout;
 }
 function grants(path) { return run("/bin/ls", ["-lde", path]).split("\n").filter((line) => /^\s+\d+:/.test(line)); }

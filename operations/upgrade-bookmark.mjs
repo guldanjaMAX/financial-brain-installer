@@ -70,7 +70,8 @@ export function secureWindowsUpgradeBookmarkPath(path, {
         // page, including surrogate pairs in non-BMP profile names.
         input: JSON.stringify({ path, directory, verifyOnly }).replace(/[\u007f-\uffff]/g,
           (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`), encoding: null, env,
-        shell: false, stdio: ["pipe", "pipe", "pipe"], timeout: WINDOWS_UPGRADE_BOOKMARK_ACL_TIMEOUT_MS, windowsHide: true,
+        shell: false, stdio: ["pipe", "pipe", "pipe"], timeout: WINDOWS_UPGRADE_BOOKMARK_ACL_TIMEOUT_MS,
+        killSignal: "SIGKILL", windowsHide: true,
       });
     if (result?.error) throw result.error;
     if (result?.status !== 0 || result.error || result.signal || String(result.stdout) !== "private") {
@@ -99,8 +100,9 @@ export function secureMacUpgradeBookmarkPath(path, {
     try {
       result = run(command, args, {
         env: { PATH: "/usr/bin:/bin", LC_ALL: "C" }, encoding: null,
-        shell: false, stdio: ["ignore", "pipe", "pipe"], timeout: 15_000,
+        shell: false, stdio: ["ignore", "pipe", "pipe"], timeout: 15_000, killSignal: "SIGKILL",
       });
+      if (result?.error) throw result.error;
       if (result?.status !== 0 || result.error || result.signal) throw new Error("ACL unavailable");
       return String(result.stdout);
     } finally {
@@ -123,7 +125,11 @@ export function secureMacUpgradeBookmarkPath(path, {
       }
     }
     if (header[10] === "+" && lines.length === 0) throw new Error("missing ACL entries");
-  } catch {
+  } catch (error) {
+    if (error?.code === "ETIMEDOUT") {
+      throw Object.assign(new Error("recovery receipt macOS permission check timed out after 15 seconds"),
+        { code: "UPGRADE_BOOKMARK_MAC_ACL_TIMEOUT" });
+    }
     throw new Error("recovery receipt macOS ACL could not be protected and verified");
   }
 }

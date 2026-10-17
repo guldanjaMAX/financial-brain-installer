@@ -12,6 +12,9 @@ import test from "node:test";
 import { createFaultFixture, runFaultUpgrade } from "./update-faults-fixture.mjs";
 import { saveUpgradeBookmark, secureWindowsUpgradeBookmarkPath } from "../operations/upgrade-bookmark.mjs";
 import { createUpgradeBookmarkWriter } from "./fixtures/upgrade-bookmark-writer.mjs";
+import { installNativeTestWatchdog } from "./fixtures/native-test-watchdog.mjs";
+
+installNativeTestWatchdog("update faults", 60_000);
 
 function fixture(t) {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "update-faults-")));
@@ -77,6 +80,29 @@ test("UF-01: a lost paused-upload reply never claims normal operation", async (t
   assert.equal(result.events.includes("migration"), false);
   assert.doesNotMatch(result.error.message, /working normally/i);
   assert.match(result.error.message, /may.*(?:paused|documents)|paused.*may/i);
+});
+
+test("bookmark deadline: pending persistence cannot authorize deployment", async (t) => {
+  const f = fixture(t);
+  let reached = 0, deployments = 0, refuse;
+  const pending = new Promise((_resolve, reject) => { refuse = reject; });
+  // The old caller drops this promise. Keep that red outcome observable
+  // without turning it into an unrelated unhandled-rejection failure.
+  pending.catch(() => {});
+  const running = runFaultUpgrade(f, {
+    saveUpgradeBookmark() { reached++; return pending; },
+    afterPause() { deployments++; },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  refuse(Object.assign(new Error("private native diagnostic"), { code: "UPGRADE_BOOKMARK_TIMEOUT" }));
+  const result = await running;
+  assert.equal(reached, 1, "persistence decision reached");
+  assert.equal(deployments, 0, "pending or timed-out receipt never authorizes upload");
+  assert.deepEqual(result.events, ["bookmark:captured"]);
+  assert.match(result.error?.message || "", /bookmark.*timed out/i);
+  assert.equal(result.error.code, "UPGRADE_BOOKMARK_TIMEOUT");
+  assert.doesNotMatch(result.error.message, /private native diagnostic/);
+  assert.equal((await runFaultUpgrade(f)).error, null, "durable receipt is the green control");
 });
 
 test("UF-02: orphan ALTER intent cannot be described as observed progress", async (t) => {
@@ -477,7 +503,8 @@ test("UF-03: SIGKILL after paused upload leaves the current pre-change bookmark 
   t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); });
   let stderr = "";
   child.stderr.on("data", (data) => { stderr += data; });
-  const exit = once(child, "exit");
+  const exit = once(child, "exit", { signal: AbortSignal.timeout(30_000) });
+  exit.catch(() => {});
   const marker = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("child did not reach paused-upload marker")), 15_000);
     let output = "";
@@ -489,7 +516,10 @@ test("UF-03: SIGKILL after paused upload leaves the current pre-change bookmark 
   });
   assert.equal(marker, true);
   child.kill("SIGKILL");
-  const [code, signal] = await exit;
+  const [code, signal] = await exit.catch(() => {
+    child.kill("SIGKILL");
+    throw new Error("NATIVE_TEST_TIMEOUT: paused-upload child exit after SIGKILL");
+  });
   assert.equal(code, null);
   assert.equal(signal, "SIGKILL");
   const directory = join(f.root, "bookmarks");

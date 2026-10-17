@@ -4,8 +4,18 @@ import fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join, win32 } from "node:path";
 import test from "node:test";
-import { saveUpgradeBookmark, secureWindowsUpgradeBookmarkPath, WINDOWS_UPGRADE_BOOKMARK_ACL_TIMEOUT_MS } from "../operations/upgrade-bookmark.mjs";
+import { saveUpgradeBookmark as saveNativeBookmark, secureWindowsUpgradeBookmarkPath as secureNativePath, WINDOWS_UPGRADE_BOOKMARK_ACL_TIMEOUT_MS } from "../operations/upgrade-bookmark.mjs";
 import { windowsFileChildEnvironment } from "../operations/current-user-file.mjs";
+import { installNativeTestWatchdog } from "./fixtures/native-test-watchdog.mjs";
+
+const nativeStep = installNativeTestWatchdog("Windows bookmark");
+const secureWindowsUpgradeBookmarkPath = (path, options = {}) => {
+  nativeStep(`${options.verifyOnly ? "verify" : "protect"} ${options.directory ? "directory" : "file"} ACL`);
+  return secureNativePath(path, options);
+};
+const saveUpgradeBookmark = (record, options) => saveNativeBookmark(record, {
+  windowsAcl: secureWindowsUpgradeBookmarkPath, ...options,
+});
 
 // Native tests touch only synthetic receipt paths. They never invoke a
 // credential helper, account endpoint, scheduler, or the installer CLI.
@@ -15,6 +25,7 @@ const NATIVE_ACL_TIMEOUT_MS = WINDOWS_UPGRADE_BOOKMARK_ACL_TIMEOUT_MS + 30_000;
 const NATIVE_TEST_TIMEOUT_MS = 20 * NATIVE_ACL_TIMEOUT_MS;
 
 function acl(path, broaden = false, administratorOwner = false, { run = spawnSync, environment = process.env } = {}) {
+  nativeStep("fixture ACL observation or mutation");
   const env = windowsFileChildEnvironment(environment);
   const script = `
     $ErrorActionPreference = 'Stop'
@@ -55,9 +66,10 @@ function acl(path, broaden = false, administratorOwner = false, { run = spawnSyn
   const result = run(win32.join(env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
     ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], {
       input: JSON.stringify({ path, broaden, administratorOwner }), encoding: "utf8", env, shell: false,
-      timeout: NATIVE_ACL_TIMEOUT_MS, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
+      timeout: NATIVE_ACL_TIMEOUT_MS, killSignal: "SIGKILL", windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
     });
-  assert.equal(result.status, 0, "native fixture ACL operation completed");
+  assert.equal(result.status, 0, result.error?.code === "ETIMEDOUT"
+    ? "NATIVE_TEST_TIMEOUT: fixture Windows ACL operation" : "native fixture ACL operation completed");
   return JSON.parse(result.stdout);
 }
 
@@ -67,6 +79,34 @@ const record = {
 };
 const now = () => new Date("2026-10-10T12:00:00.000Z");
 const privateAcl = { broad: 0, protected: true, owner: true, rules: 1 };
+
+test("native ACL deadline force-kills a child that ignores graceful termination", () => {
+  let reached = 0;
+  assert.throws(() => secureWindowsUpgradeBookmarkPath("C:\\fixture\\receipt.json", {
+    environment: { SystemRoot: "C:\\Windows" },
+    run(_command, _args, options) {
+      reached++;
+      // Check before launching: the red probe must not itself wait forever.
+      assert.equal(options.killSignal, "SIGKILL", "deadline must force termination");
+      const result = spawnSync(process.execPath, ["-e",
+        "process.on('SIGTERM', () => {}); process.stdout.write('REACHED'); setInterval(() => {}, 1000);"],
+      { ...options, input: "", timeout: 2_000 });
+      assert.equal(String(result.stdout), "REACHED", "hung child entered its wait");
+      assert.equal(result.error?.code, "ETIMEDOUT");
+      return result;
+    },
+  }), { code: "UPGRADE_BOOKMARK_ACL_TIMEOUT" });
+  assert.equal(reached, 1);
+  let controls = 0;
+  secureWindowsUpgradeBookmarkPath("C:\\fixture\\receipt.json", {
+    environment: { SystemRoot: "C:\\Windows" },
+    run(_command, _args, options) {
+      controls++;
+      return spawnSync(process.execPath, ["-e", "process.stdout.write('private')"], { ...options, input: "" });
+    },
+  });
+  assert.equal(controls, 1, "completed child remains the green control");
+});
 
 for (const startupMs of [0, 25_000, 90_000]) {
   test(`CI Windows fixture latency: ${startupMs}ms startup can reach the native ACL assertions`, () => {
