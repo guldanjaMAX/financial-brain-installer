@@ -1,0 +1,288 @@
+# Build the WhatsApp daemon's Windows binary exactly as daemons/whatsapp/build.sh
+# does, start it on a native Windows runner, and, on a manual run only,
+# Authenticode-sign and timestamp it with Azure Artifact Signing.
+#
+# This workflow cannot publish, create a release, or clear a release gate. A
+# signing run leaves one short-lived workflow artifact: the signed .exe plus a
+# JSON receipt naming the commit, both SHA-256 digests, the signer, and the
+# timestamp authority. Adopting a signed binary into a release (a release asset
+# plus a pinned SHA-256, per evidence/WP-07-go-daemon.md) is separate work.
+#
+# Pull requests that touch the daemon run the build and the Windows start check
+# only. Pull request code is never signed, and signing refuses any ref other
+# than the default branch.
+#
+# The build and tests stay on Linux on purpose. build.sh vets, tests, and
+# cross-compiles on a POSIX host with CGO disabled, and the daemon's path tests
+# assert POSIX spellings for their injected darwin and linux cases. The Windows
+# runners prove the shipped bytes start natively; they never rebuild them.
+#
+# Signing is inactive until configured. The sign job stops, naming what is
+# missing, unless every variable below is set on the `artifact-signing`
+# environment (Settings > Environments). That environment is also where to
+# require a reviewer and to limit deployments to the default branch.
+#
+#   ARTIFACT_SIGNING_ENDPOINT               regional endpoint of the signing
+#                                           account, for example
+#                                           https://eus.codesigning.azure.net/
+#   ARTIFACT_SIGNING_ACCOUNT                Artifact Signing account name
+#   ARTIFACT_SIGNING_CERTIFICATE_PROFILE    Public Trust certificate profile name
+#   ARTIFACT_SIGNING_EXPECTED_ORGANIZATION  exact O= value the signing
+#                                           certificate must carry
+#   AZURE_CLIENT_ID                         app registration the job signs in as
+#   AZURE_TENANT_ID                         Entra tenant of that registration
+#
+# No secret is stored. azure/login exchanges the sign job's GitHub OIDC token
+# for an Entra token, so the app registration needs a federated credential with
+# subject repo:<owner>/<repo>:environment:artifact-signing and exactly one role:
+# Artifact Signing Certificate Profile Signer on the signing account.
+
+name: windows-daemon-signing
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "daemons/whatsapp/**"
+      - ".github/workflows/windows-daemon-signing.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-daemon-signing-${{ github.ref }}
+  # A superseded pull request build is cheap to cancel. A signing run is never
+  # abandoned halfway.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: vet, test, and cross-compile with build.sh
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      sha256: ${{ steps.build.outputs.sha256 }}
+      version: ${{ steps.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # build.sh stamps `git describe --tags --always --dirty`. Without the
+          # tags a CI build would carry a bare commit hash instead of the
+          # version a maintainer's own build.sh run produces.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: daemons/whatsapp/go.mod
+          cache-dependency-path: daemons/whatsapp/go.sum
+
+      - name: run build.sh unchanged
+        id: build
+        working-directory: daemons/whatsapp
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The expression build.sh evaluates first, read from the same tree.
+          # build.sh would fall back to "dev"; a CI build without a real
+          # version stops here instead.
+          version="$(git describe --tags --always --dirty)"
+          ./build.sh
+          sha256="$(sha256sum dist/wa-daemon-windows-amd64.exe | cut -d' ' -f1)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+          echo "wa-daemon $version windows-amd64 sha256 $sha256" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: keep the exact tested bytes for the Windows jobs
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wa-daemon-windows-amd64.exe
+          path: daemons/whatsapp/dist/wa-daemon-windows-amd64.exe
+          archive: false
+          if-no-files-found: error
+          retention-days: 1
+
+  windows-start:
+    name: start the exact bytes on Windows
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: download the tested build by immutable artifact ID
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          path: ${{ runner.temp }}/wa-daemon
+          skip-decompress: true
+          digest-mismatch: error
+
+      - name: prove the bytes and run --version
+        env:
+          EXPECTED_SHA256: ${{ needs.build.outputs.sha256 }}
+          EXPECTED_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          $exe = Join-Path $env:RUNNER_TEMP 'wa-daemon/wa-daemon-windows-amd64.exe'
+          $sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash.ToLowerInvariant()
+          if ($sha -ne $env:EXPECTED_SHA256) {
+            throw "downloaded $($sha), but the build job produced $($env:EXPECTED_SHA256)"
+          }
+          $reported = (& $exe --version | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) { throw "--version exited $($LASTEXITCODE)" }
+          if ($reported -cne "wa-daemon $($env:EXPECTED_VERSION)") {
+            throw "binary reports '$($reported)'; expected 'wa-daemon $($env:EXPECTED_VERSION)'"
+          }
+          Write-Output "native start ok: $($reported)"
+
+  sign:
+    name: sign, then verify signature, signer, and timestamp
+    needs: [build, windows-start]
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    environment: artifact-signing
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: refuse to sign until configured, and only from the default branch
+        env:
+          ARTIFACT_SIGNING_ENDPOINT: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          ARTIFACT_SIGNING_ACCOUNT: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          ARTIFACT_SIGNING_CERTIFICATE_PROFILE: ${{ vars.ARTIFACT_SIGNING_CERTIFICATE_PROFILE }}
+          ARTIFACT_SIGNING_EXPECTED_ORGANIZATION: ${{ vars.ARTIFACT_SIGNING_EXPECTED_ORGANIZATION }}
+          # Renamed here only so Azure SDK credential chains never see them.
+          SIGNING_AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          SIGNING_AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if ($env:GITHUB_REF -ne "refs/heads/$($env:DEFAULT_BRANCH)") {
+            Write-Output "::error::Signing runs only from refs/heads/$($env:DEFAULT_BRANCH); this run is on $($env:GITHUB_REF)."
+            exit 1
+          }
+          $required = [ordered]@{
+            ARTIFACT_SIGNING_ENDPOINT              = $env:ARTIFACT_SIGNING_ENDPOINT
+            ARTIFACT_SIGNING_ACCOUNT               = $env:ARTIFACT_SIGNING_ACCOUNT
+            ARTIFACT_SIGNING_CERTIFICATE_PROFILE   = $env:ARTIFACT_SIGNING_CERTIFICATE_PROFILE
+            ARTIFACT_SIGNING_EXPECTED_ORGANIZATION = $env:ARTIFACT_SIGNING_EXPECTED_ORGANIZATION
+            AZURE_CLIENT_ID                        = $env:SIGNING_AZURE_CLIENT_ID
+            AZURE_TENANT_ID                        = $env:SIGNING_AZURE_TENANT_ID
+          }
+          $missing = @($required.GetEnumerator() | Where-Object { [string]::IsNullOrWhiteSpace($_.Value) } | ForEach-Object { $_.Key })
+          if ($missing.Count -gt 0) {
+            Write-Output "::error::Artifact Signing is not configured. Set these variables on the artifact-signing environment: $($missing -join ', ')"
+            exit 1
+          }
+
+      - name: download the tested build by immutable artifact ID
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          path: ${{ runner.temp }}/wa-daemon
+          skip-decompress: true
+          digest-mismatch: error
+
+      - name: prove these are the bytes the Windows start check ran
+        env:
+          EXPECTED_SHA256: ${{ needs.build.outputs.sha256 }}
+        run: |
+          $exe = Join-Path $env:RUNNER_TEMP 'wa-daemon/wa-daemon-windows-amd64.exe'
+          $sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash.ToLowerInvariant()
+          if ($sha -ne $env:EXPECTED_SHA256) {
+            throw "downloaded $($sha), but the build job produced $($env:EXPECTED_SHA256)"
+          }
+
+      - name: sign in to Entra with this job's GitHub OIDC token
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          # The signing identity holds one role on the signing account and no
+          # subscription-level access, so there is no subscription to select.
+          allow-no-subscriptions: true
+
+      - name: sign with Artifact Signing
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.ARTIFACT_SIGNING_CERTIFICATE_PROFILE }}
+          files: ${{ runner.temp }}\wa-daemon\wa-daemon-windows-amd64.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          # Authenticate only through the Azure CLI session azure/login just
+          # created. Every other DefaultAzureCredential source stays off.
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+
+      - name: keep nothing that does not verify
+        env:
+          EXPECTED_ORGANIZATION: ${{ vars.ARTIFACT_SIGNING_EXPECTED_ORGANIZATION }}
+          EXPECTED_VERSION: ${{ needs.build.outputs.version }}
+          UNSIGNED_SHA256: ${{ needs.build.outputs.sha256 }}
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'wa-daemon'
+          $exe = Join-Path $dir 'wa-daemon-windows-amd64.exe'
+          $sig = Get-AuthenticodeSignature -LiteralPath $exe
+          if ($sig.Status -ne 'Valid') {
+            throw "Authenticode status is $($sig.Status): $($sig.StatusMessage)"
+          }
+          # Artifact Signing certificates expire within days. The RFC 3161
+          # timestamp is what keeps this signature valid after that, so an
+          # untimestamped signature is a failure, not a warning.
+          if (-not $sig.TimeStamperCertificate) {
+            throw 'the signature carries no RFC 3161 timestamp'
+          }
+          # A valid signature from the wrong certificate profile is still the
+          # wrong publisher, so the certificate's O= must match exactly.
+          $subject = $sig.SignerCertificate.Subject
+          $match = [regex]::Match($subject, '(?:^|,\s*)O=(?:"((?:[^"]|"")*)"|([^,]*))')
+          $organization = if ($match.Groups[1].Success) { $match.Groups[1].Value -replace '""', '"' } else { $match.Groups[2].Value.Trim() }
+          if (-not $match.Success -or $organization -cne $env:EXPECTED_ORGANIZATION) {
+            throw "signer is '$($subject)'; expected O=$($env:EXPECTED_ORGANIZATION)"
+          }
+          $reported = (& $exe --version | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $reported -cne "wa-daemon $($env:EXPECTED_VERSION)") {
+            throw "signed binary reports '$($reported)' (exit $($LASTEXITCODE))"
+          }
+          $signed = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash.ToLowerInvariant()
+          $receipt = [ordered]@{
+            file                = 'wa-daemon-windows-amd64.exe'
+            commit              = $env:GITHUB_SHA
+            version             = $env:EXPECTED_VERSION
+            unsigned_sha256     = $env:UNSIGNED_SHA256
+            signed_sha256       = $signed
+            signer_subject      = $subject
+            signer_thumbprint   = $sig.SignerCertificate.Thumbprint
+            signer_not_after    = $sig.SignerCertificate.NotAfter.ToUniversalTime().ToString('o')
+            timestamp_authority = $sig.TimeStamperCertificate.Subject
+            workflow_run        = "$($env:GITHUB_SERVER_URL)/$($env:GITHUB_REPOSITORY)/actions/runs/$($env:GITHUB_RUN_ID)/attempts/$($env:GITHUB_RUN_ATTEMPT)"
+          }
+          $receipt | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $dir 'signing-receipt.json') -Encoding utf8NoBOM
+          "signed wa-daemon $($env:EXPECTED_VERSION): sha256 $($signed), signer $($subject)" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: keep the signed binary and its receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wa-daemon-windows-amd64-signed
+          path: |
+            ${{ runner.temp }}/wa-daemon/wa-daemon-windows-amd64.exe
+            ${{ runner.temp }}/wa-daemon/signing-receipt.json
+          if-no-files-found: error
+          retention-days: 5
