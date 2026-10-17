@@ -1379,6 +1379,9 @@ test("R4 blocked refresh reports the pending file by name", () => {
 
 for (const [assistant, filename, marker, write] of writers) for (const fault of [false, true]) test(`R5 replacement write failure preserves active guide: ${assistant} ${fault}`, t => {
   const { root, manifest } = fixture(t), target = join(root, filename);
+  // Exercise replacement failure policy explicitly. Windows CLI preservation
+  // has separate guarded arms; filesystem ownership still uses the real host.
+  const replacementOptions = { ...options, platformName: "darwin" };
   const before = `${marker}\n${workspace.renderOwnerRulesSection({ assistant, accountLines: ACCOUNTS })}`;
   writeFileSync(target, before);
   const original = fs.writeFileSync; let writes = 0, reached = 0;
@@ -1393,7 +1396,7 @@ for (const [assistant, filename, marker, write] of writers) for (const fault of 
   const warnings = [], successes = [];
   let result;
   try { result = (assistant === "codex" ? cli.refreshCodexWorkspaceGuideAfterUpdate : cli.refreshClaudeWorkspaceGuideAfterUpdate)(manifest, {
-    ...options, verifiedCodexWiring: true, reportWarning: text => warnings.push(text), reportOk: text => successes.push(text),
+    ...replacementOptions, verifiedCodexWiring: true, reportWarning: text => warnings.push(text), reportOk: text => successes.push(text),
   }); } finally { fs.writeFileSync = original; syncBuiltinESMExports(); }
   assert.equal(reached, 1, "real replacement content write reached after initial staging");
   if (fault) {
@@ -1407,13 +1410,13 @@ for (const [assistant, filename, marker, write] of writers) for (const fault of 
     const recovery = result.pendingPath || result.recoveryPath;
     assert.ok(existsSync(recovery));
     assert.ok(warnings[0].includes(cli.displayPathForTesting(recovery, process.cwd())));
-    assert.equal(write(manifest, options).status, "written", "retry can refresh after the fault is removed");
+    assert.equal(write(manifest, replacementOptions).status, "written", "retry can refresh after the fault is removed");
   } else {
     assert.equal(result.status, "written");
     assert.equal(successes.length, 1);
     assert.equal(warnings.length, 0);
     for (const line of ACCOUNTS) assert.ok(readFileSync(target, "utf8").includes(line));
-    assert.equal(write(manifest, options).status, "verified");
+    assert.equal(write(manifest, replacementOptions).status, "verified");
   }
 });
 
@@ -1679,7 +1682,9 @@ function countedGuideWriters(calls) {
     (manifest, opts) => {
       calls.push(assistant);
       return writer(manifest, { ...opts, ownership: {
-        ...fixtureOwnership, platform: opts.platformName, pathApi, profile: dirname(manifest),
+        // CLI policy and command rendering use opts.platformName. These files
+        // belong to the host filesystem: Windows has no POSIX uid to inspect.
+        ...fixtureOwnership, platform: process.platform, pathApi, profile: dirname(manifest),
       } });
     },
   ]));

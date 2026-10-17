@@ -30896,7 +30896,12 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
       `Next time, open Claude Code (or Codex) in your Financial Brain folder, ${displayPath(dirname(pin.target))}. This conversation runs in ${sessionFolderLabel}, which can be tidied away or synced.`,
     ] : []),
   ].join("\n");
-  safelyReportUpdateResult(options.reportUpdateFinish ?? console.log, closing);
+  // The final attention list can contain recovery commands too. Preserve the
+  // raw-message reporter seam while rendering the default owner terminal output.
+  const reportFinish = options.reportUpdateFinish ?? (message => console.log(renderCliCommands(message, {
+    platform: options.platformName ?? options.platform ?? process.platform,
+  })));
+  safelyReportUpdateResult(reportFinish, closing);
   return upgradeResult;
 }
 

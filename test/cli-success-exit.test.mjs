@@ -21,7 +21,8 @@ function runArm(mode, extraEnv = {}) {
     // macOS forkpty gives the child a real pseudo-terminal without relying on
     // the test runner itself owning a terminal. Windows exercises the same
     // live-stdin lifetime through a held-open PowerShell-style pipe.
-    const usePty = process.platform === "darwin" && process.env.CLI_EXIT_FORCE_PIPE !== "1";
+    const usePty = process.platform === "darwin" && extraEnv.CLI_EXIT_FIXTURE_PLATFORM !== "win32" &&
+      process.env.CLI_EXIT_FORCE_PIPE !== "1";
     const command = usePty ? "/usr/bin/python3" : process.execPath;
     const args = usePty
       ? [ptyFixture, ...childArgs]
@@ -34,6 +35,9 @@ function runArm(mode, extraEnv = {}) {
       cwd: dirname(dirname(fixture)),
       env: {
         HOME: home,
+        TMPDIR: process.env.TMPDIR || root,
+        TEMP: process.env.TEMP || root,
+        TMP: process.env.TMP || root,
         PATH: [dirname(process.execPath), "/usr/bin", "/bin"].join(delimiter),
         BRAIN_NO_WRANGLER_LOGIN: "1",
         BRAIN_LIFECYCLE_LOCK_ROOT: join(root, `locks-${mode}`),
@@ -111,6 +115,21 @@ try {
   assert.match(dailyAttention.stdout, /DECISION daily recovery=false enabled=false upgrades=1/);
   assert.match(dailyAttention.stdout, /DECISION bridge enabled=false pauses=1/,
     "the successful attention arm actually paused its bridge and did not silently enable it");
+
+  // Exercise the Windows owner message on every host through the real update
+  // dispatcher. Scheduler and transport boundaries remain fixture-controlled.
+  const windowsAttention = await runArm("update-daily-attention", { CLI_EXIT_FIXTURE_PLATFORM: "win32" });
+  assert.equal(windowsAttention.timedOut, false, JSON.stringify(windowsAttention));
+  assert.equal(windowsAttention.code, 0, JSON.stringify(windowsAttention));
+  assert.match(windowsAttention.stdout, /DECISION update-daily-attention completed opened=true prompt_open=false/);
+  assert.match(windowsAttention.stdout, /DECISION daily recovery=false enabled=false upgrades=1/);
+  assert.match(windowsAttention.stdout, /DECISION bridge enabled=false pauses=1/);
+  const windowsGuidance = renderCliCommands(
+    "The old daily task was paused; run brain daily on <manifest> to turn on permanent daily imports.",
+    { platform: "win32", env: { PATH: "" } },
+  );
+  assert.ok(windowsAttention.stdout.includes(windowsGuidance),
+    "the Windows command boundary renders runnable PowerShell guidance after the verified pause");
 
   const restored = commandArms.find((arm) => arm.mode === "update-daily-restored");
   assert.match(restored.stdout, /DECISION daily recovery=false enabled=true upgrades=1 restore_attempts=[1-9]/,

@@ -63,6 +63,7 @@ if (mode === "control") {
     let upgrades = 0;
     let restoreAttempts = 0;
     const updateOptions = {
+      platform: process.env.CLI_EXIT_FIXTURE_PLATFORM || process.platform,
       discoverInstalledManifest: () => ({ path: manifestPath, source: "remembered" }),
       adoptCloudflareAuthProfile: async () => {},
       withCloudflareControl: async (action) => action(),
