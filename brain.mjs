@@ -29061,7 +29061,11 @@ export async function refreshOwnerAssistantConnectionsAfterUpdate(
 }
 
 function workspaceGuideNotWrittenWarning(filename, result) {
-  return `The ${filename} guide was not written because a local write failed, its folder or file changed, or another refresh holds its lock. ` +
+  const reason = result.code === "WORKSPACE_RECOVERY_CONFLICT"
+    ? `The ${filename} guide refresh did not finish because another file appeared in its recovery folder or a recovery file changed. ` +
+      "Support code: WORKSPACE_RECOVERY_CONFLICT. The refresh lock is retained; review both files before retrying. "
+    : `The ${filename} guide was not written because a local write failed, its folder or file changed, or another refresh holds its lock. `;
+  return reason +
     (result.pendingPath ? `The staged guide is retained at ${displayPath(result.pendingPath)}. ` : "") +
     (result.recoveryPath ? `The earlier file is retained for recovery at ${displayPath(result.recoveryPath)}. ` : "") +
     "Review the local guide before retrying its refresh.";

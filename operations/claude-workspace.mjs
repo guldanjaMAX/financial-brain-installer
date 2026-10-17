@@ -336,19 +336,20 @@ function workspaceParentUnchanged(parent) {
       sameIdentity(lstatSync(parent.physical), parent.stat);
   } catch { return false; }
 }
-function unchangedWorkspaceFile(path, snapshot, text, ownership, links = 1) {
+function unchangedWorkspaceFile(path, snapshot, text, ownership, links = 1, checkOwnership = true) {
   try {
     const now = lstatSync(path);
     return now.isFile() && !now.isSymbolicLink() && now.nlink === links &&
       sameIdentity(now, snapshot) && now.uid === snapshot.uid && now.gid === snapshot.gid &&
       now.mode === snapshot.mode && now.size === snapshot.size && now.mtimeMs === snapshot.mtimeMs &&
-      workspaceFileOwnedByUser(path, now, ownership) && readFileSync(path, "utf8") === text;
+      (!checkOwnership || workspaceFileOwnedByUser(path, now, ownership)) && readFileSync(path, "utf8") === text;
   } catch { return false; }
 }
 
 function commitWorkspaceGuide(target, parent, snapshot, existing, content, ownership) {
-  let pendingPath, recoveryPath;
+  let pendingPath, recoveryPath, code;
   const notWritten = () => ({ status: "not_written", changed: false,
+    ...(code ? { code } : {}),
     ...(pendingPath ? { pendingPath } : {}), ...(recoveryPath ? { recoveryPath } : {}) });
   if (!workspaceParentUnchanged(parent)) return notWritten();
   const physicalTarget = join(parent.physical, basename(target));
@@ -404,10 +405,10 @@ function commitWorkspaceGuide(target, parent, snapshot, existing, content, owner
     // Failed identity/content checks above perform no pathname cleanup.
     unlinkSync(install);
     const installed = lstatSync(physicalTarget);
-    const exact = () => workspaceParentUnchanged(parent) &&
-      unchangedWorkspaceFile(physicalTarget, installed, content, ownership) &&
-      unchangedWorkspaceFile(pendingPath, staged, content, ownership) &&
-      (!recoveryPath || unchangedWorkspaceFile(recoveryPath, snapshot, existing, ownership));
+    const exact = (checkOwnership = true) => workspaceParentUnchanged(parent) &&
+      unchangedWorkspaceFile(physicalTarget, installed, content, ownership, 1, checkOwnership) &&
+      unchangedWorkspaceFile(pendingPath, staged, content, ownership, 1, checkOwnership) &&
+      (!recoveryPath || unchangedWorkspaceFile(recoveryPath, snapshot, existing, ownership, 1, checkOwnership));
     if (!locked() || !exact()) return notWritten();
     // Retain the original inode even on success: an editor may still hold an
     // open descriptor and write after our final read. Windows refuses moving
@@ -421,17 +422,35 @@ function commitWorkspaceGuide(target, parent, snapshot, existing, content, owner
       const current = lstatSync(retained);
       return current.isDirectory() && !current.isSymbolicLink() && sameIdentity(current, retainedStat);
     };
-    if (!locked() || !retainedUnchanged()) return notWritten();
-    renameSync(pendingPath, join(retained, pendingName));
-    pendingPath = join(retained, pendingName);
-    if (!locked() || !retainedUnchanged()) return notWritten();
+    const retain = (source, destination, stat, text, recordDestination) => {
+      const conflict = () => { code = "WORKSPACE_RECOVERY_CONFLICT"; return false; };
+      const stable = (path, links) => unchangedWorkspaceFile(path, stat, text, ownership, links, false);
+      if (!locked() || !retainedUnchanged() || !stable(source, 1)) return conflict();
+      // link is an exclusive publication, unlike rename: a concurrent file at
+      // destination must survive even if it appears inside the syscall. Keep
+      // both names until identity, bytes and native destination checks agree.
+      try { linkSync(source, destination); }
+      catch (error) { if (error.code === "EEXIST") return conflict(); throw error; }
+      if (!locked() || !retainedUnchanged() ||
+          !unchangedWorkspaceFile(destination, stat, text, ownership, 2) ||
+          !stable(source, 2) || !stable(destination, 2)) return conflict();
+      unlinkSync(source);
+      recordDestination(destination);
+      if (!locked() || !retainedUnchanged() || !stable(destination, 1)) return conflict();
+      return true;
+    };
+    if (!retain(pendingPath, join(retained, pendingName), staged, content, path => { pendingPath = path; })) return notWritten();
     if (recoveryPath) {
-      renameSync(recoveryPath, join(retained, "previous"));
-      recoveryPath = join(retained, "previous");
+      if (!retain(recoveryPath, join(retained, "previous"), snapshot, existing, path => { recoveryPath = path; })) return notWritten();
     }
-    if (!locked() || !retainedUnchanged() || !exact()) return notWritten();
+    // Each retained destination receives the baseline's final native check in
+    // retain(), before its source is unlinked. Recheck the active guide here.
+    // Additional local readbacks bracket lock release without extra PowerShell
+    // startups or caching native authorization across separate write attempts.
+    if (!locked() || !retainedUnchanged() ||
+        !unchangedWorkspaceFile(physicalTarget, installed, content, ownership) || !exact(false)) return notWritten();
     rmdirSync(lock);
-    if (!retainedUnchanged() || !exact()) return notWritten();
+    if (!retainedUnchanged() || !exact(false)) return notWritten();
     return { status: "written", changed: true, ...(recoveryPath ? { recoveryPath } : {}) };
   } catch {
     // Ordinary preparation I/O failure has not displaced the active guide.

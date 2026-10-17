@@ -2152,8 +2152,13 @@ or concurrent edits after moving the original require explicit local recovery;
 setup/update warnings name the retained paths. No competing guide is unlinked
 or overwritten. Review all retained files before explicit local recovery.
 On an uncontested write the staging and original files are individually moved
-to a unique `<guide>.financial-brain-retained-<id>` directory, with identity and
-content checked again before releasing the empty lock. Windows can refuse to
+to a unique `<guide>.financial-brain-retained-<id>` directory through exclusive
+hard-link publication. Each destination receives fresh ownership/native checks;
+both names must match the expected identity and content before the source link
+is removed. A competing destination returns `WORKSPACE_RECOVERY_CONFLICT`,
+preserving the source, competing file and refresh lock for owner review. Local
+identity and content readbacks bracket release of the empty lock without adding
+native process launches. Windows can refuse to
 rename a whole directory while an editor holds a file inside it open. The
 original inode stays reachable, including after success, so that editor cannot
 lose a later edit. These local recovery directories are
