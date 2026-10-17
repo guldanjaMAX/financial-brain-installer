@@ -347,15 +347,22 @@ export function bankFeedOwnerErrorMessage(data, status) {
     entity_not_found: "That business is no longer available. Refresh the list and choose an active business.",
     entity_not_owned: "That business is not owner-controlled, so the account was not assigned to it.",
     request_id_conflict: "This saved retry belongs to a different choice. Refresh the page and try again.",
-    plaid_duplicate_connection_review: "This bank may already be connected. Check the saved connections below and use Repair connection if you need to sign in again. We have not added another copy. If these are separate accounts, their overlap needs review first.",
+    plaid_duplicate_connection_review: "This bank may already be connected. Review the saved connections before adding another copy. If no connection is listed or these are separate accounts, contact support to review the overlap. We have not added another copy.",
+    plaid_reconnect_support_required: "This disconnected bank has saved history or prior sync progress. Contact support before reconnecting it so that history is not counted twice. No replacement connection was added, and your saved history is unchanged.",
     plaid_connection_in_progress: "Another bank connection is still finishing. Check its result before starting another connection. Your saved accounts are unchanged.",
     plaid_link_handoff_rejected: "That connection link is no longer usable. Your existing accounts are unchanged. Select Connect a bank to start again.",
+    LINK_SESSION_STALE: "This saved bank connection session is no longer usable. Select Connect a bank to start the connection again.",
     BANK_WRITES_PAUSED: "Your Brain is finishing a verified update. Your bank connections and saved choices are safe. Please return to this step after the update finishes.",
   };
   const base = (code && messages[code]) || (status === 503
     ? "This step is temporarily unavailable. Your earlier progress is safe. Please try again."
     : "That step did not finish. Your earlier progress is safe. Please try again.");
-  return code ? `${base} Reference code: ${code}.` : base;
+  if (code) return `${base} Reference code: ${code}.`;
+  // The route supplies safeFeedError output, never the raw provider response.
+  const detail = typeof data?.error === "string" ? data.error.trim().slice(0, 300) : "";
+  return detail
+    ? `${base} Details: ${detail} Reference code: BANK_FEED_REQUEST_FAILED.`
+    : base;
 }
 
 /**
@@ -2042,9 +2049,9 @@ async function start(existing) {
         loadConnections();
         waitForAccounts();
       } catch (e) {
-        if (e.code === "plaid_link_handoff_rejected") {
-          try { sessionStorage.removeItem("bank_link_session"); sessionStorage.removeItem(retry.key); } catch (ignored) {}
-        }
+        // A failed completion must not pin this tab (or a restored copy) to the
+        // same Link token. The server still fences any unknown exchange outcome.
+        try { sessionStorage.removeItem("bank_link_session"); sessionStorage.removeItem(retry.key); } catch (ignored) {}
         say(e.message, true);
       } finally { finishLink(); }
     },

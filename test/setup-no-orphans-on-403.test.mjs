@@ -88,9 +88,10 @@ function healthResponse(body, { status = 200 } = {}) {
  * candidate's `/health` answers. Anything not modeled throws, so a call this
  * fix does not expect is loud rather than silently unanswered.
  */
-function harness({ subdomainRead, health = null }) {
+function harness({ subdomainRead, health = null, initialSchedules = [], scheduleInventory = "ok" }) {
   const calls = [];
   const healthHosts = [];
+  let schedules = initialSchedules.map(cron => ({ cron }));
   const fetchImpl = async (input, init = {}) => {
     const url = new URL(String(input));
     const path = url.pathname;
@@ -110,7 +111,14 @@ function harness({ subdomainRead, health = null }) {
         ? apiResponse(null, { success: false, status: 403, code: 10000, message: "Authentication error" })
         : apiResponse({ subdomain: SUBDOMAIN_LABEL });
     }
+    if (path.endsWith(`/workers/scripts/${SCRIPT_NAME}/schedules`) && method === "GET") {
+      if (scheduleInventory === "unreadable") {
+        return apiResponse(null, { success: false, status: 403 });
+      }
+      return apiResponse(schedules);
+    }
     if (path.endsWith(`/workers/scripts/${SCRIPT_NAME}/schedules`) && method === "PUT") {
+      if (scheduleInventory !== "lost-write") schedules = JSON.parse(init.body);
       return apiResponse([]);
     }
     if (path === "/health") {
@@ -132,7 +140,28 @@ function harness({ subdomainRead, health = null }) {
     }
     throw new Error(`offline fixture has no response for ${method} ${path}`);
   };
-  return { fetchImpl, calls, healthHosts };
+  return { fetchImpl, calls, healthHosts, schedules: () => schedules.map(row => row.cron) };
+}
+
+for (const arm of ["fresh", "existing", "unreadable", "lost-write"]) {
+  test(`deploy schedule inventory and exact readback: ${arm}`, async () => {
+    const h = harness({ subdomainRead: "ok", health: "healthy",
+      initialSchedules: arm === "fresh" ? [] : ["7 6 * * *"],
+      scheduleInventory: arm,
+    });
+    const run = () => withFixture(h.fetchImpl, () => cmdDeploy(writeManifest()));
+    if (arm === "unreadable") await assert.rejects(run, /schedule inventory could not be verified/);
+    else if (arm === "lost-write") await assert.rejects(run, /required schedules did not read back/);
+    else await run();
+    assert.ok(h.calls.some(call => call === `PUT /client/v4/accounts/${ACCOUNT_ID}/workers/scripts/${SCRIPT_NAME}`),
+      "all arms reached the actual Worker upload");
+    const scheduleCalls = h.calls.filter(call => call.endsWith("/schedules"));
+    assert.deepEqual(scheduleCalls.map(call => call.split(" ")[0]),
+      arm === "unreadable" ? ["GET"] : ["GET", "PUT", "GET"],
+      "unknown inventory refuses before replacement; every write needs exact readback");
+    assert.deepEqual(h.schedules(), arm === "fresh" ? ["* * * * *"]
+      : arm === "existing" ? ["7 6 * * *", "* * * * *"] : ["7 6 * * *"]);
+  });
 }
 
 let namedProfileTokenReReads = 0;

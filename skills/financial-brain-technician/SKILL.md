@@ -596,8 +596,9 @@ before approval. `brain tools` installs or updates the reviewed technician skill
 for installed Claude Code and Codex clients, records local bootstrap status, and
 may add the Brain CLI folder to the user's PATH. Fresh `brain setup` normally
 adds or updates this Brain's MCP entry in installed AI tools and may create a new
-owner-workspace `CLAUDE.md`; it does not put a literal Brain credential in those
-files. If the owner does not approve the AI-tool configuration change, run setup
+owner-workspace `CLAUDE.md` and `AGENTS.md` for Codex, containing answer rules
+and owner-approved account labels. It does not put a literal Brain credential
+in those files. If the owner does not approve the AI-tool configuration change, run setup
 with `--no-connect`. Later, show the exact read-only `brain mcp-config <manifest>`
 preview and wait for separate approval before `--apply`.
 
@@ -856,6 +857,25 @@ must stop before resource creation.
    token. The owner still performs sign-in, 2FA, billing acceptance, and final
    consent in the browser.
 
+## Answer from the Brain
+
+Every answer that uses the Brain follows the answer rules the installer keeps
+between the "BEGIN Financial Brain answer rules" and "END Financial Brain
+answer rules" markers in the CLAUDE.md (Claude Code) or AGENTS.md (Codex)
+beside the Brain manifest, normally in `~/Financial Brain`. If that section is
+not already in this conversation, read it before the first money question. In
+short: answer first; then `Confidence: N%` with a one-line reason; one asterisk
+line per assumption with its evidence and the words that flip it; "as of
+<record date>" on every status; one brain_search sorted newest for the subject
+before any status, latest, or absence claim; "not found in this search" plus
+the next place you would check, never "nothing recorded"; money questions go
+to brain_think in the money rules' template wording. Add account names under
+"My accounts" only after the owner approves the exact lines.
+
+Brain conversations belong in the Financial Brain folder: open Claude Code (or
+Codex) there. If this conversation runs in Desktop, Downloads, or a synced
+folder, say so once and suggest that folder for next time.
+
 ## Credential boundary
 
 - Normal fresh Cloudflare setup uses the owner's official browser sign-in and
@@ -918,12 +938,15 @@ must stop before resource creation.
   - Plaid's phone-verification pane takes `123456` in sandbox, and no text
     arrives. In production a real code goes to the owner's phone, and only the
     owner enters it.
-  - Plaid can re-share a connection saved for the phone number entered in Link
-    instead of the bank the owner picked. Have the owner choose "Add new
-    account" or the specific bank, and check the connection's institution label
-    before assigning accounts. If it is wrong, disconnect it at Access > Banks >
-    Disconnect and connect again. In sandbox, use a fresh test phone number
-    (415-555-0011, or 415-555-0131 through 415-555-0138) with code `123456`.
+  - Plaid may reuse a phone number's saved connection. Choose "Add new account"
+    or the specific bank; check its label before assigning. For a wrong bank
+    with no ledger history, use Access > Banks > Disconnect, wait for confirmed
+    removal, then reconnect. Staging is cleared; saved history stays.
+    `plaid_reconnect_support_required` needs support review of retained history
+    or sync progress. Automatic reattachment is unavailable, including for
+    legacy items. Use Repair connection only for a listed bank needing sign-in.
+    In sandbox use a fresh test phone number (415-555-0011, or 415-555-0131 through
+    415-555-0138) with code `123456`.
   - Setting `corpora.bank_feed.enabled` to `false` and then running
     `brain secrets` or `brain setup` DELETES the Plaid client ID and secret
     from the Worker. Re-enabling needs `brain connect bank` again.

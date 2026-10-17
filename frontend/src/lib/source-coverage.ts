@@ -39,7 +39,8 @@ export function coverageFacts(coverage: SourceCoverageDetail): string[] {
   const from = coverage.confirmed_range.from;
   const through = coverage.confirmed_range.through;
   if (from && through) facts.push(`Confirmed ${shortDate(from)} to ${shortDate(through)}`);
-  else if (from) facts.push(`Confirmed since ${shortDate(from)}`);
+  else if (from) facts.push(`Confirmed start ${shortDate(from)}; end unconfirmed`);
+  else if (through) facts.push(`Confirmed through ${shortDate(through)}; start unconfirmed`);
 
   if (coverage.counts.seen !== null) facts.push(`${coverage.counts.seen.toLocaleString()} checked in the latest run`);
   if (coverage.counts.accepted !== null) facts.push(`${coverage.counts.accepted.toLocaleString()} accepted`);
@@ -59,9 +60,13 @@ export function coverageFacts(coverage: SourceCoverageDetail): string[] {
 export function coverageCaveat(label: string, coverage: SourceCoverageDetail): string | null {
   if (coverage.history.state === "complete") return null;
   const from = coverage.confirmed_range.from;
-  return from
-    ? `${label} is confirmed from ${shortDate(from)} onward. Older material may still be loading.`
-    : `${label} history is not yet proven complete. A missing result may still be outside the confirmed coverage.`;
+  const through = coverage.confirmed_range.through;
+  if (from && through) {
+    return `${label} is confirmed from ${shortDate(from)} through ${shortDate(through)}. Coverage outside this range remains unproven.`;
+  }
+  if (from) return `${label} has a confirmed start of ${shortDate(from)}, but the end of its coverage is unconfirmed.`;
+  if (through) return `${label} is confirmed through ${shortDate(through)}, but the start of its coverage is unconfirmed.`;
+  return `${label} history is not yet proven complete. A missing result may still be outside the confirmed coverage.`;
 }
 
 export function accessZonePresentation(accessZone: SourceRow["access_zone"]): {

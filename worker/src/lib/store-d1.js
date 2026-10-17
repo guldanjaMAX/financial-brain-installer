@@ -3821,7 +3821,7 @@ function operationalFreshness(s, now) {
   if (s.stale_reason === "NO_VERIFIED_WORK") {
     return {
       state: "review",
-      reason: "the latest refresh verified no accepted or unchanged documents",
+      reason: "the latest refresh finished without accepting, updating or confirming any record, so this source is not shown as current",
       indexingMs,
     };
   }
@@ -3871,9 +3871,12 @@ function operationalFreshness(s, now) {
   }
   if (indexingMs > INDEXING_STUCK_MS) {
     const hours = Math.floor(indexingMs / 3600000);
+    const retry = String(s.kind || "").toLowerCase() === "drive"
+      ? "; a new Drive refresh replaces it"
+      : "";
     return {
       state: "broken",
-      reason: `indexing has not completed for ${hours} hour(s)`,
+      reason: `indexing started ${new Date(started).toISOString()} and has not completed for ${hours} hour(s)${retry}`,
       indexingMs,
     };
   }
@@ -3983,7 +3986,7 @@ function assessCoverageRows(rows, {
         gaps.push({
           type: "history_unproven",
           source: s.name,
-          detail: `The "${s.name}" source was retired by the owner on ${retirement.retiredAt.slice(0, 10)}. Its ${count} stored ${recordLabel} stay searchable and it is no longer refreshed; its history was never proven complete, so a missing result is not proof that those records hold no answer.`,
+          detail: `The "${s.name}" source is historical, retired by the owner on ${retirement.retiredAt.slice(0, 10)}. Its ${count} stored ${recordLabel} stay searchable and it is no longer refreshed; its history was never proven complete, so a missing result is not proof that those records hold no answer.`,
           remedy: "No action needed.",
         });
       }
@@ -4016,7 +4019,9 @@ function assessCoverageRows(rows, {
         type: "sync_review",
         source: s.name,
         days_since_ingest: days,
-        detail: `The ${historicalSourceLabel(s.kind)} source is paused for safety review: ${operational.reason}. Its coverage is not complete until the owner resolves that review.`,
+        detail: String(s.stale_reason || "").trim().toUpperCase() === SOURCE_REVIEW_ISSUE_CODE
+          ? `The ${historicalSourceLabel(s.kind)} source is paused for safety review: ${operational.reason}. Its coverage is not complete until the owner resolves that review.`
+          : `The latest ${historicalSourceLabel(s.kind)} refresh finished without accepting, updating or confirming any record, so this source is not shown as current.`,
       }));
     }
 
@@ -4072,7 +4077,7 @@ function assessCoverageRows(rows, {
         source: s.name,
         days_since_ingest: days,
         expected_every_days: Math.round(expected / 86400) || null,
-        detail: `The "${s.name}" source was last read ${days} day(s) ago and is expected to refresh about every ${Math.max(1, Math.round(expected / 86400))} day(s). Material added since then is not in the brain, and would not show up as a missing answer.`,
+        detail: `The "${s.name}" source was last read ${refreshDuration(ageSec)} ago and is expected to refresh about every ${refreshDuration(expected)}. Material added since then is not in the brain, and would not show up as a missing answer.`,
       }));
     }
 
@@ -4089,6 +4094,12 @@ function assessCoverageRows(rows, {
     if (sourceIsStale) stale++;
   }
   return { gaps, unavailable: false, counts: { total, stale, unscheduled } };
+}
+
+// Cadence and age share units so a short refresh never reads as a fraction of an hour.
+function refreshDuration(seconds) {
+  const [unit, scale] = seconds < 3600 ? ["minute", 60] : seconds < 86400 ? ["hour", 3600] : ["day", 86400];
+  return `${Math.max(1, Math.round(seconds / scale))} ${unit}(s)`;
 }
 
 async function coverageGapAssessment(env, { now = Date.now(), allowedSources = null } = {}) {
@@ -4238,9 +4249,13 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
       let reason = unregistered ? "the source registry entry is missing" : operational.reason;
       if (!unregistered && retirement.retired) {
         state = "manual";
-        reason = `retired by the owner on ${retirement.retiredAt.slice(0, 10)}; kept, not refreshed`;
+        reason = `historical: kept and searchable, not refreshed (retired by the owner on ${retirement.retiredAt.slice(0, 10)})`;
       } else if (!unregistered && operational.state) state = operational.state;
-      else if (!unregistered && !expected) state = automatable ? "unscheduled" : "manual";
+      else if (!unregistered && !expected) {
+        state = automatable ? "unscheduled" : "manual";
+        if (s.kind === "upload") reason = `not watched; changes only when files are loaded again; ${Number.isFinite(last) ? `last loaded ${new Date(last).toISOString().slice(0, 10)}` : "no files loaded yet"}`;
+        else reason = `no refresh scheduled; ${Number.isFinite(last) ? `last read ${new Date(last).toISOString().slice(0, 10)}` : "no read recorded"}`;
+      }
       else if (!unregistered && !Number.isFinite(last)) state = "never_synced";
       else if (!unregistered && (now - last) / 1000 > expected * 1.5) state = "stale";
       const report = {
@@ -5008,9 +5023,13 @@ export async function sourceInventorySlice(env, {
     let reason = registered ? operational.reason : "the source registry entry is missing";
     if (registered && retirement.retired) {
       state = "manual";
-      reason = `retired by the owner on ${retirement.retiredAt.slice(0, 10)}; kept, not refreshed`;
+      reason = `historical: kept and searchable, not refreshed (retired by the owner on ${retirement.retiredAt.slice(0, 10)})`;
     } else if (registered && operational.state) state = operational.state;
-    else if (registered && !expectedSeconds) state = automatable ? "unscheduled" : "manual";
+    else if (registered && !expectedSeconds) {
+      state = automatable ? "unscheduled" : "manual";
+      if (row.kind === "upload") reason = `not watched; changes only when files are loaded again; ${Number.isFinite(last) ? `last loaded ${new Date(last).toISOString().slice(0, 10)}` : "no files loaded yet"}`;
+      else reason = `no refresh scheduled; ${Number.isFinite(last) ? `last read ${new Date(last).toISOString().slice(0, 10)}` : "no read recorded"}`;
+    }
     else if (registered && !Number.isFinite(last)) state = "never_synced";
     else if (registered && (now - last) / 1000 > expectedSeconds * 1.5) state = "stale";
 
@@ -5050,6 +5069,13 @@ export async function sourceInventorySlice(env, {
       }
     }
     const withheldCheckAt = providerWithheldCheckAt(row.kind, latestRun);
+    const quietCheckAt = providerNoChangeCheckAt(row.kind, latestRun);
+    if (registered && !retirement.retired && row.status === "ready" && quietCheckAt) {
+      const age = now - Date.parse(quietCheckAt);
+      state = !expectedSeconds ? (automatable ? "unscheduled" : "manual")
+        : age >= 0 && age <= expectedSeconds * 1000 * 1.5 ? "ok" : "stale";
+      reason = "checked, no changes";
+    }
     if (registered && !retirement.retired && row.status === "ready" && withheldCheckAt) {
       const age = now - Date.parse(withheldCheckAt);
       state = age >= 0 && age <= (expectedSeconds || 86400) * 1000 * 1.5 ? "ok" : "stale";

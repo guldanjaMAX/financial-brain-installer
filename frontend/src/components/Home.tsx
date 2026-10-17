@@ -563,7 +563,7 @@ const COVERAGE_TONE_CLASS = {
   quiet: "text-ink-soft",
 };
 
-function SourceCoverageDetailView({
+export function SourceCoverageDetailView({
   label,
   coverage,
 }: {
@@ -599,13 +599,6 @@ export function pendingCountLabel(pending: number, isCapped = false): string {
 
 export function PhaseNotice({ phase, status }: { phase: BrainPhase; status: SystemStatus | null }) {
   const pct = status?.vectors?.percent_visible;
-  if (phase === "coverage_unknown" && status?.unavailable?.includes("diagnose")) {
-    return (
-      <div className="border border-line rounded-2xl px-4 py-3.5 bg-card">
-        <p className="text-[14.5px] text-ink-soft leading-relaxed">{phraseFor(phase, status)}</p>
-      </div>
-    );
-  }
   if (phase === "unreachable" || phase === "paused" || phase === "unknown" || phase === "coverage_unknown") {
     return phase === "unreachable"
       ? <Critical>{phraseFor(phase, status)}</Critical>

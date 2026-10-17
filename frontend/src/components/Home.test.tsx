@@ -1,14 +1,14 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { FinanceScopeProvider } from "./FinanceScope";
-import { AttentionList, FirstFinancialEntityPrompt, Glance, Home, needsFirstFinancialEntity, pendingCountLabel, PhaseNotice, SourceChip, SystemProblems } from "./Home";
+import { AttentionList, FirstFinancialEntityPrompt, Glance, Home, needsFirstFinancialEntity, pendingCountLabel, PhaseNotice, SourceCoverageDetailView, SourceChip, SystemProblems } from "./Home";
 import { CashSection } from "./ThisYear";
 import { UnsortedReview } from "./AddReview";
 import type { FinSnapshot } from "../lib/api";
 import { derivePhase, phraseFor } from "../lib/phase";
 
 describe("home composition", () => {
-  it("renders a partial status with a verified document count as still loading, not unreachable", () => {
+  it("renders partial diagnostics with measured records as uncertainty and a next step", () => {
     const status = {
       status: "ok",
       accepting_documents: true,
@@ -22,10 +22,13 @@ describe("home composition", () => {
     const html = renderToStaticMarkup(<PhaseNotice phase={phase} status={status} />);
 
     expect(phase).toBe("coverage_unknown");
-    expect(html).toContain("Your brain is still loading");
+    expect(html).toContain("status check is incomplete");
+    expect(html).toContain("Try the status check again");
+    expect(html).not.toContain("still loading");
+    expect(html).not.toContain("will finish once loading settles");
     expect(html).not.toContain("could not be reached");
     expect(html).not.toContain('role="alert"');
-    expect(html).not.toContain('role="status"');
+    expect(html).toContain('role="status"');
   });
 
   it("renders a capped vector queue as a lower bound rather than an exact count", () => {
@@ -208,5 +211,25 @@ describe("a rounded bank balance never reads as exact", () => {
       }],
     } as unknown as FinSnapshot;
     expect(renderToStaticMarkup(<UnsortedReview snapshot={snapshot} />)).toContain("Rounded: 2 lines came from the bank");
+  });
+});
+
+
+describe("owner coverage text", () => {
+  it("renders both January receipt bounds in the facts and adjacent caveat", () => {
+    const coverage = {
+      starter_context: { state: "ready" }, live_updates: { state: "current" },
+      history: { state: "running" }, meaning_search: { state: "ready" },
+      confirmed_range: { from: "2027-01-01T00:00:00.000Z", through: "2027-01-31T23:59:59.000Z" },
+      target_range: { from: null, through: null }, current_window: null,
+      counts: { seen: 73, accepted: 73, refused: 0, failed: 0 },
+      last_progress_at: null, projection_pending: 0, waiting_on_owner_machine: false,
+    } as const;
+    const html = renderToStaticMarkup(<SourceCoverageDetailView label="Email" coverage={coverage} />);
+    expect(html).toContain("73 accepted");
+    expect(html.match(/Jan 1, 2027/g)).toHaveLength(2);
+    expect(html.match(/Jan 31, 2027/g)).toHaveLength(2);
+    expect(html).not.toContain("onward");
+    expect(html).toContain("outside this range remains unproven");
   });
 });

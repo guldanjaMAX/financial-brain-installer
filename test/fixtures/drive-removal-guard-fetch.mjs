@@ -21,6 +21,9 @@ if (!evidencePath) throw new Error("BRAIN_DRIVE_GUARD_EVIDENCE is required");
 os.homedir = () => userRoot;
 syncBuiltinESMExports();
 
+// The failed write stays ambiguous for this process: its readback also fails.
+// A later CLI run can inventory again, preserving the partial-apply recovery test.
+let readbackUnavailable = false;
 const FAMILY_COUNT = 101;
 const FAMILY_PREFIX = "drive:guard-family-";
 const familyUid = (index) => `${FAMILY_PREFIX}${String(index).padStart(4, "0")}`;
@@ -33,6 +36,7 @@ const initialEvidence = () => ({
   failedRemovalFamilies: 0,
   failureInjected: false,
   inventoryReads: 0,
+  failedMarkerReadbacks: 0,
   absenceMetadataReads: 0,
   ingestBatchWrites: 0,
   receipts: { indexing: 0, error: 0, ready: 0 },
@@ -195,6 +199,7 @@ globalThis.fetch = async (input, options = {}) => {
     if (!evidence.failureInjected) {
       if (!isExactRange(indexes, 50, 50)) throw new Error("fixture received an unexpected second removal group");
       evidence.failureInjected = true;
+      readbackUnavailable = true;
       evidence.failedRemovalFamilies += families.length;
       saveEvidence(evidence);
       return json({ error: "synthetic removal failure" }, 503);
@@ -247,6 +252,14 @@ installRemovalPlanAdapter({
     evidence[key] = Number(evidence[key] || 0) + 1;
     saveEvidence(evidence);
   },
-  inventory: () => storedFamilyIndexes(readEvidence()).map(familyUid),
+  inventory: () => {
+    if (readbackUnavailable) {
+      const evidence = readEvidence();
+      evidence.failedMarkerReadbacks++;
+      saveEvidence(evidence);
+      throw new TypeError("synthetic inventory readback unavailable");
+    }
+    return storedFamilyIndexes(readEvidence()).map(familyUid);
+  },
   revision: () => readEvidence().successfulRemovalFamilies + readEvidence().ingestBatchWrites,
 });

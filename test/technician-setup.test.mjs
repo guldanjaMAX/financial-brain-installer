@@ -1,3 +1,4 @@
+import { renderCopyableCommand } from "../operations/command-display.mjs";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -395,7 +396,7 @@ test("setup can create an owner-only Claude workspace guide with locators but no
   const content = readFileSync(first.path, "utf8");
   assert.equal(first.status, "written");
   assert.ok(content.startsWith(CLAUDE_WORKSPACE_MARKER));
-  assert.ok(content.includes(`${JSON.stringify(safeNodePath)} ${JSON.stringify(safeBrainPath)}`));
+  assert.ok(content.includes(renderCopyableCommand(safeNodePath, [safeBrainPath])));
   assert.match(content, /claude --add-dir <approved-folder>/);
   assert.match(content, /folder .* off.*keeps every document and removes nothing/is);
   assert.match(content, /Never run .*ingest --path.*folder this Brain retired/is);
@@ -556,6 +557,8 @@ test("the plan is read-only, ordered, honest about proof, and agent-readable", (
   assert.match(plan.assistance.browser_help.fresh_cloudflare_access, /no API token/i);
   assert.match(plan.assistance.local_configuration.tools_writes.join("\n"), /technician skill/i);
   assert.match(plan.assistance.local_configuration.setup_writes.join("\n"), /MCP entry/i);
+  assert.match(plan.assistance.local_configuration.setup_writes.join("\n"), /AGENTS\.md.*Codex/);
+  assert.match(plan.assistance.local_configuration.setup_writes.join("\n"), /answer rules.*owner-approved account labels/);
   assert.match(plan.assistance.local_configuration.mcp_opt_out, /--no-connect.*preview.*--apply/i);
   assert.equal(plan.assistance.local_configuration.literal_brain_credential_written_to_ai_config, false);
   assert.equal(plan.coverage.bank_connections.state, "held_outside_ordinary_onboarding");

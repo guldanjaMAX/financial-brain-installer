@@ -546,7 +546,7 @@ assert.match(skillCopier, /return renderCliCommands\(content, options\);/, "the 
 // MCP tool failures surface inside the AI tool, not a terminal, and the
 // runtime's remedies name `brain secrets` and `brain mcp-config`.
 const mcpServer = readFileSync(new URL("components/brain-mcp.mjs", productRoot), "utf8");
-assert.match(mcpServer, /text: renderCliCommands\(`brain error in \$\{params\?\.name\}/, "MCP tool errors must render the commands they name");
+assert.match(mcpServer, /text: renderCliCommands\(safeMcpError\(err\)\)/, "MCP tool errors must render the commands they name");
 
 // One emitter for the scheduler daemons, instead of a seventh private copy
 // that quietly drops the renderer the way the previous six did.

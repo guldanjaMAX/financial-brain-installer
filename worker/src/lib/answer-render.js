@@ -78,7 +78,15 @@ export function unavailableSearch(r) {
 export function answerText(r) {
   if (r.status === COVERAGE_INCOMPLETE) return r.notice || GENERIC_COVERAGE_NOTICE;
   if (unavailableSearch(r)) return r.notice || GENERIC_UNAVAILABLE_NOTICE;
-  return r.answer || (r.answer_error ? safeAnswerErrorText(r.answer_error) : "The documents do not answer the question.");
+  if (r.answer_error && !r.answer) return safeAnswerErrorText(r.answer_error);
+  if (r.answer && !/^The documents do not answer/i.test(r.answer)) return r.answer;
+  // A refusal is about the records checked, even when retrieval was healthy.
+  // Missing result metadata must not become a fabricated zero count.
+  if (!Array.isArray(r.results)) return "The records checked did not support an answer to this question.";
+  const count = r.results.length;
+  return count
+    ? `I found ${count} ${count === 1 ? "record" : "records"} in this search, but none supported an answer to this question.`
+    : "I didn't find a matching record in this search.";
 }
 
 export function confidenceText(r) {
@@ -91,6 +99,6 @@ export function confidenceText(r) {
   if (unavailableSearch(r)) return "Search incomplete. This is not a statement about what your brain holds.";
   const conf = r.confidence;
   if (!conf) return "";
-  return (r.answer && !/^The documents do not answer/.test(r.answer || "") ? "Confidence" : "Confidence nothing is recorded") +
-    ": " + conf.percent + "% (" + conf.band + ") — " + conf.basis.join("; ") + ".";
+  return (r.answer && !/^The documents do not answer/i.test(r.answer || "") ? "Confidence" : "Confidence in this search result") +
+    ": " + conf.percent + "% (" + conf.band + "). " + conf.basis.join("; ") + ".";
 }

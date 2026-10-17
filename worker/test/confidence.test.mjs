@@ -67,8 +67,8 @@ test("a refusal during healthy retrieval outranks one during a blind spot", () =
     degraded: "vector",
     gaps: [{ type: "coverage", detail: "the drive source stopped updating 4 days ago" }],
   });
-  assert.ok(healthy.percent >= 80, "healthy absence is strong evidence");
-  assert.ok(blind.percent <= healthy.percent - 20, "absence during a blind spot is a weak claim");
+  assert.ok(healthy.percent >= 80, "healthy search supports the scoped refusal rubric");
+  assert.ok(blind.percent <= healthy.percent - 20, "a blind spot limits the search result");
   assert.ok(healthy.basis[0].includes("8 nearest candidates"), "the basis states the scope checked");
 });
 
@@ -80,7 +80,7 @@ test("confidence never leaks into the answer text a refusal scorer reads", () =>
   const canonical = "The documents do not answer the question.";
   assert.ok(looksLikeRefusal(canonical), "the canonical refusal must keep passing the scorer");
   const line = confidenceLine(refusalConfidence({ resultCount: 5, sources: ["drive"] }), { refused: true });
-  assert.ok(line.startsWith("Confidence nothing is recorded:"), "refusal phrasing names what the number means");
+  assert.ok(line.startsWith("Confidence in this search result:"), "refusal phrasing names what the number means");
   assert.ok(!looksLikeRefusal(`${canonical} ${line}`),
     "concatenating the confidence line breaks the refusal contract — it must stay a separate field");
 });
@@ -89,5 +89,5 @@ test("confidenceLine is null-safe for older responses", () => {
   assert.equal(confidenceLine(undefined), null);
   assert.equal(confidenceLine({}), null);
   const line = confidenceLine(computeAnswerConfidence({ approvedDocs: [dated("a")] }));
-  assert.match(line, /^Confidence: \d{1,2}% \((high|moderate|low)\) — .+\.$/);
+  assert.match(line, /^Confidence: \d{1,2}% \((high|moderate|low)\)\. .+\.$/);
 });

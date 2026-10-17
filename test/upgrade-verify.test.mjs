@@ -1735,7 +1735,7 @@ const drainResponse = (body, status) => new Response(JSON.stringify(body), {
   // reported ok. A failure inside the paused window has to say so.
   const pausedWarning = /CANNOT ACCEPT DOCUMENTS/i;
   check("a failure inside the paused window tells the operator the brain is not accepting documents",
-    /The update stopped partway\. Your Brain can still answer questions but won't take new documents until the update finishes\. Nothing was lost\. Run brain update once more\./i.test(migrationFailure.error?.message || "") &&
+    /The update stopped partway with a confirmed pause upload\./i.test(migrationFailure.error?.message || "") &&
       /If it stops again at the same step, run brain support --preview and send us that note\./i.test(migrationFailure.error?.message || "") &&
       /For your installer:/i.test(migrationFailure.error?.message || "") &&
       pausedWarning.test(migrationFailure.error?.message || "") &&
@@ -1797,7 +1797,7 @@ const drainResponse = (body, status) => new Response(JSON.stringify(body), {
   check("a failure after writes resume does NOT claim the brain is paused",
     !/CANNOT ACCEPT DOCUMENTS/i.test(convergenceFailure.error?.message || "") &&
       !/reindex and drain are\s+refused|remain unavailable/i.test(convergenceFailure.error?.message || "") &&
-      /The update stopped before its last check\. Your Brain is working normally and nothing was lost\. Run brain update once more; it picks up where it stopped\./i.test(convergenceFailure.error?.message || "") &&
+      /The update is incomplete\. Active writer mode was verified, but all required checks did not finish\./i.test(convergenceFailure.error?.message || "") &&
       /does not claim that reindex or drain are blocked/i.test(convergenceFailure.error?.message || ""),
     convergenceFailure.error?.message);
   check("an incomplete projection bootstrap blocks health, acceptance, and every version commit",

@@ -1,10 +1,38 @@
 import { forget, forgetFamilies } from "./store-d1.js";
 
+class RemovalPlanError extends Error {
+  constructor(message, code = "INGEST_REMOVAL_INVALID", status = 400) {
+    super(message);
+    this.code = code;
+    this.status = status;
+  }
+}
+
+/** Only fixed public codes cross this boundary; D1 messages can contain data. */
+export function ingestRemovalFailure(error) {
+  if (error instanceof RemovalPlanError) return { status: error.status, code: error.code };
+  if (error instanceof SyntaxError) return { status: 400, code: "INGEST_REMOVAL_INVALID" };
+  // The shared family resolver predates typed removal errors. Preserve these
+  // exact domain refusals as conflicts; none is an infrastructure retry signal.
+  if (error?.message === "family original identity changed; review the exact target again") {
+    return { status: 409, code: "INGEST_REMOVAL_CHANGED" };
+  }
+  if (["each document family needs a base_doc_uid and any keep_doc_uids must belong to it",
+    "family original identity is invalid"].includes(error?.message)) {
+    return { status: 409, code: "INGEST_REMOVAL_INVALID" };
+  }
+  // D1 CPU resets can improve with a smaller request. Unknown infrastructure
+  // failures remain retryable, but never acquire permission to replay a delete.
+  const capacity = /D1_ERROR[^\r\n"]*exceeded[^\S\r\n]+(?:its[^\S\r\n]+)?CPU[^\S\r\n]+time[^\S\r\n]+limit/i
+    .test(typeof error?.message === "string" ? error.message : "");
+  return { status: 503, code: capacity ? "INGEST_REMOVAL_CAPACITY" : "INGEST_REMOVAL_UNAVAILABLE" };
+}
+
 const same = (a, b) => a?.instance === b?.instance && a?.nonce === b?.nonce && a?.generation === b?.generation && a?.runtime === b?.runtime;
 
 export async function readIngestRemovalRequest(request) {
   const limit = 512 * 1024;
-  if (Number(request.headers.get("content-length")) > limit || !request.body) throw new Error("Invalid removal request size.");
+  if (Number(request.headers.get("content-length")) > limit || !request.body) throw new RemovalPlanError("Invalid removal request size.");
   const reader = request.body.getReader();
   const chunks = [];
   let size = 0;
@@ -14,7 +42,7 @@ export async function readIngestRemovalRequest(request) {
     size += value.byteLength;
     if (size > limit) {
       await reader.cancel();
-      throw new Error("Invalid removal request size.");
+      throw new RemovalPlanError("Invalid removal request size.");
     }
     chunks.push(value);
   }
@@ -26,7 +54,7 @@ export async function readIngestRemovalRequest(request) {
       !["preview", "apply"].includes(body.action) ||
       Object.keys(body).some((key) => !(body.action === "preview"
         ? ["action", "families", "marker"] : ["action", "targets", "marker"]).includes(key))) {
-    throw new Error("Invalid removal request shape.");
+    throw new RemovalPlanError("Invalid removal request shape.");
   }
   return body;
 }
@@ -36,19 +64,19 @@ export async function ingestRemovalMarker(env) {
   ).first();
   const runtime = env.INGEST_VERSION?.id;
   if (!row || !Number.isSafeInteger(row.generation) || !runtime) {
-    throw new Error("The Brain needs the removal-plan migration and version binding before removal review.");
+    throw new RemovalPlanError("The Brain needs the removal-plan migration and version binding before removal review.", "INGEST_REMOVAL_UNAVAILABLE", 409);
   }
   return { instance: row.instance, nonce: row.nonce, generation: row.generation, runtime };
 }
 
 /** The preview shares the actual family resolver, but never calls a writer. */
 export async function previewIngestRemovals(env, { families = [], marker = null } = {}) {
-  if (!Array.isArray(families) || families.length > 50) throw new Error("Removal preview needs at most 50 families.");
+  if (!Array.isArray(families) || families.length > 50) throw new RemovalPlanError("Removal preview needs at most 50 families.");
   const before = await ingestRemovalMarker(env);
-  if (marker && !same(marker, before)) throw new Error("Stored inventory or runtime changed; plan ingestion again.");
+  if (marker && !same(marker, before)) throw new RemovalPlanError("Stored inventory or runtime changed; plan ingestion again.", "INGEST_REMOVAL_CHANGED", 409);
   const result = await forgetFamilies(env, { families, dryRun: true });
   const after = await ingestRemovalMarker(env);
-  if (!same(before, after)) throw new Error("Stored inventory changed during preview; plan ingestion again.");
+  if (!same(before, after)) throw new RemovalPlanError("Stored inventory changed during preview; plan ingestion again.", "INGEST_REMOVAL_CHANGED", 409);
   return { marker: after, targets: [...result.targets].sort(), documents: result.documents, excluded_documents: result.excluded_documents || 0 };
 }
 
@@ -56,10 +84,10 @@ export async function previewIngestRemovals(env, { families = [], marker = null 
 export async function applyIngestRemovals(env, { targets, marker } = {}) {
   if (!Array.isArray(targets) || targets.length < 1 || targets.length > 50 ||
       targets.some((uid) => typeof uid !== "string" || !uid) || new Set(targets).size !== targets.length) {
-    throw new Error("Removal apply needs 1 to 50 exact document identities.");
+    throw new RemovalPlanError("Removal apply needs 1 to 50 exact document identities.");
   }
   if (!same(marker, await ingestRemovalMarker(env))) {
-    throw new Error("Stored inventory or runtime changed; plan ingestion again.");
+    throw new RemovalPlanError("Stored inventory or runtime changed; plan ingestion again.", "INGEST_REMOVAL_CHANGED", 409);
   }
   // forget's transaction fence is essential: a preflight read cannot prevent
   // another writer changing the corpus between that read and DELETE.
@@ -69,7 +97,7 @@ export async function applyIngestRemovals(env, { targets, marker } = {}) {
     .bind(...targets).all();
   if (left.results.length || receipt.documents !== targets.length ||
       !same(receipt.ingest_removal_marker, await ingestRemovalMarker(env))) {
-    throw new Error("Removal readback did not match the exact plan; plan ingestion again.");
+    throw new RemovalPlanError("Removal readback did not match the exact plan; plan ingestion again.", "INGEST_REMOVAL_UNVERIFIED", 409);
   }
   return { documents: receipt.documents, marker: receipt.ingest_removal_marker };
 }

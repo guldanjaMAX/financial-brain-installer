@@ -4,6 +4,7 @@ import { join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DriveRemovalReviewRequired, assertDriveRemovalPlanSafe, formatDriveRemovalPlan } from "./drive-removal-plan.mjs";
 import { renderCliCommands } from "./cli-guidance.mjs";
+import { SOURCE_FAMILY_INVENTORY_RETRY_DELAYS_MS } from "./source-family-inventory-retry.mjs";
 
 const canonical = (value) => Array.isArray(value) ? value.map(canonical)
   : value && typeof value === "object"
@@ -105,19 +106,112 @@ export function ingestRemovalRuntime(root = fileURLToPath(new URL("../", import.
   return hash.digest("hex");
 }
 
-export async function requestIngestRemovalPlan({ base, adminKey, body, fetchImpl = fetch }) {
-  try {
-    const response = await fetchImpl(`${base}/api/admin/brain/ingest-removal-plan`, {
-      method: "POST", redirect: "error",
-      headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" },
-      body: JSON.stringify(body), signal: AbortSignal.timeout(60_000),
-    });
-    if (!response.ok) throw new Error("removal request refused");
-    return await response.json();
-  } catch {
-    fail("The authenticated removal plan is unavailable or changed. " +
-      (body.action === "apply" ? "Some approved removals may have completed. " : "") +
-      "The source cursor was not advanced. Run ingestion again after verifying the Brain's migration and runtime.");
+const REMOVAL_RESPONSE_CODES = new Set([
+  "INGEST_REMOVAL_CHANGED", "INGEST_REMOVAL_INVALID", "INGEST_REMOVAL_UNAVAILABLE",
+  "INGEST_REMOVAL_UNVERIFIED", "INGEST_REMOVAL_CAPACITY",
+]);
+const reportRemovalProgress = line => console.warn(line);
+
+/** Retry one immutable request, with a shared deadline including apply readback.
+ * A failed apply is NOT idempotent. Only an unchanged authenticated marker proves
+ * it untouched; the D1 transaction fence still closes the race after that proof.
+ */
+export async function requestIngestRemovalPlan({
+  base, adminKey, body, fetchImpl = fetch, beforeAttempt = () => {},
+  sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
+  now = () => performance.now(), random = Math.random, onProgress = reportRemovalProgress,
+}) {
+  const deadline = now() + 240_000;
+  const original = JSON.parse(JSON.stringify(body));
+  const isApply = original.action === "apply";
+  let applySent = false;
+  const once = async payload => {
+    try { beforeAttempt(); }
+    catch (cause) {
+      if (!applySent) throw cause;
+      // A local refusal cannot establish whether the earlier write committed.
+      // Keep the refusal terminal, including during marker readback or backoff.
+      const error = new DriveRemovalReviewRequired(
+        (cause instanceof Error ? cause.message : "Local removal validation failed.") +
+        " Some approved removals may have completed. The source cursor was not advanced. " +
+        "Run ingestion again and review a fresh removal plan before applying it.",
+      );
+      error.cause = cause;
+      error.removalBatchMayShrink = false;
+      throw error;
+    }
+    const remaining = Math.floor(deadline - now());
+    if (remaining <= 0) return { failure: { label: "TIMEOUT", retryable: true, capacity: true } };
+    try {
+      if (payload.action === "apply") applySent = true;
+      const response = await fetchImpl(`${base}/api/admin/brain/ingest-removal-plan`, {
+        method: "POST", redirect: "error",
+        headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" },
+        body: JSON.stringify(payload), signal: AbortSignal.timeout(Math.min(60_000, remaining)),
+      });
+      if (response.ok) return { value: await response.json() };
+      // Never surface response text, arbitrary codes, URLs, or transport errors.
+      let code;
+      try { const value = await response.json(); if (REMOVAL_RESPONSE_CODES.has(value?.code)) code = value.code; }
+      catch { /* HTTP status remains useful even for an empty or interrupted body. */ }
+      return { failure: {
+        label: `HTTP ${response.status}${code ? ` (${code})` : ""}`, code,
+        retryable: response.status === 429 || (response.status >= 500 && response.status <= 599),
+        capacity: code === "INGEST_REMOVAL_CAPACITY" || [413, 504].includes(response.status),
+      } };
+    } catch (error) {
+      const timeout = ["TimeoutError", "AbortError"].includes(error?.name);
+      return { failure: {
+        label: timeout ? "TIMEOUT" : error instanceof SyntaxError ? "INVALID_RESPONSE" : "NETWORK_ERROR",
+        retryable: !(error instanceof SyntaxError), capacity: timeout,
+      } };
+    }
+  };
+  const pause = async (failure, retry) => {
+    const delay = Math.round(SOURCE_FAMILY_INVENTORY_RETRY_DELAYS_MS[retry] * (0.75 + random() * 0.5));
+    if (now() + delay >= deadline) return false;
+    onProgress(`Removal review: temporary ${failure.label}; retrying in ${delay / 1000} second(s) ` +
+      `(retry ${retry + 1} of ${SOURCE_FAMILY_INVENTORY_RETRY_DELAYS_MS.length}).`);
+    await sleep(delay);
+    return now() < deadline;
+  };
+  let proofChanged = false;
+  const unchanged = async () => {
+    if (!original.marker) return false;
+    for (let retry = 0; ; retry++) {
+      const result = await once({ action: "preview", families: [], marker: original.marker });
+      if (!result.failure) {
+        try {
+          const proof = checkedPreview(result.value);
+          proofChanged = removalDigest(proof.marker) !== removalDigest(original.marker);
+          return proof.documents === 0 && !proofChanged;
+        } catch { return false; }
+      }
+      proofChanged = result.failure.code === "INGEST_REMOVAL_CHANGED";
+      if (!result.failure.retryable || retry >= SOURCE_FAMILY_INVENTORY_RETRY_DELAYS_MS.length ||
+          !await pause(result.failure, retry)) return false;
+    }
+  };
+  for (let retry = 0; ; retry++) {
+    const result = await once(original);
+    if (!result.failure) return result.value;
+    const failure = result.failure;
+    // Even a 5xx can follow a committed delete. Check again after every failure,
+    // including the final one before permitting a smaller apply batch.
+    const untouched = isApply && (failure.retryable || failure.capacity) && await unchanged();
+    if ((!isApply || untouched) && failure.retryable &&
+        retry < SOURCE_FAMILY_INVENTORY_RETRY_DELAYS_MS.length && await pause(failure, retry)) continue;
+    const changed = failure.code === "INGEST_REMOVAL_CHANGED" || proofChanged;
+    const error = new DriveRemovalReviewRequired(
+      (changed ? "Stored inventory or runtime changed; run ingestion again. " : "Authenticated removal request failed. ") +
+      `${failure.label}. ` + (isApply ? "Some approved removals may have completed. " : "") +
+      "The source cursor was not advanced. " +
+      (changed ? "Review a fresh removal plan before applying it." :
+        "Rerun the same approved command if the stored inventory is unchanged. " +
+        "If it changed, run ingestion again and review the new removal plan; an old approval cannot resume a completed batch."),
+    );
+    error.removalBatchMayShrink = failure.capacity && (!isApply || untouched);
+    throw error;
   }
 }
 
@@ -140,14 +234,14 @@ function checkedApply(result, targets, marker) {
       result.marker.instance !== marker.instance || result.marker.runtime !== marker.runtime ||
       typeof result.marker.nonce !== "string" || !result.marker.nonce ||
       !Number.isSafeInteger(result.marker.generation) || result.marker.generation <= marker.generation) {
-    fail("Exact removal receipt was not verified. Run ingestion again before retrying.");
+    fail("Exact removal receipt was not verified. Some approved removals may have completed. Run ingestion again before retrying.");
   }
   return result.marker;
 }
 
 // Every exact writer uses this ordering. An exact-target approval does not
 // replace the independent aggregate source review, even for structural repair.
-async function applyGuardedTargets({ plan, sourceApproval, send, verifyLocal = () => {} }) {
+async function applyGuardedTargets({ plan, sourceApproval, send, verifyLocal = () => {}, onProgress = reportRemovalProgress }) {
   verifyLocal();
   if (plan.sourcePlan) assertDriveRemovalPlanSafe(plan.sourcePlan,
     plan.providerApproval && sourceApproval === plan.providerApproval ? plan.sourcePlan.fingerprint : sourceApproval,
@@ -158,12 +252,22 @@ async function applyGuardedTargets({ plan, sourceApproval, send, verifyLocal = (
   }
   let marker = plan.marker;
   let removed = 0;
-  for (let index = 0; index < plan.targets.length; index += 50) {
+  let batchSize = 50;
+  for (let index = 0; index < plan.targets.length;) {
     verifyLocal();
-    const targets = plan.targets.slice(index, index + 50);
-    const result = await send({ action: "apply", targets, marker });
+    const targets = plan.targets.slice(index, index + batchSize);
+    let result;
+    try { result = await send({ action: "apply", targets, marker }, verifyLocal); }
+    catch (error) {
+      if (!error.removalBatchMayShrink || targets.length <= 1) throw error;
+      batchSize = Math.ceil(targets.length / 2);
+      onProgress(`Removal review: retrying the unchanged batch with at most ${batchSize} targets.`);
+      continue;
+    }
     marker = checkedApply(result, targets, marker);
     removed += result.documents;
+    index += targets.length;
+    if (plan.targets.length > 50) onProgress(`Removal review: removed ${removed.toLocaleString("en-US")} of ${plan.targets.length.toLocaleString("en-US")} approved targets.`);
   }
   return { marker, removed };
 }
@@ -185,9 +289,9 @@ export async function applyApprovedProvenanceFamily({
     fail("Exact family cleanup needs a separately approved provenance repair.");
   }
   const selectors = [{ ...families[0], family_kind: "structural" }];
-  const send = body => {
-    assertOwned?.();
-    return request({ base, adminKey, body, fetchImpl });
+  const send = (body, beforeAttempt = () => assertOwned?.()) => {
+    beforeAttempt();
+    return request({ base, adminKey, body, fetchImpl, beforeAttempt });
   };
   const observed = checkedPreview(await send({ action: "preview", families: selectors }));
   onExcluded(observed.excluded_documents ?? 0);
@@ -200,7 +304,7 @@ export async function applyApprovedProvenanceFamily({
     fail("Drive family cleanup needs an aggregate source removal plan covering this family.");
   }
   const { marker } = await applyGuardedTargets({
-    plan: { ...observed, sourcePlan }, sourceApproval, send,
+    plan: { ...observed, sourcePlan }, sourceApproval, send, verifyLocal: () => assertOwned?.(),
   });
   const after = checkedPreview(await send({ action: "preview", families: selectors, marker }));
   if (after.targets.length || removalDigest(after.marker) !== removalDigest(marker)) {
@@ -213,9 +317,13 @@ export async function applyApprovedProvenanceFamily({
 export function createIngestRemovalReview({
   state, saveState, source, manifest, manifestPath, base, adminKey, assertOwned,
   request = requestIngestRemovalPlan, runtime = ingestRemovalRuntime, kind = "upload", policy = () => null, now = () => Date.now(),
+  onProgress = reportRemovalProgress,
 }) {
   const binding = () => removalDigest({ manifest, manifestPath, source, base, kind, policy: policy() });
-  const send = (body) => { assertOwned?.(); return request({ base, adminKey, body }); };
+  const send = (body, beforeAttempt = () => assertOwned?.()) => {
+    beforeAttempt();
+    return request({ base, adminKey, body, beforeAttempt, onProgress });
+  };
   const pending = () => Object.values(state.ingest_pending_families || {}).filter(
     (entry) => state.done?.[entry.stateKey] === entry.hash && !state.skipped?.[entry.stateKey],
   ).map((entry) => entry.family);
@@ -235,12 +343,25 @@ export function createIngestRemovalReview({
     let marker = expectedMarker;
     const targets = new Set();
     let excluded = 0;
-    for (let index = 0; index < families.length || index === 0; index += 50) {
-      const part = checkedPreview(await send({ action: "preview", families: families.slice(index, index + 50), marker }));
+    let batchSize = 50;
+    for (let index = 0; index < families.length || index === 0;) {
+      const group = families.slice(index, index + batchSize);
+      let response;
+      try { response = await send({ action: "preview", families: group, marker }); }
+      catch (error) {
+        if (!error.removalBatchMayShrink || group.length <= 1) throw error;
+        batchSize = Math.ceil(group.length / 2);
+        onProgress(`Removal review: retrying the preview with at most ${batchSize} families.`);
+        continue;
+      }
+      const part = checkedPreview(response);
       if (marker && removalDigest(marker) !== removalDigest(part.marker)) fail("Stored inventory or runtime changed; run ingestion again.");
       marker = part.marker;
       excluded += part.excluded_documents ?? 0;
       for (const uid of part.targets) targets.add(uid);
+      index += group.length;
+      if (families.length > 50) onProgress(`Removal review: checked ${index.toLocaleString("en-US")} of ${families.length.toLocaleString("en-US")} families.`);
+      if (!families.length) break;
     }
     return { marker, targets: [...targets].sort(), excluded_documents: excluded };
   };
@@ -321,7 +442,7 @@ export function createIngestRemovalReview({
     verifyLocal();
     const observed = await preview(plan.families, plan.marker);
     if (removalDigest(observed.targets) !== removalDigest(plan.targets)) fail("Exact removal targets changed; run ingestion again.");
-    const { marker, removed } = await applyGuardedTargets({ plan, sourceApproval, send, verifyLocal });
+    const { marker, removed } = await applyGuardedTargets({ plan, sourceApproval, send, verifyLocal, onProgress });
     const after = await preview(plan.families, marker);
     if (after.targets.length) fail("Removal readback found remaining targets. Run ingestion again.");
     verifyLocal();

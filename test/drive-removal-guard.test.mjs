@@ -910,13 +910,15 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     assert.equal(evidence.removalRequests, 0, "a wrong fingerprint made a removal write");
     assert.equal(evidence.reconciliationRequests, 0, "a wrong fingerprint made a reconciliation write");
 
-    // A committed first group survives a failed second group. No later group
-    // may run after an uncertain result; the remaining targets need a new plan.
+    // A committed first group survives a failed second group whose marker
+    // readback also fails. Unlike a proven untouched transient, this uncertainty
+    // forbids replay and the remaining targets still need a new plan.
     const interrupted = run(["--source", "drive", "--apply-removals", readState().ingest_removal_plan.fingerprint,
       "--approve-removals", initialApproval]);
     assert.equal(interrupted.code, 1, safeDiagnostic(interrupted.output));
     assertNoFamilyLeak(interrupted.output);
-    assert.match(interrupted.output, /removal plan.*unavailable|changed/i);
+    assert.match(interrupted.output, /Authenticated removal request failed\. HTTP 503/);
+    assert.match(interrupted.output, /may have completed/);
     const interruptedState = assertCursorWithheld();
     assert.equal(interruptedState.ingest_removal_plan.targets.length, 101, "the uncertain plan was not retained for recovery");
     evidence = readEvidence();
@@ -925,6 +927,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     assert.equal(evidence.reconciliationRequests, 0, "the removal path performed an unrelated reconciliation");
     assert.equal(evidence.successfulRemovalFamilies, 50, "successful partial removals were not preserved");
     assert.equal(evidence.failedRemovalFamilies, 50, "the failed bounded group was not recorded by the fixture");
+    assert.equal(evidence.failedMarkerReadbacks, 4, "bounded readback reached the decision and could not prove replay safe");
 
     const retryStopped = run();
     assert.equal(retryStopped.code, 1, safeDiagnostic(retryStopped.output));

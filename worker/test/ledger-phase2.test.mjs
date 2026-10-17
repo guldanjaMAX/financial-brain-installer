@@ -119,7 +119,7 @@ test("merchant tokens are contiguous and category proposals and Unsorted stay ex
   assert.equal(breakdown.ledger.groups.filter(g => g.category === "software").length, 2);
 });
 
-test("transfer candidates keep every leg counted; conditional figures and near misses stay explicit", async t => {
+test("directed transfers leave the lead; advisory pairs and near misses stay explicit", async t => {
   const f = await fixture(t);
   f.add("out", "2026-09-15", 10001, "outflow", "TRANSFER TO account 2222");
   f.add("in", "2026-09-18", 10001, "inflow", "Fixture bank", "TRANSFER_IN_ACCOUNT_TRANSFER", "proposed", "account-b");
@@ -128,6 +128,10 @@ test("transfer candidates keep every leg counted; conditional figures and near m
   f.add("date-out", "2026-09-01", 30001, "outflow", "TRANSFER TO account 2222");
   f.add("date-in", "2026-09-05", 30001, "inflow", "TRANSFER FROM account 1111", null, null, "account-b");
   f.add("expense", "2026-09-16", 77);
+  const advisory = await f.ask("How much money came in and went out in September 2026?");
+  assert.equal(advisory.ledger.candidate_transfer_count, 1, "advisory pair reaches the lead decision");
+  assert.equal(advisory.ledger.default_exclusions.own_transfer_minor, 0, "one direction and a generic category do not prove the counterparty");
+  f.raw("UPDATE fin_transactions SET description='TRANSFER FROM account 1111' WHERE txn_uid='in'");
   const changes = f.sqlite.prepare("SELECT total_changes() n").get().n;
   const totals = await f.ask("How much money came in and went out in September 2026?");
   assert.equal(sumAccounts(totals, "debits_minor"), 60080);
@@ -135,7 +139,9 @@ test("transfer candidates keep every leg counted; conditional figures and near m
   assert.equal(totals.ledger.candidate_transfer_count, 1);
   assert.equal(totals.ledger.unmatched_transfers.length, 4);
   assert.equal(totals.ledger.includes_own_transfers, true);
-  assert.match(totals.answer, /If these are transfers between your own accounts/);
+  assert.match(totals.answer, /Moves between your own connected accounts, left out of the first figures/);
+  assert.match(totals.answer, /With everything counted:[\s\S]*credits \$0\.00; debits \$600\.80/);
+  assert.match(totals.answer, /credits \$600\.04; debits \$0\.00/);
   assert.equal(totals.ledger.if_own_transfers.accounts.reduce((n, a) => n + a.debits_minor, 0), 50079);
   assert.equal(totals.ledger.if_own_transfers.accounts.reduce((n, a) => n + a.credits_minor, 0), 50003);
   assert.match(totals.answer, /possible transfer, unmatched/i);

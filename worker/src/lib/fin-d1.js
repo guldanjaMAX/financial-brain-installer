@@ -226,12 +226,15 @@ export async function ledgerAccounts(env, { tenantId = DEFAULT_TENANT, entitySlu
       status: row.status,
       opened_on: row.opened_on || null,
       closed_on: row.closed_on || null,
-      coverage_status: row.coverage_status === "complete" && !row.covered_from
+      coverage_status: row.coverage_status === "complete" && /^Read from a bank export covering /i.test(row.basis_note || "")
+        ? "partial" : row.coverage_status === "complete" && !row.covered_from
         ? "missing" : row.coverage_status || null,
       covered_from: row.covered_from || null,
       covered_to: row.covered_to || null,
       covered_via_account_slug: row.covered_via_account_slug || null,
-      coverage_note: row.coverage_status === "complete" && !row.covered_from
+      coverage_note: row.coverage_status === "complete" && /^Read from a bank export covering /i.test(row.basis_note || "")
+        ? "Coverage is unproven: a legacy partial import may have widened this interval. Retain every transaction and independently review the source interval before certifying a total or zero."
+        : row.coverage_status === "complete" && !row.covered_from
         ? "No dated transaction coverage has been established." : row.basis_note || null,
       coverage_computed_at: row.computed_at || null,
       ...provenanceOf(row),

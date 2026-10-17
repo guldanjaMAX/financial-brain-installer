@@ -593,6 +593,8 @@ function updateTransactionPath(identity, { home = homedir() } = {}) {
   return join(resolve(home), ".brain", "daily-update-transactions", `${id}.json`);
 }
 
+export { updateTransactionPath as dailyRefreshUpdateTransactionPath };
+
 function transactionContext(identityOrPlan, options = {}) {
   const identity = identityOrPlan?.identity?.id ? identityOrPlan.identity : identityOrPlan;
   const manifestPath = identityOrPlan?.manifest_path || options.manifestPath || null;
@@ -1104,21 +1106,33 @@ function windowsAdapter({ home, spawn, environment, taskSpec = null, onTaskXmlDe
   if (systemRoot) childEnvironment.SystemRoot = systemRoot;
   if (environment.WINDIR) childEnvironment.WINDIR = environment.WINDIR;
   const run = (args) => {
+    let result;
     try {
-      return spawn(command, args, {
+      result = spawn(command, args, {
         encoding: args.includes("/XML") ? null : "utf8",
         windowsHide: true,
         env: childEnvironment,
+        timeout: 60_000,
+        maxBuffer: 4 * 1024 * 1024,
       });
-    } catch (cause) {
-      return { status: null, error: cause };
+    } catch {
+      throw new DailyRefreshInspectionError("the Windows scheduler operation failed to return; its outcome is unknown and requires recovery");
     }
+    // A timeout can follow a successful native mutation. It cannot prove an
+    // absent task, even if a later inventory happens to omit it.
+    if (!result || result.error || result.signal || result.status === null) {
+      throw new DailyRefreshInspectionError("the Windows scheduler operation timed out or was interrupted; its outcome is unknown and requires recovery");
+    }
+    return result;
   };
   let currentUser;
   const resolveUserId = (user) => {
     if (currentUser === undefined) {
       const result = spawn(win32Path.join(systemRoot || "", "System32", "whoami.exe"),
-        ["/user", "/fo", "csv", "/nh"], { encoding: "utf8", windowsHide: true, env: childEnvironment });
+        ["/user", "/fo", "csv", "/nh"], { encoding: "utf8", windowsHide: true, env: childEnvironment, timeout: 60_000, maxBuffer: 16384 });
+      if (!result || result.error || result.signal || result.status === null) {
+        throw new DailyRefreshInspectionError("the Windows principal lookup has an unknown outcome; keep the recovery state");
+      }
       const match = result?.status === 0 && String(result.stdout || "").trim()
         .match(/^"((?:[^"]|"")*)","(S-1-\d+(?:-\d+)+)"$/u);
       currentUser = match ? { name: match[1].replaceAll('""', '"'), sid: match[2] } : null;

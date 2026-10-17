@@ -97,6 +97,25 @@ test("an unrelated invalid field keeps the generic retry message and its referen
   } finally { fixture.close(); }
 });
 
+test("a safe route failure without a provider code remains visible with a stable reference", async () => {
+  const fixture = await createProductFixture({ env: { ...ENV, BANK_FEED_CLIENT_ID: "" } });
+  try {
+    let providerCalls = 0;
+    const { status, body } = await postLinkToken(fixture, async () => {
+      providerCalls++;
+      throw new Error("the provider must not be contacted without configuration");
+    });
+    assert.equal(status, 503);
+    assert.equal(Object.hasOwn(body, "code"), false);
+    assert.match(body.error, /not configured/, "the configuration decision point was reached");
+    assert.equal(providerCalls, 0);
+    const message = bankFeedOwnerErrorMessage(body, status);
+    assert.match(message, /^This step is temporarily unavailable\. Your earlier progress is safe\. Please try again\./);
+    assert.match(message, /the bank feed is not configured on this brain/);
+    assert.match(message, /Reference code: BANK_FEED_REQUEST_FAILED\.$/);
+  } finally { fixture.close(); }
+});
+
 /* ------------------------------------------------------------ the owner page */
 
 class FakeNode {

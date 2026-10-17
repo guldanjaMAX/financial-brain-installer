@@ -19,6 +19,8 @@ async function rows(env, sql, binds) {
 const ACCOUNTS_SQL = `SELECT a.id,a.account_slug,a.entity_slug,a.mask,a.account_kind,a.institution,a.label,a.external_ref,a.source_feed,
       a.currency,a.feed_mode,a.balance_role,a.basis_state,c.coverage_status,c.covered_from,c.covered_to,
       c.basis_state AS coverage_basis,i.last_synced_at,
+      CASE WHEN c.coverage_status='complete' AND c.basis_note LIKE 'Read from a bank export covering %'
+        THEN 1 ELSE 0 END AS coverage_review_required,
       CASE WHEN a.feed_mode='live' AND c.coverage_status='complete' AND c.covered_from IS NULL
         AND c.basis_state='confirmed' AND c.provenance='feed' AND c.source_feed=a.source_feed
         AND i.status='connected' AND i.removed_at IS NULL
@@ -139,9 +141,14 @@ async function snapshotRows(env, accounts, sql, binds, { tenantId, mask, account
 }
 
 const unknownTwinCoverage = account => account.members.length > 1 && account.live &&
-  (!validWindow(account.live) || account.live.coverage_status !== "complete" || account.live.coverage_basis !== "confirmed");
+  (!validWindow(account.live) || account.live.coverage_review_required || account.live.coverage_status !== "complete" || account.live.coverage_basis !== "confirmed");
 
 export function effectivePeriodCovered(account, from, to) {
+  // The legacy upsert preserved "complete" while replacing the basis with a
+  // partial-export note and widening MIN/MAX bounds. That fingerprint cannot
+  // certify any gap, including before the next import. No stored row is fixed
+  // or deleted here; a fresh independent coverage review must replace it.
+  if (account.members.some(member => member.coverage_review_required)) return false;
   // Legacy empty feeds may lack a start even after historical promotion.
   // This deliberately requires zero activity for the entire stored history,
   // a confirmed zero balance and the matching completed provider receipt.
@@ -195,7 +202,14 @@ export async function readEffectiveTransactions(env, accounts, { from, to, amoun
   const select = `SELECT t.id,t.account_slug AS source_account_slug,
       json_extract(m.value,'$.effective') AS effective_account_slug,
       json_extract(m.value,'$.last_synced_at') AS last_synced_at,
-      t.posted_on,t.amount_minor,t.direction,t.currency,t.description,t.payee,t.category,t.category_basis_state,t.basis_state
+      t.posted_on,t.amount_minor,t.direction,t.currency,t.description,t.payee,t.category,t.category_basis_state,t.basis_state,
+      CASE WHEN t.provenance='extracted' THEN EXISTS (
+        SELECT 1 FROM fin_transactions other WHERE other.tenant_id=t.tenant_id AND other.account_slug=t.account_slug
+          AND other.provenance='extracted' AND other.superseded_by_id IS NULL AND other.removed_at IS NULL
+          AND other.pending=0 AND other.posted_on=t.posted_on AND other.amount_minor=t.amount_minor
+          AND other.direction=t.direction AND other.currency=t.currency
+          AND (other.external_id IS NULL)<>(t.external_id IS NULL)
+      ) ELSE 0 END AS export_overlap_review
     FROM json_each(?1) m CROSS JOIN fin_transactions t INDEXED BY idx_fin_transactions_account ON t.account_slug=json_extract(m.value,'$.slug')
     WHERE t.tenant_id=?2 AND t.superseded_by_id IS NULL AND t.removed_at IS NULL AND t.pending=0
       AND (json_extract(m.value,'$.exclude_from') IS NULL OR t.posted_on IS NULL OR

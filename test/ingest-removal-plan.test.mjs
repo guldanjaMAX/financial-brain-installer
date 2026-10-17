@@ -10,7 +10,7 @@ import { spawnSync } from "node:child_process";
 import { cmdIngest, driveConnectorConfig, PROVIDER_CONNECTOR_IDS } from "../brain.mjs";
 import worker from "../worker/src/index.js";
 import { splitOversized, MAX_DOC_CHARS } from "../ingest/envelope-batching.mjs";
-import { createIngestRemovalReview, applyApprovedProvenanceFamily, removalDigest } from "../operations/ingest-removal-plan.mjs";
+import { createIngestRemovalReview, applyApprovedProvenanceFamily, removalDigest, requestIngestRemovalPlan } from "../operations/ingest-removal-plan.mjs";
 import { buildDriveRemovalPlan, DriveRemovalReviewRequired } from "../operations/drive-removal-plan.mjs";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
 import { ingestPlanStore } from "./helpers/ingest-plan-store.mjs";
@@ -324,7 +324,7 @@ test("runtime binding works in a packed installation without a lockfile and cove
   try {
     for (const folder of ["operations", "connectors", "ingest", "worker/src/lib"]) mkdirSync(join(root, folder), { recursive: true });
     for (const path of ["operations/ingest-removal-plan.mjs", "operations/drive-removal-plan.mjs",
-      "operations/cli-guidance.mjs", "operations/command-display.mjs", "worker/src/lib/stored-family-identity.js"]) {
+      "operations/cli-guidance.mjs", "operations/source-family-inventory-retry.mjs", "operations/command-display.mjs", "worker/src/lib/stored-family-identity.js"]) {
       const bytes = readFileSync(new URL(`../${path}`, import.meta.url));
       writeFileSync(join(root, path), bytes);
       console.log(`copied-runtime-source ${path} sha256=${createHash("sha256").update(bytes).digest("hex")}`);
@@ -703,4 +703,312 @@ test("an exclusion confined to a replacement family still warns and completes", 
     await assert.rejects(f.review.finish(), { code: "SAFETY_REVIEW_REQUIRED" });
     assert.deepEqual(f.state.ingest_removal_plan.targets, [uid]);
   } finally { console.warn = priorWarn; f.store.db.close(); }
+});
+
+// Transport probes use the real authenticated route and SQLite transaction fence.
+// Faults never contact a service and their private-shaped messages must not escape.
+function transportFixture(t) {
+  const store = ingestPlanStore();
+  t.after(() => store.db.close());
+  const key = randomBytes(32).toString("hex");
+  store.env.ADMIN_KEY = key;
+  const calls = [], notices = [], delays = [];
+  let fault = null;
+  let clock = 0;
+  const route = (url, options) => worker.fetch(new Request(url, options), store.env, { waitUntil() {} });
+  const request = input => requestIngestRemovalPlan({
+    ...input, base: "https://fixture.invalid", adminKey: key,
+    sleep: async ms => { delays.push(ms); clock += ms; }, now: () => clock, random: () => 0.5,
+    onProgress: line => notices.push(line),
+    fetchImpl: async (url, options) => {
+      const body = JSON.parse(options.body);
+      calls.push(body);
+      return fault ? fault(body, () => route(url, options)) : route(url, options);
+    },
+  });
+  return { store, request, calls, notices, delays,
+    fault: fn => { fault = fn; }, advance: ms => { clock += ms; } };
+}
+
+for (const failure of [500, 429, "network", "timeout"]) {
+  test(`transport preview retries ${failure} in place and reports safe progress`, async t => {
+    const f = transportFixture(t);
+    f.store.put("drive:target");
+    const body = { action: "preview", families: [{ base_doc_uid: "drive:target", keep_doc_uids: [] }] };
+    let attempted = 0;
+    f.fault((_body, next) => {
+      if (++attempted !== 1) return next();
+      if (typeof failure === "number") return Response.json({ error: "private-fixture.invalid/private-content" }, { status: failure });
+      throw Object.assign(new Error("private-fixture.invalid/private-content"), { name: failure === "timeout" ? "TimeoutError" : "TypeError" });
+    });
+    const result = await f.request({ body });
+    assert.deepEqual(result.targets, ["drive:target"]);
+    assert.equal(attempted, 2);
+    assert.deepEqual(f.calls[0], f.calls[1]);
+    assert.deepEqual(f.delays, [1000]);
+    assert.match(f.notices.join("\n"), /temporary.*retrying/i);
+    assert.doesNotMatch(f.notices.join("\n"), /private-fixture|private-content|drive:target/);
+    assert.equal(f.store.calls.batches, 0);
+  });
+}
+
+test("transport retry is bounded, reports HTTP status, and never repeats authentication refusals", async t => {
+  const f = transportFixture(t);
+  const body = { action: "preview", families: [] };
+  for (const [status, count] of [[503, 4], [401, 1], [403, 1], [409, 1]]) {
+    f.calls.length = 0;
+    f.fault(() => Response.json({ error: "private-content", code: "PRIVATE_UNTRUSTED_CODE" }, { status }));
+    await assert.rejects(f.request({ body }), error => {
+      assert.match(error.message, new RegExp(`HTTP ${status}`));
+      assert.doesNotMatch(error.message, /private-content|PRIVATE_UNTRUSTED_CODE/);
+      return error.code === "SAFETY_REVIEW_REQUIRED";
+    });
+    assert.equal(f.calls.length, count, "the HTTP decision point was reached");
+  }
+  f.calls.length = 0;
+  f.fault(() => { f.advance(240_000); return new Response(null, { status: 500 }); });
+  await assert.rejects(f.request({ body }), /HTTP 500/);
+  assert.equal(f.calls.length, 1, "overall elapsed budget prevents another attempt");
+  f.fault(null);
+  assert.equal((await f.request({ body })).documents, 0, "healthy control succeeds");
+});
+
+test("transport Worker distinguishes transient D1 failures from marker drift without exposing raw errors", async t => {
+  const f = transportFixture(t);
+  f.store.put("drive:target");
+  const body = { action: "preview", families: [{ base_doc_uid: "drive:target", keep_doc_uids: [] }] };
+  const initial = await f.request({ body });
+  const prepare = f.store.env.DB.prepare;
+  let faults = 0;
+  f.store.env.DB.prepare = sql => {
+    if (++faults === 1) throw new Error("D1_ERROR: D1 DB exceeded its CPU time limit and was reset. private-content");
+    return prepare(sql);
+  };
+  assert.deepEqual((await f.request({ body })).targets, initial.targets);
+  assert.ok(faults > 1, "the real D1 read failed then recovered");
+  f.store.put("drive:neighbor");
+  const calls = f.calls.length;
+  await assert.rejects(f.request({ body: { ...body, marker: initial.marker } }), /Stored inventory or runtime changed; run ingestion again/);
+  assert.equal(f.calls.length, calls + 1, "marker conflict is not retried");
+  assert.equal(f.store.calls.batches, 0);
+  assert.doesNotMatch(f.notices.join("\n"), /private-content/);
+});
+
+test("transport apply retries only after an unchanged authenticated marker readback", async t => {
+  const f = transportFixture(t);
+  f.store.put("drive:target");
+  const preview = await f.request({ body: { action: "preview", families: [{ base_doc_uid: "drive:target", keep_doc_uids: [] }] } });
+  let attempts = 0;
+  f.fault((body, next) => body.action === "apply" && ++attempts === 1 ? new Response(null, { status: 500 }) : next());
+  const receipt = await f.request({ body: { action: "apply", targets: preview.targets, marker: preview.marker } });
+  assert.equal(receipt.documents, 1);
+  assert.deepEqual(f.calls.map(call => call.action), ["preview", "apply", "preview", "apply"]);
+  assert.deepEqual(f.calls[2], { action: "preview", families: [], marker: preview.marker });
+  assert.deepEqual(f.calls[1], f.calls[3]);
+  assert.equal(f.store.calls.batches, 1);
+  assert.deepEqual(f.store.uids(), []);
+});
+
+for (const outcome of ["committed", "concurrent", "unavailable", "invalid-proof"]) {
+  test(`transport apply does not replay when readback is ${outcome}`, async t => {
+    const f = transportFixture(t);
+    f.store.put("drive:target");
+    const body = { action: "preview", families: [{ base_doc_uid: "drive:target", keep_doc_uids: [] }] };
+    const preview = await f.request({ body });
+    let attempts = 0, proofs = 0;
+    f.fault(async (request, next) => {
+      if (request.action === "apply") {
+        attempts++;
+        if (outcome === "committed") await next();
+        if (outcome === "concurrent") f.store.put("drive:neighbor");
+        throw new TypeError("private-content");
+      }
+      proofs++;
+      if (outcome === "unavailable") return new Response(null, { status: 503 });
+      if (outcome === "invalid-proof") return Response.json({ marker: preview.marker, documents: 0 });
+      return next();
+    });
+    await assert.rejects(f.request({ body: { action: "apply", targets: preview.targets, marker: preview.marker } }), error => {
+      assert.match(error.message, /may have completed/);
+      if (["committed", "concurrent"].includes(outcome)) {
+        assert.match(error.message, /Stored inventory or runtime changed; run ingestion again/);
+      }
+      assert.match(error.message, /run ingestion again/i);
+      assert.doesNotMatch(error.message, /private-content/);
+      return true;
+    });
+    assert.equal(attempts, 1);
+    assert.ok(proofs > 0, "uncertain apply reached the readback decision");
+    assert.equal(f.store.calls.batches, outcome === "committed" ? 1 : 0);
+    f.fault(null);
+    if (outcome === "committed") f.store.put("drive:target");
+    const fresh = await f.request({ body });
+    assert.equal((await f.request({ body: { action: "apply", targets: fresh.targets, marker: fresh.marker } })).documents, 1);
+  });
+}
+
+for (const expiry of ["after-send", "unexpired", "before-send"]) {
+  test(`transport committed response loss retains uncertainty with observation ${expiry}`, async t => {
+    const f = transportFixture(t);
+    f.store.put("drive:target");
+    f.store.put("other:retained");
+    const state = { done: {}, skipped: {}, cursor: "prior" };
+    let clock = Date.parse("2026-10-01T00:00:00Z"), saves = 0;
+    const sourcePlan = buildDriveRemovalPlan({ storedFamilies: ["drive:target"], vanishedCandidates: ["drive:target"] });
+    const review = createIngestRemovalReview({ state, saveState() { saves++; }, source: "drive", manifest: {},
+      manifestPath: "/fixture/manifest.json", runtime: () => "fixture-runtime", now: () => clock,
+      request: f.request, onProgress() {} });
+    const plan = async () => {
+      await assert.rejects(review.finish({ sourcePlan, expiresAt: new Date(clock + 1000).toISOString() }),
+        { code: "SAFETY_REVIEW_REQUIRED" });
+      assert.deepEqual(state.ingest_removal_plan.targets, ["drive:target"], "a nonempty approved decision is reached");
+    };
+    await plan();
+    const savedPlan = state.ingest_removal_plan;
+    let writes = 0;
+    f.fault(async (body, next) => {
+      if (body.action !== "apply") return next();
+      writes++;
+      assert.equal((await next()).status, 200, "the real authenticated apply committed before its response was lost");
+      if (expiry === "after-send") clock += 1001;
+      throw new TypeError("synthetic-response-loss");
+    });
+    if (expiry === "before-send") clock += 1001;
+    let failure;
+    await assert.rejects(review.apply(savedPlan.fingerprint, sourcePlan.fingerprint), error => {
+      failure = error;
+      return error.code === "SAFETY_REVIEW_REQUIRED";
+    });
+    const sent = expiry !== "before-send";
+    assert.equal(writes, sent ? 1 : 0, "no apply is replayed after the refusal");
+    assert.equal(f.store.calls.batches, sent ? 1 : 0);
+    assert.deepEqual(f.store.uids(), sent ? ["other:retained"] : ["drive:target", "other:retained"]);
+    assert.deepEqual(f.calls.map(body => body.action), expiry === "before-send" ? ["preview"]
+      : expiry === "after-send" ? ["preview", "preview", "apply"] : ["preview", "preview", "apply", "preview"]);
+    assert.deepEqual(f.delays, [], "local refusal cannot back off or retry");
+    assert.equal(state.cursor, "prior");
+    assert.equal(state.ingest_removal_plan, savedPlan);
+    assert.equal(saves, 1, "failure does not save completion");
+    assert.notEqual(failure.removalBatchMayShrink, true);
+    // Prove the same path can succeed before checking the diagnostic regression.
+    f.fault(null);
+    if (sent) f.store.put("drive:target");
+    await plan();
+    assert.equal((await review.apply(state.ingest_removal_plan.fingerprint, sourcePlan.fingerprint)).removed, 1);
+    assert.equal(state.ingest_removal_plan, undefined);
+    assert.deepEqual(f.store.uids(), ["other:retained"]);
+    if (expiry !== "unexpired") assert.match(failure.message, /observation expired/);
+    assert.doesNotMatch(failure.message, /synthetic-response-loss|drive:target|fixture\.invalid/);
+    if (sent) {
+      assert.match(failure.message, /Some approved removals may have completed/);
+      assert.match(failure.message, /The source cursor was not advanced/);
+      assert.match(failure.message, /review.*(?:fresh|new).*plan/i);
+    } else assert.doesNotMatch(failure.message, /may have completed/);
+  });
+}
+
+test("transport repeats local approval and lease checks after backoff before apply replay", async t => {
+  const f = transportFixture(t);
+  f.store.put("drive:target");
+  const preview = await f.request({ body: { action: "preview", families: [{ base_doc_uid: "drive:target", keep_doc_uids: [] }] } });
+  let attempts = 0, checks = 0;
+  f.fault((body, next) => {
+    if (body.action === "apply") { attempts++; return new Response(null, { status: 500 }); }
+    return next();
+  });
+  await assert.rejects(f.request({ body: { action: "apply", targets: preview.targets, marker: preview.marker },
+    beforeAttempt: () => { checks++; if (f.delays.length) throw new Error("fixture approval expired"); },
+  }), /fixture approval expired/);
+  assert.equal(attempts, 1);
+  assert.ok(checks >= 2);
+  assert.equal(f.store.calls.batches, 0);
+  f.fault(null);
+  assert.equal((await f.request({ body: { action: "apply", targets: preview.targets, marker: preview.marker } })).documents, 1);
+});
+
+test("transport capacity failures shrink previews and untouched apply batches without widening approval", async t => {
+  const f = transportFixture(t);
+  for (let i = 0; i < 101; i++) f.store.put(`drive:target${i}`);
+  const state = { done: {}, skipped: {} }, progress = [];
+  const review = createIngestRemovalReview({ state, saveState() {}, source: "drive", manifest: {},
+    manifestPath: "/fixture/manifest.json", base: "https://fixture.invalid", runtime: () => "fixture-runtime",
+    request: f.request, onProgress: line => progress.push(line) });
+  f.fault((body, next) => (body.families || body.targets).length > 25
+    ? Response.json({ code: "INGEST_REMOVAL_CAPACITY" }, { status: 503 }) : next());
+  const sourcePlan = buildDriveRemovalPlan({ storedFamilies: f.store.uids(), vanishedCandidates: f.store.uids() });
+  await assert.rejects(review.finish({ sourcePlan }), { code: "SAFETY_REVIEW_REQUIRED" });
+  assert.equal(state.ingest_removal_plan?.targets.length, 101, "adaptive preview reached a nonempty exact plan");
+  const result = await review.apply(state.ingest_removal_plan.fingerprint, sourcePlan.fingerprint);
+  assert.equal(result.removed, 101);
+  assert.equal(f.store.calls.batches, 5);
+  assert.deepEqual(f.store.uids(), []);
+  assert.match(progress.join("\n"), /checked 101 of 101 families/i);
+  assert.doesNotMatch(progress.join("\n"), /drive:target/);
+});
+
+test("transport backoff expiry is checked by the saved-plan apply path before replay", async t => {
+  const f = transportFixture(t);
+  f.store.put("drive:target");
+  f.store.put("drive:kept");
+  const state = { done: {}, skipped: {} };
+  let clock = Date.parse("2026-10-01T00:00:00Z");
+  const sourcePlan = buildDriveRemovalPlan({ storedFamilies: f.store.uids(), vanishedCandidates: ["drive:target"] });
+  const review = createIngestRemovalReview({ state, saveState() {}, source: "drive", manifest: {},
+    manifestPath: "/fixture/manifest.json", runtime: () => "fixture-runtime", now: () => clock,
+    request: f.request, onProgress() {} });
+  const plan = () => review.finish({ sourcePlan, expiresAt: new Date(clock + 1000).toISOString() });
+  await assert.rejects(plan(), { code: "SAFETY_REVIEW_REQUIRED" });
+  assert.deepEqual(state.ingest_removal_plan.targets, ["drive:target"]);
+  let attempts = 0;
+  f.fault((body, next) => {
+    if (body.action === "apply") {
+      attempts++;
+      clock += 1001;
+      return new Response(null, { status: 500 });
+    }
+    return next();
+  });
+  await assert.rejects(review.apply(state.ingest_removal_plan.fingerprint, sourcePlan.fingerprint), /expired/);
+  assert.equal(attempts, 1);
+  assert.equal(f.store.calls.batches, 0);
+  f.fault(null);
+  await assert.rejects(plan(), { code: "SAFETY_REVIEW_REQUIRED" });
+  assert.equal((await review.apply(state.ingest_removal_plan.fingerprint, sourcePlan.fingerprint)).removed, 1);
+});
+
+test("transport apply replay still loses to a concurrent writer at the transaction fence", async t => {
+  const f = transportFixture(t);
+  f.store.put("drive:target");
+  const body = { action: "preview", families: [{ base_doc_uid: "drive:target", keep_doc_uids: [] }] };
+  const preview = await f.request({ body });
+  let attempts = 0, fenceReached = 0;
+  f.fault((request, next) => {
+    if (request.action === "apply") {
+      attempts++;
+      if (attempts === 1) return new Response(null, { status: 500 });
+      f.store.beforeBatch(() => { fenceReached++; f.store.put("drive:concurrent"); });
+    }
+    return next();
+  });
+  await assert.rejects(f.request({ body: { action: "apply", targets: preview.targets, marker: preview.marker } }), /may have completed/);
+  assert.equal(attempts, 2);
+  assert.equal(fenceReached, 1);
+  assert.ok(f.store.uids().includes("drive:target"));
+  f.fault(null);
+  f.store.beforeBatch(null);
+  const fresh = await f.request({ body });
+  assert.equal((await f.request({ body: { action: "apply", targets: fresh.targets, marker: fresh.marker } })).documents, 1);
+});
+
+test("transport healthy control previews and applies an exact nonempty batch without retry", async t => {
+  const f = transportFixture(t);
+  f.store.put("drive:target");
+  const preview = await f.request({ body: { action: "preview", families: [{ base_doc_uid: "drive:target", keep_doc_uids: [] }] } });
+  assert.deepEqual(preview.targets, ["drive:target"]);
+  const receipt = await f.request({ body: { action: "apply", targets: preview.targets, marker: preview.marker } });
+  assert.equal(receipt.documents, 1);
+  assert.equal(f.store.calls.batches, 1);
+  assert.deepEqual(f.store.uids(), []);
+  assert.deepEqual(f.calls.map(body => body.action), ["preview", "apply"]);
+  assert.equal(f.delays.length, 0);
 });

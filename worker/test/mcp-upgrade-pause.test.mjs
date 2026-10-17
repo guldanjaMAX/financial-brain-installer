@@ -46,9 +46,15 @@ const call = async (fixture, token, name, args) => {
 };
 
 test("an upgrade pause holds against the MCP connector, not just the HTTP door", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-10-07T15:00:00.000Z") });
   const fixture = await createProductFixture();
   t.after(() => fixture.close());
   seedOwnedEntity(fixture, "mesa-coffee", "Mesa Coffee");
+  fixture.raw(
+    `INSERT INTO documents (doc_uid, source, source_id, title, ingested_at, content_hash, entity_slug)
+     VALUES ('drive:pause-control', 'drive', 'pause-control', 'Synthetic preview', ?, ?, 'mesa-coffee')`,
+    Date.now(), "a".repeat(64),
+  );
   // Two profiles, because the two mutating tools are gated differently:
   // remember needs curated:write, delete_preview needs break-glass.
   const token = "fixture-connector-token-aaaaaaaaaaaaaaaaaaaa";
@@ -65,8 +71,16 @@ test("an upgrade pause holds against the MCP connector, not just the HTTP door",
     confidence: "inferred",
   });
   assert.equal(activeWrite.status, 200);
+  assert.equal(activeWrite.body.result.isError, undefined, "the active write reached confirmed storage");
   const activeText = JSON.stringify(activeWrite.body);
   assert.doesNotMatch(activeText, /paused/i, `the active write must not be refused: ${activeText.slice(0, 300)}`);
+  const activeDelete = await call(fixture, breakGlass, "delete_preview", {
+    entity_slug: "mesa-coffee", ids: ["drive:pause-control"],
+  });
+  assert.equal(activeDelete.body.result.isError, undefined);
+  assert.equal(JSON.parse(activeDelete.body.result.content[0].text).document_count, 1);
+  assert.equal(fixture.first("SELECT COUNT(*) AS n FROM agent_action_receipts").n, 1,
+    "the authorized active control reached preview persistence");
 
   fixture.env.VECTOR_DRAIN_MODE = "paused-for-upgrade";
 
@@ -83,6 +97,11 @@ test("an upgrade pause holds against the MCP connector, not just the HTTP door",
   });
   assert.match(JSON.stringify(pausedDelete.body), /paused/i,
     "an authorized connector staged a deletion through an upgrade pause");
+  assert.equal(pausedDelete.body.result.isError, true);
+  assert.match(JSON.stringify(pausedDelete.body), /MCP_CORPUS_WRITES_PAUSED/);
+  assert.equal(fixture.first("SELECT COUNT(*) AS n FROM agent_action_receipts").n, 1,
+    "the pause must precede scope validation and preview persistence");
+  assert.ok(fixture.first("SELECT doc_uid FROM documents WHERE doc_uid = 'drive:pause-control'"));
 
   // A paused brain still answers questions; the pause is about writes.
   const read = await worker.fetch(

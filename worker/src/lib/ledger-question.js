@@ -119,7 +119,8 @@ function phaseTwoQuestion(q, intent, today) {
   if (filter && from) {
     const direction = spending ? "outflow" : "inflow";
     const mode = filter[1], value = filter[2].trim();
-    if (/\b(?:in|during|for|over|between|before|after|account|accounts|entity|and|or|last|month|year|q[1-4])\b/.test(value)) return null;
+    if (/\b(?:in|during|for|over|between|before|after|account|accounts|entity|or|last|month|year|q[1-4])\b/.test(value) ||
+        (mode !== "at" && mode !== "from" && /\band\b/.test(value))) return null;
     if (mode === "by") return ["merchant", "category"].includes(value) ? { ...result, kind: value, direction, match: null } : null;
     if (!/[\p{L}\p{N}]/u.test(value)) return null;
     return { ...result, kind: ["at", "from"].includes(mode) ? "merchant" : "category", direction, match: value };
@@ -127,31 +128,67 @@ function phaseTwoQuestion(q, intent, today) {
   return null;
 }
 
+const ARRIVAL = "arrive|arrived|receive|received|come|came|land|landed|hit|reach|reached|clear|cleared|post|posted";
+function paymentParties(text) {
+  const clause = preposition => text.match(new RegExp(`\\b${preposition}\\s+(.+?)(?=\\s+(?:on|into|to|in|for|from|via|${ARRIVAL})\\b|[?,]|$)`));
+  const namedPayment = text.match(/^(?:did|has|have)\s+(?:(?:the|my|our|a|an)\s+)?([\p{L}\p{N}]+(?:\s+[\p{L}\p{N}]+){0,3})\s+payment\b/u);
+  const named = namedPayment && !/^(?:the|my|our|a|an)$/.test(namedPayment[1]) ? namedPayment[1] : "";
+  return { partyMatch: clause("from"), viaMatch: clause("via"), namedPayment, named };
+}
+
 export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
-  const q = String(question || "").toLowerCase().replace(/[’]/g, "'").replace(/\bwhat's\b/g, "what is");
-  const broad = /\b(?:money|cash|bank|deposits?|expenses?|charges?|subscriptions|recurring (?:charges|subscriptions)|payment|paid|spend|spent|spending|income|revenue|credits?|debits?|transactions?|transfers?|checking|savings|loan|debt|tax|payroll|invoice|receivable|payable|came in|went out)\b|\$\s*\d/.test(q) || /\b(?:(?:my|our|account|card|bank|checking|savings|loan|current|available|outstanding)\s+balances?|balances?\s+(?:of|on|in|for|due))\b/.test(q);
+  let q = String(question || "").normalize("NFKC").toLowerCase().replace(/[’]/g, "'").replace(/\bwhat's\b/g, "what is");
+  const broad = /\b(?:money|cash|profit|bank|deposits?|expenses?|charges?|subscriptions|recurring (?:charges|subscriptions)|payment|paid|spend|spent|spending|income|revenue|credits?|debits?|transactions?|transfers?|checking|savings|loan|debt|tax|payroll|invoice|receivable|payable|came in|went out)\b|\$\s*\d/.test(q) || /\b(?:(?:my|our|account|card|bank|checking|savings|loan|current|available|outstanding)\s+balances?|balances?\s+(?:of|on|in|for|due))\b/.test(q);
   const base = { broad, kind: null };
   if (!broad) return base;
+  // Consume only these bounded clause families. Duplicate or conflicting
+  // clauses refuse; the remaining grammar still has to consume every word.
+  // Strip before account selection so "investment withdrawals" is not a kind.
+  const transfers = [...q.matchAll(/(?:,\s*)?\b(excluding|without|not counting|including) (?:my |our )?(?:own )?transfers(?: between (?:my|our) (?:own )?accounts)?\b/g)];
+  const withdrawals = [...q.matchAll(/(?:,\s*)?\bincluding (?:retirement |investment )?withdrawals\b/g)];
+  const loanProceeds = [...q.matchAll(/(?:,\s*)?\bincluding loan proceeds\b/g)];
+  if (transfers.length > 1 || withdrawals.length > 1 || loanProceeds.length > 1) return base;
+  const flags = {};
+  if (transfers.length) { flags.ownTransfers = transfers[0][1] === "including" ? "include" : "exclude"; q = q.replace(transfers[0][0], ""); }
+  if (withdrawals.length) { flags.withdrawals = "include"; q = q.replace(withdrawals[0][0], ""); }
+  if (loanProceeds.length) { flags.loanProceeds = "include"; q = q.replace(loanProceeds[0][0], ""); }
+  q = q.replace(/\s+/g, " ").trim();
   const today = ledgerDay(now);
-  const maskMatches = [...q.matchAll(/(?:\*{2,}|ending(?:\s+in)?\s+|mask\s+|account\s+)(\d{1,4})\b/g)];
+  let scopeText = q;
+  if (/\b(?:payment|deposit|paid)\b/.test(q) && new RegExp(`\\b(?:${ARRIVAL})\\b`).test(q)) {
+    const { partyMatch, viaMatch, namedPayment, named } = paymentParties(q);
+    for (const match of [partyMatch, viaMatch, named ? namedPayment : null]) if (match) scopeText = scopeText.replace(match[0], "");
+  }
+  const maskMatches = [...scopeText.matchAll(/(?:\*{2,}|ending(?:\s+in)?\s+|mask\s+|account\s+)(\d{1,4})\b/g)];
   const masks = [...new Set(maskMatches.map(m => m[1]))];
   if (masks.length > 1) return base;
-  const kinds = [...new Set(q.match(/\b(?:checking|savings|card|loan|investment|retirement|escrow)\b/g) || [])];
+  const kinds = [...new Set(scopeText.match(/\b(?:checking|savings|card|loan|investment|retirement|escrow)\b/g) || [])];
   const selector = { mask: masks[0] || null, accountKind: kinds.length === 1 ? kinds[0] : null };
-  const intent = { ...base, ...selector };
+  const intent = { ...base, ...selector, ...flags };
   const withoutMasks = text => maskMatches.reduce((rest, match) => rest.replace(match[0], ""), text);
   const punctuationOnly = text => !text.replace(/[?'.,:]/g, "").trim();
   if (kinds.length > 1) return intent;
   // These qualifiers require a different source or a richer financial model.
-  if (/\b(?:quickbooks|qbo|tax|profit|net income|excluding|exclude|without|except|budgeted|budget|approved|authori[sz]ed|allocated|proposed|committed|permitted|planned|projected|expected|estimated|forecast|target|allowed|average|median|smallest|interest)\b/.test(q)) return intent;
+  if (/\b(?:quickbooks|qbo|tax|excluding|exclude|without|except|including|not counting|budgeted|budget|approved|authori[sz]ed|allocated|proposed|committed|permitted|planned|projected|expected|estimated|forecast|target|allowed|average|median|smallest|interest)\b/.test(q)) return intent;
+  if (/\b(?:profit|net income|cash flow)\b/.test(q)) {
+    const period = questionPeriod(q, today);
+    if (period.invalid || !period.from || !period.to) return intent;
+    const residual = period.residual.replace(/\s+/g, " ").trim();
+    const form = residual.match(/^(?:what (?:was|is|were) (?:my|our|the) (profit|net income|cash flow)|how much (profit) did (?:i|we) make)(?: (?:for|in|of) (?:(?:my|our|the) )?(?:(checking|savings|card|loan|investment|retirement|escrow) )?account(?: (?:ending(?: in)? |mask )?(\d{1,4}))?)?$/);
+    if (!form) return intent;
+    return { ...intent, kind: "totals", measure: (form[1] || form[2]).replaceAll(" ", "_"),
+      from: period.from, to: period.to };
+  }
   const phaseTwo = phaseTwoQuestion(q, intent, today);
-  if (phaseTwo) return phaseTwo;
+  if (phaseTwo) return phaseTwo.kind === "transfers" && Object.keys(flags).length ? intent : phaseTwo;
   if (/\b(?:balance|balances)\b/.test(q)) {
+    if (Object.keys(flags).length) return intent;
     // Do not replace a named bank/entity or a historical balance with all accounts.
     const residual = withoutMasks(q).replace(/\b(?:what|is|are|my|our|the|current|latest|bank|account|accounts|balance|balances|checking|savings|card|loan|investment|retirement|escrow|per|each|show|me|please|today|now|ending|in|mask|for|all)\b/g, "");
     return punctuationOnly(residual) ? { ...intent, kind: "balance" } : intent;
   }
   if (/\b(?:payment|deposit|paid)\b/.test(q) && /\b(?:arrive|arrived|received|receive|come|came|land|landed|hit|reach|reached|clear|cleared|post|posted)\b/.test(q)) {
+    if (Object.keys(flags).length) return intent;
     const amountMinor = amountInCents(q);
     if (amountMinor === null && /\$|\busd\b|\bdollars?\b/.test(q)) return intent;
     const dates = [];
@@ -174,14 +211,11 @@ export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
     rest = period.residual;
     if (dates.length && /\b(?:before|after|between)\b/.test(rest)) return intent;
     if (!dates.length && !period.from && /\b(?:on|between|before|after|yesterday|tomorrow|last|this)\b/.test(rest)) return intent;
-    const arrival = "arrive|arrived|receive|received|come|came|land|landed|hit|reach|reached|clear|cleared|post|posted";
-    const senderClause = preposition => rest.match(new RegExp(`\\b${preposition}\\s+(.+?)(?=\\s+(?:on|into|to|in|for|from|via|${arrival})\\b|[?,]|$)`));
-    const partyMatch = senderClause("from"), viaMatch = senderClause("via");
-    const namedPayment = rest.match(/^(?:did|has|have)\s+(?:(?:the|my|our|a|an)\s+)?([\p{L}\p{N}]+(?:\s+[\p{L}\p{N}]+){0,3})\s+payment\b/u);
+    const arrival = ARRIVAL;
+    const { partyMatch, viaMatch, namedPayment, named } = paymentParties(rest);
     // Apply one specificity rule to every sender form. Generic-only clauses
     // cannot identify an amountless payment; keep all words in specific names
     // so rejecting generic narration never widens a query to every deposit.
-    const named = namedPayment && !/^(?:the|my|our|a|an)$/.test(namedPayment[1]) ? namedPayment[1] : "";
     const parties = [named, viaMatch?.[1], partyMatch?.[1]].filter(Boolean);
     // An amount does not establish which ordinal payment was meant, and a
     // generic adjective must not become sender evidence by being consumed.
@@ -193,7 +227,7 @@ export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
     if (named) rest = rest.replace(namedPayment[0], "payment");
     rest = rest.replace(/(?:\$|\busd\s+)\d[\d,]*(?:\.\d+)?|\b\d[\d,]*(?:\.\d+)?\s+dollars?\b/g, "")
       .replace(/,?\s+and when\b/g, "")
-      .replace(new RegExp(`\\b(?:did|has|have|was|is|the|a|my|our|payment|deposit|of|paid|${arrival}|yet|on|in|into|to|account|bank|checking|savings|ending|mask|please)\\b`, "g"), "");
+      .replace(new RegExp(`\\b(?:did|has|have|was|is|the|a|my|our|payment|deposit|of|paid|${arrival}|yet|on|in|into|to|account|bank|checking|savings|card|loan|investment|retirement|escrow|ending|mask|please)\\b`, "g"), "");
     if (!punctuationOnly(rest)) return intent;
     const counterpartyWords = counterparty.match(/[\p{L}\p{N}]+/gu) || [];
     if (amountMinor === null && !counterpartyWords.length) return intent;

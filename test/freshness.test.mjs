@@ -15,6 +15,8 @@ import {
   sourceFreshnessCounts,
 } from "../worker/src/lib/store-d1.js";
 
+import { renderCliCommands } from "../operations/cli-guidance.mjs";
+
 let fail = 0, ran = 0;
 const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") + n + (c ? "" : "  " + String(d).slice(0, 200))); if (!c) fail++; };
 
@@ -708,6 +710,54 @@ const GMAIL_FAILURE_EVIDENCE_FIXTURE = {
   check("T4 a successful empty registry returns exact zero counts",
     JSON.stringify(empty) === JSON.stringify({ total: 0, stale: 0, unscheduled: 0 }),
     JSON.stringify(empty));
+}
+
+/* ---- quiet work, historical archives, and retries use distinct words ---- */
+{
+  const empty = { name: "sample-chat", kind: "imessage", status: "ready",
+    last_ingest_at: daysAgo(0.01), expected_refresh_seconds: 3600,
+    stale_reason: "NO_VERIFIED_WORK" };
+  const f = await freshnessReport(mk([empty]), { now: NOW });
+  const g = await coverageGaps(mk([empty]), { now: NOW });
+  check("zero-work review reaches the same review decision",
+    f.sources[0]?.state === "review" && g.some(gap => gap.type === "sync_review"));
+  check("zero-work review describes missing evidence without inventing a safety pause",
+    /without accepting, updating or confirming any record/.test(f.sources[0]?.reason || "") &&
+      g.every(gap => !/paused|safety review/i.test(gap.detail)), JSON.stringify(g));
+  const stale = await coverageGaps(mk([{ ...empty, stale_reason: null, last_ingest_at: daysAgo(0.125) }]), { now: NOW });
+  check("an overdue hourly source names its hourly cadence",
+    stale.some(gap => gap.type === "coverage_stale" && /about every 1 hour\(s\)/.test(gap.detail)), JSON.stringify(stale));
+  const archive = { name: "sample-archive", kind: "upload", status: "ready", document_count: 7,
+    last_ingest_at: daysAgo(12), expected_refresh_seconds: null, retired_at: daysAgo(2) };
+  const historical = await freshnessReport(mk([archive]), { now: NOW });
+  const historyGaps = await coverageGaps(mk([archive]), { now: NOW });
+  check("retirement remains manual with an explicitly historical reason",
+    historical.sources[0]?.state === "manual" &&
+      historical.sources[0]?.reason === `historical: kept and searchable, not refreshed (retired by the owner on ${daysAgo(2).slice(0, 10)})`,
+    JSON.stringify(historical.sources[0]));
+  check("historical gap retains honest absence scoping",
+    historyGaps.length === 1 && historyGaps[0].type === "history_unproven" &&
+      /historical/.test(historyGaps[0].detail) && /missing result is not proof/.test(historyGaps[0].detail), JSON.stringify(historyGaps));
+  const folder = { ...archive, retired_at: null };
+  const folderReport = await freshnessReport(mk([folder]), { now: NOW });
+  check("an unscheduled folder explains additions and its last load date",
+    folderReport.sources[0]?.state === "manual" &&
+      folderReport.sources[0]?.reason === `not watched; changes only when files are loaded again; last loaded ${daysAgo(12).slice(0, 10)}` &&
+      !/stale/i.test(folderReport.sources[0]?.reason || ""), JSON.stringify(folderReport));
+  const followed = await freshnessReport(mk([{ ...folder, expected_refresh_seconds: DAILY }]), { now: NOW });
+  check("a followed folder retains its staleness rule", followed.sources[0]?.state === "stale", JSON.stringify(followed));
+  const stuck = { name: "sample-drive", kind: "drive", status: "indexing", indexing_started_at: hoursAgo(9),
+    last_ingest_at: daysAgo(4), expected_refresh_seconds: DAILY };
+  const stuckReport = await freshnessReport(mk([stuck]), { now: NOW });
+  const stuckGaps = await coverageGaps(mk([stuck]), { now: NOW });
+  const detail = stuckGaps.find(gap => gap.type === "sync_broken")?.detail || "";
+  check("stuck Drive reaches broken and names its start, elapsed time, and retry",
+    stuckReport.sources[0]?.state === "broken" &&
+      [stuckReport.sources[0]?.reason, detail].every(text => text &&
+        text.includes(new Date(hoursAgo(9)).toISOString()) && /9 hour\(s\)/.test(text) &&
+        !/brain ingest|<manifest>/.test(text) && /a new Drive refresh replaces it/i.test(text)), JSON.stringify(stuckReport));
+  check("stuck Drive gives the replacement remedy without a placeholder command or local lock homework",
+    /a new Drive refresh replaces it/i.test(detail) && !/brain ingest|<manifest>|local lock|installer/i.test(detail), detail);
 }
 
 console.log(`\nfreshness: ${ran - fail}/${ran} passed`);

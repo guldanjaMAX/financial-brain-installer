@@ -355,6 +355,7 @@ async function rejectSyncPage(page, options = {}) {
     assert.doesNotMatch(error.message, /protocol-transaction|Synthetic purchase|private-payload-canary/);
     return true;
   });
+  assert.equal(requested, 1, "the malformed page reached protocol validation");
   assert.equal(staged, 0, "the whole malformed page must be rejected before durable staging");
   assert.equal(promoted, 0, "a malformed page must not promote a committed cursor");
 }
@@ -461,10 +462,11 @@ await checkAsync("a malformed later page preserves the exact staged prefix and r
   assert.deepEqual(receipt.counts, { added: 1, modified: 0, removed: 1 });
 });
 
-await checkAsync("only a valid initial empty sync can complete with an empty cursor and incomplete history", async () => {
-  for (const history of [PLAID_HISTORY_STATE.UNKNOWN, PLAID_HISTORY_STATE.NOT_READY]) {
+await checkAsync("an initial empty cursor is valid at every provider history state", async () => {
+  for (const history of Object.values(PLAID_HISTORY_STATE)) {
     let staged;
     const receipt = await stagePlaidSyncWindow({
+      originalHistoryState: history,
       requestPage: async () => syncPage({ added: [], next_cursor: "", transactions_update_status: history }),
       resetWindow: async () => {}, stagePage: async (page) => { staged = page; },
       promoteWindow: async (promotion) => promotion,
@@ -475,8 +477,7 @@ await checkAsync("only a valid initial empty sync can complete with an empty cur
     assert.equal(staged.hasMore, false);
   }
   for (const overrides of [{ has_more: true }, { added: [syncTransaction()] },
-    { transactions_update_status: PLAID_HISTORY_STATE.INITIAL },
-    { transactions_update_status: PLAID_HISTORY_STATE.HISTORICAL }]) {
+    { modified: [syncTransaction()] }, { removed: [{ transaction_id: "removed-transaction" }] }]) {
     await rejectSyncPage(syncPage({ added: [], next_cursor: "", transactions_update_status: PLAID_HISTORY_STATE.NOT_READY, ...overrides }), { originalCursor: null });
   }
 });
@@ -484,9 +485,6 @@ await checkAsync("only a valid initial empty sync can complete with an empty cur
 await checkAsync("empty and non-advancing cursors never reset existing history or continue pagination", async () => {
   await rejectSyncPage(syncPage({ added: [], next_cursor: "", transactions_update_status: PLAID_HISTORY_STATE.NOT_READY }));
   await rejectSyncPage(syncPage({ next_cursor: "protocol-committed", has_more: true }));
-  await rejectSyncPage(syncPage({ added: [], next_cursor: "", transactions_update_status: PLAID_HISTORY_STATE.NOT_READY }), {
-    originalCursor: null, originalHistoryState: PLAID_HISTORY_STATE.HISTORICAL,
-  });
   await rejectSyncPage(syncPage({ transactions_update_status: { state: "HISTORICAL_UPDATE_COMPLETE" } }));
 });
 
@@ -732,7 +730,7 @@ await checkAsync("actual D1 sync consumer leaves the cursor and visible ledger u
     assert.equal(emptyReceipt.history_state, "running");
     assert.equal(emptyReceipt.provider_history_state, PLAID_HISTORY_STATE.NOT_READY);
     assert.equal(emptyReceipt.finalCursor, "");
-    assert.equal(fixture.first("SELECT cursor FROM bank_feed_items WHERE item_ref=?", itemRef).cursor, "");
+    assert.equal(fixture.first("SELECT cursor FROM bank_feed_items WHERE item_ref=?", itemRef).cursor, null);
     assert.equal(fixture.first("SELECT COUNT(*) AS n FROM fin_transactions").n, 0);
     assert.equal(fixture.first("SELECT COUNT(*) AS n FROM plaid_sync_windows WHERE item_ref=?", itemRef).n, 0);
   } finally { fixture.close(); }

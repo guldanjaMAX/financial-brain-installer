@@ -17,8 +17,8 @@
 //
 // Two shapes, one contract:
 //   computeAnswerConfidence — for an answer that SURVIVED the evidence gate.
-//   refusalConfidence       — for "nothing recorded": how sure are we that the
-//                             absence is real rather than a blind spot.
+//   refusalConfidence       — confidence in an unsupported search result,
+//                             limited to the candidates and coverage checked.
 //
 // The result rides the /think response as a structured `confidence` field and
 // is rendered by the CLI as its own line. It is deliberately NOT woven into
@@ -181,23 +181,21 @@ export function computeAnswerConfidence({ approvedDocs = [], gaps = [], degraded
 }
 
 /**
- * Confidence that a refusal reflects real absence.
- *
- * "Nothing recorded" earned by healthy retrieval that surfaced candidates and
- * had every one rejected is strong evidence of absence. The same sentence
- * during a degraded vector index or a stalled source is a much weaker claim,
- * and the number should say so.
+ * Confidence in the refusal from this search, never in whole-corpus absence.
+ * Rejected nearest candidates only establish that these records did not
+ * support an answer. Healthy retrieval does not prove that every record was read.
  */
 export function refusalConfidence({ gaps = [], degraded = null, resultCount = 0, sources = [] } = {}) {
   const basis = [];
   let score = 80;
   basis.push(resultCount > 0
     ? `checked ${resultCount} nearest candidate${resultCount === 1 ? "" : "s"}${sources.length ? ` across ${sources.join(", ")}` : ""}; none supported the claim`
-    : "retrieval found no candidates at all");
+    : "this search returned no candidates");
+  basis.push("this search does not establish whole-corpus absence");
 
   const adjust = gapAdjustments(gaps, degraded);
-  // Blind spots hit a refusal harder than an answer: an answer's evidence is
-  // in hand, while a refusal's correctness depends on what was NOT seen.
+  // Blind spots limit how well this search supports a refusal. A higher score
+  // still cannot extend its scope beyond the records checked.
   score += adjust.delta * 1.5;
   basis.push(...adjust.basis);
 
@@ -208,6 +206,6 @@ export function refusalConfidence({ gaps = [], degraded = null, resultCount = 0,
 /** One-line rendering shared by the CLI and anything else that prints it. */
 export function confidenceLine(confidence, { refused = false } = {}) {
   if (!confidence || !Number.isFinite(confidence.percent)) return null;
-  const label = refused ? "Confidence nothing is recorded" : "Confidence";
-  return `${label}: ${confidence.percent}% (${confidence.band}) — ${confidence.basis.join("; ")}.`;
+  const label = refused ? "Confidence in this search result" : "Confidence";
+  return `${label}: ${confidence.percent}% (${confidence.band}). ${confidence.basis.join("; ")}.`;
 }

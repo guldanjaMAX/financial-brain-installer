@@ -138,7 +138,12 @@ they belong to this client. Migrations are checksum-protected, append-only, and
 restart-safe after every independently committed statement. A D1 upgrade
 captures a required bookmark, saves and exactly reads back an owner-only local
 receipt under `~/.brain/upgrade-bookmarks/`, then deploys and verifies the paused
-compatibility Worker, accepts one exact authenticated aggregate as the pre-migration gate,
+compatibility Worker. Accepted pause-window queue work may complete through the
+existing leased bootstrap-v2 protocol at that authenticated boundary, with a
+15-minute/256-round bound and a fresh exact readiness proof. A modern paused
+retry enters custody checks before this completion; active queued work still
+refuses. Legacy, unreadable, or rebuild projection state cannot use the narrow
+completion path. The update accepts one exact authenticated aggregate as the pre-migration gate,
 waits the same old-invocation window, migrates, deploys active mode,
 reconciles allowed provider secrets, waits for the new version, and records
 success. Schema 13 changes that ordering only for an existing legacy
@@ -535,9 +540,23 @@ A version metadata binding identifies the deployed Worker generation. Each
 bounded D1 deletion transaction checks the inventory fence before any mutation,
 returns its own resulting marker, and queues vector cleanup in the existing
 outbox. Exact readback must prove absence and the returned generation. Drift or a
-lost response requires a fresh plan; the client never adopts a newer marker to
-continue an old approval. Apply keeps the source cursor unchanged. An ordinary
-refresh after apply completes the source checkpoint.
+lost response with a changed or unverifiable marker requires a fresh plan; the
+client never adopts a newer marker to continue an old approval. Preview retries
+429, 5xx, transport failures and timeouts up to three times using the inventory
+retry schedule with jitter. Each request has a 60-second timeout and a shared
+four-minute budget including backoff and any apply readback. A failed apply can
+retry only after an authenticated empty-family preview proves the original
+marker unchanged; the transaction fence still protects against a later race.
+Every retry rechecks local approval and lease validity before sending a write.
+The route returns fixed codes distinguishing marker drift, invalid input,
+unverified readback, unavailable storage and D1 CPU capacity failures, without
+returning raw database errors. Repeated capacity failures halve preview batches;
+apply batches can shrink only with the same unchanged-marker proof. Neither
+batch exceeds 50, and a one-item failure stops. Large plans report checked
+families and confirmed removals using counts only. Apply keeps the source cursor
+unchanged. An ordinary refresh after apply completes the source checkpoint.
+There is no durable fingerprint replay receipt: an interrupted completed batch
+cannot be resumed or confirmed with its old approval.
 
 The legacy family arm of `POST /api/admin/brain/forget` is preview-only. A bare
 `confirm: true` returns HTTP 409 with `INGEST_REMOVAL_PLAN_REQUIRED` and guidance
@@ -621,7 +640,11 @@ The per-user transaction retains daily and legacy scheduler snapshots. A
 content-free fence keyed by canonical Brain identity is stored beside the
 machine-wide lifecycle boundary, so every local user and manifest alias fails
 closed while recovery is unresolved. Writers inspect that fence after taking
-the lease. An interrupted update leaves the receipt, fence, and disabled state
+the lease. Dispatch tracking restores verified prior schedules after every proven
+pre-mutation failure. Possible dispatch retains the fence across retries. A
+failed daily restore or required acceptance check is an incomplete update and
+cannot print ordinary completion or claim normal operation from the pause flag.
+Native task timeout is an unknown outcome, never proof of absence. An interrupted update leaves the receipt, fence, and disabled state
 in place; a retry uses the saved definition as its authorization even after a
 manifest fingerprint change, and clears the fence only after current health
 proof and exact reconciliation.
@@ -765,19 +788,66 @@ two owned accounts and a three-day date tolerance. One leg must name the other
 owned account by its unique literal mask or stored label to label a pair as a
 candidate. Conflicting account kinds or explicit outside payees on both legs
 rule out the candidate. No provider transfer-link or owner-pair field currently
-exists, so no transaction is removed as a transfer. Primary totals, lists and
-breakdowns retain candidate legs; a separately labelled conditional figure
-shows the result if these are transfers between the owner's accounts. Candidates
-include both accounts, amounts, dates and reasons. Unmatched hints remain counted
-and visible. Recurrence uses at least three charges, bounded weekly/monthly
-intervals and integer amount tolerance; results are explicitly detected rather
-than confirmed. Category proposals and Unsorted remain visible. Ambiguous groups,
+exists. Pairing never changes stored rows. Money answers leave qualifying own
+moves out of the lead figures when both accounts are connected checking,
+savings or card accounts in scope and reciprocal directed references resolve
+uniquely to the owned counterparties. Customer, refund, income or outside-payee
+conflicts on either leg keep the pair counted. A connected card payment supports
+an exact directed outgoing reference plus an unconflicted "PAYMENT THANK YOU"
+acknowledgement. Each leg affects only its own period. The
+note offers "including transfers". A counterpart outside the question stays
+counted unless "excluding transfers" is requested. Loan and line-of-credit
+payments, contributions to investment or retirement accounts, and other
+account kinds stay with an explicit reason. Withdrawal inflows into move-kind
+accounts are excluded only by the exact case-insensitive category
+`TRANSFER_IN_INVESTMENT_AND_RETIREMENT_FUNDS` (proposed or confirmed) or a pair
+from an investment or retirement account that passes those same directed
+counterparty and conflict checks. A paired outgoing leg also leaves
+the lead when in scope. Description words never authorize withdrawal exclusion;
+"including withdrawals" restores it. A qualifying loan or line-of-credit advance
+into a selected checking, savings or card account also leaves both in-scope
+legs out of the lead. This requires reciprocal directed references to the owned
+accounts, equal amounts and no customer, refund, income or external-payee
+conflict on either leg. The immediate directed locator must resolve exactly to
+one owned account. Ordinary ONLINE, AUTOMATIC, MOBILE and INTERNET transfer
+channels and unprefixed TRANSFER keep that same exact-counterparty requirement.
+Reciprocal bare masks are supported; an outside sender with
+a later account mention, multiple candidates, or unparsed trailing memo text
+does not establish an advance. Advisory or ambiguous loan pairs stay counted;
+"including loan proceeds" restores proven advances. The unchanged gross sentences always
+remain visible. Lead lines use "money in"/"money out" so clients parsing gross
+"credits"/"debits" cannot subtract twice. Existing JSON keys remain gross or,
+for `if_own_transfers`, conditional; additive lead and exclusion fields explain
+the presentation. Lists filter the lead before applying their limit and keep
+the original gross rows separately. Exclusion notes only describe rows feeding
+the requested figure, including a displayed Unsorted total. For limited lists,
+removal amounts and flips describe only exclusions affecting displayed rows;
+below-cutoff exclusions are labelled as belonging to the wider candidate pool.
+An unavailable document search retains authorized ledger coverage gaps and a
+completed-month next step, while withholding candidate records and citations.
+The transfers view
+keeps its outgoing-date semantics. Unmatched hints remain visible; a category-
+backed withdrawal explicitly says it was left out of the lead and kept in gross.
+Bounded profit and net income forms route to `kind: totals`, with
+`measure`, `net_minor` and the label "money in minus money out, not accounting
+profit or cash flow". Cash-flow requests return `cash_flow_unsupported` with no
+figure or model fallback: unpaid card charges do not measure cash movements. The net sums only in-scope checking, savings and card lead figures;
+other account kinds are listed with a reason and no eligible account means
+`unsupported_question`. One supported period and fully consumed grammar are
+required. The three flip clause families are bounded and reject duplicates,
+contradictions and other qualifiers. They apply to totals, largest, deposits,
+merchant, category and recurring, never balances, payments or the transfers
+view. The document path retains its existing money refusal rules.
+Recurrence uses at least three charges, bounded weekly/monthly intervals and
+integer amount tolerance; results are explicitly detected rather than confirmed. Category proposals and Unsorted remain visible. Ambiguous groups,
 incomplete coverage and unreadable rows cannot establish a total or absence.
-Named payment arrivals match whole counterparty words. For an amountless
-arrival, an explicit payee supplies the sender evidence; a memo supplies it
-only when no payee is recorded. Generic-only sender clauses cannot identify
+Named payment arrivals match whole counterparty words. An explicit payee
+supplies sender evidence; otherwise a directional sender or opening sender
+phrase is required. An amount narrows that same attribution rule and cannot
+promote an invoice subject to payer. Merchant income uses the same sender
+extraction; unresolved attribution remains unknown. Generic-only sender clauses cannot identify
 an amountless payment, in named, `from` or `via` forms. Exact-amount questions
-retain their amount-plus-text match. Budget, approval and planning qualifiers
+retain their exact-cent constraint on the attributed sender. Budget, approval and planning qualifiers
 stay with documents instead of becoming merchant filters. Only posted inflows
 match. Without a
 supplied period, a named payment without an amount searches 60 days; exact
@@ -785,6 +855,34 @@ amounts retain the 30-day default. Recent deposits use 14 days, and largest
 expenses without a count list ten. The current named month ends today; period
 responses retain their actual UTC window. Unrecognized bank names, entities and
 unsupported analysis still use documents rather than widening account scope.
+
+Merchant selectors preserve literal `and` and `&` as different labels. Redacted,
+shortened or unknown labels refuse; an unmatched conjunction substitution
+returns `merchant_selector_ambiguous`. Quote the original list line instead of
+guessing hidden text or reporting zero.
+
+Partial imports cannot enlarge a certified complete interval. They retain all
+transactions but downgrade an expanded window to partial. Legacy complete rows
+with the old partial-export basis note return `coverage_review_required` until
+independent review re-establishes coverage. Cross-format imports refuse
+overlapping provider-ID and ID-less windows before writing, and SQL guards
+repeat the decision inside transaction writes. Existing mixed-identity same-day
+amount/direction candidates return `bank_export_overlap_review_required`; no
+automatic merge, deletion or recertification occurs.
+
+Plaid duplicate review distinguishes a removed Item from a still-connected
+one. A removed Item at the same institution can be ignored only after proving
+there are no retained ledger accounts (including superseded rows), transactions
+(including tombstones), balances, coverage, obligations, or prior promotion
+progress. Its abandoned staging is cleared in one guarded D1 batch before the
+new exchange. Disconnect also clears staging atomically with its revocation
+request, and confirmed revocation repeats the cleanup for older pending rows.
+The sync lease fence prevents late staging or promotion after disconnect.
+Ledger history, owner assignments, and revocation receipts are retained.
+Same-institution removed history refuses before exchange with
+`plaid_reconnect_support_required`, including legacy history without an account
+identity locator. Automatic history reattachment is not implemented here.
+Active duplicate checks continue to refuse matching or ambiguous accounts.
 
 Plaid historical promotion derives an empty window's start from its saved
 requested days and queue date, never from absent transactions. A legacy

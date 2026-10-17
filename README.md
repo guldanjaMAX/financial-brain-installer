@@ -13,7 +13,7 @@ whichever supported clients are present without placing a key in their config.
 
 ## Install it
 
-This package identifies itself as brain-installer 0.4.16. Its version alone does
+This package identifies itself as brain-installer 0.4.17. Its version alone does
 not establish whether it is approved for installation. Before installing or
 updating, use the current guided page at https://financialbrain.ai/install and
 match the exact approved package version, byte count and SHA-256. If the page
@@ -177,7 +177,7 @@ reviewed step at a time with `--run tools`, `cloudflare`, `smoke`, `google`, `zo
 `imap`, `passkey`, or `verify`. The owner still handles login, 2FA, OAuth consent,
 and the physical passkey gesture. For the supported Google, Zoom, and IMAP
 steps, tokens and app secrets go only into hidden terminal prompts or provider
-pages. The 0.4.16 candidate Windows path refuses those three credential ceremonies until
+pages. The 0.4.17 candidate Windows path refuses those three credential ceremonies until
 its secure secret-entry bridge is physically proven. Its first owner source is
 one explicitly approved local folder, previewed first and loaded manually.
 
@@ -254,8 +254,10 @@ PDF pages, and does everything else itself: creates the
 database and search index in your account, deploys the worker, generates and
 saves your key, checks it is alive, and connects the brain to Claude Code plus
 an installed Codex client. Successful Claude wiring writes an owner-only
-`CLAUDE.md` beside the manifest. It gives Claude the exact Brain CLI and
-manifest paths, but it does not grant whole-disk access, permission bypass, or
+`CLAUDE.md` beside the manifest; successful Codex wiring may create
+`AGENTS.md` in the same folder. Explain both local writes before setup approval.
+These guides contain answer rules, owner-approved account labels, and the exact
+Brain CLI and manifest paths. They do not grant whole-disk access, permission bypass, or
 unapproved Cloudflare changes. On macOS a standard setup declares and verifies a login-Keychain
 item before generating the key. Windows stores only DPAPI CurrentUser
 ciphertext; Linux uses an owner-only adjacent file. An existing legacy Mac

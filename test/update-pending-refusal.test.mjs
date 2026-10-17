@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   mkdtempSync,
+  realpathSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -22,6 +23,7 @@ import {
   updateCommandTarget,
 } from "../brain.mjs";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
+import { quotePosixArgument, quotePowerShellArgument } from "../operations/command-display.mjs";
 import {
   buildDailyRefreshDefinition,
   readDailyRefreshUpdateTransaction,
@@ -163,7 +165,7 @@ function updateHarness(manifestPath, readUpdateBacklog, events) {
 }
 
 async function withFixture(run) {
-  const sandbox = mkdtempSync(join(tmpdir(), "brain-update-pending-"));
+  const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-update-pending-")));
   const manifestPath = join(sandbox, "brain.manifest.json");
   const original = `${JSON.stringify(fixtureManifest(), null, 2)}\n`;
   writeFileSync(manifestPath, original);
@@ -337,7 +339,7 @@ test("an empty backlog reaches the paused-deployment stage", async () => {
     assert.deepEqual(finish, [
       `Done. Your Brain is now on version ${PRODUCT_VERSION} and passed its checks.\n` +
         "One last step: quit Claude Code (and Codex, if you use it) and open it again, so it connects to the updated Brain.\n" +
-        "In Claude Code type /exit, then claude --continue.\n" +
+        `In Claude Code type /exit, then open a terminal in your Financial Brain folder and run: ${process.platform === "win32" ? `Set-Location -LiteralPath ${quotePowerShellArgument(dirname(manifestPath))} -ErrorAction Stop; claude` : `cd ${quotePosixArgument(dirname(manifestPath))} && claude`}. For Codex, open that same folder. The answer rules load there.\n` +
         "Then ask: check my Brain.",
     ]);
   });
@@ -737,16 +739,13 @@ test("production recovery resumes after a post-install expectation failure", asy
       },
     };
 
-    const attended = await cmdUpdate(manifestPath, options);
-    assert.equal(attended.updated, true,
-      "the verified Brain update completes even though daily recovery still needs attention");
+    await assert.rejects(cmdUpdate(manifestPath, options), /daily.*recovery|recovery.*daily/i,
+      "incomplete daily recovery cannot return ordinary update success");
     assert.equal(installs, 1, "the attention arm reached new-definition installation");
     assert.equal(expectationCalls, 1, "the attention arm reached the post-install expectation decision");
     assert.equal(upgradeCalls, 1);
     assert.equal(native.enabled, true);
-    assert.equal(finish.length, 1, "the attention arm reached the successful command footer");
-    assert.match(finish[0], /Daily imports.*need attention/i,
-      "the successful command makes the incomplete daily recovery visible");
+    assert.equal(finish.length, 0, "incomplete daily recovery never reaches an ordinary Done footer");
     assert.ok(readDailyRefreshUpdateTransaction(getPlan().identity, { home, machineLockRoot, manifestPath }),
       "the attention arm retained its durable recovery authorization");
 
@@ -756,8 +755,8 @@ test("production recovery resumes after a post-install expectation failure", asy
     assert.equal(upgradeCalls, 2, "recovery obtained a fresh update health proof");
     assert.equal(installs, 1, "the already-installed authorized definition was not replaced again");
     assert.equal(expectationCalls, 2, "recovery retried the incomplete expectation write exactly once");
-    assert.equal(finish.length, 2, "the healthy recovery control reached its own success footer");
-    assert.doesNotMatch(finish[1], /Daily imports.*need attention/i,
+    assert.equal(finish.length, 1, "the healthy recovery control reached its own success footer");
+    assert.doesNotMatch(finish[0], /Daily imports.*need attention/i,
       "the healthy control clears the attention state");
     assert.equal(native.enabled, true);
     assert.equal(readDailyRefreshUpdateTransaction(getPlan().identity, { home, machineLockRoot, manifestPath }), null,
@@ -1570,7 +1569,7 @@ function v046DocumentsEnvelope(pending = 0) {
 }
 
 async function withManifest(mutate, run) {
-  const sandbox = mkdtempSync(join(tmpdir(), "brain-update-resume-"));
+  const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-update-resume-")));
   const manifestPath = join(sandbox, "brain.manifest.json");
   const manifest = fixtureManifest();
   mutate(manifest);
@@ -1696,29 +1695,19 @@ test("a Worker already active on this CLI's version with an older manifest proce
   });
 });
 
-test("a paused resume generation with queued work refuses truthfully at both gates, even with force", async () => {
+test("a modern paused queue reaches custody and bounded completion checks with or without force", async () => {
   await withManifest(() => {}, async ({ manifestPath, original }) => {
     const queued = boundedInventory({ version: PRODUCT_VERSION, drainMode: "paused-for-upgrade", pending: 7 });
-    const run = await throughBothGates(manifestPath, { first: queued });
-    assert.equal(run.error?.message, RESUME_PAUSED_PENDING_MESSAGE(7, "Nothing was changed."));
-    assert.equal(supportErrorCode(run.error, { command: "update" }), "UPGRADE_FAILED");
-    assert.doesNotMatch(run.error?.message || "", /mid-queue|busy|few minutes/u);
-    // The decision point was reached: exactly one successful read, no retry.
-    assert.deepEqual(run.events, ["initial backlog read"]);
-    assert.deepEqual(run.initial.sleeps, []);
-
-    const forced = await throughBothGates(manifestPath, { first: queued, force: true });
-    assert.equal(forced.error?.message, RESUME_PAUSED_PENDING_MESSAGE(
-      7, "The paused deployment was not started.",
-    ));
-    assert.equal(supportErrorCode(forced.error, { command: "update" }), "UPGRADE_FAILED");
-    assert.deepEqual(forced.events, [
-      "initial backlog read",
-      "profile adoption",
-      "verification",
-      "pre-pause backlog read",
-    ]);
-    assert.equal(readFileSync(manifestPath, "utf8"), original);
+    for (const force of [false, true]) {
+      const run = await throughBothGates(manifestPath, { first: queued, force });
+      assert.deepEqual(run.events, PROCEEDED, "nonempty paused queue reached both real readers and custody verification");
+      assert.equal(run.initial.requests, 1);
+      assert.deepEqual(run.initial.sleeps, []);
+      assert.match(run.error?.message || "", /fixture stop after the paused deployment started/);
+      assert.match(run.error?.message || "", /may be paused/);
+      assert.equal(supportErrorCode(run.error, { command: "update" }), "UPGRADE_FAILED");
+      assert.equal(readFileSync(manifestPath, "utf8"), original);
+    }
   });
 });
 

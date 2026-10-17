@@ -1,3 +1,5 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -13,6 +15,8 @@ import {
 } from "../../operations/daily-refresh-scheduler.mjs";
 
 const mode = process.argv[2];
+const dailyMode = mode.startsWith("update-daily-");
+const dailyRecoveryFailure = mode === "update-daily-recovery-failure";
 const root = process.env.HOME;
 if (!root) throw new Error("the fixture requires an isolated HOME");
 mkdirSync(root, { recursive: true });
@@ -37,10 +41,10 @@ const manifest = {
   safety: { daily_llm_spend_cap_usd: 1 },
   operations: { admin_key_secret: adminKeyPath },
 };
-if (mode === "update-daily-attention") {
+if (dailyMode) {
   manifest.client.timezone = "UTC";
   manifest.corpora = { google_drive: { enabled: true } };
-  manifest.operations.daily_refresh = { enabled: true, timezone: "UTC" };
+  manifest.operations.daily_refresh = { enabled: mode !== "update-daily-attention", timezone: "UTC" };
 }
 writeFileSync(manifestPath, JSON.stringify(manifest), { mode: 0o600 });
 writeFileSync(adminKeyPath, "fixture-admin-key\n", { mode: 0o600 });
@@ -55,16 +59,22 @@ if (mode === "control") {
   openPromptsForTesting();
   if (!promptsOpenForTesting()) throw new Error("the readline decision point was not reached");
 
-  if (mode === "update" || mode === "update-warning" || mode === "update-daily-attention") {
+  if (mode === "update" || mode === "update-warning" || dailyMode) {
+    let upgrades = 0;
+    let restoreAttempts = 0;
     const updateOptions = {
+      platform: process.env.CLI_EXIT_FIXTURE_PLATFORM || process.platform,
       discoverInstalledManifest: () => ({ path: manifestPath, source: "remembered" }),
       adoptCloudflareAuthProfile: async () => {},
       withCloudflareControl: async (action) => action(),
       cmdVerify: async () => {},
-      cmdUpgrade: async () => ({
-        status: "verified",
-        daily_final_state: { active: true, query_ready: true, pending: 0 },
-      }),
+      cmdUpgrade: async () => {
+        upgrades++;
+        return {
+          status: "verified",
+          daily_final_state: { active: true, query_ready: true, pending: 0 },
+        };
+      },
       reconcileExistingOwnerAgents: null,
       writeClaudeWorkspaceGuideAfterUpdate: null,
       installTechnicianSkills: () => {
@@ -78,7 +88,9 @@ if (mode === "control") {
     let dailyPlan = null;
     let dailyHome = null;
     let machineLockRoot = null;
-    if (mode === "update-daily-attention") {
+    let bridge = null;
+    let bridgePauses = 0;
+    if (dailyMode) {
       dailyHome = join(root, "daily-home");
       machineLockRoot = join(root, "daily-machine-locks");
       dailyPlan = {
@@ -89,7 +101,7 @@ if (mode === "control") {
         manifest_content_hash: "sha256:content",
         source_plan_hash: "sha256:sources",
         platform: "win32",
-        enabled: true,
+        enabled: manifest.operations.daily_refresh.enabled,
         ready: true,
         timezone_matches_machine: true,
         unsupported_sources: 0,
@@ -121,7 +133,10 @@ if (mode === "control") {
         schedulerAdapter: {
           read: () => dailyState,
           setEnabled: (_identity, enabled) => {
-            if (enabled) throw new Error("fixture daily restore failed");
+            if (enabled) {
+              restoreAttempts++;
+              if (dailyRecoveryFailure) throw new Error("fixture daily restore failed");
+            }
             dailyState = { ...dailyState, enabled };
           },
           install: (definition) => {
@@ -131,15 +146,56 @@ if (mode === "control") {
         schedulerOptions: { ...nativeOptions, home: dailyHome, machineLockRoot },
         syncSourceExpectations: false,
       };
+      if (mode === "update-daily-attention") {
+        // Daily imports were deliberately disabled. The verified update keeps
+        // the old bridge paused and asks the owner to approve a new schedule.
+        const principal = "S-1-5-21-100-200-300-1001";
+        const fields = ["daily-refresh-v1", manifest.brain.domain, principal];
+        const hash = createHash("sha256").update(fields.map(value => `${Buffer.byteLength(value, "utf8")}:${value},`).join(""), "utf8").digest("hex");
+        bridge = {
+          task_name: `\\Financial Brain\\daily-refresh-${hash.slice(0, 16)}`,
+          principal, enabled: true, definition: "fixture bridge definition",
+          action: `brain load '${manifestPath.replaceAll("'", "''")}' --only google_drive`,
+        };
+        updateOptions.dailyRefreshOptions.bridgeOptions = {
+          now: () => new Date("2026-10-07T15:00:00.000Z"),
+          adapter: {
+            currentSid: () => principal,
+            inventory: () => ({ entries: [{ ...bridge }], ignored: 0 }),
+            read: () => ({ ...bridge }),
+            setEnabled: (_name, enabled) => {
+              assert.equal(enabled, false, "the old bridge may only be paused in this arm");
+              bridgePauses++;
+              bridge.enabled = enabled;
+            },
+            remove: () => { throw new Error("the disabled-daily bridge must remain present"); },
+          },
+        };
+      }
     }
-    if (mode === "update-daily-attention") {
-      await dispatchUpdateCli([manifestPath], { updateOptions });
+    if (dailyMode) {
+      let failure;
+      try { await dispatchUpdateCli([manifestPath], { updateOptions }); }
+      catch (error) { failure = error; }
+      assert.equal(upgrades, 1, "the real CLI must reach the successful remote update decision");
       const recovery = readDailyRefreshUpdateTransaction(dailyPlan.identity, {
         home: dailyHome,
         manifestPath,
         machineLockRoot,
       });
-      console.log(`DECISION daily-attention recovery=${Boolean(recovery)} enabled=${dailyState.enabled}`);
+      if (dailyRecoveryFailure) {
+        assert.match(failure?.message || "", /this update is incomplete: daily imports remain paused or unverified/);
+        assert.ok(restoreAttempts > 0, "the required schedule restore must be attempted");
+        assert.ok(recovery, "failed restore must keep its durable recovery receipt");
+        assert.equal(dailyState.enabled, false);
+        console.error(failure.message);
+        process.exitCode = 1;
+      } else {
+        assert.equal(failure, undefined);
+        assert.equal(recovery, null, "a completed update clears its recovery fence");
+      }
+      console.log(`DECISION daily recovery=${Boolean(recovery)} enabled=${dailyState.enabled} upgrades=${upgrades} restore_attempts=${restoreAttempts}`);
+      if (bridge) console.log(`DECISION bridge enabled=${bridge.enabled} pauses=${bridgePauses}`);
     } else {
       await cmdUpdate(manifestPath, updateOptions);
     }
@@ -178,6 +234,6 @@ if (mode === "control") {
   }
 
   console.log(
-    `DECISION ${mode} completed opened=true prompt_open=${promptsOpenForTesting()}`,
+    `DECISION ${mode} ${dailyRecoveryFailure ? "refused" : "completed"} opened=true prompt_open=${promptsOpenForTesting()}`,
   );
 }
