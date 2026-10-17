@@ -396,6 +396,119 @@ async function update(t, { wired = ["Codex"], risky = false, createGuide = false
   return { root: brainFolder, writes, finish, messages };
 }
 
+// Exercise the production composition boundary with controlled locator data.
+// Its dependencies are replaced, but the closing logic is read from the CLI so
+// a whole-report render cannot hide behind a separately implemented formatter.
+function updateClosingBoundary({ platform = "win32", platformName, folder = "ordinary folder", locator = "", raw = false } = {}) {
+  const source = readFileSync(new URL("../brain.mjs", import.meta.url), "utf8");
+  const start = source.indexOf("  const attention = [...new Set(updateAttention)];");
+  const end = source.indexOf("\n  return upgradeResult;", start);
+  assert.ok(start > 0 && end > start, "the complete closing-report boundary was found");
+  const guidance = "Use https://financialbrain.ai/update/agent.md for this session; do not rerun brain update.";
+  const renderOptions = { platform: platformName ?? platform ?? process.platform, env: { PATH: "" }, nodePath: "C:\\Runtime\\node.exe", scriptPath: "C:\\Runtime\\brain.mjs" };
+  const target = win32.join("C:\\Owner", folder, "brain.manifest.json");
+  const reports = [], renderCalls = [];
+  const bindings = {
+    updateAttention: [guidance, guidance],
+    options: { platform, platformName, ...(raw ? { reportUpdateFinish: message => reports.push(message) } : {}) },
+    pin: { target }, PRODUCT_VERSION: "0.4.17", mailTransition: null,
+    ownerSessionFolderLabel: () => "another folder",
+    ownerBrainFolderWarning: () => locator,
+    dirname: win32.dirname, quotePowerShellArgument, quotePosixArgument,
+    console: { log: message => reports.push(message) },
+    renderCliCommands: (text, opts) => {
+      renderCalls.push(text);
+      return renderCliCommands(text, { ...renderOptions, ...opts });
+    },
+    safelyReportUpdateResult: (report, message) => report(message),
+  };
+  new Function(...Object.keys(bindings), source.slice(start, end))(...Object.values(bindings));
+  assert.equal(reports.length, 1, "the closing reporter was reached exactly once");
+  return { closing: reports[0], renderCalls, guidance, renderOptions, target };
+}
+
+test("WIN R7 closing preserves a quoted command-shaped folder with an ordinary-folder control", () => {
+  for (const folder of ["ordinary folder", "brain update archive"]) {
+    const run = updateClosingBoundary({ folder });
+    assert.ok(run.closing.includes(`Set-Location -LiteralPath ${quotePowerShellArgument(win32.dirname(run.target))} -ErrorAction Stop; claude`));
+    assert.ok(run.closing.includes(renderCliCommands(run.guidance, run.renderOptions)), "bare attention still renders");
+    assert.deepEqual(run.renderCalls, [run.guidance], "only the deduplicated bare guidance reaches the renderer");
+  }
+});
+
+test("WIN R7 closing keeps command-free locator text byte stable", () => {
+  for (const locator of ["Local folder: C:\\ordinary folder\\archive", "Local folder: C:\\brain update archive\\notes"]) {
+    const run = updateClosingBoundary({ locator });
+    assert.equal(run.closing.split("\n").at(-1), locator);
+    assert.ok(run.closing.includes(renderCliCommands(run.guidance, run.renderOptions)), "the guidance render decision was reached");
+    assert.deepEqual(run.renderCalls, [run.guidance]);
+  }
+});
+
+test("WIN R7 closing leaves already-rendered executable paths unchanged", () => {
+  for (const scriptPath of ["C:\\Runtime\\brain.mjs", "C:\\brain update archive\\brain.mjs"]) {
+    const rawGuidance = "Run brain update <manifest>.";
+    const once = renderCliCommands(rawGuidance, { platform: "win32", env: { PATH: "" }, nodePath: "C:\\Runtime\\node.exe", scriptPath });
+    assert.notEqual(once, rawGuidance, "the first command render was reached");
+    const run = updateClosingBoundary({ locator: once });
+    assert.equal(run.closing.split("\n").at(-1), once, "composition must not render the executable path a second time");
+    assert.deepEqual(run.renderCalls, [run.guidance]);
+  }
+});
+
+test("WIN R7 raw reporter and POSIX closing preserve the composed bytes and platform precedence", () => {
+  for (const platformOptions of [
+    { platform: "darwin" }, { platform: "linux" }, { platform: "win32" },
+    { platform: "win32", platformName: "linux" }, { platform: "linux", platformName: "win32" },
+    { platform: null, platformName: null },
+  ]) {
+    const inputs = { ...platformOptions, folder: "brain update archive", locator: "Local folder: C:\\brain update archive\\notes" };
+    const raw = updateClosingBoundary({ ...inputs, raw: true });
+    assert.deepEqual(raw.renderCalls, [], "the custom reporter receives raw composed bytes");
+    assert.ok(raw.closing.includes(raw.guidance));
+    const rendered = updateClosingBoundary(inputs);
+    assert.equal(rendered.closing, raw.closing.replace(raw.guidance, renderCliCommands(raw.guidance, raw.renderOptions)));
+  }
+});
+
+test("WIN R7 real update preserves folder commands and locator prose in the default closing report", async t => {
+  for (const folder of ["ordinary folder", "brain update archive"]) {
+    const { root } = fixture(t);
+    const target = join(root, folder);
+    mkdirSync(target);
+    const manifest = join(target, "brain.manifest.json");
+    const keyFile = join(root, "fixture-admin-key");
+    writeFileSync(keyFile, ["synthetic", "fixture", "only"].join("-"), { mode: 0o600 });
+    writeFileSync(manifest, JSON.stringify({
+      client: { slug: "fixture" }, brain: { version: "0.4.7", domain: "brain.example.invalid" },
+      infrastructure: { cloudflare: { account_id: "a".repeat(32), storage: "d1", d1_database_id: "fixture-database" } },
+      credentials: { admin_key: { backend: "file", path: keyFile } },
+    }));
+    const events = [], output = [];
+    const capture = mock.method(console, "log", message => output.push(String(message)));
+    try {
+      const result = await cli.cmdUpdate(manifest, {
+        lifecycleLockHeld: true, home: root, platform: "win32", sessionFolder: join(root, "Desktop"),
+        dailyRefreshOptions: { platform: "linux", schedulerOptions: { home: root, launchctl: () => { throw new Error("unexpected scheduler"); } } },
+        discoverInstalledManifest: () => ({ path: manifest, source: "remembered" }),
+        adoptCloudflareAuthProfile: async () => {}, withCloudflareControl: async run => run(),
+        cmdVerify: async () => { events.push("verify"); },
+        cmdUpgrade: async () => { events.push("upgrade"); return { status: "verified" }; },
+        reconcileExistingOwnerAgents: null, writeClaudeWorkspaceGuideAfterUpdate: null, writeCodexWorkspaceGuideAfterUpdate: null,
+        installTechnicianSkills: () => { events.push("skills"); throw new Error("fixture refresh warning"); },
+        reportSkillRefreshOk: () => {}, reportSkillRefreshWarning: () => {},
+      });
+      assert.equal(result.status, "verified");
+    } finally { capture.mock.restore(); }
+    assert.deepEqual(events, ["verify", "upgrade", "skills"], "real update reaches the successful closing decision");
+    const closing = output.filter(line => line.startsWith("Done."));
+    assert.equal(closing.length, 1);
+    assert.ok(closing[0].includes(`Set-Location -LiteralPath ${quotePowerShellArgument(target)} -ErrorAction Stop; claude`));
+    assert.equal(closing[0].split("\n").at(-1), `Next time, open Claude Code (or Codex) in your Financial Brain folder, ${cli.displayPathForTesting(target, process.cwd())}. This conversation runs in your Desktop folder, which can be tidied away or synced.`);
+    assert.ok(closing[0].includes(renderCliCommands("Use https://financialbrain.ai/update/agent.md for this session; do not rerun brain update.", { platform: "win32" })));
+  }
+});
+
 test("f/g: update refresh is gated on assistant proof, skips missing AGENTS, and outside-folder closing loads the rules", async (t) => {
   const missing = await update(t);
   assert.deepEqual(missing.writes.map(([agent]) => agent), ["codex"]);

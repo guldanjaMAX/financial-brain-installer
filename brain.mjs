@@ -30878,6 +30878,14 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
     updateAttention.push("Use https://financialbrain.ai/update/agent.md for this session; do not rerun brain update.");
   }
   const attention = [...new Set(updateAttention)];
+  // Only these bare guidance fragments need rendering. The composed report
+  // also contains literal paths and already-quoted commands, which a second
+  // render can corrupt. Custom reporters retain their raw-message contract.
+  const closingAttention = options.reportUpdateFinish == null
+    ? attention.map(message => renderCliCommands(message, {
+      platform: options.platformName ?? options.platform ?? process.platform,
+    }))
+    : attention;
   const sessionFolderLabel = ownerSessionFolderLabel(pin.target, options);
   const brainFolderWarning = ownerBrainFolderWarning(pin.target, options);
   const closing = [
@@ -30885,7 +30893,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
     ...(mailTransition ? [microsoftMailTransitionSummary(mailTransition)] : []),
     ...(attention.length ? [
       `${attention.length} ${attention.length === 1 ? "thing" : "things"} still ${attention.length === 1 ? "needs" : "need"} attention:`,
-      ...attention,
+      ...closingAttention,
     ] : []),
     "One last step: quit Claude Code (and Codex, if you use it) and open it again, so it connects to the updated Brain.",
     sessionFolderLabel
@@ -30896,12 +30904,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
       `Next time, open Claude Code (or Codex) in your Financial Brain folder, ${displayPath(dirname(pin.target))}. This conversation runs in ${sessionFolderLabel}, which can be tidied away or synced.`,
     ] : []),
   ].join("\n");
-  // The final attention list can contain recovery commands too. Preserve the
-  // raw-message reporter seam while rendering the default owner terminal output.
-  const reportFinish = options.reportUpdateFinish ?? (message => console.log(renderCliCommands(message, {
-    platform: options.platformName ?? options.platform ?? process.platform,
-  })));
-  safelyReportUpdateResult(reportFinish, closing);
+  safelyReportUpdateResult(options.reportUpdateFinish ?? console.log, closing);
   return upgradeResult;
 }
 
