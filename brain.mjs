@@ -29061,11 +29061,7 @@ export async function refreshOwnerAssistantConnectionsAfterUpdate(
 }
 
 function workspaceGuideNotWrittenWarning(filename, result) {
-  const reason = result.code === "WORKSPACE_RECOVERY_CONFLICT"
-    ? `The ${filename} guide refresh did not finish because another file appeared in its recovery folder or a recovery file changed. ` +
-      "Support code: WORKSPACE_RECOVERY_CONFLICT. The refresh lock is retained; review both files before retrying. "
-    : `The ${filename} guide was not written because a local write failed, its folder or file changed, or another refresh holds its lock. `;
-  return reason +
+  return `The ${filename} guide was not written because a local write failed, its folder or file changed, or another refresh holds its lock. ` +
     (result.pendingPath ? `The staged guide is retained at ${displayPath(result.pendingPath)}. ` : "") +
     (result.recoveryPath ? `The earlier file is retained for recovery at ${displayPath(result.recoveryPath)}. ` : "") +
     "Review the local guide before retrying its refresh.";
@@ -30801,9 +30797,23 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
     }
   }
 
+  // Windows may refuse the writer's final directory rename while a guide is
+  // open. Keep existing guides until a reviewed recovery protocol is available.
+  let windowsGuideNoticeShown = false;
+  const keepExistingWindowsGuide = filename => {
+    if ((options.platformName ?? options.platform ?? process.platform) !== "win32" ||
+        !existsSync(join(dirname(resolve(pin.target)), filename))) return false;
+    if (!windowsGuideNoticeShown) safelyReportUpdateResult(
+      options.reportWorkspaceGuideRefreshInfo ?? console.log,
+      "On Windows, this update leaves your assistant's workspace guide as it is. Refreshed answer rules arrive in the next version.",
+    );
+    windowsGuideNoticeShown = true;
+    return true;
+  };
+
   // Write-capable guidance is refreshed only after this exact Claude Code
   // registration has passed runtime, tool-list, and config readback proof.
-  if (updateWorkspaceGuide && ownerAgentRefreshResult?.wired?.includes("Claude Code")) {
+  if (updateWorkspaceGuide && ownerAgentRefreshResult?.wired?.includes("Claude Code") && !keepExistingWindowsGuide("CLAUDE.md")) {
     const workspaceGuideResult = refreshClaudeWorkspaceGuideAfterUpdate(pin.target, {
       writeClaudeWorkspaceGuide: updateWorkspaceGuide,
       brainCliPath: options.brainCliPath,
@@ -30818,7 +30828,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
     }
   }
 
-  if (updateCodexWorkspaceGuide && ownerAgentRefreshResult?.wired?.includes("Codex")) {
+  if (updateCodexWorkspaceGuide && ownerAgentRefreshResult?.wired?.includes("Codex") && !keepExistingWindowsGuide("AGENTS.md")) {
     const workspaceGuideResult = refreshCodexWorkspaceGuideAfterUpdate(pin.target, {
       writeCodexWorkspaceGuide: updateCodexWorkspaceGuide,
       verifiedCodexWiring: true,

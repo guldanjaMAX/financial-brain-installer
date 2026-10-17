@@ -80,6 +80,10 @@ exact sealed package. This version bump verifies no incident.
   retained for recovery. Native scheduler calls are bounded; an incomplete
   update retains its recovery fence and returns a non-success result.
 
+### Known limitations
+
+- On Windows, updating leaves the assistant workspace guide unchanged in this version; setup still creates it. Refreshed answer rules for Windows arrive in 0.4.18.
+
 ### Known issues
 
 - Physical Windows x64 acceptance is still required for PowerShell quoting,

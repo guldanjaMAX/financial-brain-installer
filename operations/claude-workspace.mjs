@@ -16,7 +16,6 @@ import {
   readFileSync,
   realpathSync,
   renameSync,
-  rmdirSync,
   writeFileSync,
   unlinkSync,
 } from "node:fs";
@@ -336,20 +335,19 @@ function workspaceParentUnchanged(parent) {
       sameIdentity(lstatSync(parent.physical), parent.stat);
   } catch { return false; }
 }
-function unchangedWorkspaceFile(path, snapshot, text, ownership, links = 1, checkOwnership = true) {
+function unchangedWorkspaceFile(path, snapshot, text, ownership, links = 1) {
   try {
     const now = lstatSync(path);
     return now.isFile() && !now.isSymbolicLink() && now.nlink === links &&
       sameIdentity(now, snapshot) && now.uid === snapshot.uid && now.gid === snapshot.gid &&
       now.mode === snapshot.mode && now.size === snapshot.size && now.mtimeMs === snapshot.mtimeMs &&
-      (!checkOwnership || workspaceFileOwnedByUser(path, now, ownership)) && readFileSync(path, "utf8") === text;
+      workspaceFileOwnedByUser(path, now, ownership) && readFileSync(path, "utf8") === text;
   } catch { return false; }
 }
 
 function commitWorkspaceGuide(target, parent, snapshot, existing, content, ownership) {
-  let pendingPath, recoveryPath, code;
+  let pendingPath, recoveryPath;
   const notWritten = () => ({ status: "not_written", changed: false,
-    ...(code ? { code } : {}),
     ...(pendingPath ? { pendingPath } : {}), ...(recoveryPath ? { recoveryPath } : {}) });
   if (!workspaceParentUnchanged(parent)) return notWritten();
   const physicalTarget = join(parent.physical, basename(target));
@@ -405,52 +403,20 @@ function commitWorkspaceGuide(target, parent, snapshot, existing, content, owner
     // Failed identity/content checks above perform no pathname cleanup.
     unlinkSync(install);
     const installed = lstatSync(physicalTarget);
-    const exact = (checkOwnership = true) => workspaceParentUnchanged(parent) &&
-      unchangedWorkspaceFile(physicalTarget, installed, content, ownership, 1, checkOwnership) &&
-      unchangedWorkspaceFile(pendingPath, staged, content, ownership, 1, checkOwnership) &&
-      (!recoveryPath || unchangedWorkspaceFile(recoveryPath, snapshot, existing, ownership, 1, checkOwnership));
+    const exact = () => workspaceParentUnchanged(parent) &&
+      unchangedWorkspaceFile(physicalTarget, installed, content, ownership) &&
+      unchangedWorkspaceFile(pendingPath, staged, content, ownership) &&
+      (!recoveryPath || unchangedWorkspaceFile(recoveryPath, snapshot, existing, ownership));
     if (!locked() || !exact()) return notWritten();
     // Retain the original inode even on success: an editor may still hold an
-    // open descriptor and write after our final read. Windows refuses moving
-    // a directory containing such an open file, even when that file permits a
-    // rename. Move the retained files individually, then release the empty
-    // lock only after every identity/content check still agrees.
+    // open descriptor and write after our final read. Retain staging too. Only
+    // an uncontested write releases the lock by moving its entire directory;
+    // a failed identity/content check performs no cleanup or restoration.
     const retained = `${physicalTarget}.financial-brain-retained-${id}`;
-    mkdirSync(retained, { mode: 0o700 });
-    const retainedStat = lstatSync(retained);
-    const retainedUnchanged = () => {
-      const current = lstatSync(retained);
-      return current.isDirectory() && !current.isSymbolicLink() && sameIdentity(current, retainedStat);
-    };
-    const retain = (source, destination, stat, text, recordDestination) => {
-      const conflict = () => { code = "WORKSPACE_RECOVERY_CONFLICT"; return false; };
-      const stable = (path, links) => unchangedWorkspaceFile(path, stat, text, ownership, links, false);
-      if (!locked() || !retainedUnchanged() || !stable(source, 1)) return conflict();
-      // link is an exclusive publication, unlike rename: a concurrent file at
-      // destination must survive even if it appears inside the syscall. Keep
-      // both names until identity, bytes and native destination checks agree.
-      try { linkSync(source, destination); }
-      catch (error) { if (error.code === "EEXIST") return conflict(); throw error; }
-      if (!locked() || !retainedUnchanged() ||
-          !unchangedWorkspaceFile(destination, stat, text, ownership, 2) ||
-          !stable(source, 2) || !stable(destination, 2)) return conflict();
-      unlinkSync(source);
-      recordDestination(destination);
-      if (!locked() || !retainedUnchanged() || !stable(destination, 1)) return conflict();
-      return true;
-    };
-    if (!retain(pendingPath, join(retained, pendingName), staged, content, path => { pendingPath = path; })) return notWritten();
-    if (recoveryPath) {
-      if (!retain(recoveryPath, join(retained, "previous"), snapshot, existing, path => { recoveryPath = path; })) return notWritten();
-    }
-    // Each retained destination receives the baseline's final native check in
-    // retain(), before its source is unlinked. Recheck the active guide here.
-    // Additional local readbacks bracket lock release without extra PowerShell
-    // startups or caching native authorization across separate write attempts.
-    if (!locked() || !retainedUnchanged() ||
-        !unchangedWorkspaceFile(physicalTarget, installed, content, ownership) || !exact(false)) return notWritten();
-    rmdirSync(lock);
-    if (!retainedUnchanged() || !exact(false)) return notWritten();
+    renameSync(lock, retained);
+    pendingPath = join(retained, pendingName);
+    if (recoveryPath) recoveryPath = join(retained, "previous");
+    if (!sameIdentity(lstatSync(retained), lockStat) || !exact()) return notWritten();
     return { status: "written", changed: true, ...(recoveryPath ? { recoveryPath } : {}) };
   } catch {
     // Ordinary preparation I/O failure has not displaced the active guide.

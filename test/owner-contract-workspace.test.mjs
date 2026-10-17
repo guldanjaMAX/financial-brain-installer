@@ -354,7 +354,7 @@ test("setup warns without failing for a damaged guide and every preserved or fai
   assert.equal(count(good.output, "Codex owner workspace ready"), 1);
 });
 
-async function update(t, { wired = ["Codex"], risky = false, createGuide = false, folder = "Financial Brain", platform = "darwin" } = {}) {
+async function update(t, { wired = ["Codex"], risky = false, createGuide = false, folder = "Financial Brain", platform = "darwin", beforeUpdate = () => {} } = {}) {
   const { root } = fixture(t);
   const brainFolder = join(root, folder);
   mkdirSync(brainFolder);
@@ -368,6 +368,7 @@ async function update(t, { wired = ["Codex"], risky = false, createGuide = false
     infrastructure: { cloudflare: { account_id: "a".repeat(32), auth_profile: `financial-brain-${"b".repeat(24)}`, storage: "d1", d1_database_id: "11111111-2222-4333-8444-555555555555" } },
   }));
   if (createGuide) for (const [agent, file, marker] of writers.filter(([agent]) => createGuide !== "claude" || agent === "claude")) writeFileSync(join(brainFolder, file), `${marker}\n# Earlier guide\n`);
+  beforeUpdate(brainFolder);
   const result = await cli.cmdUpdate(manifest, {
     lifecycleLockHeld: true, home: root, platform,
     dailyRefreshOptions: { platform: "linux", schedulerOptions: { home: root, launchctl: () => { throw new Error("unexpected scheduler"); } } },
@@ -415,6 +416,94 @@ test("f/g: update refresh is gated on assistant proof, skips missing AGENTS, and
   const unverified = await update(t, { wired: [], createGuide: true });
   assert.equal(unverified.writes.length, 0);
   assert.equal(readFileSync(join(unverified.root, "AGENTS.md"), "utf8"), `${CODEX}\n# Earlier guide\n`);
+});
+
+const WINDOWS_GUIDE_NOTICE = "On Windows, this update leaves your assistant's workspace guide as it is. Refreshed answer rules arrive in the next version.";
+
+for (const platform of ["win32", "darwin", "linux"]) for (const [assistant, filename] of writers) {
+  test(`WIN R4 update existing guide: ${platform} ${assistant}`, async t => {
+    let before, mtime, entries;
+    const result = await update(t, {
+      platform, wired: [assistant === "codex" ? "Codex" : "Claude Code"], createGuide: true,
+      beforeUpdate: root => {
+        const target = join(root, filename);
+        // A fixed old timestamp proves a refresh even on coarse filesystems.
+        fs.utimesSync(target, 1_700_000_000, 1_700_000_000);
+        before = readFileSync(target);
+        mtime = statSync(target).mtimeMs;
+        entries = readdirSync(root).sort();
+      },
+    });
+    const target = join(result.root, filename);
+    assert.equal(result.finish.length, 1, "the real update reached its verified completion decision");
+    if (platform === "win32") {
+      assert.deepEqual(result.writes, [], "the update must stop before the guide writer");
+      assert.deepEqual(result.messages, [WINDOWS_GUIDE_NOTICE]);
+      assert.deepEqual(readFileSync(target), before);
+      assert.equal(statSync(target).mtimeMs, mtime);
+      assert.deepEqual(readdirSync(result.root).sort(), entries, "no lock, staging or recovery folder was created");
+    } else {
+      assert.deepEqual(result.writes.map(([agent]) => agent), [assistant], "the non-Windows control reaches the writer");
+      assert.notDeepEqual(readFileSync(target), before);
+      assert.notEqual(statSync(target).mtimeMs, mtime);
+      assert.ok(readFileSync(target, "utf8").includes(BEGIN));
+      assert.equal(result.messages.length, 1);
+      assert.match(result.messages[0], /refreshed with the answer rules/);
+    }
+  });
+}
+
+test("WIN R4 dual-assistant update prints the Windows notice once", async t => {
+  const result = await update(t, { platform: "win32", wired: ["Claude Code", "Codex"], createGuide: true });
+  assert.equal(result.finish.length, 1);
+  assert.deepEqual(result.writes, []);
+  assert.deepEqual(result.messages, [WINDOWS_GUIDE_NOTICE]);
+  assert.equal(readdirSync(result.root).filter(name => name.includes(".lock") || name.includes(".financial-brain-")).length, 0);
+});
+
+for (const [assistant, filename, , write] of writers) test(`WIN R4 setup failure releases its lock: ${assistant}`, t => {
+  const { root, manifest } = fixture(t);
+  const target = join(root, filename);
+  const ownership = { ...fixtureOwnership, platform: "win32", pathApi, profile: root };
+  const original = fs.fsyncSync;
+  let flushes = 0;
+  fs.fsyncSync = () => { flushes++; throw new Error("synthetic preparation failure"); };
+  syncBuiltinESMExports();
+  let result;
+  try { result = write(manifest, { ...options, platformName: "win32", ownership }); }
+  finally { fs.fsyncSync = original; syncBuiltinESMExports(); }
+  assert.equal(flushes, 1, "setup reached the real staged-file flush before failing");
+  assert.equal(result.status, "not_written");
+  assert.equal(existsSync(target), false);
+  assert.equal(existsSync(`${target}.lock`), false);
+  assert.ok(existsSync(result.pendingPath), "failed staging remains available for review");
+  assert.equal(write(manifest, { ...options, platformName: "win32", ownership }).status, "written", "retry is the successful creation control");
+  assert.ok(readFileSync(target, "utf8").includes(BEGIN));
+  const before = statSync(target).mtimeMs;
+  assert.equal(write(manifest, { ...options, platformName: "win32", ownership }).status, "verified");
+  assert.equal(statSync(target).mtimeMs, before, "the verified path remains unchanged");
+});
+
+for (const [assistant, filename] of writers) test(`WIN R4 setup creates a missing guide: ${assistant}`, async t => {
+  let writes = 0, nativeChecks = 0;
+  const option = assistant === "codex" ? "writeCodexWorkspaceGuide" : "writeClaudeWorkspaceGuide";
+  const result = await setup(t, [assistant === "codex" ? "Codex" : "Claude Code"], {
+    platform: "win32",
+    [option]: (manifest, opts) => {
+      writes++;
+      assert.equal(existsSync(join(dirname(manifest), filename)), false, "setup reaches a missing guide");
+      assert.equal(opts.platformName, "win32");
+      return workspace[option](manifest, { ...opts, ownership: {
+        platform: "win32", pathApi, profile: dirname(manifest),
+        windowsAttributesSafe: paths => { nativeChecks++; assert.ok(paths.length); return true; },
+      } });
+    },
+  });
+  assert.equal(writes, 1);
+  assert.ok(nativeChecks > 0, "Windows ownership checks were reached without a native process");
+  assert.ok(readFileSync(join(result.root, filename), "utf8").includes(BEGIN));
+  assert.equal(existsSync(join(result.root, `${filename}.lock`)), false);
+  assert.equal(result.output.includes(WINDOWS_GUIDE_NOTICE), false);
 });
 
 test("i: skill insertion is exact, bounded and inert under Windows command rendering", () => {
@@ -906,15 +995,27 @@ test("Windows native attributes accept a regular folder and refuse a junction", 
   const { root } = fixture(t), linked = join(root, "junction");
   symlinkSync(root, linked, "junction");
   let probes = 0;
+  const completions = [];
   const probe = paths => workspace.windowsWorkspaceAttributesSafe(paths, {
     run: (command, args, opts) => {
       probes++;
       // Allow slow process startup while bounding both probes to 90 seconds.
-      return spawnSync(command, args, { ...opts, timeout: 45_000 });
+      const result = spawnSync(command, args, { ...opts, timeout: 45_000 });
+      completions.push(result);
+      return result;
     },
   });
-  assert.equal(probe([root]), true);
-  assert.equal(probe([linked]), false);
+  const regular = probe([root]), junction = probe([linked]);
+  // The helper deliberately maps process failure to false. A native smoke
+  // rejection is proof only when the child finished, including the junction.
+  assert.equal(completions.length, 2);
+  for (const result of completions) {
+    assert.ifError(result.error);
+    assert.equal(result.signal, null);
+  }
+  assert.deepEqual(completions.map(result => result.status), [0, 1]);
+  assert.equal(regular, true);
+  assert.equal(junction, false);
   assert.equal(probes, 2, "both actual native attribute decisions were reached");
 });
 
@@ -1184,7 +1285,9 @@ for (const arm of ["duplicate", "before-accounts", "misplaced-only", "fenced", "
   }
 });
 
-for (const arm of ["none", "install", "after-return"]) test(`R4 original descriptor remains reachable: ${arm}`, t => {
+for (const arm of ["none", "install", "after-return"]) test(`R4 original descriptor remains reachable: ${arm}`, {
+  skip: process.platform === "win32" ? "the 0.4.17 update path does not refresh an existing guide on Windows; see CHANGELOG known limitations" : false,
+}, t => {
   const { root, manifest } = fixture(t), target = join(root, "AGENTS.md");
   const before = `${CODEX}\n# Older guide\n`, note = "\nRetain this concurrent owner annotation.\n";
   writeFileSync(target, before);
@@ -1487,125 +1590,6 @@ test("S2 update warns when the Brain folder itself is temporary storage", async 
   assert.ok(existsSync(join(result.root, "brain.manifest.json")), "no automatic move or removal");
 });
 
-for (const heldOpen of [false, true]) test(`Windows recovery keeps files reachable without directory rename: open=${heldOpen}`, t => {
-  const { root, manifest } = fixture(t), target = join(root, "AGENTS.md");
-  const before = `${CODEX}\n# Older guide\n`, note = "\nConcurrent owner annotation.\n";
-  writeFileSync(target, before);
-  const fd = heldOpen ? fs.openSync(target, "r+") : null;
-  const original = fs.renameSync;
-  let moves = 0, directoryMoves = 0;
-  fs.renameSync = (source, destination, ...args) => {
-    moves++;
-    // Windows can refuse a directory move while an editor or scanner holds
-    // a descendant open, even when the file itself permits a rename.
-    if (lstatSync(source).isDirectory()) {
-      directoryMoves++;
-      throw Object.assign(new Error("fixture directory sharing violation"), { code: "EPERM" });
-    }
-    return original(source, destination, ...args);
-  };
-  syncBuiltinESMExports();
-  let result;
-  try {
-    result = workspace.writeCodexWorkspaceGuide(manifest, options);
-    if (heldOpen) fs.writeSync(fd, note, Buffer.byteLength(before), "utf8");
-  } finally {
-    fs.renameSync = original; syncBuiltinESMExports();
-    if (fd !== null) fs.closeSync(fd);
-  }
-  assert.ok(moves >= 2, "the actual staged and original file moves were reached");
-  assert.equal(result.status, "written");
-  assert.equal(directoryMoves, 0, "completion must not depend on moving an open directory tree");
-  assert.equal(readFileSync(result.recoveryPath, "utf8"), before + (heldOpen ? note : ""));
-  assert.equal(workspace.writeCodexWorkspaceGuide(manifest, options).status, "verified");
-});
-
-for (const fault of ["pending", "previous", "release", "none"]) test(`Windows recovery publication failure preserves the original: ${fault}`, t => {
-  const { root, manifest } = fixture(t), target = join(root, "AGENTS.md");
-  const before = `${CODEX}\n# Original owner guide\n`;
-  writeFileSync(target, before);
-  const original = { renameSync: fs.renameSync, linkSync: fs.linkSync, rmdirSync: fs.rmdirSync };
-  const decisions = [];
-  for (const method of ["renameSync", "linkSync"]) fs[method] = (source, destination, ...args) => {
-    if (dirname(destination).includes(".financial-brain-retained-")) {
-      const stage = basename(destination) === "previous" ? "previous" : "pending";
-      decisions.push(stage);
-      if (fault === stage) throw Object.assign(new Error("fixture retained-file sharing violation"), { code: "EPERM" });
-    }
-    return original[method](source, destination, ...args);
-  };
-  fs.rmdirSync = (path, ...args) => {
-    if (path === `${target}.lock`) {
-      decisions.push("release");
-      if (fault === "release") throw Object.assign(new Error("fixture lock release failure"), { code: "EBUSY" });
-    }
-    return original.rmdirSync(path, ...args);
-  };
-  syncBuiltinESMExports();
-  let result;
-  try { result = workspace.writeCodexWorkspaceGuide(manifest, options); }
-  finally { Object.assign(fs, original); syncBuiltinESMExports(); }
-  assert.ok(decisions.includes(fault === "none" ? "release" : fault), "the requested publication boundary was reached");
-  assert.equal(readFileSync(result.recoveryPath, "utf8"), before);
-  if (fault === "none") {
-    assert.equal(result.status, "written");
-    assert.equal(existsSync(`${target}.lock`), false);
-    assert.equal(workspace.writeCodexWorkspaceGuide(manifest, options).status, "verified");
-  } else {
-    assert.equal(result.status, "not_written");
-    assert.equal(existsSync(`${target}.lock`), true, "unresolved publication still blocks retries");
-    assert.equal(readFileSync(result.pendingPath, "utf8"), readFileSync(target, "utf8"));
-    assert.equal(workspace.writeCodexWorkspaceGuide(manifest, options).status, "not_written");
-  }
-});
-
-// Interpose both implementations so the regression reaches the real move on
-// the old rename writer and on an exclusive-link writer.
-for (const [assistant, filename, marker, write] of writers) for (const slot of ["pending", "previous"]) {
-  for (const collision of [false, true]) test(`R2 retained destination preserves a competing file: ${assistant} ${slot} ${collision}`, t => {
-    const { root, manifest } = fixture(t), target = join(root, filename);
-    const before = `${marker}\n# Original owner guide\n`, competitor = "Concurrent recovery annotation.\n";
-    writeFileSync(target, before);
-    const originals = { renameSync: fs.renameSync, linkSync: fs.linkSync };
-    let reached = 0, destination, source;
-    for (const method of Object.keys(originals)) fs[method] = (from, to, ...args) => {
-      if (dirname(to).includes(".financial-brain-retained-") && (basename(to) === "previous" ? "previous" : "pending") === slot) {
-        reached++; source = from; destination = to;
-        if (collision) writeFileSync(to, competitor, { flag: "wx" });
-      }
-      return originals[method](from, to, ...args);
-    };
-    syncBuiltinESMExports();
-    const warnings = [], successes = [];
-    let result;
-    try {
-      result = (assistant === "codex" ? cli.refreshCodexWorkspaceGuideAfterUpdate : cli.refreshClaudeWorkspaceGuideAfterUpdate)(manifest, {
-        ...options, reportWarning: text => warnings.push(text), reportOk: text => successes.push(text),
-      });
-    } finally { Object.assign(fs, originals); syncBuiltinESMExports(); }
-    assert.equal(reached, 1, "the real retained-file publication decision was reached");
-    assert.equal(readFileSync(result.recoveryPath, "utf8"), before);
-    if (collision) {
-      assert.equal(readFileSync(destination, "utf8"), competitor, "the competing destination is never replaced");
-      assert.ok(existsSync(source), "the source is still reachable after exclusive publication refuses");
-      assert.equal(result.status, "not_written");
-      assert.equal(result.code, "WORKSPACE_RECOVERY_CONFLICT");
-      assert.equal(successes.length, 0);
-      assert.equal(warnings.length, 1);
-      assert.match(warnings[0], /WORKSPACE_RECOVERY_CONFLICT/);
-      assert.match(warnings[0], /another file appeared.*recovery/i);
-      assert.equal(existsSync(`${target}.lock`), true);
-      assert.equal(write(manifest, options).status, "not_written", "the unresolved lock blocks retry");
-    } else {
-      assert.equal(result.status, "written");
-      assert.equal(successes.length, 1);
-      assert.equal(warnings.length, 0);
-      assert.equal(existsSync(`${target}.lock`), false);
-      assert.equal(write(manifest, options).status, "verified");
-    }
-  });
-}
-
 test("R2 Windows native launch counts stay at the pre-change baseline", t => {
   const counts = {};
   function measured(folder, filename, write) {
@@ -1656,67 +1640,32 @@ test("R2 Windows native launch counts stay at the pre-change baseline", t => {
     codex_create: 10, codex_verified: 2, codex_refresh: 15, setup_both: 21, verify_both: 4, update_both: 30 });
 });
 
-for (const slot of ["pending", "previous"]) for (const fault of ["none", "source", "destination", "edit"]) {
-  test(`R2 retained link identity and content checks: ${slot} ${fault}`, t => {
-    const { root, manifest } = fixture(t), target = join(root, "AGENTS.md");
-    const before = `${CODEX}\n# Original owner guide\n`, competitor = "Concurrent owner annotation.\n";
-    writeFileSync(target, before);
-    const original = fs.linkSync;
-    let reached = 0, source, destination, displaced;
-    fs.linkSync = (from, to, ...args) => {
-      const retained = dirname(to).includes(".financial-brain-retained-") && (basename(to) === "previous" ? "previous" : "pending") === slot;
-      const result = original(from, to, ...args);
-      if (retained) {
-        reached++; source = from; destination = to;
-        if (fault === "source" || fault === "destination") {
-          const replaced = fault === "source" ? from : to;
-          displaced = join(root, "retained-original");
-          fs.renameSync(replaced, displaced);
-          writeFileSync(replaced, competitor, { flag: "wx" });
-        } else if (fault === "edit") writeFileSync(to, competitor);
-      }
-      return result;
-    };
-    syncBuiltinESMExports();
-    let result;
-    try { result = workspace.writeCodexWorkspaceGuide(manifest, options); }
-    finally { fs.linkSync = original; syncBuiltinESMExports(); }
-    assert.equal(reached, 1, "the real exclusive retained link was published before the injected race");
-    if (fault === "none") {
-      assert.equal(result.status, "written");
-      assert.equal(readFileSync(result.recoveryPath, "utf8"), before);
-      assert.equal(workspace.writeCodexWorkspaceGuide(manifest, options).status, "verified");
-    } else {
-      assert.equal(result.status, "not_written");
-      assert.equal(result.code, "WORKSPACE_RECOVERY_CONFLICT");
-      assert.ok(existsSync(source), "a failed identity or content readback never unlinks the source");
-      assert.ok(existsSync(destination));
-      assert.equal(readFileSync(fault === "source" ? source : destination, "utf8"), competitor);
-      if (displaced) assert.ok(existsSync(displaced), "the displaced original remains reachable");
-      assert.equal(existsSync(`${target}.lock`), true);
-      assert.equal(workspace.writeCodexWorkspaceGuide(manifest, options).status, "not_written");
-    }
-  });
-}
-
-test("R2 native smoke budget accepts slow startup and still rejects a hang", () => {
+test("R2 native smoke budget accepts slow startup and rejects either hung arm", () => {
   const source = readFileSync(new URL(import.meta.url), "utf8")
     .split('test("Windows native attributes accept a regular folder and refuse a junction"')[1]
     .split('test("Windows repeated refresh')[0];
-  const timeout = Number(source.match(/timeout: ([0-9_]+)/)[1].replaceAll("_", ""));
-  let calls = 0;
-  for (const [milliseconds, expected] of [[400, true], [22_000, true], [120_000, false]]) {
-    const accepted = workspace.windowsWorkspaceAttributesSafe(["C:\\Users\\owner\\folder"], {
-      environment: { SystemRoot: "C:\\Windows" },
-      run: () => {
+  const register = new Function("test", "fixture", "symlinkSync", "join", "workspace", "spawnSync", "assert",
+    'test("Windows native attributes accept a regular folder and refuse a junction"' + source);
+  for (const arm of ["regular", "junction"]) for (const milliseconds of [400, 22_000, 120_000]) {
+    let body, calls = 0, links = 0;
+    register((_name, _options, fn) => { body = fn; }, () => ({ root: "C:\\Users\\owner\\folder" }),
+      () => { links++; }, win32.join,
+      { windowsWorkspaceAttributesSafe: (paths, options) => workspace.windowsWorkspaceAttributesSafe(paths, {
+        ...options, environment: { SystemRoot: "C:\\Windows" },
+      }) },
+      (_command, _args, opts) => {
         calls++;
-        return milliseconds > timeout
-          ? { status: null, error: Object.assign(new Error("synthetic timeout"), { code: "ETIMEDOUT" }) }
-          : { status: 0, stdout: Buffer.from("safe"), stderr: Buffer.alloc(0) };
-      },
-    });
-    assert.equal(calls, [400, 22_000, 120_000].indexOf(milliseconds) + 1, "the timeout decision was reached");
-    assert.equal(accepted, expected);
+        assert.equal(opts.timeout, 45_000);
+        const junction = JSON.parse(opts.input).paths[0].endsWith("junction");
+        const elapsed = junction === (arm === "junction") ? milliseconds : 400;
+        return elapsed > opts.timeout
+          ? { status: null, signal: "SIGTERM", error: Object.assign(new Error("synthetic timeout"), { code: "ETIMEDOUT" }) }
+          : { status: junction ? 1 : 0, signal: null, stdout: Buffer.from(junction ? "" : "safe"), stderr: Buffer.alloc(0) };
+      }, assert);
+    assert.equal(typeof body, "function", "the actual native smoke callback was registered");
+    if (milliseconds > 45_000) assert.throws(() => body({}), /synthetic timeout/, `${arm} timeout must fail the smoke test`);
+    else assert.doesNotThrow(() => body({}));
+    assert.equal(links, 1);
+    assert.ok(calls >= (arm === "junction" ? 2 : 1), "the requested native decision was reached");
   }
-  assert.ok(timeout * 2 < 120_000, "the two native probes remain bounded below two minutes");
 });

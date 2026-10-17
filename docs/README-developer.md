@@ -2151,23 +2151,23 @@ lock still present blocks retries, including verification. Publication failures
 or concurrent edits after moving the original require explicit local recovery;
 setup/update warnings name the retained paths. No competing guide is unlinked
 or overwritten. Review all retained files before explicit local recovery.
-On an uncontested write the staging and original files are individually moved
-to a unique `<guide>.financial-brain-retained-<id>` directory through exclusive
-hard-link publication. Each destination receives fresh ownership/native checks;
-both names must match the expected identity and content before the source link
-is removed. A competing destination returns `WORKSPACE_RECOVERY_CONFLICT`,
-preserving the source, competing file and refresh lock for owner review. Local
-identity and content readbacks bracket release of the empty lock without adding
-native process launches. Windows can refuse to
-rename a whole directory while an editor holds a file inside it open. The
-original inode stays reachable, including after success, so that editor cannot
-lose a later edit. These local recovery directories are
+On an uncontested write the whole lock directory is moved to a unique
+`<guide>.financial-brain-retained-<id>` directory. Both staging and the original
+inode stay there, including after success, so an editor with an open original
+file descriptor cannot lose a later edit. These local recovery directories are
 never automatically deleted. Interrupted writes likewise require explicit
 recovery; never automatically clear their lock.
+In 0.4.17, Windows updates leave existing assistant guides untouched and print
+one notice even when both assistants are connected. Setup still creates missing
+guides; verification and macOS/Linux refresh behavior are unchanged. This avoids
+the Windows open-file refusal of the final directory rename, which can retain a
+lock after publication and block later refreshes. Refreshed Windows answer rules
+are deferred to 0.4.18 with a separately reviewed recovery protocol.
 Native Windows filesystem behavior remains a separate host/CI gate.
 Repeated writer tests inject only the native attribute probe, keeping filesystem
 identity, content, link and race checks real. A separate bounded Windows test
-checks native regular-folder and junction results; protocol tests cover probe
+checks native regular-folder and junction results and requires both children
+to finish within their startup budgets; a timeout fails either arm. Protocol tests cover probe
 failure and exact readback. Owner-contract Markdown and the reviewed technician
 skill stay LF on checkout because their sections are byte-pinned.
 
