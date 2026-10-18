@@ -1,7 +1,7 @@
 import { scopeIsUnrestricted } from "./grants.js";
 import { classifyLedgerQuestion, ledgerDay, shiftLedgerDay } from "./ledger-question.js";
 import { accountLinkPairsInWindow, accountLinkRequiredInWindow, effectivePeriodCovered, readEffectiveAccounts, readEffectiveBalances, readEffectiveTransactions } from "./ledger-reader.js";
-import { categoryFor, detectRecurring, isDirectedOwnedTransfer, isLoanAdvance, matchesCategory, matchesMerchant, matchesSender, merchantFor, normalizeMerchantText, pairOwnTransfers, sumMinor } from "./ledger-analysis.js";
+import { categoryFor, detectRecurring, isDirectedOwnedTransfer, isLoanAdvance, matchesCategory, matchesMerchant, matchesSender, merchantFor, normalizeMerchantText, pairOwnTransfers, senderFor, sumMinor } from "./ledger-analysis.js";
 
 const masked = account => /^\d{1,4}$/.test(account.mask || "") ? `account ****${account.mask}` : "account (mask unavailable)";
 const money = cents => `${cents < 0 ? "-" : ""}$${Math.floor(Math.abs(cents) / 100).toLocaleString("en-US")}.${String(Math.abs(cents) % 100).padStart(2, "0")}`;
@@ -10,6 +10,24 @@ const accountCoverage = accounts => accounts.map(a => ({
   account_mask: /^\d{1,4}$/.test(a.mask || "") ? a.mask : null,
   covered_to: a.covered_to || null, last_synced_at: a.last_synced_at || null,
 }));
+
+function senderIsUnattributed(row) {
+  const sender = senderFor(row);
+  // A channel, processor or generic bank label can describe a real receipt
+  // without identifying its payer. A failed name match is not absence proof.
+  const words = sender.match(/[\p{L}\p{N}]+/gu) || [];
+  if (!words.length || words.every(word => /^(?:\d+|ach|eft|wire|zelle|bank|cash|check|cheque|credit|direct|deposit|payment|receipt|transfer|settlement|online|mobile|unknown|unidentified|unattributed|unavailable|not|provided|payer|sender|customer|client|merchant|the|a|an)$/.test(word))) return true;
+  if (/^(?:unknown|unidentified|unattributed|unavailable|not provided|n a)(?: |$)/.test(sender)) return true;
+  if (/\b(?:processor|processing|payout|batch|batched)\b/.test(sender)) return true;
+  // An explicit payee or directed sender still controls attribution. A bare
+  // settlement label identifies the intermediary, not its underlying payer.
+  // Undirected channel-prefixed text may carry arbitrary bank reference codes;
+  // those suffixes cannot promote the channel into an identified sender.
+  const description = normalizeMerchantText(row.description);
+  return !row.payee && !/\b(?:from|by) /.test(description) &&
+    (/^(?:ach|eft|wire|zelle|cash|check|cheque|credit|deposit|payment|receipt|transfer|online|mobile)(?: |$)/.test(description) ||
+      /\b(?:settlement|payout|batch|batched)\b/.test(description));
+}
 
 function gapFor(reason, accounts = [], intent = {}) {
   const review = {
@@ -145,17 +163,32 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
   if (rows.some(row => !readableRow(row))) return { reason: "unreadable_transactions" };
   const bySlug = new Map(inventory.map(a => [a.account_slug, a]));
   if (intent.kind === "payment") {
-    const matched = rows.filter(row => {
-      if (row.direction !== "inflow" || (intent.amountMinor !== null && row.amount_minor !== intent.amountMinor)) return false;
+    const candidates = rows.filter(row => row.direction === "inflow" &&
+      (intent.amountMinor === null || row.amount_minor === intent.amountMinor));
+    const matched = [], unattributed = [];
+    for (const row of candidates) {
       // An amount narrows an attributed receipt; it cannot promote a memo
       // subject to sender or override a different explicit payee.
-      return matchesSender(row, intent.counterpartyWords);
-    });
-    const citations = matched.map((row, i) => citation(row, bySlug.get(row.effective_account_slug), i));
-    const answer = matched.length
+      if (matchesSender(row, intent.counterpartyWords)) matched.push(row);
+      else if (senderIsUnattributed(row)) unattributed.push(row);
+    }
+    const citations = [...matched, ...unattributed].map((row, i) => citation(row, bySlug.get(row.effective_account_slug), i));
+    let answer = matched.length
       ? matched.map((row, i) => `Found a deposit of ${money(row.amount_minor)} posted ${row.posted_on} in ${masked(bySlug.get(row.effective_account_slug))}: ${safeDescription(row.description)} [${i + 1}].`).join("\n")
-      : `No matching deposit in ${accounts.map(masked).join(", ")} between ${intent.from} and ${intent.to}; the bank feed covers through ${accounts.map(a => `${masked(a)}: ${a.live?.covered_to || "unknown (manual records only)"}`).join("; ")}.`;
-    return { answer, citations, ledger: { kind: "payment", found: matched.length > 0,
+      : unattributed.length ? "" : `No matching deposit in ${accounts.map(masked).join(", ")} between ${intent.from} and ${intent.to}; the bank feed covers through ${accounts.map(a => `${masked(a)}: ${a.live?.covered_to || "unknown (manual records only)"}`).join("; ")}.`;
+    const gaps = [];
+    const unattributedCitations = unattributed.map((_, i) => matched.length + i + 1);
+    if (unattributed.length) {
+      const detail = `I found ${unattributed.length} ${unattributed.length === 1 ? "deposit that doesn't" : "deposits that don't"} show who paid between ${intent.from} and ${intent.to}; I can't confirm whether any came from ${safeDescription(intent.counterpartyWords.join(" "))}.`;
+      answer += `${answer ? "\n" : ""}${detail}`;
+      for (const [i, row] of unattributed.entries()) answer += `\nUnattributed deposit: ${money(row.amount_minor)} posted ${row.posted_on} in ${masked(bySlug.get(row.effective_account_slug))}: ${safeDescription(row.description)} [${unattributedCitations[i]}].`;
+      gaps.push({ type: "ledger_attribution_unknown", reason: "sender_attribution_unknown",
+        from: intent.from, to: intent.to, count: unattributed.length, citations: unattributedCitations, detail });
+    }
+    return { answer, citations, gaps,
+      ...(unattributed.length ? { evidence_gate: { supported: true, complete: false, partial: true, reason: "sender_attribution_unknown" } } : {}),
+      ledger: { kind: "payment", found: matched.length ? true : unattributed.length ? null : false,
+      ...(unattributed.length ? { unattributed_count: unattributed.length, unattributed_citations: unattributedCitations } : {}),
       from: intent.from, to: intent.to, amount_minor: intent.amountMinor, accounts: accountCoverage(accounts) } };
   }
   if (intent.kind === "merchant" && intent.match) {
@@ -381,8 +414,8 @@ export async function withLedgerAnswer({ env, question, access, grantScope, scop
         const answer = await ledgerAnswer(env, intent, accounts, inventory);
         reason = answer.reason;
         if (!reason) return new Response(JSON.stringify({ mode: "think", answer: answer.answer,
-          citations: answer.citations, results: [], gaps: [], ledger: answer.ledger,
-          evidence_gate: { supported: true, complete: true, reason: "read from covered ledger rows" } }),
+          citations: answer.citations, results: [], gaps: answer.gaps || [], ledger: answer.ledger,
+          evidence_gate: answer.evidence_gate || { supported: true, complete: true, reason: "read from covered ledger rows" } }),
         { headers: { "Content-Type": "application/json" } });
       }
       gap = gapFor(reason, reason === 'ledger_account_link_required' ? disputed : accounts, intent);

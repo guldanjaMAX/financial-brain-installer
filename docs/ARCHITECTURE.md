@@ -849,7 +849,14 @@ extraction; unresolved attribution remains unknown. Generic-only sender clauses 
 an amountless payment, in named, `from` or `via` forms. Exact-amount questions
 retain their exact-cent constraint on the attributed sender. Budget, approval and planning qualifiers
 stay with documents instead of becoming merchant filters. Only posted inflows
-match. Without a
+match. A named-payment miss with unattributed inflows inside the same account,
+period and exact-cent scope lists those deposits with dates, amounts and ledger
+citations instead of claiming absence. Generic bank and processor labels do not
+establish the underlying payer. Such answers carry a `sender_attribution_unknown`
+gap and incomplete, partial evidence; `ledger.found` is `null` unless another
+receipt independently matches the sender. Confirmed matches remain visible beside
+the unknown candidates. Amount-only queries retain their exact-cent contract.
+Without a
 supplied period, a named payment without an amount searches 60 days; exact
 amounts retain the 30-day default. Recent deposits use 14 days, and largest
 expenses without a count list ten. The current named month ends today; period

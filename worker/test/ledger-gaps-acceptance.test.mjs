@@ -203,4 +203,92 @@ test('T4 opaque processor is unknown attribution, with a positive sender control
   assert.ok(!unknown.answer || !/no matching deposit|no payment.*(?:arrived|received)/i.test(unknown.answer),
     'an unattributed inflow cannot certify payer absence');
   assert.ok(unknown.gaps.some(g => /attribution|sender|unattributed/i.test(JSON.stringify(g))), 'attribution uncertainty must remain visible');
+  assertUnknownPayment(unknown, [[81327, '2034-06-15']]);
+  assert.match(unknown.answer, /Processor settlement/);
+  assert.equal(f.counts.answer + f.counts.verifier, 0, 'stored uncertainty needs no model');
+});
+
+function assertUnknownPayment(body, receipts) {
+  assert.equal(body.ledger?.kind, 'payment', 'payment decision reached');
+  assert.ok(body.sql.some(sql => /JOIN fin_transactions/.test(sql)), 'stored candidates read');
+  assert.equal(body.ledger.found, null, 'unknown attribution is neither found nor absent');
+  assert.equal(body.ledger.unattributed_count, receipts.length);
+  assert.deepEqual(body.ledger.unattributed_citations, receipts.map((_, i) => i + 1));
+  assert.deepEqual(body.citations.map(c => [c.amount_minor, c.posted_on]), receipts);
+  assert.equal(body.gaps[0].reason, 'sender_attribution_unknown');
+  assert.equal(body.evidence_gate.complete, false, 'clients must not certify payer absence');
+  assert.equal(body.evidence_gate.partial, true);
+  assert.match(body.answer, /can't confirm whether any came from payer one/i);
+  assert.doesNotMatch(body.answer, /no matching deposit|no payment.*(?:arrived|received)/i);
+  for (const [amount, day] of receipts) {
+    assert.ok(body.answer.includes((amount / 100).toLocaleString('en-US', { minimumFractionDigits: 2 })));
+    assert.ok(body.answer.includes(day));
+  }
+}
+
+for (const [index, description, payee] of [
+  [1, '', null], [2, 'ACH credit', null], [3, 'Deposit', null],
+  [4, 'Invoice for Payer One', null], [5, 'Opaque Rail payout', null],
+  [6, 'Batch 59387520', null], [7, 'Processor settlement', 'Synthetic Processor'],
+  [8, 'Deposit', 'Unknown'], [9, 'Deposit', '   '],
+  [10, 'ACH CREDIT CCD 59387520', null], [11, 'Credit posted', null],
+  [12, 'Deposit', 'Unknown merchant'], [13, 'Deposit', 'N/A'],
+  [14, 'Deposit', 'ACH settlement'],
+]) test(`T4 unidentified inflow ${index} cannot prove payer absence`, async t => {
+  const f = await fixture(t); f.account(); f.complete('operating', '2034-06-01', '2034-06-30');
+  f.add('candidate', 81327, 'inflow', description, { payee });
+  assertUnknownPayment(await f.ask('Did the payment of $813.27 from Payer One arrive in June 2034?'), [[81327, '2034-06-15']]);
+  // The same real row is an exact-amount receipt without a payer claim.
+  const control = await f.ask('Did the payment of $813.27 arrive in June 2034?');
+  assert.equal(control.ledger.found, true);
+  assert.equal(control.citations[0].amount_minor, 81327);
+  assert.equal(control.evidence_gate.complete, true);
+});
+
+test('T4 lists every unattributed candidate with separate citations and preserves a confirmed receipt', async t => {
+  const f = await fixture(t); f.account(); f.complete('operating', '2034-06-01', '2034-06-30');
+  f.add('first', 81327, 'inflow', 'Processor settlement', { day: '2034-06-16' });
+  f.add('second', 49123, 'inflow', 'ACH credit reference 59387520', { day: '2034-06-15' });
+  f.add('other', 99999, 'inflow', 'ACH from Payer Two', { payee: 'Payer Two' });
+  const unknown = await f.ask('Did the payment from Payer One arrive in June 2034?');
+  assertUnknownPayment(unknown, [[49123, '2034-06-15'], [81327, '2034-06-16']]);
+  assert.match(unknown.answer, /2 deposits/);
+  assert.match(unknown.answer, /\[1\]/); assert.match(unknown.answer, /\[2\]/);
+  assert.match(unknown.answer, /\[redacted\]/);
+  assert.doesNotMatch(unknown.answer, /59387520|999\.99/);
+  assert.ok(unknown.citations.every(c => c.account_mask === '26'));
+  f.add('known', 10001, 'inflow', 'ACH from Payer One', { payee: 'Payer One', day: '2034-06-17' });
+  const mixed = await f.ask('Did the payment from Payer One arrive in June 2034?');
+  assert.equal(mixed.ledger.found, true, 'a separately attributed receipt stays proven');
+  assert.equal(mixed.ledger.unattributed_count, 2);
+  assert.deepEqual(mixed.ledger.unattributed_citations, [2, 3]);
+  assert.deepEqual(mixed.citations.map(c => c.amount_minor), [10001, 49123, 81327]);
+  assert.match(mixed.answer, /Found a deposit of \$100\.01/);
+  assert.match(mixed.answer, /can't confirm whether any came from payer one/i);
+  assert.equal(mixed.evidence_gate.complete, false);
+});
+
+test('T4 unattributed candidates honor amount, period, account and active posted-inflow scope', async t => {
+  const f = await fixture(t); f.account(); f.account('reserve', '357', 'savings');
+  for (const slug of ['operating', 'reserve']) f.complete(slug, '2034-05-01', '2034-07-15');
+  f.add('outside-period', 81327, 'inflow', 'Processor settlement', { day: '2034-05-31' });
+  f.add('outside-account', 81327, 'inflow', 'Processor settlement', { account: 'reserve' });
+  f.add('outflow', 81327, 'outflow', 'Processor settlement');
+  f.add('other-amount', 81328, 'inflow', 'Processor settlement');
+  for (const id of ['pending', 'removed', 'superseded']) f.add(id, 81327, 'inflow', 'Processor settlement');
+  f.raw("UPDATE fin_transactions SET pending=1 WHERE txn_uid='pending'");
+  f.raw("UPDATE fin_transactions SET removed_at=?,removal_reason='synthetic' WHERE txn_uid='removed'", NOW);
+  f.raw("UPDATE fin_transactions SET superseded_by_id=999 WHERE txn_uid='superseded'");
+  const question = 'Did the payment of $813.27 from Payer One arrive in account 26 in June 2034?';
+  const absent = await f.ask(question);
+  assert.ok(absent.sql.some(sql => /JOIN fin_transactions/.test(sql)), 'nonempty snapshot reached candidate selection');
+  assert.equal(f.first('SELECT COUNT(*) n FROM fin_transactions').n, 7);
+  assert.equal(absent.ledger?.found, false);
+  assert.match(absent.answer, /No matching deposit/);
+  assert.equal(absent.evidence_gate.complete, true);
+  f.add('eligible', 81327, 'inflow', 'Processor settlement');
+  assertUnknownPayment(await f.ask(question), [[81327, '2034-06-15']]);
+  const amountOnly = await f.ask('Did the payment of $813.27 arrive in account 26 in June 2034?');
+  assert.equal(amountOnly.ledger.found, true);
+  assert.equal(amountOnly.citations.length, 1);
 });
