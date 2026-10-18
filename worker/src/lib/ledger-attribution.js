@@ -248,21 +248,30 @@ function parseStatement(description, registry, statementCache) {
         const identity = text.slice(start, end);
         step(identity.length);
         if (!grammar.name.test(identity)) continue;
-        // A comma can belong to a complete registered name, alongside its
-        // field-boundary readings. Never discard commas to salvage prose.
+        let boundaryOnly = false;
+        // A comma can belong to a complete name, alongside its field-boundary
+        // readings. A query match is only a hypothesis here; complete competing
+        // segmentations below must not split it into multiple explicit fields.
         if (identity.includes(',')) {
           step(identity.length);
-          const phraseMatch = registry[questionPhrases]?.has(normalizeMerchantText(identity)) &&
-            identity.split(',').every(part => normalizeMerchantText(part));
-          if (!registry[companyCommaSpellings]?.has(companyCommaKey(identity)) && !phraseMatch) continue;
+          const completeParts = identity.split(',').every(part => normalizeMerchantText(part));
+          const phraseMatch = registry[questionPhrases]?.has(normalizeMerchantText(identity)) && completeParts;
+          if (!registry[companyCommaSpellings]?.has(companyCommaKey(identity)) && !phraseMatch) {
+            if (!registry[questionPhrases] || !completeParts) continue;
+            // A competing unknown company name still supplies a complete
+            // field segmentation. Keep its boundaries without granting it
+            // identity authority or requiring it to match the question first.
+            boundaryOnly = true;
+          }
         }
         for (const tail of rest(end, allowSuffix, allowProse)) {
-          let payer = lookup(identity);
+          let payer = boundaryOnly ? { state: 'missing' } : lookup(identity);
           // An unlabelled whole description is not a bank payer field. Only
           // labelled senders or explicitly noted shorthand can use the phrase.
           if (payer.query_only && !labelled && !prefix && !tail.suffix) payer = { state: 'missing' };
-          add(results, { readings: [{ identity, payer, ...(prefix ? { prefix } : {}),
-            ...(tail.suffix ? { suffix: tail.suffix } : {}) }, ...tail.readings], fields: 1 + tail.fields });
+          add(results, { readings: [{ identity, payer, start, end, ...(prefix ? { prefix } : {}),
+            ...(tail.suffix ? { suffix: tail.suffix } : {}) }, ...tail.readings], fields: 1 + tail.fields,
+            fieldStarts: tail.fieldStarts });
         }
       }
       return results;
@@ -275,7 +284,10 @@ function parseStatement(description, registry, statementCache) {
         if (optional) for (const parse of name(opening, opening === start, false,
           opening === start ? null : channel[0].trim().toLowerCase().replace(grammar.spaces, ' '))) add(results, parse);
         const label = match(grammar.sender, opening);
-        if (label && (allowBare || label[0].includes(':'))) for (const parse of name(opening + label[0].length, false, !label[0].includes(':'), null, true)) add(results, parse);
+        if (label && (allowBare || label[0].includes(':'))) for (const parse of name(opening + label[0].length, false, !label[0].includes(':'), null, true))
+          // The opening label identifies the first field; it does not split
+          // two fields. Only labels reached through rest() supply boundaries.
+          add(results, { ...parse, fieldStarts: optional ? parse.fieldStarts : [opening, ...parse.fieldStarts] });
       }
       return results;
     }
@@ -286,7 +298,7 @@ function parseStatement(description, registry, statementCache) {
       const results = [];
       cache.set(key, results);
       if (start === text.length) {
-        add(results, { readings: [], fields: 0 }); return results;
+        add(results, { readings: [], fields: 0, fieldStarts: [] }); return results;
       }
       const separator = match(grammar.separator, start)[0];
       if (!separator.length) return results;
@@ -295,8 +307,8 @@ function parseStatement(description, registry, statementCache) {
       if (next === text.length) return results;
       const remainder = text.slice(next);
       if (separator.trim() === '') {
-        if (allowSuffix && grammar.suffix.test(remainder)) add(results, { readings: [], fields: 0, suffix: remainder.toLowerCase().replace(grammar.spaces, ' ') });
-        if (allowProse && grammar.prose.test(remainder)) add(results, { readings: [], fields: 1 });
+        if (allowSuffix && grammar.suffix.test(remainder)) add(results, { readings: [], fields: 0, fieldStarts: [], suffix: remainder.toLowerCase().replace(grammar.spaces, ' ') });
+        if (allowProse && grammar.prose.test(remainder)) add(results, { readings: [], fields: 1, fieldStarts: [] });
       }
       for (const [label, shape] of grammar.metadata) {
         const field = match(label, next);
@@ -306,17 +318,40 @@ function parseStatement(description, registry, statementCache) {
           const value = text.slice(valueStart, end);
           step(value.length);
           if (!(typeof shape === 'function' ? shape(value) : shape.test(value))) continue;
-          for (const tail of rest(end)) add(results, { readings: tail.readings, fields: 1 + tail.fields });
+          for (const tail of rest(end)) add(results, { readings: tail.readings, fields: 1 + tail.fields,
+            fieldStarts: [next, ...tail.fieldStarts] });
         }
       }
       for (const parse of senders(next, false, separator.trim() !== '')) add(results, parse);
       return results;
     }
-    const parses = senders(0, true);
+    let parses = senders(0, true);
     parser.parses = parses.length;
     parser.fields = Math.max(0, ...parses.map(parse => parse.fields));
     parser.complete = parses.length > 0;
     if (!parser.complete) parser.refusal = 'incomplete';
+    if (registry[questionPhrases]) {
+      // Unknown sender names still establish subsequent field boundaries in a
+      // complete segmentation. A question cannot turn those separate fields
+      // into a whole-name authority. Registered whole names keep their own
+      // independent authority, and structured payees never enter this parser.
+      const fieldStarts = new Set(parses.flatMap(parse => parse.fieldStarts));
+      parses = parses.map(parse => {
+        const resolved = parse.readings.every(reading => reading.payer.state === 'unique');
+        return { ...parse, readings: parse.readings.map(reading => {
+          if (!reading.payer.query_only) return reading;
+          for (const start of fieldStarts) {
+            step();
+            if (start > reading.start && start < reading.end)
+              return { ...reading, payer: { state: 'missing' } };
+          }
+          // The matching field needs its own fully resolved parse. Filtering
+          // only at the final decision would leak rejected query evidence to
+          // the requested-payer resolver, including from unresolved senders.
+          return resolved ? reading : { ...reading, payer: { state: 'missing' } };
+        }) };
+      });
+    }
     // Missing *alternative* names do not erase a registered whole name. But
     // at least one complete reading must resolve EVERY sender field. A known
     // sender followed by an unknown sender therefore cannot certify absence.

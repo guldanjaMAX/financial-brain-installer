@@ -880,8 +880,14 @@ account and qualifiers. This coverage check cannot discard an unregistered
 remainder such as ", Bank", or let Payment inside one name erase another payer.
 An uncovered payer clause still refuses. With no registered mentions, the
 question's complete payer phrase can support presence when it equals a
-structured bank payee or labelled sender in a complete statement parse after
-the same normalization. This phrase is a request-local hypothesis, separate
+structured bank payee or one complete labelled sender field after the same
+normalization. A matching statement parse must resolve every sender field.
+If any competing complete segmentation puts another explicit sender or metadata
+field inside that phrase, the phrase cannot establish presence. Unresolved
+names in that segmentation, including company names with commas, still
+establish field boundaries without gaining payer authority. Ordinary company
+commas remain usable when no complete field segmentation splits the name.
+This phrase is a request-local hypothesis, separate
 from registered identities; it creates no entity and is never reused by another
 question or a generic payer listing. Two distinct matched phrases refuse, as do
 registered-name conflicts and a damaged identity inventory. Only readable

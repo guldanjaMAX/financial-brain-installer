@@ -2233,7 +2233,10 @@ containing `By`, `From`, metadata words or company commas. Complete registered
 comma-bearing names retain their registered comma positions and participate
 alongside comma field-boundary readings, within
 the same caps; there is no generic comma-stripping retry. A question-local
-phrase can match a comma-bearing sender after normalization, but empty comma
+phrase can match a comma-bearing sender after normalization only when no
+competing complete segmentation splits that phrase into explicit fields.
+Unknown sender names, including company names with commas, still establish
+those field boundaries without gaining payer authority. Empty comma
 segments and incomplete fields still refuse. All registered readings must resolve
 to one entity slug, and at least one complete parse must resolve every sender
 field. Missing alternative names do not erase a unique registered whole name;
@@ -2303,7 +2306,9 @@ only strictly contained spellings. Equal or partly overlapping mentions remain;
 distinct slugs refuse. Complete clause coverage and unchanged scope are checked
 separately from identity. Without registered mentions, a complete requested
 phrase may support presence from an exactly normalized bank payee or labelled
-sender in a complete parse. That phrase remains separate from the registry and
+sender field in a parse that resolves every sender. A phrase spanning explicit
+fields in any competing complete segmentation refuses, even when those fields
+contain unregistered names. That phrase remains separate from the registry and
 never authorizes absence or zero. Two different matched phrases, registered
 conflicts, damaged registry spellings and uncovered clauses refuse. A registered
 payer can still be absent from a covered window with independently confirmed receipts.
@@ -2328,6 +2333,12 @@ amount mismatches, multiple phrases, stale question hypotheses, date/account
 scope and bounded refusal candidates. Refusals list at most ten masked deposits
 with dates, amounts, reasons and citations plus an omitted count. No payer is
 registered or persisted by an answer.
+`worker/test/ledger-field-segmentation.test.mjs` crosses every sender-label pair
+with comma, semicolon, pipe and newline boundaries, payment and income questions,
+and exact-name mode. Each refusal reaches a nonempty snapshot, retains the
+amount, and has exact structured-payee and single-field positive controls.
+Additional cases cover metadata boundaries, ordinary company commas and
+rejected phrase evidence from incomplete or unresolved parses.
 `worker/test/ledger-identity-gate.test.mjs` exercises identity authority,
 ambiguity, exact normalization, arbitrary metadata, and render-boundary masking.
 It also counts answered, answered-with-assumption and cannot-confirm results for realistic synthetic
