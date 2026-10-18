@@ -29,3 +29,51 @@ export const originatorFormats = [...explicitStatements,
   'SENDER: Payer One', 'SENDER NAME: Payer One',
   'BY: Payer One', 'WIRE FROM: Payer One | MEMO: 48261703',
 ];
+
+// Independent expected grammar: do not derive the oracle from the tokenizer.
+export const lineSeparators = ['\n', '\r', '\r\n', '\u2028', '\u2029', '\u0085'];
+export const expandedMetadataLabels = [
+  'TRACE NUMBER:', 'TRACE NO:', 'TRACE #', 'EFFECTIVE DATE:', 'EFF DATE:',
+  'ENTRY DATE:', 'SETTLEMENT DATE:', 'COMPANY ID:', 'CO ID:', 'ORIG ID:',
+  'INDIVIDUAL ID:', 'INDIVIDUAL NAME:', 'INDIVIDUAL ID/NAME:',
+];
+
+export function* boundaryReadingCases() {
+  const identities = [
+    { entity_slug: 'shorter', legal_name: 'Payer One', display_label: 'Short Supplier' },
+    { entity_slug: 'longer', legal_name: 'Payer Two', display_label: 'Long Supplier' },
+  ];
+  for (const separator of lineSeparators) for (const clause of ['FROM', 'BY', 'FROM:', 'SENDER:']) {
+    for (const same of [false, true]) yield {
+      family: 'line-separator', identities, state: same ? 'confirmed' : 'unknown',
+      description: `WIRE FROM: Payer One; REF: 48261703${separator}${clause} Payer ${same ? 'One' : 'Two'}`,
+      candidates: same ? ['Payer One'] : ['Payer One', 'Payer Two'],
+    };
+  }
+  for (const label of expandedMetadataLabels) for (const separator of lineSeparators) {
+    const description = `ACH CREDIT ORIG CO NAME: Payer One; ${label} 48261703`;
+    yield { family: 'expanded-label', identities, description, state: 'confirmed' };
+    yield { family: 'expanded-label', identities, description: `${description}${separator}FROM Payer Two`, state: 'unknown', candidates: ['Payer One', 'Payer Two'] };
+    yield { family: 'unknown-prose', identities, description: `FROM: Payer One${separator}UNLISTED FIELD: 48261703`, state: 'unknown' };
+  }
+  for (const label of ['REFERENCE:', ...expandedMetadataLabels]) {
+    const whole = `Payer One ${label} Services`;
+    for (const prefix of ['FROM:', 'WIRE FROM']) for (const tail of ['', '; REF: 48261703']) {
+      for (const registration of ['shorter', 'both', 'longer', 'aliases']) {
+        const registered = registration === 'aliases'
+          ? [{ entity_slug: 'shorter', legal_name: 'Payer One', display_label: whole }]
+          : [
+            ...(registration === 'longer' ? [] : [identities[0]]),
+            ...(registration === 'shorter' ? [] : [{ entity_slug: 'longer', legal_name: whole, display_label: 'Long Supplier' }]),
+          ];
+        yield { family: 'registered-whole', identities: registered,
+          description: `${prefix} ${whole}${tail}`,
+          state: registration === 'both' ? 'unknown' : 'confirmed',
+          selector: registration === 'longer' ? 'Long Supplier' : registration === 'aliases' ? 'Payer One' : 'Short Supplier',
+          slug: registration === 'longer' ? 'longer' : 'shorter',
+          candidates: registration === 'both' || registration === 'aliases' ? ['Payer One', whole] : undefined,
+        };
+      }
+    }
+  }
+}

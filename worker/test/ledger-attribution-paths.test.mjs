@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { ledgerFixture, NOW } from './ledger-review-fixture.mjs';
-import { originatorWords, originatorFormats } from './ledger-attribution-cases.mjs';
+import { originatorWords, originatorFormats, boundaryReadingCases } from './ledger-attribution-cases.mjs';
 import { LEDGER_ANSWER_KINDS, classifyLedgerQuestion } from '../src/lib/ledger-question.js';
 import { attributeInflow, payerRegistry } from '../src/lib/ledger-attribution.js';
 import { senderFor, merchantFor } from '../src/lib/ledger-analysis.js';
@@ -114,7 +114,7 @@ test('legacy sender helpers require the single decision and never parse inflow t
 });
 
 for (const [path, kind, question, named = false] of paths) test(`every-path generated matrix: ${path}`, async t => {
-  const f = setup(t, kind), stats = { path, kind, cases: 0, answers: 0, confirmed: 0, assumed: 0, unknown: 0, notes: 0 };
+  const f = setup(t, kind), stats = { path, kind, cases: 0, answers: 0, confirmed: 0, assumed: 0, unknown: 0, notes: 0, boundary_families: {} };
   identity(f, 'Unrelated Supplier', 'unrelated');
   const shorter = 'Synthetic Supplier';
   const longerLabels = originatorWords.flatMap(word => [
@@ -169,6 +169,12 @@ for (const [path, kind, question, named = false] of paths) test(`every-path gene
     await exercise(`WIRE FROM: Payer One; REF: 48261703${delimiter} ${clause} Payer One payment`, 'confirmed', 'Payer One');
   }
   for (const token of ['A-123', 'AB/12', 'A.1.2.3']) await exercise(token, 'confirmed', 'Payer One', { payee: 'Payer One' });
+  for (const arm of boundaryReadingCases()) {
+    f.raw("DELETE FROM fin_entities WHERE entity_slug IN ('shorter','longer')");
+    for (const entry of arm.identities) identity(f, entry.legal_name, entry.entity_slug, entry.display_label);
+    await exercise(arm.description, arm.state, arm.selector || 'Short Supplier');
+    stats.boundary_families[arm.family] = (stats.boundary_families[arm.family] || 0) + 1;
+  }
   assert.ok(stats.confirmed > 0 && stats.assumed > 0 && stats.unknown > 0, 'uniform arms invalidate the matrix');
   t.diagnostic(JSON.stringify({ attribution_path: stats }));
 });

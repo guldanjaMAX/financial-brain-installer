@@ -1,6 +1,27 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ledgerFixture, NOW } from './ledger-review-fixture.mjs';
+import { attributeInflow, payerRegistry } from '../src/lib/ledger-attribution.js';
+import { boundaryReadingCases } from './ledger-attribution-cases.mjs';
+
+for (const family of ['line-separator', 'expanded-label', 'registered-whole', 'unknown-prose']) {
+  test(`generated boundary readings: ${family}`, () => {
+    let cases = 0;
+    for (const arm of boundaryReadingCases()) {
+      if (arm.family !== family) continue;
+      const registry = payerRegistry(arm.identities);
+      const green = attributeInflow({ payee: arm.identities[0].legal_name }, registry);
+      assert.equal(green.state, 'confirmed', 'independent identity has a positive control');
+      const result = attributeInflow({ description: arm.description }, registry);
+      assert.ok(result.evidence.candidates.length, 'the attribution decision evaluated sender readings');
+      assert.equal(result.state, arm.state, JSON.stringify(arm));
+      if (arm.state === 'confirmed') assert.equal(result.entity_slug, arm.slug || 'shorter');
+      for (const candidate of arm.candidates || []) assert.ok(result.evidence.candidates.includes(candidate), JSON.stringify(arm));
+      cases++;
+    }
+    assert.ok(cases > 0);
+  });
+}
 
 test('a bare sender clause and a whole registered name agree only when they resolve to the same entity', async t => {
   const f = ledgerFixture(t);
