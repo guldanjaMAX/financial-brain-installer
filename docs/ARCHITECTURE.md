@@ -867,6 +867,19 @@ sender; they never supply identity. Multiple conflicting sender clauses remain
 unknown. Ordinary wire-transfer and ACH-payment descriptions retain answers
 when the exact extracted payer is independently confirmed.
 
+Undelimited descriptions have one explicit exception: a confirmed opening
+identity followed only by a closed transaction-type suffix may support presence
+or positive income with an assumption. Competing registered longer readings
+are ambiguous, with candidate names passed through the single masker. The
+closed suffix list lives in `ledger-answer.js`. Structured `assumptions[]`
+record the masked identity, canonical suffix, dependent row count, amount and
+citations; the final response renders every assumption in `notes` and offers
+the `ledger.flip` qualifier "exact names only". This qualifier leaves matching
+shorthand unknown. Shorthand cannot prove absence or zero for its payer, an
+indistinguishable unregistered longer name, or an excluded conditional total.
+An independently resolved different payer remains a normal nonmatch. Labelled
+fields retain exact whole-field matching. No stored identity or row is changed.
+
 Every posted inflow in the selected account and period must have a positively
 identified payer before a named absence or exact income total can be certified.
 This includes unknown deposits with a different amount from an exact-cent

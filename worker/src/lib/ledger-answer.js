@@ -57,6 +57,53 @@ const statementField = new RegExp(String.raw`(?:^|[\s;|,])(${senderLabel}|orig\s
 const isSenderLabel = new RegExp(`^${senderLabel}$`, 'i');
 const repeatedSender = new RegExp(String.raw`[;|\n]\s*(?:${senderChannel}\s+)?(?:from|by)\s+`, 'i');
 
+// This is the entire shorthand vocabulary. It describes transaction types,
+// never proof of a legal name; a registered longer reading is a conflict.
+const shorthandSuffixes = ['deposit', 'payment', 'receipt', 'payroll', 'settlement']
+  .flatMap(type => ['', 'ach ', 'eft ', 'wire ', 'zelle '].map(channel => channel + type));
+function openingPayer(description, identities) {
+  const full = lookupPayer(description, identities);
+  const text = description.normalize('NFKC').replace(/\s+/g, ' ');
+  const readings = [];
+  for (const suffix of shorthandSuffixes) {
+    if (!text.toLowerCase().endsWith(` ${suffix}`)) continue;
+    const identity = text.slice(0, -suffix.length - 1);
+    const payer = lookupPayer(identity, identities);
+    if (payer.state !== 'missing') readings.push({ ...payer, identity, suffix });
+  }
+  if (!readings.length) return full;
+  if (full.state !== 'missing' || readings.length > 1 || readings[0].state === 'ambiguous')
+    return { state: 'ambiguous', candidates: [...readings.map(r => r.identity), ...(full.state !== 'missing' ? [description] : [])] };
+  return { state: 'unique', slug: readings[0].slug, shorthand: readings[0] };
+}
+
+function payerAssumptions(rows, payers, citations) {
+  const groups = new Map();
+  for (const row of rows) {
+    const reading = payers?.get(row.id)?.shorthand;
+    if (!reading) continue;
+    const key = JSON.stringify([normalizeMerchantText(reading.identity), reading.suffix]);
+    if (!groups.has(key)) groups.set(key, { reading, rows: [] });
+    groups.get(key).rows.push(row);
+  }
+  const refs = new Map(citations.map(c => [c.ref, c.n]));
+  return [...groups.values()].map(({ reading, rows }) => ({
+    type: 'payer_shorthand', identity: safeDescription(reading.identity),
+    // Suffix is a canonical constant from the closed vocabulary, not raw text.
+    suffix: reading.suffix, count: rows.length, amount_minor: sumMinor(rows),
+    citations: rows.map(row => refs.get(`ledger:transaction:${row.id}`)), flip: 'exact names only',
+  }));
+}
+
+function withPayerAssumptions(result, rows, payers) {
+  const assumptions = payerAssumptions(rows, payers, result.citations);
+  if (!assumptions.length) return result;
+  result.assumptions = assumptions;
+  result.notes = assumptions.map(a => `Read the description as "${a.identity} + ${a.suffix}": ${a.count} ${a.count === 1 ? 'row' : 'rows'} totaling ${money(a.amount_minor)} ${a.count === 1 ? 'rests' : 'rest'} on that reading of a confirmed identity; say "${a.flip}" to leave these out`);
+  result.ledger.flip = [...(result.ledger.flip || []), 'exact names only'];
+  return result;
+}
+
 function identifiedPayer(row, identities) {
   if (row.payee) return lookupPayer(row.payee, identities);
   const description = String(row.description || '').trim();
@@ -83,12 +130,7 @@ function identifiedPayer(row, identities) {
     const prose = candidate.match(/^(.+?)\s+(?:(?:reference|ref|for\s+invoice)\s+\d[\d ./-]*|for\s+.+\s+invoice)$/i);
     return prose ? lookupPayer(prose[1], identities) : { state: 'missing' };
   }
-  const full = lookupPayer(description, identities);
-  if (full.state !== 'missing') return full;
-  // Whole-description and opening-name statement formats have no labelled
-  // fields. Only a terminal transaction wrapper may be removed, once.
-  const opening = description.match(/^(.+?)\s+(?:(?:ach|eft|wire|zelle)\s+)?(?:deposit|payment|receipt|payroll|settlement)$/i);
-  return opening ? lookupPayer(opening[1], identities) : { state: 'missing' };
+  return openingPayer(description, identities);
 }
 
 function gapFor(reason, accounts = [], intent = {}) {
@@ -221,7 +263,8 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     : { from: shiftLedgerDay(intent.from, -6), to: shiftLedgerDay(intent.to, 6), payerIdentities: namedPayer });
   const allRows = namedPayer ? snapshot.rows : snapshot;
   const identities = namedPayer ? payerIndex(snapshot.identities) : null;
-  const wanted = namedPayer ? lookupPayer(namedIncome ? intent.match : intent.counterparty, identities) : null;
+  const wantedLabel = namedPayer ? normalizeMerchantText(namedIncome ? intent.match : intent.counterparty) : '';
+  const wanted = namedPayer ? lookupPayer(wantedLabel, identities) : null;
   const selectorAmbiguous = wanted?.state === 'ambiguous';
   const payers = namedPayer ? new Map(allRows.map(row => [row.id, identifiedPayer(row, identities)])) : null;
   const payerMatches = row => wanted?.state === 'unique' && payers.get(row.id)?.state === 'unique' && payers.get(row.id).slug === wanted.slug;
@@ -239,7 +282,11 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
       // Every in-window inflow must have positive identity evidence before a
       // named absence or zero can be certified. Amount filters only narrow
       // confirmed matches; they cannot hide an unidentified receipt.
-      if (namedPayer && (selectorAmbiguous || payers.get(row.id).state !== 'unique')) unattributed.push(row);
+      const unregisteredReading = namedPayer && wanted.state === 'missing' && payers.get(row.id).shorthand &&
+        (normalizeMerchantText(row.description) === wantedLabel || normalizeMerchantText(row.description).startsWith(`${wantedLabel} `));
+      if (namedPayer && (selectorAmbiguous || unregisteredReading || payers.get(row.id).state !== 'unique' ||
+        (payerMatches(row) && payers.get(row.id).shorthand && (intent.exactNamesOnly || row.amount_minor === 0 ||
+          (payment && intent.amountMinor !== null && row.amount_minor !== intent.amountMinor))))) unattributed.push(row);
       else if ((!payment || intent.amountMinor === null || row.amount_minor === intent.amountMinor) &&
         (!namedPayer || payerMatches(row))) matched.push(row);
     }
@@ -256,26 +303,31 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
         (matched.length ? `\nConfirmed subtotal of attributed deposits (before transfer exclusions): ${money(confirmedSubtotal)}.\n${answer}` : "");
       const gaps = [];
       const unattributedCitations = unattributed.map((_, i) => matched.length + i + 1);
+      const payerCandidates = [...new Set(unattributed.flatMap(row => payers.get(row.id)?.candidates || []))].map(safeDescription);
       if (unattributed.length || selectorAmbiguous) {
         const detail = selectorAmbiguous
           ? `The requested payer label is ambiguous: it identifies more than one confirmed entity. I can't confirm which payer you mean. There are ${unattributed.length} candidate deposits between ${intent.from} and ${intent.to}; use a unique legal name or owner label.`
           : `I found ${unattributed.length} ${unattributed.length === 1 ? "deposit that doesn't" : "deposits that don't"} show who paid between ${intent.from} and ${intent.to}; I can't confirm whether any came from the requested payer.`;
         answer += `${answer ? "\n" : ""}${detail}`;
+        if (payerCandidates.length) answer += `\nThe description is ambiguous between confirmed names: ${payerCandidates.join('; ')}. I can't confirm which reading applies.`;
         for (const [i, row] of unattributed.entries()) answer += `\nUnattributed deposit: ${money(row.amount_minor)} posted ${row.posted_on} in ${masked(bySlug.get(row.effective_account_slug))}: ${safeDescription(row.description)} [${unattributedCitations[i]}].`;
         gaps.push({ type: "ledger_attribution_unknown", reason: "sender_attribution_unknown",
           from: intent.from, to: intent.to, count: unattributed.length, citations: unattributedCitations, detail });
       }
-      return { answer, citations, gaps,
+      return withPayerAssumptions({ answer, citations, gaps,
         ...(unattributed.length || selectorAmbiguous ? { evidence_gate: { supported: true, complete: false, partial: true, reason: "sender_attribution_unknown" } } : {}),
         ledger: { kind: intent.kind, found: matched.length ? true : unattributed.length || selectorAmbiguous ? null : false,
         ...(selectorAmbiguous ? { payer_selector_ambiguous: true } : {}),
+        ...(payerCandidates.length ? { payer_candidates: payerCandidates } : {}),
         ...(namedIncome ? { total_minor: null, lead_total_minor: null, confirmed_subtotal_minor: confirmedSubtotal,
           confirmed_citations: matched.map((_, i) => i + 1) } : { amount_minor: intent.amountMinor }),
         ...(unattributed.length ? { unattributed_count: unattributed.length, unattributed_citations: unattributedCitations } : {}),
-        from: intent.from, to: intent.to, accounts: accountCoverage(accounts) } };
+        from: intent.from, to: intent.to, accounts: accountCoverage(accounts) } }, matched, payers);
     }
   }
-  if (intent.kind === "merchant" && intent.match) {
+  // Named income already used independent identities. The legacy merchant
+  // text parser can strip a real terminal name word and must not overrule it.
+  if (intent.kind === "merchant" && intent.match && !namedIncome) {
     const wanted = normalizeMerchantText(intent.match);
     const directionRows = rows.filter(row => row.direction === intent.direction);
     const conjunction = text => text.replace(/\b(and)\b|&/g, "and");
@@ -327,7 +379,7 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
   });
   ledger.if_own_transfers = { accounts: conditionalAccounts };
   let conditionalDetail = conditionalAccounts.map((a, i) => `${masked(accounts[i])}: credits ${money(a.credits_minor)}; debits ${money(a.debits_minor)}`).join("; ");
-  let answer, leadDetail;
+  let answer, leadDetail, shorthandZero = false;
   if (intent.kind === "totals") {
     ledger.accounts = accounts.map(account => {
       const ownRows = activity.filter(row => row.effective_account_slug === account.account_slug);
@@ -376,12 +428,22 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     const directionRows = activity.filter(row => row.direction === intent.direction);
     const matched = intent.match ? directionRows.filter(row => (intent.kind === "merchant" ? merchantMatches(row) : matchesCategory(row, intent.match))) : directionRows;
     const unsorted = (intent.kind === "category" ? directionRows : matched).filter(row => !categoryFor(row));
+    // Exclusions cannot turn an assumed payer reading into a certified zero,
+    // including conditional transfer totals. Keep the supported gross figure.
+    const hasShorthand = namedIncome && matched.some(row => payers.get(row.id)?.shorthand);
+    const payerTotal = list => {
+      const total = sumMinor(list);
+      if (hasShorthand && total === 0) { shorthandZero = true; return null; }
+      return total;
+    };
+    const totalText = total => total === null ? 'not confirmed' : money(total);
     ledger.total_minor = sumMinor(matched); ledger.unsorted_minor = sumMinor(unsorted); ledger.found = matched.length > 0;
-    ledger.lead_total_minor = sumMinor(withoutLead(matched));
-    leadDetail = `Total money ${intent.direction === "inflow" ? "in" : "out"}${intent.match ? ` for ${safeDescription(intent.match)}` : ` by ${intent.kind}`}: ${money(ledger.lead_total_minor)}; Unsorted: ${money(sumMinor(withoutLead(unsorted)))}.`;
-    ledger.if_own_transfers.total_minor = sumMinor(withoutCandidates(matched));
+    ledger.lead_total_minor = payerTotal(withoutLead(matched));
+    leadDetail = `Total money ${intent.direction === "inflow" ? "in" : "out"}${intent.match ? ` for ${safeDescription(intent.match)}` : ` by ${intent.kind}`}: ${totalText(ledger.lead_total_minor)}; Unsorted: ${money(sumMinor(withoutLead(unsorted)))}.`;
+    if (hasShorthand && ledger.lead_total_minor === null) leadDetail = `Income before exclusions: ${money(ledger.total_minor)}.\n${leadDetail}`;
+    ledger.if_own_transfers.total_minor = payerTotal(withoutCandidates(matched));
     ledger.if_own_transfers.unsorted_minor = sumMinor(withoutCandidates(unsorted));
-    conditionalDetail = `total ${intent.direction === "inflow" ? "income" : "spend"}${intent.match ? ` for ${safeDescription(intent.match)}` : ` by ${intent.kind}`}: ${money(ledger.if_own_transfers.total_minor)}; Unsorted: ${money(ledger.if_own_transfers.unsorted_minor)}`;
+    conditionalDetail = `total ${intent.direction === "inflow" ? "income" : "spend"}${intent.match ? ` for ${safeDescription(intent.match)}` : ` by ${intent.kind}`}: ${totalText(ledger.if_own_transfers.total_minor)}; Unsorted: ${money(ledger.if_own_transfers.unsorted_minor)}`;
     const groups = new Map();
     for (const row of matched) {
       const label = intent.kind === "category" ? categoryFor(row) : merchantFor(row) || "unknown merchant";
@@ -396,7 +458,7 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     ledger.groups = orderedGroups.map(g => ({ [intent.kind]: safeDescription(g.label),
       category_basis_state: g.state, total_minor: sumMinor(g.rows), citations: g.rows.map(row => cite(row).n),
       possible_transfer_citations: g.rows.filter(row => pairing.candidateRows.has(row.id)).map(row => cite(row).n),
-      if_own_transfers_total_minor: sumMinor(withoutCandidates(g.rows)) }));
+      if_own_transfers_total_minor: payerTotal(withoutCandidates(g.rows)) }));
     answer = `Total ${intent.direction === "inflow" ? "income" : "spend"}${intent.match ? ` for ${safeDescription(intent.match)}` : ` by ${intent.kind}`}: ${money(ledger.total_minor)}.`;
     if (!matched.length) answer += " No matching transactions found.";
     for (const g of orderedGroups) answer += `\n${safeDescription(g.label)}${g.state === "proposed" ? " (bank's category (unconfirmed))" : ""}: ${money(sumMinor(g.rows))} ${refs(g.rows)}${g.rows.some(row => pairing.candidateRows.has(row.id)) ? " (includes possible moves between your own accounts)" : ""}.`;
@@ -461,7 +523,13 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     ? noteExcluded.has(row.id) ? "left out of the first figures as a retirement or investment withdrawal; kept in the gross figures"
       : "retirement or investment withdrawal excluded from the wider candidate pool; outside the displayed rows"
     : "retained in income/spend totals"}): ${rowLine(row)}.`;
-  return { answer, citations, ledger };
+  const uncertainty = shorthandZero ? {
+    gaps: [{ type: 'ledger_attribution_unknown', reason: 'shorthand_zero_unconfirmed',
+      detail: 'A zero after exclusions is not confirmed for this payer while a deposit depends on shorthand.' }],
+    evidence_gate: { supported: true, complete: false, partial: true, reason: 'shorthand_zero_unconfirmed' },
+  } : {};
+  if (shorthandZero) answer += `\n${uncertainty.gaps[0].detail}`;
+  return withPayerAssumptions({ answer, citations, ledger, ...uncertainty }, namedIncome ? figureRows : [], payers);
 }
 
 // The only integration point wraps the existing document path. Non-money
@@ -497,7 +565,9 @@ export async function withLedgerAnswer({ env, question, access, grantScope, scop
       if (!reason) {
         const answer = await ledgerAnswer(env, intent, accounts, inventory);
         reason = answer.reason;
-        if (!reason) return new Response(JSON.stringify({ mode: "think", answer: answer.answer,
+        if (!reason) return new Response(JSON.stringify({ mode: "think",
+          answer: answer.answer + (answer.notes?.length ? `\nNote: ${answer.notes.join('; ')}.` : ''),
+          ...(answer.assumptions?.length ? { assumptions: answer.assumptions, notes: answer.notes } : {}),
           citations: answer.citations, results: [], gaps: answer.gaps || [], ledger: answer.ledger,
           evidence_gate: answer.evidence_gate || { supported: true, complete: true, reason: "read from covered ledger rows" } }),
         { headers: { "Content-Type": "application/json" } });

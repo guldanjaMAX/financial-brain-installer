@@ -131,7 +131,10 @@ function phaseTwoQuestion(q, intent, today) {
 const ARRIVAL = "arrive|arrived|receive|received|come|came|land|landed|hit|reach|reached|clear|cleared|post|posted";
 function paymentParties(text) {
   const clause = preposition => text.match(new RegExp(`\\b${preposition}\\s+(.+?)(?=\\s+(?:on|into|to|in|for|from|via|${ARRIVAL})\\b|[?,]|$)`));
-  const namedPayment = text.match(/^(?:did|has|have)\s+(?:(?:the|my|our|a|an)\s+)?([\p{L}\p{N}]+(?:\s+[\p{L}\p{N}]+){0,3})\s+payment\b/u);
+  // A payer ending in "payment" after FROM must not also be consumed as a
+  // noun-first payer, duplicating the clause and certifying a false nonmatch.
+  const namedPayment = /^(?:did|has|have)\s+(?:(?:the|my|our|a|an)\s+)?payment\s+(?:from|via)\b/.test(text) ? null
+    : text.match(/^(?:did|has|have)\s+(?:(?:the|my|our|a|an)\s+)?([\p{L}\p{N}]+(?:\s+[\p{L}\p{N}]+){0,3})\s+payment\b/u);
   const named = namedPayment && !/^(?:the|my|our|a|an)$/.test(namedPayment[1]) ? namedPayment[1] : "";
   return { partyMatch: clause("from"), viaMatch: clause("via"), namedPayment, named };
 }
@@ -147,6 +150,10 @@ export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
   const transfers = [...q.matchAll(/(?:,\s*)?\b(excluding|without|not counting|including) (?:my |our )?(?:own )?transfers(?: between (?:my|our) (?:own )?accounts)?\b/g)];
   const withdrawals = [...q.matchAll(/(?:,\s*)?\bincluding (?:retirement |investment )?withdrawals\b/g)];
   const loanProceeds = [...q.matchAll(/(?:,\s*)?\bincluding loan proceeds\b/g)];
+  // Like transfer flips, the owner repeats the scoped question with this
+  // qualifier. Do not silently widen an unsupported standalone follow-up.
+  const exactNames = q.match(/,?\s+exact names only(?=[?!.]*$)/);
+  if (exactNames) q = q.replace(exactNames[0], '');
   if (transfers.length > 1 || withdrawals.length > 1 || loanProceeds.length > 1) return base;
   const flags = {};
   if (transfers.length) { flags.ownTransfers = transfers[0][1] === "including" ? "include" : "exclude"; q = q.replace(transfers[0][0], ""); }
@@ -164,7 +171,7 @@ export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
   if (masks.length > 1) return base;
   const kinds = [...new Set(scopeText.match(/\b(?:checking|savings|card|loan|investment|retirement|escrow)\b/g) || [])];
   const selector = { mask: masks[0] || null, accountKind: kinds.length === 1 ? kinds[0] : null };
-  const intent = { ...base, ...selector, ...flags };
+  const intent = { ...base, ...selector, ...flags, ...(exactNames ? { exactNamesOnly: true } : {}) };
   const withoutMasks = text => maskMatches.reduce((rest, match) => rest.replace(match[0], ""), text);
   const punctuationOnly = text => !text.replace(/[?'.,:]/g, "").trim();
   if (kinds.length > 1) return intent;

@@ -392,6 +392,9 @@ for (const kind of ["loan", "line_of_credit"]) test(`R3 ${kind} advances are not
 
 test("m1 only excluded rows contributing to this figure justify a Note", async t => {
   const f = await fixture(t);
+  // Keep the transfer-only no-note contract on exact payer fields. Shorthand
+  // has its own mandatory note even when no transfer changes this figure.
+  f.raw("UPDATE fin_transactions SET description='FROM: Fixture client' WHERE description='Fixture client deposit'");
   for (const question of ["How much did I spend at Fixture Store in September 2026?", "How much income came from Fixture client in September 2026?", Q.recurring]) {
     const body = await f.ask(question);
     assert.equal(body.ledger.transfers.length, 1, "the excluded-pair decision was reached");
@@ -400,6 +403,15 @@ test("m1 only excluded rows contributing to this figure justify a Note", async t
   }
   const control = await ask(f);
   assert.match(control.answer, /left out of the first figures/);
+  f.raw("UPDATE fin_transactions SET description='Fixture client deposit' WHERE description='FROM: Fixture client'");
+  const shorthand = await ask(f, "How much income came from Fixture client in September 2026?", 'merchant');
+  assert.equal(shorthand.ledger.total_minor, 73129);
+  assert.equal(shorthand.ledger.default_exclusions.own_transfer_pairs, 0);
+  assert.doesNotMatch(shorthand.answer, /left out of the first figures/);
+  assert.equal(shorthand.assumptions[0].type, 'payer_shorthand');
+  assert.equal(shorthand.assumptions[0].amount_minor, 73129);
+  assert.deepEqual(shorthand.ledger.flip, ['exact names only']);
+  assert.ok(shorthand.notes.every(note => shorthand.answer.includes(note)));
 });
 
 test("m2 unmatched category withdrawals disclose the same exclusion as the lead", async t => {

@@ -147,6 +147,9 @@ test("payment edges are inclusive, optional mask and counterparty are exact, and
   for (const [id, date] of [["before", "2026-09-07"], ["start", "2026-09-08"], ["end", "2026-09-22"], ["after", "2026-09-23"]]) {
     f.add(id, "live-account", date, 5011, "inflow", "Fixture payer deposit");
   }
+  // Exact fields retain the original edge/amount contract. Under the shorthand
+  // contract, the other amount remains visible as an uncertain payer receipt.
+  f.raw("UPDATE fin_transactions SET description='FROM: Fixture payer' WHERE direction='inflow'");
   const body = await direct(f, "Did the payment of $50.11 from Fixture payer arrive on 2026-09-15 in account 4321?");
   assert.equal(body.ledger.found, true);
   assert.deepEqual(body.citations.map(c => c.posted_on), ["2026-09-08", "2026-09-22"]);
@@ -158,6 +161,19 @@ test("payment edges are inclusive, optional mask and counterparty are exact, and
   assert.deepEqual([classifyLedgerQuestion("Did the payment of $120.01 arrive?", { now: NOW }).from,
     classifyLedgerQuestion("Did the payment of $120.01 arrive?", { now: NOW }).to], ["2026-09-12", "2026-10-11"]);
   assert.equal((await direct(f, "Did the payment of $120.00 arrive?")).ledger.found, false);
+  f.raw("UPDATE fin_transactions SET description='Fixture payer deposit' WHERE direction='inflow'");
+  const shorthand = await (await f.ask("Did the payment of $50.11 from Fixture payer arrive on 2026-09-15 in account 4321?")).json();
+  assert.ok(f.seen.sql.some(sql => /JOIN fin_transactions/.test(sql)), 'real Think attribution decision reached');
+  assert.equal(shorthand.ledger.found, true);
+  assert.equal(shorthand.evidence_gate.complete, false);
+  assert.equal(shorthand.ledger.unattributed_count, 1);
+  const assumption = shorthand.assumptions[0];
+  assert.equal(assumption.type, 'payer_shorthand');
+  assert.equal(assumption.count, 2); assert.equal(assumption.amount_minor, 10022);
+  assert.deepEqual(shorthand.citations.filter(c => assumption.citations.includes(c.n)).map(c => c.posted_on), ['2026-09-08', '2026-09-22']);
+  assert.equal(shorthand.citations[shorthand.ledger.unattributed_citations[0] - 1].amount_minor, 12001);
+  assert.ok(shorthand.ledger.flip.includes('exact names only'));
+  assert.ok(shorthand.notes.every(note => shorthand.answer.includes(note)), 'Think must render every shorthand assumption note');
 });
 
 test("ambiguous and missing accounts, missing balances, unreadable and partial coverage fall through", async (t) => {

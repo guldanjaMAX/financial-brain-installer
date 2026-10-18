@@ -2210,15 +2210,27 @@ payer. Standard wire-transfer/ACH-payment sender clauses and explicit
 independent identity check. Conflicting fields remain unknown.
 Sender and metadata labels are segmented with their delimiters before identity
 normalization. Words such as `By` or `Reference` inside a name do not split it.
-The entire sender field must match; a longer unregistered name cannot authorize
-a shorter registered payer. Uncertain shorthand segmentation remains unknown.
+The entire labelled sender field must match; a longer unregistered field cannot
+authorize a shorter registered payer. Bare shorthand instead permits a confirmed
+opening identity plus one closed transaction suffix from `ledger-answer.js`
+(including payment, ACH deposit and payroll). Any competing registered longer
+reading is ambiguous; masked candidate names are shown. Accepted shorthand
+presence and income carry `assumptions[]`, cited row counts and amounts, and
+owner-facing `notes` rendered into the answer. Each note states the masked
+"identity + suffix" reading and offers `ledger.flip: ["exact names only"]`.
+Repeat the scoped question with that qualifier to leave shorthand out; such
+rows remain unknown for that payer, rather than proving absence or zero.
+Different confirmed payers remain nonmatches. Amount mismatches, zero-valued
+receipts and queries for an indistinguishable unregistered longer name also
+cannot turn shorthand into a named absence. Zero totals after exclusions stay
+unconfirmed, while a positive gross figure retains its assumption note.
 Free-text candidate fields use one conservative masker: every alphanumeric run
 of at least five characters, including letters and punctuation/space-separated
 runs, exposes only its last four. Ordinary long words are masked too. This
 changes display labels, not stored data or financial amounts. The property suite
 `worker/test/ledger-identity-gate.test.mjs` exercises identity authority,
 ambiguity, exact normalization, arbitrary metadata, and render-boundary masking.
-It also counts answered versus cannot-confirm results for realistic synthetic
+It also counts answered, answered-with-assumption and cannot-confirm results for realistic synthetic
 statements and enumerates all nine answer kinds, transfer display variants,
 account-link refusals and every other direct/fallback gap reason. Institution
 text uses the same masker; link commands use account placeholders. Structured
