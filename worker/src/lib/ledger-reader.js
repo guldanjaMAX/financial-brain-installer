@@ -126,17 +126,26 @@ export function accountLinkPairsInWindow(account, intent) {
   });
 }
 
-async function snapshotRows(env, accounts, sql, binds, { tenantId, mask, accountKind }) {
+async function snapshotRows(env, accounts, sql, binds, { tenantId, mask, accountKind, payerIdentities = false }) {
   // D1 batches run transactionally. Re-read the account mapping beside the
   // rows in that same snapshot, so a sync/assignment after account selection
   // cannot combine old coverage exclusions with new transactions or balances.
-  const [inventory, facts] = await env.DB.batch([
+  const [inventory, facts, identities] = await env.DB.batch([
     env.DB.prepare(ACCOUNTS_SQL).bind(tenantId, MAX_ACCOUNTS + 1),
     env.DB.prepare(sql).bind(...binds),
+    // Payer authority and receipts must come from the same snapshot. A bank
+    // payee string never creates a known identity, even on a confirmed row.
+    ...(payerIdentities ? [env.DB.prepare(`SELECT entity_slug,legal_name,display_label FROM fin_entities
+      WHERE tenant_id=? AND superseded_by_id IS NULL AND basis_state='confirmed'
+      ORDER BY entity_slug LIMIT ?`).bind(tenantId, MAX_ROWS + 1)] : []),
   ]);
   if (!Array.isArray(inventory?.results) || !Array.isArray(facts?.results)) throw new Error("ledger snapshot unavailable");
   const current = groupAccounts(inventory.results).filter(a => (!mask || a.mask === mask) && (!accountKind || a.account_kind === accountKind));
   if (JSON.stringify(current) !== JSON.stringify(accounts)) throw new Error("ledger mapping changed");
+  if (payerIdentities) {
+    if (!Array.isArray(identities?.results) || identities.results.length > MAX_ROWS) throw new Error("ledger identities unavailable");
+    return { rows: facts.results, identities: identities.results };
+  }
   return facts.results;
 }
 
@@ -186,7 +195,7 @@ export function effectivePeriodCovered(account, from, to) {
   return false;
 }
 
-export async function readEffectiveTransactions(env, accounts, { from, to, amountMinor = null,
+export async function readEffectiveTransactions(env, accounts, { from, to, amountMinor = null, payerIdentities = false,
   tenantId = env.BANK_FEED_TENANT || DEFAULT_TENANT, mask = null, accountKind = null } = {}) {
   if (accounts.some(unknownTwinCoverage)) throw new Error("ledger twin coverage unknown");
   const mapping = accounts.flatMap(account => account.members.map(member => ({
@@ -225,11 +234,13 @@ export async function readEffectiveTransactions(env, accounts, { from, to, amoun
     ${select} AND t.posted_on BETWEEN ?3 AND ?4
     UNION ALL ${select} AND t.posted_on IS NULL
     ) LIMIT ?6`,
-  [JSON.stringify(mapping), tenantId, from, to, amountMinor, MAX_ROWS + 1], { tenantId, mask, accountKind });
-  if (result.length > MAX_ROWS) throw new Error("ledger row limit");
+  [JSON.stringify(mapping), tenantId, from, to, amountMinor, MAX_ROWS + 1], { tenantId, mask, accountKind, payerIdentities });
+  const transactions = payerIdentities ? result.rows : result;
+  if (transactions.length > MAX_ROWS) throw new Error("ledger row limit");
   // Sorting in SQL before LIMIT scans the entire covered range. Sort only
   // after the bound is proven, so a large ledger stops at the overflow row.
-  return result.sort((a, b) => String(a.posted_on || "").localeCompare(String(b.posted_on || "")) || a.id - b.id);
+  transactions.sort((a, b) => String(a.posted_on || "").localeCompare(String(b.posted_on || "")) || a.id - b.id);
+  return result;
 }
 
 export async function readEffectiveBalances(env, accounts, {

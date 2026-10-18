@@ -1,3 +1,4 @@
+import { seedKnownPayers } from './ledger-known-payers-fixture.mjs';
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
@@ -86,6 +87,7 @@ async function fixture(t, reverse = false) {
     SESSION_SIGNING_KEY: randomBytes(32).toString("hex"), AI: { async run() { return { response: "No document answer." }; } } } });
   t.after(() => f.close());
   seedOwnedEntity(f, "owner", "Owner");
+  seedKnownPayers(f, ['Synthetic payer', 'Fixture Payer', 'Paywirerate', 'Paywire'], NOW);
   f.raw(`INSERT INTO bank_feed_items (item_ref,access_ciphertext,access_iv,environment,connected_at,last_synced_at)
     VALUES ('synthetic-feed',?,?,'sandbox','2026-10-01T00:00:00Z',?)`, randomBytes(32).toString("base64"), randomBytes(12).toString("base64"), NOW);
   f.raw(`INSERT INTO bank_feed_backfill (item_ref,requested_days,state,queued_at,finished_at,provider_history_state)
@@ -210,6 +212,6 @@ test("top spending categories rank exact totals rather than posting order", asyn
   const body = await f.ask("Show my spending in September 2026, top categories.");
   assert.ok(f.seen.sql.slice(before).some(sql => /JOIN fin_transactions/.test(sql)), "category grouping reached");
   assert.equal(body.ledger?.total_minor, 19144);
-  assert.deepEqual(body.ledger.groups.map(g => [g.category, g.total_minor]), [["software", 12345], ["office", 6799]]);
-  assert.ok(body.answer.indexOf("software: ") < body.answer.indexOf("office: "));
+  assert.deepEqual(body.ledger.groups.map(g => [g.category, g.total_minor]), [["[redacted] ****ware", 12345], ["[redacted] ****fice", 6799]]);
+  assert.ok(body.answer.indexOf("[redacted] ****ware: ") < body.answer.indexOf("[redacted] ****fice: "));
 });

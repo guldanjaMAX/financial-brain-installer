@@ -1,3 +1,4 @@
+import { seedKnownPayers } from './ledger-known-payers-fixture.mjs';
 import test from 'node:test';
 import { readBankExport } from '../src/lib/bank-export.js';
 import { importBankExport, prepareBankExportImport } from '../src/lib/fin-import.js';
@@ -22,13 +23,14 @@ export function fixture(t) {
   const sqlite = new DatabaseSync(':memory:');
   sqlite.exec(schema);
   t.after(() => sqlite.close());
-  const seen = { sql: [], rowCounts: [], fallbacks: 0, gaps: [] };
+  const seen = { sql: [], rowCounts: [], transactionRowCounts: [], fallbacks: 0, gaps: [] };
   const execute = (sql, params, mode = 'all') => {
     seen.sql.push(sql);
     const stmt = sqlite.prepare(sql);
     if (mode === 'first') return stmt.get(...params) ?? null;
     if (mode === 'run') return { meta: { changes: Number(stmt.run(...params).changes) } };
     const results = stmt.all(...params); seen.rowCounts.push(results.length);
+    if (/JOIN fin_transactions/.test(sql)) seen.transactionRowCounts.push(results.length);
     return { results };
   };
   const prepare = (sql, params = []) => ({ sql, params,
@@ -78,6 +80,7 @@ export function fixture(t) {
     },
   };
   f.entity('business-one'); f.entity('business-two'); f.entity('personal', 'household');
+  seedKnownPayers(f, ['Outside Buyer', 'Settlement Platform', 'Investment Platform'], NOW);
   return f;
 }
 
@@ -149,8 +152,11 @@ test('C19 distinct literal conjunction merchants remain distinct', async t => {
     f.add(`purchase-${i}`, 'operating', (i + 1) * 100, 'outflow', merchant, { payee: merchant });
   const listed = await f.ask(`How much did I spend by merchant ${PERIOD}?`); reached(f, listed, 'merchant');
   assert.equal(listed.ledger.groups.length, 3);
-  for (const group of listed.ledger.groups) {
-    const body = await f.ask(`How much did I spend at ${group.merchant} ${PERIOD}?`);
+  for (const [index, group] of listed.ledger.groups.entries()) {
+    const refused = await f.ask(`How much did I spend at ${group.merchant} ${PERIOD}?`);
+    assert.equal(refused.gaps[0].reason, 'merchant_selector_unsupported');
+    const original = ['Tools and Supply', 'Tools & Supply', 'Tools Supply'][index];
+    const body = await f.ask(`How much did I spend at ${original} ${PERIOD}?`);
     assert.equal(body.ledger.total_minor, group.total_minor);
     assert.equal(body.citations.length, 1);
   }
@@ -161,7 +167,7 @@ test('C19 unknown sender label cannot round-trip as a certified zero', async t =
   f.add('unknown', 'operating', 81327, 'inflow', 'Invoice for Studio Buyer');
   const listed = await f.ask(`How much income by merchant ${PERIOD}?`); reached(f, listed, 'merchant');
   assert.equal(listed.ledger.total_minor, 81327);
-  assert.equal(listed.ledger.groups[0].merchant, 'unknown merchant');
+  assert.equal(listed.ledger.groups[0].merchant, '[redacted] ****hant');
   const requested = await f.ask(`How much income came from ${listed.ledger.groups[0].merchant} ${PERIOD}?`);
   assert.equal(requested.ledger, undefined);
   assert.equal(requested.gaps[0].reason, 'merchant_selector_unsupported');
@@ -211,7 +217,7 @@ for (const withAmount of [false, true]) test(`${withAmount ? 'REGRESSION PM02' :
   f.add('receipt', 'operating', 81327, 'inflow', 'Transfer from Outside Buyer for Studio Buyer invoice', { payee: 'Outside Buyer' });
   const body = await f.ask(`Did the payment ${withAmount ? 'of $813.27 ' : ''}from Studio Buyer arrive ${PERIOD}?`);
   reached(f, body, 'payment');
-  assert.equal(f.seen.rowCounts.at(-1), 1, 'the conflicting receipt was actually read');
+  assert.equal(f.seen.transactionRowCounts.at(-1), 1, 'the conflicting receipt was actually read');
   assert.equal(body.ledger.found, false, 'a memo mention must not confirm the wrong payer');
 });
 
@@ -228,7 +234,7 @@ for (const payee of ['Outside Buyer', null]) test(`${payee ? 'CONTROL PM03' : 'R
   const f = fixture(t); f.account('operating', '26');
   f.add('receipt', 'operating', 81327, 'inflow', 'Zelle from Outside Buyer for Studio Buyer invoice', { payee });
   const body = await f.ask(`How much income came from Studio Buyer ${PERIOD}?`); reached(f, body, 'merchant');
-  assert.equal(f.seen.rowCounts.at(-1), 1);
+  assert.equal(f.seen.transactionRowCounts.at(-1), 1);
   assert.equal(body.ledger.lead_total_minor, 0, 'memo subject is not sender attribution');
 });
 
@@ -254,7 +260,7 @@ for (const twoAccounts of [false, true]) test(`${twoAccounts ? 'DEFERRED C23' : 
   for (const month of ['04', '05', '06']) for (const slug of twoAccounts ? ['card-one', 'card-two'] : ['card-one'])
     f.add(`${slug}-${month}`, slug, 2900, 'outflow', 'Workspace Software', { day: `2034-${month}-15`, payee: 'Workspace Software' });
   const body = await f.ask('What are my recurring charges in Q2 2034?'); reached(f, body, 'recurring');
-  assert.equal(f.seen.rowCounts.at(-1), twoAccounts ? 6 : 3);
+  assert.equal(f.seen.transactionRowCounts.at(-1), twoAccounts ? 6 : 3);
   assert.equal(body.ledger.monthly_total_minor, twoAccounts ? 0 : 2900);
   assert.match(body.answer, /detected, not confirmed/);
 });
@@ -277,7 +283,11 @@ for (const merchant of ['Tools Supply', 'Tools and Supply']) test(`${merchant.in
   f.add('purchase', 'operating', 27139, 'outflow', merchant, { payee: merchant });
   const listed = await f.ask(`How much did I spend by merchant ${PERIOD}?`); reached(f, listed, 'merchant');
   assert.equal(listed.ledger.total_minor, 27139);
-  const label = listed.ledger.groups[0].merchant.replace(/\band\b/g, '&');
+  assert.match(listed.ledger.groups[0].merchant, /\[redacted\]/);
+  const redacted = await f.ask(`How much did I spend at ${listed.ledger.groups[0].merchant} ${PERIOD}?`);
+  assert.equal(redacted.gaps[0].reason, 'merchant_selector_unsupported');
+  // Conjunction matching still uses original labels, never the masked suffix.
+  const label = merchant.replace(/\band\b/g, '&');
   const queried = await f.ask(`How much did I spend at ${label} ${PERIOD}?`);
   if (merchant.includes(' and ')) {
     assert.equal(queried.ledger, undefined);
@@ -346,7 +356,7 @@ test('CONTROL: pending and removed duplicates do not change a posted amount', as
   f.raw("UPDATE fin_transactions SET removed_at=?,removal_reason='fixture reversal' WHERE txn_uid='removed'", NOW);
   assert.equal(f.sqlite.prepare('SELECT COUNT(*) n FROM fin_transactions').get().n, 3);
   const body = await f.ask(moneyQuestion()); reached(f, body);
-  assert.equal(f.seen.rowCounts.at(-1), 1, 'filter decision reached with surviving green row');
+  assert.equal(f.seen.transactionRowCounts.at(-1), 1, 'filter decision reached with surviving green row');
   assert.equal(body.ledger.lead_accounts[0].debits_minor, 27139);
 });
 

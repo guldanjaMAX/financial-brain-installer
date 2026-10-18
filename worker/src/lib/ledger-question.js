@@ -231,7 +231,7 @@ export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
     if (!punctuationOnly(rest)) return intent;
     const counterpartyWords = counterparty.match(/[\p{L}\p{N}]+/gu) || [];
     if (amountMinor === null && !counterpartyWords.length) return intent;
-    return { ...intent, kind: "payment", amountMinor, counterpartyWords,
+    return { ...intent, kind: "payment", amountMinor, counterpartyWords, counterparty,
       from: dates.length ? shiftLedgerDay(dates[0], -7) : period.from || shiftLedgerDay(today, amountMinor === null ? -59 : -29),
       to: dates.length ? shiftLedgerDay(dates[0], 7) : period.to || today };
   }

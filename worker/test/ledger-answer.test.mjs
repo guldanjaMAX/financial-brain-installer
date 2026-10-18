@@ -1,3 +1,4 @@
+import { seedKnownPayers } from './ledger-known-payers-fixture.mjs';
 import test, { mock } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
@@ -29,6 +30,7 @@ async function fixtureFor(t) {
   } });
   t.after(() => fixture.close());
   seedOwnedEntity(fixture, "owner-company", "Owner Company");
+  seedKnownPayers(fixture, ['Fixture payer'], NOW);
   fixture.raw(`INSERT INTO bank_feed_items
     (item_ref,institution_label,access_ciphertext,access_iv,environment,connected_at,last_synced_at)
     VALUES ('fixture-feed','Fixture Bank',?,?,'sandbox',?,?)`,

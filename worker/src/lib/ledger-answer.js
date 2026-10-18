@@ -1,45 +1,49 @@
 import { scopeIsUnrestricted } from "./grants.js";
 import { classifyLedgerQuestion, ledgerDay, shiftLedgerDay } from "./ledger-question.js";
 import { accountLinkPairsInWindow, accountLinkRequiredInWindow, effectivePeriodCovered, readEffectiveAccounts, readEffectiveBalances, readEffectiveTransactions } from "./ledger-reader.js";
-import { categoryFor, detectRecurring, isDirectedOwnedTransfer, isLoanAdvance, matchesCategory, matchesMerchant, matchesSender, merchantFor, normalizeMerchantText, pairOwnTransfers, senderFor, sumMinor } from "./ledger-analysis.js";
+import { categoryFor, detectRecurring, isDirectedOwnedTransfer, isLoanAdvance, matchesCategory, matchesMerchant, merchantFor, normalizeMerchantText, pairOwnTransfers, senderFor, sumMinor } from "./ledger-analysis.js";
 
 const masked = account => /^\d{1,4}$/.test(account.mask || "") ? `account ****${account.mask}` : "account (mask unavailable)";
 const money = cents => `${cents < 0 ? "-" : ""}$${Math.floor(Math.abs(cents) / 100).toLocaleString("en-US")}.${String(Math.abs(cents) % 100).padStart(2, "0")}`;
-function safeDescription(text) {
-  const hide = value => `[redacted] ****${value.replace(/[^\p{L}\p{N}]/gu, "").slice(-4)}`;
-  // Bank identifiers can contain letters and separators. Mask before truncating
-  // so a long identifier cannot leave a visible prefix at the display boundary.
-  return String(text || "Deposit").normalize("NFKC")
-    .replace(/\b((?:account|acct|iban|routing)(?:\s+(?:number|no|id))?\s*[:#.-]?\s*)((?:[\p{L}]{1,4}[\s\p{P}]+)*[\p{L}]*\d[\p{L}\p{N}]*(?:[\s\p{P}]+(?:[\p{L}]{1,4}[\s\p{P}]+)*[\p{L}]*\d[\p{L}\p{N}]*)*)/giu,
-      (full, label, value) => value.replace(/[^\p{L}\p{N}]/gu, "").length > 4 ? label + hide(value) : full)
-    .replace(/\d(?:[\s\p{P}]*\d){4,}/gu, hide).slice(0, 240);
+export function maskLedgerCandidateField(text) {
+  // Free-form letters can be identifiers too. Mask every long run, including
+  // separator-spaced runs, before truncation. No guessed bank-label vocabulary
+  // can make an otherwise opaque identifier safe to print.
+  const value = String(text || "Deposit").normalize("NFKC");
+  const chars = value.match(/[\p{L}\p{N}]/gu) || [];
+  // Treat the entire free-text field as one possibly separated identifier.
+  // Symbols, combining marks and invisible separators cannot split it into
+  // apparently safe short fragments. Exact dates and money are separate fields.
+  return chars.length >= 5 ? `[redacted] ****${chars.slice(-4).join("")}` : value.slice(0, 240);
 }
+const safeDescription = maskLedgerCandidateField;
 const accountCoverage = accounts => accounts.map(a => ({
   account_mask: /^\d{1,4}$/.test(a.mask || "") ? a.mask : null,
   covered_to: a.covered_to || null, last_synced_at: a.last_synced_at || null,
 }));
 
-function senderIsUnattributed(row) {
-  const sender = senderFor(row);
-  // A channel, processor or generic bank label can describe a real receipt
-  // without identifying its payer. A failed name match is not absence proof.
-  const words = sender.match(/[\p{L}\p{N}]+/gu) || [];
-  if (!words.length || words.every(word => /^(?:\d+|ach|eft|wire|zelle|bank|cash|check|cheque|credit|direct|deposit|payment|receipt|transfer|settlement|online|mobile|ccd|ppd|ctx|web|tel|sepa|swift|ref|reference|trace|id|number|no|unknown|unidentified|unattributed|unavailable|not|provided|payer|sender|customer|client|merchant|the|a|an)$/.test(word))) return true;
-  if (/^(?:unknown|unidentified|unattributed|unavailable|not provided|n a)(?: |$)/.test(sender)) return true;
-  if (/\b(?:processor|processing|payout|batch|batched)\b/.test(sender)) return true;
-  // A named payee can itself contain a banking word. An independent directed
-  // sender clause corroborates that exact label, after explicit unknown and
-  // intermediary labels have already been refused.
+function payerIndex(identities) {
+  const index = new Map();
+  for (const identity of identities) for (const label of [identity.legal_name, identity.display_label]) {
+    const normalized = normalizeMerchantText(label);
+    if (!normalized) continue;
+    const previous = index.get(normalized);
+    // Colliding aliases cannot identify which entity paid. Null stays null.
+    index.set(normalized, previous === undefined || previous === identity.entity_slug ? identity.entity_slug : null);
+  }
+  return index;
+}
+
+function identifiedPayer(row, identities) {
+  if (row.payee) return identities.get(normalizeMerchantText(row.payee)) || null;
   const description = normalizeMerchantText(row.description);
-  if (row.payee && /\b(?:from|by) /.test(description) && senderFor({ description: row.description }) === sender) return false;
-  // A directed sender still controls attribution. A bare settlement label
-  // identifies the intermediary, not its underlying payer, in either field.
-  // Undirected channel-prefixed text may carry arbitrary bank reference codes;
-  // those suffixes cannot promote the channel into an identified sender.
-  const source = normalizeMerchantText(row.payee || row.description);
-  return !/\b(?:from|by) /.test(source) &&
-    (/^(?:ach|eft|wire|zelle|bank|cash|check|cheque|credit|direct|deposit|payment|receipt|transfer|online|mobile)(?: |$)/.test(source) ||
-      /\b(?:settlement|payout|batch|batched)\b/.test(source));
+  if (identities.get(description)) return identities.get(description);
+  // Only an explicitly supported sender grammar may remove a channel wrapper.
+  // Arbitrary text before "from" is not evidence about the actual sender.
+  const directed = /^(?:(?:ach|eft|wire|zelle|bank)(?: credit)? |(?:payment|deposit|receipt|transfer) )?(?:from|by) (.+)$/.test(description);
+  if (/\b(?:from|by) /.test(description) && !directed) return null;
+  const opening = description.match(/^(.+?) (?:ach|eft|wire|zelle) (?:deposit|payment|receipt)$/);
+  return identities.get(opening ? opening[1] : senderFor(row)) || null;
 }
 
 function gapFor(reason, accounts = [], intent = {}) {
@@ -166,26 +170,32 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
   // three days may itself have a competing leg another three days away. Only
   // rows inside the requested window contribute to its income or spend.
   const payment = intent.kind === "payment";
-  const allRows = await readEffectiveTransactions(env, payment ? accounts : inventory, payment ? intent : {
-    from: shiftLedgerDay(intent.from, -6), to: shiftLedgerDay(intent.to, 6),
-  });
+  const namedIncome = intent.kind === "merchant" && intent.direction === "inflow" && intent.match;
+  const namedPayer = Boolean(namedIncome || (payment && intent.counterpartyWords.length));
+  const snapshot = await readEffectiveTransactions(env, payment ? accounts : inventory, payment
+    ? { ...intent, ...(namedPayer ? { amountMinor: null, payerIdentities: true } : {}) }
+    : { from: shiftLedgerDay(intent.from, -6), to: shiftLedgerDay(intent.to, 6), payerIdentities: namedPayer });
+  const allRows = namedPayer ? snapshot.rows : snapshot;
+  const identities = namedPayer ? payerIndex(snapshot.identities) : null;
+  const wanted = namedPayer ? identities.get(normalizeMerchantText(namedIncome ? intent.match : intent.counterparty)) : null;
+  const payerMatches = row => Boolean(wanted && identifiedPayer(row, identities) === wanted);
+  const merchantMatches = namedIncome ? payerMatches : row => matchesMerchant(row, intent.match);
   const inWindow = row => row.posted_on >= intent.from && row.posted_on <= intent.to;
   const selected = new Set(accounts.map(a => a.account_slug));
   const rows = allRows.filter(row => selected.has(row.effective_account_slug) && (!row.posted_on || inWindow(row)));
   if (rows.some(row => row.export_overlap_review)) return { reason: "bank_export_overlap_review_required" };
   if (rows.some(row => !readableRow(row))) return { reason: "unreadable_transactions" };
   const bySlug = new Map(inventory.map(a => [a.account_slug, a]));
-  const namedIncome = intent.kind === "merchant" && intent.direction === "inflow" && intent.match;
   if (payment || namedIncome) {
-    const candidates = rows.filter(row => row.direction === "inflow" &&
-      (!payment || intent.amountMinor === null || row.amount_minor === intent.amountMinor));
+    const candidates = rows.filter(row => row.direction === "inflow");
     const matched = [], unattributed = [];
     for (const row of candidates) {
-      // An amount narrows an attributed receipt; it cannot promote a memo
-      // subject to sender or override an explicit unknown-sender label. Only
-      // amount-only receipt questions can bypass sender attribution quality.
-      if ((namedIncome || intent.counterpartyWords.length) && senderIsUnattributed(row)) unattributed.push(row);
-      else if (payment ? matchesSender(row, intent.counterpartyWords) : matchesMerchant(row, intent.match)) matched.push(row);
+      // Every in-window inflow must have positive identity evidence before a
+      // named absence or zero can be certified. Amount filters only narrow
+      // confirmed matches; they cannot hide an unidentified receipt.
+      if (namedPayer && !identifiedPayer(row, identities)) unattributed.push(row);
+      else if ((!payment || intent.amountMinor === null || row.amount_minor === intent.amountMinor) &&
+        (!namedPayer || payerMatches(row))) matched.push(row);
     }
     // A named-income answer with unknown receipts must not flow into the
     // complete-total renderer, including its zero and conditional-total keys.
@@ -201,7 +211,7 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
       const gaps = [];
       const unattributedCitations = unattributed.map((_, i) => matched.length + i + 1);
       if (unattributed.length) {
-        const detail = `I found ${unattributed.length} ${unattributed.length === 1 ? "deposit that doesn't" : "deposits that don't"} show who paid between ${intent.from} and ${intent.to}; I can't confirm whether any came from ${safeDescription(namedIncome ? intent.match : intent.counterpartyWords.join(" "))}.`;
+        const detail = `I found ${unattributed.length} ${unattributed.length === 1 ? "deposit that doesn't" : "deposits that don't"} show who paid between ${intent.from} and ${intent.to}; I can't confirm whether any came from the requested payer.`;
         answer += `${answer ? "\n" : ""}${detail}`;
         for (const [i, row] of unattributed.entries()) answer += `\nUnattributed deposit: ${money(row.amount_minor)} posted ${row.posted_on} in ${masked(bySlug.get(row.effective_account_slug))}: ${safeDescription(row.description)} [${unattributedCitations[i]}].`;
         gaps.push({ type: "ledger_attribution_unknown", reason: "sender_attribution_unknown",
@@ -220,7 +230,7 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     const wanted = normalizeMerchantText(intent.match);
     const directionRows = rows.filter(row => row.direction === intent.direction);
     const conjunction = text => text.replace(/\b(and)\b|&/g, "and");
-    if (!directionRows.some(row => matchesMerchant(row, intent.match)) && directionRows.some(row =>
+    if (!directionRows.some(merchantMatches) && directionRows.some(row =>
       conjunction(merchantFor(row)) === conjunction(wanted))) return { reason: "merchant_selector_ambiguous" };
   }
   const eligible = allRows.filter(row => readableRow(row) && usableAccount(bySlug.get(row.effective_account_slug)) &&
@@ -236,7 +246,7 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
   if (["largest", "deposits", "merchant", "category"].includes(intent.kind)) {
     figureRows = rows.filter(row => row.direction === intent.direction);
     if (intent.match) figureRows = figureRows.filter(row =>
-      (intent.kind === "merchant" ? matchesMerchant : matchesCategory)(row, intent.match) ||
+      (intent.kind === "merchant" ? merchantMatches(row) : matchesCategory(row, intent.match)) ||
       (intent.kind === "category" && !categoryFor(row)));
   } else if (intent.kind === "recurring") figureRows = detectRecurring(rows, intent.to).flatMap(group => group.rows);
   const { excluded: leadExcluded, keptPairs, summary } = leadExclusions(figureRows, intent.kind === "transfers" ? [] : pairs, selected, bySlug,
@@ -315,7 +325,7 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     }
   } else if (["merchant", "category"].includes(intent.kind)) {
     const directionRows = activity.filter(row => row.direction === intent.direction);
-    const matched = intent.match ? directionRows.filter(row => (intent.kind === "merchant" ? matchesMerchant : matchesCategory)(row, intent.match)) : directionRows;
+    const matched = intent.match ? directionRows.filter(row => (intent.kind === "merchant" ? merchantMatches(row) : matchesCategory(row, intent.match))) : directionRows;
     const unsorted = (intent.kind === "category" ? directionRows : matched).filter(row => !categoryFor(row));
     ledger.total_minor = sumMinor(matched); ledger.unsorted_minor = sumMinor(unsorted); ledger.found = matched.length > 0;
     ledger.lead_total_minor = sumMinor(withoutLead(matched));

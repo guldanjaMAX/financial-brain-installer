@@ -841,34 +841,44 @@ view. The document path retains its existing money refusal rules.
 Recurrence uses at least three charges, bounded weekly/monthly intervals and
 integer amount tolerance; results are explicitly detected rather than confirmed. Category proposals and Unsorted remain visible. Ambiguous groups,
 incomplete coverage and unreadable rows cannot establish a total or absence.
-Named payment arrivals match whole counterparty words. An explicit payee
-supplies sender evidence; otherwise a directional sender or opening sender
-phrase is required. An amount narrows that same attribution rule and cannot
-promote an invoice subject to payer. Merchant income uses the same sender
-extraction; unresolved attribution remains unknown. Generic-only sender clauses cannot identify
-an amountless payment, in named, `from` or `via` forms. Exact-amount questions
-retain their exact-cent constraint on the attributed sender. Budget, approval and planning qualifiers
-stay with documents instead of becoming merchant filters. Only posted inflows
-match. A named-payment miss with unattributed inflows inside the same account,
-period and exact-cent scope lists those deposits with dates, amounts and ledger
-citations instead of claiming absence. Generic bank and processor labels do not
-establish the underlying payer. Such answers carry a `sender_attribution_unknown`
-gap and incomplete, partial evidence; `ledger.found` is `null` unless another
-receipt independently matches the sender. Confirmed matches remain visible beside
-the unknown candidates. Amount-only queries retain their exact-cent contract.
-Attribution quality is checked before sender tokens, so an explicit unknown label
-cannot become a confirmed match just because it contains the requested name.
-Generic channel and reference metadata is unattributed in either the payee field
-or the description. Named merchant-income questions apply the same uncertainty
-rule across all eligible inflows. While candidates remain, `total_minor` and
-`lead_total_minor` are null, and `found` is null unless an independent receipt
-matches. A nonempty confirmed set has a separately labeled
+Named payment and merchant-income answers use positive identity evidence.
+Known identities are the current, confirmed `fin_entities` legal names and
+owner display labels for the same tenant. The identity inventory and receipt
+rows are read in one D1 batch; identities are bounded to 5,000 and an unavailable
+or oversized inventory refuses the answer. Duplicate normalized labels across
+entities remain ambiguous. No identity is inferred or saved from bank metadata.
+The complete normalized payee must resolve exactly to one known identity.
+Without a payee, only a bounded directed or opening sender grammar may extract
+a label, which must still resolve exactly. Query and stored labels share NFKC,
+case and punctuation normalization and preserve literal `and` versus `&`.
+Token subsets, prefixes, channel labels and invoice subjects do not establish
+identity. Unsupported sender syntax remains unknown without a growing list of
+unknown-label patterns.
+
+Every posted inflow in the selected account and period must have a positively
+identified payer before a named absence or exact income total can be certified.
+This includes unknown deposits with a different amount from an exact-cent
+question. Amounts narrow confirmed payment matches, not the uncertainty gate.
+Unidentified deposits are listed with stored dates, amounts and ledger citations.
+The answer says it cannot confirm the requested payer, carries a
+`sender_attribution_unknown` gap and incomplete, partial evidence, and leaves
+`ledger.found` null unless an independent receipt matches. Named-income
+`total_minor` and `lead_total_minor` remain null. A nonempty confirmed set has
 `confirmed_subtotal_minor` before transfer exclusions and `confirmed_citations`;
-an empty confirmed set leaves that subtotal null. Candidates retain individual
-amounts, dates and citations. These partial answers never enter the complete-total
-or conditional-transfer-total renderer. Description account identifiers, including
-separated numeric and alphanumeric forms, expose at most their final four
-characters; exact money and posting-date facts come from the ledger columns.
+an empty confirmed set leaves that subtotal null. Partial answers never enter
+the complete-total or conditional-transfer-total renderer. Amount-only queries
+retain their exact-cent contract without making a payer claim.
+
+One render-boundary function masks every run of five or more alphanumeric
+characters in free-text candidate fields, including letters-only values. The
+whole field is treated as one possibly separated identifier, so punctuation,
+symbols, whitespace and invisible separators cannot expose short fragments. Account and reference labels need
+no special-case vocabulary. Only the final four alphanumeric characters remain,
+and masking precedes truncation. This conservative rule also hides ordinary
+long words in descriptions, merchant/category labels and echoed selectors.
+Masked merchant labels cannot be used as exact selectors; the existing explicit
+refusal applies. Exact amounts, posting dates and citation locators come from
+structured ledger columns, not from the free text. Stored metadata is unchanged.
 Without a
 supplied period, a named payment without an amount searches 60 days; exact
 amounts retain the 30-day default. Recent deposits use 14 days, and largest

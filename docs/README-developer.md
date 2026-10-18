@@ -2193,9 +2193,22 @@ spend or income, recurring charges, and own-account transfers. Named months
 and Q1 through Q4 may omit the year, meaning the current UTC year. Merchant
 matches use the exact NFKC-normalized, case-insensitive payee when present.
 Only outflows without a payee use contiguous description tokens as a fallback.
-Inflows require an explicit payee or a directional/opening sender phrase, never
-an invoice subject. Both amount-qualified and amountless payment checks use
-that attribution. Payer clauses are removed before account-kind selection.
+Named inflows require an exact normalized match to a current confirmed
+`fin_entities` legal name or display label. A bank payee does not itself create
+a known identity. An absent payee permits only the bounded directed/opening
+sender grammar, followed by the same identity match. Identities and transactions
+share one bounded D1 snapshot, and duplicate names fail closed. Any unknown
+inflow in the selected window, including a different amount, prevents named
+absence or an exact income total. Unknown candidates stay visible with exact
+amounts and dates; independently matched income remains a labeled subtotal.
+Amount-only questions still match cents without claiming a payer.
+Free-text candidate fields use one conservative masker: every alphanumeric run
+of at least five characters, including letters and punctuation/space-separated
+runs, exposes only its last four. Ordinary long words are masked too. This
+changes display labels, not stored data or financial amounts. The property suite
+`worker/test/ledger-identity-gate.test.mjs` exercises identity authority,
+ambiguity, exact normalization, arbitrary metadata, and render-boundary masking.
+Payer clauses are removed before account-kind selection.
 Merchant labels preserve literal `and` and `&`. Redacted, shortened or unknown
 labels refuse; an unmatched conjunction substitution refuses as ambiguous.
 Quote the original by-merchant line rather than substituting or guessing. Category totals separate confirmed and proposed categories; proposed

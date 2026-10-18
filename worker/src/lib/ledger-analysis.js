@@ -20,15 +20,6 @@ const containsTokens = (haystack, needle) => Boolean(needle) && ` ${haystack} `.
 export const matchesMerchant = (row, query) => row.payee || row.direction === "inflow"
   ? merchantFor(row) === normalizeMerchantText(query)
   : containsTokens(normalizeMerchantText(row.description), normalizeMerchantText(query));
-export function matchesSender(row, wanted) {
-  if (!wanted.length) return true;
-  const sender = normalizeLedgerText(senderFor(row));
-  if (row.payee) {
-    const words = new Set(sender.split(" "));
-    return wanted.every(word => words.has(word));
-  }
-  return sender === wanted.join(" ") || sender.startsWith(`${wanted.join(" ")} `);
-}
 export function categoryFor(row) {
   const category = normalizeLedgerText(row.category);
   return !category || !row.category_basis_state || ["unsorted", "uncategorized", "uncategorised", "unknown"].includes(category) ? null : category;

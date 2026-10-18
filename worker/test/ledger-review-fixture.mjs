@@ -1,3 +1,4 @@
+import { seedKnownPayers } from './ledger-known-payers-fixture.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync, readdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -31,6 +32,7 @@ export function fixture(t) {
     VECTORIZE: { async upsert() { return {}; }, async deleteByIds() { return {}; } },
     AI: { async run() { return { data: [[0.1, 0.2]] }; } } };
   const raw = (sql, ...params) => db.prepare(sql).run(...params);
+  seedKnownPayers({ raw }, ['Fixture Payer', 'Fixture Payerplus', 'Unrelated Payer', 'Synthetic payer', 'Fixture Bank', 'Fixture Sender', 'Fixture'], NOW);
   const first = (sql, ...params) => db.prepare(sql).get(...params);
   const rows = (sql, ...params) => db.prepare(sql).all(...params);
   const owner = (slug = 'owner') => raw(`INSERT INTO fin_entities (entity_slug,legal_name,display_label,kind,status,relationship,provenance,basis_state,recorded_at)

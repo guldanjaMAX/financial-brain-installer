@@ -1,3 +1,4 @@
+import { seedKnownPayers } from './ledger-known-payers-fixture.mjs';
 import test, { mock } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
@@ -19,6 +20,7 @@ async function fixture(t) {
   } });
   t.after(() => f.close());
   seedOwnedEntity(f, "owner", "Owner");
+  seedKnownPayers(f, ['Fixture payer'], NOW);
   f.account = (slug, mask, kind = "checking", mode = "live") => {
     f.raw(`INSERT INTO fin_accounts (account_slug,entity_slug,account_kind,balance_role,mask,feed_mode,provenance,basis_state,recorded_at,institution)
       VALUES (?,'owner',?,'asset',?,?,'owner_stated','confirmed',?,'Fixture Bank')`, slug, kind, mask, mode, stamp);
@@ -116,7 +118,7 @@ test("merchant tokens are contiguous and category proposals and Unsorted stay ex
   assert.match(category.answer, /Unsorted.*\$0\.99/);
   const breakdown = await f.ask("How much did I spend by category in September 2026?");
   assert.equal(breakdown.ledger.total_minor, 10600);
-  assert.equal(breakdown.ledger.groups.filter(g => g.category === "software").length, 2);
+  assert.equal(breakdown.ledger.groups.filter(g => g.category === "[redacted] ****ware").length, 2);
 });
 
 test("directed transfers leave the lead; advisory pairs and near misses stay explicit", async t => {
