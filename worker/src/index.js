@@ -1196,6 +1196,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
     "14. When a claim rests on reliably dated evidence, weave that date into the sentence naturally, like: per the 2026-07-31 call transcript. A dated claim can be checked; an undated one has to be trusted. Never state a date the documents do not carry.",
     "15. A derived report, generated pack, summary, or agent-written note may accurately restate its sources, but it is not independent confirmation of them. Documents with overlapping recorded source families count as one evidence family. When lineage is unknown, do not claim that multiple documents independently confirm a fact.",
     "16. A QuickBooks balance snapshot observes the displayed balance at its exact as-of date, even if the transaction or provider last-change date is older. State that as-of date with each account balance and cite that account's own record. For a negative Credit Card balance, say the owner owes the positive amount; retain the minus sign if also quoting the provider balance. Individual retrieved records do not establish a complete list or company-wide total.",
+    "17. Answer the fact asked, without adding a different completion requirement. A dated statement by the owner that they have moved supports a dated reported address; it does not require proof that a recipient updated its system. Use the newest relevant dated statement and name its source. A request alone supports only that a request was made. If asked whether an action completed, report the request with an explicit qualification unless completion is evidenced. Preserve conflicting evidence and do not infer totals, absence, or binding agreements.",
     synthesisIntent(q) ? SYNTHESIS_INSTRUCTION : "",
     datedInstruction,
     isMoneyAnswer(q, "") ? MONEY_RECALL_INSTRUCTION : "",
@@ -1362,6 +1363,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
               `The configured brain owner is ${owner}.`,
               "Return only one JSON object: {\"supported\":true|false,\"complete\":true|false,\"evidence\":[1,2],\"reason\":\"short reason\"}.",
               "Set supported=true only if the cited documents explicitly support the proposed answer's factual claims for the exact person, company, property, agreement, policy or project in the question.",
+              "Verify the claim actually proposed, not an extra task suggested by its context. An owner's dated statement of a moved address can support that reported address without proof of a recipient's system update. A request is not proof of completion; an answer reporting the request and explicitly saying the message does not establish completion is qualified, not an unsupported completion claim. A newer relevant dated statement replaces an older report only for the same fact and subject; never invent a missing confirmation, total, absence, or legal effect.",
               "Set complete=true only if the proposed answer addresses every material part of the question. A part counts as addressed when it is answered from evidence or the answer explicitly says the documents do not provide it. Silently omitting a requested part means complete=false.",
               "If supported=true, evidence must list every document number cited anywhere in the proposed answer. If any cited document does not support the claim next to its citation, set supported=false.",
               "For an explicit current, latest, still, or going-on question, an older source establishes history only. When newer reliable-dated evidence for the named subject is supplied below, a present-status sentence must cite that newer evidence; a stale-only citation is unsupported.",
@@ -1390,7 +1392,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
               ? "exact observed account balances; full inventory explicitly not established"
               : "exact observed open items; full inventory and net amounts explicitly not established" }
             : factAnswer
-              ? { supported: true, complete: true, evidence: factAnswer.evidence, reason: "exact native contact field with dated direct evidence" }
+              ? { supported: true, complete: true, evidence: factAnswer.evidence, reason: "exact native contact fact with dated direct evidence" }
               : synthesis && !datedStatus.evidence.length ? synthesis.verdict
               : start >= 0 && end > start ? JSON.parse(raw.slice(start, end + 1)) : null;
           const conflicts = datedStatusConflicts(verdict, docs, datedStatus);
@@ -1400,7 +1402,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
             .filter((n) => citedDocs.some((doc) => doc.n === n)));
           evidenceGate = {
             ...(observedAnswer ? { method: balanceAnswer ? "quickbooks_observed_balances" : "quickbooks_observed_open_items" }
-              : factAnswer ? { method: "exact_contact_fact", fact_span: factAnswer.fact_span } : {}),
+              : factAnswer ? { method: factAnswer.method || "exact_contact_fact", fact_span: factAnswer.fact_span } : {}),
             supported: verdict?.supported === true || String(verdict?.supported).toLowerCase() === "true",
             complete: verdict?.complete === true || String(verdict?.complete).toLowerCase() === "true",
             evidence: [...allowed],

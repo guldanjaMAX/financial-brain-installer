@@ -84,6 +84,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --test test/tax-pdf.test.mjs",
   "node --test test/tax-check-storage.test.mjs",
   "node --test worker/test/entity-fact-answer.test.mjs",
+  "node --test worker/test/gate-speed.test.mjs",
   "node --test worker/test/money-veto.test.mjs",
   "node --test worker/test/temporal-guard.test.mjs",
   "node --test worker/test/temporal-money-review.test.mjs",

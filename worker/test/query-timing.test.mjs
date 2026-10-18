@@ -204,7 +204,11 @@ test('empty and degraded retrieval retain honest refusals and attempted modality
     const f = fixture(options);
     const { body } = await f.request();
     assert.equal(f.counts.keyword, 1);
-    assert.equal(f.counts.vector, options.vectorFails ? 2 : 1);
+    // An unfiltered query has no wider fallback. Repeating the same failed
+    // provider request doubled failure latency without recovering coverage.
+    assert.equal(f.counts.vector, 1);
+    assert.equal(body.timing.stages.vector_query.calls, 1);
+    assert.equal(body.timing.stages.vector_query.errors, options.vectorFails ? 1 : 0);
     assert.equal(body.timing.stages.vector_query.calls, f.counts.vector);
     assert.equal(body.timing.stages.keyword.errors, options.keywordFails ? 1 : 0);
     assert.equal(body.timing.stages.vector.errors, options.vectorFails ? 1 : 0);

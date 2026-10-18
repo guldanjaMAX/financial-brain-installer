@@ -66,7 +66,7 @@ function record(overrides = {}) {
 async function run(t, {
   rows = [record()], question = "What is Example Contact's address?", authorized = true,
   vectorFails = false, vectorMatches = true, coverageFails = false, owner = "Example Contact",
-  parameters = {}, sourceRows = [], route = worker,
+  parameters = {}, sourceRows = [], route = worker, verdict = null,
   draft = "The source records an address as of 2026-10-06. [1]",
 } = {}) {
   const clock = new Clock();
@@ -139,7 +139,7 @@ async function run(t, {
         const verify = input.messages[0].content.includes("verify a proposed answer");
         counts[verify ? "verifier" : "answer"]++;
         return clock.operation(verify ? 4000 : 7000, {
-          response: verify ? JSON.stringify({ supported: true, complete: true, evidence: [1], reason: "synthetic general-path control" })
+          response: verify ? JSON.stringify(verdict || { supported: true, complete: true, evidence: [1], reason: "synthetic general-path control" })
             : draft,
           usage: { prompt_tokens: 50, completion_tokens: 12 },
         });
@@ -457,3 +457,89 @@ test("unproven source history keeps the normal path and its coverage disclosure"
   assert.equal(counts.verifier, 1);
   assert.notEqual(body.evidence_gate?.method, "exact_contact_fact");
 });
+
+const moveMail = (id, day, statement, extra = {}) => record({
+  doc_uid: `gmail:${id}`, chunk_uid: `gmail:${id}#0`, source_id: id,
+  source: 'gmail', source_kind: 'gmail', title: 'Address change',
+  document_date: Date.parse(day), date_source: 'email_header',
+  text: `From: Example Contact <owner@example.invalid>\nTo: service@example.invalid\nDate: ${day}\nSubject: Address change\n\n${statement}`,
+  ...extra,
+});
+const wrongQuestionVerdict = { supported: false, complete: false, evidence: [], reason: 'The message does not prove the system completed the requested update.' };
+const OLD_ADDRESS = '200 Example Lane, Example City, AZ 85002';
+const move = () => moveMail('move', '2026-03-12', `I have moved to ${VALUES.address}.`);
+const postal = () => moveMail('postal', '2026-03-13', `Change of address confirmed for Example Contact: ${VALUES.address}.`, {
+  title: 'Address confirmation',
+  text: `From: Postal Service <post@example.invalid>\nTo: owner@example.invalid\nDate: 2026-03-13\nSubject: Address confirmation\n\nChange of address confirmed for Example Contact: ${VALUES.address}.`,
+});
+
+test('dated owner move statement answers the address asked, without requiring system completion', async t => {
+  const result = await run(t, { question: 'What is my current home address?', rows: [move(), postal()],
+    verdict: wrongQuestionVerdict });
+  assert.ok(result.counts.keyword > 0, 'retrieval decision reached');
+  assert.equal(result.body.evidence_gate.supported, true, JSON.stringify({ gate: result.body.evidence_gate, gaps: result.body.gaps, results: result.body.results }));
+  assert.match(result.body.answer, /2026-03-12/);
+  assert.ok(result.body.answer.includes(VALUES.address));
+  assert.ok(result.body.gaps.some(gap => gap.type === 'stale'), 'dated answer preserves freshness gap');
+  assert.equal(result.counts.answer + result.counts.verifier, 0);
+  assert.equal(result.body.timing.stages.answer_llm.calls, 0);
+  assert.equal(result.body.timing.stages.verifier_llm.calls, 0);
+  assert.ok(result.ms < 5000, 'virtual request avoids both inference stages');
+  const span = result.body.evidence_gate.fact_span;
+  assert.equal(result.body.results[span.n - 1].snippet.slice(span.start, span.end), VALUES.address);
+  const control = await run(t);
+  assert.equal(control.body.evidence_gate.supported, true);
+});
+
+test('newer dated owner statement replaces an older address regardless of retrieval order', async t => {
+  for (const reverse of [false, true]) {
+    const rows = [moveMail('old', '2026-01-01', `My home address is ${OLD_ADDRESS}.`), move()];
+    const result = await run(t, { question: 'What is my current home address?', rows: reverse ? rows.reverse() : rows,
+      verdict: wrongQuestionVerdict });
+    assert.ok(result.counts.keyword > 0);
+    assert.equal(result.body.evidence_gate.supported, true);
+    assert.ok(result.body.answer.includes(VALUES.address));
+    assert.ok(!result.body.answer.includes(OLD_ADDRESS));
+    assert.equal(result.counts.answer + result.counts.verifier, 0);
+  }
+});
+
+test('a request is reported as a request, never as completed system action', async t => {
+  const rows = [moveMail('request', '2026-03-12', `Please update my home address to ${VALUES.address}.`)];
+  const result = await run(t, { question: 'Has my address been updated in the insurer system?', rows,
+    verdict: wrongQuestionVerdict });
+  assert.ok(result.counts.keyword > 0, 'request evidence retrieved');
+  assert.equal(result.body.evidence_gate.supported, true);
+  assert.match(result.body.answer, /requests/i);
+  assert.match(result.body.answer, /does not establish.*complet/i);
+  assert.equal(result.counts.answer + result.counts.verifier, 0);
+  const control = await run(t, { question: 'What is my current home address?', rows,
+    verdict: wrongQuestionVerdict });
+  assert.equal(control.counts.answer, 1, 'request-only address cannot enter statement path');
+  assert.equal(control.body.evidence_gate.supported, false);
+});
+
+for (const [label, rows] of [
+  ['third-party sender', () => [moveMail('other', '2026-03-12', `I have moved to ${VALUES.address}.`, { text: move().text.replace('From: Example Contact', 'From: Different Contact') })]],
+  ['quoted body', () => [moveMail('quoted', '2026-03-12', `"I have moved to ${VALUES.address}."`)]],
+  ['conditional body', () => [moveMail('conditional', '2026-03-12', `If approved, I have moved to ${VALUES.address}.`)]],
+  ['same-date conflicting value', () => [move(), moveMail('conflict', '2026-03-12', `I have moved to ${OLD_ADDRESS}.`)]],
+  ['newer negation of the same value', () => [move(), moveMail('negated', '2026-03-15', `I have not moved to ${VALUES.address}.`)]],
+  ['undated contradictory record', () => [move(), moveMail('undated', '2026-03-15', `I have moved to ${OLD_ADDRESS}.`, { date_reliable: 0 })]],
+  ['future contradictory record', () => [move(), moveMail('future', '2027-03-15', `I have moved to ${OLD_ADDRESS}.`)]],
+  ['unreliable extraction', () => [moveMail('unreadable', '2026-03-12', `I have moved to ${VALUES.address}.`, { text_source: 'ocr', text_reliable: 0 })]],
+  ['illustrative body', () => [moveMail('illustration', '2026-03-12', `Example: I have moved to ${VALUES.address}.`)]],
+  ['header-date mismatch', () => [moveMail('date', '2026-03-12', `I have moved to ${VALUES.address}.`, { document_date: Date.parse('2026-03-15') })]],
+  ['draft title', () => [moveMail('draft', '2026-03-12', `I have moved to ${VALUES.address}.`, { title: 'Draft address change', text: move().text.replace('Subject: Address change', 'Subject: Draft address change') })]],
+]) {
+  test(`dated address declines ${label} after retrieval, with a direct statement control`, async t => {
+    const result = await run(t, { question: 'What is my current home address?', rows: rows(), verdict: wrongQuestionVerdict });
+    assert.ok(result.counts.keyword > 0, 'candidate decision reached');
+    assert.equal(result.counts.answer, 1, 'unsafe extraction uses ordinary generation');
+    assert.equal(result.counts.verifier, 1);
+    assert.equal(result.body.evidence_gate.supported, false);
+    const control = await run(t, { question: 'What is my current home address?', rows: [move()] });
+    assert.equal(control.body.evidence_gate.supported, true);
+    assert.equal(control.counts.answer + control.counts.verifier, 0);
+  });
+}

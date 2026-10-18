@@ -645,6 +645,10 @@ export async function searchKeyword(env, query, { limit, filters = {}, access = 
   const f = filterSql(filters, "c", 3);
   const sc = scopeSql(scope, "d", f.nextParam);
   const a = documentAccessSql(access, "c", "d", sc.nextParam);
+  // Let FTS supply BM25 order and stop after enough authorized matches. A
+  // source-first nested loop probes the FTS posting list once per source chunk
+  // and sorts all matches. CROSS JOIN fixes only loop order: every visibility,
+  // scope and supersession predicate still runs before the result LIMIT.
   const sql = (memoryClause, withCurrentPointer = true) => `
     SELECT c.chunk_uid, c.doc_uid, c.text, d.source AS source,
            COALESCE(src.kind, 'unregistered') AS source_kind,
@@ -658,11 +662,11 @@ export async function searchKeyword(env, query, { limit, filters = {}, access = 
                 THEN json_extract(d.meta, '$.start') END AS occurred_at,
            bm25(chunks_fts) AS score
     FROM chunks_fts
-    JOIN chunks c ON c.id = chunks_fts.rowid
+    CROSS JOIN chunks c ON c.id = chunks_fts.rowid
     JOIN documents d ON d.doc_uid = c.doc_uid
     LEFT JOIN sources src ON src.name = d.source
     WHERE chunks_fts MATCH ?1${f.clause}${sc.clause}${a.clause}${customApiVisibilitySql("d", withCurrentPointer)}${memoryClause}
-    ORDER BY bm25(chunks_fts)
+    ORDER BY chunks_fts.rank
     LIMIT ?2`;
 
   const run = async (memoryClause) => {
@@ -805,10 +809,11 @@ export async function searchVector(env, embedding, { limit, filters = {}, scope 
   let res;
   try {
     res = await query(true);
-  } catch {
+  } catch (error) {
     // The metadata index may not exist on this install. Falling back to an
     // unfiltered query keeps search working, because `source` is re-applied in
     // the hydration WHERE below regardless.
+    if (!hasFilter) throw error;
     res = await query(false);
   }
 
@@ -925,7 +930,7 @@ export async function search(env, {
     // advertises partial projection instead of looking fully healthy.
     vectorEligible
       ? projectionReadiness === null
-        ? measureQueryStage(timing, "projection_readiness", () => vectorReadiness(env)).catch(() => ({ ready: false }))
+        ? measureQueryStage(timing, "projection_readiness", () => searchProjectionReadiness(env, { now })).catch(() => ({ ready: false }))
         : Promise.resolve(projectionReadiness)
       : Promise.resolve(null),
     hintAttemptsPromise,
@@ -7459,6 +7464,57 @@ export async function outboxDepth(env) {
   return boundedOutboxReceipt(
     await env.DB.prepare(BOUNDED_OUTBOX_SUMMARY_SQL).first(),
   );
+}
+
+// Search alone may reuse a verified provider receipt. Health, acceptance and
+// lifecycle callers still use vectorReadiness's fresh exact proof. These weak
+// keys isolate both bindings; cached values contain only immutable metadata,
+// never request data, promises, or cross-request I/O objects.
+const searchProjectionReceipts = new WeakMap();
+const SEARCH_PROJECTION_TTL_MS = 15_000;
+async function searchProjectionMarker(env) {
+  const row = await env.DB.prepare(`/* search-projection-marker */
+    SELECT schema_version, outbox_generation,
+      vector_projection_mutation_id AS mutation_id,
+      vector_projection_submitted_at AS mutation_submitted_at,
+      vector_projection_status AS projection_status,
+      vector_projection_bootstrap_epoch AS bootstrap_epoch,
+      vector_projection_bootstrap_cursor AS bootstrap_cursor,
+      vector_projection_bootstrap_high_water AS bootstrap_high_water,
+      vector_projection_bootstrap_base_count AS expected_vectors,
+      (SELECT COALESCE(sum(chunks), 0) FROM corpus_stats) AS live_vectors,
+      EXISTS(SELECT 1 FROM vector_outbox LIMIT 1) AS has_pending
+    FROM install_state WHERE id=1`).first();
+  if (!row || !['schema_version', 'outbox_generation', 'bootstrap_epoch', 'expected_vectors', 'live_vectors']
+    .every(key => Number.isSafeInteger(row[key]) && row[key] >= 0) || row.schema_version < 13 ||
+    ![0, 1].includes(row.has_pending)) return null;
+  return { key: JSON.stringify([row.schema_version, row.outbox_generation, row.mutation_id,
+    row.mutation_submitted_at, row.projection_status, row.bootstrap_epoch, row.bootstrap_cursor,
+    row.bootstrap_high_water, row.expected_vectors, row.live_vectors, row.has_pending]),
+    eligible: row.projection_status === 'verified' && row.has_pending === 0,
+    generation: row.outbox_generation };
+}
+
+async function searchProjectionReadiness(env, { now }) {
+  let byIndex = searchProjectionReceipts.get(env.DB);
+  if (!byIndex) { byIndex = new WeakMap(); searchProjectionReceipts.set(env.DB, byIndex); }
+  let marker;
+  try { marker = await searchProjectionMarker(env); }
+  catch (error) { byIndex.delete(env.VECTORIZE); throw error; }
+  const cached = byIndex.get(env.VECTORIZE);
+  if (marker?.eligible && cached?.marker === marker.key &&
+      now >= cached.checkedAt && now - cached.checkedAt < SEARCH_PROJECTION_TTL_MS) return { ...cached.receipt };
+  byIndex.delete(env.VECTORIZE);
+  const receipt = await vectorReadiness(env);
+  if (receipt.ready && marker?.eligible && receipt.outbox_generation === marker.generation) {
+    // A write during the provider read cannot seed a ready cache for the new
+    // generation. The second marker is one bounded install-state read.
+    const after = await searchProjectionMarker(env);
+    if (after?.eligible && after.key === marker.key) {
+      byIndex.set(env.VECTORIZE, { marker: marker.key, checkedAt: now, receipt: Object.freeze({ ...receipt }) });
+    } else return { ready: false };
+  }
+  return receipt;
 }
 
 /**

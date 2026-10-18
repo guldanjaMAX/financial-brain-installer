@@ -97,17 +97,111 @@ function factFromOperative(text, doc, requested) {
   return { value: section.value, start, end: start + section.value.length };
 }
 
+// These statements establish what the owner reported, not whether a recipient
+// updated a system. Keep the question grammar separate from completion requests
+// so neither a request nor a postal receipt can become proof of residence.
+function addressMailSender(row, doc, statementAt) {
+  if (!/^(?:gmail|imap|email)$/.test(doc?.source_kind || '') || doc.date_source !== 'email_header') return null;
+  const prefix = row.snippet.slice(0, statementAt).replace(/\s+/g, ' ').trim();
+  const envelope = /^From: ([^<>]+?) <[^<>\s]+@[^<>\s]+> To: [^<>\s]+@[^<>\s]+(?:, [^<>\s]+@[^<>\s]+)* Date: (.+?) Subject: (.+)$/.exec(prefix);
+  if (!envelope || envelope[3] !== row.title || Date.parse(envelope[2]) !== reliableDocumentTime(doc)) return null;
+  return envelope[1];
+}
+
+function ownerAddressStatement({ question, owner, results, docs, now }) {
+  const addressQuestion = /^what(?: is|'s) my (?:current )?(?:home |mailing )?address\??$/i.test(question);
+  const completionQuestion = /^has my (?:home |mailing )?address been updated(?: in (?:the )?[a-z ]{1,60} system)?\??$/i.test(question);
+  if ((!addressQuestion && !completionQuestion) || !safeSubject(owner) || identity(owner) === 'the owner') return null;
+  if (docs.some(doc => doc.authority?.operative_section)) return null;
+  const candidates = [];
+  for (let index = 0; index < results.length; index++) {
+    const row = results[index], doc = docs[index], text = row.snippet;
+    if (!doc || doc.n !== index + 1 || !doc.ref || typeof text !== 'string' || QUALIFIED_FACT.test(row.title || '') ||
+        text.length > 900 || /[\u2026<>]/.test(text.replace(/<[^<>\s]+@[^<>\s]+>/g, '')) ||
+        !/^(?:gmail|imap|email)$/.test(doc.source_kind || '') ||
+        doc.text_source !== 'native' || doc.text_reliable !== true ||
+        doc.lineage?.status !== 'known' || doc.lineage?.kind !== 'source_record' ||
+        doc.authority?.eligible === false || doc.authority?.tier === 'T4') continue;
+    // Bind first-person words to the rendered sender header, never to a name
+    // borrowed from the question, a recipient, or quoted correspondence.
+    const from = /^From:\s*([^<>\r\n]+?)\s*<[^<>\s]+@[^<>\s]+>\s/i.exec(text);
+    if (!from || identity(from[1]) !== identity(owner) ||
+        (text.match(/\bFrom:/gi) || []).length !== 1 ||
+        /\b(?:forwarded|wrote|quoted|hypothetical|business|office|not|never|if|unless|until|temporary|plan|intend)\b|["“”]/i.test(text)) continue;
+    const time = reliableDocumentTime(doc);
+    if (time === null || time > now || doc.date_source !== 'email_header') continue;
+    const statement = /\b(I have moved to|My (?:home |mailing )?address is|Please update my (?:home |mailing )?address to) ([^\r\n]+?)\.?\s*$/i.exec(text);
+    if (!statement) continue;
+    if (identity(addressMailSender(row, doc, statement.index)) !== identity(owner)) continue;
+    const request = /^Please/i.test(statement[1]);
+    if (completionQuestion !== request || !safeValue('address', statement[2])) continue;
+    if ((/home address/i.test(question) && /mailing address/i.test(statement[1])) ||
+        (/mailing address/i.test(question) && /home address/i.test(statement[1]))) continue;
+    const start = statement.index + statement[1].length + 1;
+    candidates.push({ doc, value: statement[2], start, end: start + statement[2].length, time, request });
+  }
+  candidates.sort((a, b) => b.time - a.time);
+  const chosen = candidates[0];
+  if (!chosen) return null;
+  const confirmations = [];
+  // A different or unparseable newer owner record requires ordinary conflict
+  // review. Agreement from a recipient is context, never independent proof of
+  // completion. Undated and future contradictions cannot be ordered away.
+  for (let index = 0; index < results.length; index++) {
+    const row = results[index], doc = docs[index];
+    if (doc?.n === chosen.doc.n) continue;
+    const text = `${row.title || ''} ${row.snippet || ''}`;
+    if (!identity(text).includes(identity(owner)) || !/\b(?:address|moved to)\b/i.test(text)) continue;
+    const time = doc ? reliableDocumentTime(doc) : null;
+    if (time !== null && time < chosen.time) continue;
+    if (candidates.some(candidate => candidate.doc.n === doc?.n && candidate.value === chosen.value)) continue;
+    const confirmation = /\bChange of address confirmed for ([^:]+): ([^\r\n]+?)\.?\s*$/i.exec(row.snippet || '');
+    if (!chosen.request && confirmation && addressMailSender(row, doc, confirmation.index) &&
+        identity(confirmation[1]) === identity(owner) &&
+        confirmation[2] === chosen.value && time !== null && time <= now &&
+        doc.ref && doc.text_source === 'native' && doc.text_reliable === true &&
+        doc.lineage?.kind === 'source_record' && doc.lineage?.status === 'known' &&
+        doc.authority?.eligible !== false &&
+        !/\b(?:not|never|if|unless|quoted|forwarded|wrote)\b|["“”>]/i.test((row.snippet || '').replace(/<[^<>\s]+@[^<>\s]+>/g, ''))) {
+      confirmations.push({ doc, time });
+      continue;
+    }
+    return null;
+  }
+  const day = new Date(chosen.time).toISOString().slice(0, 10);
+  const n = chosen.doc.n;
+  let answer = chosen.request
+    ? `Your ${day} email requests an address update to ${chosen.value}. [${n}] That message does not establish completion of the system update. [${n}]`
+    : `The most recent retrieved owner email reporting an address lists ${chosen.value}, as of ${day} [${n}]`;
+  const evidence = [n];
+  for (const confirmation of confirmations) {
+    answer += `; the ${new Date(confirmation.time).toISOString().slice(0, 10)} email records an address-change confirmation for the same address [${confirmation.doc.n}]`;
+    evidence.push(confirmation.doc.n);
+  }
+  if (!chosen.request) answer += '.';
+  return { answer, evidence, method: 'dated_owner_address',
+    fact_span: { n, field: 'address', start: chosen.start, end: chosen.end, as_of: day,
+      basis: 'result_snippet', offset_unit: 'utf16' } };
+}
+
 /**
  * Propose an exact, dated fact or return null. No new absence conclusion is
- * possible. `now` is injectable; the default is the request clock. Requiring
- * recent evidence is stricter than the general as-of path: thirty days mirrors
- * its stale-gap boundary, and cannot make an older record current by inference.
+ * possible. `now` is injectable; the default is the request clock. Contact
+ * cards retain the thirty-day stale boundary. An explicit owner email may
+ * report older dated history while preserving the route's freshness gaps;
+ * neither path makes an old record current by inference.
  */
 export function entityFactAnswer({
   question, results, docs, owner = null, filters = {}, gaps = [], coverageGaps = [], degraded = null,
   operativeConflict = false, newerAuthoritativeEvidence = [], currentEvidence = [],
   now = Date.now(),
 } = {}) {
+  if (Array.isArray(results) && Array.isArray(docs) && Number.isFinite(now) &&
+      !degraded && !coverageGaps.length && !operativeConflict && !newerAuthoritativeEvidence.length &&
+      !gaps.some(gap => /source_|coverage_|filter_not_applied|unavailable|operative_conflict|newer_/.test(gap.type || ''))) {
+    const statement = ownerAddressStatement({ question, owner, results, docs, now });
+    if (statement) return statement;
+  }
   const requested = questionFact(question, owner);
   if (!requested || !Array.isArray(results) || !Array.isArray(docs) || !Number.isFinite(now)) return null;
   if (degraded || coverageGaps.length || operativeConflict || newerAuthoritativeEvidence.length || gaps.some((gap) =>
