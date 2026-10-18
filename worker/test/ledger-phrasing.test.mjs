@@ -139,7 +139,11 @@ for (const reverse of [false, true]) test(`Think exact cents and empty-account c
   assert.equal(named.ledger?.found, true);
   // The first deposit names a different explicit payee. Its memo mention
   // cannot supply the sender evidence for an amountless arrival (R02/F3).
-  assert.deepEqual(named.citations.map(c => [c.posted_on, c.amount_minor, c.account_mask]), [["2026-10-08", 1234, "4417"]]);
+  assert.equal(named.evidence_gate.complete, false, 'the other shorthand receipt cannot prove a different payer');
+  assert.equal(named.ledger.unattributed_count, 1);
+  assert.deepEqual(named.citations.map(c => [c.posted_on, c.amount_minor, c.account_mask]),
+    [["2026-10-08", 1234, "4417"], ["2026-10-07", 902, "8862"]]);
+  assert.deepEqual(named.ledger.unattributed_citations, [2]);
   assert.ok(f.seen.sql.some(sql => /JOIN fin_transactions/.test(sql)));
   assert.equal(modelCalls, 0);
 });

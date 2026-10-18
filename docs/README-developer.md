@@ -2212,22 +2212,40 @@ Sender and metadata labels are segmented with their delimiters before identity
 normalization. Words such as `By` or `Reference` inside a name do not split it.
 The entire labelled sender field must match; a longer unregistered field cannot
 authorize a shorter registered payer. Bare shorthand instead permits a confirmed
-opening identity plus one closed transaction suffix from `ledger-answer.js`
+opening identity plus one closed transaction suffix from `ledger-attribution.js`
 (including payment, ACH deposit and payroll). Any competing registered longer
 reading is ambiguous; masked candidate names are shown. Accepted shorthand
 presence and income carry `assumptions[]`, cited row counts and amounts, and
 owner-facing `notes` rendered into the answer. Each note states the masked
 "identity + suffix" reading and offers `ledger.flip: ["exact names only"]`.
 Repeat the scoped question with that qualifier to leave shorthand out; such
-rows remain unknown for that payer, rather than proving absence or zero.
-Different confirmed payers remain nonmatches. Amount mismatches, zero-valued
-receipts and queries for an indistinguishable unregistered longer name also
-cannot turn shorthand into a named absence. Zero totals after exclusions stay
+rows move to an Unattributed line and keep their amounts in `inflow_total_minor`.
+An assumed receipt cannot disprove any payer, including a different confirmed
+identity. Only a scope containing confirmed attributions can certify absence
+or an exact payer total. Positive figures based on shorthand carry the note.
+Amount mismatches and zero-valued receipts cannot turn shorthand into absence.
+Zero totals after exclusions stay
 unconfirmed, while a positive gross figure retains its assumption note.
-Free-text candidate fields use one conservative masker: every alphanumeric run
-of at least five characters, including letters and punctuation/space-separated
-runs, exposes only its last four. Ordinary long words are masked too. This
+Every payer display uses `attributeInflow(row, registry)` once per inflow row.
+The shared tokenizer includes comma, semicolon, pipe and newline boundaries.
+Identity conflicts use distinct entity slugs, not distinct alias spellings.
+Merchant groups and deposit or transfer lists carry the same assumption notes;
+this includes transfer diagnostics in recurring-charge answers. Group totals
+without complete attribution are marked as subtotals. Partial named-income
+answers keep confirmed and assumed-dependent subtotals separate.
+Free-text candidate fields use one conservative masker: count original
+characters, including punctuation, and mask fields of at least five characters.
+Only the final four alphanumeric characters remain. Ordinary long words are
+masked too. This
 changes display labels, not stored data or financial amounts. The property suite
+`worker/test/ledger-attribution-paths.test.mjs` inventories every exported
+answer kind and exercises the shared generated grammar matrix through all
+inflow displays, including exact-only amount preservation.
+`worker/test/ledger-attribution-zero.test.mjs` separately proves that an actual
+zero-valued receipt cannot certify a payer zero while other receipts remain
+uncertain.
+`worker/test/ledger-attribution-readings.test.mjs` proves that whole-name and
+bare FROM/BY readings also agree by entity identity.
 `worker/test/ledger-identity-gate.test.mjs` exercises identity authority,
 ambiguity, exact normalization, arbitrary metadata, and render-boundary masking.
 It also counts answered, answered-with-assumption and cannot-confirm results for realistic synthetic

@@ -3,17 +3,14 @@
 export const normalizeLedgerText = value => (String(value || "").normalize("NFKC").toLowerCase().match(/[\p{L}\p{N}]+/gu) || []).join(" ");
 // Keep literal conjunctions distinct: "A & B", "A and B" and "A B" are
 // different selectors. A displayed label must use the same normalization.
-export const normalizeMerchantText = value => (String(value || "").normalize("NFKC").toLowerCase().match(/[\p{L}\p{N}]+|&/gu) || []).join(" ");
-export function senderFor(row) {
-  if (row.payee) return normalizeMerchantText(row.payee);
-  const text = normalizeMerchantText(row.description);
-  const directed = text.match(/\b(?:from|by) (.+)/);
-  // A subject after "for" is never the sender, even without an explicit
-  // payee. Preserve the opening-sender form used by plain bank descriptions.
-  return (directed ? directed[1] : text).split(/\b(?:for|invoice|memo|reference|ref)\b/)[0].trim()
-    .replace(/\s+(?:deposit|payment|receipt|payroll|settlement)$/, "");
+export { normalizeMerchantText } from './ledger-attribution.js';
+import { normalizeMerchantText } from './ledger-attribution.js';
+// Inflow labels require the already computed decision. Without it there is no
+// payer label; callers cannot fall back to an independent free-text parser.
+export function senderFor(row, attribution) {
+  return attribution && attribution.state !== 'unknown' ? normalizeMerchantText(attribution.reading.identity) : '';
 }
-export const merchantFor = row => row.direction === "inflow" ? senderFor(row) : normalizeMerchantText(row.payee || row.description);
+export const merchantFor = (row, attribution) => row.direction === "inflow" ? senderFor(row, attribution) : normalizeMerchantText(row.payee || row.description);
 const containsTokens = (haystack, needle) => Boolean(needle) && ` ${haystack} `.includes(` ${needle} `);
 // An explicit payee controls attribution. A memo about another merchant cannot
 // turn a payment to this payee into that merchant's income or spend.

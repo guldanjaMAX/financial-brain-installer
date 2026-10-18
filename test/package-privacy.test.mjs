@@ -952,6 +952,7 @@ const expected = [
   "worker/src/lib/ledger-reader.js",
   "worker/src/lib/ledger-answer.js",
   "worker/src/lib/ledger-analysis.js",
+  "worker/src/lib/ledger-attribution.js",
   "worker/src/lib/fin-import.js",
   "worker/src/lib/fin-ledger-maintenance.js",
   "worker/src/lib/fin-upload.js",

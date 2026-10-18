@@ -1,3 +1,8 @@
+// Exported inventory is checked against parser kinds and attribution coverage.
+export const LEDGER_ANSWER_KINDS = Object.freeze([
+  'balance', 'payment', 'totals', 'largest', 'deposits', 'merchant', 'category', 'transfers', 'recurring',
+]);
+
 // The grammar is deliberately bounded. Unsupported money questions use the
 // ordinary document path without imposing unrelated account-link decisions.
 const MONTHS = "january february march april may june july august september october november december".split(" ");

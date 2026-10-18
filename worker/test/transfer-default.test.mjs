@@ -33,16 +33,27 @@ test.before(() => {
   mock.method(globalThis, "fetch", async () => { throw new Error("network forbidden"); });
 });
 test.after(() => mock.restoreAll());
-const newKeys = new Set(["lead_rows", "lead", "default_exclusions", "lead_accounts", "lead_total_minor", "lead_monthly_total_minor", "flip", "measure", "net_minor", "net_label", "excluded_from_lead", "kept_reason"]);
+const newKeys = new Set(["inflow_total_minor", "attribution_state", "payer", "total_is_exact", "lead_rows", "lead", "default_exclusions", "lead_accounts", "lead_total_minor", "lead_monthly_total_minor", "flip", "measure", "net_minor", "net_label", "excluded_from_lead", "kept_reason"]);
 function oldKeys(value) {
   if (Array.isArray(value)) return value.map(oldKeys);
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).filter(([key]) => !newKeys.has(key)).map(([key, item]) => [key, oldKeys(item)]));
   return value;
 }
+const clientNote = 'Read the description as "[redacted] ****ient + deposit": 1 row totaling $731.29 rests on that reading of a confirmed identity; say "exact names only" to leave these out of payer attribution and retain their amounts as unattributed';
+function priorText(body) {
+  if (body.assumptions?.length) {
+    assert.deepEqual(body.notes, [clientNote], 'new shorthand note is exact, not omitted from verification');
+    assert.equal(body.assumptions[0].amount_minor, 73129);
+    assert.ok(body.ledger.flip.includes('exact names only'));
+    assert.ok(body.answer.endsWith(`\nNote: ${clientNote}.`));
+    return body.answer.slice(0, -`\nNote: ${clientNote}.`.length);
+  }
+  return body.answer.replaceAll('[redacted] ****KYOU; payer: Unattributed', '[redacted] ****KYOU').replaceAll('[redacted] ****5555; payer: Unattributed', '[redacted] ****5555');
+}
 function unchanged(body, scenario, question) {
   const golden = head[scenario][question];
   assert.ok(golden, "question captured before product changes");
-  assert.equal(body.answer, golden.answer, "answer text is byte-identical outside enumerated privacy labels");
+  assert.equal(priorText(body), golden.answer, "answer text is byte-identical outside enumerated privacy labels");
   assert.deepEqual(oldKeys(body.ledger), golden.ledger, "existing JSON keys retain their values");
 }
 async function ask(f, question = Q.totals, kind = "totals", pairCount = 1) {
@@ -133,7 +144,7 @@ test("b: offered flip phrases round-trip through the classifier", async t => {
     const flipped = await ask(f, flipQuestion(question, phrases[0]), "totals", scenario === "category-withdrawal" ? 0 : 1);
     assert.equal(flipped.ledger.lead, expected);
     if (expected === "gross") {
-      assert.equal(flipped.answer, head[scenario][question].answer);
+      assert.equal(priorText(flipped), head[scenario][question].answer);
       assert.deepEqual(oldKeys(flipped.ledger), head[scenario][question].ledger);
     } else assert.equal(account(flipped, "1111").debits_minor, 4710);
   }
@@ -219,7 +230,15 @@ test("g: proposed and confirmed category withdrawals leave income with a flip no
     assert.deepEqual(body.ledger.default_exclusions, { own_transfer_pairs: 0, own_transfer_minor: 0, withdrawal_count: 1, withdrawal_minor: 41383, loan_proceeds_count: 0, loan_proceeds_minor: 0 });
     assert.match(blocks(body, scenario, Q.totals).note, /say "including withdrawals"/);
   }
-  const f = await fixture(t, "category-withdrawal"), income = await ask(f, Q.income, "merchant", 0);
+  const f = await fixture(t, "category-withdrawal");
+  const partial = await f.ask(Q.income);
+  assert.equal(partial.evidence_gate.complete, false);
+  assert.equal(partial.ledger.total_minor, null, 'other-payer shorthand cannot establish an exact total');
+  assert.equal(partial.ledger.confirmed_subtotal_minor, 41383);
+  assert.equal(partial.ledger.unattributed_count, 1);
+  // A confirmed payee restores the old exclusion/zero control on the same rows.
+  f.raw("UPDATE fin_transactions SET payee='Fixture client' WHERE description='Fixture client deposit'");
+  const income = await ask(f, Q.income, "merchant", 0);
   assert.equal(income.ledger.lead_total_minor, 0);
   assert.equal(income.ledger.total_minor, 41383);
   assert.match(blocks(income, "category-withdrawal", Q.income).lead, /money in.*\$0\.00/i);
@@ -294,7 +313,13 @@ test("h: combined profit sums only move kinds and uses real Think without a mode
   assert.equal(routed.ledger.net_minor, expected);
   assert.equal(f.modelCalls, 0);
   const gross = await ask(f, flipQuestion(Q.totals, "including transfers including withdrawals"), "totals", 4);
-  assert.equal(gross.answer, head.combined[Q.totals].answer);
+  const unknownIncoming = gross.ledger.transfers.map(pair => pair.incoming).filter(row => row.attribution_state === 'unknown');
+  assert.deepEqual(unknownIncoming.map(row => row.amount_minor), [15439, 32641]);
+  for (const row of unknownIncoming) {
+    assert.equal(row.payer, 'Unattributed');
+    assert.ok(gross.answer.includes(`${row.description}; payer: Unattributed`));
+  }
+  assert.equal(priorText(gross), head.combined[Q.totals].answer);
   assert.deepEqual(oldKeys(gross.ledger), head.combined[Q.totals].ledger);
 });
 
@@ -333,9 +358,9 @@ for (const kind of ["merchant", "category", "recurring", "largest", "deposits"])
     assert.ok(body.ledger.lead_rows.length > 0);
   }
   const phrases = offered(body);
-  assert.equal(phrases.length, 1);
+  assert.deepEqual(phrases, kind === 'deposits' ? ['including transfers', 'exact names only'] : ['including transfers']);
   const flipped = await ask(f, flipQuestion(Q[kind], phrases[0]), kind);
-  assert.equal(flipped.answer, head.own[Q[kind]].answer);
+  assert.equal(priorText(flipped), head.own[Q[kind]].answer);
   assert.deepEqual(oldKeys(flipped.ledger), head.own[Q[kind]].ledger);
 });
 

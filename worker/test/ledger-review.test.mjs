@@ -161,5 +161,8 @@ test('closure: without a payee, only the description sender clause can name the 
   const body = await f.ask('Did the Fixture Payer payment arrive?');
   assert.ok(f.calls.slice(start).some(sql => /JOIN fin_transactions/.test(sql)), 'sender match decision reached');
   assert.notEqual(body.ledger?.found, true, 'an invoice-party mention cannot confirm arrival from that party');
-  assert.equal(body.citations?.length || 0, 0);
+  assert.equal(body.ledger.found, null);
+  assert.equal(body.evidence_gate.complete, false);
+  assert.equal(body.citations.length, 1, 'assumed other payer remains a candidate');
+  assert.equal(body.ledger.unattributed_count, 1);
 });

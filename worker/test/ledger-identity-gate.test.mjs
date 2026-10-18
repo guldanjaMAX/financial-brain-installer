@@ -1,3 +1,4 @@
+import { explicitStatements, originatorWords, originatorFormats } from './ledger-attribution-cases.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ledgerFixture, NOW } from './ledger-review-fixture.mjs';
@@ -89,15 +90,13 @@ test('noun-first payer names starting with a transaction word remain answerable'
   assert.equal(body.ledger.found, true); assert.equal(body.evidence_gate.complete, true);
 });
 
-test('shorthand cannot certify absence or zero for its payer and exact names only is a working flip', async t => {
+test('shorthand cannot certify absence or zero for any payer and exact names only is a working flip', async t => {
   const f = ledgerFixture(t); identity(f, 'Payer One'); identity(f, 'Payer Two', 'payer-two');
   f.add('receipt', 'Payer One payment', null);
   const green = await f.ask(payment); reached(f, green); assert.equal(green.ledger.found, true);
   for (const q of [payment, income]) {
     unknown(f, await f.ask(q.replace('?', ', exact names only?')));
-    const other = await f.ask(q.replace('Payer One', 'Payer Two')); reached(f, other);
-    assert.equal(other.evidence_gate.complete, true);
-    assert.equal(q === payment ? other.ledger.found : other.ledger.total_minor, q === payment ? false : 0);
+    unknown(f, await f.ask(q.replace('Payer One', 'Payer Two')));
   }
   unknown(f, await f.ask('Did the payment of $26.00 from Payer One arrive in October 2026?'));
   for (const description of ['Payer One payment Services', 'Payer One payment payment', 'Payer One mystery', 'FROM: Payer One payment']) {
@@ -127,7 +126,11 @@ test('shorthand render paths aggregate only dependent rows and mask all dynamic 
       const body = await f.ask(q); reached(f, body);
       assert.equal(body.ledger.found, true);
       assert.equal(body.evidence_gate.complete, !partial);
-      if (q === income) assert.equal(partial ? body.ledger.confirmed_subtotal_minor : body.ledger.total_minor, 6500);
+      if (q === income) assert.equal(partial ? body.ledger.attributed_subtotal_minor : body.ledger.total_minor, 6500);
+      if (partial && q === income) {
+        assert.equal(body.ledger.confirmed_subtotal_minor, 500);
+        assert.equal(body.ledger.confirmed_citations.length, 1);
+      }
       shorthandNote(body, { label, count: 2, amount: 6000 });
       assert.match(body.answer, /2 rows totaling \$60\.00/);
       assert.ok(!JSON.stringify(body).includes('AB48CD26EF17GH03'));
@@ -185,7 +188,7 @@ for (const format of ['bare', 'labelled', 'payee']) test(`generated shorthand pr
       if (body.evidence_gate.complete) stats.answered++; else stats.unknown++;
       if (body.assumptions?.length) stats.answered_with_assumption++;
       const assumed = format === 'bare' && registration === 'shorter' && label === shorter;
-      const uncertain = format === 'bare' ? registration === 'both' || (registration === 'shorter' && label === longer)
+      const uncertain = format === 'bare' ? registration === 'both' || (registration === 'shorter' && label !== shorter)
         : registration === 'shorter';
       if (uncertain) unknown(f, body);
       else {
@@ -387,22 +390,6 @@ test('ambiguous requested aliases and complete statement labels stay unknown wit
   assert.equal(empty.evidence_gate.complete, false);
 });
 
-const explicitStatements = [
-  'Payer One', 'Payer One payment', 'Payer One ACH deposit', 'Payer One payroll',
-  'WIRE FROM Payer One', 'WIRE TRANSFER FROM Payer One', 'ACH PAYMENT FROM Payer One',
-  'BANK TRANSFER FROM Payer One', 'ACH CREDIT FROM: Payer One', 'FROM: Payer One',
-  'EFT CREDIT BY Payer One', 'ZELLE PAYMENT FROM Payer One',
-  'ORIG CO NAME: Payer One', 'ORIGINATOR: Payer One', 'ORIGINATOR NAME: Payer One',
-  'WIRE ORIGINATOR: Payer One', 'WIRE TRANSFER ORIGINATOR NAME: Payer One',
-  'ACH CREDIT ORIG CO NAME: Payer One ORIG ID: 4826170392 DESC DATE: 261005 CO ENTRY DESCR: PAYMENT SEC: CCD TRACE#: 482617039258001',
-  'ORIG CO NAME:Payer One ORIG ID:4826170392 DESC DATE:261005 CO ENTRY DESCR:PAYMENT SEC:CCD TRACE#:482617039258001',
-  'WIRE TRANSFER FROM: Payer One REF: 482617039258',
-  'WIRE ORIGINATOR: Payer One; BENEFICIARY: Operating Company; REFERENCE: 482617039258',
-  'ACH CREDIT ORIGINATOR: Payer One\nTRACE: 482617039258001',
-  'ACH PAYMENT FROM Payer One for invoice 48261703',
-  'BANK TRANSFER FROM Supplier Alias reference 48261703',
-];
-
 test('usefulness: explicit synthetic bank originators answer both payment and income', async t => {
   const f = ledgerFixture(t); identity(f, 'Payer One'); identity(f, 'Payer Two', 'payer-two');
   f.raw("UPDATE fin_entities SET display_label='Supplier Alias' WHERE entity_slug='payer-one'");
@@ -580,20 +567,6 @@ test('render inventory: fixed refusals and fallback gap paths do not echo free-t
 // Enumerate grammar words as identity data, independently of production parsing.
 // Each format crosses both field lengths, all three registration states, and
 // both questions about each identity plus a confirmed unrelated payer.
-const originatorWords = [
-  'from', 'by', 'sender', 'originator', 'orig', 'co', 'name', 'id', 'ref',
-  'reference', 'trace', 'memo', 'ach', 'wire', 'credit', 'deposit', 'payment',
-  'eft', 'zelle', 'bank', 'transfer', 'receipt', 'payroll', 'settlement',
-  'company', 'desc', 'date', 'entry', 'descr', 'sec', 'beneficiary', 'for', 'invoice',
-  'orig co name', 'originator name', 'sender name', 'orig id', 'co id',
-  'company id', 'desc date', 'co entry descr', 'entry descr', 'wire from',
-];
-const originatorFormats = [...explicitStatements,
-  'WIRE FROM: Payer One; REF: 48261703',
-  'ACH CREDIT ORIG CO NAME: Payer One ORIG ID: 4826170392',
-  'SENDER: Payer One', 'SENDER NAME: Payer One',
-  'BY: Payer One', 'WIRE FROM: Payer One | MEMO: 48261703',
-];
 for (const [formatIndex, format] of originatorFormats.entries()) {
   test(`generated originator structure format ${formatIndex + 1}`, async t => {
     const f = ledgerFixture(t);
@@ -630,7 +603,8 @@ for (const [formatIndex, format] of originatorFormats.entries()) {
           for (const queryName of [shorter, longer, 'Unrelated Supplier']) {
             for (const question of [payment, income]) {
               stats.generated++;
-              if (known) stats.expected_answered++;
+              const canAnswer = known && (!(formatIndex >= 1 && formatIndex <= 3) || queryName === field);
+              if (canAnswer) stats.expected_answered++;
               if (ambiguous) stats.ambiguous_shorthand++;
               const before = f.calls.length;
               const body = await f.ask(question.replace('Payer One', queryName === shorter ? 'Short Supplier' : queryName === longer ? 'Long Supplier' : queryName));
@@ -644,8 +618,8 @@ for (const [formatIndex, format] of originatorFormats.entries()) {
                 assert.ok(!serialized.includes(identifier), 'identifier inside the identity must not render');
                 for (const identifier of description.match(/\d{5,}/g) || [])
                   assert.ok(!serialized.includes(identifier), 'full free-text identifier must not render');
-                assert.equal(body.evidence_gate.complete, known, 'whole field authority or an explicit shorthand assumption is required');
-                if (!known) unknown(f, body);
+                assert.equal(body.evidence_gate.complete, canAnswer, 'whole field authority or an explicit shorthand assumption is required');
+                if (!canAnswer) unknown(f, body);
                 else {
                   const match = queryName === field;
                   if (question === payment) assert.equal(body.ledger.found, match);
@@ -690,9 +664,14 @@ test('sender structure: real repeated fields and uncertain segments stay unknown
     assert.equal(green.evidence_gate.complete, true);
     assert.equal(q === payment ? green.ledger.found : green.ledger.total_minor, q === payment ? true : 2500);
   }
+  f.raw("UPDATE fin_transactions SET description='WIRE FROM: Payer One; REF: 48261703; FROM: Payer One'");
+  for (const q of [payment, income]) {
+    const repeated = await f.ask(q); reached(f, repeated);
+    assert.equal(repeated.evidence_gate.complete, true);
+    assert.equal(q === payment ? repeated.ledger.found : repeated.ledger.total_minor, q === payment ? true : 2500);
+  }
   for (const description of [
     'WIRE FROM: Payer One; REF: 48261703; FROM: Payer Two',
-    'WIRE FROM: Payer One; REF: 48261703; FROM: Payer One',
     'WIRE FROM: Payer One; REF: 48261703; BY: Payer Two',
     'WIRE FROM: Payer One; MEMO: text; ORIG CO NAME: Payer Two',
     'WIRE FROM: Payer One; TRACE#: 48261703; SENDER NAME: Payer Two',

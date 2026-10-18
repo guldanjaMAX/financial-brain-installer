@@ -167,7 +167,8 @@ test('C19 unknown sender label cannot round-trip as a certified zero', async t =
   f.add('unknown', 'operating', 81327, 'inflow', 'Invoice for Studio Buyer');
   const listed = await f.ask(`How much income by merchant ${PERIOD}?`); reached(f, listed, 'merchant');
   assert.equal(listed.ledger.total_minor, 81327);
-  assert.equal(listed.ledger.groups[0].merchant, '[redacted] ****hant');
+  assert.equal(listed.ledger.groups[0].merchant, 'Unattributed');
+  assert.equal(listed.ledger.groups[0].attribution_state, 'unknown');
   const requested = await f.ask(`How much income came from ${listed.ledger.groups[0].merchant} ${PERIOD}?`);
   assert.equal(requested.ledger, undefined);
   assert.equal(requested.gaps[0].reason, 'merchant_selector_unsupported');

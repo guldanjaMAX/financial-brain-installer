@@ -250,7 +250,8 @@ async function mutantAnswer(from, to, target = "analysis") {
   const targetUrl = target === "analysis" ? analysisUrl : new URL("../src/lib/ledger-answer.js", import.meta.url);
   const analysis = readFileSync(targetUrl, "utf8");
   assert.equal(analysis.split(from).length - 1, 1, "exactly one mutation site");
-  const altered = analysis.replace(from, to);
+  const altered = analysis.replace(from, to).replace(/from ["'](\.\/.+?)["']/g, (_, path) =>
+    `from ${JSON.stringify(new URL(path, targetUrl).href)}`);
   const analysisModule = `data:text/javascript;base64,${Buffer.from(altered).toString("base64")}`;
   const answerUrl = new URL("../src/lib/ledger-answer.js", import.meta.url);
   const answer = (target === "analysis" ? readFileSync(answerUrl, "utf8") : altered).replace(/from "(\.\/.+?)"/g, (_, path) =>

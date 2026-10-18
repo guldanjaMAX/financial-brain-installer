@@ -841,7 +841,13 @@ view. The document path retains its existing money refusal rules.
 Recurrence uses at least three charges, bounded weekly/monthly intervals and
 integer amount tolerance; results are explicitly detected rather than confirmed. Category proposals and Unsorted remain visible. Ambiguous groups,
 incomplete coverage and unreadable rows cannot establish a total or absence.
-Named payment and merchant-income answers use positive identity evidence.
+Every answer path that displays or groups an inflow payer uses the single
+`attributeInflow(row, registry)` decision in `ledger-attribution.js`: confirmed,
+assumed or unknown, with the entity slug, reading and evidence. The decision is
+computed once per row in the request snapshot. Merchant groups use entity slugs,
+so different aliases of one entity do not split or conflict. Deposit lists and
+transfer diagnostics, including those in recurring-charge answers, use the same
+decision. Amount-only payment questions make no payer claim.
 Known identities are the current, confirmed `fin_entities` legal names and
 owner display labels for the same tenant. The identity inventory and receipt
 rows are read in one D1 batch; identities are bounded to 5,000 and an unavailable
@@ -863,22 +869,29 @@ Supported explicit fields include `FROM:`, `BY`, `ORIG CO NAME`, `ORIGINATOR`
 (with optional `NAME`) and `SENDER` (with optional `NAME`), optionally preceded
 by ACH/EFT/wire/Zelle/bank credit, transfer, payment or deposit. Standard trace,
 originator ID, entry-description, beneficiary and reference fields delimit the
-sender; they never supply identity. Multiple conflicting sender clauses remain
-unknown. Ordinary wire-transfer and ACH-payment descriptions retain answers
+sender; they never supply identity. A single tokenizer recognizes comma,
+semicolon, pipe and newline sender boundaries, including bare FROM/BY clauses
+after reference metadata. Different-entity or unresolved readings remain
+unknown with masked candidates; repeated aliases of one entity agree. Ordinary wire-transfer and ACH-payment descriptions retain answers
 when the exact extracted payer is independently confirmed.
 
 Undelimited descriptions have one explicit exception: a confirmed opening
 identity followed only by a closed transaction-type suffix may support presence
 or positive income with an assumption. Competing registered longer readings
 are ambiguous, with candidate names passed through the single masker. The
-closed suffix list lives in `ledger-answer.js`. Structured `assumptions[]`
+closed suffix list lives in `ledger-attribution.js`. Structured `assumptions[]`
 record the masked identity, canonical suffix, dependent row count, amount and
 citations; the final response renders every assumption in `notes` and offers
-the `ledger.flip` qualifier "exact names only". This qualifier leaves matching
-shorthand unknown. Shorthand cannot prove absence or zero for its payer, an
-indistinguishable unregistered longer name, or an excluded conditional total.
-An independently resolved different payer remains a normal nonmatch. Labelled
-fields retain exact whole-field matching. No stored identity or row is changed.
+the `ledger.flip` qualifier "exact names only". This qualifier moves assumed
+receipts to an Unattributed line and preserves the total inflow amount. Every transaction
+answer includes `inflow_total_minor` for its selected receipt scope. Shorthand
+can support only a positive figure for its own entity with the note and flip;
+it cannot prove absence or zero for any payer, including a different registered
+payer or a conditional total after exclusions. A scope-wide confirmed-row check
+governs exact payer figures. Group figures without that proof are marked as
+attributed subtotals with `total_is_exact: false`; overall amount totals remain
+available independently of payer attribution. Labelled fields retain exact
+whole-field matching. No stored identity or row is changed.
 
 Every posted inflow in the selected account and period must have a positively
 identified payer before a named absence or exact income total can be certified.
@@ -889,15 +902,19 @@ The answer says it cannot confirm the requested payer, carries a
 `sender_attribution_unknown` gap and incomplete, partial evidence, and leaves
 `ledger.found` null unless an independent receipt matches. Named-income
 `total_minor` and `lead_total_minor` remain null. A nonempty confirmed set has
-`confirmed_subtotal_minor` before transfer exclusions and `confirmed_citations`;
-an empty confirmed set leaves that subtotal null. Partial answers never enter
+`confirmed_subtotal_minor` before transfer exclusions and `confirmed_citations`.
+An empty or zero-valued confirmed set leaves that subtotal null while attribution
+is incomplete. A separate
+`attributed_subtotal_minor` includes positive assumed matches with their notes;
+those receipts never inflate `confirmed_subtotal_minor`. Partial answers never enter
 the complete-total or conditional-transfer-total renderer. Amount-only queries
 retain their exact-cent contract without making a payer claim.
 
-One render-boundary function masks every run of five or more alphanumeric
-characters in free-text candidate fields, including letters-only values. The
-whole field is treated as one possibly separated identifier, so punctuation,
-symbols, whitespace and invisible separators cannot expose short fragments. Account and reference labels need
+One render-boundary function masks free-text fields with five or more original
+characters, including internal punctuation in identifiers such as `A-123` and
+`AB/12`. The whole field is treated as one possibly separated identifier, so
+punctuation, symbols, whitespace and invisible separators cannot expose short
+fragments. Account and reference labels need
 no special-case vocabulary. Only the final four alphanumeric characters remain,
 and masking precedes truncation. This conservative rule also hides ordinary
 long words in descriptions, merchant/category labels and echoed selectors.

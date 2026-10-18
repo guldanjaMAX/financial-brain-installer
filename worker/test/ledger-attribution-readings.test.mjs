@@ -1,0 +1,40 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { ledgerFixture, NOW } from './ledger-review-fixture.mjs';
+
+test('a bare sender clause and a whole registered name agree only when they resolve to the same entity', async t => {
+  const f = ledgerFixture(t);
+  t.mock.method(globalThis, 'fetch', () => assert.fail('network forbidden'));
+  f.raw(`INSERT INTO fin_entities(entity_slug,legal_name,display_label,kind,relationship,provenance,basis_state,recorded_at)
+    VALUES ('payer-one','Payer One','From Payer One','business','counterparty','owner_stated','confirmed',?)`, NOW);
+  f.add('receipt', 'From Payer One', null);
+  const questions = ['Did the payment from Payer One arrive in October 2026?',
+    'How much income came from Payer One in October 2026?', 'Show income by merchant in October 2026?'];
+  async function ask(q) {
+    const before = f.calls.length, body = await f.ask(q);
+    assert.ok(f.calls.slice(before).some(sql => /JOIN fin_transactions/.test(sql)));
+    assert.equal(f.first('SELECT COUNT(*) n FROM fin_transactions').n, 1);
+    assert.equal(f.documentCalls, 0); assert.ok(body.ledger);
+    return body;
+  }
+  for (const q of questions) {
+    const green = await ask(q); assert.equal(green.evidence_gate.complete, true);
+    assert.equal(green.ledger.kind === 'payment' ? green.ledger.found : green.ledger.total_minor, green.ledger.kind === 'payment' ? true : 2500);
+  }
+  f.raw("UPDATE fin_entities SET display_label=NULL WHERE entity_slug='payer-one'");
+  f.raw(`INSERT INTO fin_entities(entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at)
+    VALUES ('payer-two','From Payer One','business','counterparty','owner_stated','confirmed',?)`, NOW);
+  for (const [i, q] of questions.entries()) {
+    const body = await ask(q);
+    if (i < 2) {
+      assert.equal(body.ledger.found, null);
+      assert.equal(body.evidence_gate.complete, false);
+      if (i === 1) assert.equal(body.ledger.total_minor, null);
+      assert.equal(body.ledger.payer_candidates.length, 2);
+    } else {
+      assert.equal(body.ledger.total_minor, 2500);
+      assert.equal(body.ledger.groups[0].attribution_state, 'unknown');
+      assert.equal(body.ledger.groups[0].payer_candidates.length, 1, 'masked labels can coincide without exposing the originals');
+    }
+  }
+});
