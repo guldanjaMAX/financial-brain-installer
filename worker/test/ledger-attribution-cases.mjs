@@ -45,16 +45,15 @@ export function* boundaryReadingCases() {
   ];
   for (const separator of lineSeparators) for (const clause of ['FROM', 'BY', 'FROM:', 'SENDER:']) {
     for (const same of [false, true]) yield {
-      family: 'line-separator', identities, state: 'unknown',
+      family: 'line-separator', identities, state: same ? 'confirmed' : 'unknown',
       description: `WIRE FROM: Payer One; REF: 48261703${separator}${clause} Payer ${same ? 'One' : 'Two'}`,
-      // All of these boundaries are outside the strict grammar alphabet.
-      candidates: [],
+      candidates: same ? ['Payer One'] : ['Payer One', 'Payer Two'],
     };
   }
   for (const label of expandedMetadataLabels) for (const separator of lineSeparators) {
     const description = `ACH CREDIT ORIG CO NAME: Payer One; ${label} 48261703`;
     yield { family: 'expanded-label', identities, description, state: /DATE/.test(label) ? 'unknown' : 'confirmed' };
-    yield { family: 'expanded-label', identities, description: `${description}${separator}FROM Payer Two`, state: 'unknown', candidates: [] };
+    yield { family: 'expanded-label', identities, description: `${description}${separator}FROM Payer Two`, state: 'unknown', candidates: /DATE/.test(label) ? [] : ['Payer One', 'Payer Two'] };
     yield { family: 'unknown-prose', identities, description: `FROM: Payer One${separator}UNLISTED FIELD: 48261703`, state: 'unknown' };
   }
   for (const label of ['REFERENCE:', ...expandedMetadataLabels]) {

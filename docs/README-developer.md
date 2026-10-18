@@ -2195,8 +2195,8 @@ matches use the exact NFKC-normalized, case-insensitive payee when present.
 Only outflows without a payee use contiguous description tokens as a fallback.
 Named inflows require an exact normalized match to a current confirmed
 `fin_entities` legal name or display label. A bank payee does not itself create
-a known identity. An absent payee permits only the bounded directed/opening
-sender grammar, followed by the same identity match. Identities and transactions
+a known identity. An absent payee requires a complete parse of the bounded
+sender/metadata grammar, followed by the same identity match. Identities and transactions
 share one bounded D1 snapshot, and duplicate names fail closed. Any unknown
 inflow in the selected window, including a different amount, prevents named
 absence or an exact income total. Unknown candidates stay visible with exact
@@ -2208,13 +2208,30 @@ A colliding full statement or extracted field never falls back to a shorter
 payer. Standard wire-transfer/ACH-payment sender clauses and explicit
 `ORIG CO NAME`, `ORIGINATOR`, `SENDER`, `FROM:` and `BY` fields use that same
 independent identity check. Conflicting fields remain unknown.
-Sender and metadata labels are segmented with their delimiters before identity
-normalization. Words such as `By` or `Reference` inside a name do not split it.
-The entire labelled sender field must match; a longer unregistered field cannot
-authorize a shorter registered payer. Bare shorthand instead permits a confirmed
+Before NFKC or trimming, the description alphabet admits Unicode letters,
+numbers and combining marks, ASCII space, and `& ' ( ) . _ / : # ; , | -`.
+CR, LF, CRLF, NEL (U+0085), U+2028 and U+2029 each become one semicolon field
+separator, never a space within a name. Every other Cc control, including FF,
+VT, NUL and tab, and every Cf format character, including U+200B, U+FEFF,
+U+200C/D, U+2060 and bidi controls, produces unknown. All other characters
+outside that alphabet also produce unknown. Validate the normalized text too.
+The caps are 512 code points before and after normalization, 12 fields, 64 parse
+alternatives and 32,768 instrumented steps. Refusal retains every amount in the
+inflow total. A SQL NUL flag covers drivers that truncate the returned text.
+
+The parser must consume every field and validate every metadata value, including
+calendar dates and numeric traces. Unknown labels, invalid values and trailing
+prose cannot be ignored. Every complete segmentation survives, including names
+containing `By`, `From` or metadata words. All registered readings must resolve
+to one entity slug, and at least one complete parse must resolve every sender
+field. Missing alternative names do not erase a unique registered whole name;
+a conflicting slug, ambiguous label or unresolved additional sender produces
+unknown. Bare shorthand permits a confirmed
 opening identity plus one closed transaction suffix from `ledger-attribution.js`
-(including payment, ACH deposit and payroll). Any competing registered longer
-reading is ambiguous; masked candidate names are shown. Accepted shorthand
+(including payment, ACH deposit and payroll). A competing registered longer
+reading is ambiguous when it resolves to a different entity slug; a confirmed
+whole-name reading for the same slug takes precedence. Masked candidate names
+are shown. Accepted shorthand
 presence and income carry `assumptions[]`, cited row counts and amounts, and
 owner-facing `notes` rendered into the answer. Each note states the masked
 "identity + suffix" reading and offers `ledger.flip: ["exact names only"]`.
@@ -2226,8 +2243,12 @@ or an exact payer total. Positive figures based on shorthand carry the note.
 Amount mismatches and zero-valued receipts cannot turn shorthand into absence.
 Zero totals after exclusions stay
 unconfirmed, while a positive gross figure retains its assumption note.
-Every payer display uses `attributeInflow(row, registry)` once per inflow row.
-The shared tokenizer includes comma, semicolon, pipe and newline boundaries.
+Every payer display uses the same attribution decision once per inflow row.
+`createInflowAttributor(registry)` binds a cache to one answer's identity
+snapshot. Complete parse results are shared by normalized description only
+after raw alphabet and length checks, with no cross-answer cache. Structured
+payees retain their direct lookup path, and grammar tables compile once per
+module. The parser includes comma, semicolon, pipe and canonicalized line boundaries.
 Identity conflicts use distinct entity slugs, not distinct alias spellings.
 Merchant groups and deposit or transfer lists carry the same assumption notes;
 this includes transfer diagnostics in recurring-charge answers. Group totals
@@ -2246,6 +2267,11 @@ zero-valued receipt cannot certify a payer zero while other receipts remain
 uncertain.
 `worker/test/ledger-attribution-readings.test.mjs` proves that whole-name and
 bare FROM/BY readings also agree by entity identity.
+`worker/test/ledger-attribution-grammar.test.mjs` enumerates the Unicode control
+and format alphabet, line-boundary controls, and successful/refused cap cases.
+`worker/test/ledger-attribution-cache.test.mjs` proves normalized reuse, raw
+validation before reuse, separate answer snapshots, structured-payee authority,
+and unchanged receipt counts and notes.
 `worker/test/ledger-identity-gate.test.mjs` exercises identity authority,
 ambiguity, exact normalization, arbitrary metadata, and render-boundary masking.
 It also counts answered, answered-with-assumption and cannot-confirm results for realistic synthetic

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { attributeInflow, payerRegistry } from '../src/lib/ledger-attribution.js';
 import { ledgerFixture, NOW } from './ledger-review-fixture.mjs';
+import { lineSeparators } from './ledger-attribution-cases.mjs';
 
 const registry = payerRegistry([
   { entity_slug: 'one', legal_name: 'Payer One' },
@@ -78,7 +79,7 @@ test('caps refuse safely with deterministic parser work and keep the amount in t
   t.diagnostic(JSON.stringify({ bounded_work: measurements }));
 });
 
-test('every Unicode control, format, line and paragraph separator refuses at every insertion boundary', async t => {
+test('Unicode line separators parse while every other control or format refuses at every insertion boundary', async t => {
   const f = ledgerFixture(t);
   t.mock.method(globalThis, 'fetch', () => assert.fail('network forbidden'));
   f.raw(`INSERT INTO fin_entities(entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at)
@@ -89,12 +90,39 @@ test('every Unicode control, format, line and paragraph separator refuses at eve
     'How much income came from Payer One in October 2026?'];
   for (const question of questions) assert.equal((await f.ask(question)).ledger.found, true);
   assert.equal(parsed(base).state, 'confirmed');
-  const hostile = [];
+  const hostile = [], allowed = [];
   // Enumerate the runtime's entire Unicode property table, not a handpicked
   // list that can forget the next invisible delimiter or normalization case.
   for (let cp = 0; cp <= 0x10ffff; cp++) {
     const char = String.fromCodePoint(cp);
-    if (/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(char)) hostile.push(char);
+    if (/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(char)) {
+      (lineSeparators.includes(char) ? allowed : hostile).push(char);
+    }
+  }
+  assert.deepEqual(new Set(allowed), new Set(['\r', '\n', '\u0085', '\u2028', '\u2029']));
+  let lineAnswers = 0;
+  for (const separator of [...allowed, '\r\n']) for (const sender of ['Payer One', 'Unregistered Supplier']) {
+    const description = `FROM: Payer One${separator}FROM: ${sender}${separator}TRACE: 123`;
+    const result = parsed(description);
+    assert.equal(result.evidence.parser.complete, true);
+    assert.equal(result.evidence.parser.fields, 3, 'CRLF counts as one field separator');
+    assert.equal(result.state, sender === 'Payer One' ? 'confirmed' : 'unknown');
+    f.raw('UPDATE fin_transactions SET description=?', description);
+    for (const question of questions) {
+      f.calls.length = 0;
+      const before = f.first('SELECT total_changes() n').n;
+      const body = await f.ask(question);
+      assert.ok(f.calls.some(sql => /JOIN fin_transactions/.test(sql)));
+      assert.equal(f.first('SELECT COUNT(*) n FROM fin_transactions').n, 1);
+      assert.equal(f.first('SELECT total_changes() n').n, before);
+      assert.equal(f.documentCalls, 0);
+      assert.equal(body.ledger.found, sender === 'Payer One' ? true : null);
+      assert.equal(body.ledger.inflow_total_minor, 2500);
+      assert.equal(body.evidence_gate.complete, sender === 'Payer One');
+      if (body.ledger.kind === 'merchant') assert.equal(body.ledger.total_minor, sender === 'Payer One' ? 2500 : null);
+      lineAnswers++;
+    }
+    assert.equal((await f.ask('Did the payment of $25.00 arrive in October 2026?')).ledger.found, true);
   }
   let parserCases = 0, answers = 0, amountControls = 0;
   for (const char of hostile) for (let boundary = 0; boundary <= base.length; boundary++) {
@@ -128,7 +156,8 @@ test('every Unicode control, format, line and paragraph separator refuses at eve
   }
   assert.ok(hostile.length > 200 && parserCases > 10000 && answers > 10000);
   t.diagnostic(JSON.stringify({ hostile_alphabet: { unicode: process.versions.unicode,
-    codepoints: hostile.length, boundaries: base.length + 1, parser_cases: parserCases,
+    codepoints: hostile.length, allowed_line_codepoints: allowed.length, line_answers: lineAnswers,
+    boundaries: base.length + 1, parser_cases: parserCases,
     payment_answers: answers / 2, income_answers: answers / 2, amount_controls: amountControls } }));
 });
 

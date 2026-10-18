@@ -1,4 +1,4 @@
-import { attributeInflow, payerRegistry, lookupPayer, selectAttributedInflows, inflowScopeConfirmed, payerAmount } from "./ledger-attribution.js";
+import { createInflowAttributor, payerRegistry, lookupPayer, selectAttributedInflows, inflowScopeConfirmed, payerAmount } from "./ledger-attribution.js";
 import { scopeIsUnrestricted } from "./grants.js";
 import { classifyLedgerQuestion, ledgerDay, shiftLedgerDay } from "./ledger-question.js";
 import { accountLinkPairsInWindow, accountLinkRequiredInWindow, effectivePeriodCovered, readEffectiveAccounts, readEffectiveBalances, readEffectiveTransactions } from "./ledger-reader.js";
@@ -193,7 +193,8 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
   const identities = payerRegistry(attributionNeeded ? snapshot.identities : []);
   const wanted = namedPayer ? lookupPayer(namedIncome ? intent.match : intent.counterparty, identities) : null;
   const selectorAmbiguous = wanted?.state === 'ambiguous';
-  const payers = new Map(allRows.filter(row => row.direction === 'inflow').map(row => [row.id, attributeInflow(row, identities)]));
+  const attribute = createInflowAttributor(identities);
+  const payers = new Map(allRows.filter(row => row.direction === 'inflow').map(row => [row.id, attribute(row)]));
   const payerMatches = row => wanted?.state === 'unique' && payers.get(row.id)?.entity_slug === wanted.slug;
   const merchantMatches = namedIncome ? payerMatches : row => matchesMerchant(row, intent.match);
   const inWindow = row => row.posted_on >= intent.from && row.posted_on <= intent.to;

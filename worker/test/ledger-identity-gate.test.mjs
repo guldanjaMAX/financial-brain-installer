@@ -409,9 +409,9 @@ test('usefulness: explicit synthetic bank originators answer both payment and in
     }
   }
   t.diagnostic(JSON.stringify({ statements: explicitStatements.length, answered, answered_with_assumption: answeredWithAssumption, cannot_confirm: cannotConfirm }));
-  // The original newline fixture remains in the set: the strict alphabet
-  // must refuse it. The other 23 forms still answer, with six noted figures.
-  assert.equal(answered, 46); assert.equal(cannotConfirm, 2);
+  // The original LF statement uses a field boundary, like the other explicit
+  // forms. Only the three shorthand forms need notes in both answer kinds.
+  assert.equal(answered, 48); assert.equal(cannotConfirm, 0);
   assert.equal(answeredWithAssumption, 6);
   f.raw("UPDATE fin_transactions SET description='ACH CREDIT ORIG CO NAME: Payer Two ORIG ID: 4826170392'");
   const other = await f.ask(payment); reached(f, other); assert.equal(other.ledger.found, false);
@@ -601,10 +601,10 @@ for (const [formatIndex, format] of originatorFormats.entries()) {
           f.raw('UPDATE fin_transactions SET description=?', description);
           const registered = field === shorter ? registration !== 'longer' : registration !== 'shorter';
           // Every complete reading participates. An unregistered alternative
-          // does not erase a unique registered shorthand reading. A forbidden
-          // alphabet character refuses even an otherwise registered name.
+          // does not erase a unique registered shorthand reading. LF is a
+          // field boundary in the same grammar as the printable delimiters.
           const ambiguous = false;
-          const known = registered && !format.includes('\n');
+          const known = registered;
           for (const queryName of [shorter, longer, 'Unrelated Supplier']) {
             for (const question of [payment, income]) {
               stats.generated++;
@@ -654,14 +654,8 @@ for (const [formatIndex, format] of originatorFormats.entries()) {
       }
     }
     t.diagnostic(JSON.stringify({ originator_property: stats }));
-    if (format.includes('\n')) {
-      // An intentionally rejected format needs its own green control so a
-      // uniformly refused family cannot hide a broken ledger harness.
-      f.raw('UPDATE fin_transactions SET description=?,payee=?', 'FROM: Unrelated Supplier', null);
-      const green = await f.ask(payment.replace('Payer One', 'Unrelated Supplier')); reached(f, green);
-      assert.equal(green.ledger.found, true); assert.equal(green.evidence_gate.complete, true);
-      assert.equal(stats.answered, 0); assert.ok(stats.unknown > 0);
-    } else assert.ok(stats.answered > 0 && stats.unknown > 0, 'uniform arms invalidate the harness');
+    assert.ok(stats.answered > 0 && stats.unknown > 0, 'uniform arms invalidate the harness');
+    assert.equal(stats.fully_parsed, stats.descriptions, 'every original format consumes the complete statement');
     assert.equal(stats.violations, 0, JSON.stringify(failures));
     assert.equal(stats.answered, stats.expected_answered);
     assert.equal(stats.unknown, stats.generated - stats.expected_answered);

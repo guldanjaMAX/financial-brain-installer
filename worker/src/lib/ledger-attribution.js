@@ -21,17 +21,22 @@ export function lookupPayer(label, registry) {
 }
 
 // One closed grammar owns both the alphabet and every supported production.
-// Spaces are the only whitespace. Validate BEFORE NFKC or trimming so neither
-// controls nor format characters can disappear into an apparently valid name.
+// Line breaks become field separators, never spaces inside a name. Validate
+// BEFORE NFKC or trimming so every other control/format character stays invalid.
+// Compile the tables once; only parser state and answer caches are per request.
 const statementGrammar = Object.freeze({
   limits: Object.freeze({ codepoints: 512, fields: 12, parses: 64, steps: 32768 }),
-  alphabet: /^[\p{L}\p{N}\p{M} &'()._/:#;,|\-]*$/u,
+  alphabet: /^[\p{L}\p{N}\p{M} &'()._/:#;,|\-\r\n\u0085\u2028\u2029]*$/u,
+  lineBreak: /\r\n|[\r\n\u0085\u2028\u2029]/g,
+  edgeSpaces: /^ +| +$/g,
+  spaces: / +/g,
+  fieldBoundary: /[;,|]/,
   name: /^[\p{L}\p{N}][\p{L}\p{N}\p{M} &'()._/:#\-]*$/u,
   separator: /^[ ]*(?:[;,|][ ]*)?/,
   channel: /^(?:(?:ach|eft|wire|zelle|bank)(?: +(?:credit|transfer|payment|deposit))?|payment|deposit|receipt|transfer) +/i,
   sender: /^(?:(?:from|by|orig +co +name|originator(?: +name)?|sender(?: +name)?) *: *|(?:from|by) +)/i,
   suffix: /^(?:(?:ach|eft|wire|zelle) +)?(?:deposit|payment|receipt|payroll|settlement)$/i,
-  metadata: [
+  metadata: Object.freeze([
     [/^(?:orig +id|co +id|company +id|individual +id) *(?:# *:?|:) */i, /^[\p{L}\p{N}]+(?:[./-][\p{L}\p{N}]+)*$/u],
     [/^(?:trace +number|trace +no|trace) *(?:# *:?|:) */i, /^[0-9]{1,34}$/],
     [/^(?:desc +date|effective +date|eff +date|entry +date|settlement +date) *: */i, validStatementDate],
@@ -39,7 +44,9 @@ const statementGrammar = Object.freeze({
     [/^sec *: */i, /^(?:ACK|ADV|ARC|ATX|BOC|CCD|CIE|COR|CTX|DNE|ENR|IAT|MTE|POP|POS|PPD|RCK|SHR|TEL|TRC|WEB|XCK)$/i],
     [/^(?:beneficiary|individual +id\/name|individual +name) *: */i, /^[\p{L}\p{N}][\p{L}\p{N}\p{M} &'()._/-]*$/u],
     [/^(?:reference|ref|invoice|memo) *(?:# *:?|:) */i, /^(?:invoice +)?[\p{L}\p{N}]+(?:[./-][\p{L}\p{N}]+)*$/iu],
-  ],
+  ].map(Object.freeze)),
+  dates: Object.freeze({ short: /^[0-9]{6}$/, compact: /^[0-9]{8}$/,
+    iso: /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/, slash: /^[0-9]{2}\/[0-9]{2}\/[0-9]{4}$/ }),
   // Legacy unlabelled reference/invoice prose is a complete terminal field,
   // available only after a bare sender label, never after a colon-labelled one.
   prose: /^(?:(?:reference|ref|for +invoice) +[0-9]+(?:[./-][0-9]+)*|for +[\p{L}\p{N}]+(?: +[\p{L}\p{N}]+)* +invoice)$/iu,
@@ -47,13 +54,13 @@ const statementGrammar = Object.freeze({
 
 function validStatementDate(value) {
   let year, month, day;
-  if (/^[0-9]{6}$/.test(value)) {
+  if (statementGrammar.dates.short.test(value)) {
     year = 2000 + Number(value.slice(0, 2)); month = Number(value.slice(2, 4)); day = Number(value.slice(4));
-  } else if (/^[0-9]{8}$/.test(value)) {
+  } else if (statementGrammar.dates.compact.test(value)) {
     year = Number(value.slice(0, 4)); month = Number(value.slice(4, 6)); day = Number(value.slice(6));
-  } else if (/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(value)) {
+  } else if (statementGrammar.dates.iso.test(value)) {
     [year, month, day] = value.split('-').map(Number);
-  } else if (/^[0-9]{2}\/[0-9]{2}\/[0-9]{4}$/.test(value)) {
+  } else if (statementGrammar.dates.slash.test(value)) {
     [month, day, year] = value.split('/').map(Number);
   } else return false;
   const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
@@ -74,7 +81,7 @@ function decision(readings, source) {
     reading: { identity: reading.identity, ...(reading.suffix ? { suffix: reading.suffix } : {}) }, evidence };
 }
 
-function parseStatement(description, registry) {
+function parseStatement(description, registry, statementCache) {
   const grammar = statementGrammar, limit = grammar.limits;
   const parser = { steps: 0, parses: 0, fields: 0, complete: false, refusal: null };
   const stopped = Symbol('parser budget');
@@ -93,8 +100,12 @@ function parseStatement(description, registry) {
   }
   try {
     bounded(description);
-    const text = description.normalize('NFKC').replace(/^ +| +$/g, '');
+    const text = description.replace(grammar.lineBreak, ';').normalize('NFKC').replace(grammar.edgeSpaces, '');
     bounded(text);
+    // Validate the raw input on every row, including SQLite's NUL flag, before
+    // reusing a normalized decision. A cache hit cannot legalize forbidden text
+    // or erase an over-cap input through normalization or trimming.
+    if (statementCache?.has(text)) return statementCache.get(text);
     const cache = new Map(), lookups = new Map();
     function lookup(identity) {
       if (!lookups.has(identity)) { step(identity.length); lookups.set(identity, lookupPayer(identity, registry)); }
@@ -113,7 +124,7 @@ function parseStatement(description, registry) {
       const out = [];
       for (let end = start; end <= text.length; end++) {
         step();
-        if (end === text.length || /[;,|]/.test(text[end])) {
+        if (end === text.length || grammar.fieldBoundary.test(text[end])) {
           if (end > start && text[end - 1] !== ' ') out.push(end);
           break;
         }
@@ -160,7 +171,7 @@ function parseStatement(description, registry) {
       if (next === text.length) return results;
       const remainder = text.slice(next);
       if (separator.trim() === '') {
-        if (allowSuffix && grammar.suffix.test(remainder)) add(results, { readings: [], fields: 0, suffix: remainder.toLowerCase().replace(/ +/g, ' ') });
+        if (allowSuffix && grammar.suffix.test(remainder)) add(results, { readings: [], fields: 0, suffix: remainder.toLowerCase().replace(grammar.spaces, ' ') });
         if (allowProse && grammar.prose.test(remainder)) add(results, { readings: [], fields: 1 });
       }
       for (const [label, shape] of grammar.metadata) {
@@ -190,6 +201,7 @@ function parseStatement(description, registry) {
     const result = decision(readings, 'description');
     if (!coherent) { result.state = 'unknown'; result.entity_slug = null; result.reading = null; }
     result.evidence.parser = parser;
+    statementCache?.set(text, result);
     return result;
   } catch (error) {
     if (error !== stopped) throw error;
@@ -198,11 +210,23 @@ function parseStatement(description, registry) {
   }
 }
 
-export function attributeInflow(row, registry) {
+function attributeRow(row, registry, statementCache) {
   if (row.payee) return decision([{ identity: row.payee, payer: lookupPayer(row.payee, registry) }], 'payee');
   // Some SQLite clients truncate TEXT at NUL. The SQL flag preserves the
   // alphabet refusal even when the returned string has lost that character.
-  return parseStatement(String(row.description || '') + (row.description_has_nul ? '\0' : ''), registry);
+  return parseStatement(String(row.description || '') + (row.description_has_nul ? '\0' : ''), registry, statementCache);
+}
+
+export function attributeInflow(row, registry) {
+  return attributeRow(row, registry);
+}
+
+// Bind to the immutable identity snapshot for exactly one answer. Neither the
+// descriptions nor decisions survive the request; structured payees bypass the
+// cache. Consumers treat the shared result as read-only and keep row data apart.
+export function createInflowAttributor(registry) {
+  const statementCache = new Map();
+  return row => attributeRow(row, registry, statementCache);
 }
 
 // Only a confirmed row can eliminate a payer. An assumption supports a

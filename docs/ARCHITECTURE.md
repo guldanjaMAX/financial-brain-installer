@@ -841,10 +841,15 @@ view. The document path retains its existing money refusal rules.
 Recurrence uses at least three charges, bounded weekly/monthly intervals and
 integer amount tolerance; results are explicitly detected rather than confirmed. Category proposals and Unsorted remain visible. Ambiguous groups,
 incomplete coverage and unreadable rows cannot establish a total or absence.
-Every answer path that displays or groups an inflow payer uses the single
-`attributeInflow(row, registry)` decision in `ledger-attribution.js`: confirmed,
+Every answer path that displays or groups an inflow payer uses the shared
+attribution decision in `ledger-attribution.js`: confirmed,
 assumed or unknown, with the entity slug, reading and evidence. The decision is
-computed once per row in the request snapshot. Merchant groups use entity slugs,
+computed once per row in the request snapshot. Complete description parses are
+memoized by normalized description within that answer's identity snapshot;
+`createInflowAttributor(registry)` owns that request-local cache; raw alphabet
+and length checks still precede every cache lookup. Grammar tables
+are compiled once per module, and no description or decision is cached across
+answers. Structured payees retain their direct lookup path. Merchant groups use entity slugs,
 so different aliases of one entity do not split or conflict. Deposit lists and
 transfer diagnostics, including those in recurring-charge answers, use the same
 decision. Amount-only payment questions make no payer claim.
@@ -859,26 +864,47 @@ when the snapshot is empty; it never certifies absence or an exact zero. An
 ambiguous complete statement or extracted sender label is terminal and cannot
 fall through to a shorter spelling.
 The complete normalized payee must resolve exactly to one known identity.
-Without a payee, only a bounded directed or opening sender grammar may extract
-a label, which must still resolve exactly. Query and stored labels share NFKC,
+Without a payee, one bounded grammar must consume the entire description before
+any sender reading can establish identity. Query and stored labels share NFKC,
 case and punctuation normalization and preserve literal `and` versus `&`.
 Token subsets, prefixes, channel labels and invoice subjects do not establish
 identity. Unsupported sender syntax remains unknown without a growing list of
 unknown-label patterns.
+Before NFKC or trimming, the description alphabet permits Unicode letters,
+numbers and combining marks, ASCII space, and `& ' ( ) . _ / : # ; , | -`.
+CR, LF, CRLF, NEL (U+0085), U+2028 and U+2029 each canonicalize to one semicolon
+field separator. They never join pieces of a name. Every other Cc control
+(including FF, VT, NUL and tab) and every Cf format character (including
+U+200B, U+FEFF, U+200C/D, U+2060 and bidi controls) produces unknown. All other
+characters outside that alphabet also produce unknown. The same alphabet is
+checked after normalization. Limits are 512 code points both before and after
+normalization, 12 sender/metadata fields, 64 parse alternatives and 32,768
+instrumented work steps. Exceeding any limit produces unknown, retaining the
+amount in the selected inflow total. A SQLite NUL indicator preserves refusal
+when a driver truncates the returned description at NUL.
+
 Supported explicit fields include `FROM:`, `BY`, `ORIG CO NAME`, `ORIGINATOR`
 (with optional `NAME`) and `SENDER` (with optional `NAME`), optionally preceded
 by ACH/EFT/wire/Zelle/bank credit, transfer, payment or deposit. Standard trace,
-originator ID, entry-description, beneficiary and reference fields delimit the
-sender; they never supply identity. A single tokenizer recognizes comma,
-semicolon, pipe and newline sender boundaries, including bare FROM/BY clauses
-after reference metadata. Different-entity or unresolved readings remain
-unknown with masked candidates; repeated aliases of one entity agree. Ordinary wire-transfer and ACH-payment descriptions retain answers
+originator ID, entry-description, beneficiary and reference fields have closed
+value shapes, including real calendar dates and numeric traces; they never
+supply identity. Comma, semicolon, pipe and canonicalized line breaks separate
+fields, including bare FROM/BY clauses after reference metadata. Unsupported
+labels, unconsumed prose, empty fields and invalid values cannot be discarded.
+Every complete segmentation participates, including whole registered names
+containing field words. All registered readings must agree on one entity slug,
+and at least one complete parse must resolve every sender field. A missing
+alternative name does not erase a unique registered whole name. Conflicting
+slugs, ambiguous labels or an unresolved additional sender remain unknown with
+masked candidates; repeated aliases of one entity agree. Ordinary wire-transfer and ACH-payment descriptions retain answers
 when the exact extracted payer is independently confirmed.
 
 Undelimited descriptions have one explicit exception: a confirmed opening
 identity followed only by a closed transaction-type suffix may support presence
-or positive income with an assumption. Competing registered longer readings
-are ambiguous, with candidate names passed through the single masker. The
+or positive income with an assumption. A competing registered longer reading
+is ambiguous only when it names a different entity slug; a confirmed whole-name
+reading for the same slug takes precedence over shorthand. Candidate names
+pass through the single masker. The
 closed suffix list lives in `ledger-attribution.js`. Structured `assumptions[]`
 record the masked identity, canonical suffix, dependent row count, amount and
 citations; the final response renders every assumption in `notes` and offers
