@@ -32,6 +32,43 @@ export function lookupPayer(label, registry) {
     : { state: 'ambiguous' };
 }
 
+export function resolveRequestedPayer(readings, registry) {
+  const slugs = new Set(), candidates = [];
+  const groups = new Set(readings.filter(r => r.sameScope !== false).map(r => r.group)), coherent = new Set();
+  const foundReadings = readings.map(reading => ({ reading, found: registry.get(normalizeMerchantText(reading.label)) }));
+  const completeName = foundReadings.some(({ reading, found }) => reading.complete && found);
+  let sameScope = true;
+  for (const { reading, found } of foundReadings) {
+    if (!found) continue;
+    // Like row parses, a missing alternative whole name cannot erase a known
+    // complete name through a fragment inside that unregistered alternative.
+    // Direct grammar readings and boundaries of registered whole names remain.
+    if (reading.parent && completeName && !registry.has(normalizeMerchantText(reading.parent))) continue;
+    candidates.push(reading.label);
+    for (const slug of found) slugs.add(slug);
+    if (reading.complete) coherent.add(reading.group);
+    if (reading.sameScope === false) sameScope = false;
+  }
+  if (slugs.size > 1) return { state: 'ambiguous', candidates };
+  // A registered prefix cannot erase the unregistered remainder of the name.
+  // Different scope readings must not quietly change the account or period.
+  if (slugs.size && (coherent.size !== groups.size || !sameScope)) return { state: 'unresolved', candidates };
+  if (!slugs.size) {
+    // A known fragment is never identity authority. It only prevents absence
+    // when an unknown complete selector could be a name with dropped words.
+    // Keep the existing missing-label behavior for wholly unknown selectors.
+    for (const reading of readings.filter(r => r.complete)) {
+      const words = normalizeMerchantText(reading.label).split(' ');
+      for (let i = 1; i < words.length; i++) for (const fragment of [words.slice(0, i).join(' '), words.slice(i).join(' ')]) {
+        if (registry.has(fragment)) candidates.push(fragment);
+      }
+    }
+    if (candidates.length) return { state: 'unresolved', candidates: [...new Set(candidates)] };
+  }
+  return slugs.size ? { state: 'unique', slug: slugs.values().next().value, candidates }
+    : { state: 'missing', candidates };
+}
+
 // One closed grammar owns both the alphabet and every supported production.
 // Line breaks become field separators, never spaces inside a name. Validate
 // BEFORE NFKC or trimming so every other control/format character stays invalid.
@@ -262,7 +299,7 @@ export function selectAttributedInflows(rows, attributions, { wanted, amountMino
     const attribution = attributions.get(row.id);
     const same = wanted.state === 'unique' && attribution.entity_slug === wanted.slug;
     const amountMatches = amountMinor === null || amountMinor === row.amount_minor;
-    if (wanted.state === 'ambiguous' || attribution.state === 'unknown' ||
+    if (['ambiguous', 'unresolved'].includes(wanted.state) || attribution.state === 'unknown' ||
         (attribution.state === 'assumed' && (!same || exactNamesOnly || row.amount_minor <= 0 || !amountMatches)))
       unattributed.push(row);
     else if (same && amountMatches) matched.push(row);

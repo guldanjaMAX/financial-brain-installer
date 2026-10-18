@@ -2291,6 +2291,17 @@ and format alphabet, line-boundary controls, and successful/refused cap cases.
 `worker/test/ledger-attribution-cache.test.mjs` proves normalized reuse, raw
 validation before reuse, separate answer snapshots, structured-payee authority,
 and unchanged receipt counts and notes.
+`worker/test/ledger-question-selector.test.mjs` crosses requested names containing
+commas and grammar words with payment and named-income templates and shorter-only,
+both-name and longer-only registrations. Real-answer arms prove that unresolved
+or conflicting selectors cannot produce presence, absence or zero. Complete
+selector spans are protected before question cleanup, then all readings use the
+row registry and distinct entity slugs. A known fragment can refuse an unknown
+whole name but cannot identify it. Completely unknown selectors retain existing
+covered-absence behavior. The suite separately checks the two stored-payer arms,
+unique aliases, exact-name mode, same-slug readings, disjoint clauses, empty
+windows, masking and bounded refusal. Selector ambiguity is reported independently
+of row ambiguity in `ledger.payer_selector_candidates`, including empty windows.
 `worker/test/ledger-identity-gate.test.mjs` exercises identity authority,
 ambiguity, exact normalization, arbitrary metadata, and render-boundary masking.
 It also counts answered, answered-with-assumption and cannot-confirm results for realistic synthetic

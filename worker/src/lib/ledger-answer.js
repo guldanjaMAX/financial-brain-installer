@@ -1,4 +1,4 @@
-import { createInflowAttributor, payerRegistry, lookupPayer, selectAttributedInflows, inflowScopeConfirmed, payerAmount } from "./ledger-attribution.js";
+import { createInflowAttributor, payerRegistry, resolveRequestedPayer, selectAttributedInflows, inflowScopeConfirmed, payerAmount } from "./ledger-attribution.js";
 import { scopeIsUnrestricted } from "./grants.js";
 import { classifyLedgerQuestion, ledgerDay, shiftLedgerDay } from "./ledger-question.js";
 import { accountLinkPairsInWindow, accountLinkRequiredInWindow, effectivePeriodCovered, readEffectiveAccounts, readEffectiveBalances, readEffectiveTransactions } from "./ledger-reader.js";
@@ -192,8 +192,9 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     : { from: shiftLedgerDay(intent.from, -6), to: shiftLedgerDay(intent.to, 6), payerIdentities: attributionNeeded });
   const allRows = attributionNeeded ? snapshot.rows : snapshot;
   const identities = payerRegistry(attributionNeeded ? snapshot.identities : []);
-  const wanted = namedPayer ? lookupPayer(namedIncome ? intent.match : intent.counterparty, identities) : null;
-  const selectorAmbiguous = wanted?.state === 'ambiguous';
+  const wanted = namedPayer ? resolveRequestedPayer(intent.payerReadings || [{ label: namedIncome ? intent.match : intent.counterparty, complete: true }], identities) : null;
+  const selectorAmbiguous = ['ambiguous', 'unresolved'].includes(wanted?.state);
+  const selectorCandidates = [...new Set((wanted?.candidates || []).map(safeDescription))];
   const attribute = createInflowAttributor(identities);
   const payers = new Map(allRows.filter(row => row.direction === 'inflow').map(row => [row.id, attribute(row)]));
   const payerMatches = row => wanted?.state === 'unique' && payers.get(row.id)?.entity_slug === wanted.slug;
@@ -227,7 +228,7 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
       const payerCandidates = [...new Set(unattributed.flatMap(row => payers.get(row.id)?.evidence.ambiguous ? payers.get(row.id).evidence.candidates : []))].map(safeDescription);
       if (unattributed.length || selectorAmbiguous) {
         const detail = selectorAmbiguous
-          ? `The requested payer label is ambiguous: it identifies more than one confirmed entity. I can't confirm which payer you mean. There are ${unattributed.length} candidate deposits between ${intent.from} and ${intent.to}; use a unique legal name or owner label.`
+          ? `I can't confirm which payer you mean: ${wanted.state === 'ambiguous' ? 'the requested label identifies more than one confirmed entity' : 'the complete requested name or its boundary is not confirmed'}. Candidate payer readings: ${selectorCandidates.join('; ')}. There are ${unattributed.length} candidate deposits between ${intent.from} and ${intent.to}; use a unique legal name or owner label.`
           : `I found ${unattributed.length} ${unattributed.length === 1 ? "deposit that doesn't" : "deposits that don't"} show who paid between ${intent.from} and ${intent.to}; I can't confirm whether any came from the requested payer.`;
         answer += `${answer ? "\n" : ""}${detail}`;
         if (payerCandidates.length) answer += `\nThe description has ambiguous payer readings: ${payerCandidates.join('; ')}. I can't confirm which reading applies.`;
@@ -238,7 +239,7 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
       return withPayerAssumptions({ answer, citations, gaps,
         ...(unattributed.length || selectorAmbiguous ? { evidence_gate: { supported: true, complete: false, partial: true, reason: "sender_attribution_unknown" } } : {}),
         ledger: { kind: intent.kind, inflow_total_minor: sumMinor(candidates), found: matched.length ? true : unattributed.length || selectorAmbiguous ? null : false,
-        ...(selectorAmbiguous ? { payer_selector_ambiguous: true } : {}),
+        ...(selectorAmbiguous ? { payer_selector_ambiguous: true, payer_selector_candidates: selectorCandidates } : {}),
         ...(payerCandidates.length ? { payer_candidates: payerCandidates } : {}),
         ...(namedIncome ? { total_minor: null, lead_total_minor: null, confirmed_subtotal_minor: confirmedSubtotal, attributed_subtotal_minor: attributedSubtotal,
           confirmed_citations: confirmed.map(row => matched.indexOf(row) + 1) } : { amount_minor: intent.amountMinor }),

@@ -10,9 +10,9 @@ const MONTH = `(${MONTHS.join("|")})`;
 const DAY_MS = 86400000;
 const GENERIC_SENDERS = new Set("bank payment payments deposit transfer money the my our a an account company client customer someone them".split(" "));
 const ledgerWords = text => text.match(/[\p{L}\p{N}]+/gu) || [];
-function specificSender(text) {
+function specificSender(text, bounded = true) {
   const words = ledgerWords(text);
-  return text.length <= 80 && words.length <= 6 && words.some(word => /\p{L}/u.test(word) && !GENERIC_SENDERS.has(word)) &&
+  return (!bounded || (text.length <= 80 && words.length <= 6)) && words.some(word => /\p{L}/u.test(word) && !GENERIC_SENDERS.has(word)) &&
     !/\b(?:second|first|third|next|last|another|other|loan|car|tax)\b/.test(text);
 }
 export const ledgerDay = (value) => new Date(value).toISOString().slice(0, 10);
@@ -144,11 +144,11 @@ function paymentParties(text) {
   return { partyMatch: clause("from"), viaMatch: clause("via"), namedPayment, named };
 }
 
-export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
+function classifyQuestionGrammar(question, { now = Date.now(), selectorSlot = false } = {}) {
   let q = String(question || "").normalize("NFKC").toLowerCase().replace(/[’]/g, "'").replace(/\bwhat's\b/g, "what is");
   const broad = /\b(?:money|cash|profit|bank|deposits?|expenses?|charges?|subscriptions|recurring (?:charges|subscriptions)|payment|paid|spend|spent|spending|income|revenue|credits?|debits?|transactions?|transfers?|checking|savings|loan|debt|tax|payroll|invoice|receivable|payable|came in|went out)\b|\$\s*\d/.test(q) || /\b(?:(?:my|our|account|card|bank|checking|savings|loan|current|available|outstanding)\s+balances?|balances?\s+(?:of|on|in|for|due))\b/.test(q);
-  const base = { broad, kind: null };
-  if (!broad) return base;
+  const base = { broad: broad || selectorSlot, kind: null };
+  if (!broad && !selectorSlot) return base;
   // Consume only these bounded clause families. Duplicate or conflicting
   // clauses refuse; the remaining grammar still has to consume every word.
   // Strip before account selection so "investment withdrawals" is not a kind.
@@ -244,6 +244,7 @@ export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
     const counterpartyWords = counterparty.match(/[\p{L}\p{N}]+/gu) || [];
     if (amountMinor === null && !counterpartyWords.length) return intent;
     return { ...intent, kind: "payment", amountMinor, counterpartyWords, counterparty,
+      ...(selectorSlot ? { selectorSlotParts: parties } : {}),
       from: dates.length ? shiftLedgerDay(dates[0], -7) : period.from || shiftLedgerDay(today, amountMinor === null ? -59 : -29),
       to: dates.length ? shiftLedgerDay(dates[0], 7) : period.to || today };
   }
@@ -253,5 +254,96 @@ export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
     const residual = rest.replace(/\b(?:how|much|money|cash|came|come|in|into|of|and|or|went|go|out|income|spend|spent|spending|expenses?|credits?|debits?|inflow|outflow|did|i|we|what|was|were|is|are|the|total|totals|my|our|account|accounts|bank|checking|savings|card|loan|investment|retirement|escrow|by|per|each|all|during|for|over|show|me|please)\b/g, "");
     if (punctuationOnly(residual)) return { ...intent, kind: "totals", from, to };
   }
+  return intent;
+}
+
+// Protect a whole selector BEFORE the intent grammar removes periods, account
+// words or punctuation. Reusing that grammar with an opaque slot keeps every
+// supported question form in one place. All successful boundaries survive;
+// the snapshot registry, not a longest/first-match heuristic, decides identity.
+export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
+  const options = { now };
+  if (String(question || '').length > 1024) return { broad: true, kind: null };
+  const original = classifyQuestionGrammar(question, options);
+  const text = String(question || '').normalize('NFKC').toLowerCase().replace(/’/g, "'")
+    .replace(/\bwhat's\b/g, 'what is').replace(/\s+/g, ' ').trim();
+  const starts = [...text.matchAll(/\b(?:from|via) +/g)].map(m => m.index + m[0].length);
+  const noun = text.match(/^(?:did|has|have) +(?:(?:the|my|our|a|an) +)?/);
+  if (noun) starts.push(noun[0].length);
+  if (!starts.length) return original;
+  // Bounds apply before the quadratic span enumeration. Refuse overflow,
+  // including an otherwise valid shorter selector, rather than prune readings.
+  if (text.length > 512 || starts.length > 12 || /[\p{Cc}\p{Cf}]/u.test(String(question || '')))
+    return { broad: original.broad, kind: null };
+  const slot = 'selectorplaceholder';
+  if (text.includes(slot)) return { broad: original.broad, kind: null };
+  const readings = [];
+  for (const start of starts) {
+    for (let end = start + 1; end <= text.length; end++) {
+      if (end < text.length && !/[ ,?!.]/.test(text[end])) continue;
+      const label = text.slice(start, end);
+      if (!/^[\p{L}\p{N}](?:[\p{L}\p{N}\p{M} &'()._/:#,\-]*[\p{L}\p{N})])?$/u.test(label)) continue;
+      if (amountInCents(label) !== null) continue;
+      const parsed = classifyQuestionGrammar(text.slice(0, start) + slot + text.slice(end), { ...options, selectorSlot: true });
+      if (!(parsed.kind === 'payment' && parsed.selectorSlotParts.includes(slot)) &&
+          !(parsed.kind === 'merchant' && parsed.direction === 'inflow' && parsed.match === slot)) continue;
+      // The whole-question cap bounds these spans. A six-word clipping rule
+      // would drop alternatives that include a period or a longer legal name.
+      if (parsed.kind === 'payment' && (parsed.amountMinor === null || start === noun?.[0].length) &&
+          (!specificSender(label, false) || !ledgerWords(label).some(word => !GENERIC_SENDERS.has(word) && !['from', 'via'].includes(word)))) continue;
+      readings.push({ label, start, end, parsed });
+    }
+  }
+  if (!readings.length) {
+    // An unsupported complete spelling must not re-enter the old comma/filler
+    // cleanup through its already-shortened selector. Amount-only and other
+    // non-payer intents retain their original routing.
+    const named = (original.kind === 'payment' && original.counterpartyWords.length) ||
+      (original.kind === 'merchant' && original.direction === 'inflow' && original.match);
+    return named ? { broad: original.broad, kind: null } : original;
+  }
+  const scope = intent => JSON.stringify([intent.kind, intent.from, intent.to, intent.mask, intent.accountKind,
+    intent.amountMinor, intent.ownTransfers, intent.withdrawals, intent.loanProceeds, intent.exactNamesOnly]);
+  const originalScope = scope(original);
+  const chosen = readings.find(r => scope(r.parsed) === originalScope) || readings[0];
+  const sameScope = readings.filter(r => scope(r.parsed) === scope(chosen.parsed));
+  const complete = r => !sameScope.some(other => other.start < r.start && other.end >= r.end) &&
+    (!sameScope.some(other => other.start === r.start && other.end > r.end) ||
+    new RegExp(`^ +(?:${ARRIVAL})(?= *[?!.]|$| +(?:in|on|into|to|my|our|the|account|yet|please)\\b)`).test(text.slice(r.end)) ||
+    (r.start === noun?.[0].length && new RegExp(`^ +payment +(?:${ARRIVAL}|from|via|of)\\b`).test(text.slice(r.end))) ||
+    new RegExp(`^ +(?:in|during|for|over) +(?:the +)?(?:${MONTHS.join('|')}|q[1-4]|last|this|so far|recent|\\d{4} so far)\\b`).test(text.slice(r.end)));
+  const whole = sameScope.find(complete);
+  // Disjoint selector slots (a channel-named payment FROM another label)
+  // require agreement too. Overlapping spans are alternatives for one slot.
+  const groups = [];
+  for (const r of [...readings].sort((a, b) => a.start - b.start || b.end - a.end)) {
+    let group = groups.at(-1);
+    if (!group || r.start >= group.end) { group = { start: r.start, end: r.end }; groups.push(group); }
+    else group.end = Math.max(group.end, r.end);
+    r.group = groups.length - 1;
+  }
+  const intent = { ...chosen.parsed, payerReadings: readings.map(r => ({ label: r.label, group: r.group,
+    complete: scope(r.parsed) === scope(chosen.parsed) && complete(r),
+    sameScope: scope(r.parsed) === scope(chosen.parsed) })) };
+  delete intent.selectorSlotParts;
+  // Structural boundaries are alternative readings even when the remaining
+  // name words cannot form question grammar. Such a prefix participates in
+  // conflicts, but cannot authorize a claim by discarding the remainder.
+  const boundaries = new RegExp(`,|\\b(?:from|via|by|for|in|of|on|into|to|${ARRIVAL})\\b`, 'g');
+  const labels = new Set(intent.payerReadings.map(r => r.label));
+  for (const reading of [...intent.payerReadings]) for (const match of reading.label.matchAll(boundaries)) {
+    for (const label of [reading.label.slice(0, match.index).trim(), reading.label.slice(match.index + match[0].length).trim()]) {
+      if (!label || labels.has(label)) continue;
+      labels.add(label);
+      intent.payerReadings.push({ label, parent: reading.label, group: reading.group, complete: false, sameScope: reading.sameScope });
+    }
+  }
+  if (intent.kind === 'payment') {
+    intent.counterparty = whole.label;
+    intent.counterpartyWords = ledgerWords(whole.label);
+    const parties = paymentParties(text);
+    if (original.kind === 'payment' && [parties.named, parties.partyMatch, parties.viaMatch].filter(Boolean).length > 1)
+      intent.counterpartyWords = original.counterpartyWords;
+  } else intent.match = whole.label;
   return intent;
 }
