@@ -36,10 +36,11 @@ exact sealed package. This version bump verifies no incident.
 - **Payer answers keep confirmed deposits but cannot prove who did not pay.**
   Unless a covered period has no deposits at all, a missing payer match means
   "can't confirm". Income from a named payer is only a matched subtotal, never
-  a complete total. Up to ten deposits show only dates, amounts and masked
-  accounts. Exclusion notes and "including" options still apply. Income by
-  merchant keeps the bank labels and total, with a reminder that bank labels
-  may not identify who paid. Check the deposits against your bank statement.
+  a complete total. When it can't confirm, up to ten deposits show only
+  dates, amounts and masked accounts. Exclusion notes and "including" options
+  still apply. Income by merchant keeps the bank labels and total, with a
+  reminder that bank labels may not identify who paid. Check the deposits
+  against your bank statement.
 - **Your assistant gets money rules v3.** Claude Code and Codex receive the
   same rules for account labels, dates, confidence, citations and the exact
   words that change a money view. The assistant keeps the returned Note and
