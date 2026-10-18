@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { productionFixture, measureProduction, reachedAnswer } from './ledger-production-fixture.mjs';
 import { ledgerFixture, NOW } from './ledger-review-fixture.mjs';
+import { ledgerStatementVocabulary, normalizeMerchantText } from '../src/lib/ledger-attribution.js';
 import { selectorTemplates } from './ledger-question-cases.mjs';
 import { originatorFormats, originatorWords, channelPrefixes } from './ledger-attribution-cases.mjs';
 
@@ -21,13 +22,12 @@ function refusal(body, { candidateZero = false } = {}) {
   if (body.ledger.kind === 'merchant') assert.equal(body.ledger.total_minor, null);
 }
 
-test('production-shaped payer presence answers at least 90 percent with no wrong answers', async t => {
+test('production-shaped payer presence answers all forty arms with no wrong answers', async t => {
   const f = productionFixture(t);
   assert.equal((await reachedAnswer(f, 'Did the payment of $25.00 arrive in October 2026?')).ledger.found, true);
   const stats = await measureProduction(f);
   t.diagnostic(JSON.stringify(stats));
-  assert.equal(stats.wrong, 0);
-  assert.ok(stats.answered >= 36, 'at least 90 percent of present-payer questions are useful');
+  assert.deepEqual([stats.answered, stats.refused, stats.wrong], [40, 0, 0]);
 });
 
 test('exact structured and labelled sender matches are cited presence, never registration or zero', async t => {
@@ -66,20 +66,57 @@ test('exact structured and labelled sender matches are cited presence, never reg
   }
 });
 
-test('shorthand and channel prefixes keep their assumption and exact-name flip', async t => {
+test('unregistered and registered shorthand keep the assumption note and exact-name flip', async t => {
   const f = single(t);
-  for (const description of ['Supplier One payment', 'ACH Supplier One']) {
+  const suffixes = ['', 'ACH ', 'EFT ', 'WIRE ', 'ZELLE '].flatMap(channel =>
+    ['deposit', 'payment', 'receipt', 'payroll', 'settlement'].map(suffix => `${channel}${suffix}`));
+  const descriptions = [...suffixes.map(suffix => `Supplier One ${suffix}`),
+    ...channelPrefixes.map(prefix => `${prefix} Supplier One`)];
+  let assumed = 0, exactRefused = 0;
+  for (const description of descriptions) {
     f.raw('UPDATE fin_transactions SET description=?', description);
     for (const form of [payment, income]) {
-      const body = await reachedAnswer(f, form('Supplier One'));
-      assert.equal(body.ledger.found, true);
-      assert.equal(body.assumptions.length, 1);
-      assert.match(body.answer, /Note:.*exact names only/);
-      assert.ok(body.ledger.flip.includes('exact names only'));
-      refusal(await reachedAnswer(f, form('Supplier One').replace('?', ', exact names only?')));
-      refusal(await reachedAnswer(f, form('Missing Supplier')));
+      // The exact bank-field control reaches the same nonempty snapshot before
+      // testing description-only authority, so a refusal cannot pass vacuously.
+      f.raw("UPDATE fin_transactions SET payee='Supplier One'");
+      assert.equal((await reachedAnswer(f, form('Supplier One'))).payer_evidence[0].type, 'bank_payee');
+      f.raw('UPDATE fin_transactions SET payee=NULL');
+      for (const registered of [false, true]) {
+        if (registered)
+          f.raw("INSERT INTO fin_entities(entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at) VALUES ('registered','Supplier One','business','counterparty','owner_stated','confirmed',?)", NOW);
+        const body = await reachedAnswer(f, form('Supplier One'));
+        assert.equal(body.ledger.found, true);
+        assert.equal(body.assumptions.length, 1);
+        assert.match(body.answer, /Note:.*exact names only/);
+        assert.ok(body.notes?.length);
+        assert.ok(body.ledger.flip.includes('exact names only'));
+        assert.ok(body.citations.some(c => c.amount_minor === 2500));
+        assert.ok(!body.payer_evidence?.length, 'shorthand cannot claim confirmed payer evidence');
+        if (body.ledger.kind === 'merchant') {
+          assert.equal(body.ledger.total_minor, registered ? 2500 : null);
+          assert.equal(body.ledger.attributed_subtotal_minor ?? null, registered ? null : 2500);
+        }
+        assumed++;
+        refusal(await reachedAnswer(f, form('Supplier One').replace('?', ', exact names only?')));
+        exactRefused++;
+        refusal(await reachedAnswer(f, form('Missing Supplier')));
+        refusal(await reachedAnswer(f, 'Did the payment of $26.00 from Supplier One arrive in October 2026?'));
+        f.raw('UPDATE fin_transactions SET amount_minor=0');
+        const zero = await reachedAnswer(f, form('Supplier One'));
+        refusal(zero, { candidateZero: true });
+        assert.equal(zero.ledger.attributed_subtotal_minor ?? null, null);
+        assert.equal(zero.ledger.unattributed_candidates[0].amount_minor, 0);
+        assert.ok(!zero.assumptions?.length);
+        f.raw('UPDATE fin_transactions SET amount_minor=2500');
+        if (registered) f.raw("DELETE FROM fin_entities WHERE entity_slug='registered'");
+      }
     }
   }
+  assert.equal(descriptions.length, 54);
+  assert.equal(assumed, 216);
+  assert.equal(exactRefused, assumed);
+  assert.equal(f.first("SELECT COUNT(*) n FROM fin_entities WHERE relationship!='owned'").n, 0);
+  t.diagnostic(JSON.stringify({ shorthand: { descriptions: descriptions.length, assumed, exactRefused } }));
 });
 
 test('bare descriptions, incomplete parses, competing phrases and registered conflicts refuse', async t => {
@@ -186,7 +223,7 @@ test('row generator uses only owned entities for all thirty formats and channel 
     for (const form of [payment, income]) for (const exact of [false, true]) {
       const body = await reachedAnswer(f, form(name).replace('?', exact ? ', exact names only?' : '?'));
       const assumed = index >= 1 && index <= 3;
-      if (index === 0 || (assumed && exact)) { refusal(body); stats.refused++; }
+      if (normalizeMerchantText(name).split(' ').some(word => ledgerStatementVocabulary.includes(word)) || index === 0 || (assumed && exact)) { refusal(body); stats.refused++; }
       else {
         assert.equal(body.ledger.found, true, `format ${index}, ${form(name)}`);
         if (assumed) { assert.equal(body.assumptions.length, 1); stats.assumptions++; }
@@ -200,11 +237,17 @@ test('row generator uses only owned entities for all thirty formats and channel 
     f.raw('UPDATE fin_transactions SET description=?', `${prefix} Supplier Unit`);
     const body = await reachedAnswer(f, payment('Supplier Unit'));
     assert.equal(body.ledger.found, true);
-    assert.equal(body.assumptions[0].prefix, prefix.toLowerCase());
+    assert.equal(body.assumptions.length, 1);
+    assert.match(body.answer, /Note:.*exact names only/);
+    assert.ok(body.ledger.flip.includes('exact names only'));
+    stats.positive++; stats.assumptions++;
     refusal(await reachedAnswer(f, payment('Supplier Unit').replace('?', ', exact names only?')));
-    stats.positive++; stats.assumptions++; stats.refused++; stats.rows++;
+    stats.refused++; stats.rows++;
+    f.raw("UPDATE fin_transactions SET description='FROM: Supplier Unit'");
+    assert.equal((await reachedAnswer(f, payment('Supplier Unit'))).ledger.found, true); stats.positive++;
   }
   assert.equal(f.first("SELECT COUNT(*) n FROM fin_entities WHERE relationship!='owned'").n, 0);
-  assert.ok(stats.positive && stats.refused && stats.assumptions);
+  assert.ok(stats.positive && stats.refused);
+  assert.equal(stats.assumptions, channelPrefixes.length, 'ordinary query-only channel readings retain their assumptions');
   t.diagnostic(JSON.stringify({ production_row_generator: stats }));
 });

@@ -2234,16 +2234,19 @@ comma-bearing names retain their registered comma positions and participate
 alongside comma field-boundary readings, within
 the same caps; there is no generic comma-stripping retry. A question-local
 phrase can match a comma-bearing sender after normalization only when no
-competing complete segmentation splits that phrase into explicit fields.
+recognized field start splits it, including invalid or empty fields. Query-only
+sender values must contain no token from the grammar vocabulary.
 Unknown sender names, including company names with commas, still establish
 those field boundaries without gaining payer authority. Empty comma
 segments and incomplete fields still refuse. All registered readings must resolve
 to one entity slug, and at least one complete parse must resolve every sender
 field. Missing alternative names do not erase a unique registered whole name;
 a conflicting slug, ambiguous label or unresolved additional sender produces
-unknown. Bare shorthand permits a confirmed opening identity plus one closed
-transaction suffix (including payment, ACH deposit and payroll), or a closed
-channel prefix plus a bare registered identity. The single grammar table in
+unknown. Bare shorthand permits an opening identity plus one closed transaction
+suffix (including payment, ACH deposit and payroll), or a closed channel prefix
+plus a bare identity. A registered identity or vocabulary-free question-local
+phrase may supply that identity, with the same assumption note and flip.
+The single grammar table in
 `ledger-attribution.js` owns both vocabularies. Prefix channels are ACH, EFT,
 wire, Zelle and bank, optionally followed by credit, transfer, payment or
 deposit, plus payment, deposit, receipt and transfer. Confirmed authority after
@@ -2306,9 +2309,18 @@ only strictly contained spellings. Equal or partly overlapping mentions remain;
 distinct slugs refuse. Complete clause coverage and unchanged scope are checked
 separately from identity. Without registered mentions, a complete requested
 phrase may support presence from an exactly normalized bank payee or labelled
-sender field in a parse that resolves every sender. A phrase spanning explicit
-fields in any competing complete segmentation refuses, even when those fields
-contain unregistered names. That phrase remains separate from the registry and
+sender field in a complete parse with exactly one sender value. A query-only
+description phrase containing any grammar token refuses. Tokens come directly
+from the same table that compiles sender and metadata labels, reference/invoice
+prose, channels, transaction suffixes and fixed metadata words. Unregistered
+names containing "Payment" or "From" therefore return cannot-confirm and the
+uncertain-deposit list. Registered names containing these words and exact
+structured-payee matches retain their existing authority. A vocabulary-free
+unregistered phrase also supports assumed presence from a closed transaction
+suffix or channel prefix, with the same assumption note and `exact names only`
+flip as registered shorthand. It never authorizes absence or zero. All recognized field
+starts are boundaries, even if their value is invalid or empty or their tail
+cannot complete; unresolved names cannot hide these boundaries. That phrase remains separate from the registry and
 never authorizes absence or zero. Two different matched phrases, registered
 conflicts, damaged registry spellings and uncovered clauses refuse. A registered
 payer can still be absent from a covered window with independently confirmed receipts.
@@ -2324,11 +2336,14 @@ refusal. Selector uncertainty appears independently of row ambiguity in
 shared test-only templates in `worker/test/ledger-question-cases.mjs`.
 `worker/test/ledger-production-payers.test.mjs` uses an owned-only registry,
 40 present-payer questions, all 30 statement formats and half-empty Plaid-shaped
-payee fields. It measures answered, refused and wrong outcomes, requiring at
-least 90% useful answers and no wrong answers. The question and row generators
+payee fields. It measures answered, refused and wrong outcomes, requiring all
+40 useful answers and no wrong answers. The question and row generators
 also run with owned entities only. Presence cites its bank-field basis;
 unregistered income remains an attributed subtotal, with complete totals null.
-Shorthand keeps its note and `exact names only` flip. Tests cover zero and
+Exactly four arms in the unchanged fixture use unregistered shorthand and carry
+the assumption note and `exact names only` flip. A separate matrix checks all
+54 closed suffix and channel forms for registered and unregistered identities,
+including exact-name refusal, amount mismatch, absent payers and zero. Tests also cover
 amount mismatches, multiple phrases, stale question hypotheses, date/account
 scope and bounded refusal candidates. Refusals list at most ten masked deposits
 with dates, amounts, reasons and citations plus an omitted count. No payer is
@@ -2336,9 +2351,15 @@ registered or persisted by an answer.
 `worker/test/ledger-field-segmentation.test.mjs` crosses every sender-label pair
 with comma, semicolon, pipe and newline boundaries, payment and income questions,
 and exact-name mode. Each refusal reaches a nonempty snapshot, retains the
-amount, and has exact structured-payee and single-field positive controls.
+amount, and has exact structured-payee and registered-name positive controls.
 Additional cases cover metadata boundaries, ordinary company commas and
 rejected phrase evidence from incomplete or unresolved parses.
+`worker/test/ledger-query-vocabulary.test.mjs` generates a payer phrase for every
+grammar token with numeric, invalid and empty values in labelled and shorthand
+descriptions. Payment and income arms,
+with both exact-name modes, must refuse description-based presence and subtotals
+while exact bank payees and registered vocabulary names remain usable. It also
+covers malformed and repeated sender fields and normalization boundaries.
 `worker/test/ledger-identity-gate.test.mjs` exercises identity authority,
 ambiguity, exact normalization, arbitrary metadata, and render-boundary masking.
 It also counts answered, answered-with-assumption and cannot-confirm results for realistic synthetic

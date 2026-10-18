@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ledgerFixture } from './ledger-review-fixture.mjs';
+import { ledgerFixture, NOW } from './ledger-review-fixture.mjs';
 import { reachedAnswer } from './ledger-production-fixture.mjs';
 import { attributeInflow, payerRegistry, payerQuestionRegistry } from '../src/lib/ledger-attribution.js';
 import { classifyLedgerQuestion } from '../src/lib/ledger-question.js';
@@ -46,8 +46,7 @@ test('every sender-label pair refuses a question spanning two explicit fields', 
       assert.equal(bank.payer_evidence[0].type, 'bank_payee'); counts.controls++;
       f.raw('UPDATE fin_transactions SET payee=NULL,description=?', `FROM: ${arm.phrase}`);
       const single = await reachedAnswer(f, question);
-      assert.equal(single.ledger.found, true, 'one undelimited sender value supports the phrase');
-      assert.equal(single.payer_evidence[0].type, 'statement_sender'); counts.controls++;
+      assert.ok(refused(single), 'unregistered grammar words refuse even in a single labelled value'); counts.controls++;
       f.raw('UPDATE fin_transactions SET description=?', arm.description);
       const amount = await reachedAnswer(f, amountOnly);
       assert.equal(amount.ledger.found, true, 'the split row still proves its actual amount'); counts.controls++;
@@ -84,18 +83,22 @@ test('complete metadata segmentations compete with comma and space whole-name hy
   }
 });
 
-test('company commas and single labelled names remain usable with complete metadata', async t => {
+test('company commas remain usable and registered vocabulary names retain complete metadata', async t => {
   const f = fixture(t);
   for (const name of ['Supplier Services, LLC', 'Supplier, Regional, LLC',
     'Supplier REF Division', 'Supplier SENDER Division']) {
+    const registered = /REF|SENDER/.test(name);
+    if (registered) f.raw("INSERT INTO fin_entities(entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at) VALUES ('registered',?,'business','counterparty','owner_stated','confirmed',?)", name, NOW);
     for (const prefix of senderLabels) for (const tail of ['', '; REF: 123', ', TRACE: 123']) {
       f.raw('UPDATE fin_transactions SET description=?', `${prefix} ${name}${tail}`);
       for (const form of [payment, income]) {
         const body = await reachedAnswer(f, form(name.replaceAll(',', '')));
         assert.equal(body.ledger.found, true, `${prefix} ${name}${tail}`);
-        assert.equal(body.payer_evidence[0].type, 'statement_sender');
+        if (!registered) assert.equal(body.payer_evidence[0].type, 'statement_sender');
+        else assert.equal(body.evidence_gate.complete, true);
       }
     }
+    if (registered) f.raw("DELETE FROM fin_entities WHERE entity_slug='registered'");
   }
 });
 
@@ -112,12 +115,14 @@ test('a phrase reading needs its own fully resolved parse and cannot leak reject
   }
 });
 
-test('an alternative opening sender label does not split one complete shorthand name', async t => {
+test('vocabulary-bearing query shorthand refuses while registered shorthand retains its note', async t => {
   const f = fixture(t), name = 'wire from Supplier Unit LLC';
   for (const tail of ['', '; REF: 123']) for (const form of [payment, income]) {
     f.raw('UPDATE fin_transactions SET payee=?,description=?', name, 'Processor text');
     assert.equal((await reachedAnswer(f, form(name))).ledger.found, true);
     f.raw('UPDATE fin_transactions SET payee=NULL,description=?', `${name} payment${tail}`);
+    assert.ok(refused(await reachedAnswer(f, form(name))));
+    f.raw("INSERT INTO fin_entities(entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at) VALUES ('registered',?,'business','counterparty','owner_stated','confirmed',?)", name, NOW);
     const body = await reachedAnswer(f, form(name));
     // A suffix shorthand followed by metadata is outside the closed suffix
     // production; use a channel shorthand for the metadata-bearing control.
@@ -130,6 +135,7 @@ test('an alternative opening sender label does not split one complete shorthand 
     assert.equal(positive.assumptions.length, 1);
     assert.equal(positive.ledger.inflow_total_minor, 2500);
     assert.ok(refused(await reachedAnswer(f, form(name).replace('?', ', exact names only?'))));
+    f.raw("DELETE FROM fin_entities WHERE entity_slug='registered'");
   }
 });
 

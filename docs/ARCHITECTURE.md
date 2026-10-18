@@ -881,12 +881,20 @@ remainder such as ", Bank", or let Payment inside one name erase another payer.
 An uncovered payer clause still refuses. With no registered mentions, the
 question's complete payer phrase can support presence when it equals a
 structured bank payee or one complete labelled sender field after the same
-normalization. A matching statement parse must resolve every sender field.
-If any competing complete segmentation puts another explicit sender or metadata
-field inside that phrase, the phrase cannot establish presence. Unresolved
-names in that segmentation, including company names with commas, still
-establish field boundaries without gaining payer authority. Ordinary company
-commas remain usable when no complete field segmentation splits the name.
+normalization. A query-only payer phrase matched from a description must contain no token from the
+single statement grammar vocabulary: sender and metadata labels, reference and
+invoice prose, channel words, transaction suffixes and fixed metadata words.
+The vocabulary is collected while those grammar productions compile, so it
+cannot drift into a second list. Unregistered names containing words such as
+"Payment" or "From" fall back to cannot-confirm with the uncertain-deposit list.
+Registered identities and exact structured-payee matches retain their existing
+paths, including names containing vocabulary words.
+A matching labelled statement parse must contain exactly one complete sender value.
+Every recognized field start is a boundary even before its value or remaining
+parse succeeds. Invalid or empty fields cannot become query-only payer text.
+Unresolved names, including company names with commas, establish boundaries
+without gaining payer authority. Ordinary company commas remain usable when
+no field boundary splits the name.
 This phrase is a request-local hypothesis, separate
 from registered identities; it creates no entity and is never reused by another
 question or a generic payer listing. Two distinct matched phrases refuse, as do
@@ -894,8 +902,10 @@ registered-name conflicts and a damaged identity inventory. Only readable
 inflows in the selected accounts and period can resolve the phrase.
 Such presence cites the bank payer field or statement sender explicitly. A
 named-income answer supplies a nonzero attributed subtotal, never a complete
-total, absence or zero for an unregistered phrase. Suffix shorthand and bare
-channel prefixes remain assumptions with the visible `exact names only` flip.
+total, absence or zero for an unregistered phrase. A vocabulary-free unregistered
+phrase may also support assumed presence through a closed transaction suffix or
+channel prefix. Like registered shorthand, it requires the visible assumption
+note and `exact names only` flip, and never authorizes absence or zero.
 An unlabelled whole description cannot establish an unregistered payer.
 A registered payer can still be proved absent from a covered, fully attributed
 window under the existing scope-wide rule. Amount-only questions retain their
@@ -956,10 +966,11 @@ slugs, ambiguous labels or an unresolved additional sender remain unknown with
 masked candidates; repeated aliases of one entity agree. Ordinary wire-transfer and ACH-payment descriptions retain answers
 when the exact extracted payer is independently confirmed.
 
-Undelimited descriptions have two explicit shorthand forms: a confirmed
-opening identity followed only by a closed transaction-type suffix, or a closed
-channel prefix followed by a bare registered identity. Both may support only
-positive figures with an assumption. The channel list is ACH/EFT/wire/Zelle/bank
+Undelimited descriptions have two explicit shorthand forms: an opening identity
+followed only by a closed transaction-type suffix, or a closed channel prefix
+followed by a bare identity. The identity may be registered or a vocabulary-free
+question-local phrase. Both forms support only positive figures with an
+assumption. The channel list is ACH/EFT/wire/Zelle/bank
 with optional credit, transfer, payment or deposit, plus payment, deposit,
 receipt and transfer. It lives in the same grammar table as explicit sender
 fields. After a channel prefix, confirmed authority requires an explicit sender

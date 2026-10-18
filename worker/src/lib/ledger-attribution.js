@@ -131,33 +131,56 @@ export function resolveRequestedPayer(intent, registry, attributions = []) {
 // Line breaks become field separators, never spaces inside a name. Validate
 // BEFORE NFKC or trimming so every other control/format character stays invalid.
 // Compile the tables once; only parser state and answer caches are per request.
-const statementGrammar = Object.freeze({
-  limits: Object.freeze({ codepoints: 512, fields: 12, parses: 64, steps: 32768 }),
-  alphabet: /^[\p{L}\p{N}\p{M} &'()._/:#;,|\-\r\n\u0085\u2028\u2029]*$/u,
-  lineBreak: /\r\n|[\r\n\u0085\u2028\u2029]/g,
-  edgeSpaces: /^ +| +$/g,
-  spaces: / +/g,
-  fieldBoundary: /[;,|]/,
-  name: /^[\p{L}\p{N}][\p{L}\p{N}\p{M} &'()._/:#,\-]*$/u,
-  separator: /^[ ]*(?:[;,|][ ]*)?/,
-  channel: /^(?:(?:ach|eft|wire|zelle|bank)(?: +(?:credit|transfer|payment|deposit))?|payment|deposit|receipt|transfer) +/i,
-  sender: /^(?:(?:from|by|orig +co +name|originator(?: +name)?|sender(?: +name)?) *: *|(?:from|by) +)/i,
-  suffix: /^(?:(?:ach|eft|wire|zelle) +)?(?:deposit|payment|receipt|payroll|settlement)$/i,
-  metadata: Object.freeze([
-    [/^(?:orig +id|co +id|company +id|individual +id) *(?:# *:?|:) */i, /^[\p{L}\p{N}]+(?:[./-][\p{L}\p{N}]+)*$/u],
-    [/^(?:trace +number|trace +no|trace) *(?:# *:?|:) */i, /^[0-9]{1,34}$/],
-    [/^(?:desc +date|effective +date|eff +date|entry +date|settlement +date) *: */i, validStatementDate],
-    [/^(?:co +entry +descr|entry +descr) *: */i, /^(?:payment|deposit|receipt|payroll|settlement|credit|transfer)$/i],
-    [/^sec *: */i, /^(?:ACK|ADV|ARC|ATX|BOC|CCD|CIE|COR|CTX|DNE|ENR|IAT|MTE|POP|POS|PPD|RCK|SHR|TEL|TRC|WEB|XCK)$/i],
-    [/^(?:beneficiary|individual +id\/name|individual +name) *: */i, /^[\p{L}\p{N}][\p{L}\p{N}\p{M} &'()._/-]*$/u],
-    [/^(?:reference|ref|invoice|memo) *(?:# *:?|:) */i, /^(?:invoice +)?[\p{L}\p{N}]+(?:[./-][\p{L}\p{N}]+)*$/iu],
-  ].map(Object.freeze)),
-  dates: Object.freeze({ short: /^[0-9]{6}$/, compact: /^[0-9]{8}$/,
-    iso: /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/, slash: /^[0-9]{2}\/[0-9]{2}\/[0-9]{4}$/ }),
-  // Legacy unlabelled reference/invoice prose is a complete terminal field,
-  // available only after a bare sender label, never after a colon-labelled one.
-  prose: /^(?:(?:reference|ref|for +invoice) +[0-9]+(?:[./-][0-9]+)*|for +[\p{L}\p{N}]+(?: +[\p{L}\p{N}]+)* +invoice)$/iu,
-});
+const statementGrammar = (() => {
+  const vocabulary = new Set();
+  // Every literal grammar word enters the vocabulary while its production is
+  // compiled. There is no separate query-only denylist to drift from parsing.
+  const words = (...phrases) => {
+    for (const phrase of phrases) for (const token of normalizeMerchantText(phrase).split(' ')) vocabulary.add(token);
+    return `(?:${phrases.map(phrase => phrase.replaceAll(' ', ' +')).join('|')})`;
+  };
+  const pattern = source => new RegExp(source, 'iu');
+  const channel = words('ach', 'eft', 'wire', 'zelle', 'bank');
+  const channelAction = words('credit', 'transfer', 'payment', 'deposit');
+  const bareChannel = words('payment', 'deposit', 'receipt', 'transfer');
+  const bareSender = words('from', 'by');
+  const sender = words('from', 'by', 'orig co name', 'originator name', 'originator', 'sender name', 'sender');
+  const suffixChannel = words('ach', 'eft', 'wire', 'zelle');
+  const suffix = words('deposit', 'payment', 'receipt', 'payroll', 'settlement');
+  const reference = words('reference', 'ref');
+  const forWord = words('for'), invoice = words('invoice');
+  const grammar = {
+    limits: Object.freeze({ codepoints: 512, fields: 12, parses: 64, steps: 32768 }),
+    alphabet: /^[\p{L}\p{N}\p{M} &'()._/:#;,|\-\r\n\u0085\u2028\u2029]*$/u,
+    lineBreak: /\r\n|[\r\n\u0085\u2028\u2029]/g,
+    edgeSpaces: /^ +| +$/g,
+    spaces: / +/g,
+    fieldBoundary: /[;,|]/,
+    name: /^[\p{L}\p{N}][\p{L}\p{N}\p{M} &'()._/:#,\-]*$/u,
+    separator: /^[ ]*(?:[;,|][ ]*)?/,
+    channel: pattern(`^(?:${channel}(?: +${channelAction})?|${bareChannel}) +`),
+    sender: pattern(`^(?:${sender} *: *|${bareSender} +)`),
+    suffix: pattern(`^(?:${suffixChannel} +)?${suffix}$`),
+    metadata: Object.freeze([
+      [pattern(`^${words('orig id', 'co id', 'company id', 'individual id')} *(?:# *:?|:) *`), /^[\p{L}\p{N}]+(?:[./-][\p{L}\p{N}]+)*$/u],
+      [pattern(`^${words('trace number', 'trace no', 'trace')} *(?:# *:?|:) *`), /^[0-9]{1,34}$/],
+      [pattern(`^${words('desc date', 'effective date', 'eff date', 'entry date', 'settlement date')} *: *`), validStatementDate],
+      [pattern(`^${words('co entry descr', 'entry descr')} *: *`), pattern(`^${words('payment', 'deposit', 'receipt', 'payroll', 'settlement', 'credit', 'transfer')}$`)],
+      [pattern(`^${words('sec')} *: *`), pattern(`^${words('ACK', 'ADV', 'ARC', 'ATX', 'BOC', 'CCD', 'CIE', 'COR', 'CTX', 'DNE', 'ENR', 'IAT', 'MTE', 'POP', 'POS', 'PPD', 'RCK', 'SHR', 'TEL', 'TRC', 'WEB', 'XCK')}$`)],
+      [pattern(`^${words('beneficiary', 'individual id/name', 'individual name')} *: *`), /^[\p{L}\p{N}][\p{L}\p{N}\p{M} &'()._/-]*$/u],
+      [pattern(`^${words('reference', 'ref', 'invoice', 'memo')} *(?:# *:?|:) *`), pattern(String.raw`^(?:${invoice} +)?[\p{L}\p{N}]+(?:[./-][\p{L}\p{N}]+)*$`)],
+    ].map(Object.freeze)),
+    dates: Object.freeze({ short: /^[0-9]{6}$/, compact: /^[0-9]{8}$/,
+      iso: /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/, slash: /^[0-9]{2}\/[0-9]{2}\/[0-9]{4}$/ }),
+    // Legacy unlabelled reference/invoice prose is a complete terminal field,
+    // available only after a bare sender label, never after a colon-labelled one.
+    prose: pattern(String.raw`^(?:(?:${reference}|${forWord} +${invoice}) +[0-9]+(?:[./-][0-9]+)*|${forWord} +[\p{L}\p{N}]+(?: +[\p{L}\p{N}]+)* +${invoice})$`),
+  };
+  return Object.freeze({ ...grammar, vocabulary: Object.freeze([...vocabulary].sort()) });
+})();
+
+export const ledgerStatementVocabulary = statementGrammar.vocabulary;
+const statementVocabulary = new Set(ledgerStatementVocabulary);
 
 function validStatementDate(value) {
   let year, month, day;
@@ -216,7 +239,7 @@ function parseStatement(description, registry, statementCache) {
     // reusing a normalized decision. A cache hit cannot legalize forbidden text
     // or erase an over-cap input through normalization or trimming.
     if (statementCache?.has(text)) return statementCache.get(text);
-    const cache = new Map(), lookups = new Map();
+    const cache = new Map(), lookups = new Map(), fieldStarts = new Set();
     function lookup(identity) {
       if (!lookups.has(identity)) { step(identity.length); lookups.set(identity, lookupPayer(identity, registry)); }
       return lookups.get(identity);
@@ -266,12 +289,14 @@ function parseStatement(description, registry, statementCache) {
         }
         for (const tail of rest(end, allowSuffix, allowProse)) {
           let payer = boundaryOnly ? { state: 'missing' } : lookup(identity);
-          // An unlabelled whole description is not a bank payer field. Only
-          // labelled senders or explicitly noted shorthand can use the phrase.
-          if (payer.query_only && !labelled && !prefix && !tail.suffix) payer = { state: 'missing' };
+          // Query-only presence needs a labelled sender or closed shorthand.
+          // Shorthand remains assumed, with its note and exact-name flip; its
+          // identity tokens still cannot overlap this grammar's vocabulary.
+          if (payer.query_only && ((!labelled && !prefix && !tail.suffix) ||
+              normalizeMerchantText(identity).split(' ').some(token => statementVocabulary.has(token))))
+            payer = { state: 'missing' };
           add(results, { readings: [{ identity, payer, start, end, ...(prefix ? { prefix } : {}),
-            ...(tail.suffix ? { suffix: tail.suffix } : {}) }, ...tail.readings], fields: 1 + tail.fields,
-            fieldStarts: tail.fieldStarts });
+            ...(tail.suffix ? { suffix: tail.suffix } : {}) }, ...tail.readings], fields: 1 + tail.fields });
         }
       }
       return results;
@@ -284,10 +309,9 @@ function parseStatement(description, registry, statementCache) {
         if (optional) for (const parse of name(opening, opening === start, false,
           opening === start ? null : channel[0].trim().toLowerCase().replace(grammar.spaces, ' '))) add(results, parse);
         const label = match(grammar.sender, opening);
+        if (label && !optional) fieldStarts.add(opening);
         if (label && (allowBare || label[0].includes(':'))) for (const parse of name(opening + label[0].length, false, !label[0].includes(':'), null, true))
-          // The opening label identifies the first field; it does not split
-          // two fields. Only labels reached through rest() supply boundaries.
-          add(results, { ...parse, fieldStarts: optional ? parse.fieldStarts : [opening, ...parse.fieldStarts] });
+          add(results, parse);
       }
       return results;
     }
@@ -298,7 +322,7 @@ function parseStatement(description, registry, statementCache) {
       const results = [];
       cache.set(key, results);
       if (start === text.length) {
-        add(results, { readings: [], fields: 0, fieldStarts: [] }); return results;
+        add(results, { readings: [], fields: 0 }); return results;
       }
       const separator = match(grammar.separator, start)[0];
       if (!separator.length) return results;
@@ -307,19 +331,24 @@ function parseStatement(description, registry, statementCache) {
       if (next === text.length) return results;
       const remainder = text.slice(next);
       if (separator.trim() === '') {
-        if (allowSuffix && grammar.suffix.test(remainder)) add(results, { readings: [], fields: 0, fieldStarts: [], suffix: remainder.toLowerCase().replace(grammar.spaces, ' ') });
-        if (allowProse && grammar.prose.test(remainder)) add(results, { readings: [], fields: 1, fieldStarts: [] });
+        if (allowSuffix && grammar.suffix.test(remainder)) add(results, { readings: [], fields: 0, suffix: remainder.toLowerCase().replace(grammar.spaces, ' ') });
+        if (allowProse && grammar.prose.test(remainder)) {
+          fieldStarts.add(next);
+          add(results, { readings: [], fields: 1 });
+        }
       }
       for (const [label, shape] of grammar.metadata) {
         const field = match(label, next);
         if (!field) continue;
+        // A malformed or empty value still starts a field. It cannot become
+        // part of an unregistered sender merely because validation fails.
+        fieldStarts.add(next);
         const valueStart = next + field[0].length;
         for (const end of ends(valueStart)) {
           const value = text.slice(valueStart, end);
           step(value.length);
           if (!(typeof shape === 'function' ? shape(value) : shape.test(value))) continue;
-          for (const tail of rest(end)) add(results, { readings: tail.readings, fields: 1 + tail.fields,
-            fieldStarts: [next, ...tail.fieldStarts] });
+          for (const tail of rest(end)) add(results, { readings: tail.readings, fields: 1 + tail.fields });
         }
       }
       for (const parse of senders(next, false, separator.trim() !== '')) add(results, parse);
@@ -331,13 +360,12 @@ function parseStatement(description, registry, statementCache) {
     parser.complete = parses.length > 0;
     if (!parser.complete) parser.refusal = 'incomplete';
     if (registry[questionPhrases]) {
-      // Unknown sender names still establish subsequent field boundaries in a
-      // complete segmentation. A question cannot turn those separate fields
-      // into a whole-name authority. Registered whole names keep their own
-      // independent authority, and structured payees never enter this parser.
-      const fieldStarts = new Set(parses.flatMap(parse => parse.fieldStarts));
+      // Record boundaries before validating values or completing the tail.
+      // Damaging a field must never increase query-only identity authority.
+      // Registered whole names keep their independent authority; structured
+      // payees bypass this parser and its vocabulary restriction entirely.
       parses = parses.map(parse => {
-        const resolved = parse.readings.every(reading => reading.payer.state === 'unique');
+        const resolved = parse.readings.length === 1 && parse.readings.every(reading => reading.payer.state === 'unique');
         return { ...parse, readings: parse.readings.map(reading => {
           if (!reading.payer.query_only) return reading;
           for (const start of fieldStarts) {
