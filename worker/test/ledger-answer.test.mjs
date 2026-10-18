@@ -376,6 +376,121 @@ test("short numeric masks use the same exact twin rule and malformed coverage ca
 // Keep the production-shaped probe in this registered suite so the full chain runs it.
 import { ledgerFixture } from "./ledger-review-fixture.mjs";
 import { reachedAnswer, productionFixture, measureProduction } from "./ledger-production-fixture.mjs";
+for (const label of ["Zelle", "ACH", "ACH Credit", "Deposit", "Transfer", "Wire", "Mobile Deposit", "Unknown", "Online Transfer",
+  "Bank", "PayPal", "Venmo", "Unknown Merchant", "Zelle Payment", "None"]) {
+  test(`generic bank label cannot prove a different payer: ${label}`, async t => {
+    const f = ledgerFixture(t);
+    for (const [description, payee] of [["Settlement", label], [`Transfer from ${label}`, null]]) {
+      f.raw("DELETE FROM fin_transactions");
+      f.add("unknown", description, payee);
+      const unknown = [];
+      for (const question of [payerPayment, payerIncome]) unknown.push(await reachedAnswer(f, question));
+      f.raw("UPDATE fin_transactions SET payee='Payer One'");
+      for (const question of [payerPayment, payerIncome]) {
+        const control = await reachedAnswer(f, question);
+        assert.equal(control.ledger.found, true);
+        assert.equal(control.evidence_gate.complete, true);
+      }
+      for (const body of unknown) {
+        assert.equal(body.ledger.found, null);
+        assert.equal(body.evidence_gate.complete, false);
+        assert.equal(body.ledger.unattributed_count, 1);
+      }
+    }
+  });
+}
+
+for (const description of ["Deposit for invoice from Payer Two", "Deposit memo by Payer Two", "Deposit invoice from Payer Two", "Deposit processed by Payer Two",
+  "Payer One memo from Payer Two"]) {
+  test(`incidental sender clause is unknown: ${description}`, async t => {
+    const f = ledgerFixture(t);
+    f.add("unknown", description, null);
+    const unknown = [];
+    for (const question of [payerPayment, payerIncome]) unknown.push(await reachedAnswer(f, question));
+    f.raw("UPDATE fin_transactions SET description='Transfer from Payer Two for invoice from Payer One'");
+    for (const question of [payerPayment, payerIncome]) {
+      const control = await reachedAnswer(f, question);
+      assert.equal(control.ledger.found, false);
+      assert.equal(control.evidence_gate.complete, true);
+    }
+    for (const body of unknown) {
+      assert.equal(body.ledger.found, null);
+      assert.equal(body.evidence_gate.complete, false);
+    }
+  });
+}
+
+test("partial sender identity cannot certify zero income", async t => {
+  const f = ledgerFixture(t);
+  f.add("partial", "WIRE FROM Payer One BENEFICIARY Operating Company", null);
+  assert.equal((await reachedAnswer(f, payerPayment)).ledger.found, true, "existing payment prefix control");
+  const income = await reachedAnswer(f, payerIncome);
+  f.raw("UPDATE fin_transactions SET description='WIRE FROM Payer One REF 48261703'");
+  assert.equal((await reachedAnswer(f, payerIncome)).ledger.total_minor, 2500, "bounded exact sender control");
+  assert.equal(income.ledger.found, null, "partial identity is unknown for an exact income total");
+  assert.equal(income.ledger.total_minor, null);
+  assert.equal(income.ledger.if_own_transfers.total_minor, null, "a conditional view also cannot certify zero");
+  assert.equal(income.evidence_gate.complete, false);
+  f.raw("UPDATE fin_transactions SET description='WIRE FROM Payer Oneplus'");
+  for (const question of [payerPayment, payerIncome]) {
+    const different = await reachedAnswer(f, question);
+    assert.equal(different.ledger.found, false, "partial words do not broaden positive matching");
+    assert.equal(different.evidence_gate.complete, true);
+  }
+});
+
+test("uncertain deposits omit descriptions and mask bank labels throughout JSON", async t => {
+  const f = ledgerFixture(t);
+  const identifiers = ["AB12CD34EF56", "482.617.039.258.001", "482617039258001"];
+  for (const [i, identifier] of identifiers.entries()) f.add(`unknown-${i}`, `Deposit TRACE: ${identifier}`, null);
+  const unknown = [];
+  for (const question of [payerPayment, payerIncome, "How much income came by merchant in October 2026?"]) unknown.push(await reachedAnswer(f, question));
+  f.raw("UPDATE fin_transactions SET payee='Payer One'");
+  const control = await reachedAnswer(f, payerIncome);
+  assert.equal(control.evidence_gate.complete, true);
+  assert.equal(control.ledger.total_minor, 7500);
+  for (const body of unknown) {
+    assert.equal(body.ledger.unattributed_deposits.length, 3);
+    for (const deposit of body.ledger.unattributed_deposits) {
+      assert.equal(deposit.description, undefined);
+      assert.equal(deposit.payee, undefined);
+      assert.equal(deposit.posted_on, "2026-10-05");
+      assert.equal(deposit.amount_minor, 2500);
+      assert.equal(deposit.account_mask, "1234");
+    }
+    for (const identifier of identifiers) assert.ok(!JSON.stringify(body).includes(identifier));
+    assert.ok(!JSON.stringify(body).includes("Deposit TRACE"));
+  }
+  for (const identifier of identifiers) {
+    f.raw("UPDATE fin_transactions SET payee=?", `Payer One TRACE: ${identifier}`);
+    const body = await reachedAnswer(f, payerIncome);
+    assert.equal(body.ledger.found, null, "partly matching bank label reached uncertainty");
+    assert.equal(body.ledger.unattributed_deposits[0].payee, "Payer One TRACE: [redacted]");
+    assert.ok(!JSON.stringify(body).includes(identifier));
+  }
+});
+
+test("income groups keep the exact bank total and mark attributed subtotals", async t => {
+  const f = ledgerFixture(t);
+  f.add("known", "Settlement", "Payer One", { cents: 1729 });
+  for (let i = 0; i < 12; i++) f.add(`unknown-${i}`, "Deposit", null);
+  const body = await reachedAnswer(f, "How much income came by merchant in October 2026?");
+  assert.equal(body.ledger.total_minor, 31729);
+  assert.equal(body.ledger.groups.find(g => g.merchant === "payer one").total_minor, 1729, "named group decision reached");
+  f.raw("UPDATE fin_transactions SET payee='Payer Two' WHERE payee IS NULL");
+  const control = await reachedAnswer(f, "How much income came by merchant in October 2026?");
+  assert.equal(control.evidence_gate.complete, true);
+  assert.equal(control.ledger.total_minor, 31729);
+  assert.equal(control.ledger.groups.length, 2);
+  assert.equal(body.evidence_gate.complete, false);
+  assert.equal(body.ledger.unattributed_count, 12);
+  assert.equal(body.ledger.unattributed_deposits.length, 10);
+  const named = body.ledger.groups.find(g => g.merchant === "payer one");
+  assert.equal(named.attributed_subtotal_minor, 1729);
+  assert.equal(named.complete, false);
+  assert.match(body.answer, /attributed subtotal.*not complete/i);
+});
+
 test("named payer production matrix never certifies an unknown deposit as absent", async t => {
   const stats = await measureProduction(productionFixture(t));
   t.diagnostic(JSON.stringify(stats));
@@ -461,10 +576,11 @@ test("income keeps only an incomplete attributed subtotal and caps masked uncert
   assert.equal(body.citations.length, 11);
   for (const row of body.ledger.unattributed_deposits) {
     assert.equal(row.posted_on, "2026-10-05");
-    assert.equal(row.description, "Deposit [redacted]");
+    assert.equal(row.description, undefined, "uncertain receipts never expose descriptions");
     assert.equal(row.account_mask, "1234");
     assert.ok(body.citations.some(c => c.n === row.n && c.amount_minor === row.amount_minor));
   }
+  assert.doesNotMatch(JSON.stringify(body), /482617039258001|Deposit \[redacted\]/);
   const payment = await reachedAnswer(f, "Did the payment from Absent Payer arrive in October 2026?");
   assert.equal(payment.ledger.found, null);
   assert.equal(payment.ledger.unattributed_deposits.length, 10);

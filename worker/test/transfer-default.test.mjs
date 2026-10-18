@@ -202,6 +202,11 @@ test("g: proposed and confirmed category withdrawals leave income with a flip no
   assert.equal(incomplete.ledger.attributed_subtotal_minor, 41383);
   assert.equal(incomplete.ledger.unattributed_count, 1);
   assert.equal(incomplete.evidence_gate.complete, false);
+  assert.equal(incomplete.ledger.lead_total_minor, 0);
+  assert.equal(incomplete.ledger.default_exclusions.withdrawal_minor, 41383);
+  assert.match(incomplete.answer, /withdrawals left out/);
+  assert.ok(incomplete.ledger.flip.includes("including withdrawals"));
+  assert.match(incomplete.answer.split("\nNote:")[0], /attributed.*\$0\.00.*not complete/i);
   f.raw("UPDATE fin_transactions SET payee='Fixture client' WHERE txn_uid='deposit'");
   const income = await ask(f, Q.income, "merchant", 0);
   assert.equal(income.ledger.lead_total_minor, 0);
@@ -215,6 +220,35 @@ for (const kind of ["investment", "retirement"]) test(`g: paired ${kind} withdra
   assert.equal(body.ledger.default_exclusions.withdrawal_minor, 32641);
   assert.equal(body.ledger.default_exclusions.withdrawal_count, 1);
   assert.equal(body.ledger.transfers[0].excluded_from_lead, true);
+});
+for (const [kind, summaryKey, phrase] of [
+  ["checking", "own_transfer_minor", "including transfers"],
+  ["loan", "loan_proceeds_minor", "including loan proceeds"],
+]) test(`incomplete payer subtotal retains ${kind} exclusion and its flip`, async t => {
+  const f = await fixture(t, "own");
+  f.raw("UPDATE fin_accounts SET label='Fixture source',account_kind=?,balance_role=? WHERE account_slug='account-a'", kind, kind === "loan" ? "liability" : "asset");
+  f.raw("UPDATE fin_transactions SET description='TRANSFER FROM Fixture source' WHERE txn_uid='move-in'");
+  f.raw("UPDATE fin_transactions SET payee='Fixture client' WHERE txn_uid='deposit'");
+  const question = "How much income came from Fixture source in September 2026?";
+  const control = await ask(f, question, "merchant");
+  assert.equal(control.evidence_gate.complete, true);
+  assert.equal(control.ledger.lead_total_minor, 0);
+  assert.equal(control.ledger.default_exclusions[summaryKey], 23617);
+  f.add("uncertain", "2026-09-20", 1000, "inflow", "Deposit", null, null, "account-b");
+  const body = await ask(f, question, "merchant");
+  assert.equal(body.ledger.found, true);
+  assert.equal(body.evidence_gate.complete, false);
+  assert.equal(body.ledger.total_minor, null);
+  assert.equal(body.ledger.attributed_subtotal_minor, 23617);
+  assert.equal(body.ledger.lead_total_minor, 0);
+  assert.equal(body.ledger.default_exclusions[summaryKey], 23617);
+  assert.ok(body.ledger.flip.includes(phrase));
+  assert.ok(body.answer.includes(`say "${phrase}"`));
+  assert.match(body.answer.split("\nNote:")[0], /attributed.*\$0\.00.*not complete/i);
+  const restored = await ask(f, flipQuestion(question, phrase), "merchant");
+  assert.equal(restored.ledger.lead_total_minor, 23617);
+  assert.equal(restored.evidence_gate.complete, false);
+  assert.equal(restored.ledger.attributed_subtotal_minor, 23617);
 });
 for (const scenario of ["dividend", "description-ira", "description-401k"]) test(`g: ${scenario} is not withdrawal evidence; category alone changes decision`, async t => {
   const f = await fixture(t, scenario), kept = await ask(f, Q.totals, "totals", 0);

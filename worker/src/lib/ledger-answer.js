@@ -1,11 +1,14 @@
 import { scopeIsUnrestricted } from "./grants.js";
 import { classifyLedgerQuestion, ledgerDay, shiftLedgerDay } from "./ledger-question.js";
 import { accountLinkPairsInWindow, accountLinkRequiredInWindow, effectivePeriodCovered, readEffectiveAccounts, readEffectiveBalances, readEffectiveTransactions } from "./ledger-reader.js";
-import { categoryFor, detectRecurring, isDirectedOwnedTransfer, isLoanAdvance, matchesCategory, matchesMerchant, matchesSender, merchantFor, normalizeMerchantText, pairOwnTransfers, senderFor, sumMinor } from "./ledger-analysis.js";
+import { categoryFor, detectRecurring, isDirectedOwnedTransfer, isLoanAdvance, matchesCategory, matchesMerchant, matchesSender, merchantFor, normalizeMerchantText, pairOwnTransfers, senderIdentity, sumMinor } from "./ledger-analysis.js";
 
 const masked = account => /^\d{1,4}$/.test(account.mask || "") ? `account ****${account.mask}` : "account (mask unavailable)";
 const money = cents => `${cents < 0 ? "-" : ""}$${Math.floor(Math.abs(cents) / 100).toLocaleString("en-US")}.${String(Math.abs(cents) % 100).padStart(2, "0")}`;
-const safeDescription = text => String(text || "Deposit").replace(/\d(?:[\s-]*\d){4,}/g, "[redacted]").slice(0, 240);
+const safeDescription = text => String(text || "Deposit")
+  .replace(/(\b(?:trace|reference|ref|orig id)\s*[#:]?\s+)[a-z\d][a-z\d._/-]*/gi, "$1[redacted]")
+  .replace(/\b(?=[a-z\d.-]*\d)(?=[a-z\d.-]*[a-z])[a-z\d][a-z\d.-]{7,}\b/gi, "[redacted]")
+  .replace(/\d(?:[\s.-]*\d){4,}/g, "[redacted]").slice(0, 240);
 const accountCoverage = accounts => accounts.map(a => ({
   account_mask: /^\d{1,4}$/.test(a.mask || "") ? a.mask : null,
   covered_to: a.covered_to || null, last_synced_at: a.last_synced_at || null,
@@ -144,20 +147,14 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
   if (rows.some(row => row.export_overlap_review)) return { reason: "bank_export_overlap_review_required" };
   if (rows.some(row => !readableRow(row))) return { reason: "unreadable_transactions" };
   const bySlug = new Map(inventory.map(a => [a.account_slug, a]));
-  const incompleteAttribution = (unattributed, matched = []) => {
+  const uncertainDeposit = (row, ref) => ({ n: ref.n, posted_on: row.posted_on,
+    amount_minor: row.amount_minor, account_mask: ref.account_mask,
+    ...(row.payee ? { payee: safeDescription(row.payee) } : {}) });
+  const uncertainDetail = (unattributed, cite) => {
     const listed = unattributed.slice(0, 10);
-    const citations = [...matched, ...listed].map((row, i) => citation(row, bySlug.get(row.effective_account_slug), i));
-    const subtotal = matched.length ? sumMinor(matched) : null;
-    const deposits = listed.map((row, i) => ({ ...citations[matched.length + i], description: safeDescription(row.description) }));
-    const answer = payment ? "I can't confirm whether that payment arrived."
-      : matched.length ? `Attributed income subtotal: ${money(subtotal)} (not complete) ${citations.slice(0, matched.length).map(c => `[${c.n}]`).join(" ")}.`
-        : "I can't confirm the income from that payer.";
-    return { answer: `${answer}\nSome deposits have no confirmed payer attribution; they may belong to the requested payer.\nUnattributed deposits (showing ${listed.length} of ${unattributed.length}):\n${deposits.map(row =>
-      `${money(row.amount_minor)} on ${row.posted_on} in ${masked({ mask: row.account_mask })}: ${row.description} [${row.n}].`).join("\n")}\nAccounts: ${accounts.map(masked).join(", ")}; ${intent.from} through ${intent.to}; ${accounts.map(a => `${masked(a)}: covered through ${a.covered_to || "unknown"}`).join("; ")}.`,
-    citations, ledger: { kind: intent.kind, found: matched.length ? true : null,
-      from: intent.from, to: intent.to, accounts: accountCoverage(accounts),
-      ...(payment ? { amount_minor: intent.amountMinor } : { total_minor: null, attributed_subtotal_minor: subtotal }),
-      attribution_incomplete: true, unattributed_count: unattributed.length, unattributed_deposits: deposits } };
+    const deposits = listed.map(row => uncertainDeposit(row, cite(row)));
+    return { deposits, answer: `Some deposits have no confirmed payer attribution; named payer figures are not complete.\nUnattributed deposits (showing ${listed.length} of ${unattributed.length}):\n${deposits.map(row =>
+      `${money(row.amount_minor)} on ${row.posted_on} in ${masked({ mask: row.account_mask })}${row.payee ? `: ${row.payee}` : ""} [${row.n}].`).join("\n")}` };
   };
   if (intent.kind === "payment") {
     const matched = rows.filter(row => {
@@ -168,8 +165,19 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     });
     if (!matched.length && intent.counterpartyWords.length) {
       const unattributed = rows.filter(row => row.direction === "inflow" &&
-        (intent.amountMinor === null || row.amount_minor === intent.amountMinor) && !senderFor(row, { requireAttribution: true }));
-      if (unattributed.length) return incompleteAttribution(unattributed);
+        (intent.amountMinor === null || row.amount_minor === intent.amountMinor) &&
+        senderIdentity(row, intent.counterpartyWords.join(" ")).attribution === "unknown");
+      if (unattributed.length) {
+        const citations = [];
+        const detail = uncertainDetail(unattributed, row => {
+          const ref = citation(row, bySlug.get(row.effective_account_slug), citations.length);
+          citations.push(ref); return ref;
+        });
+        return { answer: `I can't confirm whether that payment arrived.\n${detail.answer}\nAccounts: ${accounts.map(masked).join(", ")}; ${intent.from} through ${intent.to}; ${accounts.map(a => `${masked(a)}: covered through ${a.covered_to || "unknown"}`).join("; ")}.`,
+          citations, ledger: { kind: intent.kind, found: null, from: intent.from, to: intent.to,
+            accounts: accountCoverage(accounts), amount_minor: intent.amountMinor,
+            attribution_incomplete: true, unattributed_count: unattributed.length, unattributed_deposits: detail.deposits } };
+      }
     }
     const citations = matched.map((row, i) => citation(row, bySlug.get(row.effective_account_slug), i));
     const answer = matched.length
@@ -184,12 +192,14 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     const conjunction = text => text.replace(/\b(and)\b|&/g, "and");
     if (!directionRows.some(row => matchesMerchant(row, intent.match)) && directionRows.some(row =>
       conjunction(merchantFor(row)) === conjunction(wanted))) return { reason: "merchant_selector_ambiguous" };
-    if (intent.direction === "inflow") {
-      const matched = directionRows.filter(row => matchesMerchant(row, intent.match));
-      const unattributed = directionRows.filter(row => !matchesMerchant(row, intent.match) && !senderFor(row, { requireAttribution: true }));
-      if (unattributed.length) return incompleteAttribution(unattributed, matched);
-    }
   }
+  // Incomplete attribution still goes through the ordinary exclusion and note
+  // path. Known withdrawals, own transfers and advances retain their meaning.
+  const unattributed = intent.kind === "merchant" && intent.direction === "inflow"
+    ? rows.filter(row => row.direction === "inflow" && (intent.match
+      ? senderIdentity(row, intent.match).attribution === "unknown" : !senderIdentity(row).attributed)) : [];
+  const unattributedIds = new Set(unattributed.map(row => row.id));
+  const incompleteNamed = unattributed.length > 0 && Boolean(intent.match);
   const eligible = allRows.filter(row => readableRow(row) && usableAccount(bySlug.get(row.effective_account_slug)) &&
     effectivePeriodCovered(bySlug.get(row.effective_account_slug), row.posted_on, row.posted_on));
   const pairing = pairOwnTransfers(eligible, bySlug);
@@ -222,8 +232,9 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
   };
   const refs = list => list.map(row => `[${cite(row).n}]`).join(" ");
   const candidateMark = row => pairing.candidateRows.has(row.id) ? " (possible move between your own accounts, included)" : "";
-  const publicRow = row => ({ ...cite(row), description: safeDescription(row.description || row.payee || "Transaction"), possible_own_transfer: pairing.candidateRows.has(row.id) });
-  const rowLine = row => `${money(row.amount_minor)} on ${row.posted_on} in ${masked(bySlug.get(row.effective_account_slug))}: ${safeDescription(row.description || row.payee || "Transaction")}${candidateMark(row)} ${refs([row])}`;
+  const publicRow = row => ({ ...(unattributedIds.has(row.id) ? uncertainDeposit(row, cite(row))
+    : { ...cite(row), description: safeDescription(row.description || row.payee || "Transaction") }), possible_own_transfer: pairing.candidateRows.has(row.id) });
+  const rowLine = row => `${money(row.amount_minor)} on ${row.posted_on} in ${masked(bySlug.get(row.effective_account_slug))}: ${safeDescription(unattributedIds.has(row.id) ? row.payee || "Payer unknown" : row.description || row.payee || "Transaction")}${candidateMark(row)} ${refs([row])}`;
   const bounded = `Accounts: ${accounts.map(masked).join(", ")}; ${intent.from} through ${intent.to}; ${accounts.map(a => `${masked(a)}: covered through ${a.covered_to || "unknown"}`).join("; ")}.`;
   const ledger = { kind: intent.kind, from: intent.from, to: intent.to, accounts: accountCoverage(accounts),
     includes_own_transfers: true, matched_transfer_count: 0, candidate_transfer_count: pairs.length,
@@ -287,12 +298,15 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     ledger.total_minor = sumMinor(matched); ledger.unsorted_minor = sumMinor(unsorted); ledger.found = matched.length > 0;
     ledger.lead_total_minor = sumMinor(withoutLead(matched));
     leadDetail = `Total money ${intent.direction === "inflow" ? "in" : "out"}${intent.match ? ` for ${safeDescription(intent.match)}` : ` by ${intent.kind}`}: ${money(ledger.lead_total_minor)}; Unsorted: ${money(sumMinor(withoutLead(unsorted)))}.`;
+    if (incompleteNamed) leadDetail = matched.length
+      ? `Attributed income subtotal: ${money(ledger.lead_total_minor)} (not complete).`
+      : "I can't confirm the income from that payer.";
     ledger.if_own_transfers.total_minor = sumMinor(withoutCandidates(matched));
     ledger.if_own_transfers.unsorted_minor = sumMinor(withoutCandidates(unsorted));
     conditionalDetail = `total ${intent.direction === "inflow" ? "income" : "spend"}${intent.match ? ` for ${safeDescription(intent.match)}` : ` by ${intent.kind}`}: ${money(ledger.if_own_transfers.total_minor)}; Unsorted: ${money(ledger.if_own_transfers.unsorted_minor)}`;
     const groups = new Map();
     for (const row of matched) {
-      const label = intent.kind === "category" ? categoryFor(row) : merchantFor(row) || "unknown merchant";
+      const label = intent.kind === "category" ? categoryFor(row) : unattributedIds.has(row.id) ? "unknown merchant" : merchantFor(row) || "unknown merchant";
       if (intent.kind === "category" && !label) continue;
       const state = intent.kind === "category" ? row.category_basis_state : null;
       const key = JSON.stringify([label, state]);
@@ -303,12 +317,22 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     if (intent.ranked) orderedGroups.sort((a, b) => sumMinor(b.rows) - sumMinor(a.rows) || a.label.localeCompare(b.label));
     ledger.groups = orderedGroups.map(g => ({ [intent.kind]: safeDescription(g.label),
       category_basis_state: g.state, total_minor: sumMinor(g.rows), citations: g.rows.map(row => cite(row).n),
+      ...(unattributed.length ? { complete: false, ...(g.label === "unknown merchant" ? {} : { attributed_subtotal_minor: sumMinor(g.rows) }) } : {}),
       possible_transfer_citations: g.rows.filter(row => pairing.candidateRows.has(row.id)).map(row => cite(row).n),
       if_own_transfers_total_minor: sumMinor(withoutCandidates(g.rows)) }));
     answer = `Total ${intent.direction === "inflow" ? "income" : "spend"}${intent.match ? ` for ${safeDescription(intent.match)}` : ` by ${intent.kind}`}: ${money(ledger.total_minor)}.`;
-    if (!matched.length) answer += " No matching transactions found.";
-    for (const g of orderedGroups) answer += `\n${safeDescription(g.label)}${g.state === "proposed" ? " (bank's category (unconfirmed))" : ""}: ${money(sumMinor(g.rows))} ${refs(g.rows)}${g.rows.some(row => pairing.candidateRows.has(row.id)) ? " (includes possible moves between your own accounts)" : ""}.`;
-    answer += `\nUnsorted: ${money(ledger.unsorted_minor)}${intent.kind === "category" && intent.match && !matched.some(row => !categoryFor(row)) ? " (separate from the requested category)" : ""} ${refs(unsorted)}.`;
+    if (incompleteNamed) {
+      answer = matched.length ? `Attributed income subtotal: ${money(ledger.total_minor)} (not complete).` : "I can't confirm the income from that payer.";
+      ledger.attributed_subtotal_minor = matched.length ? ledger.total_minor : null;
+      ledger.total_minor = null;
+      conditionalDetail = matched.length ? `attributed income subtotal: ${money(ledger.if_own_transfers.total_minor)} (not complete)`
+        : "income from that payer cannot be confirmed";
+      ledger.if_own_transfers.attributed_subtotal_minor = matched.length ? ledger.if_own_transfers.total_minor : null;
+      ledger.if_own_transfers.total_minor = null;
+      if (!matched.length) { ledger.found = null; ledger.lead_total_minor = null; }
+    } else if (!matched.length) answer += " No matching transactions found.";
+    for (const g of orderedGroups) answer += `\n${safeDescription(g.label)}${g.state === "proposed" ? " (bank's category (unconfirmed))" : ""}${unattributed.length && g.label !== "unknown merchant" ? " (attributed subtotal, not complete)" : ""}: ${money(sumMinor(g.rows))} ${refs(g.rows)}${g.rows.some(row => pairing.candidateRows.has(row.id)) ? " (includes possible moves between your own accounts)" : ""}.`;
+    if (!incompleteNamed || matched.length) answer += `\nUnsorted: ${money(ledger.unsorted_minor)}${intent.kind === "category" && intent.match && !matched.some(row => !categoryFor(row)) ? " (separate from the requested category)" : ""} ${refs(unsorted)}.`;
   } else if (intent.kind === "transfers") {
     // This diagnostic view keeps its gross, outgoing-date contract. Other
     // answer kinds apply lead exclusions to each leg inside their own window.
@@ -369,6 +393,13 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     ? noteExcluded.has(row.id) ? "left out of the first figures as a retirement or investment withdrawal; kept in the gross figures"
       : "retirement or investment withdrawal excluded from the wider candidate pool; outside the displayed rows"
     : "retained in income/spend totals"}): ${rowLine(row)}.`;
+  if (unattributed.length) {
+    const detail = uncertainDetail(unattributed, cite);
+    ledger.attribution_incomplete = true;
+    ledger.unattributed_count = unattributed.length;
+    ledger.unattributed_deposits = detail.deposits;
+    answer += `\n${detail.answer}`;
+  }
   return { answer, citations, ledger };
 }
 

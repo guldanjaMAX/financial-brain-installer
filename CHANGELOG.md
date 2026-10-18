@@ -33,11 +33,14 @@ exact sealed package. This version bump verifies no incident.
   answers require evidence for the named payer; a payment-service label alone
   does not establish who paid. Check the cited rows and resolve any review
   request before using the figures.
-- **Payer answers say when they can't tell, instead of "no deposit".** When
-  a deposit in the period has no identified sender, a question about one
-  payer no longer answers "No matching deposit" or a $0.00 total. It says it
-  can't confirm and lists up to ten of those deposits with their dates and
-  amounts. Check the listed deposits against your bank statement.
+- **Supported payer answers flag uncertain deposits.** Within the selected
+  accounts, dates and any payment amount, unidentified senders prevent a
+  confirmed absence or complete payer income total. Known receipts can still
+  prove payment; income figures become attributed subtotals with exclusion
+  notes. Income by merchant keeps the bank total but flags incomplete payer
+  groups. Up to ten uncertain deposits show dates, amounts, masked accounts
+  and masked bank payee labels, without descriptions. Check them against your
+  bank statement.
 - **Your assistant gets money rules v3.** Claude Code and Codex receive the
   same rules for account labels, dates, confidence, citations and the exact
   words that change a money view. The assistant keeps the returned Note and

@@ -165,5 +165,6 @@ test('closure: without a payee, only the description sender clause can name the 
   assert.equal(body.ledger.found, null);
   assert.equal(body.ledger.unattributed_count, 1);
   assert.equal(body.citations.length, 1);
-  assert.equal(body.ledger.unattributed_deposits[0].description, 'Fixture Sender ACH deposit');
+  assert.equal(body.ledger.unattributed_deposits[0].description, undefined, 'uncertain receipt descriptions are omitted');
+  assert.doesNotMatch(JSON.stringify(body), /Fixture Sender ACH deposit/);
 });
