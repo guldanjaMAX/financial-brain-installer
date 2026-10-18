@@ -100,9 +100,16 @@ function factFromOperative(text, doc, requested) {
 // These statements establish what the owner reported, not whether a recipient
 // updated a system. Keep the question grammar separate from completion requests
 // so neither a request nor a postal receipt can become proof of residence.
+function addressMailOffset(row) {
+  // Native ingest prefixes each chunk with its exact stored title. Do not
+  // remove arbitrary bracketed prose or change offsets into the cited snippet.
+  const prefix = `[${row.title}] `;
+  return row.snippet.startsWith(prefix) ? prefix.length : 0;
+}
+
 function addressMailSender(row, doc, statementAt) {
   if (!/^(?:gmail|imap|email)$/.test(doc?.source_kind || '') || doc.date_source !== 'email_header') return null;
-  const prefix = row.snippet.slice(0, statementAt).replace(/\s+/g, ' ').trim();
+  const prefix = row.snippet.slice(addressMailOffset(row), statementAt).replace(/\s+/g, ' ').trim();
   const envelope = /^From: ([^<>]+?) <[^<>\s]+@[^<>\s]+> To: [^<>\s]+@[^<>\s]+(?:, [^<>\s]+@[^<>\s]+)* Date: (.+?) Subject: (.+)$/.exec(prefix);
   if (!envelope || envelope[3] !== row.title || Date.parse(envelope[2]) !== reliableDocumentTime(doc)) return null;
   return envelope[1];
@@ -124,16 +131,17 @@ function ownerAddressStatement({ question, owner, results, docs, now }) {
         doc.authority?.eligible === false || doc.authority?.tier === 'T4') continue;
     // Bind first-person words to the rendered sender header, never to a name
     // borrowed from the question, a recipient, or quoted correspondence.
-    const from = /^From:\s*([^<>\r\n]+?)\s*<[^<>\s]+@[^<>\s]+>\s/i.exec(text);
+    const from = /^From:\s*([^<>\r\n]+?)\s*<[^<>\s]+@[^<>\s]+>\s/i.exec(text.slice(addressMailOffset(row)));
     if (!from || identity(from[1]) !== identity(owner) ||
         (text.match(/\bFrom:/gi) || []).length !== 1 ||
         /\b(?:forwarded|wrote|quoted|hypothetical|business|office|not|never|if|unless|until|temporary|plan|intend)\b|["“”]/i.test(text)) continue;
     const time = reliableDocumentTime(doc);
     if (time === null || time > now || doc.date_source !== 'email_header') continue;
-    const statement = /\b(I have moved to|My (?:home |mailing )?address is|Please update my (?:home |mailing )?address to) ([^\r\n]+?)\.?\s*$/i.exec(text);
+    const movedRequest = /\b(Please update my (?:home |mailing )?address to) ([^\r\n]+?)\. I have moved there\.\s*$/i.exec(text);
+    const statement = movedRequest || /\b(I have moved to|My (?:home |mailing )?address is|Please update my (?:home |mailing )?address to) ([^\r\n]+?)\.?\s*$/i.exec(text);
     if (!statement) continue;
     if (identity(addressMailSender(row, doc, statement.index)) !== identity(owner)) continue;
-    const request = /^Please/i.test(statement[1]);
+    const request = !movedRequest && /^Please/i.test(statement[1]);
     if (completionQuestion !== request || !safeValue('address', statement[2])) continue;
     if ((/home address/i.test(question) && /mailing address/i.test(statement[1])) ||
         (/mailing address/i.test(question) && /home address/i.test(statement[1]))) continue;
@@ -156,14 +164,21 @@ function ownerAddressStatement({ question, owner, results, docs, now }) {
     if (time !== null && time < chosen.time) continue;
     if (candidates.some(candidate => candidate.doc.n === doc?.n && candidate.value === chosen.value)) continue;
     const confirmation = /\bChange of address confirmed for ([^:]+): ([^\r\n]+?)\.?\s*$/i.exec(row.snippet || '');
-    if (!chosen.request && confirmation && addressMailSender(row, doc, confirmation.index) &&
-        identity(confirmation[1]) === identity(owner) &&
-        confirmation[2] === chosen.value && time !== null && time <= now &&
+    // A dated event receipt can qualify the request without repeating the
+    // address. Bind its subject to the owner and its effective day to the
+    // chosen report. This is context only, never proof of system completion.
+    const event = /\bYour change-of-address request is confirmed, effective (\d{4}-\d{2}-\d{2})\.\s*$/.exec(row.snippet || '');
+    const eventMatches = event && identity(row.title) === identity(`Address change for ${owner}`) &&
+      event[1] === new Date(chosen.time).toISOString().slice(0, 10);
+    const agreeing = confirmation && identity(confirmation[1]) === identity(owner) && confirmation[2] === chosen.value;
+    const receipt = agreeing ? confirmation : eventMatches ? event : null;
+    if (!chosen.request && receipt && addressMailSender(row, doc, receipt.index) &&
+        time !== null && time <= now &&
         doc.ref && doc.text_source === 'native' && doc.text_reliable === true &&
         doc.lineage?.kind === 'source_record' && doc.lineage?.status === 'known' &&
         doc.authority?.eligible !== false &&
         !/\b(?:not|never|if|unless|quoted|forwarded|wrote)\b|["“”>]/i.test((row.snippet || '').replace(/<[^<>\s]+@[^<>\s]+>/g, ''))) {
-      confirmations.push({ doc, time });
+      confirmations.push({ doc, time, event: !agreeing });
       continue;
     }
     return null;
@@ -175,10 +190,12 @@ function ownerAddressStatement({ question, owner, results, docs, now }) {
     : `The most recent retrieved owner email reporting an address lists ${chosen.value}, as of ${day} [${n}]`;
   const evidence = [n];
   for (const confirmation of confirmations) {
-    answer += `; the ${new Date(confirmation.time).toISOString().slice(0, 10)} email records an address-change confirmation for the same address [${confirmation.doc.n}]`;
+    answer += `; the ${new Date(confirmation.time).toISOString().slice(0, 10)} email records an address-change confirmation ${confirmation.event ? `effective ${day}` : 'for the same address'} [${confirmation.doc.n}]`;
     evidence.push(confirmation.doc.n);
   }
   if (!chosen.request) answer += '.';
+  if (confirmations.some(confirmation => confirmation.event))
+    answer += ` This does not establish completion of a recipient system update. [${n}]`;
   return { answer, evidence, method: 'dated_owner_address',
     fact_span: { n, field: 'address', start: chosen.start, end: chosen.end, as_of: day,
       basis: 'result_snippet', offset_unit: 'utf16' } };
