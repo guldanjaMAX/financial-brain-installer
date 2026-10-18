@@ -153,6 +153,13 @@ test("payment edges are inclusive, optional mask and counterparty are exact, and
   const body = await direct(f, "Did the payment of $50.11 from Fixture payer arrive on 2026-09-15 in account 4321?");
   assert.equal(body.ledger.found, true);
   assert.deepEqual(body.citations.map(c => c.posted_on), ["2026-09-08", "2026-09-22"]);
+  // Unknown question labels refuse; only a registered identity can prove absence.
+  const unregistered = await direct(f, "Did the payment of $50.11 from Different payer arrive on 2026-09-15?");
+  assert.equal(unregistered.ledger.found, null);
+  assert.equal(unregistered.evidence_gate.complete, false);
+  assert.doesNotMatch(unregistered.answer, /No matching|\$0\.00/);
+  f.raw(`INSERT INTO fin_entities(entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at)
+    VALUES ('known-absent','Different payer','business','counterparty','owner_stated','confirmed',?)`, NOW);
   const wrongPayer = await direct(f, "Did the payment of $50.11 from Different payer arrive on 2026-09-15?");
   assert.equal(wrongPayer.ledger.found, false);
   const wrongMask = await direct(f, "Did the payment of $50.11 arrive on 2026-09-15 in account 9999?");

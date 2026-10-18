@@ -2293,15 +2293,23 @@ validation before reuse, separate answer snapshots, structured-payee authority,
 and unchanged receipt counts and notes.
 `worker/test/ledger-question-selector.test.mjs` crosses requested names containing
 commas and grammar words with payment and named-income templates and shorter-only,
-both-name and longer-only registrations. Real-answer arms prove that unresolved
-or conflicting selectors cannot produce presence, absence or zero. Complete
-selector spans are protected before question cleanup, then all readings use the
-row registry and distinct entity slugs. A known fragment can refuse an unknown
-whole name but cannot identify it. Completely unknown selectors retain existing
-covered-absence behavior. The suite separately checks the two stored-payer arms,
-unique aliases, exact-name mode, same-slug readings, disjoint clauses, empty
-windows, masking and bounded refusal. Selector ambiguity is reported independently
-of row ambiguity in `ledger.payer_selector_candidates`, including empty windows.
+both-name and longer-only registrations. Real-answer arms require unresolved or
+conflicting selectors to withhold presence, absence and zero. Question identity
+comes from all literal registry mentions at Unicode word boundaries, removing
+only strictly contained spellings. Equal or partly overlapping mentions remain;
+distinct slugs refuse. Complete clause coverage and unchanged scope are checked
+separately from identity. Wholly unknown names also refuse, while a registered
+payer can be absent from a covered window with independently confirmed receipts.
+`worker/test/ledger-question-mentions.test.mjs` crosses ordered payer pairs,
+all question templates, internal Payment/from/by/Bank/Services words and
+registration cases. Its independent invariant is no payer claim, with both
+stored payers, exact-name mode, nonempty snapshot reads and successful controls.
+A separate matrix requires single-payer abbreviations and commas to answer.
+The suites also check unique aliases, equal spans, partial overlaps, Unicode word
+boundaries, empty windows, masked candidates, fresh registries and bounded
+refusal. Selector uncertainty appears independently of row ambiguity in
+`ledger.payer_selector_candidates`, including empty windows. Both suites use the
+shared test-only templates in `worker/test/ledger-question-cases.mjs`.
 `worker/test/ledger-identity-gate.test.mjs` exercises identity authority,
 ambiguity, exact normalization, arbitrary metadata, and render-boundary masking.
 It also counts answered, answered-with-assumption and cannot-confirm results for realistic synthetic

@@ -80,7 +80,9 @@ export function fixture(t) {
     },
   };
   f.entity('business-one'); f.entity('business-two'); f.entity('personal', 'household');
-  seedKnownPayers(f, ['Outside Buyer', 'Settlement Platform', 'Investment Platform'], NOW);
+  // The independent registry includes the absent memo subject: absence/zero
+  // controls must not authorize a wholly unregistered requested payer.
+  seedKnownPayers(f, ['Outside Buyer', 'Studio Buyer', 'Settlement Platform', 'Investment Platform'], NOW);
   return f;
 }
 

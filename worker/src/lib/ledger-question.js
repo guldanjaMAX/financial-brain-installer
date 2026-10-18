@@ -134,12 +134,13 @@ function phaseTwoQuestion(q, intent, today) {
 }
 
 const ARRIVAL = "arrive|arrived|receive|received|come|came|land|landed|hit|reach|reached|clear|cleared|post|posted";
-function paymentParties(text) {
+function paymentParties(text, selectorSlot = false) {
   const clause = preposition => text.match(new RegExp(`\\b${preposition}\\s+(.+?)(?=\\s+(?:on|into|to|in|for|from|via|${ARRIVAL})\\b|[?,]|$)`));
   // A payer ending in "payment" after FROM must not also be consumed as a
   // noun-first payer, duplicating the clause and certifying a false nonmatch.
   const namedPayment = /^(?:did|has|have)\s+(?:(?:the|my|our|a|an)\s+)?payment\s+(?:from|via)\b/.test(text) ? null
-    : text.match(/^(?:did|has|have)\s+(?:(?:the|my|our|a|an)\s+)?([\p{L}\p{N}]+(?:\s+[\p{L}\p{N}]+){0,3})\s+payment\b/u);
+    : (selectorSlot && text.match(/^(?:did|has|have)\s+(?:(?:the|my|our|a|an)\s+)?(selectorplaceholder)\s+payment\b/)) ||
+      text.match(/^(?:did|has|have)\s+(?:(?:the|my|our|a|an)\s+)?([\p{L}\p{N}]+(?:\s+[\p{L}\p{N}]+){0,3})\s+payment\b/u);
   const named = namedPayment && !/^(?:the|my|our|a|an)$/.test(namedPayment[1]) ? namedPayment[1] : "";
   return { partyMatch: clause("from"), viaMatch: clause("via"), namedPayment, named };
 }
@@ -168,7 +169,7 @@ function classifyQuestionGrammar(question, { now = Date.now(), selectorSlot = fa
   const today = ledgerDay(now);
   let scopeText = q;
   if (/\b(?:payment|deposit|paid)\b/.test(q) && new RegExp(`\\b(?:${ARRIVAL})\\b`).test(q)) {
-    const { partyMatch, viaMatch, namedPayment, named } = paymentParties(q);
+    const { partyMatch, viaMatch, namedPayment, named } = paymentParties(q, selectorSlot);
     for (const match of [partyMatch, viaMatch, named ? namedPayment : null]) if (match) scopeText = scopeText.replace(match[0], "");
   }
   const maskMatches = [...scopeText.matchAll(/(?:\*{2,}|ending(?:\s+in)?\s+|mask\s+|account\s+)(\d{1,4})\b/g)];
@@ -224,7 +225,7 @@ function classifyQuestionGrammar(question, { now = Date.now(), selectorSlot = fa
     if (dates.length && /\b(?:before|after|between)\b/.test(rest)) return intent;
     if (!dates.length && !period.from && /\b(?:on|between|before|after|yesterday|tomorrow|last|this)\b/.test(rest)) return intent;
     const arrival = ARRIVAL;
-    const { partyMatch, viaMatch, namedPayment, named } = paymentParties(rest);
+    const { partyMatch, viaMatch, namedPayment, named } = paymentParties(rest, selectorSlot);
     // Apply one specificity rule to every sender form. Generic-only clauses
     // cannot identify an amountless payment; keep all words in specific names
     // so rejecting generic narration never widens a query to every deposit.
@@ -257,16 +258,67 @@ function classifyQuestionGrammar(question, { now = Date.now(), selectorSlot = fa
   return intent;
 }
 
+export const normalizePayerQuestion = value => String(value || '').normalize('NFKC').toLowerCase()
+  .replace(/’/g, "'").replace(/\s+/g, ' ').trim();
+const questionScope = intent => JSON.stringify([intent.kind, intent.from, intent.to, intent.mask, intent.accountKind,
+  intent.amountMinor, intent.ownTransfers, intent.withdrawals, intent.loanProceeds, intent.exactNamesOnly]);
+
+// Registry mentions are identity authority. Grammar only verifies that every
+// payer clause is fully occupied by a mention and that the scope is unchanged.
+// Replace all mentions together so Payment/FROM inside a name cannot erase a
+// different payer clause. A partly covered clause never becomes an exact name.
+export function payerMentionsCoverQuestion(intent, mentions) {
+  if (!intent.payerQuestion || !mentions.length) return false;
+  const question = intent.payerQuestion.text, slot = 'selectorplaceholder';
+  const coveredBy = (clause, mention) => mention.start <= clause.start &&
+    (mention.end >= clause.end || (/^[.?!]+$/.test(question.slice(mention.end, clause.end)) &&
+      /^(?:[, ]*exact names only)?[?!.]*$/.test(question.slice(clause.end).trim())));
+  const complete = intent.payerReadings?.filter(reading => reading.complete) || [];
+  const clauseSets = intent.payerClauseSets || [];
+  // Keep identity conflicts independent of coverage. Once all mentions agree
+  // on one slug, overlapping aliases can describe alternative covered parses.
+  // A same-entity alias in account narration need not replace that narration.
+  // A registered spelling may itself start with FROM and contain the parser's
+  // shorter clause. Preserve the question's structural cue by replacing the
+  // covered clause span, while the containing mention still decides identity.
+  const spans = [...new Map([...complete, ...clauseSets.flat()]
+    .filter(clause => mentions.some(mention => coveredBy(clause, mention)))
+    .map(clause => [`${clause.start}:${clause.end}`, clause])).values()]
+    .sort((a, b) => a.start - b.start || b.end - a.end);
+  function coveredParse(selected) {
+    const covered = clause => selected.some(mention => coveredBy(clause, mention));
+    // Generic comma tails cannot disappear in the unprotected grammar. Each
+    // separate noun/FROM clause also needs full coverage in the chosen parse.
+    if (!complete.some(covered) || (clauseSets.length && !clauseSets.some(clauses => clauses.every(covered)))) return false;
+    let text = question;
+    for (const span of selected.toReversed()) text = text.slice(0, span.start) + slot + text.slice(span.end);
+    const parsed = classifyQuestionGrammar(text, { now: intent.payerQuestion.now, selectorSlot: true });
+    if (questionScope(parsed) !== questionScope(intent)) return false;
+    if (parsed.kind === 'payment') return parsed.selectorSlotParts?.length > 0 && parsed.selectorSlotParts.every(part => part === slot);
+    return parsed.kind === 'merchant' && parsed.direction === 'inflow' && parsed.match === slot;
+  }
+  // Coverage is a bounded existence proof for a single already-resolved slug.
+  // Try complete compatible sets first; if no proof fits the budget, refuse.
+  let steps = 0;
+  function visit(index, selected) {
+    if (++steps > 64) return false;
+    if (index === spans.length) return coveredParse(selected);
+    const span = spans[index];
+    if ((!selected.length || span.start >= selected.at(-1).end) && visit(index + 1, [...selected, span])) return true;
+    return visit(index + 1, selected);
+  }
+  return visit(0, []);
+}
+
 // Protect a whole selector BEFORE the intent grammar removes periods, account
 // words or punctuation. Reusing that grammar with an opaque slot keeps every
-// supported question form in one place. All successful boundaries survive;
-// the snapshot registry, not a longest/first-match heuristic, decides identity.
+// supported question form in one place. These readings route the question only;
+// registry mentions over the entire question decide identity after the read.
 export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
   const options = { now };
   if (String(question || '').length > 1024) return { broad: true, kind: null };
   const original = classifyQuestionGrammar(question, options);
-  const text = String(question || '').normalize('NFKC').toLowerCase().replace(/’/g, "'")
-    .replace(/\bwhat's\b/g, 'what is').replace(/\s+/g, ' ').trim();
+  const text = normalizePayerQuestion(question).replace(/\bwhat's\b/g, 'what is');
   const starts = [...text.matchAll(/\b(?:from|via) +/g)].map(m => m.index + m[0].length);
   const noun = text.match(/^(?:did|has|have) +(?:(?:the|my|our|a|an) +)?/);
   if (noun) starts.push(noun[0].length);
@@ -277,12 +329,13 @@ export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
     return { broad: original.broad, kind: null };
   const slot = 'selectorplaceholder';
   if (text.includes(slot)) return { broad: original.broad, kind: null };
-  const readings = [];
+  const readings = [], clauseSets = [];
+  const labelPattern = /^[\p{L}\p{N}](?:[\p{L}\p{N}\p{M} &'()._/:#,\-]*[\p{L}\p{N}).])?$/u;
   for (const start of starts) {
     for (let end = start + 1; end <= text.length; end++) {
       if (end < text.length && !/[ ,?!.]/.test(text[end])) continue;
       const label = text.slice(start, end);
-      if (!/^[\p{L}\p{N}](?:[\p{L}\p{N}\p{M} &'()._/:#,\-]*[\p{L}\p{N})])?$/u.test(label)) continue;
+      if (!labelPattern.test(label)) continue;
       if (amountInCents(label) !== null) continue;
       const parsed = classifyQuestionGrammar(text.slice(0, start) + slot + text.slice(end), { ...options, selectorSlot: true });
       if (!(parsed.kind === 'payment' && parsed.selectorSlotParts.includes(slot)) &&
@@ -294,6 +347,25 @@ export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
       readings.push({ label, start, end, parsed });
     }
   }
+  // Two noun/FROM slots can each contain grammar words or punctuation. Protect
+  // both for routing, so an internal FROM in either label cannot hide the other
+  // slot. Registry mentions still make the sole identity decision after reading.
+  if (noun) for (const bridge of text.matchAll(/ +payment +(?:from|via) +/g)) {
+    const first = { start: noun[0].length, end: bridge.index };
+    first.label = text.slice(first.start, first.end);
+    if (!labelPattern.test(first.label) || !specificSender(first.label, false) || amountInCents(first.label) !== null) continue;
+    const start = bridge.index + bridge[0].length;
+    for (let end = start + 1; end <= text.length; end++) {
+      if (end < text.length && !/[ ,?!.]/.test(text[end])) continue;
+      const label = text.slice(start, end);
+      if (!labelPattern.test(label) || !specificSender(label, false) || amountInCents(label) !== null) continue;
+      const parsed = classifyQuestionGrammar(text.slice(0, first.start) + slot + bridge[0] + slot + text.slice(end),
+        { ...options, selectorSlot: true });
+      if (parsed.kind !== 'payment' || parsed.selectorSlotParts.length !== 2 || !parsed.selectorSlotParts.every(part => part === slot)) continue;
+      readings.push({ ...first, parsed }, { label, start, end, parsed });
+      clauseSets.push({ clauses: [first, { label, start, end }], parsed });
+    }
+  }
   if (!readings.length) {
     // An unsupported complete spelling must not re-enter the old comma/filler
     // cleanup through its already-shortened selector. Amount-only and other
@@ -302,8 +374,7 @@ export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
       (original.kind === 'merchant' && original.direction === 'inflow' && original.match);
     return named ? { broad: original.broad, kind: null } : original;
   }
-  const scope = intent => JSON.stringify([intent.kind, intent.from, intent.to, intent.mask, intent.accountKind,
-    intent.amountMinor, intent.ownTransfers, intent.withdrawals, intent.loanProceeds, intent.exactNamesOnly]);
+  const scope = questionScope;
   const originalScope = scope(original);
   const chosen = readings.find(r => scope(r.parsed) === originalScope) || readings[0];
   const sameScope = readings.filter(r => scope(r.parsed) === scope(chosen.parsed));
@@ -313,6 +384,9 @@ export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
     (r.start === noun?.[0].length && new RegExp(`^ +payment +(?:${ARRIVAL}|from|via|of)\\b`).test(text.slice(r.end))) ||
     new RegExp(`^ +(?:in|during|for|over) +(?:the +)?(?:${MONTHS.join('|')}|q[1-4]|last|this|so far|recent|\\d{4} so far)\\b`).test(text.slice(r.end)));
   const whole = sameScope.find(complete);
+  const scopedSets = clauseSets.filter(set => scope(set.parsed) === scope(chosen.parsed));
+  const completeSets = scopedSets.filter(set => !scopedSets.some(other =>
+    other.clauses[0].end === set.clauses[0].end && other.clauses[1].end > set.clauses[1].end));
   // Disjoint selector slots (a channel-named payment FROM another label)
   // require agreement too. Overlapping spans are alternatives for one slot.
   const groups = [];
@@ -322,7 +396,9 @@ export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
     else group.end = Math.max(group.end, r.end);
     r.group = groups.length - 1;
   }
-  const intent = { ...chosen.parsed, payerReadings: readings.map(r => ({ label: r.label, group: r.group,
+  const intent = { ...chosen.parsed, payerQuestion: { text, now },
+    payerClauseSets: completeSets.map(set => set.clauses),
+    payerReadings: readings.map(r => ({ label: r.label, start: r.start, end: r.end, group: r.group,
     complete: scope(r.parsed) === scope(chosen.parsed) && complete(r),
     sameScope: scope(r.parsed) === scope(chosen.parsed) })) };
   delete intent.selectorSlotParts;

@@ -1,3 +1,5 @@
+import { normalizePayerQuestion, payerMentionsCoverQuestion } from './ledger-question.js';
+
 // One request-local identity registry and one attribution decision per inflow.
 // Bank metadata never registers an identity. Every spelling uses this same key.
 export const normalizeMerchantText = value => (String(value || "").normalize("NFKC").toLowerCase().match(/[\p{L}\p{N}]+|&/gu) || []).join(" ");
@@ -6,11 +8,13 @@ export const normalizeMerchantText = value => (String(value || "").normalize("NF
 // name. Keep comma positions from actual registry spellings for that grammar
 // production; the private index has exactly the registry's request lifetime.
 const companyCommaSpellings = Symbol('company comma spellings');
+const questionSpellings = Symbol('question spellings');
 const companyCommaKey = value => String(value || '').normalize('NFKC').split(',').map(normalizeMerchantText).join(',');
 
 export function payerRegistry(identities) {
   const index = new Map();
   index[companyCommaSpellings] = new Set();
+  index[questionSpellings] = new Map();
   for (const identity of identities) for (const column of ['legal_name', 'display_label']) {
     const label = identity[column];
     // Reject only the damaged spelling, keeping the entity's valid aliases.
@@ -20,6 +24,9 @@ export function payerRegistry(identities) {
     if (!key) continue;
     if (!index.has(key)) index.set(key, new Set());
     index.get(key).add(identity.entity_slug);
+    const spelling = normalizePayerQuestion(label);
+    if (!index[questionSpellings].has(spelling)) index[questionSpellings].set(spelling, new Set());
+    index[questionSpellings].get(spelling).add(identity.entity_slug);
     if (String(label).normalize('NFKC').includes(',')) index[companyCommaSpellings].add(companyCommaKey(label));
   }
   return index;
@@ -32,41 +39,48 @@ export function lookupPayer(label, registry) {
     : { state: 'ambiguous' };
 }
 
-export function resolveRequestedPayer(readings, registry) {
-  const slugs = new Set(), candidates = [];
-  const groups = new Set(readings.filter(r => r.sameScope !== false).map(r => r.group)), coherent = new Set();
-  const foundReadings = readings.map(reading => ({ reading, found: registry.get(normalizeMerchantText(reading.label)) }));
-  const completeName = foundReadings.some(({ reading, found }) => reading.complete && found);
-  let sameScope = true;
-  for (const { reading, found } of foundReadings) {
-    if (!found) continue;
-    // Like row parses, a missing alternative whole name cannot erase a known
-    // complete name through a fragment inside that unregistered alternative.
-    // Direct grammar readings and boundaries of registered whole names remain.
-    if (reading.parent && completeName && !registry.has(normalizeMerchantText(reading.parent))) continue;
-    candidates.push(reading.label);
-    for (const slug of found) slugs.add(slug);
-    if (reading.complete) coherent.add(reading.group);
-    if (reading.sameScope === false) sameScope = false;
-  }
-  if (slugs.size > 1) return { state: 'ambiguous', candidates };
-  // A registered prefix cannot erase the unregistered remainder of the name.
-  // Different scope readings must not quietly change the account or period.
-  if (slugs.size && (coherent.size !== groups.size || !sameScope)) return { state: 'unresolved', candidates };
-  if (!slugs.size) {
-    // A known fragment is never identity authority. It only prevents absence
-    // when an unknown complete selector could be a name with dropped words.
-    // Keep the existing missing-label behavior for wholly unknown selectors.
-    for (const reading of readings.filter(r => r.complete)) {
-      const words = normalizeMerchantText(reading.label).split(' ');
-      for (let i = 1; i < words.length; i++) for (const fragment of [words.slice(0, i).join(' '), words.slice(i).join(' ')]) {
-        if (registry.has(fragment)) candidates.push(fragment);
+// Scan literal registered spellings, preserving their punctuation. Row lookup
+// remains punctuation-insensitive; that cannot authorize a question fragment.
+// This index belongs to the same bounded, request-local registry as the rows.
+export function requestedPayerMentions(question, registry) {
+  const text = normalizePayerQuestion(question), mentions = [];
+  const word = char => !!char && /[\p{L}\p{N}\p{M}_]/u.test(char);
+  for (const [label, slugs] of registry[questionSpellings] || []) {
+    // Only a registered terminal period is optional. Other punctuation stays
+    // literal; sentence punctuation after the spelling is outside its span.
+    const variants = label.endsWith('.') ? [label, label.slice(0, -1)] : [label];
+    for (const spelling of variants) {
+      if (!spelling) continue;
+      let start = text.indexOf(spelling);
+      while (start !== -1) {
+        const end = start + spelling.length;
+        const before = [...text.slice(0, start)].at(-1), after = String.fromCodePoint(text.codePointAt(end) || 0);
+        if (!word(before) && !word(after)) mentions.push({ start, end, label, slugs });
+        start = text.indexOf(spelling, start + 1);
       }
     }
-    if (candidates.length) return { state: 'unresolved', candidates: [...new Set(candidates)] };
   }
-  return slugs.size ? { state: 'unique', slug: slugs.values().next().value, candidates }
-    : { state: 'missing', candidates };
+  // Strict containment removes only a smaller complete registered spelling.
+  // Equal spans retain every slug; disjoint and partial overlaps all survive.
+  mentions.sort((a, b) => a.start - b.start || b.end - a.end);
+  let furthest = -1, containingStart = -1;
+  return mentions.filter(mention => {
+    if (mention.end < furthest || (mention.end === furthest && mention.start > containingStart)) return false;
+    if (mention.end > furthest) { furthest = mention.end; containingStart = mention.start; }
+    return true;
+  });
+}
+
+export function resolveRequestedPayer(intent, registry) {
+  const mentions = requestedPayerMentions(intent.payerQuestion?.text, registry);
+  const slugs = new Set(mentions.flatMap(mention => [...mention.slugs]));
+  const candidates = [...new Set(mentions.map(mention => mention.label))];
+  if (slugs.size > 1) return { state: 'ambiguous', candidates };
+  // No known name, or an uncovered remainder, cannot prove presence, absence
+  // or zero even when all stored receipts have independently confirmed payers.
+  if (!slugs.size || !payerMentionsCoverQuestion(intent, mentions)) return { state: 'unresolved',
+    candidates: candidates.length ? candidates : [intent.match || intent.counterparty].filter(Boolean) };
+  return { state: 'unique', slug: slugs.values().next().value, candidates };
 }
 
 // One closed grammar owns both the alphabet and every supported production.

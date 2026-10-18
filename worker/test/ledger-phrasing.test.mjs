@@ -153,6 +153,13 @@ test("named arrival absence is covered, scoped, token matched and never a model 
   f.raw("UPDATE fin_account_coverage SET covered_from='2025-11-01' WHERE account_slug='empty'");
   assert.equal((await f.ask("Did the Paywire payment hit my bank account?")).ledger?.found, true);
   const start = f.seen.sql.length;
+  // Unknown question labels refuse; only a registered identity can prove absence.
+  const unregistered = await f.ask("Did the payment from Absent Payer reach account 4417?");
+  assert.equal(unregistered.ledger.found, null);
+  assert.equal(unregistered.evidence_gate.complete, false);
+  assert.doesNotMatch(unregistered.answer, /No matching|\$0\.00/);
+  f.raw(`INSERT INTO fin_entities(entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at)
+    VALUES ('known-absent','Absent Payer','business','counterparty','owner_stated','confirmed',?)`, NOW);
   const absent = await f.ask("Did the payment from Absent Payer reach account 4417?");
   assert.equal(absent.ledger?.found, false);
   assert.match(absent.answer, /2026-08-14.*2026-10-12/);

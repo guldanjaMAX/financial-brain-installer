@@ -863,28 +863,32 @@ alias produces an incomplete cannot-confirm answer with candidate receipts, even
 when the snapshot is empty; it never certifies absence or an exact zero. An
 ambiguous complete statement or extracted sender label is terminal and cannot
 fall through to a shorter spelling.
-Requested payers are protected before question grammar consumes punctuation,
-periods or account words. The same question grammar is checked with an opaque
-selector slot at each bounded candidate boundary. Complete names and structural
-boundary readings are looked up in the same request-local registry as rows.
-Distinct registered slugs produce a cannot-confirm answer with masked selector
-candidates; aliases of one slug agree. At least one complete reading per disjoint
-selector slot must resolve, and registered alternatives cannot change the period
-or account. A known prefix cannot discard the remainder of an unregistered name.
-Fragments inside an unregistered alternative whole name cannot override a
-registered complete name, matching the row parser's complete-reading rule.
-When no reading resolves, known leading or trailing fragments can only veto a
-claim, never supply identity authority. Entirely unknown labels retain the
-existing covered-absence behavior when every receipt is independently attributed.
-Question enumeration is bounded to 512 normalized characters and 12 selector
-starts. Longer names remain intact within that whole-question cap. An overflow or
-control/format character refuses instead of pruning to a shorter name. No query
-or registry is cached across answers.
-If no complete selector spelling fits the protected alphabet, the named request
-stays unsupported; it cannot reuse a shortened selector from the older cleanup.
+Requested payers are decided from every registered spelling mentioned anywhere
+in the normalized question, using Unicode word boundaries. Legal names and owner
+display labels retain their commas, periods and other punctuation. A registered
+terminal abbreviation period is optional; sentence punctuation is outside the
+name. Only a mention strictly contained in another complete registered spelling
+is removed. Equal spans, disjoint mentions and partial overlaps all remain.
+Distinct entity slugs among the retained mentions produce an incomplete
+cannot-confirm answer with masked candidates, including in empty windows.
+Aliases of one slug agree. Exactly one slug can authorize a payer claim only
+when a complete protected payer clause fits a mention and replacing compatible
+clause mentions with opaque slots leaves every parsed payer clause covered, with the same period,
+account and qualifiers. This coverage check cannot discard an unregistered
+remainder such as ", Bank", or let Payment inside one name erase another payer.
+Zero registered mentions or any uncovered payer clause also refuses presence,
+absence and exact zero, even when all stored receipts are confirmed. A known
+registered payer can still be proved absent from a covered, fully attributed
+window. Amount-only questions retain their independent receipt contract.
+Question routing protects candidate spans before grammar cleanup, bounded to
+512 normalized characters and 12 selector starts. Longer names remain intact
+within that whole-question cap. Overflow or control/format characters refuse
+instead of pruning to a shorter name. No query or registry is cached across
+answers. If no complete selector spelling fits the protected alphabet, the named
+request stays unsupported and cannot reuse a shortened selector from cleanup.
 The complete normalized payee must resolve exactly to one known identity.
 Without a payee, one bounded grammar must consume the entire description before
-any sender reading can establish identity. Query and stored labels share NFKC,
+any sender reading can establish identity. Row sender candidates and stored identities share NFKC,
 case and punctuation normalization and preserve literal `and` versus `&`.
 Token subsets, prefixes, channel labels and invoice subjects do not establish
 identity. Unsupported sender syntax remains unknown without a growing list of

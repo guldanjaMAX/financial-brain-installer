@@ -192,7 +192,7 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     : { from: shiftLedgerDay(intent.from, -6), to: shiftLedgerDay(intent.to, 6), payerIdentities: attributionNeeded });
   const allRows = attributionNeeded ? snapshot.rows : snapshot;
   const identities = payerRegistry(attributionNeeded ? snapshot.identities : []);
-  const wanted = namedPayer ? resolveRequestedPayer(intent.payerReadings || [{ label: namedIncome ? intent.match : intent.counterparty, complete: true }], identities) : null;
+  const wanted = namedPayer ? resolveRequestedPayer(intent, identities) : null;
   const selectorAmbiguous = ['ambiguous', 'unresolved'].includes(wanted?.state);
   const selectorCandidates = [...new Set((wanted?.candidates || []).map(safeDescription))];
   const attribute = createInflowAttributor(identities);

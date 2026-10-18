@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ledgerFixture, NOW } from './ledger-review-fixture.mjs';
 import { classifyLedgerQuestion } from '../src/lib/ledger-question.js';
-import { originatorWords } from './ledger-attribution-cases.mjs';
+import { requestedSelectorCases } from './ledger-question-cases.mjs';
 import { payerRegistry, resolveRequestedPayer } from '../src/lib/ledger-attribution.js';
 
 const payment = name => `Did the payment of $25.00 from ${name} arrive in October 2026?`;
@@ -34,7 +34,7 @@ function uncertain(body) {
   assert.doesNotMatch(body.answer, /No matching|\$0\.00/);
 }
 
-test('requested comma name cannot silently select a shorter entity: both receipt arms and exact-name modes', async t => {
+test('a complete registered comma name supersedes its contained spelling: both receipt arms and exact-name modes', async t => {
   const f = setup(t);
   f.identity('short', 'Payer One', 'Short Supplier');
   f.identity('whole', 'Payer One, Bank', 'Whole Supplier');
@@ -46,11 +46,9 @@ test('requested comma name cannot silently select a shorter entity: both receipt
       assert.equal(control.ledger.found, actual === 'Payer One, Bank');
       assert.equal(control.evidence_gate.complete, true);
       const body = await f.ask(q('Payer One, Bank'));
-      uncertain(body);
-      assert.equal(body.ledger.payer_selector_ambiguous, true);
-      assert.equal(body.ledger.payer_selector_candidates.length, 2);
-      assert.match(body.answer, /can't confirm which payer/i);
-      assert.ok(body.ledger.payer_selector_candidates.every(label => label.startsWith('[redacted] ****')));
+      assert.equal(body.ledger.found, actual === 'Payer One, Bank');
+      assert.equal(body.evidence_gate.complete, true);
+      assert.equal(body.ledger.payer_selector_ambiguous, undefined);
     }
   }
 });
@@ -62,7 +60,9 @@ test('amount-bearing selectors preserve numeric and generic whole names', async 
   for (const actual of ['1234', '1234, Bank']) {
     f.raw('UPDATE fin_transactions SET payee=?', actual);
     assert.equal((await f.ask(payment('Whole Supplier'))).ledger.found, actual === '1234, Bank');
-    uncertain(await f.ask(payment('1234, Bank')));
+    const body = await f.ask(payment('1234, Bank'));
+    assert.equal(body.ledger.found, actual === '1234, Bank');
+    assert.equal(body.evidence_gate.complete, true);
   }
 });
 
@@ -99,9 +99,10 @@ test('whole names, aliases of one slug, empty snapshots and disjoint selector cl
   f.raw('UPDATE fin_transactions SET posted_on=?', '2025-01-01');
   for (const form of [payment, income]) {
     const body = await f.ask(form('Payer One, Bank'));
-    uncertain(body);
-    assert.equal(body.ledger.inflow_total_minor, 0, 'an empty window cannot settle selector ambiguity');
-    assert.equal(body.ledger.payer_selector_candidates.length, 2);
+    assert.equal(body.ledger.found, false);
+    assert.equal(body.evidence_gate.complete, true);
+    assert.equal(body.ledger.inflow_total_minor, 0, 'the unique complete name is absent from the covered empty window');
+    if (body.ledger.kind === 'merchant') assert.equal(body.ledger.total_minor, 0);
   }
 });
 
@@ -130,46 +131,18 @@ test('a selector outside the protected alphabet cannot fall back to comma trunca
   assert.equal(body.ledger, undefined);
 });
 
-test('a wholly unknown selector retains covered absence; a known fragment cannot erase extra words', async t => {
+test('unknown and partly covered selectors refuse; a confirmed registered payer remains useful', async t => {
   const f = setup(t);
   f.identity('short', 'Payer One');
   assert.equal((await f.ask(payment('Payer One'))).ledger.found, true);
   for (const form of [payment, income]) {
     const absent = await f.ask(form('Unregistered Supplier'));
-    assert.equal(absent.ledger.found, false);
-    assert.equal(absent.evidence_gate.complete, true);
-    if (absent.ledger.kind === 'merchant') assert.equal(absent.ledger.total_minor, 0);
+    uncertain(absent);
+    assert.equal(absent.ledger.payer_selector_ambiguous, true);
     uncertain(await f.ask(form('Payer One Reference')));
     uncertain(await f.ask(form('Payer One,' + ' Bank'.repeat(20))));
   }
 });
-
-// Independent question templates and row-generator vocabulary. The generator
-// varies the requested text, never the transaction parser's result.
-export const selectorTemplates = [
-  ...['did', 'has', 'have'].flatMap(aux => ['arrive', 'arrived', 'receive', 'received', 'come', 'came', 'land', 'landed', 'hit', 'reach', 'reached', 'clear', 'cleared', 'post', 'posted'].flatMap(verb => [
-    name => `${aux} the payment from ${name} ${verb} in October 2026?`,
-    name => `${aux} the payment via ${name} ${verb} in October 2026?`,
-    name => `${aux} the ${name} payment ${verb} in October 2026?`,
-  ])),
-  payment,
-  name => `Has my payment arrived from ${name} in October 2026?`,
-  name => `Did a deposit of USD 25.00 from ${name} post in October 2026?`,
-  name => `Was the payment of 25 dollars from ${name} received in October 2026?`,
-  name => `Is the payment from ${name} received in October 2026?`,
-  name => `Did the payment from ${name} reach account 1234 in October 2026, and when?`,
-  name => `Did the payment from ${name} arrive into my checking account ending 1234 in October 2026?`,
-  ...['how much income', 'how much income came', 'how much did i receive', 'how much did we receive', 'show income', 'show me income', 'what is my income', 'what is the income'].map(prefix => name => `${prefix} from ${name} in October 2026?`),
-];
-
-export function* requestedSelectorCases() {
-  for (const word of new Set(['Bank', 'Payment', 'from', 'by', 'for', 'in', 'of', ...originatorWords])) {
-    for (const whole of [`Payer One ${word}`, `Payer One, ${word}`, `${word} Payer One`]) {
-      for (const template of selectorTemplates) for (const registration of ['shorter', 'both', 'longer'])
-        yield { whole, question: template(whole), registration };
-    }
-  }
-}
 
 test('generator retains complete requested names before interpreting grammar words', () => {
   let cases = 0;
@@ -181,7 +154,7 @@ test('generator retains complete requested names before interpreting grammar wor
       ...(arm.registration === 'longer' ? [] : [{ entity_slug: 'short', legal_name: 'Payer One' }]),
       ...(arm.registration === 'shorter' ? [] : [{ entity_slug: 'whole', legal_name: arm.whole }]),
     ];
-    const resolved = resolveRequestedPayer(intent.payerReadings, payerRegistry(entries));
+    const resolved = resolveRequestedPayer(intent, payerRegistry(entries));
     if (resolved.state === 'unique') assert.equal(resolved.slug, 'whole', JSON.stringify(arm));
     if (arm.registration === 'longer') assert.equal(resolved.state, 'unique', JSON.stringify(arm));
     assert.notEqual(resolved.state, 'missing', JSON.stringify(arm));
@@ -203,7 +176,7 @@ test('generated requested selectors resolve by distinct slugs, with both real re
       ...(arm.registration === 'shorter' ? [] : [{ entity_slug: 'whole', legal_name: arm.whole }]),
     ];
     const intent = classifyLedgerQuestion(arm.question, { now: NOW });
-    const resolved = resolveRequestedPayer(intent.payerReadings, payerRegistry(entries));
+    const resolved = resolveRequestedPayer(intent, payerRegistry(entries));
     counts[resolved.state]++; counts.cases++;
     if (resolved.state === 'unique') assert.equal(resolved.slug, 'whole', JSON.stringify(arm));
     if (arm.registration === 'longer') assert.equal(resolved.state, 'unique', JSON.stringify(arm));
@@ -222,7 +195,8 @@ test('generated requested selectors resolve by distinct slugs, with both real re
       counts.answers++;
     }
   }
-  assert.ok(counts.unique > 0 && counts.ambiguous > 0 && counts.unresolved > 0);
+  assert.ok(counts.unique > 0 && counts.unresolved > 0);
+  assert.equal(counts.ambiguous, 0, 'contained shorter spellings yield to the complete registered name');
   assert.equal(counts.missing, 0, 'known fragments cannot certify absence for an unregistered longer selector');
   t.diagnostic(JSON.stringify(counts));
 });

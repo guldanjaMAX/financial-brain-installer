@@ -17,6 +17,13 @@ test('control: exact payer, absent payer, partial word and outflow exercise real
   assert.equal(body.citations.length, 1);
   assert.ok(f.calls.some(sql => /JOIN fin_transactions/.test(sql)));
   const start = f.calls.length;
+  // Unknown question labels refuse; only a registered identity can prove absence.
+  const unregistered = await f.ask('Did the Absent Payer payment arrive?');
+  assert.equal(unregistered.ledger.found, null);
+  assert.equal(unregistered.evidence_gate.complete, false);
+  assert.doesNotMatch(unregistered.answer, /No matching|\$0\.00/);
+  f.raw(`INSERT INTO fin_entities(entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at)
+    VALUES ('known-absent','Absent Payer','business','counterparty','owner_stated','confirmed',?)`, NOW);
   const absent = await f.ask('Did the Absent Payer payment arrive?');
   assert.equal(absent.ledger?.found, false);
   assert.ok(f.calls.slice(start).some(sql => /JOIN fin_transactions/.test(sql)));

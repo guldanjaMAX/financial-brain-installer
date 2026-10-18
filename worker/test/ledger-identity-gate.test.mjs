@@ -189,8 +189,9 @@ for (const format of ['bare', 'labelled', 'payee']) test(`generated shorthand pr
       if (body.evidence_gate.complete) stats.answered++; else stats.unknown++;
       if (body.assumptions?.length) stats.answered_with_assumption++;
       const assumed = format === 'bare' && registration === 'shorter' && label === shorter;
-      const uncertain = format === 'bare' ? registration === 'both' || (registration === 'shorter' && label !== shorter)
-        : registration === 'shorter';
+      const queryRegistered = label === shorter ? registration !== 'longer' : label === longer ? registration !== 'shorter' : true;
+      const uncertain = !queryRegistered || (format === 'bare' ? registration === 'both' || (registration === 'shorter' && label !== shorter)
+        : registration === 'shorter');
       if (uncertain) unknown(f, body);
       else {
         const present = assumed || (registration !== 'shorter' && label === longer);
@@ -252,7 +253,7 @@ test('proposed, superseded, cross-tenant and ambiguous identities never establis
 });
 
 test('seeded mixed windows certify absence only after every payer resolves', async t => {
-  const f = ledgerFixture(t); identity(f, 'Payer Two', 'payer-two');
+  const f = ledgerFixture(t); identity(f, 'Payer One'); identity(f, 'Payer Two', 'payer-two');
   const next = random(420);
   for (let round = 0; round < 32; round++) {
     f.raw('DELETE FROM fin_transactions');
@@ -301,7 +302,7 @@ test('identity read failure and overflow refuse after the real snapshot decision
 });
 
 test('every inflow in the selected window gates named absence, including other exact amounts', async t => {
-  const f = ledgerFixture(t); identity(f, 'Payer Two', 'payer-two');
+  const f = ledgerFixture(t); identity(f, 'Payer One'); identity(f, 'Payer Two', 'payer-two');
   f.add('receipt', 'Receipt', 'Payer Two');
   const question = 'Did the payment of $26.00 from Payer One arrive in October 2026?';
   const green = await f.ask(question); reached(f, green);
@@ -608,7 +609,11 @@ for (const [formatIndex, format] of originatorFormats.entries()) {
           for (const queryName of [shorter, longer, 'Unrelated Supplier']) {
             for (const question of [payment, income]) {
               stats.generated++;
-              const canAnswer = known && (!(formatIndex >= 1 && formatIndex <= 3) || queryName === field);
+              // Row authority is unchanged. A question alias must independently
+              // exist before a confirmed row can prove its presence or absence.
+              const queryRegistered = queryName === shorter ? registration !== 'longer'
+                : queryName === longer ? registration !== 'shorter' : true;
+              const canAnswer = queryRegistered && known && (!(formatIndex >= 1 && formatIndex <= 3) || queryName === field);
               if (canAnswer) stats.expected_answered++;
               if (ambiguous) stats.ambiguous_shorthand++;
               const before = f.calls.length;

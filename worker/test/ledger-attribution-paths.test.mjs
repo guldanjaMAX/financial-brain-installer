@@ -54,16 +54,17 @@ async function ask(f, q, kind) {
   assert.equal(f.first('SELECT total_changes() n').n, changes, 'attribution writes no facts');
   return body;
 }
-function validate(body, { named, kind, state, same, exact, stats }) {
+function validate(body, { named, kind, state, same, exact, stats, requestedKnown = true }) {
   const ledger = body.ledger;
-  const positive = state === 'confirmed' ? same : state === 'assumed' && same && !exact;
-  const uncertain = state === 'unknown' || (state === 'assumed' && !positive);
+  const positive = requestedKnown && (state === 'confirmed' ? same : state === 'assumed' && same && !exact);
+  const uncertain = !requestedKnown || state === 'unknown' || (state === 'assumed' && !positive);
   assert.equal(ledger.inflow_total_minor, amount, 'the scoped inflow survives every attribution decision and flip');
   if (named) {
     assert.equal(ledger.found, positive ? true : uncertain ? null : false);
     assert.equal(body.evidence_gate.complete, !uncertain);
     if (kind === 'merchant') assert.equal(ledger.total_minor, uncertain ? null : positive ? amount : 0);
-    if (!positive && state !== 'confirmed') assert.doesNotMatch(body.answer, /no matching|\$0\.00/i);
+    if (!positive && uncertain) assert.doesNotMatch(body.answer, /no matching|\$0\.00/i);
+    if (!requestedKnown) assert.equal(ledger.payer_selector_ambiguous, true);
   } else {
     if (['merchant', 'category'].includes(kind)) assert.equal(ledger.total_minor, amount);
     if (['deposits', 'largest'].includes(kind)) assert.equal(ledger.rows.reduce((sum, r) => sum + r.amount_minor, 0), amount);
@@ -129,7 +130,11 @@ for (const [path, kind, question, named = false] of paths) test(`every-path gene
     for (const selector of selectors) for (const exact of [false, true]) {
       const q = question.replace('QUERY', selector).replace('?', exact ? ', exact names only?' : '?');
       const body = await ask(f, q, kind);
-      validate(body, { named, kind, state, same: selector === alias, exact, stats });
+      // Registry availability for the query is independent of the row parser.
+      // The new question contract refuses an absent alias even for a confirmed row.
+      const requestedKnown = !named || f.first(`SELECT COUNT(*) n FROM fin_entities
+        WHERE lower(legal_name)=lower(?) OR lower(display_label)=lower(?)`, selector, selector).n > 0;
+      validate(body, { named, kind, state, same: selector === alias, exact, stats, requestedKnown });
     }
     stats.cases++;
   }
