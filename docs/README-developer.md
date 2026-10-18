@@ -2208,6 +2208,10 @@ A colliding full statement or extracted field never falls back to a shorter
 payer. Standard wire-transfer/ACH-payment sender clauses and explicit
 `ORIG CO NAME`, `ORIGINATOR`, `SENDER`, `FROM:` and `BY` fields use that same
 independent identity check. Conflicting fields remain unknown.
+Sender and metadata labels are segmented with their delimiters before identity
+normalization. Words such as `By` or `Reference` inside a name do not split it.
+The entire sender field must match; a longer unregistered name cannot authorize
+a shorter registered payer. Uncertain shorthand segmentation remains unknown.
 Free-text candidate fields use one conservative masker: every alphanumeric run
 of at least five characters, including letters and punctuation/space-separated
 runs, exposes only its last four. Ordinary long words are masked too. This

@@ -1,7 +1,7 @@
 import { scopeIsUnrestricted } from "./grants.js";
 import { classifyLedgerQuestion, ledgerDay, shiftLedgerDay } from "./ledger-question.js";
 import { accountLinkPairsInWindow, accountLinkRequiredInWindow, effectivePeriodCovered, readEffectiveAccounts, readEffectiveBalances, readEffectiveTransactions } from "./ledger-reader.js";
-import { categoryFor, detectRecurring, isDirectedOwnedTransfer, isLoanAdvance, matchesCategory, matchesMerchant, merchantFor, normalizeMerchantText, pairOwnTransfers, senderFor, sumMinor } from "./ledger-analysis.js";
+import { categoryFor, detectRecurring, isDirectedOwnedTransfer, isLoanAdvance, matchesCategory, matchesMerchant, merchantFor, normalizeMerchantText, pairOwnTransfers, sumMinor } from "./ledger-analysis.js";
 
 const accountMask = account => /^\d{1,4}$/.test(account.mask || "") ? account.mask : null;
 const masked = account => accountMask(account) ? `account ****${accountMask(account)}` : "account (mask unavailable)";
@@ -47,30 +47,48 @@ function lookupPayer(label, identities) {
   return slug === null ? { state: 'ambiguous' } : { state: 'unique', slug };
 }
 
+// Parse the bank's field syntax before identity normalization can erase it.
+// A bare word inside a name is data. A second labelled sender anywhere in the
+// statement is uncertainty, including one appearing after reference metadata.
+const senderLabel = String.raw`(?:from|by|orig\s+co\s+name|originator(?:\s+name)?|sender(?:\s+name)?)`;
+const senderChannel = String.raw`(?:(?:ach|eft|wire|zelle|bank)(?:\s+(?:credit|transfer|payment|deposit))?|payment|deposit|receipt|transfer)`;
+const senderOpening = new RegExp(String.raw`^(?:${senderChannel}\s+)?(?:(${senderLabel}\s*:)\s*|(?:from|by)\s+)([\s\S]+)$`, 'i');
+const statementField = new RegExp(String.raw`(?:^|[\s;|,])(${senderLabel}|orig\s+id|co\s+id|company\s+id|desc\s+date|co\s+entry\s+descr|entry\s+descr|sec|trace|beneficiary|invoice|memo|reference|ref)\s*(?:#\s*:?|:)\s*`, 'gi');
+const isSenderLabel = new RegExp(`^${senderLabel}$`, 'i');
+const repeatedSender = new RegExp(String.raw`[;|\n]\s*(?:${senderChannel}\s+)?(?:from|by)\s+`, 'i');
+
 function identifiedPayer(row, identities) {
   if (row.payee) return lookupPayer(row.payee, identities);
-  const description = normalizeMerchantText(row.description);
+  const description = String(row.description || '').trim();
+  const directed = description.match(senderOpening);
+  if (directed) {
+    const value = directed[2];
+    const fields = [...value.matchAll(statementField)];
+    if (fields.some(field => isSenderLabel.test(field[1])) || repeatedSender.test(value)) return { state: 'ambiguous' };
+    const full = lookupPayer(description, identities);
+    if (full.state === 'ambiguous') return full;
+    // A whole bare name may itself start with From or By. Explicit labels
+    // and metadata boundaries instead require the parsed field's identity.
+    if (!directed[1] && !fields.length && full.state === 'unique') return full;
+    // Colliding complete labels stay terminal; metadata must never pick a
+    // shorter identity out of an already ambiguous complete statement/field.
+    if (lookupPayer(value, identities).state === 'ambiguous') return { state: 'ambiguous' };
+    const boundary = fields[0]?.index ?? value.length;
+    const candidate = value.slice(0, boundary).replace(/[\s;|,]+$/, '');
+    const exact = lookupPayer(candidate, identities);
+    if (exact.state !== 'missing' || directed[1] || fields.length) return exact;
+    // These two legacy prose forms have a complete trailing value/phrase,
+    // not a split on any reference/for word. Never strip transaction suffixes
+    // from an explicitly delimited sender, even if the shorter label is known.
+    const prose = candidate.match(/^(.+?)\s+(?:(?:reference|ref|for\s+invoice)\s+\d[\d ./-]*|for\s+.+\s+invoice)$/i);
+    return prose ? lookupPayer(prose[1], identities) : { state: 'missing' };
+  }
   const full = lookupPayer(description, identities);
   if (full.state !== 'missing') return full;
-  // Only an explicitly supported sender grammar may remove a channel wrapper.
-  // Fields identify a candidate, never authority. A complete colliding field
-  // is terminal; stripping "payment" must not choose a different entity.
-  const directed = description.match(/^(?:(?:ach|eft|wire|zelle|bank)(?: (?:credit|transfer|payment|deposit))? |(?:payment|deposit|receipt|transfer) )?(?:from|by|orig co name|originator(?: name)?|sender(?: name)?) (.+)$/);
-  if (directed) {
-    const complete = lookupPayer(directed[1], identities);
-    if (complete.state !== 'missing') return complete;
-    // Multiple sender clauses are conflicting evidence even if the first is
-    // familiar. Do not let a reference/memo terminator hide the second clause.
-    if (/\b(?:from|by|orig co name|originator|sender)\b/.test(directed[1])) return { state: 'ambiguous' };
-    const candidate = directed[1].split(/\b(?:orig id|co id|company id|desc date|co entry descr|entry descr|sec|trace|beneficiary|for|invoice|memo|reference|ref)\b/)[0].trim();
-    const exact = lookupPayer(candidate, identities);
-    if (exact.state !== 'missing') return exact;
-    return lookupPayer(senderFor({ description: candidate }), identities);
-  }
-  const opening = description.match(/^(.+?) (?:ach|eft|wire|zelle) (?:deposit|payment|receipt)$/);
-  if (opening) return lookupPayer(opening[1], identities);
-  if (/\b(?:from|by|orig co name|originator|sender)\b/.test(description)) return { state: 'missing' };
-  return lookupPayer(senderFor(row), identities);
+  // Whole-description and opening-name statement formats have no labelled
+  // fields. Only a terminal transaction wrapper may be removed, once.
+  const opening = description.match(/^(.+?)\s+(?:(?:ach|eft|wire|zelle)\s+)?(?:deposit|payment|receipt|payroll|settlement)$/i);
+  return opening ? lookupPayer(opening[1], identities) : { state: 'missing' };
 }
 
 function gapFor(reason, accounts = [], intent = {}) {

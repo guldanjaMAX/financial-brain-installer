@@ -406,3 +406,140 @@ test('render inventory: fixed refusals and fallback gap paths do not echo free-t
   }
   t.diagnostic(JSON.stringify({ refusal_paths: arms.length, link_refusal_in_separate_test: true }));
 });
+
+// Enumerate grammar words as identity data, independently of production parsing.
+// Each format crosses both field lengths, all three registration states, and
+// both questions about each identity plus a confirmed unrelated payer.
+const originatorWords = [
+  'from', 'by', 'sender', 'originator', 'orig', 'co', 'name', 'id', 'ref',
+  'reference', 'trace', 'memo', 'ach', 'wire', 'credit', 'deposit', 'payment',
+  'eft', 'zelle', 'bank', 'transfer', 'receipt', 'payroll', 'settlement',
+  'company', 'desc', 'date', 'entry', 'descr', 'sec', 'beneficiary', 'for', 'invoice',
+  'orig co name', 'originator name', 'sender name', 'orig id', 'co id',
+  'company id', 'desc date', 'co entry descr', 'entry descr', 'wire from',
+];
+const originatorFormats = [...explicitStatements,
+  'WIRE FROM: Payer One; REF: 48261703',
+  'ACH CREDIT ORIG CO NAME: Payer One ORIG ID: 4826170392',
+  'SENDER: Payer One', 'SENDER NAME: Payer One',
+  'BY: Payer One', 'WIRE FROM: Payer One | MEMO: 48261703',
+];
+for (const [formatIndex, format] of originatorFormats.entries()) {
+  test(`generated originator structure format ${formatIndex + 1}`, async t => {
+    const f = ledgerFixture(t);
+    let external = 0;
+    t.mock.method(globalThis, 'fetch', async () => { external++; throw new Error('network forbidden'); });
+    t.after(() => assert.equal(external, 0));
+    identity(f, 'Unrelated Supplier', 'unrelated');
+    f.add('receipt', 'Receipt', null);
+    const stats = { format: formatIndex + 1, generated: 0, answered: 0, unknown: 0,
+      ambiguous_shorthand: 0, expected_answered: 0, violations: 0 };
+    const failures = [];
+    const shorter = 'Synthetic Supplier';
+    const identifier = ['AB48', 'CD26', 'EF17', 'GH03'].join('');
+    const longerLabels = originatorWords.flatMap(word => [
+      `${shorter} ${word} Services LLC`, `${word} ${shorter} LLC`, `${shorter} Services ${word} ${identifier} LLC`,
+    ]);
+    for (const [labelIndex, longer] of longerLabels.entries()) {
+      for (const registration of ['shorter', 'both', 'longer']) {
+        f.raw("DELETE FROM fin_entities WHERE entity_slug IN ('shorter','longer')");
+        if (registration !== 'longer') identity(f, shorter, 'shorter');
+        if (registration !== 'shorter') identity(f, longer, 'longer');
+        // Query stable independent aliases so this suite measures the statement
+        // parser, without invoking unrelated natural-language name ambiguities.
+        f.raw("UPDATE fin_entities SET display_label=CASE entity_slug WHEN 'shorter' THEN 'Short Supplier' ELSE 'Long Supplier' END WHERE entity_slug IN ('shorter','longer')");
+        for (const field of [shorter, longer]) {
+          const description = format.replace(/Payer One|Supplier Alias/, field);
+          f.raw('UPDATE fin_transactions SET description=?', description);
+          const registered = field === shorter ? registration !== 'longer' : registration !== 'shorter';
+          // With no field delimiters, a leading From/By clause plus a trailing
+          // transaction word has two segmentations. Refuse even a registered
+          // opening name; the same name must answer in the explicit formats.
+          const ambiguous = formatIndex >= 1 && formatIndex <= 3 && /^(?:from|by|wire from)\s/i.test(field);
+          const known = registered && !ambiguous;
+          for (const queryName of [shorter, longer, 'Unrelated Supplier']) {
+            for (const question of [payment, income]) {
+              stats.generated++;
+              if (known) stats.expected_answered++;
+              if (ambiguous) stats.ambiguous_shorthand++;
+              const before = f.calls.length;
+              const body = await f.ask(question.replace('Payer One', queryName === shorter ? 'Short Supplier' : queryName === longer ? 'Long Supplier' : queryName));
+              // A refusal must inspect this nonempty snapshot, not a prior arm.
+              assert.ok(f.calls.slice(before).some(sql => /JOIN fin_transactions/.test(sql)));
+              reached(f, body);
+              if (body.evidence_gate.complete) stats.answered++; else stats.unknown++;
+              try {
+                const serialized = JSON.stringify(body);
+                assert.ok(!serialized.includes(identifier), 'identifier inside the identity must not render');
+                for (const identifier of description.match(/\d{5,}/g) || [])
+                  assert.ok(!serialized.includes(identifier), 'full free-text identifier must not render');
+                assert.equal(body.evidence_gate.complete, known, 'authority requires the entire field');
+                if (!known) unknown(f, body);
+                else {
+                  const match = queryName === field;
+                  if (question === payment) assert.equal(body.ledger.found, match);
+                  else assert.equal(body.ledger.total_minor, match ? 2500 : 0);
+                  if (match) {
+                    assert.equal(body.citations.length, 1);
+                    assert.equal(body.citations[0].amount_minor, 2500);
+                  }
+                }
+              } catch (error) {
+                stats.violations++;
+                if (failures.length < 5) failures.push({ labelIndex, registration,
+                  field: field === shorter ? 'shorter' : 'longer',
+                  query: queryName === shorter ? 'shorter' : queryName === longer ? 'longer' : 'unrelated',
+                  kind: question === payment ? 'payment' : 'income', message: error.message });
+              }
+            }
+          }
+          const control = await f.ask(amountOnly); reached(f, control);
+          assert.equal(control.ledger.found, true, 'same row is a green amount control');
+        }
+      }
+    }
+    t.diagnostic(JSON.stringify({ originator_property: stats }));
+    assert.ok(stats.answered > 0 && stats.unknown > 0, 'uniform arms invalidate the harness');
+    assert.equal(stats.violations, 0, JSON.stringify(failures));
+    assert.equal(stats.answered, stats.expected_answered);
+    assert.equal(stats.unknown, stats.generated - stats.expected_answered);
+  });
+}
+
+test('sender structure: real repeated fields and uncertain segments stay unknown', async t => {
+  const f = ledgerFixture(t); identity(f, 'Payer One'); identity(f, 'Payer Two', 'payer-two');
+  f.add('receipt', 'WIRE FROM: Payer One; REF: 48261703', null);
+  for (const q of [payment, income]) {
+    const green = await f.ask(q); reached(f, green);
+    assert.equal(green.evidence_gate.complete, true);
+    assert.equal(q === payment ? green.ledger.found : green.ledger.total_minor, q === payment ? true : 2500);
+  }
+  for (const description of [
+    'WIRE FROM: Payer One; REF: 48261703; FROM: Payer Two',
+    'WIRE FROM: Payer One; REF: 48261703; FROM: Payer One',
+    'WIRE FROM: Payer One; REF: 48261703; BY: Payer Two',
+    'WIRE FROM: Payer One; MEMO: text; ORIG CO NAME: Payer Two',
+    'WIRE FROM: Payer One; TRACE#: 48261703; SENDER NAME: Payer Two',
+    'WIRE FROM: Payer One; REF: 48261703; WIRE FROM Payer Two',
+    'WIRE FROM: Payer One; REF: 48261703; BY Payer Two',
+    'WIRE FROM: Payer One; UNKNOWN: Payer Two',
+    'WIRE FROM: Payer One; Services LLC',
+    'WIRE FROM: Payer One Reference Services LLC',
+    'WIRE FROM: Payer One for invoice Services LLC',
+    'WIRE FROM: Payer One ORIG ID 48261703',
+    'WIRE FROM: Payer One payment',
+    'WIRE FROM: Payer One reference 48261703; REF: 48261703',
+    'WIRE FROM: Payer One for invoice 48261703; REF: 48261703',
+    'WIRE FROM: Payer One reference 48261703',
+    'WIRE FROM: Payer One for invoice 48261703',
+  ]) {
+    f.raw('UPDATE fin_transactions SET description=?', description);
+    for (const q of [payment, income]) {
+      const before = f.calls.length;
+      const body = await f.ask(q);
+      assert.ok(f.calls.slice(before).some(sql => /JOIN fin_transactions/.test(sql)));
+      unknown(f, body);
+    }
+    const amount = await f.ask(amountOnly); reached(f, amount); assert.equal(amount.ledger.found, true);
+  }
+});
