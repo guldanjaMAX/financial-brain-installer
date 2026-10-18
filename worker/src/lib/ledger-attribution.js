@@ -9,6 +9,8 @@ export const normalizeMerchantText = value => (String(value || "").normalize("NF
 // production; the private index has exactly the registry's request lifetime.
 const companyCommaSpellings = Symbol('company comma spellings');
 const questionSpellings = Symbol('question spellings');
+const questionPhrases = Symbol('question phrases');
+const damagedRegistry = Symbol('damaged registry');
 const companyCommaKey = value => String(value || '').normalize('NFKC').split(',').map(normalizeMerchantText).join(',');
 
 export function payerRegistry(identities) {
@@ -19,7 +21,10 @@ export function payerRegistry(identities) {
     const label = identity[column];
     // Reject only the damaged spelling, keeping the entity's valid aliases.
     // SQL flags preserve this decision even when a driver truncates at NUL.
-    if (identity[`${column}_has_nul`] || String(label || '').includes('\0')) continue;
+    if (identity[`${column}_has_nul`] || String(label || '').includes('\0')) {
+      index[damagedRegistry] = true;
+      continue;
+    }
     const key = normalizeMerchantText(label);
     if (!key) continue;
     if (!index.has(key)) index.set(key, new Set());
@@ -34,7 +39,10 @@ export function payerRegistry(identities) {
 
 export function lookupPayer(label, registry) {
   const slugs = registry.get(normalizeMerchantText(label));
-  if (!slugs) return { state: 'missing' };
+  if (!slugs) {
+    const phrase = registry[questionPhrases]?.get(normalizeMerchantText(label));
+    return phrase ? { state: 'unique', slug: phrase.slug, query_only: true } : { state: 'missing' };
+  }
   return slugs.size === 1 ? { state: 'unique', slug: slugs.values().next().value }
     : { state: 'ambiguous' };
 }
@@ -71,11 +79,47 @@ export function requestedPayerMentions(question, registry) {
   });
 }
 
-export function resolveRequestedPayer(intent, registry) {
+// The extra lookup is a hypothesis for this answer, never a registered entity.
+// It has no authority until a structured field or a complete sender parse
+// equals it. Keep it separate from the Map so ordinary row/group attribution
+// and registered-name conflicts retain their original authority boundary.
+export function payerQuestionRegistry(intent, registry) {
+  // A driver may hide the entire damaged spelling, so we cannot prove which
+  // phrase conflicts with it. Valid registered aliases still work normally.
+  if (registry[damagedRegistry]) return registry;
+  if (requestedPayerMentions(intent.payerQuestion?.text, registry).length) return registry;
+  const phrases = new Map();
+  for (const reading of intent.payerReadings || []) {
+    const key = normalizeMerchantText(reading.label);
+    if (key && !phrases.has(key)) phrases.set(key, { slug: Symbol(key), label: reading.label });
+  }
+  if (!phrases.size) return registry;
+  const scoped = new Map(registry);
+  scoped[questionPhrases] = phrases;
+  scoped[questionSpellings] = registry[questionSpellings];
+  scoped[companyCommaSpellings] = new Set(registry[companyCommaSpellings]);
+  for (const reading of intent.payerReadings) if (reading.label.includes(','))
+    scoped[companyCommaSpellings].add(companyCommaKey(reading.label));
+  return scoped;
+}
+
+export function resolveRequestedPayer(intent, registry, attributions = []) {
   const mentions = requestedPayerMentions(intent.payerQuestion?.text, registry);
   const slugs = new Set(mentions.flatMap(mention => [...mention.slugs]));
   const candidates = [...new Set(mentions.map(mention => mention.label))];
   if (slugs.size > 1) return { state: 'ambiguous', candidates };
+  if (!slugs.size) {
+    const supported = new Map();
+    for (const attribution of attributions) for (const phrase of attribution.evidence.query_phrases || [])
+      supported.set(normalizeMerchantText(phrase.identity), phrase);
+    if (supported.size > 1) return { state: 'ambiguous', candidates: [...supported.values()].map(p => p.identity) };
+    if (supported.size === 1) {
+      const [key, phrase] = supported.entries().next().value;
+      const spans = (intent.payerReadings || []).filter(r => Number.isInteger(r.start) && normalizeMerchantText(r.label) === key);
+      if (payerMentionsCoverQuestion(intent, spans)) return { state: 'unique', slug: phrase.slug,
+        registered: false, candidates: [phrase.identity] };
+    }
+  }
   // No known name, or an uncovered remainder, cannot prove presence, absence
   // or zero even when all stored receipts have independently confirmed payers.
   if (!slugs.size || !payerMentionsCoverQuestion(intent, mentions)) return { state: 'unresolved',
@@ -136,13 +180,15 @@ function decision(readings, source) {
   const slugs = new Set(resolved.map(r => r.payer.slug));
   const evidence = { source, ambiguous: slugs.size > 1 || readings.some(r => r.payer.state === 'ambiguous'),
     candidates: [...new Set(readings.map(r => r.identity))] };
+  const phrases = readings.filter(r => r.payer.query_only).map(r => ({ identity: r.identity, slug: r.payer.slug }));
+  if (phrases.length) evidence.query_phrases = phrases;
   if (resolved.length !== readings.length || slugs.size !== 1)
     return { state: 'unknown', entity_slug: null, reading: null, evidence };
   // Distinct aliases of a single entity do not create competing payers.
   const reading = readings.find(r => !r.suffix && !r.prefix) || readings[0];
-  return { state: reading.suffix || reading.prefix ? 'assumed' : 'confirmed', entity_slug: reading.payer.slug,
+  return { state: reading.suffix || reading.prefix ? 'assumed' : reading.payer.query_only ? 'observed' : 'confirmed', entity_slug: reading.payer.slug,
     reading: { identity: reading.identity, ...(reading.suffix ? { suffix: reading.suffix } : {}),
-      ...(reading.prefix ? { prefix: reading.prefix } : {}) }, evidence };
+      ...(reading.prefix ? { prefix: reading.prefix } : {}), ...(reading.payer.query_only ? { query_only: true } : {}) }, evidence };
 }
 
 function parseStatement(description, registry, statementCache) {
@@ -196,7 +242,7 @@ function parseStatement(description, registry, statementCache) {
       }
       return out;
     }
-    function name(start, allowSuffix, allowProse, prefix = null) {
+    function name(start, allowSuffix, allowProse, prefix = null, labelled = false) {
       const results = [];
       for (const end of ends(start, true)) {
         const identity = text.slice(start, end);
@@ -206,10 +252,16 @@ function parseStatement(description, registry, statementCache) {
         // field-boundary readings. Never discard commas to salvage prose.
         if (identity.includes(',')) {
           step(identity.length);
-          if (!registry[companyCommaSpellings]?.has(companyCommaKey(identity))) continue;
+          const phraseMatch = registry[questionPhrases]?.has(normalizeMerchantText(identity)) &&
+            identity.split(',').every(part => normalizeMerchantText(part));
+          if (!registry[companyCommaSpellings]?.has(companyCommaKey(identity)) && !phraseMatch) continue;
         }
         for (const tail of rest(end, allowSuffix, allowProse)) {
-          add(results, { readings: [{ identity, payer: lookup(identity), ...(prefix ? { prefix } : {}),
+          let payer = lookup(identity);
+          // An unlabelled whole description is not a bank payer field. Only
+          // labelled senders or explicitly noted shorthand can use the phrase.
+          if (payer.query_only && !labelled && !prefix && !tail.suffix) payer = { state: 'missing' };
+          add(results, { readings: [{ identity, payer, ...(prefix ? { prefix } : {}),
             ...(tail.suffix ? { suffix: tail.suffix } : {}) }, ...tail.readings], fields: 1 + tail.fields });
         }
       }
@@ -223,7 +275,7 @@ function parseStatement(description, registry, statementCache) {
         if (optional) for (const parse of name(opening, opening === start, false,
           opening === start ? null : channel[0].trim().toLowerCase().replace(grammar.spaces, ' '))) add(results, parse);
         const label = match(grammar.sender, opening);
-        if (label && (allowBare || label[0].includes(':'))) for (const parse of name(opening + label[0].length, false, !label[0].includes(':'))) add(results, parse);
+        if (label && (allowBare || label[0].includes(':'))) for (const parse of name(opening + label[0].length, false, !label[0].includes(':'), null, true)) add(results, parse);
       }
       return results;
     }
@@ -314,6 +366,7 @@ export function selectAttributedInflows(rows, attributions, { wanted, amountMino
     const same = wanted.state === 'unique' && attribution.entity_slug === wanted.slug;
     const amountMatches = amountMinor === null || amountMinor === row.amount_minor;
     if (['ambiguous', 'unresolved'].includes(wanted.state) || attribution.state === 'unknown' ||
+        (attribution.state === 'observed' && (!same || row.amount_minor <= 0 || !amountMatches)) ||
         (attribution.state === 'assumed' && (!same || exactNamesOnly || row.amount_minor <= 0 || !amountMatches)))
       unattributed.push(row);
     else if (same && amountMatches) matched.push(row);

@@ -238,7 +238,7 @@ test('seeded arbitrary metadata cannot authorize absence or zero in either sende
   }
 });
 
-test('proposed, superseded, cross-tenant and ambiguous identities never establish a payer', async t => {
+test('unavailable identities permit only bank-field presence; ambiguous registered identities refuse', async t => {
   for (const arm of ['proposed', 'superseded', 'tenant', 'ambiguous']) {
     const f = ledgerFixture(t); identity(f, 'Payer One');
     f.add('receipt', 'Receipt', 'Payer One');
@@ -248,7 +248,21 @@ test('proposed, superseded, cross-tenant and ambiguous identities never establis
     if (arm === 'superseded') f.raw("UPDATE fin_entities SET superseded_by_id=999 WHERE entity_slug='payer-one'");
     if (arm === 'tenant') f.raw("UPDATE fin_entities SET tenant_id='other' WHERE entity_slug='payer-one'");
     if (arm === 'ambiguous') identity(f, 'PAYER ONE', 'duplicate-payer');
-    unknown(f, await f.ask(payment)); unknown(f, await f.ask(income));
+    if (arm === 'ambiguous') {
+      unknown(f, await f.ask(payment)); unknown(f, await f.ask(income));
+    } else {
+      // The entity supplies no authority. The exact structured bank field now
+      // supports presence for this question, but never a registered total.
+      const present = await f.ask(payment); reached(f, present);
+      assert.equal(present.ledger.found, true);
+      assert.equal(present.payer_evidence[0].type, 'bank_payee');
+      const total = await f.ask(income); reached(f, total);
+      assert.equal(total.ledger.total_minor, null);
+      assert.equal(total.ledger.attributed_subtotal_minor, 2500);
+      assert.equal(total.ledger.confirmed_subtotal_minor, null);
+      assert.equal(total.evidence_gate.complete, false);
+      unknown(f, await f.ask(payment.replace('Payer One', 'Missing Supplier')));
+    }
   }
 });
 

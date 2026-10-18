@@ -5,7 +5,7 @@ import { randomBytes } from 'node:crypto';
 import { withLedgerAnswer } from '../src/lib/ledger-answer.js';
 
 export const NOW = '2026-10-12T12:00:00.000Z';
-export function fixture(t) {
+export function fixture(t, { knownPayers = true, answer = withLedgerAnswer } = {}) {
   const db = new DatabaseSync(':memory:');
   t.after(() => db.close());
   const dir = new URL('../../migrations/d1/', import.meta.url);
@@ -32,14 +32,14 @@ export function fixture(t) {
     VECTORIZE: { async upsert() { return {}; }, async deleteByIds() { return {}; } },
     AI: { async run() { return { data: [[0.1, 0.2]] }; } } };
   const raw = (sql, ...params) => db.prepare(sql).run(...params);
-  seedKnownPayers({ raw }, ['Fixture Payer', 'Fixture Payerplus', 'Unrelated Payer', 'Synthetic payer', 'Fixture Bank', 'Fixture Sender', 'Fixture'], NOW);
+  if (knownPayers) seedKnownPayers({ raw }, ['Fixture Payer', 'Fixture Payerplus', 'Unrelated Payer', 'Synthetic payer', 'Fixture Bank', 'Fixture Sender', 'Fixture'], NOW);
   const first = (sql, ...params) => db.prepare(sql).get(...params);
   const rows = (sql, ...params) => db.prepare(sql).all(...params);
   const owner = (slug = 'owner') => raw(`INSERT INTO fin_entities (entity_slug,legal_name,display_label,kind,status,relationship,provenance,basis_state,recorded_at)
     VALUES (?,?,?,'business','active','owned','owner_stated','confirmed',?)`, slug, 'Synthetic owner', 'Synthetic owner', NOW);
   let documentCalls = 0;
   const ask = async question => {
-    const response = await withLedgerAnswer({ env, question, now: Date.parse(NOW), grantScope: { all: true }, scopePrincipalKind: 'owner' }, async gap => {
+    const response = await answer({ env, question, now: Date.parse(NOW), grantScope: { all: true }, scopePrincipalKind: 'owner' }, async gap => {
       documentCalls++;
       return Response.json({ route: 'documents', gaps: gap ? [gap] : [] });
     });
@@ -48,8 +48,8 @@ export function fixture(t) {
   return { env, calls, raw, first, rows, owner, ask, get documentCalls() { return documentCalls; } };
 }
 
-export function ledgerFixture(t, { legacy = false } = {}) {
-  const f = fixture(t); f.owner();
+export function ledgerFixture(t, { legacy = false, ...options } = {}) {
+  const f = fixture(t, options); f.owner();
   f.raw(`INSERT INTO bank_feed_items (item_ref,access_ciphertext,access_iv,environment,connected_at,last_synced_at)
     VALUES ('fixture-feed',?,?,'sandbox','2026-10-01T00:00:00.000Z',?)`, randomBytes(24).toString('base64'), randomBytes(12).toString('base64'), NOW);
   f.raw(`INSERT INTO bank_feed_backfill (item_ref,requested_days,state,queued_at,finished_at,provider_history_state)

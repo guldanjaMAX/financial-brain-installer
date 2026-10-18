@@ -843,7 +843,9 @@ integer amount tolerance; results are explicitly detected rather than confirmed.
 incomplete coverage and unreadable rows cannot establish a total or absence.
 Every answer path that displays or groups an inflow payer uses the shared
 attribution decision in `ledger-attribution.js`: confirmed,
-assumed or unknown, with the entity slug, reading and evidence. The decision is
+assumed or unknown for registered identity attribution, plus observed for
+question-local exact bank-field presence. Observed decisions carry a temporary
+symbol, never a stored entity slug. Each decision includes its reading and evidence and is
 computed once per row in the request snapshot. Complete description parses are
 memoized by normalized description within that answer's identity snapshot;
 `createInflowAttributor(registry)` owns that request-local cache; raw alphabet
@@ -876,17 +878,35 @@ when a complete protected payer clause fits a mention and replacing compatible
 clause mentions with opaque slots leaves every parsed payer clause covered, with the same period,
 account and qualifiers. This coverage check cannot discard an unregistered
 remainder such as ", Bank", or let Payment inside one name erase another payer.
-Zero registered mentions or any uncovered payer clause also refuses presence,
-absence and exact zero, even when all stored receipts are confirmed. A known
-registered payer can still be proved absent from a covered, fully attributed
-window. Amount-only questions retain their independent receipt contract.
+An uncovered payer clause still refuses. With no registered mentions, the
+question's complete payer phrase can support presence when it equals a
+structured bank payee or labelled sender in a complete statement parse after
+the same normalization. This phrase is a request-local hypothesis, separate
+from registered identities; it creates no entity and is never reused by another
+question or a generic payer listing. Two distinct matched phrases refuse, as do
+registered-name conflicts and a damaged identity inventory. Only readable
+inflows in the selected accounts and period can resolve the phrase.
+Such presence cites the bank payer field or statement sender explicitly. A
+named-income answer supplies a nonzero attributed subtotal, never a complete
+total, absence or zero for an unregistered phrase. Suffix shorthand and bare
+channel prefixes remain assumptions with the visible `exact names only` flip.
+An unlabelled whole description cannot establish an unregistered payer.
+A registered payer can still be proved absent from a covered, fully attributed
+window under the existing scope-wide rule. Amount-only questions retain their
+independent receipt contract.
+Attribution refusals state the exact-match and uncertain-deposit counts, then
+list at most ten uncertain inflows with date, amount, masked bank payer field
+or description, a fixed uncertainty reason and a citation. The response states
+how many candidates were omitted. Candidate amounts, including a literal zero
+bank row, are not payer totals. Every free-text field uses the existing masker.
 Question routing protects candidate spans before grammar cleanup, bounded to
 512 normalized characters and 12 selector starts. Longer names remain intact
 within that whole-question cap. Overflow or control/format characters refuse
 instead of pruning to a shorter name. No query or registry is cached across
 answers. If no complete selector spelling fits the protected alphabet, the named
 request stays unsupported and cannot reuse a shortened selector from cleanup.
-The complete normalized payee must resolve exactly to one known identity.
+Outside this question-local presence path, the complete normalized payee must
+resolve exactly to one known identity.
 Without a payee, one bounded grammar must consume the entire description before
 any sender reading can establish identity. Row sender candidates and stored identities share NFKC,
 case and punctuation normalization and preserve literal `and` versus `&`.
