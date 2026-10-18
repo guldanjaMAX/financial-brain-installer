@@ -211,7 +211,9 @@ export async function readEffectiveTransactions(env, accounts, { from, to, amoun
   const select = `SELECT t.id,t.account_slug AS source_account_slug,
       json_extract(m.value,'$.effective') AS effective_account_slug,
       json_extract(m.value,'$.last_synced_at') AS last_synced_at,
-      t.posted_on,t.amount_minor,t.direction,t.currency,t.description,t.payee,t.category,t.category_basis_state,t.basis_state,
+      t.posted_on,t.amount_minor,t.direction,t.currency,t.description,
+      instr(COALESCE(t.description,''),char(0))>0 AS description_has_nul,
+      t.payee,t.category,t.category_basis_state,t.basis_state,
       CASE WHEN t.provenance='extracted' THEN EXISTS (
         SELECT 1 FROM fin_transactions other WHERE other.tenant_id=t.tenant_id AND other.account_slug=t.account_slug
           AND other.provenance='extracted' AND other.superseded_by_id IS NULL AND other.removed_at IS NULL

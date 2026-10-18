@@ -140,8 +140,8 @@ for (const [path, kind, question, named = false] of paths) test(`every-path gene
       for (const field of [shorter, longer]) {
         const registered = field === shorter ? registration !== 'longer' : registration !== 'shorter';
         const shorthand = formatIndex >= 1 && formatIndex <= 3;
-        const ambiguous = shorthand && /^(?:from|by|wire from)\s/i.test(field);
-        const state = !registered || ambiguous ? 'unknown' : shorthand ? 'assumed' : 'confirmed';
+        const unsupported = format.includes('\n');
+        const state = !registered || unsupported ? 'unknown' : shorthand ? 'assumed' : 'confirmed';
         await exercise(format.replace(/Payer One|Supplier Alias/, field), state, field === shorter ? 'Short Supplier' : 'Long Supplier');
       }
     }
@@ -166,7 +166,7 @@ for (const [path, kind, question, named = false] of paths) test(`every-path gene
   f.raw("UPDATE fin_entities SET display_label='Payer One payment' WHERE entity_slug='shorter'");
   for (const delimiter of [',', ';', '|', '\n']) for (const clause of ['FROM', 'BY', 'FROM:', 'SENDER:']) {
     await exercise(`WIRE FROM: Payer One; REF: 48261703${delimiter} ${clause} Payer Two`, 'unknown', 'Payer One');
-    await exercise(`WIRE FROM: Payer One; REF: 48261703${delimiter} ${clause} Payer One payment`, 'confirmed', 'Payer One');
+    await exercise(`WIRE FROM: Payer One; REF: 48261703${delimiter} ${clause} Payer One payment`, delimiter === '\n' ? 'unknown' : 'confirmed', 'Payer One');
   }
   for (const token of ['A-123', 'AB/12', 'A.1.2.3']) await exercise(token, 'confirmed', 'Payer One', { payee: 'Payer One' });
   for (const arm of boundaryReadingCases()) {

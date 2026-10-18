@@ -20,31 +20,52 @@ export function lookupPayer(label, registry) {
     : { state: 'ambiguous' };
 }
 
-const senderLabel = String.raw`(?:from|by|orig\s+co\s+name|originator(?:\s+name)?|sender(?:\s+name)?)`;
-const senderChannel = String.raw`(?:(?:ach|eft|wire|zelle|bank)(?:\s+(?:credit|transfer|payment|deposit))?|payment|deposit|receipt|transfer)`;
-const delimiters = String.raw`;,|\n`;
-// This is a closed field vocabulary, not a general trailing-prose rule.
-// Longest labels precede their prefixes; # and : are field punctuation.
-const metadataLabels = [
-  'orig id', 'co id', 'company id', 'desc date', 'co entry descr', 'entry descr',
-  'trace number', 'trace no', 'trace', 'effective date', 'eff date', 'entry date',
-  'settlement date', 'individual id/name', 'individual id', 'individual name',
-  'sec', 'beneficiary', 'invoice', 'memo', 'reference', 'ref',
-].map(label => label.replaceAll(' ', String.raw`\s+`)).join('|');
-const senderOpening = new RegExp(String.raw`^(?:${senderChannel}\s+)?(?:(${senderLabel}\s*:)\s*|(?:from|by)\s+)([\s\S]+)$`, 'i');
-// Labelled metadata and bare FROM/BY clauses share the delimiter set. Parse
-// all fields, including those after REF, before accepting any sender.
-const statementField = new RegExp(String.raw`(?:^|[\s${delimiters}])(${senderLabel}|${metadataLabels})\s*(?:#\s*:?|:)\s*|[${delimiters}]\s*(?:${senderChannel}\s+)?(from|by)\s+`, 'gi');
-const isSenderLabel = new RegExp(`^${senderLabel}$`, 'i');
-const trailingDelimiter = new RegExp(String.raw`[\s${delimiters}]+$`);
-const shorthandSuffixes = ['deposit', 'payment', 'receipt', 'payroll', 'settlement']
-  .flatMap(type => ['', 'ach ', 'eft ', 'wire ', 'zelle '].map(channel => channel + type));
+// One closed grammar owns both the alphabet and every supported production.
+// Spaces are the only whitespace. Validate BEFORE NFKC or trimming so neither
+// controls nor format characters can disappear into an apparently valid name.
+const statementGrammar = Object.freeze({
+  limits: Object.freeze({ codepoints: 512, fields: 12, parses: 64, steps: 32768 }),
+  alphabet: /^[\p{L}\p{N}\p{M} &'()._/:#;,|\-]*$/u,
+  name: /^[\p{L}\p{N}][\p{L}\p{N}\p{M} &'()._/:#\-]*$/u,
+  separator: /^[ ]*(?:[;,|][ ]*)?/,
+  channel: /^(?:(?:ach|eft|wire|zelle|bank)(?: +(?:credit|transfer|payment|deposit))?|payment|deposit|receipt|transfer) +/i,
+  sender: /^(?:(?:from|by|orig +co +name|originator(?: +name)?|sender(?: +name)?) *: *|(?:from|by) +)/i,
+  suffix: /^(?:(?:ach|eft|wire|zelle) +)?(?:deposit|payment|receipt|payroll|settlement)$/i,
+  metadata: [
+    [/^(?:orig +id|co +id|company +id|individual +id) *(?:# *:?|:) */i, /^[\p{L}\p{N}]+(?:[./-][\p{L}\p{N}]+)*$/u],
+    [/^(?:trace +number|trace +no|trace) *(?:# *:?|:) */i, /^[0-9]{1,34}$/],
+    [/^(?:desc +date|effective +date|eff +date|entry +date|settlement +date) *: */i, validStatementDate],
+    [/^(?:co +entry +descr|entry +descr) *: */i, /^(?:payment|deposit|receipt|payroll|settlement|credit|transfer)$/i],
+    [/^sec *: */i, /^(?:ACK|ADV|ARC|ATX|BOC|CCD|CIE|COR|CTX|DNE|ENR|IAT|MTE|POP|POS|PPD|RCK|SHR|TEL|TRC|WEB|XCK)$/i],
+    [/^(?:beneficiary|individual +id\/name|individual +name) *: */i, /^[\p{L}\p{N}][\p{L}\p{N}\p{M} &'()._/-]*$/u],
+    [/^(?:reference|ref|invoice|memo) *(?:# *:?|:) */i, /^(?:invoice +)?[\p{L}\p{N}]+(?:[./-][\p{L}\p{N}]+)*$/iu],
+  ],
+  // Legacy unlabelled reference/invoice prose is a complete terminal field,
+  // available only after a bare sender label, never after a colon-labelled one.
+  prose: /^(?:(?:reference|ref|for +invoice) +[0-9]+(?:[./-][0-9]+)*|for +[\p{L}\p{N}]+(?: +[\p{L}\p{N}]+)* +invoice)$/iu,
+});
+
+function validStatementDate(value) {
+  let year, month, day;
+  if (/^[0-9]{6}$/.test(value)) {
+    year = 2000 + Number(value.slice(0, 2)); month = Number(value.slice(2, 4)); day = Number(value.slice(4));
+  } else if (/^[0-9]{8}$/.test(value)) {
+    year = Number(value.slice(0, 4)); month = Number(value.slice(4, 6)); day = Number(value.slice(6));
+  } else if (/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(value)) {
+    [year, month, day] = value.split('-').map(Number);
+  } else if (/^[0-9]{2}\/[0-9]{2}\/[0-9]{4}$/.test(value)) {
+    [month, day, year] = value.split('/').map(Number);
+  } else return false;
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  return year >= 1 && month >= 1 && month <= 12 && day >= 1 &&
+    day <= [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+}
 
 function decision(readings, source) {
   const resolved = readings.filter(r => r.payer.state === 'unique');
   const slugs = new Set(resolved.map(r => r.payer.slug));
   const evidence = { source, ambiguous: slugs.size > 1 || readings.some(r => r.payer.state === 'ambiguous'),
-    candidates: readings.map(r => r.identity) };
+    candidates: [...new Set(readings.map(r => r.identity))] };
   if (resolved.length !== readings.length || slugs.size !== 1)
     return { state: 'unknown', entity_slug: null, reading: null, evidence };
   // Distinct aliases of a single entity do not create competing payers.
@@ -53,57 +74,135 @@ function decision(readings, source) {
     reading: { identity: reading.identity, ...(reading.suffix ? { suffix: reading.suffix } : {}) }, evidence };
 }
 
+function parseStatement(description, registry) {
+  const grammar = statementGrammar, limit = grammar.limits;
+  const parser = { steps: 0, parses: 0, fields: 0, complete: false, refusal: null };
+  const stopped = Symbol('parser budget');
+  const refuse = reason => { parser.refusal = reason; throw stopped; };
+  function step(work = 1) {
+    if (work > limit.steps - parser.steps) { parser.steps = limit.steps; refuse('operation-limit'); }
+    parser.steps += work;
+  }
+  function bounded(text) {
+    step();
+    // The cheap UTF-16 bound also refuses huge strings before scanning them.
+    if (text.length > limit.codepoints * 2) refuse('length-limit');
+    let count = 0;
+    for (const char of text) { step(); if (++count > limit.codepoints) refuse('length-limit'); }
+    if (!grammar.alphabet.test(text)) refuse('alphabet');
+  }
+  try {
+    bounded(description);
+    const text = description.normalize('NFKC').replace(/^ +| +$/g, '');
+    bounded(text);
+    const cache = new Map(), lookups = new Map();
+    function lookup(identity) {
+      if (!lookups.has(identity)) { step(identity.length); lookups.set(identity, lookupPayer(identity, registry)); }
+      return lookups.get(identity);
+    }
+    function match(pattern, start) { step(); return pattern.exec(text.slice(start)); }
+    function add(results, parse) {
+      step();
+      if (parse.fields > limit.fields) refuse('field-limit');
+      if (results.length >= limit.parses) refuse('parse-limit');
+      results.push(parse);
+    }
+    // Endpoints are lexical boundaries in the positive grammar. A name may
+    // contain a field word or colon, so every complete segmentation survives.
+    function ends(start) {
+      const out = [];
+      for (let end = start; end <= text.length; end++) {
+        step();
+        if (end === text.length || /[;,|]/.test(text[end])) {
+          if (end > start && text[end - 1] !== ' ') out.push(end);
+          break;
+        }
+        if (text[end] === ' ' && end > start && text[end - 1] !== ' ') out.push(end);
+      }
+      return out;
+    }
+    function name(start, allowSuffix, allowProse) {
+      const results = [];
+      for (const end of ends(start)) {
+        const identity = text.slice(start, end);
+        step(identity.length);
+        if (!grammar.name.test(identity)) continue;
+        for (const tail of rest(end, allowSuffix, allowProse)) {
+          add(results, { readings: [{ identity, payer: lookup(identity), ...(tail.suffix ? { suffix: tail.suffix } : {}) }, ...tail.readings], fields: 1 + tail.fields });
+        }
+      }
+      return results;
+    }
+    function senders(start, optional, allowBare = true) {
+      const results = [], openings = [start];
+      const channel = match(grammar.channel, start);
+      if (channel) openings.push(start + channel[0].length);
+      for (const opening of openings) {
+        if (optional) for (const parse of name(opening, opening === start, false)) add(results, parse);
+        const label = match(grammar.sender, opening);
+        if (label && (allowBare || label[0].includes(':'))) for (const parse of name(opening + label[0].length, false, !label[0].includes(':'))) add(results, parse);
+      }
+      return results;
+    }
+    function rest(start, allowSuffix = false, allowProse = false) {
+      const key = `${start}:${allowSuffix}:${allowProse}`;
+      if (cache.has(key)) return cache.get(key);
+      step();
+      const results = [];
+      cache.set(key, results);
+      if (start === text.length) {
+        add(results, { readings: [], fields: 0 }); return results;
+      }
+      const separator = match(grammar.separator, start)[0];
+      if (!separator.length) return results;
+      const next = start + separator.length;
+      // No dangling delimiter, empty value or arbitrary trailing prose.
+      if (next === text.length) return results;
+      const remainder = text.slice(next);
+      if (separator.trim() === '') {
+        if (allowSuffix && grammar.suffix.test(remainder)) add(results, { readings: [], fields: 0, suffix: remainder.toLowerCase().replace(/ +/g, ' ') });
+        if (allowProse && grammar.prose.test(remainder)) add(results, { readings: [], fields: 1 });
+      }
+      for (const [label, shape] of grammar.metadata) {
+        const field = match(label, next);
+        if (!field) continue;
+        const valueStart = next + field[0].length;
+        for (const end of ends(valueStart)) {
+          const value = text.slice(valueStart, end);
+          step(value.length);
+          if (!(typeof shape === 'function' ? shape(value) : shape.test(value))) continue;
+          for (const tail of rest(end)) add(results, { readings: tail.readings, fields: 1 + tail.fields });
+        }
+      }
+      for (const parse of senders(next, false, separator.trim() !== '')) add(results, parse);
+      return results;
+    }
+    const parses = senders(0, true);
+    parser.parses = parses.length;
+    parser.fields = Math.max(0, ...parses.map(parse => parse.fields));
+    parser.complete = parses.length > 0;
+    if (!parser.complete) parser.refusal = 'incomplete';
+    // Missing *alternative* names do not erase a registered whole name. But
+    // at least one complete reading must resolve EVERY sender field. A known
+    // sender followed by an unknown sender therefore cannot certify absence.
+    const coherent = parses.some(parse => parse.readings.every(reading => reading.payer.state === 'unique'));
+    const readings = parses.flatMap(parse => parse.readings).filter(reading => reading.payer.state !== 'missing');
+    const result = decision(readings, 'description');
+    if (!coherent) { result.state = 'unknown'; result.entity_slug = null; result.reading = null; }
+    result.evidence.parser = parser;
+    return result;
+  } catch (error) {
+    if (error !== stopped) throw error;
+    return { state: 'unknown', entity_slug: null, reading: null,
+      evidence: { source: 'description', ambiguous: false, candidates: [], parser } };
+  }
+}
+
 export function attributeInflow(row, registry) {
-  const exact = (identity, source) => decision([{ identity, payer: lookupPayer(identity, registry) }], source);
-  if (row.payee) return exact(row.payee, 'payee');
-  // Normalize every supported line boundary before either opening or field
-  // tokenization. Otherwise metadata can swallow a second bare FROM/BY line.
-  const description = String(row.description || '').replace(/\r\n|[\r\u2028\u2029\u0085]/g, '\n').trim();
-  const directed = description.match(senderOpening);
-  if (directed) {
-    const value = directed[2], fields = [...value.matchAll(statementField)];
-    const full = lookupPayer(description, registry);
-    if (full.state === 'ambiguous') return exact(description, 'description');
-    // A bare From/By opening can also be a whole registered name. Consider
-    // both registered readings: aliases agree by slug, distinct entities do not.
-    if (!directed[1] && !fields.length && full.state === 'unique') {
-      const parsed = lookupPayer(value, registry);
-      return decision([{ identity: description, payer: full },
-        ...(parsed.state === 'missing' ? [] : [{ identity: value, payer: parsed }])], 'description');
-    }
-    const starts = [0, ...fields.filter(field => field[2] || isSenderLabel.test(field[1])).map(field => field.index + field[0].length)];
-    const ends = [...fields.map(field => field.index), value.length];
-    const readings = [];
-    for (const start of starts) {
-      // A metadata label can be part of a registered legal name. Look up
-      // every structural split AND the whole remainder independently. Never
-      // prefer the shortest (or longest) spelling over another entity slug.
-      const candidates = ends.filter(end => end >= start).map(end => {
-        const identity = value.slice(start, end).replace(trailingDelimiter, '');
-        return { identity, payer: lookupPayer(identity, registry) };
-      });
-      const registered = candidates.filter(candidate => candidate.payer.state !== 'missing');
-      // An entirely unresolved explicit sender still blocks confirmation;
-      // unregistered combinations with trailing metadata are not extra payers.
-      readings.push(...(registered.length ? registered : [candidates[0]]));
-    }
-    if (!directed[1] && full.state === 'unique') readings.push({ identity: description, payer: full });
-    if (fields.length || directed[1] || readings[0].payer.state !== 'missing') return decision(readings, 'sender');
-    // Supported legacy prose has a complete trailing value, never an arbitrary
-    // split on a word that could be part of the sender's name.
-    const prose = readings[0].identity.match(/^(.+?)\s+(?:(?:reference|ref|for\s+invoice)\s+\d[\d ./-]*|for\s+.+\s+invoice)$/i);
-    return exact(prose ? prose[1] : readings[0].identity, 'sender');
-  }
-  const text = description.normalize('NFKC').replace(/\s+/g, ' ');
-  const readings = [];
-  for (const suffix of shorthandSuffixes) {
-    if (!text.toLowerCase().endsWith(` ${suffix}`)) continue;
-    const identity = text.slice(0, -suffix.length - 1), payer = lookupPayer(identity, registry);
-    if (payer.state !== 'missing') readings.push({ identity, suffix, payer });
-  }
-  const full = lookupPayer(description, registry);
-  if (full.state !== 'missing' || !readings.length) readings.push({ identity: description, payer: full });
-  return decision(readings, 'description');
+  if (row.payee) return decision([{ identity: row.payee, payer: lookupPayer(row.payee, registry) }], 'payee');
+  // Some SQLite clients truncate TEXT at NUL. The SQL flag preserves the
+  // alphabet refusal even when the returned string has lost that character.
+  return parseStatement(String(row.description || '') + (row.description_has_nul ? '\0' : ''), registry);
 }
 
 // Only a confirmed row can eliminate a payer. An assumption supports a

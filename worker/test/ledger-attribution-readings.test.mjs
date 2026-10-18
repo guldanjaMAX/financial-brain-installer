@@ -13,7 +13,7 @@ for (const family of ['line-separator', 'expanded-label', 'registered-whole', 'u
       const green = attributeInflow({ payee: arm.identities[0].legal_name }, registry);
       assert.equal(green.state, 'confirmed', 'independent identity has a positive control');
       const result = attributeInflow({ description: arm.description }, registry);
-      assert.ok(result.evidence.candidates.length, 'the attribution decision evaluated sender readings');
+      assert.ok(result.evidence.parser.steps > 0, 'the complete-parser decision ran, including alphabet/value refusals');
       assert.equal(result.state, arm.state, JSON.stringify(arm));
       if (arm.state === 'confirmed') assert.equal(result.entity_slug, arm.slug || 'shorter');
       for (const candidate of arm.candidates || []) assert.ok(result.evidence.candidates.includes(candidate), JSON.stringify(arm));

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { ledgerFixture, NOW } from './ledger-review-fixture.mjs';
 import { maskLedgerCandidateField } from '../src/lib/ledger-answer.js';
 import { withLedgerAnswer } from '../src/lib/ledger-answer.js';
+import { attributeInflow } from '../src/lib/ledger-attribution.js';
 
 const payment = 'Did the payment from Payer One arrive in October 2026?';
 const income = 'How much income came from Payer One in October 2026?';
@@ -408,7 +409,9 @@ test('usefulness: explicit synthetic bank originators answer both payment and in
     }
   }
   t.diagnostic(JSON.stringify({ statements: explicitStatements.length, answered, answered_with_assumption: answeredWithAssumption, cannot_confirm: cannotConfirm }));
-  assert.equal(answered, explicitStatements.length * 2); assert.equal(cannotConfirm, 0);
+  // The original newline fixture remains in the set: the strict alphabet
+  // must refuse it. The other 23 forms still answer, with six noted figures.
+  assert.equal(answered, 46); assert.equal(cannotConfirm, 2);
   assert.equal(answeredWithAssumption, 6);
   f.raw("UPDATE fin_transactions SET description='ACH CREDIT ORIG CO NAME: Payer Two ORIG ID: 4826170392'");
   const other = await f.ask(payment); reached(f, other); assert.equal(other.ledger.found, false);
@@ -576,7 +579,7 @@ for (const [formatIndex, format] of originatorFormats.entries()) {
     identity(f, 'Unrelated Supplier', 'unrelated');
     f.add('receipt', 'Receipt', null);
     const stats = { format: formatIndex + 1, generated: 0, answered: 0, answered_with_assumption: 0, unknown: 0,
-      ambiguous_shorthand: 0, expected_answered: 0, violations: 0 };
+      ambiguous_shorthand: 0, descriptions: 0, fully_parsed: 0, expected_answered: 0, violations: 0 };
     const failures = [];
     const shorter = 'Synthetic Supplier';
     const identifier = ['AB48', 'CD26', 'EF17', 'GH03'].join('');
@@ -593,13 +596,15 @@ for (const [formatIndex, format] of originatorFormats.entries()) {
         f.raw("UPDATE fin_entities SET display_label=CASE entity_slug WHEN 'shorter' THEN 'Short Supplier' ELSE 'Long Supplier' END WHERE entity_slug IN ('shorter','longer')");
         for (const field of [shorter, longer]) {
           const description = format.replace(/Payer One|Supplier Alias/, field);
+          stats.descriptions++;
+          if (attributeInflow({ description }, new Map()).evidence.parser.complete) stats.fully_parsed++;
           f.raw('UPDATE fin_transactions SET description=?', description);
           const registered = field === shorter ? registration !== 'longer' : registration !== 'shorter';
-          // With no field delimiters, a leading From/By clause plus a trailing
-          // transaction word has two segmentations. Refuse even a registered
-          // opening name; the same name must answer in the explicit formats.
-          const ambiguous = formatIndex >= 1 && formatIndex <= 3 && /^(?:from|by|wire from)\s/i.test(field);
-          const known = registered && !ambiguous;
+          // Every complete reading participates. An unregistered alternative
+          // does not erase a unique registered shorthand reading. A forbidden
+          // alphabet character refuses even an otherwise registered name.
+          const ambiguous = false;
+          const known = registered && !format.includes('\n');
           for (const queryName of [shorter, longer, 'Unrelated Supplier']) {
             for (const question of [payment, income]) {
               stats.generated++;
@@ -649,7 +654,14 @@ for (const [formatIndex, format] of originatorFormats.entries()) {
       }
     }
     t.diagnostic(JSON.stringify({ originator_property: stats }));
-    assert.ok(stats.answered > 0 && stats.unknown > 0, 'uniform arms invalidate the harness');
+    if (format.includes('\n')) {
+      // An intentionally rejected format needs its own green control so a
+      // uniformly refused family cannot hide a broken ledger harness.
+      f.raw('UPDATE fin_transactions SET description=?,payee=?', 'FROM: Unrelated Supplier', null);
+      const green = await f.ask(payment.replace('Payer One', 'Unrelated Supplier')); reached(f, green);
+      assert.equal(green.ledger.found, true); assert.equal(green.evidence_gate.complete, true);
+      assert.equal(stats.answered, 0); assert.ok(stats.unknown > 0);
+    } else assert.ok(stats.answered > 0 && stats.unknown > 0, 'uniform arms invalidate the harness');
     assert.equal(stats.violations, 0, JSON.stringify(failures));
     assert.equal(stats.answered, stats.expected_answered);
     assert.equal(stats.unknown, stats.generated - stats.expected_answered);

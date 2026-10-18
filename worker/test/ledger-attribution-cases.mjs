@@ -45,15 +45,16 @@ export function* boundaryReadingCases() {
   ];
   for (const separator of lineSeparators) for (const clause of ['FROM', 'BY', 'FROM:', 'SENDER:']) {
     for (const same of [false, true]) yield {
-      family: 'line-separator', identities, state: same ? 'confirmed' : 'unknown',
+      family: 'line-separator', identities, state: 'unknown',
       description: `WIRE FROM: Payer One; REF: 48261703${separator}${clause} Payer ${same ? 'One' : 'Two'}`,
-      candidates: same ? ['Payer One'] : ['Payer One', 'Payer Two'],
+      // All of these boundaries are outside the strict grammar alphabet.
+      candidates: [],
     };
   }
   for (const label of expandedMetadataLabels) for (const separator of lineSeparators) {
     const description = `ACH CREDIT ORIG CO NAME: Payer One; ${label} 48261703`;
-    yield { family: 'expanded-label', identities, description, state: 'confirmed' };
-    yield { family: 'expanded-label', identities, description: `${description}${separator}FROM Payer Two`, state: 'unknown', candidates: ['Payer One', 'Payer Two'] };
+    yield { family: 'expanded-label', identities, description, state: /DATE/.test(label) ? 'unknown' : 'confirmed' };
+    yield { family: 'expanded-label', identities, description: `${description}${separator}FROM Payer Two`, state: 'unknown', candidates: [] };
     yield { family: 'unknown-prose', identities, description: `FROM: Payer One${separator}UNLISTED FIELD: 48261703`, state: 'unknown' };
   }
   for (const label of ['REFERENCE:', ...expandedMetadataLabels]) {
@@ -66,12 +67,16 @@ export function* boundaryReadingCases() {
             ...(registration === 'longer' ? [] : [identities[0]]),
             ...(registration === 'shorter' ? [] : [{ entity_slug: 'longer', legal_name: whole, display_label: 'Long Supplier' }]),
           ];
+        // Services is a valid reference/ID/name, but never a trace number or
+        // date. Those invalid metadata alternatives are not complete readings.
+        const validMetadata = !/TRACE|DATE/.test(label);
+        const longerWins = registration === 'longer' || (registration === 'both' && !validMetadata);
         yield { family: 'registered-whole', identities: registered,
           description: `${prefix} ${whole}${tail}`,
-          state: registration === 'both' ? 'unknown' : 'confirmed',
-          selector: registration === 'longer' ? 'Long Supplier' : registration === 'aliases' ? 'Payer One' : 'Short Supplier',
-          slug: registration === 'longer' ? 'longer' : 'shorter',
-          candidates: registration === 'both' || registration === 'aliases' ? ['Payer One', whole] : undefined,
+          state: (registration === 'both' && validMetadata) || (registration === 'shorter' && !validMetadata) ? 'unknown' : 'confirmed',
+          selector: longerWins ? 'Long Supplier' : registration === 'aliases' ? 'Payer One' : 'Short Supplier',
+          slug: longerWins ? 'longer' : 'shorter',
+          candidates: validMetadata && (registration === 'both' || registration === 'aliases') ? ['Payer One', whole] : undefined,
         };
       }
     }
