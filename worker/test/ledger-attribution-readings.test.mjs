@@ -4,7 +4,7 @@ import { ledgerFixture, NOW } from './ledger-review-fixture.mjs';
 import { attributeInflow, payerRegistry } from '../src/lib/ledger-attribution.js';
 import { boundaryReadingCases } from './ledger-attribution-cases.mjs';
 
-for (const family of ['line-separator', 'expanded-label', 'registered-whole', 'unknown-prose']) {
+for (const family of ['channel-prefix', 'company-comma', 'line-separator', 'expanded-label', 'registered-whole', 'unknown-prose']) {
   test(`generated boundary readings: ${family}`, () => {
     let cases = 0;
     for (const arm of boundaryReadingCases()) {
@@ -16,6 +16,7 @@ for (const family of ['line-separator', 'expanded-label', 'registered-whole', 'u
       assert.ok(result.evidence.parser.steps > 0, 'the complete-parser decision ran, including alphabet/value refusals');
       assert.equal(result.state, arm.state, JSON.stringify(arm));
       if (arm.state === 'confirmed') assert.equal(result.entity_slug, arm.slug || 'shorter');
+      if (family === 'channel-prefix' && arm.state === 'assumed') assert.equal(result.reading.prefix, arm.prefix);
       for (const candidate of arm.candidates || []) assert.ok(result.evidence.candidates.includes(candidate), JSON.stringify(arm));
       cases++;
     }

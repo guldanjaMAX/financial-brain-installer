@@ -880,8 +880,13 @@ characters outside that alphabet also produce unknown. The same alphabet is
 checked after normalization. Limits are 512 code points both before and after
 normalization, 12 sender/metadata fields, 64 parse alternatives and 32,768
 instrumented work steps. Exceeding any limit produces unknown, retaining the
-amount in the selected inflow total. A SQLite NUL indicator preserves refusal
-when a driver truncates the returned description at NUL.
+amount in the selected inflow total. SQL NUL indicators protect every authority text column at the snapshot
+boundary: description, payee, legal_name and display_label (the owner alias).
+A damaged payee is unknown even if its truncated value is empty; it cannot
+fall through to a description. A damaged identity spelling is not indexed,
+while that entity's other valid spelling stays usable. Raw strings also reject
+NUL before lookup. This protects local SQLite drivers that truncate TEXT;
+deployed D1 transport behavior still requires separate field verification.
 
 Supported explicit fields include `FROM:`, `BY`, `ORIG CO NAME`, `ORIGINATOR`
 (with optional `NAME`) and `SENDER` (with optional `NAME`), optionally preceded
@@ -892,21 +897,31 @@ supply identity. Comma, semicolon, pipe and canonicalized line breaks separate
 fields, including bare FROM/BY clauses after reference metadata. Unsupported
 labels, unconsumed prose, empty fields and invalid values cannot be discarded.
 Every complete segmentation participates, including whole registered names
-containing field words. All registered readings must agree on one entity slug,
+containing field words or company commas. A comma-bearing name must resolve
+as one complete registered spelling with the same comma positions; comma field-boundary alternatives still
+participate. There is no generic comma-removal retry. All registered readings
+must agree on one entity slug,
 and at least one complete parse must resolve every sender field. A missing
 alternative name does not erase a unique registered whole name. Conflicting
 slugs, ambiguous labels or an unresolved additional sender remain unknown with
 masked candidates; repeated aliases of one entity agree. Ordinary wire-transfer and ACH-payment descriptions retain answers
 when the exact extracted payer is independently confirmed.
 
-Undelimited descriptions have one explicit exception: a confirmed opening
-identity followed only by a closed transaction-type suffix may support presence
-or positive income with an assumption. A competing registered longer reading
+Undelimited descriptions have two explicit shorthand forms: a confirmed
+opening identity followed only by a closed transaction-type suffix, or a closed
+channel prefix followed by a bare registered identity. Both may support only
+positive figures with an assumption. The channel list is ACH/EFT/wire/Zelle/bank
+with optional credit, transfer, payment or deposit, plus payment, deposit,
+receipt and transfer. It lives in the same grammar table as explicit sender
+fields. After a channel prefix, confirmed authority requires an explicit sender
+label such as FROM, BY or ORIG CO NAME, or a complete registered whole-name
+reading. Whole registered names that begin with a channel still compete. A competing registered longer reading
 is ambiguous only when it names a different entity slug; a confirmed whole-name
 reading for the same slug takes precedence over shorthand. Candidate names
 pass through the single masker. The
 closed suffix list lives in `ledger-attribution.js`. Structured `assumptions[]`
-record the masked identity, canonical suffix, dependent row count, amount and
+record the masked identity, canonical prefix or suffix in its actual order,
+dependent row count, amount and
 citations; the final response renders every assumption in `notes` and offers
 the `ledger.flip` qualifier "exact names only". This qualifier moves assumed
 receipts to an Unattributed line and preserves the total inflow amount. Every transaction

@@ -135,7 +135,9 @@ async function snapshotRows(env, accounts, sql, binds, { tenantId, mask, account
     env.DB.prepare(sql).bind(...binds),
     // Payer authority and receipts must come from the same snapshot. A bank
     // payee string never creates a known identity, even on a confirmed row.
-    ...(payerIdentities ? [env.DB.prepare(`SELECT entity_slug,legal_name,display_label FROM fin_entities
+    ...(payerIdentities ? [env.DB.prepare(`SELECT entity_slug,legal_name,display_label,
+      instr(COALESCE(legal_name,''),char(0))>0 AS legal_name_has_nul,
+      instr(COALESCE(display_label,''),char(0))>0 AS display_label_has_nul FROM fin_entities
       WHERE tenant_id=? AND superseded_by_id IS NULL AND basis_state='confirmed'
       ORDER BY entity_slug LIMIT ?`).bind(tenantId, MAX_ROWS + 1)] : []),
   ]);
@@ -213,7 +215,8 @@ export async function readEffectiveTransactions(env, accounts, { from, to, amoun
       json_extract(m.value,'$.last_synced_at') AS last_synced_at,
       t.posted_on,t.amount_minor,t.direction,t.currency,t.description,
       instr(COALESCE(t.description,''),char(0))>0 AS description_has_nul,
-      t.payee,t.category,t.category_basis_state,t.basis_state,
+      t.payee,instr(COALESCE(t.payee,''),char(0))>0 AS payee_has_nul,
+      t.category,t.category_basis_state,t.basis_state,
       CASE WHEN t.provenance='extracted' THEN EXISTS (
         SELECT 1 FROM fin_transactions other WHERE other.tenant_id=t.tenant_id AND other.account_slug=t.account_slug
           AND other.provenance='extracted' AND other.superseded_by_id IS NULL AND other.removed_at IS NULL

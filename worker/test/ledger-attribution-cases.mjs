@@ -38,11 +38,43 @@ export const expandedMetadataLabels = [
   'INDIVIDUAL ID:', 'INDIVIDUAL NAME:', 'INDIVIDUAL ID/NAME:',
 ];
 
+// Independent oracle for the closed channel production, including its bare
+// forms. Prefix shorthand must exercise the same displays as suffix shorthand.
+export const channelPrefixes = [
+  ...['ACH', 'EFT', 'WIRE', 'ZELLE', 'BANK'].flatMap(channel =>
+    ['', ' CREDIT', ' TRANSFER', ' PAYMENT', ' DEPOSIT'].map(type => channel + type)),
+  'PAYMENT', 'DEPOSIT', 'RECEIPT', 'TRANSFER',
+];
+
 export function* boundaryReadingCases() {
   const identities = [
     { entity_slug: 'shorter', legal_name: 'Payer One', display_label: 'Short Supplier' },
     { entity_slug: 'longer', legal_name: 'Payer Two', display_label: 'Long Supplier' },
   ];
+  for (const channel of channelPrefixes) for (const tail of ['', '; REF: 48261703']) {
+    for (const ending of ['', ' Services']) for (const registration of ['shorter', 'both', 'longer']) {
+      const shorter = `Payer One${ending}`, whole = `${channel} ${shorter}`;
+      yield { family: 'channel-prefix',
+        identities: [
+          ...(registration === 'longer' ? [] : [{ entity_slug: 'shorter', legal_name: shorter, display_label: 'Short Supplier' }]),
+          ...(registration === 'shorter' ? [] : [{ entity_slug: 'longer', legal_name: whole, display_label: 'Long Supplier' }]),
+        ],
+        description: whole + tail,
+        state: registration === 'shorter' ? 'assumed' : registration === 'both' ? 'unknown' : 'confirmed',
+        selector: registration === 'longer' ? 'Long Supplier' : 'Short Supplier',
+        slug: registration === 'longer' ? 'longer' : 'shorter',
+        prefix: channel.toLowerCase(),
+        candidates: registration === 'both' ? [shorter, whole] : undefined,
+      };
+    }
+  }
+  for (const whole of ['Supplier Services, LLC', 'Supplier, Regional, LLC', 'From Supplier, LLC', 'Supplier REF: Division, LLC']) {
+    for (const [formatIndex, format] of originatorFormats.entries()) yield {
+      family: 'company-comma', identities: [{ entity_slug: 'shorter', legal_name: whole, display_label: 'Short Supplier' }],
+      description: format.replace(/Payer One|Supplier Alias/, whole),
+      state: formatIndex >= 1 && formatIndex <= 3 ? 'assumed' : 'confirmed',
+    };
+  }
   for (const separator of lineSeparators) for (const clause of ['FROM', 'BY', 'FROM:', 'SENDER:']) {
     for (const same of [false, true]) yield {
       family: 'line-separator', identities, state: same ? 'confirmed' : 'unknown',

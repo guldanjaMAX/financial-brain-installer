@@ -73,6 +73,7 @@ function validate(body, { named, kind, state, same, exact, stats }) {
     const displayed = kind === 'merchant' ? ledger.groups : ['deposits', 'largest'].includes(kind) ? ledger.rows : ledger.transfers.map(p => p.incoming);
     assert.ok(displayed.length, 'payer rendering has a nonempty result');
     assert.ok(displayed.every(row => row.attribution_state === displayState));
+    if (kind === 'merchant') assert.ok(displayed.every(row => row.total_is_exact === (state === 'confirmed')));
     if (displayState === 'unknown') assert.match(body.answer, /Unattributed/);
   }
   const depends = state === 'assumed' && !exact && (!named || positive);

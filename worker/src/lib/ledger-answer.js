@@ -38,15 +38,16 @@ function payerAssumptions(rows, payers, citations) {
     const attribution = payers?.get(row.id);
     const reading = attribution?.state === 'assumed' ? attribution.reading : null;
     if (!reading) continue;
-    const key = JSON.stringify([normalizeMerchantText(reading.identity), reading.suffix]);
+    const key = JSON.stringify([normalizeMerchantText(reading.identity), reading.prefix, reading.suffix]);
     if (!groups.has(key)) groups.set(key, { reading, rows: [] });
     groups.get(key).rows.push(row);
   }
   const refs = new Map(citations.map(c => [c.ref, c.n]));
   return [...groups.values()].map(({ reading, rows }) => ({
     type: 'payer_shorthand', identity: safeDescription(reading.identity),
-    // Suffix is a canonical constant from the closed vocabulary, not raw text.
-    suffix: reading.suffix, count: rows.length, amount_minor: sumMinor(rows),
+    // Prefix/suffix are canonical constants from the closed grammar, not raw text.
+    ...(reading.prefix ? { prefix: reading.prefix } : { suffix: reading.suffix }),
+    count: rows.length, amount_minor: sumMinor(rows),
     citations: rows.map(row => refs.get(`ledger:transaction:${row.id}`)), flip: 'exact names only',
   }));
 }
@@ -55,7 +56,7 @@ function withPayerAssumptions(result, rows, payers) {
   const assumptions = payerAssumptions(rows, payers, result.citations);
   if (!assumptions.length) return result;
   result.assumptions = assumptions;
-  result.notes = assumptions.map(a => `Read the description as "${a.identity} + ${a.suffix}": ${a.count} ${a.count === 1 ? 'row' : 'rows'} totaling ${money(a.amount_minor)} ${a.count === 1 ? 'rests' : 'rest'} on that reading of a confirmed identity; say "${a.flip}" to leave these out of payer attribution and retain their amounts as unattributed`);
+  result.notes = assumptions.map(a => `Read the description as "${a.prefix ? `${a.prefix} + ${a.identity}` : `${a.identity} + ${a.suffix}`}": ${a.count} ${a.count === 1 ? 'row' : 'rows'} totaling ${money(a.amount_minor)} ${a.count === 1 ? 'rests' : 'rest'} on that reading of a confirmed identity; say "${a.flip}" to leave these out of payer attribution and retain their amounts as unattributed`);
   result.ledger.flip = [...(result.ledger.flip || []), 'exact names only'];
   return result;
 }

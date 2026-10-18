@@ -2217,24 +2217,38 @@ U+200C/D, U+2060 and bidi controls, produces unknown. All other characters
 outside that alphabet also produce unknown. Validate the normalized text too.
 The caps are 512 code points before and after normalization, 12 fields, 64 parse
 alternatives and 32,768 instrumented steps. Refusal retains every amount in the
-inflow total. A SQL NUL flag covers drivers that truncate the returned text.
+inflow total. SQL NUL indicators cover description, payee, legal_name and
+display_label (the current owner-alias column) at the same snapshot boundary.
+A damaged payee refuses without falling through to description, even if
+truncated to empty. Only damaged identity spellings are excluded from the
+registry; other valid spellings of that entity remain usable. Raw NUL strings
+are rejected too. Local SQLite truncation is tested; deployed D1 transport
+behavior needs separate field verification.
 
 The parser must consume every field and validate every metadata value, including
 calendar dates and numeric traces. Unknown labels, invalid values and trailing
 prose cannot be ignored. Every complete segmentation survives, including names
-containing `By`, `From` or metadata words. All registered readings must resolve
+containing `By`, `From`, metadata words or company commas. Complete registered
+comma-bearing names retain their registered comma positions and participate
+alongside comma field-boundary readings, within
+the same caps; there is no generic comma-stripping retry. All registered readings must resolve
 to one entity slug, and at least one complete parse must resolve every sender
 field. Missing alternative names do not erase a unique registered whole name;
 a conflicting slug, ambiguous label or unresolved additional sender produces
-unknown. Bare shorthand permits a confirmed
-opening identity plus one closed transaction suffix from `ledger-attribution.js`
-(including payment, ACH deposit and payroll). A competing registered longer
+unknown. Bare shorthand permits a confirmed opening identity plus one closed
+transaction suffix (including payment, ACH deposit and payroll), or a closed
+channel prefix plus a bare registered identity. The single grammar table in
+`ledger-attribution.js` owns both vocabularies. Prefix channels are ACH, EFT,
+wire, Zelle and bank, optionally followed by credit, transfer, payment or
+deposit, plus payment, deposit, receipt and transfer. Confirmed authority after
+a channel still needs an explicit sender label, unless a complete registered
+whole-name reading supplies it. A competing registered longer
 reading is ambiguous when it resolves to a different entity slug; a confirmed
 whole-name reading for the same slug takes precedence. Masked candidate names
 are shown. Accepted shorthand
 presence and income carry `assumptions[]`, cited row counts and amounts, and
 owner-facing `notes` rendered into the answer. Each note states the masked
-"identity + suffix" reading and offers `ledger.flip: ["exact names only"]`.
+"identity + suffix" or "prefix + identity" reading in its actual order and offers `ledger.flip: ["exact names only"]`.
 Repeat the scoped question with that qualifier to leave shorthand out; such
 rows move to an Unattributed line and keep their amounts in `inflow_total_minor`.
 An assumed receipt cannot disprove any payer, including a different confirmed
@@ -2265,6 +2279,11 @@ inflow displays, including exact-only amount preservation.
 `worker/test/ledger-attribution-zero.test.mjs` separately proves that an actual
 zero-valued receipt cannot certify a payer zero while other receipts remain
 uncertain.
+`worker/test/ledger-authority-fields.test.mjs` exercises every authority-column
+NUL guard on nonempty snapshots, valid alternate spellings, prefix notes and
+zero/amount-mismatch refusals. The shared generators cross every channel with
+three registration cases and every answer path, and comma-bearing names with
+all 30 statement formats.
 `worker/test/ledger-attribution-readings.test.mjs` proves that whole-name and
 bare FROM/BY readings also agree by entity identity.
 `worker/test/ledger-attribution-grammar.test.mjs` enumerates the Unicode control

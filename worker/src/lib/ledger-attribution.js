@@ -2,13 +2,25 @@
 // Bank metadata never registers an identity. Every spelling uses this same key.
 export const normalizeMerchantText = value => (String(value || "").normalize("NFKC").toLowerCase().match(/[\p{L}\p{N}]+|&/gu) || []).join(" ");
 
+// Punctuation-insensitive lookup alone would turn a dangling comma into a
+// name. Keep comma positions from actual registry spellings for that grammar
+// production; the private index has exactly the registry's request lifetime.
+const companyCommaSpellings = Symbol('company comma spellings');
+const companyCommaKey = value => String(value || '').normalize('NFKC').split(',').map(normalizeMerchantText).join(',');
+
 export function payerRegistry(identities) {
   const index = new Map();
-  for (const identity of identities) for (const label of [identity.legal_name, identity.display_label]) {
+  index[companyCommaSpellings] = new Set();
+  for (const identity of identities) for (const column of ['legal_name', 'display_label']) {
+    const label = identity[column];
+    // Reject only the damaged spelling, keeping the entity's valid aliases.
+    // SQL flags preserve this decision even when a driver truncates at NUL.
+    if (identity[`${column}_has_nul`] || String(label || '').includes('\0')) continue;
     const key = normalizeMerchantText(label);
     if (!key) continue;
     if (!index.has(key)) index.set(key, new Set());
     index.get(key).add(identity.entity_slug);
+    if (String(label).normalize('NFKC').includes(',')) index[companyCommaSpellings].add(companyCommaKey(label));
   }
   return index;
 }
@@ -31,7 +43,7 @@ const statementGrammar = Object.freeze({
   edgeSpaces: /^ +| +$/g,
   spaces: / +/g,
   fieldBoundary: /[;,|]/,
-  name: /^[\p{L}\p{N}][\p{L}\p{N}\p{M} &'()._/:#\-]*$/u,
+  name: /^[\p{L}\p{N}][\p{L}\p{N}\p{M} &'()._/:#,\-]*$/u,
   separator: /^[ ]*(?:[;,|][ ]*)?/,
   channel: /^(?:(?:ach|eft|wire|zelle|bank)(?: +(?:credit|transfer|payment|deposit))?|payment|deposit|receipt|transfer) +/i,
   sender: /^(?:(?:from|by|orig +co +name|originator(?: +name)?|sender(?: +name)?) *: *|(?:from|by) +)/i,
@@ -76,9 +88,10 @@ function decision(readings, source) {
   if (resolved.length !== readings.length || slugs.size !== 1)
     return { state: 'unknown', entity_slug: null, reading: null, evidence };
   // Distinct aliases of a single entity do not create competing payers.
-  const reading = readings.find(r => !r.suffix) || readings[0];
-  return { state: reading.suffix ? 'assumed' : 'confirmed', entity_slug: reading.payer.slug,
-    reading: { identity: reading.identity, ...(reading.suffix ? { suffix: reading.suffix } : {}) }, evidence };
+  const reading = readings.find(r => !r.suffix && !r.prefix) || readings[0];
+  return { state: reading.suffix || reading.prefix ? 'assumed' : 'confirmed', entity_slug: reading.payer.slug,
+    reading: { identity: reading.identity, ...(reading.suffix ? { suffix: reading.suffix } : {}),
+      ...(reading.prefix ? { prefix: reading.prefix } : {}) }, evidence };
 }
 
 function parseStatement(description, registry, statementCache) {
@@ -120,26 +133,33 @@ function parseStatement(description, registry, statementCache) {
     }
     // Endpoints are lexical boundaries in the positive grammar. A name may
     // contain a field word or colon, so every complete segmentation survives.
-    function ends(start) {
+    function ends(start, companyComma = false) {
       const out = [];
       for (let end = start; end <= text.length; end++) {
         step();
         if (end === text.length || grammar.fieldBoundary.test(text[end])) {
           if (end > start && text[end - 1] !== ' ') out.push(end);
-          break;
+          if (!companyComma || text[end] !== ',') break;
         }
         if (text[end] === ' ' && end > start && text[end - 1] !== ' ') out.push(end);
       }
       return out;
     }
-    function name(start, allowSuffix, allowProse) {
+    function name(start, allowSuffix, allowProse, prefix = null) {
       const results = [];
-      for (const end of ends(start)) {
+      for (const end of ends(start, true)) {
         const identity = text.slice(start, end);
         step(identity.length);
         if (!grammar.name.test(identity)) continue;
+        // A comma can belong to a complete registered name, alongside its
+        // field-boundary readings. Never discard commas to salvage prose.
+        if (identity.includes(',')) {
+          step(identity.length);
+          if (!registry[companyCommaSpellings]?.has(companyCommaKey(identity))) continue;
+        }
         for (const tail of rest(end, allowSuffix, allowProse)) {
-          add(results, { readings: [{ identity, payer: lookup(identity), ...(tail.suffix ? { suffix: tail.suffix } : {}) }, ...tail.readings], fields: 1 + tail.fields });
+          add(results, { readings: [{ identity, payer: lookup(identity), ...(prefix ? { prefix } : {}),
+            ...(tail.suffix ? { suffix: tail.suffix } : {}) }, ...tail.readings], fields: 1 + tail.fields });
         }
       }
       return results;
@@ -149,7 +169,8 @@ function parseStatement(description, registry, statementCache) {
       const channel = match(grammar.channel, start);
       if (channel) openings.push(start + channel[0].length);
       for (const opening of openings) {
-        if (optional) for (const parse of name(opening, opening === start, false)) add(results, parse);
+        if (optional) for (const parse of name(opening, opening === start, false,
+          opening === start ? null : channel[0].trim().toLowerCase().replace(grammar.spaces, ' '))) add(results, parse);
         const label = match(grammar.sender, opening);
         if (label && (allowBare || label[0].includes(':'))) for (const parse of name(opening + label[0].length, false, !label[0].includes(':'))) add(results, parse);
       }
@@ -211,6 +232,10 @@ function parseStatement(description, registry, statementCache) {
 }
 
 function attributeRow(row, registry, statementCache) {
+  // A damaged structured payee must not fall through to a description, even
+  // if the returned payee is empty or a description cache already has a hit.
+  if (row.payee_has_nul || String(row.payee || '').includes('\0'))
+    return decision([], 'payee');
   if (row.payee) return decision([{ identity: row.payee, payer: lookupPayer(row.payee, registry) }], 'payee');
   // Some SQLite clients truncate TEXT at NUL. The SQL flag preserves the
   // alphabet refusal even when the returned string has lost that character.
