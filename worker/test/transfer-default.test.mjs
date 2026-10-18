@@ -4,7 +4,30 @@ import { readFileSync } from "node:fs";
 import { fixture, NOW, Q, accepted, refused, flipQuestion } from "./fixtures/transfer-default/fixture.mjs";
 import { classifyLedgerQuestion } from "../src/lib/ledger-question.js";
 
-const head = JSON.parse(readFileSync(new URL("./fixtures/transfer-default/head-baseline.json", import.meta.url), "utf8"));
+// Preserve the frozen pre-masking baseline on disk. Only the enumerated
+// display labels change under the privacy contract; every amount, date,
+// citation, key, pairing decision and sentence outside those labels stays exact.
+// Literal expectations are independent of the product masker.
+const displayLabels = [
+  ['Fixture Store', '[redacted] ****tore'], ['Fixture Supplies', '[redacted] ****lies'],
+  ['Fixture brokerage', '[redacted] ****rage'], ['Fixture client deposit', '[redacted] ****osit'],
+  ['Fixture outside customer', '[redacted] ****omer'], ['Fixture subscription', '[redacted] ****tion'],
+  ['PAYMENT THANK YOU', '[redacted] ****KYOU'], ['PAYMENT TO CARD ENDING 3333', '[redacted] ****3333'],
+  ['TRANSFER FROM account 1111', '[redacted] ****1111'], ['TRANSFER FROM account 5555', '[redacted] ****5555'],
+  ['TRANSFER TO account 1111', '[redacted] ****1111'], ['TRANSFER TO account 2222', '[redacted] ****2222'],
+  ['TRANSFER TO account 4444', '[redacted] ****4444'], ['TRANSFER TO account 5555', '[redacted] ****5555'],
+  ['fixture brokerage', '[redacted] ****rage'], ['fixture store', '[redacted] ****tore'],
+  ['fixture subscription', '[redacted] ****tion'], ['fixture supplies', '[redacted] ****lies'],
+  ['software', '[redacted] ****ware'], ['transfer out account transfer', '[redacted] ****sfer'],
+  ['transfer to account 2222', '[redacted] ****2222'],
+];
+function displayedBaseline(value) {
+  if (typeof value === 'string') return displayLabels.reduce((text, [before, after]) => text.replaceAll(before, after), value);
+  if (Array.isArray(value)) return value.map(displayedBaseline);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, displayedBaseline(item)]));
+  return value;
+}
+const head = displayedBaseline(JSON.parse(readFileSync(new URL("./fixtures/transfer-default/head-baseline.json", import.meta.url), "utf8")));
 test.before(() => {
   mock.method(Date, "now", () => Date.parse(NOW));
   mock.method(globalThis, "fetch", async () => { throw new Error("network forbidden"); });
@@ -19,7 +42,7 @@ function oldKeys(value) {
 function unchanged(body, scenario, question) {
   const golden = head[scenario][question];
   assert.ok(golden, "question captured before product changes");
-  assert.equal(body.answer, golden.answer, "answer text is byte-identical to HEAD");
+  assert.equal(body.answer, golden.answer, "answer text is byte-identical outside enumerated privacy labels");
   assert.deepEqual(oldKeys(body.ledger), golden.ledger, "existing JSON keys retain their values");
 }
 async function ask(f, question = Q.totals, kind = "totals", pairCount = 1) {
@@ -306,7 +329,7 @@ for (const kind of ["merchant", "category", "recurring", "largest", "deposits"])
   } else if (kind === "recurring") assert.equal(body.ledger.lead_monthly_total_minor, 0);
   else {
     assert.notEqual(lead, head.own[Q[kind]].answer.split("\nAccounts:")[0]);
-    assert.doesNotMatch(lead, /TRANSFER (?:TO|FROM)/);
+    assert.doesNotMatch(lead, /\[redacted\] \*{4}(?:1111|2222)/);
     assert.ok(body.ledger.lead_rows.length > 0);
   }
   const phrases = offered(body);
@@ -329,22 +352,22 @@ test("R1 lists exclude before ranking and retain the complete gross list", async
   const question = "What were my 2 largest expenses in September 2026 excluding transfers?";
   const body = await ask(f, question, "largest");
   const lead = body.answer.split("\nNote:")[0];
-  assert.match(lead, /Fixture Store/);
-  assert.match(lead, /Fixture Supplies/);
-  assert.doesNotMatch(lead, /TRANSFER TO/);
-  assert.match(body.answer.split("With everything counted:")[1], /TRANSFER TO/);
+  assert.match(lead, /\[redacted\] \*{4}tore/);
+  assert.match(lead, /\[redacted\] \*{4}lies/);
+  assert.doesNotMatch(lead, /\[redacted\] \*{4}2222/);
+  assert.match(body.answer.split("With everything counted:")[1], /\[redacted\] \*{4}2222/);
   const control = await ask(f, question.replace("excluding", "including"), "largest");
-  assert.match(control.answer.split("\nAccounts:")[0], /TRANSFER TO/);
+  assert.match(control.answer.split("\nAccounts:")[0], /\[redacted\] \*{4}2222/);
 });
 
 test("R1 deposits omit withdrawals in the lead and list them in gross", async t => {
   const f = await fixture(t, "investment");
   const body = await ask(f, Q.deposits, "deposits");
-  assert.match(body.answer.split("\nNote:")[0], /Fixture client deposit/);
-  assert.doesNotMatch(body.answer.split("\nNote:")[0], /TRANSFER FROM/);
-  assert.match(body.answer.split("With everything counted:")[1], /TRANSFER FROM/);
+  assert.match(body.answer.split("\nNote:")[0], /\[redacted\] \*{4}osit/);
+  assert.doesNotMatch(body.answer.split("\nNote:")[0], /\[redacted\] \*{4}5555/);
+  assert.match(body.answer.split("With everything counted:")[1], /\[redacted\] \*{4}5555/);
   const control = await ask(f, flipQuestion(Q.deposits, "including withdrawals"), "deposits");
-  assert.match(control.answer.split("\nAccounts:")[0], /TRANSFER FROM/);
+  assert.match(control.answer.split("\nAccounts:")[0], /\[redacted\] \*{4}5555/);
 });
 
 for (const kind of ["loan", "line_of_credit"]) test(`R3 ${kind} advances are not profit and their flip restores them`, async t => {

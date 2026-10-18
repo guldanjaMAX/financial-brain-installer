@@ -2202,12 +2202,24 @@ inflow in the selected window, including a different amount, prevents named
 absence or an exact income total. Unknown candidates stay visible with exact
 amounts and dates; independently matched income remains a labeled subtotal.
 Amount-only questions still match cents without claiming a payer.
+Missing and ambiguous identities are distinct: ambiguous requested aliases
+return candidate receipts and incomplete evidence, including an empty snapshot.
+A colliding full statement or extracted field never falls back to a shorter
+payer. Standard wire-transfer/ACH-payment sender clauses and explicit
+`ORIG CO NAME`, `ORIGINATOR`, `SENDER`, `FROM:` and `BY` fields use that same
+independent identity check. Conflicting fields remain unknown.
 Free-text candidate fields use one conservative masker: every alphanumeric run
 of at least five characters, including letters and punctuation/space-separated
 runs, exposes only its last four. Ordinary long words are masked too. This
 changes display labels, not stored data or financial amounts. The property suite
 `worker/test/ledger-identity-gate.test.mjs` exercises identity authority,
 ambiguity, exact normalization, arbitrary metadata, and render-boundary masking.
+It also counts answered versus cannot-confirm results for realistic synthetic
+statements and enumerates all nine answer kinds, transfer display variants,
+account-link refusals and every other direct/fallback gap reason. Institution
+text uses the same masker; link commands use account placeholders. Structured
+coverage/sync dates are validated before rendering, and invalid balance dates
+refuse. Arbitrary account slugs never appear in answer guidance.
 Payer clauses are removed before account-kind selection.
 Merchant labels preserve literal `and` and `&`. Redacted, shortened or unknown
 labels refuse; an unmatched conjunction substitution refuses as ambiguous.

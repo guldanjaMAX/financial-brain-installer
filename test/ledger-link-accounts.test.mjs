@@ -63,10 +63,12 @@ test('R03 actual CLI: bounded refusal, preview, authentication, approval, replay
   const refusal = await ask(f);
   assert.equal(refusal.answer, null); assert.equal(refusal.gaps.length, 1);
   assert.equal(refusal.gaps[0].reason, 'ledger_account_link_required');
-  assert.match(refusal.gaps[0].detail, /Bank One.*4321.*checking/);
+  // Institution text can contain an account identifier; slugs are arbitrary
+  // owner strings too. Guidance retains masks/kinds and uses CLI placeholders.
+  assert.match(refusal.gaps[0].detail, /\[redacted\] \*{4}kOne.*4321.*checking/);
   // The Worker and the owner app cannot know the installer's shell, so their
   // guidance names the subcommand; only CLI output is rendered per platform.
-  assert.ok(refusal.gaps[0].detail.includes('ledger link-accounts <manifest> --manual manual-account --live live-account --preview'));
+  assert.ok(refusal.gaps[0].detail.includes(renderCliCommands('brain ledger link-accounts <manifest> --manual <manual-account> --live <live-account> --preview', { platform: 'linux' })));
   assert.ok(ownerError(new ApiError(409, { code: refusal.code })).message.includes('ledger link-accounts'));
   const think = () => worker.fetch(new Request('https://brain.invalid/api/rag/think', { method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Admin-Key': f.env.ADMIN_KEY },

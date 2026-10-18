@@ -7,6 +7,7 @@ import { fixture, account, transaction, NOW } from './fixtures/money-fix/fixture
 import { withLedgerAnswer } from '../src/lib/ledger-answer.js';
 import { readEffectiveAccounts } from '../src/lib/ledger-reader.js';
 import { createProductFixture } from './product-contract-fixture.mjs';
+import { renderCliCommands } from '../../operations/cli-guidance.mjs';
 
 async function documentAnswer(t, { title = 'Card statement', content = 'Card ending 4242 charged USD 120.00.', metadata = {} } = {}) {
   let drafts = 0, verifiers = 0;
@@ -181,7 +182,8 @@ test('P02: adding out-of-window collisions cannot hide a relevant existing colli
   assert.equal(b.code, 'ledger_account_link_required', 'the original selected September collision still exists');
   assert.equal(documents, 0);
   assert.equal(b.gaps.length, 1);
-  assert.match(b.gaps[0].detail, /--manual manual-a --live live-a --preview/);
+  assert.ok(b.gaps[0].detail.includes(renderCliCommands('brain ledger link-accounts <manifest> --manual <manual-account> --live <live-account> --preview', { platform: 'linux' })));
+  assert.doesNotMatch(b.gaps[0].detail, /--manual manual-a|--live live-a/, 'arbitrary slugs stay private');
 });
 
 test('P02 all collision edges are checked, including an earlier edge with unknown coverage', async t => {
@@ -199,7 +201,8 @@ test('P02 all collision edges are checked, including an earlier edge with unknow
   const before = f.seen.length, blocked = await ask(f, question, next);
   assert.ok(f.seen.slice(before).some(sql => sql.includes('FROM fin_accounts')));
   assert.equal(blocked.code, 'ledger_account_link_required'); assert.equal(documents, 1);
-  assert.match(blocked.gaps[0].detail, /--manual manual-a --live live-a --preview/);
+  assert.ok(blocked.gaps[0].detail.includes(renderCliCommands('brain ledger link-accounts <manifest> --manual <manual-account> --live <live-account> --preview', { platform: 'linux' })));
+  assert.doesNotMatch(blocked.gaps[0].detail, /--manual manual-a|--live live-a/, 'arbitrary slugs stay private');
   const selected = await ask(f, 'How much money came in September 2026 for account ending 2468?', next);
   assert.equal(selected.ledger.accounts[0].credits_minor, 123450);
   assert.equal(documents, 1);

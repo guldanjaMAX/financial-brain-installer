@@ -847,6 +847,11 @@ owner display labels for the same tenant. The identity inventory and receipt
 rows are read in one D1 batch; identities are bounded to 5,000 and an unavailable
 or oversized inventory refuses the answer. Duplicate normalized labels across
 entities remain ambiguous. No identity is inferred or saved from bank metadata.
+Lookups distinguish missing, unique and ambiguous labels. An ambiguous requested
+alias produces an incomplete cannot-confirm answer with candidate receipts, even
+when the snapshot is empty; it never certifies absence or an exact zero. An
+ambiguous complete statement or extracted sender label is terminal and cannot
+fall through to a shorter spelling.
 The complete normalized payee must resolve exactly to one known identity.
 Without a payee, only a bounded directed or opening sender grammar may extract
 a label, which must still resolve exactly. Query and stored labels share NFKC,
@@ -854,6 +859,13 @@ case and punctuation normalization and preserve literal `and` versus `&`.
 Token subsets, prefixes, channel labels and invoice subjects do not establish
 identity. Unsupported sender syntax remains unknown without a growing list of
 unknown-label patterns.
+Supported explicit fields include `FROM:`, `BY`, `ORIG CO NAME`, `ORIGINATOR`
+(with optional `NAME`) and `SENDER` (with optional `NAME`), optionally preceded
+by ACH/EFT/wire/Zelle/bank credit, transfer, payment or deposit. Standard trace,
+originator ID, entry-description, beneficiary and reference fields delimit the
+sender; they never supply identity. Multiple conflicting sender clauses remain
+unknown. Ordinary wire-transfer and ACH-payment descriptions retain answers
+when the exact extracted payer is independently confirmed.
 
 Every posted inflow in the selected account and period must have a positively
 identified payer before a named absence or exact income total can be certified.
@@ -876,6 +888,13 @@ symbols, whitespace and invisible separators cannot expose short fragments. Acco
 no special-case vocabulary. Only the final four alphanumeric characters remain,
 and masking precedes truncation. This conservative rule also hides ordinary
 long words in descriptions, merchant/category labels and echoed selectors.
+The same boundary covers account-link refusal institution metadata. Guidance
+uses placeholders for arbitrary account slugs rather than echoing them in a
+command. Account masks and kinds, feed modes, coverage dates, balance dates and
+sync timestamps are validated structured fields, not arbitrary text exemptions.
+Invalid sync/coverage display values become null; an invalid balance date
+refuses the balance. Transfer variants and direct/fallback refusals use the same
+field boundaries as successful money answers.
 Masked merchant labels cannot be used as exact selectors; the existing explicit
 refusal applies. Exact amounts, posting dates and citation locators come from
 structured ledger columns, not from the free text. Stored metadata is unchanged.

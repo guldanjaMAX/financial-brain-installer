@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ledgerFixture, NOW } from './ledger-review-fixture.mjs';
 import { maskLedgerCandidateField } from '../src/lib/ledger-answer.js';
+import { withLedgerAnswer } from '../src/lib/ledger-answer.js';
 
 const payment = 'Did the payment from Payer One arrive in October 2026?';
 const income = 'How much income came from Payer One in October 2026?';
@@ -186,4 +187,222 @@ test('masking happens before truncation and treats Unicode letters and short lab
     assert.equal(masked, `[redacted] ****${normalized.slice(-4).join('')}`);
     assert.ok(masked.length < 240);
   }
+});
+
+test('ambiguous requested aliases and complete statement labels stay unknown with candidates', async t => {
+  const f = ledgerFixture(t); identity(f, 'Payer One'); identity(f, 'Payer Two', 'payer-two');
+  f.add('receipt', 'Payer One payment', 'Payer One');
+  f.raw("UPDATE fin_entities SET display_label='Shared Supplier' WHERE entity_slug='payer-one'");
+  const questions = [payment, income].map(q => q.replace('Payer One', 'Shared Supplier'));
+  for (const q of questions) {
+    const green = await f.ask(q); reached(f, green); assert.equal(green.evidence_gate.complete, true);
+    assert.equal(green.ledger.kind === 'payment' ? green.ledger.found : green.ledger.total_minor,
+      green.ledger.kind === 'payment' ? true : 2500);
+  }
+  f.raw("UPDATE fin_entities SET display_label='Shared Supplier' WHERE entity_slug='payer-two'");
+  for (const q of questions) { const body = await f.ask(q); unknown(f, body); assert.match(body.answer, /ambiguous|more than one/i); }
+  identity(f, 'Alternate Supplier', 'third'); identity(f, 'Fourth Supplier', 'fourth');
+  f.raw("UPDATE fin_entities SET display_label='Payer Two payment' WHERE entity_slug IN ('third','fourth')");
+  f.raw("UPDATE fin_transactions SET payee=NULL,description='Payer Two payment'");
+  for (const name of ['Alternate Supplier', 'Payer Two']) for (const q of [payment, income])
+    unknown(f, await f.ask(q.replace('Payer One', name)));
+  // A collision in the extracted field is also terminal, even when stripping
+  // its suffix would yield a different unique legal name.
+  f.raw("UPDATE fin_transactions SET description='WIRE FROM Payer Two payment'");
+  for (const q of [payment, income]) unknown(f, await f.ask(q.replace('Payer One', 'Payer Two')));
+  f.raw("UPDATE fin_entities SET display_label='Payer Two for invoice' WHERE entity_slug IN ('third','fourth')");
+  f.raw("UPDATE fin_transactions SET description='WIRE FROM Payer Two for invoice'");
+  for (const q of [payment, income]) unknown(f, await f.ask(q.replace('Payer One', 'Payer Two')));
+  const amount = await f.ask(amountOnly); reached(f, amount); assert.equal(amount.ledger.found, true);
+  f.raw('DELETE FROM fin_transactions');
+  const before = f.calls.length;
+  const empty = await f.ask(questions[0]);
+  assert.ok(f.calls.slice(before).some(sql => /JOIN fin_transactions/.test(sql)), 'empty snapshot inspected');
+  assert.equal(empty.ledger.found, null, 'empty receipts cannot choose between colliding identities');
+  assert.equal(empty.evidence_gate.complete, false);
+});
+
+const explicitStatements = [
+  'Payer One', 'Payer One payment', 'Payer One ACH deposit', 'Payer One payroll',
+  'WIRE FROM Payer One', 'WIRE TRANSFER FROM Payer One', 'ACH PAYMENT FROM Payer One',
+  'BANK TRANSFER FROM Payer One', 'ACH CREDIT FROM: Payer One', 'FROM: Payer One',
+  'EFT CREDIT BY Payer One', 'ZELLE PAYMENT FROM Payer One',
+  'ORIG CO NAME: Payer One', 'ORIGINATOR: Payer One', 'ORIGINATOR NAME: Payer One',
+  'WIRE ORIGINATOR: Payer One', 'WIRE TRANSFER ORIGINATOR NAME: Payer One',
+  'ACH CREDIT ORIG CO NAME: Payer One ORIG ID: 4826170392 DESC DATE: 261005 CO ENTRY DESCR: PAYMENT SEC: CCD TRACE#: 482617039258001',
+  'ORIG CO NAME:Payer One ORIG ID:4826170392 DESC DATE:261005 CO ENTRY DESCR:PAYMENT SEC:CCD TRACE#:482617039258001',
+  'WIRE TRANSFER FROM: Payer One REF: 482617039258',
+  'WIRE ORIGINATOR: Payer One; BENEFICIARY: Operating Company; REFERENCE: 482617039258',
+  'ACH CREDIT ORIGINATOR: Payer One\nTRACE: 482617039258001',
+  'ACH PAYMENT FROM Payer One for invoice 48261703',
+  'BANK TRANSFER FROM Supplier Alias reference 48261703',
+];
+
+test('usefulness: explicit synthetic bank originators answer both payment and income', async t => {
+  const f = ledgerFixture(t); identity(f, 'Payer One'); identity(f, 'Payer Two', 'payer-two');
+  f.raw("UPDATE fin_entities SET display_label='Supplier Alias' WHERE entity_slug='payer-one'");
+  f.add('receipt', 'Payer One', null);
+  let answered = 0, cannotConfirm = 0;
+  for (const description of explicitStatements) {
+    f.raw('UPDATE fin_transactions SET description=?', description);
+    for (const q of [payment, income]) {
+      const body = await f.ask(q); reached(f, body);
+      if (body.evidence_gate.complete && (q === payment ? body.ledger.found === true : body.ledger.total_minor === 2500)) answered++;
+      else cannotConfirm++;
+    }
+  }
+  t.diagnostic(JSON.stringify({ statements: explicitStatements.length, answered, cannot_confirm: cannotConfirm }));
+  assert.equal(answered, explicitStatements.length * 2); assert.equal(cannotConfirm, 0);
+  f.raw("UPDATE fin_transactions SET description='ACH CREDIT ORIG CO NAME: Payer Two ORIG ID: 4826170392'");
+  const other = await f.ask(payment); reached(f, other); assert.equal(other.ledger.found, false);
+  assert.equal((await f.ask(income)).ledger.total_minor, 0);
+});
+
+test('explicit originator extraction rejects unknown, conflicting and ambiguous fields', async t => {
+  const f = ledgerFixture(t); identity(f, 'Payer One'); identity(f, 'Payer Two', 'payer-two');
+  f.add('receipt', 'FROM: Payer One', null);
+  const green = await f.ask(payment); reached(f, green); assert.equal(green.ledger.found, true);
+  for (const description of [
+    'ACH CREDIT ORIG CO NAME: Unknown Payer One ORIG ID: 4826170392',
+    'Memo ORIGINATOR: Payer One', 'Processor settlement for Payer One invoice',
+    'WIRE ORIGINATOR: Payer Two FROM: Payer One',
+    'WIRE FROM: Payer One ORIGINATOR: Payer Two',
+    'WIRE ORIGINATOR: Payer One; ORIGINATOR: Payer Two',
+    'ACH CREDIT ORIG CO NAME: Payer One Extra ORIG ID: 4826170392',
+  ]) {
+    f.raw('UPDATE fin_transactions SET description=?', description);
+    for (const q of [payment, income]) unknown(f, await f.ask(q));
+    const amount = await f.ask(amountOnly); reached(f, amount); assert.equal(amount.ledger.found, true);
+  }
+  f.raw("UPDATE fin_entities SET display_label='Shared Supplier' WHERE entity_slug IN ('payer-one','payer-two')");
+  f.raw("UPDATE fin_transactions SET description='ACH CREDIT ORIG CO NAME: Shared Supplier ORIG ID: 4826170392'");
+  for (const q of [payment, income]) unknown(f, await f.ask(q));
+});
+
+test('render inventory: every ledger answer kind and refusal keeps identifiers behind one boundary', async t => {
+  const token = 'AB4826CD1703EF9258';
+  const f = ledgerFixture(t); identity(f, 'Payer One');
+  f.add('receipt', 'AB12', 'Payer One');
+  const green = await f.ask(payment); reached(f, green); assert.match(green.answer, /AB12/);
+  f.raw('UPDATE fin_transactions SET description=?', token);
+  f.add('expense-one', token, token, { direction: 'outflow', date: '2026-08-05' });
+  f.add('expense-two', token, token, { direction: 'outflow', date: '2026-09-05' });
+  f.add('expense-three', token, token, { direction: 'outflow' });
+  f.raw('UPDATE fin_transactions SET category=?,category_basis_state=\'confirmed\'', token);
+  const kinds = new Set();
+  for (const [kind, question] of [
+    ['balance', 'What is my balance?'], ['totals', 'How much money came in October 2026?'],
+    ['payment', payment], ['deposits', 'Show my deposits in October 2026'],
+    ['largest', 'What were my largest expenses in October 2026?'],
+    ['merchant', 'Show income by merchant in October 2026'],
+    ['category', 'Show spend by category in October 2026'],
+    ['recurring', 'What recurring subscriptions am I paying for, and how much per month?'],
+    ['transfers', 'How much did I transfer between my own accounts in October 2026?'],
+  ]) {
+    const body = await f.ask(question);
+    assert.equal(body.ledger?.kind, kind, `${kind} renderer reached`); kinds.add(kind);
+    assert.equal(f.documentCalls, 0);
+    assert.ok(!JSON.stringify(body).includes(token), `${kind} text and structured fields`);
+    if (['payment','deposits','largest','merchant','category','recurring'].includes(kind)) {
+      assert.ok(body.citations.length > 0); assert.match(body.answer, /\[redacted\]/);
+    }
+  }
+  assert.equal(kinds.size, 9, 'complete classifier kind inventory');
+  f.raw("UPDATE fin_transactions SET payee=NULL WHERE direction='inflow'");
+  unknown(f, await f.ask(payment)); unknown(f, await f.ask(income));
+  // Both successful and refused coverage/citation renderers must validate
+  // structured date slots instead of trusting arbitrary stored text.
+  f.raw('UPDATE bank_feed_items SET last_synced_at=?', token);
+  const sync = await f.ask(amountOnly); reached(f, sync);
+  assert.ok(!JSON.stringify(sync).includes(token), 'sync metadata boundary');
+  f.raw("UPDATE fin_account_coverage SET coverage_status='partial',covered_to='2026-99-99'");
+  const coverage = await f.ask(payment);
+  assert.equal(coverage.gaps[0].reason, 'period_outside_coverage');
+  assert.equal(coverage.gaps[0].accounts[0].covered_to, null);
+  assert.ok(!JSON.stringify(coverage).includes(token), 'coverage refusal boundary');
+  f.raw("UPDATE fin_account_coverage SET coverage_status='complete',covered_to='2026-10-12'");
+  f.raw('UPDATE fin_accounts SET institution=?', token);
+  f.raw(`INSERT INTO fin_accounts(account_slug,entity_slug,account_kind,balance_role,mask,feed_mode,institution,provenance,basis_state,recorded_at)
+    VALUES (?,'owner','checking','asset','1234','manual',?,'owner_stated','confirmed',?)`, token.toLowerCase(), token, NOW);
+  const linked = await f.ask(payment);
+  assert.equal(linked.code, 'ledger_account_link_required');
+  assert.equal(f.first('SELECT COUNT(*) n FROM fin_accounts').n, 2, 'link decision has a real pair');
+  assert.ok(!JSON.stringify(linked).toLowerCase().includes(token.toLowerCase()), 'institution and slug refusal boundary');
+  assert.match(linked.gaps[0].detail, /\[redacted\]/);
+});
+
+test('render inventory: paired, excluded, conditional and unmatched transfer rows are nonempty and masked', async t => {
+  const f = ledgerFixture(t), token = 'AB4826CD1703EF9258';
+  f.raw(`INSERT INTO fin_accounts(account_slug,entity_slug,account_kind,balance_role,mask,feed_mode,label,provenance,basis_state,recorded_at)
+    VALUES ('reserve','owner','savings','asset','5678','manual',?,'owner_stated','confirmed',?)`, token, NOW);
+  f.raw(`INSERT INTO fin_account_coverage(account_slug,coverage_status,covered_from,covered_to,computed_at,provenance,basis_state,recorded_at)
+    VALUES ('reserve','complete','2026-01-01','2026-10-12',?,'owner_stated','confirmed',?)`, NOW, NOW);
+  f.add('outgoing', `transfer to ${token}`, null, { direction: 'outflow', cents: 3000 });
+  f.raw(`INSERT INTO fin_transactions(txn_uid,account_slug,posted_on,amount_minor,direction,description,provenance,basis_state,recorded_at)
+    VALUES ('incoming','reserve','2026-10-05',3000,'inflow','transfer from account 1234','owner_stated','confirmed',?)`, NOW);
+  f.add('unmatched', `transfer to account 8888 ref ${token}`, null, { direction: 'outflow', cents: 4000 });
+  for (const [question, excluded] of [
+    ['How much money came in October 2026?', true],
+    ['How much money came in October 2026 including transfers, including withdrawals?', false],
+    ['How much did I transfer between my own accounts in October 2026?', false],
+  ]) {
+    const body = await f.ask(question); reached(f, body);
+    assert.equal(body.ledger.transfers.length, 1, 'actual pair renderer reached');
+    assert.equal(body.ledger.transfers[0].excluded_from_lead, excluded);
+    assert.equal(body.ledger.unmatched_transfers.length, 1, 'unmatched renderer reached');
+    assert.equal(body.ledger.transfers[0].outgoing.description, maskLedgerCandidateField(`transfer to ${token}`));
+    assert.ok(body.citations.length >= 3);
+    assert.ok(!JSON.stringify(body).includes(token));
+    if (excluded) assert.match(body.answer, /left out of the first figures/);
+    else assert.match(body.answer, /If these are transfers/);
+  }
+  f.raw('UPDATE fin_transactions SET description=? WHERE txn_uid=\'outgoing\'', `transfer to account 5678 memo ${token}`);
+  const kept = await f.ask('How much money came in October 2026?'); reached(f, kept);
+  assert.equal(kept.ledger.transfers.length, 1);
+  assert.equal(kept.ledger.transfers[0].excluded_from_lead, false);
+  assert.match(kept.answer, /Kept pairs:/);
+  assert.ok(!JSON.stringify(kept).includes(token));
+});
+
+test('render inventory: fixed refusals and fallback gap paths do not echo free-text metadata', async t => {
+  const token = 'AB4826CD1703EF9258';
+  const arms = [
+    ['cash_flow_unsupported', () => {}, 'What was my cash flow in October 2026?'],
+    ['merchant_selector_unsupported', () => {}, 'How much did I spend at [redacted] in October 2026?'],
+    ['merchant_selector_ambiguous', f => f.raw("UPDATE fin_transactions SET direction='outflow',payee='Tools & Supply'"), 'How much did I spend at Tools and Supply in October 2026?'],
+    ['coverage_review_required', f => f.raw("UPDATE fin_account_coverage SET basis_note='Read from a bank export covering unproven days'")],
+    ['bank_export_overlap_review_required', f => {
+      f.raw("UPDATE fin_transactions SET provenance='extracted',source_doc_uid='synthetic-export',external_id='external-one'");
+      f.add('overlap', token, null);
+      f.raw("UPDATE fin_transactions SET provenance='extracted',source_doc_uid='synthetic-export' WHERE txn_uid='overlap'");
+    }],
+    ['period_outside_coverage', f => f.raw("UPDATE fin_account_coverage SET coverage_status='partial'")],
+    ['balance_unavailable', f => f.raw("UPDATE fin_balance_snapshots SET as_of_date='2026-99-99'"), 'What is my balance?'],
+    ['unreadable_transactions', f => f.raw("UPDATE fin_transactions SET currency='EUR'")],
+    ['unsupported_currency', f => f.raw("UPDATE fin_accounts SET currency='EUR'")],
+    ['ambiguous_account', f => f.raw("UPDATE fin_accounts SET basis_state='proposed'")],
+    ['no_accounts', f => f.raw("UPDATE fin_entities SET relationship='counterparty' WHERE entity_slug='owner'")],
+    ['ledger_unavailable', f => { f.env.DB.batch = async () => { throw new Error('synthetic unavailable'); }; }],
+    ['retrieval_scope_restricted', () => {}, payment, { access: { fixture: true } }],
+    ['unsupported_question', () => {}, payment, { ledgerEligible: false }],
+  ];
+  for (const [reason, mutate, question = payment, extra = {}] of arms) {
+    const f = ledgerFixture(t); identity(f, 'Payer One'); f.add('receipt', token, 'Payer One');
+    const green = await f.ask(payment); reached(f, green); assert.equal(green.ledger.found, true);
+    f.raw('UPDATE bank_feed_items SET last_synced_at=?', token);
+    f.raw('UPDATE fin_accounts SET institution=?,label=?', token, token);
+    mutate(f);
+    const before = f.calls.length; let fallback = 0;
+    const body = await (await withLedgerAnswer({ env: f.env, question, now: Date.parse(NOW),
+      grantScope: { all: true }, scopePrincipalKind: 'owner', ...extra }, async gap => {
+      fallback++; assert.equal(gap.reason, reason, 'fallback received exact refusal');
+      return Response.json({ answer: null, gaps: [] });
+    })).json();
+    assert.equal(body.gaps[0].reason, reason, 'exact refusal decision reached');
+    assert.equal(body.ledger, undefined);
+    assert.ok(body.code === reason || fallback === 1, 'direct refusal or fallback render path reached');
+    if (!Object.keys(extra).length) assert.ok(f.calls.slice(before).some(sql => /FROM fin_accounts a/.test(sql)), 'inventory read reached');
+    assert.ok(!JSON.stringify(body).includes(token), reason);
+  }
+  t.diagnostic(JSON.stringify({ refusal_paths: arms.length, link_refusal_in_separate_test: true }));
 });

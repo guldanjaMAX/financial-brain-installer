@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createProductFixture, seedOwnedEntity } from "../../product-contract-fixture.mjs";
 import { withLedgerAnswer } from "../../../src/lib/ledger-answer.js";
+import { seedKnownPayers } from '../../ledger-known-payers-fixture.mjs';
 
 export const NOW = "2026-10-11T12:00:00Z";
 const stamp = "2026-10-11T10:00:00Z";
@@ -63,6 +64,10 @@ export async function fixture(t, scenario = "own") {
   if (t) t.after(() => f.close());
   f.modelCalls = 0;
   seedOwnedEntity(f, "owner", "Fixture Owner");
+  // Independent owner-confirmed identities precede every receipt. The bank
+  // descriptions below do not create payer authority for named-income tests.
+  seedKnownPayers(f, ['Fixture client', 'Fixture brokerage'], NOW);
+  f.raw("UPDATE fin_entities SET display_label='account 1111' WHERE entity_slug='owner'");
   f.account = (slug, mask, kind = "checking", mode = "live") => {
     const role = ["card", "loan", "line_of_credit"].includes(kind) ? "liability" : "asset";
     f.raw(`INSERT INTO fin_accounts (account_slug,entity_slug,account_kind,balance_role,mask,feed_mode,provenance,basis_state,recorded_at,institution)

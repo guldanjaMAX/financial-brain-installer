@@ -3,7 +3,13 @@ import { classifyLedgerQuestion, ledgerDay, shiftLedgerDay } from "./ledger-ques
 import { accountLinkPairsInWindow, accountLinkRequiredInWindow, effectivePeriodCovered, readEffectiveAccounts, readEffectiveBalances, readEffectiveTransactions } from "./ledger-reader.js";
 import { categoryFor, detectRecurring, isDirectedOwnedTransfer, isLoanAdvance, matchesCategory, matchesMerchant, merchantFor, normalizeMerchantText, pairOwnTransfers, senderFor, sumMinor } from "./ledger-analysis.js";
 
-const masked = account => /^\d{1,4}$/.test(account.mask || "") ? `account ****${account.mask}` : "account (mask unavailable)";
+const accountMask = account => /^\d{1,4}$/.test(account.mask || "") ? account.mask : null;
+const masked = account => accountMask(account) ? `account ****${accountMask(account)}` : "account (mask unavailable)";
+const safeDay = value => /^\d{4}-\d{2}-\d{2}$/.test(value || "") && Number.isFinite(Date.parse(value)) && ledgerDay(value) === value ? value : null;
+const safeSync = value => /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value || "") &&
+  Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value.replace(/(?<=:\d{2})Z$/, '.000Z') ? value : null;
+const accountKind = account => ['checking', 'savings', 'card', 'loan', 'line_of_credit', 'investment', 'retirement', 'escrow', 'other'].includes(account?.account_kind)
+  ? account.account_kind : 'kind unavailable';
 const money = cents => `${cents < 0 ? "-" : ""}$${Math.floor(Math.abs(cents) / 100).toLocaleString("en-US")}.${String(Math.abs(cents) % 100).padStart(2, "0")}`;
 export function maskLedgerCandidateField(text) {
   // Free-form letters can be identifiers too. Mask every long run, including
@@ -18,8 +24,8 @@ export function maskLedgerCandidateField(text) {
 }
 const safeDescription = maskLedgerCandidateField;
 const accountCoverage = accounts => accounts.map(a => ({
-  account_mask: /^\d{1,4}$/.test(a.mask || "") ? a.mask : null,
-  covered_to: a.covered_to || null, last_synced_at: a.last_synced_at || null,
+  account_mask: accountMask(a),
+  covered_to: safeDay(a.covered_to), last_synced_at: safeSync(a.last_synced_at),
 }));
 
 function payerIndex(identities) {
@@ -34,16 +40,37 @@ function payerIndex(identities) {
   return index;
 }
 
+function lookupPayer(label, identities) {
+  const key = normalizeMerchantText(label);
+  if (!identities.has(key)) return { state: 'missing' };
+  const slug = identities.get(key);
+  return slug === null ? { state: 'ambiguous' } : { state: 'unique', slug };
+}
+
 function identifiedPayer(row, identities) {
-  if (row.payee) return identities.get(normalizeMerchantText(row.payee)) || null;
+  if (row.payee) return lookupPayer(row.payee, identities);
   const description = normalizeMerchantText(row.description);
-  if (identities.get(description)) return identities.get(description);
+  const full = lookupPayer(description, identities);
+  if (full.state !== 'missing') return full;
   // Only an explicitly supported sender grammar may remove a channel wrapper.
-  // Arbitrary text before "from" is not evidence about the actual sender.
-  const directed = /^(?:(?:ach|eft|wire|zelle|bank)(?: credit)? |(?:payment|deposit|receipt|transfer) )?(?:from|by) (.+)$/.test(description);
-  if (/\b(?:from|by) /.test(description) && !directed) return null;
+  // Fields identify a candidate, never authority. A complete colliding field
+  // is terminal; stripping "payment" must not choose a different entity.
+  const directed = description.match(/^(?:(?:ach|eft|wire|zelle|bank)(?: (?:credit|transfer|payment|deposit))? |(?:payment|deposit|receipt|transfer) )?(?:from|by|orig co name|originator(?: name)?|sender(?: name)?) (.+)$/);
+  if (directed) {
+    const complete = lookupPayer(directed[1], identities);
+    if (complete.state !== 'missing') return complete;
+    // Multiple sender clauses are conflicting evidence even if the first is
+    // familiar. Do not let a reference/memo terminator hide the second clause.
+    if (/\b(?:from|by|orig co name|originator|sender)\b/.test(directed[1])) return { state: 'ambiguous' };
+    const candidate = directed[1].split(/\b(?:orig id|co id|company id|desc date|co entry descr|entry descr|sec|trace|beneficiary|for|invoice|memo|reference|ref)\b/)[0].trim();
+    const exact = lookupPayer(candidate, identities);
+    if (exact.state !== 'missing') return exact;
+    return lookupPayer(senderFor({ description: candidate }), identities);
+  }
   const opening = description.match(/^(.+?) (?:ach|eft|wire|zelle) (?:deposit|payment|receipt)$/);
-  return identities.get(opening ? opening[1] : senderFor(row)) || null;
+  if (opening) return lookupPayer(opening[1], identities);
+  if (/\b(?:from|by|orig co name|originator|sender)\b/.test(description)) return { state: 'missing' };
+  return lookupPayer(senderFor(row), identities);
 }
 
 function gapFor(reason, accounts = [], intent = {}) {
@@ -59,11 +86,10 @@ function gapFor(reason, accounts = [], intent = {}) {
   if (reason === 'ledger_account_link_required') {
     // Display one relevant pair; the admission decision checks every edge.
     const pair = accounts.flatMap(a => accountLinkPairsInWindow(a, intent))[0];
-    const describe = (a, role) => `${role}: ${String(a?.institution || 'institution unavailable').replace(/[\r\n]/g, ' ').slice(0, 100)}, ${masked(a || {})}, ${a?.account_kind || 'kind unavailable'}`;
-    const slug = a => /^[a-z0-9][a-z0-9_-]{0,63}$/.test(a?.account_slug || '') ? a.account_slug : '<account>';
+    const describe = (a, role) => `${role}: ${a?.institution ? safeDescription(a.institution) : 'institution unavailable'}, ${masked(a || {})}, ${accountKind(a)}`;
     return { type: 'ledger_not_consulted', reason, code: reason,
       ...(intent.from ? { from: intent.from, to: intent.to } : {}),
-      detail: `Confirm whether these records describe the same account: ${describe(pair?.manual, 'manual import')}; ${describe(pair?.live, 'live feed')}. No money was removed. Preview with brain ledger link-accounts <manifest> --manual ${slug(pair?.manual)} --live ${slug(pair?.live)} --preview. Approve only if they are the same account; use --apply --approve <hash>. An outdated link can be reviewed with --unlink --preview.` };
+      detail: `Confirm whether these records describe the same account: ${describe(pair?.manual, 'manual import')}; ${describe(pair?.live, 'live feed')}. No money was removed. Preview with brain ledger link-accounts <manifest> --manual <manual-account> --live <live-account> --preview. Use the original account slugs from your local ledger inventory in those placeholders. Approve only if they are the same account; use --apply --approve <hash>. An outdated link can be reviewed with --unlink --preview.` };
   }
   const coverage = accountCoverage(accounts);
   const detail = coverage.length ? coverage.map(a =>
@@ -85,10 +111,10 @@ function citation(row, account, index, balance = false) {
     n: index + 1, source: "ledger", source_kind: "ledger",
     ref: `ledger:${balance ? "balance" : "transaction"}:${row.id}`,
     title: `${masked(account)}: ${money(amount)} on ${day}`,
-    account_mask: /^\d{1,4}$/.test(account.mask || "") ? account.mask : null,
+    account_mask: accountMask(account),
     posted_on: day, amount_minor: amount, currency: row.currency,
-    last_synced_at: row.last_synced_at || null,
-    supplied_by: member?.feed_mode || "unknown",
+    last_synced_at: safeSync(row.last_synced_at),
+    supplied_by: ['manual', 'live'].includes(member?.feed_mode) ? member.feed_mode : "unknown",
     ts: day, date_reliable: true, text_source: "native", text_reliable: true,
   };
 }
@@ -155,7 +181,7 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
   if (intent.kind === "balance") {
     const balances = await readEffectiveBalances(env, accounts, intent);
     if (balances.length !== accounts.length || balances.some(b => b.basis_state !== "confirmed" ||
-      !Number.isSafeInteger(b.current_minor) || b.currency !== "USD")) return { reason: "balance_unavailable" };
+      !Number.isSafeInteger(b.current_minor) || b.currency !== "USD" || !safeDay(b.as_of_date))) return { reason: "balance_unavailable" };
     const citations = balances.map((row, i) => citation(row, accounts.find(a => a.account_slug === row.effective_account_slug), i, true));
     return { answer: balances.map((row, i) => `${masked(accounts.find(a => a.account_slug === row.effective_account_slug))}: ${money(row.current_minor)} as of ${row.as_of_date} [${i + 1}].`).join("\n"),
       citations, ledger: { kind: "balance", accounts: citations.map(c => ({ account_mask: c.account_mask, current_minor: c.amount_minor, as_of: c.posted_on })) } };
@@ -177,8 +203,10 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     : { from: shiftLedgerDay(intent.from, -6), to: shiftLedgerDay(intent.to, 6), payerIdentities: namedPayer });
   const allRows = namedPayer ? snapshot.rows : snapshot;
   const identities = namedPayer ? payerIndex(snapshot.identities) : null;
-  const wanted = namedPayer ? identities.get(normalizeMerchantText(namedIncome ? intent.match : intent.counterparty)) : null;
-  const payerMatches = row => Boolean(wanted && identifiedPayer(row, identities) === wanted);
+  const wanted = namedPayer ? lookupPayer(namedIncome ? intent.match : intent.counterparty, identities) : null;
+  const selectorAmbiguous = wanted?.state === 'ambiguous';
+  const payers = namedPayer ? new Map(allRows.map(row => [row.id, identifiedPayer(row, identities)])) : null;
+  const payerMatches = row => wanted?.state === 'unique' && payers.get(row.id)?.state === 'unique' && payers.get(row.id).slug === wanted.slug;
   const merchantMatches = namedIncome ? payerMatches : row => matchesMerchant(row, intent.match);
   const inWindow = row => row.posted_on >= intent.from && row.posted_on <= intent.to;
   const selected = new Set(accounts.map(a => a.account_slug));
@@ -193,33 +221,36 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
       // Every in-window inflow must have positive identity evidence before a
       // named absence or zero can be certified. Amount filters only narrow
       // confirmed matches; they cannot hide an unidentified receipt.
-      if (namedPayer && !identifiedPayer(row, identities)) unattributed.push(row);
+      if (namedPayer && (selectorAmbiguous || payers.get(row.id).state !== 'unique')) unattributed.push(row);
       else if ((!payment || intent.amountMinor === null || row.amount_minor === intent.amountMinor) &&
         (!namedPayer || payerMatches(row))) matched.push(row);
     }
     // A named-income answer with unknown receipts must not flow into the
     // complete-total renderer, including its zero and conditional-total keys.
     // Fully attributed income retains the usual transfer and grouping rules.
-    if (payment || unattributed.length) {
+    if (payment || unattributed.length || selectorAmbiguous) {
       const citations = [...matched, ...unattributed].map((row, i) => citation(row, bySlug.get(row.effective_account_slug), i));
       let answer = matched.length
         ? matched.map((row, i) => `Found a deposit of ${money(row.amount_minor)} posted ${row.posted_on} in ${masked(bySlug.get(row.effective_account_slug))}: ${safeDescription(row.description)} [${i + 1}].`).join("\n")
-        : unattributed.length ? "" : `No matching deposit in ${accounts.map(masked).join(", ")} between ${intent.from} and ${intent.to}; the bank feed covers through ${accounts.map(a => `${masked(a)}: ${a.live?.covered_to || "unknown (manual records only)"}`).join("; ")}.`;
+        : unattributed.length || selectorAmbiguous ? "" : `No matching deposit in ${accounts.map(masked).join(", ")} between ${intent.from} and ${intent.to}; the bank feed covers through ${accounts.map(a => `${masked(a)}: ${safeDay(a.live?.covered_to) || "unknown (manual records only)"}`).join("; ")}.`;
       const confirmedSubtotal = namedIncome && matched.length ? sumMinor(matched) : null;
       if (namedIncome) answer = `Income from ${safeDescription(intent.match)} is not yet known for ${intent.from} through ${intent.to}.` +
         (matched.length ? `\nConfirmed subtotal of attributed deposits (before transfer exclusions): ${money(confirmedSubtotal)}.\n${answer}` : "");
       const gaps = [];
       const unattributedCitations = unattributed.map((_, i) => matched.length + i + 1);
-      if (unattributed.length) {
-        const detail = `I found ${unattributed.length} ${unattributed.length === 1 ? "deposit that doesn't" : "deposits that don't"} show who paid between ${intent.from} and ${intent.to}; I can't confirm whether any came from the requested payer.`;
+      if (unattributed.length || selectorAmbiguous) {
+        const detail = selectorAmbiguous
+          ? `The requested payer label is ambiguous: it identifies more than one confirmed entity. I can't confirm which payer you mean. There are ${unattributed.length} candidate deposits between ${intent.from} and ${intent.to}; use a unique legal name or owner label.`
+          : `I found ${unattributed.length} ${unattributed.length === 1 ? "deposit that doesn't" : "deposits that don't"} show who paid between ${intent.from} and ${intent.to}; I can't confirm whether any came from the requested payer.`;
         answer += `${answer ? "\n" : ""}${detail}`;
         for (const [i, row] of unattributed.entries()) answer += `\nUnattributed deposit: ${money(row.amount_minor)} posted ${row.posted_on} in ${masked(bySlug.get(row.effective_account_slug))}: ${safeDescription(row.description)} [${unattributedCitations[i]}].`;
         gaps.push({ type: "ledger_attribution_unknown", reason: "sender_attribution_unknown",
           from: intent.from, to: intent.to, count: unattributed.length, citations: unattributedCitations, detail });
       }
       return { answer, citations, gaps,
-        ...(unattributed.length ? { evidence_gate: { supported: true, complete: false, partial: true, reason: "sender_attribution_unknown" } } : {}),
-        ledger: { kind: intent.kind, found: matched.length ? true : unattributed.length ? null : false,
+        ...(unattributed.length || selectorAmbiguous ? { evidence_gate: { supported: true, complete: false, partial: true, reason: "sender_attribution_unknown" } } : {}),
+        ledger: { kind: intent.kind, found: matched.length ? true : unattributed.length || selectorAmbiguous ? null : false,
+        ...(selectorAmbiguous ? { payer_selector_ambiguous: true } : {}),
         ...(namedIncome ? { total_minor: null, lead_total_minor: null, confirmed_subtotal_minor: confirmedSubtotal,
           confirmed_citations: matched.map((_, i) => i + 1) } : { amount_minor: intent.amountMinor }),
         ...(unattributed.length ? { unattributed_count: unattributed.length, unattributed_citations: unattributedCitations } : {}),
@@ -267,13 +298,13 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
   const candidateMark = row => pairing.candidateRows.has(row.id) ? " (possible move between your own accounts, included)" : "";
   const publicRow = row => ({ ...cite(row), description: safeDescription(row.description || row.payee || "Transaction"), possible_own_transfer: pairing.candidateRows.has(row.id) });
   const rowLine = row => `${money(row.amount_minor)} on ${row.posted_on} in ${masked(bySlug.get(row.effective_account_slug))}: ${safeDescription(row.description || row.payee || "Transaction")}${candidateMark(row)} ${refs([row])}`;
-  const bounded = `Accounts: ${accounts.map(masked).join(", ")}; ${intent.from} through ${intent.to}; ${accounts.map(a => `${masked(a)}: covered through ${a.covered_to || "unknown"}`).join("; ")}.`;
+  const bounded = `Accounts: ${accounts.map(masked).join(", ")}; ${intent.from} through ${intent.to}; ${accounts.map(a => `${masked(a)}: covered through ${safeDay(a.covered_to) || "unknown"}`).join("; ")}.`;
   const ledger = { kind: intent.kind, from: intent.from, to: intent.to, accounts: accountCoverage(accounts),
     includes_own_transfers: true, matched_transfer_count: 0, candidate_transfer_count: pairs.length,
     lead: leadExcluded.size ? "default_exclusions" : "gross", default_exclusions: summary, flip: [] };
   const conditionalAccounts = accounts.map(account => {
     const ownRows = withoutCandidates(rows.filter(row => row.effective_account_slug === account.account_slug));
-    return { account_mask: account.mask, credits_minor: sumMinor(ownRows.filter(r => r.direction === "inflow")),
+    return { account_mask: accountMask(account), credits_minor: sumMinor(ownRows.filter(r => r.direction === "inflow")),
       debits_minor: sumMinor(ownRows.filter(r => r.direction === "outflow")), transaction_count: ownRows.length };
   });
   ledger.if_own_transfers = { accounts: conditionalAccounts };
@@ -282,7 +313,7 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
   if (intent.kind === "totals") {
     ledger.accounts = accounts.map(account => {
       const ownRows = activity.filter(row => row.effective_account_slug === account.account_slug);
-      return { account_mask: account.mask, credits_minor: sumMinor(ownRows.filter(r => r.direction === "inflow")),
+      return { account_mask: accountMask(account), credits_minor: sumMinor(ownRows.filter(r => r.direction === "inflow")),
         debits_minor: sumMinor(ownRows.filter(r => r.direction === "outflow")), transaction_count: ownRows.length };
     });
     answer = ledger.accounts.map((total, i) => {
@@ -291,7 +322,7 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     }).join("\n");
     ledger.lead_accounts = accounts.map(account => {
       const ownRows = withoutLead(rows.filter(row => row.effective_account_slug === account.account_slug));
-      return { account_mask: account.mask, credits_minor: sumMinor(ownRows.filter(r => r.direction === "inflow")),
+      return { account_mask: accountMask(account), credits_minor: sumMinor(ownRows.filter(r => r.direction === "inflow")),
         debits_minor: sumMinor(ownRows.filter(r => r.direction === "outflow")), transaction_count: ownRows.length };
     });
     leadDetail = ledger.lead_accounts.map((total, i) => `${masked(accounts[i])}, ${intent.from} through ${intent.to}: money in ${money(total.credits_minor)}; money out ${money(total.debits_minor)}.`).join("\n");
@@ -301,7 +332,7 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
       ledger.net_label = "money in minus money out, not accounting profit or cash flow";
       leadDetail = `Money in minus money out, not accounting profit or cash flow: ${money(ledger.net_minor)}.\n${leadDetail}`;
       for (const account of accounts.filter(a => !moveKind(a.account_kind)))
-        leadDetail += `\n${masked(account)}: ${account.account_kind} account, left out of money in minus money out; only checking, savings and card accounts contribute.`;
+        leadDetail += `\n${masked(account)}: ${accountKind(account)} account, left out of money in minus money out; only checking, savings and card accounts contribute.`;
     }
   } else if (["largest", "deposits"].includes(intent.kind)) {
     const found = activity.filter(row => row.direction === intent.direction).sort((a, b) =>
