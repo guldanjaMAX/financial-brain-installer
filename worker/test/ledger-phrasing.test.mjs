@@ -150,8 +150,8 @@ test("named arrival absence is covered, scoped, token matched and never a model 
   const absent = await f.ask("Did the payment from Absent Payer reach account 4417?");
   // The window contains a deposit with only a generic opening description.
   assert.equal(absent.ledger?.found, null);
-  assert.equal(absent.ledger.unattributed_count, 1);
-  assert.equal(absent.citations[0].amount_minor, 10001);
+  assert.equal(absent.ledger.inflow_count, 2);
+  assert.deepEqual(absent.citations.map(c => c.amount_minor), [1234, 10001]);
   assert.match(absent.answer, /2026-08-14.*2026-10-12/);
   assert.ok(f.seen.sql.slice(start).some(sql => /JOIN fin_transactions/.test(sql)), "absence read the window");
   f.raw("UPDATE fin_account_coverage SET covered_from='2026-10-01'");

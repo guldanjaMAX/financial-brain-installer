@@ -4,50 +4,30 @@ export const normalizeLedgerText = value => (String(value || "").normalize("NFKC
 // Keep literal conjunctions distinct: "A & B", "A and B" and "A B" are
 // different selectors. A displayed label must use the same normalization.
 export const normalizeMerchantText = value => (String(value || "").normalize("NFKC").toLowerCase().match(/[\p{L}\p{N}]+|&/gu) || []).join(" ");
-const genericSenders = new Set([
-  "zelle", "zelle payment", "paypal", "venmo", "bank", "ach", "ach credit", "ach payment", "eft", "eft credit", "deposit",
-  "mobile deposit", "direct deposit", "transfer", "online transfer", "bank transfer",
-  "wire", "wire transfer", "payment", "payments", "receipt", "payroll", "settlement",
-  "unknown", "unknown sender", "unknown payer", "unknown merchant", "none", "unavailable", "not available", "n a",
-]);
-// One ephemeral identity result serves payment presence and exact income sums.
-// Preserve the payment prefix rule, but a partial identity cannot prove that
-// this is a different payer. No query or parsed identity is stored.
-export function senderIdentity(row, query = "") {
-  const structured = Boolean(row.payee);
-  // Stop before incidental clauses BEFORE looking for a directed sender.
-  const fullText = normalizeMerchantText(row.description);
-  const text = fullText.split(/\b(?:for|invoice|memo|reference|ref)\b/)[0].trim();
+export function senderFor(row) {
+  if (row.payee) return normalizeMerchantText(row.payee);
+  const text = normalizeMerchantText(row.description);
   const directed = text.match(/\b(?:from|by) (.+)/);
-  const incidental = !directed && /\b(?:from|by) /.test(fullText.slice(text.length));
-  const processing = directed && /\b(?:processed|processing|handled)\b/.test(text.slice(0, directed.index));
-  let sender = structured ? normalizeMerchantText(row.payee) : processing || incidental ? "" : directed ? directed[1] : text;
-  if (!structured && !genericSenders.has(sender)) sender = sender.replace(/\s+(?:deposit|payment|receipt|payroll|settlement)$/, "");
-  if (genericSenders.has(sender)) sender = "";
-  const attributed = Boolean(sender && (structured || directed));
-  const wanted = normalizeMerchantText(query), plain = normalizeLedgerText(sender), words = normalizeLedgerText(query);
-  const paymentMatch = Boolean(plain && words && (structured
-    ? words.split(" ").every(word => plain.split(" ").includes(word))
-    : plain === words || plain.startsWith(`${words} `)));
-  const merchantMatch = Boolean(sender && wanted && sender === wanted);
-  const partial = paymentMatch || (plain && words.startsWith(`${plain} `));
-  return { sender, attributed, paymentMatch, merchantMatch,
-    attribution: merchantMatch ? "same" : attributed && !partial ? "different" : "unknown" };
-}
-export function senderFor(row, { requireAttribution = false } = {}) {
-  const identity = senderIdentity(row);
-  return requireAttribution && !identity.attributed ? "" : identity.sender;
+  // A subject after "for" is never the sender, even without an explicit
+  // payee. Preserve the opening-sender form used by plain bank descriptions.
+  return (directed ? directed[1] : text).split(/\b(?:for|invoice|memo|reference|ref)\b/)[0].trim()
+    .replace(/\s+(?:deposit|payment|receipt|payroll|settlement)$/, "");
 }
 export const merchantFor = row => row.direction === "inflow" ? senderFor(row) : normalizeMerchantText(row.payee || row.description);
 const containsTokens = (haystack, needle) => Boolean(needle) && ` ${haystack} `.includes(` ${needle} `);
 // An explicit payee controls attribution. A memo about another merchant cannot
 // turn a payment to this payee into that merchant's income or spend.
-export const matchesMerchant = (row, query) => row.direction === "inflow" ? senderIdentity(row, query).merchantMatch
-  : row.payee ? merchantFor(row) === normalizeMerchantText(query)
-    : containsTokens(normalizeMerchantText(row.description), normalizeMerchantText(query));
+export const matchesMerchant = (row, query) => row.payee || row.direction === "inflow"
+  ? merchantFor(row) === normalizeMerchantText(query)
+  : containsTokens(normalizeMerchantText(row.description), normalizeMerchantText(query));
 export function matchesSender(row, wanted) {
   if (!wanted.length) return true;
-  return senderIdentity(row, wanted.join(" ")).paymentMatch;
+  const sender = normalizeLedgerText(senderFor(row));
+  if (row.payee) {
+    const words = new Set(sender.split(" "));
+    return wanted.every(word => words.has(word));
+  }
+  return sender === wanted.join(" ") || sender.startsWith(`${wanted.join(" ")} `);
 }
 export function categoryFor(row) {
   const category = normalizeLedgerText(row.category);

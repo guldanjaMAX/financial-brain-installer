@@ -138,9 +138,13 @@ test(`C17/C18 sender control amount=${amount} payee=${Boolean(payee)}`, async t 
   const payer = await f.ask(`Did the payment ${amount ? 'of $813.27 ' : ''}from Outside Buyer arrive ${PERIOD}?`);
   reached(f, payer, 'payment'); assert.equal(payer.ledger.found, true);
   const subject = await f.ask(`Did the payment ${amount ? 'of $813.27 ' : ''}from Studio Buyer arrive ${PERIOD}?`);
-  assert.equal(subject.ledger.found, false);
+  reached(f, subject, 'payment');
+  assert.equal(subject.ledger.found, null);
+  assert.equal(subject.evidence_gate.complete, false);
   const income = await f.ask(`How much income came from Outside Buyer ${PERIOD}?`);
-  assert.equal(income.ledger.total_minor, 81327);
+  assert.equal(income.ledger.total_minor, null);
+  assert.equal(income.ledger.attributed_subtotal_minor, 81327);
+  assert.equal(income.evidence_gate.complete, false);
 });
 
 test('C19 distinct literal conjunction merchants remain distinct', async t => {
@@ -212,7 +216,11 @@ for (const withAmount of [false, true]) test(`${withAmount ? 'REGRESSION PM02' :
   const body = await f.ask(`Did the payment ${withAmount ? 'of $813.27 ' : ''}from Studio Buyer arrive ${PERIOD}?`);
   reached(f, body, 'payment');
   assert.equal(f.seen.rowCounts.at(-1), 1, 'the conflicting receipt was actually read');
-  assert.equal(body.ledger.found, false, 'a memo mention must not confirm the wrong payer');
+  assert.equal(body.ledger.found, null, 'a memo mention proves neither receipt nor absence');
+  assert.equal(body.evidence_gate.complete, false);
+  const positive = await f.ask(`Did the payment from Outside Buyer arrive ${PERIOD}?`);
+  reached(f, positive, 'payment');
+  assert.equal(positive.ledger.found, true);
 });
 
 for (const payer of ['Settlement Platform', 'Investment Platform']) test(`${payer.startsWith('Investment') ? 'REGRESSION PM09' : 'CONTROL PM09'}: a payer word must not select an account kind`, async t => {
@@ -229,7 +237,14 @@ for (const payee of ['Outside Buyer', null]) test(`${payee ? 'CONTROL PM03' : 'R
   f.add('receipt', 'operating', 81327, 'inflow', 'Zelle from Outside Buyer for Studio Buyer invoice', { payee });
   const body = await f.ask(`How much income came from Studio Buyer ${PERIOD}?`); reached(f, body, 'merchant');
   assert.equal(f.seen.rowCounts.at(-1), 1);
-  assert.equal(body.ledger.lead_total_minor, 0, 'memo subject is not sender attribution');
+  assert.equal(body.ledger.lead_total_minor, null, 'memo subject cannot certify a payer zero');
+  assert.equal(body.ledger.attributed_subtotal_minor, null);
+  assert.equal(body.ledger.found, null);
+  assert.equal(body.evidence_gate.complete, false);
+  const positive = await f.ask(`How much income came from Outside Buyer ${PERIOD}?`);
+  reached(f, positive, 'merchant');
+  assert.equal(positive.ledger.attributed_subtotal_minor, 81327);
+  assert.equal(positive.ledger.found, true);
 });
 
 for (const kind of ['checking', 'card']) test(`C20 cash flow refuses; supported surplus keeps the ${kind} purchase`, async t => {
