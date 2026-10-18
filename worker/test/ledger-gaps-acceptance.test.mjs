@@ -292,3 +292,94 @@ test('T4 unattributed candidates honor amount, period, account and active posted
   assert.equal(amountOnly.ledger.found, true);
   assert.equal(amountOnly.citations.length, 1);
 });
+
+const namedIncome = 'How much income came from Payer One in June 2034?';
+const namedPayment = 'Did the payment of $813.27 from Payer One arrive in June 2034?';
+async function attributionFixture(t) {
+  const f = await fixture(t); f.account(); f.complete('operating', '2034-06-01', '2034-06-30');
+  return f;
+}
+function partialIncome(body, amounts, confirmed = null) {
+  assert.equal(body.ledger?.kind, 'merchant', 'named-income decision reached');
+  assert.ok(body.sql.some(sql => /JOIN fin_transactions/.test(sql)), 'actual transaction snapshot reached');
+  assert.equal(body.evidence_gate.complete, false);
+  assert.equal(body.evidence_gate.partial, true);
+  assert.equal(body.gaps[0].reason, 'sender_attribution_unknown');
+  assert.equal(body.ledger.total_minor, null);
+  assert.equal(body.ledger.lead_total_minor, null);
+  assert.equal(body.ledger.found, confirmed === null ? null : true);
+  assert.equal(body.ledger.confirmed_subtotal_minor, confirmed);
+  assert.equal(body.ledger.unattributed_count, amounts.length);
+  assert.deepEqual(body.ledger.unattributed_citations.map(n => body.citations[n - 1].amount_minor), amounts);
+  assert.doesNotMatch(body.answer, /\$0\.00|No matching|no (?:income|deposits|transactions)/i);
+}
+
+for (const payee of ['ACH CREDIT CCD', 'ACH PPD ref 71935', 'Wire credit reference QX73',
+  'Bank credit reference QX73', 'Direct deposit CCD', 'CCD',
+  'Unknown Payer One', 'Unidentified Payer One', 'Unattributed Payer One', 'Not provided Payer One'])
+test(`T4 attribution precedes token matching and handles bank payee metadata: ${payee}`, async t => {
+  const f = await attributionFixture(t);
+  f.add('receipt', 81327, 'inflow', 'Processor settlement for Payer One invoice', { payee: 'Payer One' });
+  assert.equal((await f.ask(namedPayment)).ledger.found, true);
+  assert.equal((await f.ask(namedIncome)).ledger.total_minor, 81327);
+  f.raw("UPDATE fin_transactions SET payee=? WHERE txn_uid='receipt'", payee);
+  assertUnknownPayment(await f.ask(namedPayment), [[81327, '2034-06-15']]);
+  partialIncome(await f.ask(namedIncome), [81327]);
+  const amount = await f.ask('Did the payment of $813.27 arrive in June 2034?');
+  assert.equal(amount.ledger.found, true); assert.equal(amount.evidence_gate.complete, true);
+});
+
+test('T4 named income keeps a confirmed subtotal separate from every unknown receipt', async t => {
+  const f = await attributionFixture(t);
+  f.add('opaque', 81327, 'inflow', 'Processor settlement');
+  partialIncome(await f.ask(namedIncome), [81327]);
+  f.add('known', 49123, 'inflow', 'ACH from Payer One', { payee: 'Payer One', day: '2034-06-13' });
+  f.add('other', 99999, 'inflow', 'ACH from Payer Two', { payee: 'Payer Two' });
+  const mixed = await f.ask(namedIncome);
+  partialIncome(mixed, [81327], 49123);
+  assert.deepEqual(mixed.citations.map(c => [c.n, c.amount_minor, c.posted_on]),
+    [[1, 49123, '2034-06-13'], [2, 81327, '2034-06-15']]);
+  assert.match(mixed.answer, /Confirmed subtotal.*\$491\.23/);
+  assert.doesNotMatch(mixed.answer, /999\.99|1,304\.50/);
+  f.raw("UPDATE fin_transactions SET payee='Payer One' WHERE txn_uid='opaque'");
+  const resolved = await f.ask(namedIncome);
+  assert.equal(resolved.evidence_gate.complete, true);
+  assert.equal(resolved.ledger.total_minor, 130450);
+});
+
+test('T4 named-income uncertainty honors selected accounts, period and active inflows', async t => {
+  const f = await attributionFixture(t); f.account('reserve', '357'); f.complete('reserve', '2034-06-01', '2034-06-30');
+  f.add('known-other', 71327, 'inflow', 'ACH from Payer Two', { payee: 'Payer Two' });
+  f.add('wrong-month', 81327, 'inflow', 'Processor settlement', { day: '2034-05-31' });
+  f.add('wrong-account', 81327, 'inflow', 'Processor settlement', { account: 'reserve' });
+  f.add('outflow', 81327, 'outflow', 'Processor settlement');
+  for (const id of ['pending', 'removed', 'superseded']) f.add(id, 81327, 'inflow', 'Processor settlement');
+  f.raw("UPDATE fin_transactions SET pending=1 WHERE txn_uid='pending'");
+  f.raw("UPDATE fin_transactions SET removed_at=?,removal_reason='synthetic' WHERE txn_uid='removed'", NOW);
+  f.raw("UPDATE fin_transactions SET superseded_by_id=999 WHERE txn_uid='superseded'");
+  const q = namedIncome.replace('in June', 'in account 26 in June');
+  const control = await f.ask(q);
+  assert.equal(control.ledger.total_minor, 0); assert.equal(control.evidence_gate.complete, true);
+  assert.equal(f.first('SELECT COUNT(*) n FROM fin_transactions').n, 7);
+  f.add('eligible', 91731, 'inflow', 'Processor settlement');
+  partialIncome(await f.ask(q), [91731]);
+});
+
+for (const identifier of ['482617039258', '4826.1703.9258', '4826-1703-9258',
+  '4826 / 1703 / 9258', '4826_1703_9258', 'AB48.26CD.1703.9258', 'AB48 26CD 1703 9258',
+  'ABCD.EF12.1703.9258', 'GB82 WEST 1234 5698 7654 9258'])
+test(`T4 account identifiers expose at most their final four characters: ${identifier}`, async t => {
+  const f = await attributionFixture(t);
+  f.add('receipt', 81327, 'inflow', `ACH credit account ${identifier}`, { payee: 'Payer One' });
+  for (const known of [true, false]) {
+    if (!known) f.raw("UPDATE fin_transactions SET payee=NULL WHERE txn_uid='receipt'");
+    const body = await f.ask(namedPayment);
+    assert.equal(body.ledger.found, known ? true : null, 'receipt renderer reached in both arms');
+    assert.equal(body.citations[0].amount_minor, 81327);
+    assert.equal(body.citations[0].posted_on, '2034-06-15');
+    assert.match(body.answer, /\$813\.27/);
+    assert.match(body.answer, /\*{4}9258/);
+    assert.ok(!JSON.stringify(body).includes(identifier), 'no full identifier in any public response field');
+    assert.doesNotMatch(body.answer, /4826|1703|AB48|26CD|ABCD|EF12|GB82|WEST|1234|5698|7654/);
+  }
+});

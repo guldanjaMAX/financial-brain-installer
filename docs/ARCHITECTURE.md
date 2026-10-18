@@ -856,6 +856,19 @@ establish the underlying payer. Such answers carry a `sender_attribution_unknown
 gap and incomplete, partial evidence; `ledger.found` is `null` unless another
 receipt independently matches the sender. Confirmed matches remain visible beside
 the unknown candidates. Amount-only queries retain their exact-cent contract.
+Attribution quality is checked before sender tokens, so an explicit unknown label
+cannot become a confirmed match just because it contains the requested name.
+Generic channel and reference metadata is unattributed in either the payee field
+or the description. Named merchant-income questions apply the same uncertainty
+rule across all eligible inflows. While candidates remain, `total_minor` and
+`lead_total_minor` are null, and `found` is null unless an independent receipt
+matches. A nonempty confirmed set has a separately labeled
+`confirmed_subtotal_minor` before transfer exclusions and `confirmed_citations`;
+an empty confirmed set leaves that subtotal null. Candidates retain individual
+amounts, dates and citations. These partial answers never enter the complete-total
+or conditional-transfer-total renderer. Description account identifiers, including
+separated numeric and alphanumeric forms, expose at most their final four
+characters; exact money and posting-date facts come from the ledger columns.
 Without a
 supplied period, a named payment without an amount searches 60 days; exact
 amounts retain the 30-day default. Recent deposits use 14 days, and largest

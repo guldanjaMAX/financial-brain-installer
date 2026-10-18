@@ -5,7 +5,15 @@ import { categoryFor, detectRecurring, isDirectedOwnedTransfer, isLoanAdvance, m
 
 const masked = account => /^\d{1,4}$/.test(account.mask || "") ? `account ****${account.mask}` : "account (mask unavailable)";
 const money = cents => `${cents < 0 ? "-" : ""}$${Math.floor(Math.abs(cents) / 100).toLocaleString("en-US")}.${String(Math.abs(cents) % 100).padStart(2, "0")}`;
-const safeDescription = text => String(text || "Deposit").replace(/\d(?:[\s-]*\d){4,}/g, "[redacted]").slice(0, 240);
+function safeDescription(text) {
+  const hide = value => `[redacted] ****${value.replace(/[^\p{L}\p{N}]/gu, "").slice(-4)}`;
+  // Bank identifiers can contain letters and separators. Mask before truncating
+  // so a long identifier cannot leave a visible prefix at the display boundary.
+  return String(text || "Deposit").normalize("NFKC")
+    .replace(/\b((?:account|acct|iban|routing)(?:\s+(?:number|no|id))?\s*[:#.-]?\s*)((?:[\p{L}]{1,4}[\s\p{P}]+)*[\p{L}]*\d[\p{L}\p{N}]*(?:[\s\p{P}]+(?:[\p{L}]{1,4}[\s\p{P}]+)*[\p{L}]*\d[\p{L}\p{N}]*)*)/giu,
+      (full, label, value) => value.replace(/[^\p{L}\p{N}]/gu, "").length > 4 ? label + hide(value) : full)
+    .replace(/\d(?:[\s\p{P}]*\d){4,}/gu, hide).slice(0, 240);
+}
 const accountCoverage = accounts => accounts.map(a => ({
   account_mask: /^\d{1,4}$/.test(a.mask || "") ? a.mask : null,
   covered_to: a.covered_to || null, last_synced_at: a.last_synced_at || null,
@@ -16,17 +24,22 @@ function senderIsUnattributed(row) {
   // A channel, processor or generic bank label can describe a real receipt
   // without identifying its payer. A failed name match is not absence proof.
   const words = sender.match(/[\p{L}\p{N}]+/gu) || [];
-  if (!words.length || words.every(word => /^(?:\d+|ach|eft|wire|zelle|bank|cash|check|cheque|credit|direct|deposit|payment|receipt|transfer|settlement|online|mobile|unknown|unidentified|unattributed|unavailable|not|provided|payer|sender|customer|client|merchant|the|a|an)$/.test(word))) return true;
+  if (!words.length || words.every(word => /^(?:\d+|ach|eft|wire|zelle|bank|cash|check|cheque|credit|direct|deposit|payment|receipt|transfer|settlement|online|mobile|ccd|ppd|ctx|web|tel|sepa|swift|ref|reference|trace|id|number|no|unknown|unidentified|unattributed|unavailable|not|provided|payer|sender|customer|client|merchant|the|a|an)$/.test(word))) return true;
   if (/^(?:unknown|unidentified|unattributed|unavailable|not provided|n a)(?: |$)/.test(sender)) return true;
   if (/\b(?:processor|processing|payout|batch|batched)\b/.test(sender)) return true;
-  // An explicit payee or directed sender still controls attribution. A bare
-  // settlement label identifies the intermediary, not its underlying payer.
+  // A named payee can itself contain a banking word. An independent directed
+  // sender clause corroborates that exact label, after explicit unknown and
+  // intermediary labels have already been refused.
+  const description = normalizeMerchantText(row.description);
+  if (row.payee && /\b(?:from|by) /.test(description) && senderFor({ description: row.description }) === sender) return false;
+  // A directed sender still controls attribution. A bare settlement label
+  // identifies the intermediary, not its underlying payer, in either field.
   // Undirected channel-prefixed text may carry arbitrary bank reference codes;
   // those suffixes cannot promote the channel into an identified sender.
-  const description = normalizeMerchantText(row.description);
-  return !row.payee && !/\b(?:from|by) /.test(description) &&
-    (/^(?:ach|eft|wire|zelle|cash|check|cheque|credit|deposit|payment|receipt|transfer|online|mobile)(?: |$)/.test(description) ||
-      /\b(?:settlement|payout|batch|batched)\b/.test(description));
+  const source = normalizeMerchantText(row.payee || row.description);
+  return !/\b(?:from|by) /.test(source) &&
+    (/^(?:ach|eft|wire|zelle|bank|cash|check|cheque|credit|direct|deposit|payment|receipt|transfer|online|mobile)(?: |$)/.test(source) ||
+      /\b(?:settlement|payout|batch|batched)\b/.test(source));
 }
 
 function gapFor(reason, accounts = [], intent = {}) {
@@ -162,34 +175,46 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
   if (rows.some(row => row.export_overlap_review)) return { reason: "bank_export_overlap_review_required" };
   if (rows.some(row => !readableRow(row))) return { reason: "unreadable_transactions" };
   const bySlug = new Map(inventory.map(a => [a.account_slug, a]));
-  if (intent.kind === "payment") {
+  const namedIncome = intent.kind === "merchant" && intent.direction === "inflow" && intent.match;
+  if (payment || namedIncome) {
     const candidates = rows.filter(row => row.direction === "inflow" &&
-      (intent.amountMinor === null || row.amount_minor === intent.amountMinor));
+      (!payment || intent.amountMinor === null || row.amount_minor === intent.amountMinor));
     const matched = [], unattributed = [];
     for (const row of candidates) {
       // An amount narrows an attributed receipt; it cannot promote a memo
-      // subject to sender or override a different explicit payee.
-      if (matchesSender(row, intent.counterpartyWords)) matched.push(row);
-      else if (senderIsUnattributed(row)) unattributed.push(row);
+      // subject to sender or override an explicit unknown-sender label. Only
+      // amount-only receipt questions can bypass sender attribution quality.
+      if ((namedIncome || intent.counterpartyWords.length) && senderIsUnattributed(row)) unattributed.push(row);
+      else if (payment ? matchesSender(row, intent.counterpartyWords) : matchesMerchant(row, intent.match)) matched.push(row);
     }
-    const citations = [...matched, ...unattributed].map((row, i) => citation(row, bySlug.get(row.effective_account_slug), i));
-    let answer = matched.length
-      ? matched.map((row, i) => `Found a deposit of ${money(row.amount_minor)} posted ${row.posted_on} in ${masked(bySlug.get(row.effective_account_slug))}: ${safeDescription(row.description)} [${i + 1}].`).join("\n")
-      : unattributed.length ? "" : `No matching deposit in ${accounts.map(masked).join(", ")} between ${intent.from} and ${intent.to}; the bank feed covers through ${accounts.map(a => `${masked(a)}: ${a.live?.covered_to || "unknown (manual records only)"}`).join("; ")}.`;
-    const gaps = [];
-    const unattributedCitations = unattributed.map((_, i) => matched.length + i + 1);
-    if (unattributed.length) {
-      const detail = `I found ${unattributed.length} ${unattributed.length === 1 ? "deposit that doesn't" : "deposits that don't"} show who paid between ${intent.from} and ${intent.to}; I can't confirm whether any came from ${safeDescription(intent.counterpartyWords.join(" "))}.`;
-      answer += `${answer ? "\n" : ""}${detail}`;
-      for (const [i, row] of unattributed.entries()) answer += `\nUnattributed deposit: ${money(row.amount_minor)} posted ${row.posted_on} in ${masked(bySlug.get(row.effective_account_slug))}: ${safeDescription(row.description)} [${unattributedCitations[i]}].`;
-      gaps.push({ type: "ledger_attribution_unknown", reason: "sender_attribution_unknown",
-        from: intent.from, to: intent.to, count: unattributed.length, citations: unattributedCitations, detail });
+    // A named-income answer with unknown receipts must not flow into the
+    // complete-total renderer, including its zero and conditional-total keys.
+    // Fully attributed income retains the usual transfer and grouping rules.
+    if (payment || unattributed.length) {
+      const citations = [...matched, ...unattributed].map((row, i) => citation(row, bySlug.get(row.effective_account_slug), i));
+      let answer = matched.length
+        ? matched.map((row, i) => `Found a deposit of ${money(row.amount_minor)} posted ${row.posted_on} in ${masked(bySlug.get(row.effective_account_slug))}: ${safeDescription(row.description)} [${i + 1}].`).join("\n")
+        : unattributed.length ? "" : `No matching deposit in ${accounts.map(masked).join(", ")} between ${intent.from} and ${intent.to}; the bank feed covers through ${accounts.map(a => `${masked(a)}: ${a.live?.covered_to || "unknown (manual records only)"}`).join("; ")}.`;
+      const confirmedSubtotal = namedIncome && matched.length ? sumMinor(matched) : null;
+      if (namedIncome) answer = `Income from ${safeDescription(intent.match)} is not yet known for ${intent.from} through ${intent.to}.` +
+        (matched.length ? `\nConfirmed subtotal of attributed deposits (before transfer exclusions): ${money(confirmedSubtotal)}.\n${answer}` : "");
+      const gaps = [];
+      const unattributedCitations = unattributed.map((_, i) => matched.length + i + 1);
+      if (unattributed.length) {
+        const detail = `I found ${unattributed.length} ${unattributed.length === 1 ? "deposit that doesn't" : "deposits that don't"} show who paid between ${intent.from} and ${intent.to}; I can't confirm whether any came from ${safeDescription(namedIncome ? intent.match : intent.counterpartyWords.join(" "))}.`;
+        answer += `${answer ? "\n" : ""}${detail}`;
+        for (const [i, row] of unattributed.entries()) answer += `\nUnattributed deposit: ${money(row.amount_minor)} posted ${row.posted_on} in ${masked(bySlug.get(row.effective_account_slug))}: ${safeDescription(row.description)} [${unattributedCitations[i]}].`;
+        gaps.push({ type: "ledger_attribution_unknown", reason: "sender_attribution_unknown",
+          from: intent.from, to: intent.to, count: unattributed.length, citations: unattributedCitations, detail });
+      }
+      return { answer, citations, gaps,
+        ...(unattributed.length ? { evidence_gate: { supported: true, complete: false, partial: true, reason: "sender_attribution_unknown" } } : {}),
+        ledger: { kind: intent.kind, found: matched.length ? true : unattributed.length ? null : false,
+        ...(namedIncome ? { total_minor: null, lead_total_minor: null, confirmed_subtotal_minor: confirmedSubtotal,
+          confirmed_citations: matched.map((_, i) => i + 1) } : { amount_minor: intent.amountMinor }),
+        ...(unattributed.length ? { unattributed_count: unattributed.length, unattributed_citations: unattributedCitations } : {}),
+        from: intent.from, to: intent.to, accounts: accountCoverage(accounts) } };
     }
-    return { answer, citations, gaps,
-      ...(unattributed.length ? { evidence_gate: { supported: true, complete: false, partial: true, reason: "sender_attribution_unknown" } } : {}),
-      ledger: { kind: "payment", found: matched.length ? true : unattributed.length ? null : false,
-      ...(unattributed.length ? { unattributed_count: unattributed.length, unattributed_citations: unattributedCitations } : {}),
-      from: intent.from, to: intent.to, amount_minor: intent.amountMinor, accounts: accountCoverage(accounts) } };
   }
   if (intent.kind === "merchant" && intent.match) {
     const wanted = normalizeMerchantText(intent.match);
