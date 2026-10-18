@@ -4,10 +4,13 @@ export const normalizeLedgerText = value => (String(value || "").normalize("NFKC
 // Keep literal conjunctions distinct: "A & B", "A and B" and "A B" are
 // different selectors. A displayed label must use the same normalization.
 export const normalizeMerchantText = value => (String(value || "").normalize("NFKC").toLowerCase().match(/[\p{L}\p{N}]+|&/gu) || []).join(" ");
-export function senderFor(row) {
+export function senderFor(row, { requireAttribution = false } = {}) {
   if (row.payee) return normalizeMerchantText(row.payee);
   const text = normalizeMerchantText(row.description);
   const directed = text.match(/\b(?:from|by) (.+)/);
+  // An unmatched opening description is not proof of a different payer.
+  // Keep existing positive matches, but require explicit attribution for absence.
+  if (requireAttribution && !directed) return "";
   // A subject after "for" is never the sender, even without an explicit
   // payee. Preserve the opening-sender form used by plain bank descriptions.
   return (directed ? directed[1] : text).split(/\b(?:for|invoice|memo|reference|ref)\b/)[0].trim()

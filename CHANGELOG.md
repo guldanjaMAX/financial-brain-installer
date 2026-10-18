@@ -33,6 +33,11 @@ exact sealed package. This version bump verifies no incident.
   answers require evidence for the named payer; a payment-service label alone
   does not establish who paid. Check the cited rows and resolve any review
   request before using the figures.
+- **Payer answers say when they can't tell, instead of "no deposit".** When
+  a deposit in the period has no identified sender, a question about one
+  payer no longer answers "No matching deposit" or a $0.00 total. It says it
+  can't confirm and lists up to ten of those deposits with their dates and
+  amounts. Check the listed deposits against your bank statement.
 - **Your assistant gets money rules v3.** Claude Code and Codex receive the
   same rules for account labels, dates, confidence, citations and the exact
   words that change a money view. The assistant keeps the returned Note and

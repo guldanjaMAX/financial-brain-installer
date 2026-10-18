@@ -1,7 +1,7 @@
 import { scopeIsUnrestricted } from "./grants.js";
 import { classifyLedgerQuestion, ledgerDay, shiftLedgerDay } from "./ledger-question.js";
 import { accountLinkPairsInWindow, accountLinkRequiredInWindow, effectivePeriodCovered, readEffectiveAccounts, readEffectiveBalances, readEffectiveTransactions } from "./ledger-reader.js";
-import { categoryFor, detectRecurring, isDirectedOwnedTransfer, isLoanAdvance, matchesCategory, matchesMerchant, matchesSender, merchantFor, normalizeMerchantText, pairOwnTransfers, sumMinor } from "./ledger-analysis.js";
+import { categoryFor, detectRecurring, isDirectedOwnedTransfer, isLoanAdvance, matchesCategory, matchesMerchant, matchesSender, merchantFor, normalizeMerchantText, pairOwnTransfers, senderFor, sumMinor } from "./ledger-analysis.js";
 
 const masked = account => /^\d{1,4}$/.test(account.mask || "") ? `account ****${account.mask}` : "account (mask unavailable)";
 const money = cents => `${cents < 0 ? "-" : ""}$${Math.floor(Math.abs(cents) / 100).toLocaleString("en-US")}.${String(Math.abs(cents) % 100).padStart(2, "0")}`;
@@ -144,6 +144,21 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
   if (rows.some(row => row.export_overlap_review)) return { reason: "bank_export_overlap_review_required" };
   if (rows.some(row => !readableRow(row))) return { reason: "unreadable_transactions" };
   const bySlug = new Map(inventory.map(a => [a.account_slug, a]));
+  const incompleteAttribution = (unattributed, matched = []) => {
+    const listed = unattributed.slice(0, 10);
+    const citations = [...matched, ...listed].map((row, i) => citation(row, bySlug.get(row.effective_account_slug), i));
+    const subtotal = matched.length ? sumMinor(matched) : null;
+    const deposits = listed.map((row, i) => ({ ...citations[matched.length + i], description: safeDescription(row.description) }));
+    const answer = payment ? "I can't confirm whether that payment arrived."
+      : matched.length ? `Attributed income subtotal: ${money(subtotal)} (not complete) ${citations.slice(0, matched.length).map(c => `[${c.n}]`).join(" ")}.`
+        : "I can't confirm the income from that payer.";
+    return { answer: `${answer}\nSome deposits have no confirmed payer attribution; they may belong to the requested payer.\nUnattributed deposits (showing ${listed.length} of ${unattributed.length}):\n${deposits.map(row =>
+      `${money(row.amount_minor)} on ${row.posted_on} in ${masked({ mask: row.account_mask })}: ${row.description} [${row.n}].`).join("\n")}\nAccounts: ${accounts.map(masked).join(", ")}; ${intent.from} through ${intent.to}; ${accounts.map(a => `${masked(a)}: covered through ${a.covered_to || "unknown"}`).join("; ")}.`,
+    citations, ledger: { kind: intent.kind, found: matched.length ? true : null,
+      from: intent.from, to: intent.to, accounts: accountCoverage(accounts),
+      ...(payment ? { amount_minor: intent.amountMinor } : { total_minor: null, attributed_subtotal_minor: subtotal }),
+      attribution_incomplete: true, unattributed_count: unattributed.length, unattributed_deposits: deposits } };
+  };
   if (intent.kind === "payment") {
     const matched = rows.filter(row => {
       if (row.direction !== "inflow" || (intent.amountMinor !== null && row.amount_minor !== intent.amountMinor)) return false;
@@ -151,6 +166,11 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
       // subject to sender or override a different explicit payee.
       return matchesSender(row, intent.counterpartyWords);
     });
+    if (!matched.length && intent.counterpartyWords.length) {
+      const unattributed = rows.filter(row => row.direction === "inflow" &&
+        (intent.amountMinor === null || row.amount_minor === intent.amountMinor) && !senderFor(row, { requireAttribution: true }));
+      if (unattributed.length) return incompleteAttribution(unattributed);
+    }
     const citations = matched.map((row, i) => citation(row, bySlug.get(row.effective_account_slug), i));
     const answer = matched.length
       ? matched.map((row, i) => `Found a deposit of ${money(row.amount_minor)} posted ${row.posted_on} in ${masked(bySlug.get(row.effective_account_slug))}: ${safeDescription(row.description)} [${i + 1}].`).join("\n")
@@ -164,6 +184,11 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     const conjunction = text => text.replace(/\b(and)\b|&/g, "and");
     if (!directionRows.some(row => matchesMerchant(row, intent.match)) && directionRows.some(row =>
       conjunction(merchantFor(row)) === conjunction(wanted))) return { reason: "merchant_selector_ambiguous" };
+    if (intent.direction === "inflow") {
+      const matched = directionRows.filter(row => matchesMerchant(row, intent.match));
+      const unattributed = directionRows.filter(row => !matchesMerchant(row, intent.match) && !senderFor(row, { requireAttribution: true }));
+      if (unattributed.length) return incompleteAttribution(unattributed, matched);
+    }
   }
   const eligible = allRows.filter(row => readableRow(row) && usableAccount(bySlug.get(row.effective_account_slug)) &&
     effectivePeriodCovered(bySlug.get(row.effective_account_slug), row.posted_on, row.posted_on));
@@ -382,7 +407,8 @@ export async function withLedgerAnswer({ env, question, access, grantScope, scop
         reason = answer.reason;
         if (!reason) return new Response(JSON.stringify({ mode: "think", answer: answer.answer,
           citations: answer.citations, results: [], gaps: [], ledger: answer.ledger,
-          evidence_gate: { supported: true, complete: true, reason: "read from covered ledger rows" } }),
+          evidence_gate: { supported: true, complete: !answer.ledger.attribution_incomplete,
+            reason: answer.ledger.attribution_incomplete ? "payer attribution incomplete in covered ledger rows" : "read from covered ledger rows" } }),
         { headers: { "Content-Type": "application/json" } });
       }
       gap = gapFor(reason, reason === 'ledger_account_link_required' ? disputed : accounts, intent);

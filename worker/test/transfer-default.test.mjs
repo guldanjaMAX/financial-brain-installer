@@ -196,7 +196,14 @@ test("g: proposed and confirmed category withdrawals leave income with a flip no
     assert.deepEqual(body.ledger.default_exclusions, { own_transfer_pairs: 0, own_transfer_minor: 0, withdrawal_count: 1, withdrawal_minor: 41383, loan_proceeds_count: 0, loan_proceeds_minor: 0 });
     assert.match(blocks(body, scenario, Q.totals).note, /say "including withdrawals"/);
   }
-  const f = await fixture(t, "category-withdrawal"), income = await ask(f, Q.income, "merchant", 0);
+  const f = await fixture(t, "category-withdrawal"), incomplete = await ask(f, Q.income, "merchant", 0);
+  // The other deposit has no confirmed payer, so this cannot be a complete income total.
+  assert.equal(incomplete.ledger.total_minor, null);
+  assert.equal(incomplete.ledger.attributed_subtotal_minor, 41383);
+  assert.equal(incomplete.ledger.unattributed_count, 1);
+  assert.equal(incomplete.evidence_gate.complete, false);
+  f.raw("UPDATE fin_transactions SET payee='Fixture client' WHERE txn_uid='deposit'");
+  const income = await ask(f, Q.income, "merchant", 0);
   assert.equal(income.ledger.lead_total_minor, 0);
   assert.equal(income.ledger.total_minor, 41383);
   assert.match(blocks(income, "category-withdrawal", Q.income).lead, /money in.*\$0\.00/i);
