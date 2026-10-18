@@ -21,7 +21,10 @@ export function maskLedgerCandidateField(text) {
   // Treat the entire free-text field as one possibly separated identifier.
   // Symbols, combining marks and invisible separators cannot split it into
   // apparently safe short fragments. Exact dates and money are separate fields.
-  return [...String(text || "Deposit")].length >= 5 ? `[redacted] ****${chars.slice(-4).join("")}` : value.slice(0, 240);
+  // Compatibility normalization can lengthen input (one ligature becomes
+  // several letters), so either the original or the rendered length counts.
+  const long = [...String(text || "Deposit")].length >= 5 || [...value].length >= 5;
+  return long ? `[redacted] ****${chars.slice(-4).join("")}` : value.slice(0, 240);
 }
 const safeDescription = maskLedgerCandidateField;
 const accountCoverage = accounts => accounts.map(a => ({
