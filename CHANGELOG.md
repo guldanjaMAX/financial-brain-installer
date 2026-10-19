@@ -4,6 +4,12 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## Unreleased
+
+- **Windows updates no longer stop at the restore-bookmark step on a second
+  update.** Later updates reuse the private recovery folder safely. Check that
+  the update saves its restore bookmark and continues to verification.
+
 ## 0.4.17 (2026-10-16)
 
 Candidate only. This version has not been released. The changes below still

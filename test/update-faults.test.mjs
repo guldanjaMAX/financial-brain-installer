@@ -332,7 +332,7 @@ test("CI Windows: an elevated creator can privatize an Administrators-owned rece
               /\$owner = \$acl\.GetOwner\(\[System\.Security\.Principal\.SecurityIdentifier\]\)/.test(precheck) &&
               /if \(\$owner\.Value -ne \$sid\.Value\)\s*\{/.test(precheck) &&
               /\$principal = New-Object System\.Security\.Principal\.WindowsPrincipal\(\$identity\)/.test(precheck) &&
-              /if \(\$request\.verifyOnly -or\s*-not \$owner\.IsWellKnown\(\[System\.Security\.Principal\.WellKnownSidType\]::BuiltinAdministratorsSid\) -or\s*-not \$principal\.IsInRole\(\[System\.Security\.Principal\.WindowsBuiltInRole\]::Administrator\)\) \{ throw 'wrong owner' \}/.test(precheck);
+              /if \(\$request\.verifyOnly -or\s*-not \$owner\.IsWellKnown\(\[System\.Security\.Principal\.WellKnownSidType\]::BuiltinAdministratorsSid\) -or\s*-not \$principal\.IsInRole\(\[System\.Security\.Principal\.WindowsBuiltInRole\]::Administrator\)\) \{\s*\$reason = 'wrong-owner'\s*throw 'wrong-owner'\s*\}/.test(precheck);
             // An existing individual-owner receipt is the unchanged control.
             // Group ownership occurs on creation, never accepted at readback.
             const refused = groupOwned && !request.verifyOnly && !canAdoptGroupOwner;
