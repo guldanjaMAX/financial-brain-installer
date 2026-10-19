@@ -144,6 +144,21 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
   if (rows.some(row => row.export_overlap_review)) return { reason: "bank_export_overlap_review_required" };
   if (rows.some(row => !readableRow(row))) return { reason: "unreadable_transactions" };
   const bySlug = new Map(inventory.map(a => [a.account_slug, a]));
+  let inflows = rows.filter(row => row.direction === "inflow");
+  const payerIncome = intent.kind === "merchant" && intent.direction === "inflow" && Boolean(intent.match);
+  const incompleteNamed = payerIncome && inflows.length > 0;
+  // Coverage proves the bank window, never the completeness of a payer label.
+  // Keep the sealed positive matcher; only an entirely empty inflow window
+  // can establish absence. Amount filters cannot establish payer absence.
+  const inflowDetail = cite => {
+    const listed = [...inflows].sort((a, b) => b.posted_on.localeCompare(a.posted_on) || a.id - b.id).slice(0, 10);
+    const deposits = listed.map(row => {
+      const ref = cite(row);
+      return { n: ref.n, posted_on: row.posted_on, amount_minor: row.amount_minor, account_mask: ref.account_mask };
+    });
+    return { deposits, answer: `In-scope deposits (showing ${listed.length} of ${inflows.length}):\n${deposits.map(row =>
+      `${row.posted_on}: ${money(row.amount_minor)} in ${masked({ mask: row.account_mask })} [${row.n}].`).join("\n")}` };
+  };
   if (intent.kind === "payment") {
     const matched = rows.filter(row => {
       if (row.direction !== "inflow" || (intent.amountMinor !== null && row.amount_minor !== intent.amountMinor)) return false;
@@ -151,10 +166,28 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
       // subject to sender or override a different explicit payee.
       return matchesSender(row, intent.counterpartyWords);
     });
+    // The first read preserves the base positive path. Before claiming an
+    // empty period, re-read without an amount predicate to see every inflow.
+    if (!matched.length && intent.counterpartyWords.length && intent.amountMinor !== null) {
+      const windowRows = await readEffectiveTransactions(env, accounts, { ...intent, amountMinor: null });
+      if (windowRows.some(row => row.export_overlap_review)) return { reason: "bank_export_overlap_review_required" };
+      if (windowRows.some(row => !readableRow(row))) return { reason: "unreadable_transactions" };
+      inflows = windowRows.filter(row => row.direction === "inflow");
+    }
     const citations = matched.map((row, i) => citation(row, bySlug.get(row.effective_account_slug), i));
+    if (!matched.length && intent.counterpartyWords.length && inflows.length) {
+      const detail = inflowDetail(row => {
+        const ref = citation(row, bySlug.get(row.effective_account_slug), citations.length);
+        citations.push(ref); return ref;
+      });
+      return { answer: `I can't confirm whether that payer paid.\n${detail.answer}\nAccounts: ${accounts.map(masked).join(", ")}; ${intent.from} through ${intent.to}; ${accounts.map(a => `${masked(a)}: covered through ${a.covered_to || "unknown"}`).join("; ")}.`,
+        citations, ledger: { kind: "payment", found: null, total_minor: null, complete: false,
+          from: intent.from, to: intent.to, amount_minor: intent.amountMinor, accounts: accountCoverage(accounts),
+          attribution_incomplete: true, inflow_count: inflows.length, inflows: detail.deposits } };
+    }
     const answer = matched.length
       ? matched.map((row, i) => `Found a deposit of ${money(row.amount_minor)} posted ${row.posted_on} in ${masked(bySlug.get(row.effective_account_slug))}: ${safeDescription(row.description)} [${i + 1}].`).join("\n")
-      : `No matching deposit in ${accounts.map(masked).join(", ")} between ${intent.from} and ${intent.to}; the bank feed covers through ${accounts.map(a => `${masked(a)}: ${a.live?.covered_to || "unknown (manual records only)"}`).join("; ")}.`;
+      : `${intent.counterpartyWords.length && !inflows.length ? "No deposits at all in this period" : "No matching deposit"} in ${accounts.map(masked).join(", ")} between ${intent.from} and ${intent.to}; the bank feed covers through ${accounts.map(a => `${masked(a)}: ${a.live?.covered_to || "unknown (manual records only)"}`).join("; ")}.`;
     return { answer, citations, ledger: { kind: "payment", found: matched.length > 0,
       from: intent.from, to: intent.to, amount_minor: intent.amountMinor, accounts: accountCoverage(accounts) } };
   }
@@ -197,8 +230,8 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
   };
   const refs = list => list.map(row => `[${cite(row).n}]`).join(" ");
   const candidateMark = row => pairing.candidateRows.has(row.id) ? " (possible move between your own accounts, included)" : "";
-  const publicRow = row => ({ ...cite(row), description: safeDescription(row.description || row.payee || "Transaction"), possible_own_transfer: pairing.candidateRows.has(row.id) });
-  const rowLine = row => `${money(row.amount_minor)} on ${row.posted_on} in ${masked(bySlug.get(row.effective_account_slug))}: ${safeDescription(row.description || row.payee || "Transaction")}${candidateMark(row)} ${refs([row])}`;
+  const publicRow = row => ({ ...cite(row), ...(incompleteNamed ? {} : { description: safeDescription(row.description || row.payee || "Transaction") }), possible_own_transfer: pairing.candidateRows.has(row.id) });
+  const rowLine = row => `${money(row.amount_minor)} on ${row.posted_on} in ${masked(bySlug.get(row.effective_account_slug))}${incompleteNamed ? "" : `: ${safeDescription(row.description || row.payee || "Transaction")}`}${candidateMark(row)} ${refs([row])}`;
   const bounded = `Accounts: ${accounts.map(masked).join(", ")}; ${intent.from} through ${intent.to}; ${accounts.map(a => `${masked(a)}: covered through ${a.covered_to || "unknown"}`).join("; ")}.`;
   const ledger = { kind: intent.kind, from: intent.from, to: intent.to, accounts: accountCoverage(accounts),
     includes_own_transfers: true, matched_transfer_count: 0, candidate_transfer_count: pairs.length,
@@ -284,6 +317,34 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     if (!matched.length) answer += " No matching transactions found.";
     for (const g of orderedGroups) answer += `\n${safeDescription(g.label)}${g.state === "proposed" ? " (bank's category (unconfirmed))" : ""}: ${money(sumMinor(g.rows))} ${refs(g.rows)}${g.rows.some(row => pairing.candidateRows.has(row.id)) ? " (includes possible moves between your own accounts)" : ""}.`;
     answer += `\nUnsorted: ${money(ledger.unsorted_minor)}${intent.kind === "category" && intent.match && !matched.some(row => !categoryFor(row)) ? " (separate from the requested category)" : ""} ${refs(unsorted)}.`;
+    if (incompleteNamed) {
+      const subtotal = amount => amount > 0
+        ? `Income from that payer is at least ${money(amount)} (matched subtotal, not complete).`
+        : "I can't confirm the income from that payer.";
+      leadDetail = subtotal(ledger.lead_total_minor);
+      answer = `${subtotal(ledger.total_minor)} ${refs(matched)}`.trim();
+      conditionalDetail = subtotal(ledger.if_own_transfers.total_minor);
+      ledger.attributed_subtotal_minor = matched.length ? ledger.total_minor : null;
+      ledger.lead_attributed_subtotal_minor = matched.length ? ledger.lead_total_minor : null;
+      ledger.total_minor = null; ledger.lead_total_minor = null;
+      ledger.found = matched.length ? true : null;
+      ledger.if_own_transfers.attributed_subtotal_minor = matched.length ? ledger.if_own_transfers.total_minor : null;
+      ledger.if_own_transfers.total_minor = null;
+      ledger.if_own_transfers.complete = false;
+      for (const group of ledger.groups) {
+        group.attributed_subtotal_minor = group.total_minor; group.total_minor = null;
+        group.if_own_transfers_attributed_subtotal_minor = group.if_own_transfers_total_minor;
+        group.if_own_transfers_total_minor = null; group.complete = false;
+      }
+    } else if (payerIncome && !inflows.length) {
+      answer = "No deposits at all in this period.";
+    }
+    if (intent.kind === "merchant" && intent.direction === "inflow" && !intent.match) {
+      ledger.complete = false;
+      ledger.attribution_incomplete = true;
+      for (const group of ledger.groups) group.complete = false;
+      answer += "\nNote: Labels come from your bank and may not identify who paid.";
+    }
   } else if (intent.kind === "transfers") {
     // This diagnostic view keeps its gross, outgoing-date contract. Other
     // answer kinds apply lead exclusions to each leg inside their own window.
@@ -344,6 +405,12 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     ? noteExcluded.has(row.id) ? "left out of the first figures as a retirement or investment withdrawal; kept in the gross figures"
       : "retirement or investment withdrawal excluded from the wider candidate pool; outside the displayed rows"
     : "retained in income/spend totals"}): ${rowLine(row)}.`;
+  if (incompleteNamed) {
+    const detail = inflowDetail(cite);
+    ledger.complete = false; ledger.attribution_incomplete = true;
+    ledger.inflow_count = inflows.length; ledger.inflows = detail.deposits;
+    answer += `\n${detail.answer}`;
+  }
   return { answer, citations, ledger };
 }
 
@@ -382,7 +449,8 @@ export async function withLedgerAnswer({ env, question, access, grantScope, scop
         reason = answer.reason;
         if (!reason) return new Response(JSON.stringify({ mode: "think", answer: answer.answer,
           citations: answer.citations, results: [], gaps: [], ledger: answer.ledger,
-          evidence_gate: { supported: true, complete: true, reason: "read from covered ledger rows" } }),
+          evidence_gate: { supported: true, complete: !answer.ledger.attribution_incomplete,
+            reason: answer.ledger.attribution_incomplete ? "payer attribution incomplete in covered ledger rows" : "read from covered ledger rows" } }),
         { headers: { "Content-Type": "application/json" } });
       }
       gap = gapFor(reason, reason === 'ledger_account_link_required' ? disputed : accounts, intent);

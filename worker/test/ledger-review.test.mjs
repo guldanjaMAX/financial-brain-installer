@@ -18,7 +18,7 @@ test('control: exact payer, absent payer, partial word and outflow exercise real
   assert.ok(f.calls.some(sql => /JOIN fin_transactions/.test(sql)));
   const start = f.calls.length;
   const absent = await f.ask('Did the Absent Payer payment arrive?');
-  assert.equal(absent.ledger?.found, false);
+  assert.equal(absent.ledger?.found, null);
   assert.ok(f.calls.slice(start).some(sql => /JOIN fin_transactions/.test(sql)));
 });
 
@@ -62,8 +62,9 @@ test('F3 payer substring: description mention must not override a different expl
   const start = f.calls.length;
   const body = await f.ask('Did the Fixture Payer payment arrive?');
   assert.ok(f.calls.slice(start).some(sql => /JOIN fin_transactions/.test(sql)), 'payment matcher reached');
-  assert.equal(body.ledger?.found, false, 'mentioned invoice payer is not the sender');
-  assert.deepEqual(body.citations, []);
+  assert.equal(body.ledger?.found, null, 'an invoice mention proves neither presence nor absence');
+  assert.equal(body.citations.length, 1);
+  assert.equal(body.ledger.inflow_count, 1);
 });
 
 for (const [now, period, from, to] of [
@@ -161,5 +162,10 @@ test('closure: without a payee, only the description sender clause can name the 
   const body = await f.ask('Did the Fixture Payer payment arrive?');
   assert.ok(f.calls.slice(start).some(sql => /JOIN fin_transactions/.test(sql)), 'sender match decision reached');
   assert.notEqual(body.ledger?.found, true, 'an invoice-party mention cannot confirm arrival from that party');
-  assert.equal(body.citations?.length || 0, 0);
+  // Keep the opening-description receipt visible without certifying its payer.
+  assert.equal(body.ledger.found, null);
+  assert.equal(body.ledger.inflow_count, 2);
+  assert.equal(body.citations.length, 2);
+  assert.equal(body.ledger.inflows[0].description, undefined, 'uncertain receipt descriptions are omitted');
+  assert.doesNotMatch(JSON.stringify(body), /Fixture Sender ACH deposit/);
 });
