@@ -9,18 +9,30 @@ import { windowsFileChildEnvironment } from "./current-user-file.mjs";
 // CI runners. Keep a finite bound with room for startup and ACL readback.
 export const WINDOWS_UPGRADE_BOOKMARK_ACL_TIMEOUT_MS = 120_000;
 
-// Modes passed to Node do not establish a Windows DACL. Replace inherited and
-// explicit grants on our own receipt paths, then independently read the DACL.
+// Modes passed to Node do not establish a Windows DACL. Verify first; replace
+// grants only when needed, then independently read the owner and DACL back.
 // Paths travel on stdin, never inside executable PowerShell source.
 const WINDOWS_ACL_SCRIPT = `
 $ErrorActionPreference = 'Stop'
+$reason = 'unsafe-path'
+function Test-PrivateAcl($acl) {
+  $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+  if (-not $acl.AreAccessRulesProtected -or
+      $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $sid.Value -or
+      $rules.Count -ne 1) { return $false }
+  $rule = $rules[0]
+  return ($rule.IdentityReference.Value -eq $sid.Value -and -not $rule.IsInherited -and
+      $rule.AccessControlType -eq 'Allow' -and $rule.FileSystemRights -eq 'FullControl' -and
+      $rule.InheritanceFlags -eq $inheritance -and $rule.PropagationFlags -eq 'None')
+}
 try {
   $request = [Console]::In.ReadToEnd() | ConvertFrom-Json
   $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
   $sid = $identity.User
   $item = Get-Item -LiteralPath $request.path -Force
   if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-      [bool]$item.PSIsContainer -ne [bool]$request.directory) { throw 'unsafe path' }
+      [bool]$item.PSIsContainer -ne [bool]$request.directory) { throw 'unsafe-path' }
+  $reason = 'verify-failed'
   $acl = Get-Acl -LiteralPath $request.path
   $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier])
   if ($owner.Value -ne $sid.Value) {
@@ -30,30 +42,37 @@ try {
     $principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
     if ($request.verifyOnly -or
         -not $owner.IsWellKnown([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid) -or
-        -not $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'wrong owner' }
+        -not $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
+      $reason = 'wrong-owner'
+      throw 'wrong-owner'
+    }
   }
   $inheritance = [System.Security.AccessControl.InheritanceFlags]::None
   if ($request.directory) { $inheritance = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit' }
-  if (-not $request.verifyOnly) {
-    if ($request.directory) { $acl = New-Object System.Security.AccessControl.DirectorySecurity }
-    else { $acl = New-Object System.Security.AccessControl.FileSecurity }
-    $acl.SetOwner($sid)
-    $acl.SetAccessRuleProtection($true, $false)
-    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', $inheritance, 'None', 'Allow')
-    $acl.AddAccessRule($rule)
-    Set-Acl -LiteralPath $request.path -AclObject $acl
+  if (Test-PrivateAcl $acl) {
+    [Console]::Out.Write('private')
+    exit 0
   }
+  if ($request.verifyOnly) { throw 'verify-failed' }
+  $reason = 'set-failed'
+  # A fresh security object marks only Owner and Access as modified. The .NET
+  # Framework FileInfo/DirectoryInfo writer persists only those sections;
+  # the PowerShell ACL provider can also write Audit and demand SeSecurityPrivilege.
+  if ($request.directory) { $acl = New-Object System.Security.AccessControl.DirectorySecurity }
+  else { $acl = New-Object System.Security.AccessControl.FileSecurity }
+  $acl.SetOwner($sid)
+  $acl.SetAccessRuleProtection($true, $false)
+  $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', $inheritance, 'None', 'Allow')
+  $acl.AddAccessRule($rule)
+  $item.SetAccessControl($acl)
+  $reason = 'verify-failed'
   $acl = Get-Acl -LiteralPath $request.path
-  $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
-  if (-not $acl.AreAccessRulesProtected -or
-      $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $sid.Value -or
-      $rules.Count -ne 1) { throw 'unverified ACL' }
-  $rule = $rules[0]
-  if ($rule.IdentityReference.Value -ne $sid.Value -or $rule.IsInherited -or
-      $rule.AccessControlType -ne 'Allow' -or $rule.FileSystemRights -ne 'FullControl' -or
-      $rule.InheritanceFlags -ne $inheritance -or $rule.PropagationFlags -ne 'None') { throw 'unverified grant' }
+  if (-not (Test-PrivateAcl $acl)) { throw 'verify-failed' }
   [Console]::Out.Write('private')
-} catch { exit 1 }
+} catch {
+  [Console]::Error.Write($reason)
+  exit 1
+}
 `;
 
 export function secureWindowsUpgradeBookmarkPath(path, {
@@ -81,7 +100,10 @@ export function secureWindowsUpgradeBookmarkPath(path, {
       throw Object.assign(new Error(`recovery receipt Windows permission check timed out after ${WINDOWS_UPGRADE_BOOKMARK_ACL_TIMEOUT_MS / 1000} seconds`),
         { code: "UPGRADE_BOOKMARK_ACL_TIMEOUT" });
     }
-    throw new Error("recovery receipt Windows ACL could not be protected and verified");
+    // Never include native diagnostics: they can contain paths or account names.
+    const reason = String(result?.stderr || "");
+    const safeReason = ["set-failed", "verify-failed", "wrong-owner", "unsafe-path"].includes(reason) ? ` (${reason})` : "";
+    throw new Error(`recovery receipt Windows ACL could not be protected and verified${safeReason}`);
   } finally {
     if (Buffer.isBuffer(result?.stdout)) result.stdout.fill(0);
     if (Buffer.isBuffer(result?.stderr)) result.stderr.fill(0);
