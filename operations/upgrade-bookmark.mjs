@@ -14,6 +14,7 @@ export const WINDOWS_UPGRADE_BOOKMARK_ACL_TIMEOUT_MS = 120_000;
 // Paths travel on stdin, never inside executable PowerShell source.
 const WINDOWS_ACL_SCRIPT = `
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 $reason = 'unsafe-path'
 function Test-PrivateAcl($acl) {
   $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
@@ -70,7 +71,9 @@ try {
   if (-not (Test-PrivateAcl $acl)) { throw 'verify-failed' }
   [Console]::Out.Write('private')
 } catch {
-  [Console]::Error.Write($reason)
+  # Windows PowerShell can prefix stderr with serialized progress records, so
+  # the reason travels on stdout, the channel the success proof already owns.
+  [Console]::Out.Write('failed:' + $reason)
   exit 1
 }
 `;
@@ -101,8 +104,9 @@ export function secureWindowsUpgradeBookmarkPath(path, {
         { code: "UPGRADE_BOOKMARK_ACL_TIMEOUT" });
     }
     // Never include native diagnostics: they can contain paths or account names.
-    const reason = String(result?.stderr || "");
-    const safeReason = ["set-failed", "verify-failed", "wrong-owner", "unsafe-path"].includes(reason) ? ` (${reason})` : "";
+    // Only an exact allowlisted reason on stdout is reported.
+    const reason = /^failed:(set-failed|verify-failed|wrong-owner|unsafe-path)$/.exec(String(result?.stdout || ""))?.[1];
+    const safeReason = reason ? ` (${reason})` : "";
     throw new Error(`recovery receipt Windows ACL could not be protected and verified${safeReason}`);
   } finally {
     if (Buffer.isBuffer(result?.stdout)) result.stdout.fill(0);

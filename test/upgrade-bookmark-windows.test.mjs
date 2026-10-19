@@ -118,19 +118,24 @@ test("Windows ACL boundary: already-private proof exits before the only write", 
   assert.equal(calls, 1, "private proof needs only one child and no repair invocation");
 });
 
+// On a normal-user Windows PC (10-19) the native refusal was reached but its
+// stderr reason did not match exactly, while stdout stayed clean. Reasons now
+// travel on stdout; stderr noise such as serialized progress must not matter.
+const serializedProgress = "#< CLIXML\r\n<Objs Version=\"1.1.0.1\"><Obj S=\"progress\" RefId=\"0\"></Obj></Objs>";
 for (const reason of ["set-failed", "verify-failed", "wrong-owner", "unsafe-path"]) {
   test(`Windows ACL boundary: ${reason} is reported without native details`, () => {
     let calls = 0;
     const path = "C:\\fixture\\private-profile\\receipt.json";
-    const stdout = Buffer.from(path);
-    const stderr = Buffer.from(reason);
+    const stdout = Buffer.from(`failed:${reason}`);
+    const stderr = Buffer.from(`${serializedProgress}${path}`);
     assert.throws(() => secureWindowsUpgradeBookmarkPath(path, {
       environment: { SystemRoot: "C:\\Windows" },
       run(_command, args) {
         calls++;
         const script = Buffer.from(args.at(-1), "base64").toString("utf16le");
-        assert.match(script, /\[Console\]::Error.Write\(\$reason\)/);
-        assert.doesNotMatch(script, /Write-Error|\[Console\]::Error.Write\([^)]*request/);
+        assert.match(script, /\[Console\]::Out.Write\('failed:' \+ \$reason\)/);
+        assert.match(script, /\$ProgressPreference = 'SilentlyContinue'/);
+        assert.doesNotMatch(script, /Write-Error|\[Console\]::Error.Write|\[Console\]::Out.Write\([^)]*request/);
         return { status: 1, stdout, stderr };
       },
     }), { message: `recovery receipt Windows ACL could not be protected and verified (${reason})` });
@@ -144,14 +149,15 @@ for (const reason of ["set-failed", "verify-failed", "wrong-owner", "unsafe-path
   });
 }
 
-test("Windows ACL boundary: arbitrary stderr and thrown native errors never echo a path", () => {
+test("Windows ACL boundary: arbitrary output and thrown native errors never echo a path", () => {
   const path = "C:\\fixture\\private-profile\\receipt.json";
-  for (const stderr of [path, `set-failed\n${path}`, `unsafe-path ${path}`, "unknown-reason"]) {
+  for (const stdout of [path, `failed:set-failed\n${path}`, `failed:unsafe-path ${path}`, "failed:unknown-reason",
+    "verify-failed", ` failed:verify-failed`]) {
     let calls = 0;
     assert.throws(() => secureWindowsUpgradeBookmarkPath(path, {
       environment: { SystemRoot: "C:\\Windows" }, run() {
         calls++;
-        return { status: 1, stdout: Buffer.from(path), stderr: Buffer.from(stderr) };
+        return { status: 1, stdout: Buffer.from(stdout), stderr: Buffer.from("verify-failed") };
       },
     }), { message: "recovery receipt Windows ACL could not be protected and verified" });
     assert.equal(calls, 1);
