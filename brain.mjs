@@ -7588,6 +7588,35 @@ function shellQuote(value) {
   return `'${String(value).replaceAll("'", `'"'"'`)}'`;
 }
 
+/**
+ * Render one copyable `<tool> mcp add` command for the shell the owner uses.
+ *
+ * POSIX keeps the multi-line form joined with backslash continuations,
+ * byte-for-byte as it has always printed. Windows PowerShell rejects those
+ * continuations, and a bare `--` can be consumed by PowerShell before the
+ * tool sees it (an npm .ps1 shim drops it), so on win32 the command is one
+ * line: every argument single-quoted with any embedded ' doubled, and the
+ * separator written as '--'. The flags, their order, and the environment
+ * entries are identical on both platforms.
+ */
+function renderMcpAddCommand(head, envFlag, { name, env, command, args }, platform) {
+  if (platform === "win32") {
+    const quoted = [
+      quotePowerShellArgument(name),
+      ...Object.entries(env).flatMap(([key, value]) => [envFlag, quotePowerShellArgument(`${key}=${value}`)]),
+      quotePowerShellArgument("--"),
+      quotePowerShellArgument(command),
+      ...args.map(quotePowerShellArgument),
+    ];
+    return `  ${head} ${quoted.join(" ")}\n`;
+  }
+  return (
+    `  ${head} ${shellQuote(name)} \\\n` +
+      Object.entries(env).map(([key, value]) => `    ${envFlag} ${shellQuote(`${key}=${value}`)} \\\n`).join("") +
+      `    -- ${shellQuote(command)} ${args.map(shellQuote).join(" ")}\n`
+  );
+}
+
 export async function cmdMcpConfig(manifestPath, options = {}) {
   const { m } = loadManifest(manifestPath);
   const flags = options.flags ?? parseFlags(process.argv.slice(4));
@@ -7646,6 +7675,11 @@ export async function cmdMcpConfig(manifestPath, options = {}) {
   const descriptor = mcpRegistrationDescriptor(m, manifestPath, { baseUrl: base });
   const { name, command, args, env } = descriptor;
   const owner = m.client?.display_name || "the owner";
+  // Only the printed copy depends on this. It defaults to the machine running
+  // the command; tests choose it to pin each shell's output.
+  const commandPlatform = options.platform ?? process.platform;
+  const windowsShell = commandPlatform === "win32";
+  const quoteForShell = windowsShell ? quotePowerShellArgument : shellQuote;
 
   const block = {
     mcpServers: {
@@ -7667,12 +7701,12 @@ export async function cmdMcpConfig(manifestPath, options = {}) {
       "changes stay in explicit owner controls.\n"
   );
 
-  console.log(`${c.bold("Claude Code")}: run this once, then it works in every folder:\n`);
   console.log(
-    `  claude mcp add --scope user ${shellQuote(name)} \\\n` +
-      Object.entries(env).map(([key, value]) => `    -e ${shellQuote(`${key}=${value}`)} \\\n`).join("") +
-      `    -- ${shellQuote(command)} ${args.map(shellQuote).join(" ")}\n`
+    windowsShell
+      ? `${c.bold("Claude Code")}: run this once in PowerShell, as one line, then it works in every folder:\n`
+      : `${c.bold("Claude Code")}: run this once, then it works in every folder:\n`
   );
+  console.log(renderMcpAddCommand("claude mcp add --scope user", "-e", descriptor, commandPlatform));
   say(
     "  If this name already exists, run brain setup to reconcile it safely. Do not use\n" +
       "  a config-display command on an older entry because it may print the retired key.\n"
@@ -7692,13 +7726,13 @@ export async function cmdMcpConfig(manifestPath, options = {}) {
   // Codex. Verified against `codex mcp add --help` on 2026-08-17: the form is
   // `codex mcp add <NAME> --env K=V -- <COMMAND>...`, and the `--` separator is
   // REQUIRED or the launch command is parsed as codex's own flags.
-  console.log(`${c.bold("Codex")}: run this once:\n`);
   console.log(
-    `  codex mcp add ${shellQuote(name)} \\\n` +
-      Object.entries(env).map(([key, value]) => `    --env ${shellQuote(`${key}=${value}`)} \\\n`).join("") +
-      `    -- ${shellQuote(command)} ${args.map(shellQuote).join(" ")}\n`
+    windowsShell
+      ? `${c.bold("Codex")}: run this once in PowerShell, as one line:\n`
+      : `${c.bold("Codex")}: run this once:\n`
   );
-  console.log(`  Confirm with: codex mcp get ${shellQuote(name)}\n`);
+  console.log(renderMcpAddCommand("codex mcp add", "--env", descriptor, commandPlatform));
+  console.log(`  Confirm with: codex mcp get ${quoteForShell(name)}\n`);
   console.log(`  Or write it into ~/.codex/config.toml by hand:\n`);
   console.log(
     `  [mcp_servers.${name}]\n` +

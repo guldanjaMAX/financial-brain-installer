@@ -21,7 +21,10 @@ export function quotePosixArgument(value) {
 
 export function quotePowerShellArgument(value) {
   const text = displayValue(value);
-  return `'${text.replaceAll("'", "''")}'`;
+  // PowerShell treats the typographic single quotes U+2018, U+2019, U+201A and
+  // U+201B as quote characters too, so a folder named with a curly apostrophe
+  // would end the string early. Doubling each one keeps it literal.
+  return `'${text.replace(/['\u2018\u2019\u201A\u201B]/g, "$&$&")}'`;
 }
 
 export function renderCopyableCommand(command, args = [], {
