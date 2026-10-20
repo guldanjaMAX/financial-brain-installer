@@ -65,6 +65,7 @@ import {
 } from "./lib/store.js";
 import { installedSchemaVersion, acceleratedVectorBootstrap, drainOutbox, outboxDepth, vectorReadiness, retryQuarantinedVectorOps, forget, forgetFamilies, listSourceFamilies, SOURCE_FAMILY_CURSOR_MAX_BYTES, SOURCE_FAMILY_UID_FILTER_MAX, sourceFamilyCounts, sourceRetirementState, reindex, coverageGapReport, freshnessReport, sourceFreshnessCounts, diagnose } from "./lib/store-d1.js";
 import { embedText, embedTexts } from "./lib/supabase.js";
+import { retrievalFailed } from "./lib/store-d1.js";
 import {
   currentEvidenceCandidates, hasExplicitCurrentIntent, newestCurrentEvidence,
   parseCanonicalEvidenceDate,
@@ -1654,6 +1655,15 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
   // Trust metadata beside the answer, never inside it: the refusal sentence
   // is a verbatim contract (worker tests and the eval refusal scorer both pin
   // it), so the confidence rubric travels as its own field.
+  // Failed retrieval cannot certify a complete answer, even when the
+  // verifier approves the surviving citations. Preserve the supported facts.
+  // A prior rejection or partial answer keeps its more specific explanation.
+  if (evidenceGate?.complete && retrievalFailed(degraded, degradedReason)) {
+    evidenceGate = { ...evidenceGate, complete: false,
+      ...(evidenceGate.supported ? { partial: true } : {}),
+      reason: evidenceGate.supported && !evidenceGate.partial ? 'retrieval incomplete' : evidenceGate.reason };
+  }
+
   const categoricalRefusal = !answerError &&
     (!answer || answer === unsupportedAnswer || !approvedDocs.length);
   const refusalSearchDisclosure = categoricalRefusal && degraded

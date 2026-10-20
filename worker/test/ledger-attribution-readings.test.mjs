@@ -28,7 +28,7 @@ test('a bare sender clause and a whole registered name agree only when they reso
   const f = ledgerFixture(t);
   t.mock.method(globalThis, 'fetch', () => assert.fail('network forbidden'));
   f.raw(`INSERT INTO fin_entities(entity_slug,legal_name,display_label,kind,relationship,provenance,basis_state,recorded_at)
-    VALUES ('payer-one','Payer One','From Payer One','business','counterparty','owner_stated','confirmed',?)`, NOW);
+    VALUES ('payer-one','Payer One','From Payer One','business','owned','owner_stated','confirmed',?)`, NOW);
   f.add('receipt', 'From Payer One', null);
   const questions = ['Did the payment from Payer One arrive in October 2026?',
     'How much income came from Payer One in October 2026?', 'Show income by merchant in October 2026?'];
@@ -45,7 +45,7 @@ test('a bare sender clause and a whole registered name agree only when they reso
   }
   f.raw("UPDATE fin_entities SET display_label=NULL WHERE entity_slug='payer-one'");
   f.raw(`INSERT INTO fin_entities(entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at)
-    VALUES ('payer-two','From Payer One','business','counterparty','owner_stated','confirmed',?)`, NOW);
+    VALUES ('payer-two','From Payer One','business','owned','owner_stated','confirmed',?)`, NOW);
   for (const [i, q] of questions.entries()) {
     const body = await ask(q);
     if (i < 2) {

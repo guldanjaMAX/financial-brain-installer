@@ -1,5 +1,6 @@
 import { explicitStatements, originatorWords, originatorFormats } from './ledger-attribution-cases.mjs';
 import test from 'node:test';
+import { assertPossibleMatch, assertExactSelection } from './partner-r7-assertions.mjs';
 import assert from 'node:assert/strict';
 import { ledgerFixture, NOW } from './ledger-review-fixture.mjs';
 import { maskLedgerCandidateField } from '../src/lib/ledger-answer.js';
@@ -11,7 +12,7 @@ const income = 'How much income came from Payer One in October 2026?';
 const amountOnly = 'Did the payment of $25.00 arrive in October 2026?';
 function identity(f, name, slug = 'payer-one', state = 'confirmed') {
   f.raw(`INSERT INTO fin_entities(entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at)
-    VALUES (?,?,'business','counterparty','owner_stated',?,?)`, slug, name, state, NOW);
+    VALUES (?,?,'business','owned','owner_stated',?,?)`, slug, name, state, NOW);
 }
 function reached(f, body) {
   assert.ok(f.calls.some(sql => /JOIN fin_transactions/.test(sql)), 'transaction decision reached');
@@ -62,8 +63,7 @@ test('shorthand premise: identical bare bytes answer only with an explicit assum
   const control = await f.ask(amountOnly); reached(f, control); assert.equal(control.ledger.found, true);
   for (const q of [payment, income]) {
     const body = await f.ask(q); reached(f, body);
-    assert.equal(body.evidence_gate.complete, true);
-    assert.equal(q === payment ? body.ledger.found : body.ledger.total_minor, q === payment ? true : 2500);
+    assertPossibleMatch(body, 2500);
     shorthandNote(body);
   }
   for (const q of [payment, income]) {
@@ -94,7 +94,8 @@ test('noun-first payer names starting with a transaction word remain answerable'
 test('shorthand cannot certify absence or zero for any payer and exact names only is a working flip', async t => {
   const f = ledgerFixture(t); identity(f, 'Payer One'); identity(f, 'Payer Two', 'payer-two');
   f.add('receipt', 'Payer One payment', null);
-  const green = await f.ask(payment); reached(f, green); assert.equal(green.ledger.found, true);
+  const green = await f.ask(amountOnly); reached(f, green); assert.equal(green.ledger.found, true);
+  assertPossibleMatch(await f.ask(payment), 2500);
   for (const q of [payment, income]) {
     unknown(f, await f.ask(q.replace('?', ', exact names only?')));
     unknown(f, await f.ask(q.replace('Payer One', 'Payer Two')));
@@ -126,33 +127,40 @@ test('shorthand render paths aggregate only dependent rows and mask all dynamic 
     for (const q of [payment, income]) {
       const body = await f.ask(q); reached(f, body);
       assert.equal(body.ledger.found, true);
-      assert.equal(body.evidence_gate.complete, !partial);
-      if (q === income) assert.equal(partial ? body.ledger.attributed_subtotal_minor : body.ledger.total_minor, 6500);
-      if (partial && q === income) {
+      assert.equal(body.evidence_gate.complete, false);
+      if (q === income) {
+        assert.equal(body.ledger.attributed_subtotal_minor, 500);
         assert.equal(body.ledger.confirmed_subtotal_minor, 500);
         assert.equal(body.ledger.confirmed_citations.length, 1);
       }
-      shorthandNote(body, { label, count: 2, amount: 6000 });
-      assert.match(body.answer, /2 rows totaling \$60\.00/);
+      assert.equal(body.assumptions, undefined, 'exact field selection excludes shorthand rows');
       assert.ok(!JSON.stringify(body).includes('AB48CD26EF17GH03'));
     }
+  }
+  f.raw("DELETE FROM fin_transactions WHERE txn_uid='exact'");
+  for (const q of [payment, income]) {
+    const body = await f.ask(q); reached(f, body);
+    assertPossibleMatch(body, 6000);
+    shorthandNote(body, { label, count: 2, amount: 6000 });
+    assert.match(body.answer, /2 rows totaling \$60\.00/);
+    assert.ok(!JSON.stringify(body).includes('AB48CD26EF17GH03'));
   }
 });
 
 test('shorthand notes coexist with transfer notes without certifying a zero for the payer', async t => {
   const f = ledgerFixture(t); identity(f, 'Payer One');
   f.add('receipt', 'Payer One payment', null);
-  const green = await f.ask(income); reached(f, green); assert.equal(green.ledger.total_minor, 2500);
+  const green = await f.ask(income); reached(f, green); assertPossibleMatch(green, 2500);
   f.raw("UPDATE fin_transactions SET category='TRANSFER_IN_INVESTMENT_AND_RETIREMENT_FUNDS',category_basis_state='proposed'");
   const body = await f.ask(income); reached(f, body);
-  assert.equal(body.ledger.total_minor, 2500);
+  assertPossibleMatch(body, 2500);
   assert.equal(body.ledger.lead_total_minor, null, 'shorthand cannot certify a zero lead total for its payer');
   assert.equal(body.evidence_gate.complete, false);
   assert.match(body.answer, /including withdrawals/);
   assert.doesNotMatch(body.answer, /for [^;\n]+: \$0\.00/);
   shorthandNote(body);
   const included = await f.ask(income.replace('?', ', including withdrawals?')); reached(f, included);
-  assert.equal(included.ledger.lead_total_minor, 2500); assert.equal(included.evidence_gate.complete, true);
+  assertPossibleMatch(included, 2500);
   shorthandNote(included);
   f.raw('UPDATE fin_transactions SET category=NULL,category_basis_state=NULL');
   f.raw(`INSERT INTO fin_accounts(account_slug,entity_slug,account_kind,balance_role,mask,feed_mode,provenance,basis_state,recorded_at)
@@ -163,7 +171,7 @@ test('shorthand notes coexist with transfer notes without certifying a zero for 
   f.raw("UPDATE fin_transactions SET account_slug='reserve' WHERE txn_uid='outgoing'");
   const conditional = await f.ask(income); reached(f, conditional);
   assert.equal(conditional.ledger.candidate_transfer_count, 1, 'conditional exclusion decision reached');
-  assert.equal(conditional.ledger.total_minor, 2500);
+  assertPossibleMatch(conditional, 2500);
   assert.equal(conditional.ledger.if_own_transfers.total_minor, null);
   assert.equal(conditional.ledger.groups[0].if_own_transfers_total_minor, null);
   assert.equal(conditional.evidence_gate.complete, false);
@@ -192,7 +200,9 @@ for (const format of ['bare', 'labelled', 'payee']) test(`generated shorthand pr
       const queryRegistered = label === shorter ? registration !== 'longer' : label === longer ? registration !== 'shorter' : true;
       const uncertain = !queryRegistered || (format === 'bare' ? registration === 'both' || (registration === 'shorter' && label !== shorter)
         : registration === 'shorter');
-      if (uncertain) unknown(f, body);
+      if (assumed) { assertPossibleMatch(body, 2500); shorthandNote(body, { suffix: suffix.toLowerCase() }); }
+      else if (format === 'payee' && label === longer) assertExactSelection(body, 2500);
+      else if (uncertain) unknown(f, body);
       else {
         const present = assumed || (registration !== 'shorter' && label === longer);
         assert.equal(body.evidence_gate.complete, true);
@@ -252,15 +262,13 @@ test('unavailable identities permit only bank-field presence; ambiguous register
       unknown(f, await f.ask(payment)); unknown(f, await f.ask(income));
     } else {
       // The entity supplies no authority. The exact structured bank field now
-      // supports presence for this question, but never a registered total.
+      // supports an exact answer without manufacturing a registered identity.
       const present = await f.ask(payment); reached(f, present);
       assert.equal(present.ledger.found, true);
       assert.equal(present.payer_evidence[0].type, 'bank_payee');
       const total = await f.ask(income); reached(f, total);
-      assert.equal(total.ledger.total_minor, null);
-      assert.equal(total.ledger.attributed_subtotal_minor, 2500);
-      assert.equal(total.ledger.confirmed_subtotal_minor, null);
-      assert.equal(total.evidence_gate.complete, false);
+      assertExactSelection(total, 2500);
+      assert.equal(total.payer_evidence[0].type, 'bank_payee');
       unknown(f, await f.ask(payment.replace('Payer One', 'Missing Supplier')));
     }
   }
@@ -306,7 +314,7 @@ test('identity read failure and overflow refuse after the real snapshot decision
     };
     if (arm === 'overflow') f.raw(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<5001)
       INSERT INTO fin_entities(entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at)
-      SELECT 'extra-'||i,'Extra '||i,'business','counterparty','owner_stated','confirmed',? FROM n`, NOW);
+      SELECT 'extra-'||i,'Extra '||i,'business','owned','owner_stated','confirmed',? FROM n`, NOW);
     const refused = await f.ask(payment);
     assert.equal(attempts, 1, 'identity query executed alongside a nonempty receipt snapshot');
     assert.equal(refused.ledger, undefined);
@@ -419,6 +427,7 @@ test('usefulness: explicit synthetic bank originators answer both payment and in
       else cannotConfirm++;
       if (body.assumptions?.length) {
         answeredWithAssumption++;
+        assertPossibleMatch(body, 2500);
         shorthandNote(body, { suffix: description.slice('Payer One '.length).toLowerCase() });
       }
     }
@@ -426,7 +435,7 @@ test('usefulness: explicit synthetic bank originators answer both payment and in
   t.diagnostic(JSON.stringify({ statements: explicitStatements.length, answered, answered_with_assumption: answeredWithAssumption, cannot_confirm: cannotConfirm }));
   // The original LF statement uses a field boundary, like the other explicit
   // forms. Only the three shorthand forms need notes in both answer kinds.
-  assert.equal(answered, 48); assert.equal(cannotConfirm, 0);
+  assert.equal(answered, 42); assert.equal(cannotConfirm, 6);
   assert.equal(answeredWithAssumption, 6);
   f.raw("UPDATE fin_transactions SET description='ACH CREDIT ORIG CO NAME: Payer Two ORIG ID: 4826170392'");
   const other = await f.ask(payment); reached(f, other); assert.equal(other.ledger.found, false);
@@ -570,7 +579,7 @@ test('render inventory: fixed refusals and fallback gap paths do not echo free-t
     const before = f.calls.length; let fallback = 0;
     const body = await (await withLedgerAnswer({ env: f.env, question, now: Date.parse(NOW),
       grantScope: { all: true }, scopePrincipalKind: 'owner', ...extra }, async gap => {
-      fallback++; assert.equal(gap.reason, reason, 'fallback received exact refusal');
+      fallback++; assert.ok(gap, `fallback lost refusal ${reason}`); assert.equal(gap.reason, reason, 'fallback received exact refusal');
       return Response.json({ answer: null, gaps: [] });
     })).json();
     assert.equal(body.gaps[0].reason, reason, 'exact refusal decision reached');
@@ -594,7 +603,7 @@ for (const [formatIndex, format] of originatorFormats.entries()) {
     identity(f, 'Unrelated Supplier', 'unrelated');
     f.add('receipt', 'Receipt', null);
     const stats = { format: formatIndex + 1, generated: 0, answered: 0, answered_with_assumption: 0, unknown: 0,
-      ambiguous_shorthand: 0, descriptions: 0, fully_parsed: 0, expected_answered: 0, violations: 0 };
+      possible: 0, ambiguous_shorthand: 0, descriptions: 0, fully_parsed: 0, expected_answered: 0, violations: 0 };
     const failures = [];
     const shorter = 'Synthetic Supplier';
     const identifier = ['AB48', 'CD26', 'EF17', 'GH03'].join('');
@@ -627,7 +636,8 @@ for (const [formatIndex, format] of originatorFormats.entries()) {
               // exist before a confirmed row can prove its presence or absence.
               const queryRegistered = queryName === shorter ? registration !== 'longer'
                 : queryName === longer ? registration !== 'shorter' : true;
-              const canAnswer = queryRegistered && known && (!(formatIndex >= 1 && formatIndex <= 3) || queryName === field);
+              const possible = queryRegistered && known && formatIndex >= 1 && formatIndex <= 3 && queryName === field;
+              const canAnswer = queryRegistered && known && !(formatIndex >= 1 && formatIndex <= 3);
               if (canAnswer) stats.expected_answered++;
               if (ambiguous) stats.ambiguous_shorthand++;
               const before = f.calls.length;
@@ -635,7 +645,7 @@ for (const [formatIndex, format] of originatorFormats.entries()) {
               // A refusal must inspect this nonempty snapshot, not a prior arm.
               assert.ok(f.calls.slice(before).some(sql => /JOIN fin_transactions/.test(sql)));
               reached(f, body);
-              if (body.evidence_gate.complete) stats.answered++; else stats.unknown++;
+              if (body.evidence_gate.complete) stats.answered++; else if (possible) stats.possible++; else stats.unknown++;
               if (body.assumptions?.length) stats.answered_with_assumption++;
               try {
                 const serialized = JSON.stringify(body);
@@ -643,7 +653,10 @@ for (const [formatIndex, format] of originatorFormats.entries()) {
                 for (const identifier of description.match(/\d{5,}/g) || [])
                   assert.ok(!serialized.includes(identifier), 'full free-text identifier must not render');
                 assert.equal(body.evidence_gate.complete, canAnswer, 'whole field authority or an explicit shorthand assumption is required');
-                if (!canAnswer) unknown(f, body);
+                if (possible) {
+                  assertPossibleMatch(body, 2500);
+                  shorthandNote(body, { label: field, suffix: ['payment', 'ach deposit', 'payroll'][formatIndex - 1] });
+                } else if (!canAnswer) unknown(f, body);
                 else {
                   const match = queryName === field;
                   if (question === payment) assert.equal(body.ledger.found, match);
@@ -673,11 +686,12 @@ for (const [formatIndex, format] of originatorFormats.entries()) {
       }
     }
     t.diagnostic(JSON.stringify({ originator_property: stats }));
-    assert.ok(stats.answered > 0 && stats.unknown > 0, 'uniform arms invalidate the harness');
+    assert.ok(stats.answered + stats.possible > 0 && stats.unknown > 0, 'uniform arms invalidate the harness');
     assert.equal(stats.fully_parsed, stats.descriptions, 'every original format consumes the complete statement');
     assert.equal(stats.violations, 0, JSON.stringify(failures));
     assert.equal(stats.answered, stats.expected_answered);
-    assert.equal(stats.unknown, stats.generated - stats.expected_answered);
+    assert.equal(stats.unknown, stats.generated - stats.expected_answered - stats.possible);
+    if (formatIndex >= 1 && formatIndex <= 3) assert.equal(stats.possible, 1032);
   });
 }
 

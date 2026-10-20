@@ -10,6 +10,7 @@ import { SNAPSHOT, CHANGED, FIXTURES } from "../../test/fixtures/quickbooks-reco
 import { quickBooksBalanceAnswer } from "../src/lib/quickbooks-balance.js";
 import { quickBooksOpenItemsAnswer, quickBooksOpenItemsRequest } from "../src/lib/quickbooks-open-items.js";
 import { quickBooksMoneyPolicy } from "../src/lib/quickbooks-money.js";
+import { drainOutbox, vectorReadiness } from "../src/lib/store-d1.js";
 import { quickBooksLabel } from "../src/lib/quickbooks-label.js";
 
 const ADMIN = { "X-Admin-Key": "fixture-admin-key" };
@@ -123,6 +124,20 @@ async function answerCase(t, { mutate = (doc) => doc, source = "quickbooks", kin
     for (const [relatedEntity, relatedRows] of related) {
       await ingest(fixture, normalizeProviderResult(source, await collect(relatedEntity, relatedRows)).documents);
     }
+    // Proposed control: complete verdict assertions need a verified semantic index.
+    const visible = new Map(); let mutation = null, sequence = 0;
+    fixture.env.VECTORIZE.upsert = async rows => {
+      rows.forEach(row => visible.set(row.id, row));
+      return { mutationId: mutation = `synthetic-${++sequence}` };
+    };
+    fixture.env.VECTORIZE.getByIds = async ids => ids.map(id => visible.get(id)).filter(Boolean);
+    fixture.env.VECTORIZE.describe = async () => ({ vectorCount: visible.size, processedUpToMutation: mutation });
+    for (let attempt = 0; attempt < 10; attempt++) {
+      await drainOutbox(fixture.env, { embed: async () => [0.1, 0.2, 0.3],
+        embedBatch: async texts => texts.map(() => [0.1, 0.2, 0.3]), maxBatches: 10 });
+      if ((await vectorReadiness(fixture.env)).ready) break;
+    }
+    assert.equal((await vectorReadiness(fixture.env)).ready, true, 'healthy retrieval control reached');
     if (hybrid) {
       fixture.env.VECTORIZE.query = async () => {
         fixture.seen.vectorQueries.push("synthetic matched chunks");
@@ -136,6 +151,7 @@ async function answerCase(t, { mutate = (doc) => doc, source = "quickbooks", kin
     const response = await fixture.post("/api/rag/think", { q, limit }, ADMIN);
     assert.equal(response.status, 200);
     const body = await response.json();
+    assert.equal(body.degraded ?? null, null, "complete-answer fixture has healthy retrieval");
     assert.ok(body.results.length, "retrieval reached actual stored evidence");
     if (hybrid) assert.ok(fixture.seen.vectorQueries.length, "real hybrid search reached the injected semantic boundary");
     assert.equal(verifierCalls, expectedVerifiers, "the draft reached the expected evidence-verifier decision point");

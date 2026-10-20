@@ -1,4 +1,4 @@
-import { normalizePayerQuestion, payerMentionsCoverQuestion } from './ledger-question.js';
+import { hasUnsupportedPayerPunctuation, normalizePayerCommas, normalizePayerQuestion, payerMentionsCoverQuestion } from './ledger-question.js';
 
 // One request-local identity registry and one attribution decision per inflow.
 // Bank metadata never registers an identity. Every spelling uses this same key.
@@ -11,7 +11,30 @@ const companyCommaSpellings = Symbol('company comma spellings');
 const questionSpellings = Symbol('question spellings');
 const questionPhrases = Symbol('question phrases');
 const damagedRegistry = Symbol('damaged registry');
-const companyCommaKey = value => String(value || '').normalize('NFKC').split(',').map(normalizeMerchantText).join(',');
+export const payerRegistryHasDamage = registry => Boolean(registry[damagedRegistry]);
+function phraseCommaMatches(left, right) {
+  const valid = value => {
+    const text = normalizePayerCommas(value);
+    // Unregistered punctuation must not disappear into apparent authority.
+    // Registered names keep their independently established spelling rules.
+    if (hasUnsupportedPayerPunctuation(text)) return false;
+    const parts = text.normalize('NFKC').split(',');
+    return parts.length === 1 || (parts.length === 2 && normalizeMerchantText(parts[0]) &&
+      statementGrammar.companySuffix.test(parts[1].trim().replaceAll('.', '')));
+  };
+  return valid(left) && valid(right) && companyCommaKey(left) === companyCommaKey(right);
+}
+export function exactPayerFieldAdmitted(selector, field) {
+  if (hasUnsupportedPayerPunctuation(selector) || hasUnsupportedPayerPunctuation(field)) return false;
+  // A grouped number inside a literal name has numeric commas, not a second
+  // payer clause. Keep the original comma positions equal on both sides; this
+  // admission check never changes the selector or its exact-match key.
+  const numericCommas = value => normalizePayerCommas(value).normalize('NFKC')
+    .replace(/\b\d{1,3}(?:,\d{3})+\b/g, number => number.replaceAll(',', ''));
+  return companyCommaKey(selector) === companyCommaKey(field) &&
+    phraseCommaMatches(numericCommas(selector), numericCommas(field));
+}
+const companyCommaKey = value => normalizePayerCommas(value).normalize('NFKC').split(',').map(normalizeMerchantText).join(',');
 
 export function payerRegistry(identities) {
   const index = new Map();
@@ -32,7 +55,7 @@ export function payerRegistry(identities) {
     const spelling = normalizePayerQuestion(label);
     if (!index[questionSpellings].has(spelling)) index[questionSpellings].set(spelling, new Set());
     index[questionSpellings].get(spelling).add(identity.entity_slug);
-    if (String(label).normalize('NFKC').includes(',')) index[companyCommaSpellings].add(companyCommaKey(label));
+    if (normalizePayerCommas(label).normalize('NFKC').includes(',')) index[companyCommaSpellings].add(companyCommaKey(label));
   }
   return index;
 }
@@ -41,31 +64,34 @@ export function lookupPayer(label, registry) {
   const slugs = registry.get(normalizeMerchantText(label));
   if (!slugs) {
     const phrase = registry[questionPhrases]?.get(normalizeMerchantText(label));
-    return phrase ? { state: 'unique', slug: phrase.slug, query_only: true } : { state: 'missing' };
+    return phrase && phraseCommaMatches(label, phrase.label) ? { state: 'unique', slug: phrase.slug, query_only: true } : { state: 'missing' };
   }
   return slugs.size === 1 ? { state: 'unique', slug: slugs.values().next().value }
     : { state: 'ambiguous' };
 }
 
-// Scan literal registered spellings, preserving their punctuation. Row lookup
-// remains punctuation-insensitive; that cannot authorize a question fragment.
-// This index belongs to the same bounded, request-local registry as the rows.
+// Match the same normalized tokens as bank rows, retaining source offsets for
+// clause coverage. Punctuation cannot change identity or erase a clause tail.
 export function requestedPayerMentions(question, registry) {
   const text = normalizePayerQuestion(question), mentions = [];
-  const word = char => !!char && /[\p{L}\p{N}\p{M}_]/u.test(char);
+  const tokens = [...text.matchAll(/[\p{L}\p{N}]+|&/gu)];
   for (const [label, slugs] of registry[questionSpellings] || []) {
-    // Only a registered terminal period is optional. Other punctuation stays
-    // literal; sentence punctuation after the spelling is outside its span.
-    const variants = label.endsWith('.') ? [label, label.slice(0, -1)] : [label];
-    for (const spelling of variants) {
-      if (!spelling) continue;
-      let start = text.indexOf(spelling);
-      while (start !== -1) {
-        const end = start + spelling.length;
-        const before = [...text.slice(0, start)].at(-1), after = String.fromCodePoint(text.codePointAt(end) || 0);
-        if (!word(before) && !word(after)) mentions.push({ start, end, label, slugs });
-        start = text.indexOf(spelling, start + 1);
-      }
+    const words = normalizeMerchantText(label).split(' ');
+    for (let i = 0; i + words.length <= tokens.length; i++) {
+      if (!words.every((word, j) => tokens[i + j][0] === word)) continue;
+      const last = tokens[i + words.length - 1];
+      let start = tokens[i].index, end = last.index + last[0].length;
+      // Literal names can begin with punctuation, including a currency sign.
+      // Keep that registered boundary just as we keep trailing punctuation.
+      const leading = label.match(/^[^\p{L}\p{N}&]+/u)?.[0];
+      if (leading && text.slice(0, start).endsWith(leading)) start -= leading.length;
+      const trailing = label.match(/[^\p{L}\p{N}&]+$/u)?.[0];
+      if (trailing && text.slice(end).startsWith(trailing)) end += trailing.length;
+      // Combining marks and underscores remain word boundaries that cannot
+      // disappear into a normalized mention of a different complete spelling.
+      if (/[\p{L}\p{N}\p{M}_]/u.test(text[start - 1] || '') ||
+          /[\p{L}\p{N}\p{M}_]/u.test(text[end] || '')) continue;
+      mentions.push({ start, end, label, slugs });
     }
   }
   // Strict containment removes only a smaller complete registered spelling.
@@ -79,6 +105,12 @@ export function requestedPayerMentions(question, registry) {
   });
 }
 
+function clausePayerMentions(intent, registry) {
+  const clauses = [...(intent.payerReadings || []).filter(r => r.complete), ...(intent.payerClauseSets || []).flat()];
+  return requestedPayerMentions(intent.payerQuestion?.text, registry).filter(m =>
+    clauses.some(r => m.start < r.end && m.end > r.start));
+}
+
 // The extra lookup is a hypothesis for this answer, never a registered entity.
 // It has no authority until a structured field or a complete sender parse
 // equals it. Keep it separate from the Map so ordinary row/group attribution
@@ -87,7 +119,8 @@ export function payerQuestionRegistry(intent, registry) {
   // A driver may hide the entire damaged spelling, so we cannot prove which
   // phrase conflicts with it. Valid registered aliases still work normally.
   if (registry[damagedRegistry]) return registry;
-  if (requestedPayerMentions(intent.payerQuestion?.text, registry).length) return registry;
+  if (clausePayerMentions(intent, registry).length) return registry;
+  if (intent.payerQuestion?.unsupportedPunctuation) return registry;
   const phrases = new Map();
   for (const reading of intent.payerReadings || []) {
     const key = normalizeMerchantText(reading.label);
@@ -98,13 +131,13 @@ export function payerQuestionRegistry(intent, registry) {
   scoped[questionPhrases] = phrases;
   scoped[questionSpellings] = registry[questionSpellings];
   scoped[companyCommaSpellings] = new Set(registry[companyCommaSpellings]);
-  for (const reading of intent.payerReadings) if (reading.label.includes(','))
+  for (const reading of intent.payerReadings) if (normalizePayerCommas(reading.label).includes(','))
     scoped[companyCommaSpellings].add(companyCommaKey(reading.label));
   return scoped;
 }
 
 export function resolveRequestedPayer(intent, registry, attributions = []) {
-  const mentions = requestedPayerMentions(intent.payerQuestion?.text, registry);
+  const mentions = clausePayerMentions(intent, registry);
   const slugs = new Set(mentions.flatMap(mention => [...mention.slugs]));
   const candidates = [...new Set(mentions.map(mention => mention.label))];
   if (slugs.size > 1) return { state: 'ambiguous', candidates };
@@ -149,11 +182,17 @@ const statementGrammar = (() => {
   const suffix = words('deposit', 'payment', 'receipt', 'payroll', 'settlement');
   const reference = words('reference', 'ref');
   const forWord = words('for'), invoice = words('invoice');
+  const caps = { codepoints: 512, fields: 12, parses: 64 };
   const grammar = {
-    limits: Object.freeze({ codepoints: 512, fields: 12, parses: 64, steps: 32768 }),
+    // Each candidate end costs one bounded operation (at most 512 code
+    // points). The parse cap bounds branching; the answer ceiling is the
+    // field/parse product of row budgets, shared by all descriptions.
+    limits: Object.freeze({ ...caps, steps: caps.codepoints * caps.parses,
+      answerSteps: caps.codepoints * caps.parses * caps.fields * caps.parses }),
     alphabet: /^[\p{L}\p{N}\p{M} &'()._/:#;,|\-\r\n\u0085\u2028\u2029]*$/u,
     lineBreak: /\r\n|[\r\n\u0085\u2028\u2029]/g,
-    edgeSpaces: /^ +| +$/g,
+    edgeSpaces: /^[ \r\n\u0085\u2028\u2029]+|[ \r\n\u0085\u2028\u2029]+$/g,
+    companySuffix: /^(?:llc|llp|lp|inc|ltd|corp|corporation|co|company|plc|pc|pa|na|sa)\.?$/i,
     spaces: / +/g,
     fieldBoundary: /[;,|]/,
     name: /^[\p{L}\p{N}][\p{L}\p{N}\p{M} &'()._/:#,\-]*$/u,
@@ -162,12 +201,12 @@ const statementGrammar = (() => {
     sender: pattern(`^(?:${sender} *: *|${bareSender} +)`),
     suffix: pattern(`^(?:${suffixChannel} +)?${suffix}$`),
     metadata: Object.freeze([
-      [pattern(`^${words('orig id', 'co id', 'company id', 'individual id')} *(?:# *:?|:) *`), /^[\p{L}\p{N}]+(?:[./-][\p{L}\p{N}]+)*$/u],
-      [pattern(`^${words('trace number', 'trace no', 'trace')} *(?:# *:?|:) *`), /^[0-9]{1,34}$/],
+      [pattern(`^${words('orig id', 'co id', 'company id', 'individual id', 'ind id')} *(?:# *:?|:) *`), /^[\p{L}\p{N}]+(?:[./-][\p{L}\p{N}]+)*$/u],
+      [pattern(`^${words('trace number', 'trace no', 'trace', 'trn')} *(?:# *:?|:) *`), /^[0-9]{1,34}$/],
       [pattern(`^${words('desc date', 'effective date', 'eff date', 'entry date', 'settlement date')} *: *`), validStatementDate],
       [pattern(`^${words('co entry descr', 'entry descr')} *: *`), pattern(`^${words('payment', 'deposit', 'receipt', 'payroll', 'settlement', 'credit', 'transfer')}$`)],
       [pattern(`^${words('sec')} *: *`), pattern(`^${words('ACK', 'ADV', 'ARC', 'ATX', 'BOC', 'CCD', 'CIE', 'COR', 'CTX', 'DNE', 'ENR', 'IAT', 'MTE', 'POP', 'POS', 'PPD', 'RCK', 'SHR', 'TEL', 'TRC', 'WEB', 'XCK')}$`)],
-      [pattern(`^${words('beneficiary', 'individual id/name', 'individual name')} *: *`), /^[\p{L}\p{N}][\p{L}\p{N}\p{M} &'()._/-]*$/u],
+      [pattern(`^${words('beneficiary', 'individual id/name', 'individual name', 'ind name')} *: *`), /^[\p{L}\p{N}][\p{L}\p{N}\p{M} &'()._/-]*$/u],
       [pattern(`^${words('reference', 'ref', 'invoice', 'memo')} *(?:# *:?|:) *`), pattern(String.raw`^(?:${invoice} +)?[\p{L}\p{N}]+(?:[./-][\p{L}\p{N}]+)*$`)],
     ].map(Object.freeze)),
     dates: Object.freeze({ short: /^[0-9]{6}$/, compact: /^[0-9]{8}$/,
@@ -180,6 +219,7 @@ const statementGrammar = (() => {
 })();
 
 export const ledgerStatementVocabulary = statementGrammar.vocabulary;
+export const ledgerAttributionLimits = statementGrammar.limits;
 const statementVocabulary = new Set(ledgerStatementVocabulary);
 
 function validStatementDate(value) {
@@ -214,13 +254,17 @@ function decision(readings, source) {
       ...(reading.prefix ? { prefix: reading.prefix } : {}), ...(reading.payer.query_only ? { query_only: true } : {}) }, evidence };
 }
 
-function parseStatement(description, registry, statementCache) {
+function parseStatement(description, registry, statementCache, budget) {
   const grammar = statementGrammar, limit = grammar.limits;
   const parser = { steps: 0, parses: 0, fields: 0, complete: false, refusal: null };
+  let normalizedText;
   const stopped = Symbol('parser budget');
   const refuse = reason => { parser.refusal = reason; throw stopped; };
   function step(work = 1) {
-    if (work > limit.steps - parser.steps) { parser.steps = limit.steps; refuse('operation-limit'); }
+    const rowLimit = budget?.stepLimit ?? limit.steps;
+    if (budget && work > budget.remaining) { budget.remaining = 0; refuse('answer-operation-limit'); }
+    if (budget) budget.remaining -= work;
+    if (work > rowLimit - parser.steps) { parser.steps = rowLimit; refuse('operation-limit'); }
     parser.steps += work;
   }
   function bounded(text) {
@@ -229,19 +273,21 @@ function parseStatement(description, registry, statementCache) {
     if (text.length > limit.codepoints * 2) refuse('length-limit');
     let count = 0;
     for (const char of text) { step(); if (++count > limit.codepoints) refuse('length-limit'); }
-    if (!grammar.alphabet.test(text)) refuse('alphabet');
+    if (!grammar.alphabet.test(normalizePayerCommas(text)) || /\p{Default_Ignorable_Code_Point}/u.test(text)) refuse('alphabet');
   }
   try {
     bounded(description);
-    const text = description.replace(grammar.lineBreak, ';').normalize('NFKC').replace(grammar.edgeSpaces, '');
+    const text = normalizePayerCommas(description).replace(grammar.edgeSpaces, '').replace(grammar.lineBreak, ';').normalize('NFKC');
     bounded(text);
+    if (/\p{M}/u.test(text)) refuse('alphabet');
+    normalizedText = text;
     // Validate the raw input on every row, including SQLite's NUL flag, before
     // reusing a normalized decision. A cache hit cannot legalize forbidden text
     // or erase an over-cap input through normalization or trimming.
     if (statementCache?.has(text)) return statementCache.get(text);
-    const cache = new Map(), lookups = new Map(), fieldStarts = new Set();
+    const cache = new Map(), lookups = new Map(), fieldStarts = new Map();
     function lookup(identity) {
-      if (!lookups.has(identity)) { step(identity.length); lookups.set(identity, lookupPayer(identity, registry)); }
+      if (!lookups.has(identity)) { step(); lookups.set(identity, lookupPayer(identity, registry)); }
       return lookups.get(identity);
     }
     function match(pattern, start) { step(); return pattern.exec(text.slice(start)); }
@@ -269,18 +315,20 @@ function parseStatement(description, registry, statementCache) {
       const results = [];
       for (const end of ends(start, true)) {
         const identity = text.slice(start, end);
-        step(identity.length);
+        step();
         if (!grammar.name.test(identity)) continue;
         let boundaryOnly = false;
         // A comma can belong to a complete name, alongside its field-boundary
         // readings. A query match is only a hypothesis here; complete competing
         // segmentations below must not split it into multiple explicit fields.
         if (identity.includes(',')) {
-          step(identity.length);
-          const completeParts = identity.split(',').every(part => normalizeMerchantText(part));
-          const phraseMatch = registry[questionPhrases]?.has(normalizeMerchantText(identity)) && completeParts;
+          step();
+          const parts = identity.split(',');
+          const completeParts = parts.every(part => normalizeMerchantText(part));
+          const phrase = registry[questionPhrases]?.get(normalizeMerchantText(identity));
+          const phraseMatch = phrase && phraseCommaMatches(identity, phrase.label);
           if (!registry[companyCommaSpellings]?.has(companyCommaKey(identity)) && !phraseMatch) {
-            if (!registry[questionPhrases] || !completeParts) continue;
+            if ((!registry[questionPhrases] && !phraseCommaMatches(identity, identity)) || !completeParts) continue;
             // A competing unknown company name still supplies a complete
             // field segmentation. Keep its boundaries without granting it
             // identity authority or requiring it to match the question first.
@@ -295,7 +343,7 @@ function parseStatement(description, registry, statementCache) {
           if (payer.query_only && ((!labelled && !prefix && !tail.suffix) ||
               normalizeMerchantText(identity).split(' ').some(token => statementVocabulary.has(token))))
             payer = { state: 'missing' };
-          add(results, { readings: [{ identity, payer, start, end, ...(prefix ? { prefix } : {}),
+          add(results, { readings: [{ identity, payer, start, end, labelled, ...(prefix ? { prefix } : {}),
             ...(tail.suffix ? { suffix: tail.suffix } : {}) }, ...tail.readings], fields: 1 + tail.fields });
         }
       }
@@ -309,7 +357,7 @@ function parseStatement(description, registry, statementCache) {
         if (optional) for (const parse of name(opening, opening === start, false,
           opening === start ? null : channel[0].trim().toLowerCase().replace(grammar.spaces, ' '))) add(results, parse);
         const label = match(grammar.sender, opening);
-        if (label && !optional) fieldStarts.add(opening);
+        if (label && !optional) fieldStarts.set(opening, opening + label[0].length);
         if (label && (allowBare || label[0].includes(':'))) for (const parse of name(opening + label[0].length, false, !label[0].includes(':'), null, true))
           add(results, parse);
       }
@@ -333,7 +381,7 @@ function parseStatement(description, registry, statementCache) {
       if (separator.trim() === '') {
         if (allowSuffix && grammar.suffix.test(remainder)) add(results, { readings: [], fields: 0, suffix: remainder.toLowerCase().replace(grammar.spaces, ' ') });
         if (allowProse && grammar.prose.test(remainder)) {
-          fieldStarts.add(next);
+          fieldStarts.set(next, next + remainder.length);
           add(results, { readings: [], fields: 1 });
         }
       }
@@ -342,11 +390,11 @@ function parseStatement(description, registry, statementCache) {
         if (!field) continue;
         // A malformed or empty value still starts a field. It cannot become
         // part of an unregistered sender merely because validation fails.
-        fieldStarts.add(next);
+        fieldStarts.set(next, next + field[0].length);
         const valueStart = next + field[0].length;
         for (const end of ends(valueStart)) {
           const value = text.slice(valueStart, end);
-          step(value.length);
+          step();
           if (!(typeof shape === 'function' ? shape(value) : shape.test(value))) continue;
           for (const tail of rest(end)) add(results, { readings: tail.readings, fields: 1 + tail.fields });
         }
@@ -362,13 +410,13 @@ function parseStatement(description, registry, statementCache) {
     if (registry[questionPhrases]) {
       // Record boundaries before validating values or completing the tail.
       // Damaging a field must never increase query-only identity authority.
-      // Registered whole names keep their independent authority; structured
-      // payees bypass this parser and its vocabulary restriction entirely.
+      // Registered whole names keep their independent authority. Structured
+      // payees use their own lookup, then check these labelled senders.
       parses = parses.map(parse => {
         const resolved = parse.readings.length === 1 && parse.readings.every(reading => reading.payer.state === 'unique');
         return { ...parse, readings: parse.readings.map(reading => {
           if (!reading.payer.query_only) return reading;
-          for (const start of fieldStarts) {
+          for (const start of fieldStarts.keys()) {
             step();
             if (start > reading.start && start < reading.end)
               return { ...reading, payer: { state: 'missing' } };
@@ -385,27 +433,93 @@ function parseStatement(description, registry, statementCache) {
     // sender followed by an unknown sender therefore cannot certify absence.
     const coherent = parses.some(parse => parse.readings.every(reading => reading.payer.state === 'unique'));
     const readings = parses.flatMap(parse => parse.readings).filter(reading => reading.payer.state !== 'missing');
+    // Distinct complete labelled sender readings cannot be resolved by
+    // discarding the unknown alternative. Preserve exact registered whole-name
+    // authority over an unlabelled lexical alternative, but never over another
+    // explicit sender field. Query evidence must obey this guard too.
+    const labelledSenders = parses.flatMap(parse => parse.readings.filter(r => r.labelled &&
+      // Swallowing an entire later label is not another sender value. A name
+      // ending inside an overlapping label is a real alternative (Co Entry
+      // Descr versus Entry Descr), and must still participate in agreement.
+      ![...fieldStarts].some(([start, end]) => start > r.start && end <= r.end)));
+    const senderKeys = new Set(labelledSenders.map(r => JSON.stringify(r.payer.state === 'unique' && !r.payer.query_only
+        ? ['entity', r.payer.slug] : ['name', normalizeMerchantText(r.identity)])));
     const result = decision(readings, 'description');
+    if (senderKeys.size > 1) {
+      result.state = 'unknown'; result.entity_slug = null; result.reading = null;
+      delete result.evidence.query_phrases;
+    }
     if (!coherent) { result.state = 'unknown'; result.entity_slug = null; result.reading = null; }
     result.evidence.parser = parser;
+    // Keep unknown complete sender fields for agreement with a structured
+    // payee. Filtering them out here would turn a contradiction into absence.
+    result.evidence.labelled_senders = labelledSenders.map(({ identity, payer }) => ({ identity, payer }));
     statementCache?.set(text, result);
     return result;
   } catch (error) {
     if (error !== stopped) throw error;
-    return { state: 'unknown', entity_slug: null, reading: null,
+    const result = { state: 'unknown', entity_slug: null, reading: null,
       evidence: { source: 'description', ambiguous: false, candidates: [], parser } };
+    if (normalizedText !== undefined && parser.refusal === 'operation-limit') statementCache?.set(normalizedText, result);
+    return result;
   }
 }
 
-function attributeRow(row, registry, statementCache) {
+function attributeRow(row, registry, statementCache, budget) {
   // A damaged structured payee must not fall through to a description, even
   // if the returned payee is empty or a description cache already has a hit.
   if (row.payee_has_nul || String(row.payee || '').includes('\0'))
     return decision([], 'payee');
-  if (row.payee) return decision([{ identity: row.payee, payer: lookupPayer(row.payee, registry) }], 'payee');
   // Some SQLite clients truncate TEXT at NUL. The SQL flag preserves the
   // alphabet refusal even when the returned string has lost that character.
-  return parseStatement(String(row.description || '') + (row.description_has_nul ? '\0' : ''), registry, statementCache);
+  const statement = parseStatement(String(row.description || '') + (row.description_has_nul ? '\0' : ''), registry, statementCache, budget);
+  if (!row.payee) return statement;
+  const payee = { identity: row.payee, payer: lookupPayer(row.payee, registry) };
+  const senders = statement.evidence.labelled_senders || [];
+  const registered = reading => reading.payer.state === 'unique' && !reading.payer.query_only;
+  const conflict = new Set([payee, ...senders].filter(registered).map(reading => reading.payer.slug)).size > 1 || senders.some(sender => {
+    if ([payee, sender].some(reading => reading.payer.state === 'ambiguous')) return true;
+    // Distinct registered identities cannot merge through suffix removal.
+    if (registered(payee) && registered(sender)) return payee.payer.slug !== sender.payer.slug;
+    const key = agreementName(payee.identity);
+    return !key || key !== agreementName(sender.identity);
+  });
+  if (conflict) {
+    const result = decision([payee, ...senders], 'payee');
+    result.state = 'unknown'; result.entity_slug = null; result.reading = null;
+    result.evidence.ambiguous = true;
+    delete result.evidence.query_phrases;
+    result.evidence.parser = statement.evidence.parser;
+    result.evidence.labelled_senders = senders;
+    return result;
+  }
+  // Equal fields corroborate an existing registration or a question-local
+  // presence hypothesis. They never create registration for an unknown name.
+  const agreed = [payee, ...senders].find(registered) ||
+    // A comma can also yield a shorter question reading. Prefer the complete
+    // matching spelling so agreement cannot discard the rest of that clause.
+    [payee, ...senders].filter(reading => reading.payer.state === 'unique')
+      .sort((a, b) => normalizeMerchantText(b.identity).length - normalizeMerchantText(a.identity).length)[0] || payee;
+  const result = decision([agreed], agreed === payee ? 'payee' : 'description');
+  // Parsing may exhaust the answer budget even when the bank supplies a name.
+  // Preserve that signal so no answer kind can certify a complete figure.
+  result.evidence.parser = statement.evidence.parser;
+  result.evidence.labelled_senders = senders;
+  return result;
+}
+
+function agreementName(value) {
+  const words = normalizeMerchantText(normalizePayerCommas(value)).split(' ');
+  // Normalize punctuation before removing one closed suffix, so (Ltd.) and
+  // dotted initials such as N.A. follow the same merchant key on both sides.
+  for (let size = 1; size <= words.length; size++) {
+    const tail = words.slice(-size);
+    if (size > 1 && tail.some(word => word.length !== 1)) break;
+    if (statementGrammar.companySuffix.test(tail.join(''))) {
+      words.splice(-size); break;
+    }
+  }
+  return words.join(' ');
 }
 
 export function attributeInflow(row, registry) {
@@ -413,11 +527,36 @@ export function attributeInflow(row, registry) {
 }
 
 // Bind to the immutable identity snapshot for exactly one answer. Neither the
-// descriptions nor decisions survive the request; structured payees bypass the
-// cache. Consumers treat the shared result as read-only and keep row data apart.
-export function createInflowAttributor(registry) {
+// descriptions nor decisions survive the request. Payee agreement is row-local;
+// consumers treat the cached statement as read-only and keep row data apart.
+export function createInflowAttributionBudget({ stepLimit = ledgerAttributionLimits.steps,
+  answerStepLimit = ledgerAttributionLimits.answerSteps } = {}) {
+  const boundedLimit = (value, cap) => Number.isSafeInteger(value) && value >= 0 ? Math.min(value, cap) : 0;
+  return { stepLimit: boundedLimit(stepLimit, ledgerAttributionLimits.steps),
+    remaining: boundedLimit(answerStepLimit, ledgerAttributionLimits.answerSteps) };
+}
+
+export function createInflowAttributor(registry, { stepLimit = ledgerAttributionLimits.steps,
+  answerStepLimit = ledgerAttributionLimits.answerSteps,
+  budget = createInflowAttributionBudget({ stepLimit, answerStepLimit }) } = {}) {
+  // Alternative selector readings have separate identity caches but spend the
+  // same answer budget. Comparing names cannot multiply the parsing allowance.
   const statementCache = new Map();
-  return row => attributeRow(row, registry, statementCache);
+  return row => attributeRow(row, registry, statementCache, budget);
+}
+
+// Literal-field existence is independent of final registry attribution. An
+// unresolved or conflicted name remains competing evidence, never an empty
+// field. Consume the already bounded parse without another parser pass.
+export function boundedPayerFields(row, attribution, registry) {
+  const senders = attribution.evidence.labelled_senders || [];
+  const fields = [...(row.payee && !row.payee_has_nul && !String(row.payee).includes('\0') ? [row.payee] : []),
+    ...senders.map(sender => sender.identity)];
+  const keys = new Set(fields.map(normalizeMerchantText));
+  const slugs = new Set(fields.flatMap(field => [...(registry.get(normalizeMerchantText(field)) || [])]));
+  const aliases = fields.length > 0 && fields.every(field => registry.get(normalizeMerchantText(field))?.size === 1) && slugs.size === 1;
+  return { fields, conflict: Boolean(row.payee_has_nul || String(row.payee || '').includes('\0') ||
+    slugs.size > 1 || keys.size > 1 && !aliases) };
 }
 
 // Only a confirmed row can eliminate a payer. An assumption supports a

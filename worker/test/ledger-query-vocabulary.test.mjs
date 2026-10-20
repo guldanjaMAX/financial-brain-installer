@@ -5,6 +5,8 @@ import { productionFixture, productionCases, measureProduction, reachedAnswer } 
 import { attributeInflow, payerRegistry, payerQuestionRegistry, ledgerStatementVocabulary } from '../src/lib/ledger-attribution.js';
 import { classifyLedgerQuestion } from '../src/lib/ledger-question.js';
 
+import { assertPossibleMatch } from './partner-r7-assertions.mjs';
+
 const payment = name => `Did the payment of $25.00 from ${name} arrive in October 2026?`;
 const income = name => `How much income came from ${name} in October 2026?`;
 function fixture(t) {
@@ -32,15 +34,15 @@ test('query-only sender authority rejects reference prose and damaged explicit f
   for (const [description, phrase] of [
     ['FROM Supplier One ref 123', 'Supplier One ref 123'],
     ['FROM: Supplier One, TRACE: ABC', 'Supplier One TRACE ABC'],
-    ['FROM: Supplier One, FROM:', 'Supplier One FROM'],
+    ['FROM: Supplier One, FROM:', 'Supplier One FROM Services'],
     ['FROM: Supplier Payment Services', 'Supplier Payment Services'],
   ]) for (const form of [payment, income]) for (const exact of [false, true]) {
     const question = form(phrase).replace('?', exact ? ', exact names only?' : '?');
-    f.raw('UPDATE fin_transactions SET payee=?,description=?', phrase, description);
+    f.raw('UPDATE fin_transactions SET payee=?,description=?', phrase, 'Opaque bank memo');
     const control = await reachedAnswer(f, question);
     assert.equal(control.ledger.found, true);
     assert.equal(control.payer_evidence[0].type, 'bank_payee');
-    f.raw('UPDATE fin_transactions SET payee=NULL');
+    f.raw('UPDATE fin_transactions SET payee=NULL,description=?', description);
     const attribution = attributeInflow({ description }, payerQuestionRegistry(
       classifyLedgerQuestion(question, { now: Date.parse(NOW) }), payerRegistry([])));
     assert.ok(attribution.evidence.parser.steps > 0, 'statement decision reached');
@@ -55,16 +57,25 @@ test('every grammar token refuses query-only descriptions with valid, invalid an
   const counts = { tokens: ledgerStatementVocabulary.length, rows: 0, refusals: 0, controls: 0 };
   assert.ok(counts.tokens >= 38, 'the generator must reach the complete nonempty grammar vocabulary');
   for (const token of ledgerStatementVocabulary) for (const value of ['123', 'ABC', '']) {
-    const phrase = `Supplier Unit ${token} ${value}`.trim();
+    const rawPhrase = `Supplier Unit ${token} ${value}`.trim();
+    // S1 no longer routes a name ending in a connector. Prove that refusal,
+    // then retain a routable structured-payee control for the vocabulary test.
+    const terminal = !value && ['from', 'by', 'for'].includes(token);
+    if (terminal) {
+      const rejected = classifyLedgerQuestion(payment(rawPhrase), { now: Date.parse(NOW) });
+      assert.equal(rejected.broad, true);
+      assert.equal(rejected.kind, null, 'terminal connector cannot be accepted as a payer');
+    }
+    const phrase = terminal ? `${rawPhrase} Services` : rawPhrase;
     for (const description of [`FROM: ${phrase}`, `FROM Supplier Unit ${token} ${value}`.trim(),
       `FROM: Supplier Unit, ${token}: ${value}`.trim(), `${phrase} payment`, `ACH ${phrase}`]) {
       for (const form of [payment, income]) for (const exact of [false, true]) {
         const question = form(phrase).replace('?', exact ? ', exact names only?' : '?');
-        f.raw('UPDATE fin_transactions SET payee=?,description=?', phrase, description);
+        f.raw('UPDATE fin_transactions SET payee=?,description=?', phrase, 'Opaque bank memo');
         const bank = await reachedAnswer(f, question);
         assert.equal(bank.ledger.found, true);
         assert.equal(bank.payer_evidence[0].type, 'bank_payee'); counts.controls++;
-        f.raw('UPDATE fin_transactions SET payee=NULL');
+        f.raw('UPDATE fin_transactions SET payee=NULL,description=?', description);
         const a = attributeInflow({ description }, payerQuestionRegistry(
           classifyLedgerQuestion(question, { now: Date.parse(NOW) }), payerRegistry([])));
         assert.ok(a.evidence.parser.steps > 0, 'each description reaches the parser');
@@ -86,7 +97,7 @@ test('registered vocabulary names and ordinary labelled query names retain indep
   const f = fixture(t);
   for (const token of ledgerStatementVocabulary) {
     const name = `Supplier Unit ${token} Services`;
-    f.raw("INSERT INTO fin_entities(entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at) VALUES ('registered',?,'business','counterparty','owner_stated','confirmed',?)", name, NOW);
+    f.raw("INSERT INTO fin_entities(entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at) VALUES ('registered',?,'business','owned','owner_stated','confirmed',?)", name, NOW);
     f.raw('UPDATE fin_transactions SET description=?', `FROM: ${name}`);
     for (const form of [payment, income]) {
       const body = await reachedAnswer(f, form(name));
@@ -132,8 +143,8 @@ test('unregistered production shorthand restores four answers with notes and exa
   let noted = 0;
   for (const c of productionCases) {
     const body = await reachedAnswer(f, c.question);
-    assert.equal(body.ledger.found, true);
-    if (!shorthandCases.includes(c)) { assert.ok(!body.assumptions?.length); continue; }
+    if (!shorthandCases.includes(c)) { assert.equal(body.ledger.found, true); assert.ok(!body.assumptions?.length); continue; }
+    assertPossibleMatch(body, c.cents);
     assert.equal(body.assumptions.length, 1);
     assert.equal(body.assumptions[0].query_only, true);
     assert.equal(body.assumptions[0].amount_minor, c.cents);
@@ -158,7 +169,7 @@ test('unregistered production shorthand restores four answers with notes and exa
     const isolated = fixture(t);
     isolated.raw('UPDATE fin_transactions SET amount_minor=?,description=?', c.cents, c.raw.name);
     const single = await reachedAnswer(isolated, c.question);
-    assert.equal(single.ledger.found, true);
+    assertPossibleMatch(single, c.cents);
     assert.equal(single.assumptions[0].amount_minor, c.cents);
     assert.ok(single.citations.some(ref => ref.amount_minor === c.cents));
   }

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { ledgerFixture } from './ledger-review-fixture.mjs';
+import { assertPossibleMatch } from './partner-r7-assertions.mjs';
 import { originatorFormats } from './ledger-attribution-cases.mjs';
 
 export const productionCases = Array.from({ length: 40 }, (_, i) => {
@@ -28,18 +29,19 @@ export function productionFixture(t, options = {}) {
 
 export async function reachedAnswer(f, question) {
   f.calls.length = 0;
+  const documentsBefore = f.documentCalls;
   const before = f.first('SELECT total_changes() n').n;
   const body = await f.ask(question);
   assert.ok(f.calls.some(sql => /JOIN fin_transactions/.test(sql)), 'real snapshot decision reached');
   assert.ok(f.first('SELECT COUNT(*) n FROM fin_transactions').n, 'decision has receipts');
   assert.equal(f.first('SELECT total_changes() n').n, before, 'question cannot register an identity or write');
-  assert.equal(f.documentCalls, 0, 'no fallback can hide a refusal');
+  assert.equal(f.documentCalls, documentsBefore, 'no fallback can hide a refusal');
   assert.ok(body.ledger);
   return body;
 }
 
 export async function measureProduction(f) {
-  const stats = { questions: 40, answered: 0, refused: 0, wrong: 0, rows: 40, formats: 30, empty_payees: 20 };
+  const stats = { questions: 40, answered: 0, complete: 0, exact_partial: 0, possible: 0, possible_arms: [], refused: 0, wrong: 0, rows: 40, formats: 30, empty_payees: 20 };
   for (const c of productionCases) {
     const b = await reachedAnswer(f, c.question);
     const matched = b.ledger.found === true;
@@ -49,7 +51,10 @@ export async function measureProduction(f) {
     const paymentAmounts = [...b.answer.matchAll(/^Found a deposit of \$([\d,]+\.\d{2}) posted /gm)]
       .map(m => Math.round(Number(m[1].replaceAll(',', '')) * 100));
     const amount = b.ledger.attributed_subtotal_minor ?? b.ledger.total_minor;
-    if (matched && cited && (c.kind === 'payment' ? paymentAmounts.length === 1 && paymentAmounts[0] === c.cents : amount === c.cents)) stats.answered++;
+    if (matched && cited && (c.kind === 'payment' ? paymentAmounts.length === 1 && paymentAmounts[0] === c.cents : amount === c.cents)) { stats.answered++; if (b.evidence_gate.complete) stats.complete++; else stats.exact_partial++; }
+    else if (b.evidence_gate.reason === 'name_similarity' && cited && amount === c.cents) {
+      assertPossibleMatch(b, c.cents); stats.answered++; stats.possible++; stats.possible_arms.push(productionCases.indexOf(c) + 1);
+    }
     else if (b.ledger.found === null && amount == null) stats.refused++;
     else stats.wrong++;
   }

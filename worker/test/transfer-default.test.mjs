@@ -1,3 +1,4 @@
+import { assertPossibleMatch } from './partner-r7-assertions.mjs';
 import test, { mock } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -419,6 +420,7 @@ test("m1 only excluded rows contributing to this figure justify a Note", async t
   const f = await fixture(t);
   // Keep the transfer-only no-note contract on exact payer fields. Shorthand
   // has its own mandatory note even when no transfer changes this figure.
+  f.raw("UPDATE fin_transactions SET payee='Fixture Store' WHERE txn_uid='expense-a'");
   f.raw("UPDATE fin_transactions SET description='FROM: Fixture client' WHERE description='Fixture client deposit'");
   for (const question of ["How much did I spend at Fixture Store in September 2026?", "How much income came from Fixture client in September 2026?", Q.recurring]) {
     const body = await f.ask(question);
@@ -429,8 +431,11 @@ test("m1 only excluded rows contributing to this figure justify a Note", async t
   const control = await ask(f);
   assert.match(control.answer, /left out of the first figures/);
   f.raw("UPDATE fin_transactions SET description='Fixture client deposit' WHERE description='FROM: Fixture client'");
-  const shorthand = await ask(f, "How much income came from Fixture client in September 2026?", 'merchant');
-  assert.equal(shorthand.ledger.total_minor, 73129);
+  const reads = f.seen.sql.length;
+  const shorthand = await f.ask("How much income came from Fixture client in September 2026?");
+  assert.ok(f.seen.sql.slice(reads).some(sql => /JOIN fin_transactions/.test(sql)), 'possible-match snapshot reached');
+  assert.equal(shorthand.ledger.candidate_transfer_count, 0);
+  assertPossibleMatch(shorthand,73129);
   assert.equal(shorthand.ledger.default_exclusions.own_transfer_pairs, 0);
   assert.doesNotMatch(shorthand.answer, /left out of the first figures/);
   assert.equal(shorthand.assumptions[0].type, 'payer_shorthand');

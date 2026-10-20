@@ -1,3 +1,4 @@
+import { assertPossibleMatch } from './partner-r7-assertions.mjs';
 import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
@@ -176,11 +177,19 @@ test('R02 description fallback only when an explicit payee is absent', async t =
   const f = fixture(); t.after(f.close); account(f);
   add(f, { uid: 'fallback', amount: 1200, direction: 'outflow', description: 'Cloud Tools subscription' });
   const question = 'How much did I spend at Cloud Tools in September 2026?';
-  assert.equal((await ask(f, question)).ledger.total_minor, 1200);
+  assertPossibleMatch(await ask(f, question), 1200);
   f.raw("UPDATE fin_transactions SET payee='Outside Consultant'");
   const before = f.seen.length;
-  assert.equal((await ask(f, question)).ledger.total_minor, 0);
+  const nonmatch = await ask(f, question);
+  assert.equal(nonmatch.ledger.found, false);
+  assert.equal(nonmatch.ledger.total_minor, null, 'an unmatched selector does not certify zero');
+  assert.equal(nonmatch.ledger.total_is_exact, false);
+  assert.equal(nonmatch.evidence_gate.complete, false);
+  assert.ok(nonmatch.gaps.some(gap => gap.type === 'ledger_selector_unmatched'));
   assert.ok(f.seen.slice(before).some(sql => sql.includes('JOIN fin_transactions')));
+  assert.equal(f.first('SELECT COUNT(*) n FROM fin_transactions').n, 1, 'the different payee remains in the read snapshot');
+  assert.equal((await ask(f, question.replace('Cloud Tools', 'Outside Consultant'))).ledger.total_minor, 1200,
+    'the explicit payee still answers exactly');
 });
 
 test('R01 a mask shared by two owned accounts cannot identify the counterparty', async t => {

@@ -51,6 +51,7 @@ async function ledgerBodies(t) {
   add("payment", "2026-09-15", 12001, "inflow", "Fixture payer deposit");
   add("deposit", "2026-10-01", 13001, "inflow", "Fixture payer deposit");
   add("purchase", "2026-09-15", 23001, "outflow", "Fixture Store purchase", "software");
+  f.raw("UPDATE fin_transactions SET payee='Fixture Store' WHERE txn_uid='purchase'");
   add("sent", "2026-09-15", 34001, "outflow", "TRANSFER TO account 2222");
   add("received", "2026-09-18", 34001, "inflow", "TRANSFER FROM account 1111", null, "account-b");
   for (const [i, day] of ["2026-08-10", "2026-09-10", "2026-10-10"].entries())
@@ -70,7 +71,13 @@ async function ledgerBodies(t) {
       })).json();
       assert.equal(body.ledger?.kind, kind, `${kind}: real ledger intent`);
       assert.equal(body.evidence_gate?.supported, true, `${kind}: supported ledger answer`);
-      assert.equal(body.evidence_gate?.complete, true, `${kind}: complete ledger answer`);
+      const selectorNonmatch = empty && ["merchant", "category"].includes(kind);
+      assert.equal(body.evidence_gate?.complete, !selectorNonmatch, `${kind}: covered read completeness`);
+      if (selectorNonmatch) {
+        assert.equal(body.ledger.total_minor, null);
+        assert.equal(body.ledger.total_is_exact, false);
+        assert.ok(body.gaps.some(gap => gap.type === "ledger_selector_unmatched"));
+      }
       assert.ok(f.seen.sql.filter(sql => readPattern.test(sql)).length > before, `${kind}: ledger read count increased`);
       if (kind === "totals") assert.equal(body.ledger.accounts.reduce((n, a) => n + a.transaction_count, 0) > 0, !empty);
       else if (kind !== "balance") assert.equal(body.ledger.found, !empty, `${kind}: populated/zero decision`);
@@ -135,7 +142,11 @@ globalThis.fetch = async (url, init) => {
       const out = result(index + 1);
       assert.equal(out.answer, body.answer, "answer equals the real Worker ledger body");
       assert.deepEqual(out.ledger, body.ledger, "ledger metadata is unchanged");
-      assert.equal(out.note, PRESERVE, "every supported complete ledger answer gets the preserve note");
+      assert.deepEqual(out.evidence_gate, body.evidence_gate, "completeness and uncertainty survive MCP");
+      assert.deepEqual(out.gaps, body.gaps, "selector uncertainty survives MCP");
+      assert.equal(out.note, body.evidence_gate.complete ? PRESERVE
+        : "Preserve the ledger answer and its uncertainty and coverage gaps. A selector nonmatch does not establish a complete zero.",
+        "every supported ledger answer gets its matching preserve note");
       assert.doesNotMatch(JSON.stringify(out), GLOBAL_ABSENCE, "no document absence or no-match instruction beside ledger answers");
     });
     await t.test(`remote ${key}`, async () => {

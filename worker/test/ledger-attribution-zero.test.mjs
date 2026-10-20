@@ -7,7 +7,7 @@ test('a zero-valued confirmed row does not certify a payer zero when another rec
   t.mock.method(globalThis, 'fetch', () => assert.fail('network forbidden'));
   for (const [slug, label] of [['one', 'Payer One'], ['two', 'Payer Two']])
     f.raw(`INSERT INTO fin_entities(entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at)
-      VALUES (?,?,'business','counterparty','owner_stated','confirmed',?)`, slug, label, NOW);
+      VALUES (?,?,'business','owned','owner_stated','confirmed',?)`, slug, label, NOW);
   f.add('zero', 'FROM: Payer One', null, { cents: 0 });
   const named = 'How much income came from Payer One in October 2026?';
   const grouped = 'Show income by merchant in October 2026?';

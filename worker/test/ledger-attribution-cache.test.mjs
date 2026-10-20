@@ -1,3 +1,4 @@
+import { assertPossibleMatch } from './partner-r7-assertions.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as attribution from '../src/lib/ledger-attribution.js';
@@ -67,8 +68,17 @@ test('one answer caches normalized complete parses and keeps raw alphabet and le
   assert.strictEqual(decide({ description: 'FROM: Payer One\nFROM: Payer Two' }), conflict);
   assert.equal(lookups, afterConflict, 'unknown complete results are cached too');
   const structured = decide({ description: 'FROM: Payer One;TRACE: 123', payee: 'Payer Two' });
-  assert.equal(structured.entity_slug, 'two');
+  // A cached sender cannot be discarded when the structured payee disagrees.
+  assert.equal(structured.state, 'unknown');
+  assert.equal(structured.entity_slug, null);
+  assert.deepEqual(new Set(structured.evidence.candidates), new Set(['Payer One', 'Payer Two']));
+  assert.equal(structured.evidence.parser.complete, true);
   assert.equal(structured.evidence.source, 'payee');
+  const agreeing = decide({ description: 'FROM: Payer One;TRACE: 123', payee: 'Supplier Alias' });
+  assert.equal(agreeing.state, 'confirmed', 'the same cached sender agrees with its registered alias');
+  assert.equal(agreeing.entity_slug, 'one');
+  assert.equal(agreeing.evidence.parser.complete, true);
+  assert.strictEqual(decide({ description: 'FROM: Payer One;TRACE: 123' }), first);
   const assumed = decide({ description: 'Payer One payment' });
   assert.equal(assumed.state, 'assumed');
   assert.strictEqual(decide({ description: 'Payer One payment' }), assumed);
@@ -87,7 +97,7 @@ test('real answers refresh the identity snapshot and preserve each repeated rece
   const f = ledgerFixture(t);
   t.mock.method(globalThis, 'fetch', () => assert.fail('network forbidden'));
   f.raw(`INSERT INTO fin_entities(entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at)
-    VALUES ('one','Payer One','business','counterparty','owner_stated','confirmed',?)`, NOW);
+    VALUES ('one','Payer One','business','owned','owner_stated','confirmed',?)`, NOW);
   for (let i = 0; i < 5; i++) f.add(`receipt-${i}`, 'Payer One payment', null);
   const question = 'How much income came from Payer One in October 2026?';
   async function ask(q = question) {
@@ -102,7 +112,7 @@ test('real answers refresh the identity snapshot and preserve each repeated rece
     return body;
   }
   const green = await ask();
-  assert.equal(green.ledger.total_minor, 12500);
+  assertPossibleMatch(green, 12500);
   assert.equal(green.assumptions[0].count, 5);
   assert.equal(green.assumptions[0].citations.length, 5);
   assert.ok(green.answer.includes(green.notes[0]));
@@ -110,11 +120,11 @@ test('real answers refresh the identity snapshot and preserve each repeated rece
   assert.equal(exact.ledger.total_minor, null);
   assert.equal(exact.ledger.unattributed_count, 5);
   f.raw(`INSERT INTO fin_entities(entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at)
-    VALUES ('two','Payer One payment','business','counterparty','owner_stated','confirmed',?)`, NOW);
+    VALUES ('two','Payer One payment','business','owned','owner_stated','confirmed',?)`, NOW);
   const conflict = await ask();
   assert.equal(conflict.ledger.total_minor, null);
   assert.equal(conflict.ledger.unattributed_count, 5);
   assert.equal(conflict.evidence_gate.complete, false);
   f.raw("UPDATE fin_entities SET legal_name='Other Supplier' WHERE entity_slug='two'");
-  assert.equal((await ask()).ledger.total_minor, 12500);
+  assertPossibleMatch(await ask(), 12500);
 });

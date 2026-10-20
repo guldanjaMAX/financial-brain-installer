@@ -431,6 +431,56 @@ brain holds nothing about still returns rows. `/api/rag/think` is the only guard
 and it holds. Never show raw `/api/rag/unified` output as proof the brain "found
 something".
 
+The bounded fact answer in `entity-fact-answer.js` normalizes typographic
+apostrophes in the question before matching. Every free-text value and rendered
+subject label passes one allowlist: its NFKC form contains only letters, marks
+attached to letters, ASCII digits, spaces, or `. , ' & - / # ( )`. Non-ASCII
+numerals also refuse in the original text, since cited bytes are preserved and
+some numerals normalize to letters. After removing everything except letters
+and ASCII digits, any run of six digits refuses. Default casefold must leave
+none of the words account, acct, routing, card, IBAN, SWIFT or ABA. This covers
+dated owner addresses, contact cards and operative company/role values. Phone,
+mobile and email values retain their own validators; their subject labels use
+the allowlist. The normal generation and masking path handles declined facts.
+
+Ledger attribution checks complete labelled description senders even when a
+structured payee is present. Names agree after shared comma mapping, NFKC and
+merchant normalization, ignoring a trailing company suffix from the closed
+grammar list; aliases registered to the same identity also agree. Different
+registered identities always disagree. Agreement preserves registered identity
+or observed presence for an unregistered phrase, without registering it.
+Disagreement leaves the row unknown with both candidates, preventing absence,
+zero and complete-total claims.
+Merchant and payer authority requires a unique exact selection. The original
+selector, with shared comma mapping, NFKC and merchant normalization only, must
+equal a registered identity/alias or a bounded bank payee/merchant or complete
+labelled sender value. Only equal bounded fields or that exact registered
+identity's confirmed rows enter the selection. Different exact readings that
+select different identities or row sets refuse, including period-boundary
+alternatives. A conflicting or unresolved literal field remains evidence;
+failed attribution cannot turn it into an absent field.
+Cleanup, shortened names, registered fragments, description containment and
+closed shorthand can supply possible matches only. Their response has null
+totals and null confirmed presence, a partial subtotal when positive, the note
+"matched by name similarity, not an exact merchant/payer name", and the
+`exact names only` flip. They never certify absence or zero. A nonmatch retains
+the existing incomplete/null-total contract. Exact literal zero rows remain
+usable when the other attribution/coverage checks permit them. Unknown receipts
+still prevent complete income totals. Amounts inside the literal name are not
+receipt filters; external amounts and noun possessives retain their scope.
+Categories keep their separate bank-taxonomy matching and ambiguity contract.
+All readings consume one covered snapshot and one shared parser budget. Public
+candidate fields remain masked. No question creates an identity registration.
+Meeting, calendar and text hint-search failures contribute to the ordinary
+degraded signals and gaps.
+The shared `retrievalFailed` predicate in `store-d1.js` covers both adapters'
+keyword, semantic, embedding and unavailable-search failures, including
+`no-embedding` / `embedding-unavailable`. Projection and authority-index gaps
+also block completeness. Deliberate D1 document/zone keyword-only scope is a
+nonfailure; an unknown degradation fails closed. The final evidence gate keeps
+supported facts and citations while lowering completeness. Existing rejection
+or partial-answer reasons survive this gate.
+
 For a narrow contact lookup, `/think` can extract an address, email, phone,
 company, or role directly from one explicitly labelled contact record or a
 matching owner-confirmed operative section. It requires a matching subject,
@@ -2193,7 +2243,7 @@ spend or income, recurring charges, and own-account transfers. Named months
 and Q1 through Q4 may omit the year, meaning the current UTC year. Merchant
 matches use the exact NFKC-normalized, case-insensitive payee when present.
 Only outflows without a payee use contiguous description tokens as a fallback.
-Named inflows require an exact normalized match to a current confirmed
+Named inflows require an exact normalized match to a current confirmed, owned
 `fin_entities` legal name or display label. A bank payee does not itself create
 a known identity. An absent payee requires a complete parse of the bounded
 sender/metadata grammar, followed by the same identity match. Identities and transactions
@@ -2210,13 +2260,26 @@ payer. Standard wire-transfer/ACH-payment sender clauses and explicit
 independent identity check. Conflicting fields remain unknown.
 Before NFKC or trimming, the description alphabet admits Unicode letters,
 numbers and combining marks, ASCII space, and `& ' ( ) . _ / : # ; , | -`.
+Leading and trailing line breaks are trimmed after raw validation. Internal
 CR, LF, CRLF, NEL (U+0085), U+2028 and U+2029 each become one semicolon field
 separator, never a space within a name. Every other Cc control, including FF,
 VT, NUL and tab, and every Cf format character, including U+200B, U+FEFF,
 U+200C/D, U+2060 and bidi controls, produces unknown. All other characters
-outside that alphabet also produce unknown. Validate the normalized text too.
+outside that alphabet also produce unknown. Default-ignorable code points
+are refused regardless of Unicode category. Any combining mark remaining
+after NFKC also refuses; it must never disappear into a different identity.
 The caps are 512 code points before and after normalization, 12 fields, 64 parse
-alternatives and 32,768 instrumented steps. Refusal retains every amount in the
+alternatives and 32,768 instrumented steps (512 × 64). Each candidate end,
+lookup and match costs one bounded operation, with at most 512 code points
+per candidate; scanning and parse expansion are charged separately. One answer
+has 25,165,824 steps (512 × 64 × 12 × 64), including raw validation on cache
+hits. Exhaustion anywhere in the rows read, including transfer padding, emits
+`ledger_attribution_budget` with reason `answer_operation_limit`, incomplete
+evidence, and retained amounts. Every answer kind withholds complete totals and
+sets `total_is_exact: false`; retained subtotals say partial and expose
+`subtotal_is_partial: true`. Conditional, grouped, net and recurring complete
+figures are withheld too. `inflow_total_minor` still preserves selected read
+amounts. Refusal retains every amount in the
 inflow total. SQL NUL indicators cover description, payee, legal_name and
 display_label (the current owner-alias column) at the same snapshot boundary.
 A damaged payee refuses without falling through to description, even if
@@ -2233,12 +2296,27 @@ containing `By`, `From`, metadata words or company commas. Complete registered
 comma-bearing names retain their registered comma positions and participate
 alongside comma field-boundary readings, within
 the same caps; there is no generic comma-stripping retry. A question-local
-phrase can match a comma-bearing sender after normalization only when no
+phrase requires identical comma positions in question and bank field. Its only
+allowed comma is before a closed company suffix: LLC, LLP, LP, Inc, Ltd, Corp,
+Corporation, Co, Company, PLC, PC, PA, N.A. or S.A. This rule applies to structured
+payees too; registered identity lookup retains punctuation normalization.
+Before comma logic, questions, bank fields and registered comma keys map U+060C,
+U+3001, U+FF0C, U+FF64, U+FE50, U+FE51, U+2E41, U+1802, U+1808, U+A4FE,
+U+A60D, U+07F8 and U+055D to ASCII comma. Any other general-category Po
+character in a raw payer clause, structured payee or labelled sender refuses query-only authority
+except `. ' & - / # ,`. This check precedes compatibility normalization so it
+cannot silently turn unsupported punctuation into an allowed spelling. Question
+routing retains the raw refusal across normalized clause offsets and shorter
+alternative readings. Independently registered identities retain authority.
+A phrase can match a comma-bearing sender only when no
 recognized field start splits it, including invalid or empty fields. Query-only
 sender values must contain no token from the grammar vocabulary.
 Unknown sender names, including company names with commas, still establish
 those field boundaries without gaining payer authority. Empty comma
-segments and incomplete fields still refuse. All registered readings must resolve
+segments and incomplete fields still refuse. Different complete explicit sender values, including unresolved alternatives
+from overlapping labels such as Co Entry Descr and Entry Descr, produce unknown
+and cannot supply query-phrase evidence. Registered alias agreement uses entity
+identity rather than spelling. All registered readings must resolve
 to one entity slug, and at least one complete parse must resolve every sender
 field. Missing alternative names do not erase a unique registered whole name;
 a conflicting slug, ambiguous label or unresolved additional sender produces
@@ -2247,7 +2325,8 @@ suffix (including payment, ACH deposit and payroll), or a closed channel prefix
 plus a bare identity. A registered identity or vocabulary-free question-local
 phrase may supply that identity, with the same assumption note and flip.
 The single grammar table in
-`ledger-attribution.js` owns both vocabularies. Prefix channels are ACH, EFT,
+`ledger-attribution.js` owns both vocabularies. The metadata table also accepts
+`Ind ID:`, `Ind Name:` and `TRN:`. Prefix channels are ACH, EFT,
 wire, Zelle and bank, optionally followed by credit, transfer, payment or
 deposit, plus payment, deposit, receipt and transfer. Confirmed authority after
 a channel still needs an explicit sender label, unless a complete registered
@@ -2268,7 +2347,7 @@ Zero totals after exclusions stay
 unconfirmed, while a positive gross figure retains its assumption note.
 Every payer display uses the same attribution decision once per inflow row.
 `createInflowAttributor(registry)` binds a cache to one answer's identity
-snapshot. Complete parse results are shared by normalized description only
+snapshot. Complete parses and operation-limit refusals are shared by normalized description only
 after raw alphabet and length checks, with no cross-answer cache. Structured
 payees retain their direct lookup path, and grammar tables compile once per
 module. The parser includes comma, semicolon, pipe and canonicalized line boundaries.
@@ -2304,11 +2383,14 @@ and unchanged receipt counts and notes.
 commas and grammar words with payment and named-income templates and shorter-only,
 both-name and longer-only registrations. Real-answer arms require unresolved or
 conflicting selectors to withhold presence, absence and zero. Question identity
-comes from all literal registry mentions at Unicode word boundaries, removing
+comes from registry mentions using the same `normalizeMerchantText` tokens as
+bank rows, with original question offsets and Unicode word boundaries, removing
 only strictly contained spellings. Equal or partly overlapping mentions remain;
 distinct slugs refuse. Complete clause coverage and unchanged scope are checked
-separately from identity. Without registered mentions, a complete requested
-phrase may support presence from an exactly normalized bank payee or labelled
+separately from identity. Only registered mentions covering or overlapping a
+payer clause disable its phrase path; disjoint account narration does not.
+A contained short alias cannot erase an equal complete structured bank field.
+A complete requested phrase may support presence from an exactly normalized bank payee or labelled
 sender field in a complete parse with exactly one sender value. A query-only
 description phrase containing any grammar token refuses. Tokens come directly
 from the same table that compiles sender and metadata labels, reference/invoice
@@ -2316,12 +2398,12 @@ prose, channels, transaction suffixes and fixed metadata words. Unregistered
 names containing "Payment" or "From" therefore return cannot-confirm and the
 uncertain-deposit list. Registered names containing these words and exact
 structured-payee matches retain their existing authority. A vocabulary-free
-unregistered phrase also supports assumed presence from a closed transaction
-suffix or channel prefix, with the same assumption note and `exact names only`
-flip as registered shorthand. It never authorizes absence or zero. All recognized field
+unregistered phrase also supports possible matches from a closed transaction
+suffix or channel prefix, with a partial subtotal, the similarity note and
+`exact names only` flip, as does registered shorthand. It never authorizes absence or zero. All recognized field
 starts are boundaries, even if their value is invalid or empty or their tail
-cannot complete; unresolved names cannot hide these boundaries. That phrase remains separate from the registry and
-never authorizes absence or zero. Two different matched phrases, registered
+cannot complete; unresolved names cannot hide these boundaries. That phrase remains separate from the registry; a missing or merely similar
+phrase never authorizes absence or zero. Two different matched phrases, registered
 conflicts, damaged registry spellings and uncovered clauses refuse. A registered
 payer can still be absent from a covered window with independently confirmed receipts.
 `worker/test/ledger-question-mentions.test.mjs` crosses ordered payer pairs,
@@ -2339,9 +2421,13 @@ shared test-only templates in `worker/test/ledger-question-cases.mjs`.
 payee fields. It measures answered, refused and wrong outcomes, requiring all
 40 useful answers and no wrong answers. The question and row generators
 also run with owned entities only. Presence cites its bank-field basis;
-unregistered income remains an attributed subtotal, with complete totals null.
-Exactly four arms in the unchanged fixture use unregistered shorthand and carry
-the assumption note and `exact names only` flip. A separate matrix checks all
+exact bank fields remain useful without registering a payer; unresolved inflows
+still keep income totals partial. Exactly four arms in the unchanged fixture
+use unregistered shorthand and are possible matches with partial subtotals,
+null confirmed presence, the similarity note and `exact names only` flip.
+The R7 exact-field fixture separately requires forty complete answers with
+zero wrong answers, and seeded tests cross all filler/amount forms, boundary
+classes, registration combinations, literal zeros and description-only rows. A separate matrix checks all
 54 closed suffix and channel forms for registered and unregistered identities,
 including exact-name refusal, amount mismatch, absent payers and zero. Tests also cover
 amount mismatches, multiple phrases, stale question hypotheses, date/account
@@ -2368,7 +2454,10 @@ account-link refusals and every other direct/fallback gap reason. Institution
 text uses the same masker; link commands use account placeholders. Structured
 coverage/sync dates are validated before rendering, and invalid balance dates
 refuse. Arbitrary account slugs never appear in answer guidance.
-Payer clauses are removed before account-kind selection.
+Payer readings cannot end in question connector or date words. One question
+grammar table supplies those boundaries and arrival words. Replacement readings
+must preserve the original account mask, account kind and explicit qualifiers;
+otherwise they retain the original routing. Payer clauses are removed before account-kind selection.
 Merchant labels preserve literal `and` and `&`. Redacted, shortened or unknown
 labels refuse; an unmatched conjunction substitution refuses as ambiguous.
 Quote the original by-merchant line rather than substituting or guessing. Category totals separate confirmed and proposed categories; proposed

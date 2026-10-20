@@ -138,7 +138,7 @@ async function snapshotRows(env, accounts, sql, binds, { tenantId, mask, account
     ...(payerIdentities ? [env.DB.prepare(`SELECT entity_slug,legal_name,display_label,
       instr(COALESCE(legal_name,''),char(0))>0 AS legal_name_has_nul,
       instr(COALESCE(display_label,''),char(0))>0 AS display_label_has_nul FROM fin_entities
-      WHERE tenant_id=? AND superseded_by_id IS NULL AND basis_state='confirmed'
+      WHERE tenant_id=? AND superseded_by_id IS NULL AND basis_state='confirmed' AND relationship='owned'
       ORDER BY entity_slug LIMIT ?`).bind(tenantId, MAX_ROWS + 1)] : []),
   ]);
   if (!Array.isArray(inventory?.results) || !Array.isArray(facts?.results)) throw new Error("ledger snapshot unavailable");

@@ -1,3 +1,4 @@
+import { assertPossibleMatch } from './partner-r7-assertions.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { classifyLedgerQuestion as classify } from '../src/lib/ledger-question.js';
@@ -23,7 +24,7 @@ test('control: exact payer, absent payer, partial word and outflow exercise real
   assert.equal(unregistered.evidence_gate.complete, false);
   assert.doesNotMatch(unregistered.answer, /No matching|\$0\.00/);
   f.raw(`INSERT INTO fin_entities(entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at)
-    VALUES ('known-absent','Absent Payer','business','counterparty','owner_stated','confirmed',?)`, NOW);
+    VALUES ('known-absent','Absent Payer','business','owned','owner_stated','confirmed',?)`, NOW);
   const absent = await f.ask('Did the Absent Payer payment arrive?');
   assert.equal(absent.ledger?.found, false);
   assert.ok(f.calls.slice(start).some(sql => /JOIN fin_transactions/.test(sql)));
@@ -133,7 +134,10 @@ test('F3 description is sender evidence only when no payee is present', async t 
   f.add('conflict', 'Payment from Fixture Payer', 'Unrelated Payer', { cents: 3690 });
   const body = await f.ask('Did the Fixture Payer payment arrive?');
   assert.equal(body.ledger?.found, true);
-  assert.deepEqual(body.citations.map(row => row.amount_minor), [1357, 2468]);
+  assert.deepEqual(body.citations.filter(row => !body.ledger.unattributed_citations.includes(row.n)).map(row => row.amount_minor), [1357, 2468]);
+  assert.equal(body.ledger.unattributed_count, 1);
+  assert.deepEqual(body.citations.filter(row => body.ledger.unattributed_citations.includes(row.n)).map(row => row.amount_minor), [3690]);
+  assert.equal(body.evidence_gate.complete, false);
   assert.ok(f.calls.some(sql => /JOIN fin_transactions/.test(sql)));
 });
 
@@ -163,7 +167,7 @@ test('closure: without a payee, only the description sender clause can name the 
   f.add('unrelated', 'Transfer from Unrelated Payer for Fixture Payer invoice', null);
   f.add('opening', 'Fixture Sender ACH deposit', null);
   assert.equal((await f.ask('Did the Unrelated Payer payment arrive?')).ledger?.found, true);
-  assert.equal((await f.ask('Did the Fixture Sender payment arrive?')).ledger?.found, true);
+  assertPossibleMatch(await f.ask('Did the Fixture Sender payment arrive?'), 2500);
   const start = f.calls.length;
   const body = await f.ask('Did the Fixture Payer payment arrive?');
   assert.ok(f.calls.slice(start).some(sql => /JOIN fin_transactions/.test(sql)), 'sender match decision reached');

@@ -12,20 +12,20 @@ function setup(t) {
   t.mock.method(globalThis, 'fetch', () => assert.fail('network forbidden'));
   const identity = (slug, name, alias = null) => f.raw(`INSERT INTO fin_entities
     (entity_slug,legal_name,display_label,kind,relationship,provenance,basis_state,recorded_at)
-    VALUES (?,?,?,'business','counterparty','owner_stated','confirmed',?)`, slug, name, alias, NOW);
+    VALUES (?,?,?,'business','owned','owner_stated','confirmed',?)`, slug, name, alias, NOW);
   f.add('receipt', 'Confirmed receipt', 'Payer One');
   async function ask(q) {
     f.calls.length = 0;
-    const before = f.calls.length, changes = f.first('SELECT total_changes() n').n;
+    const before = f.calls.length, documentsBefore = f.documentCalls, changes = f.first('SELECT total_changes() n').n;
     const body = await f.ask(q);
     assert.ok(f.calls.slice(before).some(sql => /JOIN fin_transactions/.test(sql)), q);
     assert.equal(f.first('SELECT COUNT(*) n FROM fin_transactions').n, 1);
     assert.equal(f.first('SELECT total_changes() n').n, changes);
-    assert.equal(f.documentCalls, 0, q);
+    assert.equal(f.documentCalls, documentsBefore, q);
     assert.ok(body.ledger, q);
     return body;
   }
-  return { ...f, identity, ask };
+  return { ...f, identity, ask, route: f.ask };
 }
 function uncertain(body) {
   assert.equal(body.ledger.found, null);
@@ -121,7 +121,7 @@ test('a selector outside the protected alphabet cannot fall back to comma trunca
   const f = ledgerFixture(t);
   t.mock.method(globalThis, 'fetch', () => assert.fail('network forbidden'));
   f.raw(`INSERT INTO fin_entities(entity_slug,legal_name,display_label,kind,relationship,provenance,basis_state,recorded_at)
-    VALUES ('whole','& Payer One, Bank','Whole Supplier','business','counterparty','owner_stated','confirmed',?)`, NOW);
+    VALUES ('whole','& Payer One, Bank','Whole Supplier','business','owned','owner_stated','confirmed',?)`, NOW);
   f.add('receipt', 'Confirmed receipt', '& Payer One, Bank');
   assert.equal((await f.ask(payment('Whole Supplier'))).ledger.found, true);
   const before = f.documentCalls, reads = f.calls.length;
@@ -148,6 +148,14 @@ test('generator retains complete requested names before interpreting grammar wor
   let cases = 0;
   for (const arm of requestedSelectorCases()) {
     const intent = classifyLedgerQuestion(arm.question, { now: NOW });
+    if (/\b(?:from|by|for|in|of)$/.test(arm.whole.toLowerCase())) {
+      // Receive wording has no money keyword; unsupported names keep that
+      // original document routing rather than inventing a money question.
+      assert.equal(intent.broad, !/^how much did (?:i|we) receive\b/i.test(arm.question), 'original routing retained');
+      assert.equal(intent.kind, null, JSON.stringify(arm));
+      assert.equal(intent.payerReadings, undefined, 'S1 cannot retain a terminal connector as a name');
+      cases++; continue;
+    }
     assert.ok(intent.kind, JSON.stringify(arm));
     assert.ok(intent.payerReadings?.some(reading => reading.label === arm.whole.toLowerCase()), JSON.stringify(arm));
     const entries = [
@@ -176,6 +184,15 @@ test('generated requested selectors resolve by distinct slugs, with both real re
       ...(arm.registration === 'shorter' ? [] : [{ entity_slug: 'whole', legal_name: arm.whole }]),
     ];
     const intent = classifyLedgerQuestion(arm.question, { now: NOW });
+    if (/\b(?:from|by|for|in|of)$/.test(arm.whole.toLowerCase())) {
+      const reads = f.calls.length;
+      assert.equal(intent.broad, !/^how much did (?:i|we) receive\b/i.test(arm.question), 'original routing retained');
+      assert.equal(intent.kind, null, JSON.stringify(arm));
+      const body = await f.route(arm.question);
+      assert.equal(body.route, 'documents', 'unsupported terminal selector reaches fallback');
+      assert.equal(f.calls.length, reads);
+      counts.cases++; counts.unsupported = (counts.unsupported || 0) + 1; continue;
+    }
     const resolved = resolveRequestedPayer(intent, payerRegistry(entries));
     counts[resolved.state]++; counts.cases++;
     if (resolved.state === 'unique') assert.equal(resolved.slug, 'whole', JSON.stringify(arm));
@@ -187,7 +204,14 @@ test('generated requested selectors resolve by distinct slugs, with both real re
     for (const actual of ['Payer One', arm.whole]) for (const exact of [false, true]) {
       f.raw('UPDATE fin_transactions SET payee=?', actual);
       const body = await f.ask(arm.question.replace('?', exact ? ', exact names only?' : '?'));
-      if (resolved.state !== 'unique') uncertain(body);
+      if (resolved.state !== 'unique') {
+        // The registry may lack the whole name while the complete structured
+        // field supplies the unique R7 exact reading. A short field still refuses.
+        if (actual === arm.whole && (!arm.whole.includes(',') || /, (?:co|company)$/i.test(arm.whole))) {
+          assert.equal(body.ledger.found, true, JSON.stringify(arm));
+          assert.ok(body.citations.some(c => c.amount_minor === 2500));
+        } else uncertain(body);
+      }
       if (resolved.state === 'unique') {
         if (actual === arm.whole) assert.equal(body.ledger.found, true, JSON.stringify(arm));
         else assert.notEqual(body.ledger.found, true, JSON.stringify(arm));

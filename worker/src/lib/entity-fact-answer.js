@@ -24,11 +24,11 @@ const OWNER_QUESTION = new RegExp(`^what(?: is|'s) (?:my|our) (?:current )?(${FI
 const identity = (value) => String(value || "").normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
 const QUALIFIED_FACT = /\b(?:not|no longer|old|former|previous|unknown|unconfirmed|maybe|possibly|temporary|if|unless|until|historical|superseded|instead|ignore|instructions?|must|should|please|draft|proposed|or)\b/i;
 const safeSubject = (value) => typeof value === "string" && value.length <= 120 &&
-  /^[\p{L}\p{N}][\p{L}\p{N} '&.,-]*$/u.test(value) &&
+  !unsafeScalarFact(value) && /^[\p{L}\p{N}][\p{L}\p{N}\p{M} '&.,-]*$/u.test(value) &&
   !/\b(?:and|or|former|previous|old|not|unknown|my|our|the|their|this|that)\b/i.test(value);
 
 function questionFact(question, owner) {
-  const text = String(question || "").trim();
+  const text = String(question || "").replace(/’/g, "'").trim();
   let subject, field;
   let match = POSSESSIVE_QUESTION.exec(text);
   if (match) [, subject, field] = match;
@@ -41,6 +41,23 @@ function questionFact(question, owner) {
   return { subject, field: FIELDS.get(field.toLowerCase()) };
 }
 
+function unsafeScalarFact(value) {
+  // Allowlist every free-text value and rendered subject. Inspect, never
+  // rewrite, cited bytes. Marks must attach to a letter, not a digit or a
+  // separator. A raw numeral cannot escape as a letter through NFKC (e.g.
+  // Roman numerals); declining these spellings only costs the fast path.
+  const normalized = value.normalize('NFKC');
+  if (!/^(?:\p{L}\p{M}*|[0-9 .,'&/#()\-])+$/u.test(normalized) ||
+      [...value].some(char => /\p{N}/u.test(char) && !/^[0-9]$/.test(char))) return true;
+  if (/[0-9]{6}/.test(normalized.replace(/[^\p{L}0-9]/gu, ''))) return true;
+  // NFKC precedes default casefold;
+  // dotless i stays distinct, Cherokee folds to uppercase, and sharp s expands.
+  const folded = [...normalized].map(char => char === '\u0131' ? char
+    : /[\u13a0-\u13ff\uab70-\uabbf]/u.test(char) ? char.toUpperCase()
+      : char.toUpperCase().toLowerCase().replace(/ß/g, 'ss')).join('');
+  return /\b(?:account|acct|routing|card|iban|swift|aba)\b/.test(folded);
+}
+
 function safeValue(field, value) {
   if (!value || value.length > 180 || /[\u0000-\u001f\u007f<>`\[\]{}\\]/.test(value)) return false;
   // A label containing prose or qualifications is not an exact scalar fact.
@@ -49,8 +66,11 @@ function safeValue(field, value) {
   if (QUALIFIED_FACT.test(value)) return false;
   if (field === "email") return /^[A-Za-z0-9.!#$%&'*+/=?^_{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/.test(value);
   if (field === "phone" || field === "mobile") return /^\+?[0-9(][0-9 ()-]{6,28}$/.test(value) && value.replace(/\D/g, "").length >= 7;
-  if (field.includes("address")) return /^\d{1,6}[A-Za-z]? [\p{L}\p{N} ,.'#()/-]{4,160}$/u.test(value);
-  return /^[\p{L}\p{N}][\p{L}\p{N} &,'()./-]{1,119}$/u.test(value);
+  // Every other scalar can carry an identifier, including company and role.
+  // Keep phone/email validators above this guard and fall back to masking.
+  if (unsafeScalarFact(value)) return false;
+  if (field.includes("address")) return /^\d{1,6}[A-Za-z]? [\p{L}\p{N}\p{M} ,.'#()/-]{4,160}$/u.test(value);
+  return /^[\p{L}\p{N}][\p{L}\p{N}\p{M} &,'()./-]{1,119}$/u.test(value);
 }
 
 function factFromCard(text, requested) {
@@ -116,6 +136,7 @@ function addressMailSender(row, doc, statementAt) {
 }
 
 function ownerAddressStatement({ question, owner, results, docs, now }) {
+  question = String(question || '').replace(/’/g, "'").trim();
   const addressQuestion = /^what(?: is|'s) my (?:current )?(?:home |mailing )?address\??$/i.test(question);
   const completionQuestion = /^has my (?:home |mailing )?address been updated(?: in (?:the )?[a-z ]{1,60} system)?\??$/i.test(question);
   if ((!addressQuestion && !completionQuestion) || !safeSubject(owner) || identity(owner) === 'the owner') return null;

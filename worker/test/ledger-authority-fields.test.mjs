@@ -14,7 +14,7 @@ function setup(t) {
   t.mock.method(globalThis, 'fetch', () => assert.fail('network forbidden'));
   for (const [slug, label] of [['one', 'Payer One'], ['two', 'Payer Two']])
     f.raw(`INSERT INTO fin_entities(entity_slug,legal_name,display_label,kind,relationship,provenance,basis_state,recorded_at)
-      VALUES (?,?,?,'business','counterparty','owner_stated','confirmed',?)`, slug, label, `${label} Alias`, NOW);
+      VALUES (?,?,?,'business','owned','owner_stated','confirmed',?)`, slug, label, `${label} Alias`, NOW);
   f.add('receipt', 'FROM: Payer Two', 'Payer Two');
   return f;
 }
@@ -66,10 +66,10 @@ for (const column of ['description', 'payee', 'legal_name', 'display_label']) {
       await unknown(f);
       if (identity) {
         assert.ok(f.calls.length);
-        f.raw("UPDATE fin_transactions SET payee='Valid Supplier'");
+        f.raw("UPDATE fin_transactions SET payee='Valid Supplier',description='FROM: Valid Supplier'");
         await positive(f, 'Valid Supplier');
         assert.ok(f.calls.some(sql => /legal_name_has_nul/.test(sql) && /display_label_has_nul/.test(sql)), 'both identity guards read in the snapshot');
-        f.raw("UPDATE fin_transactions SET payee='Payer Two'");
+        f.raw("UPDATE fin_transactions SET payee='Payer Two',description='FROM: Payer Two'");
       }
     }
     f.raw(`UPDATE ${table} SET ${column}=?${where}`, clean);

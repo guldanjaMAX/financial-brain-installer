@@ -1,3 +1,4 @@
+import { assertPossibleMatch } from './partner-r7-assertions.mjs';
 import { seedKnownPayers } from './ledger-known-payers-fixture.mjs';
 import test, { mock } from "node:test";
 import assert from "node:assert/strict";
@@ -60,7 +61,8 @@ for (const [question, kind, seed] of [
     const f = await fixture(t); seed(f);
     const found = await f.ask(question);
     assert.equal(found.ledger?.kind, kind);
-    assert.equal(found.ledger.found, true);
+    if (kind === 'merchant') assertPossibleMatch(found, 12001);
+    else assert.equal(found.ledger.found, true);
     assert.ok(found.citations.length > 0);
     assert.ok(transactionReads(f) > 0, "real transaction decision reached");
     f.raw("DELETE FROM fin_transactions");
@@ -68,9 +70,15 @@ for (const [question, kind, seed] of [
     const absent = await f.ask(question);
     assert.equal(absent.ledger?.found, false);
     assert.ok(transactionReads(f) > before, "absence inspected transactions");
+    if (kind === 'merchant' && question.includes('spend')) {
+      assert.equal(absent.evidence_gate.complete, false);
+      assert.equal(absent.ledger.total_minor, null);
+      assert.deepEqual(absent.ledger.accounts.map(a => a.account_mask), ['1111', '2222']);
+    } else {
     assert.match(absent.answer, /1111.*2222/);
     assert.ok(absent.answer.includes(absent.ledger.from) && absent.answer.includes(absent.ledger.to));
     assert.match(absent.answer, /covered through 2026-10-11/);
+    }
     seed(f);
     f.raw("UPDATE fin_account_coverage SET covered_from='2026-10-05'");
     const readCount = f.seen.sql.length;
@@ -109,8 +117,8 @@ test("merchant tokens are contiguous and category proposals and Unsorted stay ex
   f.add("other", "2026-09-16", 500, "outflow", "Fixture Storehouse", "SOFTWARE", "confirmed");
   f.add("unsorted", "2026-09-17", 99, "outflow", "Fixture Store");
   const merchant = await f.ask("How much did I spend at fixture store in September 2026?");
-  assert.equal(merchant.ledger.total_minor, 10100);
-  assert.match(merchant.answer, /Unsorted.*\$0\.99/);
+  assertPossibleMatch(merchant, 10100);
+  assert.deepEqual(merchant.citations.map(c => c.amount_minor).sort((a,b) => a-b), [99, 10001]);
   const category = await f.ask("How much did I spend on software/SaaS in Q3?");
   assert.equal(category.ledger.total_minor, 10501);
   assert.equal(category.ledger.unsorted_minor, 99);
@@ -300,11 +308,11 @@ test("merchant punctuation and category words do not become implicit account sel
   const f = await fixture(t);
   f.add("punctuation", "2026-09-15", 1357, "outflow", "Fixture.Store card payment", "SOFTWARE", "confirmed");
   const punctuation = await f.ask("How much did I spend at Fixture.Store in September 2026?");
-  assert.equal(punctuation.ledger.total_minor, 1357);
+  assertPossibleMatch(punctuation, 1357);
   const accountWord = await f.ask("How much did I spend at Fixture Store card in September 2026?");
-  assert.equal(accountWord.ledger?.total_minor, 1357);
+  assertPossibleMatch(accountWord, 1357);
   const selected = await f.ask("How much did I spend at Fixture.Store in September 2026 for checking account 1111?");
-  assert.equal(selected.ledger.total_minor, 1357);
+  assertPossibleMatch(selected, 1357);
   assert.equal(selected.ledger.accounts.length, 1);
 });
 

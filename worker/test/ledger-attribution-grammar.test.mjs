@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { attributeInflow, payerRegistry } from '../src/lib/ledger-attribution.js';
+import { attributeInflow, createInflowAttributor, payerRegistry } from '../src/lib/ledger-attribution.js';
 import { ledgerFixture, NOW } from './ledger-review-fixture.mjs';
 import { lineSeparators } from './ledger-attribution-cases.mjs';
 
@@ -58,7 +58,7 @@ test('caps refuse safely with deterministic parser work and keep the amount in t
   const f = ledgerFixture(t);
   t.mock.method(globalThis, 'fetch', () => assert.fail('network forbidden'));
   f.raw(`INSERT INTO fin_entities(entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at)
-    VALUES ('one','Payer One','business','counterparty','owner_stated','confirmed',?)`, NOW);
+    VALUES ('one','Payer One','business','owned','owner_stated','confirmed',?)`, NOW);
   f.add('receipt', 'FROM: Payer One', null);
   const payment = 'Did the payment from Payer One arrive in October 2026?';
   assert.equal((await f.ask(payment)).ledger.found, true);
@@ -83,7 +83,7 @@ test('Unicode line separators parse while every other control or format refuses 
   const f = ledgerFixture(t);
   t.mock.method(globalThis, 'fetch', () => assert.fail('network forbidden'));
   f.raw(`INSERT INTO fin_entities(entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at)
-    VALUES ('one','Payer One','business','counterparty','owner_stated','confirmed',?)`, NOW);
+    VALUES ('one','Payer One','business','owned','owner_stated','confirmed',?)`, NOW);
   const base = 'WIRE FROM: Payer One; REF: 123';
   f.add('receipt', base, null);
   const questions = ['Did the payment from Payer One arrive in October 2026?',
@@ -172,10 +172,12 @@ test('the length, field and parse limits have successful boundary controls', t =
   const sixtyFour = parsed(Array(6).fill('FROM: A').join(' '), one);
   assert.equal(sixtyFour.state, 'confirmed'); assert.equal(sixtyFour.evidence.parser.parses, 64);
   assert.equal(parsed(Array(7).fill('FROM: A').join(' '), one).evidence.parser.refusal, 'parse-limit');
-  const dense = parsed(Array(250).fill('A').join(' '), one);
+  // Candidate-end accounting removes the old artificial quadratic charge.
+  // Exercise exhaustion with an injected cap, independently of input density.
+  const dense = createInflowAttributor(one, { stepLimit: 1024 })({ description: Array(250).fill('A').join(' ') });
   assert.equal(dense.state, 'unknown');
   assert.equal(dense.evidence.parser.refusal, 'operation-limit');
-  assert.equal(dense.evidence.parser.steps, 32768);
+  assert.equal(dense.evidence.parser.steps, 1024);
   t.diagnostic(JSON.stringify({ budget_controls: { length: 512, fields: twelve.evidence.parser,
     parses: sixtyFour.evidence.parser, operations: dense.evidence.parser } }));
 });

@@ -4,6 +4,7 @@ import { createProductFixture } from "./product-contract-fixture.mjs";
 import { demoteScaffolding } from "../src/index.js";
 import { evidenceLineageFor } from "../src/lib/evidence-lineage.js";
 import { applyMoneyVeto } from "../src/lib/money-veto.js";
+import { drainOutbox, vectorReadiness } from "../src/lib/store-d1.js";
 import { tierOf } from "../src/lib/evidence-authority.js";
 
 const NOW = Date.parse("2026-10-11T12:00:00Z");
@@ -37,10 +38,25 @@ async function run(t, {
     }] }, { "X-Admin-Key": fixture.env.ADMIN_KEY });
     assert.equal(response.status, 200);
     assert.equal((await response.json()).results[0].status, "created");
+    // Proposed control: complete verdict assertions need a verified semantic index.
+    const visible = new Map(); let mutation = null, sequence = 0;
+    fixture.env.VECTORIZE.upsert = async rows => {
+      rows.forEach(row => visible.set(row.id, row));
+      return { mutationId: mutation = `synthetic-${++sequence}` };
+    };
+    fixture.env.VECTORIZE.getByIds = async ids => ids.map(id => visible.get(id)).filter(Boolean);
+    fixture.env.VECTORIZE.describe = async () => ({ vectorCount: visible.size, processedUpToMutation: mutation });
+    for (let attempt = 0; attempt < 10; attempt++) {
+      await drainOutbox(fixture.env, { embed: async () => [0.1, 0.2, 0.3],
+        embedBatch: async texts => texts.map(() => [0.1, 0.2, 0.3]), maxBatches: 10 });
+      if ((await vectorReadiness(fixture.env)).ready) break;
+    }
+    assert.equal((await vectorReadiness(fixture.env)).ready, true, 'healthy retrieval control reached');
     fixture.env.VECTORIZE.query = async () => ({ matches: fixture.rows("SELECT chunk_uid AS id FROM chunks") });
     const result = await fixture.post("/api/rag/think", { q: question }, { "X-Admin-Key": fixture.env.ADMIN_KEY });
     assert.equal(result.status, 200);
     const body = await result.json();
+    assert.equal(body.degraded ?? null, null, "complete-answer fixture has healthy retrieval");
     assert.ok(body.results.length, "real retrieval reached stored evidence");
     assert.equal(drafts, 1, "real draft path was reached");
     assert.equal(verifiers, expectedVerifiers, "the expected verifier decision path was reached");

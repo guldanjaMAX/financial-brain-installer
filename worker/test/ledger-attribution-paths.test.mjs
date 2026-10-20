@@ -1,3 +1,4 @@
+import { assertPossibleMatch } from './partner-r7-assertions.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -24,7 +25,7 @@ const identifier = 'AB48CD26EF17GH03';
 const amount = 2500;
 function identity(f, label, slug, alias = null) {
   f.raw(`INSERT INTO fin_entities(entity_slug,legal_name,display_label,kind,relationship,provenance,basis_state,recorded_at)
-    VALUES (?,?,?,'business','counterparty','owner_stated','confirmed',?)`, slug, label, alias, NOW);
+    VALUES (?,?,?,'business','owned','owner_stated','confirmed',?)`, slug, label, alias, NOW);
 }
 function setup(t, kind) {
   const f = ledgerFixture(t);
@@ -60,9 +61,12 @@ function validate(body, { named, kind, state, same, exact, stats, requestedKnown
   const uncertain = !requestedKnown || state === 'unknown' || (state === 'assumed' && !positive);
   assert.equal(ledger.inflow_total_minor, amount, 'the scoped inflow survives every attribution decision and flip');
   if (named) {
-    assert.equal(ledger.found, positive ? true : uncertain ? null : false);
-    assert.equal(body.evidence_gate.complete, !uncertain);
-    if (kind === 'merchant') assert.equal(ledger.total_minor, uncertain ? null : positive ? amount : 0);
+    if (state === 'assumed' && positive) assertPossibleMatch(body, amount);
+    else {
+      assert.equal(ledger.found, positive ? true : uncertain ? null : false);
+      assert.equal(body.evidence_gate.complete, !uncertain);
+      if (kind === 'merchant') assert.equal(ledger.total_minor, uncertain ? null : positive ? amount : 0);
+    }
     if (!positive && uncertain) assert.doesNotMatch(body.answer, /no matching|\$0\.00/i);
     if (!requestedKnown) assert.equal(ledger.payer_selector_ambiguous, true);
   } else {

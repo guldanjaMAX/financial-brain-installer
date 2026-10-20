@@ -1,5 +1,15 @@
 import { collapseTitleFamilies, domainExpansion, queryNames, containsName, metadataNameVariant } from './retrieval-expansion.js';
 import { measureQueryStage, startQueryStage } from "./query-timing.js";
+
+// Both store adapters share this final completeness contract. Only deliberate
+// D1 scope restrictions are nonfailure degradation; unknown future outcomes
+// fail closed rather than silently authorizing a complete answer.
+export function retrievalFailed(degraded, reason = null) {
+  if (reason === 'embedding-unavailable') return true;
+  if (degraded == null) return false;
+  return !(degraded === 'scoped-vector' &&
+    ['document-scope-keyword-only', 'zone-scope-keyword-only'].includes(reason));
+}
 /**
  * store-d1 — retrieval over Cloudflare alone: D1 for text and keywords,
  * Vectorize for vectors, fusion in the Worker.
@@ -1000,8 +1010,12 @@ export async function search(env, {
   const kw = keywordAttempt.results.map(assessStoredProvenance);
   const expanded = expansionRows.map(assessStoredProvenance);
   const vec = vectorAttempt.results.map(assessStoredProvenance);
-  const keywordFailed = (keywordAttempt.attempted && Boolean(keywordAttempt.error)) || expansionFailed;
-  const vectorFailed = vectorAttempt.attempted && Boolean(vectorAttempt.error);
+  // Supplemental source lanes are part of the requested evidence search.
+  // Losing one must not certify absence just because the base query succeeded.
+  const keywordFailed = (keywordAttempt.attempted && Boolean(keywordAttempt.error)) || expansionFailed ||
+    hintAttempts.some(attempt => attempt.keyword.attempted && Boolean(attempt.keyword.error));
+  const vectorFailed = (vectorAttempt.attempted && Boolean(vectorAttempt.error)) ||
+    hintAttempts.some(attempt => attempt.vector.attempted && Boolean(attempt.vector.error));
 
   // Empty is a valid result from either modality. A zero-row success must never
   // be guessed into an outage, just as a caught query error must never be

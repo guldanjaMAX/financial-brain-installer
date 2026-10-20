@@ -1,3 +1,4 @@
+import { assertPossibleMatch } from './partner-r7-assertions.mjs';
 import { seedKnownPayers } from './ledger-known-payers-fixture.mjs';
 import test, { mock } from "node:test";
 import assert from "node:assert/strict";
@@ -159,7 +160,7 @@ test("payment edges are inclusive, optional mask and counterparty are exact, and
   assert.equal(unregistered.evidence_gate.complete, false);
   assert.doesNotMatch(unregistered.answer, /No matching|\$0\.00/);
   f.raw(`INSERT INTO fin_entities(entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at)
-    VALUES ('known-absent','Different payer','business','counterparty','owner_stated','confirmed',?)`, NOW);
+    VALUES ('known-absent','Different payer','business','owned','owner_stated','confirmed',?)`, NOW);
   const wrongPayer = await direct(f, "Did the payment of $50.11 from Different payer arrive on 2026-09-15?");
   assert.equal(wrongPayer.ledger.found, false);
   const wrongMask = await direct(f, "Did the payment of $50.11 arrive on 2026-09-15 in account 9999?");
@@ -171,14 +172,15 @@ test("payment edges are inclusive, optional mask and counterparty are exact, and
   f.raw("UPDATE fin_transactions SET description='Fixture payer deposit' WHERE direction='inflow'");
   const shorthand = await (await f.ask("Did the payment of $50.11 from Fixture payer arrive on 2026-09-15 in account 4321?")).json();
   assert.ok(f.seen.sql.some(sql => /JOIN fin_transactions/.test(sql)), 'real Think attribution decision reached');
-  assert.equal(shorthand.ledger.found, true);
+  assertPossibleMatch(shorthand, 10022);
   assert.equal(shorthand.evidence_gate.complete, false);
-  assert.equal(shorthand.ledger.unattributed_count, 1);
+  assert.equal(shorthand.ledger.rows.length, 2);
   const assumption = shorthand.assumptions[0];
   assert.equal(assumption.type, 'payer_shorthand');
   assert.equal(assumption.count, 2); assert.equal(assumption.amount_minor, 10022);
   assert.deepEqual(shorthand.citations.filter(c => assumption.citations.includes(c.n)).map(c => c.posted_on), ['2026-09-08', '2026-09-22']);
-  assert.equal(shorthand.citations[shorthand.ledger.unattributed_citations[0] - 1].amount_minor, 12001);
+  assert.equal(shorthand.ledger.inflow_total_minor, 22023, 'all read inflows remain in the gross scope');
+  assert.ok(shorthand.citations.every(c => c.amount_minor === 5011), 'only possible matching receipts enter the subtotal');
   assert.ok(shorthand.ledger.flip.includes('exact names only'));
   assert.ok(shorthand.notes.every(note => shorthand.answer.includes(note)), 'Think must render every shorthand assumption note');
 });

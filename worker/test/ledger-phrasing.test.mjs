@@ -159,7 +159,7 @@ test("named arrival absence is covered, scoped, token matched and never a model 
   assert.equal(unregistered.evidence_gate.complete, false);
   assert.doesNotMatch(unregistered.answer, /No matching|\$0\.00/);
   f.raw(`INSERT INTO fin_entities(entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at)
-    VALUES ('known-absent','Absent Payer','business','counterparty','owner_stated','confirmed',?)`, NOW);
+    VALUES ('known-absent','Absent Payer','business','owned','owner_stated','confirmed',?)`, NOW);
   const absent = await f.ask("Did the payment from Absent Payer reach account 4417?");
   assert.equal(absent.ledger?.found, false);
   assert.match(absent.answer, /2026-08-14.*2026-10-12/);

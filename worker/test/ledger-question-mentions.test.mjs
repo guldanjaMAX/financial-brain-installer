@@ -12,7 +12,7 @@ function setup(t) {
   t.mock.method(globalThis, 'fetch', () => assert.fail('network forbidden'));
   const identity = (slug, name, alias = null) => f.raw(`INSERT INTO fin_entities
     (entity_slug,legal_name,display_label,kind,relationship,provenance,basis_state,recorded_at)
-    VALUES (?,?,?,'business','counterparty','owner_stated','confirmed',?)`, slug, name, alias, NOW);
+    VALUES (?,?,?,'business','owned','owner_stated','confirmed',?)`, slug, name, alias, NOW);
   f.add('receipt', 'Confirmed receipt', 'Payer One');
   async function ask(question) {
     f.calls.length = 0;

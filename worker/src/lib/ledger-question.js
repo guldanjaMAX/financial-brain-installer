@@ -3,9 +3,29 @@ export const LEDGER_ANSWER_KINDS = Object.freeze([
   'balance', 'payment', 'totals', 'largest', 'deposits', 'merchant', 'category', 'transfers', 'recurring',
 ]);
 
+// Preserve comma positions before either question or bank-field grammar can
+// discard punctuation. This fixed mapping is shared with attribution.
+export const normalizePayerCommas = value => String(value || '')
+  .replace(/[\u060c\u3001\uff0c\uff64\ufe50\ufe51\u2e41\u1802\u1808\ua4fe\ua60d\u07f8\u055d]/g, ',');
+export const hasUnsupportedPayerPunctuation = value => [...normalizePayerCommas(value)]
+  .some(char => /\p{Po}/u.test(char) && !".'&-/#,".includes(char));
+
 // The grammar is deliberately bounded. Unsupported money questions use the
 // ordinary document path without imposing unrelated account-link decisions.
-const MONTHS = "january february march april may june july august september october november december".split(" ");
+export const payerQuestionGrammar = Object.freeze({
+  arrivals: Object.freeze("arrive arrived receive received come came land landed hit reach reached clear cleared post posted".split(" ")),
+  months: Object.freeze("january february march april may june july august september october november december".split(" ")),
+  connectors: Object.freeze("on in at for by from to via into during over between before after of".split(" ")),
+  dateWords: Object.freeze("last this recent month year days today yesterday tomorrow".split(" ")),
+  filler: Object.freeze(["please", "thanks", "for me", "if you can", "right now", "exactly", "again"]),
+});
+const MONTHS = payerQuestionGrammar.months;
+const trailingQuestionFiller = new RegExp(`(?:[, ]+(?:${payerQuestionGrammar.filler.join('|')}))+$`);
+const spendQuestionFiller = new RegExp(`\\b(?:${payerQuestionGrammar.filler.join('|')})\\b`, 'g');
+const payerTerminalWords = new Set([...MONTHS, ...payerQuestionGrammar.connectors, ...payerQuestionGrammar.dateWords, ...payerQuestionGrammar.arrivals]);
+const terminalDate = new RegExp(`\\b(?:${MONTHS.join('|')}|q[1-4])(?: +[0-9]{1,4}){0,2}$|\\b[0-9]{4}-[0-9]{2}-[0-9]{2}$|\\b[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}$`);
+const terminalGrammarWord = label => payerTerminalWords.has(ledgerWords(label).at(-1)) || terminalDate.test(label);
+const danglingConnector = new RegExp(`^[ ,]+(?:${payerQuestionGrammar.connectors.join('|')}) +(?:${[...payerQuestionGrammar.connectors, ...payerQuestionGrammar.arrivals].join('|')})\\b`);
 const MONTH = `(${MONTHS.join("|")})`;
 const DAY_MS = 86400000;
 const GENERIC_SENDERS = new Set("bank payment payments deposit transfer money the my our a an account company client customer someone them".split(" "));
@@ -13,7 +33,8 @@ const ledgerWords = text => text.match(/[\p{L}\p{N}]+/gu) || [];
 function specificSender(text, bounded = true) {
   const words = ledgerWords(text);
   return (!bounded || (text.length <= 80 && words.length <= 6)) && words.some(word => /\p{L}/u.test(word) && !GENERIC_SENDERS.has(word)) &&
-    !/\b(?:second|first|third|next|last|another|other|loan|car|tax)\b/.test(text);
+    !(bounded ? /\b(?:second|first|third|next|last|another|other|loan|car|tax)\b/
+      : /\b(?:second|first|third|next|another|other|loan|car|tax)\b/).test(text);
 }
 export const ledgerDay = (value) => new Date(value).toISOString().slice(0, 10);
 export const shiftLedgerDay = (day, delta) => ledgerDay(Date.parse(`${day}T00:00:00Z`) + delta * DAY_MS);
@@ -35,16 +56,34 @@ function amountInCents(text) {
 
 // Exactly one supported period is removed. Unconsumed qualifiers still have
 // to match a bounded intent grammar, so a second scope cannot become a total.
-function questionPeriod(q, today) {
-  const pattern = new RegExp(`\\b(?:${MONTHS.join("|")})(?:\\s+\\d{4})?\\b|\\bq[1-4](?:\\s+\\d{4})?\\b|\\blast\\s+\\d+\\s+days\\b|\\b(?:last|this) month\\b|\\bso far this year\\b|\\b\\d{4} so far\\b|\\brecent\\b`, "g");
-  const matches = [...q.matchAll(pattern)];
+function questionPeriod(q, today, protectSpend = false) {
+  const pattern = new RegExp(`\\b(?:${MONTHS.join("|")})(?:\\s+(?:of\\s+)?\\d{4})?\\b|\\bq[1-4](?:\\s+\\d{4})?\\b|\\blast\\s+\\d+\\s+days\\b|\\b(?:last|this) month\\b|\\bso far this year\\b|\\b\\d{4} so far\\b|\\brecent\\b`, "g");
+  let matches = [...q.matchAll(pattern)];
+  if (protectSpend) {
+    const spend = q.match(new RegExp(spendPattern.source.replace('^', '(?:^|, *)')));
+    if (spend && spend[1] !== 'by') {
+      const start = spend.index + spend[0].length - spend[2].length;
+      const external = matches.find(match => {
+        if (match.index < start) return false;
+        if (/\b(?:in|during|for|over) +(?:the +)?$/.test(q.slice(start, match.index))) return true;
+        // Bare relative periods at the end retain their original grammar.
+        // A relative phrase followed by more name text remains in the span.
+        const relative = !MONTHS.includes(match[0].split(' ')[0]) && !/^q[1-4]/.test(match[0]);
+        const tail = q.slice(match.index + match[0].length).replace(/[?!.]+$/, '').replace(trailingQuestionFiller, '').trim();
+        return relative && !tail;
+      });
+      // A bare month inside a merchant name is not another period clause.
+      // Explicit clauses after the name still all participate in ambiguity.
+      matches = matches.filter(match => match.index < start || (external && match.index >= external.index));
+    }
+  }
   // "Recent deposits in September" has one explicit period; recent is a
   // listing modifier there. It supplies the 14-day default only on its own.
   const periods = matches.some(m => m[0] !== "recent") ? matches.filter(m => m[0] !== "recent") : matches;
   if (periods.length > 1) return { invalid: true };
-  let from, to, residual = q.trim().replace(/[?!.]+$/, "").trim();
+  let from, to, boundaryResidual, residual = q.trim().replace(/[?!.]+$/, "").trim();
   if (periods.length) {
-    const period = periods[0][0], parts = period.split(/\s+/);
+    const period = periods[0][0], parts = period.replace(/ of /, " ").split(/\s+/);
     const year = Number(parts[1]) || Number(today.slice(0, 4));
     if (MONTHS.includes(parts[0])) {
       const month = MONTHS.indexOf(parts[0]);
@@ -70,20 +109,46 @@ function questionPeriod(q, today) {
       from = shiftLedgerDay(today, 1 - Number(parts[1])); to = today;
     }
     if (!from || !to) return { invalid: true };
-    residual = residual.replace(new RegExp(`(?:\\b(?:in|during|for|over)\\s+(?:the\\s+)?)?${period}\\b`), "").trim();
+    const at = periods[0].index;
+    const prefix = q.slice(0, at).match(/\b(?:in|during|for|over)\s+(?:the\s+)?$/)?.[0] || '';
+    const before = residual.slice(0, at - prefix.length), after = residual.slice(at + period.length);
+    boundaryResidual = `${before} \u0001 ${after}`;
+    residual = (before + after).trim();
   }
-  return { from, to, residual, period: periods[0]?.[0] };
+  return { from, to, residual, boundaryResidual, period: periods[0]?.[0] };
+}
+
+const spendPattern = /^(?:how much did (?:i|we) spend|(?:show(?: me)? |what is (?:my |the )?)spend(?:ing)?)(?: (at|on|by) (.+))$/;
+function spendSelectorText(residual) {
+  // Preserve the period boundary until its tail is consumed. Concatenating
+  // an unknown tail onto the merchant would turn an understood expense into $0.
+  const filler = trailingQuestionFiller;
+  const parts = residual.split('\u0001');
+  if (parts.length > 2) return null; // Raw input cannot inject another boundary.
+  const [beforePeriod, afterPeriod] = parts;
+  if (afterPeriod !== undefined && spendPattern.test(beforePeriod.trim())) {
+    if (afterPeriod.replace(filler, '').trim()) return null;
+    residual = beforePeriod.trim();
+  } else residual = residual.replace('\u0001', '').replace(/\s+/g, ' ').trim();
+  if (spendPattern.test(residual)) residual = residual.replace(filler, '').trim();
+  return residual;
 }
 
 function phaseTwoQuestion(q, intent, today) {
-  const period = questionPeriod(q, today);
+  // The same closed filler grammar applies on either side of the selector
+  // and period clause. Unknown words remain for grammar or row-match refusal.
+  if (/\bspend(?:ing)?\b/.test(q)) q = q.replace(spendQuestionFiller, ' ').replace(/\s+/g, ' ').trim();
+  const period = questionPeriod(q, today, true);
   if (period.invalid) return null;
   let { from, to, residual } = period;
+  residual = period.boundaryResidual ?? residual;
   // Account clauses are explicit and literal. A named bank or entity cannot
   // be consumed as filler, nor can a merchant named "card" select card accounts.
-  const selected = residual.match(/\b(?:in|for|of|into)\s+(?:(?:my|the)\s+)?(?:(checking|savings|card|loan|investment|retirement|escrow)\s+)?account\s+(?:ending(?:\s+in)?\s+)?(\d{1,4})\b/);
+  const selected = residual.match(/\b(?:in|for|of|into)\s+(?:(?:my|the)\s+)?(?:(checking|savings|card|loan|investment|retirement|escrow)\s+)?account(?:\s+(?:ending(?:\s+in)?\s+)?(\d{1,4}))?\b/);
   if (selected) residual = residual.replace(selected[0], "");
   residual = residual.replace(/,/g, "").replace(/\s+/g, " ").trim();
+  residual = spendSelectorText(residual);
+  if (residual === null) return null;
   const result = { ...intent, mask: selected?.[2] || null, accountKind: selected?.[1] || null, from, to };
   const numberWords = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
   const count = "(\\d+|one|two|three|four|five|six|seven|eight|nine|ten)";
@@ -118,13 +183,13 @@ function phaseTwoQuestion(q, intent, today) {
         (ledgerWords(name).length === 1 && /ed$/.test(name))) return null;
     residual = `show spending ${/^(?:software|saas|software\/saas)$/.test(name) ? "on" : "at"} ${name}`;
   }
-  const spending = residual.match(/^(?:how much did (?:i|we) spend|(?:show(?: me)? |what is (?:my |the )?)spend(?:ing)?)(?: (at|on|by) (.+))$/);
+  const spending = residual.match(spendPattern);
   const income = residual.match(/^(?:how much income(?: came)?|how much did (?:i|we) receive|(?:show(?: me)? |what is (?:my |the )?)income) (from|by|in category) (.+)$/);
   const filter = spending || income;
   if (filter && from) {
     const direction = spending ? "outflow" : "inflow";
     const mode = filter[1], value = filter[2].trim();
-    if (/\b(?:in|during|for|over|between|before|after|account|accounts|entity|or|last|month|year|q[1-4])\b/.test(value) ||
+    if (/\b(?:in|during|for|over|between|before|after|account|accounts|entity|or|month|year|q[1-4])\b/.test(value) ||
         (mode !== "at" && mode !== "from" && /\band\b/.test(value))) return null;
     if (mode === "by") return ["merchant", "category"].includes(value) ? { ...result, kind: value, direction, match: null } : null;
     if (!/[\p{L}\p{N}]/u.test(value)) return null;
@@ -133,8 +198,22 @@ function phaseTwoQuestion(q, intent, today) {
   return null;
 }
 
-const ARRIVAL = "arrive|arrived|receive|received|come|came|land|landed|hit|reach|reached|clear|cleared|post|posted";
+const ARRIVAL = payerQuestionGrammar.arrivals.join("|");
+const paymentAmount = /(?:\$|\busd\s+)\d[\d,]*(?:\.\d+)?|\b\d[\d,]*(?:\.\d+)?\s+dollars?\b/g;
+const nounExternalAmount = new RegExp(`'s +(?:${paymentAmount.source})$`);
+const nounPossessive = new RegExp(`^((?:did|has|have) +.*?)'s(?= +payment +(?:${ARRIVAL}|from|via|of)\\b)`);
+function stripNounPossessive(text) {
+  // Amount and possessive are one noun-payment grammar. Remove the amount
+  // before deciding whether 's belongs to that noun. Amount scope is carried
+  // separately through every protected-span and registry-coverage parse.
+  if (/^(?:did|has|have)\b/.test(text) && /\bpayment\b/.test(text))
+    text = text.replace(paymentAmount, '').replace(/\s+/g, ' ').trim();
+  // A possessive inside a FROM payer is part of that registered spelling.
+  return text.replace(nounPossessive, (match, payer) => /\bpayment +(?:from|via)\b/.test(payer) ? match : payer);
+}
 function paymentParties(text, selectorSlot = false) {
+  // Currency words qualify the amount, never a noun-form payer.
+  text = text.replace(paymentAmount, '').replace(/\s+/g, ' ').trim();
   const clause = preposition => text.match(new RegExp(`\\b${preposition}\\s+(.+?)(?=\\s+(?:on|into|to|in|for|from|via|${ARRIVAL})\\b|[?,]|$)`));
   // A payer ending in "payment" after FROM must not also be consumed as a
   // noun-first payer, duplicating the clause and certifying a false nonmatch.
@@ -145,8 +224,8 @@ function paymentParties(text, selectorSlot = false) {
   return { partyMatch: clause("from"), viaMatch: clause("via"), namedPayment, named };
 }
 
-function classifyQuestionGrammar(question, { now = Date.now(), selectorSlot = false } = {}) {
-  let q = String(question || "").normalize("NFKC").toLowerCase().replace(/[’]/g, "'").replace(/\bwhat's\b/g, "what is");
+function classifyQuestionGrammar(question, { now = Date.now(), selectorSlot = false, amountSource = question } = {}) {
+  let q = stripNounPossessive(normalizePayerCommas(question).normalize("NFKC").toLowerCase().replace(/[’]/g, "'").replace(/\bwhat's\b/g, "what is"));
   const broad = /\b(?:money|cash|profit|bank|deposits?|expenses?|charges?|subscriptions|recurring (?:charges|subscriptions)|payment|paid|spend|spent|spending|income|revenue|credits?|debits?|transactions?|transfers?|checking|savings|loan|debt|tax|payroll|invoice|receivable|payable|came in|went out)\b|\$\s*\d/.test(q) || /\b(?:(?:my|our|account|card|bank|checking|savings|loan|current|available|outstanding)\s+balances?|balances?\s+(?:of|on|in|for|due))\b/.test(q);
   const base = { broad: broad || selectorSlot, kind: null };
   if (!broad && !selectorSlot) return base;
@@ -202,8 +281,9 @@ function classifyQuestionGrammar(question, { now = Date.now(), selectorSlot = fa
   }
   if (/\b(?:payment|deposit|paid)\b/.test(q) && /\b(?:arrive|arrived|received|receive|come|came|land|landed|hit|reach|reached|clear|cleared|post|posted)\b/.test(q)) {
     if (Object.keys(flags).length) return intent;
-    const amountMinor = amountInCents(q);
-    if (amountMinor === null && /\$|\busd\b|\bdollars?\b/.test(q)) return intent;
+    const amountText = normalizePayerQuestion(amountSource);
+    const amountMinor = amountInCents(amountText);
+    if (amountMinor === null && /\$|\busd\b|\bdollars?\b/.test(amountText)) return intent;
     const dates = [];
     let rest = withoutMasks(q);
     const date = (match, day) => { dates.push(day); rest = rest.replace(match[0], ""); };
@@ -221,7 +301,7 @@ function classifyQuestionGrammar(question, { now = Date.now(), selectorSlot = fa
     // A bare month still cannot date an exact payment. Keep the original
     // ambiguity control; an explicit year or relative bounded window is needed.
     if (period.period && MONTHS.includes(period.period)) return intent;
-    rest = period.residual;
+    rest = period.residual.replace(paymentAmount, '').replace(/\s+/g, ' ').trim();
     if (dates.length && /\b(?:before|after|between)\b/.test(rest)) return intent;
     if (!dates.length && !period.from && /\b(?:on|between|before|after|yesterday|tomorrow|last|this)\b/.test(rest)) return intent;
     const arrival = ARRIVAL;
@@ -258,8 +338,23 @@ function classifyQuestionGrammar(question, { now = Date.now(), selectorSlot = fa
   return intent;
 }
 
-export const normalizePayerQuestion = value => String(value || '').normalize('NFKC').toLowerCase()
+export const normalizePayerQuestion = value => normalizePayerCommas(value).normalize('NFKC').toLowerCase()
   .replace(/’/g, "'").replace(/\s+/g, ' ').trim();
+const questionGrammarText = value => stripNounPossessive(normalizePayerQuestion(value).replace(/\bwhat's\b/g, 'what is'));
+
+function unsupportedQuestionPunctuation(question) {
+  const raw = normalizePayerCommas(question), spans = [];
+  // Decide on raw punctuation BEFORE compatibility normalization. Map only
+  // refused characters into the bounded grammar text so routing/registered
+  // coverage keep their existing offsets. Prefix normalization accounts for
+  // composed letters, expanded glyphs, whitespace and contractions before it.
+  for (const match of raw.matchAll(/\p{Po}/gu)) {
+    if (!hasUnsupportedPayerPunctuation(match[0])) continue;
+    const end = questionGrammarText(raw.slice(0, match.index + match[0].length)).length;
+    spans.push({ start: end - questionGrammarText(match[0]).length, end });
+  }
+  return spans;
+}
 const questionScope = intent => JSON.stringify([intent.kind, intent.from, intent.to, intent.mask, intent.accountKind,
   intent.amountMinor, intent.ownTransfers, intent.withdrawals, intent.loanProceeds, intent.exactNamesOnly]);
 
@@ -292,7 +387,8 @@ export function payerMentionsCoverQuestion(intent, mentions) {
     if (!complete.some(covered) || (clauseSets.length && !clauseSets.some(clauses => clauses.every(covered)))) return false;
     let text = question;
     for (const span of selected.toReversed()) text = text.slice(0, span.start) + slot + text.slice(span.end);
-    const parsed = classifyQuestionGrammar(text, { now: intent.payerQuestion.now, selectorSlot: true });
+    const parsed = classifyQuestionGrammar(text, { now: intent.payerQuestion.now, selectorSlot: true,
+      amountSource: intent.payerQuestion.amountSource });
     if (questionScope(parsed) !== questionScope(intent)) return false;
     if (parsed.kind === 'payment') return parsed.selectorSlotParts?.length > 0 && parsed.selectorSlotParts.every(part => part === slot);
     return parsed.kind === 'merchant' && parsed.direction === 'inflow' && parsed.match === slot;
@@ -314,11 +410,15 @@ export function payerMentionsCoverQuestion(intent, mentions) {
 // words or punctuation. Reusing that grammar with an opaque slot keeps every
 // supported question form in one place. These readings route the question only;
 // registry mentions over the entire question decide identity after the read.
-export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
-  const options = { now };
+function classifyPayerQuestion(question, { now = Date.now(), amountSource = question } = {}) {
+  const options = { now, amountSource };
   if (String(question || '').length > 1024) return { broad: true, kind: null };
   const original = classifyQuestionGrammar(question, options);
-  const text = normalizePayerQuestion(question).replace(/\bwhat's\b/g, 'what is');
+  // Natural receive questions can lack a money keyword. Read their original
+  // selectors with the same grammar before protecting names, without changing
+  // the fallback routing or inventing an account from a candidate reading.
+  const originalSelectors = original.broad ? original : classifyQuestionGrammar(question, { ...options, selectorSlot: true });
+  const text = questionGrammarText(question);
   const starts = [...text.matchAll(/\b(?:from|via) +/g)].map(m => m.index + m[0].length);
   const noun = text.match(/^(?:did|has|have) +(?:(?:the|my|our|a|an) +)?/);
   if (noun) starts.push(noun[0].length);
@@ -327,6 +427,7 @@ export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
   // including an otherwise valid shorter selector, rather than prune readings.
   if (text.length > 512 || starts.length > 12 || /[\p{Cc}\p{Cf}]/u.test(String(question || '')))
     return { broad: original.broad, kind: null };
+  const unsupportedPunctuation = unsupportedQuestionPunctuation(question);
   const slot = 'selectorplaceholder';
   if (text.includes(slot)) return { broad: original.broad, kind: null };
   const readings = [], clauseSets = [];
@@ -335,15 +436,21 @@ export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
     for (let end = start + 1; end <= text.length; end++) {
       if (end < text.length && !/[ ,?!.]/.test(text[end])) continue;
       const label = text.slice(start, end);
-      if (!labelPattern.test(label)) continue;
+      if (!labelPattern.test(label) || terminalGrammarWord(label)) continue;
+      // The old payment filler pass consumes "in arrive" or a repeated "in".
+      // That cannot authorize shortening a rejected terminal-connector name.
+      if (danglingConnector.test(text.slice(end))) continue;
       if (amountInCents(label) !== null) continue;
       const parsed = classifyQuestionGrammar(text.slice(0, start) + slot + text.slice(end), { ...options, selectorSlot: true });
       if (!(parsed.kind === 'payment' && parsed.selectorSlotParts.includes(slot)) &&
           !(parsed.kind === 'merchant' && parsed.direction === 'inflow' && parsed.match === slot)) continue;
+      if (parsed.selectorSlotParts?.some(part => part !== slot && terminalGrammarWord(part))) continue;
       // The whole-question cap bounds these spans. A six-word clipping rule
       // would drop alternatives that include a period or a longer legal name.
       if (parsed.kind === 'payment' && (parsed.amountMinor === null || start === noun?.[0].length) &&
           (!specificSender(label, false) || !ledgerWords(label).some(word => !GENERIC_SENDERS.has(word) && !['from', 'via'].includes(word)))) continue;
+      if (parsed.mask !== (originalSelectors.mask ?? null) || parsed.accountKind !== (originalSelectors.accountKind ?? null) ||
+          ['exactNamesOnly', 'ownTransfers', 'withdrawals', 'loanProceeds'].some(key => parsed[key] !== originalSelectors[key])) continue;
       readings.push({ label, start, end, parsed });
     }
   }
@@ -353,15 +460,18 @@ export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
   if (noun) for (const bridge of text.matchAll(/ +payment +(?:from|via) +/g)) {
     const first = { start: noun[0].length, end: bridge.index };
     first.label = text.slice(first.start, first.end);
-    if (!labelPattern.test(first.label) || !specificSender(first.label, false) || amountInCents(first.label) !== null) continue;
+    if (!labelPattern.test(first.label) || terminalGrammarWord(first.label) || !specificSender(first.label, false) || amountInCents(first.label) !== null) continue;
     const start = bridge.index + bridge[0].length;
     for (let end = start + 1; end <= text.length; end++) {
       if (end < text.length && !/[ ,?!.]/.test(text[end])) continue;
       const label = text.slice(start, end);
-      if (!labelPattern.test(label) || !specificSender(label, false) || amountInCents(label) !== null) continue;
+      if (!labelPattern.test(label) || terminalGrammarWord(label) || !specificSender(label, false) || amountInCents(label) !== null) continue;
+      if (danglingConnector.test(text.slice(end))) continue;
       const parsed = classifyQuestionGrammar(text.slice(0, first.start) + slot + bridge[0] + slot + text.slice(end),
         { ...options, selectorSlot: true });
       if (parsed.kind !== 'payment' || parsed.selectorSlotParts.length !== 2 || !parsed.selectorSlotParts.every(part => part === slot)) continue;
+      if (parsed.mask !== (originalSelectors.mask ?? null) || parsed.accountKind !== (originalSelectors.accountKind ?? null) ||
+          ['exactNamesOnly', 'ownTransfers', 'withdrawals', 'loanProceeds'].some(key => parsed[key] !== originalSelectors[key])) continue;
       readings.push({ ...first, parsed }, { label, start, end, parsed });
       clauseSets.push({ clauses: [first, { label, start, end }], parsed });
     }
@@ -396,7 +506,12 @@ export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
     else group.end = Math.max(group.end, r.end);
     r.group = groups.length - 1;
   }
-  const intent = { ...chosen.parsed, payerQuestion: { text, now },
+  // Refuse all query-only readings when a complete payer clause contains raw
+  // unsupported punctuation. A shorter alternative must not discard the mark
+  // and acquire authority. Independently registered mentions remain usable.
+  const unsupported = [...sameScope.filter(complete), ...completeSets.flatMap(set => set.clauses)]
+    .some(clause => unsupportedPunctuation.some(mark => mark.start < clause.end && mark.end > clause.start));
+  const intent = { ...chosen.parsed, payerQuestion: { text, now, amountSource, unsupportedPunctuation: unsupported },
     payerClauseSets: completeSets.map(set => set.clauses),
     payerReadings: readings.map(r => ({ label: r.label, start: r.start, end: r.end, group: r.group,
     complete: scope(r.parsed) === scope(chosen.parsed) && complete(r),
@@ -405,11 +520,11 @@ export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
   // Structural boundaries are alternative readings even when the remaining
   // name words cannot form question grammar. Such a prefix participates in
   // conflicts, but cannot authorize a claim by discarding the remainder.
-  const boundaries = new RegExp(`,|\\b(?:from|via|by|for|in|of|on|into|to|${ARRIVAL})\\b`, 'g');
+  const boundaries = new RegExp(`,|\\b(?:${payerQuestionGrammar.connectors.join('|')}|${ARRIVAL})\\b`, 'g');
   const labels = new Set(intent.payerReadings.map(r => r.label));
   for (const reading of [...intent.payerReadings]) for (const match of reading.label.matchAll(boundaries)) {
     for (const label of [reading.label.slice(0, match.index).trim(), reading.label.slice(match.index + match[0].length).trim()]) {
-      if (!label || labels.has(label)) continue;
+      if (!label || labels.has(label) || terminalGrammarWord(label)) continue;
       labels.add(label);
       intent.payerReadings.push({ label, parent: reading.label, group: reading.group, complete: false, sameScope: reading.sameScope });
     }
@@ -422,4 +537,103 @@ export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
       intent.counterpartyWords = original.counterpartyWords;
   } else intent.match = whole.label;
   return intent;
+}
+
+
+// Cleanup is an alternative interpretation, not authority to edit a name.
+// Reuse the bounded grammar with an opaque slot, preserving the literal span
+// and deriving amount scope only from text outside it. The reader decides
+// between these interpretations using its one covered snapshot and registry.
+export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
+  const original = classifyPayerQuestion(question, { now });
+  // An amount-only payment has no name selector to reinterpret. Preserve its
+  // amount and shorter default window instead of inventing a numeric payer.
+  if (original.kind === 'payment' && !original.counterpartyWords.length) return original;
+  const text = normalizePayerQuestion(question);
+  const merchant = original.kind === 'merchant' && original.direction === 'outflow' && original.match;
+  // Printed privacy labels remain explicit unsupported-selector refusals;
+  // span enumeration must not reroute them to an unqualified document answer.
+  if (merchant && (/\[redacted\]/i.test(original.match) || original.match.length >= 240)) return original;
+  if (!merchant && !text.match(spendQuestionFiller) && !text.match(paymentAmount)) return original;
+  // A rejected literal boundary must not re-enter the lossy cleaned parser.
+  if (text.length > 512 || /[\p{Cc}\p{Cf}]/u.test(String(question || '')))
+    return { broad: original.broad, kind: null };
+  const slot = 'literalnameplaceholder';
+  if (text.includes(slot)) return { broad: true, kind: null };
+  const starts = [...text.matchAll(/\b(?:at|on|from|via|in category) +/g)].map(m => m.index + m[0].length);
+  const noun = text.match(/^(?:did|has|have|show(?: me)?|what (?:was|is)) +(?:(?:the|my|our|a|an) +)?/);
+  if (noun && !/^(?:payment|deposit)(?: +of)? +(?:from|via)\b/.test(text.slice(noun[0].length).replace(paymentAmount, '').replace(/\s+/g, ' ').trim())) starts.push(noun[0].length);
+  if (starts.length > 12) return { broad: original.broad, kind: null };
+  const clean = value => value.replace(spendQuestionFiller, ' ').replace(paymentAmount, ' ').replace(/\s+/g, ' ').trim();
+  const candidates = [];
+  for (const start of starts) for (let end = start + 1; end <= text.length; end++) {
+    if (end < text.length && !/[ ,?!.']/u.test(text[end])) continue;
+    const label = text.slice(start, end).trimEnd(), cleaned = clean(label);
+    if (!/[\p{L}\p{N}]/u.test(label) ||
+        !/^[\p{L}\p{N}\p{M} &'()._/:#,$-]+$/u.test(label)) continue;
+    // Only a terminal noun possessive/amount belongs to the payment grammar.
+    // FROM names and internal possessives stay literal. A following possessive
+    // marks the outer noun boundary even when the name itself ends in one.
+    if (start === noun?.[0].length && !text.slice(end).startsWith("'s") &&
+        (nounExternalAmount.test(label) || /'s$/.test(label))) continue;
+    const before = text.slice(0, start).replace(spendQuestionFiller, ' ').replace(/^[ ,]+/, '');
+    const after = text.slice(end).replace(spendQuestionFiller, ' ');
+    const protectedText = before + slot + after;
+    const parsed = classifyPayerQuestion(protectedText, { now });
+    const isPayer = parsed.kind === 'payment' || parsed.kind === 'merchant' && parsed.direction === 'inflow';
+    const name = parsed.kind === 'payment' ? parsed.counterparty : parsed.match;
+    if (!['merchant', 'category', 'payment'].includes(parsed.kind) || name !== slot) continue;
+    // Protecting a name must not swallow account selection or explicit flags.
+    // In particular, an unsupported account tail cannot become name text.
+    if (parsed.mask !== (original.mask ?? null) || parsed.accountKind !== (original.accountKind ?? null) ||
+        ['exactNamesOnly', 'ownTransfers', 'withdrawals', 'loanProceeds'].some(key => parsed[key] !== original[key])) continue;
+    const raw = { ...parsed };
+    if (isPayer) {
+      const at = parsed.payerQuestion.text.indexOf(slot), delta = label.length - slot.length;
+      const span = reading => ({ ...reading,
+        ...(reading.label ? { label: reading.label.replace(slot, label) } : {}),
+        ...(reading.parent ? { parent: reading.parent.replace(slot, label) } : {}),
+        ...(Number.isInteger(reading.start) ? { start: reading.start > at ? reading.start + delta : reading.start,
+          end: reading.end > at ? reading.end + delta : reading.end } : {}) });
+      raw.payerQuestion = { ...parsed.payerQuestion, text: parsed.payerQuestion.text.replace(slot, label),
+        amountSource: protectedText };
+      raw.payerReadings = parsed.payerReadings.map(span);
+      raw.payerClauseSets = parsed.payerClauseSets.map(clauses => clauses.map(span));
+    }
+    if (parsed.kind === 'payment') { raw.counterparty = label; raw.counterpartyWords = ledgerWords(label); }
+    else raw.match = label;
+    const cleanedText = before + cleaned + after;
+    // For the cleaned reading the removed amount lies outside the selected
+    // shortened name. Preserve that scope; it never applies to the RAW name.
+    const alternate = cleaned ? classifyPayerQuestion(cleanedText, { now, amountSource: before + label.replace(spendQuestionFiller, ' ') + after }) : { kind: null };
+    // Removing an amount from a literal payer also changes the default
+    // payment window (60 days without an amount, 30 with one). Preserve both
+    // readings; the wider RAW read covers the CLEANED window as well.
+    const today = ledgerDay(now);
+    const defaultAmountWindow = raw.kind === 'payment' && raw.amountMinor === null &&
+      Number.isSafeInteger(alternate.amountMinor) && raw.from === shiftLedgerDay(today, -59) && raw.to === today &&
+      alternate.from === shiftLedgerDay(today, -29) && alternate.to === today;
+    if (alternate.kind && (alternate.kind !== raw.kind || alternate.direction !== raw.direction ||
+        (!defaultAmountWindow && (alternate.from !== raw.from || alternate.to !== raw.to)) ||
+        alternate.mask !== raw.mask || alternate.accountKind !== raw.accountKind)) continue;
+    candidates.push({ start, end, raw, cleaned: alternate, labels: [label, cleaned] });
+  }
+  // If cleanup changed a selector but no bounded original span survived,
+  // it cannot fall back to certifying the shortened name.
+  if (!candidates.length) return { broad: original.broad, kind: null };
+  // A complete span takes precedence over its subspans. Independent selector
+  // clauses remain under the existing multi-payer grammar and refusal rules.
+  const maximal = candidates.filter(c => !candidates.some(other => other !== c &&
+    other.start <= c.start && other.end >= c.end && (other.start < c.start || other.end > c.end)));
+  if (maximal.length !== 1) return { ...original, selectorUnproven: true };
+  const longest = maximal[0];
+  const periodBoundary = new RegExp(`^ +(?:in|during|for|over) +(?:the +)?(?:${MONTHS.join('|')}|q[1-4]|last|this|so far|recent|\\d{4} so far)\\b`);
+  const bounded = candidates.filter(candidate => candidate.start === longest.start && periodBoundary.test(text.slice(candidate.end)));
+  const preferred = bounded[0] || longest;
+  const { raw, cleaned, labels } = preferred;
+  // No name text changed. Keep the existing grammar's scope and punctuation
+  // guards, including unsupported terminal connector names.
+  if (labels[0] === labels[1] && !merchant) return original;
+  const alternatives = [longest, ...bounded].filter(candidate => candidate !== preferred);
+  return { ...raw, selectorReadings: { raw, cleaned, labels, alternatives: alternatives.map(candidate => candidate.raw) } };
 }

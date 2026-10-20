@@ -6,6 +6,8 @@ import { ledgerStatementVocabulary, normalizeMerchantText } from '../src/lib/led
 import { selectorTemplates } from './ledger-question-cases.mjs';
 import { originatorFormats, originatorWords, channelPrefixes } from './ledger-attribution-cases.mjs';
 
+import { assertExactSelection, assertPossibleMatch } from './partner-r7-assertions.mjs';
+
 const payment = name => `Did the payment from ${name} arrive in October 2026?`;
 const income = name => `How much income came from ${name} in October 2026?`;
 function single(t) {
@@ -28,6 +30,7 @@ test('production-shaped payer presence answers all forty arms with no wrong answ
   const stats = await measureProduction(f);
   t.diagnostic(JSON.stringify(stats));
   assert.deepEqual([stats.answered, stats.refused, stats.wrong], [40, 0, 0]);
+  assert.equal(stats.possible, 4);
 });
 
 test('exact structured and labelled sender matches are cited presence, never registration or zero', async t => {
@@ -45,8 +48,8 @@ test('exact structured and labelled sender matches are cited presence, never reg
       assert.match(body.answer, /your bank lists the payer as|statement line names.*as sender/i);
       assert.ok(!JSON.stringify(body).includes('482617039258001'));
       if (body.ledger.kind === 'merchant') {
-        assert.equal(body.ledger.total_minor, null);
-        assert.equal(body.ledger.attributed_subtotal_minor, 2500);
+        assert.equal(body.ledger.total_minor, 2500);
+        assert.equal(body.ledger.total_is_exact, true);
       }
       refusal(await reachedAnswer(f, form('Missing Supplier')));
     }
@@ -83,9 +86,9 @@ test('unregistered and registered shorthand keep the assumption note and exact-n
       f.raw('UPDATE fin_transactions SET payee=NULL');
       for (const registered of [false, true]) {
         if (registered)
-          f.raw("INSERT INTO fin_entities(entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at) VALUES ('registered','Supplier One','business','counterparty','owner_stated','confirmed',?)", NOW);
+          f.raw("INSERT INTO fin_entities(entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at) VALUES ('registered','Supplier One','business','owned','owner_stated','confirmed',?)", NOW);
         const body = await reachedAnswer(f, form('Supplier One'));
-        assert.equal(body.ledger.found, true);
+        assertPossibleMatch(body, 2500);
         assert.equal(body.assumptions.length, 1);
         assert.match(body.answer, /Note:.*exact names only/);
         assert.ok(body.notes?.length);
@@ -93,8 +96,8 @@ test('unregistered and registered shorthand keep the assumption note and exact-n
         assert.ok(body.citations.some(c => c.amount_minor === 2500));
         assert.ok(!body.payer_evidence?.length, 'shorthand cannot claim confirmed payer evidence');
         if (body.ledger.kind === 'merchant') {
-          assert.equal(body.ledger.total_minor, registered ? 2500 : null);
-          assert.equal(body.ledger.attributed_subtotal_minor ?? null, registered ? null : 2500);
+          assert.equal(body.ledger.total_minor, null);
+          assert.equal(body.ledger.attributed_subtotal_minor, 2500);
         }
         assumed++;
         refusal(await reachedAnswer(f, form('Supplier One').replace('?', ', exact names only?')));
@@ -132,8 +135,9 @@ test('bare descriptions, incomplete parses, competing phrases and registered con
   for (const q of ['Did the Supplier One payment from Supplier Two arrive in October 2026?',
     'Did the payment from Supplier One from Supplier Two arrive in October 2026?']) refusal(await reachedAnswer(f, q));
   f.raw(`INSERT INTO fin_entities(entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at)
-    VALUES ('registered','Supplier','business','counterparty','owner_stated','confirmed',?)`, NOW);
-  refusal(await reachedAnswer(f, payment('Supplier One')));
+    VALUES ('registered','Supplier','business','owned','owner_stated','confirmed',?)`, NOW);
+  // A shorter registry entry cannot erase the exact complete bank field.
+  assertExactSelection(await reachedAnswer(f, payment('Supplier One')), 2500);
 });
 
 test('query-only evidence cannot persist across questions, zero rows, amounts or account and date scopes', async t => {
@@ -148,9 +152,8 @@ test('query-only evidence cannot persist across questions, zero rows, amounts or
   f.raw('UPDATE fin_transactions SET amount_minor=0');
   for (const form of [payment, income]) {
     const body = await reachedAnswer(f, form('Supplier One'));
-    refusal(body, { candidateZero: true });
-    assert.equal(body.ledger.unattributed_candidates[0].amount_minor, 0, 'a candidate keeps its bank amount without claiming a payer zero');
-    assert.notEqual(body.ledger.attributed_subtotal_minor, 0);
+    assertExactSelection(body, 0);
+    assert.equal(f.first('SELECT COUNT(*) n FROM fin_entities').n, 1, 'exact field evidence is not registration');
   }
   f.raw("UPDATE fin_transactions SET amount_minor=2500,posted_on='2026-09-30'");
   f.add('in-window', 'Opaque processor text', null);
@@ -164,12 +167,12 @@ test('query-only evidence cannot persist across questions, zero rows, amounts or
   assert.equal((await reachedAnswer(f, payment('Supplier One').replace(' in October', ' in account 5678 in October'))).ledger.found, true);
 });
 
-test('normalized names in labelled comma fields do not require question punctuation', async t => {
+test('unregistered labelled comma fields require the same company comma in the question', async t => {
   const f = single(t);
   f.raw("UPDATE fin_transactions SET description='FROM: Supplier Services, LLC; REF: 48261703'");
   assert.equal((await reachedAnswer(f, payment('Supplier Services, LLC'))).ledger.found, true);
   for (const form of [payment, income]) {
-    assert.equal((await reachedAnswer(f, form('Supplier Services LLC'))).ledger.found, true);
+    refusal(await reachedAnswer(f, form('Supplier Services LLC')));
   }
   f.raw("UPDATE fin_transactions SET description='FROM: Supplier Services LLC,'");
   refusal(await reachedAnswer(f, payment('Supplier Services LLC')));
@@ -201,10 +204,23 @@ test('question generator uses only owned entities, including keyword and punctua
     f.raw('UPDATE fin_transactions SET payee=?,description=?', name, `FROM: ${name}`);
     for (const form of selectorTemplates) for (const exact of [false, true]) {
       const question = form(name).replace('?', exact ? ', exact names only?' : '?');
+      // S1 disallows a selector ending in a connector. G2 disallows an
+      // unregistered comma except before a company suffix, even in a payee.
+      if (/\b(?:from|by|for|in|of)$/.test(name.toLowerCase())) {
+        const before = f.documentCalls, reads = f.calls.length;
+        const body = await f.ask(question);
+        assert.equal(f.documentCalls, before + 1, `unsupported terminal selector reached routing: ${question}`);
+        assert.equal(f.calls.length, reads);
+        assert.equal(body.ledger, undefined);
+        stats.questions++; stats.refused++; continue;
+      }
       const body = await reachedAnswer(f, question);
+      if (name.includes(',') && !/, (?:LLC|LLP|LP|Inc\.?|Ltd\.?|Corp\.?|Corporation|Co\.?|Company|PLC|PC|PA|N\.A\.|S\.A\.)$/i.test(name)) {
+        refusal(body); stats.questions++; stats.refused++; continue;
+      }
       assert.equal(body.ledger.found, true, question);
       assert.equal(body.payer_evidence[0].type, 'bank_payee');
-      if (body.ledger.kind === 'merchant') assert.equal(body.ledger.total_minor, null);
+      if (body.ledger.kind === 'merchant') assert.equal(body.ledger.total_minor, 2500);
       stats.questions++; stats.positive++;
     }
     refusal(await reachedAnswer(f, payment('Missing Supplier'))); stats.refused++;
@@ -225,9 +241,8 @@ test('row generator uses only owned entities for all thirty formats and channel 
       const assumed = index >= 1 && index <= 3;
       if (normalizeMerchantText(name).split(' ').some(word => ledgerStatementVocabulary.includes(word)) || index === 0 || (assumed && exact)) { refusal(body); stats.refused++; }
       else {
-        assert.equal(body.ledger.found, true, `format ${index}, ${form(name)}`);
-        if (assumed) { assert.equal(body.assumptions.length, 1); stats.assumptions++; }
-        else assert.equal(body.payer_evidence[0].type, 'statement_sender');
+        if (assumed) { assertPossibleMatch(body, 2500); assert.equal(body.assumptions.length, 1); stats.assumptions++; }
+        else { assert.equal(body.ledger.found, true, `format ${index}, ${form(name)}`); assert.equal(body.payer_evidence[0].type, 'statement_sender'); }
         stats.positive++;
       }
     }
@@ -236,7 +251,7 @@ test('row generator uses only owned entities for all thirty formats and channel 
   for (const prefix of channelPrefixes) {
     f.raw('UPDATE fin_transactions SET description=?', `${prefix} Supplier Unit`);
     const body = await reachedAnswer(f, payment('Supplier Unit'));
-    assert.equal(body.ledger.found, true);
+    assertPossibleMatch(body, 2500);
     assert.equal(body.assumptions.length, 1);
     assert.match(body.answer, /Note:.*exact names only/);
     assert.ok(body.ledger.flip.includes('exact names only'));

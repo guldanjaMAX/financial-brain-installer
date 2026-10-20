@@ -5,6 +5,8 @@ import { reachedAnswer } from './ledger-production-fixture.mjs';
 import { attributeInflow, payerRegistry, payerQuestionRegistry } from '../src/lib/ledger-attribution.js';
 import { classifyLedgerQuestion } from '../src/lib/ledger-question.js';
 
+import { assertPossibleMatch } from './partner-r7-assertions.mjs';
+
 const payment = name => `Did the payment of $25.00 from ${name} arrive in October 2026?`;
 const income = name => `How much income came from ${name} in October 2026?`;
 const amountOnly = 'Did the payment of $25.00 arrive in October 2026?';
@@ -40,7 +42,7 @@ test('every sender-label pair refuses a question spanning two explicit fields', 
   for (const arm of splitFields()) {
     for (const form of [payment, income]) for (const exact of [false, true]) {
       const question = form(arm.phrase).replace('?', exact ? ', exact names only?' : '?');
-      f.raw('UPDATE fin_transactions SET payee=?,description=?', arm.phrase, arm.description);
+      f.raw('UPDATE fin_transactions SET payee=?,description=?', arm.phrase, 'Opaque bank memo');
       const bank = await reachedAnswer(f, question);
       assert.equal(bank.ledger.found, true, 'an exact structured field supports the complete phrase');
       assert.equal(bank.payer_evidence[0].type, 'bank_payee'); counts.controls++;
@@ -73,7 +75,13 @@ test('complete metadata segmentations compete with comma and space whole-name hy
       const phrase = `Supplier One${punctuation ? delimiter : ' '}${label.replace(':', '')} ${value}`;
       for (const form of [payment, income]) {
         f.raw('UPDATE fin_transactions SET payee=?,description=?', phrase, 'Processor text');
-        assert.equal((await reachedAnswer(f, form(phrase))).ledger.found, true);
+        const bank = await reachedAnswer(f, form(phrase));
+        if (phrase.includes(',')) {
+          assert.ok(refused(bank), 'G2 rejects a non-company comma even in a query-only payee');
+          const plain = phrase.replaceAll(',', '');
+          f.raw('UPDATE fin_transactions SET payee=?', plain);
+          assert.equal((await reachedAnswer(f, form(plain))).ledger.found, true, 'nearby exact payee remains usable');
+        } else assert.equal(bank.ledger.found, true);
         f.raw('UPDATE fin_transactions SET payee=NULL,description=?', `FROM: Supplier One${delimiter}${label} ${value}`);
         const body = await reachedAnswer(f, form(phrase));
         assert.equal(body.ledger.inflow_total_minor, 2500);
@@ -88,14 +96,23 @@ test('company commas remain usable and registered vocabulary names retain comple
   for (const name of ['Supplier Services, LLC', 'Supplier, Regional, LLC',
     'Supplier REF Division', 'Supplier SENDER Division']) {
     const registered = /REF|SENDER/.test(name);
-    if (registered) f.raw("INSERT INTO fin_entities(entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at) VALUES ('registered',?,'business','counterparty','owner_stated','confirmed',?)", name, NOW);
+    if (registered) f.raw("INSERT INTO fin_entities(entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at) VALUES ('registered',?,'business','owned','owner_stated','confirmed',?)", name, NOW);
     for (const prefix of senderLabels) for (const tail of ['', '; REF: 123', ', TRACE: 123']) {
       f.raw('UPDATE fin_transactions SET description=?', `${prefix} ${name}${tail}`);
       for (const form of [payment, income]) {
-        const body = await reachedAnswer(f, form(name.replaceAll(',', '')));
-        assert.equal(body.ledger.found, true, `${prefix} ${name}${tail}`);
-        if (!registered) assert.equal(body.payer_evidence[0].type, 'statement_sender');
-        else assert.equal(body.evidence_gate.complete, true);
+        const body = await reachedAnswer(f, form(name));
+        if (name === 'Supplier, Regional, LLC') {
+          assert.ok(refused(body), 'G2 requires one comma immediately before a company suffix');
+          f.raw("INSERT INTO fin_entities(entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at) VALUES ('comma-control',?,'business','owned','owner_stated','confirmed',?)", name, NOW);
+          assert.equal((await reachedAnswer(f, form(name))).ledger.found, true, 'a registered whole spelling retains authority');
+          f.raw("DELETE FROM fin_entities WHERE entity_slug='comma-control'");
+        } else {
+          assert.equal(body.ledger.found, true, `${prefix} ${name}${tail}`);
+          if (!registered) assert.equal(body.payer_evidence[0].type, 'statement_sender');
+          else assert.equal(body.evidence_gate.complete, true);
+        }
+        if (!registered) assert.ok(refused(await reachedAnswer(f, form(name.replaceAll(',', '')))),
+          'query-only company comma positions must agree');
       }
     }
     if (registered) f.raw("DELETE FROM fin_entities WHERE entity_slug='registered'");
@@ -122,7 +139,7 @@ test('vocabulary-bearing query shorthand refuses while registered shorthand reta
     assert.equal((await reachedAnswer(f, form(name))).ledger.found, true);
     f.raw('UPDATE fin_transactions SET payee=NULL,description=?', `${name} payment${tail}`);
     assert.ok(refused(await reachedAnswer(f, form(name))));
-    f.raw("INSERT INTO fin_entities(entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at) VALUES ('registered',?,'business','counterparty','owner_stated','confirmed',?)", name, NOW);
+    f.raw("INSERT INTO fin_entities(entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at) VALUES ('registered',?,'business','owned','owner_stated','confirmed',?)", name, NOW);
     const body = await reachedAnswer(f, form(name));
     // A suffix shorthand followed by metadata is outside the closed suffix
     // production; use a channel shorthand for the metadata-bearing control.
@@ -131,7 +148,7 @@ test('vocabulary-bearing query shorthand refuses while registered shorthand reta
       f.raw('UPDATE fin_transactions SET description=?', `ACH ${name}${tail}`);
     }
     const positive = tail ? await reachedAnswer(f, form(name)) : body;
-    assert.equal(positive.ledger.found, true);
+    assertPossibleMatch(positive, 2500);
     assert.equal(positive.assumptions.length, 1);
     assert.equal(positive.ledger.inflow_total_minor, 2500);
     assert.ok(refused(await reachedAnswer(f, form(name).replace('?', ', exact names only?'))));
@@ -150,10 +167,10 @@ test('unknown company-comma fields cannot disappear from competing segmentations
         const description = `${first} ${firstName}${delimiter}${second} ${secondName}`;
         for (const form of [payment, income]) for (const exact of [false, true]) {
           const question = form(phrase).replace('?', exact ? ', exact names only?' : '?');
-          f.raw('UPDATE fin_transactions SET payee=?,description=?', phrase, description);
+          f.raw('UPDATE fin_transactions SET payee=?,description=?', phrase, 'Opaque bank memo');
           assert.equal((await reachedAnswer(f, question)).ledger.found, true);
           controls++;
-          f.raw('UPDATE fin_transactions SET payee=NULL');
+          f.raw('UPDATE fin_transactions SET payee=NULL,description=?', description);
           assert.equal((await reachedAnswer(f, amountOnly)).ledger.found, true);
           controls++;
           const body = await reachedAnswer(f, question);

@@ -645,10 +645,12 @@ async function runTool(name, args = {}, queryTiming = null) {
         out.note = (d.notice || coverageIncompleteNotice(coverageUnavailable)) +
           " Relay the source coverage gaps and describe the result as provisional.";
       } else if (typeof d.answer === "string" && d.ledger && typeof d.ledger === "object" &&
-        typeof d.ledger.kind === "string" && d.evidence_gate?.supported === true && d.evidence_gate?.complete === true) {
-        // A covered zero or a bounded deposit miss has no matching row to cite.
-        // That is a ledger answer, not an empty document search.
-        out.note = "Preserve the ledger answer's exact amounts, account masks, dates, and coverage bounds.";
+        typeof d.ledger.kind === "string" && d.evidence_gate?.supported === true) {
+        // Complete ledger reads and incomplete selector nonmatches can both
+        // lack citations. Neither is an empty document-search response.
+        out.note = d.evidence_gate.complete === true
+          ? "Preserve the ledger answer's exact amounts, account masks, dates, and coverage bounds."
+          : "Preserve the ledger answer and its uncertainty and coverage gaps. A selector nonmatch does not establish a complete zero.";
       } else if (!out.citations.length && !out.results?.length) {
         out.note =
           'No match in this search. Say "I didn\'t find a matching record in this search", name what you searched, and name the next search you would run (another source, a wider date window, sort "newest", or a distinctive name or number). Do not turn one search into a claim that no such record exists. Do not substitute inference.';

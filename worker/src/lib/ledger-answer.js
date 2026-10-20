@@ -1,6 +1,6 @@
-import { createInflowAttributor, payerRegistry, payerQuestionRegistry, resolveRequestedPayer, selectAttributedInflows, inflowScopeConfirmed, payerAmount } from "./ledger-attribution.js";
+import { createInflowAttributionBudget, createInflowAttributor, boundedPayerFields, exactPayerFieldAdmitted, payerRegistryHasDamage, payerRegistry, payerQuestionRegistry, resolveRequestedPayer, selectAttributedInflows, inflowScopeConfirmed, payerAmount } from "./ledger-attribution.js";
 import { scopeIsUnrestricted } from "./grants.js";
-import { classifyLedgerQuestion, ledgerDay, shiftLedgerDay } from "./ledger-question.js";
+import { classifyLedgerQuestion, ledgerDay, shiftLedgerDay, payerMentionsCoverQuestion } from "./ledger-question.js";
 import { accountLinkPairsInWindow, accountLinkRequiredInWindow, effectivePeriodCovered, readEffectiveAccounts, readEffectiveBalances, readEffectiveTransactions } from "./ledger-reader.js";
 import { categoryFor, detectRecurring, isDirectedOwnedTransfer, isLoanAdvance, matchesCategory, matchesMerchant, merchantFor, normalizeMerchantText, pairOwnTransfers, sumMinor } from "./ledger-analysis.js";
 
@@ -49,11 +49,19 @@ function payerAssumptions(rows, payers, citations) {
     // Prefix/suffix are canonical constants from the closed grammar, not raw text.
     ...(reading.prefix ? { prefix: reading.prefix } : { suffix: reading.suffix }),
     count: rows.length, amount_minor: sumMinor(rows),
-    citations: rows.map(row => refs.get(`ledger:transaction:${row.id}`)), flip: 'exact names only',
+    citations: rows.map(row => refs.get(`ledger:transaction:${row.id}`)).filter(Number.isInteger), flip: 'exact names only',
   }));
 }
 
+const answerBudgetExhausted = payers => [...payers.values()].some(payer => payer.evidence.parser?.refusal === 'answer-operation-limit');
+
 function withPayerAssumptions(result, rows, payers) {
+  if (answerBudgetExhausted(payers)) {
+    const detail = 'The answer reached its sender parsing work limit. Some rows read remain unattributed; no complete total or absence is confirmed. Subtotals are partial.';
+    result.gaps = [...(result.gaps || []), { type: 'ledger_attribution_budget', reason: 'answer_operation_limit', detail }];
+    result.answer += `\n${detail}`;
+    result.evidence_gate = { supported: true, complete: false, partial: true, reason: 'answer_operation_limit' };
+  }
   const assumptions = payerAssumptions(rows, payers, result.citations);
   if (!assumptions.length) return result;
   result.assumptions = assumptions;
@@ -176,6 +184,142 @@ function leadExclusions(rows, pairs, selected, bySlug, intent) {
     loan_proceeds_count: loanProceeds.size, loan_proceeds_minor: sumMinor([...loanProceeds.values()]) } };
 }
 
+// Exactness belongs to the original selector and bounded evidence, never to
+// the success of a cleanup predicate. All alternatives share one snapshot and
+// one parsing budget; unresolved literal fields still participate in conflict.
+function chooseLiteralSelector(intent, identities, rows, budget) {
+  const labelOf = reading => reading.kind === 'payment' ? reading.counterparty : reading.match;
+  if (!['merchant', 'category', 'payment'].includes(intent.kind) || !labelOf(intent)) return { intent };
+  // Categories have their own bank taxonomy (including software/SaaS aliases),
+  // not a merchant/payer identity. Preserve that separate selection contract.
+  if (intent.kind === 'category') {
+    if (!intent.selectorReadings) return { intent };
+    const { raw, cleaned, labels } = intent.selectorReadings;
+    const matches = reading => reading.kind ? rows.filter(row => row.direction === reading.direction && matchesCategory(row, reading.match)) : [];
+    const literal = matches(raw), alternate = matches(cleaned);
+    if (literal.length && alternate.length && JSON.stringify(literal.map(row => row.id)) !== JSON.stringify(alternate.map(row => row.id)))
+      return { refusal: 'ambiguous', labels };
+    if (literal.length) return { intent: raw };
+    if (alternate.length) return { intent: cleaned };
+    return { refusal: 'unmatched', labels };
+  }
+  const payer = intent.kind === 'payment' || intent.kind === 'merchant' && intent.direction === 'inflow';
+  const labels = intent.selectorReadings?.labels || [labelOf(intent)];
+  const evaluate = reading => {
+    if (!reading.kind) return { exact: false, matched: [], possible: [] };
+    const label = labelOf(reading), key = normalizeMerchantText(label);
+    const ids = identities.get(key) || new Set();
+    const scoped = rows.filter(row => row.posted_on >= reading.from && row.posted_on <= reading.to &&
+      row.direction === (payer ? 'inflow' : reading.direction));
+    const amountMatches = row => reading.kind !== 'payment' || reading.amountMinor === null || row.amount_minor === reading.amountMinor;
+    if (!payer) {
+      const possible = scoped.filter(row => matchesMerchant(row, label));
+      const slug = ids.size === 1 ? [...ids][0] : null;
+      const matched = scoped.filter(row => {
+        if (!row.payee || row.payee_has_nul) return false;
+        const field = normalizeMerchantText(row.payee), aliases = identities.get(field);
+        return field === key || slug && aliases?.size === 1 && aliases.has(slug);
+      });
+      return { exact: matched.length > 0, matched, possible, ids,
+        conflict: ids.size > 1 || payerRegistryHasDamage(identities) && !slug };
+    }
+    const attribute = createInflowAttributor(payerQuestionRegistry(reading, identities), { budget });
+    const attributions = new Map(scoped.map(row => [row.id, attribute(row)]));
+    const fields = new Map(scoped.map(row => [row.id, boundedPayerFields(row, attributions.get(row.id), identities)]));
+    const wanted = resolveRequestedPayer(reading, identities, [...attributions.values()]);
+    const coversName = payerMentionsCoverQuestion(reading, (reading.payerReadings || []).filter(span =>
+      Number.isInteger(span.start) && normalizeMerchantText(span.label) === key));
+    const registered = wanted.state === 'unique' && wanted.registered !== false;
+    const slug = registered ? wanted.slug : coversName && ids.size === 1 ? [...ids][0] : null;
+    const literal = row => fields.get(row.id)?.fields.some(field => normalizeMerchantText(field) === key);
+    const sameIdentity = row => slug && attributions.get(row.id)?.state === 'confirmed' && attributions.get(row.id)?.entity_slug === slug;
+    const supportedLiteral = row => coversName && literal(row) && (registered || !reading.payerQuestion?.unsupportedPunctuation) &&
+      (row.payee ? registered || exactPayerFieldAdmitted(label, row.payee)
+        : ['confirmed', 'observed'].includes(attributions.get(row.id)?.state));
+    // Attribution covers the entire window, including other amounts. They
+    // neither enter this selection nor become unknown merely due to its filter.
+    const matched = scoped.filter(row => amountMatches(row) && (supportedLiteral(row) || sameIdentity(row)) && !fields.get(row.id)?.conflict);
+    const possible = selectAttributedInflows(scoped, attributions, { wanted, amountMinor: reading.kind === 'payment' ? reading.amountMinor : null,
+      exactNamesOnly: reading.exactNamesOnly }).matched;
+    // A registered substring cannot become an exact question reading merely
+    // because attribution resolved it. Whole-clause coverage is still required.
+    const conflict = ids.size > 1 || wanted.state === 'ambiguous' || payerRegistryHasDamage(identities) && !registered ||
+      scoped.some(row => literal(row) && fields.get(row.id)?.conflict);
+    return { exact: registered || matched.length > 0, matched, possible, ids, conflict,
+      knownRows: new Set(scoped.filter(row => !fields.get(row.id)?.conflict && (!literal(row) || supportedLiteral(row)) &&
+        (fields.get(row.id)?.fields.length || attributions.get(row.id)?.state === 'confirmed')).map(row => row.id)),
+      attributions, candidates: wanted.candidates, blockedLiteral: scoped.some(row => literal(row) && !supportedLiteral(row)),
+      exhausted: answerBudgetExhausted(attributions) };
+  };
+  const raw = intent.selectorReadings?.raw || intent;
+  const literal = evaluate(raw);
+  const alternatives = (intent.selectorReadings?.alternatives || []).map(reading => ({ reading, result: evaluate(reading) }));
+  const cleaned = intent.selectorReadings?.cleaned;
+  const alternate = cleaned ? evaluate(cleaned) : { possible: [] };
+  if (literal.exhausted && !intent.selectorReadings) {
+    if (literal.possible.some(row => literal.attributions.get(row.id)?.state === 'assumed'))
+      return { intent, possible: literal.possible, attributions: literal.attributions, labels };
+    return { intent, attributions: literal.attributions };
+  }
+  if (literal.exhausted || alternate.exhausted || alternatives.some(a => a.result.exhausted)) return { refusal: 'budget', labels };
+  if (literal.conflict) return intent.selectorReadings
+    ? { refusal: 'ambiguous', labels: literal.candidates?.length > 1 ? literal.candidates : labels }
+    : { intent, attributions: literal.attributions };
+  const exact = [{ reading: raw, result: literal }, ...alternatives].filter(a => a.result.exact &&
+    (a.result.matched.length || !a.result.possible.length));
+  const key = result => JSON.stringify([[...(result.ids || [])].sort(), result.matched.map(row => row.id).sort((a, b) => a - b)]);
+  if (exact.some(a => a.result.conflict) || new Set(exact.map(a => key(a.result))).size > 1)
+    return { refusal: 'ambiguous', labels: exact.map(a => labelOf(a.reading)) };
+  if (exact.length && !intent.selectorUnproven) {
+    const chosen = exact[0];
+    return { intent: chosen.reading, exact: true, attributions: chosen.result.attributions, knownRows: chosen.result.knownRows,
+      exactRows: new Set(chosen.result.matched.map(row => row.id)) };
+  }
+  if (literal.blockedLiteral && cleaned) return { refusal: 'ambiguous', labels };
+  const possible = [...new Map([...literal.possible, ...alternate.possible, ...(alternate.matched || [])].map(row => [row.id, row])).values()];
+  if (possible.length) return { intent: raw, possible, labels, attributions: new Map([
+    ...(literal.attributions || []), ...(alternate.attributions || [])]) };
+  // Keep the established uncertainty detail for ordinary unresolved payers.
+  // Cleanup nonmatches use the explicit null-total contract.
+  return intent.selectorReadings || intent.selectorUnproven || !payer ? { refusal: 'unmatched', labels } : { intent, attributions: literal.attributions };
+}
+
+function possibleSelectorAnswer(selection, accounts, inventory, scopedRows, allRows) {
+  const { intent } = selection;
+  const rows = intent.exactNamesOnly ? [] : selection.possible;
+  const total = sumMinor(rows), subtotal = total > 0 ? total : null;
+  const bySlug = new Map(inventory.map(account => [account.account_slug, account]));
+  const citations = rows.slice(0, 10).map((row, i) => citation(row, bySlug.get(row.effective_account_slug), i));
+  const note = 'matched by name similarity, not an exact merchant/payer name; say "exact names only" to exclude these possible matches.';
+  const detail = intent.exactNamesOnly ? 'Exact names only excludes the possible matches. No complete total, presence or absence is confirmed.'
+    : 'These are possible matches. No complete total, presence or absence is confirmed.';
+  const assumed = withPayerAssumptions({ answer: '', citations, ledger: {} },
+    rows.filter(row => row.amount_minor > 0), selection.attributions || new Map());
+  const assumptions = assumed.assumptions || [];
+  const pairing = pairOwnTransfers(allRows.filter(row => readableRow(row) && usableAccount(bySlug.get(row.effective_account_slug)) &&
+    effectivePeriodCovered(bySlug.get(row.effective_account_slug), row.posted_on, row.posted_on)), bySlug);
+  const selected = new Set(accounts.map(account => account.account_slug));
+  const { summary } = leadExclusions(rows, pairing.pairs, selected, bySlug, intent);
+  const candidates = rows.filter(row => pairing.candidateRows.has(row.id));
+  const transferNotes = [
+    ...(summary.withdrawal_count ? ['The partial subtotal is before transfer exclusions, including withdrawals.'] : []),
+    ...(candidates.length ? ['Possible moves between your own accounts remain in this partial subtotal.'] : []),
+  ];
+  const notes = [...(assumed.notes || []), note, ...transferNotes];
+  return { answer: `${detail}${subtotal === null ? '' : ` Partial subtotal before exclusions: ${money(subtotal)}.`}\nNote: ${notes.join('; ')}.` +
+      citations.filter(c => c.amount_minor > 0).map(c => `\nPossible match: ${money(c.amount_minor)} posted ${c.posted_on} [${c.n}].`).join(''),
+    citations, assumptions: assumptions.length ? assumptions : [{ type: 'name_similarity', count: rows.length, flip: 'exact names only' }], notes,
+    gaps: [{ type: 'ledger_selector_possible', reason: 'name_similarity', detail }],
+    evidence_gate: { supported: true, complete: false, partial: true, reason: 'name_similarity' },
+    ledger: { kind: intent.kind, found: null, total_minor: null, lead_total_minor: null, total_is_exact: false,
+      inflow_total_minor: sumMinor(scopedRows.filter(row => row.direction === 'inflow')),
+      subtotal_is_partial: true, attributed_subtotal_minor: subtotal, confirmed_subtotal_minor: null,
+      from: intent.from, to: intent.to, accounts: accountCoverage(accounts), rows: citations,
+      candidate_transfer_count: candidates.length, default_exclusions: summary,
+      groups: [{ total_minor: null, total_is_exact: false, if_own_transfers_total_minor: null }],
+      omitted_count: Math.max(0, rows.length - citations.length), flip: ['exact names only'], if_own_transfers: { total_minor: null } } };
+}
+
 async function ledgerAnswer(env, intent, accounts, inventory) {
   if (intent.measure === "cash_flow") return { reason: "cash_flow_unsupported" };
   if (intent.measure && !accounts.some(a => moveKind(a.account_kind))) return { reason: "unsupported_question" };
@@ -205,34 +349,76 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     : { from: shiftLedgerDay(intent.from, -6), to: shiftLedgerDay(intent.to, 6), payerIdentities: attributionNeeded });
   const allRows = attributionNeeded ? snapshot.rows : snapshot;
   const identities = payerRegistry(attributionNeeded ? snapshot.identities : []);
-  const attribute = createInflowAttributor(namedPayer ? payerQuestionRegistry(intent, identities) : identities);
-  const payers = new Map(allRows.filter(row => row.direction === 'inflow').map(row => [row.id, attribute(row)]));
   const inWindow = row => row.posted_on >= intent.from && row.posted_on <= intent.to;
   const selected = new Set(accounts.map(a => a.account_slug));
-  const rows = allRows.filter(row => selected.has(row.effective_account_slug) && (!row.posted_on || inWindow(row)));
+  let rows = allRows.filter(row => selected.has(row.effective_account_slug) && (!row.posted_on || inWindow(row)));
   if (rows.some(row => row.export_overlap_review)) return { reason: "bank_export_overlap_review_required" };
   if (rows.some(row => !readableRow(row))) return { reason: "unreadable_transactions" };
+  if (intent.kind === 'merchant' && intent.direction === 'outflow' && intent.match) {
+    const wanted = normalizeMerchantText(intent.match), conjunction = text => text.replace(/\b(and)\b|&/g, 'and');
+    const outgoing = rows.filter(row => row.direction === 'outflow');
+    if (!outgoing.some(row => matchesMerchant(row, intent.match)) && outgoing.some(row =>
+      conjunction(merchantFor(row)) === conjunction(wanted))) return { reason: 'merchant_selector_ambiguous' };
+  }
+  const attributionBudget = createInflowAttributionBudget();
+  const selection = chooseLiteralSelector(intent, identities, rows, attributionBudget);
+  if (selection.possible) return possibleSelectorAnswer(selection, accounts, inventory, rows, allRows);
+  if (selection.refusal) {
+    const ambiguous = selection.refusal === 'ambiguous', budget = selection.refusal === 'budget';
+    const labels = selection.labels.map(safeDescription);
+    const detail = budget ? 'The answer reached its sender parsing work limit while comparing names. No complete total or presence or absence is confirmed.' : ambiguous ? `I can't tell whether you mean ${labels[0]} or ${labels[1] || 'a competing payer reading'}. Use a unique registered label or the complete statement name.`
+      : `No matching transactions were found for ${labels[0]} in the covered accounts. The merchant may appear under a different name on statements.`;
+    const reason = budget ? 'answer_operation_limit' : ambiguous ? 'selector_cleanup_ambiguous' : 'statement_name_unconfirmed';
+    return { answer: detail, citations: [], gaps: [{ type: budget ? 'ledger_attribution_budget' : ambiguous ? 'ledger_selector_ambiguous' : 'ledger_selector_unmatched', reason, detail }],
+      ledger: { kind: intent.kind, found: ambiguous || budget ? null : false, total_minor: null, lead_total_minor: null,
+        total_is_exact: false, from: intent.from, to: intent.to, accounts: accountCoverage(accounts),
+        ...(ambiguous ? { selector_ambiguous: true, selector_candidates: labels,
+          ...(namedPayer ? { payer_selector_ambiguous: true, payer_selector_candidates: labels } : {}) } : {}),
+        if_own_transfers: { total_minor: null } },
+      evidence_gate: { supported: true, complete: false, partial: true, reason } };
+  }
+  intent = selection.intent;
+  // A cleaned amount reading may select the shorter default window.
+  rows = rows.filter(inWindow);
+  const attribute = createInflowAttributor(namedPayer ? payerQuestionRegistry(intent, identities) : identities, { budget: attributionBudget });
+  const payers = new Map(allRows.filter(row => row.direction === 'inflow').map(row => [row.id, selection.attributions?.get(row.id) || attribute(row)]));
+  // Literal bank fields are answer-local evidence, not new registry entries.
+  // Keep their source visible even when a shorter registered mention prevented
+  // the old question-local lookup from resolving the complete raw name.
+  if (namedPayer && selection.exactRows) for (const row of rows) {
+    if (!selection.exactRows.has(row.id) || ['confirmed', 'observed'].includes(payers.get(row.id)?.state)) continue;
+    const previous = payers.get(row.id);
+    payers.set(row.id, { ...previous, state: 'observed', entity_slug: previous?.entity_slug || Symbol('literal payer'),
+      reading: { identity: row.payee || intent.counterparty || intent.match, query_only: true },
+      evidence: { ...previous?.evidence, source: row.payee ? 'payee' : 'description' } });
+  }
+  // This is an answer-wide refusal, including transfer padding and other
+  // accounts read. Decide before any complete-total text or keys are built.
+  const budgetExhausted = answerBudgetExhausted(payers);
   // Only selected, readable receipts inside the requested window can supply
   // phrase evidence. Transfer padding and other accounts cannot resolve it.
   const wanted = namedPayer ? resolveRequestedPayer(intent, identities,
     rows.filter(row => row.direction === 'inflow').map(row => payers.get(row.id))) : null;
-  const selectorAmbiguous = ['ambiguous', 'unresolved'].includes(wanted?.state);
+  const selectorAmbiguous = !selection.exact && ['ambiguous', 'unresolved'].includes(wanted?.state);
   const selectorCandidates = [...new Set((wanted?.candidates || []).map(safeDescription))];
-  const phraseOnly = wanted?.registered === false;
-  const payerMatches = row => wanted?.state === 'unique' && payers.get(row.id)?.entity_slug === wanted.slug;
-  const merchantMatches = namedIncome ? payerMatches : row => matchesMerchant(row, intent.match);
+  const phraseOnly = !selection.exact && wanted?.registered === false;
+  const payerMatches = row => selection.exactRows ? selection.exactRows.has(row.id) : wanted?.state === 'unique' && payers.get(row.id)?.entity_slug === wanted.slug;
+  const merchantMatches = selection.exactRows ? row => selection.exactRows.has(row.id) : namedIncome ? payerMatches : row => matchesMerchant(row, intent.match);
   const bySlug = new Map(inventory.map(a => [a.account_slug, a]));
   if (payment || namedIncome) {
     const candidates = rows.filter(row => row.direction === "inflow");
-    const { matched, unattributed } = namedPayer
+    const { matched, unattributed } = namedPayer && selection.exactRows?.size
+      ? { matched: candidates.filter(row => selection.exactRows.has(row.id)),
+        unattributed: candidates.filter(row => !selection.knownRows?.has(row.id)) }
+      : namedPayer
       ? selectAttributedInflows(candidates, payers, { wanted, amountMinor: payment ? intent.amountMinor : null, exactNamesOnly: intent.exactNamesOnly })
       : { matched: candidates.filter(row => intent.amountMinor === null || row.amount_minor === intent.amountMinor), unattributed: [] };
     // A named-income answer with unknown receipts must not flow into the
     // complete-total renderer, including its zero and conditional-total keys.
     // Fully attributed income retains the usual transfer and grouping rules.
-    if (payment || unattributed.length || selectorAmbiguous || phraseOnly) {
+    if (payment || unattributed.length || selectorAmbiguous || phraseOnly || budgetExhausted) {
       const listedUnattributed = unattributed.slice(0, 10);
-      const uncertain = unattributed.length || selectorAmbiguous || (phraseOnly && (!matched.length || namedIncome));
+      const uncertain = budgetExhausted || unattributed.length || selectorAmbiguous || (phraseOnly && (!matched.length || namedIncome));
       const citations = [...matched, ...listedUnattributed].map((row, i) => citation(row, bySlug.get(row.effective_account_slug), i));
       const payerEvidence = matched.flatMap((row, i) => payers.get(row.id)?.state === 'observed' ? [{
         type: payers.get(row.id).evidence.source === 'payee' ? 'bank_payee' : 'statement_sender',
@@ -252,7 +438,7 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
       const confirmedSubtotal = namedIncome && confirmed.length ? payerAmount(sumMinor(confirmed), false) : null;
       const attributedSubtotal = namedIncome && matched.length ? payerAmount(sumMinor(matched), false) : null;
       if (namedIncome) answer = `Income from ${safeDescription(intent.match)} is not yet known for ${intent.from} through ${intent.to}.` +
-        (matched.length ? `${attributedSubtotal === null ? '' : `\n${confirmed.length === matched.length ? "Confirmed subtotal of attributed deposits" : "Attributed subtotal"} (before transfer exclusions): ${money(attributedSubtotal)}.`}\n${answer}` : "");
+        (matched.length ? `${attributedSubtotal === null ? '' : `\n${confirmed.length === matched.length ? "Confirmed subtotal of attributed deposits" : "Attributed subtotal"} (${budgetExhausted ? 'partial; ' : ''}before transfer exclusions): ${money(attributedSubtotal)}.`}\n${answer}` : "");
       const gaps = [];
       const unattributedCitations = listedUnattributed.map((_, i) => matched.length + i + 1);
       const uncertainCandidates = listedUnattributed.map((row, i) => ({
@@ -261,7 +447,7 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
         reason: attributionUncertainty(row, payers.get(row.id), selectorAmbiguous, intent.exactNamesOnly), citation: unattributedCitations[i],
       }));
       const payerCandidates = [...new Set(unattributed.flatMap(row => payers.get(row.id)?.evidence.ambiguous ? payers.get(row.id).evidence.candidates : []))].slice(0, 10).map(safeDescription);
-      if (uncertain) {
+      if (unattributed.length || selectorAmbiguous || (phraseOnly && (!matched.length || namedIncome))) {
         const detail = selectorAmbiguous
           ? `I can't confirm which payer you mean: ${wanted.state === 'ambiguous' ? 'the question has ambiguous payer readings' : 'the complete requested name or its boundary is not confirmed'}. Candidate payer readings: ${selectorCandidates.join('; ')}. There are ${unattributed.length} candidate deposits between ${intent.from} and ${intent.to}; use the exact bank payer field, statement sender, or a unique registered label.`
           : phraseOnly ? `These matches support the requested phrase for this answer only. The payer is not registered, so I can't confirm a complete income total or absence.`
@@ -279,6 +465,7 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
         ...(payerEvidence.length ? { payer_evidence: payerEvidence } : {}),
         ...(uncertain ? { evidence_gate: { supported: true, complete: false, partial: true, reason: "sender_attribution_unknown" } } : {}),
         ledger: { kind: intent.kind, inflow_total_minor: sumMinor(candidates), found: matched.length ? true : uncertain ? null : false,
+        ...(budgetExhausted || namedIncome ? { total_is_exact: false, subtotal_is_partial: true } : {}),
         ...(selectorAmbiguous ? { payer_selector_ambiguous: true, payer_selector_candidates: selectorCandidates } : {}),
         ...(payerCandidates.length ? { payer_candidates: payerCandidates } : {}),
         ...(namedIncome ? { total_minor: null, lead_total_minor: null, confirmed_subtotal_minor: confirmedSubtotal, attributed_subtotal_minor: attributedSubtotal,
@@ -313,6 +500,25 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
       (intent.kind === "merchant" ? merchantMatches(row) : matchesCategory(row, intent.match)) ||
       (intent.kind === "category" && !categoryFor(row)));
   } else if (intent.kind === "recurring") figureRows = detectRecurring(rows, intent.to).flatMap(group => group.rows);
+  if (budgetExhausted) {
+    // No answer kind can render a complete figure after the shared budget
+    // fails. Preserve read amounts and citations as explicitly partial data,
+    // without producing conditional, grouped, net or recurring total claims.
+    const listed = figureRows.slice(0, 10);
+    const citations = listed.map((row, i) => citation(row, bySlug.get(row.effective_account_slug), i));
+    const partial = {
+      inflow_minor: sumMinor(figureRows.filter(row => row.direction === 'inflow')),
+      outflow_minor: sumMinor(figureRows.filter(row => row.direction === 'outflow')),
+    };
+    const answer = `Partial subtotal of read inflows before exclusions: ${money(partial.inflow_minor)}; partial subtotal of read outflows before exclusions: ${money(partial.outflow_minor)}.\n` +
+      listed.map((row, i) => `${money(row.amount_minor)} posted ${row.posted_on} in ${masked(bySlug.get(row.effective_account_slug))} [${i + 1}].`).join('\n') +
+      (figureRows.length > listed.length ? `\nShowing ${listed.length} of ${figureRows.length} read transactions.` : '');
+    return withPayerAssumptions({ answer, citations, ledger: { kind: intent.kind,
+      from: intent.from, to: intent.to, accounts: accountCoverage(accounts), found: null,
+      total_minor: null, lead_total_minor: null, total_is_exact: false, subtotal_is_partial: true,
+      partial_subtotals: partial, inflow_total_minor: sumMinor(rows.filter(row => row.direction === 'inflow')),
+      rows: citations, omitted_count: figureRows.length - listed.length } }, [], payers);
+  }
   const { excluded: leadExcluded, keptPairs, summary } = leadExclusions(figureRows, intent.kind === "transfers" ? [] : pairs, selected, bySlug,
     intent.kind === "transfers" ? { withdrawals: "include" } : intent);
   let noteSummary = summary, noteExcluded = leadExcluded, unchangedLimitedList = false;
@@ -334,6 +540,7 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     if (row.direction !== 'inflow') return {};
     const attribution = payers.get(row.id);
     const usable = attribution?.state === 'confirmed' ||
+      (selection.exactRows?.has(row.id) && attribution?.state === 'observed') ||
       (attribution?.state === 'assumed' && !intent.exactNamesOnly && row.amount_minor > 0);
     if (usable) attributedRows.set(row.id, row);
     return { attribution_state: usable ? attribution.state : 'unknown',
@@ -406,11 +613,23 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
   } else if (["merchant", "category"].includes(intent.kind)) {
     const directionRows = activity.filter(row => row.direction === intent.direction);
     const matched = intent.match ? directionRows.filter(row => (intent.kind === "merchant" ? merchantMatches(row) : matchesCategory(row, intent.match))) : directionRows;
+    // A literal selector with no rows proves only a nonmatch, not a complete
+    // zero: statement spellings and categories may differ from the question.
+    // Decide on the covered gross rows before any optional exclusions.
+    if (intent.match && !matched.length && (intent.direction === 'outflow' || intent.kind === 'category')) {
+      const selector = safeDescription(intent.match);
+      const detail = 'The merchant may appear under a different name on statements.';
+      return { answer: `No matching transactions were found for ${selector} in the covered accounts.\n${bounded}\n${detail}`,
+        citations, ledger: { ...ledger, found: false, total_minor: null, lead_total_minor: null,
+          total_is_exact: false, groups: [], if_own_transfers: { ...ledger.if_own_transfers, total_minor: null } },
+        gaps: [{ type: 'ledger_selector_unmatched', reason: 'statement_name_unconfirmed', detail }],
+        evidence_gate: { supported: true, complete: false, partial: true, reason: 'statement_name_unconfirmed' } };
+    }
     const unsorted = (intent.kind === "category" ? directionRows : matched).filter(row => !categoryFor(row));
     // Exclusions cannot turn an assumed payer reading into a certified zero,
     // including conditional transfer totals. Keep the supported gross figure.
     const hasShorthand = namedIncome && matched.some(row => payers.get(row.id)?.state === 'assumed');
-    const scopeConfirmed = inflowScopeConfirmed(rows, payers);
+    const scopeConfirmed = selection.exact || inflowScopeConfirmed(rows, payers);
     const payerTotal = (list, payerFigure = Boolean(namedIncome)) => {
       const total = sumMinor(list);
       const displayed = payerFigure ? payerAmount(total, scopeConfirmed) : total;
@@ -419,6 +638,7 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     };
     const totalText = total => total === null ? 'not confirmed' : money(total);
     ledger.total_minor = payerTotal(matched);
+    if (selection.exact) ledger.total_is_exact = true;
     if (intent.kind === 'merchant' && intent.direction === 'inflow') ledger.total_is_exact = !intent.match || scopeConfirmed;
     ledger.unsorted_minor = sumMinor(unsorted); ledger.found = matched.length > 0;
     ledger.lead_total_minor = payerTotal(withoutLead(matched));
@@ -521,7 +741,16 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
   if (payerZeroUnknown) answer += `\n${uncertainty.gaps[0].detail}`;
   // Notes follow displayed payer claims, including gross rows, excluded rows
   // and transfer diagnostics. Exact-only never removes the underlying amounts.
-  return withPayerAssumptions({ answer, citations, ledger, ...uncertainty }, [...attributedRows.values()], payers);
+  const payerEvidence = namedIncome && selection.exactRows ? [...attributedRows.values()].filter(row =>
+    selection.exactRows.has(row.id) && payers.get(row.id)?.state === 'observed').map(row => {
+      const attribution = payers.get(row.id), identity = safeDescription(attribution.reading.identity);
+      const bank = attribution.evidence.source === 'payee';
+      answer += bank ? `\nYour bank lists the payer as ${identity} [${cite(row).n}].`
+        : `\nThe statement line names ${identity} as sender [${cite(row).n}].`;
+      return { type: bank ? 'bank_payee' : 'statement_sender', identity, citations: [cite(row).n] };
+    }) : [];
+  return withPayerAssumptions({ answer, citations, ledger, ...uncertainty,
+    ...(payerEvidence.length ? { payer_evidence: payerEvidence } : {}) }, [...attributedRows.values()], payers);
 }
 
 // The only integration point wraps the existing document path. Non-money
