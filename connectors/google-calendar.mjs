@@ -948,7 +948,9 @@ export function buildEnvelope(event, { calendar, config } = {}) {
       date_source: start.allDay ? "calendar:all_day_start" : "calendar:event_start",
       date_reliable: true,
       uri: event.htmlLink || null,
-      title: `${(stripPasscodes(event.summary) || "(untitled event)").trim()} — ${start.date}`,
+      // Trim before the fallback, as renderEvent does, so a title that was only
+      // a passcode and spaces reads "(untitled event)" here too, not an empty name.
+      title: `${(stripPasscodes(event.summary) || "").trim() || "(untitled event)"} — ${start.date}`,
       content,
       metadata: {
         category: "calendar",

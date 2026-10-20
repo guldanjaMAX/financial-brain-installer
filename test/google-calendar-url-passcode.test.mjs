@@ -232,6 +232,23 @@ test("gate: a bare pwd=<token> in the TITLE no longer gets the event refused", (
   assert.ok(bare.content.startsWith("Meeting: (untitled event)\n"), bare.content);
 });
 
+test("a title that is only a passcode plus spaces falls back to (untitled event) in the envelope title too", () => {
+  // The envelope title must agree with the rendered Meeting line. Before this,
+  // the title fell back before trimming, so 'pwd=<token> ' left an empty name:
+  // " <em dash> 2026-10-21". A whitespace-only title did the same.
+  for (const summary of [`pwd=${TOKEN} `, `   pwd=${TOKEN}   `, `\tpasscode=${TOKEN}\n`, "   "]) {
+    const env = upsert(baseEvent({ summary }));
+    assertGatePasses(env);
+    assertNoPasscode(env);
+    assert.equal(env.title, titleFor("(untitled event)"), JSON.stringify(summary));
+    assert.ok(env.content.startsWith("Meeting: (untitled event)\n"), env.content);
+  }
+  // A title with real words around the passcode keeps those words, trimmed.
+  const kept = upsert(baseEvent({ summary: `  Weekly sync pwd=${TOKEN} ` }));
+  assert.equal(kept.title, titleFor("Weekly sync"));
+  assert.ok(kept.content.startsWith("Meeting: Weekly sync\n"), kept.content);
+});
+
 test("a '.1'-suffixed Zoom token is stripped even though the gate alone would let it through", () => {
   const dotted = `${TOKEN}.1`;
   // Why the gate is not enough: its lookahead stops at the '.', so this exact
