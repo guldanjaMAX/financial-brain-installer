@@ -58,7 +58,14 @@ test('two payer mentions survive overlapping selector readings and internal Paym
     f.raw('UPDATE fin_transactions SET payee=?', actual);
     assert.equal((await f.ask(payment(actual))).ledger.found, true);
     for (const second of ['Payer Two Payment', 'Supplier Payment Services']) for (const mode of ['from', 'via']) for (const exact of [false, true]) {
-      const body = await f.ask(`Did the Payer One payment ${mode} ${second} arrive in October 2026${exact ? ', exact names only' : ''}?`);
+      const question = `Did the Payer One payment ${mode} ${second} arrive in October 2026${exact ? ', exact names only' : ''}?`;
+      if (mode === 'via') {
+        // Partner answer 13: a "via" phrase after a named payer is a channel
+        // phrase; outside the closed channel list it refuses at classification.
+        assert.equal(classifyLedgerQuestion(question, { now: NOW }).kind, null, question);
+        continue;
+      }
+      const body = await f.ask(question);
       refused(body);
       assert.equal(body.ledger.payer_selector_candidates.length, 2);
       assert.ok(body.ledger.payer_selector_candidates.every(label => label.startsWith('[redacted] ****')));
@@ -109,8 +116,11 @@ test('mention spans retain equal and partial overlaps, use Unicode boundaries, a
 const pairTemplates = [
   ...selectorTemplates.map(template => (a, b) => template(`${a} from ${b}`)),
   (a, b) => `Did the ${a} payment from ${b} arrive in October 2026?`,
-  (a, b) => `Did the ${a} payment via ${b} arrive in October 2026?`,
 ];
+// Partner answer 13: "via <b>" after the named payer <a> is a channel phrase.
+// Outside the closed channel list it refuses at classification, so this pair
+// template no longer reaches the ledger as a second payer clause.
+const channelPairTemplate = (a, b) => `Did the ${a} payment via ${b} arrive in October 2026?`;
 
 test('two-payer generator: every ordered pair, template, internal keyword and registration refuses claims', async t => {
   const f = setup(t);
@@ -134,6 +144,11 @@ test('two-payer generator: every ordered pair, template, internal keyword and re
           assert.equal(control.ledger.found, true); assert.equal(control.evidence_gate.complete, true); counts.controls++;
         }
         const registry = payerRegistry(entries);
+        for (const exact of [false, true]) {
+          const question = channelPairTemplate(first, second).replace('?', exact ? ', exact names only?' : '?');
+          assert.equal(classifyLedgerQuestion(question, { now: NOW }).kind, null, JSON.stringify({ question, registration }));
+          counts.channelRefusals = (counts.channelRefusals || 0) + 1;
+        }
         for (const template of pairTemplates) {
           const question = template(first, second), intent = classifyLedgerQuestion(question, { now: NOW });
           const detail = JSON.stringify({ question, registration });
@@ -155,6 +170,7 @@ test('two-payer generator: every ordered pair, template, internal keyword and re
   }
   assert.equal(counts.cases, 3 * 2 * 5 * 5 * pairTemplates.length);
   assert.equal(counts.answers, counts.cases * 4);
+  assert.equal(counts.channelRefusals, 3 * 2 * 5 * 5 * 2);
   assert.ok(counts.ambiguous > 0 && counts.unresolved > 0 && counts.controls > 0);
   t.diagnostic(JSON.stringify({ two_payer: counts, templates: pairTemplates.length }));
 });

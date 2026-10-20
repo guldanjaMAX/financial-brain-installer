@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { ledgerFixture, fixture, NOW } from './ledger-review-fixture.mjs';
 import { seedKnownPayers } from './ledger-known-payers-fixture.mjs';
 import { classifyLedgerQuestion } from '../src/lib/ledger-question.js';
-import { search } from '../src/lib/store-d1.js';
+import { search, retrievalFailed } from '../src/lib/store-d1.js';
 
 const now = Date.parse(NOW);
 const classify = question => classifyLedgerQuestion(question, { now });
@@ -73,13 +73,24 @@ const flipInside = [
   ['merchant', 'how much income from Payer One, exact names only, in September 2026?'],
 ];
 
+// Partner answer 5 (verbatim): "Support "exact names only" anywhere in the
+// question: strip it and set exactNamesOnly=true."
 test('R3-QUESTION-2-2 "exact names only" before the final clause is swallowed into the selector and silently dropped', () => {
-  for (const [, question] of flipInside) {
+  for (const [kind, question] of flipInside) {
     const intent = classify(question);
     const selector = String(selectorOf(intent) || '');
     assert.doesNotMatch(selector, /exact names only/, `${question}: selector became ${JSON.stringify(selector)}`);
     assert.ok(intent.kind === null || intent.exactNamesOnly === true,
       `${question}: routed as ${intent.kind} with exactNamesOnly=${intent.exactNamesOnly}`);
+    assert.equal(intent.kind, kind, `${question}: supported anywhere in the question`);
+    assert.equal(intent.exactNamesOnly, true, question);
+    assert.equal(selector, kind === 'payment' || /income/.test(question) ? 'payer one' : 'vendor alpha', question);
+  }
+  for (const question of ['exact names only, did the payment from Payer One arrive?', 'did the payment, exact names only, from Payer One arrive?']) {
+    const intent = classify(question);
+    assert.equal(intent.kind, 'payment', question);
+    assert.equal(intent.exactNamesOnly, true, question);
+    assert.equal(intent.counterparty, 'payer one', question);
   }
 });
 
@@ -163,12 +174,29 @@ function vectorSearch(f, mode, calls) {
     supplementalFilters: [{ category: 'meeting' }], projectionReadiness: { ready: true } });
 }
 
+// Partner answer 6 (verbatim): "Yes. A failed filtered query counts as
+// degraded (complete=false) even if the unfiltered retry succeeds, on the hint
+// lanes and the base query alike."
 test('R3-QUESTION-2-4 a failed filtered vector query on the hint lane is swallowed by the unfiltered fallback and leaves degraded=null', async t => {
   const f = fixture(t, { knownPayers: false });
   const calls = [];
   const result = await vectorSearch(f, 'filtered-fails', calls);
   assert.deepEqual(calls, ['filtered', 'unfiltered', 'unfiltered'], 'the hint lane failed once and was retried unfiltered');
   assert.notEqual(result.degraded, null, `hint lane vector query failed, yet degraded=${result.degraded} reason=${result.degraded_reason}`);
+  assert.equal(result.degraded, 'vector');
+  assert.equal(result.degraded_reason, 'vector-query-failed');
+  assert.equal(retrievalFailed(result.degraded, result.degraded_reason), true, 'the answer cannot be certified complete');
+  const baseCalls = [];
+  const env = { ...f.env, VECTORIZE: { async query(embedding, options) {
+    baseCalls.push(options.filter ? 'filtered' : 'unfiltered');
+    if (options.filter) throw new Error('synthetic: filtered vector query failed');
+    return { matches: [] };
+  } } };
+  const base = await search(env, { query: meetingQuestion, embedding: [0.1, 0.2], limit: 10,
+    filters: { category: 'meeting' }, projectionReadiness: { ready: true } });
+  assert.deepEqual(baseCalls, ['filtered', 'unfiltered'], 'the base query failed filtered and was retried unfiltered');
+  assert.equal(base.degraded, 'vector', `base query: degraded=${base.degraded} reason=${base.degraded_reason}`);
+  assert.equal(base.degraded_reason, 'vector-query-failed');
 });
 
 test('R3-QUESTION-2-4 control: healthy lanes are not degraded; a vector failure that also hits the base query is marked', async t => {

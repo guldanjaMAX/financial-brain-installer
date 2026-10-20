@@ -99,6 +99,15 @@ function gapFor(reason, accounts = [], intent = {}) {
   };
   if (review[reason]) return { type: "ledger_not_consulted", reason, code: reason,
     ...(intent.from ? { from: intent.from, to: intent.to } : {}), detail: review[reason] };
+  // The period text comes from the bounded period grammar only (month, year,
+  // quarter or a fixed relative phrase), never from a payer name.
+  if (reason === 'payment_period_ambiguous') {
+    const period = String(intent.forPeriod);
+    const received = /^(?:last|this) month$|^so far this year$/.test(period) ? `received ${period}`
+      : /^last \d+ days$/.test(period) ? `received in the ${period}` : `received in ${period}`;
+    return { type: 'ledger_not_consulted', reason, code: reason,
+      detail: `"for ${period}" can name the period a payment covers, not when it arrived. Did you mean "${received}"? Nothing is confirmed present or absent.` };
+  }
   if (reason === 'ledger_account_link_required') {
     // Display one relevant pair; the admission decision checks every edge.
     const pair = accounts.flatMap(a => accountLinkPairsInWindow(a, intent))[0];
@@ -363,6 +372,9 @@ function possibleSelectorAnswer(selection, accounts, inventory, scopedRows, allR
 
 async function ledgerAnswer(env, intent, accounts, inventory) {
   if (intent.measure === "cash_flow") return { reason: "cash_flow_unsupported" };
+  // Partner answer 10: "for <period>" may name what a payment covers, not when
+  // it arrived. Ask for "received in <period>" instead of reading the window.
+  if (intent.kind === "payment" && intent.forPeriod) return { reason: "payment_period_ambiguous" };
   if (intent.measure && !accounts.some(a => moveKind(a.account_kind))) return { reason: "unsupported_question" };
   if (intent.kind === "balance") {
     const balances = await readEffectiveBalances(env, accounts, intent);
@@ -848,7 +860,8 @@ export async function withLedgerAnswer({ env, question, access, grantScope, scop
       // Documents cannot resolve a disputed ledger identity or authorize a
       // financial total that this deterministic account decision refused.
       if (['ledger_account_link_required', 'cash_flow_unsupported', 'merchant_selector_unsupported',
-        'merchant_selector_ambiguous', 'coverage_review_required', 'bank_export_overlap_review_required'].includes(reason)) return new Response(JSON.stringify({ mode: 'think',
+        'merchant_selector_ambiguous', 'coverage_review_required', 'bank_export_overlap_review_required',
+        'payment_period_ambiguous'].includes(reason)) return new Response(JSON.stringify({ mode: 'think',
         code: reason, answer: null, citations: [], results: [], gaps: [gap],
         evidence_gate: { supported: false, complete: false, reason } }), { headers: { 'Content-Type': 'application/json' } });
     } catch {

@@ -816,7 +816,7 @@ export async function searchVector(env, embedding, { limit, filters = {}, scope 
       ...(withFilter && hasFilter ? { filter: vectorFilter } : {}),
     }));
 
-  let res;
+  let res, filterFailed = false;
   try {
     res = await query(true);
   } catch (error) {
@@ -824,11 +824,14 @@ export async function searchVector(env, embedding, { limit, filters = {}, scope 
     // unfiltered query keeps search working, because `source` is re-applied in
     // the hydration WHERE below regardless.
     if (!hasFilter) throw error;
+    // Partner answer 6: the widened pool is still useful evidence, but the
+    // filtered query this lane asked for failed, so the lane is degraded.
+    filterFailed = true;
     res = await query(false);
   }
 
   const ids = (res?.matches || []).map((m) => m.id);
-  if (!ids.length) return [];
+  if (!ids.length) return markVectorFilterFailure([], filterFailed);
 
   // A hashed id cannot be looked up in D1 directly, so those are resolved via
   // the mapping column written at upsert time.
@@ -890,8 +893,18 @@ export async function searchVector(env, embedding, { limit, filters = {}, scope 
   const byUid = new Map((results || []).map((r) => [r.chunk_uid, r]));
   // A vector whose chunk is missing from D1 means the two systems have drifted.
   // Dropping it silently would hide that, so it is counted by the caller.
-  return resolved.map((id) => byUid.get(id)).filter(Boolean);
+  return markVectorFilterFailure(resolved.map((id) => byUid.get(id)).filter(Boolean), filterFailed);
 }
+
+// A non-enumerable marker keeps searchVector's array shape for every caller,
+// while search() can still see that the filtered query failed.
+const VECTOR_FILTER_FAILED = Symbol("vector filter failed");
+function markVectorFilterFailure(rows, failed) {
+  if (failed) Object.defineProperty(rows, VECTOR_FILTER_FAILED, { value: true });
+  return rows;
+}
+const vectorLaneFailed = (attempt) => attempt.attempted &&
+  (Boolean(attempt.error) || attempt.results?.[VECTOR_FILTER_FAILED] === true);
 
 /**
  * Hybrid search: both lists, fused.
@@ -1014,8 +1027,11 @@ export async function search(env, {
   // Losing one must not certify absence just because the base query succeeded.
   const keywordFailed = (keywordAttempt.attempted && Boolean(keywordAttempt.error)) || expansionFailed ||
     hintAttempts.some(attempt => attempt.keyword.attempted && Boolean(attempt.keyword.error));
-  const vectorFailed = (vectorAttempt.attempted && Boolean(vectorAttempt.error)) ||
-    hintAttempts.some(attempt => attempt.vector.attempted && Boolean(attempt.vector.error));
+  // Partner answer 6: a failed filtered query counts as a failed vector lane
+  // even when its unfiltered retry succeeded, on the base query and every hint
+  // lane alike, so the answer cannot be certified complete.
+  const vectorFailed = vectorLaneFailed(vectorAttempt) ||
+    hintAttempts.some(attempt => vectorLaneFailed(attempt.vector));
 
   // Empty is a valid result from either modality. A zero-row success must never
   // be guessed into an outage, just as a caught query error must never be

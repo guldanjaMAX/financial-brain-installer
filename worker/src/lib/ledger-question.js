@@ -81,7 +81,7 @@ function questionPeriod(q, today, protectSpend = false) {
   // listing modifier there. It supplies the 14-day default only on its own.
   const periods = matches.some(m => m[0] !== "recent") ? matches.filter(m => m[0] !== "recent") : matches;
   if (periods.length > 1) return { invalid: true };
-  let from, to, boundaryResidual, residual = q.trim().replace(/[?!.]+$/, "").trim();
+  let from, to, boundaryResidual, connector = null, residual = q.trim().replace(/[?!.]+$/, "").trim();
   if (periods.length) {
     const period = periods[0][0], parts = period.replace(/ of /, " ").split(/\s+/);
     const year = Number(parts[1]) || Number(today.slice(0, 4));
@@ -114,8 +114,9 @@ function questionPeriod(q, today, protectSpend = false) {
     const before = residual.slice(0, at - prefix.length), after = residual.slice(at + period.length);
     boundaryResidual = `${before} \u0001 ${after}`;
     residual = (before + after).trim();
+    connector = prefix.trim().split(/\s+/)[0] || null;
   }
-  return { from, to, residual, boundaryResidual, period: periods[0]?.[0] };
+  return { from, to, residual, boundaryResidual, period: periods[0]?.[0], connector };
 }
 
 const spendPattern = /^(?:how much did (?:i|we) spend|(?:show(?: me)? |what is (?:my |the )?)spend(?:ing)?)(?: (at|on|by) (.+))$/;
@@ -317,6 +318,10 @@ function classifyQuestionGrammar(question, { now = Date.now(), selectorSlot = fa
     if (dates.some(d => !d) || new Set(dates).size > 1) return intent;
     const period = dates.length ? { residual: rest } : questionPeriod(rest, today);
     if (period.invalid) return intent;
+    // Partner answer 10: "for <period>" can name the period a payment covers,
+    // not when it arrived. Keep the reading so the answer can refuse with a
+    // note asking for "received in <period>"; it never certifies absence.
+    const forPeriod = period.connector === 'for' ? period.period : null;
     // A bare month still cannot date an exact payment. Keep the original
     // ambiguity control; an explicit year or relative bounded window is needed.
     if (period.period && MONTHS.includes(period.period)) return intent;
@@ -344,7 +349,7 @@ function classifyQuestionGrammar(question, { now = Date.now(), selectorSlot = fa
     const counterpartyWords = counterparty.match(/[\p{L}\p{N}]+/gu) || [];
     if (amountMinor === null && !counterpartyWords.length) return intent;
     return { ...intent, kind: "payment", amountMinor, counterpartyWords, counterparty,
-      ...(selectorSlot ? { selectorSlotParts: parties } : {}),
+      ...(selectorSlot ? { selectorSlotParts: parties } : {}), ...(forPeriod ? { forPeriod } : {}),
       from: dates.length ? shiftLedgerDay(dates[0], -7) : period.from || shiftLedgerDay(today, amountMinor === null ? -59 : -29),
       to: dates.length ? shiftLedgerDay(dates[0], 7) : period.to || today };
   }
@@ -375,7 +380,7 @@ function unsupportedQuestionPunctuation(question) {
   return spans;
 }
 const questionScope = intent => JSON.stringify([intent.kind, intent.from, intent.to, intent.mask, intent.accountKind,
-  intent.amountMinor, intent.ownTransfers, intent.withdrawals, intent.loanProceeds, intent.exactNamesOnly]);
+  intent.amountMinor, intent.ownTransfers, intent.withdrawals, intent.loanProceeds, intent.exactNamesOnly, intent.forPeriod]);
 
 // Registry mentions are identity authority. Grammar only verifies that every
 // payer clause is fully occupied by a mention and that the scope is unchanged.
@@ -572,11 +577,83 @@ function classifyPayerQuestion(question, { now = Date.now(), amountSource = ques
 }
 
 
+// Partner answers 5, 9, 11 and 13 (round 3) are closed rewrites of the raw
+// question. They run once, before any selector span is protected, so every
+// parse below, and the payer clauses registry mentions are read from, see the
+// same rewritten text. A question none of them touches is passed unchanged.
+// The two lists are exactly the partner's, no additions.
+export const paymentQualifiers = Object.freeze(['any', 'latest', 'last', 'recent', 'monthly', 'invoice', 'ach', 'wire']);
+export const paymentChannels = Object.freeze(['ach', 'zelle', 'wire', 'check', 'venmo', 'paypal']);
+const questionRefused = Symbol('question refused at classification');
+const exactNamesOnlyPhrase = /(?:^\s*|[\s,]+)exact\s+names\s+only\b(?:\s*[:;](?=\s)|[\s,]*)/giu;
+const slotArticles = new Set(['the', 'my', 'our', 'a', 'an']);
+// A word that can name a payer: not grammar (months, connectors, date words,
+// arrival verbs, quarters), not an article, not a number or an amount.
+const payerSlotWord = word => /^\p{L}/u.test(word) && !payerTerminalWords.has(word) && !slotArticles.has(word) && !/^q[1-4]$/.test(word);
+const slotNamesPayer = slot => ledgerWords(slot.toLowerCase().replace(paymentAmount, ' ')).some(payerSlotWord);
+// Text after a stripped channel or moved amount must be a clause boundary,
+// never a further selector, so "via wire from <name>" keeps its own readings.
+const clauseBoundary = `(?=\\s*(?:[?!.,]|$)|\\s+(?:${[...payerTerminalWords].filter(word => !['from', 'via', 'by', 'of'].includes(word)).join('|')})\\b)`;
+const channelPhrase = new RegExp(`(?:\\s*,)?\\s+via\\s+(?:${paymentChannels.join('|')})\\b${clauseBoundary}`, 'giu');
+const qualifierRun = new RegExp(`(^\\s*(?:did|has|have)\\s+(?:(?:the|my|our|a|an)\\s+)?|['’]s\\s+)((?:(?:${paymentQualifiers.join('|')})\\s+)+)(?=payment\\b)`, 'giu');
+const amountAfterName = new RegExp(`\\bfrom\\s+(\\S(?:[\\s\\S]*?\\S)?)(?:\\s+(?:of|for)\\s+(${paymentAmount.source})\\s*,?|\\s*,\\s*(${paymentAmount.source})\\s*,)` +
+  `(?=\\s*(?:[?!.]|$)|\\s+(?:${ARRIVAL}|in|on|into|to|during|over|before|after|between|yet|and)\\b)`, 'iu');
+
+function rewriteLedgerQuestion(question) {
+  const original = String(question ?? '');
+  // Same whole-question cap as the span parser, which refuses longer text
+  // anyway; it also bounds the rewrite patterns below.
+  if (original.length > 1024) return question;
+  let text = original, exactNamesOnly = false;
+  // Answer 5: "exact names only" anywhere is removed, then restated once at
+  // the end of the question, the one place every parse already reads it.
+  text = text.replace(exactNamesOnlyPhrase, () => { exactNamesOnly = true; return ' '; });
+  if (/\b(?:payment|deposit|paid)\b/iu.test(text) && new RegExp(`\\b(?:${ARRIVAL})\\b`, 'iu').test(text)) {
+    // Answer 13: "via <channel>" for the closed channel list is removed.
+    text = text.replace(channelPhrase, '');
+    // Any other "via" phrase after a named payer (a FROM or VIA clause, or a
+    // noun payer before "payment") is a channel phrase too, and refuses. A
+    // "via" that is the only selector still names the payer.
+    for (const via of text.matchAll(/\bvia\s+/giu)) {
+      const before = text.slice(0, via.index);
+      const noun = before.match(/^\s*(?:did|has|have)\s+(?:(?:the|my|our|a|an)\s+)?([\s\S]+?)\s+payment\s*$/iu);
+      if (/\b(?:from|via)\s+\S/iu.test(before) || (noun && slotNamesPayer(noun[1]))) return questionRefused;
+    }
+    // Answer 9: a run of closed qualifiers that alone fills the slot before
+    // "payment" (after the article, or after a payer's 's) is removed. "recent"
+    // stays where it is: the period grammar already reads it as the 14-day
+    // window and never as a payer.
+    text = text.replace(qualifierRun, (match, lead, run) =>
+      lead + run.split(/\s+/).filter(word => word.toLowerCase() === 'recent').map(word => `${word} `).join(''));
+    // Any other single-word qualifier there refuses. It is never a second payer.
+    const lone = text.match(/^\s*(?:did|has|have)\s+(?:(?:the|my|our|a|an)\s+)?([\p{L}\p{N}]+)\s+payment\s+(?:from|via)\b/iu) ||
+      text.match(/['’]s\s+([\p{L}\p{N}]+)\s+payment\b/iu);
+    if (lone && payerSlotWord(lone[1].toLowerCase())) return questionRefused;
+    // Answer 11: "of $25", "for $25" or ", $25," after the FROM name is amount
+    // scope, read exactly as "payment of $25 from <name>".
+    const moved = text.match(amountAfterName);
+    if (moved) {
+      const head = text.slice(0, moved.index), tail = text.slice(moved.index + moved[0].length);
+      const noun = [...head.matchAll(/\b(?:payment|deposit)\b/giu)].at(-1);
+      const end = noun ? noun.index + noun[0].length : -1;
+      if (noun && !/^\s+of\b/iu.test(head.slice(end))) {
+        const amount = (moved[2] || moved[3]).replace(/,+$/, '');
+        text = `${head.slice(0, end)} of ${amount}${head.slice(end)}from ${moved[1]}${tail}`;
+      }
+    }
+  }
+  if (exactNamesOnly) text = text.replace(/^\s+/, '').replace(/[\s,]*([?!.]*)\s*$/u, ', exact names only$1');
+  return text === original ? question : text;
+}
+
 // Cleanup is an alternative interpretation, not authority to edit a name.
 // Reuse the bounded grammar with an opaque slot, preserving the literal span
 // and deriving amount scope only from text outside it. The reader decides
 // between these interpretations using its one covered snapshot and registry.
 export function classifyLedgerQuestion(question, { now = Date.now(), parseLimit = ledgerQuestionLimits.parses } = {}) {
+  const rewritten = rewriteLedgerQuestion(question);
+  if (rewritten === questionRefused) return { broad: classifyQuestionGrammar(question, { now }).broad, kind: null };
+  question = rewritten;
   const budget = { remaining: Number.isSafeInteger(parseLimit) && parseLimit >= 0
     ? Math.min(parseLimit, ledgerQuestionLimits.parses) : 0 };
   try {

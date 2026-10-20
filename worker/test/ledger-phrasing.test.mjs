@@ -28,10 +28,13 @@ add("payment", ["2026-10-01", "2026-10-12"], ["Did a payment of $2,500 arrive in
 add("payment", SIXTY, ["Did the Paywire payment hit my bank account?"], null, { counterpartyWords: ["paywire"] });
 add("totals", SEP, ["How much money came in and went out in September 2026?"]);
 // Audit items 1, 3-7, 10, 14-16 have deterministic ledger operations.
+// The two channel-named payer phrasings that used to sit here now refuse at
+// classification (see channelPhrasings below): partner answers 9 and 13.
+// A listed qualifier or channel is stripped and never becomes a payer word.
 add("payment", SIXTY, [
-  "Did the Paywire payment from Fixture Payer reach account 4417, and when?",
-  "Has the payment from Fixture Payer via Paywire posted in account ending 4417?",
-], "4417", { counterpartyWords: ["paywire", "fixture", "payer"] });
+  "Did the ACH payment from Fixture Payer reach account 4417, and when?",
+  "Has the payment from Fixture Payer via ACH posted in account ending 4417?",
+], "4417", { counterpartyWords: ["fixture", "payer"] });
 add("balance", [], ["What is the current balance in each bank account?", "Show me all my bank balances.", "What are my checking balances?", "What is my current savings balance?"]);
 add("totals", SEP, ["How much income came in during September 2026, by account?", "Show me money in for September 2026 by account.", "How much did I spend in September 2026?", "What was my spending last month?", "What were my expenses in September 2026?", "How much money went out last month?", "How much money came in during September 2026?", "What did I spend in September 2026?", "Show me income in September 2026."]);
 add("category", SEP, ["What was my spending in September 2026 by category?", "Show my spending in September 2026, top categories.", "What were my top spending categories last month?", "Show me spending by category in September 2026."]);
@@ -65,6 +68,23 @@ const documents = [
   "What is the balance in my Fixture Bank account?", "Did a payment of $2,500 arrive in my Fixture Bank account?",
   "How do I balance work and rest?",
 ];
+// Partner answers 9 and 13 (round 3): a single word before "payment" beside a
+// FROM payer is a qualifier, and a "via" phrase after a named payer is a
+// channel phrase. Outside the closed lists (qualifiers any, latest, last,
+// recent, monthly, invoice, ACH, wire; channels ACH, Zelle, wire, check, Venmo,
+// PayPal) both refuse at classification; a qualifier is never a second payer.
+// These two audit phrasings were payment questions with counterparty words
+// ["paywire", "fixture", "payer"] before those answers.
+const channelPhrasings = [
+  "Did the Paywire payment from Fixture Payer reach account 4417, and when?",
+  "Has the payment from Fixture Payer via Paywire posted in account ending 4417?",
+];
+for (const question of channelPhrasings) test(`channel phrasing refuses at classification: ${question}`, () => {
+  const result = classifyLedgerQuestion(question, { now: NOW });
+  assert.equal(result.kind, null);
+  assert.equal(result.mask ?? null, null);
+  assert.equal(result.broad, true, "still routed as a money question to the document path");
+});
 for (const row of corpus) test(`phrasing: ${row.question}`, () => {
   const result = classifyLedgerQuestion(row.question, { now: NOW });
   assert.equal(result.kind, row.kind);

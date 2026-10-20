@@ -88,13 +88,21 @@ const qualifiedPayment = [
   'did the big payment from Payer One arrive?',
 ];
 
+// Partner answer 9 (verbatim): "Strip a closed list of qualifiers before
+// "payment": any, latest, last, recent, monthly, invoice, ACH, wire. Refuse any
+// other qualifier at classification. A qualifier is never a second payer."
 test('R3-QUESTION-3-2 a qualifier before "payment" is read as a second payer clause and a registered unique FROM payer is refused as unconfirmed', async t => {
-  for (const question of qualifiedPayment) {
+  for (const question of [...qualifiedPayment, 'did the last payment from Payer One arrive?']) {
     const f = registeredPayerFixture(t);
     const intent = classify(question);
     const body = await f.ask(question);
     assert.ok(intent.kind === null || (body.route !== 'documents' && body.evidence_gate?.complete === true && body.ledger?.found === true),
       `${question}: classified as ${intent.kind} selector ${JSON.stringify(intent.counterparty)} words ${JSON.stringify(intent.counterpartyWords)}, answered complete=${body.evidence_gate?.complete} found=${body.ledger?.found}: ${body.answer}`);
+    if (/\b(?:big)\b/.test(question)) assert.equal(intent.kind, null, `${question}: an unlisted qualifier refuses at classification`);
+    else {
+      assert.equal(intent.kind, 'payment', `${question}: a listed qualifier is stripped`);
+      assert.deepEqual(intent.counterpartyWords, ['payer', 'one'], `${question}: the qualifier is never a second payer`);
+    }
   }
 });
 
@@ -185,12 +193,23 @@ const invoicePeriod = [
   'did the payment from Payer One for last month arrive?',
 ];
 
+// Partner answer 10 (verbatim): "Refuse "for <period>" in the payment grammar,
+// with a short note asking whether they mean "received in <period>". Never
+// certify absence on it."
 test('R3-QUESTION-3-4 "for <period>" between the payer name and "arrive" is read as the arrival window and certifies a complete absence', async t => {
-  for (const question of invoicePeriod) {
+  for (const [question, received] of [
+    [invoicePeriod[0], 'received in september 2026'],
+    [invoicePeriod[1], 'received in q3 2026'],
+    [invoicePeriod[2], 'received last month'],
+  ]) {
     const f = registeredPayerFixture(t, { octoberOnly: true });
     const body = await f.ask(question);
     assert.ok(!(body.evidence_gate?.complete === true && body.ledger?.found === false),
       `${question}: certified absence for ${body.ledger?.from}..${body.ledger?.to} although the payment posted 2026-10-05: ${body.answer}`);
+    assert.equal(body.code, 'payment_period_ambiguous', question);
+    assert.equal(body.evidence_gate?.complete, false, question);
+    assert.equal(body.ledger, undefined, `${question}: no presence or absence is read`);
+    assert.ok(body.gaps?.some(gap => gap.detail.includes(`Did you mean "${received}"?`)), `${question}: ${JSON.stringify(body.gaps)}`);
   }
 });
 
@@ -224,6 +243,9 @@ const amountAfterName = [
   'did the payment from Payer One, $25, arrive?',
 ];
 
+// Partner answer 11 (verbatim): "Yes, "of $25", "for $25" and ", $25," after
+// the FROM name are amount scope (amountMinor), answered like "payment of $25
+// from Payer One"."
 test('R3-QUESTION-3-5 an amount after the FROM name with a preposition is swallowed into the payer label and the registered payer reports no match', async t => {
   for (const question of amountAfterName) {
     const f = registeredPayerFixture(t);
@@ -231,6 +253,13 @@ test('R3-QUESTION-3-5 an amount after the FROM name with a preposition is swallo
     const body = await f.ask(question);
     assert.ok(intent.kind === null || (intent.amountMinor === 2500 && body.ledger?.found !== false),
       `${question}: selector ${JSON.stringify(intent.counterparty)} amount ${intent.amountMinor} window ${intent.from}..${intent.to}; answered found=${body.ledger?.found} complete=${body.evidence_gate?.complete}: ${body.answer}`);
+    assert.equal(intent.kind, 'payment', question);
+    assert.equal(intent.counterparty, 'payer one', question);
+    assert.equal(intent.amountMinor, 2500, question);
+    assert.equal(intent.from, '2026-09-13', question);
+    assert.equal(body.evidence_gate?.complete, true, `${question}: ${body.answer}`);
+    assert.equal(body.ledger?.found, true, question);
+    assert.ok(body.citations.some(c => c.amount_minor === 2500), question);
   }
 });
 
@@ -256,13 +285,17 @@ test('R3-QUESTION-3-5 control: the amount before the name or after "payment of" 
 });
 
 // ---------------------------------------------------------------- R3-QUESTION-3-6
-// Contract question (needs_contract_decision). R2-QF4 area, inverse case.
-// retrievalFailed() whitelists only the two scoped-vector reasons as
-// non-failure degradation. search() also reports degraded="vector" with
-// reason "entity-vector-authority-unindexed" for every entity-scoped query
-// whose lanes all SUCCEEDED (store-d1.js:1059-1063). retrievalFailed treats
-// that deliberate restriction as a failed retrieval, so index.js:1661 turns
-// every complete entity-scoped answer into "retrieval incomplete".
+// Contract question, decided. R2-QF4 area, inverse case. retrievalFailed()
+// whitelists only the two scoped-vector reasons as non-failure degradation.
+// search() reports degraded="vector" with reason
+// "entity-vector-authority-unindexed" for every entity-scoped query whose
+// lanes all SUCCEEDED, and retrievalFailed treats that restriction as a failed
+// retrieval, so index.js turns every complete entity-scoped answer into
+// "retrieval incomplete". Partner answer 12 (verbatim): "That one is
+// deliberate for now: without entity authority in the vector index,
+// entity-scoped answers stay incomplete. Leave it, and list it as a separate
+// item to index that metadata." This test now pins that deliberate behaviour;
+// indexing entity metadata in Vectorize is tracked as a separate item.
 function entityScopedSearch(f, { filters, supplementalFilters = [], keywordFails = false }) {
   const env = { ...f.env, VECTORIZE: { async query() { return { matches: [] }; } } };
   if (keywordFails) {
@@ -275,13 +308,13 @@ function entityScopedSearch(f, { filters, supplementalFilters = [], keywordFails
     filters, supplementalFilters, projectionReadiness: { ready: true } });
 }
 
-test('R3-QUESTION-3-6 a successful entity-scoped search is reported as failed retrieval, so its complete answer is downgraded', async t => {
+test('R3-QUESTION-3-6 decided (partner answer 12): an entity-scoped search stays incomplete while entity authority is unindexed in Vectorize', async t => {
   const f = fixture(t, { knownPayers: false });
   const result = await entityScopedSearch(f, { filters: { entity_slug: 'owner' } });
   assert.equal(result.degraded, 'vector');
   assert.equal(result.degraded_reason, 'entity-vector-authority-unindexed', 'every lane succeeded; only the entity restriction applies');
-  assert.equal(retrievalFailed(result.degraded, result.degraded_reason), false,
-    `a deliberate entity restriction with no failed lane is treated as failed retrieval (${result.degraded}/${result.degraded_reason})`);
+  assert.equal(retrievalFailed(result.degraded, result.degraded_reason), true,
+    `entity-scoped answers stay incomplete until entity metadata is indexed in Vectorize (${result.degraded}/${result.degraded_reason})`);
 });
 
 test('R3-QUESTION-3-6 control: healthy unscoped search is not failed retrieval; scoped-vector reasons are not; a failed hint keyword lane and a failed base lane are', async t => {
@@ -313,16 +346,30 @@ const channelPhrase = [
   ['did the payment from Payer One via ACH arrive?', 'payer one via ach'],
 ];
 
+// Partner answer 13 (verbatim): "Strip "via <channel>" for a closed list (ACH,
+// Zelle, wire, check, Venmo, PayPal). Refuse other "via" phrases."
 test('R3-QUESTION-3-7 a "via <channel>" phrase after the payer becomes the payer selector', async t => {
   for (const [question, observed] of channelPhrase) {
     const intent = classify(question);
     assert.ok(intent.kind === null || intent.counterparty === 'payer one',
       `${question}: counterparty ${JSON.stringify(intent.counterparty)} (expected "payer one" or a refusal; observed on HEAD: ${JSON.stringify(observed)})`);
+    assert.equal(intent.kind, 'payment', `${question}: a listed channel is stripped`);
+    assert.deepEqual(intent.counterpartyWords, ['payer', 'one'], question);
   }
   const f = registeredPayerFixture(t);
   const body = await f.ask(channelPhrase[0][0]);
   assert.ok(body.route === 'documents' || body.evidence_gate?.complete === true,
     `${channelPhrase[0][0]}: registered unique payer refused: ${body.answer}`);
+  assert.equal(body.evidence_gate?.complete, true, body.answer);
+  assert.equal(body.ledger?.found, true);
+  for (const question of ['did the payment from Payer One via Venmo arrive?', 'did the Payer One payment via PayPal arrive?',
+    'did the payment from Payer One via check arrive?', 'did the payment from Payer One via wire arrive?']) {
+    assert.equal(classify(question).counterparty, 'payer one', question);
+  }
+  for (const question of ['did the payment from Payer One via Fixture Rail arrive?', 'did the Payer One payment via Vendor Alpha arrive?',
+    'did the payment from Payer One arrive via Fixture Rail?']) {
+    assert.equal(classify(question).kind, null, `${question}: an unlisted via phrase after the payer refuses`);
+  }
 });
 
 test('R3-QUESTION-3-7 control: the same noun and FROM questions without a channel phrase, and "via <payer>", name "payer one" and answer', async t => {
