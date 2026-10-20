@@ -1,0 +1,2 @@
+This file sits under a private path prefix. The manifest excludes it, so the
+harness must see it reported as a source-policy exclusion and never sent.

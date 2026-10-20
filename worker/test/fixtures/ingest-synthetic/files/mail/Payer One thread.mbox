@@ -1,0 +1,24 @@
+From payer-one@example.invalid Mon Mar 02 10:00:00 2026
+From: Payer One <payer-one@example.invalid>
+To: Store North <store-north@example.invalid>
+Date: Mon, 02 Mar 2026 10:00:00 -0700
+Subject: March remittance schedule
+Message-ID: <thread-0001@example.invalid>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Store North, the March remittance will be sent as a single deposit on the
+last business day of the month. The remittance advice will follow by email.
+
+From store-north@example.invalid Tue Mar 03 08:30:00 2026
+From: Store North <store-north@example.invalid>
+To: Payer One <payer-one@example.invalid>
+Date: Tue, 03 Mar 2026 08:30:00 -0700
+Subject: Re: March remittance schedule
+Message-ID: <thread-0002@example.invalid>
+In-Reply-To: <thread-0001@example.invalid>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Thank you, Payer One. We will watch for the single deposit and match it to
+the remittance advice when it arrives.
