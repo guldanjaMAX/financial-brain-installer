@@ -12,6 +12,11 @@
  * The proof runs the real rendered envelope through scanEnvelope, the same gate
  * the worker applies, rather than asserting on a regex in isolation.
  *
+ * The same rule covers the event TITLE, and a bare `pwd=` / `passcode=` /
+ * `pw=` key=value typed outside any URL in the title, description or location
+ * (the partner's ruling on the two review notes). Microsoft Graph events and
+ * .ics imports are proven end to end through syncMicrosoftGraph and extract().
+ *
  * All fixtures are synthetic. The passcode tokens are invented strings shaped
  * like a Zoom pwd value; they open nothing.
  */
@@ -19,6 +24,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { buildEnvelope, renderEvent } from "../connectors/google-calendar.mjs";
+import { syncMicrosoftGraph } from "../connectors/microsoft-graph.mjs";
+import { extract } from "../ingest/extract.mjs";
 import { scanEnvelope } from "../worker/src/lib/secret-scan.js";
 
 const CAL = { id: "calendar-owner@example.com", key: "primary", label: "Calendar Owner" };
@@ -52,11 +59,29 @@ function upsert(event) {
   return out.envelope;
 }
 
+function stringsIn(value, out = []) {
+  if (typeof value === "string") out.push(value);
+  else if (Array.isArray(value)) for (const item of value) stringsIn(item, out);
+  else if (value && typeof value === "object") for (const [k, v] of Object.entries(value)) { out.push(k); stringsIn(v, out); }
+  return out;
+}
+
 function assertNoPasscode(envelope) {
   const json = JSON.stringify(envelope);
   assert.ok(!json.includes(TOKEN), "the passcode token must not appear anywhere in the envelope");
   assert.ok(!/[?&](pwd|passcode|pw)=/i.test(json), "no passcode query parameter may survive in the envelope");
+  for (const s of stringsIn(envelope)) {
+    assert.ok(!/(?<![A-Za-z0-9_])(pwd|passcode|pw)=\S/i.test(s), `no bare passcode key=value may survive: ${s}`);
+  }
 }
+
+function assertGatePasses(envelope) {
+  const verdict = scanEnvelope(envelope);
+  assert.equal(verdict.shouldRefuse, false, `credential gate refused the envelope: ${JSON.stringify(verdict.labels)}`);
+}
+
+// The envelope title is "<summary> <em dash> <local start date>".
+const titleFor = (summary) => `${summary} \u2014 2026-10-21`;
 
 test("gate: a Zoom link with ?pwd= pasted into the DESCRIPTION no longer gets the event refused", () => {
   const event = baseEvent({
@@ -158,4 +183,197 @@ test("control: the structured conference link is still sanitized", () => {
   assertNoPasscode(env);
   assert.equal(env.metadata.conference_url, ZOOM_PATH);
   assert.ok(env.content.includes(`Video link: ${ZOOM_PATH}`), env.content);
+});
+
+/* ------------------------------------------------------------------------
+ * Second commit: the event TITLE, and bare pwd= / passcode= / pw= outside URLs.
+ * --------------------------------------------------------------------- */
+
+test("gate: a Zoom link with ?pwd= in the TITLE no longer gets the event refused", () => {
+  const env = upsert(baseEvent({ summary: `Vendor Alpha LLC renewal ${ZOOM_WITH_PWD}` }));
+  assertGatePasses(env);
+  assertNoPasscode(env);
+  assert.equal(env.title, titleFor(`Vendor Alpha LLC renewal ${ZOOM_PATH}`));
+  assert.ok(env.content.startsWith(`Meeting: Vendor Alpha LLC renewal ${ZOOM_PATH}\n`), env.content);
+});
+
+test("gate: a bare pwd=<token> in the DESCRIPTION no longer gets the event refused", () => {
+  const env = upsert(baseEvent({
+    description: `Agenda: review the renewal terms.<br>Room code pwd=${TOKEN} then dial in.<br>Bring the signed scope.`,
+  }));
+  assertGatePasses(env);
+  assertNoPasscode(env);
+  // Only the key=value token goes; the text on both sides is untouched.
+  assert.ok(env.content.includes(
+    "Notes:\nAgenda: review the renewal terms.\nRoom code  then dial in.\nBring the signed scope.\n"
+  ), env.content);
+});
+
+test("gate: a bare pwd=<token> in the LOCATION no longer gets the event refused", () => {
+  const env = upsert(baseEvent({ location: `Owner Holdings LLC office, pwd=${TOKEN} at the front desk` }));
+  assertGatePasses(env);
+  assertNoPasscode(env);
+  assert.equal(env.metadata.location, "Owner Holdings LLC office,  at the front desk");
+  assert.ok(env.content.includes("Where: Owner Holdings LLC office,  at the front desk\n"), env.content);
+});
+
+test("gate: a bare pwd=<token> in the TITLE no longer gets the event refused", () => {
+  const env = upsert(baseEvent({ summary: `Weekly sync pwd=${TOKEN}` }));
+  assertGatePasses(env);
+  assertNoPasscode(env);
+  assert.equal(env.title, titleFor("Weekly sync"));
+  assert.ok(env.content.startsWith("Meeting: Weekly sync\n"), env.content);
+
+  // A title that was nothing but the passcode falls back like an empty title.
+  const bare = upsert(baseEvent({ summary: `pwd=${TOKEN}` }));
+  assertGatePasses(bare);
+  assertNoPasscode(bare);
+  assert.equal(bare.title, titleFor("(untitled event)"));
+  assert.ok(bare.content.startsWith("Meeting: (untitled event)\n"), bare.content);
+});
+
+test("a '.1'-suffixed Zoom token is stripped even though the gate alone would let it through", () => {
+  const dotted = `${TOKEN}.1`;
+  // Why the gate is not enough: its lookahead stops at the '.', so this exact
+  // credential passes the gate untouched. It must be removed anyway.
+  assert.equal(scanEnvelope({ content: `pwd=${dotted}` }).shouldRefuse, false);
+
+  const env = upsert(baseEvent({
+    summary: `Weekly sync pwd=${dotted}`,
+    description: `Room code pwd=${dotted}. Or ${ZOOM_PATH}?pwd=${dotted}, then dial in.`,
+    location: `Owner Holdings LLC office pwd=${dotted}`,
+  }));
+  assertGatePasses(env);
+  assertNoPasscode(env);
+  assert.equal(env.title, titleFor("Weekly sync"));
+  // Trailing sentence punctuation after the token is kept.
+  assert.ok(env.content.includes(`Notes:\nRoom code . Or ${ZOOM_PATH}, then dial in.\n`), env.content);
+  assert.equal(env.metadata.location, "Owner Holdings LLC office ");
+});
+
+test("bare passcode keys are matched case-insensitively and quoted or bracketed values go whole", () => {
+  const env = upsert(baseEvent({
+    summary: `Sync PWD=${TOKEN} today`,
+    description: [
+      `A: Passcode=${TOKEN} for the room`,
+      `B: PW=${TOKEN}`,
+      `C: pwd="${TOKEN}" as sent`,
+      `D: (pwd=${TOKEN}).`,
+      `E: confno=444&pwd=${TOKEN}&uname=guest`,
+    ].join("\n"),
+    location: `Room 4 passcode=${TOKEN}`,
+  }));
+  assertGatePasses(env);
+  assertNoPasscode(env);
+  assert.equal(env.title, titleFor("Sync  today"));
+  assert.ok(env.content.includes(
+    ["A:  for the room", "B:", "C:  as sent", "D: ().", "E: confno=444&&uname=guest"].join("\n")
+  ), env.content);
+  assert.equal(env.metadata.location, "Room 4 ");
+});
+
+test("control: ordinary text containing pw, pwd or passcode is byte-identical in title, description and location", () => {
+  const summary = "pw is short for password; the word pwd alone stays";
+  const description = [
+    "pw is short for password.",
+    "The word pwd alone is not a passcode, and neither is PWD in capitals.",
+    "Keys that only contain the letters stay: spw=abc npw=abc pwdhint=x my_pwd=abc pw2=abc passcodes=abc.",
+    "Passcode lines are filtered by the boilerplate rule, not by this one.",
+    "A key with no value stays as written: pwd= and pwd=.",
+  ].join("\n");
+  const location = "Room pw-4, spw=abc, pwdhint=x";
+  const env = upsert(baseEvent({ summary, description, location }));
+  assertGatePasses(env);
+  assert.equal(env.title, titleFor(summary));
+  assert.ok(env.content.startsWith(`Meeting: ${summary}\n`), env.content);
+  assert.ok(env.content.includes(`Notes:\n${description}\n`), env.content);
+  assert.equal(env.metadata.location, location);
+  assert.ok(env.content.includes(`Where: ${location}\n`), env.content);
+});
+
+test("control: a 'Passcode:' line is still dropped by the boilerplate rule, as before", () => {
+  const env = upsert(baseEvent({ description: "Before the call.\nPasscode: 482913\nAfter the call." }));
+  assert.ok(env.content.includes("Notes:\nBefore the call.\nAfter the call.\n"), env.content);
+  assert.ok(!env.content.includes("482913"), env.content);
+});
+
+test("control: other URLs in the TITLE, including a path containing pwd=, are byte-identical", () => {
+  const summary =
+    "Review https://docs.example.com/d/abc123/edit?usp=sharing#heading=h.1 and https://wiki.example.com/pwd=policy/reset-pwd";
+  const env = upsert(baseEvent({ summary }));
+  assert.equal(env.title, titleFor(summary));
+  assert.ok(env.content.startsWith(`Meeting: ${summary}\n`), env.content);
+});
+
+test("control: the conference link is still sanitized when the title also carries a passcode", () => {
+  const env = upsert(baseEvent({
+    summary: `Vendor Alpha LLC renewal pwd=${TOKEN}`,
+    conferenceData: {
+      conferenceSolution: { name: "Zoom Meeting" },
+      entryPoints: [{ entryPointType: "video", uri: ZOOM_WITH_PWD }],
+    },
+  }));
+  assertGatePasses(env);
+  assertNoPasscode(env);
+  assert.equal(env.metadata.conference_url, ZOOM_PATH);
+  assert.ok(env.content.includes(`Video link: ${ZOOM_PATH}`), env.content);
+});
+
+test("Microsoft Graph: a passcode in the subject, body and location is removed before the gate", async () => {
+  const graphEvent = {
+    id: "graph-pwd-fixture-1",
+    subject: `Vendor Alpha LLC renewal ${ZOOM_WITH_PWD} pwd=${TOKEN}`,
+    body: { contentType: "text", content: `Agenda first.\nRoom code pwd=${TOKEN} then dial in.\nJoin: ${ZOOM_WITH_PWD}` },
+    start: { dateTime: "2026-10-21T16:00:00.0000000", timeZone: "UTC" },
+    end: { dateTime: "2026-10-21T17:00:00.0000000", timeZone: "UTC" },
+    organizer: { emailAddress: { name: "Calendar Owner", address: "calendar-owner@example.com" } },
+    attendees: [{ type: "required", status: { response: "accepted" }, emailAddress: { name: "Payer One", address: "payer-one@vendor-alpha.example" } }],
+    location: { displayName: `Owner Holdings LLC office pwd=${TOKEN}` },
+    webLink: "https://outlook.office.invalid/calendar/item/pwd-fixture",
+    lastModifiedDateTime: "2026-10-19T16:00:00.000Z",
+    iCalUId: "pwd-fixture-ical-uid",
+  };
+  const result = await syncMicrosoftGraph({
+    accessToken: "offline-token",
+    mailFolderIds: [], driveIds: [], siteIds: [], includePersonalDrive: false,
+    now: () => Date.parse("2026-10-20T12:00:00.000Z"),
+    fetchImpl: async () => new Response(JSON.stringify({
+      value: [graphEvent],
+      "@odata.deltaLink": "https://graph.microsoft.com/calendar-delta-pwd-fixture",
+    }), { status: 200, headers: { "content-type": "application/json" } }),
+  });
+  assert.equal(result.documents.length, 1, JSON.stringify(result.warnings));
+  const env = result.documents[0];
+  assertGatePasses(env);
+  assertNoPasscode(env);
+  assert.ok(env.title.startsWith(`Vendor Alpha LLC renewal ${ZOOM_PATH} — `), env.title);
+  assert.ok(env.content.includes(`Room code  then dial in.\nJoin: ${ZOOM_PATH}`), env.content);
+  assert.equal(env.metadata.location, "Owner Holdings LLC office ");
+});
+
+test(".ics import: a passcode in SUMMARY, DESCRIPTION and LOCATION is removed from the rendered text", async () => {
+  const ics = [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    "PRODID:-//Fixture//Passcode//EN",
+    "X-WR-CALNAME:Calendar Owner",
+    "BEGIN:VEVENT",
+    "UID:pwd-fixture-1@example.test",
+    "DTSTART:20261021T160000Z",
+    "DTEND:20261021T170000Z",
+    `SUMMARY:Vendor Alpha LLC renewal ${ZOOM_WITH_PWD} pwd=${TOKEN}.1`,
+    `DESCRIPTION:Agenda first.\\nRoom code pwd=${TOKEN} then dial in.\\nJoin: ${ZOOM_WITH_PWD}`,
+    `LOCATION:Owner Holdings LLC office\\, passcode=${TOKEN}`,
+    "END:VEVENT",
+    "END:VCALENDAR",
+    "",
+  ].join("\r\n");
+  const got = await extract(Buffer.from(ics, "utf-8"), "owner-calendar.ics");
+  assert.equal(got.how, "calendar", JSON.stringify(got));
+  assert.ok(got.text, JSON.stringify(got));
+  assertGatePasses({ content: got.text });
+  assert.ok(!got.text.includes(TOKEN), got.text);
+  assert.ok(got.text.includes(`Meeting: Vendor Alpha LLC renewal ${ZOOM_PATH}\n`), got.text);
+  assert.ok(got.text.includes(`Room code  then dial in.\nJoin: ${ZOOM_PATH}`), got.text);
+  assert.ok(got.text.includes("Where: Owner Holdings LLC office, \n"), got.text);
 });
