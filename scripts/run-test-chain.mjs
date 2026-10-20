@@ -290,6 +290,9 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --test test/machine-prep-installers.test.mjs",
   "node --no-warnings test/windows-dpapi-signing-workflow.test.mjs",
   "node --test test/owner-contract-workspace.test.mjs",
+  // A Zoom passcode pasted into a calendar description or location is removed
+  // before the credential gate sees it, so one event cannot fail the sync.
+  "node --test test/google-calendar-url-passcode.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node --test test/daily-evidence.test.mjs",
@@ -544,6 +547,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node test/load-all.test.mjs",
   "node test/drive-live-fixture.test.mjs",
   "node test/google-calendar.test.mjs",
+  "node --test test/google-calendar-url-passcode.test.mjs",
   "node test/google-auth-storage.test.mjs",
   "node test/google-drive.test.mjs",
   "node test/drive-scheduler.test.mjs",
