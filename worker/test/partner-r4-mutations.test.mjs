@@ -72,7 +72,7 @@ test('R4 QF1 structural nonmatch mutation restores a complete false zero; matchi
 });
 
 test('R4 KF1 the inherited single allowlist blocks all three card fields and its mutation discloses them', async () => {
-  const mutant = await mutatedModule('entity-fact-answer.js', 'if (unsafeScalarFact(value)) return false;', 'if (false) return false;');
+  const mutant = await mutatedModule('entity-fact-answer.js', 'if (unsafeScalarFact(value, field)) return false;', 'if (false) return false;');
   for (const [field, plain] of [['address', '12 Synthetic Road'], ['company', 'Example Organization'], ['role', 'Operations Manager']]) {
     for (const answer of [entityFactAnswer, mutant.entityFactAnswer]) {
       assert.ok(card(field, plain, answer)?.answer.includes(plain), 'same card decision answers the green control');

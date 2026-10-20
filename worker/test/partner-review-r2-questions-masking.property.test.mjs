@@ -506,9 +506,12 @@ test('R2-Q3 budget exhaustion never becomes a definitive no', async t => {
 // so a 5-digit identifier window in the output can only be a leak.
 const ARABIC = 0x0660, EXT_ARABIC = 0x06F0, FULL = 0xFF10;
 const ID_FORMS = ['plain', 'spaced', 'dashed', 'fullwidth', 'arabic', 'ext-arabic', 'zero-width', 'iban', 'routing'];
-function identifier(g, form = g.pick(ID_FORMS)) {
+// `shortest` is the shortest identifier drawn. R2-K2 card arms lower it to the
+// partner answer 3 threshold of the field (five digits for company and role,
+// six for an address), so the property pins exactly that rule.
+function identifier(g, form = g.pick(ID_FORMS), shortest = 8) {
   const digits = n => Array.from({ length: n }, () => String(g.int(6, 9))).join('');
-  const run = form === 'routing' ? digits(9) : digits(g.int(8, 19));
+  const run = form === 'routing' ? digits(9) : digits(g.int(shortest, 19));
   const groups = (s, size) => s.match(new RegExp(`.{1,${size}}`, 'g'));
   const text = {
     plain: run, spaced: groups(run, g.pick([3, 4])).join(' '), dashed: groups(run, 4).join('-'),
@@ -683,7 +686,9 @@ test('R2-K2 entity-fact answers never echo more than 4 digits of an injected ide
       if (result) stats.ownerAnswered++;
     } else {
       const subject = g.pick(K2_SUBJECTS), field = g.pick(['address', 'company', 'role']);
-      id = identifier(g);
+      // Partner answer 3: company and role refuse a five-digit run, an address
+      // keeps the six-digit rule (a five-digit ZIP answers there by design).
+      id = identifier(g, undefined, field === 'address' ? 6 : 5);
       where = `card:${field}`;
       const fields = { ...CLEAN, [field]: withIdentifier(g, field, id.text) };
       result = entityFactAnswer({ question: factQuestion(g, subject, field), owner: 'Record Owner', now: K2_NOW, ...contactCard(subject, fields) });

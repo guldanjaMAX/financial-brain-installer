@@ -30,6 +30,9 @@ const longestDigitRun = text => Math.max(0, ...(String(text).normalize('NFKC').m
 // local part or domain label that is itself an identifier-length digit run,
 // or that is prefixed with an allowlisted identifier word, is not an email
 // fact the fast path should certify.
+// Decided by partner answer 7 (the proposal above): refuse 7 or more digits in
+// the local part or in any domain label, plus the identifier-word check with
+// digits and dots as boundaries; both controls are kept.
 const CARD_LENGTH = '4111111111111111';
 test('R3-LEAK-2-1 repro: email fast path echoes an identifier-length digit run and an identifier-word local part', () => {
   for (const value of [`${CARD_LENGTH}@example.invalid`, `account${CARD_LENGTH}@bank.invalid`,
@@ -37,6 +40,30 @@ test('R3-LEAK-2-1 repro: email fast path echoes an identifier-length digit run a
     for (const operative of [false, true]) {
       const result = card('email', value, entityFactAnswer, operative);
       assert.equal(result, null, `email (${operative ? 'operative' : 'card'}) echoed an identifier: ${JSON.stringify(result?.answer)}`);
+    }
+  }
+});
+
+// Partner answer 7: refuse 7 or more digits in the local part or in any domain
+// label, plus the identifier-word check with digits and dots as boundaries.
+// Both controls are kept, so each one must refuse on its own: the word cases
+// carry fewer than 7 digits and the digit cases carry no identifier word.
+// Digits are counted per local part or label, separators included.
+test('R3-LEAK-2-1 answer 7: the digit bound and the identifier-word check each refuse on their own', () => {
+  for (const value of ['acct.1234@example.invalid', 'account1@bank.invalid', 'owner@routing.example.invalid',
+    'contact.1234567@example.invalid', 'c1o2n3t4a5c6t7@example.invalid', 'owner@mail1234567.example.invalid']) {
+    for (const operative of [false, true]) {
+      const result = card('email', value, entityFactAnswer, operative);
+      assert.equal(result, null, `email (${operative ? 'operative' : 'card'}) echoed ${value}: ${JSON.stringify(result?.answer)}`);
+    }
+  }
+  // Six digits in the local part or in one label still answer (the
+  // partner-r3-allowlist.test.mjs control), and a letter is not a boundary.
+  for (const value of ['contact123456@example.invalid', 'owner@mail123456.example.invalid', 'cardinal.office@example.invalid']) {
+    for (const operative of [false, true]) {
+      const result = card('email', value, entityFactAnswer, operative);
+      assert.ok(result?.fact_span, `email ${value} reaches the fact decision`);
+      assert.ok(result.answer.includes(value));
     }
   }
 });

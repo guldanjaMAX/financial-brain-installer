@@ -97,7 +97,7 @@ test('F2 registered company comma spellings use the same mapping through the rea
 
 test('F1 new canonical guard mutation restores unsafe scalar output and preserves controls', async () => {
   const mutant = await mutatedModule('entity-fact-answer.js',
-    'if (unsafeScalarFact(value)) return false;', 'if (false) return false;');
+    'if (unsafeScalarFact(value, field)) return false;', 'if (false) return false;');
   for (const api of [entityFactAnswer, mutant.entityFactAnswer]) {
     assert.equal(address(plainAddress, api)?.method, 'dated_owner_address');
     assert.ok(card('company', 'Synthetic Services', api)?.fact_span);

@@ -28,7 +28,7 @@ function address(answer, value) {
 
 test('K1 exact address guard mutation flips the refusal and leaves a plain address usable', async () => {
   const mutant = await mutatedModule('entity-fact-answer.js',
-    'if (unsafeScalarFact(value)) return false;', 'if (false) return false;');
+    'if (unsafeScalarFact(value, field)) return false;', 'if (false) return false;');
   const plain = '12 Synthetic Road, Fixture City, AZ 85001';
   assert.equal(address(entityFactAnswer, plain)?.method, 'dated_owner_address', 'same envelope reaches the fact decision');
   for (const tail of ['Account 1234', 'acct 1234', 'routing 1234', 'card 1234', 'IBAN 1234',

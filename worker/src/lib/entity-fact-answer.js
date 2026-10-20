@@ -41,11 +41,12 @@ function questionFact(question, owner) {
   return { subject, field: FIELDS.get(field.toLowerCase()) };
 }
 
-function unsafeScalarFact(value) {
+function unsafeScalarFact(value, field) {
   // Allowlist every free-text value and rendered subject. Inspect, never
   // rewrite, cited bytes. Marks must attach to a letter, not a digit or a
   // separator. A raw numeral cannot escape as a letter through NFKC (e.g.
   // Roman numerals); declining these spellings only costs the fast path.
+  // `field` is the value's field; a rendered subject passes none.
   const normalized = value.normalize('NFKC');
   if (!/^(?:\p{L}\p{M}*|[0-9 .,'&/#()\-])+$/u.test(normalized) ||
       [...value].some(char => /\p{N}/u.test(char) && !/^[0-9]$/.test(char))) return true;
@@ -54,7 +55,11 @@ function unsafeScalarFact(value) {
   if (/\p{Default_Ignorable_Code_Point}/u.test(value) || /\p{Default_Ignorable_Code_Point}/u.test(normalized)) return true;
   // Modifier letters (tatweel, modifier apostrophe) read as separators, so
   // they join adjacent digit groups exactly like ASCII punctuation does.
-  if (/[0-9]{6}/.test(normalized.replace(/[^\p{L}0-9]|\p{Lm}/gu, ''))) return true;
+  // Partner answer 3: company, role and the rendered subject refuse a run of
+  // five or more digits once separators are stripped. An address keeps the
+  // six-digit rule, so a five-digit ZIP code still answers.
+  const digitRun = field?.includes("address") ? /[0-9]{6}/ : /[0-9]{5}/;
+  if (digitRun.test(normalized.replace(/[^\p{L}0-9]|\p{Lm}/gu, ''))) return true;
   // NFKC precedes default casefold;
   // dotless i stays distinct, Cherokee folds to uppercase, and sharp s expands.
   const folded = [...normalized].map(char => char === '\u0131' ? char
@@ -69,11 +74,23 @@ function safeValue(field, value) {
   // These shapes intentionally decline international/free-form variants that
   // need interpretation; the ordinary answer path still handles them.
   if (QUALIFIED_FACT.test(value)) return false;
-  if (field === "email") return /^[A-Za-z0-9.!#$%&'*+/=?^_{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/.test(value);
-  if (field === "phone" || field === "mobile") return /^\+?[0-9(][0-9 ()-]{6,28}$/.test(value) && value.replace(/\D/g, "").length >= 7;
+  if (field === "email") {
+    // Partner answer 7: an identifier is not an email fact. Refuse 7 or more
+    // digits in the local part or in any domain label, and the identifier
+    // words with digits and dots as boundaries (beside the non-word ones).
+    const email = /^([A-Za-z0-9.!#$%&'*+/=?^_{|}~-]+)@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)$/.exec(value);
+    return Boolean(email) && [email[1], ...email[2].split(".")].every(part => part.replace(/[^0-9]/g, "").length < 7) &&
+      !/(?<![a-z_])(?:account|acct|routing|card|iban|swift|aba)(?![a-z_])/i.test(value);
+  }
+  if (field === "phone" || field === "mobile") {
+    // Partner answer 2: at most 15 digits in total (the E.164 maximum) across
+    // every digit group. Anything longer leaves the fast path.
+    const digits = value.replace(/\D/g, "").length;
+    return /^\+?[0-9(][0-9 ()-]{6,28}$/.test(value) && digits >= 7 && digits <= 15;
+  }
   // Every other scalar can carry an identifier, including company and role.
   // Keep phone/email validators above this guard and fall back to masking.
-  if (unsafeScalarFact(value)) return false;
+  if (unsafeScalarFact(value, field)) return false;
   if (field.includes("address")) return /^\d{1,6}[A-Za-z]? [\p{L}\p{N}\p{M} ,.'#()/-]{4,160}$/u.test(value);
   return /^[\p{L}\p{N}][\p{L}\p{N}\p{M} &,'()./-]{1,119}$/u.test(value);
 }

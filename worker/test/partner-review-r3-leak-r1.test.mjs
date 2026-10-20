@@ -29,6 +29,8 @@ const longestDigitRun = text => Math.max(0, ...(normalizeDigits(text).match(/[0-
 // number inside the same field, is not a phone number yet is echoed verbatim.
 // R2-K2 scoped phone/mobile out as "digit facts"; this is the narrower claim
 // that the label alone is the allowlist. Contract decision requested.
+// Decided by partner answer 2: phone and mobile allow at most 15 digits in
+// total across all digit groups; anything over that leaves the fast path.
 const CARD_LENGTH = '4111111111111111';
 test('R3-LEAK-1-1 repro: phone and mobile fast path echoes a 16-digit card-length value and a phone followed by an account number', () => {
   for (const [field, value] of [['phone', CARD_LENGTH], ['mobile', '4111 1111 1111 1111'],
@@ -56,6 +58,9 @@ test('R3-LEAK-1-1 control: phone and mobile values within the E.164 digit bound 
 // five-digit runs split by a word, are echoed from those fields. The lens
 // threshold is any run longer than four digits. Contract decision requested:
 // keep five digits for address only, or keep six everywhere.
+// Decided by partner answer 3: company, role and the rendered subject refuse
+// a run of 5 or more digits, separators stripped; address keeps the 6-digit
+// rule. The property arms live in partner-r3-allowlist.test.mjs and R2-K2.
 test('R3-LEAK-1-2 repro: company and role fast path echoes five-digit runs', () => {
   for (const [field, value] of [['company', 'Synthetic Services 12345'], ['role', 'Operations Lead 12345'],
     ['company', 'Synthetic 12345 Services 67890'], ['role', 'Lead 1-2345']]) {

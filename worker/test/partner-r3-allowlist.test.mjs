@@ -47,6 +47,19 @@ function refusedEverywhere(tail) {
   }
 }
 
+// Partner answer 3: company, role and the rendered subject refuse a run of
+// five or more digits once separators are stripped. An address keeps the
+// six-digit rule, pinned separately below.
+function fiveDigitRunRefused(tail) {
+  for (const operative of [false, true]) {
+    for (const [field, plain] of [['company', 'Synthetic Services'], ['role', 'Operations Lead']])
+      assert.equal(card(field, `${plain} ${tail}`, entityFactAnswer, operative), null, `${field} scalar`);
+    for (const field of ['company', 'role', 'phone', 'mobile', 'email'])
+      for (const ownerQuestion of [false, true])
+        assert.equal(subjectFact(`Record Owner ${tail}`, field, operative, ownerQuestion), null, `${field} subject`);
+  }
+}
+
 test('K1 generator covers every runtime No, Nl and Nd codepoint through real fact paths', t => {
   controls();
   const categories = { No: /\p{No}/u, Nl: /\p{Nl}/u, Nd: /\p{Nd}/u };
@@ -73,10 +86,23 @@ test('K1 generator covers every ASCII punctuation and symbol separator, plus ful
     const glyph = String.fromCodePoint(codepoint);
     if (!/[\p{P}\p{S}]/u.test(glyph)) continue;
     refusedEverywhere(`123${glyph}456`);
+    fiveDigitRunRefused(`12${glyph}345`);
     separators++;
   }
   assert.equal(separators, 32);
   refusedEverywhere('123 456');
+  fiveDigitRunRefused('12345');
+  fiveDigitRunRefused('12 345');
+  // The address keeps the six-digit rule: a five-digit run apart from the ZIP
+  // answers, and six digits refuse, on the card, operative and dated paths.
+  const fiveDigitAddress = '12345 Synthetic Road, Fixture City, AZ 85001';
+  const sixDigitAddress = '123456 Synthetic Road, Fixture City, AZ 85001';
+  assert.equal(address(fiveDigitAddress)?.method, 'dated_owner_address');
+  assert.equal(address(sixDigitAddress), null);
+  for (const operative of [false, true]) {
+    assert.ok(card('address', fiveDigitAddress, entityFactAnswer, operative)?.answer.includes(fiveDigitAddress));
+    assert.equal(card('address', sixDigitAddress, entityFactAnswer, operative), null);
+  }
   for (const word of ['account', 'acct', 'routing', 'card', 'iban', 'swift', 'aba']) {
     const wide = [...word.toUpperCase()].map(c => String.fromCodePoint(c.codePointAt(0) + 0xfee0)).join('');
     for (const spelling of [word, word.toUpperCase(), wide]) refusedEverywhere(`${spelling} 1234`);
@@ -96,7 +122,7 @@ test('K1 attached combining marks and ordinary text answer; marks on numbers or 
 
 test('K1 disabling the one allowlist restores R2 value and subject disclosures', async () => {
   const mutant = await mutatedModule('entity-fact-answer.js',
-    'function unsafeScalarFact(value) {', 'function unsafeScalarFact(value) { return false;');
+    'function unsafeScalarFact(value, field) {', 'function unsafeScalarFact(value, field) { return false;');
   controls(mutant.entityFactAnswer);
   for (const tail of ["123'456", '123,456', '123(456)', '123#456', '❶❷❸❹❺❻']) {
     assert.equal(address(`${plainAddress}, ${tail}`), null);
