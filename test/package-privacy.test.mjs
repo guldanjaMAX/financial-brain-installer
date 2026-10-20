@@ -1077,12 +1077,16 @@ try {
   mkdirSync(join(inventoryFixture, "worker", "test"), { recursive: true });
   mkdirSync(join(inventoryFixture, "docs"));
   mkdirSync(join(inventoryFixture, "node_modules"));
-  for (const name of ["HANDOFF.md", "WORKLOG.md", "docs/HANDOFF.md", "worker/test/untracked-canary.test.mjs", "node_modules/ignored.txt"]) {
+  // A fixture module is scanned like a test file: synthetic store fixtures live
+  // beside the tests as plain .mjs modules, not only as *.test.mjs files.
+  for (const name of ["HANDOFF.md", "WORKLOG.md", "docs/HANDOFF.md", "worker/test/untracked-canary.test.mjs",
+    "worker/test/untracked-canary-fixture.mjs", "node_modules/ignored.txt"]) {
     writeFileSync(join(inventoryFixture, name), "synthetic inventory fixture\n");
   }
   writeFileSync(join(inventoryFixture, ".gitignore"), "node_modules/\n");
   const before = candidateInventory(inventoryFixture);
   if (before.failed || !before.files.includes("worker/test/untracked-canary.test.mjs") ||
+      !before.files.includes("worker/test/untracked-canary-fixture.mjs") ||
       !before.files.includes("docs/HANDOFF.md") || before.files.includes("HANDOFF.md") ||
       before.files.includes("WORKLOG.md") || before.files.includes("node_modules/ignored.txt")) {
     throw new Error("privacy inventory failed its untracked candidate boundary fixture");

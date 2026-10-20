@@ -249,6 +249,10 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   // MCP search-first contract: filters, paging, dates, facets, gaps, retry.
   "node --test test/mcp-search-contract.test.mjs",
   "node --test worker/test/triage-0417-trust.test.mjs",
+  // Tier 1 store shapes: generic multi-entity rows, scope and money invariants.
+  "node --no-warnings --test worker/test/store-shapes.test.mjs",
+  "node --no-warnings --test worker/test/store-separation.test.mjs",
+  "node --no-warnings --test worker/test/store-money-acceptance.test.mjs",
   "node --test test/mcp-error-privacy.test.mjs",
   // Plaid owner-flow repairs from two sandbox rehearsals: provider precision,
   // key replacement, Link errors, the first-connection page, and status truth.
@@ -508,6 +512,10 @@ export const TEST_COMMANDS = Object.freeze([
   // MCP search-first contract: filters, paging, dates, facets, gaps, retry.
   "node --test test/mcp-search-contract.test.mjs",
   "node --test worker/test/triage-0417-trust.test.mjs",
+  // Tier 1 store shapes: generic multi-entity rows, scope and money invariants.
+  "node --no-warnings --test worker/test/store-shapes.test.mjs",
+  "node --no-warnings --test worker/test/store-separation.test.mjs",
+  "node --no-warnings --test worker/test/store-money-acceptance.test.mjs",
   "node --test test/mcp-error-privacy.test.mjs",
   "node --test test/machine-prep.test.mjs",
   "node --test test/machine-prep-installers.test.mjs",
