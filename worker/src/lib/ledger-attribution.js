@@ -454,6 +454,12 @@ function parseStatement(description, registry, statementCache, budget) {
     // Keep unknown complete sender fields for agreement with a structured
     // payee. Filtering them out here would turn a contradiction into absence.
     result.evidence.labelled_senders = labelledSenders.map(({ identity, payer }) => ({ identity, payer }));
+    // Every reading this parser rates confirmed on its own (a unique
+    // registered whole name, no shorthand affix, not a question-only phrase),
+    // labelled or not. A structured payee must agree with each one; an
+    // unlabelled opening name is not discarded merely because a payee exists.
+    result.evidence.confirmed_readings = readings.filter(reading => reading.payer.state === 'unique' &&
+      !reading.payer.query_only && !reading.suffix && !reading.prefix).map(({ identity, payer }) => ({ identity, payer }));
     statementCache?.set(text, result);
     return result;
   } catch (error) {
@@ -497,8 +503,12 @@ function attributeRow(row, registry, statementCache, budget) {
     return result;
   }
   const senders = statement.evidence.labelled_senders || [];
+  // The agreement check covers every reading the parser rates confirmed,
+  // labelled or not. A disagreeing confirmed reading makes the row unknown.
+  // Agreement with an unlabelled reading never adds authority beyond the payee.
+  const compared = [...senders, ...(statement.evidence.confirmed_readings || [])];
   const registered = reading => reading.payer.state === 'unique' && !reading.payer.query_only;
-  const conflict = new Set([payee, ...senders].filter(registered).map(reading => reading.payer.slug)).size > 1 || senders.some(sender => {
+  const conflict = new Set([payee, ...compared].filter(registered).map(reading => reading.payer.slug)).size > 1 || compared.some(sender => {
     if ([payee, sender].some(reading => reading.payer.state === 'ambiguous')) return true;
     // Distinct registered identities cannot merge through suffix removal.
     if (registered(payee) && registered(sender)) return payee.payer.slug !== sender.payer.slug;
@@ -506,12 +516,13 @@ function attributeRow(row, registry, statementCache, budget) {
     return !key || key !== agreementName(sender.identity);
   });
   if (conflict) {
-    const result = decision([payee, ...senders], 'payee');
+    const result = decision([payee, ...compared], 'payee');
     result.state = 'unknown'; result.entity_slug = null; result.reading = null;
     result.evidence.ambiguous = true;
     delete result.evidence.query_phrases;
     result.evidence.parser = statement.evidence.parser;
     result.evidence.labelled_senders = senders;
+    result.evidence.confirmed_readings = statement.evidence.confirmed_readings || [];
     return result;
   }
   // Equal fields corroborate an existing registration or a question-local
@@ -526,6 +537,7 @@ function attributeRow(row, registry, statementCache, budget) {
   // Preserve that signal so no answer kind can certify a complete figure.
   result.evidence.parser = statement.evidence.parser;
   result.evidence.labelled_senders = senders;
+  result.evidence.confirmed_readings = statement.evidence.confirmed_readings || [];
   return result;
 }
 
@@ -579,6 +591,14 @@ function descriptionIsPayee(description, payee) {
   return Boolean(key) && [trimmed, unlabelled].some(value => normalizeMerchantText(value) === key);
 }
 
+// EXACT agreement between two bounded payer fields: equal normalized names
+// after one closed trailing company suffix is removed (R4B). A name that is
+// only a suffix agrees with nothing.
+export function payerFieldsAgree(left, right) {
+  const key = agreementName(left);
+  return Boolean(key) && key === agreementName(right);
+}
+
 function agreementName(value) {
   const words = normalizeMerchantText(normalizePayerCommas(value)).split(' ');
   // Normalize punctuation before removing one closed suffix, so (Ltd.) and
@@ -621,11 +641,18 @@ export function createInflowAttributor(registry, { stepLimit = ledgerAttribution
 // field. Consume the already bounded parse without another parser pass.
 export function boundedPayerFields(row, attribution, registry) {
   const senders = attribution.evidence.labelled_senders || [];
-  const fields = [...(row.payee && !row.payee_has_nul && !String(row.payee).includes('\0') ? [row.payee] : []),
-    ...senders.map(sender => sender.identity)];
-  const keys = new Set(fields.map(normalizeMerchantText));
-  const slugs = new Set(fields.flatMap(field => [...(registry.get(normalizeMerchantText(field)) || [])]));
-  const aliases = fields.length > 0 && fields.every(field => registry.get(normalizeMerchantText(field))?.size === 1) && slugs.size === 1;
+  const payee = row.payee && !row.payee_has_nul && !String(row.payee).includes('\0') ? [row.payee] : [];
+  const fields = [...payee, ...senders.map(sender => sender.identity)];
+  // Beside a payee, every reading the parser rates confirmed joins the same
+  // agreement comparison attributeRow() makes. It competes; it never becomes a
+  // literal field the question can match exactly.
+  const compared = [...fields, ...(payee.length ? (attribution.evidence.confirmed_readings || []).map(reading => reading.identity) : [])];
+  // Agreement is the attributeRow() rule: normalized names equal after one
+  // closed trailing company suffix is removed. A name that is only a suffix
+  // keeps its own normalized key, so two different bare suffixes still differ.
+  const keys = new Set(compared.map(field => agreementName(field) || `\0${normalizeMerchantText(field)}`));
+  const slugs = new Set(compared.flatMap(field => [...(registry.get(normalizeMerchantText(field)) || [])]));
+  const aliases = compared.length > 0 && compared.every(field => registry.get(normalizeMerchantText(field))?.size === 1) && slugs.size === 1;
   // A refused description may hold a sender that disagrees with the payee,
   // so an unread statement is competing evidence, never agreement.
   return { fields, conflict: Boolean(row.payee_has_nul || String(row.payee || '').includes('\0') ||

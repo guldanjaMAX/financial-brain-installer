@@ -61,17 +61,17 @@ test('R3-MONEY-3-1 control: the same row read whole, and an unflagged exact desc
 });
 
 // ---------------------------------------------------------------------------
-// R3-MONEY-3-2: a REGISTERED labelled sender beside an UNREGISTERED payee that
-// differs only by a company suffix ("Vendor Alpha Inc" / "FROM: Vendor Alpha")
-// is confirmed by attributeRow's suffix agreement (agreementName), while
-// boundedPayerFields flags the same row as a bounded-field conflict
-// (keys.size > 1 && !aliases). chooseLiteralSelector then takes the
-// literal.conflict fallback ({ intent, attributions }) and the complete
-// renderer certifies the total: evidence_gate.complete=true, total_is_exact=
-// true, and $0 / absence for every other registered payer. R4B
-// (partner-r4-boundaries.test.mjs) pins the precedent for suffix-only
-// agreement between unregistered fields: the deposit is found, but the income
-// total stays incomplete (total_minor null, attributed_subtotal set).
+// R3-MONEY-3-2 (decided by partner answer 8): a REGISTERED labelled sender
+// beside an UNREGISTERED payee that differs only by a closed trailing company
+// suffix ("Vendor Alpha Inc" / "FROM: Vendor Alpha") is EXACT agreement, as
+// decided in R4B. attributeRow confirmed it through agreementName while
+// boundedPayerFields compared plain normalized names and flagged a conflict;
+// boundedPayerFields now uses the same agreementName rule. The repro's original
+// expectation (no complete total, no $0 / absence for the other payer) was the
+// contract question, and the answer reverses it: Vendor Alpha gets a complete
+// exact total, and Vendor Beta gets what the contract then allows, which is
+// exactly what it gets beside an identical payee spelling. The R4B unregistered
+// suffix pair follows the same rule (partner-r4-boundaries.test.mjs).
 const SUFFIX_PAYEE = 'Vendor Alpha Inc';
 const REGISTERED_SENDER = 'FROM: Vendor Alpha; REF: 100000';
 
@@ -83,44 +83,72 @@ function suffixRow(t) {
   return f;
 }
 
-test('R3-MONEY-3-2 suffix-only agreement with a registered sender certifies a complete income total', async t => {
+test('R3-MONEY-3-2 suffix-only agreement with a registered sender is EXACT agreement and a complete income total', async t => {
   const row = { description: REGISTERED_SENDER, payee: SUFFIX_PAYEE };
   const decided = createInflowAttributor(twoPayers())(row);
-  assert.equal(boundedPayerFields(row, decided, twoPayers()).conflict, true, 'the bounded fields are flagged as a conflict');
+  assert.equal(decided.state, 'confirmed');
+  assert.equal(decided.entity_slug, 'alpha');
+  assert.equal(boundedPayerFields(row, decided, twoPayers()).conflict, false, 'the bounded fields agree once the closed suffix is ignored');
   const f = suffixRow(t);
   const income = await f.ask('How much income came from Vendor Alpha in October 2026?');
   assert.ok(income.ledger, 'ledger answer reached');
   assert.deepEqual(cents(income), [1000], 'the row is read');
-  assert.notEqual(income.evidence_gate.complete, true, `complete total over a suffix-only payee agreement: ${income.answer}`);
-  assert.equal(income.ledger.total_minor, null);
-  assert.notEqual(income.ledger.total_is_exact, true);
+  assert.equal(income.evidence_gate.complete, true, `exact agreement after the closed suffix: ${income.answer}`);
+  assert.equal(income.ledger.total_minor, 1000);
+  assert.equal(income.ledger.total_is_exact, true);
+  const found = await f.ask('Did the payment from Vendor Alpha arrive in October 2026?');
+  assert.equal(found.ledger.found, true);
+  assert.equal(found.evidence_gate.complete, true);
 });
 
-test('R3-MONEY-3-2 suffix-only agreement certifies $0 and absence for the other registered payer', async t => {
+test('R3-MONEY-3-2 the other registered payer is certified only as it is beside an identical payee spelling', async t => {
   const f = suffixRow(t);
   const zero = await f.ask('How much income came from Vendor Beta in October 2026?');
-  assert.ok(zero.ledger);
-  assert.ok(!(zero.evidence_gate.complete === true && zero.ledger.total_minor === 0),
-    `certified $0 while the only deposit rests on suffix-only agreement: ${zero.answer}`);
   const absent = await f.ask('Did the payment from Vendor Beta arrive in October 2026?');
-  assert.notEqual(absent.ledger.found, false, `certified absence: ${absent.answer}`);
+  // The contract allows a zero and an absence for Vendor Beta here only
+  // because the one receipt in scope is an EXACT, confirmed Vendor Alpha row.
+  // The suffix spelling must decide exactly as the identical spelling does.
+  f.raw('UPDATE fin_transactions SET payee=?', 'Vendor Alpha');
+  const zeroIdentical = await f.ask('How much income came from Vendor Beta in October 2026?');
+  const absentIdentical = await f.ask('Did the payment from Vendor Beta arrive in October 2026?');
+  for (const [suffixed, identical] of [[zero, zeroIdentical], [absent, absentIdentical]]) {
+    assert.deepEqual(suffixed.evidence_gate, identical.evidence_gate);
+    assert.equal(suffixed.ledger.found, identical.ledger.found);
+    assert.equal(suffixed.ledger.total_minor, identical.ledger.total_minor);
+    assert.deepEqual(cents(suffixed), cents(identical));
+  }
+  assert.equal(zero.evidence_gate.complete, true);
+  assert.equal(zero.ledger.total_minor, 0);
+  assert.equal(absent.ledger.found, false);
 });
 
-test('R3-MONEY-3-2 control: exact agreement is complete; the R4B unregistered suffix pair is found but not complete', async t => {
+test('R3-MONEY-3-2 control: exact agreement is complete; the R4B unregistered suffix pair is EXACT too; a wider difference stays unknown', async t => {
   const f = suffixRow(t);
   f.raw('UPDATE fin_transactions SET payee=?', 'Vendor Alpha');
   const exact = await f.ask('How much income came from Vendor Alpha in October 2026?');
   assert.equal(exact.evidence_gate.complete, true);
   assert.equal(exact.ledger.total_minor, 1000);
   assert.equal(exact.ledger.total_is_exact, true);
-  // The precedent: neither spelling registered, agreement only by suffix.
+  // A payee that differs by more than a closed suffix is no agreement: the
+  // row is unknown and neither registered payer gets a complete figure.
+  f.raw('UPDATE fin_transactions SET payee=?', 'Vendor Alpha Holdings');
+  for (const name of ['Vendor Alpha', 'Vendor Beta']) {
+    const wider = await f.ask(`How much income came from ${name} in October 2026?`);
+    assert.equal(wider.evidence_gate.complete, false);
+    assert.equal(wider.ledger.total_minor, null);
+    assert.equal(wider.ledger.unattributed_count, 1);
+  }
+  // The R4B pair: neither spelling registered, agreement only by suffix. It
+  // is the same EXACT agreement, asked by either spelling.
   f.raw('UPDATE fin_transactions SET payee=?, description=?', 'Supplier Unit', 'FROM: Supplier Unit, LLC');
-  const found = await f.ask('Did the payment from Supplier Unit arrive in October 2026?');
-  assert.equal(found.ledger.found, true);
-  const partial = await f.ask('How much income came from Supplier Unit in October 2026?');
-  assert.equal(partial.evidence_gate.complete, false);
-  assert.equal(partial.ledger.total_minor, null);
-  assert.equal(partial.ledger.attributed_subtotal_minor, 1000);
+  for (const name of ['Supplier Unit', 'Supplier Unit, LLC']) {
+    const found = await f.ask(`Did the payment from ${name} arrive in October 2026?`);
+    assert.equal(found.ledger.found, true);
+    const income = await f.ask(`How much income came from ${name} in October 2026?`);
+    assert.equal(income.evidence_gate.complete, true);
+    assert.equal(income.ledger.total_minor, 1000);
+    assert.equal(income.ledger.total_is_exact, true);
+  }
   // A suffix payee with no sender at all is an unattributed candidate.
   f.raw('UPDATE fin_transactions SET payee=?, description=?', SUFFIX_PAYEE, 'Deposit');
   const alone = await f.ask('How much income came from Vendor Alpha in October 2026?');
@@ -138,13 +166,19 @@ test('R3-MONEY-3-2 control: exact agreement is complete; the R4B unregistered su
 // and evidence_gate.complete is true. The exact path lists the same shorthand
 // row as unattributed and leaves the answer incomplete; a shorthand-only
 // answer has total_minor null (ledger-identity-gate.test.mjs).
+// After partner answer 8 the suffix row is EXACT agreement and no longer a
+// bounded-field conflict, so this fixture takes the exact path: the shorthand
+// row is listed as an unattributed deposit with its shorthand reason (the
+// 3-3 control's behaviour). The literalConflict guard in ledgerAnswer stays.
 test('R3-MONEY-3-3 the literal.conflict fallback adds a shorthand row to a total with a complete gate', async t => {
   const f = suffixRow(t);
   f.add('bare', 'Vendor Alpha deposit', null, { cents: 2500 });
   const income = await f.ask('How much income came from Vendor Alpha in October 2026?');
   assert.ok(income.ledger, 'ledger answer reached');
   assert.deepEqual(cents(income).sort(), [1000, 2500], 'both rows are read');
-  assert.ok(income.assumptions?.some(a => a.type === 'payer_shorthand'), 'the shorthand reading is declared');
+  assert.equal(income.ledger.unattributed_count, 1, 'the shorthand row is listed beside the exact row');
+  assert.match(income.answer, /Unattributed deposit: \$25\.00 [^\n]*uncertain because shorthand cannot rule out another payer/,
+    'the shorthand reading is declared');
   assert.notEqual(income.evidence_gate.complete, true, `complete gate over a shorthand row: ${income.answer}`);
   assert.equal(income.ledger.total_minor, null);
   assert.doesNotMatch(income.answer, /^Total income for [^\n]*\$35\.00\./);

@@ -90,10 +90,39 @@ test('R7 description containment is possible; bounded exact fields count only eq
   possible(await reached(f, 'How much did I spend at Supply in October 2026?'));
   f.add('exact', 'Purchase', 'Supply', { direction: 'outflow', cents: 12300 });
   const b = await reached(f, 'How much did I spend at Supply in October 2026?');
-  assert.equal(b.evidence_gate.complete, true);
-  assert.equal(b.ledger.total_is_exact, true);
-  assert.equal(b.ledger.total_minor, 12300);
-  assert.deepEqual(b.citations.map(c => c.amount_minor), [12300]);
+  // Partner answer 1 (a): the containment row blocks completeness, as on the
+  // inflow side. The exact row is a partial subtotal and the containment row
+  // is listed as a possible match; no complete total, zero or absence.
+  assert.equal(b.evidence_gate.complete, false);
+  assert.equal(b.ledger.total_is_exact, false);
+  assert.equal(b.ledger.total_minor, null);
+  assert.equal(b.ledger.found, true);
+  assert.equal(b.ledger.subtotal_is_partial, true);
+  assert.equal(b.ledger.attributed_subtotal_minor, 12300);
+  assert.equal(b.ledger.possible_subtotal_minor, 40000);
+  assert.deepEqual(b.citations.map(c => c.amount_minor), [12300, 40000]);
+  assert.match(b.answer, /Exact-name subtotal \(partial; before exclusions\): \$123\.00\./);
+  assert.match(b.answer, /Exact match: \$123\.00 posted [^\n]*\[1\]\./);
+  assert.match(b.answer, /Possible match: \$400\.00 posted [^\n]*\[2\]\./);
+  assert.match(b.answer, /matched by name similarity, not an exact merchant\/payer name/);
+  assert.doesNotMatch(b.answer, /Total (?:spend|income)|No matching/i);
+  // "Exact names only" leaves the possible match out of the list, counts it,
+  // and still certifies no complete total.
+  const only = await reached(f, 'How much did I spend at Supply in October 2026, exact names only?');
+  assert.equal(only.evidence_gate.complete, false);
+  assert.equal(only.ledger.total_minor, null);
+  assert.equal(only.ledger.found, true);
+  assert.equal(only.ledger.attributed_subtotal_minor, 12300);
+  assert.equal(only.ledger.possible_count, 1);
+  assert.deepEqual(only.citations.map(c => c.amount_minor), [12300]);
+  assert.match(only.answer, /Exact names only leaves out 1 possible match by name similarity, so no complete total or absence is confirmed\./);
+  // Without the containment row the exact payee row alone is complete.
+  f.raw("DELETE FROM fin_transactions WHERE txn_uid='other'");
+  const alone = await reached(f, 'How much did I spend at Supply in October 2026?');
+  assert.equal(alone.evidence_gate.complete, true);
+  assert.equal(alone.ledger.total_is_exact, true);
+  assert.equal(alone.ledger.total_minor, 12300);
+  assert.deepEqual(alone.citations.map(c => c.amount_minor), [12300]);
 });
 
 test('R7 exact structured payees and labelled senders retain forty complete useful answers', async t => {

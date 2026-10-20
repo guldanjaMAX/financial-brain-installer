@@ -70,10 +70,11 @@ test('R4B agreement normalizes both fields and ignores only a closed trailing co
       assert.equal(a.state, 'observed', JSON.stringify({ payee, sender, q, a }));
       assert.equal((await reached(f, q)).ledger.found, true, JSON.stringify({ payee, sender, q }));
       const income = await reached(f, `How much income came from ${name} in October 2026?`);
-      const exactAgreement = payee.normalize('NFKC').toLowerCase() === sender.toLowerCase();
-      assert.equal(income.ledger.total_minor, exactAgreement ? 2500 : null);
-      if (!exactAgreement) assert.equal(income.ledger.attributed_subtotal_minor, 2500);
-      assert.equal(income.evidence_gate.complete, exactAgreement);
+      // Partner answer 8: names equal after one closed trailing company
+      // suffix are EXACT agreement, so either spelling is a complete total.
+      assert.equal(income.ledger.total_minor, 2500, JSON.stringify({ payee, sender, name }));
+      assert.equal(income.ledger.total_is_exact, true);
+      assert.equal(income.evidence_gate.complete, true);
     }
   }
   for (const [payee, sender] of [

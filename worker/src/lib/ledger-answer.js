@@ -1,4 +1,4 @@
-import { createInflowAttributionBudget, createInflowAttributor, boundedPayerFields, exactPayerFieldAdmitted, payerRegistryHasDamage, payerRegistry, payerQuestionRegistry, resolveRequestedPayer, selectAttributedInflows, inflowScopeConfirmed, payerAmount } from "./ledger-attribution.js";
+import { createInflowAttributionBudget, createInflowAttributor, boundedPayerFields, exactPayerFieldAdmitted, payerFieldsAgree, payerRegistryHasDamage, payerRegistry, payerQuestionRegistry, resolveRequestedPayer, selectAttributedInflows, inflowScopeConfirmed, payerAmount } from "./ledger-attribution.js";
 import { scopeIsUnrestricted } from "./grants.js";
 import { classifyLedgerQuestion, ledgerDay, shiftLedgerDay, payerMentionsCoverQuestion } from "./ledger-question.js";
 import { accountLinkPairsInWindow, accountLinkRequiredInWindow, effectivePeriodCovered, readEffectiveAccounts, readEffectiveBalances, readEffectiveTransactions } from "./ledger-reader.js";
@@ -240,8 +240,14 @@ function chooseLiteralSelector(intent, identities, rows, budget) {
     const slug = registered ? wanted.slug : coversName && ids.size === 1 ? [...ids][0] : null;
     const literal = row => fields.get(row.id)?.fields.some(field => normalizeMerchantText(field) === key);
     const sameIdentity = row => slug && attributions.get(row.id)?.state === 'confirmed' && attributions.get(row.id)?.entity_slug === slug;
+    // The question can equal a labelled sender while the payee differs only by
+    // a closed trailing company suffix. That is EXACT agreement (as in R4B),
+    // so the admitted sender field supports the row as the payee would.
+    const agreeingSender = row => payerFieldsAgree(row.payee, label) &&
+      ['confirmed', 'observed'].includes(attributions.get(row.id)?.state) &&
+      fields.get(row.id)?.fields.some(field => normalizeMerchantText(field) === key && exactPayerFieldAdmitted(label, field));
     const supportedLiteral = row => coversName && literal(row) && (registered || !reading.payerQuestion?.unsupportedPunctuation) &&
-      (row.payee ? registered || exactPayerFieldAdmitted(label, row.payee)
+      (row.payee ? registered || exactPayerFieldAdmitted(label, row.payee) || agreeingSender(row)
         : ['confirmed', 'observed'].includes(attributions.get(row.id)?.state));
     // Attribution covers the entire window, including other amounts. They
     // neither enter this selection nor become unknown merely due to its filter.
@@ -283,6 +289,14 @@ function chooseLiteralSelector(intent, identities, rows, budget) {
     return { refusal: 'ambiguous', labels: exact.map(a => labelOf(a.reading)) };
   if (exact.length && !intent.selectorUnproven) {
     const chosen = exact[0];
+    // Rows matched only by description containment block completeness, the
+    // same as unattributed receipts on the inflow side: the exact rows are a
+    // partial subtotal and the others are listed as possible matches.
+    if (!payer) {
+      const exactIds = new Set(chosen.result.matched.map(row => row.id));
+      const others = chosen.result.possible.filter(row => !exactIds.has(row.id));
+      if (others.length) return { intent: chosen.reading, possible: others, exactMatches: chosen.result.matched, labels };
+    }
     return { intent: chosen.reading, exact: true, attributions: chosen.result.attributions, knownRows: chosen.result.knownRows,
       exactRows: new Set(chosen.result.matched.map(row => row.id)) };
   }
@@ -297,12 +311,23 @@ function chooseLiteralSelector(intent, identities, rows, budget) {
 
 function possibleSelectorAnswer(selection, accounts, inventory, scopedRows, allRows) {
   const { intent } = selection;
+  // Exact rows beside possible matches (an outflow merchant whose bounded
+  // payee field equals the question while other rows match only by
+  // description): presence is shown, but the exact rows are a partial
+  // subtotal and never a complete total, zero or absence.
+  const exactRows = selection.exactMatches || [], mixed = exactRows.length > 0;
   const rows = intent.exactNamesOnly ? [] : selection.possible;
   const total = sumMinor(rows), subtotal = total > 0 ? total : null;
+  const exactTotal = sumMinor(exactRows), exactSubtotal = exactTotal > 0 ? exactTotal : null;
   const bySlug = new Map(inventory.map(account => [account.account_slug, account]));
-  const citations = rows.slice(0, 10).map((row, i) => citation(row, bySlug.get(row.effective_account_slug), i));
+  const listedRows = [...exactRows, ...rows].slice(0, 10);
+  const citations = listedRows.map((row, i) => citation(row, bySlug.get(row.effective_account_slug), i));
   const note = 'matched by name similarity, not an exact merchant/payer name; say "exact names only" to exclude these possible matches.';
-  const detail = intent.exactNamesOnly ? 'Exact names only excludes the possible matches. No complete total, presence or absence is confirmed.'
+  const excluded = selection.possible.length;
+  const detail = mixed
+    ? intent.exactNamesOnly ? `Exact names only leaves out ${excluded} possible ${excluded === 1 ? 'match' : 'matches'} by name similarity, so no complete total or absence is confirmed.`
+      : 'Some rows match the exact name and others are possible matches. No complete total or absence is confirmed.'
+    : intent.exactNamesOnly ? 'Exact names only excludes the possible matches. No complete total, presence or absence is confirmed.'
     : 'These are possible matches. No complete total, presence or absence is confirmed.';
   const assumed = withPayerAssumptions({ answer: '', citations, ledger: {} },
     rows.filter(row => row.amount_minor > 0), selection.attributions || new Map());
@@ -310,25 +335,30 @@ function possibleSelectorAnswer(selection, accounts, inventory, scopedRows, allR
   const pairing = pairOwnTransfers(allRows.filter(row => readableRow(row) && usableAccount(bySlug.get(row.effective_account_slug)) &&
     effectivePeriodCovered(bySlug.get(row.effective_account_slug), row.posted_on, row.posted_on)), bySlug);
   const selected = new Set(accounts.map(account => account.account_slug));
-  const { summary } = leadExclusions(rows, pairing.pairs, selected, bySlug, intent);
-  const candidates = rows.filter(row => pairing.candidateRows.has(row.id));
+  const { summary } = leadExclusions([...exactRows, ...rows], pairing.pairs, selected, bySlug, intent);
+  const candidates = [...exactRows, ...rows].filter(row => pairing.candidateRows.has(row.id));
   const transferNotes = [
     ...(summary.withdrawal_count ? ['The partial subtotal is before transfer exclusions, including withdrawals.'] : []),
     ...(candidates.length ? ['Possible moves between your own accounts remain in this partial subtotal.'] : []),
   ];
   const notes = [...(assumed.notes || []), note, ...transferNotes];
-  return { answer: `${detail}${subtotal === null ? '' : ` Partial subtotal before exclusions: ${money(subtotal)}.`}\nNote: ${notes.join('; ')}.` +
-      citations.filter(c => c.amount_minor > 0).map(c => `\nPossible match: ${money(c.amount_minor)} posted ${c.posted_on} [${c.n}].`).join(''),
+  const exactCitations = citations.slice(0, exactRows.length).map(c => c.n);
+  const possibleCitations = citations.slice(exactRows.length).map(c => c.n);
+  return { answer: `${detail}${mixed && exactSubtotal !== null ? ` Exact-name subtotal (partial; before exclusions): ${money(exactSubtotal)}.` : ''}` +
+      `${subtotal === null ? '' : ` ${mixed ? 'Possible-match subtotal' : 'Partial subtotal'} before exclusions: ${money(subtotal)}.`}\nNote: ${notes.join('; ')}.` +
+      citations.filter(c => c.amount_minor > 0).map(c => `\n${exactCitations.includes(c.n) ? 'Exact match' : 'Possible match'}: ${money(c.amount_minor)} posted ${c.posted_on} [${c.n}].`).join(''),
     citations, assumptions: assumptions.length ? assumptions : [{ type: 'name_similarity', count: rows.length, flip: 'exact names only' }], notes,
     gaps: [{ type: 'ledger_selector_possible', reason: 'name_similarity', detail }],
     evidence_gate: { supported: true, complete: false, partial: true, reason: 'name_similarity' },
-    ledger: { kind: intent.kind, found: null, total_minor: null, lead_total_minor: null, total_is_exact: false,
+    ledger: { kind: intent.kind, found: mixed ? true : null, total_minor: null, lead_total_minor: null, total_is_exact: false,
       inflow_total_minor: sumMinor(scopedRows.filter(row => row.direction === 'inflow')),
-      subtotal_is_partial: true, attributed_subtotal_minor: subtotal, confirmed_subtotal_minor: null,
+      subtotal_is_partial: true, attributed_subtotal_minor: mixed ? exactSubtotal : subtotal, confirmed_subtotal_minor: mixed ? exactSubtotal : null,
+      ...(mixed ? { exact_count: exactRows.length, exact_citations: exactCitations, possible_count: excluded,
+        possible_subtotal_minor: subtotal, possible_citations: possibleCitations } : {}),
       from: intent.from, to: intent.to, accounts: accountCoverage(accounts), rows: citations,
       candidate_transfer_count: candidates.length, default_exclusions: summary,
       groups: [{ total_minor: null, total_is_exact: false, if_own_transfers_total_minor: null }],
-      omitted_count: Math.max(0, rows.length - citations.length), flip: ['exact names only'], if_own_transfers: { total_minor: null } } };
+      omitted_count: Math.max(0, exactRows.length + rows.length - citations.length), flip: ['exact names only'], if_own_transfers: { total_minor: null } } };
 }
 
 async function ledgerAnswer(env, intent, accounts, inventory) {
