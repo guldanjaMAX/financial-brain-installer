@@ -4,15 +4,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { cmdIngestCalendar, cmdIngestRemote, credentialScannerFingerprint } from "../brain.mjs";
-import { gmailPolicyFingerprint } from "../connectors/gmail.mjs";
+import { gmailLabelDecision, gmailPolicyFingerprint } from "../connectors/gmail.mjs";
 import { TOKEN_URL, createTokenProvider, syncAll } from "../connectors/google-calendar.mjs";
 import { batchStream, prefetch, splitOversized } from "../ingest/run.mjs";
 import { ingestPlanStore } from "./helpers/ingest-plan-store.mjs";
 
-// The packet 10 addendum: an item deleted, trashed or cancelled at the
-// source loses its one stored document in the daily run itself. No plan, no
-// fingerprint, no review stop. Google and the Worker are in-process doubles;
-// every other network attempt fails the test.
+// The packet 10 addendum and its follow-up: a Gmail message marked as spam,
+// and a cancelled or deleted Calendar event, lose their one stored document in
+// the daily run itself. No plan, no fingerprint, no review stop. A Gmail
+// message moved to Trash, or deleted, keeps its document. A removal that does
+// not finish carries the retry code REMOVAL_RETRY_PENDING, never a review
+// code. Google and the Worker are in-process doubles; every other network
+// attempt fails the test.
 globalThis.fetch = async () => { throw new Error("unexpected network attempt"); };
 
 const capture = async (task) => {
@@ -20,7 +23,12 @@ const capture = async (task) => {
   const { log, warn } = console;
   const write = process.stdout.write;
   console.log = console.warn = (...args) => lines.push(args.join(" ").replace(/\x1b\[[0-9;]*m/g, ""));
-  process.stdout.write = () => true;
+  // Swallow only the run's own carriage-return progress writes, never the
+  // node:test reporter's, so node --test names every test in this file.
+  process.stdout.write = function progressOnly(chunk, ...rest) {
+    if (typeof chunk === "string" && chunk.startsWith("\r")) return true;
+    return write.call(this, chunk, ...rest);
+  };
   let result;
   let error;
   try { result = await task(); } catch (caught) { error = caught; }
@@ -67,7 +75,10 @@ const rawMessage = (id) => Buffer.from([
   "",
 ].join("\r\n")).toString("base64url");
 
-function gmailScenario(t, { labels, history }) {
+// `labels[id] === null` is a stored message Gmail answers 404 for (deleted, or
+// purged from Trash). `listed` is what a full list returns; its query excludes
+// Trash and Spam. `historyExpired` makes Gmail refuse the saved history id.
+function gmailScenario(t, { labels, history = [], listed = [], historyExpired = false }) {
   const { manifest, manifestPath } = sandbox(t, "gmail-trash-");
   const store = ingestPlanStore();
   t.after(() => store.db.close());
@@ -81,11 +92,20 @@ function gmailScenario(t, { labels, history }) {
     store.put(`gmail:${id}`);
     state.done[`gmail:${id}`] = `${id}-v1`;
   }
+  // A --reset run starts from a fresh state object; the next run loads it.
+  let current = state;
   const sent = [];
+  const receipts = [];
+  const removal = { fail: false };
   globalThis.fetch = async (input) => {
     const url = new URL(input);
     if (url.hostname !== "gmail.googleapis.com") throw new Error(`unexpected network attempt: ${url.hostname}`);
-    if (url.pathname.endsWith("/users/me/history")) return Response.json({ history, historyId: "history-next" });
+    if (url.pathname.endsWith("/users/me/history")) {
+      if (historyExpired) return Response.json({ error: { message: "Requested entity was not found." } }, { status: 404 });
+      return Response.json({ history, historyId: "history-next" });
+    }
+    if (url.pathname.endsWith("/users/me/profile")) return Response.json({ historyId: "history-sweep" });
+    if (url.pathname.endsWith("/users/me/messages")) return Response.json({ messages: listed.map((id) => ({ id })) });
     const id = url.pathname.split("/").at(-1);
     if (!labels[id]) return Response.json({ error: { message: "Not Found" } }, { status: 404 });
     return Response.json({
@@ -96,8 +116,18 @@ function gmailScenario(t, { labels, history }) {
   t.after(() => { globalThis.fetch = async () => { throw new Error("unexpected network attempt"); }; });
   const options = {
     ...commonOptions(store),
+    postSourceReceipt: async (_base, _key, receipt) => { receipts.push(receipt); return {}; },
+    removalPlanRequest: async (input) => {
+      if (removal.fail && input.body.action === "apply") {
+        throw new Error("Authenticated removal request failed. HTTP 503. Some approved removals may have completed. " +
+          "The source cursor was not advanced. Review a fresh removal plan before applying it.");
+      }
+      return store.request(input);
+    },
     getAccessToken: async () => "fixture-access-token",
-    ingestLib: async () => ({ batchStream, splitOversized, prefetch, loadState: () => state, saveState() {} }),
+    ingestLib: async () => ({
+      batchStream, splitOversized, prefetch, loadState: () => current, saveState: (_path, next) => { current = next; },
+    }),
     sendBatches: async ({ groups, onResult }) => {
       const tally = { created: 0 };
       for (const item of groups.flat()) {
@@ -109,13 +139,13 @@ function gmailScenario(t, { labels, history }) {
       return tally;
     },
   };
-  const run = () => capture(() => cmdIngestRemote(manifest, manifestPath, { from: "gmail" }, options));
-  return { store, state, sent, run };
+  const run = (flags = {}) => capture(() => cmdIngestRemote(manifest, manifestPath, { from: "gmail", ...flags }, options));
+  return { store, state, current: () => current, sent, receipts, removal, run };
 }
 
 const record = (field, id) => ({ [field]: [{ message: { id } }] });
 
-test("Gmail: a trashed, a spam and a deleted message each lose their document with no review stop", async (t) => {
+test("Gmail: a spam message loses its document; a trashed and a deleted message keep theirs, with no review stop", async (t) => {
   const s = gmailScenario(t, {
     labels: {
       "trash-msg": ["TRASH"],
@@ -136,15 +166,66 @@ test("Gmail: a trashed, a spam and a deleted message each lose their document wi
   delete s.state.done["gmail:new-msg"];
   const { error, output } = await s.run();
   assert.equal(error, undefined, `${error?.message}\n${output.slice(-1500)}`);
-  assert.deepEqual(s.store.uids(), ["gmail:new-msg", "gmail:normal-msg"],
-    "trash, spam and deleted messages are removed; the untouched message stays");
+  assert.deepEqual(s.store.uids(), ["gmail:deleted-msg", "gmail:new-msg", "gmail:normal-msg", "gmail:trash-msg"],
+    "only the spam message is removed; trashed, deleted and untouched messages stay");
   assert.deepEqual(s.sent, ["new-msg"]);
   assert.equal(s.state.ingest_removal_plan, undefined, "no removal plan is saved");
   assert.equal(s.state.history_id, "history-next", "the cursor advances in the same run");
   assert.doesNotMatch(output, /--apply-removals|--approve-removals/);
-  assert.equal(s.store.calls.apply, 1, "one preview then apply removes the batch");
-  for (const id of ["trash-msg", "spam-msg", "deleted-msg"]) assert.equal(s.state.done[`gmail:${id}`], undefined);
+  assert.equal(s.store.calls.apply, 1, "one preview then apply removes the spam message");
+  assert.equal(s.state.done["gmail:spam-msg"], undefined);
+  assert.equal(s.state.done["gmail:trash-msg"], "trash-msg-v1", "the trashed message keeps its document");
+  assert.equal(s.state.done["gmail:deleted-msg"], "deleted-msg-v1", "the deleted message keeps its document");
+  assert.match(output, /2 Gmail message\(s\) moved to Trash or deleted at the source; any stored document is kept/);
+  assert.match(output, /removed 1 stored Gmail document\(s\) for 1 spam message\(s\)/);
+  assert.equal(s.receipts.at(-1).status, "ready");
   assert.equal(s.state.done["gmail:normal-msg"], "normal-msg-v1", "the control message is untouched");
+});
+
+test("Gmail: Spam and Trash win over a category label carried with them", async (t) => {
+  assert.equal(gmailLabelDecision(["CATEGORY_PROMOTIONS", "SPAM"]).spam, true);
+  assert.equal(gmailLabelDecision(["CATEGORY_SOCIAL", "TRASH"]).trashed, true);
+  assert.equal(gmailLabelDecision(["CATEGORY_SOCIAL", "TRASH"]).spam, false);
+  assert.equal(gmailLabelDecision(["CATEGORY_FORUMS"]).trashed || gmailLabelDecision(["CATEGORY_FORUMS"]).spam, false,
+    "a category label alone is still a policy exclusion");
+  const s = gmailScenario(t, {
+    labels: {
+      "spam-category": ["CATEGORY_PROMOTIONS", "SPAM"],
+      "trash-category": ["CATEGORY_SOCIAL", "TRASH"],
+      "normal-msg": ["INBOX"],
+    },
+    history: [record("labelsAdded", "spam-category"), record("labelsAdded", "trash-category")],
+  });
+  const { error, output } = await s.run();
+  assert.equal(error, undefined, `${error?.message}\n${output.slice(-1500)}`);
+  assert.deepEqual(s.store.uids(), ["gmail:normal-msg", "gmail:trash-category"],
+    "spam with a category is removed at once; trash with a category is kept");
+  assert.equal(s.state.ingest_removal_plan, undefined, "neither stops for a review");
+  assert.doesNotMatch(output, /--apply-removals|--approve-removals/);
+  assert.equal(s.state.history_id, "history-next");
+});
+
+test("Gmail: a spam removal that fails stays pending with the retry code and holds the cursor", async (t) => {
+  const s = gmailScenario(t, {
+    labels: { "spam-msg": ["SPAM"], "normal-msg": ["INBOX"] },
+    history: [record("labelsAdded", "spam-msg")],
+  });
+  s.removal.fail = true;
+  const failed = await s.run();
+  assert.equal(failed.error?.code, "REMOVAL_RETRY_PENDING", failed.error?.message);
+  assert.doesNotMatch(failed.error.message, /review/i);
+  assert.match(failed.error.message, /HTTP 503/);
+  assert.equal(s.receipts.at(-1).status, "error");
+  assert.equal(s.receipts.at(-1).issue_code, "REMOVAL_RETRY_PENDING");
+  assert.equal(s.state.history_id, "history-prior", "the cursor is held");
+  assert.ok(s.store.uids().includes("gmail:spam-msg"), "the spam message is still stored, pending");
+  assert.equal(s.state.ingest_removal_plan, undefined, "no review plan is saved");
+
+  s.removal.fail = false;
+  const retried = await s.run();
+  assert.equal(retried.error, undefined, retried.error?.message);
+  assert.deepEqual(s.store.uids(), ["gmail:normal-msg"], "the next run retries and removes it");
+  assert.equal(s.state.history_id, "history-next");
 });
 
 test("Gmail control: a normal message changing labels is untouched", async (t) => {
@@ -157,6 +238,73 @@ test("Gmail control: a normal message changing labels is untouched", async (t) =
   assert.deepEqual(s.store.uids(), ["gmail:normal-msg", "gmail:other-msg"]);
   assert.equal(s.store.calls.apply, 0);
   assert.equal(s.state.history_id, "history-next");
+});
+
+// A full list (--reset, an expired history id, a changed scanner or policy)
+// cannot see Trash or Spam: its query excludes both. A stored message missing
+// from it is classified the way the daily run would classify it.
+const FULL_SWEEP_TRIGGERS = [
+  { name: "--reset", flags: { reset: true } },
+  { name: "an expired history id", historyExpired: true },
+  {
+    name: "a credential scanner change",
+    setup: (state) => {
+      state.credential_scanner_fingerprint = "an-older-scanner-fingerprint";
+      state.gmail_policy_fingerprint = "an-older-policy-fingerprint";
+    },
+  },
+];
+
+for (const trigger of FULL_SWEEP_TRIGGERS) {
+  test(`Gmail full sweep after ${trigger.name}: a trashed and a deleted message are kept, spam is removed, no review stop on two runs`, async (t) => {
+    const s = gmailScenario(t, {
+      labels: { "trash-msg": ["TRASH"], "deleted-msg": null, "spam-msg": ["SPAM"], "normal-msg": ["INBOX"] },
+      listed: ["normal-msg"],
+      historyExpired: trigger.historyExpired === true,
+    });
+    trigger.setup?.(s.state);
+
+    const first = await s.run(trigger.flags);
+    assert.equal(first.error, undefined, `${first.error?.name}: ${first.error?.message}\n${first.output.slice(-1500)}`);
+    assert.deepEqual(s.store.uids(), ["gmail:deleted-msg", "gmail:normal-msg", "gmail:trash-msg"],
+      "only the spam message is removed; the trashed and the deleted message stay findable");
+    assert.match(first.output, /2 Gmail message\(s\) moved to Trash or deleted at the source; any stored document is kept/);
+    assert.match(first.output, /removed 1 stored Gmail document\(s\) for 1 spam message\(s\)/);
+    assert.doesNotMatch(first.output, /--apply-removals|--approve-removals/);
+    assert.equal(s.current().ingest_removal_plan, undefined, "no removal plan is saved");
+    assert.equal(s.current().history_id, "history-sweep", "the cursor advances");
+    assert.equal(s.receipts.at(-1).status, "ready");
+
+    const second = await s.run();
+    assert.equal(second.error, undefined, `${second.error?.name}: ${second.error?.message}\n${second.output.slice(-1500)}`);
+    assert.deepEqual(s.store.uids(), ["gmail:deleted-msg", "gmail:normal-msg", "gmail:trash-msg"]);
+    assert.doesNotMatch(second.output, /--apply-removals|--approve-removals/);
+    assert.equal(s.current().ingest_removal_plan, undefined);
+    assert.equal(s.current().history_id, trigger.historyExpired ? "history-sweep" : "history-next",
+      "the next run advances the cursor too");
+    assert.equal(s.receipts.at(-1).status, "ready");
+  });
+}
+
+test("Gmail full sweep control: a stored message that left the list for another reason still stops for review", async (t) => {
+  const s = gmailScenario(t, {
+    labels: { "promo-msg": ["CATEGORY_PROMOTIONS"], "normal-msg": ["INBOX"] },
+    listed: ["normal-msg"],
+  });
+  const { error } = await s.run({ reset: true });
+  assert.equal(error?.name, "DriveRemovalReviewRequired", error?.message);
+  assert.deepEqual(s.store.uids(), ["gmail:normal-msg", "gmail:promo-msg"], "nothing is removed without the review");
+});
+
+test("Gmail full sweep control: a trashed message with an older pending removal of unknown cause goes to review, not a held cursor", async (t) => {
+  const s = gmailScenario(t, {
+    labels: { "trash-msg": ["TRASH"], "normal-msg": ["INBOX"] },
+    listed: ["normal-msg"],
+  });
+  s.state.removed = { "gmail:trash-msg": "2026-09-04T00:00:00.000Z" };
+  const { error } = await s.run({ reset: true });
+  assert.equal(error?.name, "DriveRemovalReviewRequired", error?.message);
+  assert.deepEqual(s.store.uids(), ["gmail:normal-msg", "gmail:trash-msg"], "nothing is removed without the review");
 });
 
 /* --------------------------------------------------------------- Calendar */
@@ -178,6 +326,8 @@ function calendarScenario(t, pages) {
   let state = {};
   const sent = [];
   const calls = [];
+  const receipts = [];
+  const removal = { fail: false };
   let page = 0;
   const fetchImpl = async (url) => {
     if (String(url).startsWith(TOKEN_URL)) {
@@ -190,6 +340,14 @@ function calendarScenario(t, pages) {
   };
   const options = {
     ...commonOptions(store),
+    postSourceReceipt: async (_base, _key, receipt) => { receipts.push(receipt); return {}; },
+    removalPlanRequest: async (input) => {
+      if (removal.fail && input.body.action === "apply") {
+        throw new Error("Authenticated removal request failed. HTTP 503. Some approved removals may have completed. " +
+          "The source cursor was not advanced. Review a fresh removal plan before applying it.");
+      }
+      return store.request(input);
+    },
     fetchImpl,
     getAccessToken: createTokenProvider({ clientId: "cid", clientSecret: "csec", refreshToken: "rt", fetchImpl }).get,
     loadCalendarState: () => structuredClone(state),
@@ -206,7 +364,7 @@ function calendarScenario(t, pages) {
     },
   };
   const run = () => capture(() => cmdIngestCalendar(manifest, manifestPath, {}, options));
-  return { store, sent, calls, run, state: () => state };
+  return { store, sent, calls, receipts, removal, run, state: () => state };
 }
 
 test("Calendar: a cancelled and a deleted event each lose their document with no review stop", async (t) => {
@@ -234,6 +392,31 @@ test("Calendar: a cancelled and a deleted event each lose their document with no
   assert.equal(s.state().ingest_removal_plan, undefined, "no removal plan is saved");
   assert.doesNotMatch(output, /--apply-removals|--approve-removals/);
   assert.match(output, /2 cancellation\(s\) removed/);
+});
+
+test("Calendar: a cancellation removal that fails stays pending with the retry code, not a review code", async (t) => {
+  const s = calendarScenario(t, [
+    { nextSyncToken: "TOK_1", items: [EVENT("evt_normal"), EVENT("evt_cancelled")] },
+    { nextSyncToken: "TOK_2", items: [EVENT("evt_cancelled", { status: "cancelled" })] },
+    { nextSyncToken: "TOK_2", items: [EVENT("evt_cancelled", { status: "cancelled" })] },
+  ]);
+  await s.run();
+  s.removal.fail = true;
+  const failed = await s.run();
+  assert.equal(failed.error?.code, "REMOVAL_RETRY_PENDING", failed.error?.message);
+  assert.doesNotMatch(failed.error.message, /review/i);
+  assert.equal(s.receipts.at(-1).status, "error");
+  assert.equal(s.receipts.at(-1).issue_code, "REMOVAL_RETRY_PENDING");
+  assert.equal(s.state().primary.sync_token, "TOK_1", "the cursor is held");
+  assert.ok(s.store.uids().includes("calendar:gcal:primary:evt_cancelled"));
+
+  s.removal.fail = false;
+  const retried = await s.run();
+  assert.equal(retried.error, undefined, retried.error?.message);
+  assert.equal(s.calls.at(-1), "TOK_1", "the retry replays the same window");
+  assert.equal(retried.result.removed, 1);
+  assert.equal(s.store.uids().includes("calendar:gcal:primary:evt_cancelled"), false);
+  assert.equal(s.state().primary.sync_token, "TOK_2");
 });
 
 test("Calendar control: a normal event change is untouched", async (t) => {

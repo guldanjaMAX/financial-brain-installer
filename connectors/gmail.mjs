@@ -118,18 +118,22 @@ export function gmailPolicyFingerprint({ credentialScannerFingerprint = "", sinc
  */
 export function gmailLabelDecision(labelIds, { since = null, internalDate = null } = {}) {
   const floor = normalizeGmailSince(since);
-  const excluded = Array.isArray(labelIds)
-    ? labelIds.find((label) => DEFAULT_EXCLUDED_LABEL_IDS.has(String(label).toUpperCase()))
-    : null;
+  const labels = Array.isArray(labelIds) ? labelIds.map((label) => String(label).toUpperCase()) : [];
+  // Trash and Spam are the owner's own per-message action at the source, not
+  // a scope rule, so they win over a category label carried alongside them.
+  // Trash wins over Spam: a trashed message keeps its document.
+  const excluded = ["TRASH", "SPAM"].find((label) => labels.includes(label)) ??
+    labels.find((label) => DEFAULT_EXCLUDED_LABEL_IDS.has(label));
   if (excluded) {
     return {
       allowed: false,
       policy: true,
-      // Trash and Spam are the owner's own per-message action at the source,
-      // not a scope rule, so the caller removes the stored copy right away.
-      trashed: ["TRASH", "SPAM"].includes(String(excluded).toUpperCase()),
+      // A trashed message keeps its stored document (Trash is reversible and
+      // a trashed email can still matter). A spam message loses it at once.
+      trashed: excluded === "TRASH",
+      spam: excluded === "SPAM",
       cursor_blocking: false,
-      reason: `Gmail policy excludes messages carrying ${String(excluded).toLowerCase()}`,
+      reason: `Gmail policy excludes messages carrying ${excluded.toLowerCase()}`,
     };
   }
   if (floor) {
@@ -392,6 +396,7 @@ export async function messagePolicy(getAccessToken, id, opts = {}) {
     skip: { path: id, id, reason: decision.reason },
     policy_skip: decision.policy,
     source_trashed: decision.trashed === true,
+    source_spam: decision.spam === true,
     retain_existing: !decision.policy,
     cursor_blocking: decision.cursor_blocking,
   };
@@ -432,6 +437,7 @@ export async function toEnvelope(
       skip: { path: id, id, reason: labelDecision.reason },
       policy_skip: labelDecision.policy,
       source_trashed: labelDecision.trashed === true,
+      source_spam: labelDecision.spam === true,
       // An absent classification is an incomplete read, not deletion proof.
       // Keep a prior accepted revision while the run stays visibly non-green.
       retain_existing: !labelDecision.policy,

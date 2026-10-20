@@ -640,15 +640,19 @@ export async function startPageToken(getAccessToken, opts = {}) {
 /**
  * Everything that changed since a saved token.
  *
- * Returns { changed, removed, nextToken }. `removed` covers deletion, trashing,
- * and a file that merely left this credential's view. The caller must classify
- * a stored removed id with classifyScopedAbsence() before treating it as source
- * deletion. A removed change-feed event can annotate a not-returned review
- * record, but it cannot corroborate deletion or shorten the seven-day window.
+ * Returns { changed, removed, trashed, nextToken }. `removed` covers deletion,
+ * trashing, and a file that merely left this credential's view. `trashed` is
+ * the subset whose change carried the file marked trashed; any other removed
+ * id only left this account's view (Google's removed: true). The caller must
+ * classify a stored removed id with classifyScopedAbsence() before treating it
+ * as source deletion. A removed change-feed event can annotate a not-returned
+ * review record, but it cannot corroborate deletion or shorten the seven-day
+ * window.
  */
 export async function listChanges(getAccessToken, pageToken, opts = {}) {
   const changed = [];
   const removed = [];
+  const trashed = [];
   let token = googlePageToken(pageToken, "changes", { required: true });
   let nextToken = null;
   let pages = 0;
@@ -680,8 +684,10 @@ export async function listChanges(getAccessToken, pageToken, opts = {}) {
       throw new DriveError("Google Drive returned an invalid changes list", 200, "invalidChangeList");
     }
     for (const c of page.changes || []) {
-      if (c.removed || c.file?.trashed) removed.push(c.fileId);
-      else if (c.file) changed.push(c.file);
+      if (c.removed || c.file?.trashed) {
+        removed.push(c.fileId);
+        if (c.file?.trashed) trashed.push(c.fileId);
+      } else if (c.file) changed.push(c.file);
     }
     if (page.newStartPageToken != null) {
       nextToken = googlePageToken(page.newStartPageToken, "terminal changes", { required: true });
@@ -699,7 +705,7 @@ export async function listChanges(getAccessToken, pageToken, opts = {}) {
   if (!nextToken) {
     throw new DriveError("Google Drive returned no terminal changes token", 200, "incompleteChangeFeed");
   }
-  return { changed, removed, nextToken };
+  return { changed, removed, trashed, nextToken };
 }
 
 /** Should this file be fetched at all? Decided before spending a request. */

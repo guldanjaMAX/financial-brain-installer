@@ -2,13 +2,42 @@
  * Simple Drive sync helpers (packet 10).
  *
  * The daily Drive refresh reads Google's changes feed and acts on each change
- * directly: a changed file under a configured root is loaded, a trashed,
- * deleted or moved-out file has its stored document removed at once. There is
- * no removal plan to approve. The Worker still requires its two-step
+ * directly: a changed file under a configured root is loaded, a trashed or
+ * moved-out file has its stored document removed at once, and a file that
+ * only left this account's view keeps it until --cleanup. There is no removal
+ * plan to approve. The Worker still requires its two-step
  * preview/apply removal route, so each removal batch is previewed and then
  * applied with the exact marker the preview returned.
  */
 import { requestIngestRemovalPlan } from "./ingest-removal-plan.mjs";
+
+/** The support and receipt code for an at-once removal that did not finish. */
+export const REMOVAL_RETRY_PENDING = "REMOVAL_RETRY_PENDING";
+
+/**
+ * A removal the daily run makes at once (a Calendar cancellation, a Gmail spam
+ * message) failed. Nothing asks for a review: the item stays pending, the
+ * cursor is held, and the next run retries it. The Worker's own wording about
+ * reviewing a fresh plan is dropped, so the error, the receipt and `brain
+ * support --explain` all say retry. A lost source lock is passed through
+ * untouched so the caller still leaves the newer owner's receipt alone.
+ */
+export function removalRetryPending(error, { count = 1, what = "removal(s)" } = {}) {
+  if (error?.code === "source_ingest_lock_lost") return error;
+  const reason = String(error?.message || "the removal did not finish")
+    .split(/\s+(?=(?:Some approved|The source cursor|Rerun|Review|Run again|run ingestion)\b)|;\s*(?=(?:the cursor|run again|run ingestion)\b)/i)[0]
+    .replace(/[\s.;]+$/, "")
+    .slice(0, 200);
+  const wrapped = new Error(
+    `${count} ${what} were not removed yet (${reason}). They stay pending, the cursor was not advanced, ` +
+      "and the next run retries them.",
+    { cause: error },
+  );
+  wrapped.name = "RemovalRetryPending";
+  wrapped.code = REMOVAL_RETRY_PENDING;
+  wrapped.supportCode = REMOVAL_RETRY_PENDING;
+  return wrapped;
+}
 
 /** The base Drive file id of a stored family uid such as `drive:abc#part1of2`. */
 export function driveFileIdOf(uid, sourceName = "drive") {
@@ -57,8 +86,9 @@ export function driveFailureText(error) {
  *
  * Each batch is previewed (which resolves split parts and drops anything not
  * stored), applied with the preview's marker, then previewed again to prove
- * nothing is left. `dryRun` previews only. Gmail and Calendar use this same
- * path for a trashed, spam, deleted or cancelled item.
+ * nothing is left. `dryRun` previews only. Gmail uses this same path for a
+ * spam message, and Google and Outlook Calendar for a cancelled or deleted
+ * event.
  */
 export async function removeDriveFamilies({
   families,
@@ -117,7 +147,9 @@ export async function removeDriveFamilies({
  * Google about every stored Drive file the walk did not see. A file is a
  * target only when Google says it is trashed or not found, or when it is
  * visible and its parents are outside every walked folder. Anything else,
- * including access denied and transient errors, is kept.
+ * including access denied and transient errors, is kept. Trashed files are
+ * `gone`; not-found files (no longer visible to this account, which the daily
+ * run keeps) are `notVisible`, counted on their own.
  *
  * A stored file the walk did see is also a target when the current settings
  * exclude it (`exclusionOf`) or the current credential scanner refuses it
@@ -147,7 +179,7 @@ export async function findDriveCleanupTargets({
   const storedIds = [...new Set([...stored].map((uid) => driveFileIdOf(uid, sourceName)).filter(Boolean))].sort();
   const fileIds = storedIds.filter((id) => !walked.has(id));
   const counts = {
-    stored: stored.size, in_roots: 0, gone: 0, outside_roots: 0, excluded: 0, credential_refused: 0,
+    stored: stored.size, in_roots: 0, gone: 0, not_visible: 0, outside_roots: 0, excluded: 0, credential_refused: 0,
     credential_unreadable: 0, kept: 0,
   };
   const excluded = [];
@@ -168,6 +200,7 @@ export async function findDriveCleanupTargets({
   counts.credential_refused = refused.length;
   counts.credential_unreadable = unreadable.length;
   const gone = [];
+  const notVisible = [];
   const outside = [];
   let checked = 0;
   for (const id of fileIds) {
@@ -178,12 +211,14 @@ export async function findDriveCleanupTargets({
       if (error?.name !== "DriveError" || error?.retryable !== true) throw error;
       kind = "transient";
     }
-    if (kind === "source_deleted" || kind === "unresolved_not_returned") gone.push(`${sourceName}:${id}`);
+    if (kind === "source_deleted") gone.push(`${sourceName}:${id}`);
+    else if (kind === "unresolved_not_returned") notVisible.push(`${sourceName}:${id}`);
     else if (kind === "left_scope") outside.push(`${sourceName}:${id}`);
     else counts.kept++;
     if (++checked % 100 === 0) onProgress(`  cleanup: checked ${checked} of ${fileIds.length} stored file(s) not under a root`);
   }
   counts.gone = gone.length;
+  counts.not_visible = notVisible.length;
   counts.outside_roots = outside.length;
-  return { gone, outside, excluded, refused, unreadable, counts };
+  return { gone, notVisible, outside, excluded, refused, unreadable, counts };
 }

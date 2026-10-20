@@ -392,7 +392,8 @@ try {
       calendar: [{ status: 200, body: { nextSyncToken: "TOK_PENDING_DELETE", items: [EVENT_CANCELLED] } }],
     });
     // The Worker refuses the removal (a 503 after its own retries). Nothing
-    // asks for review; the cancellation stays pending for the next run.
+    // asks for review; the cancellation stays pending for the next run, and
+    // the error and receipt carry the retry code, never a review code.
     await assert.rejects(cmdIngestCalendar(
       { infrastructure: { cloudflare: {} } }, cleanupManifest, {},
       {
@@ -409,7 +410,10 @@ try {
           ingestEnvelopes: async () => ({ created: 0, updated: 0, unchanged: 0, refused: [], errors: [], total: 0 }),
         },
       },
-    ), /HTTP 503/);
+    ), (error) => /HTTP 503/.test(error.message) && error.code === "REMOVAL_RETRY_PENDING" && !/review/i.test(error.message));
+    check("a pending Calendar cancellation carries the retry code, not a review code",
+      fakeReceipts.at(-1)?.receipt.issue_code === "REMOVAL_RETRY_PENDING",
+      JSON.stringify(fakeReceipts.at(-1)?.receipt));
     check("a pending Calendar cancellation withholds the sync state",
       !existsSync(join(cleanupDir, ".brain-ingest-calendar.json")) &&
         store.uids().includes("calendar:gcal:primary:evt_old_002"));

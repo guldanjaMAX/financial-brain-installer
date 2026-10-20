@@ -155,10 +155,16 @@ globalThis.fetch = async (input, options = {}) => {
         url.searchParams.get("startHistoryId") === "history-current") {
       return json({ historyId: "history-current" });
     }
-    if (["deleted", "readback-stale"].includes(mode)) {
+    if (mode === "deleted") {
       return json({
         historyId: "history-current",
         history: [{ id: "history-current", messagesDeleted: [{ message: { id: "gone" } }] }],
+      });
+    }
+    if (mode === "readback-stale") {
+      return json({
+        historyId: "history-current",
+        history: [{ id: "history-current", labelsAdded: [{ message: { id: "gone" } }] }],
       });
     }
     if (mode === "pending-readback-failure") {
@@ -399,6 +405,9 @@ globalThis.fetch = async (input, options = {}) => {
         id, historyId: "migration-unreadable-v1", internalDate: "1788030000000", labelIds: ["INBOX"],
       });
     }
+    if (id === "gone" && mode === "readback-stale") {
+      return json({ id, historyId: "history-current", internalDate: "1788030000000", labelIds: ["SPAM"] });
+    }
     if (id === "relabelled") {
       return json({
         id, historyId: "history-current", internalDate: "1788030000000", labelIds: ["CATEGORY_PROMOTIONS"],
@@ -432,6 +441,15 @@ globalThis.fetch = async (input, options = {}) => {
         id, historyId: `new-v1-${id}`, internalDate: "1788030000000", labelIds: ["INBOX"],
         raw: rawMail("New account mail", `This invented clean message ${id} must not dilute cleanup review for the prior corpus.`),
       });
+    }
+    // A full sweep reads the labels of each stored message its list did not
+    // return. These left the corpus for a reason other than Trash, Spam or a
+    // delete (a category or the date floor), so each stays a review candidate.
+    if (dilutionOldIds.includes(id) || id === "migration-omitted") {
+      return json({ id, internalDate: "1788030000000", labelIds: ["CATEGORY_FORUMS"] });
+    }
+    if (id === "since-older") {
+      return json({ id, internalDate: "1647777600000", labelIds: ["INBOX"] });
     }
   }
 

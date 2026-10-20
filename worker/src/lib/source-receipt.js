@@ -28,6 +28,7 @@ export const SOURCE_RECEIPT_ISSUE_CODES = Object.freeze([
   "REMOTE_NOT_FOUND",
   "REMOTE_PERMISSION_DENIED",
   "REMOTE_UNAVAILABLE",
+  "REMOVAL_RETRY_PENDING",
   "SAFETY_REVIEW_REQUIRED",
   "SCHEDULE_INSTALL_FAILED",
   "SCHEDULE_RUN_FAILED",
@@ -354,6 +355,7 @@ const OWNER_MESSAGES = Object.freeze({
   REMOTE_NOT_FOUND: "The connected source could not be found. Your installer can help review the connection.",
   REMOTE_PERMISSION_DENIED: "The source did not allow this update. Your installer can help review its access.",
   REMOTE_UNAVAILABLE: "The source is temporarily unavailable. It is safe to try again later.",
+  REMOVAL_RETRY_PENDING: "A removal did not finish this time. It stays pending and the next update retries it.",
   SAFETY_REVIEW_REQUIRED: "The latest update paused for a safety review. Your installer can help confirm the next step.",
   VECTOR_DRAIN_FAILED: "The latest update is stored, but search indexing still needs attention from your installer.",
 });

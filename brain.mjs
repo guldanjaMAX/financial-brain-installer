@@ -14707,7 +14707,10 @@ async function cmdIngestCalendarRun(
         }));
       }
     } catch (error) {
-      removalError = error;
+      // Nothing asks for a review here: the cancellation stays pending and the
+      // next run retries it, so the receipt and the error carry a retry code.
+      const { removalRetryPending } = await import("./operations/drive-sync.mjs");
+      removalError = removalRetryPending(error, { count: uids.length, what: "cancelled or deleted calendar event(s)" });
       removalPending = uids.length;
     }
   }
@@ -14768,7 +14771,7 @@ async function cmdIngestCalendarRun(
       (completeSweep
         ? "every configured calendar completed a full traversal and returned an authoritative sync token"
         : "this run did not prove the configured history in full"),
-    ...(removalError?.code === "SAFETY_REVIEW_REQUIRED" ? { issue_code: "SAFETY_REVIEW_REQUIRED" } : {}),
+    ...(removalError?.code === "REMOVAL_RETRY_PENDING" ? { issue_code: "REMOVAL_RETRY_PENDING" } : {}),
     ...(finalStatus === "error" ? { error: incompleteReason || "calendar sync incomplete" } : {}),
   });
 
@@ -16923,8 +16926,10 @@ export function gmailFailureEvidence(error, statePath, beforeState) {
  *
  * One-time cleanup for stored Drive documents the daily changes feed will
  * never mention again. It removes a stored document only when Google says the
- * file is trashed or not found, when the file is visible and outside every
- * configured root, when the current settings exclude it (exclusion paths,
+ * file is trashed or not found (a not-found file, no longer visible to this
+ * account and kept by the daily run, is counted on its own line), when the
+ * file is visible and outside every configured root, when the current
+ * settings exclude it (exclusion paths,
  * exclude_file_ids, name parts, private prefixes), or when the current
  * credential scanner refuses it. Anything else is kept. Removal runs in
  * batches of 50.
@@ -16980,7 +16985,7 @@ export async function cmdDriveCleanup(m, manifestPath, flags, options = {}) {
     const stored = await (options.listStoredSourceFamilies ?? listStoredSourceFamilies)({ base, adminKey, source: sourceName });
     info(`Drive cleanup${dry ? " (dry run)" : ""}: ${stored.size} stored Drive document(s); walking ` +
       `${sourcePolicy.rootFolderIds.length} root folder(s)${sourcePolicy.includeMyDriveRootFiles ? " plus direct My Drive files" : ""}`);
-    const { gone, outside, excluded, refused, counts } = await findDriveCleanupTargets({
+    const { gone, notVisible, outside, excluded, refused, counts } = await findDriveCleanupTargets({
       drive, getToken, stored, sourceName,
       rootFolderIds: sourcePolicy.rootFolderIds,
       includeMyDriveRootFiles: sourcePolicy.includeMyDriveRootFiles,
@@ -16998,10 +17003,13 @@ export async function cmdDriveCleanup(m, manifestPath, flags, options = {}) {
       },
       onProgress: info,
     });
-    info(`  ${counts.in_roots} under a root (kept); ${counts.gone} trashed or not found at Google; ` +
+    info(`  ${counts.in_roots} under a root (kept); ${counts.gone} trashed at Google; ` +
       `${counts.outside_roots} outside every root; ${counts.excluded} excluded by the current settings; ` +
       `${counts.credential_refused} refused by the credential scanner; ` +
       `${counts.kept} kept because Google did not confirm either`);
+    // The daily run keeps these; this is where they are removed.
+    info(`  ${counts.not_visible} no longer visible to this account (Google says not found)` +
+      `${counts.not_visible ? (dry ? "; a real run removes them" : "; removed below") : ""}`);
     if (counts.credential_unreadable) {
       const next = !ocrCfg.enabled
         ? "run with OCR enabled or remove manually"
@@ -17010,7 +17018,7 @@ export async function cmdDriveCleanup(m, manifestPath, flags, options = {}) {
           : "run again later or remove manually";
       warn(`${counts.credential_unreadable} marked as carrying a credential but could not be re-read (kept); ${next}`);
     }
-    const targets = [...gone, ...outside, ...excluded, ...refused].sort();
+    const targets = [...gone, ...notVisible, ...outside, ...excluded, ...refused].sort();
     const result = targets.length
       ? await removeDriveFamilies({
           families: targets.map((uid) => ({ base_doc_uid: uid, keep_doc_uids: [], family_kind: "structural" })),
@@ -17866,10 +17874,12 @@ const cmdIngestRemoteRun = async (
 
   if (which === "drive" && !assistantJson) {
     // The daily Drive path. The changes feed decides everything: a changed
-    // file under a root is loaded, a trashed, deleted or moved-out file loses
-    // its stored document at once. First run, --reset, an expired token or a
-    // changed policy save a start token and then make one additive pass that
-    // never removes. A file the connector cannot read keeps its stored copy.
+    // file under a root is loaded, a trashed or moved-out file loses its
+    // stored document at once, and a file that only left this account's view
+    // keeps it and is counted for --cleanup. First run, --reset, an expired
+    // token or a changed policy save a start token and then make one additive
+    // pass that never removes. A file the connector cannot read keeps its
+    // stored copy.
     const drive = options.drive ?? await import("./connectors/google-drive.mjs");
     const { driveFileIdOf, driveFileInRoots, driveFailureText, removeDriveFamilies } =
       await import("./operations/drive-sync.mjs");
@@ -17878,6 +17888,9 @@ const cmdIngestRemoteRun = async (
     const roots = sourcePolicy.rootFolderIds;
     const byId = new Map();
     const gone = new Set();
+    // removed: true without a trash: the file only left this account's view.
+    // Its stored documents are kept and counted; --cleanup removes them.
+    const notVisible = new Set();
     const deliberate = [];
     let nextSync = null;
     let changes = null;
@@ -17886,13 +17899,17 @@ const cmdIngestRemoteRun = async (
     // folder that moved in would already look in-root and never be walked.
     let folders = state.drive_folders || {};
     if (incremental && sourcePolicy.includeMyDriveRootFiles && !state.drive_my_drive_root_id) {
-      // Older builds saved the My Drive root in the folder index with an empty
-      // name and no parents. Without its id a changed loose file would look
-      // outside the roots and be removed, so an unknown id forces one
-      // additive pass instead.
-      const candidates = Object.entries(folders)
-        .filter(([id, entry]) => entry?.name === "" && !(entry.parents || []).length && !roots.includes(id));
-      if (candidates.length === 1) state.drive_my_drive_root_id = candidates[0][0];
+      // Older builds never saved the My Drive root id. Without it a changed
+      // loose file would look outside the roots and be removed, so ask Google
+      // for it exactly; if that fails, make one additive pass instead.
+      let rootId = null;
+      try {
+        const root = await drive.getFileMetadata(getToken, "root");
+        if (typeof root?.id === "string" && root.id) rootId = root.id;
+      } catch (error) {
+        warn(`could not read the My Drive root id: ${driveFailureText(error)}`);
+      }
+      if (rootId) state.drive_my_drive_root_id = rootId;
       else {
         info("the My Drive root id is not known yet, so this run reloads the roots once; nothing is removed on that pass");
         incremental = false;
@@ -17913,8 +17930,16 @@ const cmdIngestRemoteRun = async (
       nextSync = changes.nextToken;
       const priorFolders = folders;
       folders = drive.updateFolderIndex(changes.changed, priorFolders);
-      const scope = (index) => ({ rootFolderIds: roots, folders: index, myDriveRootId: state.drive_my_drive_root_id || null });
-      for (const id of changes.removed) gone.add(`${sourceName}:${id}`);
+      // The saved My Drive id admits loose files only while the flag is on.
+      const myDriveRootId = sourcePolicy.includeMyDriveRootFiles ? state.drive_my_drive_root_id || null : null;
+      const scope = (index) => ({ rootFolderIds: roots, folders: index, myDriveRootId });
+      // A trashed file is removed at once. A file that only left this
+      // account's view (removed: true, no trash) keeps its documents.
+      const trashed = new Set((changes.trashed || []).map(String));
+      for (const id of changes.removed) {
+        if (trashed.has(String(id))) gone.add(`${sourceName}:${id}`);
+        else notVisible.add(`${sourceName}:${id}`);
+      }
       for (const file of changes.changed) {
         const inRoots = driveFileInRoots(file, scope(folders));
         if (file.mimeType !== drive.FOLDER_MIME) {
@@ -17928,7 +17953,10 @@ const cmdIngestRemoteRun = async (
         }
       }
       folders = drive.updateFolderIndex([...byId.values()], folders);
-      for (const id of byId.keys()) gone.delete(`${sourceName}:${id}`);
+      for (const id of byId.keys()) {
+        gone.delete(`${sourceName}:${id}`);
+        notVisible.delete(`${sourceName}:${id}`);
+      }
       info(`incremental Drive sync: ${byId.size} changed file(s) under the roots, ${gone.size} removal candidate(s)`);
     } else {
       // Taken BEFORE the walk, so nothing that changes during it is missed.
@@ -18043,11 +18071,18 @@ const cmdIngestRemoteRun = async (
     // only when the file itself changed. The additive pass never removes.
     if (incremental) for (const uid of [...deliberate, ...intentionalRemovalUids]) gone.add(uid);
     intentionalRemovalUids.length = 0;
-    if (gone.size && dry) {
-      info(`${gone.size} Drive file(s) were trashed, deleted, moved out of the roots or excluded; a real run removes any stored copy`);
-    } else if (gone.size) {
+    const notVisibleLine = (count) => info(
+      `${count} Drive file(s) are no longer visible to this account; their stored documents are kept. ` +
+        "--cleanup removes them (run it with --dry-run first to see the count).",
+    );
+    if ((gone.size || notVisible.size) && dry) {
+      if (gone.size) info(`${gone.size} Drive file(s) were trashed, moved out of the roots or excluded; a real run removes any stored copy`);
+      if (notVisible.size) notVisibleLine(notVisible.size);
+    } else if (gone.size || notVisible.size) {
       const stored = await listPreparedSourceFamilies({ base, adminKey, source: sourceName });
       const storedIds = new Set([...stored].map((uid) => driveFileIdOf(uid, sourceName)));
+      const keptNotVisible = [...notVisible].filter((uid) => storedIds.has(driveFileIdOf(uid, sourceName))).length;
+      if (keptNotVisible) notVisibleLine(keptNotVisible);
       const targets = [...gone].filter((uid) => storedIds.has(driveFileIdOf(uid, sourceName))).sort();
       if (targets.length) {
         const removal = await removeDriveFamilies({
@@ -18060,7 +18095,7 @@ const cmdIngestRemoteRun = async (
           if (state.removed) delete state.removed[uid];
         }
         saveState(statePath, state);
-        info(`removed ${removal.removed} stored Drive document(s) for ${targets.length} trashed, deleted, moved-out or excluded file(s)`);
+        info(`removed ${removal.removed} stored Drive document(s) for ${targets.length} trashed, moved-out or excluded file(s)`);
       }
     }
     // A reloaded file can leave stale members of its own family, such as an
@@ -18628,7 +18663,10 @@ const cmdIngestRemoteRun = async (
     const gmailActiveUids = new Set();
     const gmailAcceptedUids = new Set();
     const gmailPolicyUids = [];
-    const gmailDeletedUids = [];
+    // Spam loses its one stored document at once. Trash, and a delete at the
+    // source (including Gmail's 30-day purge of Trash), keep it.
+    const gmailSpamUids = [];
+    const gmailKeptUids = [];
     const gmailIntentionalUids = [];
 
     const capturePrewalkHistory = async () => {
@@ -18660,7 +18698,7 @@ const cmdIngestRemoteRun = async (
           `incremental: ${h.ids.length} changed message(s), ${h.deletedIds.length} deleted message(s), ` +
           `${retryIds.length} durable retry message(s)`,
         );
-        gmailDeletedUids.push(...h.deletedIds.map((id) => `${sourceName}:${id}`));
+        gmailKeptUids.push(...h.deletedIds.map((id) => `${sourceName}:${id}`));
         nextHistory = h.historyId || nextHistory;
         gmailHistoryMarkerMissing = nextHistory ? 0 : 1;
         ids = [...new Set([...retryIds, ...h.ids])].slice(0, limit);
@@ -18721,7 +18759,6 @@ const cmdIngestRemoteRun = async (
     // entire prior corpus below the unattended ratio limit.
     const gmailHasPotentialRemovalWork = authoritativeSnapshot ||
       (Array.isArray(ids) && ids.length > 0) ||
-      gmailDeletedUids.length > 0 ||
       Object.keys(state.removed || {}).some((uid) => uid.startsWith(`${sourceName}:`));
     let gmailRemovalSafetyCount = null;
     if (!dry && gmailLabelGaps === 0 && gmailHasPotentialRemovalWork) {
@@ -18815,15 +18852,21 @@ const cmdIngestRemoteRun = async (
           ? storedBeforeSweep.has(key)
           : Object.prototype.hasOwnProperty.call(state.done || {}, key);
         state.skipped[key] = r.skip.reason;
-        if (r.policy_skip === true && r.source_trashed !== true) {
-          policySkipped++;
-          gmailPolicyUids.push(key);
-        } else if (r.source_deleted === true || r.source_trashed === true) {
-          // Trash, Spam or a permanent delete at the source is the owner's own
-          // per-message action. Its one document is removed below, at once.
+        if (r.source_spam === true) {
+          // Spam is the owner's own per-message action. Its one document is
+          // removed below, at once.
           sourceResolvedSkipped++;
           gmailActiveUids.delete(key);
-          gmailDeletedUids.push(key);
+          gmailSpamUids.push(key);
+        } else if (r.source_trashed === true || r.source_deleted === true) {
+          // A message moved to Trash, or deleted at the source, keeps its
+          // document: a trashed email can still need to be found. No removal,
+          // no review stop.
+          sourceResolvedSkipped++;
+          gmailKeptUids.push(key);
+        } else if (r.policy_skip === true) {
+          policySkipped++;
+          gmailPolicyUids.push(key);
         } else if (r.retain_existing !== true) {
           gmailIntentionalUids.push(key);
         }
@@ -18900,9 +18943,42 @@ const cmdIngestRemoteRun = async (
       }
     }
 
+    // A full list cannot see Trash or Spam: its query excludes both. Read the
+    // labels of each stored message it did not return and decide the way the
+    // daily run does. Trash, or a delete at the source (404, including Gmail's
+    // 30-day purge of Trash), keeps the document. Spam is removed at once
+    // below. Anything else, and any message carrying an older pending removal
+    // whose cause is unknown, stays a removal candidate for the review gate.
+    if (!dry && authoritativeSnapshot && storedBeforeSweep &&
+        gmailLabelGaps === 0 && gmailHistoryMarkerMissing === 0) {
+      const prefix = `${sourceName}:`;
+      const unlistedIds = [...storedBeforeSweep]
+        .filter((uid) => uid.startsWith(prefix) && !gmailActiveUids.has(uid) &&
+          !Object.prototype.hasOwnProperty.call(state.removed || {}, uid))
+        .map((uid) => uid.slice(prefix.length))
+        .filter((id) => /^[A-Za-z0-9_-]+$/.test(id));
+      for await (const item of prefetch(
+        unlistedIds,
+        async (id) => ({ id, policy: await gmail.messagePolicy(getToken, id, { since: gmailSince }) }),
+        { concurrency: GMAIL_FETCH_CONCURRENCY },
+      )) {
+        const key = `${prefix}${item.id}`;
+        if (item.policy.source_spam === true) {
+          gmailSpamUids.push(key);
+        } else if (item.policy.source_trashed === true || item.policy.source_deleted === true) {
+          gmailActiveUids.add(key);
+          gmailKeptUids.push(key);
+        }
+      }
+    }
+
+    const keptGmailCount = new Set(gmailKeptUids).size;
+    if (keptGmailCount) {
+      info(`${keptGmailCount} Gmail message(s) moved to Trash or deleted at the source; any stored document is kept`);
+    }
     const currentGmailRemovalUids = new Set([
       ...gmailPolicyUids,
-      ...gmailDeletedUids,
+      ...gmailSpamUids,
       ...gmailIntentionalUids,
       ...intentionalRemovalUids,
     ]);
@@ -18945,7 +19021,7 @@ const cmdIngestRemoteRun = async (
         uids: gmailPolicyUids, base, adminKey, state, dryRun: true, label: "source policy",
       });
       await applyPreparedRemovals({
-        uids: gmailDeletedUids, base, adminKey, state, dryRun: true, label: "Gmail source deletion",
+        uids: gmailSpamUids, base, adminKey, state, dryRun: true, label: "Gmail spam",
       });
       await applyPreparedRemovals({
         uids: [...gmailIntentionalUids, ...intentionalRemovalUids],
@@ -18953,32 +19029,38 @@ const cmdIngestRemoteRun = async (
       });
     } else if (gmailLabelGaps === 0 && gmailHistoryMarkerMissing === 0) {
       const needsGmailInventory = authoritativeSnapshot || gmailPolicyUids.length ||
-        gmailDeletedUids.length || gmailIntentionalUids.length ||
+        gmailSpamUids.length || gmailIntentionalUids.length ||
         pendingGmailUids.length || intentionalRemovalUids.length;
       if (needsGmailInventory) {
         const storedGmailUids = new Set(storedBeforeSweep || []);
-        // A message moved to Trash or Spam, or deleted, loses its one stored
-        // document right away: no plan, no fingerprint, no review stop. The
-        // review gate below stays for bulk removals nobody made item by item.
-        const sourceGoneUids = [...new Set(gmailDeletedUids)]
+        // A message marked as spam loses its one stored document right away:
+        // no plan, no fingerprint, no review stop. A failed removal holds the
+        // cursor and is retried on the next run. The review gate below stays
+        // for bulk removals nobody made item by item.
+        const spamUids = [...new Set(gmailSpamUids)]
           .filter((uid) => storedGmailUids.has(uid) && !gmailActiveUids.has(uid)).sort();
-        if (sourceGoneUids.length) {
-          const { removeDriveFamilies } = await import("./operations/drive-sync.mjs");
-          const removal = await removeDriveFamilies({
-            families: sourceGoneUids.map((uid) => ({ base_doc_uid: uid, keep_doc_uids: [], family_kind: "structural" })),
-            base, adminKey, assertOwned: assertLockOwned, request: options.removalPlanRequest, onProgress: info,
-          });
-          for (const uid of sourceGoneUids) storedGmailUids.delete(uid);
-          info(`removed ${removal.removed} stored Gmail document(s) for ${sourceGoneUids.length} trashed, spam or deleted message(s)`);
+        if (spamUids.length) {
+          const { removeDriveFamilies, removalRetryPending } = await import("./operations/drive-sync.mjs");
+          let removal;
+          try {
+            removal = await removeDriveFamilies({
+              families: spamUids.map((uid) => ({ base_doc_uid: uid, keep_doc_uids: [], family_kind: "structural" })),
+              base, adminKey, assertOwned: assertLockOwned, request: options.removalPlanRequest, onProgress: info,
+            });
+          } catch (error) {
+            throw removalRetryPending(error, { count: spamUids.length, what: "Gmail spam message(s)" });
+          }
+          for (const uid of spamUids) storedGmailUids.delete(uid);
+          info(`removed ${removal.removed} stored Gmail document(s) for ${spamUids.length} spam message(s)`);
         }
         const currentRemovalCandidates = new Set([
           ...gmailPolicyUids,
-          ...gmailDeletedUids,
+          ...gmailSpamUids,
           ...gmailIntentionalUids,
           ...pendingGmailUids,
           ...intentionalRemovalUids,
         ]);
-        const currentDeletedCandidates = new Set(gmailDeletedUids);
+        const currentDeletedCandidates = new Set(gmailSpamUids);
         for (const uid of currentRemovalCandidates) {
           if (storedGmailUids.has(uid)) continue;
           if (state.done) delete state.done[uid];
@@ -18991,7 +19073,7 @@ const cmdIngestRemoteRun = async (
           : [];
         const currentTypedRemovalUids = new Set([
           ...gmailPolicyUids,
-          ...gmailDeletedUids,
+          ...gmailSpamUids,
         ]);
         const unrelatedPendingGmailUids = pendingGmailUids.filter(
           (uid) => !currentTypedRemovalUids.has(uid)
@@ -19005,7 +19087,7 @@ const cmdIngestRemoteRun = async (
           storedFamilies: storedGmailUids,
           activeFamilies: gmailActiveUids,
           policyCandidates: gmailPolicyUids,
-          vanishedCandidates: [...gmailDeletedUids, ...vanishedSnapshotUids],
+          vanishedCandidates: [...gmailSpamUids, ...vanishedSnapshotUids],
           intentionalCandidates: [
             ...gmailIntentionalUids,
             ...pendingGmailUids,
@@ -31866,6 +31948,8 @@ async function cmdIngestProviderRun(
       adminKey,
       assertOwned: assertLockOwned,
       reset: Boolean(flags.reset),
+      removalRequest: options.removalPlanRequest,
+      onRemovalProgress: info,
       reviewRemovals: async ({ uids, storedFamilies, requiredApproval, notice }) => {
         const lib = await (options.ingestLib ?? ingestLib)();
         const path = canonicalSourceIngestStatePath({ manifestPath, sourceName });
@@ -33375,9 +33459,12 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
 
   brain ingest takes --source <name>, --limit <n>, --dry-run, and --reset. It is
   resumable: re-run the same command to continue an interrupted load. Drive
-  follows its changes feed and removes trashed, deleted or moved-out files at
-  once. A Gmail message moved to Trash or Spam or deleted, and a cancelled or
-  deleted Calendar event, also lose their document at once. Other folder,
+  follows its changes feed and removes trashed or moved-out files at once; a
+  file no longer visible to this account is kept and counted until --cleanup.
+  A Gmail message marked as spam, and a cancelled or deleted Google or Outlook
+  calendar event, also lose their document at once. A Gmail message moved to
+  Trash or deleted keeps its document. A removal that does not finish stays
+  pending (REMOVAL_RETRY_PENDING) and the next run retries it. Other folder,
   Gmail, IMAP and provider removals stop for a separate
   --apply-removals command. Larger or protected plans also need the printed
   --approve-removals fingerprint. Accepted additions and updates are saved.
@@ -33449,9 +33536,11 @@ if (IS_MAIN) {
     // Fatal is a failure this code ANTICIPATED and already explained: a missing
     // token, a free-tier account, a typo'd source name. A Drive removal review
     // is an intentional safety stop with the same no-crash treatment and a
-    // clearer label. Anything else is a bug, and crash() says so.
+    // clearer label, and so is an at-once removal left pending for the next
+    // run. Anything else is a bug, and crash() says so.
     const reviewRequired = e instanceof DriveRemovalReviewRequired || e instanceof WindowsDailyTaskRepairRequired;
-    if (e instanceof Fatal || reviewRequired) {
+    const retryPending = e?.code === "REMOVAL_RETRY_PENDING";
+    if (e instanceof Fatal || reviewRequired || retryPending) {
       if (e instanceof JsonFatal) {
         console.log(e.message);
         process.exit(1);
@@ -33462,7 +33551,7 @@ if (IS_MAIN) {
       // PowerShell wraps anything on stderr in a NativeCommandError block, which
       // makes a clear explanation look like the tool itself fell over.
       const supportEventId = recordSupportFailure(e);
-      const label = reviewRequired ? c.yellow("review required") : c.red("fail");
+      const label = reviewRequired ? c.yellow("review required") : retryPending ? c.yellow("retry pending") : c.red("fail");
       console.log(`${label}  ${renderCliCommands(e.message)}`);
       printSupportReceipt(supportEventId, (line) => console.log(line));
       process.exit(1);

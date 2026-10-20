@@ -373,7 +373,8 @@ async function syncOutlookCalendar({ accessToken, fetchImpl, cursor, now }) {
       if (change.kind !== "delete" && !priorEventIds.has(eventId) && !inventory.has(eventId)) continue;
       inventory.delete(eventId);
       documents.delete(eventId);
-      deletions.set(eventId, { source_type: "microsoft", source_id: sourceId });
+      // A cancelled or deleted event is removed at once, like Google Calendar.
+      deletions.set(eventId, { source_type: "microsoft", source_id: sourceId, remove_at_once: true });
     } else if (instruction.kind === "upsert") {
       inventory.add(eventId);
       deletions.delete(eventId);

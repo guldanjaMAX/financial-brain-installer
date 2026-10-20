@@ -146,7 +146,14 @@ for (const source of ["upload", "gmail", "microsoft"]) {
         return { updated: groups.flat().length };
       },
       gmail: { currentHistoryId: async () => "next-cursor", listMessages: () => active,
-        toEnvelope: async (_token, id) => ({ version: "new-version", envelope: envelope(id) }) },
+        toEnvelope: async (_token, id) => ({ version: "new-version", envelope: envelope(id) }),
+        // A full sweep reads the labels of a stored message its list no longer
+        // returns. item0 moved to a category (not Trash, Spam or a delete), so
+        // it stays a review target.
+        messagePolicy: async (_token, id) => ({
+          allowed: false, skip: { path: id, id, reason: "Gmail policy excludes messages carrying category_promotions" },
+          policy_skip: true, source_trashed: false, source_spam: false, retain_existing: false, cursor_blocking: false,
+        }) },
       oauth: {
         loadProviderSyncState: () => ({ cursor: providerCheckpoint }),
         saveProviderSyncState: () => { providerCursorWrites++; },

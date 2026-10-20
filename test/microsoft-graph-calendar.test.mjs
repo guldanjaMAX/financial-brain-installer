@@ -380,10 +380,15 @@ async function runCalendarContract(syncImpl) {
     cursor,
     now: () => NOW,
     fetchImpl: async () => json({
-      value: [{ id: "event-cap-1", "@removed": { reason: "deleted" } }],
+      // Every searchable field blanked: not a cancellation, so it still takes
+      // the reviewed removal path.
+      value: [{ ...activeEvent, id: "event-cap-1", subject: "", attendees: [],
+        body: { contentType: "text", content: "" }, location: null, onlineMeeting: null }],
       "@odata.deltaLink": "https://graph.microsoft.com/calendar-delta-removal-cap-next",
     }),
   });
+  assert.equal(adapter.deletions.length, 1);
+  assert.equal(adapter.deletions[0].remove_at_once, undefined, "a blanked event is not an at-once removal");
   const stored = new Set([
     "microsoft:outlook:event:event-cap-1",
     ...Array.from({ length: 20 }, (_, index) => `microsoft:outlook:message:unrelated-${index + 1}`),
@@ -429,6 +434,84 @@ async function runCalendarContract(syncImpl) {
     await run();
     check("the exact approved calendar removal reaches deletion and resumed cursor save as the green control",
       removalCalls === 1 && stateSaves === 1 && !store.uids().includes("microsoft:outlook:event:event-cap-1"));
+  } finally { store.db.close(); }
+}
+
+// Decision 2: Outlook matches Google Calendar. A cancelled or deleted event
+// loses its stored document in the same run, with no review stop, and the
+// cursor advances. A removal that fails stays pending, holds the cursor, and
+// carries the retry code.
+for (const change of [
+  { id: "event-gone-1", "@removed": { reason: "deleted" } },
+  { ...activeEvent, id: "event-gone-1", isCancelled: true },
+]) {
+  const kind = change.isCancelled ? "cancelled" : "deleted";
+  const cursor = {
+    mail: {}, drives: {},
+    calendar: {
+      delta_link: "https://graph.microsoft.com/calendar-delta-at-once",
+      window_start: WINDOW_START,
+      window_end: WINDOW_END,
+      id_type: "immutable",
+      event_ids: ["event-gone-1"],
+    },
+  };
+  const adapter = await syncMicrosoftGraph({
+    accessToken: "offline-token",
+    mailFolderIds: [], driveIds: [], siteIds: [], includePersonalDrive: false,
+    cursor,
+    now: () => NOW,
+    fetchImpl: async () => json({ value: [change], "@odata.deltaLink": "https://graph.microsoft.com/calendar-delta-at-once-next" }),
+  });
+  const store = ingestPlanStore();
+  store.put("microsoft:outlook:event:event-gone-1");
+  for (let index = 1; index <= 20; index++) store.put(`microsoft:outlook:message:unrelated-${index}`);
+  let applies = 0;
+  let reviews = 0;
+  let stateSaves = 0;
+  let failApply = true;
+  const receipts = [];
+  const run = () => runProviderConnector({
+    provider: "microsoft",
+    sync: async () => adapter,
+    resolveAccess: async () => ({ accessToken: "offline-token", connection: {} }),
+    loadState: () => ({ cursor }),
+    saveState: () => { stateSaves++; },
+    sendBatch: async () => ({ body: { results: [] } }),
+    removeDocuments: async () => { throw new Error("the legacy forget route was reached"); },
+    listStoredFamilies: async () => new Set(store.uids()),
+    removalRequest: async (input) => {
+      if (input.body.action === "apply") {
+        if (failApply) {
+          throw new Error("Authenticated removal request failed. HTTP 503. Some approved removals may have completed. " +
+            "The source cursor was not advanced. Review a fresh removal plan before applying it.");
+        }
+        applies++;
+      }
+      return store.request(input);
+    },
+    reviewRemovals: async () => { reviews++; throw new Error("a cancelled or deleted Outlook event reached the review gate"); },
+    postReceipt: async (_base, _key, receipt) => { receipts.push(receipt); },
+    base: "https://brain.invalid",
+    adminKey: "offline-key",
+    now: () => new Date(NOW),
+  });
+  try {
+    assert.equal(adapter.deletions[0]?.remove_at_once, true);
+    let failure;
+    try { await run(); } catch (error) { failure = error; }
+    check(`a failed ${kind} Outlook event removal stays pending, holds the cursor and carries the retry code`,
+      failure?.code === "REMOVAL_RETRY_PENDING" && !/review/i.test(failure.message) && /HTTP 503/.test(failure.message) &&
+      stateSaves === 0 && reviews === 0 && store.uids().includes("microsoft:outlook:event:event-gone-1") &&
+      receipts.at(-1)?.status === "error" && receipts.at(-1)?.issue_code === "REMOVAL_RETRY_PENDING",
+      `${failure?.code} ${failure?.message} ${JSON.stringify(receipts.at(-1))}`);
+    failApply = false;
+    const result = await run();
+    check(`a ${kind} Outlook event is removed at once with no review stop, and the cursor advances, like Google Calendar`,
+      applies === 1 && reviews === 0 && stateSaves === 1 && result.removed === 1 && result.cursor_advanced === true &&
+      !store.uids().includes("microsoft:outlook:event:event-gone-1") && store.uids().length === 20 &&
+      receipts.at(-1)?.status === "ready" && /1 removed/.test(receipts.at(-1)?.detail || ""),
+      JSON.stringify({ applies, reviews, stateSaves, removed: result.removed, receipt: receipts.at(-1) }));
   } finally { store.db.close(); }
 }
 

@@ -737,7 +737,8 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     assert.equal(evidence.ingestBatchWrites, 0);
     assert.equal(evidence.retainedFamilyReachedForget, false, "an unchanged adjudicated family was removed");
     assert.equal(evidence.removedFamilies, 2, "cleanup did not remove the trashed and the refused file");
-    assert.match(cleanup.output, /1 trashed or not found at Google; 0 outside every root; 0 excluded by the current settings; 1 refused by the credential scanner/);
+    assert.match(cleanup.output, /1 trashed at Google; 0 outside every root; 0 excluded by the current settings; 1 refused by the credential scanner/);
+    assert.match(cleanup.output, /0 no longer visible to this account \(Google says not found\)/);
 
     environment.BRAIN_DRIVE_SKIP_MODE = "adjudicated-only";
     const adjudicatedAccepted = run(["--reset"]);
@@ -1106,9 +1107,10 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
   }
 
   // The daily approval gate for trashed and moved-out files is retired
-  // (packet 10). A removed file in the feed loses its stored document in the
+  // (packet 10). A trashed file in the feed loses its stored document in the
   // same run, through the Worker's preview then apply route.
-  for (const mode of ["incremental-trash", "incremental-left-scope"]) {
+  {
+    const mode = "incremental-trash";
     const confirmed = runScopeScenario(mode);
     try {
       assert.equal(confirmed.code, 0, confirmed.output);
@@ -1124,6 +1126,30 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       assert.equal(state.sync_token, `fixture-next-${mode}`);
     } finally {
       confirmed.cleanup();
+    }
+  }
+
+  // A file that only left this account's view (removed: true, no trash)
+  // keeps its stored documents and is counted on its own line; --cleanup is
+  // where it is removed. The cursor still advances.
+  {
+    const mode = "incremental-left-scope";
+    const kept = runScopeScenario(mode);
+    try {
+      assert.equal(kept.code, 0, kept.output);
+      const evidence = kept.evidence();
+      assert.equal(evidence.rootedWalks, 0, `${mode} unexpectedly required a full walk`);
+      assert.equal(evidence.forgetRequests, 0, `${mode} removed a file that only left this account's view`);
+      assert.equal(evidence.removedFamilies, 0);
+      assert.equal(evidence.planApplies ?? 0, 0);
+      assert.equal(evidence.ingestBatchWrites, 0);
+      assert.match(kept.output, /1 Drive file\(s\) are no longer visible to this account; their stored documents are kept/);
+      assert.doesNotMatch(kept.output, /--apply-removals|--approve-removals/);
+      const state = kept.state();
+      assert.equal(state.ingest_removal_plan, undefined, "no removal plan is saved");
+      assert.equal(state.sync_token, `fixture-next-${mode}`);
+    } finally {
+      kept.cleanup();
     }
   }
 

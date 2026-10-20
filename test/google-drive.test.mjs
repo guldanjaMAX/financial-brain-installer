@@ -358,6 +358,9 @@ const workbookBytes = (sheets) => {
   // Trashing is how deletion usually looks. Treating it as a change would leave
   // the brain answering from a document the client believes they deleted.
   check("a trashed file counts as removed, not changed", r.removed.includes("c"), JSON.stringify(r));
+  // A trash is removed at once; removed: true alone only left this account's view.
+  check("trashed ids are reported apart from ids that only left this account's view",
+    r.trashed?.join(",") === "c", JSON.stringify(r));
   check("the next token is returned for the following run", r.nextToken === "T99");
 }
 {

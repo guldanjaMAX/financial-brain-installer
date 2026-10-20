@@ -31,7 +31,7 @@ const BIG = { size: String(drive.DOWNLOAD_LIMIT + 1) };
 function googleDouble(entries, { myDriveId = null } = {}) {
   const byId = new Map(entries.map((entry) => [entry.id, entry]));
   const world = { byId, changes: [], startToken: "token-1", nextToken: "token-2", missing: new Set(), denied: new Set(),
-    content: new Map(), changesExpired: false };
+    content: new Map(), changesExpired: false, rootLookupFailures: 0 };
   // Google answers the "root" alias with the real My Drive folder.
   const alias = (id) => (id === "root" && myDriveId ? myDriveId : id);
   const calls = [];
@@ -41,6 +41,10 @@ function googleDouble(entries, { myDriveId = null } = {}) {
     const path = url.pathname.replace(/^\/drive\/v3/, "");
     const media = url.searchParams.get("alt") === "media";
     calls.push({ path, query: url.searchParams.get("q"), media });
+    if (path === "/files/root" && world.rootLookupFailures > 0) {
+      world.rootLookupFailures--;
+      return json({ error: { message: "Backend error.", errors: [{ reason: "backendError" }] } }, 503);
+    }
     if (path === "/changes/startPageToken") return json({ startPageToken: world.startToken });
     if (path === "/changes" && world.changesExpired) {
       return json({ error: { message: "The page token is no longer valid.", errors: [{ reason: "badRequest" }] } }, 410);
@@ -68,6 +72,7 @@ function googleDouble(entries, { myDriveId = null } = {}) {
     listRootedFiles: (get, args) => drive.listRootedFiles(get, { ...args, opts }),
     listRootedFilesPreview: (get, args) => drive.listRootedFilesPreview(get, { ...args, opts }),
     classifyScopedAbsence: (get, id, args) => drive.classifyScopedAbsence(get, id, { ...args, opts }),
+    getFileMetadata: (get, id) => drive.getFileMetadata(get, id, opts),
     toEnvelope: (get, entry, args) => drive.toEnvelope(get, entry, args, opts),
   };
   return { world, calls, connector };
@@ -132,8 +137,14 @@ function scenario(t, entries, { driveConfig = {}, myDriveId = null } = {}) {
     const lines = [];
     const log = console.log;
     console.log = (...args) => lines.push(args.join(" ").replace(/\x1b\[[0-9;]*m/g, ""));
+    // Swallow only the run's own carriage-return progress writes. node:test
+    // writes its results to the same stream, often while the next test runs,
+    // so a blanket stub hid them and node --test could not name every test.
     const write = process.stdout.write;
-    process.stdout.write = () => true;
+    process.stdout.write = function progressOnly(chunk, ...rest) {
+      if (typeof chunk === "string" && chunk.startsWith("\r")) return true;
+      return write.call(this, chunk, ...rest);
+    };
     let result;
     let error;
     try { result = await cmdIngestRemote(manifest, manifestPath, { from: "drive", ...flags }, options); }
@@ -178,7 +189,7 @@ test("first run saves the start token, then makes one additive pass that removes
   assert.match(output, /nothing is removed on this pass/);
 });
 
-test("incremental run loads changed and new files and removes trashed, deleted and moved-out files at once", async (t) => {
+test("incremental run loads changed and new files, removes trashed and moved-out files at once, and keeps a file that only left this account's view", async (t) => {
   const entries = baseEntries();
   const s = scenario(t, entries);
   s.seedSynced(entries.filter((entry) => entry.mimeType !== drive.FOLDER_MIME));
@@ -196,8 +207,9 @@ test("incremental run loads changed and new files and removes trashed, deleted a
   const { error, output } = await s.run();
   assert.equal(error, undefined, `${error?.message}\n${output.slice(-1200)}`);
   assert.deepEqual([...s.sent].sort(), ["edit-file", "new-file"]);
-  assert.deepEqual(s.store.uids(), ["drive:big-file", "drive:edit-file", "drive:keep-file", "drive:new-file"],
-    "trashed, deleted and moved-out files lose their stored document; the big file stays");
+  assert.deepEqual(s.store.uids(), ["drive:big-file", "drive:edit-file", "drive:gone-file", "drive:keep-file", "drive:new-file"],
+    "trashed and moved-out files lose their stored document; the big file and the no-longer-visible file stay");
+  assert.match(output, /1 Drive file\(s\) are no longer visible to this account; their stored documents are kept/);
   assert.equal(s.state.done["drive:big-file"], bigVersion, "the over-limit file keeps its stored version");
   assert.deepEqual(s.calls.filter((call) => call.media).map((call) => call.path).sort(),
     ["/files/edit-file", "/files/new-file"], "only the changed readable files are downloaded");
@@ -205,7 +217,8 @@ test("incremental run loads changed and new files and removes trashed, deleted a
   assert.equal(s.calls.some((call) => call.path === "/changes/startPageToken"), false);
   assert.equal(s.state.sync_token, "token-2", "the cursor advances to the feed's new start token");
   assert.ok(s.store.calls.apply >= 1, "removal applied without an approval stop");
-  for (const uid of ["drive:trash-file", "drive:gone-file", "drive:move-file"]) assert.equal(s.state.done[uid], undefined);
+  for (const uid of ["drive:trash-file", "drive:move-file"]) assert.equal(s.state.done[uid], undefined);
+  assert.ok(s.state.done["drive:gone-file"], "the no-longer-visible file keeps its accepted version");
   assert.equal(s.receipts.at(-1).status, "error", "the skipped over-limit file is still reported as a coverage gap");
 });
 
@@ -280,45 +293,56 @@ test("cleanup --dry-run counts, then cleanup removes only gone or outside-root f
   assert.equal(s.store.calls.apply, 0);
   assert.equal(preview.result.would_remove, 64, "trashed + not found + split pair + 60 outside");
   assert.match(preview.output, /Nothing was removed/);
-  assert.match(preview.output, /1 under a root \(kept\); 2 trashed or not found at Google; 61 outside every root; 0 excluded by the current settings; 0 refused by the credential scanner; 1 kept/);
+  assert.match(preview.output, /1 under a root \(kept\); 1 trashed at Google; 61 outside every root; 0 excluded by the current settings; 0 refused by the credential scanner; 1 kept/);
+  assert.match(preview.output, /1 no longer visible to this account \(Google says not found\); a real run removes them/);
+  assert.equal(preview.result.gone, 1);
+  assert.equal(preview.result.not_visible, 1);
 
   const applied = await s.run({ cleanup: true });
   assert.equal(applied.error, undefined, applied.error?.message);
   assert.equal(applied.result.removed, 64);
+  assert.equal(applied.result.not_visible, 1);
+  assert.match(applied.output, /1 no longer visible to this account \(Google says not found\); removed below/);
   assert.deepEqual(s.store.uids(), ["drive:denied-x", "drive:in-root"]);
   assert.match(applied.output, /removal: 50 of 63 file\(s\) checked/);
   assert.match(applied.output, /removed 64 stored Drive document\(s\) for 63 file\(s\)/);
   assert.deepEqual(s.sent, [], "cleanup never loads documents");
 });
 
-test("an upgraded install with loose My Drive files recovers the root id, so a changed loose file is kept", async (t) => {
-  const myDrive = { ...folder("owner-drive", "Owner Drive"), scope_my_drive_root: true };
+test("an upgraded install with loose My Drive files reads the exact My Drive root id, so a changed loose file is kept", async (t) => {
   const entries = [folder("owner-drive", "Owner Drive"), folder(ROOT, "Folder Alpha", "owner-drive"),
     folder(OUTSIDE, "Folder Outside", "owner-drive"), file("loose-file", "owner-drive"), file("keep-file")];
   const s = scenario(t, entries, { driveConfig: { include_my_drive_root_files: true }, myDriveId: "owner-drive" });
-  // Older builds saved the My Drive root with an empty name and never saved its id.
+  // Older builds never saved the id. This saved index has no My Drive entry,
+  // so only Google's own answer for "root" can supply it.
   s.seedSynced([s.world.byId.get("loose-file"), s.world.byId.get("keep-file")],
-    [myDrive, folder(ROOT, "Folder Alpha", "owner-drive"), folder(OUTSIDE, "Folder Outside", "owner-drive")]);
-  assert.equal(s.state.drive_folders["owner-drive"].name, "");
+    [folder(ROOT, "Folder Alpha", "owner-drive"), folder(OUTSIDE, "Folder Outside", "owner-drive")]);
   assert.equal(s.state.drive_my_drive_root_id, undefined);
   s.world.changes = [{ fileId: "loose-file", removed: false,
     file: { ...s.world.byId.get("loose-file"), modifiedTime: "2026-10-10T00:00:00Z", md5Checksum: "loose-file-v2" } }];
   const { error, output } = await s.run();
   assert.equal(error, undefined, `${error?.message}
 ${output.slice(-1200)}`);
-  assert.equal(s.state.drive_my_drive_root_id, "owner-drive", "the id comes from the saved folder index");
+  assert.equal(s.state.drive_my_drive_root_id, "owner-drive", "the id comes from the exact root lookup");
+  assert.equal(s.calls.filter((call) => call.path === "/files/root").length, 1, "one exact root lookup");
+  assert.equal(s.calls.some((call) => call.path === "/changes/startPageToken"), false, "the changes feed is trusted");
   assert.deepEqual(s.sent, ["loose-file"], "the changed loose file is reloaded, not removed");
   assert.deepEqual(s.store.uids(), ["drive:keep-file", "drive:loose-file"]);
   assert.equal(s.store.calls.apply, 0);
   assert.equal(s.state.sync_token, "token-2");
 });
 
-test("an upgraded install whose My Drive root id cannot be recovered makes one additive pass instead", async (t) => {
+test("an upgraded install whose My Drive root lookup fails makes one additive pass instead", async (t) => {
+  const myDrive = { ...folder("owner-drive", "Owner Drive"), scope_my_drive_root: true };
   const entries = [folder("owner-drive", "Owner Drive"), folder(ROOT, "Folder Alpha", "owner-drive"),
     folder(OUTSIDE, "Folder Outside", "owner-drive"), file("loose-file", "owner-drive"), file("keep-file")];
   const s = scenario(t, entries, { driveConfig: { include_my_drive_root_files: true }, myDriveId: "owner-drive" });
+  // The saved index still holds the empty-name entry an older build wrote.
+  // It is not trusted: only the exact lookup can supply the id, and it fails.
   s.seedSynced([s.world.byId.get("loose-file"), s.world.byId.get("keep-file")],
-    [folder(ROOT, "Folder Alpha", "owner-drive"), folder(OUTSIDE, "Folder Outside", "owner-drive")]);
+    [myDrive, folder(ROOT, "Folder Alpha", "owner-drive"), folder(OUTSIDE, "Folder Outside", "owner-drive")]);
+  assert.equal(s.state.drive_folders["owner-drive"].name, "");
+  s.world.rootLookupFailures = 1;
   s.world.byId.set("loose-file", { ...s.world.byId.get("loose-file"), modifiedTime: "2026-10-10T00:00:00Z", md5Checksum: "loose-file-v2" });
   s.world.changes = [{ fileId: "loose-file", removed: false, file: s.world.byId.get("loose-file") }];
   const { error, output } = await s.run();
@@ -326,7 +350,8 @@ test("an upgraded install whose My Drive root id cannot be recovered makes one a
 ${output.slice(-1200)}`);
   assert.match(output, /My Drive root id is not known yet/);
   assert.equal(s.calls.some((call) => call.path === "/changes"), false, "the changes feed is not trusted on this run");
-  assert.equal(s.calls[0].path, "/changes/startPageToken");
+  assert.equal(s.calls[0].path, "/files/root", "the exact lookup comes first");
+  assert.equal(s.calls[1].path, "/changes/startPageToken");
   assert.deepEqual(s.store.uids(), ["drive:keep-file", "drive:loose-file"], "nothing is removed");
   assert.equal(s.store.calls.apply, 0);
   assert.deepEqual(s.sent, ["loose-file"]);
@@ -514,6 +539,66 @@ test("cleanup without OCR counts a marked scanned PDF on its own line and keeps 
   assert.deepEqual(s.store.uids(), ["drive:keep-file", "drive:scan-file"], "a file that could not be re-read is kept");
   assert.match(String(s.state.skipped["drive:scan-file"]), /^refused: carries /, "its marker stays for a later cleanup");
   assert.deepEqual(s.ocrPassed, [true, false, false]);
+});
+
+test("a file that only left this account's view is counted daily, then --cleanup removes it on its own counted line", async (t) => {
+  const entries = baseEntries();
+  const s = scenario(t, entries);
+  s.seedSynced(entries.filter((entry) => entry.mimeType !== drive.FOLDER_MIME && entry.id !== "big-file"));
+  // Google now answers "not found" for it, and the feed says removed: true.
+  s.world.byId.delete("gone-file");
+  s.world.changes = [{ fileId: "gone-file", removed: true }];
+  const daily = await s.run();
+  assert.equal(daily.error, undefined, daily.error?.message);
+  assert.match(daily.output, /1 Drive file\(s\) are no longer visible to this account; their stored documents are kept/);
+  assert.ok(s.store.uids().includes("drive:gone-file"), "the daily run keeps it");
+  assert.equal(s.store.calls.apply, 0);
+  assert.equal(s.state.sync_token, "token-2", "the cursor advances");
+
+  const preview = await s.run({ cleanup: true, "dry-run": true });
+  assert.equal(preview.error, undefined, preview.error?.message);
+  assert.equal(preview.result.not_visible, 1);
+  assert.equal(preview.result.gone, 0);
+  assert.equal(preview.result.would_remove, 1);
+  assert.match(preview.output, /1 no longer visible to this account \(Google says not found\); a real run removes them/);
+  assert.ok(s.store.uids().includes("drive:gone-file"), "a dry run removes nothing");
+
+  const applied = await s.run({ cleanup: true });
+  assert.equal(applied.error, undefined, applied.error?.message);
+  assert.equal(applied.result.not_visible, 1);
+  assert.equal(applied.result.removed, 1);
+  assert.match(applied.output, /1 no longer visible to this account \(Google says not found\); removed below/);
+  assert.equal(s.store.uids().includes("drive:gone-file"), false);
+  assert.equal(s.state.done["drive:gone-file"], undefined);
+});
+
+test("the saved My Drive id is ignored once include_my_drive_root_files is off", async (t) => {
+  const entries = [folder("owner-drive", "Owner Drive"), folder(ROOT, "Folder Alpha", "owner-drive"),
+    file("loose-file", "owner-drive"), file("keep-file")];
+  const s = scenario(t, entries, { driveConfig: { include_my_drive_root_files: true }, myDriveId: "owner-drive" });
+  const first = await s.run();
+  assert.equal(first.error, undefined, first.error?.message);
+  assert.equal(s.state.drive_my_drive_root_id, "owner-drive", "the first pass saved the id");
+  assert.deepEqual([...s.sent].sort(), ["keep-file", "loose-file"]);
+
+  s.manifest.corpora.google_drive.include_my_drive_root_files = false;
+  const policyPass = await s.run();
+  assert.equal(policyPass.error, undefined, policyPass.error?.message);
+  assert.match(policyPass.output, /nothing is removed on this pass/);
+  assert.equal(s.state.drive_my_drive_root_id, "owner-drive", "the saved id is still in state");
+
+  s.sent.length = 0;
+  const callsBefore = s.calls.length;
+  s.world.byId.set("loose-file", { ...s.world.byId.get("loose-file"), modifiedTime: "2026-10-10T00:00:00Z", md5Checksum: "loose-file-v2" });
+  s.world.changes = [{ fileId: "loose-file", removed: false, file: s.world.byId.get("loose-file") }];
+  const daily = await s.run();
+  assert.equal(daily.error, undefined, daily.error?.message);
+  assert.deepEqual(s.sent, [], "a changed loose My Drive file is not loaded once the flag is off");
+  assert.equal(s.calls.slice(callsBefore).some((call) => call.media), false, "it is not downloaded");
+  assert.equal(s.store.uids().includes("drive:loose-file"), false,
+    "like any changed file outside the roots, its stored copy is removed at once");
+  assert.ok(s.store.uids().includes("drive:keep-file"));
+  assert.equal(s.state.sync_token, "token-2");
 });
 
 test("root scope follows the saved folder index, and My Drive admits direct children only", () => {

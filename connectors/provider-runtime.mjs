@@ -13,6 +13,7 @@ import { ingestionOutcome } from "../ingest/outcome.mjs";
 import { providerWithheldReason, sourceReceiptIssueCode } from "../worker/src/lib/source-receipt.js";
 import { restampFirstPartySourceProvenance } from "../worker/src/lib/provenance-receipt.js";
 import { credentialRefusalReason } from "../worker/src/lib/secret-scan.js";
+import { removeDriveFamilies, removalRetryPending } from "../operations/drive-sync.mjs";
 
 const SAFE_SOURCE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const RESULT_STATUSES = new Set(["created", "updated", "unchanged", "refused", "failed"]);
@@ -215,6 +216,10 @@ export async function runProviderConnector({
   runId = providerRunId(),
   reset = false,
   reviewRemovals = null,
+  // The Worker request for an at-once removal (tests pass an offline store);
+  // undefined uses the authenticated preview, apply and readback route.
+  removalRequest = undefined,
+  onRemovalProgress = () => {},
   assertOwned = null,
 } = {}) {
   const sourceName = clean(source).toLowerCase();
@@ -252,6 +257,13 @@ export async function runProviderConnector({
     assertOwned?.();
     let storedFamiliesBefore = null;
     let snapshotNeedsRemovalReview = false;
+    // A deletion the adapter marks remove_at_once (an Outlook event the owner
+    // cancelled or deleted) is removed in this run, like Google Calendar: no
+    // plan, no review stop. It never enters or dilutes the review below.
+    let atOnce = [];
+    const atOnceIds = new Set(normalized.deletions
+      .filter((item) => item?.remove_at_once === true)
+      .map((item) => String(item.source_id || "")));
     let requiredRemovalApproval = null;
     let removalReviewNotice = "";
     if (normalized.authoritative_snapshot === true) {
@@ -273,7 +285,7 @@ export async function runProviderConnector({
         source_type: sourceName,
         source_id: uid.slice(sourceName.length + 1),
       }));
-      snapshotNeedsRemovalReview = stale.length > 0;
+      snapshotNeedsRemovalReview = stale.some((item) => !atOnceIds.has(item.source_id));
       normalized = {
         ...normalized,
         deletions: [...normalized.deletions, ...stale].filter((item, index, all) =>
@@ -288,8 +300,10 @@ export async function runProviderConnector({
         });
       }
       storedFamiliesBefore ||= await listStoredFamilies({ base, adminKey, source: sourceName });
-      const planned = normalized.deletions.filter((item) =>
+      const stored = normalized.deletions.filter((item) =>
         storedFamiliesBefore.has(`${sourceName}:${String(item.source_id || "")}`));
+      atOnce = stored.filter((item) => atOnceIds.has(String(item.source_id || "")));
+      const planned = stored.filter((item) => !atOnceIds.has(String(item.source_id || "")));
       const plannedUids = planned.map((item) => `${sourceName}:${item.source_id}`);
       const aggregateReviewRequired = snapshotNeedsRemovalReview ||
         providerRemovalReviewRequired(planned.length, storedFamiliesBefore.size);
@@ -322,7 +336,7 @@ export async function runProviderConnector({
       sendBatch, base, adminKey, assertOwned,
     });
     terminalEvidence = {
-      files_seen: normalized.documents.length + normalized.deletions.length,
+      files_seen: normalized.documents.length + normalized.deletions.length + atOnce.length,
       docs_added: tally.created, docs_updated: tally.updated, docs_unchanged: tally.unchanged,
       docs_refused: tally.refused, docs_failed: tally.failed,
       refusal_reason: providerWithheldReason(tally.withheld),
@@ -336,6 +350,20 @@ export async function runProviderConnector({
       throw new ProviderDeliveryError("Provider document delivery is incomplete; the cursor was kept.", {
         code: "provider_delivery_incomplete", tally,
       });
+    }
+    let removedAtOnce = 0;
+    if (atOnce.length) {
+      const uids = atOnce.map((item) => `${sourceName}:${item.source_id}`);
+      try {
+        ({ removed: removedAtOnce } = await removeDriveFamilies({
+          families: uids.map((uid) => ({ base_doc_uid: uid, keep_doc_uids: [], family_kind: "structural" })),
+          base, adminKey, assertOwned, request: removalRequest, onProgress: onRemovalProgress,
+        }));
+      } catch (error) {
+        // Nothing asks for a review: the item stays pending, the cursor is
+        // held, and the error and receipt carry the retry code.
+        throw removalRetryPending(error, { count: uids.length, what: "cancelled or deleted calendar event(s)" });
+      }
     }
     if (normalized.deletions.length) {
       if (typeof reviewRemovals !== "function") {
@@ -353,8 +381,8 @@ export async function runProviderConnector({
       // re-expand tombstones after that proof; only exact apply may delete.
       normalized = { ...normalized, deletions: [] };
     }
-    // All nonempty removals leave through the separate exact-plan command.
-    const removal = { applied: 0, pending: 0 };
+    // Every other nonempty removal leaves through the separate exact-plan command.
+    const removal = { applied: removedAtOnce, pending: 0 };
     const deletionReadbackVerified = normalized.deletions.length === 0;
     const deliveryComplete = tally.failed === 0 && tally.refused === tally.withheld;
     const sourceComplete = normalized.outcome.kind === "completed";
@@ -379,7 +407,7 @@ export async function runProviderConnector({
     }
     const detail = resultDetail(normalized, tally, removal, cursorAdvanced);
     terminalEvidence = {
-      files_seen: normalized.documents.length + normalized.deletions.length,
+      files_seen: normalized.documents.length + normalized.deletions.length + atOnce.length,
       docs_added: tally.created,
       docs_updated: tally.updated,
       docs_unchanged: tally.unchanged,
@@ -398,7 +426,7 @@ export async function runProviderConnector({
     await postReceipt(base, adminKey, {
       source: sourceName, kind, status: sourceWalkComplete ? "ready" : "error", run_id: runId, lane,
       started_at: startedAt, completed_at: completedAt,
-      files_seen: normalized.documents.length + normalized.deletions.length,
+      files_seen: normalized.documents.length + normalized.deletions.length + atOnce.length,
       docs_added: tally.created, docs_updated: tally.updated, docs_unchanged: tally.unchanged,
       docs_refused: tally.refused, docs_failed: tally.failed,
       refusal_reason: providerWithheldReason(tally.withheld),

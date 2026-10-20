@@ -270,6 +270,16 @@ globalThis.fetch = async (input, options = {}) => {
     if (["incremental-stale-marker-404", "incremental-stale-marker-live", "incremental-review-empty"].includes(mode)) {
       return json({ changes: [], newStartPageToken: `fixture-next-${mode}` });
     }
+    if (mode === "incremental-trash") {
+      return json({
+        changes: [{
+          fileId: MISSING_ID,
+          removed: false,
+          file: { id: MISSING_ID, name: "Removed fixture.txt", mimeType: "text/plain", trashed: true, parents: [ROOT_ID] },
+        }],
+        newStartPageToken: `fixture-next-${mode}`,
+      });
+    }
     if (mode.startsWith("incremental-")) {
       return json({
         changes: (["incremental-unresolved-batch", "incremental-transient-batch"].includes(mode)
