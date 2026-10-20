@@ -224,6 +224,20 @@ function paymentParties(text, selectorSlot = false) {
   return { partyMatch: clause("from"), viaMatch: clause("via"), namedPayment, named };
 }
 
+// Every selector-span grammar parse for one question spends one shared work
+// budget, like the statement parser's operation limit. The length and start
+// caps alone still allow nested span enumeration to multiply; overflow
+// refuses the whole question rather than pruning readings.
+export const ledgerQuestionLimits = Object.freeze({ parses: 30000 });
+const questionBudgetSpent = Symbol('question parse budget');
+function budgetedGrammar(budget, question, options) {
+  if (budget) {
+    if (budget.remaining <= 0) throw questionBudgetSpent;
+    budget.remaining--;
+  }
+  return classifyQuestionGrammar(question, options);
+}
+
 function classifyQuestionGrammar(question, { now = Date.now(), selectorSlot = false, amountSource = question } = {}) {
   let q = stripNounPossessive(normalizePayerCommas(question).normalize("NFKC").toLowerCase().replace(/[’]/g, "'").replace(/\bwhat's\b/g, "what is"));
   const broad = /\b(?:money|cash|profit|bank|deposits?|expenses?|charges?|subscriptions|recurring (?:charges|subscriptions)|payment|paid|spend|spent|spending|income|revenue|credits?|debits?|transactions?|transfers?|checking|savings|loan|debt|tax|payroll|invoice|receivable|payable|came in|went out)\b|\$\s*\d/.test(q) || /\b(?:(?:my|our|account|card|bank|checking|savings|loan|current|available|outstanding)\s+balances?|balances?\s+(?:of|on|in|for|due))\b/.test(q);
@@ -410,14 +424,14 @@ export function payerMentionsCoverQuestion(intent, mentions) {
 // words or punctuation. Reusing that grammar with an opaque slot keeps every
 // supported question form in one place. These readings route the question only;
 // registry mentions over the entire question decide identity after the read.
-function classifyPayerQuestion(question, { now = Date.now(), amountSource = question } = {}) {
+function classifyPayerQuestion(question, { now = Date.now(), amountSource = question, budget } = {}) {
   const options = { now, amountSource };
   if (String(question || '').length > 1024) return { broad: true, kind: null };
-  const original = classifyQuestionGrammar(question, options);
+  const original = budgetedGrammar(budget, question, options);
   // Natural receive questions can lack a money keyword. Read their original
   // selectors with the same grammar before protecting names, without changing
   // the fallback routing or inventing an account from a candidate reading.
-  const originalSelectors = original.broad ? original : classifyQuestionGrammar(question, { ...options, selectorSlot: true });
+  const originalSelectors = original.broad ? original : budgetedGrammar(budget, question, { ...options, selectorSlot: true });
   const text = questionGrammarText(question);
   const starts = [...text.matchAll(/\b(?:from|via) +/g)].map(m => m.index + m[0].length);
   const noun = text.match(/^(?:did|has|have) +(?:(?:the|my|our|a|an) +)?/);
@@ -441,7 +455,7 @@ function classifyPayerQuestion(question, { now = Date.now(), amountSource = ques
       // That cannot authorize shortening a rejected terminal-connector name.
       if (danglingConnector.test(text.slice(end))) continue;
       if (amountInCents(label) !== null) continue;
-      const parsed = classifyQuestionGrammar(text.slice(0, start) + slot + text.slice(end), { ...options, selectorSlot: true });
+      const parsed = budgetedGrammar(budget, text.slice(0, start) + slot + text.slice(end), { ...options, selectorSlot: true });
       if (!(parsed.kind === 'payment' && parsed.selectorSlotParts.includes(slot)) &&
           !(parsed.kind === 'merchant' && parsed.direction === 'inflow' && parsed.match === slot)) continue;
       if (parsed.selectorSlotParts?.some(part => part !== slot && terminalGrammarWord(part))) continue;
@@ -467,7 +481,7 @@ function classifyPayerQuestion(question, { now = Date.now(), amountSource = ques
       const label = text.slice(start, end);
       if (!labelPattern.test(label) || terminalGrammarWord(label) || !specificSender(label, false) || amountInCents(label) !== null) continue;
       if (danglingConnector.test(text.slice(end))) continue;
-      const parsed = classifyQuestionGrammar(text.slice(0, first.start) + slot + bridge[0] + slot + text.slice(end),
+      const parsed = budgetedGrammar(budget, text.slice(0, first.start) + slot + bridge[0] + slot + text.slice(end),
         { ...options, selectorSlot: true });
       if (parsed.kind !== 'payment' || parsed.selectorSlotParts.length !== 2 || !parsed.selectorSlotParts.every(part => part === slot)) continue;
       if (parsed.mask !== (originalSelectors.mask ?? null) || parsed.accountKind !== (originalSelectors.accountKind ?? null) ||
@@ -544,8 +558,21 @@ function classifyPayerQuestion(question, { now = Date.now(), amountSource = ques
 // Reuse the bounded grammar with an opaque slot, preserving the literal span
 // and deriving amount scope only from text outside it. The reader decides
 // between these interpretations using its one covered snapshot and registry.
-export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
-  const original = classifyPayerQuestion(question, { now });
+export function classifyLedgerQuestion(question, { now = Date.now(), parseLimit = ledgerQuestionLimits.parses } = {}) {
+  const budget = { remaining: Number.isSafeInteger(parseLimit) && parseLimit >= 0
+    ? Math.min(parseLimit, ledgerQuestionLimits.parses) : 0 };
+  try {
+    return classifyBoundedLedgerQuestion(question, now, budget);
+  } catch (error) {
+    if (error !== questionBudgetSpent) throw error;
+    // One unbudgeted top-level parse keeps the routing flag; no selector
+    // reading survives an exhausted budget.
+    return { broad: classifyQuestionGrammar(question, { now }).broad, kind: null };
+  }
+}
+
+function classifyBoundedLedgerQuestion(question, now, budget) {
+  const original = classifyPayerQuestion(question, { now, budget });
   // An amount-only payment has no name selector to reinterpret. Preserve its
   // amount and shorter default window instead of inventing a numeric payer.
   if (original.kind === 'payment' && !original.counterpartyWords.length) return original;
@@ -579,7 +606,7 @@ export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
     const before = text.slice(0, start).replace(spendQuestionFiller, ' ').replace(/^[ ,]+/, '');
     const after = text.slice(end).replace(spendQuestionFiller, ' ');
     const protectedText = before + slot + after;
-    const parsed = classifyPayerQuestion(protectedText, { now });
+    const parsed = classifyPayerQuestion(protectedText, { now, budget });
     const isPayer = parsed.kind === 'payment' || parsed.kind === 'merchant' && parsed.direction === 'inflow';
     const name = parsed.kind === 'payment' ? parsed.counterparty : parsed.match;
     if (!['merchant', 'category', 'payment'].includes(parsed.kind) || name !== slot) continue;
@@ -605,7 +632,7 @@ export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
     const cleanedText = before + cleaned + after;
     // For the cleaned reading the removed amount lies outside the selected
     // shortened name. Preserve that scope; it never applies to the RAW name.
-    const alternate = cleaned ? classifyPayerQuestion(cleanedText, { now, amountSource: before + label.replace(spendQuestionFiller, ' ') + after }) : { kind: null };
+    const alternate = cleaned ? classifyPayerQuestion(cleanedText, { now, budget, amountSource: before + label.replace(spendQuestionFiller, ' ') + after }) : { kind: null };
     // Removing an amount from a literal payer also changes the default
     // payment window (60 days without an amount, 30 with one). Preserve both
     // readings; the wider RAW read covers the CLEANED window as well.

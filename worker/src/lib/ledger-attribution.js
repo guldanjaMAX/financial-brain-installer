@@ -475,6 +475,22 @@ function attributeRow(row, registry, statementCache, budget) {
   const statement = parseStatement(String(row.description || '') + (row.description_has_nul ? '\0' : ''), registry, statementCache, budget);
   if (!row.payee) return statement;
   const payee = { identity: row.payee, payer: lookupPayer(row.payee, registry) };
+  // A description the parser refused for its own reason (length, alphabet,
+  // operation, field or parse limit) may carry a labelled sender that
+  // disagrees with the payee. Unread text cannot corroborate the payee, so
+  // the row is unknown. A grammar nonmatch ('incomplete') read the whole
+  // text and found no sender field, so the payee still stands. So does a
+  // description that is exactly the payee, optionally after one sender
+  // label: it cannot name anyone else.
+  const refusal = statement.evidence.parser?.refusal;
+  if (refusal && refusal !== 'incomplete' && !descriptionIsPayee(row.description, row.payee)) {
+    const result = decision([], 'payee');
+    result.state = 'unknown'; result.entity_slug = null; result.reading = null;
+    result.evidence.ambiguous = false;
+    result.evidence.parser = statement.evidence.parser;
+    result.evidence.sender_unread = true;
+    return result;
+  }
   const senders = statement.evidence.labelled_senders || [];
   const registered = reading => reading.payer.state === 'unique' && !reading.payer.query_only;
   const conflict = new Set([payee, ...senders].filter(registered).map(reading => reading.payer.slug)).size > 1 || senders.some(sender => {
@@ -506,6 +522,17 @@ function attributeRow(row, registry, statementCache, budget) {
   result.evidence.parser = statement.evidence.parser;
   result.evidence.labelled_senders = senders;
   return result;
+}
+
+function descriptionIsPayee(description, payee) {
+  const text = String(description || ''), name = String(payee || '');
+  // The comparison is linear, but stays inside the same order of size as the
+  // parser cap so refused huge inputs are not rescanned.
+  if (!text || !name || text.length > statementGrammar.limits.codepoints * 4) return false;
+  const trimmed = text.trim();
+  const unlabelled = trimmed.replace(statementGrammar.sender, '');
+  const key = normalizeMerchantText(name);
+  return Boolean(key) && [trimmed, unlabelled].some(value => normalizeMerchantText(value) === key);
 }
 
 function agreementName(value) {
@@ -555,8 +582,10 @@ export function boundedPayerFields(row, attribution, registry) {
   const keys = new Set(fields.map(normalizeMerchantText));
   const slugs = new Set(fields.flatMap(field => [...(registry.get(normalizeMerchantText(field)) || [])]));
   const aliases = fields.length > 0 && fields.every(field => registry.get(normalizeMerchantText(field))?.size === 1) && slugs.size === 1;
+  // A refused description may hold a sender that disagrees with the payee,
+  // so an unread statement is competing evidence, never agreement.
   return { fields, conflict: Boolean(row.payee_has_nul || String(row.payee || '').includes('\0') ||
-    slugs.size > 1 || keys.size > 1 && !aliases) };
+    attribution.evidence.sender_unread || slugs.size > 1 || keys.size > 1 && !aliases) };
 }
 
 // Only a confirmed row can eliminate a payer. An assumption supports a

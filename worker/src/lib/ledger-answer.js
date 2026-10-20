@@ -13,6 +13,9 @@ const accountKind = account => ['checking', 'savings', 'card', 'loan', 'line_of_
   ? account.account_kind : 'kind unavailable';
 const money = cents => `${cents < 0 ? "-" : ""}$${Math.floor(Math.abs(cents) / 100).toLocaleString("en-US")}.${String(Math.abs(cents) % 100).padStart(2, "0")}`;
 export function maskLedgerCandidateField(text) {
+  // A placeholder is renderer text, not a bank field. Masking it would print a
+  // redaction tail claiming an identifier was hidden where none was read.
+  if (text === null || text === undefined || text === "") return "Deposit";
   // Free-form letters can be identifiers too. Mask every long run, including
   // separator-spaced runs, before truncation. No guessed bank-label vocabulary
   // can make an otherwise opaque identifier safe to print.
@@ -27,6 +30,9 @@ export function maskLedgerCandidateField(text) {
   return long ? `[redacted] ****${chars.slice(-4).join("")}` : value.slice(0, 240);
 }
 const safeDescription = maskLedgerCandidateField;
+// Only read bank text is masked; the placeholder for a row with neither field
+// is renderer text and prints plainly.
+const rowDescription = row => row.description || row.payee ? safeDescription(row.description || row.payee) : "Transaction";
 const accountCoverage = accounts => accounts.map(a => ({
   account_mask: accountMask(a),
   covered_to: safeDay(a.covered_to), last_synced_at: safeSync(a.last_synced_at),
@@ -77,6 +83,7 @@ function attributionUncertainty(row, attribution, selectorAmbiguous, exactNamesO
     ? 'shorthand reading excluded by exact names only' : 'shorthand cannot rule out another payer';
   if (attribution.evidence.ambiguous) return 'competing payer readings';
   if (row.payee_has_nul || row.description_has_nul) return 'damaged bank field';
+  if (attribution.evidence.sender_unread) return 'statement sender could not be read';
   if (row.payee) return 'bank payer field does not establish the requested identity';
   if (attribution.evidence.parser && !attribution.evidence.parser.complete) return 'statement sender could not be completely parsed';
   return selectorAmbiguous ? 'requested payer phrase could not be resolved' : 'sender identity is not confirmed';
@@ -547,13 +554,13 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
       payer: usable ? safeDescription(attribution.reading.identity) : 'Unattributed',
       ...(attribution?.evidence.ambiguous ? { payer_candidates: [...new Set(attribution.evidence.candidates.map(safeDescription))] } : {}) };
   };
-  const publicRow = row => ({ ...cite(row), ...publicAttribution(row), description: safeDescription(row.description || row.payee || "Transaction"), possible_own_transfer: pairing.candidateRows.has(row.id) });
+  const publicRow = row => ({ ...cite(row), ...publicAttribution(row), description: rowDescription(row), possible_own_transfer: pairing.candidateRows.has(row.id) });
   const payerLine = row => {
     if (row.direction !== 'inflow') return '';
     const attribution = publicAttribution(row);
     return attribution.attribution_state === 'unknown' ? `; payer: Unattributed${attribution.payer_candidates?.length ? ` (candidate readings: ${attribution.payer_candidates.join('; ')})` : ''}` : '';
   };
-  const rowLine = row => `${money(row.amount_minor)} on ${row.posted_on} in ${masked(bySlug.get(row.effective_account_slug))}: ${safeDescription(row.description || row.payee || "Transaction")}${payerLine(row)}${candidateMark(row)} ${refs([row])}`;
+  const rowLine = row => `${money(row.amount_minor)} on ${row.posted_on} in ${masked(bySlug.get(row.effective_account_slug))}: ${rowDescription(row)}${payerLine(row)}${candidateMark(row)} ${refs([row])}`;
   const bounded = `Accounts: ${accounts.map(masked).join(", ")}; ${intent.from} through ${intent.to}; ${accounts.map(a => `${masked(a)}: covered through ${safeDay(a.covered_to) || "unknown"}`).join("; ")}.`;
   const ledger = { kind: intent.kind, inflow_total_minor: sumMinor(rows.filter(row => row.direction === "inflow")), from: intent.from, to: intent.to, accounts: accountCoverage(accounts),
     includes_own_transfers: true, matched_transfer_count: 0, candidate_transfer_count: pairs.length,
