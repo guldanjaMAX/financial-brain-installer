@@ -201,7 +201,10 @@ function phaseTwoQuestion(q, intent, today) {
 const ARRIVAL = payerQuestionGrammar.arrivals.join("|");
 const paymentAmount = /(?:\$|\busd\s+)\d[\d,]*(?:\.\d+)?|\b\d[\d,]*(?:\.\d+)?\s+dollars?\b/g;
 const nounExternalAmount = new RegExp(`'s +(?:${paymentAmount.source})$`);
-const nounPossessive = new RegExp(`^((?:did|has|have) +.*?)'s(?= +payment +(?:${ARRIVAL}|from|via|of)\\b)`);
+// One date or period may sit between the possessive and "payment" ("Payer
+// One's September 2026 payment"); the 's still belongs to the noun grammar.
+const possessiveDate = `(?:\\d{4}-\\d{2}-\\d{2}|\\d{1,2}/\\d{1,2}/\\d{4}|q[1-4](?: +\\d{4})?|(?:${MONTHS.join('|')})(?: +\\d{1,2}(?:st|nd|rd|th)?)?(?:,? +\\d{4})?)`;
+const nounPossessive = new RegExp(`^((?:did|has|have) +.*?)'s(?= +(?:${possessiveDate} +)?payment +(?:${ARRIVAL}|from|via|of)\\b)`);
 function stripNounPossessive(text) {
   // Amount and possessive are one noun-payment grammar. Remove the amount
   // before deciding whether 's belongs to that noun. Amount scope is carried
@@ -420,6 +423,12 @@ export function payerMentionsCoverQuestion(intent, mentions) {
   return visit(0, []);
 }
 
+// A payer label never contains a connector-introduced period clause. The
+// plain grammar refuses two periods; admitting "payer one in september 2026
+// and" as a name would let the second period alone scope the question.
+// A bare month inside a name ("October Ventures") is not such a clause.
+const labelPeriodClause = new RegExp(`\\b(?:in|during|for|over|between|before|after) +(?:the +)?(?:${MONTHS.join('|')}|q[1-4]|last|this|so far|recent|\\d{4} so far)\\b`);
+
 // Protect a whole selector BEFORE the intent grammar removes periods, account
 // words or punctuation. Reusing that grammar with an opaque slot keeps every
 // supported question form in one place. These readings route the question only;
@@ -450,7 +459,7 @@ function classifyPayerQuestion(question, { now = Date.now(), amountSource = ques
     for (let end = start + 1; end <= text.length; end++) {
       if (end < text.length && !/[ ,?!.]/.test(text[end])) continue;
       const label = text.slice(start, end);
-      if (!labelPattern.test(label) || terminalGrammarWord(label)) continue;
+      if (!labelPattern.test(label) || terminalGrammarWord(label) || labelPeriodClause.test(label)) continue;
       // The old payment filler pass consumes "in arrive" or a repeated "in".
       // That cannot authorize shortening a rejected terminal-connector name.
       if (danglingConnector.test(text.slice(end))) continue;
@@ -474,12 +483,14 @@ function classifyPayerQuestion(question, { now = Date.now(), amountSource = ques
   if (noun) for (const bridge of text.matchAll(/ +payment +(?:from|via) +/g)) {
     const first = { start: noun[0].length, end: bridge.index };
     first.label = text.slice(first.start, first.end);
-    if (!labelPattern.test(first.label) || terminalGrammarWord(first.label) || !specificSender(first.label, false) || amountInCents(first.label) !== null) continue;
+    if (!labelPattern.test(first.label) || terminalGrammarWord(first.label) || labelPeriodClause.test(first.label) ||
+        !specificSender(first.label, false) || amountInCents(first.label) !== null) continue;
     const start = bridge.index + bridge[0].length;
     for (let end = start + 1; end <= text.length; end++) {
       if (end < text.length && !/[ ,?!.]/.test(text[end])) continue;
       const label = text.slice(start, end);
-      if (!labelPattern.test(label) || terminalGrammarWord(label) || !specificSender(label, false) || amountInCents(label) !== null) continue;
+      if (!labelPattern.test(label) || terminalGrammarWord(label) || labelPeriodClause.test(label) ||
+          !specificSender(label, false) || amountInCents(label) !== null) continue;
       if (danglingConnector.test(text.slice(end))) continue;
       const parsed = budgetedGrammar(budget, text.slice(0, first.start) + slot + bridge[0] + slot + text.slice(end),
         { ...options, selectorSlot: true });

@@ -478,12 +478,16 @@ function attributeRow(row, registry, statementCache, budget) {
   // A description the parser refused for its own reason (length, alphabet,
   // operation, field or parse limit) may carry a labelled sender that
   // disagrees with the payee. Unread text cannot corroborate the payee, so
-  // the row is unknown. A grammar nonmatch ('incomplete') read the whole
-  // text and found no sender field, so the payee still stands. So does a
-  // description that is exactly the payee, optionally after one sender
-  // label: it cannot name anyone else.
+  // the row is unknown. A grammar nonmatch ('incomplete') means only that no
+  // COMPLETE parse survived: a labelled sender followed by any field the
+  // closed grammar cannot consume ("FROM: X; ID: 1") is read and then
+  // discarded with its parse. So 'incomplete' lets the payee stand only when
+  // no field start carries a sender label at all. So does a description that
+  // is exactly the payee, optionally after one sender label: it cannot name
+  // anyone else.
   const refusal = statement.evidence.parser?.refusal;
-  if (refusal && refusal !== 'incomplete' && !descriptionIsPayee(row.description, row.payee)) {
+  if (refusal && (refusal !== 'incomplete' || senderLabelPresent(row.description)) &&
+      !descriptionIsPayee(row.description, row.payee)) {
     const result = decision([], 'payee');
     result.state = 'unknown'; result.entity_slug = null; result.reading = null;
     result.evidence.ambiguous = false;
@@ -522,6 +526,45 @@ function attributeRow(row, registry, statementCache, budget) {
   result.evidence.parser = statement.evidence.parser;
   result.evidence.labelled_senders = senders;
   return result;
+}
+
+// Sticky copies of the anchored sender and channel productions, so one scan
+// over the bounded text tests each field start without slicing.
+const stickySender = new RegExp(statementGrammar.sender.source.replace(/^\^/, ''), 'iuy');
+const stickyChannel = new RegExp(statementGrammar.channel.source.replace(/^\^/, ''), 'iuy');
+
+// Over-approximates every position where parseStatement() tries a sender
+// label: the opening (optionally after a channel) and every later field
+// start. A bare label (FROM, BY) counts after a delimiter; after spaces
+// alone only a colon label does, exactly as rest() allows. Called only for a
+// description the parser already bounded (refusal 'incomplete'), so the
+// text is at most the code point cap.
+function senderLabelPresent(description) {
+  const grammar = statementGrammar;
+  const text = normalizePayerCommas(String(description || '')).replace(grammar.edgeSpaces, '')
+    .replace(grammar.lineBreak, ';').normalize('NFKC');
+  const labelAt = (position, allowBare) => {
+    stickySender.lastIndex = position;
+    const label = stickySender.exec(text);
+    return Boolean(label) && (allowBare || label[0].includes(':'));
+  };
+  let delimited = true;
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index];
+    if (char === ' ' || grammar.fieldBoundary.test(char)) {
+      if (char !== ' ') delimited = true;
+      continue;
+    }
+    const previous = index === 0 ? null : text[index - 1];
+    if (index === 0 || previous === ' ' || grammar.fieldBoundary.test(previous)) {
+      if (labelAt(index, delimited)) return true;
+      stickyChannel.lastIndex = index;
+      const channel = stickyChannel.exec(text);
+      if (channel && labelAt(index + channel[0].length, delimited)) return true;
+    }
+    delimited = false;
+  }
+  return false;
 }
 
 function descriptionIsPayee(description, payee) {
