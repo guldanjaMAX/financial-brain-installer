@@ -16931,7 +16931,9 @@ export function gmailFailureEvidence(error, statePath, beforeState) {
  *
  * The credential check re-reads only files the daily run already recorded as
  * refused, then scans them again with the current scanner, so a one-time
- * cleanup does not download the whole corpus.
+ * cleanup does not download the whole corpus. It reads with the same OCR the
+ * daily run uses (none on a dry run). A marked file it cannot re-read is kept
+ * and counted on its own line, never counted as kept under a root.
  */
 export async function cmdDriveCleanup(m, manifestPath, flags, options = {}) {
   if (flags.cleanup !== true) die("--cleanup takes no value. Run it with --dry-run first to see the counts.");
@@ -16961,6 +16963,20 @@ export async function cmdDriveCleanup(m, manifestPath, flags, options = {}) {
     const lib = await (options.ingestLib ?? ingestLib)();
     const priorState = lib.loadState(statePath);
     const scannerOn = m.safety?.credential_scanner?.enabled !== false;
+    // The daily run's OCR, so a scanned file it refused reads the same way
+    // here. A dry run never sends a page to a model.
+    const ocrCfg = ocrPolicy(m);
+    const ocrCallback = dry || !ocrCfg.enabled ? null : makeOcrCallback({
+      base, adminKey, model: ocrCfg.model, maxPages: ocrCfg.maxPages,
+      assertOwned: assertLockOwned,
+      onPage: ({ page, totalPages }) => info(`  OCR page ${page}${totalPages ? ` of ${totalPages}` : ""}`),
+    });
+    if (ocrCallback) {
+      const { estimateOcrCost, describeOcrCost } = await ingestOcrLib();
+      info(`OCR is ON, model ${ocrCfg.model}, up to ${ocrCfg.maxPages} page(s) per document, ` +
+        "for files the daily run marked as carrying a credential.");
+      info(`  cost per 100 scanned pages: ${describeOcrCost(estimateOcrCost(100))}`);
+    }
     const stored = await (options.listStoredSourceFamilies ?? listStoredSourceFamilies)({ base, adminKey, source: sourceName });
     info(`Drive cleanup${dry ? " (dry run)" : ""}: ${stored.size} stored Drive document(s); walking ` +
       `${sourcePolicy.rootFolderIds.length} root folder(s)${sourcePolicy.includeMyDriveRootFiles ? " plus direct My Drive files" : ""}`);
@@ -16973,11 +16989,12 @@ export async function cmdDriveCleanup(m, manifestPath, flags, options = {}) {
         if (!scannerOn || !/^refused: carries /.test(String(priorState.skipped?.[`${sourceName}:${file.id}`] || ""))) return false;
         let read;
         try {
-          read = await drive.toEnvelope(getToken, file, { sourceName, pathOf: (f) => drive.folderPathFor(f, folders), ocr: null });
+          read = await drive.toEnvelope(getToken, file, { sourceName, pathOf: (f) => drive.folderPathFor(f, folders), ocr: ocrCallback });
         } catch {
-          return false;
+          return "unreadable";
         }
-        return Boolean(read?.envelope && credentialRefusalOf(sanitizeIngestEnvelope(read.envelope), true));
+        if (!read?.envelope) return "unreadable";
+        return Boolean(credentialRefusalOf(sanitizeIngestEnvelope(read.envelope), true));
       },
       onProgress: info,
     });
@@ -16985,6 +17002,14 @@ export async function cmdDriveCleanup(m, manifestPath, flags, options = {}) {
       `${counts.outside_roots} outside every root; ${counts.excluded} excluded by the current settings; ` +
       `${counts.credential_refused} refused by the credential scanner; ` +
       `${counts.kept} kept because Google did not confirm either`);
+    if (counts.credential_unreadable) {
+      const next = !ocrCfg.enabled
+        ? "run with OCR enabled or remove manually"
+        : dry
+          ? "a dry run never sends a page to OCR; run without --dry-run to re-read with OCR, or remove manually"
+          : "run again later or remove manually";
+      warn(`${counts.credential_unreadable} marked as carrying a credential but could not be re-read (kept); ${next}`);
+    }
     const targets = [...gone, ...outside, ...excluded, ...refused].sort();
     const result = targets.length
       ? await removeDriveFamilies({
@@ -17973,6 +17998,9 @@ const cmdIngestRemoteRun = async (
       const refusal = credentialRefusalOf(envelope, scannerOn);
       if (refusal) {
         state.skipped[key] = refusal.reason;
+        // Forget the accepted version. Otherwise a later additive pass matches
+        // the file as unchanged and erases the marker --cleanup looks for.
+        delete state.done[key];
         localRefused++;
         deliberate.push(key);
         return { skip: { path: safeIngestDisplay(envelope.title, f.name, f.id), id: f.id, reason: refusal.reason } };

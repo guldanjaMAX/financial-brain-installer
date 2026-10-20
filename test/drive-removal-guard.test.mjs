@@ -1126,6 +1126,117 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       confirmed.cleanup();
     }
   }
+
+  // Inventory-route robustness, on the runs that still read the whole stored
+  // inventory: the one-time --cleanup and a --reset additive pass. A failed
+  // read leaves source state as the run found it. A --reset pass saves its
+  // reset state before the read, so for it that is exactly the reset state:
+  // no cursor and nothing accepted.
+  const assertStateKept = (run, args, message) => {
+    if (args.includes("--reset")) {
+      assert.deepEqual(run.state(), {
+        version: 1,
+        done: {},
+        skipped: {},
+        credential_scanner_progress: { fingerprint: scannerFingerprint, accepted: {} },
+      }, message);
+    } else {
+      assert.equal(run.stateBytes(), run.initialStateBytes, message);
+    }
+  };
+
+  for (const args of [["--cleanup"], ["--reset"]]) {
+    const unpageable = runScopeScenario("full-unresolved", { full: true, inventoryRouteMode: "unpageable-409", args });
+    try {
+      assert.equal(unpageable.code, 1, unpageable.output);
+      assert.match(unpageable.output, /not accepted \(409\)/i);
+      const evidence = unpageable.evidence();
+      assert.equal(evidence.inventoryReads, 1,
+        `${args[0]} treated typed 409 as a first-page capability signal`);
+      assert.deepEqual(evidence.inventoryCursors, [""]);
+      assert.equal(evidence.forgetRequests, 0);
+      assertStateKept(unpageable, args, `${args[0]} changed source state after typed 409`);
+    } finally {
+      unpageable.cleanup();
+    }
+  }
+
+  for (const args of [["--cleanup"], ["--reset"]]) {
+    const overlong = runScopeScenario("full-unresolved", { full: true, inventoryRouteMode: "overlong-tail-v048", args });
+    try {
+      assert.equal(overlong.code, 1, overlong.output);
+      assert.match(overlong.output, /update the Brain/i);
+      assert.doesNotMatch(overlong.output, /unexpected error/i);
+      const evidence = overlong.evidence();
+      assert.equal(evidence.inventoryReads, 1,
+        `${args[0]} attempted to send the over-long continuation token back to the Brain`);
+      assert.equal(evidence.inventoryAcceptedFamilies, 1,
+        `${args[0]} did not reach the over-long page-tail decision`);
+      assert.equal(evidence.forgetRequests, 0);
+      assertStateKept(overlong, args, `${args[0]} changed source state after the over-long continuation token`);
+    } finally {
+      overlong.cleanup();
+    }
+  }
+
+  for (const args of [["--cleanup"], ["--reset"]]) {
+    const v048ControlCursor = runScopeScenario("full-control-cursor-v048", { full: true, args });
+    try {
+      assert.equal(v048ControlCursor.code, 1, v048ControlCursor.output);
+      assert.match(v048ControlCursor.output, /update the Brain/i);
+      assert.doesNotMatch(v048ControlCursor.output, /unexpected error/i);
+      const evidence = v048ControlCursor.evidence();
+      assert.deepEqual(evidence.inventoryCursors, ["", "drive:a\t"]);
+      assert.equal(evidence.forgetRequests, 0);
+      assert.equal(v048ControlCursor.state().sync_token,
+        args.includes("--reset") ? undefined : "fixture-prior-full-control-cursor-v048");
+      assertStateKept(v048ControlCursor, args,
+        `${args[0]} changed source state after the rejected control-character cursor`);
+    } finally {
+      v048ControlCursor.cleanup();
+    }
+  }
+
+  {
+    const originalFetch = globalThis.fetch;
+    const sqliteOrdered = ["drive:a\uff5e", "drive:a\ud83d\ude00"];
+    try {
+      globalThis.fetch = async () => new Response(JSON.stringify({
+        source: "drive",
+        families: sqliteOrdered,
+        next_cursor: null,
+      }), { status: 200, headers: { "content-type": "application/json" } });
+      const inventory = await listStoredSourceFamilies({
+        base: "https://fixture.invalid",
+        adminKey: "fixture-admin",
+        source: "drive",
+        includeServerObservedAt: true,
+      });
+      assert.deepEqual([...inventory.malformedIdentities], sqliteOrdered,
+        "the client did not preserve SQLite UTF-8 byte ordering while quarantining rows");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+
+  {
+    const lines = [];
+    const zeroWidth = "drive:abc\u200bdef";
+    const bidi = "drive:abc\u202edef";
+    renderMalformedDriveIdentities([
+      "drive:\t",
+      zeroWidth,
+      bidi,
+      `drive:${"a".repeat(251)}`,
+    ], { write: (line) => lines.push(line) });
+    const output = lines.join("\n");
+    assert.match(output, /drive:\\t/, "brain diagnose did not surface the escaped quarantined identity");
+    assert.match(output, /\\u200b/);
+    assert.match(output, /\\u202e/);
+    assert.doesNotMatch(output, /\u200b|\u202e/,
+      "brain diagnose emitted an invisible or bidi code point raw");
+    assert.ok(output.length < 1000, "brain diagnose did not cap a malformed identity's display length");
+  }
 }
 
 /* CLI wiring keeps the aggregate approval guard ahead of every planned deletion. */

@@ -10,6 +10,7 @@ import {
 import { batchStream, splitOversized, prefetch } from "../ingest/run.mjs";
 import { driveFileInRoots, removeDriveFamilies } from "../operations/drive-sync.mjs";
 import { ingestPlanStore } from "./helpers/ingest-plan-store.mjs";
+import { scanPdf } from "./fixtures/scan-pdf.mjs";
 
 // Packet 10: the daily Drive refresh follows the changes feed and acts on each
 // change directly. Google and the Worker are in-process doubles; any other
@@ -30,7 +31,7 @@ const BIG = { size: String(drive.DOWNLOAD_LIMIT + 1) };
 function googleDouble(entries, { myDriveId = null } = {}) {
   const byId = new Map(entries.map((entry) => [entry.id, entry]));
   const world = { byId, changes: [], startToken: "token-1", nextToken: "token-2", missing: new Set(), denied: new Set(),
-    content: new Map() };
+    content: new Map(), changesExpired: false };
   // Google answers the "root" alias with the real My Drive folder.
   const alias = (id) => (id === "root" && myDriveId ? myDriveId : id);
   const calls = [];
@@ -41,6 +42,9 @@ function googleDouble(entries, { myDriveId = null } = {}) {
     const media = url.searchParams.get("alt") === "media";
     calls.push({ path, query: url.searchParams.get("q"), media });
     if (path === "/changes/startPageToken") return json({ startPageToken: world.startToken });
+    if (path === "/changes" && world.changesExpired) {
+      return json({ error: { message: "The page token is no longer valid.", errors: [{ reason: "badRequest" }] } }, 410);
+    }
     if (path === "/changes") return json({ changes: world.changes, newStartPageToken: world.nextToken });
     if (path === "/files") {
       const parent = alias(/^'([^']+)' in parents and trashed = false$/.exec(url.searchParams.get("q") || "")?.[1]);
@@ -149,7 +153,7 @@ function scenario(t, entries, { driveConfig = {}, myDriveId = null } = {}) {
       store.put(`drive:${entry.id}`);
     }
   };
-  return { ...google, store, state, sent, receipts, failLoads, run, seedSynced, inventoryReads: () => inventoryReads };
+  return { ...google, manifest, store, state, sent, receipts, failLoads, run, seedSynced, inventoryReads: () => inventoryReads };
 }
 
 const baseEntries = () => [
@@ -387,6 +391,129 @@ test("cleanup also removes stored files the current settings exclude or the curr
   const reads = (id) => s.calls.filter((call) => call.media && call.path === `/files/${id}`).length;
   assert.equal(reads("keep-file"), 1, "cleanup does not re-read a file that was never refused");
   assert.equal(reads("clean-file"), 3, "cleanup re-scans a marked file before removing it");
+});
+
+// A file accepted under an older scanner and refused by the current one keeps
+// its stored copy on the add-only pass. Its refusal marker is what --cleanup
+// looks for, so a later additive pass must not erase it as "unchanged".
+for (const [label, forceAdditivePass] of [
+  ["the change token expires", (s) => { s.world.changesExpired = true; }],
+  ["the settings change", (s) => { s.manifest.corpora.google_drive.exclude_file_ids = ["unrelated-file"]; }],
+]) {
+  test(`a credential refusal survives a second additive pass when ${label}, so cleanup removes the file`, async (t) => {
+    const credential = ["sk", "a".repeat(32)].join("-");
+    const entries = [folder("owner-drive", "Owner Drive"), folder(ROOT, "Folder Alpha", "owner-drive"),
+      file("keep-file"), file("secret-file")];
+    const s = scenario(t, entries);
+    // An older build accepted and stored both files at their current version.
+    const accepted = await s.run();
+    assert.equal(accepted.error, undefined, accepted.error?.message);
+    const acceptedVersion = s.state.done["drive:secret-file"];
+    assert.ok(acceptedVersion, "the older load recorded the accepted version");
+    // The file itself never changes; only the scanner does. The double serves
+    // the credential from now on to stand in for the older scanner passing it.
+    s.world.content.set("secret-file", `${TEXT} Synthetic scanner fixture ${credential}`);
+    s.state.credential_scanner_fingerprint = "older-scanner-fixture";
+    s.state.drive_policy_fingerprint = "older-policy-fixture";
+
+    const first = await s.run();
+    assert.equal(first.error, undefined, first.error?.message);
+    assert.match(first.output, /nothing is removed on this pass/);
+    assert.ok(s.store.uids().includes("drive:secret-file"), "the first additive pass keeps the refused file");
+    assert.match(String(s.state.skipped["drive:secret-file"]), /^refused: carries /);
+    assert.equal(s.state.credential_scanner_fingerprint, credentialScannerFingerprint(true));
+    assert.equal(s.state.sync_token, "token-1");
+
+    forceAdditivePass(s);
+    const second = await s.run();
+    assert.equal(second.error, undefined, second.error?.message);
+    assert.match(second.output, /nothing is removed on this pass/);
+    assert.ok(s.store.uids().includes("drive:secret-file"), "the second additive pass keeps the refused file too");
+    assert.match(String(s.state.skipped["drive:secret-file"]), /^refused: carries /,
+      "a later additive pass erased the refusal marker cleanup depends on");
+
+    s.world.changesExpired = false;
+    const cleanup = await s.run({ cleanup: true });
+    assert.equal(cleanup.error, undefined, cleanup.error?.message);
+    assert.equal(cleanup.result.credential_refused, 1);
+    assert.equal(cleanup.result.removed, 1);
+    assert.match(cleanup.output, /0 excluded by the current settings; 1 refused by the credential scanner/);
+    assert.deepEqual(s.store.uids(), ["drive:keep-file"], "the credential-bearing file is no longer stored");
+  });
+}
+
+// A scanned PDF has text only through OCR. The page reader below stands in for
+// the callback a run builds from the OCR settings, and is used only when the
+// run actually passes one.
+function scannedCredentialScenario(t) {
+  const credential = ["sk", "a".repeat(32)].join("-");
+  const scan = { ...file("scan-file"), name: "scan-file.pdf", mimeType: "application/pdf", size: String(scanPdf().length) };
+  const s = scenario(t, [folder("owner-drive", "Owner Drive"), folder(ROOT, "Folder Alpha", "owner-drive"),
+    file("keep-file"), scan]);
+  s.manifest.safety.ocr.enabled = true;
+  s.world.content.set("scan-file", scanPdf());
+  s.store.put("drive:scan-file");
+  const ocrPassed = [];
+  const stubOcr = async () => ({ text: `${TEXT} Synthetic scanner fixture ${credential}` });
+  stubOcr.model = "@cf/fixture/ocr";
+  stubOcr.maxPages = 2;
+  const toEnvelope = s.connector.toEnvelope;
+  s.connector.toEnvelope = (get, entry, args) => {
+    const configured = typeof args?.ocr === "function";
+    if (entry.id === "scan-file") ocrPassed.push(configured);
+    return toEnvelope(get, entry, { ...args, ocr: configured ? stubOcr : null });
+  };
+  return { ...s, ocrPassed };
+}
+
+test("cleanup re-reads a marked scanned PDF with the configured OCR and removes it when the scanner still refuses", async (t) => {
+  const s = scannedCredentialScenario(t);
+  const daily = await s.run();
+  assert.equal(daily.error, undefined, daily.error?.message);
+  assert.match(String(s.state.skipped["drive:scan-file"]), /^refused: carries /, "the OCR text is refused");
+  assert.ok(s.store.uids().includes("drive:scan-file"), "the additive pass keeps the stored copy");
+
+  const preview = await s.run({ cleanup: true, "dry-run": true });
+  assert.equal(preview.error, undefined, preview.error?.message);
+  assert.equal(preview.result.credential_refused, 0, "a dry run never sends a page to OCR");
+  assert.equal(preview.result.credential_unreadable, 1, "so the scanned file is counted, not kept silently");
+  assert.equal(preview.result.in_roots, 1);
+  assert.match(preview.output,
+    /1 marked as carrying a credential but could not be re-read[^\n]*run without --dry-run to re-read with OCR/);
+
+  const applied = await s.run({ cleanup: true });
+  assert.equal(applied.error, undefined, applied.error?.message);
+  assert.equal(applied.result.credential_refused, 1);
+  assert.equal(applied.result.credential_unreadable, 0);
+  assert.equal(applied.result.removed, 1);
+  assert.doesNotMatch(applied.output, /could not be re-read/);
+  assert.deepEqual(s.store.uids(), ["drive:keep-file"]);
+  assert.deepEqual(s.ocrPassed, [true, false, true],
+    "the daily run and the real cleanup pass the configured OCR; the dry run does not");
+});
+
+test("cleanup without OCR counts a marked scanned PDF on its own line and keeps it, in the dry run and the real run", async (t) => {
+  const s = scannedCredentialScenario(t);
+  const daily = await s.run();
+  assert.equal(daily.error, undefined, daily.error?.message);
+  assert.match(String(s.state.skipped["drive:scan-file"]), /^refused: carries /);
+  s.manifest.safety.ocr.enabled = false;
+
+  const preview = await s.run({ cleanup: true, "dry-run": true });
+  const applied = await s.run({ cleanup: true });
+  for (const [name, run] of [["dry run", preview], ["real run", applied]]) {
+    assert.equal(run.error, undefined, `${name}: ${run.error?.message}`);
+    assert.equal(run.result.credential_unreadable, 1, `${name} counted the unreadable marked file as kept`);
+    assert.equal(run.result.credential_refused, 0, name);
+    assert.equal(run.result.in_roots, 1, name);
+    assert.match(run.output,
+      /1 marked as carrying a credential but could not be re-read[^\n]*run with OCR enabled or remove manually/, name);
+  }
+  assert.equal(preview.result.would_remove, 0);
+  assert.equal(applied.result.removed, 0);
+  assert.deepEqual(s.store.uids(), ["drive:keep-file", "drive:scan-file"], "a file that could not be re-read is kept");
+  assert.match(String(s.state.skipped["drive:scan-file"]), /^refused: carries /, "its marker stays for a later cleanup");
+  assert.deepEqual(s.ocrPassed, [true, false, false]);
 });
 
 test("root scope follows the saved folder index, and My Drive admits direct children only", () => {

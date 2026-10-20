@@ -123,6 +123,8 @@ export async function removeDriveFamilies({
  * exclude it (`exclusionOf`) or the current credential scanner refuses it
  * (`credentialRefused`). These are the scope changes the daily run never
  * removes in bulk; this one command is where they are cleaned up.
+ * `credentialRefused` answers "unreadable" for a marked file it could not
+ * re-read; that file is kept and counted on its own, never as in a root.
  */
 export async function findDriveCleanupTargets({
   drive,
@@ -144,17 +146,27 @@ export async function findDriveCleanupTargets({
   const folderIndex = drive.updateFolderIndex([...walked.values()]);
   const storedIds = [...new Set([...stored].map((uid) => driveFileIdOf(uid, sourceName)).filter(Boolean))].sort();
   const fileIds = storedIds.filter((id) => !walked.has(id));
-  const counts = { stored: stored.size, in_roots: 0, gone: 0, outside_roots: 0, excluded: 0, credential_refused: 0, kept: 0 };
+  const counts = {
+    stored: stored.size, in_roots: 0, gone: 0, outside_roots: 0, excluded: 0, credential_refused: 0,
+    credential_unreadable: 0, kept: 0,
+  };
   const excluded = [];
   const refused = [];
+  const unreadable = [];
   for (const id of storedIds.filter((entry) => walked.has(entry))) {
     const file = walked.get(id);
-    if (exclusionOf(file, folderIndex)) excluded.push(`${sourceName}:${id}`);
-    else if (await credentialRefused(file, folderIndex)) refused.push(`${sourceName}:${id}`);
+    if (exclusionOf(file, folderIndex)) {
+      excluded.push(`${sourceName}:${id}`);
+      continue;
+    }
+    const verdict = await credentialRefused(file, folderIndex);
+    if (verdict === "unreadable") unreadable.push(`${sourceName}:${id}`);
+    else if (verdict) refused.push(`${sourceName}:${id}`);
     else counts.in_roots++;
   }
   counts.excluded = excluded.length;
   counts.credential_refused = refused.length;
+  counts.credential_unreadable = unreadable.length;
   const gone = [];
   const outside = [];
   let checked = 0;
@@ -173,5 +185,5 @@ export async function findDriveCleanupTargets({
   }
   counts.gone = gone.length;
   counts.outside_roots = outside.length;
-  return { gone, outside, excluded, refused, counts };
+  return { gone, outside, excluded, refused, unreadable, counts };
 }
