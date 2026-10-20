@@ -253,6 +253,7 @@ function chooseLiteralSelector(intent, identities, rows, budget) {
     const conflict = ids.size > 1 || wanted.state === 'ambiguous' || payerRegistryHasDamage(identities) && !registered ||
       scoped.some(row => literal(row) && fields.get(row.id)?.conflict);
     return { exact: registered || matched.length > 0, matched, possible, ids, conflict,
+      conflictRows: new Set(scoped.filter(row => fields.get(row.id)?.conflict).map(row => row.id)),
       knownRows: new Set(scoped.filter(row => !fields.get(row.id)?.conflict && (!literal(row) || supportedLiteral(row)) &&
         (fields.get(row.id)?.fields.length || attributions.get(row.id)?.state === 'confirmed')).map(row => row.id)),
       attributions, candidates: wanted.candidates, blockedLiteral: scoped.some(row => literal(row) && !supportedLiteral(row)),
@@ -269,9 +270,12 @@ function chooseLiteralSelector(intent, identities, rows, budget) {
     return { intent, attributions: literal.attributions };
   }
   if (literal.exhausted || alternate.exhausted || alternatives.some(a => a.result.exhausted)) return { refusal: 'budget', labels };
+  // Without alternative readings the conflict keeps the legacy attribution
+  // path, but it is still a conflict: the answer can show what it read and
+  // never certify a complete total, zero or absence from it.
   if (literal.conflict) return intent.selectorReadings
     ? { refusal: 'ambiguous', labels: literal.candidates?.length > 1 ? literal.candidates : labels }
-    : { intent, attributions: literal.attributions };
+    : { intent, attributions: literal.attributions, literalConflict: payer, conflictRows: literal.conflictRows || new Set() };
   const exact = [{ reading: raw, result: literal }, ...alternatives].filter(a => a.result.exact &&
     (a.result.matched.length || !a.result.possible.length));
   const key = result => JSON.stringify([[...(result.ids || [])].sort(), result.matched.map(row => row.id).sort((a, b) => a - b)]);
@@ -409,6 +413,12 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
   const selectorAmbiguous = !selection.exact && ['ambiguous', 'unresolved'].includes(wanted?.state);
   const selectorCandidates = [...new Set((wanted?.candidates || []).map(safeDescription))];
   const phraseOnly = !selection.exact && wanted?.registered === false;
+  // The literal-conflict fallback has no exact/possible split. It may reach
+  // the complete renderer only when every receipt in scope is confirmed; an
+  // assumed (shorthand) or observed row there is a possible match, so the
+  // answer stays incomplete with an attributed subtotal.
+  const literalConflict = Boolean(namedPayer && selection.literalConflict &&
+    rows.some(row => row.direction === 'inflow' && payers.get(row.id)?.state !== 'confirmed'));
   const payerMatches = row => selection.exactRows ? selection.exactRows.has(row.id) : wanted?.state === 'unique' && payers.get(row.id)?.entity_slug === wanted.slug;
   const merchantMatches = selection.exactRows ? row => selection.exactRows.has(row.id) : namedIncome ? payerMatches : row => matchesMerchant(row, intent.match);
   const bySlug = new Map(inventory.map(a => [a.account_slug, a]));
@@ -423,9 +433,10 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     // A named-income answer with unknown receipts must not flow into the
     // complete-total renderer, including its zero and conditional-total keys.
     // Fully attributed income retains the usual transfer and grouping rules.
-    if (payment || unattributed.length || selectorAmbiguous || phraseOnly || budgetExhausted) {
+    if (payment || unattributed.length || selectorAmbiguous || phraseOnly || budgetExhausted || literalConflict) {
       const listedUnattributed = unattributed.slice(0, 10);
-      const uncertain = budgetExhausted || unattributed.length || selectorAmbiguous || (phraseOnly && (!matched.length || namedIncome));
+      const uncertain = budgetExhausted || unattributed.length || selectorAmbiguous || (phraseOnly && (!matched.length || namedIncome)) ||
+        (literalConflict && (!matched.length || namedIncome));
       const citations = [...matched, ...listedUnattributed].map((row, i) => citation(row, bySlug.get(row.effective_account_slug), i));
       const payerEvidence = matched.flatMap((row, i) => payers.get(row.id)?.state === 'observed' ? [{
         type: payers.get(row.id).evidence.source === 'payee' ? 'bank_payee' : 'statement_sender',
@@ -454,13 +465,15 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
         reason: attributionUncertainty(row, payers.get(row.id), selectorAmbiguous, intent.exactNamesOnly), citation: unattributedCitations[i],
       }));
       const payerCandidates = [...new Set(unattributed.flatMap(row => payers.get(row.id)?.evidence.ambiguous ? payers.get(row.id).evidence.candidates : []))].slice(0, 10).map(safeDescription);
-      if (unattributed.length || selectorAmbiguous || (phraseOnly && (!matched.length || namedIncome))) {
+      if (unattributed.length || selectorAmbiguous || (phraseOnly && (!matched.length || namedIncome)) ||
+          (literalConflict && (!matched.length || namedIncome))) {
         const detail = selectorAmbiguous
           ? `I can't confirm which payer you mean: ${wanted.state === 'ambiguous' ? 'the question has ambiguous payer readings' : 'the complete requested name or its boundary is not confirmed'}. Candidate payer readings: ${selectorCandidates.join('; ')}. There are ${unattributed.length} candidate deposits between ${intent.from} and ${intent.to}; use the exact bank payer field, statement sender, or a unique registered label.`
           : phraseOnly ? `These matches support the requested phrase for this answer only. The payer is not registered, so I can't confirm a complete income total or absence.`
-          : `I found ${unattributed.length} ${unattributed.length === 1 ? "deposit that doesn't" : "deposits that don't"} show who paid between ${intent.from} and ${intent.to}; I can't confirm whether any came from the requested payer.`;
+          : unattributed.length ? `I found ${unattributed.length} ${unattributed.length === 1 ? "deposit that doesn't" : "deposits that don't"} show who paid between ${intent.from} and ${intent.to}; I can't confirm whether any came from the requested payer.`
+          : `A deposit's bank payer field and statement sender are not the same spelling, so I can't confirm a complete income total or absence.`;
         answer += `${answer ? "\n" : ""}${detail}`;
-        const exactMatches = matched.filter(row => payers.get(row.id)?.state !== 'assumed').length;
+        const exactMatches = matched.filter(row => payers.get(row.id)?.state !== 'assumed' && !selection.conflictRows?.has(row.id)).length;
         answer += `\nFound ${exactMatches} exact matches; ${unattributed.length} deposits I couldn't attribute.`;
         if (payerCandidates.length) answer += `\nThe description has ambiguous payer readings: ${payerCandidates.join('; ')}. I can't confirm which reading applies.`;
         for (const candidate of uncertainCandidates) answer += `\nUnattributed deposit: ${money(candidate.amount_minor)} posted ${candidate.posted_on}; ${candidate.field === 'bank_payee' ? "bank's payer field" : 'statement description'}: ${candidate.label}; uncertain because ${candidate.reason} [${candidate.citation}].`;

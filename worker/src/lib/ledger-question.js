@@ -202,8 +202,10 @@ const ARRIVAL = payerQuestionGrammar.arrivals.join("|");
 const paymentAmount = /(?:\$|\busd\s+)\d[\d,]*(?:\.\d+)?|\b\d[\d,]*(?:\.\d+)?\s+dollars?\b/g;
 const nounExternalAmount = new RegExp(`'s +(?:${paymentAmount.source})$`);
 // One date or period may sit between the possessive and "payment" ("Payer
-// One's September 2026 payment"); the 's still belongs to the noun grammar.
-const possessiveDate = `(?:\\d{4}-\\d{2}-\\d{2}|\\d{1,2}/\\d{1,2}/\\d{4}|q[1-4](?: +\\d{4})?|(?:${MONTHS.join('|')})(?: +\\d{1,2}(?:st|nd|rd|th)?)?(?:,? +\\d{4})?)`;
+// One's September 2026 payment", "Payer One's last month payment"); the 's
+// still belongs to the noun grammar. The relative forms are exactly the ones
+// questionPeriod consumes as the window.
+const possessiveDate = `(?:\\d{4}-\\d{2}-\\d{2}|\\d{1,2}/\\d{1,2}/\\d{4}|q[1-4](?: +\\d{4})?|(?:${MONTHS.join('|')})(?: +\\d{1,2}(?:st|nd|rd|th)?)?(?:,? +\\d{4})?|recent|(?:last|this) +month|last +\\d+ +days|so far this year|\\d{4} so far)`;
 const nounPossessive = new RegExp(`^((?:did|has|have) +.*?)'s(?= +(?:${possessiveDate} +)?payment +(?:${ARRIVAL}|from|via|of)\\b)`);
 function stripNounPossessive(text) {
   // Amount and possessive are one noun-payment grammar. Remove the amount
@@ -427,7 +429,12 @@ export function payerMentionsCoverQuestion(intent, mentions) {
 // plain grammar refuses two periods; admitting "payer one in september 2026
 // and" as a name would let the second period alone scope the question.
 // A bare month inside a name ("October Ventures") is not such a clause.
-const labelPeriodClause = new RegExp(`\\b(?:in|during|for|over|between|before|after) +(?:the +)?(?:${MONTHS.join('|')}|q[1-4]|last|this|so far|recent|\\d{4} so far)\\b`);
+// Nor does it contain a complete period expression without a connector
+// ("payer one september 2026 and"): a month with its year, a dated quarter or
+// a relative period is never name text, so it cannot be stuffed into a label
+// while a second period scopes the question.
+const labelPeriodClause = new RegExp(`\\b(?:in|during|for|over|between|before|after) +(?:the +)?(?:${MONTHS.join('|')}|q[1-4]|last|this|so far|recent|\\d{4} so far)\\b|` +
+  `\\b(?:(?:${MONTHS.join('|')}) +(?:of +)?\\d{4}|q[1-4] +\\d{4}|last +\\d+ +days|(?:last|this) +month|so far this year|\\d{4} so far)\\b`);
 
 // Protect a whole selector BEFORE the intent grammar removes periods, account
 // words or punctuation. Reusing that grammar with an opaque slot keeps every

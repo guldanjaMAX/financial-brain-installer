@@ -484,10 +484,11 @@ function attributeRow(row, registry, statementCache, budget) {
   // discarded with its parse. So 'incomplete' lets the payee stand only when
   // no field start carries a sender label at all. So does a description that
   // is exactly the payee, optionally after one sender label: it cannot name
-  // anyone else.
+  // anyone else. A NUL-flagged description is never that: a truncating
+  // driver may have returned only the visible prefix, and the tail is unread.
   const refusal = statement.evidence.parser?.refusal;
   if (refusal && (refusal !== 'incomplete' || senderLabelPresent(row.description)) &&
-      !descriptionIsPayee(row.description, row.payee)) {
+      (row.description_has_nul || !descriptionIsPayee(row.description, row.payee))) {
     const result = decision([], 'payee');
     result.state = 'unknown'; result.entity_slug = null; result.reading = null;
     result.evidence.ambiguous = false;

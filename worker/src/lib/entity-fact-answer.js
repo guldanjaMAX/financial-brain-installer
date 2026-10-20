@@ -49,7 +49,12 @@ function unsafeScalarFact(value) {
   const normalized = value.normalize('NFKC');
   if (!/^(?:\p{L}\p{M}*|[0-9 .,'&/#()\-])+$/u.test(normalized) ||
       [...value].some(char => /\p{N}/u.test(char) && !/^[0-9]$/.test(char))) return true;
-  if (/[0-9]{6}/.test(normalized.replace(/[^\p{L}0-9]/gu, ''))) return true;
+  // A blank (default-ignorable) letter such as a Hangul filler can hide the
+  // join between digit groups; refuse it outright, as the ledger parser does.
+  if (/\p{Default_Ignorable_Code_Point}/u.test(value) || /\p{Default_Ignorable_Code_Point}/u.test(normalized)) return true;
+  // Modifier letters (tatweel, modifier apostrophe) read as separators, so
+  // they join adjacent digit groups exactly like ASCII punctuation does.
+  if (/[0-9]{6}/.test(normalized.replace(/[^\p{L}0-9]|\p{Lm}/gu, ''))) return true;
   // NFKC precedes default casefold;
   // dotless i stays distinct, Cherokee folds to uppercase, and sharp s expands.
   const folded = [...normalized].map(char => char === '\u0131' ? char
