@@ -56,7 +56,9 @@ export function driveFailureText(error) {
  * Remove stored families now, in batches of 50, and return the counts.
  *
  * Each batch is previewed (which resolves split parts and drops anything not
- * stored) and then applied with the preview's marker. `dryRun` previews only.
+ * stored), applied with the preview's marker, then previewed again to prove
+ * nothing is left. `dryRun` previews only. Gmail and Calendar use this same
+ * path for a trashed, spam, deleted or cancelled item.
  */
 export async function removeDriveFamilies({
   families,
@@ -93,6 +95,14 @@ export async function removeDriveFamilies({
         marker = out.marker;
         removed += out.documents;
       }
+      // Read the batch back. A family still present was not removed, so the
+      // caller keeps its cursor and the next run tries again.
+      if (preview.targets.length) {
+        const after = await send({ action: "preview", families: group });
+        if (!Array.isArray(after?.targets) || after.targets.length) {
+          throw new Error("Removal readback found remaining targets; the cursor was not advanced. Run again to finish.");
+        }
+      }
     }
     if (families.length > 50) {
       onProgress(`  removal: ${Math.min(index + 50, families.length)} of ${families.length} file(s) checked, ` +
@@ -108,6 +118,11 @@ export async function removeDriveFamilies({
  * target only when Google says it is trashed or not found, or when it is
  * visible and its parents are outside every walked folder. Anything else,
  * including access denied and transient errors, is kept.
+ *
+ * A stored file the walk did see is also a target when the current settings
+ * exclude it (`exclusionOf`) or the current credential scanner refuses it
+ * (`credentialRefused`). These are the scope changes the daily run never
+ * removes in bulk; this one command is where they are cleaned up.
  */
 export async function findDriveCleanupTargets({
   drive,
@@ -116,19 +131,30 @@ export async function findDriveCleanupTargets({
   rootFolderIds,
   includeMyDriveRootFiles = false,
   sourceName = "drive",
+  exclusionOf = () => null,
+  credentialRefused = async () => false,
   onProgress = (line) => console.log(line),
 }) {
-  const walked = new Set();
+  const walked = new Map();
   const folders = new Set(rootFolderIds);
   for await (const file of drive.listRootedFiles(getToken, { rootFolderIds, includeMyDriveRootFiles })) {
-    walked.add(String(file.id));
+    walked.set(String(file.id), file);
     if (file.mimeType === drive.FOLDER_MIME) folders.add(String(file.id));
   }
-  const fileIds = [...new Set([...stored].map((uid) => driveFileIdOf(uid, sourceName)).filter(Boolean))]
-    .filter((id) => !walked.has(id)).sort();
-  const counts = { stored: stored.size, in_roots: 0, gone: 0, outside_roots: 0, kept: 0 };
-  counts.in_roots = [...new Set([...stored].map((uid) => driveFileIdOf(uid, sourceName)).filter(Boolean))]
-    .filter((id) => walked.has(id)).length;
+  const folderIndex = drive.updateFolderIndex([...walked.values()]);
+  const storedIds = [...new Set([...stored].map((uid) => driveFileIdOf(uid, sourceName)).filter(Boolean))].sort();
+  const fileIds = storedIds.filter((id) => !walked.has(id));
+  const counts = { stored: stored.size, in_roots: 0, gone: 0, outside_roots: 0, excluded: 0, credential_refused: 0, kept: 0 };
+  const excluded = [];
+  const refused = [];
+  for (const id of storedIds.filter((entry) => walked.has(entry))) {
+    const file = walked.get(id);
+    if (exclusionOf(file, folderIndex)) excluded.push(`${sourceName}:${id}`);
+    else if (await credentialRefused(file, folderIndex)) refused.push(`${sourceName}:${id}`);
+    else counts.in_roots++;
+  }
+  counts.excluded = excluded.length;
+  counts.credential_refused = refused.length;
   const gone = [];
   const outside = [];
   let checked = 0;
@@ -147,5 +173,5 @@ export async function findDriveCleanupTargets({
   }
   counts.gone = gone.length;
   counts.outside_roots = outside.length;
-  return { gone, outside, counts };
+  return { gone, outside, excluded, refused, counts };
 }

@@ -644,11 +644,14 @@ if (process.platform !== "win32") {
 }
 
 {
-  const result = runApprovedCase("deleted");
+  // Packet 10 addendum: a message deleted at the source loses its document in
+  // the same run, with no saved plan and no separate apply.
+  const result = runCase("deleted");
   try {
-    check("a typed Gmail deletion removes the prior family and advances only after readback",
+    check("a typed Gmail deletion removes the prior family in one run and advances only after readback",
       result.code === 0 && result.evidence.forget_targets.join(",") === "gmail:gone" &&
-      !Object.hasOwn(result.state.done, "gmail:gone") &&
+      !Object.hasOwn(result.state.done, "gmail:gone") && result.state.ingest_removal_plan === undefined &&
+      !/--apply-removals/.test(result.output) &&
       result.state.history_id === "history-current" && result.evidence.final_receipt?.status === "ready",
       `${result.output.slice(-1_200)}\n${JSON.stringify(result.state)}\n${JSON.stringify(result.evidence)}`);
   } finally { rmSync(result.directory, { recursive: true, force: true }); }
@@ -718,16 +721,16 @@ if (process.platform !== "win32") {
 }
 
 {
-  const result = runApprovedCase("readback-stale");
+  const result = runCase("readback-stale");
   try {
     check("a success-shaped Gmail deletion cannot advance past a family still present on readback",
       result.code === 1 && result.evidence.forget_targets.join(",") === "gmail:gone" &&
       result.state.history_id === "history-prior" &&
-      result.state.ingest_removal_plan.targets.includes("gmail:gone") &&
+      result.state.ingest_removal_plan === undefined &&
       result.evidence.final_receipt?.status === "error" &&
       /Removal readback found remaining targets/i.test(result.output),
       `${result.output.slice(-1_200)}\n${JSON.stringify(result.state)}\n${JSON.stringify(result.evidence)}`);
-    const retry = runApprovedCase("readback-stale", { directory: result.directory });
+    const retry = runCase("readback-stale", { directory: result.directory });
     check("a transient readback failure does not turn the same typed Gmail deletion into a manual-review wedge",
       retry.code === 1 && retry.state.history_id === "history-prior" &&
       retry.evidence.forget_targets.filter((uid) => uid === "gmail:gone").length === 2 &&

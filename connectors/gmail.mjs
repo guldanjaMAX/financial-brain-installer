@@ -125,6 +125,9 @@ export function gmailLabelDecision(labelIds, { since = null, internalDate = null
     return {
       allowed: false,
       policy: true,
+      // Trash and Spam are the owner's own per-message action at the source,
+      // not a scope rule, so the caller removes the stored copy right away.
+      trashed: ["TRASH", "SPAM"].includes(String(excluded).toUpperCase()),
       cursor_blocking: false,
       reason: `Gmail policy excludes messages carrying ${String(excluded).toLowerCase()}`,
     };
@@ -388,6 +391,7 @@ export async function messagePolicy(getAccessToken, id, opts = {}) {
     allowed: false,
     skip: { path: id, id, reason: decision.reason },
     policy_skip: decision.policy,
+    source_trashed: decision.trashed === true,
     retain_existing: !decision.policy,
     cursor_blocking: decision.cursor_blocking,
   };
@@ -427,6 +431,7 @@ export async function toEnvelope(
     return {
       skip: { path: id, id, reason: labelDecision.reason },
       policy_skip: labelDecision.policy,
+      source_trashed: labelDecision.trashed === true,
       // An absent classification is an incomplete read, not deletion proof.
       // Keep a prior accepted revision while the run stays visibly non-green.
       retain_existing: !labelDecision.policy,

@@ -178,7 +178,7 @@ for (const fault of ["incomplete", "repeat"]) test(`root-only ${fault} listing r
   assert.deepEqual(yielded, []);
 });
 
-async function runCommand(t, { enabled, omitLoose = false, preview = false, rootOnly = false, excludeLoose = false, connector = drive }) {
+async function runCommand(t, { enabled, omitLoose = false, preview = false, rootOnly = false, excludeLoose = false, cleanup = false, connector = drive }) {
   const directory = realpathSync.native(mkdtempSync(join(tmpdir(), "drive-root-files-")));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const manifestPath = join(directory, "manifest.json");
@@ -233,35 +233,48 @@ async function runCommand(t, { enabled, omitLoose = false, preview = false, root
   let result, error;
   const log = console.log;
   console.log = () => {};
-  try { result = await cmdIngestRemote(manifest, manifestPath, { from: "drive", ...(preview ? { "dry-run": true, json: true } : {}) }, options); }
+  try {
+    result = await cmdIngestRemote(manifest, manifestPath, { from: "drive",
+      ...(preview ? { "dry-run": true, json: true } : {}), ...(cleanup ? { cleanup: true } : {}) }, options);
+  }
   catch (caught) { error = caught; }
   finally { console.log = log; }
   return { result, error, state, inventoryReads, sent, calls: f.calls, store, credentialReads };
 }
 
-for (const enabled of [true, false]) test(`real ingest removal plan ${enabled ? "keeps" : "removes"} loose files with flag ${enabled}`, async (t) => {
-  const result = await runCommand(t, { enabled });
-  assert.ok(result.inventoryReads > 0);
-  assert.equal(result.error?.code, "SAFETY_REVIEW_REQUIRED", result.error?.message);
-  assert.deepEqual(result.state.ingest_removal_plan.targets, enabled ? ["drive:outside"] : ["drive:loose", "drive:outside"]);
-  assert.equal(result.store.calls.apply, 0);
-  assert.ok(result.sent.some((entry) => entry.source_id === "rooted"), "the green control was ingested");
-  if (enabled) assert.equal(result.sent.find((entry) => entry.source_id === "loose").metadata.top_folder, null);
-  else assert.equal(result.calls.some((call) => call.query?.startsWith("'root' in parents")), false);
+// Packet 10: the daily first pass is add-only; the one-time --cleanup is where
+// stored files outside the current scope are removed.
+for (const enabled of [true, false]) test(`daily first pass is add-only and cleanup ${enabled ? "keeps" : "removes"} loose files with flag ${enabled}`, async (t) => {
+  const daily = await runCommand(t, { enabled });
+  assert.equal(daily.error, undefined, daily.error?.message);
+  assert.ok(daily.inventoryReads > 0);
+  assert.equal(daily.store.calls.apply, 0, "the first pass never removes");
+  assert.deepEqual(daily.store.uids().filter((uid) => ["drive:loose", "drive:outside"].includes(uid)), ["drive:loose", "drive:outside"]);
+  assert.equal(daily.state.ingest_removal_plan, undefined);
+  assert.ok(daily.sent.some((entry) => entry.source_id === "rooted"), "the green control was ingested");
+  if (enabled) assert.equal(daily.sent.find((entry) => entry.source_id === "loose").metadata.top_folder, null);
+  else assert.equal(daily.calls.some((call) => call.query?.startsWith("'root' in parents")), false);
+
+  const cleanup = await runCommand(t, { enabled, cleanup: true });
+  assert.equal(cleanup.error, undefined, cleanup.error?.message);
+  assert.deepEqual(cleanup.store.uids(), enabled ? ["drive:loose"] : []);
+  assert.equal(cleanup.result.outside_roots, enabled ? 1 : 2);
 });
 
-test("an omitted visible root file is protected by current parent scope", async (t) => {
-  const result = await runCommand(t, { enabled: true, omitLoose: true });
+test("cleanup keeps an omitted root file that Google still places in scope", async (t) => {
+  const result = await runCommand(t, { enabled: true, omitLoose: true, cleanup: true });
+  assert.equal(result.error, undefined, result.error?.message);
   assert.ok(result.calls.some((call) => call.id === "loose" && !call.media), "absence metadata decision was reached");
-  assert.deepEqual(result.state.ingest_removal_plan.targets, ["drive:outside"]);
-  assert.equal(result.store.calls.apply, 0);
+  assert.deepEqual(result.store.uids(), ["drive:loose"]);
+  assert.equal(result.result.kept, 1);
 });
 
-test("an explicit exclusion still plans removal of a stored loose file", async (t) => {
-  const result = await runCommand(t, { enabled: true, excludeLoose: true });
+test("cleanup removes a stored loose file the current settings exclude", async (t) => {
+  const result = await runCommand(t, { enabled: true, excludeLoose: true, cleanup: true });
+  assert.equal(result.error, undefined, result.error?.message);
   assert.ok(result.calls.some((call) => call.query?.startsWith("'root' in parents")));
-  assert.deepEqual(result.state.ingest_removal_plan.targets, ["drive:loose", "drive:outside"]);
-  assert.equal(result.store.calls.apply, 0);
+  assert.equal(result.result.excluded, 1);
+  assert.deepEqual(result.store.uids(), []);
 });
 
 test("real assistant preview supports only loose files with zero recursive roots", async (t) => {
@@ -300,13 +313,12 @@ test("mutation controls catch missing root listing, folder scope leakage, and lo
   const leakFolder = await loadMutant('if (shallow && file.mimeType === FOLDER_MIME) continue;', '/* mutation: admit unselected folders */');
   await assert.rejects(() => assertListing(leakFolder), /unselected folder leaked into scope/);
   const assertProtection = async (connector) => {
-    const result = await runCommand(t, { enabled: true, omitLoose: true, connector });
+    const result = await runCommand(t, { enabled: true, omitLoose: true, cleanup: true, connector });
     assert.ok(result.calls.some((call) => call.id === "loose" && !call.media));
-    assert.ok(result.state.ingest_removal_plan.targets.includes("drive:outside"), "nonempty removal control");
-    assert.equal(result.state.ingest_removal_plan.targets.includes("drive:loose"), false, "lost root absence protection");
+    assert.equal(result.store.uids().includes("drive:outside"), false, "nonempty removal control");
+    assert.equal(result.store.uids().includes("drive:loose"), true, "lost root absence protection");
   };
   await assertProtection(drive);
-  const noRootIndex = await loadMutant('if (file?.mimeType !== FOLDER_MIME || !file.id) continue;',
-    'if (file?.mimeType !== FOLDER_MIME || !file.id || file.scope_my_drive_root === true) continue;');
-  await assert.rejects(() => assertProtection(noRootIndex), /lost root absence protection/);
+  const noScopeCheck = await loadMutant('if (parents.some((parent) => scopedFolderIds.has(parent))) {', 'if (false) {');
+  await assert.rejects(() => assertProtection(noScopeCheck), /lost root absence protection/);
 });

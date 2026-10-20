@@ -106,17 +106,16 @@ const commonOptions = () => ({
   applyDriveRemovals: async ({ uids }) => { fakeRemovals.push(uids); return { applied: uids.length, pending: 0 }; },
 });
 
-async function reviewThenResume(manifest, path, flags, options) {
+// Packet 10 addendum: a cancelled event loses its stored document in the same
+// run, with no saved plan and no separate --apply-removals step.
+async function removeInOneRun(manifest, path, flags, options) {
   const statePath = join(dirname(path), `.brain-ingest-${flags.source || "calendar"}.json`);
-  await assert.rejects(cmdIngestCalendar(manifest, path, flags, options), { code: "SAFETY_REVIEW_REQUIRED" });
+  const result = await cmdIngestCalendar(manifest, path, flags, options);
+  assert.equal(result.removed, 1);
+  assert.equal(result.removalPending, 0);
   const state = JSON.parse(readFileSync(statePath, "utf8"));
-  assert.ok(state.ingest_removal_plan.targets.length > 0);
-  assert.equal(state.primary?.sync_token, undefined);
-  const applied = await cmdIngestCalendar(manifest, path, {
-    source: flags.source || "calendar", "apply-removals": state.ingest_removal_plan.fingerprint,
-  }, options);
-  assert.equal(applied.removed, 1);
-  return cmdIngestCalendar(manifest, path, flags, options);
+  assert.equal(state.ingest_removal_plan, undefined, "no removal plan is saved for a cancellation");
+  return result;
 }
 
 try {
@@ -156,7 +155,7 @@ try {
       ],
     });
     const sentEnvelopes = [];
-    const result = await reviewThenResume(
+    const result = await removeInOneRun(
       { infrastructure: { cloudflare: {} } }, manifestPath, {},
       {
         ...commonOptions(),
@@ -183,20 +182,18 @@ try {
     check("the cancelled event was forwarded to removal, not upsert",
       fakeRemovals.length === 1 && fakeRemovals[0][0] === "calendar:gcal:primary:evt_old_002",
       JSON.stringify(fakeRemovals));
-    check("review and resumed runs each post indexing and final receipts",
-      fakeReceipts.length === 4 && fakeReceipts[1].receipt.status === "error" && fakeReceipts[3].receipt.status === "ready",
+    check("one run posts an indexing and a ready receipt, with no review stop",
+      fakeReceipts.length === 2 && fakeReceipts[0].receipt.status === "indexing" && fakeReceipts[1].receipt.status === "ready",
       JSON.stringify(fakeReceipts.map((r) => r.receipt.status)));
-    check("the review receipt reports accepted additions and pending removal",
-      fakeReceipts[1].receipt.docs_added === 1 && /1 removal\(s\) pending/.test(fakeReceipts[1].receipt.detail),
+    check("the receipt reports the accepted addition and the removal, with nothing pending",
+      fakeReceipts[1].receipt.docs_added === 1 && /1 removed, 0 removal\(s\) pending/.test(fakeReceipts[1].receipt.detail),
       JSON.stringify(fakeReceipts[1].receipt));
-    check("a review stop preserves traversal evidence without claiming complete history",
+    check("a full traversal with its cancellation removed proves the configured history",
       fakeReceipts[1].receipt.walk_complete === true &&
-      fakeReceipts[1].receipt.complete_sweep === false &&
+      fakeReceipts[1].receipt.complete_sweep === true &&
       fakeReceipts[1].receipt.files_seen === 2 &&
       fakeReceipts[1].receipt.docs_refused === 0 &&
-      fakeReceipts[1].receipt.docs_failed === 0 &&
-      !("confirmed_range" in fakeReceipts[1].receipt) &&
-      fakeReceipts[3].receipt.complete_sweep === true,
+      fakeReceipts[1].receipt.docs_failed === 0,
       JSON.stringify(fakeReceipts[1].receipt));
     check("cmdIngestCalendar returns a real result object, not undefined",
       result && result.result && result.sent && typeof result.removed === "number");
@@ -255,7 +252,7 @@ try {
     const sentEnvelopes = [];
     const removalsBefore = fakeRemovals.length;
     const receiptsBefore = fakeReceipts.length;
-    await reviewThenResume(
+    await removeInOneRun(
       { infrastructure: { cloudflare: {} } }, customManifest, { source: "client-calendar" },
       {
         ...commonOptions(),
@@ -276,7 +273,7 @@ try {
       fakeRemovals[removalsBefore]?.[0] === "client-calendar:gcal:primary:evt_old_002",
       JSON.stringify(fakeRemovals.slice(removalsBefore)));
     check("a custom Calendar source names its lifecycle receipts",
-      fakeReceipts.slice(receiptsBefore).length === 4 &&
+      fakeReceipts.slice(receiptsBefore).length === 2 &&
         fakeReceipts.slice(receiptsBefore).every((entry) => entry.receipt.source === "client-calendar"),
       JSON.stringify(fakeReceipts.slice(receiptsBefore).map((entry) => entry.receipt.source)));
     check("a custom Calendar source gets its own resume state",
@@ -394,6 +391,8 @@ try {
     const impl = fakeGoogle({
       calendar: [{ status: 200, body: { nextSyncToken: "TOK_PENDING_DELETE", items: [EVENT_CANCELLED] } }],
     });
+    // The Worker refuses the removal (a 503 after its own retries). Nothing
+    // asks for review; the cancellation stays pending for the next run.
     await assert.rejects(cmdIngestCalendar(
       { infrastructure: { cloudflare: {} } }, cleanupManifest, {},
       {
@@ -402,6 +401,7 @@ try {
           store.put("calendar:gcal:primary:evt_old_002");
           return new Set(store.uids().filter((uid) => uid.startsWith("calendar:")));
         },
+        removalPlanRequest: async () => { throw new Error("Authenticated removal request failed. HTTP 503."); },
         getAccessToken: provider(impl).get,
         fetchImpl: impl,
         googleCalendar: {
@@ -409,10 +409,10 @@ try {
           ingestEnvelopes: async () => ({ created: 0, updated: 0, unchanged: 0, refused: [], errors: [], total: 0 }),
         },
       },
-    ), { code: "SAFETY_REVIEW_REQUIRED" });
-    const pending = JSON.parse(readFileSync(join(cleanupDir, ".brain-ingest-calendar.json"), "utf8"));
+    ), /HTTP 503/);
     check("a pending Calendar cancellation withholds the sync state",
-      pending.primary?.sync_token === undefined && pending.ingest_removal_plan.targets.length === 1);
+      !existsSync(join(cleanupDir, ".brain-ingest-calendar.json")) &&
+        store.uids().includes("calendar:gcal:primary:evt_old_002"));
     check("a pending Calendar cancellation marks the source receipt incomplete",
       fakeReceipts.at(-1)?.receipt.status === "error" && /remain pending/.test(fakeReceipts.at(-1)?.receipt.error || ""),
       JSON.stringify(fakeReceipts.at(-1)?.receipt));

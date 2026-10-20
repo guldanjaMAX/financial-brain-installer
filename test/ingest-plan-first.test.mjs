@@ -12,7 +12,9 @@ import { batchStream, splitOversized, prefetch, removedSinceLastRun } from "../i
 // are in-process doubles; an unexpected fetch must never leave this process.
 globalThis.fetch = async () => { throw new Error("unexpected network attempt"); };
 
-test("ordinary Drive ingest preserves additions and stops before a small removal", async () => {
+// Packet 10: the daily Drive first pass is add-only. A stored file the current
+// policy excludes is kept by that pass and removed by the one-time --cleanup.
+test("ordinary Drive ingest preserves additions, removes nothing, and --cleanup removes the excluded file", async () => {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "ingest-plan-")));
   const manifestPath = join(root, "manifest.json");
   const manifest = {
@@ -80,23 +82,22 @@ test("ordinary Drive ingest preserves additions and stops before a small removal
     let error;
     try { await cmdIngestRemote(manifest, manifestPath, { from: "drive" }, options); }
     catch (caught) { error = caught; }
+    assert.equal(error, undefined, error?.message);
     assert.ok(inventoryReads > 0, "authenticated inventory decision was reached");
-    assert.ok(sent.includes("added"), "accepted addition landed before the review boundary");
-    assert.equal(stored.size + forgotten.length, 21, "the nonempty one-of-twenty plan was exercised");
-    assert.deepEqual(forgotten, [], "ordinary ingest must not apply an under-threshold removal");
-    assert.equal(error?.code, "SAFETY_REVIEW_REQUIRED");
-    assert.equal(store.calls.apply, 0);
-    assert.deepEqual(state.ingest_removal_plan.targets, ["drive:item0"]);
+    assert.ok(sent.includes("added"), "accepted addition landed");
+    assert.deepEqual(forgotten, [], "the daily path never uses the legacy forget route");
+    assert.equal(store.calls.apply, 0, "the first pass is add-only");
+    assert.equal(state.ingest_removal_plan, undefined, "no removal plan is saved");
+    assert.ok(store.uids().includes("drive:item0"), "the excluded stored file is kept by the first pass");
     assert.ok(state.done["drive:added"]);
-    const result = await cmdApplyIngestRemovals(manifest, manifestPath, {
-      source: "drive", "apply-removals": state.ingest_removal_plan.fingerprint,
-    }, options);
+    assert.equal(state.sync_token, "next-cursor");
+    const result = await cmdIngestRemote(manifest, manifestPath, { from: "drive", cleanup: true }, options);
+    assert.equal(result.excluded, 1);
     assert.equal(result.removed, 1);
     assert.equal(store.calls.apply, 1);
     assert.equal(store.uids().length, 20);
     assert.equal(store.uids().includes("drive:item0"), false);
     assert.equal(store.uids().includes("drive:added"), true);
-    assert.equal(state.sync_token, undefined);
     store.db.close();
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -240,7 +241,9 @@ test("a changed scan with OCR off preserves its old family and accepts a neighbo
 });
 
 
-test("Calendar cancellation saves an addition but requires a separate exact apply", async () => {
+// Packet 10 addendum: a cancelled event is removed in the same run, through
+// the Worker's preview then apply route, with no saved plan to approve.
+test("Calendar cancellation saves an addition and removes the cancelled event in the same run", async () => {
   const store = ingestPlanStore();
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "ingest-calendar-plan-")));
   const path = join(root, "manifest.json");
@@ -273,24 +276,24 @@ test("Calendar cancellation saves an addition but requires a separate exact appl
     postSourceReceipt: async () => ({}),
   };
   try {
-    let stopped;
-    try { await cmdIngestCalendar(manifest, path, {}, options); } catch (error) { stopped = error; }
+    const result = await cmdIngestCalendar(manifest, path, {}, options);
     assert.equal(accepted, 1);
-    assert.equal(unreviewed, 0, "ordinary Calendar cancellation must not call forget");
-    assert.equal(stopped?.code, "SAFETY_REVIEW_REQUIRED");
-    assert.deepEqual(state.ingest_removal_plan.targets, ["calendar:item0"]);
-    assert.equal(state.primary.sync_token, "prior");
-    await cmdIngestCalendar(manifest, path, { source: "calendar", "apply-removals": state.ingest_removal_plan.fingerprint }, options);
+    assert.equal(unreviewed, 0, "Calendar cancellation must not call the legacy forget route");
+    assert.equal(result.removed, 1);
     assert.equal(store.calls.apply, 1);
+    assert.equal(state.ingest_removal_plan, undefined, "no removal plan is saved");
     assert.ok(store.uids().includes("calendar:added"));
     assert.equal(store.uids().includes("calendar:item0"), false);
-    assert.equal(state.primary.sync_token, "prior");
+    assert.equal(store.uids().length, 20, "the other stored events are untouched");
+    assert.equal(state.primary.sync_token, "next", "the cursor advances in the same run");
   } finally { store.db.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
 // Exercise the scanner migration through the real CLI orchestrators and real
 // Worker preview resolver. Provider data and storage are synthetic and local.
-for (const source of ["upload", "drive"]) {
+// Drive no longer holds its daily cursor for a refused stored row; the test
+// below asserts that --cleanup removes that row instead.
+for (const source of ["upload"]) {
   for (const unverified of [false, true]) {
     test(`${source} credential-refused stored row holds scanner and cursor (unverified=${unverified})`, async () => {
       const root = realpathSync.native(mkdtempSync(join(tmpdir(), "ingest-refused-plan-")));
@@ -395,4 +398,96 @@ for (const source of ["upload", "drive"]) {
       } finally { store.db.close(); rmSync(root, { recursive: true, force: true }); }
     });
   }
+}
+
+// Packet 10: the daily Drive pass is add-only, so a stored row the current
+// credential scanner refuses stays until the one-time --cleanup removes it.
+// Cleanup re-scans only rows the daily run recorded as refused.
+for (const unverified of [false, true]) {
+  test(`drive credential-refused stored row is kept by the daily pass and removed by --cleanup (unverified=${unverified})`, async () => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "ingest-refused-cleanup-")));
+    const manifestPath = join(root, "manifest.json");
+    const manifest = { brain: { domain: "fixture.invalid" },
+      corpora: { google_drive: { root_folder_ids: ["fixture-root"] } },
+      safety: { credential_scanner: { enabled: true }, ocr: { enabled: false } } };
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    const store = ingestPlanStore();
+    const files = [...Array.from({ length: 11 }, (_, i) => `item${i}.txt`), "secret.txt"];
+    const refusedUid = "drive:secret.txt";
+    for (const rel of files) store.put(`drive:${rel}`);
+    if (unverified) {
+      store.db.exec("INSERT INTO source_original_id_key_state (tenant_id, signing_salt) VALUES ('primary', lower(hex(randomblob(32))))");
+      store.db.prepare("UPDATE documents SET document_revision_id='rev-v1:' || lower(hex(randomblob(32))), source_original_binding_hash=? WHERE doc_uid=?")
+        .run("sha256:" + "ab".repeat(32), refusedUid);
+    }
+    const CURRENT = credentialScannerFingerprint(true);
+    let state = { version: 1,
+      done: Object.fromEntries(files.map((rel) => [`drive:${rel}`, "old-version"])),
+      skipped: {}, credential_scanner_fingerprint: "pre-upgrade-scanner-fingerprint", sync_token: "prior-cursor" };
+    const key = randomBytes(32).toString("hex");
+    const credential = ["sk", "a".repeat(32)].join("-");
+    let accepted = 0;
+    const envelope = (rel) => ({ source_type: "drive", source_id: rel, title: "Synthetic document",
+      content: rel === "secret.txt" ? `Synthetic scanner fixture ${credential}` : "Readable synthetic fixture content." });
+    const options = {
+      withSourceIngestLock: async (_input, run) => run({ assertOwned() {} }),
+      resolveBaseUrl: async () => "https://fixture.invalid", resolveAdminKey: () => key,
+      getAccessToken: async () => key,
+      removalPlanRequest: store.request, removalPlanRuntime: () => "fixture-runtime",
+      ingestLib: async () => ({ batchStream, splitOversized, prefetch, removedSinceLastRun,
+        loadState: () => state, saveState: (_path, next) => { state = structuredClone(next); } }),
+      drive: {
+        startPageToken: async () => "next-cursor",
+        listRootedFiles: async function* () {
+          for (const id of files) yield { id, name: id, mimeType: "text/plain", parents: ["fixture-root"] };
+        },
+        updateFolderIndex: () => ({}), folderPathFor: () => "fixture-folder",
+        exclusionReason: () => null, driveVersion: (file) => `new-${file.id}`,
+        toEnvelope: async (_token, file) => ({ version: `new-${file.id}`, envelope: envelope(file.id) }),
+      },
+      listStoredSourceFamilies: store.inventory,
+      sendBatches: async ({ groups, onResult }) => {
+        for (const item of groups.flat()) {
+          accepted++;
+          store.put(`drive:${item.envelope.source_id}`, item.envelope.metadata, "v2");
+          onResult(item, { status: "updated" });
+        }
+        return { updated: groups.flat().length };
+      },
+      applyDriveRemovals: async () => { throw new Error("the legacy forget route was reached"); },
+      reconcileDocumentFamilies: async () => { throw new Error("unreviewed reconciliation reached"); },
+      postSourceReceipt: async () => ({}), reportBacklog: async () => ({}),
+    };
+    const { log, warn } = console;
+    const lines = [];
+    console.log = console.warn = (...args) => lines.push(args.join(" "));
+    try {
+      await cmdIngestRemote(manifest, manifestPath, { from: "drive" }, options);
+      assert.equal(accepted, files.length - 1, "non-refused updates were saved");
+      assert.equal(store.calls.apply, 0, "the daily pass is add-only");
+      assert.ok(store.uids().includes(refusedUid), "the refused stored row is kept by the daily pass");
+      assert.match(String(state.skipped[refusedUid]), /^refused: carries /);
+      assert.equal(state.ingest_removal_plan, undefined);
+      assert.equal(state.credential_scanner_fingerprint, CURRENT);
+      assert.equal(state.sync_token, "next-cursor");
+
+      const result = await cmdIngestRemote(manifest, manifestPath, { from: "drive", cleanup: true }, options);
+      assert.equal(result.credential_refused, 1, "cleanup counts the credential-refused row");
+      if (unverified) {
+        assert.equal(result.removed, 0, "an unverified stored row is preserved by the Worker");
+        assert.equal(result.preserved, 1);
+        assert.ok(store.uids().includes(refusedUid));
+        assert.match(lines.join("\n"), /1 stored document\(s\) were kept/);
+      } else {
+        assert.equal(result.removed, 1);
+        assert.equal(store.uids().includes(refusedUid), false, "cleanup removes the credential-refused row");
+      }
+      assert.equal(store.uids().filter((uid) => uid !== refusedUid).length, 11, "the other rows stay");
+    } finally {
+      console.log = log;
+      console.warn = warn;
+      store.db.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 }

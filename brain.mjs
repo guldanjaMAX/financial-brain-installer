@@ -14688,26 +14688,32 @@ async function cmdIngestCalendarRun(
     assertOwned: assertLockOwned,
   });
 
-  const removed = 0;
+  // A cancelled or deleted event loses its one stored document right away:
+  // no plan, no fingerprint, no review stop. The Worker still takes its
+  // two-step preview then apply removal route.
+  let removed = 0;
   let removalPending = 0;
   let removalError = null;
   if (result.deletions.length && !sent.errors.length && !sent.refused.length) {
-    const uids = result.deletions.map((d) => `${sourceName}:${d.source_id}`);
-    // Calendar keeps per-calendar cursors. Preserve those exact prior tokens
-    // alongside the common removal checkpoint until separate apply completes.
-    state.done ||= {};
-    state.skipped ||= {};
-    const review = ingestRemovalReview(m, manifestPath, sourceName, state,
-      () => saveState(statePath, state), base, adminKey,
-      { ...options, removalSourceKind: "calendar" }, assertLockOwned);
+    const uids = [...new Set(result.deletions.map((d) => `${sourceName}:${d.source_id}`))];
     try {
       const storedFamilies = await listFamilies({ base, adminKey, source: sourceName, assertOwned: assertLockOwned });
-      await review.finish({ sourcePlan: buildDriveRemovalPlan({ storedFamilies, vanishedCandidates: uids }) });
+      const targets = uids.filter((uid) => storedFamilies.has(uid)).sort();
+      if (targets.length) {
+        const { removeDriveFamilies } = await import("./operations/drive-sync.mjs");
+        ({ removed } = await removeDriveFamilies({
+          families: targets.map((uid) => ({ base_doc_uid: uid, keep_doc_uids: [], family_kind: "structural" })),
+          base, adminKey, assertOwned: assertLockOwned, request: options.removalPlanRequest, onProgress: info,
+        }));
+      }
     } catch (error) {
       removalError = error;
       removalPending = uids.length;
     }
   }
+  // A plan saved by an older build's review stop no longer applies.
+  delete result.state.ingest_removal_plan;
+  delete result.state.ingest_pending_families;
 
   // Provider-level partial failure is tracked per calendar in result.state, so
   // successful sibling calendars may keep their progress. A document send,
@@ -16917,8 +16923,15 @@ export function gmailFailureEvidence(error, statePath, beforeState) {
  *
  * One-time cleanup for stored Drive documents the daily changes feed will
  * never mention again. It removes a stored document only when Google says the
- * file is trashed or not found, or when the file is visible and outside every
- * configured root. Anything else is kept. Removal runs in batches of 50.
+ * file is trashed or not found, when the file is visible and outside every
+ * configured root, when the current settings exclude it (exclusion paths,
+ * exclude_file_ids, name parts, private prefixes), or when the current
+ * credential scanner refuses it. Anything else is kept. Removal runs in
+ * batches of 50.
+ *
+ * The credential check re-reads only files the daily run already recorded as
+ * refused, then scans them again with the current scanner, so a one-time
+ * cleanup does not download the whole corpus.
  */
 export async function cmdDriveCleanup(m, manifestPath, flags, options = {}) {
   if (flags.cleanup !== true) die("--cleanup takes no value. Run it with --dry-run first to see the counts.");
@@ -16945,18 +16958,34 @@ export async function cmdDriveCleanup(m, manifestPath, flags, options = {}) {
     });
     const drive = options.drive ?? await import("./connectors/google-drive.mjs");
     const { findDriveCleanupTargets, removeDriveFamilies } = await import("./operations/drive-sync.mjs");
+    const lib = await (options.ingestLib ?? ingestLib)();
+    const priorState = lib.loadState(statePath);
+    const scannerOn = m.safety?.credential_scanner?.enabled !== false;
     const stored = await (options.listStoredSourceFamilies ?? listStoredSourceFamilies)({ base, adminKey, source: sourceName });
     info(`Drive cleanup${dry ? " (dry run)" : ""}: ${stored.size} stored Drive document(s); walking ` +
       `${sourcePolicy.rootFolderIds.length} root folder(s)${sourcePolicy.includeMyDriveRootFiles ? " plus direct My Drive files" : ""}`);
-    const { gone, outside, counts } = await findDriveCleanupTargets({
+    const { gone, outside, excluded, refused, counts } = await findDriveCleanupTargets({
       drive, getToken, stored, sourceName,
       rootFolderIds: sourcePolicy.rootFolderIds,
       includeMyDriveRootFiles: sourcePolicy.includeMyDriveRootFiles,
+      exclusionOf: (file, folders) => drive.exclusionReason(file, drive.folderPathFor(file, folders), sourcePolicy),
+      credentialRefused: async (file, folders) => {
+        if (!scannerOn || !/^refused: carries /.test(String(priorState.skipped?.[`${sourceName}:${file.id}`] || ""))) return false;
+        let read;
+        try {
+          read = await drive.toEnvelope(getToken, file, { sourceName, pathOf: (f) => drive.folderPathFor(f, folders), ocr: null });
+        } catch {
+          return false;
+        }
+        return Boolean(read?.envelope && credentialRefusalOf(sanitizeIngestEnvelope(read.envelope), true));
+      },
       onProgress: info,
     });
     info(`  ${counts.in_roots} under a root (kept); ${counts.gone} trashed or not found at Google; ` +
-      `${counts.outside_roots} outside every root; ${counts.kept} kept because Google did not confirm either`);
-    const targets = [...gone, ...outside].sort();
+      `${counts.outside_roots} outside every root; ${counts.excluded} excluded by the current settings; ` +
+      `${counts.credential_refused} refused by the credential scanner; ` +
+      `${counts.kept} kept because Google did not confirm either`);
+    const targets = [...gone, ...outside, ...excluded, ...refused].sort();
     const result = targets.length
       ? await removeDriveFamilies({
           families: targets.map((uid) => ({ base_doc_uid: uid, keep_doc_uids: [], family_kind: "structural" })),
@@ -16969,11 +16998,10 @@ export async function cmdDriveCleanup(m, manifestPath, flags, options = {}) {
       if (targets.length) info("Run the same command without --dry-run to remove them.");
     } else {
       if (targets.length) {
-        const lib = await (options.ingestLib ?? ingestLib)();
         const state = lib.loadState(statePath);
         for (const uid of targets) {
           delete state.done?.[uid];
-          delete state.skipped?.[uid];
+          if (!excluded.includes(uid) && !refused.includes(uid)) delete state.skipped?.[uid];
           if (state.removed) delete state.removed[uid];
         }
         assertLockOwned?.();
@@ -16981,7 +17009,10 @@ export async function cmdDriveCleanup(m, manifestPath, flags, options = {}) {
       }
       ok(`removed ${result.removed} stored Drive document(s) for ${targets.length} file(s)`);
     }
-    return { dry_run: dry, ...counts, would_remove: result.matched, removed: result.removed };
+    if (result.preserved) {
+      warn(`${result.preserved} stored document(s) were kept because the Brain could not verify they belong to those files`);
+    }
+    return { dry_run: dry, ...counts, would_remove: result.matched, removed: result.removed, preserved: result.preserved };
   };
   if (dry) return run();
   return runMutatingSourceIngest({
@@ -17825,6 +17856,24 @@ const cmdIngestRemoteRun = async (
     const deliberate = [];
     let nextSync = null;
     let changes = null;
+    // The folder index is saved only with the cursor. A run that holds its
+    // cursor back must replay the same window with the same prior index, or a
+    // folder that moved in would already look in-root and never be walked.
+    let folders = state.drive_folders || {};
+    if (incremental && sourcePolicy.includeMyDriveRootFiles && !state.drive_my_drive_root_id) {
+      // Older builds saved the My Drive root in the folder index with an empty
+      // name and no parents. Without its id a changed loose file would look
+      // outside the roots and be removed, so an unknown id forces one
+      // additive pass instead.
+      const candidates = Object.entries(folders)
+        .filter(([id, entry]) => entry?.name === "" && !(entry.parents || []).length && !roots.includes(id));
+      if (candidates.length === 1) state.drive_my_drive_root_id = candidates[0][0];
+      else {
+        info("the My Drive root id is not known yet, so this run reloads the roots once; nothing is removed on that pass");
+        incremental = false;
+        lane = "sweep";
+      }
+    }
     if (incremental) {
       try {
         changes = await drive.listChanges(getToken, state.sync_token);
@@ -17837,12 +17886,12 @@ const cmdIngestRemoteRun = async (
     }
     if (changes) {
       nextSync = changes.nextToken;
-      const priorFolders = state.drive_folders || {};
-      state.drive_folders = drive.updateFolderIndex(changes.changed, priorFolders);
-      const scope = (folders) => ({ rootFolderIds: roots, folders, myDriveRootId: state.drive_my_drive_root_id || null });
+      const priorFolders = folders;
+      folders = drive.updateFolderIndex(changes.changed, priorFolders);
+      const scope = (index) => ({ rootFolderIds: roots, folders: index, myDriveRootId: state.drive_my_drive_root_id || null });
       for (const id of changes.removed) gone.add(`${sourceName}:${id}`);
       for (const file of changes.changed) {
-        const inRoots = driveFileInRoots(file, scope(state.drive_folders));
+        const inRoots = driveFileInRoots(file, scope(folders));
         if (file.mimeType !== drive.FOLDER_MIME) {
           if (inRoots) byId.set(String(file.id), file);
           else gone.add(`${sourceName}:${file.id}`);
@@ -17853,7 +17902,7 @@ const cmdIngestRemoteRun = async (
           }
         }
       }
-      state.drive_folders = drive.updateFolderIndex([...byId.values()], state.drive_folders);
+      folders = drive.updateFolderIndex([...byId.values()], folders);
       for (const id of byId.keys()) gone.delete(`${sourceName}:${id}`);
       info(`incremental Drive sync: ${byId.size} changed file(s) under the roots, ${gone.size} removal candidate(s)`);
     } else {
@@ -17872,10 +17921,10 @@ const cmdIngestRemoteRun = async (
         if (file.scope_my_drive_root === true) state.drive_my_drive_root_id = String(file.id);
         if (byId.size >= limit) break;
       }
-      state.drive_folders = drive.updateFolderIndex([...byId.values()], {});
+      folders = drive.updateFolderIndex([...byId.values()], {});
     }
 
-    const pathOf = (file) => drive.folderPathFor(file, state.drive_folders);
+    const pathOf = (file) => drive.folderPathFor(file, folders);
     // The additive pass reloads anything missing from the Brain, so it checks
     // the stored inventory once. The incremental path trusts local state.
     const storedBefore = !dry && !incremental
@@ -17986,8 +18035,10 @@ const cmdIngestRemoteRun = async (
         info(`removed ${removal.removed} stored Drive document(s) for ${targets.length} trashed, deleted, moved-out or excluded file(s)`);
       }
     }
-    // A re-split document can leave stale #part siblings. Remove them now
-    // rather than holding them for an approval.
+    // A reloaded file can leave stale members of its own family, such as an
+    // old whole document or #part siblings from an earlier split. Remove them
+    // now rather than holding them for an approval. This is the only removal
+    // the additive pass makes: it never touches another file's documents.
     const replaced = Object.values(state.ingest_pending_families || {})
       .filter((entry) => state.done?.[entry.stateKey] === entry.hash && !state.skipped?.[entry.stateKey])
       .map((entry) => entry.family);
@@ -18005,7 +18056,11 @@ const cmdIngestRemoteRun = async (
     pendingCursor = {
       key: "sync_token",
       value: nextSync,
-      statePatch: { drive_policy_fingerprint: policyFingerprint, credential_scanner_fingerprint: scannerFingerprint },
+      statePatch: {
+        drive_policy_fingerprint: policyFingerprint,
+        credential_scanner_fingerprint: scannerFingerprint,
+        drive_folders: folders,
+      },
       deleteKeysOnScannerCommit: [],
     };
   } else if (which === "drive") {
@@ -18732,10 +18787,12 @@ const cmdIngestRemoteRun = async (
           ? storedBeforeSweep.has(key)
           : Object.prototype.hasOwnProperty.call(state.done || {}, key);
         state.skipped[key] = r.skip.reason;
-        if (r.policy_skip === true) {
+        if (r.policy_skip === true && r.source_trashed !== true) {
           policySkipped++;
           gmailPolicyUids.push(key);
-        } else if (r.source_deleted === true) {
+        } else if (r.source_deleted === true || r.source_trashed === true) {
+          // Trash, Spam or a permanent delete at the source is the owner's own
+          // per-message action. Its one document is removed below, at once.
           sourceResolvedSkipped++;
           gmailActiveUids.delete(key);
           gmailDeletedUids.push(key);
@@ -18872,6 +18929,20 @@ const cmdIngestRemoteRun = async (
         pendingGmailUids.length || intentionalRemovalUids.length;
       if (needsGmailInventory) {
         const storedGmailUids = new Set(storedBeforeSweep || []);
+        // A message moved to Trash or Spam, or deleted, loses its one stored
+        // document right away: no plan, no fingerprint, no review stop. The
+        // review gate below stays for bulk removals nobody made item by item.
+        const sourceGoneUids = [...new Set(gmailDeletedUids)]
+          .filter((uid) => storedGmailUids.has(uid) && !gmailActiveUids.has(uid)).sort();
+        if (sourceGoneUids.length) {
+          const { removeDriveFamilies } = await import("./operations/drive-sync.mjs");
+          const removal = await removeDriveFamilies({
+            families: sourceGoneUids.map((uid) => ({ base_doc_uid: uid, keep_doc_uids: [], family_kind: "structural" })),
+            base, adminKey, assertOwned: assertLockOwned, request: options.removalPlanRequest, onProgress: info,
+          });
+          for (const uid of sourceGoneUids) storedGmailUids.delete(uid);
+          info(`removed ${removal.removed} stored Gmail document(s) for ${sourceGoneUids.length} trashed, spam or deleted message(s)`);
+        }
         const currentRemovalCandidates = new Set([
           ...gmailPolicyUids,
           ...gmailDeletedUids,
@@ -18913,7 +18984,7 @@ const cmdIngestRemoteRun = async (
             ...intentionalRemovalUids,
           ],
         }, {
-          safetyBaselineCount: gmailRemovalSafetyCount ?? storedGmailUids.size,
+          safetyBaselineCount: Math.min(gmailRemovalSafetyCount ?? storedGmailUids.size, storedGmailUids.size),
           ratioFloorCount: oneTypedRoutineRemoval ? 1 : 0,
           fingerprintContext: oneTypedRoutineRemoval ? "gmail-current-typed" : "gmail-strict",
         });
@@ -33277,7 +33348,9 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
   brain ingest takes --source <name>, --limit <n>, --dry-run, and --reset. It is
   resumable: re-run the same command to continue an interrupted load. Drive
   follows its changes feed and removes trashed, deleted or moved-out files at
-  once. Folder, Gmail, IMAP and provider removals always stop for a separate
+  once. A Gmail message moved to Trash or Spam or deleted, and a cancelled or
+  deleted Calendar event, also lose their document at once. Other folder,
+  Gmail, IMAP and provider removals stop for a separate
   --apply-removals command. Larger or protected plans also need the printed
   --approve-removals fingerprint. Accepted additions and updates are saved.
 
