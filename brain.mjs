@@ -16912,11 +16912,92 @@ export function gmailFailureEvidence(error, statePath, beforeState) {
   };
 }
 
+/**
+ * brain ingest <manifest> --from drive --cleanup [--dry-run]
+ *
+ * One-time cleanup for stored Drive documents the daily changes feed will
+ * never mention again. It removes a stored document only when Google says the
+ * file is trashed or not found, or when the file is visible and outside every
+ * configured root. Anything else is kept. Removal runs in batches of 50.
+ */
+export async function cmdDriveCleanup(m, manifestPath, flags, options = {}) {
+  if (flags.cleanup !== true) die("--cleanup takes no value. Run it with --dry-run first to see the counts.");
+  if (flags.limit || flags.reset || flags["approve-removals"] !== undefined) {
+    die("--cleanup cannot be combined with --limit, --reset or --approve-removals.");
+  }
+  const sourceName = assertSourceName(flags.source === true || !flags.source ? "drive" : flags.source);
+  const dry = !!flags["dry-run"];
+  let sourcePolicy;
+  try {
+    sourcePolicy = driveConnectorConfig(m, manifestPath);
+  } catch (error) {
+    die(error.message);
+  }
+  const statePath = canonicalSourceIngestStatePath({ manifestPath, sourceName });
+  const run = async (assertLockOwned = null) => {
+    const acct = m.brain?.domain ? null : await (options.resolveAccount ?? resolveAccount)(m);
+    const base = await (options.resolveBaseUrl ?? resolveBaseUrl)(m, acct);
+    const adminKey = (options.resolveAdminKey ?? resolveAdminKey)(manifestPath);
+    if (!adminKey) die("Drive cleanup needs this Brain's admin key to read what is stored.");
+    const getToken = options.getAccessToken ?? googleAuth("drive", {
+      storageOptions: options.googleStorageOptions,
+      loadStore: dry ? options.loadGoogleTokensReadOnly ?? loadTokensReadOnly : options.loadGoogleTokens ?? loadTokens,
+    });
+    const drive = options.drive ?? await import("./connectors/google-drive.mjs");
+    const { findDriveCleanupTargets, removeDriveFamilies } = await import("./operations/drive-sync.mjs");
+    const stored = await (options.listStoredSourceFamilies ?? listStoredSourceFamilies)({ base, adminKey, source: sourceName });
+    info(`Drive cleanup${dry ? " (dry run)" : ""}: ${stored.size} stored Drive document(s); walking ` +
+      `${sourcePolicy.rootFolderIds.length} root folder(s)${sourcePolicy.includeMyDriveRootFiles ? " plus direct My Drive files" : ""}`);
+    const { gone, outside, counts } = await findDriveCleanupTargets({
+      drive, getToken, stored, sourceName,
+      rootFolderIds: sourcePolicy.rootFolderIds,
+      includeMyDriveRootFiles: sourcePolicy.includeMyDriveRootFiles,
+      onProgress: info,
+    });
+    info(`  ${counts.in_roots} under a root (kept); ${counts.gone} trashed or not found at Google; ` +
+      `${counts.outside_roots} outside every root; ${counts.kept} kept because Google did not confirm either`);
+    const targets = [...gone, ...outside].sort();
+    const result = targets.length
+      ? await removeDriveFamilies({
+          families: targets.map((uid) => ({ base_doc_uid: uid, keep_doc_uids: [], family_kind: "structural" })),
+          base, adminKey, dryRun: dry, assertOwned: assertLockOwned,
+          request: options.removalPlanRequest, onProgress: info,
+        })
+      : { matched: 0, removed: 0, preserved: 0 };
+    if (dry) {
+      ok(`dry run: ${result.matched} stored document(s) for ${targets.length} file(s) would be removed. Nothing was removed.`);
+      if (targets.length) info("Run the same command without --dry-run to remove them.");
+    } else {
+      if (targets.length) {
+        const lib = await (options.ingestLib ?? ingestLib)();
+        const state = lib.loadState(statePath);
+        for (const uid of targets) {
+          delete state.done?.[uid];
+          delete state.skipped?.[uid];
+          if (state.removed) delete state.removed[uid];
+        }
+        assertLockOwned?.();
+        lib.saveState(statePath, state);
+      }
+      ok(`removed ${result.removed} stored Drive document(s) for ${targets.length} file(s)`);
+    }
+    return { dry_run: dry, ...counts, would_remove: result.matched, removed: result.removed };
+  };
+  if (dry) return run();
+  return runMutatingSourceIngest({
+    manifestPath, sourceName, statePath, sharedRecord: "provider:google", dryRun: false, options,
+  }, run);
+}
+
 export async function cmdIngestRemote(m, manifestPath, flags, options = {}) {
   if (flags["apply-removals"] !== undefined) return cmdApplyIngestRemovals(m, manifestPath, flags, options);
   const which = String(flags.from).toLowerCase();
   if (!["drive", "gmail", "imap"].includes(which)) {
     die(`--from ${which} is not a source. Available: drive, gmail, imap.`);
+  }
+  if (flags.cleanup !== undefined) {
+    if (which !== "drive") die("--cleanup is only valid with --from drive.");
+    return cmdDriveCleanup(m, manifestPath, flags, options);
   }
 
   const removalApproval = flags["approve-removals"];
@@ -17176,8 +17257,12 @@ const cmdIngestRemoteRun = async (
     });
     gmailPolicyChanged = state.gmail_policy_fingerprint !== policyFingerprint;
   }
+  // The daily Drive path stays on the changes feed while its token and policy
+  // are current. No periodic full re-walk; the bounded preview keeps its rule.
   let incremental = which === "drive"
-    ? driveDecision.incremental
+    ? (assistantJson
+      ? driveDecision.incremental
+      : !flags.reset && Boolean(state.sync_token) && state.drive_policy_fingerprint === policyFingerprint)
     : which === "imap"
       ? !flags.reset && !scannerPolicyChanged && !imapPolicyChanged && !!state.imap_folders
       : !flags.reset && !scannerPolicyChanged && !gmailPolicyChanged && Boolean(state.history_id);
@@ -17224,7 +17309,9 @@ const cmdIngestRemoteRun = async (
   let gmailPendingRemovalGaps = 0;
   let gmailOperationalFailure = null;
   let imapSnapshotGaps = 0;
-  const storedDriveRemovalReview = which === "drive" &&
+  // The daily Drive path has no removal review. Only the bounded preview still
+  // reaches the older review machinery below, so only it reads saved review state.
+  const storedDriveRemovalReview = which === "drive" && assistantJson &&
     state.drive_removal_review?.issue_code === "SAFETY_REVIEW_REQUIRED"
     ? state.drive_removal_review
     : null;
@@ -17626,6 +17713,9 @@ const cmdIngestRemoteRun = async (
             pacedChunks += result.chunks;
           }
         }
+        if (which === "drive" && result.status === "failed") {
+          warn(`  Drive file ${item.envelope?.source_id} was not loaded: ${String(result.error || "the Brain gave no reason").slice(0, 200)}`);
+        }
         if (!item.familyPlan) return;
         const key = item.familyPlan.stateKey;
         if (["created", "updated", "unchanged"].includes(result.status)) {
@@ -17718,7 +17808,207 @@ const cmdIngestRemoteRun = async (
     // delete a restored document or bypass a large-removal review.
   }
 
-  if (which === "drive") {
+  if (which === "drive" && !assistantJson) {
+    // The daily Drive path. The changes feed decides everything: a changed
+    // file under a root is loaded, a trashed, deleted or moved-out file loses
+    // its stored document at once. First run, --reset, an expired token or a
+    // changed policy save a start token and then make one additive pass that
+    // never removes. A file the connector cannot read keeps its stored copy.
+    const drive = options.drive ?? await import("./connectors/google-drive.mjs");
+    const { driveFileIdOf, driveFileInRoots, driveFailureText, removeDriveFamilies } =
+      await import("./operations/drive-sync.mjs");
+    delete state.drive_removal_review;
+    delete state.drive_removal_safety_baseline;
+    const roots = sourcePolicy.rootFolderIds;
+    const byId = new Map();
+    const gone = new Set();
+    const deliberate = [];
+    let nextSync = null;
+    let changes = null;
+    if (incremental) {
+      try {
+        changes = await drive.listChanges(getToken, state.sync_token);
+      } catch (error) {
+        if (error?.status !== 410) throw error;
+        warn("the saved Drive change token expired, so this run reloads the roots once; nothing is removed on that pass");
+        incremental = false;
+        lane = "sweep";
+      }
+    }
+    if (changes) {
+      nextSync = changes.nextToken;
+      const priorFolders = state.drive_folders || {};
+      state.drive_folders = drive.updateFolderIndex(changes.changed, priorFolders);
+      const scope = (folders) => ({ rootFolderIds: roots, folders, myDriveRootId: state.drive_my_drive_root_id || null });
+      for (const id of changes.removed) gone.add(`${sourceName}:${id}`);
+      for (const file of changes.changed) {
+        const inRoots = driveFileInRoots(file, scope(state.drive_folders));
+        if (file.mimeType !== drive.FOLDER_MIME) {
+          if (inRoots) byId.set(String(file.id), file);
+          else gone.add(`${sourceName}:${file.id}`);
+        } else if (inRoots && !(priorFolders[file.id] && driveFileInRoots(priorFolders[file.id], scope(priorFolders)))) {
+          // A folder moved in brings files that did not change themselves.
+          for await (const child of drive.listRootedFiles(getToken, { rootFolderIds: [String(file.id)] })) {
+            byId.set(String(child.id), child);
+          }
+        }
+      }
+      state.drive_folders = drive.updateFolderIndex([...byId.values()], state.drive_folders);
+      for (const id of byId.keys()) gone.delete(`${sourceName}:${id}`);
+      info(`incremental Drive sync: ${byId.size} changed file(s) under the roots, ${gone.size} removal candidate(s)`);
+    } else {
+      // Taken BEFORE the walk, so nothing that changes during it is missed.
+      try {
+        nextSync = await drive.startPageToken(getToken);
+      } catch (error) {
+        warn(`could not get a Drive change token, so the next run repeats this pass: ${driveFailureText(error)}`);
+      }
+      info(`loading ${roots.length} Drive root folder(s)${sourcePolicy.includeMyDriveRootFiles ? " plus direct My Drive files" : ""}; nothing is removed on this pass`);
+      for await (const file of drive.listRootedFiles(getToken, {
+        rootFolderIds: roots,
+        includeMyDriveRootFiles: sourcePolicy.includeMyDriveRootFiles,
+      })) {
+        byId.set(String(file.id), file);
+        if (file.scope_my_drive_root === true) state.drive_my_drive_root_id = String(file.id);
+        if (byId.size >= limit) break;
+      }
+      state.drive_folders = drive.updateFolderIndex([...byId.values()], {});
+    }
+
+    const pathOf = (file) => drive.folderPathFor(file, state.drive_folders);
+    // The additive pass reloads anything missing from the Brain, so it checks
+    // the stored inventory once. The incremental path trusts local state.
+    const storedBefore = !dry && !incremental
+      ? await listPreparedSourceFamilies({ base, adminKey, source: sourceName })
+      : null;
+    const progress = () => info(
+      `  Drive: ${scanned} file(s) checked; ${tally.created + tally.updated} loaded, ` +
+        `${unchanged} unchanged, ${skips.length} skipped, ${tally.failed} failed`
+    );
+    const prepareDrive = async (f) => {
+      if (f.mimeType === drive.FOLDER_MIME) return null;
+      scanned++;
+      if (scanned % 100 === 0) progress();
+      const key = `${sourceName}:${f.id}`;
+      const folder = pathOf(f);
+      const excluded = drive.exclusionReason(f, folder, sourcePolicy);
+      if (excluded) {
+        state.skipped[key] = excluded;
+        deliberate.push(key);
+        policySkipped++;
+        return { skip: { path: [folder, f.name].filter(Boolean).join("/") || f.name || f.id, id: f.id, reason: excluded } };
+      }
+      const listedVersion = drive.driveVersion(f, folder);
+      if ((storedBefore == null || storedBefore.has(key)) &&
+          (!scannerPolicyChanged || hasCredentialScannerProgress(state, scannerFingerprint, key, listedVersion)) &&
+          state.done[key] === listedVersion) {
+        recordAcceptedDocumentState(state, { stateKey: key, hash: listedVersion, skipKeys: [f.id], legacyPartRoot: f.id });
+        unchanged++;
+        return { unchanged: true };
+      }
+      const r = await drive.toEnvelope(getToken, f, { sourceName, pathOf, ocr: ocrCallback });
+      if (!r) return null;
+      if (r.skip) {
+        // Too large, unsupported or unreadable: the stored copy stays as it is.
+        state.skipped[key] = r.skip.reason;
+        if (r.skip.retryable === true && r.skip.code === "ocr_page_timeout") {
+          delete state.done[key];
+          scannerProgressCanCommit = false;
+          retryableOcrSkips++;
+        }
+        if (r.skip.code === "source_deleted") sourceResolvedSkipped++;
+        else if (["shortcut_not_followed", "non_text_media"].includes(r.skip.code)) adjudicatedSkipped++;
+        return { skip: r.skip };
+      }
+      const envelope = sanitizeIngestEnvelope(r.envelope);
+      const refusal = credentialRefusalOf(envelope, scannerOn);
+      if (refusal) {
+        state.skipped[key] = refusal.reason;
+        localRefused++;
+        deliberate.push(key);
+        return { skip: { path: safeIngestDisplay(envelope.title, f.name, f.id), id: f.id, reason: refusal.reason } };
+      }
+      const envelopes = splitOversized(envelope);
+      return {
+        hash: r.version, envelopes, rel: f.name, stateKey: key, deferState: true,
+        familyPlan: {
+          stateKey: key,
+          hash: r.version,
+          expectedParts: envelopes.length,
+          base_doc_uid: key,
+          keep_doc_uids: envelopes.map((part) => `${part.source_type}:${part.source_id}`),
+          family_kind: "structural",
+          skipKeys: [key, ...envelopes.map((part) => part.source_id)],
+          legacyPartRoot: f.id,
+          ocrPageRequestIds: Array.isArray(r.ocrPageRequestIds) ? [...r.ocrPageRequestIds] : [],
+        },
+      };
+    };
+    const isolatePreparationError = makeRemotePreparationErrorIsolator({
+      sourceLabel: "Drive", state, statePath, dryRun: dry, saveState, tally, skips,
+      assertOwned: assertLockOwned,
+      stateKeyOf: (file) => typeof file?.id === "string" ? `${sourceName}:${file.id}` : "",
+    });
+    for await (const group of batchStream([...byId.values()].slice(0, limit), prepareDrive, {
+      onSkip: (skip) => skips.push(skip),
+      onPrepareError: (error, file) => {
+        const handled = isolatePreparationError(error, file);
+        warn(`  Drive file ${file?.id} was not loaded: ${driveFailureText(error)}`);
+        return handled;
+      },
+    })) {
+      await consumeGroup(group);
+    }
+    if (scanned % 100 !== 0) progress();
+    else if (!scanned) info("  Drive: no changed files under the roots");
+
+    // Policy exclusions and credential refusals are deliberate removals, made
+    // only when the file itself changed. The additive pass never removes.
+    if (incremental) for (const uid of [...deliberate, ...intentionalRemovalUids]) gone.add(uid);
+    intentionalRemovalUids.length = 0;
+    if (gone.size && dry) {
+      info(`${gone.size} Drive file(s) were trashed, deleted, moved out of the roots or excluded; a real run removes any stored copy`);
+    } else if (gone.size) {
+      const stored = await listPreparedSourceFamilies({ base, adminKey, source: sourceName });
+      const storedIds = new Set([...stored].map((uid) => driveFileIdOf(uid, sourceName)));
+      const targets = [...gone].filter((uid) => storedIds.has(driveFileIdOf(uid, sourceName))).sort();
+      if (targets.length) {
+        const removal = await removeDriveFamilies({
+          families: targets.map((uid) => ({ base_doc_uid: uid, keep_doc_uids: [], family_kind: "structural" })),
+          base, adminKey, assertOwned: assertLockOwned, request: options.removalPlanRequest, onProgress: info,
+        });
+        for (const uid of targets) {
+          delete state.done[uid];
+          delete state.skipped[uid];
+          if (state.removed) delete state.removed[uid];
+        }
+        saveState(statePath, state);
+        info(`removed ${removal.removed} stored Drive document(s) for ${targets.length} trashed, deleted, moved-out or excluded file(s)`);
+      }
+    }
+    // A re-split document can leave stale #part siblings. Remove them now
+    // rather than holding them for an approval.
+    const replaced = Object.values(state.ingest_pending_families || {})
+      .filter((entry) => state.done?.[entry.stateKey] === entry.hash && !state.skipped?.[entry.stateKey])
+      .map((entry) => entry.family);
+    if (!dry && replaced.length) {
+      const stale = await removeDriveFamilies({
+        families: replaced, base, adminKey, assertOwned: assertLockOwned,
+        request: options.removalPlanRequest, onProgress: () => {},
+      });
+      if (stale.removed) info(`removed ${stale.removed} stale split part(s) of reloaded Drive file(s)`);
+    }
+    if (!dry) {
+      delete state.ingest_pending_families;
+      saveState(statePath, state);
+    }
+    pendingCursor = {
+      key: "sync_token",
+      value: nextSync,
+      statePatch: { drive_policy_fingerprint: policyFingerprint, credential_scanner_fingerprint: scannerFingerprint },
+      deleteKeysOnScannerCommit: [],
+    };
+  } else if (which === "drive") {
     const drive = options.drive ?? await import("./connectors/google-drive.mjs");
     const sourceDeletedUids = [];
     if (!assistantJson && !incremental && state.sync_token) info(`${driveDecision.reason}; using a full Drive comparison`);
@@ -32897,6 +33187,9 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain ingest     <manifest> --from drive  load from a connected remote source
                                            add --dry-run --json for one bounded,
                                            aggregate-only assistant preview
+    brain ingest     <manifest> --from drive --cleanup [--dry-run]
+                                           one-time removal of stored Drive documents
+                                           Google reports gone or outside every root
     brain ingest     <manifest> --from gmail  sync connected Gmail (--dry-run to preview;
                                            --pace-vectors-per-minute N bounds new vector work)
     brain ingest     <manifest> --from calendar  sync Google Calendar (--dry-run to preview)
@@ -32982,8 +33275,9 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain support    --clear --yes         clear private local issue notes
 
   brain ingest takes --source <name>, --limit <n>, --dry-run, and --reset. It is
-  resumable: re-run the same command to continue an interrupted load. Folder,
-  Drive, Gmail, IMAP and provider removals always stop for a separate
+  resumable: re-run the same command to continue an interrupted load. Drive
+  follows its changes feed and removes trashed, deleted or moved-out files at
+  once. Folder, Gmail, IMAP and provider removals always stop for a separate
   --apply-removals command. Larger or protected plans also need the printed
   --approve-removals fingerprint. Accepted additions and updates are saved.
 
