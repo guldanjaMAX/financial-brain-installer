@@ -116,6 +116,12 @@ function gmailScenario(t, { labels, history = [], listed = [], historyExpired = 
   t.after(() => { globalThis.fetch = async () => { throw new Error("unexpected network attempt"); }; });
   const options = {
     ...commonOptions(store),
+    // A dry run only prints what the legacy route would count; a real call to
+    // it still fails the test.
+    applyDriveRemovals: async ({ dryRun }) => {
+      if (dryRun === true) return { applied: 0, pending: 0 };
+      throw new Error("the daily path must not use the legacy forget route");
+    },
     postSourceReceipt: async (_base, _key, receipt) => { receipts.push(receipt); return {}; },
     removalPlanRequest: async (input) => {
       if (removal.fail && input.body.action === "apply") {
@@ -381,6 +387,90 @@ test("Gmail daily run: a spam message carrying a legacy marker is removed at onc
   assert.equal(s.state.ingest_removal_plan, undefined, "no review stop");
   assert.equal(s.state.history_id, "history-next", "the cursor advances");
   assert.equal(s.receipts.at(-1).status, "ready");
+});
+
+// A legacy marker may have come from an older credential refusal. Every marker
+// the keep rule clears is recorded in `legacy_marker_cleared`, so the one-time
+// retry can re-read that message once. Spam is removed, so it is never
+// recorded; neither is a message that carried no marker.
+const clearedUids = (state) => (state.legacy_marker_cleared || []).map((entry) => entry.uid).sort();
+
+test("Gmail daily run: a trashed and a deleted message whose legacy marker is cleared are recorded for the one-time retry; spam, an unmarked trashed message and a normal message are not", async (t) => {
+  const s = gmailScenario(t, {
+    labels: {
+      "trash-msg": ["TRASH"], "deleted-msg": null, "spam-msg": ["SPAM"],
+      "plain-trash-msg": ["TRASH"], "normal-msg": ["INBOX", "STARRED"],
+    },
+    history: [
+      record("labelsAdded", "trash-msg"), record("messagesDeleted", "deleted-msg"),
+      record("labelsAdded", "spam-msg"), record("labelsAdded", "plain-trash-msg"),
+      record("labelsAdded", "normal-msg"),
+    ],
+  });
+  s.state.removed = {
+    "gmail:trash-msg": LEGACY_MARKER, "gmail:deleted-msg": LEGACY_MARKER, "gmail:spam-msg": LEGACY_MARKER,
+  };
+  const { error, output } = await s.run();
+  assert.equal(error, undefined, `${error?.name}: ${error?.message}\n${output.slice(-1500)}`);
+  assert.deepEqual(s.state.removed || {}, {}, "every marker is settled");
+  assert.deepEqual(clearedUids(s.state), ["gmail:deleted-msg", "gmail:trash-msg"],
+    "only the kept messages whose marker was cleared are recorded");
+  for (const entry of s.state.legacy_marker_cleared) {
+    assert.deepEqual(Object.keys(entry).sort(), ["cleared_at", "uid"]);
+    assert.ok(Number.isFinite(Date.parse(entry.cleared_at)), "cleared_at is a time");
+  }
+  assert.equal(s.state.history_id, "history-next", "the cursor advances");
+  assert.equal(s.receipts.at(-1).status, "ready");
+
+  // The same window again: nothing carries a marker now, so nothing is added,
+  // and nothing that was recorded is dropped.
+  const recorded = structuredClone(s.state.legacy_marker_cleared);
+  const again = await s.run();
+  assert.equal(again.error, undefined, `${again.error?.name}: ${again.error?.message}\n${again.output.slice(-1500)}`);
+  assert.deepEqual(s.state.legacy_marker_cleared, recorded, "a later run keeps the list and adds nothing");
+});
+
+test("Gmail full sweep: a trashed and a deleted message whose legacy marker is cleared are recorded; spam is not; later sweeps and daily runs keep the list", async (t) => {
+  const s = gmailScenario(t, {
+    labels: { "trash-msg": ["TRASH"], "deleted-msg": null, "spam-msg": ["SPAM"], "normal-msg": ["INBOX"] },
+    listed: ["normal-msg"],
+  });
+  s.state.removed = {
+    "gmail:trash-msg": LEGACY_MARKER, "gmail:deleted-msg": LEGACY_MARKER, "gmail:spam-msg": LEGACY_MARKER,
+  };
+  const first = await s.run({ reset: true });
+  assert.equal(first.error, undefined, `${first.error?.name}: ${first.error?.message}\n${first.output.slice(-1500)}`);
+  assert.deepEqual(s.store.uids(), ["gmail:deleted-msg", "gmail:normal-msg", "gmail:trash-msg"]);
+  assert.deepEqual(s.current().removed || {}, {}, "every marker is settled");
+  assert.deepEqual(clearedUids(s.current()), ["gmail:deleted-msg", "gmail:trash-msg"],
+    "the trashed and the deleted message are recorded; the removed spam message and the normal message are not");
+  assert.equal(s.current().history_id, "history-sweep");
+
+  const recorded = structuredClone(s.current().legacy_marker_cleared);
+  const resweep = await s.run({ reset: true });
+  assert.equal(resweep.error, undefined, `${resweep.error?.name}: ${resweep.error?.message}\n${resweep.output.slice(-1500)}`);
+  assert.deepEqual(s.current().legacy_marker_cleared, recorded, "a --reset sweep carries the list forward and adds nothing");
+  const daily = await s.run();
+  assert.equal(daily.error, undefined, `${daily.error?.name}: ${daily.error?.message}\n${daily.output.slice(-1500)}`);
+  assert.deepEqual(s.current().legacy_marker_cleared, recorded, "a daily run keeps the list and adds nothing");
+});
+
+test("Gmail: a dry run records nothing and keeps the marker; the real run after it records the cleared marker", async (t) => {
+  const s = gmailScenario(t, {
+    labels: { "trash-msg": ["TRASH"], "normal-msg": ["INBOX", "STARRED"] },
+    history: [record("labelsAdded", "trash-msg"), record("labelsAdded", "normal-msg")],
+  });
+  s.state.removed = { "gmail:trash-msg": LEGACY_MARKER };
+  for (const flags of [{ "dry-run": true }, { "dry-run": true, reset: true }]) {
+    const preview = await s.run(flags);
+    assert.equal(preview.error, undefined, `${preview.error?.name}: ${preview.error?.message}\n${preview.output.slice(-1500)}`);
+    assert.equal(s.current().legacy_marker_cleared, undefined, `${JSON.stringify(flags)} records nothing`);
+    assert.equal(s.current().removed?.["gmail:trash-msg"], LEGACY_MARKER, `${JSON.stringify(flags)} keeps the marker`);
+  }
+  const real = await s.run();
+  assert.equal(real.error, undefined, `${real.error?.name}: ${real.error?.message}\n${real.output.slice(-1500)}`);
+  assert.deepEqual(clearedUids(s.current()), ["gmail:trash-msg"]);
+  assert.equal(s.current().removed?.["gmail:trash-msg"], undefined);
 });
 
 // An account switch: the saved history id means nothing to the new mailbox,

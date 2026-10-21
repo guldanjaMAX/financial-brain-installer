@@ -9159,6 +9159,29 @@ export function recordLocalSkippedDocumentState(state, { stateKey, nativePath, r
 export const GMAIL_ACCOUNT_MISMATCH_WARNING = "GMAIL_ACCOUNT_MISMATCH_SUSPECTED";
 
 /**
+ * `legacy_marker_cleared` in the Gmail source state: the messages whose legacy
+ * pending-removal marker (`state.removed`, written only by the older forget
+ * route after a transport failure) a real daily run or full sweep cleared
+ * because the message was moved to Trash or deleted at the source, so its
+ * stored document was kept. Such a marker may have come from an older
+ * credential refusal, so the one-time retry (Packet 11) reads this list
+ * alongside the items on record as refused and re-reads each message once.
+ *
+ * Shape: an array of `{ uid, cleared_at }`, one entry per uid, where `uid` is
+ * the state key `<source>:<message id>` and `cleared_at` is the ISO time of
+ * the run that cleared it. Written only when a marker is actually cleared,
+ * never on a dry run; spam is never recorded (it is removed). Later runs never
+ * remove an entry, and --reset carries the list forward.
+ */
+export const GMAIL_LEGACY_MARKER_CLEARED_KEY = "legacy_marker_cleared";
+
+export function recordGmailLegacyMarkerCleared(state, uid, clearedAt) {
+  const list = Array.isArray(state[GMAIL_LEGACY_MARKER_CLEARED_KEY]) ? state[GMAIL_LEGACY_MARKER_CLEARED_KEY] : [];
+  if (!list.some((entry) => entry?.uid === uid)) list.push({ uid, cleared_at: clearedAt });
+  state[GMAIL_LEGACY_MARKER_CLEARED_KEY] = list;
+}
+
+/**
  * Return exact Gmail message ids held for another ingest attempt.
  *
  * The adjacent source state is private, but it is still untrusted input. A
@@ -17271,6 +17294,10 @@ const cmdIngestRemoteRun = async (
         ...(savedState.gmail_retry && Object.keys(savedState.gmail_retry).length
           ? { gmail_retry: { ...savedState.gmail_retry } }
           : {}),
+        // The one-time retry still owes these messages their re-read.
+        ...(Array.isArray(savedState[GMAIL_LEGACY_MARKER_CLEARED_KEY]) && savedState[GMAIL_LEGACY_MARKER_CLEARED_KEY].length
+          ? { [GMAIL_LEGACY_MARKER_CLEARED_KEY]: savedState[GMAIL_LEGACY_MARKER_CLEARED_KEY].map((entry) => ({ ...entry })) }
+          : {}),
         ...Object.fromEntries(
           ["drive_removal_safety_baseline", "drive_removal_review", "gmail_removal_safety_baseline", "imap_removal_safety_baseline"]
             .filter((key) => savedState[key] != null)
@@ -18129,10 +18156,18 @@ const cmdIngestRemoteRun = async (
       .filter((entry) => state.done?.[entry.stateKey] === entry.hash && !state.skipped?.[entry.stateKey])
       .map((entry) => entry.family);
     if (!dry && replaced.length) {
-      const stale = await removeDriveFamilies({
-        families: replaced, base, adminKey, assertOwned: assertLockOwned,
-        request: options.removalPlanRequest, onProgress: () => {},
-      });
+      let stale;
+      try {
+        stale = await removeDriveFamilies({
+          families: replaced, base, adminKey, assertOwned: assertLockOwned,
+          request: options.removalPlanRequest, onProgress: () => {},
+        });
+      } catch (error) {
+        // Like the at-once removals above: the families stay pending in
+        // ingest_pending_families, the cursor is held, and the next run
+        // retries them.
+        throw removalRetryPending(error, { count: replaced.length, what: "set(s) of stale split parts of reloaded Drive file(s)" });
+      }
       if (stale.removed) info(`removed ${stale.removed} stale split part(s) of reloaded Drive file(s)`);
     }
     if (!dry) {
@@ -19064,8 +19099,13 @@ const cmdIngestRemoteRun = async (
       if (state.removed) delete state.removed[uid];
     }
     if (!dry && gmailLabelGaps === 0 && gmailHistoryMarkerMissing === 0) {
+      const clearedAt = new Date().toISOString();
       for (const uid of gmailKeptMarkerUids) {
-        if (state.removed) delete state.removed[uid];
+        if (!Object.prototype.hasOwnProperty.call(state.removed || {}, uid)) continue;
+        // Recorded for the one-time retry before the marker goes, in the same
+        // state the marker's removal is saved with.
+        recordGmailLegacyMarkerCleared(state, uid, clearedAt);
+        delete state.removed[uid];
       }
     }
 

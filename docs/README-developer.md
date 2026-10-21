@@ -835,6 +835,18 @@ them, and remove a retry only after full family acceptance or a current typed
 source decision. The cursor gate requires the failed-part count to match the
 durably retained failed-part count, and malformed retry state fails closed.
 
+The Gmail source state also keeps `legacy_marker_cleared`, an array of
+`{ uid, cleared_at }` with one entry per uid (`<source>:<message id>`, the ISO
+time of the clearing run). A legacy pending-removal marker in `removed` was
+written only by the older forget route after a transport failure, and may have
+come from an older credential refusal. When a real daily run or full sweep
+clears such a marker because the message was moved to Trash or deleted at the
+source (its document is kept), it records the uid here first. A dry run records
+nothing, spam is never recorded because its document is removed, later runs
+never remove an entry, and `--reset` carries the list forward. Packet 11's
+one-time retry reads it alongside the items on record as refused, so each of
+these messages still gets its one re-read.
+
 A credential refusal is a measured Gmail policy outcome rather than an
 operational failure. Local scanner refusals and Worker content-scanner
 refusals are removed from Gmail's skip-derived coverage gap and do not set

@@ -642,6 +642,41 @@ ${retried.output.slice(-1200)}`);
   assert.equal(s.receipts.at(-1).status, "ready");
 });
 
+test("a reloaded file whose stale split-part cleanup fails stays pending with the retry code and holds the cursor; the next run removes the parts", async (t) => {
+  const entries = baseEntries();
+  const s = scenario(t, entries);
+  s.seedSynced(entries.filter((entry) => entry.mimeType !== drive.FOLDER_MIME && entry.id !== "big-file"));
+  // An earlier load stored edit-file in two parts. It now fits in one document.
+  s.store.db.prepare("DELETE FROM documents WHERE doc_uid='drive:edit-file'").run();
+  for (const part of [1, 2]) s.store.put(`drive:edit-file#part${part}of2`, { part_of: "edit-file" });
+  s.world.byId.set("edit-file", { ...s.world.byId.get("edit-file"), modifiedTime: "2026-10-10T00:00:00Z", md5Checksum: "edit-file-v2" });
+  s.world.changes = [{ fileId: "edit-file", removed: false, file: s.world.byId.get("edit-file") }];
+  s.removal.fail = true;
+  const failed = await s.run();
+  assert.equal(failed.error?.code, "REMOVAL_RETRY_PENDING", `${failed.error?.name}: ${failed.error?.message}`);
+  assert.equal(failed.error instanceof DriveRemovalReviewRequired, false, "not a review stop");
+  assert.doesNotMatch(failed.error.message, /review/i);
+  assert.match(failed.error.message,
+    /^1 set\(s\) of stale split parts of reloaded Drive file\(s\) were not removed yet \(Authenticated removal request failed\. HTTP 503\)\. They stay pending, the cursor was not advanced, and the next run retries them\.$/);
+  assert.equal(s.receipts.at(-1).status, "error");
+  assert.equal(s.receipts.at(-1).issue_code, "REMOVAL_RETRY_PENDING");
+  assert.equal(s.state.sync_token, "token-1", "the cursor is held");
+  assert.deepEqual(s.sent, ["edit-file"], "the reload itself was accepted");
+  assert.deepEqual(s.store.uids().filter((uid) => uid.startsWith("drive:edit-file")),
+    ["drive:edit-file", "drive:edit-file#part1of2", "drive:edit-file#part2of2"], "the stale parts are still stored, pending");
+
+  s.removal.fail = false;
+  const retried = await s.run();
+  assert.equal(retried.error, undefined, `${retried.error?.message}
+${retried.output.slice(-1200)}`);
+  assert.deepEqual(s.store.uids().filter((uid) => uid.startsWith("drive:edit-file")), ["drive:edit-file"],
+    "the next run retries and removes the stale parts");
+  assert.match(retried.output, /removed 2 stale split part\(s\) of reloaded Drive file\(s\)/);
+  assert.deepEqual(s.sent, ["edit-file"], "the accepted reload is not sent again");
+  assert.equal(s.state.sync_token, "token-2");
+  assert.equal(s.receipts.at(-1).status, "ready");
+});
+
 test("the saved My Drive id is ignored once include_my_drive_root_files is off", async (t) => {
   const entries = [folder("owner-drive", "Owner Drive"), folder(ROOT, "Folder Alpha", "owner-drive"),
     file("loose-file", "owner-drive"), file("keep-file")];
