@@ -106,8 +106,8 @@ test('R4-QUESTION-1 control: the closed run alone is stripped in either word ord
 // question with the channel after the name answers completely.
 // Partner answer 13 (verbatim): "Strip "via <channel>" for a closed list (ACH,
 // Zelle, wire, check, Venmo, PayPal). Refuse other "via" phrases."
-// 'has the payment via wire from Payer One arrived?' moved to the held test
-// below: "wire from" is pinned as part of a complete requested name.
+// 'has the payment via wire from Payer One arrived?' was held ("wire from" was
+// pinned as part of a complete requested name) and is decided by ruling 6 below.
 const channelBeforeFrom = [
   'did the payment via Zelle from Payer One arrive?',
   'did the deposit via Zelle from Payer One land?',
@@ -131,52 +131,58 @@ test('R4-QUESTION-2 a closed-list channel before the FROM clause is kept as paye
   }
 });
 
-// The unlisted half of R4-QUESTION-2 (triage decided kind=null) is HELD: the
-// committed two-payer generator (ledger-question-mentions.test.mjs, pair
-// templates over selectorTemplates' "the payment via <name>") pins
-// "did the payment via <a> from <b> arrive?" as a classified two-payer
-// question that refuses at the answer ("can't confirm which payer"), never at
-// classification. Today these questions classify with a two-clause payer and
-// the answer is incomplete with found=null; nothing is certified.
-// The "via wire from" case of R4-QUESTION-2 is HELD: "wire from" is a closed
+// The "via wire from" case of R4-QUESTION-2 was held: "wire from" is a closed
 // statement sender phrase in the committed originator vocabulary, and the
 // name-retention generators (ledger-question-selector.test.mjs and
 // ledger-production-payers.test.mjs, "the payment via wire from <name>")
-// pin "wire from <name>" as the complete requested name: with only the
-// shorter name registered the answer must stay uncertain, and a bank payee
-// "wire from <name>" must be found. Same question, opposite answer.
-test('R4-QUESTION-2 (held) "via wire" before the FROM clause is stripped', {
-  todo: 'held for a decision: stripping "via wire" before FROM conflicts with the committed name-retention generators in ledger-question-selector.test.mjs and ledger-production-payers.test.mjs, which pin "wire from <name>" as a complete requested name',
-}, async t => {
-  const question = 'has the payment via wire from Payer One arrived?';
-  const intent = classify(question);
-  assert.equal(intent.kind, 'payment', `${question}: ${describe(intent)}`);
-  assert.deepEqual(intent.counterpartyWords, ['payer', 'one'], `${question}: ${describe(intent)}`);
-  await assertComplete(t, question);
-});
-
-test('R4-QUESTION-2 (held) an unlisted via phrase before the FROM clause refuses at classification', {
-  todo: 'held for a decision: refusing "via <unlisted> from <payer>" at classification conflicts with the committed two-payer generator in ledger-question-mentions.test.mjs, which pins "the payment via <a> from <b>" as a classified two-payer question',
-}, () => {
-  for (const question of unlistedViaBeforeFrom) {
+// pinned "wire from <name>" as the complete requested name. Partner ruling 6
+// (round 7, verbatim): "Strip the channel: "via wire from <name>" means payer
+// <name>. Update the name-retention generators."
+test('R4-QUESTION-2 (ruling 6) "via wire" before the FROM clause is stripped: "via wire from <name>" means payer <name>', async t => {
+  for (const question of ['has the payment via wire from Payer One arrived?', 'did the payment via wire from Payer One arrive?',
+    'did the deposit via wire from Payer One land?', 'did the payment via wire from Payer One arrive in September 2026?']) {
     const intent = classify(question);
-    assert.equal(intent.kind, null, `${question}: an unlisted via phrase refuses (${describe(intent)})`);
+    assert.equal(intent.kind, 'payment', `${question}: ${describe(intent)}`);
+    assert.equal(intent.counterparty, 'payer one', `${question}: ${describe(intent)}`);
+    assert.deepEqual(intent.counterpartyWords, ['payer', 'one'], `${question}: ${describe(intent)}`);
+    const body = await assertComplete(t, question);
+    if (/September 2026/.test(question)) assert.equal(body.ledger.from, '2026-09-01', question);
   }
 });
 
+// The unlisted half of R4-QUESTION-2 (triage decided kind=null) was held: the
+// committed two-payer generator (ledger-question-mentions.test.mjs, pair
+// templates over selectorTemplates' "the payment via <name>") pinned
+// "did the payment via <a> from <b> arrive?" as a classified two-payer
+// question refused at the answer. Partner ruling 5 (round 7, verbatim): "Yes,
+// refuse it at classification and update the two-payer generator."
+test('R4-QUESTION-2 (ruling 5) an unlisted via phrase before the FROM clause refuses at classification', async t => {
+  for (const question of [...unlistedViaBeforeFrom, 'did the payment via Vendor Alpha from Payer One arrive?',
+    'did the payment via Fixture Rail from Payer One arrive in September 2026?']) {
+    const intent = classify(question);
+    assert.equal(intent.kind, null, `${question}: an unlisted via phrase refuses (${describe(intent)})`);
+    assert.equal(intent.broad, true, `${question}: still routed as a money question`);
+  }
+  const f = registeredPayerFixture(t);
+  const body = await f.ask(unlistedViaBeforeFrom[0]);
+  assert.equal(body.route, 'documents', body.answer);
+  assert.equal(body.ledger, undefined);
+});
+
 // Triage asked to change this control's 'did the payment via Payer One
-// arrive?' line to kind=null (R4-FIDELITY-6). That change is HELD: the
-// committed selector generators (ledger-question-cases.mjs selectorTemplates
-// "the payment via <name>", used by ledger-question-mentions,
-// ledger-question-selector and ledger-production-payers) and ledger-review F2
-// pin "via <name>" alone as a payer clause, so the line stays as reviewed.
-test('R4-QUESTION-2 control: the same channels after the name are stripped, an unlisted channel after the name refuses, and "via <payer>" alone names the payer', async t => {
-  for (const question of ['did the payment from Payer One via Zelle arrive?', 'did the payment from Payer One via wire arrive?', 'did the payment via Payer One arrive?']) {
+// arrive?' line to kind=null (R4-FIDELITY-6). That change was held while the
+// committed selector generators and ledger-review F2 pinned "via <name>" alone
+// as a payer clause. Partner ruling 4 (round 7) refuses it: the line moved
+// from the answering list to the refusal list below.
+test('R4-QUESTION-2 control: the same channels after the name are stripped, an unlisted channel after the name refuses, and "via <payer>" alone refuses', async t => {
+  for (const question of ['did the payment from Payer One via Zelle arrive?', 'did the payment from Payer One via wire arrive?']) {
     const intent = classify(question);
     assert.equal(intent.kind, 'payment', question);
     assert.deepEqual(intent.counterpartyWords, ['payer', 'one'], question);
     await assertComplete(t, question);
   }
+  // Ruling 4: "Via <name>" that isn't a listed channel refuses.
+  assert.equal(classify('did the payment via Payer One arrive?').kind, null, '"via <payer>" alone refuses');
   for (const question of ['did the payment from Payer One via Fixture Rail arrive?', 'did the payment from Payer One arrive via ACH transfer?']) {
     assert.equal(classify(question).kind, null, `${question}: an unlisted via phrase after the payer refuses`);
   }
@@ -289,15 +295,27 @@ const qualifiedDeposit = [
   'did the invoice deposit from Payer One land?',
 ];
 
-// Triage: contract question, kept as a todo until the partner answers.
-test('R4-QUESTION-5 a closed-list qualifier before "deposit" is refused while the same qualifier before "payment" answers', {
-  todo: 'contract question for the partner: is the answer-9 closed qualifier list also stripped before "deposit", or does a qualifier before "deposit" keep refusing?',
-}, async t => {
-  for (const question of qualifiedDeposit) {
+// Partner ruling 1 (round 7, verbatim): "Yes, strip the same closed qualifier
+// list before "deposit"."
+test('R4-QUESTION-5 (ruling 1) the closed qualifier list is stripped before "deposit" as it is before "payment"', async t => {
+  for (const question of [...qualifiedDeposit, 'did the latest deposit from Payer One land?', 'has the last deposit from Payer One arrived?',
+    'did any deposit from Payer One arrive?', 'did the wire deposit from Payer One clear?', 'did the ACH monthly deposit from Payer One land?',
+    'was the ACH deposit from Payer One received?']) {
     const intent = classify(question);
     assert.equal(intent.kind, 'payment', `${question}: ${describe(intent)}`);
     assert.deepEqual(intent.counterpartyWords, ['payer', 'one'], question);
+    // Stripped to the amountless default window, the same as "payment".
+    assert.equal(intent.from, classify(question.replace(/\bdeposit\b/, 'payment')).from, question);
     await assertComplete(t, question);
+  }
+  // "recent" before "deposit" is a qualifier there too, not the 14-day window.
+  const recent = classify('did the recent deposit from Payer One land?');
+  assert.equal(recent.kind, 'payment');
+  assert.equal(recent.from, '2026-08-14');
+  // An unlisted qualifier, or a closed one mixed with another word, before
+  // "deposit" still refuses: a qualifier is never a second payer.
+  for (const question of ['did the big deposit from Payer One land?', 'did the big ACH deposit from Payer One land?', 'did the 2nd deposit from Payer One land?']) {
+    assert.equal(classify(question).kind, null, question);
   }
 });
 

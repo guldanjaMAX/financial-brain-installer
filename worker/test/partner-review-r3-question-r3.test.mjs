@@ -375,8 +375,12 @@ test('R3-QUESTION-3-7 a "via <channel>" phrase after the payer becomes the payer
   }
 });
 
-test('R3-QUESTION-3-7 control: the same noun and FROM questions without a channel phrase, and "via <payer>", name "payer one" and answer', async t => {
-  for (const question of ['did the Payer One payment arrive?', 'did the payment from Payer One arrive?', 'did the payment via Payer One arrive?']) {
+// Partner ruling 4 (round 7): ""Via <name>" that isn't a listed channel
+// refuses. Rewrite ... the R3-QUESTION-3-7 control to match." The "via
+// <payer>" line now reads "via <listed channel> from <payer>", and "via
+// <payer>" alone refuses at classification.
+test('R3-QUESTION-3-7 control: the same noun and FROM questions without a channel phrase, and "via <channel> from <payer>", name "payer one" and answer; "via <payer>" alone refuses', async t => {
+  for (const question of ['did the Payer One payment arrive?', 'did the payment from Payer One arrive?', 'did the payment via Zelle from Payer One arrive?']) {
     const f = registeredPayerFixture(t);
     const intent = classify(question);
     assert.equal(intent.kind, 'payment', question);
@@ -385,4 +389,7 @@ test('R3-QUESTION-3-7 control: the same noun and FROM questions without a channe
     assert.equal(body.evidence_gate?.complete, true, `${question}: ${body.answer}`);
     assert.equal(body.ledger?.found, true, question);
   }
+  const alone = classify('did the payment via Payer One arrive?');
+  assert.equal(alone.kind, null, `"via <payer>" alone: ${JSON.stringify(alone.counterparty)}`);
+  assert.equal(alone.broad, true);
 });

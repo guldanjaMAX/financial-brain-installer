@@ -99,24 +99,41 @@ test('R4-FIDELITY-3 repro: a listed qualifier before the noun payer is swallowed
   }
 });
 
-// The 'ACH' case of R4-FIDELITY-3 is HELD. "ach", "wire" and "invoice" are on
+// The 'ACH' case of R4-FIDELITY-3 was held: "ach", "wire" and "invoice" are on
 // answer 9's list and are also closed statement vocabulary, and the committed
-// name-retention generators (ledger-question-selector.test.mjs, cases
-// "<word> Payer One" from ledger-question-cases.mjs, e.g. 'did the ach Payer
-// One payment arrive in October 2026?' with only "Payer One" registered) pin
-// that such a complete requested noun payer is retained and never resolves to
-// the shorter registered name. Same question, same registry, opposite answer.
-test('R4-FIDELITY-3 (held) a listed statement-vocabulary qualifier before the noun payer is stripped', {
-  todo: 'held for a decision: stripping "ACH" before a noun payer conflicts with the committed name-retention generator in ledger-question-selector.test.mjs ("did the ach Payer One payment arrive" must keep "ach payer one" and not resolve to the shorter "Payer One")',
-}, async t => {
-  const question = 'did the ACH Payer One payment arrive?';
-  const intent = classify(question);
-  const f = registeredPayerFixture(t);
-  const body = await f.ask(question);
-  assert.equal(intent.kind, 'payment', question);
-  assert.deepEqual(intent.counterpartyWords, ['payer', 'one'], `${question}: selector ${JSON.stringify(intent.counterparty)}`);
-  assert.equal(body.evidence_gate?.complete, true, `${question}: ${body.answer}`);
-  assert.equal(body.ledger?.found, true, question);
+// name-retention generator (ledger-question-selector.test.mjs, cases
+// "<word> Payer One" from ledger-question-cases.mjs) pinned such a complete
+// requested noun payer as retained. Partner ruling 7 (round 7, verbatim):
+// "Strip ACH there too, so the payer is "Payer One". Update the selector
+// generator." The statement vocabulary on answer 9's list (ach, wire, invoice)
+// is stripped before the noun payer like the rest of the list; the unstripped
+// slot stays a competing reading, so a registered "ACH Payer One" alone still
+// answers exactly and both names registered refuse as ambiguous.
+test('R4-FIDELITY-3 (ruling 7) a listed statement-vocabulary qualifier before the noun payer is stripped, so the payer is "Payer One"', async t => {
+  for (const question of ['did the ACH Payer One payment arrive?', 'did the wire Payer One payment arrive?',
+    'did the invoice Payer One payment arrive?', 'did the ACH, Payer One payment arrive?']) {
+    const intent = classify(question);
+    const f = registeredPayerFixture(t);
+    const body = await f.ask(question);
+    assert.equal(intent.kind, 'payment', question);
+    assert.deepEqual(intent.counterpartyWords, ['payer', 'one'], `${question}: selector ${JSON.stringify(intent.counterparty)}`);
+    assert.equal(body.evidence_gate?.complete, true, `${question}: ${body.answer}`);
+    assert.equal(body.ledger?.found, true, question);
+  }
+  // The unstripped slot competes: only "ACH Payer One" registered answers for
+  // it exactly; both names registered is two exact entities and refuses.
+  const longer = ledgerFixture(t, { knownPayers: false });
+  seedKnownPayers(longer, ['ACH Payer One', 'Vendor Alpha'], NOW);
+  longer.add('oct-in', 'Deposit', 'ACH Payer One', { date: '2026-10-05', cents: 2500 });
+  const own = await longer.ask('did the ACH Payer One payment arrive?');
+  assert.equal(own.evidence_gate?.complete, true, own.answer);
+  assert.equal(own.ledger?.found, true);
+  const both = ledgerFixture(t, { knownPayers: false });
+  seedKnownPayers(both, ['ACH Payer One', 'Payer One'], NOW);
+  both.add('oct-in', 'ACH credit Payer One', 'Payer One', { date: '2026-10-05', cents: 2500 });
+  const ambiguous = await both.ask('did the ACH Payer One payment arrive?');
+  assert.notEqual(ambiguous.evidence_gate?.complete, true, ambiguous.answer);
+  assert.notEqual(ambiguous.ledger?.found, false, ambiguous.answer);
 });
 
 test('R4-FIDELITY-3 control: the same noun question without the qualifier, the possessive form and the FROM form answer completely', async t => {
@@ -131,11 +148,10 @@ test('R4-FIDELITY-3 control: the same noun question without the qualifier, the p
     assert.equal(body.ledger?.found, true, question);
   }
   // A registered name that begins with a listed word answers exactly: the
-  // strip never runs before a noun payer on HEAD, so "Wire Works" is the whole
-  // exact name. When "Works" is registered too, HEAD still answers for Wire
-  // Works (nothing was stripped); after the repro's fix the stripped and
+  // unstripped slot "Wire Works" competes with the stripped "Works" and is
+  // the only exact one. When "Works" is registered too, the stripped and
   // unstripped slots are both exact for different entities and the question
-  // is ambiguous. In both worlds the deposit is never certified absent.
+  // is ambiguous (ruling 7). The deposit is never certified absent.
   const wireWorks = ledgerFixture(t, { knownPayers: false });
   seedKnownPayers(wireWorks, ['Wire Works', 'Vendor Alpha'], NOW);
   wireWorks.add('oct-in', 'ACH credit Wire Works', 'Wire Works', { date: '2026-10-05', cents: 2500 });
@@ -168,21 +184,29 @@ test('R4-FIDELITY-3 control: the same noun question without the qualifier, the p
 // arrive?" answered for Payer One). The round-3 control pinned that form as a
 // payer before the answer. Triage decided this as a bug, overriding the
 // earlier contract-question todo: the literal answer and the principle both
-// refuse ("via X" can name a channel or an intermediary). The fix is HELD:
-// the committed selector generators (ledger-question-cases.mjs
+// refuse ("via X" can name a channel or an intermediary). The fix was held
+// because the committed selector generators (ledger-question-cases.mjs
 // selectorTemplates, 45 "<aux> the payment via <name> <verb>" templates used
 // by ledger-question-mentions, ledger-question-selector and
 // ledger-production-payers), ledger-review.test.mjs F2 ('Did the payment via
-// Fixture Bank arrive?' found=true) and the R3-QUESTION-3-7 control all pin
-// "via <name>" alone as a payer clause; changing them is broader than the
-// two control lines triage listed.
-test('R4-FIDELITY-6 repro: "via <payer>" as the only selector still names the payer although answer 13 refuses every "via" phrase outside the closed channel list', {
-  todo: 'held for a decision: refusing "via <name>" alone conflicts with committed tests that pin it as a payer clause (selectorTemplates generators in ledger-question-mentions/selector/production-payers, ledger-review F2, R3-QUESTION-3-7 control)',
-}, () => {
-  for (const question of ['did the payment via Payer One arrive?', 'did the payment via Fixture Rail arrive?', 'did the payment via Wire Works arrive?']) {
+// Fixture Bank arrive?' found=true) and the R3-QUESTION-3-7 control all
+// pinned "via <name>" alone as a payer clause. Partner ruling 4 (round 7,
+// verbatim): "Apply answer 13. "Via <name>" that isn't a listed channel
+// refuses. Rewrite the 45 templates and the F2 and R3-QUESTION-3-7 controls
+// to match." The 45 templates now read "via <listed channel> from <name>".
+test('R4-FIDELITY-6 (ruling 4) "via <name>" as the only selector refuses at classification when <name> is not a listed channel', async t => {
+  for (const question of ['did the payment via Payer One arrive?', 'did the payment via Fixture Rail arrive?', 'did the payment via Wire Works arrive?',
+    'has the deposit via Payer One landed?', 'did the payment via Payer One arrive in September 2026?']) {
     const intent = classify(question);
     assert.equal(intent.kind, null, `${question}: named ${JSON.stringify(intent.counterparty)} as the payer`);
+    assert.equal(intent.broad, true, `${question}: still routed as a money question`);
   }
+  // The registered payer is never certified either way: the refusal routes
+  // to documents and reads no ledger rows.
+  const f = registeredPayerFixture(t);
+  const body = await f.ask('did the payment via Payer One arrive?');
+  assert.equal(body.route, 'documents', body.answer);
+  assert.equal(body.ledger, undefined);
 });
 
 test('R4-FIDELITY-6 control: an unlisted "via" phrase after a named payer refuses, a channel alone refuses, and the FROM form answers', async t => {
@@ -192,10 +216,13 @@ test('R4-FIDELITY-6 control: an unlisted "via" phrase after a named payer refuse
   const body = await f.ask('did the payment from Payer One arrive?');
   assert.equal(body.evidence_gate?.complete, true, body.answer);
   assert.equal(body.ledger?.found, true);
-  // Triage decided: closed-list channels are still stripped.
-  const zelle = await f.ask('did the payment from Payer One via Zelle arrive?');
-  assert.equal(zelle.evidence_gate?.complete, true, zelle.answer);
-  assert.equal(zelle.ledger?.found, true);
+  // Triage decided: closed-list channels are still stripped, after the name
+  // or before the FROM clause (the rewritten template form, ruling 4).
+  for (const question of ['did the payment from Payer One via Zelle arrive?', 'did the payment via Zelle from Payer One arrive?']) {
+    const zelle = await f.ask(question);
+    assert.equal(zelle.evidence_gate?.complete, true, `${question}: ${zelle.answer}`);
+    assert.equal(zelle.ledger?.found, true, question);
+  }
 });
 
 // ------------------------------------------------------------- R4-FIDELITY-7
@@ -244,18 +271,33 @@ test('R4-FIDELITY-7 control: one amount before or after the FROM name is amount 
 // note, and the deposit posted on that date is not shown. Contract question:
 // is a single date a "<period>" for answer 10 (the note would read
 // "received on <date>")? Either way the silent refusal hides the useful part.
-// Triage: contract question, kept as a todo until the partner answers.
-test('R4-FIDELITY-9 repro (contract question): "for <date>" is refused silently, without the answer-10 note, although the dated deposit exists', {
-  todo: 'contract question for the partner: does a single date count as a <period> for answer 10, so "for 2026-09-10" gets the payment_period_ambiguous refusal with a "received on 2026-09-10" note, or does it stay a silent refusal?',
-}, async t => {
+// Partner ruling 3 (round 7, verbatim): "Yes, a single date counts as a
+// period: "for 2026-09-10" gets payment_period_ambiguous with the "received on
+// 2026-09-10?" note."
+test('R4-FIDELITY-9 (ruling 3) "for <date>" refuses with the answer-10 note "received on <date>", never a silent refusal and never absence', async t => {
   for (const [question, received] of [['did the payment from Payer One for 2026-09-10 arrive?', 'received on 2026-09-10'],
-    ['did the payment from Payer One for September 10 arrive?', 'received on september 10']]) {
+    ['did the payment from Payer One for September 10 arrive?', 'received on september 10'],
+    ['did the payment from Payer One for 9/10/2026 arrive?', 'received on 9/10/2026'],
+    ['did the payment from Payer One for September 10, 2026 arrive?', 'received on september 10, 2026'],
+    ['did the payment from Payer One for 10 September 2026 arrive?', 'received on 10 september 2026'],
+    ['did the payment of $100 from Payer One for 2026-09-10 arrive?', 'received on 2026-09-10'],
+    ['did the Payer One payment for 2026-09-10 arrive?', 'received on 2026-09-10'],
+    // Beside an explicit arrival window, as answer 10's for-period is (R4-QUESTION-6).
+    ['did the payment from Payer One for 2026-09-10 arrive in October 2026?', 'received on 2026-09-10']]) {
     const f = registeredPayerFixture(t);
     const body = await f.ask(question);
     assert.equal(body.code, 'payment_period_ambiguous',
       `${question}: classified as ${classify(question).kind}; answered code=${body.code} route=${body.route} complete=${body.evidence_gate?.complete}: ${body.answer}`);
     assert.equal(body.evidence_gate?.complete, false, question);
+    assert.equal(body.ledger, undefined, `${question}: no presence or absence is read`);
     assert.ok(body.gaps?.some(gap => gap.detail.includes(`Did you mean "${received}"?`)), `${question}: ${JSON.stringify(body.gaps)}`);
+    assert.ok(!body.gaps?.some(gap => gap.detail.includes('Name the year.')), `${question}: a date is not a bare month`);
+  }
+  // A second for-clause, or a date for-clause with a second arrival window,
+  // still refuses at classification; nothing is read.
+  for (const question of ['did the payment from Payer One for 2026-09-10 for September 2026 arrive?',
+    'did the payment from Payer One for 2026-09-10 arrive on 2026-09-12?']) {
+    assert.equal(classify(question).kind, null, question);
   }
 });
 

@@ -43,11 +43,11 @@ function registeredPayerFixture(t, names = ['Payer One', 'Vendor Alpha']) {
 // qualifier in any other position, or without it, answers completely.
 // Triage (round 5) decided: any, latest, last, recent and monthly in this
 // trailing position are stripped, the unstripped reading stays a competing
-// alternative. ACH, wire and invoice there are NOT changed: the "ACH" case
-// joins the held R4-FIDELITY-3 ACH case (todo below), because the committed
-// name-retention generator (ledger-question-selector.test.mjs, words from
-// ledger-attribution-cases.mjs originatorWords) pins "did the Payer One ach
-// payment arrive" as the complete requested name "payer one ach".
+// alternative. ACH, wire and invoice there were held with the R4-FIDELITY-3
+// ACH case, because the committed name-retention generator
+// (ledger-question-selector.test.mjs, words from ledger-attribution-cases.mjs
+// originatorWords) pinned "did the Payer One ach payment arrive" as the
+// complete requested name "payer one ach"; ruling 7 (below) strips them too.
 test('R5-FIDELITY-1 repro: a listed qualifier after the noun payer, directly before "payment", is kept as payer text and the registered unique payer is refused', async t => {
   for (const [question, amounts, from] of [['did the Payer One monthly payment arrive?', [10000, 2500]],
     ['has the Payer One latest payment arrived?', [10000, 2500]],
@@ -74,17 +74,34 @@ test('R5-FIDELITY-1 repro: a listed qualifier after the noun payer, directly bef
   assert.equal(ambiguous.ledger?.selector_ambiguous, true, ambiguous.answer);
 });
 
-test('R5-FIDELITY-1 (held) a statement-vocabulary qualifier after the noun payer is stripped', {
-  todo: 'held for a decision: stripping "ACH" after a noun payer conflicts with the committed name-retention generator in ledger-question-selector.test.mjs ("did the Payer One ach payment arrive" must keep "payer one ach" and not resolve to the shorter "Payer One"), the same conflict as the held R4-FIDELITY-3 ACH case',
-}, async t => {
-  const question = 'did the Payer One ACH payment arrive?';
-  const intent = classify(question);
-  const f = registeredPayerFixture(t);
-  const body = await f.ask(question);
-  assert.equal(intent.kind, 'payment', question);
-  assert.deepEqual(intent.counterpartyWords, ['payer', 'one'], `${question}: selector ${JSON.stringify(intent.counterparty)}`);
-  assert.equal(body.evidence_gate?.complete, true, `${question}: ${body.answer}`);
-  assert.equal(body.ledger?.found, true, question);
+// Partner ruling 7 (round 7, verbatim): "Strip ACH there too, so the payer is
+// "Payer One". Update the selector generator." The statement vocabulary on
+// answer 9's list (ach, wire, invoice) after the noun payer is stripped like
+// the rest of the list; the unstripped slot stays a competing reading.
+test('R5-FIDELITY-1 (ruling 7) a statement-vocabulary qualifier after the noun payer is stripped, so the payer is "Payer One"', async t => {
+  for (const [question, amounts, from] of [['did the Payer One ACH payment arrive?', [10000, 2500]],
+    ['did the Payer One wire payment arrive?', [10000, 2500]], ['did the Payer One invoice payment arrive?', [10000, 2500]],
+    ['did the Payer One, ACH payment arrive?', [10000, 2500]],
+    ['did the Payer One ACH payment arrive in September 2026?', [10000], '2026-09-01']]) {
+    const intent = classify(question);
+    const f = registeredPayerFixture(t);
+    const body = await f.ask(question);
+    assert.equal(intent.kind, 'payment', question);
+    assert.deepEqual(intent.counterpartyWords, ['payer', 'one'], `${question}: selector ${JSON.stringify(intent.counterparty)}`);
+    assert.equal(body.evidence_gate?.complete, true, `${question}: ${body.answer}`);
+    assert.equal(body.ledger?.found, true, question);
+    assert.deepEqual(body.citations.map(c => c.amount_minor), amounts, question);
+    if (from) assert.equal(body.ledger.from, from, question);
+  }
+  // Two exact readings of different entities (the stripped and the
+  // unstripped slot) refuse as ambiguous; nothing is certified.
+  const both = ledgerFixture(t, { knownPayers: false });
+  seedKnownPayers(both, ['Payer One', 'Payer One ACH'], NOW);
+  both.add('oct-in', 'ACH credit Payer One', 'Payer One', { date: '2026-10-05', cents: 2500 });
+  const ambiguous = await both.ask('did the Payer One ACH payment arrive?');
+  assert.notEqual(ambiguous.evidence_gate?.complete, true, ambiguous.answer);
+  assert.notEqual(ambiguous.ledger?.found, false, ambiguous.answer);
+  assert.equal(ambiguous.ledger?.selector_ambiguous, true, ambiguous.answer);
 });
 
 test('R5-FIDELITY-1 control: the same qualifier before the noun payer, beside a FROM payer or after a possessive is stripped and the plain noun form answers; an unlisted trailing word is never certified absent; a registered name ending in a listed word is its own exact name', async t => {

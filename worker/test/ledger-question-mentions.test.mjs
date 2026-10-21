@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ledgerFixture, NOW } from './ledger-review-fixture.mjs';
 import { classifyLedgerQuestion } from '../src/lib/ledger-question.js';
-import { selectorTemplates } from './ledger-question-cases.mjs';
+import { selectorTemplates, unlistedViaTemplates } from './ledger-question-cases.mjs';
 import { payerRegistry, resolveRequestedPayer, requestedPayerMentions } from '../src/lib/ledger-attribution.js';
 
 const payment = name => `Did the payment of $25.00 from ${name} arrive in October 2026?`;
@@ -121,6 +121,12 @@ const pairTemplates = [
 // Outside the closed channel list it refuses at classification, so this pair
 // template no longer reaches the ledger as a second payer clause.
 const channelPairTemplate = (a, b) => `Did the ${a} payment via ${b} arrive in October 2026?`;
+// Partner ruling 5 (round 7): "the payment via <a> from <b>" with <a> not a
+// listed channel refuses at classification too; it was a classified two-payer
+// question refused at the answer. The 45 old "via <name>" templates over the
+// pair (the via templates of selectorTemplates now read "via <listed
+// channel> from <name>", ruling 4) all refuse.
+const viaPairTemplates = unlistedViaTemplates.map(template => (a, b) => template(`${a} from ${b}`));
 
 test('two-payer generator: every ordered pair, template, internal keyword and registration refuses claims', async t => {
   const f = setup(t);
@@ -129,6 +135,14 @@ test('two-payer generator: every ordered pair, template, internal keyword and re
   for (const keyword of ['Payment', 'from', 'by', 'Bank', 'Services']) {
     const names = [`Payer ${keyword} One`, `Supplier ${keyword} Two`, `${keyword} Example, Ltd.`];
     for (const first of names) for (const second of names.filter(name => name !== first)) {
+      // Ruling 5: classification alone decides, so the registry is not read.
+      for (const template of viaPairTemplates) for (const exact of [false, true]) {
+        const question = template(first, second).replace('?', exact ? ', exact names only?' : '?');
+        const intent = classifyLedgerQuestion(question, { now: NOW });
+        assert.equal(intent.kind, null, question);
+        assert.equal(intent.broad, true, question);
+        counts.viaRefusals = (counts.viaRefusals || 0) + 1;
+      }
       for (const registration of ['both', 'first', 'second', 'display', 'aliases']) {
         const entries = [
           { entity_slug: 'one', legal_name: registration === 'display' ? 'First Alias' : registration === 'second' ? 'Unused First' : first,
@@ -171,13 +185,15 @@ test('two-payer generator: every ordered pair, template, internal keyword and re
   assert.equal(counts.cases, 3 * 2 * 5 * 5 * pairTemplates.length);
   assert.equal(counts.answers, counts.cases * 4);
   assert.equal(counts.channelRefusals, 3 * 2 * 5 * 5 * 2);
+  assert.equal(counts.viaRefusals, 3 * 2 * 5 * viaPairTemplates.length * 2);
+  assert.equal(viaPairTemplates.length, 45);
   assert.ok(counts.ambiguous > 0 && counts.unresolved > 0 && counts.controls > 0);
   t.diagnostic(JSON.stringify({ two_payer: counts, templates: pairTemplates.length }));
 });
 
 test('single-payer punctuation generator answers across templates, registrations and sentence endings', async t => {
   const f = setup(t); f.identity('supplier', 'Initial Supplier', 'Supplier Alias'); f.identity('short', 'Supplier');
-  let answers = 0;
+  let answers = 0, viaRefusals = 0;
   for (const full of ['Supplier Services Ltd.', 'Supplier, Inc.', 'Supplier, Co.', 'Supplier Bank, N.A.', 'Supplier S.A.']) {
     for (const registration of ['legal', 'display', 'both']) {
       const legal = registration === 'display' ? 'Supplier Alias' : full;
@@ -190,10 +206,18 @@ test('single-payer punctuation generator answers across templates, registrations
         if (body.ledger.kind === 'merchant') assert.equal(body.ledger.total_minor, 2500);
         answers++;
       }
+      // Ruling 4: the old "via <name>" form names no payer; it refuses at
+      // classification whatever the registry holds.
+      for (const label of [full, full.slice(0, -1)]) for (const template of unlistedViaTemplates) for (const exact of [false, true]) for (const punctuation of ['?', '.']) {
+        const question = template(label).replace('?', `${exact ? ', exact names only' : ''}${punctuation}`);
+        assert.equal(classifyLedgerQuestion(question, { now: NOW }).kind, null, question);
+        viaRefusals++;
+      }
     }
   }
   assert.equal(answers, 5 * 3 * 2 * selectorTemplates.length * 2 * 2);
-  t.diagnostic(JSON.stringify({ single_payer_answers: answers, templates: selectorTemplates.length }));
+  assert.equal(viaRefusals, 5 * 3 * 2 * unlistedViaTemplates.length * 2 * 2);
+  t.diagnostic(JSON.stringify({ single_payer_answers: answers, via_refusals: viaRefusals, templates: selectorTemplates.length }));
 });
 
 test('every separate payer clause must be covered even when the known mentions share one slug', async t => {

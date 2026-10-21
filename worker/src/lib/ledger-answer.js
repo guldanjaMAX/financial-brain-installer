@@ -111,7 +111,10 @@ function gapFor(reason, accounts = [], intent = {}) {
     // A bare month cannot date an arrival either, so the note asks for the
     // year instead of guessing one (round 6, R6-QUESTION-6).
     const bareMonth = payerQuestionGrammar.months.includes(period);
-    const received = /^(?:last|this) month$|^so far this year$/.test(period) ? `received ${period}`
+    // A single date is a period too (round 7, ruling 3): "received on <date>".
+    const months = payerQuestionGrammar.months.join('|');
+    const singleDate = new RegExp(`^(?:\\d{4}-\\d{2}-\\d{2}|\\d{1,2}/\\d{1,2}/\\d{4}|(?:${months}) +\\d{1,2}(?:st|nd|rd|th)?(?:,? +\\d{4})?|\\d{1,2}(?:st|nd|rd|th)? +(?:${months}) +\\d{4})$`).test(period);
+    const received = singleDate ? `received on ${period}` : /^(?:last|this) month$|^so far this year$/.test(period) ? `received ${period}`
       : /^last \d+ days$/.test(period) ? `received in the ${period}` : bareMonth ? `received in ${period} <year>` : `received in ${period}`;
     return { type: 'ledger_not_consulted', reason, code: reason,
       detail: `"for ${period}" can name the period a payment covers, not when it arrived. Did you mean "${received}"?${bareMonth ? ' Name the year.' : ''} Nothing is confirmed present or absent.` };

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ledgerFixture, NOW } from './ledger-review-fixture.mjs';
 import { classifyLedgerQuestion } from '../src/lib/ledger-question.js';
-import { requestedSelectorCases } from './ledger-question-cases.mjs';
+import { requestedSelectorCases, unlistedViaTemplates } from './ledger-question-cases.mjs';
 import { payerRegistry, resolveRequestedPayer } from '../src/lib/ledger-attribution.js';
 
 const payment = name => `Did the payment of $25.00 from ${name} arrive in October 2026?`;
@@ -144,8 +144,21 @@ test('unknown and partly covered selectors refuse; a confirmed registered payer 
   }
 });
 
+// Partner answer 9's closed qualifier list, and partner ruling 7 (round 7,
+// verbatim): "Strip ACH there too, so the payer is "Payer One". Update the
+// selector generator." A generated noun payer whose only other word is on the
+// list ("ach Payer One", "Payer One wire", "Payer One, invoice"), in the slot
+// before the question's own "payment", is stripped to "Payer One"; the
+// complete requested name stays the competing unstripped reading.
+const answerNineQualifiers = ['any', 'latest', 'last', 'recent', 'monthly', 'invoice', 'ach', 'wire'];
+function strippedNounArm(arm) {
+  const whole = arm.whole.toLowerCase();
+  const word = whole.replace(/^payer one,? +| +payer one$/, '');
+  return word !== whole && answerNineQualifiers.includes(word) && arm.question.includes(` the ${arm.whole} payment `);
+}
+
 test('generator retains complete requested names before interpreting grammar words', () => {
-  let cases = 0;
+  let cases = 0, stripped = 0;
   for (const arm of requestedSelectorCases()) {
     const intent = classifyLedgerQuestion(arm.question, { now: NOW });
     if (/\b(?:from|by|for|in|of)$/.test(arm.whole.toLowerCase())) {
@@ -156,12 +169,26 @@ test('generator retains complete requested names before interpreting grammar wor
       assert.equal(intent.payerReadings, undefined, 'S1 cannot retain a terminal connector as a name');
       cases++; continue;
     }
-    assert.ok(intent.kind, JSON.stringify(arm));
-    assert.ok(intent.payerReadings?.some(reading => reading.label === arm.whole.toLowerCase()), JSON.stringify(arm));
     const entries = [
       ...(arm.registration === 'longer' ? [] : [{ entity_slug: 'short', legal_name: 'Payer One' }]),
       ...(arm.registration === 'shorter' ? [] : [{ entity_slug: 'whole', legal_name: arm.whole }]),
     ];
+    if (strippedNounArm(arm)) {
+      // Ruling 7: the payer is "Payer One"; the complete requested name is
+      // retained as the unstripped reading, which competes at the answer.
+      assert.equal(intent.kind, 'payment', JSON.stringify(arm));
+      assert.equal(intent.counterparty, 'payer one', JSON.stringify(arm));
+      assert.ok(intent.unstrippedReading?.payerReadings?.some(reading => reading.label === arm.whole.toLowerCase()), JSON.stringify(arm));
+      const registry = payerRegistry(entries);
+      const shorter = resolveRequestedPayer(intent, registry), whole = resolveRequestedPayer(intent.unstrippedReading, registry);
+      if (arm.registration === 'longer') assert.equal(shorter.state, 'unresolved', JSON.stringify(arm));
+      else assert.deepEqual([shorter.state, shorter.slug], ['unique', 'short'], JSON.stringify(arm));
+      if (arm.registration === 'shorter') assert.equal(whole.state, 'unresolved', JSON.stringify(arm));
+      else assert.deepEqual([whole.state, whole.slug], ['unique', 'whole'], JSON.stringify(arm));
+      cases++; stripped++; continue;
+    }
+    assert.ok(intent.kind, JSON.stringify(arm));
+    assert.ok(intent.payerReadings?.some(reading => reading.label === arm.whole.toLowerCase()), JSON.stringify(arm));
     const resolved = resolveRequestedPayer(intent, payerRegistry(entries));
     if (resolved.state === 'unique') assert.equal(resolved.slug, 'whole', JSON.stringify(arm));
     if (arm.registration === 'longer') assert.equal(resolved.state, 'unique', JSON.stringify(arm));
@@ -169,6 +196,44 @@ test('generator retains complete requested names before interpreting grammar wor
     cases++;
   }
   assert.ok(cases > 50000);
+  // ach, wire and invoice x three shapes x 45 noun templates x 3 registrations.
+  assert.equal(stripped, 3 * 3 * 45 * 3);
+});
+
+// The generator's old "<aux> the payment via <whole> <verb>" arms. Partner
+// ruling 4 (round 7): ""Via <name>" that isn't a listed channel refuses."
+// Partner ruling 6 (round 7, verbatim): "Strip the channel: "via wire from
+// <name>" means payer <name>. Update the name-retention generators." The old
+// arm "via wire from Payer One" (whole "wire from Payer One") was pinned as
+// the complete requested name "wire from payer one"; it now names "Payer One".
+test('generator: the old "via <whole>" arms refuse at classification, and "via wire from <name>" names <name>', () => {
+  const counts = { refused: 0, wireFrom: 0 };
+  for (const arm of requestedSelectorCases()) {
+    // One arm per whole and registration; the 45 old forms are applied here.
+    if (arm.question !== `did the payment from ${arm.whole} arrive in October 2026?`) continue;
+    for (const template of unlistedViaTemplates) {
+      const question = template(arm.whole), intent = classifyLedgerQuestion(question, { now: NOW });
+      const named = arm.whole.match(/^wire from (.+)$/i)?.[1];
+      if (!named || /\b(?:from|by|for|in|of)$/i.test(named)) {
+        assert.equal(intent.kind, null, question);
+        counts.refused++; continue;
+      }
+      assert.equal(intent.kind, 'payment', question);
+      assert.equal(intent.counterparty, named.toLowerCase(), question);
+      assert.ok(!intent.payerReadings.some(reading => /^wire\b/.test(reading.label)), `${question}: the channel is never payer text`);
+      const entries = [
+        ...(arm.registration === 'longer' ? [] : [{ entity_slug: 'short', legal_name: 'Payer One' }]),
+        ...(arm.registration === 'shorter' ? [] : [{ entity_slug: 'whole', legal_name: arm.whole }]),
+      ];
+      const resolved = resolveRequestedPayer(intent, payerRegistry(entries));
+      if (arm.registration === 'longer') assert.equal(resolved.state, 'unresolved', question);
+      else assert.deepEqual([resolved.state, resolved.slug], ['unique', 'short'], question);
+      counts.wireFrom++;
+    }
+  }
+  // One whole, "wire from Payer One", x 45 templates x 3 registrations.
+  assert.equal(counts.wireFrom, 45 * 3);
+  assert.ok(counts.refused > 10000);
 });
 
 test('generated requested selectors resolve by distinct slugs, with both real receipt arms', async t => {
@@ -192,6 +257,25 @@ test('generated requested selectors resolve by distinct slugs, with both real re
       assert.equal(body.route, 'documents', 'unsupported terminal selector reaches fallback');
       assert.equal(f.calls.length, reads);
       counts.cases++; counts.unsupported = (counts.unsupported || 0) + 1; continue;
+    }
+    if (strippedNounArm(arm)) {
+      // Ruling 7: the stripped "Payer One" and the unstripped complete name
+      // compete. One registered answers for its own exact payee row only;
+      // both registered are two exact entities and refuse; nothing else is
+      // certified, and no absence or zero is read.
+      f.raw('UPDATE fin_entities SET legal_name=? WHERE entity_slug=?', arm.registration === 'longer' ? 'Unused Short' : 'Payer One', 'short');
+      f.raw('UPDATE fin_entities SET legal_name=? WHERE entity_slug=?', arm.registration === 'shorter' ? 'Unused Whole' : arm.whole, 'whole');
+      for (const actual of ['Payer One', arm.whole]) for (const exact of [false, true]) {
+        f.raw('UPDATE fin_transactions SET payee=?', actual);
+        const body = await f.ask(arm.question.replace('?', exact ? ', exact names only?' : '?'));
+        if (arm.registration !== 'both' && (arm.registration === 'shorter') === (actual === 'Payer One')) {
+          assert.equal(body.ledger.found, true, JSON.stringify({ arm, actual }));
+          assert.equal(body.evidence_gate.complete, true, JSON.stringify({ arm, actual }));
+          assert.ok(body.citations.some(c => c.amount_minor === 2500));
+        } else uncertain(body);
+        counts.answers++;
+      }
+      counts.cases++; counts.stripped = (counts.stripped || 0) + 1; continue;
     }
     const resolved = resolveRequestedPayer(intent, payerRegistry(entries));
     counts[resolved.state]++; counts.cases++;
@@ -222,5 +306,6 @@ test('generated requested selectors resolve by distinct slugs, with both real re
   assert.ok(counts.unique > 0 && counts.unresolved > 0);
   assert.equal(counts.ambiguous, 0, 'contained shorter spellings yield to the complete registered name');
   assert.equal(counts.missing, 0, 'known fragments cannot certify absence for an unregistered longer selector');
+  assert.equal(counts.stripped, 3 * 3 * 45 * 3, 'ruling 7 arms');
   t.diagnostic(JSON.stringify(counts));
 });

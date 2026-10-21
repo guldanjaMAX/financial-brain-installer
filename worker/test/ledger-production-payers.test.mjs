@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { productionFixture, measureProduction, reachedAnswer } from './ledger-production-fixture.mjs';
 import { ledgerFixture, NOW } from './ledger-review-fixture.mjs';
 import { ledgerStatementVocabulary, normalizeMerchantText } from '../src/lib/ledger-attribution.js';
-import { selectorTemplates } from './ledger-question-cases.mjs';
+import { selectorTemplates, unlistedViaTemplates } from './ledger-question-cases.mjs';
+import { classifyLedgerQuestion } from '../src/lib/ledger-question.js';
 import { originatorFormats, originatorWords, channelPrefixes } from './ledger-attribution-cases.mjs';
 
 import { assertExactSelection, assertPossibleMatch } from './partner-r7-assertions.mjs';
@@ -223,8 +224,22 @@ test('question generator uses only owned entities, including keyword and punctua
       if (body.ledger.kind === 'merchant') assert.equal(body.ledger.total_minor, 2500);
       stats.questions++; stats.positive++;
     }
+    // The old "<aux> the payment via <name> <verb>" forms. Partner ruling 4
+    // (round 7): ""Via <name>" that isn't a listed channel refuses." Partner
+    // ruling 6: ""via wire from <name>" means payer <name>": the old arm for
+    // the name "wire from Supplier Unit" names "Supplier Unit", whose exact
+    // field this row is not, so it is never found and never certified absent.
+    for (const form of unlistedViaTemplates) {
+      const question = form(name), intent = classifyLedgerQuestion(question, { now: NOW });
+      const named = name.match(/^wire from (.+)$/)?.[1];
+      if (!named) { assert.equal(intent.kind, null, question); stats.viaRefused = (stats.viaRefused || 0) + 1; continue; }
+      assert.equal(intent.counterparty, named.toLowerCase(), question);
+      refusal(await reachedAnswer(f, question)); stats.wireFrom = (stats.wireFrom || 0) + 1;
+    }
     refusal(await reachedAnswer(f, payment('Missing Supplier'))); stats.refused++;
   }
+  assert.equal(stats.wireFrom, 45, 'one "wire from" name x 45 old via forms');
+  assert.equal(stats.viaRefused, (names.length - 1) * 45);
   assert.equal(f.first("SELECT COUNT(*) n FROM fin_entities WHERE relationship!='owned'").n, 0);
   assert.ok(stats.positive && stats.refused);
   t.diagnostic(JSON.stringify({ production_question_generator: stats }));

@@ -108,7 +108,10 @@ for (const [label, change] of [
   assert.equal(body.gaps[0]?.reason, 'period_outside_coverage');
 });
 
-for (const question of ['Did the Fixture Bank payment arrive?', 'Did the payment from Fixture Bank arrive?', 'Did the payment via Fixture Bank arrive?']) test(`F2 specific mixed sender control: ${question}`, async t => {
+// Partner ruling 4 (round 7): ""Via <name>" that isn't a listed channel
+// refuses. Rewrite ... the F2 ... control to match." The via form names the
+// payer in a FROM clause after a listed channel, which is stripped.
+for (const question of ['Did the Fixture Bank payment arrive?', 'Did the payment from Fixture Bank arrive?', 'Did the payment via ACH from Fixture Bank arrive?']) test(`F2 specific mixed sender control: ${question}`, async t => {
   const f = ledgerFixture(t);
   f.add('exact', 'Settlement', 'Fixture Bank');
   f.add('different', 'Bank settlement', 'Fixture');
@@ -116,6 +119,20 @@ for (const question of ['Did the Fixture Bank payment arrive?', 'Did the payment
   assert.equal(body.ledger?.found, true);
   assert.equal(body.citations.length, 1, 'generic words in a specific name remain matching constraints');
   assert.ok(f.calls.some(sql => /JOIN fin_transactions/.test(sql)));
+});
+
+test('F2 specific sender after "via" alone refuses at classification (ruling 4)', async t => {
+  const f = ledgerFixture(t);
+  f.add('exact', 'Settlement', 'Fixture Bank');
+  f.add('different', 'Bank settlement', 'Fixture');
+  assert.equal((await f.ask('Did the payment from Fixture Bank arrive?')).ledger?.found, true, 'green control');
+  const start = f.calls.length, documents = f.documentCalls;
+  const question = 'Did the payment via Fixture Bank arrive?';
+  assert.equal(classify(question, { now: Date.parse(NOW) }).kind, null);
+  const body = await f.ask(question);
+  assert.deepEqual(body, { route: 'documents', gaps: [] }, '"via <name>" names no payer');
+  assert.equal(f.documentCalls, documents + 1);
+  assert.equal(f.calls.length, start, 'no ledger rows are read for it');
 });
 
 for (const name of ['!!!', '123', 'one two three four five six seven eight nine', 'very much']) test(`F1 bounded merchant shorthand: ${name}`, async t => {

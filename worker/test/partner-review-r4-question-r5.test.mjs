@@ -232,15 +232,34 @@ const phraseQualifier = [
   'did the bill pay payment from Payer One arrive?',
 ];
 
-test('R5-QUESTION-5 (contract question) a two-word unlisted qualifier phrase before "payment from <payer>" becomes a second payer clause instead of refusing at classification', {
-  todo: 'contract question for the partner: should a phrase of two or more words before "payment from <payer>" that is neither on the closed qualifier list nor a registered name ("direct deposit", "bill pay") (a) refuse at classification as an unlisted qualifier (needs a registry check before classifying and changes the committed two-payer generator in ledger-question-mentions.test.mjs), or (b) stay a second payer clause refused at the answer ("I can\'t confirm which payer you mean", deposits listed)?',
-}, async t => {
+// Partner ruling 8 (round 7, verbatim): "(b): keep it as a second payer
+// clause, refused at the answer. No registry check." The repro's option (a)
+// expectation (kind null) is rewritten to option (b): the phrase stays the
+// noun payer clause beside Payer One, and the answer refuses with "I can't
+// confirm which payer you mean", lists the deposits and certifies nothing.
+test('R5-QUESTION-5 (ruling 8 (b)) a two-word unlisted phrase before "payment from <payer>" stays a second payer clause refused at the answer, deposits listed', async t => {
   for (const question of phraseQualifier) {
     const f = registeredPayerFixture(t);
     const intent = classify(question);
+    const phrase = question.match(/^did the (.+) payment from/)[1];
+    assert.equal(intent.kind, 'payment', `${question}: ${describe(intent)}`);
+    assert.deepEqual(intent.payerClauseSets?.map(set => set.map(clause => clause.label)), [[phrase, 'payer one']], `${question}: ${describe(intent)}`);
     const body = await f.ask(question);
-    assert.notEqual(body.evidence_gate?.complete, true, `${question}: ${outcome(body)}`);
-    assert.equal(intent.kind, null, `${question}: refused at classification if the phrase is a qualifier (${describe(intent)}; ${outcome(body)})`);
+    assert.equal(body.evidence_gate?.complete, false, `${question}: ${outcome(body)}`);
+    assert.equal(body.ledger?.found, null, `${question}: ${outcome(body)}`);
+    assert.equal(body.ledger?.payer_selector_ambiguous, true, `${question}: ${outcome(body)}`);
+    assert.match(body.answer, /can't confirm which payer you mean/, question);
+    assert.doesNotMatch(body.answer, /No matching|\$0\.00/, question);
+    // "deposits listed": both of Payer One's deposits stay visible.
+    assert.deepEqual(body.citations.map(c => c.amount_minor), [10000, 2500], `${question}: ${outcome(body)}`);
+    // "No registry check": the classification does not depend on whether the
+    // phrase is a registered name, and the answer still refuses.
+    const registered = registeredPayerFixture(t, ['Payer One', 'Vendor Alpha', phrase.replace(/\b\w/g, c => c.toUpperCase())]);
+    assert.deepEqual(classify(question).payerClauseSets?.map(set => set.map(clause => clause.label)), [[phrase, 'payer one']], question);
+    const twoPayers = await registered.ask(question);
+    assert.equal(twoPayers.evidence_gate?.complete, false, `${question}: ${outcome(twoPayers)}`);
+    assert.equal(twoPayers.ledger?.found, null, `${question}: ${outcome(twoPayers)}`);
+    assert.match(twoPayers.answer, /can't confirm which payer you mean/, question);
   }
 });
 
