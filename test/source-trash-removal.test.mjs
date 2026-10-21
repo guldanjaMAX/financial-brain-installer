@@ -211,6 +211,39 @@ test("Gmail: Spam and Trash win over a category label carried with them", async 
   assert.equal(s.state.history_id, "history-next");
 });
 
+// Minor from the review: Trash beats Spam. A message carrying both labels is
+// treated as trashed, so it keeps its document, on the daily run and on a
+// full sweep. A spam-only message in the same run is the control: removed.
+test("Gmail: Trash beats Spam, so a message carrying both keeps its document on the daily run and a full sweep", async (t) => {
+  for (const labels of [["SPAM", "TRASH"], ["TRASH", "SPAM"], ["CATEGORY_PROMOTIONS", "SPAM", "TRASH"]]) {
+    const decision = gmailLabelDecision(labels);
+    assert.equal(decision.trashed, true, labels.join(","));
+    assert.equal(decision.spam, false, labels.join(","));
+  }
+  const daily = gmailScenario(t, {
+    labels: { "both-msg": ["SPAM", "TRASH"], "spam-msg": ["SPAM"], "normal-msg": ["INBOX"] },
+    history: [record("labelsAdded", "both-msg"), record("labelsAdded", "spam-msg")],
+  });
+  const first = await daily.run();
+  assert.equal(first.error, undefined, `${first.error?.message}\n${first.output.slice(-1500)}`);
+  assert.deepEqual(daily.store.uids(), ["gmail:both-msg", "gmail:normal-msg"],
+    "the message in both Trash and Spam is kept; the spam-only message is removed");
+  assert.equal(daily.state.done["gmail:both-msg"], "both-msg-v1");
+  assert.match(first.output, /1 Gmail message\(s\) moved to Trash or deleted at the source; any stored document is kept/);
+  assert.match(first.output, /removed 1 stored Gmail document\(s\) for 1 spam message\(s\)/);
+  assert.equal(daily.state.history_id, "history-next");
+
+  const sweep = gmailScenario(t, {
+    labels: { "both-msg": ["TRASH", "SPAM"], "spam-msg": ["SPAM"], "normal-msg": ["INBOX"] },
+    listed: ["normal-msg"],
+  });
+  const swept = await sweep.run({ reset: true });
+  assert.equal(swept.error, undefined, `${swept.error?.message}\n${swept.output.slice(-1500)}`);
+  assert.deepEqual(sweep.store.uids(), ["gmail:both-msg", "gmail:normal-msg"]);
+  assert.equal(sweep.current().ingest_removal_plan, undefined, "no review stop");
+  assert.equal(sweep.current().history_id, "history-sweep");
+});
+
 test("Gmail: a spam removal that fails stays pending with the retry code and holds the cursor", async (t) => {
   const s = gmailScenario(t, {
     labels: { "spam-msg": ["SPAM"], "normal-msg": ["INBOX"] },

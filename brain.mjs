@@ -16957,6 +16957,28 @@ export function gmailFailureEvidence(error, statePath, beforeState) {
 }
 
 /**
+ * A configured Drive root this account cannot use is the owner's to fix, never
+ * a removal trigger and never a crash: it is in the trash, no longer shared,
+ * or the connected Google account is a different one.
+ */
+function dieDriveRootsUnavailable(detail, { cursorHeld = false, next }) {
+  dieWithSupportCode(
+    `${detail}. Nothing was removed${cursorHeld ? " and the cursor was not advanced" : ""}: ` +
+      "a root folder that is in the trash, no longer shared, or not visible to the connected Google account " +
+      "never triggers removal. Restore or re-share the folder, or reconnect the Google account that owns it. " +
+      `If the folder is gone for good, remove it from root_folder_ids, then ${next}.`,
+    "REMOTE_PERMISSION_DENIED",
+  );
+}
+
+/** The connector's rootUnavailable message without its trailing reassurance. */
+function driveRootUnavailableDetail(error) {
+  const detail = String(error?.message || "a Drive root folder is unavailable")
+    .replace(/;\s*existing indexed content was preserved\.?$/i, "");
+  return detail.charAt(0).toUpperCase() + detail.slice(1);
+}
+
+/**
  * brain ingest <manifest> --from drive --cleanup [--dry-run]
  *
  * One-time cleanup for stored Drive documents the daily changes feed will
@@ -16980,6 +17002,12 @@ export function gmailFailureEvidence(error, statePath, beforeState) {
  * both accounts can see resolves either way). As the Gmail sweep does, it
  * warns and removes nothing. Each removal batch forgets its files' accepted
  * versions as it commits, so a later failed batch leaves no stale state.
+ *
+ * Every configured root must resolve before anything is classified: a root in
+ * the trash, no longer shared, or not visible to this account stops the
+ * command with nothing removed. A stored identity the inventory quarantined
+ * as malformed is never looked up or removed; it is counted on its own line
+ * and saved for brain diagnose.
  */
 export async function cmdDriveCleanup(m, manifestPath, flags, options = {}) {
   if (flags.cleanup !== true) die("--cleanup takes no value. Run it with --dry-run first to see the counts.");
@@ -17023,27 +17051,59 @@ export async function cmdDriveCleanup(m, manifestPath, flags, options = {}) {
         "for files the daily run marked as carrying a credential.");
       info(`  cost per 100 scanned pages: ${describeOcrCost(estimateOcrCost(100))}`);
     }
-    const stored = await (options.listStoredSourceFamilies ?? listStoredSourceFamilies)({ base, adminKey, source: sourceName });
+    // The object form carries the stored identities the inventory quarantined.
+    const inventory = await (options.listStoredSourceFamilies ?? listStoredSourceFamilies)({
+      base, adminKey, source: sourceName, includeServerObservedAt: true,
+    });
+    const stored = inventory instanceof Set ? inventory : inventory.families;
+    const malformed = inventory instanceof Set ? [] : [...(inventory.malformedIdentities || [])].sort();
     info(`Drive cleanup${dry ? " (dry run)" : ""}: ${stored.size} stored Drive document(s); walking ` +
       `${sourcePolicy.rootFolderIds.length} root folder(s)${sourcePolicy.includeMyDriveRootFiles ? " plus direct My Drive files" : ""}`);
-    const { gone, notVisible, outside, excluded, refused, counts } = await findDriveCleanupTargets({
-      drive, getToken, stored, sourceName,
-      rootFolderIds: sourcePolicy.rootFolderIds,
-      includeMyDriveRootFiles: sourcePolicy.includeMyDriveRootFiles,
-      exclusionOf: (file, folders) => drive.exclusionReason(file, drive.folderPathFor(file, folders), sourcePolicy),
-      credentialRefused: async (file, folders) => {
-        if (!scannerOn || !/^refused: carries /.test(String(priorState.skipped?.[`${sourceName}:${file.id}`] || ""))) return false;
-        let read;
-        try {
-          read = await drive.toEnvelope(getToken, file, { sourceName, pathOf: (f) => drive.folderPathFor(f, folders), ocr: ocrCallback });
-        } catch {
-          return "unreadable";
-        }
-        if (!read?.envelope) return "unreadable";
-        return Boolean(credentialRefusalOf(sanitizeIngestEnvelope(read.envelope), true));
-      },
-      onProgress: info,
-    });
+    // A malformed stored identity never becomes a Google lookup or a removal
+    // target. It is held, counted, and saved for brain diagnose to show.
+    if (malformed.length) {
+      warn(malformed.length === 1
+        ? "1 stored item has a malformed identity and is held; nothing will be deleted from it until it is looked at. " +
+          "Run brain diagnose to see the quarantined identity."
+        : `${malformed.length} stored items have malformed identities and are held; ` +
+          "nothing will be deleted from them until they are looked at. Run brain diagnose to see the quarantined identities.");
+    }
+    if (!dry) {
+      const saved = lib.loadState(statePath);
+      if (JSON.stringify(saved.drive_malformed_identities || []) !== JSON.stringify(malformed)) {
+        if (malformed.length) saved.drive_malformed_identities = malformed;
+        else delete saved.drive_malformed_identities;
+        assertLockOwned?.();
+        lib.saveState(statePath, saved);
+      }
+    }
+    let found;
+    try {
+      found = await findDriveCleanupTargets({
+        drive, getToken, stored, sourceName,
+        rootFolderIds: sourcePolicy.rootFolderIds,
+        includeMyDriveRootFiles: sourcePolicy.includeMyDriveRootFiles,
+        exclusionOf: (file, folders) => drive.exclusionReason(file, drive.folderPathFor(file, folders), sourcePolicy),
+        credentialRefused: async (file, folders) => {
+          if (!scannerOn || !/^refused: carries /.test(String(priorState.skipped?.[`${sourceName}:${file.id}`] || ""))) return false;
+          let read;
+          try {
+            read = await drive.toEnvelope(getToken, file, { sourceName, pathOf: (f) => drive.folderPathFor(f, folders), ocr: ocrCallback });
+          } catch {
+            return "unreadable";
+          }
+          if (!read?.envelope) return "unreadable";
+          return Boolean(credentialRefusalOf(sanitizeIngestEnvelope(read.envelope), true));
+        },
+        onProgress: info,
+      });
+    } catch (error) {
+      // Every root must resolve before anything is classified: an unavailable
+      // or wrong-account root never makes the stored files look gone.
+      if (error?.reason !== "rootUnavailable") throw error;
+      dieDriveRootsUnavailable(driveRootUnavailableDetail(error), { next: "run --cleanup again" });
+    }
+    const { gone, notVisible, outside, excluded, refused, counts } = found;
     info(`  ${counts.in_roots} under a root (kept); ${counts.gone} trashed at Google; ` +
       `${counts.outside_roots} outside every root; ${counts.excluded} excluded by the current settings; ` +
       `${counts.credential_refused} refused by the credential scanner; ` +
@@ -17948,8 +18008,9 @@ const cmdIngestRemoteRun = async (
     // additive pass that never removes. A file the connector cannot read, or
     // one the credential scanner refuses, keeps its stored copy.
     const drive = options.drive ?? await import("./connectors/google-drive.mjs");
-    const { driveFileIdOf, driveFileInRoots, driveFailureText, removeDriveFamilies, removalRetryPending } =
-      await import("./operations/drive-sync.mjs");
+    const {
+      driveFileIdOf, driveFileInRoots, driveFailureText, removeDriveFamilies, removalRetryPending, unavailableDriveRoots,
+    } = await import("./operations/drive-sync.mjs");
     delete state.drive_removal_review;
     delete state.drive_removal_safety_baseline;
     const roots = sourcePolicy.rootFolderIds;
@@ -18049,13 +18110,18 @@ const cmdIngestRemoteRun = async (
         warn(`could not get a Drive change token, so the next run repeats this pass: ${driveFailureText(error)}`);
       }
       info(`loading ${roots.length} Drive root folder(s)${sourcePolicy.includeMyDriveRootFiles ? " plus direct My Drive files" : ""}; nothing is removed on this pass`);
-      for await (const file of drive.listRootedFiles(getToken, {
-        rootFolderIds: roots,
-        includeMyDriveRootFiles: sourcePolicy.includeMyDriveRootFiles,
-      })) {
-        byId.set(String(file.id), file);
-        if (file.scope_my_drive_root === true) state.drive_my_drive_root_id = String(file.id);
-        if (byId.size >= limit) break;
+      try {
+        for await (const file of drive.listRootedFiles(getToken, {
+          rootFolderIds: roots,
+          includeMyDriveRootFiles: sourcePolicy.includeMyDriveRootFiles,
+        })) {
+          byId.set(String(file.id), file);
+          if (file.scope_my_drive_root === true) state.drive_my_drive_root_id = String(file.id);
+          if (byId.size >= limit) break;
+        }
+      } catch (error) {
+        if (error?.reason !== "rootUnavailable") throw error;
+        dieDriveRootsUnavailable(driveRootUnavailableDetail(error), { cursorHeld: !dry, next: "run Drive ingestion again" });
       }
       folders = drive.updateFolderIndex([...byId.values()], {});
       fileParents = {};
@@ -18164,6 +18230,30 @@ const cmdIngestRemoteRun = async (
     intentionalRemovalUids.length = 0;
     // A removed or moved-out file no longer has a place under a root.
     for (const uid of gone) delete fileParents[driveFileIdOf(uid, sourceName)];
+    // An unavailable root never triggers removal. A root in the trash, no
+    // longer shared, or not visible to the connected Google account makes the
+    // files under it look trashed or moved out, so while any root is
+    // unavailable this run removes nothing and holds the cursor. A root that
+    // cannot be checked right now holds the removals for the next run. Checked
+    // only when there is something to remove.
+    if (gone.size) {
+      let unavailable;
+      try {
+        unavailable = await unavailableDriveRoots({
+          drive, getToken, rootFolderIds: roots,
+          myDriveRootId: sourcePolicy.includeMyDriveRootFiles ? state.drive_my_drive_root_id || null : null,
+        });
+      } catch (error) {
+        if (error?.name !== "DriveError") throw error;
+        throw removalRetryPending(error, { count: gone.size, what: "trashed, moved-out or excluded Drive file(s)" });
+      }
+      if (unavailable.length) {
+        dieDriveRootsUnavailable(
+          `Drive root folder(s) not available to this account: ${unavailable.map(({ id, reason }) => `${id} (${reason})`).join(", ")}`,
+          { cursorHeld: !dry, next: "run Drive ingestion again" },
+        );
+      }
+    }
     const notVisibleLine = (count) => info(
       `${count} Drive file(s) are no longer visible to this account; their stored documents are kept. ` +
         "--cleanup removes them (run it with --dry-run first to see the count).",
@@ -18181,7 +18271,16 @@ const cmdIngestRemoteRun = async (
       if (recorded(notVisible)) notVisibleLine(recorded(notVisible));
       if (recorded(outsideKept)) outsideKeptLine(recorded(outsideKept));
     } else if (gone.size || notVisible.size || outsideKept.size) {
-      const stored = await listPreparedSourceFamilies({ base, adminKey, source: sourceName });
+      let stored;
+      try {
+        stored = await listPreparedSourceFamilies({ base, adminKey, source: sourceName });
+      } catch (error) {
+        // The read that decides what to remove is part of the at-once removal:
+        // if it fails, the files stay pending with the retry code. A read only
+        // for the kept counts, or an anticipated stop, keeps its own error.
+        if (error instanceof Fatal || !gone.size) throw error;
+        throw removalRetryPending(error, { count: gone.size, what: "trashed, moved-out or excluded Drive file(s)" });
+      }
       const storedIds = new Set([...stored].map((uid) => driveFileIdOf(uid, sourceName)));
       const isStored = (uid) => storedIds.has(driveFileIdOf(uid, sourceName));
       const keptNotVisible = [...notVisible].filter(isStored).length;
@@ -26199,10 +26298,12 @@ export function readMalformedDriveIdentities(manifestPath) {
   const statePath = canonicalSourceIngestStatePath({ manifestPath, sourceName: "drive" });
   try {
     const state = JSON.parse(readFileSync(statePath, "utf8"));
-    const identities = state?.drive_removal_review?.malformed_identities;
-    return Array.isArray(identities)
-      ? identities.filter((uid) => typeof uid === "string" && !isCanonicalStoredFamilyUid(uid, "drive"))
-      : [];
+    // Drive --cleanup records them now; an older build's review record still counts.
+    const identities = [
+      ...(Array.isArray(state?.drive_malformed_identities) ? state.drive_malformed_identities : []),
+      ...(Array.isArray(state?.drive_removal_review?.malformed_identities) ? state.drive_removal_review.malformed_identities : []),
+    ];
+    return [...new Set(identities.filter((uid) => typeof uid === "string" && !isCanonicalStoredFamilyUid(uid, "drive")))];
   } catch (error) {
     if (error?.code === "ENOENT" || error instanceof SyntaxError) return [];
     throw error;

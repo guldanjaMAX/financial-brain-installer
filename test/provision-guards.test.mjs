@@ -942,10 +942,17 @@ check("a fully accepted batch may advance its source cursor", sourceCursorCanAdv
   const src = await fs.readFile(new URL("../brain.mjs", import.meta.url), "utf-8");
   const i = src.indexOf("const reviewRequired = e instanceof DriveRemovalReviewRequired || e instanceof WindowsDailyTaskRepairRequired;");
   check("both deliberate review types reach the anticipated failure renderer", i >= 0);
-  const block = src.slice(i, i + 1_100);
-  check("a Fatal prints on stdout, so PowerShell does not dress it up as a crash",
-    /if \(e instanceof Fatal \|\| reviewRequired\)/.test(block) &&
-      /const label = reviewRequired \? c\.yellow\("review required"\) : c\.red\("fail"\)/.test(block) &&
+  // The handler ends where an unanticipated error falls through to crash().
+  const end = src.indexOf("crash(e);", i);
+  check("the anticipated failure renderer ends before the crash fallback", i >= 0 && end > i);
+  const block = src.slice(i, end);
+  // Packet 10: an at-once removal left pending for the next run
+  // (REMOVAL_RETRY_PENDING) is anticipated too, with its own yellow label.
+  check("a pending at-once removal is recognised by its retry code",
+    /const retryPending = e\?\.code === "REMOVAL_RETRY_PENDING";/.test(block), block.slice(0, 300));
+  check("a Fatal, a review stop or a pending removal prints on stdout, so PowerShell does not dress it up as a crash",
+    /if \(e instanceof Fatal \|\| reviewRequired \|\| retryPending\)/.test(block) &&
+      /const label = reviewRequired \? c\.yellow\("review required"\) : retryPending \? c\.yellow\("retry pending"\) : c\.red\("fail"\)/.test(block) &&
       /console\.log\(`\$\{label\}/.test(block) &&
       !/console\.error/.test(block), block.slice(0, 300));
   check("and still exits 1, because that is the machine-readable part", /process\.exit\(1\)/.test(block));

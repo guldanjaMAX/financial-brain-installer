@@ -36,9 +36,10 @@ const CHANGES_FIELDS = "nextPageToken, newStartPageToken, changes(fileId, remove
 function googleDouble(entries, { myDriveId = null } = {}) {
   const byId = new Map(entries.map((entry) => [entry.id, entry]));
   const world = { byId, changes: [], startToken: "token-1", nextToken: "token-2", missing: new Set(), denied: new Set(),
-    content: new Map(), changesExpired: false, rootLookupFailures: 0 };
-  // Google answers the "root" alias with the real My Drive folder.
-  const alias = (id) => (id === "root" && myDriveId ? myDriveId : id);
+    content: new Map(), changesExpired: false, rootLookupFailures: 0, myDriveId, unavailableNow: new Set() };
+  // Google answers the "root" alias with the connected account's My Drive
+  // folder. A test switches world.myDriveId to model a different account.
+  const alias = (id) => (id === "root" && world.myDriveId ? world.myDriveId : id);
   const calls = [];
   const json = (body, status = 200) => Response.json(body, { status });
   const opts = { attempts: 1, fetchImpl: async (input) => {
@@ -68,6 +69,9 @@ function googleDouble(entries, { myDriveId = null } = {}) {
       return json({ files: [...byId.values()].filter((entry) => entry.parents.includes(parent) && !entry.trashed) });
     }
     const id = alias(path.split("/")[2]);
+    if (world.unavailableNow.has(id)) {
+      return json({ error: { message: "Backend error.", errors: [{ reason: "backendError" }] } }, 503);
+    }
     if (world.missing.has(id) || !byId.has(id)) {
       return json({ error: { message: "File not found.", errors: [{ reason: "notFound" }] } }, 404);
     }
@@ -114,8 +118,15 @@ function scenario(t, entries, { driveConfig = {}, myDriveId = null } = {}) {
   // batch fails after an earlier one committed.
   const removal = { fail: false, failAfterApplies: null, applies: 0 };
   let inventoryReads = 0;
+  // `failures` makes that many stored-inventory reads fail the way an
+  // unavailable Worker route does.
+  const inventoryFault = { failures: 0 };
   const inventory = async ({ includeServerObservedAt = false, includeLabels = false } = {}) => {
     inventoryReads++;
+    if (inventoryFault.failures > 0) {
+      inventoryFault.failures--;
+      throw new Error("source-family inventory was not accepted (503): synthetic outage");
+    }
     const families = new Set(store.uids());
     return includeServerObservedAt || includeLabels
       ? { families, malformedIdentities: new Set(), serverObservedAt: "2026-10-01T00:00:00Z",
@@ -202,7 +213,7 @@ function scenario(t, entries, { driveConfig = {}, myDriveId = null } = {}) {
     }
   };
   return { ...google, manifest, store, state, sent, receipts, failLoads, refuseLoads, removal, run, seedSynced,
-    inventoryReads: () => inventoryReads };
+    inventoryFault, inventoryReads: () => inventoryReads };
 }
 
 const baseEntries = () => [
@@ -1009,4 +1020,215 @@ test("with loose My Drive files on, a changed top-level My Drive folder does not
     "the top-level folder is not walked");
   assert.equal(s.store.uids().includes("drive:deep-file"), false);
   assert.equal(s.state.sync_token, "token-2");
+});
+
+// Review item 9. An unavailable or wrong-account root never triggers removal.
+// --cleanup walks every root before it classifies anything, so a root that is
+// not found (a different Google account, or a folder no longer shared),
+// access denied, or in the trash stops it with nothing removed, on the dry run
+// and the real run, even while another root is fine.
+const BETA = "folder-beta";
+for (const [label, makeUnavailable] of [
+  ["not found, as for a different Google account or a folder no longer shared", (s) => s.world.missing.add(BETA)],
+  ["access denied", (s) => s.world.denied.add(BETA)],
+  ["in the trash", (s) => s.world.byId.set(BETA, { ...s.world.byId.get(BETA), trashed: true })],
+]) {
+  test(`cleanup removes nothing while a root is ${label}`, async (t) => {
+    const entries = [folder("owner-drive", "Owner Drive"), folder(ROOT, "Folder Alpha", "owner-drive"),
+      folder(BETA, "Folder Beta", "owner-drive"), folder(OUTSIDE, "Folder Outside", "owner-drive"),
+      file("in-root"), file("beta-file", BETA), file("outside-file", OUTSIDE), file("trashed-file", ROOT, { trashed: true })];
+    const s = scenario(t, entries, { driveConfig: { root_folder_ids: [ROOT, BETA] } });
+    for (const id of ["in-root", "beta-file", "outside-file", "trashed-file", "missing-file"]) s.store.put(`drive:${id}`);
+    const before = s.store.uids();
+    makeUnavailable(s);
+    const preview = await s.run({ cleanup: true, "dry-run": true });
+    const applied = await s.run({ cleanup: true });
+    for (const [name, run] of [["dry run", preview], ["real run", applied]]) {
+      assert.equal(run.error?.supportCode, "REMOTE_PERMISSION_DENIED", `${name}: ${run.error?.message}`);
+      assert.match(run.error.message,
+        /^Reviewed Drive root folder-beta (?:is unavailable|is not an active folder)\. Nothing was removed: a root folder that is in the trash, no longer shared, or not visible to the connected Google account never triggers removal\./,
+        name);
+    }
+    assert.deepEqual(s.store.uids(), before);
+    assert.equal(s.store.calls.preview + s.store.calls.apply, 0, "the removal route is never reached");
+    assert.equal(s.calls.some((call) => ["/files/outside-file", "/files/trashed-file", "/files/missing-file"].includes(call.path)),
+      false, "no stored file is classified while a root is unavailable");
+
+    // Control: with the root available again, the same cleanup removes the
+    // trashed, outside and not-found files and keeps both roots' files.
+    s.world.missing.clear();
+    s.world.denied.clear();
+    s.world.byId.set(BETA, folder(BETA, "Folder Beta", "owner-drive"));
+    const control = await s.run({ cleanup: true });
+    assert.equal(control.error, undefined, control.error?.message);
+    assert.equal(control.result.removed, 3);
+    assert.deepEqual(s.store.uids(), ["drive:beta-file", "drive:in-root"]);
+  });
+}
+
+// On the daily path, a root moved to the trash takes every file under it to
+// the trash too, and the changes feed names each one as trashed. That is not
+// the owner trashing those files one by one: nothing is removed, the cursor
+// waits, and the run says which root to restore.
+test("a root moved to the trash never triggers removal on the daily path, and the cursor waits for it", async (t) => {
+  const entries = baseEntries().filter((entry) => entry.id !== "big-file");
+  const s = scenario(t, entries);
+  const files = entries.filter((entry) => entry.mimeType !== drive.FOLDER_MIME);
+  s.seedSynced(files);
+  const before = s.store.uids();
+  const trashedRoot = { ...s.world.byId.get(ROOT), trashed: true };
+  s.world.byId.set(ROOT, trashedRoot);
+  s.world.changes = [{ fileId: ROOT, removed: false, file: trashedRoot },
+    ...files.map((entry) => ({ fileId: entry.id, removed: false, file: { ...entry, trashed: true } }))];
+  const preview = await s.run({ "dry-run": true });
+  assert.equal(preview.error?.supportCode, "REMOTE_PERMISSION_DENIED", preview.error?.message);
+  const daily = await s.run();
+  assert.equal(daily.error?.supportCode, "REMOTE_PERMISSION_DENIED", `${daily.error?.message}\n${daily.output.slice(-1200)}`);
+  assert.ok(daily.error.message.startsWith(`Drive root folder(s) not available to this account: ${ROOT} (in the trash). ` +
+    "Nothing was removed and the cursor was not advanced"), daily.error.message);
+  assert.deepEqual(s.store.uids(), before, "nothing under the trashed root is removed");
+  assert.equal(s.store.calls.preview + s.store.calls.apply, 0);
+  assert.equal(s.state.sync_token, "token-1", "the cursor waits");
+  for (const entry of files) assert.ok(s.state.done[`drive:${entry.id}`], `${entry.id} keeps its accepted version`);
+  assert.equal(s.receipts.at(-1).status, "error");
+  assert.equal(s.receipts.at(-1).issue_code, "REMOTE_PERMISSION_DENIED");
+
+  // Restored: the replayed window shows the root and its files as they were.
+  // Nothing reloads, nothing is removed, and the cursor advances.
+  s.world.byId.set(ROOT, { ...trashedRoot, trashed: false });
+  s.world.changes = [{ fileId: ROOT, removed: false, file: s.world.byId.get(ROOT) },
+    ...files.map((entry) => ({ fileId: entry.id, removed: false, file: entry }))];
+  const restored = await s.run();
+  assert.equal(restored.error, undefined, restored.error?.message);
+  assert.deepEqual(s.store.uids(), before);
+  assert.deepEqual(s.sent, []);
+  assert.equal(s.state.sync_token, "token-2");
+
+  // Control: with the root available, a file trashed under it is removed at once.
+  s.world.changes = [{ fileId: "trash-file", removed: false, file: { ...s.world.byId.get("trash-file"), trashed: true } }];
+  const control = await s.run();
+  assert.equal(control.error, undefined, control.error?.message);
+  assert.equal(s.store.uids().includes("drive:trash-file"), false);
+  assert.equal(s.receipts.at(-1).status, "ready");
+});
+
+// A root that is no longer shared, or that the connected account cannot see,
+// takes most files out of view (kept anyway), but a file still shared on its
+// own comes back without the parent this account can no longer see. On its
+// own that looks like a recorded file moved out.
+for (const [label, makeUnavailable, reason] of [
+  ["no longer shared with this account", (s) => s.world.missing.add(ROOT), "not found"],
+  ["no longer readable by this account", (s) => s.world.denied.add(ROOT), "access denied"],
+]) {
+  test(`a root ${label} never triggers removal on the daily path`, async (t) => {
+    const entries = baseEntries().filter((entry) => entry.id !== "big-file");
+    const s = scenario(t, entries);
+    const files = entries.filter((entry) => entry.mimeType !== drive.FOLDER_MIME);
+    s.seedSynced(files);
+    const before = s.store.uids();
+    makeUnavailable(s);
+    s.world.changes = [{ fileId: ROOT, removed: true },
+      ...["keep-file", "edit-file", "trash-file", "gone-file"].map((id) => ({ fileId: id, removed: true })),
+      { fileId: "move-file", removed: false, file: { ...s.world.byId.get("move-file"), parents: [] } }];
+    const daily = await s.run();
+    assert.equal(daily.error?.supportCode, "REMOTE_PERMISSION_DENIED", `${daily.error?.message}\n${daily.output.slice(-1200)}`);
+    assert.ok(daily.error.message.startsWith(`Drive root folder(s) not available to this account: ${ROOT} (${reason}). ` +
+      "Nothing was removed and the cursor was not advanced"), daily.error.message);
+    assert.deepEqual(s.store.uids(), before);
+    assert.equal(s.store.calls.preview + s.store.calls.apply, 0);
+    assert.equal(s.state.sync_token, "token-1");
+    assert.ok(s.state.done["drive:move-file"], "the file keeps its accepted version");
+
+    // Control: shared again, the same file moved out of the root is removed at once.
+    s.world.missing.clear();
+    s.world.denied.clear();
+    s.world.changes = [{ fileId: "move-file", removed: false, file: { ...s.world.byId.get("move-file"), parents: [OUTSIDE] } }];
+    const control = await s.run();
+    assert.equal(control.error, undefined, control.error?.message);
+    assert.equal(s.store.uids().includes("drive:move-file"), false);
+    assert.equal(s.state.sync_token, "token-2");
+  });
+}
+
+// With loose My Drive files on, a different Google account answers "root" with
+// its own My Drive. A loose file shared with both accounts then shows no
+// parent, which on its own looks like a recorded file moved out.
+test("a different Google account never triggers removal on the daily path with loose My Drive files", async (t) => {
+  const entries = [folder("owner-drive", "Owner Drive"), folder("other-drive", "Other Drive"),
+    folder(OUTSIDE, "Folder Outside", "owner-drive"), file("loose-file", "owner-drive")];
+  const s = scenario(t, entries, { driveConfig: { root_folder_ids: [], include_my_drive_root_files: true }, myDriveId: "owner-drive" });
+  s.seedSynced([s.world.byId.get("loose-file")], [folder("owner-drive", "Owner Drive"), folder(OUTSIDE, "Folder Outside", "owner-drive")]);
+  s.state.drive_my_drive_root_id = "owner-drive";
+  s.world.myDriveId = "other-drive";
+  s.world.changes = [{ fileId: "loose-file", removed: false, file: { ...s.world.byId.get("loose-file"), parents: [] } }];
+  const daily = await s.run();
+  assert.equal(daily.error?.supportCode, "REMOTE_PERMISSION_DENIED", `${daily.error?.message}\n${daily.output.slice(-1200)}`);
+  assert.ok(daily.error.message.startsWith("Drive root folder(s) not available to this account: " +
+    "My Drive (not the My Drive this source recorded). Nothing was removed and the cursor was not advanced"), daily.error.message);
+  assert.deepEqual(s.store.uids(), ["drive:loose-file"]);
+  assert.equal(s.store.calls.preview + s.store.calls.apply, 0);
+  assert.equal(s.state.sync_token, "token-1");
+
+  // Control: the owner's account again, and the loose file moved out of My Drive is removed at once.
+  s.world.myDriveId = "owner-drive";
+  s.world.changes = [{ fileId: "loose-file", removed: false, file: { ...s.world.byId.get("loose-file"), parents: [OUTSIDE] } }];
+  const control = await s.run();
+  assert.equal(control.error, undefined, control.error?.message);
+  assert.deepEqual(s.store.uids(), []);
+  assert.equal(s.state.sync_token, "token-2");
+});
+
+// A root that cannot be checked right now proves nothing either way: the
+// removals wait with the retry code, and the next run makes them.
+test("a root that cannot be checked right now holds the daily removals with the retry code", async (t) => {
+  const entries = baseEntries().filter((entry) => entry.id !== "big-file");
+  const s = scenario(t, entries);
+  s.seedSynced(entries.filter((entry) => entry.mimeType !== drive.FOLDER_MIME));
+  s.world.unavailableNow.add(ROOT);
+  s.world.changes = [{ fileId: "trash-file", removed: false, file: { ...s.world.byId.get("trash-file"), trashed: true } }];
+  const held = await s.run();
+  assert.equal(held.error?.code, "REMOVAL_RETRY_PENDING", `${held.error?.name}: ${held.error?.message}`);
+  assert.match(held.error.message, /^1 trashed, moved-out or excluded Drive file\(s\) were not removed yet \(Backend error\)\./);
+  assert.ok(s.store.uids().includes("drive:trash-file"));
+  assert.equal(s.store.calls.preview + s.store.calls.apply, 0);
+  assert.equal(s.state.sync_token, "token-1");
+  assert.equal(s.receipts.at(-1).issue_code, "REMOVAL_RETRY_PENDING");
+
+  s.world.unavailableNow.clear();
+  const retried = await s.run();
+  assert.equal(retried.error, undefined, retried.error?.message);
+  assert.equal(s.store.uids().includes("drive:trash-file"), false);
+  assert.equal(s.state.sync_token, "token-2");
+});
+
+// Minor from the review: the stored-inventory read that decides an at-once
+// removal is part of that removal, so its failure carries the retry code too.
+// A read made only for the kept counts keeps its own error.
+test("a failed stored-inventory read before an at-once removal carries the retry code; a count-only read keeps its own error", async (t) => {
+  const entries = baseEntries().filter((entry) => entry.id !== "big-file");
+  const s = scenario(t, entries);
+  s.seedSynced(entries.filter((entry) => entry.mimeType !== drive.FOLDER_MIME));
+  s.world.changes = [{ fileId: "trash-file", removed: false, file: { ...s.world.byId.get("trash-file"), trashed: true } }];
+  s.inventoryFault.failures = 1;
+  const held = await s.run();
+  assert.equal(held.error?.code, "REMOVAL_RETRY_PENDING", `${held.error?.name}: ${held.error?.message}`);
+  assert.match(held.error.message,
+    /^1 trashed, moved-out or excluded Drive file\(s\) were not removed yet \(source-family inventory was not accepted \(503\): synthetic outage\)\. They stay pending, the cursor was not advanced, and the next run retries them\.$/);
+  assert.equal(s.receipts.at(-1).issue_code, "REMOVAL_RETRY_PENDING");
+  assert.ok(s.store.uids().includes("drive:trash-file"));
+  assert.equal(s.state.sync_token, "token-1");
+
+  const retried = await s.run();
+  assert.equal(retried.error, undefined, retried.error?.message);
+  assert.equal(s.store.uids().includes("drive:trash-file"), false);
+  assert.equal(s.state.sync_token, "token-2");
+
+  // Control: a window with only a file that left this account's view reads
+  // the inventory only to count it, and that failure is not a pending removal.
+  s.world.changes = [{ fileId: "gone-file", removed: true }];
+  s.inventoryFault.failures = 1;
+  const countOnly = await s.run();
+  assert.ok(countOnly.error, "the failed read is still reported");
+  assert.notEqual(countOnly.error.code, "REMOVAL_RETRY_PENDING");
+  assert.match(countOnly.error.message, /source-family inventory was not accepted \(503\)/);
 });

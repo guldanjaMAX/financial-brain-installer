@@ -75,6 +75,43 @@ export function driveFileInRoots(file, { rootFolderIds = [], folders = {}, myDri
   return false;
 }
 
+/**
+ * The configured roots this account cannot use right now, each with a short
+ * reason. A root in the trash, not found, access denied, or not a folder is
+ * unavailable: an unshared root, or a different Google account, looks like
+ * this. With `myDriveRootId` (include_my_drive_root_files on), a My Drive
+ * whose id differs from the recorded one means a different account. A
+ * transient error is thrown, so the caller holds its removals and retries.
+ * Every trashed or moved-out file under an unavailable root would look gone,
+ * so the daily run removes nothing while any root is unavailable.
+ */
+export async function unavailableDriveRoots({ drive, getToken, rootFolderIds = [], myDriveRootId = null }) {
+  const read = async (id) => {
+    try {
+      return { file: await drive.getFileMetadata(getToken, id) };
+    } catch (error) {
+      if (error?.name === "DriveError" && error.retryable !== true && [403, 404].includes(error.status)) {
+        return { reason: error.status === 404 ? "not found" : "access denied" };
+      }
+      throw error;
+    }
+  };
+  const unavailable = [];
+  for (const id of rootFolderIds) {
+    const { file, reason } = await read(id);
+    const why = reason ?? (file?.trashed === true ? "in the trash"
+      : !file?.id || file.mimeType !== DRIVE_FOLDER_MIME ? "not a folder" : null);
+    if (why) unavailable.push({ id: String(id), reason: why });
+  }
+  if (myDriveRootId) {
+    const { file, reason } = await read("root");
+    if (reason || String(file?.id || "") !== String(myDriveRootId)) {
+      unavailable.push({ id: "My Drive", reason: reason ?? "not the My Drive this source recorded" });
+    }
+  }
+  return unavailable;
+}
+
 /** A short, content-free reason for one failed Drive load. */
 export function driveFailureText(error) {
   const parts = [String(error?.name || "Error")];

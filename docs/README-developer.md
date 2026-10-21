@@ -1053,9 +1053,11 @@ The stored-family inventory and removal-plan builder share one canonical
 identity validator. A Drive source ID must contain only printable ASCII U+0021
 through U+007E, and the complete `drive:<id>` UID is limited to 256 UTF-8 bytes.
 Other source namespaces retain their existing non-control opaque identities,
-including spaces. Invalid Drive identities are preserved byte-for-byte in
-`drive_removal_review.malformed_identities`, excluded before provider lookup,
-and shown only through the read-only diagnostic path. Diagnose escapes every
+including spaces. Invalid Drive identities are excluded before provider lookup
+or removal, counted on their own line by Drive `--cleanup`, preserved
+byte-for-byte in the source state's `drive_malformed_identities` (an older
+build's `drive_removal_review.malformed_identities` is still read), and shown
+only through the read-only diagnostic path. Diagnose escapes every
 code point outside printable ASCII and caps display length while the stored
 value remains exact. The removal plan never trims an identity.
 

@@ -23,6 +23,7 @@ import {
   isRetryableDriveError,
   isCanonicalStoredFamilyUid,
   listStoredSourceFamilies,
+  readMalformedDriveIdentities,
   renderMalformedDriveIdentities,
   remoteFamilySettlement,
   safeIngestDisplay,
@@ -744,11 +745,15 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     const adjudicatedAccepted = run(["--reset"]);
     assert.equal(adjudicatedAccepted.code, 0, adjudicatedAccepted.output.slice(-1_200));
     const adjudicatedEvidence = JSON.parse(readFileSync(evidencePath, "utf8"));
-    assert.equal(adjudicatedEvidence.lastFinalReceipt.status, "ready",
-      `an adjudicated Drive skip blocked a zero-refusal completed walk:\n${adjudicatedAccepted.output.slice(-1_200)}`);
-    assert.equal(adjudicatedEvidence.lastFinalReceipt.docs_refused, 0);
-    assert.equal(adjudicatedEvidence.lastFinalReceipt.issue_code, null);
-    assert.match(adjudicatedEvidence.lastFinalReceipt.detail || "", /coverage_gaps=0; source_resolved=0; adjudicated_skips=1/);
+    assert.deepEqual(adjudicatedEvidence.lastFinalReceipt, {
+      status: "ready",
+      complete_sweep: true,
+      walk_complete: true,
+      docs_refused: 0,
+      docs_failed: 0,
+      issue_code: null,
+      detail: "drive sweep sync completed; skipped=1; policy_skipped=0; coverage_gaps=0; source_resolved=0; adjudicated_skips=1",
+    }, `an adjudicated Drive skip blocked a zero-refusal completed walk:\n${adjudicatedAccepted.output.slice(-1_200)}`);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -823,6 +828,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     inventoryUidFilterMode = "available",
     inventoryRouteMode = "available",
     storedUid = "drive:",
+    rootState = "active",
     win32 = false,
     args = [],
   } = {}) => {
@@ -854,6 +860,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       BRAIN_DRIVE_SCOPE_ROUTE_MODE: inventoryRouteMode,
       BRAIN_DRIVE_SCOPE_STORED_UID: storedUid,
       BRAIN_DRIVE_SCOPE_STORED_UID_JSON: JSON.stringify(storedUid),
+      BRAIN_DRIVE_SCOPE_ROOT_STATE: rootState,
       ...(win32 ? { BRAIN_DRIVE_SCOPE_WIN32_GUIDANCE: "1" } : {}),
       ADMIN_KEY: "fixture-admin",
     });
@@ -1069,6 +1076,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     return {
       code: result.code,
       output: result.output,
+      manifestPath,
       priorCursor,
       priorFullSweep,
       initialStateBytes,
@@ -1150,6 +1158,168 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       assert.equal(state.sync_token, `fixture-next-${mode}`);
     } finally {
       kept.cleanup();
+    }
+  }
+
+  // Review item 8: the malformed-identity checks of the retired daily approval
+  // gate, ported to the two commands that now decide Drive removals. A stored
+  // identity that is not a canonical Drive uid (an invisible, bidi or filler
+  // code point, a lone surrogate, an empty or whitespace id, or more than 256
+  // bytes) is quarantined by the stored inventory. --cleanup never looks it up
+  // at Google or removes it, counts it on its own held line, and saves it for
+  // brain diagnose. The daily run never removes it, even when the changes feed
+  // names its id as trashed. A legitimate short id and the 256-byte boundary
+  // are the controls: each reaches classification and is removed.
+  const malformedDriveIdentities = [
+    "drive:abc\u200bdef",
+    "drive:abc\u200ddef",
+    "drive:abc\u202edef",
+    "drive:abc\u2066def",
+    "drive:abc\u3164def",
+    "drive:abc\ufe0fdef",
+    "drive:abc\ud800def",
+    `drive:${"a".repeat(251)}`,
+    "drive:",
+    "drive:   ",
+    "drive:\t",
+    "drive: abc",
+  ];
+  for (const storedUid of malformedDriveIdentities) {
+    const label = JSON.stringify(storedUid);
+    const cleanup = runScopeScenario("full-identity", { full: true, storedUid, args: ["--cleanup"] });
+    try {
+      assert.equal(cleanup.code, 0, cleanup.output);
+      assert.match(cleanup.output, /1 stored item has a malformed identity and is held/i, label);
+      assert.ok(cleanup.output.includes(singularDiagnoseGuidance),
+        `--cleanup omitted the platform-rendered diagnose remediation for ${label}`);
+      assert.doesNotMatch(cleanup.output, /unexpected error|INGEST_FAILED/i);
+      const evidence = cleanup.evidence();
+      assert.equal(evidence.absenceMetadataReads, 0, `${label} reached Drive classification during --cleanup`);
+      assert.equal(evidence.forgetRequests, 0, `${label} reached deletion during --cleanup`);
+      assert.equal(evidence.planPreviews ?? 0, 0, `${label} reached the removal route during --cleanup`);
+      assert.deepEqual(cleanup.state().drive_malformed_identities, [storedUid]);
+      assert.deepEqual(readMalformedDriveIdentities(cleanup.manifestPath), [storedUid],
+        `brain diagnose cannot see the quarantined ${label}`);
+    } finally {
+      cleanup.cleanup();
+    }
+
+    const daily = runScopeScenario("incremental-identity-trash", { storedUid });
+    try {
+      assert.equal(daily.code, 0, daily.output);
+      assert.doesNotMatch(daily.output, /unexpected error|INGEST_FAILED/i);
+      const evidence = daily.evidence();
+      assert.equal(evidence.inventoryReads, 1, "the daily run did not read the stored inventory before removing");
+      assert.equal(evidence.absenceMetadataReads, 0, `${label} reached a Drive lookup during the daily run`);
+      assert.equal(evidence.forgetRequests, 0, `${label} reached deletion during the daily run`);
+      assert.equal(evidence.planPreviews ?? 0, 0, `${label} reached the removal route during the daily run`);
+      assert.equal(evidence.ingestBatchWrites, 0);
+      assert.equal(daily.state().sync_token, "fixture-next-incremental-identity-trash");
+    } finally {
+      daily.cleanup();
+    }
+  }
+
+  for (const storedUid of ["drive:a", `drive:${"a".repeat(250)}`]) {
+    const label = storedUid.length > 20 ? "the 256-byte Drive uid" : "a legitimate short Drive uid";
+    const cleanup = runScopeScenario("full-identity", { full: true, storedUid, args: ["--cleanup"] });
+    try {
+      assert.equal(cleanup.code, 0, cleanup.output);
+      assert.doesNotMatch(cleanup.output, /malformed/i);
+      const evidence = cleanup.evidence();
+      assert.equal(evidence.absenceMetadataReads, 1, `${label} did not reach Drive classification during --cleanup`);
+      assert.equal(evidence.forgetRequests, 1, `${label}, not found at Google, was not removed by --cleanup`);
+      assert.equal(evidence.removedFamilies, 1);
+      assert.equal(cleanup.state().drive_malformed_identities, undefined);
+    } finally {
+      cleanup.cleanup();
+    }
+    const daily = runScopeScenario("incremental-identity-trash", { storedUid });
+    try {
+      assert.equal(daily.code, 0, daily.output);
+      const evidence = daily.evidence();
+      assert.equal(evidence.forgetRequests, 1, `${label}, trashed, was not removed at once by the daily run`);
+      assert.equal(evidence.removedFamilies, 1);
+      assert.equal(evidence.absenceMetadataReads, 0, "the daily run looked up a file the changes feed already described");
+      assert.equal(daily.state().sync_token, "fixture-next-incremental-identity-trash");
+    } finally {
+      daily.cleanup();
+    }
+  }
+
+  // Several malformed identities across an inventory page boundary: the read
+  // resumes after them, the one legitimate family is still classified, and
+  // the held line is plural.
+  {
+    const boundary = runScopeScenario("full-page-boundary", { full: true, args: ["--cleanup"] });
+    try {
+      assert.equal(boundary.code, 0, boundary.output);
+      assert.match(boundary.output, /3 stored items have malformed identities and are held/i);
+      assert.ok(boundary.output.includes(pluralDiagnoseGuidance),
+        "--cleanup omitted the platform-rendered plural diagnose remediation");
+      const evidence = boundary.evidence();
+      assert.deepEqual(evidence.inventoryCursors.slice(0, 2), ["", "drive:b "],
+        "--cleanup did not read each inventory page exactly once");
+      assert.equal(evidence.absenceMetadataReads, 1,
+        "--cleanup did not classify the legitimate family after the malformed page boundary");
+      assert.equal(evidence.forgetRequests, 0);
+      assert.deepEqual(boundary.state().drive_malformed_identities, ["drive:a\t", "drive:b ", "drive:c\u0001"]);
+    } finally {
+      boundary.cleanup();
+    }
+  }
+
+  for (const [mode, storedUid, expectedGuidance] of [
+    ["full-identity", "drive:", win32SingularDiagnoseGuidance],
+    ["full-page-boundary", undefined, win32PluralDiagnoseGuidance],
+  ]) {
+    const rendered = runScopeScenario(mode, { full: true, storedUid, win32: true, args: ["--cleanup"] });
+    try {
+      assert.equal(rendered.code, 0, rendered.output);
+      assert.ok(rendered.output.includes(expectedGuidance), `${mode} omitted the win32-rendered diagnose remediation`);
+      assert.doesNotMatch(rendered.output, bareDiagnoseCommand,
+        `${mode} emitted bare diagnose guidance under the win32 preload`);
+    } finally {
+      rendered.cleanup();
+    }
+  }
+
+  // Review item 9 at the CLI: a root that is not found (a different Google
+  // account, or no longer shared), access denied, or in the trash stops
+  // --cleanup and the daily run with the anticipated "fail" label, never as a
+  // crash, and nothing is removed. The active-root "incremental-trash" run
+  // above is the control: the same trashed file is removed at once.
+  for (const rootState of ["missing", "denied", "trashed"]) {
+    const cleanup = runScopeScenario("full-unresolved", { full: true, rootState, args: ["--cleanup"] });
+    try {
+      assert.equal(cleanup.code, 1, cleanup.output);
+      assert.match(cleanup.output,
+        /fail\s+Reviewed Drive root root-fixture (?:is unavailable|is not an active folder)\. Nothing was removed: a root folder that is in the trash, no longer shared, or not visible to the connected Google account never triggers removal/);
+      assert.doesNotMatch(cleanup.output, /unexpected error/i);
+      const evidence = cleanup.evidence();
+      assert.equal(evidence.absenceMetadataReads, 0, `--cleanup classified a stored file with the root ${rootState}`);
+      assert.equal(evidence.forgetRequests, 0);
+      assert.equal(evidence.planPreviews ?? 0, 0);
+      assert.equal(cleanup.stateBytes(), cleanup.initialStateBytes, `--cleanup changed source state with the root ${rootState}`);
+    } finally {
+      cleanup.cleanup();
+    }
+
+    const daily = runScopeScenario("incremental-trash", { rootState });
+    try {
+      assert.equal(daily.code, 1, daily.output);
+      const reason = { missing: "not found", denied: "access denied", trashed: "in the trash" }[rootState];
+      assert.ok(daily.output.includes(`Drive root folder(s) not available to this account: root-fixture (${reason}). ` +
+        "Nothing was removed and the cursor was not advanced"), daily.output.slice(-1_200));
+      assert.match(daily.output, /^fail\s+Drive root folder/m);
+      assert.doesNotMatch(daily.output, /unexpected error/i);
+      const evidence = daily.evidence();
+      assert.equal(evidence.forgetRequests, 0, `the daily run removed a file with the root ${rootState}`);
+      assert.equal(evidence.planPreviews ?? 0, 0);
+      assert.equal(evidence.lastErrorReceipt?.issue_code, "REMOTE_PERMISSION_DENIED");
+      assert.equal(daily.state().sync_token, daily.priorCursor, "the cursor advanced past held removals");
+    } finally {
+      daily.cleanup();
     }
   }
 

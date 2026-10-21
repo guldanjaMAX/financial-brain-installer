@@ -23,6 +23,11 @@ const inventoryUidFilterMode = String(process.env.BRAIN_DRIVE_SCOPE_UID_FILTER |
 const inventoryRouteMode = String(process.env.BRAIN_DRIVE_SCOPE_ROUTE_MODE || "available");
 const inventoryLabelsAvailable = inventoryLabelMode !== "none";
 const inventoryDateAvailable = process.env.BRAIN_DRIVE_SCOPE_DATE !== "none";
+// The reviewed root as this account sees it: "active" (default), or
+// "missing", "denied" or "trashed", as for a root no longer shared, a
+// different Google account, or a root moved to the trash.
+const rootState = String(process.env.BRAIN_DRIVE_SCOPE_ROOT_STATE || "active");
+if (!["active", "missing", "denied", "trashed"].includes(rootState)) throw new Error("BRAIN_DRIVE_SCOPE_ROOT_STATE is invalid");
 const testedStoredUid = process.env.BRAIN_DRIVE_SCOPE_STORED_UID_JSON
   ? JSON.parse(process.env.BRAIN_DRIVE_SCOPE_STORED_UID_JSON)
   : String(process.env.BRAIN_DRIVE_SCOPE_STORED_UID || "drive:");
@@ -40,6 +45,7 @@ const MODES = new Set([
   "incremental-page-boundary",
   "incremental-structured-page-rejection",
   "incremental-identity",
+  "incremental-identity-trash",
   "incremental-unresolved-batch",
   "incremental-gone",
   "incremental-restored",
@@ -143,7 +149,13 @@ function storedFamilies(evidence) {
     return STRUCTURED_PAGE_UIDS;
   }
   if (mode === "full-control-cursor-v048") return ["drive:a\t", "drive:b"];
-  if (["full-identity", "incremental-identity"].includes(mode)) return [testedStoredUid];
+  if (mode === "incremental-identity") return [testedStoredUid];
+  if (["full-identity", "incremental-identity-trash"].includes(mode)) {
+    // One visible stored file under the root, so a not-found tested identity
+    // is not mistaken for a different Google account.
+    return (evidence.removedFamilies ? [RETAINED_UIDS[0]] : [testedStoredUid, RETAINED_UIDS[0]])
+      .sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)));
+  }
   if (mode === "incremental-unresolved-batch") {
     const removed = evidence.removedFamilies ? new Set(BATCH_MISSING_UIDS.slice(3)) : new Set();
     return [...BATCH_MISSING_UIDS, ...BATCH_RETAINED_UIDS]
@@ -252,6 +264,17 @@ globalThis.fetch = async (input, options = {}) => {
         newStartPageToken: "fixture-next-incremental-identity",
       });
     }
+    if (mode === "incremental-identity-trash") {
+      const id = testedStoredUid.slice("drive:".length);
+      return json({
+        changes: [{
+          fileId: id,
+          removed: false,
+          file: { id, name: "Removed fixture.txt", mimeType: "text/plain", trashed: true, parents: [ROOT_ID] },
+        }],
+        newStartPageToken: `fixture-next-${mode}`,
+      });
+    }
     if (mode === "incremental-page-boundary") {
       return json({
         changes: [{ fileId: "d", removed: true }],
@@ -293,11 +316,18 @@ globalThis.fetch = async (input, options = {}) => {
   }
 
   if (url.hostname === "www.googleapis.com" && url.pathname === `/drive/v3/files/${ROOT_ID}`) {
+    const evidence = readEvidence();
+    evidence.rootReads = Number(evidence.rootReads || 0) + 1;
+    saveEvidence(evidence);
+    if (rootState === "missing") return json({ error: { message: "File not found", errors: [{ reason: "notFound" }] } }, 404);
+    if (rootState === "denied") {
+      return json({ error: { message: "insufficient permissions", errors: [{ reason: "insufficientFilePermissions" }] } }, 403);
+    }
     return json({
       id: ROOT_ID,
       name: "Reviewed Root",
       mimeType: "application/vnd.google-apps.folder",
-      trashed: false,
+      trashed: rootState === "trashed",
       parents: [],
     });
   }
@@ -313,6 +343,8 @@ globalThis.fetch = async (input, options = {}) => {
     return json({
       files: mode === "incremental-restored"
         ? [restoredFile()]
+        : mode === "full-identity"
+          ? [retainedFile(0)]
         : ["full-malformed", "full-unresolved-subthreshold", "incremental-stale-marker-404", "incremental-stale-marker-live"].includes(mode)
           ? RETAINED_UIDS.map((_, index) => retainedFile(index))
           : [],
@@ -380,7 +412,7 @@ globalThis.fetch = async (input, options = {}) => {
 
   if (url.hostname === "www.googleapis.com" &&
       decodeURIComponent(url.pathname.slice("/drive/v3/files/".length)) === testedStoredUid.slice("drive:".length) &&
-      ["full-identity", "incremental-identity"].includes(mode)) {
+      ["full-identity", "incremental-identity", "incremental-identity-trash"].includes(mode)) {
     const evidence = readEvidence();
     evidence.absenceMetadataReads++;
     saveEvidence(evidence);
@@ -579,8 +611,10 @@ globalThis.fetch = async (input, options = {}) => {
     evidence.forgetRequests++;
     const expectedUids = mode === "incremental-unresolved-batch"
       ? BATCH_MISSING_UIDS.slice(3)
-      : [MISSING_UID];
-    if (!["full-unresolved", "incremental-gone", "incremental-trash", "incremental-left-scope", "incremental-unresolved-batch", "incremental-review-empty"].includes(mode) ||
+      : ["full-identity", "incremental-identity-trash"].includes(mode)
+        ? [testedStoredUid]
+        : [MISSING_UID];
+    if (!["full-unresolved", "incremental-gone", "incremental-trash", "incremental-left-scope", "incremental-unresolved-batch", "incremental-review-empty", "full-identity", "incremental-identity-trash"].includes(mode) ||
         request.confirm !== true || families.length !== expectedUids.length ||
         families.some((family, index) => family?.base_doc_uid !== expectedUids[index] ||
           !Array.isArray(family?.keep_doc_uids) || family.keep_doc_uids.length !== 0)) {
