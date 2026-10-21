@@ -9161,17 +9161,20 @@ export const GMAIL_ACCOUNT_MISMATCH_WARNING = "GMAIL_ACCOUNT_MISMATCH_SUSPECTED"
 /**
  * `legacy_marker_cleared` in the Gmail source state: the messages whose legacy
  * pending-removal marker (`state.removed`, written only by the older forget
- * route after a transport failure) a real daily run or full sweep cleared
- * because the message was moved to Trash or deleted at the source, so its
- * stored document was kept. Such a marker may have come from an older
- * credential refusal, so the one-time retry (Packet 11) reads this list
- * alongside the items on record as refused and re-reads each message once.
+ * route after a transport failure) a real daily run or full sweep cleared by
+ * either route: the keep rule (the message was moved to Trash or deleted at
+ * the source, so its stored document was kept), or the older rule (its stored
+ * family was already gone from D1 before the run). Such a marker may have come
+ * from an older credential refusal, so the one-time retry (Packet 11) reads
+ * this list alongside the items on record as refused and re-reads each message
+ * once.
  *
  * Shape: an array of `{ uid, cleared_at }`, one entry per uid, where `uid` is
  * the state key `<source>:<message id>` and `cleared_at` is the ISO time of
  * the run that cleared it. Written only when a marker is actually cleared,
- * never on a dry run; spam is never recorded (it is removed). Later runs never
- * remove an entry, and --reset carries the list forward.
+ * never on a dry run; spam is never recorded, and neither is a marker settled
+ * by this run's accepted re-read. Later runs never remove an entry, and
+ * --reset carries the list forward.
  */
 export const GMAIL_LEGACY_MARKER_CLEARED_KEY = "legacy_marker_cleared";
 
@@ -19068,8 +19071,14 @@ const cmdIngestRemoteRun = async (
     // family before counting active unreadable messages as unresolved; keep a
     // newly accepted re-post's fresh done marker intact.
     if (storedBeforeSweep) {
+      const clearedAt = new Date().toISOString();
       for (const uid of Object.keys(state.removed || {})) {
         if (!uid.startsWith(`${sourceName}:`) || storedBeforeSweep.has(uid)) continue;
+        // Recorded for the one-time retry like a marker the keep rule clears,
+        // unless this run's re-read was accepted (that settles it) or it is spam.
+        if (!dry && !gmailAcceptedUids.has(uid) && !gmailSpamSet.has(uid)) {
+          recordGmailLegacyMarkerCleared(state, uid, clearedAt);
+        }
         delete state.removed[uid];
         if (!gmailAcceptedUids.has(uid) && state.done) delete state.done[uid];
       }

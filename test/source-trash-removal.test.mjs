@@ -473,6 +473,51 @@ test("Gmail: a dry run records nothing and keeps the marker; the real run after 
   assert.equal(s.current().removed?.["gmail:trash-msg"], undefined);
 });
 
+// The older clearing route: the prior forget committed but its answer was
+// lost, so the family is already gone from D1 before the run and the marker
+// stayed. Pre-run D1 truth clears that marker too, and it is recorded the same
+// way, unless this run's re-read of the message was accepted or it is spam.
+test("Gmail daily run: a legacy marker on a message whose family is already gone from D1 is cleared and recorded; a dry run records nothing; an accepted re-read and spam are not recorded; a second run adds nothing", async (t) => {
+  const s = gmailScenario(t, {
+    labels: {
+      "gone-msg": ["INBOX"], "reread-msg": ["INBOX", "STARRED"], "spam-msg": ["SPAM"],
+      "normal-msg": ["INBOX", "STARRED"],
+    },
+    history: [
+      record("labelsAdded", "reread-msg"), record("labelsAdded", "spam-msg"), record("labelsAdded", "normal-msg"),
+    ],
+  });
+  const marked = ["gone-msg", "reread-msg", "spam-msg"];
+  for (const id of marked) s.store.db.prepare("DELETE FROM documents WHERE doc_uid=?").run(`gmail:${id}`);
+  s.state.removed = Object.fromEntries(marked.map((id) => [`gmail:${id}`, LEGACY_MARKER]));
+  const markers = structuredClone(s.state.removed);
+
+  for (const flags of [{ "dry-run": true }, { "dry-run": true, reset: true }]) {
+    const preview = await s.run(flags);
+    assert.equal(preview.error, undefined, `${preview.error?.name}: ${preview.error?.message}\n${preview.output.slice(-1500)}`);
+    assert.equal(s.current().legacy_marker_cleared, undefined, `${JSON.stringify(flags)} records nothing`);
+    assert.deepEqual(s.current().removed, markers, `${JSON.stringify(flags)} keeps every marker`);
+  }
+
+  const real = await s.run();
+  assert.equal(real.error, undefined, `${real.error?.name}: ${real.error?.message}\n${real.output.slice(-1500)}`);
+  assert.deepEqual(s.current().removed || {}, {}, "every marker is cleared");
+  assert.deepEqual(clearedUids(s.current()), ["gmail:gone-msg"],
+    "the message whose family was already gone is recorded; the accepted re-read and spam are not");
+  for (const entry of s.current().legacy_marker_cleared) {
+    assert.deepEqual(Object.keys(entry).sort(), ["cleared_at", "uid"]);
+    assert.ok(Number.isFinite(Date.parse(entry.cleared_at)), "cleared_at is a time");
+  }
+  assert.deepEqual(s.store.uids(), ["gmail:normal-msg", "gmail:reread-msg"], "the re-read message is stored again");
+  assert.equal(s.current().history_id, "history-next", "the cursor advances");
+  assert.equal(s.receipts.at(-1).status, "ready");
+
+  const recorded = structuredClone(s.current().legacy_marker_cleared);
+  const again = await s.run();
+  assert.equal(again.error, undefined, `${again.error?.name}: ${again.error?.message}\n${again.output.slice(-1500)}`);
+  assert.deepEqual(s.current().legacy_marker_cleared, recorded, "a second run keeps the list and adds nothing");
+});
+
 // An account switch: the saved history id means nothing to the new mailbox,
 // so the run is a full sweep, and every stored message answers 404.
 test("Gmail full sweep where every stored message answers 404: a loud account warning on the terminal and in the receipt; the corpus is kept and the cursor advances", async (t) => {

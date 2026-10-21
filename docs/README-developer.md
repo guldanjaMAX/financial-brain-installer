@@ -840,10 +840,12 @@ The Gmail source state also keeps `legacy_marker_cleared`, an array of
 time of the clearing run). A legacy pending-removal marker in `removed` was
 written only by the older forget route after a transport failure, and may have
 come from an older credential refusal. When a real daily run or full sweep
-clears such a marker because the message was moved to Trash or deleted at the
-source (its document is kept), it records the uid here first. A dry run records
-nothing, spam is never recorded because its document is removed, later runs
-never remove an entry, and `--reset` carries the list forward. Packet 11's
+clears such a marker by either route, it records the uid here first: the keep
+rule (the message was moved to Trash or deleted at the source, so its document
+is kept), or the older rule (its stored family was already gone from D1 before
+the run). A dry run records nothing, spam is never recorded, a marker settled
+by the run's accepted re-read is not recorded, later runs never remove an
+entry, and `--reset` carries the list forward. Packet 11's
 one-time retry reads it alongside the items on record as refused, so each of
 these messages still gets its one re-read.
 
