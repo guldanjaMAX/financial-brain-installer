@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtempSync as makeTempDirectory, realpathSync, writeFileSync } from "node:fs";
+import { mkdtempSync as makeTempDirectory, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { buildDailyRefreshDefinition } from "../operations/daily-refresh-scheduler.mjs";
 import { runDailyRefresh, runDailyRefreshCli } from "../operations/daily-refresh-run.mjs";
+import { DriveRemovalReviewRequired } from "../operations/drive-removal-plan.mjs";
 
 const mkdtempSync = (...args) => realpathSync.native(makeTempDirectory(...args));
 
@@ -159,7 +160,7 @@ test("unavailable daily-owned work is retained as a failed source outcome", asyn
   assert.equal(result.sources[0].status, "unavailable");
 });
 
-test("source exceptions cross receipt boundaries only as allowlisted codes", async () => {
+test("unknown source exceptions retain only a safe diagnostic detail", async () => {
   const privateSentinel = ["SYNTHETIC", "PRIVATE", "VALUE"].join("_");
   const receipts = [];
   let runCalls = 0;
@@ -173,7 +174,209 @@ test("source exceptions cross receipt boundaries only as allowlisted codes", asy
   assert.equal(runCalls, 1, "the exception boundary was reached");
   assert.equal(result.status, "failed");
   assert.equal(result.sources[0].reason_code, "source_execution_failed");
+  assert.equal(result.sources[0].issue_code, "UNKNOWN");
+  assert.equal(typeof result.sources[0].detail, "string");
+  assert.ok(result.sources[0].detail.length > 0 && result.sources[0].detail.length <= 200);
   assert.doesNotMatch(JSON.stringify(receipts), new RegExp(privateSentinel));
+});
+
+test("removal review failures retain safe cause, attention, status, and daily-log evidence", async () => {
+  const home = mkdtempSync(join(tmpdir(), "daily-removal-review-"));
+  const manifestPath = join(home, "brain.manifest.json");
+  writeFileSync(manifestPath, "{}\n");
+  const fingerprint = "a".repeat(64);
+  const reviewPlan = {
+    ...plan,
+    manifest_path: manifestPath,
+    sources: [{
+      key: "archive", class: "machine-pull", owner: "daily-task", status: "ready",
+      run_key: "archive", source_names: ["archive"],
+    }],
+  };
+  let sourceCalls = 0;
+  const error = new DriveRemovalReviewRequired(
+    `2 stored document(s) would be removed across 0 source removal(s) and 9 replacement family review(s). ` +
+      `Source cleanup would remove 0 of 861 stored documents (0.0%). --apply-removals ${fingerprint}`,
+  );
+  error.removal_review = Object.freeze({
+    stored_documents_to_remove: 2,
+    source_removals: 0,
+    replacement_family_reviews: 9,
+    source_cleanup_percentage: 0,
+    fingerprint,
+  });
+  const now = () => new Date("2026-10-21T16:00:00.000Z");
+  const result = await runDailyRefreshCli(manifestPath, {
+    brainModule: {},
+    buildPlan: async () => reviewPlan,
+    acquireLock: () => ({ assertOwned() {}, release() {} }),
+    runSource: async () => { sourceCalls += 1; throw error; },
+    readFreshness: async () => ({}),
+    readUpdateTransaction: () => null,
+    home,
+    platform: "darwin",
+    now,
+    silent: true,
+  });
+
+  assert.equal(sourceCalls, 1, "the removal-review decision point was reached");
+  assert.equal(result.status, "failed");
+  assert.equal(result.sources[0].status, "failed");
+  assert.equal(result.sources[0].issue_code, "SAFETY_REVIEW_REQUIRED");
+  assert.equal(result.sources[0].reason_code, "removal_review_required");
+  assert.equal(result.sources[0].reason,
+    `a removal review is waiting: 2 stored documents would be removed across 0 source removals and 9 replacement family reviews; ` +
+      `source cleanup is 0.0% of stored documents; plan fingerprint ${fingerprint}. Nothing was removed.`);
+  assert.ok(result.sources[0].detail.length > 0 && result.sources[0].detail.length <= 200);
+  assert.doesNotMatch(result.sources[0].detail, /[\r\n]/u);
+  assert.deepEqual(result.schedule_attention, [
+    "archive: a removal review is waiting (2 stored parts, 0 source removals). Nothing was removed.",
+  ]);
+  assert.doesNotMatch(result.schedule_attention[0], /--apply-removals|then run|re-run/iu);
+
+  const logPath = join(home, ".brain", "logs", reviewPlan.identity.id, "daily.log");
+  const logRecords = readFileSync(logPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  const failures = logRecords.filter((record) => record.kind === "source_failure");
+  assert.equal(failures.length, 1, "the failed source wrote exactly one diagnostic log record");
+  assert.equal(failures[0].source, "archive");
+  assert.equal(failures[0].issue_code, "SAFETY_REVIEW_REQUIRED");
+  assert.equal(failures[0].detail, result.sources[0].detail);
+
+  const { dailyObservationStatus, renderDailyObservation } = await import("../operations/daily-refresh-observation.mjs");
+  const schedule = dailyObservationStatus(reviewPlan, {
+    enabled: true, plan_matches_registered_definition: true, registered_node_usable: true,
+  }, { known: true, running: false, exit_code: 0 }, true, { home, platform: "darwin", now });
+  assert.deepEqual(schedule.schedule_attention, result.schedule_attention,
+    "daily status reads the persisted removal-review attention");
+  assert.deepEqual(schedule.source_issues, [{
+    source: "archive", issue_code: "SAFETY_REVIEW_REQUIRED", detail: result.sources[0].detail,
+  }]);
+  assert.equal(JSON.parse(JSON.stringify(schedule)).source_issues[0].issue_code, "SAFETY_REVIEW_REQUIRED",
+    "daily status JSON carries the source issue code");
+  const lines = [];
+  renderDailyObservation(schedule, (line) => lines.push(line));
+  assert.ok(lines.includes(`Daily attention: ${result.schedule_attention[0]}`));
+  assert.ok(lines.includes(`Daily source issue: archive | SAFETY_REVIEW_REQUIRED | ${result.sources[0].detail}`));
+});
+
+test("unknown failures redact planted secrets and log each failed source independently", async () => {
+  const home = mkdtempSync(join(tmpdir(), "daily-failure-redaction-"));
+  const manifestPath = join(home, "brain.manifest.json");
+  writeFileSync(manifestPath, "{}\n");
+  const plantedSecret = ["sk", "abcdefghijklmnopqrstuvwxyzABCDEF"].join("-");
+  const outsidePath = ["", "private", "fixture", "owner", "source.txt"].join("/");
+  const failurePlan = {
+    ...plan,
+    manifest_path: manifestPath,
+    sources: ["first", "second"].map((key) => ({
+      key, class: "machine-pull", owner: "daily-task", status: "ready", run_key: key, source_names: [key],
+    })),
+  };
+  let sourceCalls = 0;
+  const result = await runDailyRefreshCli(manifestPath, {
+    brainModule: {},
+    buildPlan: async () => failurePlan,
+    acquireLock: () => ({ assertOwned() {}, release() {} }),
+    runSource: async (source) => {
+      sourceCalls += 1;
+      throw new Error(source.key === "first"
+        ? `provider rejected ${plantedSecret} while reading ${outsidePath}`
+        : "second synthetic source stopped");
+    },
+    readFreshness: async () => ({}),
+    readUpdateTransaction: () => null,
+    home,
+    platform: "darwin",
+    now: () => new Date("2026-10-21T17:00:00.000Z"),
+    silent: true,
+  });
+
+  assert.equal(sourceCalls, 2, "both source execution decision points were reached");
+  assert.equal(result.sources.length, 2);
+  assert.deepEqual(result.sources.map((source) => source.issue_code), ["UNKNOWN", "UNKNOWN"]);
+  assert.deepEqual(result.sources.map((source) => source.reason_code), [
+    "source_execution_failed", "source_execution_failed",
+  ]);
+  assert.deepEqual(result.sources.map((source) => source.source), ["first", "second"]);
+  const receiptText = JSON.stringify(result);
+  assert.doesNotMatch(receiptText, new RegExp(plantedSecret));
+  assert.doesNotMatch(receiptText, new RegExp(outsidePath));
+  assert.match(result.sources[0].detail, /\[REDACTED:openai_legacy_key\]/u);
+  assert.match(result.sources[0].detail, /\[REDACTED:path\]/u);
+  assert.ok(result.sources.every((source) => source.detail.length <= 200 && !/[\r\n]/u.test(source.detail)));
+
+  const logPath = join(home, ".brain", "logs", failurePlan.identity.id, "daily.log");
+  const logText = readFileSync(logPath, "utf8");
+  assert.doesNotMatch(logText, new RegExp(plantedSecret));
+  assert.doesNotMatch(logText, new RegExp(outsidePath));
+  const failures = logText.trim().split("\n").map((line) => JSON.parse(line))
+    .filter((record) => record.kind === "source_failure");
+  assert.equal(failures.length, 2, "each failed source wrote its own diagnostic log record");
+  assert.deepEqual(failures.map((record) => record.source), ["first", "second"]);
+  assert.deepEqual(failures.map((record) => record.issue_code), ["UNKNOWN", "UNKNOWN"]);
+});
+
+test("complete and partial source receipts remain byte-identical to the 60afb222 contract", async () => {
+  const observedAt = "2026-10-21T18:00:00.000Z";
+  const before = "2026-10-20T18:00:00.000Z";
+  const after = "2026-10-21T18:00:00.000Z";
+  const expected = (status) => {
+    const source = {
+      schema_version: 1,
+      kind: "daily_refresh_source",
+      identity: "v1-run",
+      source: "drive",
+      status,
+      started_at: observedAt,
+      completed_at: observedAt,
+      last_successful_run_at_before: before,
+      last_successful_run_at_after: after,
+      freshness_advanced: true,
+      check_verified: true,
+      no_change: false,
+      last_check_at_before: before,
+      last_check_at_after: after,
+      docs_refused: null,
+      docs_withheld: 0,
+      docs_excluded: null,
+      missing_freshness_sources: [],
+      unadvanced_freshness_sources: [],
+      reason: null,
+    };
+    return [source, {
+      schema_version: 1,
+      kind: "daily_refresh",
+      identity: "v1-run",
+      status,
+      started_at: observedAt,
+      completed_at: observedAt,
+      schedule_attention: [],
+      sources: [source],
+    }];
+  };
+
+  for (const status of ["complete", "partial"]) {
+    const receipts = [];
+    let reads = 0;
+    let sourceCalls = 0;
+    await runDailyRefresh({
+      plan,
+      acquireLock: () => ({ assertOwned() {}, release() {} }),
+      runSource: async () => {
+        sourceCalls += 1;
+        return { status: "complete", ...(status === "partial" ? { partial: 1 } : {}) };
+      },
+      readFreshness: async () => ({
+        drive: { last_successful_run_at: reads++ === 0 ? before : after },
+      }),
+      writeReceipt: (receipt) => receipts.push(receipt),
+      now: () => new Date(observedAt),
+    });
+    assert.equal(sourceCalls, 1, `${status} control reached source execution`);
+    assert.equal(reads, 2, `${status} control reached both freshness decisions`);
+    assert.equal(JSON.stringify(receipts), JSON.stringify(expected(status)),
+      `${status} receipt bytes match the pinned baseline shape`);
+  }
 });
 
 test("a restarted scheduled runner honors an update recovery-required receipt", async () => {
@@ -463,11 +666,12 @@ test("runtime exhaustion reaches the decision point and defers remaining sources
   assert.ok(result.sources.every((source) => /runtime budget/i.test(source.reason)));
 });
 
-test("daily CLI journals successful, refused, and failed runs without raw diagnostics", async () => {
+test("daily CLI journals successful, refused, and failed runs with redacted source diagnostics", async () => {
   const { readFileSync } = await import("node:fs");
   const home = mkdtempSync(join(tmpdir(), "daily-observation-"));
   const manifestPath = join(home, "brain.manifest.json");
   writeFileSync(manifestPath, "{}\n");
+  const privateDiagnostic = ["SYNTHETIC", "PRIVATE", "DIAGNOSTIC"].join("_");
   let decisions = 0;
   const options = {
     home, platform: "darwin", brainModule: {},
@@ -476,7 +680,7 @@ test("daily CLI journals successful, refused, and failed runs without raw diagno
     acquireLock: () => ({ assertOwned() {}, release() {} }),
     readUpdateTransaction: () => null,
     readFreshness: async () => ({}), writeReceipt: () => {}, silent: true,
-    runSource: async () => { decisions += 1; throw new Error("private diagnostic must not be retained"); },
+    runSource: async () => { decisions += 1; throw new Error(`source stopped: ${privateDiagnostic}`); },
   };
   const failed = await runDailyRefreshCli(manifestPath, options);
   assert.equal(decisions, 1, "the failed source was actually attempted");
@@ -485,7 +689,8 @@ test("daily CLI journals successful, refused, and failed runs without raw diagno
   let rows = readFileSync(logPath, "utf8").trim().split("\n").map(JSON.parse);
   assert.equal(rows.at(-1).result, "failed");
   assert.equal(rows.at(-1).started_at, "2026-10-07T16:00:00.000Z");
-  assert.doesNotMatch(JSON.stringify(rows), /private diagnostic|google_drive|fixtures/);
+  assert.doesNotMatch(JSON.stringify(rows), new RegExp(`${privateDiagnostic}|google_drive|fixtures`));
+  assert.equal(rows.find((row) => row.kind === "source_failure")?.issue_code, "UNKNOWN");
   let reads = 0;
   const complete = await runDailyRefreshCli(manifestPath, {
     ...options,
@@ -502,7 +707,8 @@ test("daily CLI journals successful, refused, and failed runs without raw diagno
   }), /authorization denied/);
   assert.equal(authorizationReads, 1, "the refusal reached schedule authorization");
   rows = readFileSync(logPath, "utf8").trim().split("\n").map(JSON.parse);
-  assert.deepEqual(rows.filter((row) => row.result !== "running").map((row) => row.result), ["failed", "complete", "failed"]);
+  assert.deepEqual(rows.filter((row) => row.kind !== "source_failure" && row.result !== "running")
+    .map((row) => row.result), ["failed", "complete", "failed"]);
   assert.equal(rows.at(-1).error, "Daily refresh failed before completion. Inspect the schedule and source authorization.");
 });
 

@@ -14,7 +14,11 @@ const snapshotState = (state) => {
   const { ingest_removal_plan: _plan, ...rest } = state;
   return removalDigest(rest);
 };
-const fail = (text) => { throw new DriveRemovalReviewRequired(text); };
+const fail = (text, removalReview = null) => {
+  const error = new DriveRemovalReviewRequired(text);
+  if (removalReview) error.removal_review = Object.freeze({ ...removalReview });
+  throw error;
+};
 const validFingerprint = (value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 
 /** Bind code bytes, lockfile and installed dependencies, not a version label. */
@@ -420,6 +424,13 @@ export function createIngestRemovalReview({
       (extraApproval ? "The additional source removal safety review also requires approval.\n" : "") +
       `Review this plan, then run: brain ingest <manifest>${from ? ` --from ${from}` : ""} --source ${source} --apply-removals ${plan.fingerprint}` +
       (extraApproval ? ` --approve-removals ${extraApproval}` : ""),
+      {
+        stored_documents_to_remove: observed.targets.length,
+        source_removals: sourceTargets.length,
+        replacement_family_reviews: families.length - sourceTargets.length,
+        ...(sourcePlan ? { source_cleanup_percentage: sourcePlan.ratio * 100 } : {}),
+        fingerprint: plan.fingerprint,
+      },
     );
   };
 

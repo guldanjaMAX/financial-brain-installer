@@ -1398,18 +1398,27 @@ proof and exact scheduler reconciliation succeed.
 `daily on` and `daily off` save owner intent in `operations.daily_refresh`
 while holding the same lifecycle lease.
 
-Every scheduled runner writes a content-free run journal at
+Every scheduled runner writes a bounded private run journal at
 `~/.brain/logs/<brain-and-user-identity>/daily.log` on both platforms. The
 identity is the same one used by the native schedule. The directory is private
 to the owner (0700 on POSIX, current-user DACL on Windows), and each log file is
 0600 or current-user-only. The active log and one rotated history file each
 have a 64 KiB limit. Unsafe links, invalid records, or a failed permissions
 operation stop logging and execution instead of accepting an unprotected log.
-Entries contain only timestamps, a result, and a fixed diagnostic sentence.
-Source names, raw stdout/stderr, exception text, and credentials are excluded.
+Run entries contain only timestamps, a result, and a fixed diagnostic sentence.
+Each failed source also gets one bounded record with its source label, mapped
+issue code, and a single-line detail capped at 200 characters. That detail is
+passed through the shared credential scanner and redaction, absolute paths are
+removed, and scanner findings that survive replacement fail closed to fixed
+text. Removal-review records may also carry aggregate counts and the exact plan
+fingerprint in the private receipt, but never document identities, raw
+stdout/stderr, source content, credentials, or an instruction to apply removal.
 
 `daily status` reports the last observed start time, result, next planned run,
-last error line, and log path. A native nonzero exit or terminating signal
+last error line, log path, and any mapped source issue from the latest run. A
+pending removal review appears as schedule attention with aggregate counts and
+a plain statement that nothing was removed. Text and JSON expose the same
+bounded issue and attention fields. A native nonzero exit or terminating signal
 cannot be hidden by an older successful journal entry. Windows obtains last
 and next run times from Task Scheduler's locale-independent task-info object.
 Mac status combines launchd exit evidence with journal timestamps and the next
