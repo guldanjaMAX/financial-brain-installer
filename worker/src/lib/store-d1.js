@@ -5,6 +5,8 @@ import { measureQueryStage, startQueryStage } from "./query-timing.js";
 // D1 scope restrictions are nonfailure degradation; unknown future outcomes
 // fail closed rather than silently authorizing a complete answer.
 export function retrievalFailed(degraded, reason = null) {
+  if (degraded === 'vector' &&
+      ['projection-catching-up', 'projection-incomplete'].includes(reason)) return false;
   if (reason === 'embedding-unavailable') return true;
   if (degraded == null) return false;
   return !(degraded === 'scoped-vector' &&
