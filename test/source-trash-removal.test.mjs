@@ -296,15 +296,129 @@ test("Gmail full sweep control: a stored message that left the list for another 
   assert.deepEqual(s.store.uids(), ["gmail:normal-msg", "gmail:promo-msg"], "nothing is removed without the review");
 });
 
-test("Gmail full sweep control: a trashed message with an older pending removal of unknown cause goes to review, not a held cursor", async (t) => {
+// A legacy pending-removal marker (state.removed) was written only by the older
+// forget route when a request failed in transit. A current decision about the
+// message settles it, on the daily run and on a full sweep alike.
+const LEGACY_MARKER = "2026-09-04T00:00:00.000Z";
+
+test("Gmail full sweep: a trashed message carrying a legacy pending-removal marker is kept, the marker is cleared and the cursor advances", async (t) => {
   const s = gmailScenario(t, {
     labels: { "trash-msg": ["TRASH"], "normal-msg": ["INBOX"] },
     listed: ["normal-msg"],
   });
-  s.state.removed = { "gmail:trash-msg": "2026-09-04T00:00:00.000Z" };
+  s.state.removed = { "gmail:trash-msg": LEGACY_MARKER };
+  const { error, output } = await s.run({ reset: true });
+  assert.equal(error, undefined, `${error?.name}: ${error?.message}\n${output.slice(-1500)}`);
+  assert.deepEqual(s.store.uids(), ["gmail:normal-msg", "gmail:trash-msg"], "the trashed message keeps its document");
+  assert.equal(s.store.calls.apply, 0);
+  assert.equal(s.current().removed?.["gmail:trash-msg"], undefined, "the marker is cleared");
+  assert.equal(s.current().ingest_removal_plan, undefined, "no review stop");
+  assert.doesNotMatch(output, /--apply-removals|--approve-removals|partial coverage/);
+  assert.equal(s.current().history_id, "history-sweep", "the cursor advances");
+  assert.equal(s.receipts.at(-1).status, "ready");
+});
+
+test("Gmail full sweep: a spam message carrying a legacy marker is removed at once and the marker is cleared", async (t) => {
+  const s = gmailScenario(t, {
+    labels: { "spam-msg": ["SPAM"], "normal-msg": ["INBOX"] },
+    listed: ["normal-msg"],
+  });
+  s.state.removed = { "gmail:spam-msg": LEGACY_MARKER };
+  const { error, output } = await s.run({ reset: true });
+  assert.equal(error, undefined, `${error?.name}: ${error?.message}\n${output.slice(-1500)}`);
+  assert.deepEqual(s.store.uids(), ["gmail:normal-msg"], "the spam message is removed; the normal message stays");
+  assert.match(output, /removed 1 stored Gmail document\(s\) for 1 spam message\(s\)/);
+  assert.equal(s.current().removed?.["gmail:spam-msg"], undefined, "the marker is cleared");
+  assert.equal(s.current().ingest_removal_plan, undefined, "no review stop");
+  assert.equal(s.current().history_id, "history-sweep", "the cursor advances");
+  assert.equal(s.receipts.at(-1).status, "ready");
+});
+
+test("Gmail full sweep control: a category message carrying a legacy marker still stops for review", async (t) => {
+  const s = gmailScenario(t, {
+    labels: { "promo-msg": ["CATEGORY_PROMOTIONS"], "normal-msg": ["INBOX"] },
+    listed: ["normal-msg"],
+  });
+  s.state.removed = { "gmail:promo-msg": LEGACY_MARKER };
   const { error } = await s.run({ reset: true });
   assert.equal(error?.name, "DriveRemovalReviewRequired", error?.message);
-  assert.deepEqual(s.store.uids(), ["gmail:normal-msg", "gmail:trash-msg"], "nothing is removed without the review");
+  assert.deepEqual(s.store.uids(), ["gmail:normal-msg", "gmail:promo-msg"], "nothing is removed without the review");
+  assert.equal(s.current().removed?.["gmail:promo-msg"], LEGACY_MARKER, "its marker stays for the review");
+});
+
+test("Gmail daily run: a trashed message carrying a legacy pending-removal marker is kept, the marker is cleared and the cursor advances", async (t) => {
+  const s = gmailScenario(t, {
+    labels: { "trash-msg": ["TRASH"], "normal-msg": ["INBOX", "STARRED"] },
+    history: [record("labelsAdded", "trash-msg"), record("labelsAdded", "normal-msg")],
+  });
+  s.state.removed = { "gmail:trash-msg": LEGACY_MARKER };
+  const { error, output } = await s.run();
+  assert.equal(error, undefined, `${error?.name}: ${error?.message}\n${output.slice(-1500)}`);
+  assert.deepEqual(s.store.uids(), ["gmail:normal-msg", "gmail:trash-msg"], "nothing is removed");
+  assert.equal(s.store.calls.apply, 0);
+  assert.equal(s.state.done["gmail:trash-msg"], "trash-msg-v1", "the trashed message keeps its document");
+  assert.equal(s.state.removed?.["gmail:trash-msg"], undefined, "the marker is cleared");
+  assert.doesNotMatch(output, /partial coverage|unresolved pending removals|--apply-removals|--approve-removals/);
+  assert.equal(s.state.history_id, "history-next", "the cursor advances");
+  assert.equal(s.receipts.at(-1).status, "ready");
+  assert.equal(s.state.removed?.["gmail:normal-msg"], undefined, "the control message carries no marker");
+  assert.ok(s.store.uids().includes("gmail:normal-msg"), "the control message is untouched");
+});
+
+test("Gmail daily run: a spam message carrying a legacy marker is removed at once and the marker is cleared", async (t) => {
+  const s = gmailScenario(t, {
+    labels: { "spam-msg": ["SPAM"], "normal-msg": ["INBOX", "STARRED"] },
+    history: [record("labelsAdded", "spam-msg"), record("labelsAdded", "normal-msg")],
+  });
+  s.state.removed = { "gmail:spam-msg": LEGACY_MARKER };
+  const { error, output } = await s.run();
+  assert.equal(error, undefined, `${error?.name}: ${error?.message}\n${output.slice(-1500)}`);
+  assert.deepEqual(s.store.uids(), ["gmail:normal-msg"], "the spam message is removed; the control message stays");
+  assert.equal(s.store.calls.apply, 1, "one preview then apply, through the spam route");
+  assert.match(output, /removed 1 stored Gmail document\(s\) for 1 spam message\(s\)/);
+  assert.equal(s.state.done["gmail:spam-msg"], undefined);
+  assert.equal(s.state.removed?.["gmail:spam-msg"], undefined, "the marker is cleared");
+  assert.equal(s.state.ingest_removal_plan, undefined, "no review stop");
+  assert.equal(s.state.history_id, "history-next", "the cursor advances");
+  assert.equal(s.receipts.at(-1).status, "ready");
+});
+
+// An account switch: the saved history id means nothing to the new mailbox,
+// so the run is a full sweep, and every stored message answers 404.
+test("Gmail full sweep where every stored message answers 404: a loud account warning on the terminal and in the receipt; the corpus is kept and the cursor advances", async (t) => {
+  const s = gmailScenario(t, {
+    labels: { "old-msg-1": null, "old-msg-2": null, "old-msg-3": null, "other-msg": ["INBOX"] },
+    listed: ["other-msg"],
+    historyExpired: true,
+  });
+  // other-msg belongs to the newly connected mailbox; it is not stored yet.
+  s.store.db.prepare("DELETE FROM documents WHERE doc_uid='gmail:other-msg'").run();
+  delete s.state.done["gmail:other-msg"];
+  const { error, output } = await s.run();
+  assert.equal(error, undefined, `${error?.name}: ${error?.message}\n${output.slice(-1500)}`);
+  assert.match(output,
+    /warn\s+None of the 3 stored messages exist in this mailbox\. Did you connect a different Google account\?/);
+  assert.deepEqual(s.store.uids(), ["gmail:old-msg-1", "gmail:old-msg-2", "gmail:old-msg-3", "gmail:other-msg"],
+    "the stored corpus is kept");
+  assert.equal(s.store.calls.apply, 0);
+  assert.equal(s.current().ingest_removal_plan, undefined, "a warning, not a stop");
+  assert.equal(s.current().history_id, "history-sweep", "the cursor advances");
+  const receipt = s.receipts.at(-1);
+  assert.equal(receipt.status, "ready");
+  assert.match(receipt.detail, /; warning=GMAIL_ACCOUNT_MISMATCH_SUSPECTED; stored_not_found=3$/);
+});
+
+test("Gmail full sweep control: one deleted message among stored mail that still exists raises no account warning", async (t) => {
+  const s = gmailScenario(t, {
+    labels: { "deleted-msg": null, "normal-msg": ["INBOX"] },
+    listed: ["normal-msg"],
+    historyExpired: true,
+  });
+  const { error, output } = await s.run();
+  assert.equal(error, undefined, `${error?.name}: ${error?.message}\n${output.slice(-1500)}`);
+  assert.doesNotMatch(output, /different Google account/);
+  assert.doesNotMatch(s.receipts.at(-1).detail, /warning=/);
+  assert.equal(s.receipts.at(-1).status, "ready");
 });
 
 /* --------------------------------------------------------------- Calendar */

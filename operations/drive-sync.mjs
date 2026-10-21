@@ -15,12 +15,13 @@ import { requestIngestRemovalPlan } from "./ingest-removal-plan.mjs";
 export const REMOVAL_RETRY_PENDING = "REMOVAL_RETRY_PENDING";
 
 /**
- * A removal the daily run makes at once (a Calendar cancellation, a Gmail spam
- * message) failed. Nothing asks for a review: the item stays pending, the
- * cursor is held, and the next run retries it. The Worker's own wording about
- * reviewing a fresh plan is dropped, so the error, the receipt and `brain
- * support --explain` all say retry. A lost source lock is passed through
- * untouched so the caller still leaves the newer owner's receipt alone.
+ * A removal the daily run makes at once (a trashed or moved-out Drive file, a
+ * Calendar cancellation, a Gmail spam message) failed. Nothing asks for a
+ * review: the item stays pending, the cursor is held, and the next run
+ * retries it. The Worker's own wording about reviewing a fresh plan is
+ * dropped, so the error, the receipt and `brain support --explain` all say
+ * retry. A lost source lock is passed through untouched so the caller still
+ * leaves the newer owner's receipt alone.
  */
 export function removalRetryPending(error, { count = 1, what = "removal(s)" } = {}) {
   if (error?.code === "source_ingest_lock_lost") return error;

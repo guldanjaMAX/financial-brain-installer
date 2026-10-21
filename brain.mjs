@@ -9150,6 +9150,15 @@ export function recordLocalSkippedDocumentState(state, { stateKey, nativePath, r
 }
 
 /**
+ * The warning a full Gmail sweep writes into its ready receipt's detail when
+ * every stored message it checked answered 404 and none was found: most likely
+ * a different Google account was connected. A closed code plus a count; the
+ * Worker stores a ready receipt's detail as written, so no new issue code is
+ * needed (issue codes are for error receipts only).
+ */
+export const GMAIL_ACCOUNT_MISMATCH_WARNING = "GMAIL_ACCOUNT_MISMATCH_SUSPECTED";
+
+/**
  * Return exact Gmail message ids held for another ingest attempt.
  *
  * The adjacent source state is private, but it is still untrusted input. A
@@ -17371,6 +17380,9 @@ const cmdIngestRemoteRun = async (
   let gmailLabelGaps = 0;
   let gmailHistoryMarkerMissing = 0;
   let gmailPendingRemovalGaps = 0;
+  // A full sweep where every stored message it checked answered 404: the
+  // count rides on the terminal warning and the ready receipt's detail.
+  let gmailAccountMismatchCount = 0;
   let gmailOperationalFailure = null;
   let imapSnapshotGaps = 0;
   // The daily Drive path has no removal review. Only the bounded preview still
@@ -17881,7 +17893,7 @@ const cmdIngestRemoteRun = async (
     // pass that never removes. A file the connector cannot read keeps its
     // stored copy.
     const drive = options.drive ?? await import("./connectors/google-drive.mjs");
-    const { driveFileIdOf, driveFileInRoots, driveFailureText, removeDriveFamilies } =
+    const { driveFileIdOf, driveFileInRoots, driveFailureText, removeDriveFamilies, removalRetryPending } =
       await import("./operations/drive-sync.mjs");
     delete state.drive_removal_review;
     delete state.drive_removal_safety_baseline;
@@ -18077,7 +18089,11 @@ const cmdIngestRemoteRun = async (
     );
     if ((gone.size || notVisible.size) && dry) {
       if (gone.size) info(`${gone.size} Drive file(s) were trashed, moved out of the roots or excluded; a real run removes any stored copy`);
-      if (notVisible.size) notVisibleLine(notVisible.size);
+      // A dry run never reads the Brain, so it counts the files this source
+      // recorded as stored, as the incremental path does everywhere else.
+      const storedNotVisible = [...notVisible]
+        .filter((uid) => Object.prototype.hasOwnProperty.call(state.done || {}, uid)).length;
+      if (storedNotVisible) notVisibleLine(storedNotVisible);
     } else if (gone.size || notVisible.size) {
       const stored = await listPreparedSourceFamilies({ base, adminKey, source: sourceName });
       const storedIds = new Set([...stored].map((uid) => driveFileIdOf(uid, sourceName)));
@@ -18085,10 +18101,17 @@ const cmdIngestRemoteRun = async (
       if (keptNotVisible) notVisibleLine(keptNotVisible);
       const targets = [...gone].filter((uid) => storedIds.has(driveFileIdOf(uid, sourceName))).sort();
       if (targets.length) {
-        const removal = await removeDriveFamilies({
-          families: targets.map((uid) => ({ base_doc_uid: uid, keep_doc_uids: [], family_kind: "structural" })),
-          base, adminKey, assertOwned: assertLockOwned, request: options.removalPlanRequest, onProgress: info,
-        });
+        let removal;
+        try {
+          removal = await removeDriveFamilies({
+            families: targets.map((uid) => ({ base_doc_uid: uid, keep_doc_uids: [], family_kind: "structural" })),
+            base, adminKey, assertOwned: assertLockOwned, request: options.removalPlanRequest, onProgress: info,
+          });
+        } catch (error) {
+          // Nothing asks for a review: the files stay pending, the cursor is
+          // held, and the next run replays the same window and retries them.
+          throw removalRetryPending(error, { count: targets.length, what: "trashed, moved-out or excluded Drive file(s)" });
+        }
         for (const uid of targets) {
           delete state.done[uid];
           delete state.skipped[uid];
@@ -18668,6 +18691,10 @@ const cmdIngestRemoteRun = async (
     const gmailSpamUids = [];
     const gmailKeptUids = [];
     const gmailIntentionalUids = [];
+    // What a full sweep proved about each message it checked: present in this
+    // mailbox, or not found (404). Only counts leave this run.
+    const gmailPresentUids = new Set();
+    const gmailNotFoundUids = new Set();
 
     const capturePrewalkHistory = async () => {
       try {
@@ -18834,6 +18861,7 @@ const cmdIngestRemoteRun = async (
       const key = `${sourceName}:${id}`;
       gmailActiveUids.add(key);
       if (resumedVersion !== null) {
+        gmailPresentUids.add(key);
         recordAcceptedDocumentState(state, {
           stateKey: key, hash: resumedVersion, skipKeys: [id], legacyPartRoot: id,
         });
@@ -18847,6 +18875,7 @@ const cmdIngestRemoteRun = async (
         }
         throw preparationError;
       }
+      (r.source_deleted === true ? gmailNotFoundUids : gmailPresentUids).add(key);
       if (r.skip) {
         const previouslyAccepted = storedBeforeSweep
           ? storedBeforeSweep.has(key)
@@ -18947,14 +18976,14 @@ const cmdIngestRemoteRun = async (
     // labels of each stored message it did not return and decide the way the
     // daily run does. Trash, or a delete at the source (404, including Gmail's
     // 30-day purge of Trash), keeps the document. Spam is removed at once
-    // below. Anything else, and any message carrying an older pending removal
-    // whose cause is unknown, stays a removal candidate for the review gate.
+    // below. A legacy pending-removal marker on either is settled by that
+    // decision, as on the daily run. Anything else (a category, the date
+    // floor), marked or not, stays a removal candidate for the review gate.
     if (!dry && authoritativeSnapshot && storedBeforeSweep &&
         gmailLabelGaps === 0 && gmailHistoryMarkerMissing === 0) {
       const prefix = `${sourceName}:`;
       const unlistedIds = [...storedBeforeSweep]
-        .filter((uid) => uid.startsWith(prefix) && !gmailActiveUids.has(uid) &&
-          !Object.prototype.hasOwnProperty.call(state.removed || {}, uid))
+        .filter((uid) => uid.startsWith(prefix) && !gmailActiveUids.has(uid))
         .map((uid) => uid.slice(prefix.length))
         .filter((id) => /^[A-Za-z0-9_-]+$/.test(id));
       for await (const item of prefetch(
@@ -18963,6 +18992,7 @@ const cmdIngestRemoteRun = async (
         { concurrency: GMAIL_FETCH_CONCURRENCY },
       )) {
         const key = `${prefix}${item.id}`;
+        (item.policy.source_deleted === true ? gmailNotFoundUids : gmailPresentUids).add(key);
         if (item.policy.source_spam === true) {
           gmailSpamUids.push(key);
         } else if (item.policy.source_trashed === true || item.policy.source_deleted === true) {
@@ -18970,12 +19000,28 @@ const cmdIngestRemoteRun = async (
           gmailKeptUids.push(key);
         }
       }
+      // Every stored message this sweep checked answered 404 and none was
+      // found: the connected mailbox is most likely a different account. A
+      // warning, not a stop: the stored corpus is kept and the cursor advances.
+      const storedGmail = [...storedBeforeSweep].filter((uid) => uid.startsWith(prefix));
+      const notFound = storedGmail.filter((uid) => gmailNotFoundUids.has(uid)).length;
+      if (notFound > 0 && !storedGmail.some((uid) => gmailPresentUids.has(uid))) {
+        gmailAccountMismatchCount = notFound;
+        warn(`None of the ${notFound} stored messages exist in this mailbox. Did you connect a different Google account? ` +
+          "Nothing was removed: the stored messages are kept.");
+      }
     }
 
     const keptGmailCount = new Set(gmailKeptUids).size;
     if (keptGmailCount) {
       info(`${keptGmailCount} Gmail message(s) moved to Trash or deleted at the source; any stored document is kept`);
     }
+    // A kept message settles a legacy pending-removal marker (written only by
+    // the older forget route after a transport failure): the marker is
+    // cleared, nothing is removed, and it holds neither the cursor nor a
+    // review. Spam is settled by its removal below.
+    const gmailSpamSet = new Set(gmailSpamUids);
+    const gmailKeptMarkerUids = new Set(gmailKeptUids.filter((uid) => !gmailSpamSet.has(uid)));
     const currentGmailRemovalUids = new Set([
       ...gmailPolicyUids,
       ...gmailSpamUids,
@@ -18996,6 +19042,7 @@ const cmdIngestRemoteRun = async (
     const pendingGmailUids = Object.keys(state.removed || {}).filter((uid) =>
       uid.startsWith(`${sourceName}:`) &&
       !gmailAcceptedUids.has(uid) &&
+      !gmailKeptMarkerUids.has(uid) &&
       // A visible message whose current read is incomplete is not deletion
       // proof. Preserve its existing family until a successful replacement or
       // a current typed policy/deletion decision resolves it.
@@ -19005,15 +19052,21 @@ const cmdIngestRemoteRun = async (
       uid.startsWith(`${sourceName}:`) &&
       gmailActiveUids.has(uid) &&
       !gmailAcceptedUids.has(uid) &&
+      !gmailKeptMarkerUids.has(uid) &&
       !currentGmailRemovalUids.has(uid)
     );
     // A timestamp-only legacy pending marker does not say whether it came from
     // a source deletion or a security refusal. Visibility alone cannot safely
     // clear it. Keep the marker and replay this Gmail window until the message
-    // is accepted or a current typed decision resolves the removal.
+    // is accepted or a current typed decision (kept, spam, policy) resolves it.
     gmailPendingRemovalGaps = unresolvedActivePendingUids.length;
     for (const uid of gmailAcceptedUids) {
       if (state.removed) delete state.removed[uid];
+    }
+    if (!dry && gmailLabelGaps === 0 && gmailHistoryMarkerMissing === 0) {
+      for (const uid of gmailKeptMarkerUids) {
+        if (state.removed) delete state.removed[uid];
+      }
     }
 
     if (dry) {
@@ -19551,7 +19604,12 @@ const cmdIngestRemoteRun = async (
             `policy_skipped=${policySkipped}; coverage_gaps=${coverageGaps}; ` +
             `source_resolved=${sourceResolvedSkipped}; adjudicated_skips=${adjudicatedSkipped}` +
             (which === "imap" ? `; folder_policy_skipped=${folderPolicySkipped}` : "") +
-            (which === "gmail" ? `; withheld_for_secrets=${totalRefused}` : ""),
+            (which === "gmail" ? `; withheld_for_secrets=${totalRefused}` : "") +
+            // A closed warning code and a count, never an identity. The Worker
+            // keeps a ready receipt's detail as written.
+            (gmailAccountMismatchCount
+              ? `; warning=${GMAIL_ACCOUNT_MISMATCH_WARNING}; stored_not_found=${gmailAccountMismatchCount}`
+              : ""),
         }),
   });
   runClosed = true;

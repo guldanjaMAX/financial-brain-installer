@@ -9,6 +9,7 @@ import {
 } from "../brain.mjs";
 import { batchStream, splitOversized, prefetch } from "../ingest/run.mjs";
 import { driveFileInRoots, removeDriveFamilies } from "../operations/drive-sync.mjs";
+import { DriveRemovalReviewRequired } from "../operations/drive-removal-plan.mjs";
 import { ingestPlanStore } from "./helpers/ingest-plan-store.mjs";
 import { scanPdf } from "./fixtures/scan-pdf.mjs";
 
@@ -95,6 +96,8 @@ function scenario(t, entries, { driveConfig = {}, myDriveId = null } = {}) {
   const sent = [];
   const receipts = [];
   const failLoads = new Set();
+  // `fail` makes the Worker's apply step fail the way the authenticated route does.
+  const removal = { fail: false };
   let inventoryReads = 0;
   const inventory = async ({ includeServerObservedAt = false, includeLabels = false } = {}) => {
     inventoryReads++;
@@ -109,7 +112,15 @@ function scenario(t, entries, { driveConfig = {}, myDriveId = null } = {}) {
     resolveBaseUrl: async () => "https://fixture.invalid",
     resolveAdminKey: () => "fixture-admin-key",
     getAccessToken: async () => "fixture-access-token",
-    removalPlanRequest: store.request,
+    removalPlanRequest: async (input) => {
+      if (removal.fail && input.body.action === "apply") {
+        throw new DriveRemovalReviewRequired("Authenticated removal request failed. HTTP 503. " +
+          "Some approved removals may have completed. The source cursor was not advanced. " +
+          "Rerun the same approved command if the stored inventory is unchanged. If it changed, run ingestion " +
+          "again and review the new removal plan; an old approval cannot resume a completed batch.");
+      }
+      return store.request(input);
+    },
     removalPlanRuntime: () => "fixture-runtime",
     ingestLib: async () => ({ batchStream, splitOversized, prefetch, loadState: () => state, saveState() {} }),
     drive: google.connector,
@@ -164,7 +175,7 @@ function scenario(t, entries, { driveConfig = {}, myDriveId = null } = {}) {
       store.put(`drive:${entry.id}`);
     }
   };
-  return { ...google, manifest, store, state, sent, receipts, failLoads, run, seedSynced, inventoryReads: () => inventoryReads };
+  return { ...google, manifest, store, state, sent, receipts, failLoads, removal, run, seedSynced, inventoryReads: () => inventoryReads };
 }
 
 const baseEntries = () => [
@@ -570,6 +581,65 @@ test("a file that only left this account's view is counted daily, then --cleanup
   assert.match(applied.output, /1 no longer visible to this account \(Google says not found\); removed below/);
   assert.equal(s.store.uids().includes("drive:gone-file"), false);
   assert.equal(s.state.done["drive:gone-file"], undefined);
+});
+
+test("the dry run's no-longer-visible line counts only files that were stored", async (t) => {
+  const entries = baseEntries();
+  const s = scenario(t, entries);
+  s.seedSynced(entries.filter((entry) => entry.mimeType !== drive.FOLDER_MIME && entry.id !== "big-file"));
+  s.world.byId.delete("gone-file");
+  // gone-file was stored; the other two left this account's view without ever being stored.
+  s.world.changes = [{ fileId: "gone-file", removed: true }, { fileId: "never-stored-a", removed: true },
+    { fileId: "never-stored-b", removed: true }];
+  const preview = await s.run({ "dry-run": true });
+  assert.equal(preview.error, undefined, preview.error?.message);
+  assert.match(preview.output, /(?:^|\s)1 Drive file\(s\) are no longer visible to this account; their stored documents are kept/);
+  assert.doesNotMatch(preview.output, /[23] Drive file\(s\) are no longer visible/);
+  assert.equal(s.store.calls.preview + s.store.calls.apply, 0, "a dry run touches nothing");
+  assert.equal(s.state.sync_token, "token-1");
+
+  // The real run counts the same way, from the stored inventory.
+  const real = await s.run();
+  assert.equal(real.error, undefined, real.error?.message);
+  assert.match(real.output, /(?:^|\s)1 Drive file\(s\) are no longer visible to this account; their stored documents are kept/);
+
+  // Nothing stored among them: no line at all.
+  s.world.changes = [{ fileId: "never-stored-a", removed: true }];
+  const none = await s.run({ "dry-run": true });
+  assert.equal(none.error, undefined, none.error?.message);
+  assert.doesNotMatch(none.output, /no longer visible/);
+});
+
+test("a trashed or moved-out file whose at-once removal fails stays pending with the retry code and holds the cursor; the next run removes it", async (t) => {
+  const entries = baseEntries();
+  const s = scenario(t, entries);
+  s.seedSynced(entries.filter((entry) => entry.mimeType !== drive.FOLDER_MIME && entry.id !== "big-file"));
+  s.world.changes = [
+    { fileId: "trash-file", removed: false, file: { ...s.world.byId.get("trash-file"), trashed: true } },
+    { fileId: "move-file", removed: false, file: { ...s.world.byId.get("move-file"), parents: [OUTSIDE] } },
+  ];
+  s.removal.fail = true;
+  const failed = await s.run();
+  assert.equal(failed.error?.code, "REMOVAL_RETRY_PENDING", `${failed.error?.name}: ${failed.error?.message}`);
+  assert.equal(failed.error instanceof DriveRemovalReviewRequired, false, "not a review stop");
+  assert.doesNotMatch(failed.error.message, /review/i);
+  assert.match(failed.error.message,
+    /^2 trashed, moved-out or excluded Drive file\(s\) were not removed yet \(Authenticated removal request failed\. HTTP 503\)\. They stay pending, the cursor was not advanced, and the next run retries them\.$/);
+  assert.equal(s.receipts.at(-1).status, "error");
+  assert.equal(s.receipts.at(-1).issue_code, "REMOVAL_RETRY_PENDING");
+  assert.equal(s.state.sync_token, "token-1", "the cursor is held");
+  assert.ok(s.store.uids().includes("drive:trash-file") && s.store.uids().includes("drive:move-file"), "both are still stored");
+  assert.ok(s.state.done["drive:trash-file"], "the accepted version stays until the removal lands");
+
+  s.removal.fail = false;
+  const retried = await s.run();
+  assert.equal(retried.error, undefined, `${retried.error?.message}
+${retried.output.slice(-1200)}`);
+  assert.equal(s.store.uids().includes("drive:trash-file"), false, "the next run retries and removes it");
+  assert.equal(s.store.uids().includes("drive:move-file"), false);
+  assert.match(retried.output, /removed 2 stored Drive document\(s\) for 2 trashed, moved-out or excluded file\(s\)/);
+  assert.equal(s.state.sync_token, "token-2");
+  assert.equal(s.receipts.at(-1).status, "ready");
 });
 
 test("the saved My Drive id is ignored once include_my_drive_root_files is off", async (t) => {
