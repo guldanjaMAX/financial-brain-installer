@@ -7,12 +7,14 @@
 //   R4-LEAK-2  the modifier-letter strip runs after NFKC, so modifier letters
 //              with a compatibility decomposition are never stripped
 //   R4-LEAK-3  an underscore is not a boundary for the email identifier-word
-//              check (contract question under partner answer 7)
+//              check (contract question under partner answer 7; confirmed by
+//              the partner in round 7: "_" is a boundary)
 //   R4-LEAK-4  email digits are bounded per part, never in total (contract
-//              question: answer 2 caps phone at 15, answer 7 says nothing)
+//              question: answer 2 caps phone at 15, answer 7 says nothing;
+//              round 7 ruling 2: total digits across all parts capped at 6)
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { address, card, plainAddress } from './partner-r2-helpers.mjs';
+import { address, card, mutatedModule, plainAddress } from './partner-r2-helpers.mjs';
 import { entityFactAnswer } from '../src/lib/entity-fact-answer.js';
 
 globalThis.fetch = () => { throw new Error('network forbidden'); };
@@ -221,6 +223,40 @@ test('R4-LEAK-3 control: the same identifier words beside a dash, dot, plus or d
     }
 });
 
+// Round 7, the partner's ruling: "treat "_" as a boundary in the
+// identifier-word check" (email fast path; the partner's own example is
+// acct_1234@bank.invalid). An underscore closes an identifier word on either
+// side, in any case and next to any other separator; only a letter continues
+// a word, so an identifier word inside a longer word still answers.
+const UNDERSCORE_RULING_REFUSED = ['acct_1234@bank.invalid', 'ACCT_1234@bank.invalid', 'owner_acct@bank.invalid',
+  'my_card_office@example.invalid', '_routing@bank.invalid', 'iban_@bank.invalid', 'swift_code@bank.invalid',
+  'aba_number@bank.invalid', 'account__1@bank.invalid', 'first.card_x@example.invalid'];
+const UNDERSCORE_RULING_ANSWERED = ['first_last@example.invalid', 'cardinal_office@example.invalid',
+  'abacus_team@example.invalid', 'discard_box@example.invalid', 'accounts_x@example.invalid'];
+
+test('R4-LEAK-3 round 7 ruling: an underscore is a boundary for the email identifier-word check, so acct_1234@bank.invalid is refused', () => {
+  for (const value of UNDERSCORE_RULING_REFUSED)
+    for (const operative of [false, true])
+      assert.equal(card('email', value, entityFactAnswer, operative), null,
+        `email ${value} (${operative ? 'operative' : 'card'}) is refused`);
+  for (const value of UNDERSCORE_RULING_ANSWERED)
+    for (const operative of [false, true]) {
+      const result = card('email', value, entityFactAnswer, operative);
+      assert.ok(result?.fact_span, `email ${value} (${operative ? 'operative' : 'card'}) reaches the fact decision`);
+      assert.ok(result.answer.includes(value));
+    }
+});
+
+test('R4-LEAK-3 round 7 ruling, mutation: if "_" continued a word, the ruling pin would catch it', async () => {
+  const guard = '(?<![a-z])(?:account|acct|routing|card|iban|swift|aba)(?![a-z])';
+  const mutant = await mutatedModule('entity-fact-answer.js', guard,
+    '(?<![a-z_])(?:account|acct|routing|card|iban|swift|aba)(?![a-z_])');
+  // The partner's example is echoed by the mutant, so the pin above is live.
+  assert.ok(card('email', 'acct_1234@bank.invalid', mutant.entityFactAnswer)?.answer.includes('acct_1234@bank.invalid'));
+  // A dash still closes the word in the mutant: only the underscore changed.
+  assert.equal(card('email', 'acct-1234@bank.invalid', mutant.entityFactAnswer), null);
+});
+
 // ----------------------------------------------------------- R4-LEAK-4 --
 // entity-fact-answer.js:82 counts digits per part (the local part and each
 // domain label) and refuses a part with seven or more. There is no bound on
@@ -236,13 +272,13 @@ test('R4-LEAK-3 control: the same identifier words beside a dash, dot, plus or d
 // check): every part here is within the per-part bound and carries no word.
 // Contract question: answer 7 decided the per-part bound and answer 2 a
 // 15-digit total for phone; neither decides a total digit bound for email.
+// Round 7 ruling 2 (the partner): "cap total digits across all email parts at
+// 6. Above that, leave the fast path." The repro is now a normal test that
+// pins the ruling; the boundary test below pins 6 answered and 7 refused.
 const SPLIT_DIGIT_EMAILS = ['4111@1111.1111.1111.invalid', '123456@123456.123456.invalid', '411111@111111.111111.111111.invalid'];
 const totalDigits = value => value.replace(/[^0-9]/g, '').length;
 
-// Triage: contract question, kept as a todo until the partner answers.
-test('R4-LEAK-4 repro: digits are bounded per email part, never in total, so a 16-digit value split at the @ and dots is echoed', {
-  todo: 'contract question for the partner: should the email fast path also cap total digits across all parts (as answer 2 caps phone at 15), and if so at what cap (15 mirrors phone; 6 keeps today\'s six-digit controls)?',
-}, t => {
+test('R4-LEAK-4 repro: digits are bounded per email part, never in total, so a 16-digit value split at the @ and dots is echoed', t => {
   for (const value of SPLIT_DIGIT_EMAILS) assert.ok(totalDigits(value) >= 16, `${value} carries 16 or more digits`);
   const leaked = [];
   for (const value of SPLIT_DIGIT_EMAILS)
@@ -270,4 +306,47 @@ test('R4-LEAK-4 control: a seven-digit part is refused, six-digit parts answer, 
     assert.ok(card(field, '+1 (480) 555 0100 1234')?.fact_span, `${field} with 15 digits answers`);
     assert.equal(card(field, '4111 1111 1111 1111'), null, `${field} with 16 digits is refused`);
   }
+});
+
+// Round 7 ruling 2 at the boundary: six digits in total answer however they
+// are spread across the local part, the domain labels and the top-level
+// label; seven in total leave the fast path even when every part holds six
+// or fewer, so the per-part bound alone could not refuse any of them.
+const SIX_TOTAL_EMAILS = ['123@456.example.invalid', 'owner12@mail34.example56.invalid', 'o1w2n3@m4a5i6l.invalid',
+  'contact123@mail456.invalid', 'owner@mail123.example456.invalid', 'contact123456@example.invalid'];
+const SEVEN_TOTAL_EMAILS = ['1234@567.example.invalid', 'owner1234@mail567.example.invalid',
+  'contact123456@mail7.example.invalid', 'o1w2n3e4r@m5a6i7l.example.invalid', 'owner@mail1234.example567.invalid',
+  'owner123456@example.in7', '12@34.56.7.invalid'];
+const perPart = value => value.split(/[@.]/).map(part => part.replace(/[^0-9]/g, '').length);
+
+test('R4-LEAK-4 round 7 ruling 2: six digits in total across all email parts answer and seven leave the fast path', t => {
+  for (const value of SIX_TOTAL_EMAILS) {
+    assert.equal(totalDigits(value), 6, `${value} carries exactly six digits`);
+    for (const operative of [false, true]) {
+      const result = card('email', value, entityFactAnswer, operative);
+      assert.ok(result?.fact_span, `email ${value} (${operative ? 'operative' : 'card'}) reaches the fact decision`);
+      assert.ok(result.answer.includes(value));
+    }
+  }
+  const leaked = [];
+  for (const value of SEVEN_TOTAL_EMAILS) {
+    assert.equal(totalDigits(value), 7, `${value} carries exactly seven digits`);
+    assert.ok(Math.max(...perPart(value)) <= 6, `${value} keeps every part within the per-part bound`);
+    for (const operative of [false, true]) {
+      const result = card('email', value, entityFactAnswer, operative);
+      if (result !== null) leaked.push({ surface: operative ? 'email (operative)' : 'email', value, answer: result.answer });
+    }
+  }
+  t.diagnostic(JSON.stringify({ six: SIX_TOTAL_EMAILS.length, seven: SEVEN_TOTAL_EMAILS.length, echoes: leaked.length }));
+  assert.equal(leaked.length, 0, `${leaked.length} echoes, e.g. ${JSON.stringify(leaked[0])}`);
+});
+
+test('R4-LEAK-4 round 7 ruling 2, mutation: without the total bound the seven-digit split values are echoed', async () => {
+  const mutant = await mutatedModule('entity-fact-answer.js', 'value.replace(/[^0-9]/g, "").length <= 6',
+    'true');
+  // The per-part bound is all that is left in the mutant, and it never sees
+  // more than six digits in one part, so the ruling pin above is live.
+  for (const value of ['1234@567.example.invalid', '4111@1111.1111.1111.invalid'])
+    assert.ok(card('email', value, mutant.entityFactAnswer)?.answer.includes(value), `mutant echoes ${value}`);
+  assert.equal(card('email', '1234567@example.invalid', mutant.entityFactAnswer), null, 'mutant still refuses a seven-digit part');
 });

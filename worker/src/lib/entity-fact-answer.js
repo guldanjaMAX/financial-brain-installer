@@ -126,9 +126,15 @@ function safeValue(field, value) {
     // digits in the local part or in any domain label, and the identifier
     // words with digits and dots as boundaries (beside the non-word ones).
     // Only letters continue a word, so an underscore is a boundary too
-    // ("acct_123456@"; round 4, R4-LEAK-3).
+    // ("acct_123456@"; round 4, R4-LEAK-3; the partner confirmed it in round 7
+    // with "acct_1234@bank.invalid").
+    // Round 7 ruling 2 (R4-LEAK-4): at most 6 digits in TOTAL across the local
+    // part and every domain label, so "4111@1111.1111.1111.invalid" cannot
+    // carry a card number split at the "@" and the dots. Above that, the value
+    // leaves the fast path. The per-part bound stays as a second guard.
     const email = /^([A-Za-z0-9.!#$%&'*+/=?^_{|}~-]+)@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)$/.exec(value);
-    return Boolean(email) && [email[1], ...email[2].split(".")].every(part => part.replace(/[^0-9]/g, "").length < 7) &&
+    return Boolean(email) && value.replace(/[^0-9]/g, "").length <= 6 &&
+      [email[1], ...email[2].split(".")].every(part => part.replace(/[^0-9]/g, "").length < 7) &&
       !/(?<![a-z])(?:account|acct|routing|card|iban|swift|aba)(?![a-z])/i.test(value);
   }
   if (field === "phone" || field === "mobile") {
