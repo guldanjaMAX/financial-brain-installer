@@ -23,7 +23,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildEnvelope, renderEvent } from "../connectors/google-calendar.mjs";
+import { buildEnvelope, renderEvent, stripBoilerplate, stripPasscodes } from "../connectors/google-calendar.mjs";
 import { syncMicrosoftGraph } from "../connectors/microsoft-graph.mjs";
 import { extract } from "../ingest/extract.mjs";
 import { scanEnvelope } from "../worker/src/lib/secret-scan.js";
@@ -322,7 +322,8 @@ test("control: other URLs in the TITLE, including a path containing pwd=, are by
   assert.ok(env.content.startsWith(`Meeting: ${summary}\n`), env.content);
 });
 
-test("control: the conference link is still sanitized when the title also carries a passcode", () => {
+// Not a control: before the title rule (b83a67b) the gate refused this envelope.
+test("a passcode in the title is removed and the conference link is still sanitized, so the gate passes", () => {
   const env = upsert(baseEvent({
     summary: `Vendor Alpha LLC renewal pwd=${TOKEN}`,
     conferenceData: {
@@ -393,4 +394,143 @@ test(".ics import: a passcode in SUMMARY, DESCRIPTION and LOCATION is removed fr
   assert.ok(got.text.includes(`Meeting: Vendor Alpha LLC renewal ${ZOOM_PATH}\n`), got.text);
   assert.ok(got.text.includes(`Room code  then dial in.\nJoin: ${ZOOM_PATH}`), got.text);
   assert.ok(got.text.includes("Where: Owner Holdings LLC office, \n"), got.text);
+});
+
+/* ------------------------------------------------------------------------
+ * Review follow-up: the decode-then-strip order in stripBoilerplate, and the
+ * whole "ordinary text is untouched" rule. Appended so earlier test numbers
+ * stay the same.
+ * --------------------------------------------------------------------- */
+
+test("HTML description: entities are decoded before passcodes are stripped, so an encoded passcode never reaches stored text", () => {
+  // stripBoilerplate runs htmlToText first and stripPasscodes second. In the
+  // other order every passcode below is still encoded when the strip runs, so
+  // the strip misses it and the token is stored. Most come back from the decode
+  // as a plain pwd= or passcode=, which also makes the gate refuse the envelope.
+  const html = [
+    `Join: ${ZOOM_PATH}?uname=guest&amp;pwd=${TOKEN}&amp;from=addon`,
+    `Room code pwd&#61;${TOKEN} then dial in.`,
+    `Backup: ${ZOOM_PATH}?pwd&#61;${TOKEN}`,
+    `Typed: <b>passcode</b>=${TOKEN} at the desk.`,
+    "R&amp;D notes stay readable.",
+  ].join("<br>");
+  const expected = [
+    `Join: ${ZOOM_PATH}?uname=guest&from=addon`,
+    "Room code  then dial in.",
+    `Backup: ${ZOOM_PATH}`,
+    "Typed:  at the desk.",
+    "R&D notes stay readable.",
+  ].join("\n");
+  assert.equal(stripBoilerplate(html), expected);
+
+  const env = upsert(baseEvent({ description: html }));
+  assertGatePasses(env);
+  assertNoPasscode(env);
+  assert.ok(env.content.includes(`\nNotes:\n${expected}\n`), env.content);
+});
+
+// Non-ASCII fixtures, spelled as escapes so invisible characters stay visible.
+const U = {
+  cafe: "Café", // precomposed e-acute
+  naive: "naïve",
+  gross: "Größe",
+  apres: "après",
+  cjk: "東京", // two CJK ideographs
+  coffee: "☕",
+  party: "\u{1F389}", // outside the BMP: a surrogate pair in a JS string
+  nbsp: " ",
+  ideoSpace: "　",
+  combining: "é", // e plus a combining acute, not precomposed
+  zwsp: "​",
+  fullWidthPwd: "ｐｗｄ＝ａｂｃ", // full-width p w d = a b c
+};
+
+// Each control string goes into the title, the description and the location of
+// one event, and must come back byte-identical everywhere it is stored:
+// env.title, the Meeting line, the Notes, the Where line and metadata.location.
+// stripPasscodes is checked on its own first. One difference is allowed, and it
+// is older than the passcode rule: the description's boilerplate pass splits
+// lines on \r?\n and joins them with \n, so a CRLF reads as LF in the Notes.
+function assertUntouchedEverywhere(text) {
+  const label = JSON.stringify(text);
+  assert.equal(stripPasscodes(text), text, `the rule changed ordinary text: ${label}`);
+  const env = upsert(baseEvent({ summary: text, description: text, location: text }));
+  assertGatePasses(env);
+  assert.equal(env.title, titleFor(text), label);
+  assert.ok(env.content.startsWith(`Meeting: ${text}\n`), `${label}\n${env.content}`);
+  assert.equal(env.metadata.location, text, label);
+  assert.ok(env.content.includes(`\nWhere: ${text}\n`), `${label}\n${env.content}`);
+  const notes = text.replace(/\r\n/g, "\n");
+  assert.equal(stripBoilerplate(text), notes, label);
+  assert.ok(env.content.includes(`\nNotes:\n${notes}\n`), `${label}\n${env.content}`);
+}
+
+test("control: pw, pwd and passcode as words, and key-like words that are not passcode keys, are byte-identical in title, description and location", () => {
+  for (const text of [
+    "pw is short for password; PWD, Pwd and pwd alone stay, and so do Passcode and PASSCODE.",
+    "Ask the host for the passcode, the pw or the pwd before the call.",
+    // A key must not follow a letter, digit or underscore.
+    "spw=abc npw=abc xpasscode=abc 1pwd=abc _pw=abc my_pwd=abc",
+    // A key must be exactly pwd, passcode or pw, followed directly by "=".
+    "PW2=abc passcodes=abc pwdhint=x pwd_reset=abc pw-d=abc pwd:abc pwd =abc passcode: abc",
+    // A key with no value is left as written.
+    "pw= then pwd=. then pwd=&x",
+  ]) assertUntouchedEverywhere(text);
+});
+
+test("control: URLs without a passcode parameter are byte-identical in title, description and location", () => {
+  for (const text of [
+    "Doc https://docs.example.com/d/abc123/edit?usp=sharing&tab=t.0#heading=h.1, then https://example.com/b?&x=1.",
+    // Query keys that only look like passcode keys, and passcode-like VALUES of other keys.
+    "Search https://example.com/s?spw=1&pwdhint=x&pw2=y&passcodes=z&my_pwd=q&q=pwd%3Dabc&next=%2Fpw",
+    // Paths containing pwd, a bare trailing "?", and a scheme-less host.
+    "Local http://localhost:8080/a? and example.org/path/pwd/?page=2 and https://example.com/pwd=policy/?x=1",
+    "Mail mailto:payer-one@vendor-alpha.example?subject=pw%20reset or zoommtg://zoom.us/join?confno=444&uname=guest",
+  ]) assertUntouchedEverywhere(text);
+});
+
+test("control: CRLF line endings pass through the rule byte-identical in title, description and location", () => {
+  // Byte-identical in the title, the Meeting line, the Where line and
+  // metadata.location. In the Notes the boilerplate pass reads CRLF as LF, as
+  // it did before the passcode rule; stripPasscodes alone returns CRLF as is.
+  for (const text of [
+    "First line with pw and pwd as words\r\nSecond line spw=abc pwdhint=x\r\nThird https://example.com/x?y=1&z=2\r\nEnd",
+    "A lone CR\rthen a lone LF\nthen CRLF\r\nend",
+  ]) assertUntouchedEverywhere(text);
+});
+
+test("control: unicode text, full-width look-alikes and unicode spaces are byte-identical in title, description and location", () => {
+  for (const text of [
+    `${U.cafe} ${U.coffee} ${U.naive} ${U.gross} ${U.cjk} ${U.party} with pw, pwd and passcode as words`,
+    `Full-width look-alikes are not keys: ${U.fullWidthPwd}`,
+    `No-break${U.nbsp}pw${U.nbsp}notes, an ideographic${U.ideoSpace}space, ${U.combining} combining, a${U.zwsp}zero-width space`,
+    `Unicode URL https://example.com/${U.cafe}/${U.cjk}?q=${U.naive}&lang=${U.cjk}&pwdhint=${U.apres}`,
+  ]) assertUntouchedEverywhere(text);
+});
+
+// Not a control: at b83a67b, before the title and bare-key rules, these tokens
+// stayed in the title, and the bare ones stayed everywhere.
+test("the text around a removed token stays byte-identical, including CRLF, unicode and no-break spaces, in title, description and location", () => {
+  for (const [withToken, without] of [
+    [`${U.cafe} ${U.cjk} pwd=${TOKEN} ${U.coffee} end`, `${U.cafe} ${U.cjk}  ${U.coffee} end`],
+    [`Room${U.nbsp}pwd=${TOKEN}${U.nbsp}suite ${U.party}`, `Room${U.nbsp}${U.nbsp}suite ${U.party}`],
+    [`Room code pwd=${TOKEN}\r\nFloor 2 ${U.cafe}`, `Room code \r\nFloor 2 ${U.cafe}`],
+    [`Join ${ZOOM_PATH}?pwd=${TOKEN}\r\nNotes ${U.apres}`, `Join ${ZOOM_PATH}\r\nNotes ${U.apres}`],
+    [
+      `Link https://example.com/${U.cafe}/${U.cjk}?q=${U.naive}&pwd=${TOKEN}&lang=${U.cjk} ok`,
+      `Link https://example.com/${U.cafe}/${U.cjk}?q=${U.naive}&lang=${U.cjk} ok`,
+    ],
+  ]) {
+    const label = JSON.stringify(withToken);
+    assert.equal(stripPasscodes(withToken), without, label);
+    const env = upsert(baseEvent({ summary: withToken, description: withToken, location: withToken }));
+    assertGatePasses(env);
+    assertNoPasscode(env);
+    assert.equal(env.title, titleFor(without), label);
+    assert.ok(env.content.startsWith(`Meeting: ${without}\n`), `${label}\n${env.content}`);
+    assert.equal(env.metadata.location, without, label);
+    assert.ok(env.content.includes(`\nWhere: ${without}\n`), `${label}\n${env.content}`);
+    // The whole envelope is the one the same event gives with the token never typed.
+    assert.deepEqual(env, upsert(baseEvent({ summary: without, description: without, location: without })), label);
+  }
 });
