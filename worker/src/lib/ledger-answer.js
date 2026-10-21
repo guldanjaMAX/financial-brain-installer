@@ -1,6 +1,6 @@
-import { createInflowAttributionBudget, createInflowAttributor, boundedPayerFields, exactPayerFieldAdmitted, payerFieldsAgree, payerKeyDamaged, payerNameVariant, payerRegistryHasDamage, payerRegistry, payerQuestionRegistry, resolveRequestedPayer, selectAttributedInflows, shorthandNames, inflowScopeConfirmed, payerAmount } from "./ledger-attribution.js";
+import { createInflowAttributionBudget, createInflowAttributor, boundedPayerFields, damagedSpellingsOf, exactPayerFieldAdmitted, payerFieldsAgree, payerKeyDamaged, payerNameVariant, payerRegistryHasDamage, payerRegistry, payerQuestionRegistry, resolveRequestedPayer, selectAttributedInflows, shorthandNames, inflowScopeConfirmed, payerAmount } from "./ledger-attribution.js";
 import { scopeIsUnrestricted } from "./grants.js";
-import { classifyLedgerQuestion, ledgerDay, shiftLedgerDay, payerMentionsCoverQuestion } from "./ledger-question.js";
+import { classifyLedgerQuestion, ledgerDay, shiftLedgerDay, payerMentionsCoverQuestion, payerQuestionGrammar } from "./ledger-question.js";
 import { accountLinkPairsInWindow, accountLinkRequiredInWindow, effectivePeriodCovered, readEffectiveAccounts, readEffectiveBalances, readEffectiveTransactions } from "./ledger-reader.js";
 import { categoryFor, detectRecurring, isDirectedOwnedTransfer, isLoanAdvance, matchesCategory, matchesMerchant, merchantFor, normalizeMerchantText, pairOwnTransfers, sumMinor } from "./ledger-analysis.js";
 
@@ -108,10 +108,13 @@ function gapFor(reason, accounts = [], intent = {}) {
   // quarter or a fixed relative phrase), never from a payer name.
   if (reason === 'payment_period_ambiguous') {
     const period = String(intent.forPeriod);
+    // A bare month cannot date an arrival either, so the note asks for the
+    // year instead of guessing one (round 6, R6-QUESTION-6).
+    const bareMonth = payerQuestionGrammar.months.includes(period);
     const received = /^(?:last|this) month$|^so far this year$/.test(period) ? `received ${period}`
-      : /^last \d+ days$/.test(period) ? `received in the ${period}` : `received in ${period}`;
+      : /^last \d+ days$/.test(period) ? `received in the ${period}` : bareMonth ? `received in ${period} <year>` : `received in ${period}`;
     return { type: 'ledger_not_consulted', reason, code: reason,
-      detail: `"for ${period}" can name the period a payment covers, not when it arrived. Did you mean "${received}"? Nothing is confirmed present or absent.` };
+      detail: `"for ${period}" can name the period a payment covers, not when it arrived. Did you mean "${received}"?${bareMonth ? ' Name the year.' : ''} Nothing is confirmed present or absent.` };
   }
   if (reason === 'ledger_account_link_required') {
     // Display one relevant pair; the admission decision checks every edge.
@@ -251,17 +254,29 @@ function chooseLiteralSelector(intent, identities, rows, budget) {
       // names no registered entity there is no "other" to compare: a payee
       // registered to one entity is possible when it, or any registered
       // spelling of that entity, is such a variant of the question (R5-MONEY-1).
+      // The requested entity's own NUL-damaged registered spellings never
+      // enter lookup, so a payee equal to one (or a variant of one) would read
+      // as nobody's. It can be this entity's own row: a possible match, never
+      // a known other (round 6, R6-MONEY-2).
+      const ownDamaged = damagedSpellingsOf(identities, slug);
       let spellings = null;
       const possiblePayee = row => {
         if (!row.payee || row.payee_has_nul || String(row.payee).includes('\0')) return false;
         const field = normalizeMerchantText(row.payee), owners = identities.get(field);
         if (field === key) return false;
+        if (ownDamaged.includes(field)) return true;
         if (slug && owners?.has(slug)) return owners.size > 1 || payerKeyDamaged(identities, row.payee);
         if (owners?.size === 1) return !slug && [row.payee, ...spellingsOf(identities, [...owners][0])]
           .some(spelling => payerNameVariant(spelling, [label], { longer: false }));
-        spellings ??= [label, ...spellingsOf(identities, slug)];
+        spellings ??= [label, ...spellingsOf(identities, slug), ...ownDamaged];
         return payerNameVariant(row.payee, spellings, { longer: false });
       };
+      // A NUL-damaged bounded field (the payee, or the description of a row
+      // with no payee) is unread: a truncating driver can hide any tail, so
+      // whatever its visible text the row is a possible match, never a known
+      // other, as on the inflow side (round 6, R6-MONEY-1).
+      const damagedField = row => row.payee_has_nul || String(row.payee || '').includes('\0') ||
+        (!row.payee && (row.description_has_nul || String(row.description || '').includes('\0')));
       const matched = scoped.filter(row => {
         if (!row.payee || row.payee_has_nul) return false;
         const field = normalizeMerchantText(row.payee), aliases = identities.get(field);
@@ -277,9 +292,11 @@ function chooseLiteralSelector(intent, identities, rows, budget) {
       // spend total, so it is no doubt about it (partner-r6-literals pins a
       // $0 shortened payee beside an exact RAW name as an exact total).
       const possible = scoped.filter(row => contained.some(spelling => matchesMerchant(row, spelling)) ||
-        (row.amount_minor > 0 && possiblePayee(row)));
-      return { exact: matched.length > 0, matched, possible, ids,
-        conflict: ids.size > 1 || damagedName || payerRegistryHasDamage(identities) && !slug };
+        (row.amount_minor > 0 && (possiblePayee(row) || damagedField(row) ||
+          (!row.payee && ownDamaged.some(spelling => matchesMerchant(row, spelling))))));
+      return { exact: matched.length > 0, matched, possible, ids, damaged: new Set(possible.filter(damagedField).map(row => row.id)),
+        conflict: ids.size > 1 || damagedName || payerRegistryHasDamage(identities) && !slug,
+        conflictReason: ids.size > 1 ? 'shared' : 'damaged' };
     }
     const attribute = createInflowAttributor(payerQuestionRegistry(reading, identities), { budget });
     const attributions = new Map(scoped.map(row => [row.id, attribute(row)]));
@@ -321,13 +338,17 @@ function chooseLiteralSelector(intent, identities, rows, budget) {
     // registered spelling of its entity, is a variant of the question
     // (R5-MONEY-1), so registering a spelling never removes the doubt its
     // unregistered variants carry.
+    // A field equal to the requested entity's own NUL-damaged registered
+    // spelling, or a variant of one, is possible too (round 6, R6-MONEY-2).
+    const ownDamaged = damagedSpellingsOf(identities, slug);
     let spellings = null;
     const possibleField = row => fields.get(row.id)?.fields.some(field => {
       const fieldKey = normalizeMerchantText(field), owners = identities.get(fieldKey);
       if (fieldKey === key) return false;
+      if (ownDamaged.includes(fieldKey)) return true;
       if (owners?.size === 1 && !(slug && owners.has(slug))) return !slug &&
         [field, ...spellingsOf(identities, [...owners][0])].some(spelling => payerNameVariant(spelling, [label]));
-      spellings ??= [label, ...spellingsOf(identities, slug)];
+      spellings ??= [label, ...spellingsOf(identities, slug), ...ownDamaged];
       return payerNameVariant(field, spellings);
     });
     // The shorthand clause covers a row whose attribution is unknown (its
@@ -336,6 +357,9 @@ function chooseLiteralSelector(intent, identities, rows, budget) {
     const possibleRow = row => !sameIdentity(row) && (possibleField(row) || (attributions.get(row.id)?.state === 'unknown' &&
       shorthandNames(attributions.get(row.id), wanted.state === 'unique' ? wanted : { state: slug ? 'unique' : 'missing', slug }, key)));
     return { exact: registered || matched.length > 0, matched, possible, ids, conflict,
+      // Rows whose bounded field shares the requested name (a variant, or the
+      // requested entity's damaged spelling) without being an exact field.
+      variants: scoped.filter(row => amountMatches(row) && !fields.get(row.id)?.conflict && !literal(row) && possibleRow(row)),
       conflictRows: new Set(scoped.filter(row => fields.get(row.id)?.conflict).map(row => row.id)),
       knownRows: new Set(scoped.filter(row => !fields.get(row.id)?.conflict && (literal(row) ? supportedLiteral(row) : !possibleRow(row)) &&
         (fields.get(row.id)?.fields.length || attributions.get(row.id)?.state === 'confirmed')).map(row => row.id)),
@@ -358,6 +382,20 @@ function chooseLiteralSelector(intent, identities, rows, budget) {
     return { intent, attributions: literal.attributions };
   }
   if (literal.exhausted || alternate.exhausted || alternatives.some(a => a.result.exhausted)) return { refusal: 'budget', labels };
+  // An outflow merchant name that is shared by two entities, or whose
+  // uniqueness a damaged registry spelling leaves unproven, never certifies,
+  // but its rows stay visible: the exact-name rows as a partial subtotal, the
+  // others (and a different cleaned reading's rows) as possible matches, with
+  // a note saying why (round 6, R6-MONEY-3). The inflow side lists them too.
+  if (literal.conflict && !payer) {
+    const exactIds = new Set(literal.matched.map(row => row.id));
+    const cleanedRows = cleaned && normalizeMerchantText(labelOf(cleaned)) !== normalizeMerchantText(labelOf(raw))
+      ? [...(alternate.matched || []), ...alternate.possible] : [];
+    const others = [...new Map([...literal.possible, ...cleanedRows].filter(row => !exactIds.has(row.id))
+      .map(row => [row.id, row])).values()];
+    if (literal.matched.length || others.length) return { intent: raw, possible: others, exactMatches: literal.matched, labels,
+      uniquenessUnproven: literal.conflictReason, damaged: new Set([...(literal.damaged || []), ...(alternate.damaged || [])]) };
+  }
   // Without alternative readings the conflict keeps the legacy attribution
   // path, but it is still a conflict: the answer can show what it read and
   // never certify a complete total, zero or absence from it.
@@ -377,7 +415,8 @@ function chooseLiteralSelector(intent, identities, rows, budget) {
     if (!payer) {
       const exactIds = new Set(chosen.result.matched.map(row => row.id));
       const others = chosen.result.possible.filter(row => !exactIds.has(row.id));
-      if (others.length) return { intent: chosen.reading, possible: others, exactMatches: chosen.result.matched, labels };
+      if (others.length) return { intent: chosen.reading, possible: others, exactMatches: chosen.result.matched, labels,
+        damaged: chosen.result.damaged };
     }
     return { intent: chosen.reading, exact: true, attributions: chosen.result.attributions, knownRows: chosen.result.knownRows,
       exactRows: new Set(chosen.result.matched.map(row => row.id)) };
@@ -395,8 +434,20 @@ function chooseLiteralSelector(intent, identities, rows, budget) {
   const amountScoped = row => raw.kind !== 'payment' || raw.amountMinor === null || row.amount_minor === raw.amountMinor;
   const unattributed = payer && literal.knownRows ? rows.filter(row => row.direction === 'inflow' && amountScoped(row) &&
     row.posted_on >= raw.from && row.posted_on <= raw.to && !literal.knownRows.has(row.id) && !possibleIds.has(row.id)) : [];
-  if (possible.length) return { intent: raw, possible, unattributed, labels, attributions: new Map([
-    ...(literal.attributions || []), ...(alternate.attributions || [])]) };
+  const attributions = new Map([...(literal.attributions || []), ...(alternate.attributions || [])]);
+  if (possible.length) return { intent: raw, possible, unattributed, labels, attributions,
+    damaged: new Set([...(literal.damaged || []), ...(alternate.damaged || [])]) };
+  // A payer selector with no possible reading still lists every deposit in
+  // scope that is not a known other (R5-MONEY-2), never the absence-shaped
+  // nonmatch refusal: rows whose bounded field shares the requested name (a
+  // registered whole-word prefix of an unlisted amount phrase, "Payer One of
+  // about $25") are possible matches, the rest unattributed deposits (round
+  // 6, R6-QUESTION-3).
+  if (payer && unattributed.length && (intent.selectorReadings || intent.selectorUnproven)) {
+    const variantIds = new Set((literal.variants || []).map(row => row.id));
+    return { intent: raw, possible: unattributed.filter(row => variantIds.has(row.id)),
+      unattributed: unattributed.filter(row => !variantIds.has(row.id)), labels, attributions };
+  }
   // Keep the established uncertainty detail for ordinary unresolved payers.
   // Cleanup nonmatches use the explicit null-total contract.
   return intent.selectorReadings || intent.selectorUnproven || !payer ? { refusal: 'unmatched', labels } : { intent, attributions: literal.attributions };
@@ -420,11 +471,19 @@ function possibleSelectorAnswer(selection, accounts, inventory, scopedRows, allR
   const citations = [...listedRows, ...listedUnattributed].map((row, i) => citation(row, bySlug.get(row.effective_account_slug), i));
   const note = 'matched by name similarity, not an exact merchant/payer name; say "exact names only" to exclude these possible matches.';
   const excluded = selection.possible.length;
-  const detail = mixed
+  // A name shared by two entities, or one whose uniqueness a damaged
+  // registry spelling leaves unproven, shows its exact-name rows but never
+  // confirms presence for the entity (round 6, R6-MONEY-3).
+  const unproven = selection.uniquenessUnproven;
+  const uniqueness = unproven === 'shared' ? 'This name is registered to more than one entity, so whose rows these are is unproven.'
+    : unproven ? "A registered spelling is damaged, so this name's uniqueness is unproven." : null;
+  const detail = `${uniqueness ? `${uniqueness} ` : ''}${mixed
     ? intent.exactNamesOnly ? `Exact names only leaves out ${excluded} possible ${excluded === 1 ? 'match' : 'matches'} by name similarity, so no complete total or absence is confirmed.`
-      : 'Some rows match the exact name and others are possible matches. No complete total or absence is confirmed.'
+      : !excluded ? 'These rows match the exact name. No complete total, presence or absence is confirmed.'
+      : `Some rows match the exact name and others are possible matches. No complete total${unproven ? ', presence' : ''} or absence is confirmed.`
     : intent.exactNamesOnly ? 'Exact names only excludes the possible matches. No complete total, presence or absence is confirmed.'
-    : 'These are possible matches. No complete total, presence or absence is confirmed.';
+    : 'These are possible matches. No complete total, presence or absence is confirmed.'}`;
+  const damagedRows = selection.damaged || new Set();
   const unattributedCitations = listedUnattributed.map((_, i) => listedRows.length + i + 1);
   const attributions = selection.attributions || new Map();
   const wantedKey = normalizeMerchantText(intent.kind === 'payment' ? intent.counterparty : intent.match);
@@ -450,20 +509,26 @@ function possibleSelectorAnswer(selection, accounts, inventory, scopedRows, allR
   const notes = [...(assumed.notes || []), note, ...transferNotes];
   const exactCitations = citations.slice(0, exactRows.length).map(c => c.n);
   const possibleCitations = citations.slice(exactRows.length, listedRows.length).map(c => c.n);
+  // A possible match read from a NUL-damaged bank field says so (round 6,
+  // R6-MONEY-1), in the inflow side's reason vocabulary.
+  const damagedNote = i => damagedRows.has(listedRows[i].id) ? '; uncertain because damaged bank field' : '';
   return { answer: `${detail}${mixed && exactSubtotal !== null ? ` Exact-name subtotal (partial; before exclusions): ${money(exactSubtotal)}.` : ''}` +
       `${subtotal === null ? '' : ` ${mixed ? 'Possible-match subtotal' : 'Partial subtotal'} before exclusions: ${money(subtotal)}.`}\nNote: ${notes.join('; ')}.` +
-      citations.slice(0, listedRows.length).filter(c => c.amount_minor > 0).map(c => `\n${exactCitations.includes(c.n) ? 'Exact match' : 'Possible match'}: ${money(c.amount_minor)} posted ${c.posted_on} [${c.n}].`).join('') +
+      citations.slice(0, listedRows.length).map((c, i) => c.amount_minor > 0 ? `\n${exactCitations.includes(c.n) ? 'Exact match' : 'Possible match'}: ${money(c.amount_minor)} posted ${c.posted_on}${damagedNote(i)} [${c.n}].` : '').join('') +
       (unattributedDetail ? `\n${unattributedDetail}` : '') +
       uncertainCandidates.map(candidate => `\nUnattributed deposit: ${money(candidate.amount_minor)} posted ${candidate.posted_on}; ${candidate.field === 'bank_payee' ? "bank's payer field" : 'statement description'}: ${candidate.label}; uncertain because ${candidate.reason} [${candidate.citation}].`).join('') +
       (unattributed.length > listedUnattributed.length ? `\nShowing ${listedUnattributed.length} of ${unattributed.length} candidate deposits; ${unattributed.length - listedUnattributed.length} more are not listed.` : ''),
     citations, assumptions: assumptions.length ? assumptions : [{ type: 'name_similarity', count: rows.length, flip: 'exact names only' }], notes,
     gaps: [{ type: 'ledger_selector_possible', reason: 'name_similarity', detail },
+      ...(uniqueness ? [{ type: 'ledger_selector_ambiguous', reason: 'selector_uniqueness_unproven', detail: uniqueness }] : []),
       ...(unattributedDetail ? [{ type: 'ledger_attribution_unknown', reason: 'sender_attribution_unknown',
         from: intent.from, to: intent.to, count: unattributed.length, citations: unattributedCitations, detail: unattributedDetail }] : [])],
-    evidence_gate: { supported: true, complete: false, partial: true, reason: 'name_similarity' },
-    ledger: { kind: intent.kind, found: mixed ? true : null, total_minor: null, lead_total_minor: null, total_is_exact: false,
+    evidence_gate: { supported: true, complete: false, partial: true, reason: uniqueness ? 'selector_uniqueness_unproven' : 'name_similarity' },
+    ledger: { kind: intent.kind, found: mixed && !unproven ? true : null, total_minor: null, lead_total_minor: null, total_is_exact: false,
       inflow_total_minor: sumMinor(scopedRows.filter(row => row.direction === 'inflow')),
-      subtotal_is_partial: true, attributed_subtotal_minor: mixed ? exactSubtotal : subtotal, confirmed_subtotal_minor: mixed ? exactSubtotal : null,
+      ...(uniqueness ? { selector_ambiguous: true, selector_candidates: [...new Map((selection.labels || [])
+        .map(label => [normalizeMerchantText(label), label])).values()].map(safeDescription) } : {}),
+      subtotal_is_partial: true, attributed_subtotal_minor: mixed ? exactSubtotal : subtotal, confirmed_subtotal_minor: mixed && !unproven ? exactSubtotal : null,
       ...(mixed ? { exact_count: exactRows.length, exact_citations: exactCitations, possible_count: excluded,
         possible_subtotal_minor: subtotal, possible_citations: possibleCitations } : {}),
       ...(unattributed.length ? { unattributed_count: unattributed.length, unattributed_citations: unattributedCitations,
@@ -522,8 +587,10 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
   if (selection.possible) return possibleSelectorAnswer(selection, accounts, inventory, rows, allRows);
   if (selection.refusal) {
     const ambiguous = selection.refusal === 'ambiguous', budget = selection.refusal === 'budget';
-    const labels = selection.labels.map(safeDescription);
-    const detail = budget ? 'The answer reached its sender parsing work limit while comparing names. No complete total or presence or absence is confirmed.' : ambiguous ? `I can't tell whether you mean ${labels[0]} or ${labels[1] || 'a competing payer reading'}. Use a unique registered label or the complete statement name.`
+    // Two readings that print the same never read as two candidates (round 6,
+    // R6-MONEY-3): the single-label wording names the competing reading.
+    const labels = [...new Map(selection.labels.map(label => [normalizeMerchantText(label), label])).values()].map(safeDescription);
+    const detail = budget ? 'The answer reached its sender parsing work limit while comparing names. No complete total or presence or absence is confirmed.' : ambiguous ? `I can't tell whether you mean ${labels[0]} or ${labels[1] || (namedPayer ? 'a competing payer reading' : 'a competing reading')}. Use a unique registered label or the complete statement name.`
       : `No matching transactions were found for ${labels[0]} in the covered accounts. The merchant may appear under a different name on statements.`;
     const reason = budget ? 'answer_operation_limit' : ambiguous ? 'selector_cleanup_ambiguous' : 'statement_name_unconfirmed';
     return { answer: detail, citations: [], gaps: [{ type: budget ? 'ledger_attribution_budget' : ambiguous ? 'ledger_selector_ambiguous' : 'ledger_selector_unmatched', reason, detail }],

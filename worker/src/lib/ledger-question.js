@@ -204,6 +204,7 @@ function phaseTwoQuestion(q, intent, today) {
 
 const ARRIVAL = payerQuestionGrammar.arrivals.join("|");
 const paymentAmount = /(?:\$|\busd\s+)\d[\d,]*(?:\.\d+)?|\b\d[\d,]*(?:\.\d+)?\s+dollars?\b/g;
+const labelAmount = new RegExp(paymentAmount.source, 'iu');
 const nounExternalAmount = new RegExp(`'s +(?:${paymentAmount.source})$`);
 // One date or period may sit between the possessive and "payment" ("Payer
 // One's September 2026 payment", "Payer One's last month payment"); the 's
@@ -339,7 +340,10 @@ function classifyQuestionGrammar(question, { now = Date.now(), selectorSlot = fa
     const forPeriod = coveredPeriod || (period.connector === 'for' ? period.period : null);
     // A bare month still cannot date an exact payment. Keep the original
     // ambiguity control; an explicit year or relative bounded window is needed.
-    if (period.period && MONTHS.includes(period.period)) return intent;
+    // "for <bare month>" is still answer 10's for-period: it refuses with the
+    // note (asking for the year) instead of a silent document route (round 6,
+    // R6-QUESTION-6). The window is never read for it.
+    if (period.period && MONTHS.includes(period.period) && !forPeriod) return intent;
     rest = period.residual.replace(paymentAmount, '').replace(/\s+/g, ' ').trim();
     if (dates.length && /\b(?:before|after|between)\b/.test(rest)) return intent;
     if (!dates.length && !period.from && /\b(?:on|between|before|after|yesterday|tomorrow|last|this)\b/.test(rest)) return intent;
@@ -675,11 +679,15 @@ function paymentSlot(slot) {
   const payerWords = tokens.filter(token => token.kind === 'payer').length;
   return { payer: payerWords > 0, payerWords, qualified: tokens.some(token => token.kind === 'qualifier'),
     stripped: without(tokens.filter(token => token.kind === 'qualifier')),
-    nounQualified: leading.length + trailing.length > 0, nounStripped: without([...leading, ...trailing.toReversed()]) };
+    nounQualified: leading.length + trailing.length > 0, nounStripped: without([...leading, ...trailing.toReversed()]),
+    leadQualified: leading.length > 0, leadStripped: without(leading) };
 }
 const ownPaymentNoun = new RegExp(`\\bpayment\\b(?=\\s*(?:[?!.,;:]|$)|\\s+(?:${ARRIVAL}|from|via|of|for|by|in|on|into|to|yet|and|during|over|before|after|between)\\b|\\s+(?:${paymentAmount.source}))`, 'iu');
+// The amount may also be followed by a relative period the window grammar
+// reads ("of $25 last month arrive"; round 6, R6-QUESTION-2).
 const amountAfterName = new RegExp(`\\bfrom\\s+(\\S(?:[\\s\\S]*?\\S)?)(?:\\s+(?:of|for)\\s+(${paymentAmount.source})\\s*,?|\\s*,\\s*(${paymentAmount.source})\\s*,)` +
-  `(?=\\s*(?:[?!.]|$)|\\s+(?:${ARRIVAL}|in|on|into|to|during|over|before|after|between|yet|and)\\b)`, 'iu');
+  `(?=\\s*(?:[?!.]|$)|\\s+(?:${ARRIVAL}|in|on|into|to|during|over|before|after|between|yet|and)\\b|` +
+  `\\s+(?:(?:last|this)\\s+month|last\\s+\\d+\\s+days|so\\s+far\\s+this\\s+year|\\d{4}\\s+so\\s+far|recent)\\b)`, 'iu');
 
 function rewriteLedgerQuestion(question, { nounLead = true } = {}) {
   const original = String(question ?? '');
@@ -703,8 +711,19 @@ function rewriteLedgerQuestion(question, { nounLead = true } = {}) {
   const flip = () => { exactNamesOnly = true; return ' '; };
   text = text.replace(exactNamesOnlyBracketed, flip).replace(exactNamesOnlyPhrase, flip);
   if (/\b(?:payment|deposit|paid)\b/iu.test(text) && new RegExp(`\\b(?:${ARRIVAL})\\b`, 'iu').test(text)) {
-    // Answer 13: "via <channel>" for the closed channel list is removed.
-    text = text.replace(channelPhrase, '').replace(channelBeforeFrom, '');
+    // Answer 13: "via <channel>" for the closed channel list is removed. A
+    // comma before "via" that closes the answer-11 ", $25," amount form stays,
+    // so ", $25, via Zelle arrive" reads as ", $25, arrive" (round 6,
+    // R6-QUESTION-1).
+    const closingAmountComma = new RegExp(`,\\s*(?:${paymentAmount.source})\\s*$`, 'iu');
+    const keepAmountComma = (match, ...rest) => {
+      const [offset, whole] = rest.slice(-2);
+      // ", $25, via Zelle, arrive" already has its closing comma after the
+      // channel; only a channel the comma alone set off keeps it.
+      return /^\s*,/.test(match) && closingAmountComma.test(whole.slice(0, offset)) &&
+        !/^\s*[,;:.?!)]/.test(whole.slice(offset + match.length)) ? ',' : '';
+    };
+    text = text.replace(channelPhrase, keepAmountComma).replace(channelBeforeFrom, keepAmountComma);
     // Any other "via" phrase after a named payer (a FROM or VIA clause, or a
     // noun payer before "payment") is a channel phrase too, and refuses. A
     // "via" clause that comes first, alone or before a FROM clause, still
@@ -729,10 +748,12 @@ function rewriteLedgerQuestion(question, { nounLead = true } = {}) {
     // none (R4-QUESTION-8). The question's own "payment" is the first one
     // followed by grammar (an arrival verb, a clause word, an amount or the
     // end), never a "Payment" inside a name ("the Payer Payment One payment").
+    // A leading "please" (with or without a comma) is filler the payment
+    // grammar itself consumes, never a slot word (round 6, R6-FIDELITY-1).
     const payment = ownPaymentNoun.exec(text);
     if (payment) {
       const head = text.slice(0, payment.index), tail = text.slice(payment.index);
-      const lead = /^\s*(?:(?:did|has|have|was|is|were|are)\s+)?(?:(?:the|my|our|a|an)\s+)?/iu.exec(head);
+      const lead = /^\s*(?:please\b\s*,?\s*)?(?:(?:did|has|have|was|is|were|are)\s+)?(?:(?:the|my|our|a|an)\s+)?/iu.exec(head);
       const named = /\b(?:from|via)\s+\S/iu.test(text);
       const possessive = !named && lead ? [...head.matchAll(/['’]s\s+/giu)].filter(m => m.index >= lead[0].length).at(-1) : null;
       const start = possessive ? possessive.index + possessive[0].length : lead ? lead[0].length : null;
@@ -750,7 +771,18 @@ function rewriteLedgerQuestion(question, { nounLead = true } = {}) {
           // R5-FIDELITY-1). The unstripped slot remains a competing reading.
           replacement = slot.nounStripped;
         }
-        if (replacement !== null) text = `${head.slice(0, start)}${replacement ? `${replacement} ` : ''}${tail}`;
+        // The same closed run leading a possessive noun payer ("the latest
+        // Payer One's payment") is stripped from the owner, and the
+        // unstripped owner remains a competing reading, exactly as for the
+        // noun form above (round 6, R6-QUESTION-5).
+        let prefix = head.slice(0, start);
+        if (possessive && nounLead) {
+          const owner = paymentSlot(head.slice(lead[0].length, possessive.index));
+          if (owner.payer && owner.leadQualified)
+            prefix = `${head.slice(0, lead[0].length)}${owner.leadStripped}${head.slice(possessive.index, start)}`;
+        }
+        if (replacement !== null || prefix !== head.slice(0, start))
+          text = `${prefix}${replacement === null ? head.slice(start) : replacement ? `${replacement} ` : ''}${tail}`;
       }
     }
     // Answer 11: "of $25", "for $25" or ", $25," after the FROM name is amount
@@ -833,6 +865,10 @@ function classifyBoundedLedgerQuestion(question, now, budget) {
     const label = text.slice(start, end).trimEnd(), cleaned = clean(label);
     if (!/[\p{L}\p{N}]/u.test(label) ||
         !/^[\p{L}\p{N}\p{M} &'()._/:#,$-]+$/u.test(label)) continue;
+    // A literal name never absorbs an amount together with a period clause
+    // ("payer one of $25 last month"): both are scope, not name text (round
+    // 6, R6-QUESTION-2; the span parser applies labelPeriodClause the same way).
+    if (labelAmount.test(label) && labelPeriodClause.test(label)) continue;
     // Only a terminal noun possessive/amount belongs to the payment grammar.
     // FROM names and internal possessives stay literal. A following possessive
     // marks the outer noun boundary even when the name itself ends in one.

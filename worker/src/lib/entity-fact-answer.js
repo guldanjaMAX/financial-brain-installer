@@ -44,12 +44,16 @@ function questionFact(question, owner) {
 // The digits of a cited value with every joining separator removed, read per
 // raw code point: modifier letters, marks and default-ignorable code points
 // are dropped (they join), every other non-letter is a separator (it joins),
-// and a run of letters is kept as a splitting word unless it is one letter
-// that is either not an ASCII letter in the cited value or directly between
-// two digits, or it is a run with no ASCII letter directly between two
-// digits ("4111ǀǀ1111", "4111ǀ́ǀ1111": doubled punctuation-shaped letters
-// read as a separator; round 5, R5-LEAK-1). Only digit runs matter to the
-// caller.
+// and a run of letters splits two digit groups only when it holds an ASCII
+// letter of the cited value, unless it is one ASCII letter directly between
+// two digits ("4111a1111" joins). A run with no ASCII letter of the cited
+// value always joins, touching or set off by spaces or ASCII punctuation
+// ("4111ǀǀ1111", "4111 ǀǀ 1111", "4111-ǀǀ-1111"; round 5, R5-LEAK-1; round 6,
+// R6-LEAK-1). `ascii` is read from the cited code point, so one cited letter
+// whose NFKC form is several letters or several words (Ĳ, ﬁ, ﷺ) is one
+// non-ASCII letter and joins too (round 6, R6-LEAK-2). The cost: a non-ASCII
+// word directly between two digit groups ("1234 日本 5678") leaves the fast
+// path, as "4111 日 1111" already did. Only digit runs matter to the caller.
 function codePointRunText(value) {
   const tokens = [];
   for (const char of value) {
@@ -69,7 +73,7 @@ function codePointRunText(value) {
     while (tokens[end + 1]?.kind === 'letter') { end++; ascii ||= tokens[end].ascii; }
     const lone = end === index;
     const touching = tokens[index - 1]?.kind === 'digit' && tokens[end + 1]?.kind === 'digit';
-    if (!((lone && (!token.ascii || touching)) || (touching && !ascii))) out += ' ';
+    if (ascii && !(lone && touching)) out += ' ';
     index = end;
   }
   return out;
@@ -94,11 +98,13 @@ function unsafeScalarFact(value, field) {
   // six-digit rule, so a five-digit ZIP code still answers.
   // Round 4 (R4-LEAK-1, R4-LEAK-2): the run is also read code point by code
   // point from the cited value, so a modifier letter is judged BEFORE NFKC
-  // turns it into a base letter, and a lone letter between digit groups joins
-  // them when it is not an ASCII letter (U+01C0, U+A78F, ª and the like read as
-  // punctuation) or when it touches a digit on both sides. A lone ASCII letter
-  // set off by spaces ("1234 N 56th St") and every word of two or more letters
-  // still split the run, so no list of look-alike letters is needed.
+  // turns it into a base letter, and letters between digit groups join them
+  // when none is an ASCII letter of the cited value (U+01C0, U+A78F, ª, a
+  // doubled run of them, or a ligature such as Ĳ, read as punctuation; round
+  // 6, R6-LEAK-1/2), or when one ASCII letter touches a digit on both sides. A
+  // lone ASCII letter set off by spaces ("1234 N 56th St") and every word that
+  // holds an ASCII letter still split the run, so no list of look-alike
+  // letters is needed.
   const digitRun = field?.includes("address") ? /[0-9]{6}/ : /[0-9]{5}/;
   if (digitRun.test(normalized.replace(/[^\p{L}0-9]|\p{Lm}/gu, '')) || digitRun.test(codePointRunText(value))) return true;
   // NFKC precedes default casefold;

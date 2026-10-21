@@ -24,6 +24,14 @@ export function payerKeyDamaged(registry, label) {
   const slugs = registry.get(key);
   return [...damaged].some(slug => !slugs?.has(slug));
 }
+// The normalized visible texts (whole string and pre-NUL prefix) of one
+// entity's own NUL-damaged registered spellings. A bank field equal to one of
+// them, or a name variant of one, can be that entity's own row: it is never a
+// known other (round 6, R6-MONEY-2).
+export function damagedSpellingsOf(registry, slug) {
+  if (!slug || typeof slug === 'symbol') return [];
+  return [...(registry[damagedSpellings] || [])].filter(([, slugs]) => slugs.has(slug)).map(([key]) => key);
+}
 function phraseCommaMatches(left, right) {
   const valid = value => {
     const text = normalizePayerCommas(value);

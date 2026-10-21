@@ -145,6 +145,10 @@ import { supplementalRetrievalFilters } from "./lib/retrieval-routing.js";
 import { dispatchCfoWorkflow } from "./lib/cfo-workflow.js";
 import { entityFactAnswer } from "./lib/entity-fact-answer.js";
 
+// Ledger gap reasons that mean the bank ledger read failed, not a deliberate
+// absence: a thrown read, unreadable rows, unreadable balances.
+const FAILED_LEDGER_READS = new Set(["ledger_unavailable", "unreadable_transactions", "balance_unavailable"]);
+
 /* ------------------------------------------------------------ retrieval */
 
 /**
@@ -1662,6 +1666,15 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
     evidenceGate = { ...evidenceGate, complete: false,
       ...(evidenceGate.supported ? { partial: true } : {}),
       reason: evidenceGate.supported && !evidenceGate.partial ? 'retrieval incomplete' : evidenceGate.reason };
+  }
+  // A money question whose bank ledger read failed (it threw, or returned
+  // rows or balances that could not be read) is failed retrieval too, even
+  // when the document lanes were healthy. A deliberate absence (no accounts,
+  // restricted scope) is not a failure (round 6, R6-QUESTION-4).
+  if (evidenceGate?.complete && FAILED_LEDGER_READS.has(ledgerGap?.reason)) {
+    evidenceGate = { ...evidenceGate, complete: false,
+      ...(evidenceGate.supported ? { partial: true } : {}),
+      reason: evidenceGate.supported && !evidenceGate.partial ? 'ledger retrieval incomplete' : evidenceGate.reason };
   }
 
   const categoricalRefusal = !answerError &&
