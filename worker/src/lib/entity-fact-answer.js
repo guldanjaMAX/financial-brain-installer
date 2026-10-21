@@ -51,17 +51,31 @@ function questionFact(question, owner) {
 // ("4111ǀǀ1111", "4111 ǀǀ 1111", "4111-ǀǀ-1111"; round 5, R5-LEAK-1; round 6,
 // R6-LEAK-1). `ascii` is read from the cited code point, so one cited letter
 // whose NFKC form is several letters or several words (Ĳ, ﬁ, ﷺ) is one
-// non-ASCII letter and joins too (round 6, R6-LEAK-2). The cost: a non-ASCII
+// non-ASCII letter and joins too (round 6, R6-LEAK-2). A cited letter that
+// carries a combining mark is judged as the letter it renders (its NFC
+// grapheme), not as its bare base code point: "e" + U+0301 is the decomposed
+// spelling of "é", so it is a non-ASCII letter and joins exactly as the
+// precomposed letter does (round 7 review, R7-LEAK-1). The cost: a non-ASCII
 // word directly between two digit groups ("1234 日本 5678") leaves the fast
 // path, as "4111 日 1111" already did. Only digit runs matter to the caller.
 function codePointRunText(value) {
   const tokens = [];
+  // The letter tokens of the previous cited code point, which a following
+  // combining mark attaches to.
+  let previous = [];
   for (const char of value) {
-    if (/\p{Lm}|\p{M}|\p{Default_Ignorable_Code_Point}/u.test(char)) continue;
+    if (/\p{M}/u.test(char)) {
+      for (const token of previous) if (token.kind === 'letter') token.ascii = false;
+      continue;
+    }
+    previous = [];
+    if (/\p{Lm}|\p{Default_Ignorable_Code_Point}/u.test(char)) continue;
     for (const piece of char.normalize('NFKC')) {
-      if (/[0-9]/.test(piece)) tokens.push({ kind: 'digit', text: piece });
-      else if (/\p{L}/u.test(piece) && !/\p{Lm}/u.test(piece)) tokens.push({ kind: 'letter', ascii: /^[A-Za-z]$/.test(char) });
-      else if (!/\p{M}|\p{Lm}/u.test(piece)) tokens.push({ kind: 'separator' });
+      let token = null;
+      if (/[0-9]/.test(piece)) token = { kind: 'digit', text: piece };
+      else if (/\p{L}/u.test(piece) && !/\p{Lm}/u.test(piece)) token = { kind: 'letter', ascii: /^[A-Za-z]$/.test(char) };
+      else if (!/\p{M}|\p{Lm}/u.test(piece)) token = { kind: 'separator' };
+      if (token) { tokens.push(token); previous.push(token); }
     }
   }
   let out = '';
@@ -104,7 +118,8 @@ function unsafeScalarFact(value, field) {
   // 6, R6-LEAK-1/2), or when one ASCII letter touches a digit on both sides. A
   // lone ASCII letter set off by spaces ("1234 N 56th St") and every word that
   // holds an ASCII letter still split the run, so no list of look-alike
-  // letters is needed.
+  // letters is needed. An ASCII base letter carrying a combining mark is the
+  // accented letter it renders, never an ASCII letter (round 7, R7-LEAK-1).
   const digitRun = field?.includes("address") ? /[0-9]{6}/ : /[0-9]{5}/;
   if (digitRun.test(normalized.replace(/[^\p{L}0-9]|\p{Lm}/gu, '')) || digitRun.test(codePointRunText(value))) return true;
   // NFKC precedes default casefold;

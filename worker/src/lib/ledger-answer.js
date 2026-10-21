@@ -342,7 +342,8 @@ function chooseLiteralSelector(intent, identities, rows, budget) {
       scoped.some(row => literal(row) && fields.get(row.id)?.conflict);
     // A row the question does not name exactly is a known other only when no
     // bounded field shares the requested name (one closed company suffix
-    // apart, extra trailing words, or a whole-word prefix of it; R4-MONEY-5)
+    // apart, extra whole words around it, or a whole-word run of it;
+    // R4-MONEY-5, ruling 10, round 7 review R7-MONEY-1)
     // and, when its attribution is unknown, its statement does not name the
     // requested payer in shorthand (R4-MONEY-4). Those are possible matches:
     // they stay listed and keep the exact rows a partial subtotal.
@@ -381,9 +382,18 @@ function chooseLiteralSelector(intent, identities, rows, budget) {
     // The shorthand clause covers a row whose attribution is unknown (its
     // fields cannot say who paid); a row confirmed by its own fields, such as
     // a payee that the shorthand spells out, keeps that attribution.
+    // Round 7 review (R7-MONEY-3): so does an unknown row whose own statement
+    // parse rates the requested payer a confirmed reading ("Payer One; FROM:
+    // Vendor Gamma" with no payee). The parser recorded doubt between that
+    // name and another field, and only a confirmed row can eliminate a payer,
+    // so the row stays a listed possible match beside an exact row, exactly as
+    // it is alone or beside a payee.
+    const readsRequested = row => attributions.get(row.id)?.state === 'unknown' &&
+      (attributions.get(row.id)?.evidence?.confirmed_readings || []).some(reading => slug && typeof slug !== 'symbol'
+        ? reading.payer?.slug === slug : normalizeMerchantText(reading.identity) === key);
     const possibleRow = row => !sameIdentity(row) && (possibleField(row) || (attributions.get(row.id)?.state === 'unknown' &&
       shorthandNames(attributions.get(row.id), wanted.state === 'unique' ? wanted : { state: slug ? 'unique' : 'missing', slug }, key)) ||
-      namesRequested(row));
+      namesRequested(row) || readsRequested(row));
     // A row confirmed to another entity is hidden from this payer's
     // attributed selection; when its description names this payer it joins
     // the possible matches (with no exact row the answer is a possible match;

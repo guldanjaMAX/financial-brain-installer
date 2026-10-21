@@ -765,19 +765,25 @@ export function payerFieldsAgree(left, right) {
 
 // A bounded field that shares a requested name without equalling it: the two
 // agree only after one closed company suffix is removed, the field extends
-// the requested name with trailing words, or the field is a shorter
-// whole-word run of it, leading, trailing or inner (each read with and
-// without the requested name's own closed suffix). Each is a shortened-name
-// or substring match, so a possible match, never EXACT and never proof that
-// the row is someone else (R4-MONEY-5). `labels` are every spelling of the
-// requested entity, so all of its aliases decide alike. `longer: false`
-// leaves out the field that only extends the name: on the outflow side an
-// explicit longer payee is a different merchant identity (money-rereview
-// R02), while a suffix or a shortened payee stays possible.
+// the requested name with whole words (trailing, leading or around it), or
+// the field is a shorter whole-word run of it, leading, trailing or inner
+// (each read with and without the requested name's own closed suffix). Each
+// is a shortened-name or substring match, so a possible match, never EXACT
+// and never proof that the row is someone else (R4-MONEY-5). `labels` are
+// every spelling of the requested entity, so all of its aliases decide alike.
+// `longer: false` leaves out the field that only extends the name: on the
+// outflow side an explicit longer payee is a different merchant identity
+// (money-rereview R02), while a suffix or a shortened payee stays possible.
 // Partner ruling 10 (round 7, R5-MONEY-4): a trailing or inner whole-word
 // run ("Payer One" for "Acme Payer One", "Supply" for "Again Supply") is a
 // possible match that blocks completeness, per the contract's "a shortened
 // name, a substring", exactly like a leading one.
+// Round 7 review (R7-MONEY-1, R7-QUESTION-1, R7-FIDELITY-1): on the inflow
+// side the longer field is read by position-free whole-word containment, so
+// "ACH Payer One", "Acme Payer One" and "Acme Payer One Holdings" are the
+// same substring match for "Payer One" as "Payer One Holdings" (R4-MONEY-5):
+// beside an exact row they stay listed and block completeness, as they
+// already did alone.
 export function payerNameVariant(field, labels, { longer = true } = {}) {
   const fieldKey = normalizeMerchantText(field), fieldBase = agreementName(field);
   if (!fieldKey) return false;
@@ -785,7 +791,7 @@ export function payerNameVariant(field, labels, { longer = true } = {}) {
     const key = normalizeMerchantText(label), base = agreementName(label);
     if (!key || fieldKey === key) return false;
     return Boolean(fieldBase && fieldBase === base) ||
-      [key, base].some(name => name && ((longer && fieldKey.startsWith(`${name} `)) ||
+      [key, base].some(name => name && ((longer && ` ${fieldKey} `.includes(` ${name} `)) ||
         ` ${name} `.includes(` ${fieldKey} `)));
   });
 }
