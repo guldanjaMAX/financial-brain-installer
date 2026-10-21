@@ -28,7 +28,8 @@ const MCP = fileURLToPath(new URL("../components/brain-mcp.mjs", import.meta.url
 const ABSENCE = 'No match in this search. Say "I didn\'t find a matching record in this search", name what you searched, and name the next search you would run (another source, a wider date window, sort "newest", or a distinctive name or number). Do not turn one search into a claim that no such record exists. Do not substitute inference.';
 const NO_HITS = 'No hits in this search. This is not proof that no such record exists. Say "I didn\'t find a matching record in this search" and name the next search you would run.';
 const SCOPED_GAP = "No match in this search. This is not proof that no such record exists.";
-const REFUSAL = "I didn't find a matching record in this search. Next, search with alternate subject terms or a distinctive name or number. Remote search is relevance-ranked and cannot filter or sort by date.";
+const REFUSAL = "I didn't find a matching record in this search.";
+const NEXT_NO_MATCH = "Next: ask again with a name, date or exact phrase the record would contain.";
 const PRESERVE = "Preserve the ledger answer's exact amounts, account masks, dates, and coverage bounds.";
 const LATEST = 'Before any status, "latest", or absence claim, run one brain_search for the subject with sort "newest", read newest_record, and say "as of <record date>" for the record you relied on.';
 const MONEY = "For a money question the bank ledger answers (a balance, a payment received, money in and out, largest expenses, deposits, spend by merchant or category, transfers between the owner's own accounts, recurring charges, profit, net income, withdrawals, loan proceeds), use brain_think: it reads the ledger directly. Cash flow is unsupported: relay cash_flow_unsupported with no figure or model fallback. The profit and net-income view is money in minus money out, not accounting profit or cash flow. Keep its exact amounts, account masks, dates and coverage bounds.";
@@ -262,6 +263,26 @@ await test("found-but-uncited keeps three rows", async () => {
   console.log("PASS documents found but none cited is not reported as absence");
 });
 
+await test("answer_withheld keeps the reviewed notice, reason, and candidate rows", async () => {
+  const out = await thinkReturns({
+    status: "answer_withheld",
+    notice: "The answer was withheld because it did not pass the money evidence check.",
+    answer: null,
+    confidence: { percent: 50, band: "low", basis: ["must not cross"] },
+    evidence_gate: { supported: false, reason: "synthetic evidence detail" },
+    citations: [],
+    results: [{ title: "Synthetic payment record", snippet: "Synthetic amount" }],
+    gaps: [],
+  });
+  assert.equal(out.search_status, "answer_withheld");
+  assert.equal(out.answer, null);
+  assert.equal(out.confidence, undefined, "withheld answers have no percentage");
+  assert.equal(out.results?.length, 1, "the held-back candidate remains available");
+  assert.match(out.note || "", /money evidence check/i);
+  assert.match(out.note || "", /FOUND 1 document/);
+  assert.equal(out.evidence_gate?.reason, "synthetic evidence detail");
+});
+
 // 3. A cited answer stays clean: no scolding note bolted onto a good result.
 await test("cited answer stays clean", async () => {
   const out = await thinkReturns({
@@ -376,6 +397,7 @@ await test("local tool descriptions route money and require newest-record eviden
   assert.ok(search.includes(NEWEST_DESCRIPTION), "search explains the whole matched window");
   assert.ok(instructions.includes(LATEST), "initialize requires a newest search and an as-of date");
   assert.ok(instructions.includes(MONEY), "initialize routes ledger questions to think");
+  assert.match(instructions, /answer_withheld/);
   assert.match(instructions, /To answer, search, read, then write\./);
   assert.doesNotMatch(instructions, /Call brain_think first/);
 });
@@ -551,7 +573,7 @@ await test("remote incomplete coverage retains newest metadata and unavailable s
 await test("remote refused ask scopes its line and confidence beside an unchanged cited control", async () => {
   const confidence = { percent: 80, band: "high", basis: ["fixture evidence"] };
   const refused = await remoteCall({ answer: "The documents do not answer the question.", confidence, results: [], citations: [], gaps: [] }, "ask");
-  assert.equal(refused, `${REFUSAL}\n\nConfidence in this search result: 80% (high). fixture evidence.`);
+  assert.equal(refused, `${REFUSAL}\n${NEXT_NO_MATCH}\n\nConfidence in this search result: 80% (high). fixture evidence.`);
   assert.doesNotMatch(refused, /Confidence nothing is recorded|The documents do not answer/);
   const cited = await remoteCall({ answer: "Fixture answer [1].", confidence,
     citations: [{ n: 1, title: "Fixture record", source: "fixture", lineage: { status: "known" } }], results: [], gaps: [] }, "ask");
@@ -559,6 +581,17 @@ await test("remote refused ask scopes its line and confidence beside an unchange
   const unavailable = await remoteCall({ status: "search_unavailable", answer: "The documents do not answer the question.", confidence, results: [], citations: [], gaps: [] }, "ask");
   assert.match(unavailable, /could not be completed/i);
   assert.doesNotMatch(unavailable, /\d+%|Confidence nothing is recorded|I didn't find a matching record/);
+});
+
+await test("remote refusal renders Why before the exact reviewed Next action", async () => {
+  const next = "Next: ask about one record at a time, naming its title or date.";
+  const out = await remoteCall({
+    status: "answer_withheld", answer: null, results: [reliable], citations: [], gaps: [],
+    evidence_gate: { supported: false, reason: "synthetic support was insufficient" },
+    next_action: next,
+  }, "ask");
+  assert.match(out, /Why: synthetic support was insufficient\nNext: ask about one record at a time/);
+  assert.equal(out.split(next).length - 1, 1, "the reviewed action is rendered once");
 });
 
 await test("remote descriptions and initialize route money and newest-record reading", async () => {

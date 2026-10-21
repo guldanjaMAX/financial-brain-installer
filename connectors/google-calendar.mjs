@@ -431,8 +431,97 @@ const BOILERPLATE_MARKERS = [
 const DIAL_LINE = /^\+?\d[\d\s().+-]{7,}(\s|$)/;
 const PASSCODE_LINE = /^(passcode|password|pin|meeting id|phone conference id)\s*:/i;
 
+/**
+ * Remove meeting-passcode query parameters from every URL inside free text.
+ *
+ * sanitizeConferenceUri covers the structured conference link, but people
+ * also paste the full Zoom link, `?pwd=<secret>` included, into an event's
+ * description or location. That is the same credential, and the worker's
+ * credential gate refuses the whole envelope on it (`pwd=<long token>` is an
+ * env_assignment hit). One refused event stops a calendar sync from ever
+ * completing, so it reports "failed" every day while new events keep arriving.
+ *
+ * Only the passcode parameters (pwd, passcode, pw; any case) are removed.
+ * Every other parameter, the path, the fragment, every URL without a passcode
+ * parameter, and all surrounding text stay byte-identical. A path segment that
+ * merely contains the letters "pwd" is not a query parameter and is untouched.
+ */
+const PASSCODE_PARAMS = new Set(["pwd", "passcode", "pw"]);
+const URL_IN_TEXT =
+  /(?:\b[a-z][a-z0-9+.-]{0,31}:\/\/|(?<![\w@./-])(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?\/)[^\s<>"'`]*/gi;
+const URL_TRAILING_PUNCTUATION = /[.,;:!?)\]}]+$/;
+
+function paramName(part) {
+  const eq = part.indexOf("=");
+  const raw = eq === -1 ? part : part.slice(0, eq);
+  try {
+    return decodeURIComponent(raw.replace(/\+/g, " ")).trim().toLowerCase();
+  } catch {
+    return raw.trim().toLowerCase();
+  }
+}
+
+function stripPasscodeFromUrl(url) {
+  const q = url.indexOf("?");
+  if (q === -1) return url;
+  const trail = (URL_TRAILING_PUNCTUATION.exec(url.slice(q + 1)) || [""])[0];
+  const body = trail ? url.slice(0, url.length - trail.length) : url;
+  const hash = body.indexOf("#", q);
+  const end = hash === -1 ? body.length : hash;
+  const parts = body.slice(q + 1, end).split("&");
+  const kept = parts.filter((part) => !PASSCODE_PARAMS.has(paramName(part)));
+  if (kept.length === parts.length) return url;
+  const query = kept.join("&");
+  return `${body.slice(0, q)}${query ? `?${query}` : ""}${body.slice(end)}${trail}`;
+}
+
+export function stripUrlPasscodes(text) {
+  if (!text) return text;
+  const s = String(text);
+  if (s.indexOf("?") === -1) return s;
+  return s.replace(URL_IN_TEXT, stripPasscodeFromUrl);
+}
+
+/**
+ * Remove meeting passcodes from free text: inside URLs (the stripUrlPasscodes
+ * rule, applied in the same pass) AND as a bare `pwd=<value>`,
+ * `passcode=<value>` or `pw=<value>` written outside any URL. The connector
+ * runs this on an event's title, description and location.
+ *
+ * The bare form is the same credential typed or pasted without its link
+ * ("Weekly sync pwd=<token>"), and the credential gate refuses it the same way.
+ * A Zoom value ending in `.1` slips past the gate's lookahead, but it is still
+ * the passcode, so it is removed too.
+ *
+ * The key must stand alone: not preceded by a letter, digit or underscore, and
+ * followed directly by `=`. So "spw=abc", "pwdhint=x", the word "pwd", and "pw
+ * is short for password" are untouched. The value runs to the next whitespace
+ * or `&`; trailing sentence punctuation is kept. Only the key=value token goes;
+ * the text around it is left byte-identical. Inside a URL only the query
+ * parameters are touched, so a path such as `/pwd=policy/` is never cut.
+ */
+const BARE_PASSCODE = /(?<![A-Za-z0-9_])(?:pwd|passcode|pw)=[^\s&]+/;
+const URL_OR_BARE_PASSCODE = new RegExp(`(${URL_IN_TEXT.source})|${BARE_PASSCODE.source}`, "gi");
+
+function stripBarePasscode(token) {
+  const value = token.slice(token.indexOf("=") + 1);
+  const trail = (URL_TRAILING_PUNCTUATION.exec(value) || [""])[0];
+  // "pwd=." is punctuation, not a value: leave it as written.
+  if (trail.length === value.length) return token;
+  return trail;
+}
+
+export function stripPasscodes(text) {
+  if (!text) return text;
+  const s = String(text);
+  if (s.indexOf("?") === -1 && s.indexOf("=") === -1) return s;
+  return s.replace(URL_OR_BARE_PASSCODE, (match, url) =>
+    url !== undefined ? stripPasscodeFromUrl(match) : stripBarePasscode(match)
+  );
+}
+
 export function stripBoilerplate(description, { maxChars = 1500 } = {}) {
-  const text = htmlToText(description);
+  const text = stripPasscodes(htmlToText(description));
   if (!text.trim()) return "";
 
   const lines = text.split(/\r?\n/);
@@ -717,7 +806,7 @@ export function renderEvent(event, { calendar, config } = {}) {
   const cfg = config && config.calendars ? config : normalizeConfig(config || {});
   const cal = calendar || { id: "primary", key: "primary", label: null };
 
-  const summary = (event.summary || "").trim() || "(untitled event)";
+  const summary = (stripPasscodes(event.summary) || "").trim() || "(untitled event)";
   const lines = [`Meeting: ${summary}`, describeWhen(event)];
 
   const organizer = personLabel(event.organizer);
@@ -741,7 +830,7 @@ export function renderEvent(event, { calendar, config } = {}) {
     if (self && self.responseStatus === "declined") lines.push("The calendar owner declined this invitation.");
   }
 
-  const where = [event.location, rooms.length ? `room: ${rooms.join(", ")}` : null].filter(Boolean).join(" | ");
+  const where = [stripPasscodes(event.location), rooms.length ? `room: ${rooms.join(", ")}` : null].filter(Boolean).join(" | ");
   if (where) lines.push(`Where: ${where}`);
 
   const conf = conferenceInfo(event);
@@ -859,7 +948,9 @@ export function buildEnvelope(event, { calendar, config } = {}) {
       date_source: start.allDay ? "calendar:all_day_start" : "calendar:event_start",
       date_reliable: true,
       uri: event.htmlLink || null,
-      title: `${(event.summary || "(untitled event)").trim()} — ${start.date}`,
+      // Trim before the fallback, as renderEvent does, so a title that was only
+      // a passcode and spaces reads "(untitled event)" here too, not an empty name.
+      title: `${(stripPasscodes(event.summary) || "").trim() || "(untitled event)"} — ${start.date}`,
       content,
       metadata: {
         category: "calendar",
@@ -887,7 +978,7 @@ export function buildEnvelope(event, { calendar, config } = {}) {
         is_recurring_master: Array.isArray(event.recurrence) && event.recurrence.length > 0,
         recurrence: Array.isArray(event.recurrence) ? event.recurrence : null,
         recurring_event_id: event.recurringEventId || null,
-        location: event.location || null,
+        location: stripPasscodes(event.location) || null,
         conference_url: conf.uri,
         conference_solution: conf.solution,
         html_link: event.htmlLink || null,

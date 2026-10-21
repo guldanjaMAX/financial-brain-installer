@@ -172,6 +172,7 @@ export type EvidenceAuthority = {
   current?: boolean;
   owner_confirmed?: boolean;
   operative?: boolean;
+  scanned?: boolean;
 };
 export type Citation = {
   n: number;
@@ -184,8 +185,10 @@ export type Citation = {
   date_reliable?: boolean;
   text_source?: string;
   text_reliable?: boolean;
+  scanned?: boolean;
   authority?: EvidenceAuthority | null;
 };
+export type AnswerGap = { type?: string; detail?: string; count?: number; total?: number };
 export type Confidence = { percent: number; band: string; basis: string[] };
 export type EntityScopeEcho = { entity_slug: string | null; applied: boolean };
 export type EvidenceGate = {
@@ -194,6 +197,7 @@ export type EvidenceGate = {
   partial?: boolean;
   reason?: string;
   error?: string;
+  scanned_evidence?: number[];
 };
 export type Answer = {
   answer: string | null;
@@ -204,8 +208,9 @@ export type Answer = {
   degraded?: string;
   notice?: string;
   results?: unknown[];
+  gaps?: AnswerGap[];
   confidence?: Confidence;
-  evidence_authority?: Pick<EvidenceAuthority, "tier" | "name" | "reason" | "claim">;
+  evidence_authority?: Pick<EvidenceAuthority, "tier" | "name" | "reason" | "claim" | "scanned">;
   citations?: Citation[];
   evidence_gate?: EvidenceGate;
   entity_scope?: EntityScopeEcho;
@@ -283,7 +288,7 @@ export type SystemStatus = {
   problem_counts?: { crit: number; warn: number; info: number };
   sources?: SourceRow[];
   vectors?: {
-    ready: boolean; expected: number; visible: number;
+    ready: boolean; expected: number | null; visible: number | null;
     pending: number; pending_is_capped: boolean; percent_visible: number | null;
   };
   unavailable: string[];

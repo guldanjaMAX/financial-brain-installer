@@ -200,7 +200,7 @@ function queryEntity(question, yearIndex) {
   return properName ? conservativeEntityWords(properName) : [];
 }
 
-function parseTaxQuestionScope(question = "") {
+function parseNamedTaxQuestionScope(question = "") {
   const text = String(question || "");
   if (isTaxPreparationServiceQuestion(text)) return null;
 
@@ -221,21 +221,95 @@ function parseTaxQuestionScope(question = "") {
   return Object.freeze({ form: formMatch.form, year: yearMatch[0], entity });
 }
 
+const validOwnerEntity = (owner) => {
+  const entity = entityWords(owner);
+  const normalized = entity.join(" ");
+  return normalized && normalized !== "owner" && normalized !== "the owner" ? entity : [];
+};
+
+const ownerTimeZone = (value) => {
+  const candidate = String(value || "").trim();
+  if (!candidate) return "UTC";
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: candidate }).format(0);
+    return candidate;
+  } catch {
+    return "UTC";
+  }
+};
+
+function ownerQuestionState(question, { owner, now = Date.now(), timeZone = "UTC" } = {}) {
+  const text = String(question || "");
+  const ownerBeforeYear = /\b(?:my|our)\s+(?=(?:(?:19|20)\d{2}\b|(?:last|this)\s+year(?:[’']s)?\b))/i.test(text);
+  const ownerInSubject = /\b(?:did|do|does|for|of|from|on|are|is|was|were)\s+(?:i|we|my|our)\b/i.test(text);
+  if (!ownerBeforeYear && !ownerInSubject) return { active: false };
+
+  const years = [...text.matchAll(/\b(?:19|20)\d{2}\b/g)];
+  let year = years.length === 1 ? years[0][0] : null;
+  let missing = years.length > 1 || /\bthis\s+year(?:[’']s)?\b/i.test(text) ? "year" : null;
+  if (!year && !missing && /\blast\s+year(?:[’']s)?\b/i.test(text)) {
+    const instant = Number(now);
+    if (Number.isFinite(instant) && Number.isFinite(new Date(instant).getTime())) {
+      year = String(Number(new Intl.DateTimeFormat("en-US", {
+        timeZone: ownerTimeZone(timeZone), year: "numeric",
+      }).format(new Date(instant))) - 1);
+    } else {
+      missing = "year";
+    }
+  }
+  if (!year && !missing) missing = "year";
+
+  const forms = exactQuestionFormMatch(text);
+  let form = forms?.[0]?.form || null;
+  if (!form && year && (
+    /\b(?:individual|federal\s+income)?\s*tax\s+return\b/i.test(text) ||
+    new RegExp(`\\b${year}\\s+(?:federal\\s+income\\s+)?return\\b`, "i").test(text) ||
+    new RegExp(`\\b${year}\\s+taxes\\b`, "i").test(text) ||
+    /\blast\s+year(?:[’']s)?\s+(?:federal\s+income\s+)?(?:taxes|return)\b/i.test(text)
+  )) form = "1040";
+  if (!form && !missing) missing = "form";
+
+  const entity = validOwnerEntity(owner);
+  if (!entity.length) missing = "owner_name";
+  const notices = {
+    year: "The tax year is unclear. Name one four-digit year, or say last year.",
+    form: "The tax form is unclear. Name one form or say tax return for an individual Form 1040.",
+    owner_name: "The owner's name is unknown. Set a real owner name before using owner tax records.",
+  };
+  return {
+    active: true,
+    missing,
+    notice: missing ? notices[missing] : null,
+    scope: missing ? null : Object.freeze({ form, year, entity, kind: "owner" }),
+  };
+}
+
+function parseTaxQuestionScope(question = "", options = {}) {
+  const named = parseNamedTaxQuestionScope(question);
+  if (named) return named;
+
+  // A recognizable named subject remains governed by the original adjacent
+  // year/form grammar. An owner pronoun elsewhere cannot weaken that boundary.
+  const years = [...String(question || "").matchAll(/\b(?:19|20)\d{2}\b/g)];
+  if (years.length === 1 && queryEntity(question, years[0].index).length) return null;
+  return ownerQuestionState(question, options).scope || null;
+}
+
 /** Parse only an unambiguous named-entity, tax-year, exact-form question. */
-export function taxQuestionScope(question = "") {
-  return parseTaxQuestionScope(question);
+export function taxQuestionScope(question = "", options = {}) {
+  return parseTaxQuestionScope(question, options);
 }
 
 /**
  * Keep tax intent separate from exact scope resolution. A partial tax request
  * must fail closed rather than silently dropping the entity/year/form guard.
  */
-export function taxQuestionScopeAssessment(question = "") {
+export function taxQuestionScopeAssessment(question = "", options = {}) {
   const text = String(question || "");
   if (isTaxPreparationServiceQuestion(text)) {
     return Object.freeze({ applicable: false, resolved: false, scope: null });
   }
-  const scope = parseTaxQuestionScope(text);
+  const scope = parseTaxQuestionScope(text, options);
   if (scope) return Object.freeze({ applicable: true, resolved: true, scope });
   const formIntent = QUESTION_FORM_PATTERNS.some(([, pattern]) => pattern.test(text));
   const bareFormIntent = /\b(?:1040(?:-x)?|1065|1120(?:-s|-h)?|1099-(?:int|nec|misc|div|k|r|b|s)|941|940)\b/i.test(text);
@@ -244,11 +318,26 @@ export function taxQuestionScopeAssessment(question = "") {
   const returnIntent = /\b(?:tax\s+(?:return|filing)|income\s+tax\s+return|partnership\s+return|corporate\s+return)\b/i.test(text);
   const returnFactIntent = /\b(?:amount|balance|basis|credit|deduction|distribution|expense|income|liabilit(?:y|ies)|line\s+\d+|loss|ordinary\s+business|owe(?:d|s)?|owing|paid|pay(?:ment|ments|s)?|refund|report(?:ed|s|ing)?|revenue|show(?:ed|n|s|ing)?|state(?:d|s|ing)?|tax(?:es)?\s+(?:due|withheld)|wages?)\b/i.test(text);
   const namedTaxLineFactIntent = hasNamedTaxLineFactQuestion(text);
+  const ownerState = ownerQuestionState(text, options);
+  const ownerReturnIntent = ownerState.active && (returnFactIntent || /\bcompare\b/i.test(text)) && (
+    formIntent || bareFormIntent || adjacentYearBareFormIntent || returnIntent ||
+    /\b(?:19|20)\d{2}\b/.test(text) || /\b(?:last|this)\s+year\b/i.test(text)
+  );
+  const applicable = returnFactIntent && (
+    formIntent || adjacentYearBareFormIntent || (bareFormIntent && taxContext) ||
+    returnIntent || namedTaxLineFactIntent
+  ) || ownerReturnIntent;
+  if (applicable && ownerState.active && ownerState.missing) {
+    return Object.freeze({
+      applicable: true,
+      resolved: false,
+      scope: null,
+      missing: ownerState.missing,
+      notice: ownerState.notice,
+    });
+  }
   return Object.freeze({
-    applicable: returnFactIntent && (
-      formIntent || adjacentYearBareFormIntent || (bareFormIntent && taxContext) ||
-      returnIntent || namedTaxLineFactIntent
-    ),
+    applicable,
     resolved: false,
     scope: null,
   });
@@ -298,6 +387,65 @@ function nativeHeaderMatchesEntity(value, requestedEntity) {
   return entityWords(leadingIdentity).join(" ") === requestedEntity.join(" ");
 }
 
+function ownerNameWordsMatch(candidate, requestedEntity) {
+  const actual = entityWords(candidate);
+  if (actual.length === requestedEntity.length) {
+    return actual.every((word, index) => word === requestedEntity[index]);
+  }
+  if (actual.length !== requestedEntity.length + 1) return false;
+  // A form may split a first and last name with one middle initial. Leading or
+  // trailing initials are different identities, not harmless layout noise.
+  for (let index = 1; index < actual.length - 1; index++) {
+    if (actual[index].length !== 1) continue;
+    const withoutInitial = [...actual.slice(0, index), ...actual.slice(index + 1)];
+    if (withoutInitial.every((word, wordIndex) => word === requestedEntity[wordIndex])) return true;
+  }
+  return false;
+}
+
+function ownerHeaderIdentity(value, requestedEntity) {
+  const text = String(value || "");
+  const candidates = [...text.matchAll(
+    /(?:^|\n)\s*(?:taxpayer(?:\s+name)?|filer(?:\s+name)?|partnership\s+name|corporation\s+name|employer\s+name|employee[’']s\s+name|name\s+of\s+(?:taxpayer|partnership|corporation|organization))\s*[:#-]\s*([^\n.;]{1,200})/gi,
+  )].map((match) => match[1]);
+  const individual = /(?:^|\n)\s*your\s+first\s+name(?:\s+and\s+(?:middle\s+)?initial)?\s*[:#-]\s*([^\n.;]{1,100})\s*\n\s*last\s+name\s*[:#-]\s*([^\n.;]{1,100})/i.exec(text);
+  if (individual) candidates.push(`${individual[1]} ${individual[2]}`);
+  return {
+    present: candidates.length > 0,
+    matched: candidates.length > 0 && candidates.every((candidate) =>
+      ownerNameWordsMatch(candidate, requestedEntity)),
+  };
+}
+
+function ownerIdentityEvidence(row, metadata, requestedEntity) {
+  const structured = [];
+  if (row?.entity_slug) structured.push(row.entity_slug);
+  for (const key of [
+    "entity_slug", "taxpayer_name", "filer_name", "partnership_name", "entity_name", "legal_name",
+  ]) {
+    if (metadata?.[key]) structured.push(metadata[key]);
+  }
+  const structuredMatched = structured.length > 0 &&
+    structured.every((value) => entityWords(value).join(" ") === requestedEntity.join(" "));
+  const head = projectedDocumentHead(row);
+  const labeled = head.present
+    ? ownerHeaderIdentity(head.value || "", requestedEntity)
+    : { present: false, matched: false };
+  if (labeled.present) {
+    return {
+      matched: labeled.matched && (!structured.length || structuredMatched),
+      reason: labeled.matched ? null : "The labeled filer is not the configured owner.",
+    };
+  }
+  if (structured.length) {
+    return {
+      matched: structuredMatched,
+      reason: structuredMatched ? null : "The structured filer identity is not the configured owner.",
+    };
+  }
+  return { matched: false, reason: "The filer name could not be read from a labeled field." };
+}
+
 function documentIdentityEvidence(row, metadata) {
   const authoritative = [];
   if (row?.entity_slug) authoritative.push({ value: row.entity_slug, exact: true });
@@ -343,19 +491,24 @@ function surfaceMatchesOnlyYear(surface, requestedYear) {
  * receipt safe to expose beside evidence. The requested entity name remains in
  * the private question and is deliberately omitted from this receipt.
  */
-export function taxEvidenceScope(row = {}, question = "") {
-  const requested = taxQuestionScope(question);
+export function taxEvidenceScope(row = {}, question = "", options = {}) {
+  const requested = taxQuestionScope(question, options);
   if (!requested) return null;
   const metadata = jsonObject(row.authority_meta ?? row._authority_meta);
-  const identity = documentIdentityEvidence(row, metadata);
+  const identity = requested.kind === "owner" ? null : documentIdentityEvidence(row, metadata);
   const taxSurfaces = documentTaxSurface(row);
 
   const identityMatches = ({ value, exact }) => exact
     ? entityWords(value).join(" ") === requested.entity.join(" ")
     : nativeHeaderMatchesEntity(value, requested.entity);
-  const entityMatched = identity.requireAll
-    ? identity.surfaces.every(identityMatches)
-    : identity.surfaces.some(identityMatches);
+  const ownerIdentity = requested.kind === "owner"
+    ? ownerIdentityEvidence(row, metadata, requested.entity)
+    : null;
+  const entityMatched = ownerIdentity
+    ? ownerIdentity.matched
+    : identity.requireAll
+      ? identity.surfaces.every(identityMatches)
+      : identity.surfaces.some(identityMatches);
   const explicitTaxYear = metadata?.tax_year ?? metadata?.taxYear ?? null;
   const structuredYearPresent = explicitTaxYear !== null && explicitTaxYear !== undefined && explicitTaxYear !== "";
   const header = projectedDocumentHead(row);
@@ -385,5 +538,6 @@ export function taxEvidenceScope(row = {}, question = "") {
     title_candidate_matched: titleMatched,
     requested_year: requested.year,
     requested_form: requested.form,
+    ...(ownerIdentity?.reason ? { reason: ownerIdentity.reason } : {}),
   };
 }

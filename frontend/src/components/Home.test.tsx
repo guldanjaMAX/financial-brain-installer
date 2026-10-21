@@ -8,6 +8,63 @@ import type { FinSnapshot } from "../lib/api";
 import { derivePhase, phraseFor } from "../lib/phase";
 
 describe("home composition", () => {
+  it("shows two search counts without a percentage bar while meaning search catches up", () => {
+    const status = {
+      status: "ok",
+      accepting_documents: true,
+      documents: 12,
+      unavailable: [],
+      sources: [],
+      vectors: {
+        ready: false, expected: 48_000, visible: 12_400,
+        pending: 35_600, pending_is_capped: false, percent_visible: 25,
+      },
+    } as never;
+
+    const html = renderToStaticMarkup(<PhaseNotice phase="indexing" status={status} />);
+    expect(html).toContain("Meaning search covers 12,400 of 48,000 chunks; keyword search covers all");
+    expect(html).toContain("Keyword search covers everything");
+    expect(html).not.toContain("25%");
+    expect(html).not.toContain("width:");
+    expect(html).not.toContain("rounded-full overflow-hidden");
+  });
+
+  it("shows counting without a bar or percentage when the meaning-search total is unknown", () => {
+    const status = {
+      status: "ok",
+      accepting_documents: true,
+      documents: 12,
+      unavailable: [],
+      sources: [],
+      vectors: {
+        ready: false, expected: null, visible: 12_400,
+        pending: 10_001, pending_is_capped: true, percent_visible: null,
+      },
+    } as never;
+
+    const html = renderToStaticMarkup(<PhaseNotice phase="indexing" status={status} />);
+    expect(html).toContain("Meaning search is still counting chunks; keyword search covers all");
+    expect(html).not.toMatch(/\d+%/);
+    expect(html).not.toContain("width:");
+  });
+
+  it("shows no meaning-search catch-up line when every chunk is visible", () => {
+    const status = {
+      status: "ok",
+      accepting_documents: true,
+      documents: 12,
+      unavailable: [],
+      sources: [],
+      vectors: {
+        ready: true, expected: 48_000, visible: 48_000,
+        pending: 0, pending_is_capped: false, percent_visible: 100,
+      },
+    } as never;
+    const html = renderToStaticMarkup(<PhaseNotice phase="ready" status={status} />);
+    expect(html).not.toContain("Meaning search covers");
+    expect(html).not.toContain("Meaning search is still counting");
+  });
+
   it("renders partial diagnostics with measured records as uncertainty and a next step", () => {
     const status = {
       status: "ok",
@@ -231,5 +288,19 @@ describe("owner coverage text", () => {
     expect(html.match(/Jan 31, 2027/g)).toHaveLength(2);
     expect(html).not.toContain("onward");
     expect(html).toContain("outside this range remains unproven");
+  });
+
+  it("shows when a source last made progress", () => {
+    const coverage = {
+      starter_context: { state: "ready" }, live_updates: { state: "current" },
+      history: { state: "running" }, meaning_search: { state: "projecting" },
+      confirmed_range: { from: null, through: null },
+      target_range: { from: null, through: null }, current_window: null,
+      counts: { seen: 73, accepted: 72, refused: 1, failed: 0 },
+      last_progress_at: "2027-01-15T23:59:00.000Z",
+      projection_pending: 1, waiting_on_owner_machine: false,
+    } as const;
+    const html = renderToStaticMarkup(<SourceCoverageDetailView label="Email" coverage={coverage} />);
+    expect(html).toContain("Last progress Jan 15, 2027");
   });
 });

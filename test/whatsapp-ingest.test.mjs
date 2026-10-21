@@ -26,7 +26,9 @@ import {
   cmdDisconnectWhatsapp,
   cmdIngestWhatsapp,
 } from "../brain.mjs";
-import { pairDaemon, PairingError } from "../connectors/whatsapp.mjs";
+import { drainOnce, pairDaemon, PairingError, rowToSessionRow } from "../connectors/whatsapp.mjs";
+import { MessageSessionizer } from "../ingest/message-session.mjs";
+import { createProductFixture } from "../worker/test/product-contract-fixture.mjs";
 
 let fail = 0, ran = 0;
 const check = (n, c, d = "") => {
@@ -216,6 +218,124 @@ try {
       fakes.receipts.length === 0 && fakes.batches.length === 0 &&
       !existsSync(join(sandbox, ".brain-ingest-whatsapp-preview.json")),
       JSON.stringify(preview));
+  }
+
+  /* =========== names and group titles already present in outbox ========== */
+  {
+    const nameDir = join(sandbox, "wa-name-data");
+    mkdirSync(nameDir);
+    const nameOutbox = join(nameDir, "wa-outbox.db");
+    const namesDb = new DatabaseSync(nameOutbox);
+    namesDb.exec(OUTBOX_SCHEMA);
+    const add = namesDb.prepare(`INSERT INTO outbox_messages
+      (chat_jid,message_id,ts,direction,body,sender_jid,sender_name,thread_title,is_group,source,received_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)`);
+    const contactJid = "15550100@s.whatsapp.net";
+    const groupJid = "fixture-group@g.us";
+    add.run(contactJid, "name-1", "2026-03-05T10:00:00Z", "out", "Fixture outbound opening.", "", "", "", 0, "history_sync", "2026-03-05T10:00:01Z");
+    add.run(contactJid, "name-2", "2026-03-05T10:01:00Z", "in", "Fixture history reply.", contactJid, "+15550100", "", 0, "history_sync", "2026-03-05T10:01:01Z");
+    add.run(contactJid, "name-3", "2026-03-05T10:02:00Z", "in", "Fixture live reply.", contactJid, "Contact A", "", 0, "live", "2026-03-05T10:02:01Z");
+    add.run(groupJid, "group-1", "2026-03-05T11:00:00Z", "in", "Fixture history group row.", "15550101@s.whatsapp.net", "+15550101", "Fixture Group", 1, "history_sync", "2026-03-05T11:00:01Z");
+    add.run(groupJid, "group-2", "2026-03-05T11:01:00Z", "in", "Fixture live group row.", "15550101@s.whatsapp.net", "+15550101", "", 1, "live", "2026-03-05T11:01:01Z");
+    const whatsapp = await import("../connectors/whatsapp.mjs");
+    const directory = typeof whatsapp.outboxNameDirectory === "function"
+      ? whatsapp.outboxNameDirectory(namesDb)
+      : null;
+    check("the outbox exposes a read-only sender and title directory decision point",
+      directory && directory.names instanceof Map && directory.titles instanceof Map);
+    check("a push name equal to the phone fallback is not promoted as a name",
+      directory?.names.get("15550101@s.whatsapp.net") === undefined,
+      String(directory?.names.get("15550101@s.whatsapp.net")));
+    namesDb.close();
+
+    const statePath = join(sandbox, ".brain-ingest-whatsapp-names.json");
+    const drainBytes = async () => {
+      const delivered = [];
+      await drainOnce({
+        outboxPath: nameOutbox, statePath, reset: true, ownerLabel: "Fixture Owner",
+        sendEnvelopes: async (rows) => delivered.push(...rows),
+        now: () => Date.parse("2026-03-05T12:00:00Z"),
+      });
+      await drainOnce({
+        statePath, flushOnly: true, ownerLabel: "Fixture Owner",
+        sendEnvelopes: async (rows) => delivered.push(...rows),
+        now: () => Date.parse("2026-03-05T12:00:00Z"),
+      });
+      return JSON.stringify(delivered);
+    };
+    const firstBytes = await drainBytes();
+    const secondBytes = await drainBytes();
+    const named = JSON.parse(firstBytes);
+    const direct = named.find((row) => row.source_id === "name-1");
+    check("an outbound-first 1:1 session takes the counterparty name and phone as its title",
+      direct?.title.startsWith("Contact A (+15550100) ·") &&
+      /Contact A \(\+15550100\): Fixture history reply/.test(direct?.content || "") &&
+      /Contact A \(\+15550100\): Fixture live reply/.test(direct?.content || ""),
+      JSON.stringify({ title: direct?.title, content: direct?.content }));
+    check("resetting and draining the same outbox emits identical document bytes",
+      secondBytes === firstBytes);
+
+    const liveGroupState = join(sandbox, ".brain-ingest-whatsapp-live-group.json");
+    writeFileSync(liveGroupState, JSON.stringify({ version: 1, last_seq: 4, sessionizer: [] }));
+    const liveGroupRows = [];
+    await drainOnce({
+      outboxPath: nameOutbox, statePath: liveGroupState, ownerLabel: "Fixture Owner",
+      sendEnvelopes: async (rows) => liveGroupRows.push(...rows),
+      now: () => Date.parse("2026-03-05T12:00:00Z"),
+    });
+    await drainOnce({
+      statePath: liveGroupState, flushOnly: true, ownerLabel: "Fixture Owner",
+      sendEnvelopes: async (rows) => liveGroupRows.push(...rows),
+      now: () => Date.parse("2026-03-05T12:00:00Z"),
+    });
+    const liveGroup = liveGroupRows.find((row) => row.source_id === "group-2");
+    check("an untitled live-only group row reuses the earlier outbox subject",
+      liveGroup?.title.startsWith("Fixture Group ·") &&
+      /Conversation: Fixture Group/.test(liveGroup?.content || ""),
+      JSON.stringify({ title: liveGroup?.title, content: liveGroup?.content }));
+
+    const fallbackRow = {
+      chat_jid: "15550102@s.whatsapp.net", sender_jid: "15550102@s.whatsapp.net",
+      message_id: "fallback", ts: "2026-03-05T12:00:00Z", direction: "in",
+      body: "Fixture fallback row.", sender_name: "+15550102", thread_title: "", is_group: 0,
+    };
+    const sessionBytes = (row) => {
+      const sessionizer = new MessageSessionizer({ ownerLabel: "Fixture Owner", groupingTimezone: "UTC" });
+      sessionizer.push(row);
+      return JSON.stringify(sessionizer.finish());
+    };
+    check("an inbound-first outbox with no real name keeps today's exact document bytes",
+      sessionBytes(rowToSessionRow(fallbackRow, { directory: { names: new Map(), titles: new Map() } })) ===
+      sessionBytes(rowToSessionRow(fallbackRow)));
+    const lidRow = { ...fallbackRow, sender_jid: "opaque-fixture@lid", sender_name: "opaque-fixture" };
+    check("a known LID sender keeps the name and drops the opaque routing id",
+      rowToSessionRow(lidRow, { directory: {
+        names: new Map([["opaque-fixture@lid", "Contact A"]]), titles: new Map(),
+      } }).sender_name === "Contact A");
+    check("an unknown LID sender does not expose its opaque routing id as a name",
+      rowToSessionRow(lidRow, { directory: { names: new Map(), titles: new Map() } }).sender_name === "");
+
+    const retrieval = await createProductFixture();
+    try {
+      retrieval.raw("INSERT INTO sources(name,kind,status,created_at) VALUES ('whatsapp','whatsapp','ready',?)", "2026-03-05T12:00:00Z");
+      const ingested = await retrieval.post("/api/admin/brain/ingest/batch", { docs: [direct] }, {
+        "X-Admin-Key": retrieval.env.ADMIN_KEY,
+      });
+      check("the named WhatsApp session enters the real SQLite product fixture",
+        ingested.status === 200 && (await ingested.json()).results[0].status === "created");
+      retrieval.env.VECTORIZE.query = async () => ({
+        matches: retrieval.rows("SELECT chunk_uid AS id FROM chunks"),
+      });
+      const found = await retrieval.post("/api/rag/unified", { q: "Contact A" }, {
+        "X-Admin-Key": retrieval.env.ADMIN_KEY,
+      });
+      const foundBody = await found.json();
+      check("real SQLite retrieval by the WhatsApp name finds the session",
+        foundBody.results.some((row) => row.source_id === "name-1"),
+        JSON.stringify(foundBody.results.map((row) => row.source_id)));
+    } finally {
+      retrieval.close();
+    }
   }
 
   {

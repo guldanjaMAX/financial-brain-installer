@@ -174,25 +174,62 @@ for (const env of [{ ...base }, { ...base, VECTOR_DRAIN_MODE: "paused-for-upgrad
   assert.equal("sources_stale" in paused.body, false);
   assert.equal("sources_unscheduled" in paused.body, false);
 
-  let sourceAttempts = 0;
-  const failed = await health({
-    ...base,
-    STORAGE: "d1",
-    DB: {
-      prepare(sql) {
-        if (/install_state/.test(sql)) return { first: async () => ({ schema_version: 48 }) };
-        sourceAttempts++;
-        return { all: async () => { throw new Error("fixture source read failed"); } };
+  for (const failure of ["schema", "sources", "both"]) {
+    let schemaAttempts = 0;
+    let sourceAttempts = 0;
+    const failed = await health({
+      ...base,
+      STORAGE: "d1",
+      DB: {
+        prepare(sql) {
+          if (/install_state/.test(sql)) {
+            schemaAttempts++;
+            return {
+              first: async () => {
+                if (failure === "schema" || failure === "both") throw new Error("fixture schema read failed");
+                return { schema_version: 48 };
+              },
+            };
+          }
+          if (/FROM sources s/.test(sql)) {
+            sourceAttempts++;
+            return {
+              all: async () => {
+                if (failure === "sources" || failure === "both") throw new Error("fixture source read failed");
+                return { results: [] };
+              },
+            };
+          }
+          throw new Error(`unexpected fixture SQL: ${sql}`);
+        },
       },
-    },
-  });
-  assert.equal(failed.res.status, 200, "R4 source-count failure keeps health reachable");
-  assert.equal(failed.body.ok, true);
-  assert.equal(failed.body.schema_version, 48, "R4 schema evidence survives a source read failure");
-  assert.ok(sourceAttempts > 0, "R4 source query decision point was reached");
-  assert.equal("sources_total" in failed.body, false);
-  assert.equal("sources_stale" in failed.body, false);
-  assert.equal("sources_unscheduled" in failed.body, false);
+    });
+    assert.equal(failed.res.status, 200, `R4 ${failure} failure keeps health reachable`);
+    assert.equal(failed.body.ok, false, `R4 ${failure} failure cannot report a healthy database`);
+    assert.equal(failed.body.status, "storage-unavailable");
+    assert.match(failed.body.reason, /database.*could not be read/i);
+    assert.equal(failed.body.accepting_documents, true,
+      "storage availability does not change the pause-only accepting_documents field");
+    assert.equal(failed.body.vector_drain_mode, "active");
+    assert.equal(schemaAttempts, 1, `R4 ${failure} arm reached the schema decision point`);
+    assert.equal(sourceAttempts, 1, `R4 ${failure} arm reached the source-count decision point`);
+    if (failure === "sources") {
+      assert.equal(failed.body.schema_version, 48, "R4 schema evidence survives a source read failure");
+    } else {
+      assert.equal("schema_version" in failed.body, false);
+    }
+    if (failure === "schema") {
+      assert.deepEqual(
+        [failed.body.sources_total, failed.body.sources_stale, failed.body.sources_unscheduled],
+        [0, 0, 0],
+        "R4 valid aggregate counts survive a schema read failure",
+      );
+    } else {
+      assert.equal("sources_total" in failed.body, false);
+      assert.equal("sources_stale" in failed.body, false);
+      assert.equal("sources_unscheduled" in failed.body, false);
+    }
+  }
 
   const nonD1 = await health({ ...base });
   assert.equal("sources_total" in nonD1.body, false, "R5 non-D1 health has no source counts");

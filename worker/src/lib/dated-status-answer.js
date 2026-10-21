@@ -1,5 +1,6 @@
 import { hasExplicitCurrentIntent, reliableDocumentTime } from './query-intent.js';
 import { answerSentences } from './answer-sentences.js';
+import { evidenceTextBasis } from './evidence-authority.js';
 
 // Relationship and financial claims retain their dedicated gates. This lane
 // qualifies ordinary owner state lists without declaring that an old record
@@ -7,7 +8,7 @@ import { answerSentences } from './answer-sentences.js';
 const SPECIALIZED = /\b(?:addresses|address|phone|email|clients?|customers?|relationships?|engagements?|contracts?|subscriptions?|accounts?|invoices?|payments?|balances?|revenue|income|expenses|profit|tax|owe|owed|dollars?|usd)\b|[$€£]/i;
 export function datedStatusPrompt(question, docs, now = Date.now()) {
   if (!hasExplicitCurrentIntent(question) || !/\b(?:current|currently|latest|now|today)\b/i.test(question) || SPECIALIZED.test(question)) return '';
-  const candidates = docs.filter(doc => doc.text_source === 'native' && doc.text_reliable === true &&
+  const candidates = docs.filter(doc => evidenceTextBasis(doc) !== null &&
     doc.authority?.eligible !== false && (doc.authority?.owner_confirmed === true || doc.authority?.tier === 'T1') &&
     reliableDocumentTime(doc) !== null && reliableDocumentTime(doc) <= now);
   return candidates.length ? 'When the newest relevant primary or owner-confirmed list is older than today, answer what it records using its exact as-of date. Do not refuse solely because the record is old. Keep the freshness gap and disclose any newer contradiction. This establishes dated history only, never an unqualified present state.' : '';
@@ -23,7 +24,7 @@ export function qualifyDatedStatus({ question, answer, docs, now = Date.now() })
     if (!cited.length || cited.length !== new Set(numbers).size) return sentence;
     const times = cited.map(reliableDocumentTime);
     if (times.some(time => time === null || time > now) || !cited.every(doc =>
-      doc.text_source === 'native' && doc.text_reliable === true && doc.authority?.eligible !== false &&
+      evidenceTextBasis(doc) !== null && doc.authority?.eligible !== false &&
       (doc.authority?.owner_confirmed === true || doc.authority?.tier === 'T1'))) return sentence;
     // Mixed dates need per-item qualification, not one invented observation day.
     const days = [...new Set(times.map(time => new Date(time).toISOString().slice(0, 10)))];

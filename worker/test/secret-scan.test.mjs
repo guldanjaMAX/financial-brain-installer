@@ -60,6 +60,23 @@ const r = redact("k=re_2QKY3kyq_AbCdEfGhIjKlMnOpQrStUvWx done");
 chk("redact removes", !r.includes("2QKY3kyq"), r);
 chk("redact labels", r.includes("[REDACTED:"), r);
 chk("redact keeps public id", redact("zone abcdef0123456789abcdef0123456789") === "zone abcdef0123456789abcdef0123456789");
+const dottedMeetingPasscode = "A1b2C3d4E5f6G7h8J9k0L1m2N3p4Q5r6";
+for (const [separator, prefix] of [["?", ""], ["&", "?role=attendee"]]) {
+  const link = `https://meet.example.test/j/123456789${prefix}${separator}pwd=${dottedMeetingPasscode}.1`;
+  const result = scan(link);
+  chk(`dotted meeting passcode after ${separator}pwd is confirmed as a URL query secret`,
+    result.verdict === CONFIRMED && result.labels.includes("url_query_secret"), JSON.stringify(result.labels));
+  const cleaned = redact(link);
+  chk(`redaction after ${separator}pwd keeps the meeting path and removes the whole value`,
+    cleaned.startsWith(`https://meet.example.test/j/123456789${prefix}${separator}pwd=`) &&
+      !cleaned.includes(dottedMeetingPasscode) && !cleaned.endsWith(".1"), cleaned);
+}
+for (const [name, link] of [
+  ["placeholder", "https://meet.example.test/j/123456789?pwd=YOUR_PASSCODE_HERE.1"],
+  ["short value", "https://meet.example.test/j/123456789?pwd=A1b2C3d4.1"],
+]) chk(`clean: dotted meeting ${name}`, scan(link).verdict === CLEAN, JSON.stringify(scan(link).labels));
+chk("clean: shell working-directory prose", scan("cd $(pwd)/build").verdict === CLEAN,
+  JSON.stringify(scan("cd $(pwd)/build").labels));
 chk("preview never leaks", !JSON.stringify(scan(s).findings).includes("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"));
 chk("empty", scan("").verdict === CLEAN);
 chk("null", scan(null).verdict === CLEAN);

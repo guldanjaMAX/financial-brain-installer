@@ -6,6 +6,27 @@ the brain, not for whoever built it: what changed for them, and what to check.
 
 ## Unreleased
 
+- **A scan that OCR read cleanly can now answer a question, and the answer
+  always says it came from a scanned copy.** It carries the note "Part of this
+  answer comes from a scanned document read by OCR. Check the original for
+  exact figures." and marks the source "(scanned)". A scan counts only when
+  the OCR record stored with it shows every page was read, with none
+  unreadable, and the passage the answer relies on has no spot OCR marked as
+  illegible. Any other scan can still be found and cited, exactly as before,
+  but it cannot be the proof behind an answer. When the tax filing you asked
+  about is found as a scan and no answer comes from it, you still see "The
+  requested tax filing was found, but its text could not be read reliably",
+  never a plain "the documents do not answer the question".
+- **Older native-text records regain their intended evidence status without a
+  reload.** Recognized older email, Drive, upload and curated records can use
+  their native text at read time while remaining visibly unassessed. Older
+  non-note Drive and upload documents can regain original-record lineage;
+  scans, Markdown notes and text notes are never upgraded by this rule.
+- **Signed court orders rank with other original records while drafts do not.**
+  Executed orders, rulings, minute entries and parenting plans can ground an
+  answer. Draft, unsigned, proposed, redline, template and review copies stay
+  below the signed record. Correspondence and plain-text notes are not
+  promoted merely because they mention an order.
 - **Windows updates no longer stop at the restore-bookmark step on a second
   update.** Later updates reuse the private recovery folder safely. Check that
   the update saves its restore bookmark and continues to verification.

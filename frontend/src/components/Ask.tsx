@@ -3,7 +3,10 @@ import { ApiError, api, ownerError, type Answer, type Citation, type GrantPrinci
 // Shared with the Worker: the rule that an incomplete search must never render
 // as an absence is a product rule, not a rendering detail, so both surfaces
 // derive it from one module instead of each writing their own.
-import { answerText, confidenceText, unavailableSearch } from "../lib/answer-render.js";
+import {
+  SCANNED_CITATION_MARK, answerText, citationIsScanned, confidenceText, scannedEvidenceNotice,
+  nextActionText, unavailableSearch,
+} from "../lib/answer-render.js";
 import { Attention, TruthNote } from "./ui";
 import { FinanceScopeBar, useFinanceScope } from "./FinanceScope";
 import { scopedAnswerLabel } from "../lib/owner";
@@ -79,6 +82,10 @@ export function citationMeta(citation: Citation): string {
   return parts.join(" · ");
 }
 
+export function citationTitle(citation: Citation): string {
+  return citationIsScanned(citation) ? `${citation.title} ${SCANNED_CITATION_MARK}` : citation.title;
+}
+
 export function CitationSources({ citations }: { citations: Citation[] }) {
   return (
     <div className="mt-4 pt-4 border-t border-line">
@@ -90,7 +97,7 @@ export function CitationSources({ citations }: { citations: Citation[] }) {
           const meta = citationMeta(citation);
           return (
             <li key={citation.n} className="text-[13.5px] text-ink-soft leading-snug">
-              <span className="text-accent font-medium">[{citation.n}]</span> {citation.title}
+              <span className="text-accent font-medium">[{citation.n}]</span> {citationTitle(citation)}
               {meta && <span className="block pl-7 text-[12.5px] opacity-75">{meta}</span>}
             </li>
           );
@@ -110,6 +117,12 @@ export function evidenceGateNote(answer: Answer): string | null {
   if (answer.evidence_gate?.partial) return `What the records did not cover: ${punctuated}`;
   if (answer.evidence_gate?.supported === false) return `Why no answer was shown: ${punctuated}`;
   return `Why this answer was shown: ${punctuated}`;
+}
+
+export function ScannedEvidenceNote({ answer }: { answer: Answer }) {
+  const note = scannedEvidenceNotice(answer);
+  if (!note) return null;
+  return <div className="mt-4"><TruthNote>{note}</TruthNote></div>;
 }
 
 export function EvidenceGateReason({ answer }: { answer: Answer }) {
@@ -287,8 +300,12 @@ export function Ask({ owner = false }: { owner?: boolean }) {
             </div>
           )}
           <p className="whitespace-pre-wrap leading-relaxed">{answerText(answer)}</p>
+          <ScannedEvidenceNote answer={answer} />
           <EvidenceGateReason answer={answer} />
           <Trust answer={answer} />
+          {nextActionText(answer) && (
+            <p className="mt-3 text-[14px] text-ink-soft">{nextActionText(answer)}</p>
+          )}
           {!!answer.citations?.length && <CitationSources citations={answer.citations} />}
         </article>
       )}
@@ -393,8 +410,12 @@ export function ScopedAsk({ principal, onAccessEnded }: {
               Exact shared documents only
             </p>
             <p className="whitespace-pre-wrap leading-relaxed">{answerText(answer)}</p>
+            <ScannedEvidenceNote answer={answer} />
             <EvidenceGateReason answer={answer} />
             <Trust answer={answer} />
+            {nextActionText(answer) && (
+              <p className="mt-3 text-[14px] text-ink-soft">{nextActionText(answer)}</p>
+            )}
             {!!answer.citations?.length && <CitationSources citations={answer.citations} />}
           </article>
         )}

@@ -4,7 +4,7 @@
  */
 import { answerSentences } from "./answer-sentences.js";
 import { hasExplicitCurrentIntent, parseCanonicalEvidenceDate, queryEntityAnchors, reliableDocumentTime } from "./query-intent.js";
-import { isMoneyAnswer } from "./money-veto.js";
+import { isMoneyQuestion } from "./money-veto.js";
 
 const FUTURE = /\b(?:next|upcoming|coming up)\b|\bwhen (?:do|will) (?:i|we) see\b|\bwhen is (?:my|our|the)\b[^?\n]*\b(?:appointment|meeting|call|visit|session|event)\b/i;
 const EVENT_NOUN = /\b(?:appointments?|visits?|meetings?|calls?|sessions?|flights?|trips?|deadlines?|due dates?|events?)\b/i;
@@ -159,7 +159,7 @@ function containsPhrase(text, phrase) {
 export function applyTemporalVeto({ question, answer, evidenceGate, docs = [], candidates = docs,
   now = Date.now(), timeZone, owner } = {}) {
   const unchanged = { answer, evidenceGate };
-  if (!answer || evidenceGate?.supported !== true || isMoneyAnswer(question, answer)) return unchanged;
+  if (!answer || evidenceGate?.supported !== true || isMoneyQuestion(question)) return unchanged;
   const when = /\bwhen (?:do|does|will|is|are|can|should)\b/i.test(question || "");
   // Remove only procedural next-step phrases. A second event request, a
   // possessive week modifier or "who do I see next" retains event intent.

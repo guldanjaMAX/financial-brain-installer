@@ -26,7 +26,10 @@ import { confidenceLine } from "./confidence.js";
 // The same rule the owner's app obeys: a search that did not complete must
 // never be reported as an absence. retrieval-status.js names an MCP server as
 // a consumer that has to defend itself, and this is the remote one.
-import { answerText, confidenceText, safeAnswerErrorText, unavailableSearch } from "./answer-render.js";
+import {
+  SCANNED_CITATION_MARK, answerText, citationIsScanned, confidenceText,
+  nextActionText, safeAnswerErrorText, scannedEvidenceNotice, unavailableSearch,
+} from "./answer-render.js";
 import { COVERAGE_INCOMPLETE } from "./retrieval-status.js";
 // A refusal about the owner's own entities is only honest with the reason
 // beside it. financial-map-question.js owns the wording so no renderer can
@@ -82,10 +85,16 @@ const TOOLS = [
   },
   {
     name: "fetch",
-    description: "Fetch one document's full text by the id a search result returned.",
+    description: "Fetch one document's text by the id a search result returned. Long documents arrive in pages; when a page is incomplete, call fetch again with the same id and the returned next_offset as offset.",
     inputSchema: {
       type: "object",
-      properties: { id: { type: "string", description: "A result id from search." } },
+      properties: {
+        id: { type: "string", description: "A result id from search." },
+        offset: {
+          type: "integer", minimum: 0, default: 0,
+          description: "Character offset for the next page of a long document.",
+        },
+      },
       required: ["id"],
     },
   },
@@ -205,6 +214,16 @@ async function runAsk(deps, args) {
   // seen without confirming, and the one step that fixes it.
   const guidance = financialMapGuidanceLines(thought.map_guidance);
   const withGuidance = (rest) => text([...(guidance.length ? [...guidance, ""] : []), ...rest].join("\n"));
+  const refusalExplanation = () => {
+    const lines = [];
+    const reason = typeof thought.evidence_gate?.reason === "string"
+      ? thought.evidence_gate.reason.replace(/\s+/g, " ").trim().slice(0, 240)
+      : "";
+    if (reason) lines.push(`Why: ${reason}`);
+    const next = nextActionText(thought);
+    if (next) lines.push(next);
+    return lines;
+  };
 
   // An incomplete search reaching a client's phone as "the documents do not
   // answer the question" is the worst error this product can make: a confident
@@ -230,6 +249,7 @@ async function runAsk(deps, args) {
       ...(ledgerGaps.length ? [ledgerGaps.some(gap => gap.type === "ledger_out_of_coverage")
         ? "Try the last finished month if the feed covers it, or a past month ending on or before the covered-through date."
         : "Resolve the ledger gap above, then try the last finished month if the feed covers it, or a past covered month."] : []),
+      ...refusalExplanation(),
       "", confidenceText(thought)]);
   }
   const lines = guidance.length ? [...guidance, ""] : [];
@@ -243,13 +263,15 @@ async function runAsk(deps, args) {
         const date = Number.isFinite(Date.parse(row.ts || "")) ? String(row.ts).slice(0, 10) : "date unavailable";
         lines.push(`- ${row.title || "Untitled record"} (${date}${row.ts && row.date_reliable !== true ? "; date unverified" : ""})`);
       }
-      lines.push("Next, refine the search with distinctive subject terms and read the matching records. Remote search is relevance-ranked and cannot filter or sort by date.");
     } else if (!gaps.some(gap => ["ledger_out_of_coverage", "ledger_not_consulted"].includes(gap.type))) {
-      lines.push("I didn't find a matching record in this search. Next, search with alternate subject terms or a distinctive name or number. Remote search is relevance-ranked and cannot filter or sort by date.");
+      lines.push("I didn't find a matching record in this search.");
     }
     for (const gap of gaps) if (gap.type !== "no_results" && gap.detail) lines.push(gap.detail);
     if (gaps.some(gap => gap.type === "ledger_out_of_coverage")) lines.push("Try the last finished month if the feed covers it, or a past month ending on or before the covered-through date.");
   } else lines.push(answerText(thought));
+  if (refused) lines.push(...refusalExplanation());
+  const scanned = scannedEvidenceNotice(thought);
+  if (scanned) lines.push("", scanned);
   const confidence = thought.confidence;
   const trust = confidenceLine(confidence, { refused });
   if (trust) lines.push("", trust);
@@ -258,7 +280,8 @@ async function runAsk(deps, args) {
     lines.push("", "Sources:");
     for (const citation of citations) {
       const provenance = citationProvenance(citation);
-      lines.push(`[${citation.n}] ${citation.title}${provenance.length ? ` · ${provenance.join(" · ")}` : ""}`);
+      const mark = citationIsScanned(citation) ? ` ${SCANNED_CITATION_MARK}` : "";
+      lines.push(`[${citation.n}] ${citation.title}${mark}${provenance.length ? ` · ${provenance.join(" · ")}` : ""}`);
     }
   }
   return text(lines.join("\n"));
@@ -299,6 +322,7 @@ async function runSearch(deps, args, origin) {
     date_reliable: typeof r.date_reliable === "boolean" ? r.date_reliable : null,
     text_source: r.text_source || "unknown",
     text_reliable: r.text_reliable === true || r.text_reliable === 1,
+    ...(r.scanned === true ? { scanned: true } : {}),
     lineage: r.lineage || null,
   }));
   // An empty result list is indistinguishable from "your corpus has nothing"
@@ -325,6 +349,10 @@ async function runFetch(env, args, origin) {
   const id = String(args?.id || "");
   const separator = id.indexOf(":");
   if (separator < 1) return toolError("id must look like source:source_id, as returned by search");
+  const offset = args?.offset ?? 0;
+  if (!Number.isSafeInteger(offset) || offset < 0) {
+    return toolError("offset must be a non-negative integer");
+  }
   const docUid = id;
   const source = id.slice(0, separator);
   const sourceId = id.slice(separator + 1);
@@ -362,8 +390,28 @@ async function runFetch(env, args, origin) {
   const rows = chunks?.results || [];
   // Chunks overlap by design; joined text repeats a little at the seams.
   // Complete and slightly redundant beats trimmed and possibly wrong.
-  let body = rows.map((row) => row.text).join("\n\n");
-  if (body.length > MAX_FETCH_CHARS) body = `${body.slice(0, MAX_FETCH_CHARS)}\n\n[truncated]`;
+  const body = rows.map((row) => row.text).join("\n\n");
+  if (offset > body.length) {
+    return toolError(`offset ${offset} is past the end of this ${body.length}-character document`);
+  }
+  // Continuation offsets are UTF-16 indices because that is the stable unit
+  // JavaScript exposes for strings. Move a page boundary back by one code unit
+  // when it would separate a surrogate pair, then return that exact boundary
+  // as next_offset so successive page slices still reconstruct the full body.
+  if (offset > 0 && offset < body.length &&
+      /[\uD800-\uDBFF]/.test(body[offset - 1]) && /[\uDC00-\uDFFF]/.test(body[offset])) {
+    return toolError(`offset ${offset} splits a Unicode character; use offset=${offset - 1}`);
+  }
+  let pageEnd = Math.min(body.length, offset + MAX_FETCH_CHARS);
+  if (pageEnd < body.length &&
+      /[\uD800-\uDBFF]/.test(body[pageEnd - 1]) && /[\uDC00-\uDFFF]/.test(body[pageEnd])) {
+    pageEnd--;
+  }
+  const pageText = body.slice(offset, pageEnd);
+  const nextOffset = pageEnd < body.length ? pageEnd : null;
+  const renderedText = nextOffset === null
+    ? pageText
+    : `${pageText}\n\nCall fetch again with id "${id}" and offset=${nextOffset}.`;
   const timestamp = Number(doc?.document_date);
   const date = Number.isFinite(timestamp) && timestamp > 0
     ? new Date(timestamp).toISOString()
@@ -379,8 +427,15 @@ async function runFetch(env, args, origin) {
   return text(JSON.stringify({
     id,
     title: doc?.title || "untitled",
-    text: body,
+    text: renderedText,
     url: doc?.uri || `${origin}/app`,
+    page: {
+      offset,
+      returned_chars: pageText.length,
+      total_chars: body.length,
+      next_offset: nextOffset,
+      complete: nextOffset === null,
+    },
     metadata: {
       chunks: rows.length,
       source: doc?.source || id.slice(0, separator),

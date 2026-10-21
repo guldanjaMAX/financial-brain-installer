@@ -21,7 +21,8 @@
  */
 
 import {
-  absenceUnproven, COVERAGE_INCOMPLETE, coverageIncompleteNotice, unavailableNotice,
+  absenceUnproven, ANSWER_WITHHELD, COVERAGE_INCOMPLETE, coverageIncompleteNotice,
+  REFUSAL_NEXT_ACTIONS, refusalNextAction, unavailableNotice,
 } from "./retrieval-status.js";
 
 // The fallback when the worker sent no notice of its own — an older worker, or
@@ -89,7 +90,43 @@ export function answerText(r) {
     : "I didn't find a matching record in this search.";
 }
 
+export const SCANNED_EVIDENCE_GAP_TYPE = "scanned_evidence";
+export const SCANNED_ANSWER_NOTICE =
+  "Part of this answer comes from a scanned document read by OCR. Check the original for exact figures.";
+export const SCANNED_RESULTS_NOTICE =
+  "Some of these results come from a scanned document read by OCR. Check the original for exact figures.";
+export const SCANNED_CITATION_MARK = "(scanned)";
+
+export function scannedEvidenceGap(rows, { results = false } = {}) {
+  const list = Array.isArray(rows) ? rows : [];
+  const count = list.filter((row) => row?.scanned === true).length;
+  if (!count) return null;
+  return {
+    type: SCANNED_EVIDENCE_GAP_TYPE,
+    count,
+    total: list.length,
+    detail: results ? SCANNED_RESULTS_NOTICE : SCANNED_ANSWER_NOTICE,
+  };
+}
+
+export function citationIsScanned(citation) {
+  return citation?.scanned === true;
+}
+
+export function scannedEvidenceNotice(r) {
+  if (!r || typeof r !== "object" || unavailableSearch(r)) return null;
+  const answer = typeof r.answer === "string" ? r.answer.trim() : "";
+  if (!answer || /^The documents do not answer/i.test(answer)) return null;
+  const gapped = (Array.isArray(r.gaps) ? r.gaps : [])
+    .some((gap) => gap?.type === SCANNED_EVIDENCE_GAP_TYPE);
+  const cited = (Array.isArray(r.citations) ? r.citations : []).some(citationIsScanned);
+  return gapped || cited ? SCANNED_ANSWER_NOTICE : null;
+}
+
 export function confidenceText(r) {
+  if (r.status === ANSWER_WITHHELD) {
+    return "Answer withheld by an evidence check. No confidence percentage is shown.";
+  }
   if (r.status === COVERAGE_INCOMPLETE) {
     return "Source coverage is incomplete. This result is provisional.";
   }
@@ -101,4 +138,24 @@ export function confidenceText(r) {
   if (!conf) return "";
   return (r.answer && !/^The documents do not answer/i.test(r.answer || "") ? "Confidence" : "Confidence in this search result") +
     ": " + conf.percent + "% (" + conf.band + "). " + conf.basis.join("; ") + ".";
+}
+
+/** Render only locally reviewed actions; older Workers fall back by status. */
+export function nextActionText(r) {
+  if (!r || typeof r !== "object") return null;
+  if (Object.prototype.hasOwnProperty.call(r, "next_action")) {
+    return Object.values(REFUSAL_NEXT_ACTIONS).includes(r.next_action) ? r.next_action : null;
+  }
+  if (r.answer_error || (typeof r.answer === "string" && r.answer.trim() &&
+      !/^The documents do not answer/i.test(r.answer.trim()))) return null;
+  if (r.status === ANSWER_WITHHELD) {
+    return refusalNextAction({ status: ANSWER_WITHHELD, withheldGate: "unsupported" });
+  }
+  if (r.status) return refusalNextAction({ status: r.status });
+  if (r.evidence_gate?.supported === false && Array.isArray(r.results) && r.results.length) {
+    return refusalNextAction({ status: ANSWER_WITHHELD, withheldGate: "unsupported" });
+  }
+  return Array.isArray(r.results) && r.results.length === 0
+    ? refusalNextAction()
+    : null;
 }

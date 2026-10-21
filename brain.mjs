@@ -346,11 +346,14 @@ import {
 } from "./operations/technician-setup.mjs";
 import { fetchBrainWithAdminKey, guardBrainAdminFetch, secureBrainRequestUrl } from "./components/brain-http.mjs";
 import { confidenceLine } from "./worker/src/lib/confidence.js";
-import { answerText as renderAnswerText } from "./worker/src/lib/answer-render.js";
+import { answerText as renderAnswerText, nextActionText } from "./worker/src/lib/answer-render.js";
 import {
   absenceUnproven, COVERAGE_INCOMPLETE, coverageIncompleteNotice,
-  unavailableNotice,
+  meaningSearchLine, unavailableNotice,
 } from "./worker/src/lib/retrieval-status.js";
+import {
+  SCANNED_CITATION_MARK, citationIsScanned, scannedEvidenceNotice,
+} from "./worker/src/lib/answer-render.js";
 import {
   LOCAL_OWNER_AGENT_PROFILE,
   profileHas,
@@ -3968,6 +3971,14 @@ export async function cmdHealth(manifestPath, {
   for (let i = 1; i <= healthAttempts; i++) {
     res = await request(`${base}/health?cb=${i}`, {}, { timeoutMs: 20_000, what: "the health check" });
     body = await res.text();
+    let reportedHealth = null;
+    try { reportedHealth = JSON.parse(body); } catch { /* validated below */ }
+    if (res.ok && reportedHealth?.status === "storage-unavailable") {
+      die(
+        "the Worker is live, but its database could not be read. The deploy is serving and was not treated as missing.\n" +
+          "      Restore database availability, then rerun the health check."
+      );
+    }
     // A 200 is NOT proof the new build is live. Cloudflare keeps serving the
     // PREVIOUS worker for a few seconds after a deploy, so breaking on the first
     // 200 verifies the build that was just replaced and reports it as success.
@@ -4396,6 +4407,8 @@ export async function cmdAsk(manifestPath, options = {}) {
           : unavailableNotice(body.degraded))
     : renderAnswerText({ ...body, answer: typeof body.answer === "string" ? body.answer.trim() : null });
   console.log(`\n${answer}\n`);
+  const scanned = scannedEvidenceNotice(body);
+  if (scanned) console.log(`  ${scanned}\n`);
   // The response keeps the scorer's canonical answer; presentation scopes a
   // refusal to this search. An incomplete search has no refusal percentage.
   const refused = body.evidence_gate?.supported === false || typeof body.answer !== "string" || !body.answer.trim() || /^The documents do not answer/i.test(body.answer.trim());
@@ -4410,8 +4423,17 @@ export async function cmdAsk(manifestPath, options = {}) {
       provisional || refused)) {
     console.log(`  ${c.dim(gate.partial === true ? "Not covered" : "Why")}: ${gateReason}\n`);
   }
+  const nextAction = nextActionText(body);
+  if (nextAction) console.log(`  ${c.dim(nextAction)}\n`);
   if (body.answer_error) warn(`answer generation reported: ${String(body.answer_error).slice(0, 160)}`);
-  if (body.degraded) warn(`search is degraded: ${String(body.degraded).slice(0, 80)}`);
+  const searchLine = body.meaning_search && typeof body.meaning_search === "object"
+    ? meaningSearchLine({
+        visible: body.meaning_search.visible,
+        total: body.meaning_search.total,
+      })
+    : null;
+  if (searchLine) console.log(`  ${c.dim(searchLine)}\n`);
+  else if (body.degraded) warn(`search is degraded: ${String(body.degraded).slice(0, 80)}`);
   const citations = Array.isArray(body.citations) ? body.citations : [];
   if (citations.length) {
     console.log(`  ${c.bold("Sources")}`);
@@ -4434,7 +4456,8 @@ export async function cmdAsk(manifestPath, options = {}) {
       if (citation?.ref) {
         provenance.push(`reference ${source}:${String(citation.ref).replace(/\s+/g, " ").slice(0, 160)}`);
       }
-      console.log(`  ${number} ${title} (${provenance.join("; ")})`);
+      const mark = citationIsScanned(citation) ? ` ${SCANNED_CITATION_MARK}` : "";
+      console.log(`  ${number} ${title}${mark} (${provenance.join("; ")})`);
     }
     console.log("");
   }
@@ -21427,6 +21450,14 @@ export async function prepareSetupAdminKey(manifestPath, manifest, options = {})
 export async function probeExistingWorkerHealth(manifestPath, options = {}) {
   const body = await readLiveWorkerHealthBody(manifestPath, options);
   if (!body) return null;
+  if (body.ok === false && body.status === "storage-unavailable" &&
+      body.vector_writer_protocol === "lease-v1" && body.vector_drain_mode === "active") {
+    return {
+      version: String(body.version || ""),
+      acceptingDocuments: body.accepting_documents === true,
+      storageUnavailable: true,
+    };
+  }
   // `ok` is the brain's verdict on ITSELF, and it belongs to this question
   // alone. A paused Worker answers 200 with ok:false on purpose, so while that
   // check lived in the shared body reader every caller inherited it and a
@@ -21870,7 +21901,13 @@ export async function cmdSetup(manifestPath, options = {}) {
         (pinnedPath) => probeLiveWorker(pinnedPath, { domain: existingWorkerProbeDomain }),
       );
     }
-    if (liveLeaseBrain) {
+    if (liveLeaseBrain?.storageUnavailable) {
+      die(
+        "setup found the existing Worker, but its database could not be read. Nothing was changed.\n" +
+          "      The Worker is live, so setup will not start a cutover while storage is unavailable.\n" +
+          "      Restore database availability and verify health before retrying setup."
+      );
+    } else if (liveLeaseBrain) {
       // A finished brain on the lease protocol is not a cutover candidate. If
       // it is on another release, setup is the wrong tool and says so before
       // touching anything; if it is on this one, there is nothing to migrate

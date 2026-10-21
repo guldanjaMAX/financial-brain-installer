@@ -3,7 +3,7 @@
  * explicitly qualified history, or refuse. They never select or rewrite money.
  */
 import { answerSentences } from './answer-sentences.js';
-import { isMoneyAnswer } from './money-veto.js';
+import { isMoneyAnswer, isMoneyQuestion } from './money-veto.js';
 import { currentEvidenceCandidates, hasExplicitCurrentIntent, queryEntityAnchors,
   reliableDocumentTime } from './query-intent.js';
 
@@ -60,7 +60,7 @@ export function moneyRecordQualification({ question, answer, docs = [], now = Da
 
 export function applyMoneyRecallVeto({ question, answer, evidenceGate, docs = [], candidates = docs, now = Date.now(), owner, filters }) {
   const unchanged = { answer, evidenceGate };
-  if (!answer || evidenceGate?.supported !== true || !isMoneyAnswer(question, answer)) return unchanged;
+  if (!answer || evidenceGate?.supported !== true || !isMoneyQuestion(question)) return unchanged;
   const refuse = reason => ({ answer: null, evidenceGate: { ...evidenceGate,
     supported: false, complete: false, evidence: [], reason },
     gap: { type: 'money_recall', detail: reason } });

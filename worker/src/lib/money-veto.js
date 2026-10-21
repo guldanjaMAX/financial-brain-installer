@@ -9,6 +9,7 @@ import { isAgentDerivedArtifact } from "./evidence-lineage.js";
 import { parseCanonicalEvidenceDate, queryTimeWindow, reliableDocumentTime } from "./query-intent.js";
 
 const MONEY_TOPIC = /\b(?:money|financial|bank|cards?|accounts?|statements?|charges?|charged|payments?|pay(?:s|ing)?|paid|unpaid|invoices?|bills?|owe[ds]?|owing|due|outstanding|settled|refund(?:s|ed|ing)?|bounc(?:e[ds]?|ing)|return(?:s|ed|ing)?|wir(?:e[ds]?|ing)|debits?|credits?|transactions?|spend|spent|expenses?|income|revenue|fees?|costs?|prices?|tax|salary|wages?|receipts?)\b/i;
+const MONEY_QUESTION = /\b(?:how much|amounts?|payers?|payees?|deposits?|withdrawals?|transfers?|loans?|rent|worth|budgets?|profits?)\b/i;
 const CURRENCY = /[$€£¥]|\b(?:USD|EUR|GBP|CAD|AUD|JPY|dollars?|euros?|pounds?|cents?)\b/i;
 const UNCONFIRMED = /\b(?:documents?|sources?|evidence|records?)\s+(?:do(?:es)? not|don['’]t|doesn['’]t|cannot|can['’]t)\s+(?:confirm|establish|cover|show|provide|answer|verify|prove)\b|\b(?:cannot|can['’]t|could not|unable to)\s+(?:be\s+)?(?:confirm|verify|establish|determine)\b|\b(?:not (?:confirmed|covered|established|verified|known)|unconfirmed|unknown|insufficient evidence)\b/i;
 const ABSENCE = /\b(?:no|without|zero)\s+(?:(?:duplicate|unusual|missing|outstanding|unpaid|overdue|further|other|additional|remaining)\s+)*(?:charges?|payments?|balances?|bills?|invoices?|statements?|transactions?|debts?|amounts?|fees?|duplicates?)\b|\b(?:nothing|none)\s+(?:(?:is|was|are|were|remains?|else)\s+)*(?:due|owed|outstanding|missing|unpaid|overdue)\b|\b(?:all|every)\s+(?:[\w-]+\s+){0,4}(?:statements?|payments?|bills?|invoices?)\s+(?:(?:are|is|were|was|have been|has been)\s+)?(?:present|available|received|paid|complete|accounted for)\b|\b(?:complete (?:set|list)|no (?:duplicates?|anomalies)|paid (?:everything|in full))\b|^\s*(?:nothing|none|nope|not any)\b[.!]?\s*(?:\[\d+\])?\s*[.!]?\s*$|\b(?:owe[sd]?|owing)\s+nothing\b|\bnothing\s+(?:is\s+|was\s+)?(?:owed|due|outstanding|unpaid)\b|\b(?:is|are|was|were|has been|have been)\s+(?:fully\s+)?settled\b|\bnot any\s+(?:payments?|charges?|balances?|bills?|invoices?|debts?)\b|\bpaid\s+all\s+(?:invoices?|bills?|payments?)\b|\b(?:not|never)\s+owe\s+anything\b/i;
@@ -288,10 +289,14 @@ export function isMoneyAnswer(question, answer) {
     /\b(?:(?:my|our|account|card|bank|checking|savings|loan|current|available|outstanding|no|without|zero)\s+balances?|balances?\s+(?:of|on|in|for|due))\b/i.test(`${question || ""} ${answer || ""}`);
 }
 
+export function isMoneyQuestion(question) {
+  return isMoneyAnswer(question, "") || MONEY_QUESTION.test(String(question || ""));
+}
+
 export function applyMoneyVeto({ question, answer, evidenceGate, docs = [], now = Date.now() } = {}) {
   const unchanged = { answer, evidenceGate };
   if (!answer || evidenceGate?.supported !== true) return unchanged;
-  if (!isMoneyAnswer(question, answer)) return unchanged;
+  if (!isMoneyQuestion(question)) return unchanged;
   const diagnostic = (rule, refused = true) => ({ type: "money_veto", rule, count: 1,
     detail: refused ? "The money evidence check refused a claim." : "The money evidence check qualified an incomplete answer." });
   const veto = (rule, reason) => ({ gap: diagnostic(rule), answer: null, evidenceGate: {

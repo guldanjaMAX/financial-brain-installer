@@ -823,6 +823,129 @@ const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") +
   check("vector rank survives DB row order", order[0] === "v1", JSON.stringify(order));
 }
 
+/* ---- legacy native reads are lifted only by bounded producer evidence ---- */
+{
+  const retrieve = async (row) => {
+    const env = {
+      DB: { prepare: () => ({ bind: () => ({ all: async () => ({ results: [row] }) }) }) },
+    };
+    return (await search(env, { query: "lease", embedding: null, limit: 1 })).results[0];
+  };
+  const base = {
+    chunk_uid: "legacy-drive#0",
+    doc_uid: "drive:legacy-drive",
+    source: "drive",
+    source_kind: "drive",
+    source_id: "legacy-drive",
+    title: "Lease Agreement.pdf",
+    text: "Synthetic lease terms.",
+    authority_document_head: "Synthetic lease terms.",
+    text_source: "native",
+    text_reliable: 1,
+    authority_meta: JSON.stringify({ extracted_as: "pdf" }),
+  };
+
+  const drive = await retrieve(base);
+  check("legacy Drive PDF is assembled as legacy native text",
+    drive.text_source === "native" && drive.text_reliable === true &&
+      drive.text_basis === "legacy_native" && drive.provenance_assessed === false,
+    JSON.stringify(drive));
+  check("legacy Drive PDF derives one read-time source lineage and tiers primary",
+    drive.lineage?.kind === "source_record" && drive.lineage?.status === "known" &&
+      drive.authority?.tier === "T1",
+    JSON.stringify({ lineage: drive.lineage, authority: drive.authority }));
+
+  const gmail = await retrieve({
+    ...base,
+    chunk_uid: "legacy-mail#0",
+    doc_uid: "owner-mail:legacy-mail",
+    source: "owner-mail",
+    source_kind: "gmail",
+    source_id: "legacy-mail",
+    title: "Monthly statement is ready",
+    authority_meta: JSON.stringify({ extracted_as: "gmail" }),
+  });
+  check("legacy Gmail text is native but never receives derived source lineage",
+    gmail.text_basis === "legacy_native" && gmail.text_source === "native" &&
+      gmail.lineage?.status === "unknown" && gmail.authority?.tier === "T3",
+    JSON.stringify({ text_basis: gmail.text_basis, lineage: gmail.lineage, authority: gmail.authority }));
+
+  const note = await retrieve({
+    ...base,
+    chunk_uid: "legacy-note#0",
+    doc_uid: "drive:legacy-note",
+    source_id: "legacy-note",
+    title: "Lease Agreement.md",
+    uri: "archive/lease-agreement.md",
+    authority_meta: JSON.stringify({ extracted_as: "plain text" }),
+  });
+  check("legacy Markdown and text notes become readable without primary lineage",
+    note.text_basis === "legacy_native" && note.text_source === "native" &&
+      note.lineage?.status === "unknown" && note.authority?.tier === "T3",
+    JSON.stringify({ text_basis: note.text_basis, lineage: note.lineage, authority: note.authority }));
+
+  const curated = await retrieve({
+    ...base,
+    chunk_uid: "legacy-curated#0",
+    doc_uid: "curated:brain:custom:fixture-record",
+    source: "curated",
+    source_kind: "curated",
+    source_id: "brain:custom:fixture-record",
+    title: "Curated fixture record",
+    authority_meta: "{}",
+  });
+  check("legacy curated-sync namespace is assembled as legacy native text",
+    curated.text_basis === "legacy_native" && curated.text_source === "native" &&
+      curated.provenance_assessed === false,
+    JSON.stringify(curated));
+
+  const exclusions = [
+    ["raw OCR", { text_source: "ocr" }],
+    ["raw partial OCR", { text_source: "ocr_partial" }],
+    ["unrecognized source kind", { source: "calendar", source_kind: "calendar" }],
+    ["noncanonical source kind", { source_kind: "Drive" }],
+    ["noncanonical extractor label", { authority_meta: JSON.stringify({ extracted_as: " PDF " }) }],
+    ["OCR metadata", { authority_meta: JSON.stringify({ extracted_as: "pdf", ocr: {} }) }],
+    ["migration metadata", { authority_meta: JSON.stringify({ extracted_as: "pdf", migrated_from: "legacy" }) }],
+    ["incomplete extraction", { authority_meta: JSON.stringify({ extracted_as: "pdf", extraction_incomplete: true }) }],
+    ["OCR banner in chunk", { text: "[OCR] The text below was read from a scanned image by a machine, not from a text layer in the file. It can be wrong, and figures especially can be wrong." }],
+    ["unreadable mark in chunk", { text: "Synthetic terms [[UNREADABLE]]" }],
+    ["unreadable mark in document head", { authority_document_head: "Synthetic terms [[page 2: could not be read - fixture]]" }],
+  ];
+  for (const [label, change] of exclusions) {
+    const row = await retrieve({ ...base, ...change, chunk_uid: `excluded-${label.replaceAll(" ", "-")}#0` });
+    check(`legacy-native gate refuses ${label}`,
+      row.text_source === "unknown" && row.text_reliable === false && row.text_basis === undefined,
+      JSON.stringify({ label, row }));
+  }
+
+  const receiptMetadata = {
+    extracted_as: "pdf",
+    evidence_lineage: { version: 1, kind: "source_record", root_ids: [] },
+    provenance_receipt: {
+      version: 1,
+      status: "complete",
+      reason: "lineage_and_text_recorded",
+      root_ids: ["drive:receipt-control"],
+    },
+  };
+  const receiptRow = {
+    ...base,
+    chunk_uid: "receipt-control#0",
+    doc_uid: "drive:receipt-control",
+    source_id: "receipt-control",
+    authority_meta: JSON.stringify(receiptMetadata),
+  };
+  const receiptBytes = JSON.stringify(receiptRow);
+  const receipt = await retrieve(receiptRow);
+  check("a receipt-backed row keeps its established provenance result",
+    receipt.provenance_assessed === true && receipt.text_source === "native" &&
+      receipt.text_basis === undefined,
+    JSON.stringify(receipt));
+  check("legacy read-time assessment does not mutate a receipt-backed row",
+    JSON.stringify(receiptRow) === receiptBytes);
+}
+
 /* ---- writes go to D1 first, and always queue a vector ---- */
 {
   const batched = [];

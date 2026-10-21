@@ -683,6 +683,15 @@ validates against the row's source or recorded family identity. Inventory and
 authority code must use `storedProvenanceAssessment(row)` rather than trusting
 those columns directly.
 
+Retrieval has one bounded read-time compatibility rule that does not change
+that receipt contract. A row whose assessed basis is unknown can be exposed as
+native with `text_basis: "legacy_native"` only for recognized older Gmail,
+Drive, upload, and `curated:brain:` producer shapes, a recognized native
+extractor, and no OCR, migration, incomplete-extraction, banner, or unreadable
+marker. The row remains `provenance_assessed: false` and is never rewritten.
+Only non-note Drive and upload artifacts derive the single source-record root
+their producer would stamp today. Gmail and Markdown or text notes do not.
+
 CSV and TSV are rendered row-wise as `Header: value` rather than as a bare grid,
 because `15234.11` on its own is unretrievable while `Balance: 15234.11` answers
 a question about a balance.
@@ -1760,9 +1769,11 @@ written that ledger, so these counts do not prove target coverage.
 `--dry-run` reads no credential and
 makes no request. `--audit` reads the Cloudflare Drive-family inventory but
 writes no document. `--sync` builds every transformed envelope once and sends
-the same title, content and metadata independently to any configured legacy endpoint and
-to the Cloudflare identity `curated:brain:<legacy source type>:<legacy source
-id>`. The legacy write stays in place while its target is declared. Cloudflare-only
+the same title, content and metadata independently to any configured legacy endpoint. The
+Cloudflare copy adds the first-party native-text receipt and lineage expected
+of a current write, without changing the neutral `envelope_sha256`, and uses
+the identity `curated:brain:<legacy source type>:<legacy source id>`. The legacy
+write stays in place while its target is declared. Cloudflare-only
 receipts and coverage contain only the Cloudflare target; historical raw Drive
 evidence keeps the same meaning and never permits deletion.
 
@@ -2664,6 +2675,10 @@ receipts on new writes, and it refuses a later write that weakens established
 proof. Migration defaults and legacy `native/1` columns are still explicitly
 unassessed. Inventory labels that debt as partial or unavailable rather than
 retrospectively upgrading it.
+Retrieval alone may label a narrowly recognized older producer row
+`text_basis: "legacy_native"` under the fail-closed rule above. Financial
+Picture, document access, stored receipt validation, transitions, migrations,
+and durable rows remain unchanged.
 
 `brain provenance-repair <manifest> --source <name>` schema 1 is now a legacy
 inventory preview only. The canonical semantic plan still binds every source

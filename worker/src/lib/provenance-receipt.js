@@ -436,6 +436,85 @@ export function storedProvenanceAssessment(row = {}) {
   };
 }
 
+const LEGACY_NATIVE_EXTRACTORS = new Set([
+  "bank export", "calendar", "csv", "email", "html", "json", "mail archive",
+  "pdf", "plain text", "powerpoint", "rich text", "spreadsheet", "subtitles",
+  "transcript", "tsv", "word", "xml", "yaml",
+]);
+const LEGACY_OCR_BANNER =
+  "[OCR] The text below was read from a scanned image by a machine, not from a " +
+  "text layer in the file. It can be wrong, and figures especially can be wrong.";
+const LEGACY_UNREADABLE_MARK = /\[\[\s*unreadable\s*\]\]|\[\[page \d+: could not be read/i;
+const LEGACY_NOTE_PATH = /\.(?:md|markdown|txt|text)(?:$|[?#])/i;
+
+/**
+ * Recover only native text facts that an older reviewed producer already
+ * wrote but could not receipt. This is a query-time interpretation, never a
+ * stored repair. A caller applies it only after the ordinary stored assessment
+ * returns an unknown text basis.
+ */
+export function legacyNativeStoredAssessment(row = {}, assessment = storedProvenanceAssessment(row)) {
+  if (assessment?.text_source !== "unknown") return null;
+  const rawTextSource = String(row.text_source || "unknown");
+  if (rawTextSource === "ocr" || rawTextSource === "ocr_partial") return null;
+
+  const metadata = jsonObject(
+    row.authority_meta ?? row._authority_meta ?? row.meta ?? row.metadata,
+  ) || {};
+  const kind = String(
+    Object.hasOwn(row || {}, "source_kind") ? row.source_kind : row.source,
+  );
+  const extractedAs = String(metadata.extracted_as || "");
+  const curatedSync = kind === "curated" && String(row.source_id || "").startsWith("brain:");
+  const producerMatched =
+    (kind === "gmail" && extractedAs === "gmail") ||
+    ((kind === "drive" || kind === "upload") && LEGACY_NATIVE_EXTRACTORS.has(extractedAs)) ||
+    curatedSync;
+  if (!producerMatched) return null;
+
+  if (owns(metadata, "ocr") || owns(metadata, "migrated_from") ||
+      metadata.extraction_incomplete === true) return null;
+  const chunk = String(row.text ?? row.snippet ?? "");
+  const head = String(row.authority_document_head ?? row._authority_document_head ?? "");
+  if ([chunk, head].some((text) => text.includes(LEGACY_OCR_BANNER) || LEGACY_UNREADABLE_MARK.test(text))) {
+    return null;
+  }
+
+  const recovered = {
+    provenance_assessed: false,
+    text_source: "native",
+    text_reliable: true,
+    text_basis: "legacy_native",
+  };
+
+  // A direct Drive or upload re-send would stamp exactly one source-record
+  // root. Gmail is correspondence, and Markdown/plain-text notes deliberately
+  // remain without primary lineage even though their text becomes readable.
+  const noteIdentity = [row.title, row.uri, row.source_id];
+  if ((kind !== "drive" && kind !== "upload") ||
+      noteIdentity.some((value) => LEGACY_NOTE_PATH.test(String(value || ""))) ||
+      owns(metadata, "evidence_lineage")) return recovered;
+  const source = String(row.source || row.source_type || "").trim();
+  const sourceId = String(row.source_id || "").trim();
+  const rootIds = provenanceRootIds({
+    source_type: source,
+    source_id: sourceId,
+    metadata,
+  });
+  if (rootIds.length !== 1) return recovered;
+  return {
+    ...recovered,
+    authority_meta: JSON.stringify({
+      ...metadata,
+      evidence_lineage: {
+        version: 1,
+        kind: "source_record",
+        root_ids: rootIds,
+      },
+    }),
+  };
+}
+
 /**
  * Cheap marker-shape gate for synchronous callers. A legacy row with a valid-
  * looking receipt but no shared-boundary marker is deliberately not proven.

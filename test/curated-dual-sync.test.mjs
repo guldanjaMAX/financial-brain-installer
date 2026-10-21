@@ -188,6 +188,14 @@ try {
   assert.equal(gamma.legacyEnvelope.title, "gamma");
   assert.equal(alpha.cloudflareEnvelope.source_type, "curated");
   assert.equal(alpha.cloudflareEnvelope.source_id, "brain:custom:fixture-alpha-id");
+  assert.equal(alpha.cloudflareEnvelope.text_source, "native");
+  assert.equal(alpha.cloudflareEnvelope.text_reliable, true);
+  assert.equal(alpha.cloudflareEnvelope.metadata.provenance_receipt.status, "complete");
+  assert.deepEqual(alpha.cloudflareEnvelope.metadata.evidence_lineage, {
+    version: 1,
+    kind: "source_record",
+    root_ids: ["curated:brain:custom:fixture-alpha-id"],
+  });
   assert.equal(alpha.rawMd5, alphaRawMd5);
   assert.equal(
     alpha.legacyEnvelope.metadata.content_hash,
@@ -625,7 +633,18 @@ try {
     assert.ok(legacyEnvelope);
     assert.equal(cloudEnvelope.content, legacyEnvelope.content);
     assert.equal(cloudEnvelope.title, legacyEnvelope.title);
-    assert.deepEqual(cloudEnvelope.metadata, legacyEnvelope.metadata);
+    assert.equal(cloudEnvelope.text_source, "native");
+    assert.equal(cloudEnvelope.text_reliable, true);
+    const { evidence_lineage, provenance_receipt, ...neutralMetadata } = cloudEnvelope.metadata;
+    assert.deepEqual(neutralMetadata, legacyEnvelope.metadata);
+    const roots = [`curated:${cloudEnvelope.source_id}`];
+    assert.deepEqual(evidence_lineage, { version: 1, kind: "source_record", root_ids: roots });
+    assert.deepEqual(provenance_receipt, {
+      version: 1,
+      status: "complete",
+      reason: "lineage_and_text_recorded",
+      root_ids: roots,
+    });
   }
   assert.equal(partialLedger.target_coverage.cloudflare_confirmed.total, 3);
 

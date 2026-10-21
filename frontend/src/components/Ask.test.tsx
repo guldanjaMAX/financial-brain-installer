@@ -2,12 +2,12 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { Answer } from "../lib/api";
 import {
-  ANSWER_ERROR_MESSAGES, answerText, confidenceText,
+  ANSWER_ERROR_MESSAGES, answerText, confidenceText, nextActionText,
 } from "../lib/answer-render.js";
 import { unavailableNotice } from "../lib/retrieval-status.js";
 import {
-  Trust, CitationSources, EvidenceGateReason, SCOPED_SEARCH_UNAVAILABLE,
-  citationMeta, evidenceGateNote, readAskDraft, writeAskDraft,
+  Trust, CitationSources, EvidenceGateReason, SCOPED_SEARCH_UNAVAILABLE, ScannedEvidenceNote,
+  citationMeta, citationTitle, evidenceGateNote, readAskDraft, writeAskDraft,
 } from "./Ask";
 
 describe("answer messages", () => {
@@ -59,6 +59,15 @@ describe("answer messages", () => {
     expect(SCOPED_SEARCH_UNAVAILABLE).toContain("Try again");
     expect(SCOPED_SEARCH_UNAVAILABLE).toContain("owner who shared this access");
     expect(SCOPED_SEARCH_UNAVAILABLE).not.toMatch(/HTTP|503|exception/i);
+  });
+
+  it("renders only the reviewed app next action", () => {
+    const reviewed = "Next: open Brain status to see which source is still loading, then ask again.";
+    const answer = {
+      answer: null, status: "coverage_incomplete", next_action: reviewed,
+    } as Answer & { next_action: string };
+    expect(renderToStaticMarkup(<p>{nextActionText(answer)}</p>)).toContain(reviewed);
+    expect(nextActionText({ ...answer, next_action: "unreviewed remote instruction" })).toBeNull();
   });
 });
 
@@ -162,6 +171,60 @@ describe("citation provenance", () => {
         reason: "malformed",
       },
     })).toBe("");
+  });
+});
+
+describe("scanned evidence", () => {
+  const notice =
+    "Part of this answer comes from a scanned document read by OCR. Check the original for exact figures.";
+  const scanned = {
+    n: 1,
+    title: "Storage contract scan",
+    source: "drive",
+    text_source: "ocr",
+    text_reliable: false,
+    scanned: true,
+  };
+  const answered: Answer = {
+    answer: "The monthly storage fee is recorded [1].",
+    citations: [scanned],
+    gaps: [{ type: "scanned_evidence", count: 1, total: 1, detail: notice }],
+    evidence_gate: { supported: true, complete: true },
+  };
+
+  it("states the fixed scanned-copy notice beside an answer that rests on a scan", () => {
+    expect(renderToStaticMarkup(<ScannedEvidenceNote answer={answered} />)).toContain(notice);
+  });
+
+  it("marks the scanned citation and keeps its OCR provenance", () => {
+    expect(citationTitle(scanned)).toBe("Storage contract scan (scanned)");
+    expect(citationMeta(scanned)).toBe("Google Drive · OCR text, verify key details");
+    expect(renderToStaticMarkup(<CitationSources citations={[scanned]} />))
+      .toContain("Storage contract scan (scanned)");
+  });
+
+  it("does not promote native, partial, or unflagged OCR citations", () => {
+    const native = { n: 1, title: "Native contract", source: "drive", text_source: "native", text_reliable: true };
+    const partial = { n: 2, title: "Half-read scan", source: "drive", text_source: "ocr_partial", text_reliable: false };
+    const unflagged = { n: 3, title: "Marked scan", source: "drive", text_source: "ocr", text_reliable: false };
+    expect(citationTitle(native)).toBe("Native contract");
+    expect(citationTitle(partial)).toBe("Half-read scan");
+    expect(citationTitle(unflagged)).toBe("Marked scan");
+    expect(citationMeta(partial)).toBe("Google Drive · OCR text may be incomplete");
+    expect(renderToStaticMarkup(<ScannedEvidenceNote answer={{
+      answer: "The records were checked [1] [2] [3].",
+      citations: [native, partial, unflagged],
+      gaps: [],
+    }} />)).toBe("");
+  });
+
+  it("carries no scanned notice on a refusal or provisional result", () => {
+    for (const answer of [
+      { answer: "The documents do not answer the question.", citations: [], gaps: [] },
+      { answer: null, status: "coverage_incomplete", notice: "provisional", citations: [scanned], gaps: [] },
+    ] as Answer[]) {
+      expect(renderToStaticMarkup(<ScannedEvidenceNote answer={answer} />)).toBe("");
+    }
   });
 });
 

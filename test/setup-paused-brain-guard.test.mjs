@@ -160,6 +160,51 @@ try {
   check("a brain that reports itself not ok is never called finished, whatever its drain says",
     notOkActive === null, JSON.stringify(notOkActive));
 
+  let storageSchemaReads = 0, storageSourceReads = 0;
+  const storageUnavailableHealth = async () => worker.fetch(
+    new Request(`https://${DOMAIN}/health`),
+    {
+      ...workerEnv("active"),
+      STORAGE: "d1",
+      DB: {
+        prepare(sql) {
+          if (/install_state/.test(sql)) {
+            storageSchemaReads++;
+            return { first: async () => { throw new Error("fixture schema unavailable"); } };
+          }
+          storageSourceReads++;
+          return { all: async () => { throw new Error("fixture source registry unavailable"); } };
+        },
+      },
+    },
+    { waitUntil() {} },
+  );
+  const storageBody = JSON.parse(await (await storageUnavailableHealth()).text());
+  check("an active Worker names an unreadable D1 without changing its pause fields",
+    storageBody.ok === false && storageBody.status === "storage-unavailable" &&
+      storageBody.vector_drain_mode === "active" && storageBody.accepting_documents === true,
+    JSON.stringify(storageBody));
+  check("the storage-unavailable health arm reached both D1 decision points",
+    storageSchemaReads === 1 && storageSourceReads === 1,
+    JSON.stringify({ storageSchemaReads, storageSourceReads }));
+
+  const storageAsFinished = await brain.probeExistingWorkerHealth(manifestPath, {
+    http: storageUnavailableHealth,
+  });
+  check("the existing-Worker probe preserves the database failure for setup",
+    storageAsFinished?.storageUnavailable === true && storageAsFinished.version === PRODUCT_VERSION,
+    JSON.stringify(storageAsFinished));
+
+  let storageHealthFailure = null;
+  try {
+    await quiet(() => brain.cmdHealth(manifestPath, { request: storageUnavailableHealth }));
+  } catch (error) { storageHealthFailure = error; }
+  const storageHealthMessage = String(storageHealthFailure?.message || "");
+  check("the health command names the database instead of falsely blaming deployment",
+    storageHealthFailure?.constructor?.name === "Fatal" && /database/i.test(storageHealthMessage) &&
+      !/deploy is not live|previous build|not being replaced/i.test(storageHealthMessage),
+    storageHealthMessage || "no refusal");
+
   /* ------------------------------------------------------------------------
    * 2. setup REFUSES a paused brain, driven through the REAL probes
    * --------------------------------------------------------------------- */
@@ -214,6 +259,29 @@ try {
   check("setup stops at the check: only the read-only stages ran, nothing destructive",
     JSON.stringify(pausedTouched) === JSON.stringify(["verify", "provision"]),
     JSON.stringify(pausedTouched));
+
+  const storageTouched = [];
+  let storageRefusal = null, storageDrainProbeCalls = 0;
+  try {
+    await quiet(() => brain.cmdSetup(manifestPath, setupOptions({
+      probeExistingWorkerHealth: (pinned) =>
+        brain.probeExistingWorkerHealth(pinned, { http: storageUnavailableHealth }),
+      probeExistingWorkerDrainMode: async () => {
+        storageDrainProbeCalls++;
+        return "active";
+      },
+    }, storageTouched)));
+  } catch (error) { storageRefusal = error; }
+  const storageRefusalMessage = String(storageRefusal?.message || "");
+  check("setup refuses an existing lease-v1 Worker whose database cannot be read",
+    storageRefusal?.constructor?.name === "Fatal" && /database/i.test(storageRefusalMessage),
+    storageRefusalMessage || "no refusal");
+  check("the storage refusal does not claim that the deploy is absent or stale",
+    !/deploy is not live|previous build|not being replaced/i.test(storageRefusalMessage),
+    storageRefusalMessage);
+  check("setup makes no cutover call after the storage-unavailable decision",
+    JSON.stringify(storageTouched) === JSON.stringify(["verify", "provision"]) && storageDrainProbeCalls === 0,
+    JSON.stringify({ storageTouched, storageDrainProbeCalls }));
 
   /* ------------------------------------------------------------------------
    * 3. unknown health after a denied subdomain read never authorizes a pause

@@ -36,7 +36,9 @@ import { measureQueryStage, startQueryStage } from "./query-timing.js";
 import {
   currentEvidenceCandidates, hasExplicitCurrentIntent, parseCanonicalEvidenceDate,
 } from "./query-intent.js";
-import { authorityFor } from "./evidence-authority.js";
+import {
+  UNREADABLE_SOURCE_CHUNK, authorityFor, hasUnreadableMark,
+} from "./evidence-authority.js";
 import { quickBooksOpenItemsRequest } from "./quickbooks-open-items.js";
 import {
   annotateLineageFamilyTokens, attachEvidenceLineage, evidenceLineageFor,
@@ -57,6 +59,7 @@ import { scopeIsUnrestricted } from "./grants.js";
 import { probeStalledVectorFence } from "./vector-fence-probe.js";
 import { publicOwnerNoteProvenance } from "./owner-note-contract.js";
 import {
+  legacyNativeStoredAssessment,
   storedProvenanceAssessment,
   storedProvenanceMarkerAssessment,
 } from "./provenance-receipt.js";
@@ -126,7 +129,10 @@ const assessStoredProvenance = (row) => {
   // no receipt. The latter is gated to unknown below.
   const projected = ["authority_meta", "_authority_meta", "meta", "metadata"]
     .some((key) => Object.prototype.hasOwnProperty.call(row || {}, key));
-  return projected ? { ...row, ...storedProvenanceAssessment(row) } : row;
+  if (!projected) return row;
+  const stored = storedProvenanceAssessment(row);
+  const legacy = legacyNativeStoredAssessment(row, stored);
+  return { ...row, ...stored, ...(legacy || {}) };
 };
 
 function historicalSourceLabel(kind) {
@@ -370,6 +376,14 @@ function composeDocumentEvidence(vectorRow, keywordRow, query) {
   }
   if (!keywordRow) return vectorRow;
   if (!vectorRow) return keywordRow;
+
+  const composed = composeBoundedDocumentEvidence(vectorRow, keywordRow, query);
+  return hasUnreadableMark(keywordRow.text) || hasUnreadableMark(vectorRow.text)
+    ? { ...composed, [UNREADABLE_SOURCE_CHUNK]: true }
+    : composed;
+}
+
+function composeBoundedDocumentEvidence(vectorRow, keywordRow, query) {
 
   const keywordText = boundedEvidencePart(keywordRow.text, query);
   const vectorText = boundedEvidencePart(vectorRow.text, query);
@@ -903,20 +917,29 @@ export async function search(env, {
     (results) => ({ attempted: true, results, error: null }),
     (error) => ({ attempted: true, results: [], error }),
   );
-  const vectorEligible = Boolean(embedding) && access?.kind !== "grant" && scopeIsUnrestricted(scope);
-  const hintAttemptsPromise = Promise.all(supplementalFilters.map(async (hint) => {
+  const keywordAttemptPromise = settleModality(
+    measureQueryStage(timing, "keyword", () => searchKeyword(env, query, { limit: pool, filters, access, scope })),
+  );
+  const hintKeywordPromises = supplementalFilters.map((hint) =>
+    settleModality(measureQueryStage(timing, "keyword", () =>
+      searchKeyword(env, query, { limit: pool, filters: hint, access, scope }))));
+  const resolvedEmbedding = access?.kind !== "grant" && scopeIsUnrestricted(scope)
+    ? await Promise.resolve(embedding).catch(() => null)
+    : null;
+  const vectorEligible = Boolean(resolvedEmbedding) && access?.kind !== "grant" && scopeIsUnrestricted(scope);
+  const hintAttemptsPromise = Promise.all(supplementalFilters.map(async (hint, index) => {
     const [keyword, vector] = await Promise.all([
-      settleModality(measureQueryStage(timing, "keyword", () => searchKeyword(env, query, { limit: pool, filters: hint, access, scope }))),
+      hintKeywordPromises[index],
       vectorEligible
-        ? settleModality(measureQueryStage(timing, "vector", () => searchVector(env, embedding, { limit: pool, filters: hint, scope, timing })))
+        ? settleModality(measureQueryStage(timing, "vector", () => searchVector(env, resolvedEmbedding, { limit: pool, filters: hint, scope, timing })))
         : Promise.resolve({ attempted: false, results: [], error: null }),
     ]);
     return { keyword, vector };
   }));
   const [keywordAttempt, vectorAttempt, projection, hintAttempts] = await Promise.all([
-    settleModality(measureQueryStage(timing, "keyword", () => searchKeyword(env, query, { limit: pool, filters, access, scope }))),
+    keywordAttemptPromise,
     vectorEligible
-      ? settleModality(measureQueryStage(timing, "vector", () => searchVector(env, embedding, { limit: pool, filters, scope, timing })))
+      ? settleModality(measureQueryStage(timing, "vector", () => searchVector(env, resolvedEmbedding, { limit: pool, filters, scope, timing })))
       : Promise.resolve({ attempted: false, results: [], error: null }),
     // Vectorize may return some old/current candidates while a newer accepted
     // changeset is still processing. Non-empty semantic results therefore do
@@ -1028,12 +1051,14 @@ export async function search(env, {
   } else if (!scopeIsUnrestricted(scope)) {
     degraded = "scoped-vector";
     degradedReason = "zone-scope-keyword-only";
-  } else if (embedding && projection?.ready !== true) {
+  } else if (resolvedEmbedding && projection?.ready !== true && projection?.query_ready !== true) {
     degraded = "vector";
-    degradedReason = projectionCatchupEligible(projection, { now })
-      ? "projection-catching-up"
-      : "projection-incomplete";
-  } else if (!embedding) {
+    degradedReason = projection?.reason === "vector_count_mismatch"
+      ? "projection-count-mismatch"
+      : projectionCatchupEligible(projection, { now })
+        ? "projection-catching-up"
+        : "projection-incomplete";
+  } else if (!resolvedEmbedding) {
     degraded = "no-embedding";
     degradedReason = "embedding-unavailable";
   }
@@ -1118,7 +1143,7 @@ export async function search(env, {
     rankLists.push({ items: currentDocuments, weight: CURRENT_INTENT_RRF_WEIGHT, itemWeight: sourceWeight });
   }
   const operativeCurrentDocuments = currentDocuments.filter((row) => {
-    const authority = authorityFor(row, { query, current: true });
+    const authority = authorityFor(row, { query, current: true, owner: env.BRAIN_OWNER, now: Date.now(), timeZone: env.BRAIN_TIMEZONE });
     return authority.operative && authority.authoritative;
   });
   if (operativeCurrentDocuments.length) {
@@ -1189,7 +1214,7 @@ export async function search(env, {
   for (const row of fused) {
     // content_hash is an internal dedupe key, not part of the authenticated
     // search response contract or a stable source identifier for clients.
-    const authority = authorityFor(row, { query, current: hasExplicitCurrentIntent(query) });
+    const authority = authorityFor(row, { query, current: hasExplicitCurrentIntent(query), owner: env.BRAIN_OWNER, now: Date.now(), timeZone: env.BRAIN_TIMEZONE });
     const lineage = evidenceLineageFor(row, { trustedSourceRecord: authority.owner_confirmed === true });
     const {
       content_hash: _internalContentHash,
@@ -1197,6 +1222,8 @@ export async function search(env, {
       _authority_meta: _internalLegacyAuthorityMeta,
       authority_document_head: _internalAuthorityDocumentHead,
       _authority_document_head: _internalLegacyAuthorityDocumentHead,
+      [UNREADABLE_SOURCE_CHUNK]: _internalUnreadableSourceChunk,
+      scanned: _unverifiedScanned,
       ...publicRow
     } = row;
     const writeProvenance = publicOwnerNoteProvenance(
@@ -1210,6 +1237,7 @@ export async function search(env, {
     documents.push(attachEvidenceLineage({
       ...publicRow,
       source_id: publicSourceId,
+      ...(authority.scanned === true ? { scanned: true } : {}),
       authority,
       lineage: lineage.lineage,
       ...(writeProvenance ? { write_provenance: writeProvenance } : {}),
@@ -1222,6 +1250,19 @@ export async function search(env, {
     results: documents.slice(0, limit),
     degraded,
     degraded_reason: degradedReason,
+    ...((degradedReason === "projection-catching-up" || degradedReason === "projection-incomplete")
+      ? {
+          retrieval_receipt: "keyword_only_indexing",
+          meaning_search: {
+            visible: Number.isSafeInteger(projection?.actual_vectors) && projection.actual_vectors >= 0
+              ? projection.actual_vectors
+              : null,
+            total: Number.isSafeInteger(projection?.expected_vectors) && projection.expected_vectors >= 0
+              ? projection.expected_vectors
+              : null,
+          },
+        }
+      : {}),
     ignored_filters: unsupportedFilters(filters),
     counts: {
       keyword: kw.length,
@@ -4072,12 +4113,17 @@ function assessCoverageRows(rows, {
     // working. Warning at the first minute past due is how alerts get ignored.
     if (ageSec !== null && ageSec > expected * 1.5) {
       sourceIsStale = true;
+      const heldForReview = operational.state === "review" &&
+        String(s.stale_reason || "").trim().toUpperCase() === SOURCE_REVIEW_ISSUE_CODE;
       gaps.push(gapWithRemedy(s, "refresh", {
         type: "coverage_stale",
         source: s.name,
         days_since_ingest: days,
         expected_every_days: Math.round(expected / 86400) || null,
-        detail: `The "${s.name}" source was last read ${refreshDuration(ageSec)} ago and is expected to refresh about every ${refreshDuration(expected)}. Material added since then is not in the brain, and would not show up as a missing answer.`,
+        ...(heldForReview ? { held_for_review: true } : {}),
+        detail: heldForReview
+          ? `The "${s.name}" source is held for review. Its last complete refresh finished ${days} day(s) ago. Records loaded since then may already be in the brain, but newer material is not guaranteed until the review is resolved.`
+          : `The "${s.name}" source was last read ${refreshDuration(ageSec)} ago and is expected to refresh about every ${refreshDuration(expected)}. Material added since then is not in the brain, and would not show up as a missing answer.`,
       }));
     }
 
@@ -7610,12 +7656,30 @@ export async function vectorReadiness(env, {
       action = remedyForState(env, "This finishes on its own on the next scheduled background drain; running `brain drain` by hand does not speed it up.");
     }
   }
+  const providerOrphans = Math.max(0, vectorCount - expected);
+  const providerOrphanQueryReady =
+    pending === 0 &&
+    submitted === 0 &&
+    mutationProcessed &&
+    status !== "bootstrap_required" &&
+    vectorCount > expected &&
+    expected > 0 &&
+    providerOrphans / expected < PROVIDER_ORPHAN_MAX_RATIO;
+  if (providerOrphanQueryReady && reason !== "vector_count_mismatch") {
+    throw new Error("provider-orphan query readiness requires a vector count mismatch");
+  }
+  const queryReady = ready || providerOrphanQueryReady;
+  if (queryReady && !ready) {
+    action = "Search is fully usable. Run `brain health <manifest>` to review the small provider-only vector excess.";
+  }
   const receipt = {
     ready,
+    query_ready: queryReady,
     reason,
     expected_vectors: expected,
     expected_vectors_exact: status === "verified",
     actual_vectors: vectorCount,
+    provider_orphans: providerOrphans,
     pending,
     pending_is_capped: backlog.pending_is_capped === true,
     pending_display: backlog.pending_display,
@@ -7638,6 +7702,8 @@ export async function vectorReadiness(env, {
   });
   return receipt;
 }
+
+export const PROVIDER_ORPHAN_MAX_RATIO = 0.0001;
 
 /**
  * Remove documents from D1 and durably queue their Vectorize cleanup.

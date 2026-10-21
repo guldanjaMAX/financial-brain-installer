@@ -95,6 +95,106 @@ export function queryTimeWindow(query, { now = Date.now() } = {}) {
   return null;
 }
 
+const retrievalTimeZone = (value) => {
+  const candidate = String(value || "").trim();
+  if (!candidate) return "UTC";
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: candidate }).format(0);
+    return candidate;
+  } catch {
+    return "UTC";
+  }
+};
+
+const zonedParts = (instant, timeZone) => Object.fromEntries(
+  new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(instant))
+    .filter((part) => part.type !== "literal")
+    .map((part) => [part.type, Number(part.value)]),
+);
+
+const localMidnight = ({ year, month, day }, timeZone) => {
+  const target = Date.UTC(year, month - 1, day);
+  let instant = target;
+  // The offset can change between the first guess and the requested local day.
+  // Re-reading the zone after each adjustment handles both ordinary offsets and
+  // midnight-adjacent daylight-saving transitions without a timezone library.
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const parts = zonedParts(instant, timeZone);
+    const represented = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+    const adjustment = target - represented;
+    if (adjustment === 0) return instant;
+    instant += adjustment;
+  }
+  return instant;
+};
+
+const calendarDay = (year, month, day) => {
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return { year: date.getUTCFullYear(), month: date.getUTCMonth() + 1, day: date.getUTCDate() };
+};
+
+const shiftCalendarMonths = ({ year, month, day }, amount) => {
+  const target = new Date(Date.UTC(year, month - 1 + amount, 1));
+  const targetYear = target.getUTCFullYear();
+  const targetMonth = target.getUTCMonth() + 1;
+  const lastDay = new Date(Date.UTC(targetYear, targetMonth, 0)).getUTCDate();
+  return { year: targetYear, month: targetMonth, day: Math.min(day, lastDay) };
+};
+
+/**
+ * A deliberately narrower window than queryTimeWindow. Retrieval may discard
+ * evidence, so only explicit nearby calendar phrases are safe here. Tax years,
+ * quarters, and future ranges remain verification context rather than filters.
+ */
+export function retrievalTimeWindow(query, { now = Date.now(), timeZone = "UTC" } = {}) {
+  if (!Number.isFinite(now) || !Number.isFinite(new Date(now).getTime())) return null;
+  const zone = retrievalTimeZone(timeZone);
+  const current = zonedParts(now, zone);
+  const today = { year: current.year, month: current.month, day: current.day };
+  const text = String(query || "")
+    .replace(/\b(?:card|account|invoice|order|reference)\s*(?:(?:number|ending(?: in)?|ends in|no\.)\s*|#\s*)?[\w*-]*\d[\w*-]*/gi, " ")
+    .replace(/(?:[xX•*]+)\s*\d+\b/g, " ")
+    .replace(/(?:[$€£¥]\s*|\b(?:USD|EUR|GBP|CAD|AUD|JPY)\s+)[-+−]?[\d,]+(?:\.\d+)?/gi, " ")
+    .replace(/\b\d[\d,]*(?:\.\d+)?\s*(?:dollars?|euros?|pounds?|cents?|items?|rows?|transactions?|payments?|charges?|%)/gi, " ");
+  if (/\b(?:next\s+[1-9]\d*\s+(?:days?|weeks?|months?)|this quarter|last quarter)\b/i.test(text) ||
+      /\b(?:19|20)\d{2}\b/.test(text)) return null;
+
+  let startDay = null;
+  let endDay = null;
+  const rolling = /\b(?:last|past)\s+([1-9]\d*)\s+(days?|weeks?|months?)\b/i.exec(text);
+  if (rolling) {
+    const count = Number(rolling[1]);
+    if (!Number.isSafeInteger(count) || count > 36600) return null;
+    startDay = /^month/i.test(rolling[2])
+      ? shiftCalendarMonths(today, -count)
+      : calendarDay(today.year, today.month, today.day - count * (/^week/i.test(rolling[2]) ? 7 : 1));
+    endDay = calendarDay(today.year, today.month, today.day + 1);
+  } else if (/\b(?:this|last)\s+week\b/i.test(text)) {
+    const dayOfWeek = new Date(Date.UTC(today.year, today.month - 1, today.day)).getUTCDay();
+    const mondayOffset = (dayOfWeek + 6) % 7;
+    const last = /\blast\s+week\b/i.test(text);
+    startDay = calendarDay(today.year, today.month, today.day - mondayOffset - (last ? 7 : 0));
+    endDay = calendarDay(startDay.year, startDay.month, startDay.day + 7);
+  } else if (/\b(?:this|last)\s+month\b/i.test(text)) {
+    const last = /\blast\s+month\b/i.test(text);
+    startDay = shiftCalendarMonths({ ...today, day: 1 }, last ? -1 : 0);
+    endDay = shiftCalendarMonths(startDay, 1);
+  } else {
+    return null;
+  }
+
+  const start = localMidnight(startDay, zone);
+  const end = localMidnight(endDay, zone);
+  return Number.isFinite(start) && Number.isFinite(end) && start < end
+    ? { start, end, timeZone: zone }
+    : null;
+}
+
 const validCalendarDay = (year, month, day) => {
   const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
   const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];

@@ -34,6 +34,9 @@ export const CLAIM_KINDS = Object.freeze({
 });
 
 const PRIMARY_TITLE = /\b(registrar|transcript of record|decree|judgment|judgement|docket|exhibit|affidavit|subpoena|deed|lease|contract|agreement|settlement|title|policy|passport|licen[cs]e|certificate|articles of (?:incorporation|organization)|k-?1|w-?2|1099|statement|payoff|lien|patent)\b/i;
+const COURT_ORDER_TITLE = /\b(?:(?:temporary|interim|final|protective|restraining|custody|support|withholding)[\s_-]+orders?|order[\s_-]+(?:granting|denying|vacating|adopting|on|of|re)|minute[\s_-]+entry|ruling|parenting[\s_-]+plan)\b/i;
+const DRAFT_TITLE = /\b(draft|unsigned|not[\s_-]+signed|unexecuted|proposed|redline|template|for[\s_-]+review)\b/i;
+const PLAIN_TEXT_NOTE = /\.(?:md|markdown|txt|text)(?:$|[?#])/i;
 const DERIVED_TITLE = /\b(invoice|receipt|summary|report|return|reconciliation|ledger|export|spreadsheet|balance sheet|p&l|profit and loss)\b/i;
 const RECOLLECTION_TITLE = /\b(notes?|minutes|transcript|recording|call|meeting|interview|debrief|standup|1:1)\b/i;
 
@@ -62,13 +65,68 @@ const EXPLICIT_RELATIONSHIP_CLAIM = /\b(client|customer|engagement|relationship|
 const STATUS_LANGUAGE = /\b(active|inactive|current(?:ly)?|still|remains?|continues?|continuing|ongoing|stopped|ended|terminated|cancelled|canceled|ceased|churned|closed|left|no longer|renewed|retained|working together)\b|\b(?:is|are)\s+(?:still\s+)?(?:an?\s+)?(?:client|customer|member|patient|employee|tenant|vendor|partner)\b/i;
 
 const trueValue = (value) => value === true || value === 1 || value === "1";
-const reliableText = (row) => {
+
+/** The marks OCR leaves in stored text where it could not read something. */
+export const OCR_UNREADABLE_MARK = "[[UNREADABLE]]";
+const UNREADABLE_TEXT = /\[\[\s*unreadable\s*\]\]|\[\[page \d+: could not be read/i;
+
+/** True when this text carries a mark of something OCR could not read. */
+export function hasUnreadableMark(text) {
+  return typeof text === "string" && UNREADABLE_TEXT.test(text);
+}
+
+/**
+ * Internal to retrieval. A bounded excerpt cannot hide an unreadable mark
+ * elsewhere in the source chunk used to make that excerpt.
+ */
+export const UNREADABLE_SOURCE_CHUNK = "_unreadable_source_chunk";
+
+const METADATA_PROJECTIONS = ["authority_meta", "_authority_meta", "meta", "metadata"];
+const pageCount = (value) => Number.isSafeInteger(value) && value >= 0;
+
+/** A stored OCR receipt proves that every page was accounted for and none failed. */
+export function completeOcrRead(metadata) {
+  const ocr = metadata?.ocr;
+  if (!ocr || typeof ocr !== "object" || Array.isArray(ocr)) return false;
+  const pages = Array.isArray(ocr.per_page) ? ocr.per_page : null;
+  return ocr.text_source === "ocr" &&
+    ocr.pages_unreadable === 0 &&
+    pageCount(ocr.pages_total) && pageCount(ocr.pages_read) && pageCount(ocr.pages_blank) &&
+    ocr.pages_read > 0 &&
+    ocr.pages_read + ocr.pages_blank === ocr.pages_total &&
+    pages !== null && pages.length === ocr.pages_total &&
+    pages.every((page) => page?.status === "read" || page?.status === "blank");
+}
+
+function ocrReadIsEvidence(row) {
+  if (hasUnreadableMark(row?.text) || hasUnreadableMark(row?.snippet) ||
+      row?.[UNREADABLE_SOURCE_CHUNK] === true) return false;
+  if (METADATA_PROJECTIONS.some((key) => Object.hasOwn(row || {}, key))) {
+    return completeOcrRead(jsonObject(
+      row.authority_meta ?? row._authority_meta ?? row.meta ?? row.metadata,
+    ));
+  }
+  return row?.scanned === true;
+}
+
+/**
+ * Return the extraction basis that may stand behind an answer. Native text
+ * keeps its existing reliability rule. OCR counts only from a complete stored
+ * receipt and a clean relied-on chunk; partial and receiptless OCR stays null.
+ */
+export function evidenceTextBasis(row) {
   const source = String(row?.text_source || "unknown").toLowerCase();
-  const reliable = row?.text_reliable === undefined || row?.text_reliable === null
-    ? false
-    : trueValue(row.text_reliable);
-  return source === "native" && reliable;
-};
+  if (source === "native") {
+    const reliable = row?.text_reliable === undefined || row?.text_reliable === null
+      ? false
+      : trueValue(row.text_reliable);
+    return reliable ? "native" : null;
+  }
+  return source === "ocr" && ocrReadIsEvidence(row) ? "ocr" : null;
+}
+
+export const SCANNED_TEXT_REASON = "its text was read by OCR from a scanned copy";
+const reliableNativeText = (row) => evidenceTextBasis(row) === "native";
 const evidenceTime = (row) => {
   const raw = row?.document_date ?? row?.ts;
   if (typeof raw === "number") {
@@ -140,7 +198,7 @@ export function ownerConfirmedRecord(row = {}) {
     titleMatch && titleMatch[1] === idMatch?.[1] &&
     day === idMatch?.[1] &&
     row.date_source === "owner_confirmation" && reliableDate(row) &&
-    reliableText(row) &&
+    reliableNativeText(row) &&
     metadata?.authority === "T1" && metadata?.operative === true &&
     subjectIdentityMatches
   );
@@ -268,7 +326,27 @@ export function tierOf(row = {}) {
   if (PRIMARY_SOURCES.has(source)) {
     return { tier: "T1", ...TIERS.T1, reason: `a machine feed (${source}), not somebody's account of it` };
   }
-  const primaryMatch = PRIMARY_TITLE.exec(titleAndUri) || PRIMARY_FOLDER.exec(folder);
+  const correspondence = CORRESPONDENCE_SOURCES.has(source);
+  const plainTextNote = PLAIN_TEXT_NOTE.test(titleAndUri);
+  const namedCourtOrder = COURT_ORDER_TITLE.exec(titleAndUri);
+  const courtOrderMatch = correspondence || plainTextNote ? null : namedCourtOrder;
+  const primaryMatch = PRIMARY_TITLE.exec(titleAndUri) || courtOrderMatch || PRIMARY_FOLDER.exec(folder);
+  const draftMatch = primaryMatch ? DRAFT_TITLE.exec(titleAndUri) : null;
+  if (draftMatch) {
+    return {
+      tier: "T3", ...TIERS.T3,
+      reason: `marked as a non-final record (${draftMatch[0]}); it cannot outrank an executed or filed version`,
+    };
+  }
+  if (namedCourtOrder && correspondence) {
+    return { tier: "T3", ...TIERS.T3, reason: `${source}, written at the time` };
+  }
+  if (namedCourtOrder && plainTextNote) {
+    return {
+      tier: "T3", ...TIERS.T3,
+      reason: `court-order wording appears only in a Markdown or plain-text note (${namedCourtOrder[0]})`,
+    };
+  }
   if (primaryMatch && lineage.kind === "source_record" && lineage.status === "known") {
     return { tier: "T1", ...TIERS.T1, reason: `a recorded direct source artifact (${primaryMatch[0]})` };
   }
@@ -316,6 +394,7 @@ const transactionalEvidence = (row) => {
  */
 export function authorityFor(row = {}, {
   query = "", claimText = "", current = false, claim = null,
+  owner: configuredOwner = null, now = Date.now(), timeZone = "UTC",
 } = {}) {
   const base = tierOf(row);
   const claimKind = claim || claimKindFor(claimText, query);
@@ -323,14 +402,19 @@ export function authorityFor(row = {}, {
   const operativeSection = owner.valid ? operativeSectionForQuery(row, query) : null;
   const relationshipBlocked = claimKind === CLAIM_KINDS.RELATIONSHIP_STATUS && transactionalEvidence(row) && !owner.valid;
   const ownerSectionMismatch = owner.valid && !operativeSection;
-  const taxScope = taxEvidenceScope(row, query);
+  const taxScope = taxEvidenceScope(row, query, { owner: configuredOwner, now, timeZone });
   const taxScopeBlocked = taxScope?.matched === false;
-  const textIsReliable = reliableText(row);
+  const textBasis = evidenceTextBasis(row);
+  const textIsReliable = textBasis !== null;
+  const scanned = textBasis === "ocr";
   const dateIsReliable = !current || reliableDate(row);
   const eligible = !relationshipBlocked && !ownerSectionMismatch && !taxScopeBlocked;
   const authoritative = eligible && base.rank <= TIERS.T2.rank && textIsReliable && dateIsReliable;
 
-  let reason = base.reason;
+  const readReason = scanned && !String(base.reason).includes(SCANNED_TEXT_REASON)
+    ? `${base.reason}; ${SCANNED_TEXT_REASON}`
+    : base.reason;
+  let reason = readReason;
   if (relationshipBlocked) {
     reason = `${String(row.source || "this financial record")} can establish its account or transaction state, not a relationship`;
   } else if (ownerSectionMismatch) {
@@ -340,7 +424,7 @@ export function authorityFor(row = {}, {
   } else if (!textIsReliable) {
     reason = `${base.reason}; its text was not obtained from a reliable native text layer`;
   } else if (!dateIsReliable) {
-    reason = `${base.reason}; it has no reliable as-of date for a current claim`;
+    reason = `${readReason}; it has no reliable as-of date for a current claim`;
   } else if (operativeSection) {
     reason = `owner-confirmed operative ${operativeSection.name} as of ${operativeSection.as_of}`;
   }
@@ -356,6 +440,7 @@ export function authorityFor(row = {}, {
     current: Boolean(current),
     owner_confirmed: owner.valid,
     operative: Boolean(operativeSection),
+    ...(scanned ? { scanned: true } : {}),
     ...(taxScope ? { tax_scope: taxScope } : {}),
     ...(operativeSection ? { operative_section: operativeSection } : {}),
   };

@@ -27,9 +27,10 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import worker from "../src/index.js";
 import {
-  COVERAGE_INCOMPLETE, NO_RESULTS_GAP, SEARCH_UNAVAILABLE,
+  ANSWER_WITHHELD, COVERAGE_INCOMPLETE, NO_RESULTS_GAP, REFUSAL_NEXT_ACTIONS,
+  SEARCH_UNAVAILABLE, absenceUnproven, answerWithheldNotice,
   coverageIncompleteNotice, degradedCause, emptyRetrievalDisclosure,
-  retrievalUnavailable, unavailableNotice,
+  meaningSearchLine, projectionPending, refusalNextAction, retrievalUnavailable, unavailableNotice,
 } from "../src/lib/retrieval-status.js";
 import {
   PROJECTION_CATCHUP_MAX_AGE_MS,
@@ -39,6 +40,7 @@ import {
   search,
   vectorReadiness,
 } from "../src/lib/store-d1.js";
+import { storeFor } from "../src/lib/store.js";
 import { looksLikeRefusal } from "../../eval/scorer.mjs";
 import { cmdAsk } from "../../brain.mjs";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -73,6 +75,17 @@ function assertsAbsence(text) {
     .some((sentence) => ABSENCE_CLAIM.test(sentence) && !PROHIBITION.test(sentence));
 }
 
+{
+  check("meaning-search progress names visible and total chunks instead of a percentage",
+    meaningSearchLine({ visible: 12_400, total: 48_000 }) ===
+      "Meaning search covers 12,400 of 48,000 chunks; keyword search covers all");
+  check("an unknown meaning-search total stays a counting state",
+    meaningSearchLine({ visible: 12_400, total: null }) ===
+      "Meaning search is still counting chunks; keyword search covers all");
+  check("a ready meaning-search projection needs no catch-up line",
+    meaningSearchLine({ visible: 48_000, total: 48_000 }) === null);
+}
+
 /* Everything in a response that a model or a human actually reads as prose. */
 const proseOf = (obj) => [
   obj?.note, obj?.notice, obj?.answer,
@@ -87,17 +100,53 @@ const proseOf = (obj) => [
     assertsAbsence("Do NOT say or imply that the brain has nothing on this question.") === false);
 }
 
+for (const gate of [
+  "uncited_draft", "money_check", "date_check", "conflicting_records",
+  "unreadable_check_reply", "unsupported",
+]) {
+  const notice = answerWithheldNotice(gate);
+  check(`answer-withheld ${gate} notice does not score as a refusal`,
+    looksLikeRefusal(notice) === false, notice);
+}
+
+const WORKER_NEXT_ACTIONS = [
+  [undefined, null, 'Next: ask again with a name, date or exact phrase the record would contain.'],
+  [COVERAGE_INCOMPLETE, null, 'Next: say "check my Brain" to see which source is still loading, then ask again.'],
+  [SEARCH_UNAVAILABLE, null, 'Next: ask again in a minute; if it fails twice, say "check my Brain".'],
+  [ANSWER_WITHHELD, "uncited_draft", "Next: ask about one record at a time, naming its title or date."],
+  [ANSWER_WITHHELD, "unsupported", "Next: ask about one record at a time, naming its title or date."],
+  [ANSWER_WITHHELD, "money_check", "Next: ask for one amount with its payer, payee and date."],
+  [ANSWER_WITHHELD, "date_check", "Next: ask again with the exact date range you mean."],
+  [ANSWER_WITHHELD, "conflicting_records", "Next: ask which record is newest on this; the records found disagree."],
+  [ANSWER_WITHHELD, "unreadable_check_reply", "Next: ask the same question again in a minute."],
+];
+{
+  check("the refusal next-action map is closed and complete",
+    Object.isFrozen(REFUSAL_NEXT_ACTIONS) &&
+      Object.keys(REFUSAL_NEXT_ACTIONS).sort().join(",") ===
+        "answer_withheld:conflicting_records,answer_withheld:date_check,answer_withheld:money_check,answer_withheld:uncited_draft,answer_withheld:unreadable_check_reply,answer_withheld:unsupported,coverage_incomplete,no_results,search_unavailable");
+  for (const [status, withheldGate, expected] of WORKER_NEXT_ACTIONS) {
+    const action = refusalNextAction({ status, withheldGate });
+    check(`the ${status || "no_results"}:${withheldGate || "default"} refusal has its exact next action`,
+      action === expected && looksLikeRefusal(action) === false && !/%|brain (?:drain|health)/i.test(action),
+      String(action));
+  }
+  check("an unmapped refusal status has no invented next action",
+    refusalNextAction({ status: "future_refusal" }) === null);
+}
+
 /* ------------------------------------------------------------------ */
 /* a worker env whose vector projection is not finished                */
 /* ------------------------------------------------------------------ */
 
 function mkEnv({
-  rows = [], coverageRows = [], coverageUnavailable = false,
+  rows = [], keywordRows = rows, coverageRows = [], coverageUnavailable = false,
   vectorIds = [], projectionReady = true, embeds = true,
   expectedVectors = vectorIds.length, actualVectors = vectorIds.length,
-  pending = 0, oldestQueuedAt = null, supportedAnswer = false,
+  pending = 0, oldestQueuedAt = null, supportedAnswer = false, embeddingGate = null,
+  vectorThrows = false,
 } = {}) {
-  const retrievalCalls = { keyword: 0, vector: 0 };
+  const retrievalCalls = { keyword: 0, vector: 0, embedding: 0, events: [] };
   const env = {
     STORAGE: "d1",
     ADMIN_KEY: "k",
@@ -110,7 +159,11 @@ function mkEnv({
               if (coverageUnavailable) throw new Error("coverage read unavailable");
               return { results: coverageRows };
             }
-            if (/chunks_fts MATCH/.test(sql)) retrievalCalls.keyword++;
+            if (/chunks_fts MATCH/.test(sql)) {
+              retrievalCalls.keyword++;
+              retrievalCalls.events.push("keyword");
+              return { results: keywordRows };
+            }
             return { results: rows };
           },
           first: async () => {
@@ -150,6 +203,8 @@ function mkEnv({
     VECTORIZE: {
       query: async () => {
         retrievalCalls.vector++;
+        retrievalCalls.events.push("vector");
+        if (vectorThrows) throw new Error("synthetic vector failure");
         return { matches: vectorIds.map((id) => ({ id })) };
       },
       upsert: async () => {},
@@ -158,6 +213,9 @@ function mkEnv({
     AI: {
       run: async (model, input) => {
         if (model.includes("bge-")) {
+          retrievalCalls.embedding++;
+          retrievalCalls.events.push("embedding");
+          if (embeddingGate) await embeddingGate;
           return embeds ? { data: [[0.1, 0.2, 0.3]] } : (() => { throw new Error("embedder down"); })();
         }
         const system = String(input?.messages?.[0]?.content || "");
@@ -208,30 +266,112 @@ const unified = async (env, q = "the") => {
     JSON.stringify({ d: healthy.degraded, r: healthy.degraded_reason }));
 }
 
+{
+  check("only the two indexing reasons are pending projection states",
+    projectionPending("vector", "projection-catching-up") === true &&
+      projectionPending("vector", "projection-incomplete") === true &&
+      projectionPending("vector", "vector-query-failed") === false &&
+      projectionPending("no-embedding", "embedding-unavailable") === false &&
+      projectionPending("vector", "projection-count-mismatch") === false);
+}
+
+/* ---- keyword retrieval starts while the embedding provider is pending ---- */
+{
+  let releaseEmbedding;
+  const embeddingGate = new Promise((resolve) => { releaseEmbedding = resolve; });
+  const row = {
+    chunk_uid: "drive:vector-only#0", doc_uid: "drive:vector-only", source: "drive",
+    source_id: "vector-only", title: "Vector-only record", text: "A differently worded fact.",
+    document_date: Date.parse("2026-09-28T00:00:00.000Z"),
+    date_source: "fixture:date", date_reliable: 1, text_source: "native", text_reliable: 1,
+  };
+  const env = mkEnv({
+    rows: [row], keywordRows: [], vectorIds: [row.chunk_uid], embeddingGate,
+  });
+  const searchPromise = storeFor(env).search(env, { query: "alternate phrase", limit: 5 });
+  await new Promise((resolve) => setImmediate(resolve));
+  check("deferred embedding: FTS reaches its decision point before the embedding resolves",
+    env.__retrievalCalls.keyword > 0 && env.__retrievalCalls.vector === 0,
+    JSON.stringify(env.__retrievalCalls));
+  releaseEmbedding();
+  const result = await searchPromise;
+  check("deferred embedding: the late vector lane still contributes its record",
+    env.__retrievalCalls.vector > 0 && result.results.some((candidate) => candidate.doc_uid === row.doc_uid),
+    JSON.stringify({ calls: env.__retrievalCalls, results: result.results.map((candidate) => candidate.doc_uid) }));
+}
+
+{
+  let rejectEmbedding;
+  const embeddingGate = new Promise((_, reject) => { rejectEmbedding = reject; });
+  const row = {
+    chunk_uid: "drive:keyword#0", doc_uid: "drive:keyword", source: "drive",
+    source_id: "keyword", title: "Keyword record", text: "Exact fixture wording.",
+    document_date: Date.parse("2026-09-28T00:00:00.000Z"),
+    date_source: "fixture:date", date_reliable: 1, text_source: "native", text_reliable: 1,
+  };
+  const env = mkEnv({ rows: [row], keywordRows: [row], embeddingGate });
+  const searchPromise = storeFor(env).search(env, { query: "fixture wording", limit: 5 });
+  await new Promise((resolve) => setImmediate(resolve));
+  check("failed embedding: FTS runs while the provider call is still pending",
+    env.__retrievalCalls.keyword > 0 && env.__retrievalCalls.vector === 0,
+    JSON.stringify(env.__retrievalCalls));
+  rejectEmbedding(new Error("synthetic embedding failure"));
+  const result = await searchPromise;
+  check("failed embedding: keyword evidence answers with the existing no-embedding state and no indexing receipt",
+    result.results.some((candidate) => candidate.doc_uid === row.doc_uid) &&
+      result.degraded === "no-embedding" && result.degraded_reason === "embedding-unavailable" &&
+      result.retrieval_receipt === undefined && result.meaning_search === undefined,
+    JSON.stringify(result));
+}
+
+{
+  const row = {
+    chunk_uid: "drive:ready#0", doc_uid: "drive:ready", source: "drive",
+    source_id: "ready", title: "Ready record", text: "Ready fixture wording.",
+    document_date: Date.parse("2026-09-28T00:00:00.000Z"),
+    date_source: "fixture:date", date_reliable: 1, text_source: "native", text_reliable: 1,
+  };
+  const ready = mkEnv({ rows: [row], vectorIds: [row.chunk_uid] });
+  const baseline = await storeFor(ready).search(ready, { query: "ready wording", limit: 5 });
+  check("control: ready hybrid ranking has no indexing receipt",
+    baseline.results[0]?.doc_uid === row.doc_uid && baseline.retrieval_receipt === undefined &&
+      baseline.meaning_search === undefined,
+    JSON.stringify(baseline));
+
+  const grant = mkEnv({ rows: [row], vectorIds: [row.chunk_uid] });
+  await storeFor(grant).search(grant, {
+    query: "ready wording", limit: 5,
+    access: { kind: "grant", grantId: "fixture-grant", entitySlug: "fixture-entity" },
+  });
+  check("control: an exact-document grant never calls the embedding provider",
+    grant.__retrievalCalls.keyword > 0 && grant.__retrievalCalls.embedding === 0 &&
+      grant.__retrievalCalls.vector === 0,
+    JSON.stringify(grant.__retrievalCalls));
+}
+
 /* ---- (a) empty + degraded: no absence instruction, cause named ---- */
 {
-  const { res, body } = await think(mkEnv({ projectionReady: false }));
+  const { res, body } = await think(mkEnv({
+    projectionReady: false,
+    expectedVectors: 48_000,
+    actualVectors: 12_400,
+  }));
   check("the route still answers 200", res.status === 200, String(res.status));
-  check("it reports a distinct unavailable status, not a result",
-    body.status === SEARCH_UNAVAILABLE, JSON.stringify(body.status));
+  check("projection-incomplete zero results are provisional coverage, not a failed search",
+    body.status === COVERAGE_INCOMPLETE, JSON.stringify(body.status));
   check("degraded is still on the wire", body.degraded === "vector", String(body.degraded));
 
   const gapTypes = (body.gaps || []).map((g) => g.type);
   check("no no_results gap survives", !gapTypes.includes("no_results"), JSON.stringify(gapTypes));
-  check("the gap is typed as an unavailable search",
-    gapTypes.includes(SEARCH_UNAVAILABLE), JSON.stringify(gapTypes));
+  check("the gap is typed as keyword-only indexing",
+    gapTypes.includes("keyword_only_indexing"), JSON.stringify(gapTypes));
 
   const gapText = (body.gaps || []).map((g) => g.detail).join(" ");
   check("THE DEFECT: the gap must not instruct anyone to state an absence",
     !assertsAbsence(gapText), gapText);
-  check("the gap says the search could not be completed",
-    /could not be completed/i.test(gapText), gapText);
-  check("the gap names the cause: the index is still building",
-    /still building/i.test(gapText), gapText);
-  check("the gap explicitly forbids concluding the brain has nothing",
-    /Do NOT say or imply that the brain has nothing/.test(gapText), gapText);
-  check("and forbids answering from the model's own knowledge instead",
-    /do not answer from your own knowledge/i.test(gapText), gapText);
+  check("the gap names exact indexing coverage and why a miss remains provisional",
+    gapText === "Meaning search covers 12,400 of 48,000 chunks; keyword search covers all. Cited answers rest on keyword evidence; a record worded differently may not be found yet, so a missing result is provisional.",
+    gapText);
 
   check("a human-readable notice rides along", typeof body.notice === "string" && body.notice.length > 40,
     String(body.notice));
@@ -239,8 +379,11 @@ const unified = async (env, q = "the") => {
     !assertsAbsence(body.notice), String(body.notice));
   check("the notice does not read as a refusal to the eval scorer",
     !looksLikeRefusal(body.notice), String(body.notice));
-  check("the notice tells the owner what to do next",
-    /brain drain/.test(body.notice), String(body.notice));
+  check("the notice reports the completed zero-match and exact two-count state",
+    body.notice === "The search completed with zero matches. Meaning search covers 12,400 of 48,000 chunks; keyword search covers all, so treat this result as provisional.",
+    String(body.notice));
+  check("projection-incomplete gives the exact coverage next action",
+    body.next_action === WORKER_NEXT_ACTIONS[1][2], String(body.next_action));
 
   check("no refusal confidence is published for a search that never ran",
     body.confidence === undefined, JSON.stringify(body.confidence));
@@ -279,6 +422,12 @@ const unified = async (env, q = "the") => {
     check("a completed search during the observed small recent backlog is coverage-incomplete",
       body.status === COVERAGE_INCOMPLETE && body.degraded_reason === "projection-catching-up",
       JSON.stringify({ status: body.status, reason: body.degraded_reason }));
+    check("the pending Think response carries its keyword-only receipt and exact search counts",
+      body.retrieval_receipt === "keyword_only_indexing" &&
+        body.meaning_search?.visible === 1_793_009 && body.meaning_search?.total === 1_795_309 &&
+        body.meaning_search?.line ===
+          "Meaning search covers 1,793,009 of 1,795,309 chunks; keyword search covers all",
+      JSON.stringify({ receipt: body.retrieval_receipt, meaning_search: body.meaning_search }));
     check("a provisional zero-result search still refuses an absence claim",
       body.answer === null && body.confidence === undefined &&
         !body.gaps?.some((gap) => gap.type === "no_results") && !assertsAbsence(proseOf(body)),
@@ -307,12 +456,31 @@ const unified = async (env, q = "the") => {
       supportedAnswer: true,
     });
     const supportedBody = (await think(supported, "what does the synthetic record support")).body;
+    const healthySupported = mkEnv({
+      rows: [supportedRow], vectorIds: [supportedRow.chunk_uid], supportedAnswer: true,
+    });
+    const healthySupportedBody = (await think(
+      healthySupported, "what does the synthetic record support",
+    )).body;
     check("an evidence-gated answer survives proportional projection catch-up",
       supported.__retrievalCalls.keyword > 0 && supported.__retrievalCalls.vector > 0 &&
         supportedBody.answer === "The retrieved record supports the answer [1]." &&
-        supportedBody.evidence_gate?.supported === true && supportedBody.citations?.length === 1 &&
+        supportedBody.evidence_gate?.supported === true && supportedBody.evidence_gate?.complete === true &&
+        supportedBody.evidence_gate?.partial !== true && supportedBody.citations?.length === 1 &&
         supportedBody.status === undefined && supportedBody.degraded_reason === "projection-catching-up",
       JSON.stringify(supportedBody));
+    check("a cited answer gets no refusal next action",
+      supportedBody.next_action === undefined, String(supportedBody.next_action));
+    check("pending cited keyword evidence keeps the healthy confidence score",
+      supportedBody.confidence?.percent === healthySupportedBody.confidence?.percent &&
+        !supportedBody.confidence?.basis?.includes("vector index not fully query-ready"),
+      JSON.stringify({ pending: supportedBody.confidence, healthy: healthySupportedBody.confidence }));
+    const pendingGap = supportedBody.gaps?.find((gap) => gap.type === "keyword_only_indexing");
+    check("pending cited evidence gets the exact keyword-only indexing gap",
+      pendingGap?.detail ===
+        "Meaning search covers 1,793,009 of 1,795,309 chunks; keyword search covers all. Cited answers rest on keyword evidence; a record worded differently may not be found yet, so a missing result is provisional." &&
+        !/brain drain|try again shortly/i.test(pendingGap.detail),
+      JSON.stringify(supportedBody.gaps));
 
     const old = mkEnv({
       projectionReady: false,
@@ -322,9 +490,10 @@ const unified = async (env, q = "the") => {
       oldestQueuedAt: now - 25 * 60 * 60 * 1000,
     });
     const oldBody = (await think(old)).body;
-    check("control: the same completed search with an old backlog stays unavailable",
+    check("the same completed search with an old backlog remains provisional while indexing",
       old.__retrievalCalls.keyword > 0 && old.__retrievalCalls.vector > 0 &&
-        oldBody.status === SEARCH_UNAVAILABLE && oldBody.degraded_reason === "projection-incomplete",
+        oldBody.status === COVERAGE_INCOMPLETE && oldBody.degraded_reason === "projection-incomplete" &&
+        absenceUnproven(oldBody) === true,
       JSON.stringify({ calls: old.__retrievalCalls, status: oldBody.status, reason: oldBody.degraded_reason }));
   } finally {
     Date.now = realNow;
@@ -391,9 +560,10 @@ const unified = async (env, q = "the") => {
     !/reports the projection complete/i.test(notice), notice);
 
   const { body } = await think(mkEnv({ projectionReady: false }));
-  check("the live /think notice carries the same fixed wording, not just the helper in isolation",
-    /does not speed it up/i.test(body.notice || "") &&
-      !/reports the projection complete/i.test(body.notice || ""),
+  check("the live /think notice treats pending projection as provisional keyword coverage",
+    /search completed with zero matches/i.test(body.notice || "") &&
+      /keyword search covers all/i.test(body.notice || "") &&
+      !/brain drain|try again shortly/i.test(body.notice || ""),
     String(body.notice));
 }
 
@@ -403,9 +573,41 @@ const unified = async (env, q = "the") => {
   check("a dead embedder also produces an unavailable search, not an absence",
     body.status === SEARCH_UNAVAILABLE && body.degraded === "no-embedding",
     JSON.stringify({ s: body.status, d: body.degraded }));
+  check("a dead embedder gives the exact unavailable-search next action",
+    body.next_action === WORKER_NEXT_ACTIONS[2][2], String(body.next_action));
   check("its gap names ITS cause, not the vector index",
     /embedding model did not answer/i.test((body.gaps || []).map((g) => g.detail).join(" ")),
     JSON.stringify(body.gaps));
+  check("a missing embedding is not misclassified as pending projection",
+    projectionPending(body.degraded, body.degraded_reason) === false &&
+      body.retrieval_receipt === undefined, JSON.stringify(body));
+}
+
+/* ---- a real vector-query failure keeps its confidence penalty and failure gap ---- */
+{
+  const row = {
+    chunk_uid: "drive:failure-control#0", doc_uid: "drive:failure-control", source: "drive",
+    source_id: "failure-control", title: "Failure control", text: "The supported fixture fact.",
+    document_date: Date.parse("2026-09-28T00:00:00.000Z"),
+    date_source: "fixture:date", date_reliable: 1, text_source: "native", text_reliable: 1,
+  };
+  const healthyBody = (await think(mkEnv({
+    rows: [row], vectorIds: [row.chunk_uid], supportedAnswer: true,
+  }), "what is the supported fixture fact")).body;
+  const failedBody = (await think(mkEnv({
+    rows: [row], vectorIds: [row.chunk_uid], vectorThrows: true, supportedAnswer: true,
+  }), "what is the supported fixture fact")).body;
+  const failureGap = failedBody.gaps?.find((gap) => gap.type === "vector_unavailable");
+  check("control: vector-query-failed keeps the 15-point confidence penalty",
+    healthyBody.confidence?.percent - failedBody.confidence?.percent === 15 &&
+      failedBody.confidence?.basis?.includes("vector index not fully query-ready"),
+    JSON.stringify({ healthy: healthyBody.confidence, failed: failedBody.confidence }));
+  check("control: vector-query-failed keeps the failure gap and receives no indexing receipt",
+    failedBody.degraded_reason === "vector-query-failed" &&
+      /Meaning-based search failed/.test(failureGap?.detail || "") &&
+      failedBody.retrieval_receipt === undefined &&
+      projectionPending(failedBody.degraded, failedBody.degraded_reason) === false,
+    JSON.stringify(failedBody));
 }
 
 /* ---- (b) empty + healthy: the honest refusal, unchanged ---- */
@@ -422,6 +624,9 @@ const unified = async (env, q = "the") => {
   check("degraded is absent", body.degraded === undefined, String(body.degraded));
   check("and the refusal confidence is still published",
     body.confidence && body.confidence.percent >= 80, JSON.stringify(body.confidence));
+  check("a healthy no-match gives the exact search-refinement action without adding status",
+    body.status === undefined && body.next_action === WORKER_NEXT_ACTIONS[0][2],
+    JSON.stringify({ status: body.status, next_action: body.next_action }));
   check("the honest path is not treated as unavailable by clients",
     retrievalUnavailable(body) === false, JSON.stringify(body));
 }
@@ -478,8 +683,10 @@ const unified = async (env, q = "the") => {
 /* ---- /unified carries the same distinction on its own shape ---- */
 {
   const { body: broken } = await unified(mkEnv({ projectionReady: false }));
-  check("unified marks a zero-row degraded search unavailable",
-    broken.results.length === 0 && broken.status === SEARCH_UNAVAILABLE, JSON.stringify(broken).slice(0, 200));
+  check("unified marks zero rows during pending projection as provisional coverage",
+    broken.results.length === 0 && broken.status === COVERAGE_INCOMPLETE &&
+      broken.gaps?.some((gap) => gap.type === "keyword_only_indexing"),
+    JSON.stringify(broken).slice(0, 200));
   check("unified's notice does not assert an absence",
     typeof broken.notice === "string" && !assertsAbsence(broken.notice), String(broken.notice));
 
@@ -578,6 +785,12 @@ const unified = async (env, q = "the") => {
         http: async () => new Response(JSON.stringify({
           mode: "think", degraded: "vector", status: SEARCH_UNAVAILABLE,
           notice: unavailableNotice("vector"),
+          meaning_search: {
+            visible: 12_400,
+            total: 48_000,
+            line: "Meaning search covers 12,400 of 48,000 chunks; keyword search covers all",
+          },
+          next_action: WORKER_NEXT_ACTIONS[2][2],
           answer: null, citations: [], results: [],
           gaps: [{ type: SEARCH_UNAVAILABLE, detail: "x" }],
         }), { status: 200, headers: { "content-type": "application/json" } }),
@@ -587,8 +800,52 @@ const unified = async (env, q = "the") => {
     check("CLI: an unavailable search does not print the refusal sentence",
       !/The documents do not answer the question/.test(out), out);
     check("CLI: it prints the notice instead", /could not be completed/i.test(out), out);
+    check("CLI: it prints exact meaning-search counts instead of the vector degradation token",
+      /Meaning search covers 12,400 of 48,000 chunks; keyword search covers all/.test(out) &&
+        !/search is degraded: vector/.test(out), out);
+    check("CLI: Next follows the refusal explanation verbatim",
+      out.includes(WORKER_NEXT_ACTIONS[2][2]), out);
     check("CLI: it does not print a confidence-in-absence line",
       !/Confidence nothing is recorded/.test(out), out);
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
+}
+
+/* ---- answer withholding reaches the unchanged CLI renderer honestly ---- */
+{
+  const sandbox = mkdtempSync(join(tmpdir(), "brain-withheld-ask-"));
+  try {
+    const manifest = join(sandbox, "brain.manifest.json");
+    writeFileSync(manifest, JSON.stringify({
+      client: { slug: "fixture" },
+      brain: { domain: "fixture.example", worker_name: "fixture-brain" },
+      infrastructure: { cloudflare: { account_id: "not-needed-with-a-domain" } },
+    }));
+    const printed = [];
+    const realLog = console.log;
+    console.log = (...a) => printed.push(a.join(" "));
+    try {
+      await cmdAsk(manifest, {
+        ask: async () => "How much is the monthly payment?",
+        adminKey: `fixture-${"k".repeat(40)}`,
+        http: async () => new Response(JSON.stringify({
+          mode: "think", status: ANSWER_WITHHELD,
+          notice: answerWithheldNotice("money_check"),
+          answer: null,
+          confidence: { percent: 77, band: "moderate", basis: ["must not print"] },
+          evidence_gate: { supported: false, reason: "amount did not match its cited span" },
+          citations: [], results: [{ title: "Synthetic payment record" }], gaps: [],
+        }), { status: 200, headers: { "content-type": "application/json" } }),
+      });
+    } finally { console.log = realLog; }
+    const out = printed.join("\n");
+    check("CLI: answer_withheld prints the reviewed notice",
+      /money evidence check/i.test(out), out);
+    check("CLI: answer_withheld prints Why from evidence_gate",
+      /Why.*amount did not match its cited span/is.test(out), out);
+    check("CLI: answer_withheld prints no confidence percentage",
+      !/77%/.test(out), out);
   } finally {
     rmSync(sandbox, { recursive: true, force: true });
   }
@@ -694,6 +951,12 @@ async function mcpCall(responder, toolCalls) {
 const EMPTY_DEGRADED_THINK = {
   mode: "think", degraded: "vector", status: SEARCH_UNAVAILABLE,
   notice: unavailableNotice("vector"),
+  meaning_search: {
+    visible: 12_400,
+    total: 48_000,
+    line: "Meaning search covers 12,400 of 48,000 chunks; keyword search covers all",
+  },
+  next_action: WORKER_NEXT_ACTIONS[2][2],
   answer: null, citations: [], results: [],
   gaps: [{ type: SEARCH_UNAVAILABLE, detail: "the search could not be completed" }],
 };
@@ -761,6 +1024,12 @@ const EMPTY_DEGRADED_THINK = {
     typeof thought.note === "string" && !assertsAbsence(thought.note), String(thought.note));
   check("MCP brain_think: the note tells the model what actually happened",
     /could not be completed/i.test(thought.note), String(thought.note));
+  check("MCP brain_think: exact meaning-search counts pass through",
+    thought.meaning_search?.line ===
+      "Meaning search covers 12,400 of 48,000 chunks; keyword search covers all",
+    JSON.stringify(thought.meaning_search));
+  check("MCP brain_think: the exact next action passes through",
+    thought.next_action === WORKER_NEXT_ACTIONS[2][2], String(thought.next_action));
 
   const searched = JSON.parse(lines.find((l) => l.id === 3).result.content[0].text);
   check("MCP brain_search: degraded reaches the client's model",

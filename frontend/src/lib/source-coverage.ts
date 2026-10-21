@@ -50,6 +50,7 @@ export function coverageFacts(coverage: SourceCoverageDetail): string[] {
   if (coverage.counts.failed !== null && coverage.counts.failed > 0) {
     facts.push(`${coverage.counts.failed.toLocaleString()} failed`);
   }
+  if (coverage.last_progress_at) facts.push(`Last progress ${shortDate(coverage.last_progress_at)}`);
   if (coverage.projection_pending !== null && coverage.projection_pending > 0) {
     facts.push(`${coverage.projection_pending.toLocaleString()} waiting for meaning search`);
   }

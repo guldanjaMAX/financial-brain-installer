@@ -20,8 +20,9 @@ function connectorDb() {
     documents: new Map(), chunks: [], passkeys: new Map(),
     state: { session_generation: 1 },
   };
+  const calls = { chunkQueries: 0 };
   return {
-    tables,
+    tables, calls,
     prepare(sql) {
       let bound = [];
       const statement = {
@@ -46,6 +47,7 @@ function connectorDb() {
         },
         async all() {
           if (/FROM chunks WHERE doc_uid/.test(sql)) {
+            calls.chunkQueries++;
             return { results: tables.chunks.filter((c) => c.doc_uid === bound[0]) };
           }
           // A session now names the passkey device behind it, so resolving one
@@ -194,6 +196,15 @@ test("the full connector journey, register through revocation", async () => {
     jsonrpc: "2.0", id: 2, method: "tools/list",
   }, bearer), testEnv)).json();
   assert.deepEqual(tools.result.tools.map((t) => t.name), ["ask", "search", "fetch"]);
+  const fetchTool = tools.result.tools.find((tool) => tool.name === "fetch");
+  assert.deepEqual(fetchTool.inputSchema.properties.offset, {
+    type: "integer",
+    minimum: 0,
+    default: 0,
+    description: "Character offset for the next page of a long document.",
+  });
+  assert.match(fetchTool.description, /pages/i);
+  assert.match(fetchTool.description, /offset/i);
 
   const searched = await (await worker.fetch(jsonPost("/mcp", {
     jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "search", arguments: { query: "anything" } },
@@ -245,6 +256,99 @@ test("the full connector journey, register through revocation", async () => {
       reason: "derivation family was not recorded; this document may support what it directly says but cannot count as independent corroboration",
     },
   });
+  assert.deepEqual(fetchedBody.page, {
+    offset: 0,
+    returned_chars: "the fixture body".length,
+    total_chars: "the fixture body".length,
+    next_offset: null,
+    complete: true,
+  }, "a short record is one complete page");
+  assert.doesNotMatch(fetchedBody.text, /call fetch again/i,
+    "a complete short record carries no continuation instruction");
+
+  // Long records are paged through the real MCP fetch path. The page text may
+  // append an instruction, so returned_chars is the exact document prefix to
+  // concatenate. Nothing past the first 60,000 characters disappears.
+  const longChunks = Array.from({ length: 9 }, (_, index) =>
+    `section ${index + 1}\n${String(index + 1).repeat(9_990)}`);
+  const longBody = longChunks.join("\n\n");
+  db.tables.documents.set("drive:long-doc", {
+    title: "Long fixture doc", uri: null, source: "fixture-drive", source_id: "long-doc", source_kind: "drive",
+    document_date: null, date_source: null, date_reliable: 0,
+    text_source: "native", text_reliable: 1, meta: "{}",
+  });
+  db.tables.chunks.push(...longChunks.map((text) => ({ doc_uid: "drive:long-doc", text })));
+
+  const firstLongFetch = await (await worker.fetch(jsonPost("/mcp", {
+    jsonrpc: "2.0", id: 40, method: "tools/call",
+    params: { name: "fetch", arguments: { id: "drive:long-doc" } },
+  }, bearer), testEnv)).json();
+  const firstLongPage = JSON.parse(firstLongFetch.result.content[0].text);
+  assert.equal(firstLongPage.page.offset, 0);
+  assert.ok(firstLongPage.page.returned_chars <= 60_000);
+  assert.equal(firstLongPage.page.total_chars, longBody.length);
+  assert.equal(firstLongPage.page.complete, false);
+  assert.equal(firstLongPage.page.next_offset, firstLongPage.page.returned_chars);
+  assert.match(firstLongPage.text, new RegExp(`call fetch again.*offset=${firstLongPage.page.next_offset}`, "i"));
+
+  const secondLongFetch = await (await worker.fetch(jsonPost("/mcp", {
+    jsonrpc: "2.0", id: 41, method: "tools/call",
+    params: { name: "fetch", arguments: { id: "drive:long-doc", offset: firstLongPage.page.next_offset } },
+  }, bearer), testEnv)).json();
+  const secondLongPage = JSON.parse(secondLongFetch.result.content[0].text);
+  assert.deepEqual(secondLongPage.page, {
+    offset: firstLongPage.page.next_offset,
+    returned_chars: longBody.length - firstLongPage.page.next_offset,
+    total_chars: longBody.length,
+    next_offset: null,
+    complete: true,
+  });
+  const reconstructed = firstLongPage.text.slice(0, firstLongPage.page.returned_chars) +
+    secondLongPage.text.slice(0, secondLongPage.page.returned_chars);
+  assert.equal(reconstructed, longBody, "the two document page slices reconstruct the joined body exactly");
+  assert.match(secondLongPage.text, /section 9/, "the final section is fetchable");
+
+  const chunkQueriesBeforePastEnd = db.calls.chunkQueries;
+  const pastEnd = await (await worker.fetch(jsonPost("/mcp", {
+    jsonrpc: "2.0", id: 42, method: "tools/call",
+    params: { name: "fetch", arguments: { id: "drive:long-doc", offset: longBody.length + 1 } },
+  }, bearer), testEnv)).json();
+  assert.equal(pastEnd.result.isError, true);
+  assert.match(pastEnd.result.content[0].text, /offset/i);
+  assert.ok(db.calls.chunkQueries > chunkQueriesBeforePastEnd,
+    "the past-end refusal reached the chunk-query decision point");
+
+  for (const [label, offset] of [["negative", -1], ["non-integer", 1.5]]) {
+    const invalid = await (await worker.fetch(jsonPost("/mcp", {
+      jsonrpc: "2.0", id: 43, method: "tools/call",
+      params: { name: "fetch", arguments: { id: "drive:long-doc", offset } },
+    }, bearer), testEnv)).json();
+    assert.equal(invalid.result.isError, true, `${label} offset is a tool error`);
+    assert.match(invalid.result.content[0].text, /offset/i);
+  }
+
+  const surrogateBody = `${"x".repeat(59_999)}\u{1F642}tail`;
+  db.tables.documents.set("drive:surrogate-doc", {
+    title: "Unicode fixture doc", uri: null, source: "fixture-drive", source_id: "surrogate-doc", source_kind: "drive",
+    document_date: null, date_source: null, date_reliable: 0,
+    text_source: "native", text_reliable: 1, meta: "{}",
+  });
+  db.tables.chunks.push({ doc_uid: "drive:surrogate-doc", text: surrogateBody });
+  const surrogateFirst = JSON.parse((await (await worker.fetch(jsonPost("/mcp", {
+    jsonrpc: "2.0", id: 44, method: "tools/call",
+    params: { name: "fetch", arguments: { id: "drive:surrogate-doc" } },
+  }, bearer), testEnv)).json()).result.content[0].text);
+  const surrogateSecond = JSON.parse((await (await worker.fetch(jsonPost("/mcp", {
+    jsonrpc: "2.0", id: 45, method: "tools/call",
+    params: { name: "fetch", arguments: { id: "drive:surrogate-doc", offset: surrogateFirst.page.next_offset } },
+  }, bearer), testEnv)).json()).result.content[0].text);
+  const surrogateJoined = surrogateFirst.text.slice(0, surrogateFirst.page.returned_chars) +
+    surrogateSecond.text.slice(0, surrogateSecond.page.returned_chars);
+  assert.equal(surrogateJoined, surrogateBody);
+  assert.doesNotMatch(surrogateFirst.text.slice(0, surrogateFirst.page.returned_chars), /[\uD800-\uDBFF]$/,
+    "page one does not end with a lone high surrogate");
+  assert.doesNotMatch(surrogateSecond.text.slice(0, surrogateSecond.page.returned_chars), /^[\uDC00-\uDFFF]/,
+    "page two does not start with a lone low surrogate");
 
   // ask flows through the REAL think handler; with no LLM key configured the
   // plumbing still answers deterministically instead of fabricating.

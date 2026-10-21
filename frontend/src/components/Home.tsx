@@ -9,6 +9,7 @@ import { sourceOutcome } from "../lib/outcome";
 import {
   COVERAGE_DIMENSIONS, accessZonePresentation, coverageCaveat, coverageFacts, coveragePresentation,
 } from "../lib/source-coverage";
+import { meaningSearchLine } from "../lib/retrieval-status.js";
 import {
   Attention, Badge, Chip, Critical, NextStep, Note, Row, Section, TruthNote,
 } from "./ui";
@@ -598,7 +599,10 @@ export function pendingCountLabel(pending: number, isCapped = false): string {
 }
 
 export function PhaseNotice({ phase, status }: { phase: BrainPhase; status: SystemStatus | null }) {
-  const pct = status?.vectors?.percent_visible;
+  const searchLine = meaningSearchLine({
+    visible: status?.vectors?.visible,
+    total: status?.vectors?.expected,
+  });
   if (phase === "unreachable" || phase === "paused" || phase === "unknown" || phase === "coverage_unknown") {
     return phase === "unreachable"
       ? <Critical>{phraseFor(phase, status)}</Critical>
@@ -607,15 +611,10 @@ export function PhaseNotice({ phase, status }: { phase: BrainPhase; status: Syst
   return (
     <div className="border border-line rounded-2xl px-4 py-3.5 bg-card">
       <p className="text-[14.5px] text-ink-soft leading-relaxed">{phraseFor(phase, status)}</p>
-      {phase === "indexing" && pct !== null && pct !== undefined && (
-        <div className="mt-3">
-          <div className="h-1.5 bg-paper rounded-full overflow-hidden border border-line">
-            <div className="h-full bg-accent rounded-full transition-all" style={{ width: `${pct}%` }} />
-          </div>
-          <p className="text-[12.5px] text-ink-soft mt-1.5">
-            {pendingCountLabel(status?.vectors?.pending ?? 0, status?.vectors?.pending_is_capped)} still to work through. Answers may be incomplete until it finishes.
-          </p>
-        </div>
+      {phase === "indexing" && searchLine && (
+        <p className="text-[12.5px] text-ink-soft mt-2">
+          {searchLine}
+        </p>
       )}
     </div>
   );

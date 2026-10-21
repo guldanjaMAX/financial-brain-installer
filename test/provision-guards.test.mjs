@@ -175,6 +175,15 @@ check("older document receipts still have a count", documentCountOf({ total: 42 
   }, true);
   check("client preflight scans connector path metadata",
     pathRefusal?.labels?.includes("openai_api_key") && !pathRefusal.reason.includes(boundarySecret), JSON.stringify(pathRefusal));
+  const meetingPasscode = "A1b2C3d4E5f6G7h8J9k0L1m2N3p4Q5r6";
+  const meetingRefusal = credentialRefusalOf({
+    content: `Join the meeting: https://meet.example.test/j/123456789?pwd=${meetingPasscode}.1`,
+  }, true);
+  check("CLI credential preflight refuses a dotted meeting passcode at the shared decision point",
+    meetingRefusal?.labels?.includes("url_query_secret") &&
+      !meetingRefusal.reason.includes(meetingPasscode), JSON.stringify(meetingRefusal));
+  check("CLI credential preflight accepts the token-free meeting-link control",
+    credentialRefusalOf({ content: "Join the meeting: https://meet.example.test/j/123456789" }, true) === null);
 
   const paymentToken = "Pw8Ks4".repeat(8);
   const capabilityUrl = `https://invoice.stripe.com/i/acct_fixture123/test_${paymentToken}`;

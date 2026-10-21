@@ -264,12 +264,47 @@ export async function openOutbox(path, { DatabaseSync = null, busyTimeoutMs = 10
 export function fetchOutboxSince(db, sinceSeq, limit = WHATSAPP_DRAIN_PAGE_SIZE) {
   return db.prepare(
     `SELECT seq, chat_jid, message_id, ts, direction, body,
-            sender_name, thread_title, is_group, source
+            sender_jid, sender_name, thread_title, is_group, source
        FROM outbox_messages
       WHERE seq > ?
       ORDER BY seq ASC
       LIMIT ?`
   ).all(sinceSeq, limit);
+}
+
+const jidFallbackLabel = (jid) => {
+  const [rawUser = "", server = ""] = String(jid || "").split("@", 2);
+  const user = rawUser.split(":", 1)[0];
+  if (!user) return "";
+  return server === "s.whatsapp.net" ? `+${user}` : user;
+};
+
+const directoryName = (senderJid, senderName) => {
+  const name = String(senderName || "").trim();
+  if (!name || /^\+?\d+$/.test(name) || name === jidFallbackLabel(senderJid)) return null;
+  return name;
+};
+
+/** Read the newest usable labels already captured in the local outbox. */
+export function outboxNameDirectory(db) {
+  const names = new Map();
+  const titles = new Map();
+  const rows = db.prepare(
+    `SELECT sender_jid, sender_name, chat_jid, thread_title, direction
+       FROM outbox_messages
+      ORDER BY seq DESC`
+  ).all();
+  for (const row of rows) {
+    const senderJid = String(row.sender_jid || "");
+    if (String(row.direction || "") === "in" && senderJid && !names.has(senderJid)) {
+      const name = directoryName(senderJid, row.sender_name);
+      if (name) names.set(senderJid, name);
+    }
+    const chatJid = String(row.chat_jid || "");
+    const title = String(row.thread_title || "").trim();
+    if (chatJid && title && !titles.has(chatJid)) titles.set(chatJid, title);
+  }
+  return { names, titles };
 }
 
 /**
@@ -289,8 +324,31 @@ export function countUndrained(db) {
   return Number(row?.n || 0);
 }
 
+const directorySpeaker = (row, directory) => {
+  const senderJid = String(row.sender_jid || "");
+  const fallback = jidFallbackLabel(senderJid);
+  const name = directory?.names?.get(senderJid) || directoryName(senderJid, row.sender_name);
+  if (name) return fallback.startsWith("+") ? `${name} (${fallback})` : name;
+  // LID users are opaque routing identifiers, not useful speaker names.
+  if (senderJid.endsWith("@lid")) return "";
+  return String(row.sender_name || fallback || "");
+};
+
+const directoryThreadTitle = (row, directory) => {
+  const title = String(row.thread_title || "").trim();
+  if (title || !directory) return title;
+  const chatJid = String(row.chat_jid || "");
+  if (row.is_group === true || row.is_group === 1 || row.is_group === "1") {
+    return directory.titles?.get(chatJid) || "";
+  }
+  const fallback = jidFallbackLabel(chatJid);
+  const name = directory.names?.get(chatJid);
+  if (name) return fallback.startsWith("+") ? `${name} (${fallback})` : name;
+  return chatJid.endsWith("@lid") ? "" : fallback;
+};
+
 /** Map one outbox row to the shape MessageSessionizer.push() consumes. */
-export function rowToSessionRow(row) {
+export function rowToSessionRow(row, { directory = null } = {}) {
   const outbound = String(row.direction || "") === "out";
   return {
     id: String(row.message_id || ""),
@@ -298,12 +356,12 @@ export function rowToSessionRow(row) {
     body: String(row.body || ""),
     platform: WHATSAPP_PLATFORM,
     thread_id: String(row.chat_jid || "unknown"),
-    thread_title: String(row.thread_title || ""),
+    thread_title: directoryThreadTitle(row, directory),
     direction: outbound ? "out" : "in",
     // The owner speaks under their manifest name; an inbound speaker is
     // whatever push name WhatsApp supplied, which may be a phone number. No
     // contact-book resolution happens anywhere in this connector.
-    sender_name: outbound ? "" : String(row.sender_name || ""),
+    sender_name: outbound ? "" : directorySpeaker(row, directory),
   };
 }
 
@@ -475,6 +533,7 @@ export async function drainOnce({
   const opened = await openDb(outboxPath);
   counts.outbox_writable = opened.writable !== false;
   try {
+    const directory = outboxNameDirectory(opened.db);
     let remaining = maxRows;
     let newestSeenMs = -Infinity;
     for (;;) {
@@ -495,7 +554,7 @@ export async function drainOnce({
       let pageMaxSeq = counts.watermark;
       for (const raw of rows) pageMaxSeq = Math.max(pageMaxSeq, Number(raw.seq) || 0);
       const ordered = rows
-        .map((raw) => ({ raw, row: rowToSessionRow(raw), at: Date.parse(String(raw.ts || "")) }))
+        .map((raw) => ({ raw, row: rowToSessionRow(raw, { directory }), at: Date.parse(String(raw.ts || "")) }))
         .sort((a, b) => (a.at - b.at) || (Number(a.raw.seq) - Number(b.raw.seq)));
 
       const closed = [];
