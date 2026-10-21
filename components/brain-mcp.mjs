@@ -45,7 +45,7 @@ import {
 } from "./brain-mcp-runtime.mjs";
 import {
   ANSWER_WITHHELD, COVERAGE_INCOMPLETE, coverageIncompleteNotice, retrievalUnavailable,
-  SEARCH_UNAVAILABLE, unavailableGap, unavailableNotice,
+  meaningSearchLine, SEARCH_UNAVAILABLE, unavailableGap, unavailableNotice,
 } from "../worker/src/lib/retrieval-status.js";
 import {
   LOCAL_OWNER_AGENT_PROFILE, normalizeAgentProfile, profileDescription, profileHas,
@@ -326,6 +326,22 @@ function publicDegradation(body) {
   return { degraded, degradedReason };
 }
 
+function publicMeaningSearch(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const count = (candidate) => {
+    if (candidate === null) return null;
+    return Number.isSafeInteger(candidate) && candidate >= 0 ? candidate : undefined;
+  };
+  const visible = count(value.visible);
+  const total = count(value.total);
+  if (visible === undefined || total === undefined) return undefined;
+  return {
+    visible,
+    total,
+    line: meaningSearchLine({ visible, total }),
+  };
+}
+
 const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
 
 function dateOnlyInstant(value, edge) {
@@ -575,7 +591,7 @@ async function runTool(name, args = {}, queryTiming = null) {
         answer_error: d.answer_error ? safeAnswerErrorText(d.answer_error) : undefined,
         next_action: nextActionText(d) || undefined,
         answer_error_code: d.answer_error ? "MCP_ANSWER_ERROR" : undefined,
-        meaning_search: d.meaning_search ?? undefined,
+        meaning_search: publicMeaningSearch(d.meaning_search),
         degraded,
         degraded_reason: degradedReason,
         search_status: cannotSupportAbsence
@@ -934,7 +950,7 @@ When a healthy search finds no match, say "I didn't find a matching record in th
 
 EXCEPT when the response carries search_status "search_unavailable", search_status "coverage_incomplete", search_status "answer_withheld", or a degraded field. With search_unavailable the search did not complete. With coverage_incomplete the search ran but declared source history is partial or unknown. With answer_withheld the search found records but an evidence check stopped the draft. For any refusal, relay "Why:" using its notice or evidence_gate.reason, then relay its next_action "Next:" line verbatim. In any of these states, "nothing recorded on this" would overstate what was checked. Relay the note and gaps and describe the result as provisional. This is common in the first hours of a new brain while its index is still building.
 
-When meaning_search.line is present, relay that line once, verbatim.
+When meaning_search.line is present, it was rendered locally from closed numeric counts. Relay it once.
 
 In the answer, give each fact's date and source title. For every money figure, quote the sentence it comes from, name the payer and payee, and say what kind of event it was (invoice, payment, payout, refund). For "what is still open", say which document is newest on that exact topic. A newer document about something else does not change the answer.
 

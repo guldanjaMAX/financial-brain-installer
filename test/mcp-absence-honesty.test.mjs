@@ -21,7 +21,7 @@ import { handleMcp } from "../worker/src/lib/mcp-endpoint.js";
 import { createProductFixture, seedOwnedEntity } from "../worker/test/product-contract-fixture.mjs";
 import { withLedgerAnswer } from "../worker/src/lib/ledger-answer.js";
 import { createServer } from "node:http";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const MCP = fileURLToPath(new URL("../components/brain-mcp.mjs", import.meta.url));
 
@@ -70,6 +70,47 @@ async function localMessages(runtime, messages) {
   const replies = stdout.split("\n").filter(Boolean).map(JSON.parse);
   assert.equal(replies.length, messages.length, "every MCP request must receive a reply");
   return replies;
+}
+
+async function localThinkBodies(bodies) {
+  const runtime = fixtureRuntime("https://fixture.invalid");
+  const hook = join(runtime.env.TMPDIR, "fetch-hook.mjs");
+  writeFileSync(hook, `
+const bodies = ${JSON.stringify(bodies)};
+globalThis.fetch = async (input, init = {}) => {
+  const url = new URL(String(input));
+  if (url.origin !== "https://fixture.invalid" || url.pathname !== "/api/rag/think") {
+    throw new Error("unexpected synthetic fetch target");
+  }
+  const request = JSON.parse(String(init.body || "{}"));
+  if (!Object.hasOwn(bodies, request.q)) throw new Error("unexpected synthetic question");
+  return new Response(JSON.stringify(bodies[request.q]), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+};
+`);
+  runtime.env.NODE_OPTIONS = `--import=${pathToFileURL(hook).href}`;
+  try {
+    const names = Object.keys(bodies);
+    const replies = await localMessages(runtime, [
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: {
+        protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fixture", version: "1" },
+      } },
+      ...names.map((q, index) => ({
+        jsonrpc: "2.0", id: index + 2, method: "tools/call",
+        params: { name: "brain_think", arguments: { q } },
+      })),
+    ]);
+    return {
+      instructions: replies[0].result.instructions,
+      results: Object.fromEntries(names.map((q, index) => {
+        const reply = replies[index + 1];
+        assert.equal(reply.result?.isError, undefined, reply.result?.content?.[0]?.text);
+        return [q, JSON.parse(reply.result.content[0].text)];
+      })),
+    };
+  } finally { runtime.close(); }
 }
 
 /** Serve one canned body; every assertion must first reach the requested route. */
@@ -148,6 +189,54 @@ function assertMapOpeningSequence(text, label) {
     /Activation requires another separate owner decision[\s\S]{0,260}?fresh passkey/i,
     cursor, label);
 }
+
+test("local MCP rebuilds meaning_search from closed counts and omits invalid values", async () => {
+  const arbitrary = ["synthetic", "remote", "private", "text"].join("-");
+  const base = {
+    status: "coverage_incomplete", answer: null, citations: [], results: [], gaps: [],
+  };
+  const { instructions, results } = await localThinkBodies({
+    "version-skew": {
+      ...base,
+      next_action: "unreviewed remote instruction",
+      meaning_search: { visible: 1, total: 2, line: arbitrary, private_note: arbitrary },
+    },
+    control: {
+      ...base,
+      meaning_search: { visible: 1234, total: 5678 },
+    },
+    invalid: {
+      ...base,
+      meaning_search: { visible: -1, total: 2, line: arbitrary },
+    },
+  });
+
+  assert.equal(results["version-skew"].search_status, "coverage_incomplete",
+    "the version-skew response reached the provisional-result decision");
+  assert.equal(results["version-skew"].next_action, undefined,
+    "the adjacent unreviewed action remains rejected");
+  assert.deepEqual(results["version-skew"].meaning_search, {
+    visible: 1,
+    total: 2,
+    line: "Meaning search covers 1 of 2 chunks; keyword search covers all",
+  }, "remote line text and unknown siblings cannot cross the closed schema");
+
+  assert.equal(results.control.search_status, "coverage_incomplete",
+    "the ordinary response reached the same decision as a green control");
+  assert.deepEqual(results.control.meaning_search, {
+    visible: 1234,
+    total: 5678,
+    line: "Meaning search covers 1,234 of 5,678 chunks; keyword search covers all",
+  });
+
+  assert.equal(results.invalid.search_status, "coverage_incomplete",
+    "the invalid response reached the omission decision");
+  assert.equal(Object.hasOwn(results.invalid, "meaning_search"), false,
+    "one invalid count omits the complete meaning_search object");
+  assert.doesNotMatch(instructions,
+    /When meaning_search\.line is present, relay that line once, verbatim\./u);
+  assert.match(instructions, /meaning_search\.line is present, it was rendered locally/u);
+});
 
 // Optimize ordering must live in the MCP initialize response, because that is
 // what the owner-facing assistant actually reads. Keep its anchors aligned
