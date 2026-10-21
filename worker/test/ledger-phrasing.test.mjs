@@ -160,10 +160,16 @@ for (const reverse of [false, true]) test(`Think exact cents and empty-account c
   // The first deposit names a different explicit payee. Its memo mention
   // cannot supply the sender evidence for an amountless arrival (R02/F3).
   assert.equal(named.evidence_gate.complete, false, 'the other shorthand receipt cannot prove a different payer');
-  assert.equal(named.ledger.unattributed_count, 1);
+  // Packet 7 round 4, R4-MONEY-3 (triage option A): its shorthand "Paywire
+  // settlement" names another registered payer beside the payee, so the row
+  // is unknown, never Paywire's deposit, and it is listed as a deposit that
+  // doesn't show who paid (formerly hidden: unattributed_count 1, citations
+  // [10-08, 10-07], unattributed_citations [2]).
+  assert.equal(named.ledger.unattributed_count, 2);
   assert.deepEqual(named.citations.map(c => [c.posted_on, c.amount_minor, c.account_mask]),
-    [["2026-10-08", 1234, "4417"], ["2026-10-07", 902, "8862"]]);
-  assert.deepEqual(named.ledger.unattributed_citations, [2]);
+    [["2026-10-08", 1234, "4417"], ["2026-10-05", 250000, "8862"], ["2026-10-07", 902, "8862"]]);
+  assert.deepEqual(named.ledger.unattributed_citations, [2, 3]);
+  assert.doesNotMatch(named.answer, /Found a deposit of \$2,500\.00/, 'the memo mention never makes it a found Paywire deposit');
   assert.ok(f.seen.sql.some(sql => /JOIN fin_transactions/.test(sql)));
   assert.equal(modelCalls, 0);
 });

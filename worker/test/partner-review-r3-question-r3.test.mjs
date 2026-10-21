@@ -137,7 +137,9 @@ test('R3-QUESTION-3-2 control: the plain, dated and amount-qualified forms answe
 // counterparty becomes "payer one's", and the registered payer is refused.
 // The same relative period after "arrive" answers completely.
 const relativeNoun = [
-  ["did Payer One's recent payment arrive?", '2026-09-29', '2026-10-12'],
+  // Partner answer 9 lists "recent" among the qualifiers stripped before
+  // "payment" (round 4, R4-FIDELITY-1): the window is the default 60 days.
+  ["did Payer One's recent payment arrive?", '2026-08-14', '2026-10-12'],
   ["did Payer One's last month payment arrive?", '2026-09-01', '2026-09-30'],
   ["did Payer One's this month payment arrive?", '2026-10-01', '2026-10-12'],
   ["did Payer One's last 30 days payment arrive?", '2026-09-13', '2026-10-12'],
@@ -163,7 +165,8 @@ test('R3-QUESTION-3-3 control: the same relative periods after "arrive", the FRO
     ["did Payer One's payment arrive last month?", '2026-09-01', '2026-09-30'],
     ["did Payer One's payment arrive this month?", '2026-10-01', '2026-10-12'],
     ["did Payer One's payment arrive in the last 30 days?", '2026-09-13', '2026-10-12'],
-    ['did the recent payment from Payer One arrive?', '2026-09-29', '2026-10-12'],
+    // Answer 9 strips "recent" before "payment" (R4-FIDELITY-1): default window.
+    ['did the recent payment from Payer One arrive?', '2026-08-14', '2026-10-12'],
     ["did Payer One's October 5 payment arrive?", '2026-09-28', '2026-10-12'],
   ]) {
     const f = registeredPayerFixture(t);

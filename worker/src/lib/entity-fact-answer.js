@@ -41,6 +41,37 @@ function questionFact(question, owner) {
   return { subject, field: FIELDS.get(field.toLowerCase()) };
 }
 
+// The digits of a cited value with every joining separator removed, read per
+// raw code point: modifier letters, marks and default-ignorable code points
+// are dropped (they join), every other non-letter is a separator (it joins),
+// and a run of letters is kept as a splitting word unless it is one letter
+// that is either not an ASCII letter in the cited value or directly between
+// two digits. Only digit runs matter to the caller.
+function codePointRunText(value) {
+  const tokens = [];
+  for (const char of value) {
+    if (/\p{Lm}|\p{M}|\p{Default_Ignorable_Code_Point}/u.test(char)) continue;
+    for (const piece of char.normalize('NFKC')) {
+      if (/[0-9]/.test(piece)) tokens.push({ kind: 'digit', text: piece });
+      else if (/\p{L}/u.test(piece) && !/\p{Lm}/u.test(piece)) tokens.push({ kind: 'letter', ascii: /^[A-Za-z]$/.test(char) });
+      else if (!/\p{M}|\p{Lm}/u.test(piece)) tokens.push({ kind: 'separator' });
+    }
+  }
+  let out = '';
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (token.kind === 'digit') { out += token.text; continue; }
+    if (token.kind === 'separator') continue;
+    let end = index;
+    while (tokens[end + 1]?.kind === 'letter') end++;
+    const lone = end === index;
+    const touching = tokens[index - 1]?.kind === 'digit' && tokens[end + 1]?.kind === 'digit';
+    if (!(lone && (!token.ascii || touching))) out += ' ';
+    index = end;
+  }
+  return out;
+}
+
 function unsafeScalarFact(value, field) {
   // Allowlist every free-text value and rendered subject. Inspect, never
   // rewrite, cited bytes. Marks must attach to a letter, not a digit or a
@@ -58,8 +89,15 @@ function unsafeScalarFact(value, field) {
   // Partner answer 3: company, role and the rendered subject refuse a run of
   // five or more digits once separators are stripped. An address keeps the
   // six-digit rule, so a five-digit ZIP code still answers.
+  // Round 4 (R4-LEAK-1, R4-LEAK-2): the run is also read code point by code
+  // point from the cited value, so a modifier letter is judged BEFORE NFKC
+  // turns it into a base letter, and a lone letter between digit groups joins
+  // them when it is not an ASCII letter (U+01C0, U+A78F, ª and the like read as
+  // punctuation) or when it touches a digit on both sides. A lone ASCII letter
+  // set off by spaces ("1234 N 56th St") and every word of two or more letters
+  // still split the run, so no list of look-alike letters is needed.
   const digitRun = field?.includes("address") ? /[0-9]{6}/ : /[0-9]{5}/;
-  if (digitRun.test(normalized.replace(/[^\p{L}0-9]|\p{Lm}/gu, ''))) return true;
+  if (digitRun.test(normalized.replace(/[^\p{L}0-9]|\p{Lm}/gu, '')) || digitRun.test(codePointRunText(value))) return true;
   // NFKC precedes default casefold;
   // dotless i stays distinct, Cherokee folds to uppercase, and sharp s expands.
   const folded = [...normalized].map(char => char === '\u0131' ? char
@@ -78,9 +116,11 @@ function safeValue(field, value) {
     // Partner answer 7: an identifier is not an email fact. Refuse 7 or more
     // digits in the local part or in any domain label, and the identifier
     // words with digits and dots as boundaries (beside the non-word ones).
+    // Only letters continue a word, so an underscore is a boundary too
+    // ("acct_123456@"; round 4, R4-LEAK-3).
     const email = /^([A-Za-z0-9.!#$%&'*+/=?^_{|}~-]+)@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)$/.exec(value);
     return Boolean(email) && [email[1], ...email[2].split(".")].every(part => part.replace(/[^0-9]/g, "").length < 7) &&
-      !/(?<![a-z_])(?:account|acct|routing|card|iban|swift|aba)(?![a-z_])/i.test(value);
+      !/(?<![a-z])(?:account|acct|routing|card|iban|swift|aba)(?![a-z])/i.test(value);
   }
   if (field === "phone" || field === "mobile") {
     // Partner answer 2: at most 15 digits in total (the E.164 maximum) across

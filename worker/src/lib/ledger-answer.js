@@ -1,4 +1,4 @@
-import { createInflowAttributionBudget, createInflowAttributor, boundedPayerFields, exactPayerFieldAdmitted, payerFieldsAgree, payerRegistryHasDamage, payerRegistry, payerQuestionRegistry, resolveRequestedPayer, selectAttributedInflows, inflowScopeConfirmed, payerAmount } from "./ledger-attribution.js";
+import { createInflowAttributionBudget, createInflowAttributor, boundedPayerFields, exactPayerFieldAdmitted, payerFieldsAgree, payerKeyDamaged, payerNameVariant, payerRegistryHasDamage, payerRegistry, payerQuestionRegistry, resolveRequestedPayer, selectAttributedInflows, shorthandNames, inflowScopeConfirmed, payerAmount } from "./ledger-attribution.js";
 import { scopeIsUnrestricted } from "./grants.js";
 import { classifyLedgerQuestion, ledgerDay, shiftLedgerDay, payerMentionsCoverQuestion } from "./ledger-question.js";
 import { accountLinkPairsInWindow, accountLinkRequiredInWindow, effectivePeriodCovered, readEffectiveAccounts, readEffectiveBalances, readEffectiveTransactions } from "./ledger-reader.js";
@@ -78,8 +78,13 @@ function withPayerAssumptions(result, rows, payers) {
 
 // Fixed reason vocabulary and the same free-field masker apply to every
 // refusal candidate. Never echo raw parser fragments or bank identifiers.
-function attributionUncertainty(row, attribution, selectorAmbiguous, exactNamesOnly) {
-  if (attribution.state === 'assumed') return exactNamesOnly
+function attributionUncertainty(row, attribution, selectorAmbiguous, exactNamesOnly, shorthandOfRequest = false) {
+  // A statement that names the requested payer only in shorthand gets the
+  // shorthand note, whoever else the row's own fields name (a payee beside
+  // it is the other payer the shorthand cannot rule out).
+  const shorthand = attribution.state === 'assumed' || (shorthandOfRequest &&
+    !attribution.evidence.sender_unread && !row.payee_has_nul && !row.description_has_nul);
+  if (shorthand) return exactNamesOnly
     ? 'shorthand reading excluded by exact names only' : 'shorthand cannot rule out another payer';
   if (attribution.evidence.ambiguous) return 'competing payer readings';
   if (row.payee_has_nul || row.description_has_nul) return 'damaged bank field';
@@ -200,6 +205,11 @@ function leadExclusions(rows, pairs, selected, bySlug, intent) {
     loan_proceeds_count: loanProceeds.size, loan_proceeds_minor: sumMinor([...loanProceeds.values()]) } };
 }
 
+// Every registered spelling (normalized key) of one entity, for name-variant
+// checks that must not depend on which alias the question used.
+const spellingsOf = (identities, slug) => slug && typeof slug !== 'symbol'
+  ? [...identities].filter(([, slugs]) => slugs.has(slug)).map(([key]) => key) : [];
+
 // Exactness belongs to the original selector and bounded evidence, never to
 // the success of a cleanup predicate. All alternatives share one snapshot and
 // one parsing budget; unresolved literal fields still participate in conflict.
@@ -229,15 +239,38 @@ function chooseLiteralSelector(intent, identities, rows, budget) {
       row.direction === (payer ? 'inflow' : reading.direction));
     const amountMatches = row => reading.kind !== 'payment' || reading.amountMinor === null || row.amount_minor === reading.amountMinor;
     if (!payer) {
-      const possible = scoped.filter(row => matchesMerchant(row, label));
-      const slug = ids.size === 1 ? [...ids][0] : null;
+      const damagedName = payerKeyDamaged(identities, label);
+      const slug = ids.size === 1 && !damagedName ? [...ids][0] : null;
+      // A bounded payee that only shares the requested name (one closed company
+      // suffix apart, or a shortened, whole-word prefix of it) or is an alias
+      // the requested entity shares with another is a possible match, never
+      // hidden behind an exact row (round 4, R4-MONEY-5 and R4-MONEY-6). A
+      // payee registered to one other entity is not, and neither is a longer
+      // payee (money-rereview R02: a different merchant identity).
+      let spellings = null;
+      const possiblePayee = row => {
+        if (!row.payee || row.payee_has_nul || String(row.payee).includes('\0')) return false;
+        const field = normalizeMerchantText(row.payee), owners = identities.get(field);
+        if (field === key) return false;
+        if (slug && owners?.has(slug)) return owners.size > 1 || payerKeyDamaged(identities, row.payee);
+        if (owners?.size === 1) return false;
+        spellings ??= [label, ...spellingsOf(identities, slug)];
+        return payerNameVariant(row.payee, spellings, { longer: false });
+      };
       const matched = scoped.filter(row => {
         if (!row.payee || row.payee_has_nul) return false;
         const field = normalizeMerchantText(row.payee), aliases = identities.get(field);
-        return field === key || slug && aliases?.size === 1 && aliases.has(slug);
+        return field === key || slug && aliases?.size === 1 && aliases.has(slug) && !payerKeyDamaged(identities, row.payee);
       });
+      // Beside exact rows only: alone, such a row keeps the established
+      // nonmatch answer (incomplete, "may appear under a different name";
+      // partner-r4-mutations QF1 pins it). A zero-amount row cannot change
+      // the spend total, so it is no doubt about it (partner-r6-literals pins
+      // a $0 shortened payee beside an exact RAW name as an exact total).
+      const possible = scoped.filter(row => matchesMerchant(row, label) ||
+        (matched.length > 0 && row.amount_minor > 0 && possiblePayee(row)));
       return { exact: matched.length > 0, matched, possible, ids,
-        conflict: ids.size > 1 || payerRegistryHasDamage(identities) && !slug };
+        conflict: ids.size > 1 || damagedName || payerRegistryHasDamage(identities) && !slug };
     }
     const attribute = createInflowAttributor(payerQuestionRegistry(reading, identities), { budget });
     const attributions = new Map(scoped.map(row => [row.id, attribute(row)]));
@@ -267,16 +300,39 @@ function chooseLiteralSelector(intent, identities, rows, budget) {
     // because attribution resolved it. Whole-clause coverage is still required.
     const conflict = ids.size > 1 || wanted.state === 'ambiguous' || payerRegistryHasDamage(identities) && !registered ||
       scoped.some(row => literal(row) && fields.get(row.id)?.conflict);
+    // A row the question does not name exactly is a known other only when no
+    // bounded field shares the requested name (one closed company suffix
+    // apart, extra trailing words, or a whole-word prefix of it; R4-MONEY-5)
+    // and, when its attribution is unknown, its statement does not name the
+    // requested payer in shorthand (R4-MONEY-4). Those are possible matches:
+    // they stay listed and keep the exact rows a partial subtotal.
+    let spellings = null;
+    const possibleField = row => fields.get(row.id)?.fields.some(field => {
+      const fieldKey = normalizeMerchantText(field), owners = identities.get(fieldKey);
+      if (fieldKey === key || (owners?.size === 1 && !(slug && owners.has(slug)))) return false;
+      spellings ??= [label, ...spellingsOf(identities, slug)];
+      return payerNameVariant(field, spellings);
+    });
+    // The shorthand clause covers a row whose attribution is unknown (its
+    // fields cannot say who paid); a row confirmed by its own fields, such as
+    // a payee that the shorthand spells out, keeps that attribution.
+    const possibleRow = row => !sameIdentity(row) && (possibleField(row) || (attributions.get(row.id)?.state === 'unknown' &&
+      shorthandNames(attributions.get(row.id), wanted.state === 'unique' ? wanted : { state: slug ? 'unique' : 'missing', slug }, key)));
     return { exact: registered || matched.length > 0, matched, possible, ids, conflict,
       conflictRows: new Set(scoped.filter(row => fields.get(row.id)?.conflict).map(row => row.id)),
-      knownRows: new Set(scoped.filter(row => !fields.get(row.id)?.conflict && (!literal(row) || supportedLiteral(row)) &&
+      knownRows: new Set(scoped.filter(row => !fields.get(row.id)?.conflict && (literal(row) ? supportedLiteral(row) : !possibleRow(row)) &&
         (fields.get(row.id)?.fields.length || attributions.get(row.id)?.state === 'confirmed')).map(row => row.id)),
       attributions, candidates: wanted.candidates, blockedLiteral: scoped.some(row => literal(row) && !supportedLiteral(row)),
       exhausted: answerBudgetExhausted(attributions) };
   };
   const raw = intent.selectorReadings?.raw || intent;
   const literal = evaluate(raw);
-  const alternatives = (intent.selectorReadings?.alternatives || []).map(reading => ({ reading, result: evaluate(reading) }));
+  // A noun payer slot that began with a closed qualifier was stripped (partner
+  // answer 9). The unstripped slot competes: a registered name that begins
+  // with a listed word still answers, and two exact readings of different
+  // entities refuse as ambiguous below.
+  const alternatives = [...(intent.selectorReadings?.alternatives || []), ...(intent.unstrippedReading ? [intent.unstrippedReading] : [])]
+    .map(reading => ({ reading, result: evaluate(reading) }));
   const cleaned = intent.selectorReadings?.cleaned;
   const alternate = cleaned ? evaluate(cleaned) : { possible: [] };
   if (literal.exhausted && !intent.selectorReadings) {
@@ -453,6 +509,7 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
   const wanted = namedPayer ? resolveRequestedPayer(intent, identities,
     rows.filter(row => row.direction === 'inflow').map(row => payers.get(row.id))) : null;
   const selectorAmbiguous = !selection.exact && ['ambiguous', 'unresolved'].includes(wanted?.state);
+  const requestedKey = namedPayer ? normalizeMerchantText(payment ? intent.counterparty : intent.match) : null;
   const selectorCandidates = [...new Set((wanted?.candidates || []).map(safeDescription))];
   const phraseOnly = !selection.exact && wanted?.registered === false;
   // The literal-conflict fallback has no exact/possible split. It may reach
@@ -504,7 +561,8 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
       const uncertainCandidates = listedUnattributed.map((row, i) => ({
         posted_on: row.posted_on, amount_minor: row.amount_minor,
         field: row.payee ? 'bank_payee' : 'description', label: safeDescription(row.payee || row.description),
-        reason: attributionUncertainty(row, payers.get(row.id), selectorAmbiguous, intent.exactNamesOnly), citation: unattributedCitations[i],
+        reason: attributionUncertainty(row, payers.get(row.id), selectorAmbiguous, intent.exactNamesOnly,
+          shorthandNames(payers.get(row.id), wanted, requestedKey)), citation: unattributedCitations[i],
       }));
       const payerCandidates = [...new Set(unattributed.flatMap(row => payers.get(row.id)?.evidence.ambiguous ? payers.get(row.id).evidence.candidates : []))].slice(0, 10).map(safeDescription);
       if (unattributed.length || selectorAmbiguous || (phraseOnly && (!matched.length || namedIncome)) ||

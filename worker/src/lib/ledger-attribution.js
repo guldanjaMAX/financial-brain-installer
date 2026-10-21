@@ -11,7 +11,19 @@ const companyCommaSpellings = Symbol('company comma spellings');
 const questionSpellings = Symbol('question spellings');
 const questionPhrases = Symbol('question phrases');
 const damagedRegistry = Symbol('damaged registry');
+const damagedSpellings = Symbol('damaged spellings');
 export const payerRegistryHasDamage = registry => Boolean(registry[damagedRegistry]);
+// A damaged spelling never enters lookup, but its visible text (the whole
+// returned string, or the prefix a truncating driver returns) may equal a
+// registered name of a different entity. Uniqueness of that name is then
+// unproven: it is at least as ambiguous as the same collision undamaged.
+export function payerKeyDamaged(registry, label) {
+  const key = normalizeMerchantText(label);
+  const damaged = registry[damagedSpellings]?.get(key);
+  if (!damaged) return false;
+  const slugs = registry.get(key);
+  return [...damaged].some(slug => !slugs?.has(slug));
+}
 function phraseCommaMatches(left, right) {
   const valid = value => {
     const text = normalizePayerCommas(value);
@@ -40,12 +52,21 @@ export function payerRegistry(identities) {
   const index = new Map();
   index[companyCommaSpellings] = new Set();
   index[questionSpellings] = new Map();
+  index[damagedSpellings] = new Map();
   for (const identity of identities) for (const column of ['legal_name', 'display_label']) {
     const label = identity[column];
     // Reject only the damaged spelling, keeping the entity's valid aliases.
     // SQL flags preserve this decision even when a driver truncates at NUL.
     if (identity[`${column}_has_nul`] || String(label || '').includes('\0')) {
       index[damagedRegistry] = true;
+      // Keep its visible text out of lookup, but remember it so it can never
+      // leave a colliding registered name looking unique.
+      for (const visible of new Set([String(label || ''), String(label || '').split('\0')[0]])) {
+        const key = normalizeMerchantText(visible);
+        if (!key) continue;
+        if (!index[damagedSpellings].has(key)) index[damagedSpellings].set(key, new Set());
+        index[damagedSpellings].get(key).add(identity.entity_slug);
+      }
       continue;
     }
     const key = normalizeMerchantText(label);
@@ -66,7 +87,7 @@ export function lookupPayer(label, registry) {
     const phrase = registry[questionPhrases]?.get(normalizeMerchantText(label));
     return phrase && phraseCommaMatches(label, phrase.label) ? { state: 'unique', slug: phrase.slug, query_only: true } : { state: 'missing' };
   }
-  return slugs.size === 1 ? { state: 'unique', slug: slugs.values().next().value }
+  return slugs.size === 1 && !payerKeyDamaged(registry, label) ? { state: 'unique', slug: slugs.values().next().value }
     : { state: 'ambiguous' };
 }
 
@@ -140,7 +161,7 @@ export function resolveRequestedPayer(intent, registry, attributions = []) {
   const mentions = clausePayerMentions(intent, registry);
   const slugs = new Set(mentions.flatMap(mention => [...mention.slugs]));
   const candidates = [...new Set(mentions.map(mention => mention.label))];
-  if (slugs.size > 1) return { state: 'ambiguous', candidates };
+  if (slugs.size > 1 || mentions.some(mention => payerKeyDamaged(registry, mention.label))) return { state: 'ambiguous', candidates };
   if (!slugs.size) {
     const supported = new Map();
     for (const attribution of attributions) for (const phrase of attribution.evidence.query_phrases || [])
@@ -460,6 +481,27 @@ function parseStatement(description, registry, statementCache, budget) {
     // unlabelled opening name is not discarded merely because a payee exists.
     result.evidence.confirmed_readings = readings.filter(reading => reading.payer.state === 'unique' &&
       !reading.payer.query_only && !reading.suffix && !reading.prefix).map(({ identity, payer }) => ({ identity, payer }));
+    // Shorthand readings (a closed channel before and/or a closed suffix after
+    // a resolved name) never confirm a payer. Beside a payee, one that names
+    // another registered entity joins the agreement check (R4-MONEY-3), and
+    // an unknown row that names the requested payer in shorthand stays a
+    // listed possible match for it (R4-MONEY-4), so neither name gets a
+    // certified zero or absence.
+    const shorthand = readings.filter(reading => reading.payer.state === 'unique' && (reading.suffix || reading.prefix))
+      .map(({ identity, payer, prefix, suffix }) => ({ identity, payer, ...(prefix ? { prefix } : {}), ...(suffix ? { suffix } : {}) }));
+    // The grammar admits a suffix only after an opening name, so the closed
+    // form "<channel> <name> <suffix>" has no reading. Read it here as well.
+    const head = match(grammar.channel, 0);
+    if (head) for (let end = head[0].length; end < text.length; end++) {
+      step();
+      if (text[end] !== ' ' || !grammar.suffix.test(text.slice(end + 1))) continue;
+      const identity = text.slice(head[0].length, end);
+      if (!grammar.name.test(identity)) continue;
+      const payer = lookup(identity);
+      if (payer.state === 'unique') shorthand.push({ identity, payer, prefix: head[0].trim().toLowerCase().replace(grammar.spaces, ' '),
+        suffix: text.slice(end + 1).toLowerCase().replace(grammar.spaces, ' ') });
+    }
+    result.evidence.shorthand_readings = shorthand;
     statementCache?.set(text, result);
     return result;
   } catch (error) {
@@ -493,7 +535,13 @@ function attributeRow(row, registry, statementCache, budget) {
   // anyone else. A NUL-flagged description is never that: a truncating
   // driver may have returned only the visible prefix, and the tail is unread.
   const refusal = statement.evidence.parser?.refusal;
-  if (refusal && (refusal !== 'incomplete' || senderLabelPresent(row.description)) &&
+  // Answer 4 also reaches a bare registered name at a field start whose tail
+  // the grammar cannot read ("Vendor Beta; ID: 123", "Vendor Beta REF 100000"):
+  // it would be a confirmed reading had the tail parsed, so an unread tail
+  // cannot let the payee stand over it (round 4, R4-MONEY-2).
+  const foreignStart = (!refusal || refusal === 'incomplete') && !row.description_has_nul
+    ? fieldStartReading(row.description, payee, registry) : null;
+  if (refusal && (refusal !== 'incomplete' || senderLabelPresent(row.description) || foreignStart) &&
       (row.description_has_nul || !descriptionIsPayee(row.description, row.payee))) {
     const result = decision([], 'payee');
     result.state = 'unknown'; result.entity_slug = null; result.reading = null;
@@ -502,12 +550,19 @@ function attributeRow(row, registry, statementCache, budget) {
     result.evidence.sender_unread = true;
     return result;
   }
+  const shorthand = statement.evidence.shorthand_readings || [];
   const senders = statement.evidence.labelled_senders || [];
   // The agreement check covers every reading the parser rates confirmed,
   // labelled or not. A disagreeing confirmed reading makes the row unknown.
   // Agreement with an unlabelled reading never adds authority beyond the payee.
-  const compared = [...senders, ...(statement.evidence.confirmed_readings || [])];
+  // A shorthand reading (closed channel or suffix) that resolves to a
+  // registered entity other than the payee's joins the check too (round 4,
+  // R4-MONEY-3, option A): the statement line names another registered payer,
+  // so the payee cannot stand for either name. Same-entity shorthand agrees.
   const registered = reading => reading.payer.state === 'unique' && !reading.payer.query_only;
+  const fieldStart = foreignStart ? [foreignStart] : [];
+  const compared = [...senders, ...(statement.evidence.confirmed_readings || []), ...fieldStart,
+    ...foreignShorthandReadings(row, shorthand, payee.payer.state === 'unique' && !payee.payer.query_only ? payee.payer.slug : null)];
   const conflict = new Set([payee, ...compared].filter(registered).map(reading => reading.payer.slug)).size > 1 || compared.some(sender => {
     if ([payee, sender].some(reading => reading.payer.state === 'ambiguous')) return true;
     // Distinct registered identities cannot merge through suffix removal.
@@ -523,6 +578,8 @@ function attributeRow(row, registry, statementCache, budget) {
     result.evidence.parser = statement.evidence.parser;
     result.evidence.labelled_senders = senders;
     result.evidence.confirmed_readings = statement.evidence.confirmed_readings || [];
+    result.evidence.shorthand_readings = shorthand;
+    if (fieldStart.length) result.evidence.field_start_readings = fieldStart;
     return result;
   }
   // Equal fields corroborate an existing registration or a question-local
@@ -538,7 +595,67 @@ function attributeRow(row, registry, statementCache, budget) {
   result.evidence.parser = statement.evidence.parser;
   result.evidence.labelled_senders = senders;
   result.evidence.confirmed_readings = statement.evidence.confirmed_readings || [];
+  result.evidence.shorthand_readings = shorthand;
   return result;
+}
+
+// Shorthand readings (a closed channel before and/or a closed suffix after a
+// resolved name) that resolve to a registered entity other than the payee's
+// (R4-MONEY-3, option A). A description that is the payee itself, or a
+// shorthand whose spelled-out text is the payee's name ("Payer One payment"
+// beside payee "Payer One payment"), names nobody else and is left out.
+function foreignShorthandReadings(row, shorthand, payeeSlug) {
+  if (!row.payee || descriptionIsPayee(row.description, row.payee)) return [];
+  const payeeKey = agreementName(row.payee);
+  return shorthand.filter(reading => reading.payer.state === 'unique' && !reading.payer.query_only &&
+    reading.payer.slug !== payeeSlug &&
+    ![[reading.prefix, reading.identity, reading.suffix], [reading.identity, reading.suffix], [reading.prefix, reading.identity]]
+      .some(parts => payeeKey && agreementName(parts.filter(Boolean).join(' ')) === payeeKey));
+}
+
+// The bare registered name at a field start (the opening or the text after a
+// field delimiter, optionally after a closed channel there), read whatever
+// follows it: the LONGEST whole-word run from that start that is either the
+// payee's own name or a registered name decides. Returns that run as a
+// reading when it is ambiguous or names a registered entity other than the
+// payee's, else null. A shorter registered prefix of a run that is the payee
+// ("Vendor Alpha" inside "Vendor Alpha Holdings ID 1") never conflicts.
+// Called only for a description the parser read within its code point cap.
+function fieldStartReading(description, payee, registry) {
+  const grammar = statementGrammar;
+  const text = normalizePayerCommas(String(description || '')).replace(grammar.edgeSpaces, '')
+    .replace(grammar.lineBreak, ';').normalize('NFKC');
+  if (!text || text.length > grammar.limits.codepoints * 2) return null;
+  const payeeKey = agreementName(payee.identity);
+  const verdict = identity => {
+    if (payeeKey && agreementName(identity) === payeeKey) return false;
+    const found = lookupPayer(identity, registry);
+    if (found.state === 'ambiguous') return { identity, payer: found };
+    if (found.state !== 'unique' || found.query_only) return null;
+    if (payee.payer.state === 'unique' && !payee.payer.query_only && payee.payer.slug === found.slug) return false;
+    return { identity, payer: found };
+  };
+  const starts = [0];
+  for (let index = 0; index < text.length; index++) if (grammar.fieldBoundary.test(text[index])) starts.push(index + 1);
+  for (const boundary of starts) {
+    const start = boundary + text.slice(boundary).match(/^ */)[0].length;
+    const channel = grammar.channel.exec(text.slice(start));
+    for (const opening of channel ? [start, start + channel[0].length] : [start]) {
+      let decided = null;
+      for (let end = opening + 1; end <= text.length; end++) {
+        const fieldEnd = end === text.length || grammar.fieldBoundary.test(text[end]);
+        if (!fieldEnd && text[end] !== ' ') continue;
+        const identity = text.slice(opening, end).replace(/ +$/, '');
+        if (identity && grammar.name.test(identity)) {
+          const found = verdict(identity);
+          if (found !== null) decided = found;
+        }
+        if (fieldEnd) break;
+      }
+      if (decided) return decided;
+    }
+  }
+  return null;
 }
 
 // Sticky copies of the anchored sender and channel productions, so one scan
@@ -599,6 +716,27 @@ export function payerFieldsAgree(left, right) {
   return Boolean(key) && key === agreementName(right);
 }
 
+// A bounded field that shares a requested name without equalling it: the two
+// agree only after one closed company suffix is removed, the field extends
+// the requested name with trailing words, or the field is a whole-word prefix
+// of it (each read with and without the requested name's own closed suffix).
+// Each is a shortened-name or substring match, so a possible match, never
+// EXACT and never proof that the row is someone else (R4-MONEY-5). `labels`
+// are every spelling of the requested entity, so all of its aliases decide
+// alike. `longer: false` leaves out the field that only extends the name: on
+// the outflow side an explicit longer payee is a different merchant identity
+// (money-rereview R02), while a suffix or a shortened payee stays possible.
+export function payerNameVariant(field, labels, { longer = true } = {}) {
+  const fieldKey = normalizeMerchantText(field), fieldBase = agreementName(field);
+  if (!fieldKey) return false;
+  return labels.some(label => {
+    const key = normalizeMerchantText(label), base = agreementName(label);
+    if (!key || fieldKey === key) return false;
+    return Boolean(fieldBase && fieldBase === base) ||
+      [key, base].some(name => name && ((longer && fieldKey.startsWith(`${name} `)) || name.startsWith(`${fieldKey} `)));
+  });
+}
+
 function agreementName(value) {
   const words = normalizeMerchantText(normalizePayerCommas(value)).split(' ');
   // Normalize punctuation before removing one closed suffix, so (Ltd.) and
@@ -646,7 +784,13 @@ export function boundedPayerFields(row, attribution, registry) {
   // Beside a payee, every reading the parser rates confirmed joins the same
   // agreement comparison attributeRow() makes. It competes; it never becomes a
   // literal field the question can match exactly.
-  const compared = [...fields, ...(payee.length ? (attribution.evidence.confirmed_readings || []).map(reading => reading.identity) : [])];
+  // So does a registered shorthand reading of an entity other than the
+  // payee's (R4-MONEY-3, option A), exactly as attributeRow() compares it.
+  const payeeSlugs = payee.length ? registry.get(normalizeMerchantText(payee[0])) : null;
+  const foreignShorthand = payee.length ? foreignShorthandReadings(row, attribution.evidence.shorthand_readings || [],
+    payeeSlugs?.size === 1 ? payeeSlugs.values().next().value : null).map(reading => reading.identity) : [];
+  const compared = [...fields, ...(payee.length ? (attribution.evidence.confirmed_readings || []).map(reading => reading.identity) : []),
+    ...foreignShorthand, ...(payee.length ? (attribution.evidence.field_start_readings || []).map(reading => reading.identity) : [])];
   // Agreement is the attributeRow() rule: normalized names equal after one
   // closed trailing company suffix is removed. A name that is only a suffix
   // keeps its own normalized key, so two different bare suffixes still differ.
@@ -674,6 +818,14 @@ export function selectAttributedInflows(rows, attributions, { wanted, amountMino
     else if (same && amountMatches) matched.push(row);
   }
   return { matched, unattributed };
+}
+
+// True when the row's statement carries a shorthand reading of the requested
+// payer: the same resolved identity, or the requested name itself.
+export function shorthandNames(attribution, wanted, wantedKey = null) {
+  return (attribution?.evidence?.shorthand_readings || []).some(reading =>
+    (wanted?.state === 'unique' && reading.payer.slug === wanted.slug) ||
+    (Boolean(wantedKey) && normalizeMerchantText(reading.identity) === wantedKey));
 }
 
 // This scope-wide proof governs every exact payer figure, including optional
