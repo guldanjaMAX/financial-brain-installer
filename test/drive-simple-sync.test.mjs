@@ -28,6 +28,10 @@ const file = (id, parent = ROOT, extra = {}) => ({
   createdTime: "2026-09-01T00:00:00Z", modifiedTime: "2026-09-01T00:00:00Z", md5Checksum: `${id}-v1`, ...extra,
 });
 const BIG = { size: String(drive.DOWNLOAD_LIMIT + 1) };
+// The exact changes.list field mask: each change's file carries the same
+// fields a folder listing returns for one file.
+const CHANGES_FIELDS = "nextPageToken, newStartPageToken, changes(fileId, removed, file(id, name, mimeType, size, " +
+  "createdTime, modifiedTime, trashed, parents, webViewLink, md5Checksum, driveId, shortcutDetails(targetId,targetMimeType)))";
 
 function googleDouble(entries, { myDriveId = null } = {}) {
   const byId = new Map(entries.map((entry) => [entry.id, entry]));
@@ -41,7 +45,7 @@ function googleDouble(entries, { myDriveId = null } = {}) {
     const url = new URL(input);
     const path = url.pathname.replace(/^\/drive\/v3/, "");
     const media = url.searchParams.get("alt") === "media";
-    calls.push({ path, query: url.searchParams.get("q"), media });
+    calls.push({ path, query: url.searchParams.get("q"), media, fields: url.searchParams.get("fields") });
     if (path === "/files/root" && world.rootLookupFailures > 0) {
       world.rootLookupFailures--;
       return json({ error: { message: "Backend error.", errors: [{ reason: "backendError" }] } }, 503);
@@ -50,7 +54,14 @@ function googleDouble(entries, { myDriveId = null } = {}) {
     if (path === "/changes" && world.changesExpired) {
       return json({ error: { message: "The page token is no longer valid.", errors: [{ reason: "badRequest" }] } }, 410);
     }
-    if (path === "/changes") return json({ changes: world.changes, newStartPageToken: world.nextToken });
+    if (path === "/changes") {
+      // Google answers a malformed field selection with 400, so the double
+      // checks the mask is the exact one a change of a file needs.
+      if (url.searchParams.get("fields") !== CHANGES_FIELDS) {
+        return json({ error: { message: "Invalid field selection", errors: [{ reason: "invalidParameter" }] } }, 400);
+      }
+      return json({ changes: world.changes, newStartPageToken: world.nextToken });
+    }
     if (path === "/files") {
       const parent = alias(/^'([^']+)' in parents and trashed = false$/.exec(url.searchParams.get("q") || "")?.[1]);
       assert.ok(parent, "every listing must be bounded to one parent");
@@ -96,8 +107,12 @@ function scenario(t, entries, { driveConfig = {}, myDriveId = null } = {}) {
   const sent = [];
   const receipts = [];
   const failLoads = new Set();
-  // `fail` makes the Worker's apply step fail the way the authenticated route does.
-  const removal = { fail: false };
+  // The Worker refuses these the way its credential scanner does.
+  const refuseLoads = new Set();
+  // `fail` makes the Worker's apply step fail the way the authenticated route
+  // does. `failAfterApplies` lets that many applies land first, so a later
+  // batch fails after an earlier one committed.
+  const removal = { fail: false, failAfterApplies: null, applies: 0 };
   let inventoryReads = 0;
   const inventory = async ({ includeServerObservedAt = false, includeLabels = false } = {}) => {
     inventoryReads++;
@@ -113,7 +128,10 @@ function scenario(t, entries, { driveConfig = {}, myDriveId = null } = {}) {
     resolveAdminKey: () => "fixture-admin-key",
     getAccessToken: async () => "fixture-access-token",
     removalPlanRequest: async (input) => {
-      if (removal.fail && input.body.action === "apply") {
+      const failApply = input.body.action === "apply" && (removal.fail ||
+        (removal.failAfterApplies != null && removal.applies >= removal.failAfterApplies));
+      if (input.body.action === "apply" && !failApply) removal.applies++;
+      if (failApply) {
         throw new DriveRemovalReviewRequired("Authenticated removal request failed. HTTP 503. " +
           "Some approved removals may have completed. The source cursor was not advanced. " +
           "Rerun the same approved command if the stored inventory is unchanged. If it changed, run ingestion " +
@@ -131,6 +149,11 @@ function scenario(t, entries, { driveConfig = {}, myDriveId = null } = {}) {
         if (failLoads.has(item.envelope.source_id)) {
           onResult(item, { status: "failed", source_id: item.envelope.source_id, error: "synthetic worker refusal" });
           tally.failed++;
+          continue;
+        }
+        if (refuseLoads.has(item.envelope.source_id)) {
+          onResult(item, { status: "refused", source_id: item.envelope.source_id, labels: ["synthetic_credential_label"] });
+          tally.refused = (tally.refused || 0) + 1;
           continue;
         }
         sent.push(item.envelope.source_id);
@@ -170,12 +193,16 @@ function scenario(t, entries, { driveConfig = {}, myDriveId = null } = {}) {
     state.drive_policy_fingerprint = drivePolicyFingerprint(config, true, false);
     state.drive_last_full_sweep_at = new Date().toISOString();
     state.drive_folders = drive.updateFolderIndex(folderEntries);
+    // A completed run also records where each loaded file sat under a root.
+    state.drive_file_parents = {};
     for (const entry of storedFiles) {
       state.done[`drive:${entry.id}`] = drive.driveVersion(entry, drive.folderPathFor(entry, state.drive_folders));
+      state.drive_file_parents[entry.id] = [...entry.parents];
       store.put(`drive:${entry.id}`);
     }
   };
-  return { ...google, manifest, store, state, sent, receipts, failLoads, removal, run, seedSynced, inventoryReads: () => inventoryReads };
+  return { ...google, manifest, store, state, sent, receipts, failLoads, refuseLoads, removal, run, seedSynced,
+    inventoryReads: () => inventoryReads };
 }
 
 const baseEntries = () => [
@@ -677,7 +704,7 @@ ${retried.output.slice(-1200)}`);
   assert.equal(s.receipts.at(-1).status, "ready");
 });
 
-test("the saved My Drive id is ignored once include_my_drive_root_files is off", async (t) => {
+test("the saved My Drive id is ignored once include_my_drive_root_files is off, and a changed loose file is kept for --cleanup", async (t) => {
   const entries = [folder("owner-drive", "Owner Drive"), folder(ROOT, "Folder Alpha", "owner-drive"),
     file("loose-file", "owner-drive"), file("keep-file")];
   const s = scenario(t, entries, { driveConfig: { include_my_drive_root_files: true }, myDriveId: "owner-drive" });
@@ -700,10 +727,19 @@ test("the saved My Drive id is ignored once include_my_drive_root_files is off",
   assert.equal(daily.error, undefined, daily.error?.message);
   assert.deepEqual(s.sent, [], "a changed loose My Drive file is not loaded once the flag is off");
   assert.equal(s.calls.slice(callsBefore).some((call) => call.media), false, "it is not downloaded");
-  assert.equal(s.store.uids().includes("drive:loose-file"), false,
-    "like any changed file outside the roots, its stored copy is removed at once");
+  // Turning the flag off is a scope change. The daily path removes only a
+  // file recorded under a current root before; --cleanup removes this one.
+  assert.ok(s.store.uids().includes("drive:loose-file"), "a scope change never removes on the daily path");
+  assert.match(daily.output, /(?:^|\s)1 changed Drive file\(s\) are outside your folders, kept/);
+  assert.equal(s.store.calls.apply, 0);
   assert.ok(s.store.uids().includes("drive:keep-file"));
   assert.equal(s.state.sync_token, "token-2");
+
+  const cleanup = await s.run({ cleanup: true });
+  assert.equal(cleanup.error, undefined, cleanup.error?.message);
+  assert.equal(cleanup.result.outside_roots, 1);
+  assert.equal(cleanup.result.removed, 1);
+  assert.deepEqual(s.store.uids(), ["drive:keep-file"], "--cleanup is where the scope change is removed");
 });
 
 test("root scope follows the saved folder index, and My Drive admits direct children only", () => {
@@ -714,6 +750,10 @@ test("root scope follows the saved folder index, and My Drive admits direct chil
   assert.equal(driveFileInRoots(file("b", "owner-drive"), scope), true);
   assert.equal(driveFileInRoots(file("c", OUTSIDE), scope), false);
   assert.equal(driveFileInRoots(file("d", OUTSIDE), { ...scope, myDriveRootId: null }), false);
+  // The flag covers direct files only: a top-level My Drive folder is not admitted.
+  assert.equal(driveFileInRoots(folder("top-folder", "Top Folder", "owner-drive"), scope), false);
+  assert.equal(driveFileInRoots(file("e", "top-folder"), { ...scope,
+    folders: { ...folders, ...drive.updateFolderIndex([folder("top-folder", "Top Folder", "owner-drive")]) } }), false);
 });
 
 test("removal batches preview, apply with the preview marker, then read back", async () => {
@@ -747,4 +787,226 @@ test("removal batches preview, apply with the preview marker, then read back", a
     : { documents: body.targets.length, marker: { generation: ++generation } });
   await assert.rejects(removeDriveFamilies({ families: families.slice(0, 1), base: "b", adminKey: "k", request: stale,
     onProgress: () => {} }), /Removal readback found remaining targets/);
+});
+
+// Review item 1. On the daily path a changed file outside the roots is removed
+// only when this source recorded it under a current root before. A stored file
+// that never was (an older, wider scope, or a shared-with-me loose file) is
+// kept and counted; --cleanup is where scope changes are removed.
+test("a changed file outside the roots with no record of being under one is kept and counted; a recorded file moved out is removed", async (t) => {
+  const entries = [...baseEntries().filter((entry) => entry.id !== "big-file"),
+    file("older-scope-file", OUTSIDE), file("shared-loose-file", "unlisted-parent")];
+  const s = scenario(t, entries);
+  const first = await s.run();
+  assert.equal(first.error, undefined, first.error?.message);
+  assert.deepEqual([...s.sent].sort(), ["edit-file", "gone-file", "keep-file", "move-file", "trash-file"]);
+  // An older build with a wider scope stored both and recorded them as accepted.
+  for (const id of ["older-scope-file", "shared-loose-file"]) {
+    s.store.put(`drive:${id}`);
+    s.state.done[`drive:${id}`] = drive.driveVersion(s.world.byId.get(id), "");
+  }
+  const edited = (id, extra = {}) => {
+    s.world.byId.set(id, { ...s.world.byId.get(id), modifiedTime: "2026-10-10T00:00:00Z", md5Checksum: `${id}-v2`, ...extra });
+    return { fileId: id, removed: false, file: s.world.byId.get(id) };
+  };
+  s.world.changes = [edited("older-scope-file"), edited("shared-loose-file"), edited("move-file", { parents: [OUTSIDE] })];
+
+  const preview = await s.run({ "dry-run": true });
+  assert.equal(preview.error, undefined, preview.error?.message);
+  assert.match(preview.output, /(?:^|\s)2 changed Drive file\(s\) are outside your folders, kept/);
+  assert.match(preview.output, /(?:^|\s)1 Drive file\(s\) were trashed, moved out of the roots or excluded/);
+
+  s.sent.length = 0;
+  const daily = await s.run();
+  assert.equal(daily.error, undefined, `${daily.error?.message}\n${daily.output.slice(-1200)}`);
+  assert.deepEqual(s.store.uids(), ["drive:edit-file", "drive:gone-file", "drive:keep-file", "drive:older-scope-file",
+    "drive:shared-loose-file", "drive:trash-file"], "only the file recorded under a root and then moved out is removed");
+  assert.match(daily.output, /(?:^|\s)2 changed Drive file\(s\) are outside your folders, kept/);
+  assert.match(daily.output, /removed 1 stored Drive document\(s\) for 1 trashed, moved-out or excluded file\(s\)/);
+  assert.deepEqual(s.sent, [], "a file outside the roots is never loaded");
+  assert.equal(s.state.sync_token, "token-2");
+  assert.equal(s.receipts.at(-1).status, "ready");
+
+  const cleanup = await s.run({ cleanup: true });
+  assert.equal(cleanup.error, undefined, cleanup.error?.message);
+  assert.equal(cleanup.result.outside_roots, 2);
+  assert.equal(cleanup.result.removed, 2);
+  assert.deepEqual(s.store.uids(), ["drive:edit-file", "drive:gone-file", "drive:keep-file", "drive:trash-file"]);
+});
+
+// Review item 2. A removal that fails part-way must not leave the removed
+// files' accepted versions behind: a file restored at the same version would
+// never reload while the receipt says ready.
+test("a removal that fails after an earlier batch committed clears that batch's accepted versions, so every restored file reloads", async (t) => {
+  const many = Array.from({ length: 60 }, (_, index) => file(`t-${String(index).padStart(3, "0")}`));
+  const s = scenario(t, [folder("owner-drive", "Owner Drive"), folder(ROOT, "Folder Alpha", "owner-drive"), ...many]);
+  s.seedSynced(many);
+  const accepted = () => many.filter((entry) => s.state.done[`drive:${entry.id}`]).length;
+  s.world.changes = many.map((entry) => ({ fileId: entry.id, removed: false, file: { ...entry, trashed: true } }));
+  s.removal.failAfterApplies = 1;
+  const failed = await s.run();
+  assert.equal(failed.error?.code, "REMOVAL_RETRY_PENDING", `${failed.error?.name}: ${failed.error?.message}`);
+  assert.equal(s.store.uids().length, 10, "the first batch of 50 committed, the second did not");
+  assert.equal(s.state.sync_token, "token-1", "the cursor is held");
+  assert.equal(accepted(), 10, "the committed batch no longer carries accepted versions");
+
+  s.removal.failAfterApplies = null;
+  const retried = await s.run();
+  assert.equal(retried.error, undefined, `${retried.error?.message}\n${retried.output.slice(-1200)}`);
+  assert.deepEqual(s.store.uids(), []);
+  assert.equal(accepted(), 0);
+  assert.equal(s.state.sync_token, "token-2");
+
+  // Every file comes back from the trash at the version it had.
+  s.world.changes = many.map((entry) => ({ fileId: entry.id, removed: false, file: entry }));
+  const restored = await s.run();
+  assert.equal(restored.error, undefined, restored.error?.message);
+  assert.equal(s.sent.length, 60, "all 60 restored files reload, not only the last batch");
+  assert.equal(s.store.uids().length, 60);
+  assert.equal(s.receipts.at(-1).status, "ready");
+});
+
+test("on replay, a gone file that is no longer stored loses its accepted version even when the earlier removal's answer was lost", async (t) => {
+  const entries = baseEntries().filter((entry) => entry.id !== "big-file");
+  const s = scenario(t, entries);
+  s.seedSynced(entries.filter((entry) => entry.mimeType !== drive.FOLDER_MIME));
+  // An earlier run's removal committed at the Worker but its answer never came
+  // back: the documents are gone while the accepted versions remain.
+  s.store.db.prepare("DELETE FROM documents WHERE doc_uid IN ('drive:trash-file', 'drive:move-file')").run();
+  const trashFile = s.world.byId.get("trash-file");
+  const moveFile = s.world.byId.get("move-file");
+  s.world.changes = [
+    { fileId: "trash-file", removed: false, file: { ...trashFile, trashed: true } },
+    { fileId: "move-file", removed: false, file: { ...moveFile, parents: [OUTSIDE] } },
+  ];
+  const replay = await s.run();
+  assert.equal(replay.error, undefined, replay.error?.message);
+  assert.equal(s.state.done["drive:trash-file"], undefined);
+  assert.equal(s.state.done["drive:move-file"], undefined);
+
+  // Both come back at the version they had: each reloads.
+  s.world.changes = [{ fileId: "trash-file", removed: false, file: trashFile },
+    { fileId: "move-file", removed: false, file: moveFile }];
+  const back = await s.run();
+  assert.equal(back.error, undefined, back.error?.message);
+  assert.deepEqual([...s.sent].sort(), ["move-file", "trash-file"]);
+  assert.ok(s.store.uids().includes("drive:trash-file") && s.store.uids().includes("drive:move-file"));
+});
+
+test("a cleanup that fails after an earlier batch committed clears that batch's accepted versions", async (t) => {
+  const outsideFiles = Array.from({ length: 60 }, (_, index) => file(`out-${String(index).padStart(3, "0")}`, OUTSIDE));
+  const s = scenario(t, [folder("owner-drive", "Owner Drive"), folder(ROOT, "Folder Alpha", "owner-drive"),
+    folder(OUTSIDE, "Folder Outside", "owner-drive"), file("in-root"), ...outsideFiles]);
+  s.seedSynced([s.world.byId.get("in-root"), ...outsideFiles]);
+  s.removal.failAfterApplies = 1;
+  const failed = await s.run({ cleanup: true });
+  assert.ok(failed.error, "the failed batch is reported");
+  assert.equal(s.store.uids().length, 11, "the first batch of 50 committed");
+  assert.equal(outsideFiles.filter((entry) => s.state.done[`drive:${entry.id}`]).length, 10,
+    "the committed batch no longer carries accepted versions");
+  assert.ok(s.state.done["drive:in-root"]);
+});
+
+// Review item 3. A refusal is not a removal trigger: a changed file the
+// credential scanner refuses keeps its stored document, and --cleanup is
+// where it is removed.
+test("a changed file the credential scanner refuses keeps its stored document on the daily path", async (t) => {
+  const credential = ["sk", "a".repeat(32)].join("-");
+  const entries = baseEntries().filter((entry) => entry.id !== "big-file");
+  const s = scenario(t, entries);
+  s.seedSynced(entries.filter((entry) => entry.mimeType !== drive.FOLDER_MIME));
+  const edited = (id) => {
+    s.world.byId.set(id, { ...s.world.byId.get(id), modifiedTime: "2026-10-10T00:00:00Z", md5Checksum: `${id}-v2` });
+    return { fileId: id, removed: false, file: s.world.byId.get(id) };
+  };
+  // edit-file now carries a credential the local scanner refuses; the Worker's
+  // scanner refuses keep-file. trash-file is the control: still removed.
+  s.world.content.set("edit-file", `${TEXT} Synthetic scanner fixture ${credential}`);
+  s.refuseLoads.add("keep-file");
+  s.world.changes = [edited("edit-file"), edited("keep-file"),
+    { fileId: "trash-file", removed: false, file: { ...s.world.byId.get("trash-file"), trashed: true } }];
+  const daily = await s.run();
+  assert.equal(daily.error, undefined, `${daily.error?.message}\n${daily.output.slice(-1200)}`);
+  assert.ok(s.store.uids().includes("drive:edit-file"), "a local scanner refusal keeps the stored document");
+  assert.ok(s.store.uids().includes("drive:keep-file"), "a Worker scanner refusal keeps the stored document");
+  assert.equal(s.store.uids().includes("drive:trash-file"), false, "a trashed file is still removed at once");
+  assert.match(String(s.state.skipped["drive:edit-file"]), /^refused: carries /);
+  assert.equal(s.state.done["drive:edit-file"], undefined, "the refused version is not recorded as accepted");
+  assert.equal(s.state.done["drive:keep-file"], undefined);
+  assert.equal(s.receipts.at(-1).status, "error", "a refusal keeps the run visibly incomplete");
+  assert.equal(s.receipts.at(-1).issue_code, "INPUT_REFUSED");
+
+  const cleanup = await s.run({ cleanup: true });
+  assert.equal(cleanup.error, undefined, cleanup.error?.message);
+  assert.equal(cleanup.result.credential_refused, 1);
+  assert.equal(s.store.uids().includes("drive:edit-file"), false, "--cleanup removes the refused file");
+});
+
+// Review item 4. Google answers a malformed field selection with 400, and the
+// daily path now depends entirely on the changes feed.
+test("the changes request sends the exact field mask", async (t) => {
+  const entries = baseEntries().filter((entry) => entry.id !== "big-file");
+  const s = scenario(t, entries);
+  s.seedSynced(entries.filter((entry) => entry.mimeType !== drive.FOLDER_MIME));
+  const { error } = await s.run();
+  assert.equal(error, undefined, error?.message);
+  assert.deepEqual(s.calls.filter((call) => call.path === "/changes").map((call) => call.fields), [CHANGES_FIELDS]);
+});
+
+// Review item 5. If none of the stored Drive files is visible to the connected
+// account, it is most likely a different Google account: --cleanup warns and
+// removes nothing, as the Gmail sweep does.
+for (const [label, entries, driveConfig, myDriveId] of [
+  ["roots the other account can also see", [folder(ROOT, "Folder Alpha"), file("other-account-file")], {}, null],
+  ["a My-Drive-only scope", [folder("other-my-drive", ""), file("other-account-file", "other-my-drive")],
+    { root_folder_ids: [], include_my_drive_root_files: true }, "other-my-drive"],
+]) {
+  test(`cleanup removes nothing when none of the stored files is visible to the connected account (${label})`, async (t) => {
+    const s = scenario(t, entries, { driveConfig, myDriveId });
+    for (const id of ["stored-a", "stored-b", "stored-c"]) s.store.put(`drive:${id}`);
+    const preview = await s.run({ cleanup: true, "dry-run": true });
+    const applied = await s.run({ cleanup: true });
+    for (const [name, run] of [["dry run", preview], ["real run", applied]]) {
+      assert.equal(run.error, undefined, `${name}: ${run.error?.message}`);
+      assert.match(run.output, /None of the 3 stored Drive files are visible to this account\. Did you connect a different Google account\? Nothing was removed/, name);
+      assert.equal(run.result.not_visible, 3, name);
+      assert.equal(run.result.account_mismatch, 3, name);
+    }
+    assert.equal(preview.result.would_remove, 0);
+    assert.equal(applied.result.removed, 0);
+    assert.equal(s.store.calls.apply, 0);
+    assert.deepEqual(s.store.uids(), ["drive:stored-a", "drive:stored-b", "drive:stored-c"]);
+
+    // Control: once one stored file is visible, the not-found ones are removed.
+    s.store.put("drive:other-account-file");
+    const control = await s.run({ cleanup: true });
+    assert.equal(control.error, undefined, control.error?.message);
+    assert.equal(control.result.account_mismatch, 0);
+    assert.equal(control.result.removed, 3);
+    assert.deepEqual(s.store.uids(), ["drive:other-account-file"]);
+  });
+}
+
+// Review item 6. include_my_drive_root_files covers direct files only, so a
+// change to a top-level My Drive folder never pulls in that folder's subtree.
+test("with loose My Drive files on, a changed top-level My Drive folder does not pull in its subtree", async (t) => {
+  const entries = [folder("owner-drive", "Owner Drive"), folder(ROOT, "Folder Alpha", "owner-drive"),
+    folder("top-folder", "Top Folder", "owner-drive"), file("deep-file", "top-folder"), file("keep-file")];
+  const s = scenario(t, entries, { driveConfig: { include_my_drive_root_files: true }, myDriveId: "owner-drive" });
+  const first = await s.run();
+  assert.equal(first.error, undefined, first.error?.message);
+  assert.deepEqual(s.sent, ["keep-file"], "the first pass loads direct files only, never a top-level folder's subtree");
+  s.sent.length = 0;
+  // The top-level folder is renamed, and a new loose file lands next to it.
+  s.world.byId.set("top-folder", { ...s.world.byId.get("top-folder"), name: "Top Folder Renamed" });
+  s.world.byId.set("new-loose-file", file("new-loose-file", "owner-drive"));
+  s.world.changes = [{ fileId: "top-folder", removed: false, file: s.world.byId.get("top-folder") },
+    { fileId: "new-loose-file", removed: false, file: s.world.byId.get("new-loose-file") }];
+  const daily = await s.run();
+  assert.equal(daily.error, undefined, `${daily.error?.message}\n${daily.output.slice(-1200)}`);
+  assert.deepEqual(s.sent, ["new-loose-file"], "a new direct file is loaded");
+  assert.equal(s.calls.some((call) => call.query === "'top-folder' in parents and trashed = false"), false,
+    "the top-level folder is not walked");
+  assert.equal(s.store.uids().includes("drive:deep-file"), false);
+  assert.equal(s.state.sync_token, "token-2");
 });

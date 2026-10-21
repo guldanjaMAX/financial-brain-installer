@@ -364,6 +364,22 @@ const workbookBytes = (sheets) => {
   check("the next token is returned for the following run", r.nextToken === "T99");
 }
 {
+  // Google answers a malformed field selection with 400, and the daily Drive
+  // path depends entirely on this request, so the exact mask is pinned.
+  let fields = null;
+  await listChanges(tok, "T1", {
+    fetchImpl: async (url) => {
+      fields = new URL(url).searchParams.get("fields");
+      return json({ changes: [], newStartPageToken: "T2" });
+    },
+    sleep: async () => {},
+  });
+  check("the changes request selects each change's file with the file-list fields, exactly",
+    fields === "nextPageToken, newStartPageToken, changes(fileId, removed, file(id, name, mimeType, size, createdTime, " +
+      "modifiedTime, trashed, parents, webViewLink, md5Checksum, driveId, shortcutDetails(targetId,targetMimeType)))",
+    fields);
+}
+{
   let calls = 0, error = null;
   await listChanges(tok, "T1", {
     fetchImpl: async () => { calls++; return json({ changes: [], nextPageToken: "T1" }); },

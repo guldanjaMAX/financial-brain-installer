@@ -48,16 +48,21 @@ export function driveFileIdOf(uid, sourceName = "drive") {
   return id || null;
 }
 
+/** Google's folder type. Kept here so Calendar and Gmail never load the Drive connector. */
+const DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder";
+
 /**
  * Is this file under a configured root, using the saved folder index?
  *
- * `myDriveRootId` admits only DIRECT children of My Drive, matching the
- * rooted walk's include_my_drive_root_files contract.
+ * `myDriveRootId` admits only DIRECT child FILES of My Drive, matching the
+ * rooted walk's include_my_drive_root_files contract: the walk never descends
+ * into a top-level My Drive folder, so a change to one must not pull in its
+ * subtree. A folder-index entry carries no type; pass it with the folder type.
  */
 export function driveFileInRoots(file, { rootFolderIds = [], folders = {}, myDriveRootId = null } = {}) {
   const roots = new Set(rootFolderIds);
   const parents = Array.isArray(file?.parents) ? file.parents.map(String) : [];
-  if (myDriveRootId && parents.includes(myDriveRootId)) return true;
+  if (myDriveRootId && file?.mimeType !== DRIVE_FOLDER_MIME && parents.includes(myDriveRootId)) return true;
   const queue = [...parents];
   const seen = new Set();
   while (queue.length) {
@@ -90,6 +95,11 @@ export function driveFailureText(error) {
  * nothing is left. `dryRun` previews only. Gmail uses this same path for a
  * spam message, and Google and Outlook Calendar for a cancelled or deleted
  * event.
+ *
+ * `onBatchRemoved(families)` runs as each batch is proved gone, before the
+ * next batch starts, so a caller can forget that batch's local state at once.
+ * A later batch that fails then cannot leave an earlier, committed batch
+ * looking stored. It never runs on a dry run.
  */
 export async function removeDriveFamilies({
   families,
@@ -99,6 +109,7 @@ export async function removeDriveFamilies({
   assertOwned = null,
   request = requestIngestRemovalPlan,
   onProgress = (line) => console.log(line),
+  onBatchRemoved = null,
 }) {
   let matched = 0;
   let removed = 0;
@@ -134,6 +145,7 @@ export async function removeDriveFamilies({
           throw new Error("Removal readback found remaining targets; the cursor was not advanced. Run again to finish.");
         }
       }
+      await onBatchRemoved?.(group);
     }
     if (families.length > 50) {
       onProgress(`  removal: ${Math.min(index + 50, families.length)} of ${families.length} file(s) checked, ` +
@@ -158,6 +170,11 @@ export async function removeDriveFamilies({
  * removes in bulk; this one command is where they are cleaned up.
  * `credentialRefused` answers "unreadable" for a marked file it could not
  * re-read; that file is kept and counted on its own, never as in a root.
+ *
+ * `counts.visible` is how many stored files Google showed this account at
+ * all: walked under a root, trashed, or visible outside the roots. When it is
+ * zero and some are not found, the caller is most likely connected to a
+ * different Google account and must remove nothing.
  */
 export async function findDriveCleanupTargets({
   drive,
@@ -180,7 +197,8 @@ export async function findDriveCleanupTargets({
   const storedIds = [...new Set([...stored].map((uid) => driveFileIdOf(uid, sourceName)).filter(Boolean))].sort();
   const fileIds = storedIds.filter((id) => !walked.has(id));
   const counts = {
-    stored: stored.size, in_roots: 0, gone: 0, not_visible: 0, outside_roots: 0, excluded: 0, credential_refused: 0,
+    stored: stored.size, stored_files: storedIds.length, visible: storedIds.length - fileIds.length,
+    in_roots: 0, gone: 0, not_visible: 0, outside_roots: 0, excluded: 0, credential_refused: 0,
     credential_unreadable: 0, kept: 0,
   };
   const excluded = [];
@@ -216,6 +234,10 @@ export async function findDriveCleanupTargets({
     else if (kind === "unresolved_not_returned") notVisible.push(`${sourceName}:${id}`);
     else if (kind === "left_scope") outside.push(`${sourceName}:${id}`);
     else counts.kept++;
+    // Trashed, outside the roots, or under a root but missed by the walk:
+    // Google showed this account the file. Access denied and transient
+    // errors prove nothing either way.
+    if (["source_deleted", "left_scope", "present_in_scope"].includes(kind)) counts.visible++;
     if (++checked % 100 === 0) onProgress(`  cleanup: checked ${checked} of ${fileIds.length} stored file(s) not under a root`);
   }
   counts.gone = gone.length;

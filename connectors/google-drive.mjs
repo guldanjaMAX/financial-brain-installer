@@ -673,7 +673,10 @@ export async function listChanges(getAccessToken, pageToken, opts = {}) {
       search: {
         pageToken: token,
         pageSize: 1000,
-        fields: `nextPageToken, newStartPageToken, changes(fileId, removed, file(${FIELDS.replace(/^nextPageToken, files\(|\)$/g, "")}))`,
+        // Each change's file carries the same fields a folder listing returns
+        // for one file. Built from FILE_FIELDS, never by trimming FIELDS: a
+        // trim that missed would send a malformed mask Google answers with 400.
+        fields: `nextPageToken, newStartPageToken, changes(fileId, removed, file(${FILE_FIELDS}))`,
         supportsAllDrives: true,
         includeItemsFromAllDrives: true,
         includeRemoved: true,

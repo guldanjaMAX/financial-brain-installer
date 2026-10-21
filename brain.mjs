@@ -16974,6 +16974,12 @@ export function gmailFailureEvidence(error, statePath, beforeState) {
  * cleanup does not download the whole corpus. It reads with the same OCR the
  * daily run uses (none on a dry run). A marked file it cannot re-read is kept
  * and counted on its own line, never counted as kept under a root.
+ *
+ * If none of the stored files is visible to the connected account at all and
+ * some are not found, it is most likely a different Google account (a root
+ * both accounts can see resolves either way). As the Gmail sweep does, it
+ * warns and removes nothing. Each removal batch forgets its files' accepted
+ * versions as it commits, so a later failed batch leaves no stale state.
  */
 export async function cmdDriveCleanup(m, manifestPath, flags, options = {}) {
   if (flags.cleanup !== true) die("--cleanup takes no value. Run it with --dry-run first to see the counts.");
@@ -16999,7 +17005,7 @@ export async function cmdDriveCleanup(m, manifestPath, flags, options = {}) {
       loadStore: dry ? options.loadGoogleTokensReadOnly ?? loadTokensReadOnly : options.loadGoogleTokens ?? loadTokens,
     });
     const drive = options.drive ?? await import("./connectors/google-drive.mjs");
-    const { findDriveCleanupTargets, removeDriveFamilies } = await import("./operations/drive-sync.mjs");
+    const { driveFileIdOf, findDriveCleanupTargets, removeDriveFamilies } = await import("./operations/drive-sync.mjs");
     const lib = await (options.ingestLib ?? ingestLib)();
     const priorState = lib.loadState(statePath);
     const scannerOn = m.safety?.credential_scanner?.enabled !== false;
@@ -17042,9 +17048,17 @@ export async function cmdDriveCleanup(m, manifestPath, flags, options = {}) {
       `${counts.outside_roots} outside every root; ${counts.excluded} excluded by the current settings; ` +
       `${counts.credential_refused} refused by the credential scanner; ` +
       `${counts.kept} kept because Google did not confirm either`);
+    // Google showed this account none of the stored files: most likely a
+    // different Google account. Nothing is removed, as the Gmail sweep does.
+    const accountMismatch = counts.not_visible > 0 && counts.visible === 0 ? counts.not_visible : 0;
     // The daily run keeps these; this is where they are removed.
     info(`  ${counts.not_visible} no longer visible to this account (Google says not found)` +
-      `${counts.not_visible ? (dry ? "; a real run removes them" : "; removed below") : ""}`);
+      `${counts.not_visible ? (accountMismatch ? "; kept, see the warning below" : dry ? "; a real run removes them" : "; removed below") : ""}`);
+    if (accountMismatch) {
+      warn(`None of the ${counts.stored_files} stored Drive files are visible to this account. ` +
+        "Did you connect a different Google account? Nothing was removed: the stored documents are kept. " +
+        "Reconnect the Google account that owns these files, then run --cleanup again.");
+    }
     if (counts.credential_unreadable) {
       const next = !ocrCfg.enabled
         ? "run with OCR enabled or remove manually"
@@ -17053,34 +17067,42 @@ export async function cmdDriveCleanup(m, manifestPath, flags, options = {}) {
           : "run again later or remove manually";
       warn(`${counts.credential_unreadable} marked as carrying a credential but could not be re-read (kept); ${next}`);
     }
-    const targets = [...gone, ...notVisible, ...outside, ...excluded, ...refused].sort();
+    const targets = accountMismatch ? [] : [...gone, ...notVisible, ...outside, ...excluded, ...refused].sort();
+    // The markers --cleanup reads stay on an excluded or refused file.
+    const keepMarker = new Set([...excluded, ...refused]);
+    const state = !dry && targets.length ? lib.loadState(statePath) : null;
+    const forgetBatch = (families) => {
+      for (const { base_doc_uid: uid } of families) {
+        delete state.done?.[uid];
+        if (!keepMarker.has(uid)) delete state.skipped?.[uid];
+        if (state.removed) delete state.removed[uid];
+        const fileId = driveFileIdOf(uid, sourceName);
+        if (fileId && state.drive_file_parents) delete state.drive_file_parents[fileId];
+      }
+      assertLockOwned?.();
+      lib.saveState(statePath, state);
+    };
     const result = targets.length
       ? await removeDriveFamilies({
           families: targets.map((uid) => ({ base_doc_uid: uid, keep_doc_uids: [], family_kind: "structural" })),
           base, adminKey, dryRun: dry, assertOwned: assertLockOwned,
           request: options.removalPlanRequest, onProgress: info,
+          onBatchRemoved: dry ? null : forgetBatch,
         })
       : { matched: 0, removed: 0, preserved: 0 };
     if (dry) {
       ok(`dry run: ${result.matched} stored document(s) for ${targets.length} file(s) would be removed. Nothing was removed.`);
       if (targets.length) info("Run the same command without --dry-run to remove them.");
     } else {
-      if (targets.length) {
-        const state = lib.loadState(statePath);
-        for (const uid of targets) {
-          delete state.done?.[uid];
-          if (!excluded.includes(uid) && !refused.includes(uid)) delete state.skipped?.[uid];
-          if (state.removed) delete state.removed[uid];
-        }
-        assertLockOwned?.();
-        lib.saveState(statePath, state);
-      }
       ok(`removed ${result.removed} stored Drive document(s) for ${targets.length} file(s)`);
     }
     if (result.preserved) {
       warn(`${result.preserved} stored document(s) were kept because the Brain could not verify they belong to those files`);
     }
-    return { dry_run: dry, ...counts, would_remove: result.matched, removed: result.removed, preserved: result.preserved };
+    return {
+      dry_run: dry, ...counts, account_mismatch: accountMismatch,
+      would_remove: result.matched, removed: result.removed, preserved: result.preserved,
+    };
   };
   if (dry) return run();
   return runMutatingSourceIngest({
@@ -17916,12 +17938,15 @@ const cmdIngestRemoteRun = async (
 
   if (which === "drive" && !assistantJson) {
     // The daily Drive path. The changes feed decides everything: a changed
-    // file under a root is loaded, a trashed or moved-out file loses its
-    // stored document at once, and a file that only left this account's view
-    // keeps it and is counted for --cleanup. First run, --reset, an expired
-    // token or a changed policy save a start token and then make one additive
-    // pass that never removes. A file the connector cannot read keeps its
-    // stored copy.
+    // file under a root is loaded, a trashed file loses its stored document at
+    // once, and so does a file that moved out of the roots when this source
+    // recorded it under a current root before. A changed file outside the
+    // roots with no such record (an older, wider scope, or a shared-with-me
+    // loose file) keeps its document, as does a file that only left this
+    // account's view; both are counted for --cleanup. First run, --reset, an
+    // expired token or a changed policy save a start token and then make one
+    // additive pass that never removes. A file the connector cannot read, or
+    // one the credential scanner refuses, keeps its stored copy.
     const drive = options.drive ?? await import("./connectors/google-drive.mjs");
     const { driveFileIdOf, driveFileInRoots, driveFailureText, removeDriveFamilies, removalRetryPending } =
       await import("./operations/drive-sync.mjs");
@@ -17933,7 +17958,16 @@ const cmdIngestRemoteRun = async (
     // removed: true without a trash: the file only left this account's view.
     // Its stored documents are kept and counted; --cleanup removes them.
     const notVisible = new Set();
+    // Changed outside the roots with no record of being under a current root:
+    // kept and counted on the "outside your folders, kept" line.
+    const outsideKept = new Set();
     const deliberate = [];
+    // Where each file sat when this source last saw it under a root. It is the
+    // evidence a file moved out, and is saved only with the cursor, like the
+    // folder index. The additive pass rebuilds it from its walk.
+    const priorParents = state.drive_file_parents && typeof state.drive_file_parents === "object"
+      ? state.drive_file_parents : {};
+    let fileParents = { ...priorParents };
     let nextSync = null;
     let changes = null;
     // The folder index is saved only with the cursor. A run that holds its
@@ -17982,12 +18016,18 @@ const cmdIngestRemoteRun = async (
         if (trashed.has(String(id))) gone.add(`${sourceName}:${id}`);
         else notVisible.add(`${sourceName}:${id}`);
       }
+      // Under a current root as of the saved cursor: the file's recorded
+      // parents, resolved through the saved folder index.
+      const wasInRoots = (id) => Array.isArray(priorParents[id]) &&
+        driveFileInRoots({ parents: priorParents[id] }, scope(priorFolders));
       for (const file of changes.changed) {
         const inRoots = driveFileInRoots(file, scope(folders));
         if (file.mimeType !== drive.FOLDER_MIME) {
           if (inRoots) byId.set(String(file.id), file);
-          else gone.add(`${sourceName}:${file.id}`);
-        } else if (inRoots && !(priorFolders[file.id] && driveFileInRoots(priorFolders[file.id], scope(priorFolders)))) {
+          else if (wasInRoots(String(file.id))) gone.add(`${sourceName}:${file.id}`);
+          else outsideKept.add(`${sourceName}:${file.id}`);
+        } else if (inRoots && !(priorFolders[file.id] &&
+          driveFileInRoots({ ...priorFolders[file.id], mimeType: drive.FOLDER_MIME }, scope(priorFolders)))) {
           // A folder moved in brings files that did not change themselves.
           for await (const child of drive.listRootedFiles(getToken, { rootFolderIds: [String(file.id)] })) {
             byId.set(String(child.id), child);
@@ -17998,6 +18038,7 @@ const cmdIngestRemoteRun = async (
       for (const id of byId.keys()) {
         gone.delete(`${sourceName}:${id}`);
         notVisible.delete(`${sourceName}:${id}`);
+        outsideKept.delete(`${sourceName}:${id}`);
       }
       info(`incremental Drive sync: ${byId.size} changed file(s) under the roots, ${gone.size} removal candidate(s)`);
     } else {
@@ -18017,6 +18058,11 @@ const cmdIngestRemoteRun = async (
         if (byId.size >= limit) break;
       }
       folders = drive.updateFolderIndex([...byId.values()], {});
+      fileParents = {};
+    }
+    // Every file seen under a root on this run records where it sits.
+    for (const [id, file] of byId) {
+      if (file.mimeType !== drive.FOLDER_MIME && Array.isArray(file.parents)) fileParents[id] = file.parents.map(String);
     }
 
     const pathOf = (file) => drive.folderPathFor(file, folders);
@@ -18067,12 +18113,13 @@ const cmdIngestRemoteRun = async (
       const envelope = sanitizeIngestEnvelope(r.envelope);
       const refusal = credentialRefusalOf(envelope, scannerOn);
       if (refusal) {
+        // A refusal is not a removal trigger: the stored copy stays, and this
+        // marker is what --cleanup looks for.
         state.skipped[key] = refusal.reason;
         // Forget the accepted version. Otherwise a later additive pass matches
         // the file as unchanged and erases the marker --cleanup looks for.
         delete state.done[key];
         localRefused++;
-        deliberate.push(key);
         return { skip: { path: safeIngestDisplay(envelope.title, f.name, f.id), id: f.id, reason: refusal.reason } };
       }
       const envelopes = splitOversized(envelope);
@@ -18109,45 +18156,71 @@ const cmdIngestRemoteRun = async (
     if (scanned % 100 !== 0) progress();
     else if (!scanned) info("  Drive: no changed files under the roots");
 
-    // Policy exclusions and credential refusals are deliberate removals, made
-    // only when the file itself changed. The additive pass never removes.
-    if (incremental) for (const uid of [...deliberate, ...intentionalRemovalUids]) gone.add(uid);
+    // Policy exclusions are deliberate removals, made only when the file
+    // itself changed. A credential refusal, local or the Worker's, is not: the
+    // stored copy stays and --cleanup removes it. The additive pass never
+    // removes.
+    if (incremental) for (const uid of deliberate) gone.add(uid);
     intentionalRemovalUids.length = 0;
+    // A removed or moved-out file no longer has a place under a root.
+    for (const uid of gone) delete fileParents[driveFileIdOf(uid, sourceName)];
     const notVisibleLine = (count) => info(
       `${count} Drive file(s) are no longer visible to this account; their stored documents are kept. ` +
         "--cleanup removes them (run it with --dry-run first to see the count).",
     );
-    if ((gone.size || notVisible.size) && dry) {
+    const outsideKeptLine = (count) => info(
+      `${count} changed Drive file(s) are outside your folders, kept: this source never recorded them under one, ` +
+        "so their stored documents stay. --cleanup removes them (run it with --dry-run first to see the count).",
+    );
+    if ((gone.size || notVisible.size || outsideKept.size) && dry) {
       if (gone.size) info(`${gone.size} Drive file(s) were trashed, moved out of the roots or excluded; a real run removes any stored copy`);
       // A dry run never reads the Brain, so it counts the files this source
       // recorded as stored, as the incremental path does everywhere else.
-      const storedNotVisible = [...notVisible]
+      const recorded = (uids) => [...uids]
         .filter((uid) => Object.prototype.hasOwnProperty.call(state.done || {}, uid)).length;
-      if (storedNotVisible) notVisibleLine(storedNotVisible);
-    } else if (gone.size || notVisible.size) {
+      if (recorded(notVisible)) notVisibleLine(recorded(notVisible));
+      if (recorded(outsideKept)) outsideKeptLine(recorded(outsideKept));
+    } else if (gone.size || notVisible.size || outsideKept.size) {
       const stored = await listPreparedSourceFamilies({ base, adminKey, source: sourceName });
       const storedIds = new Set([...stored].map((uid) => driveFileIdOf(uid, sourceName)));
-      const keptNotVisible = [...notVisible].filter((uid) => storedIds.has(driveFileIdOf(uid, sourceName))).length;
+      const isStored = (uid) => storedIds.has(driveFileIdOf(uid, sourceName));
+      const keptNotVisible = [...notVisible].filter(isStored).length;
       if (keptNotVisible) notVisibleLine(keptNotVisible);
-      const targets = [...gone].filter((uid) => storedIds.has(driveFileIdOf(uid, sourceName))).sort();
+      const keptOutside = [...outsideKept].filter(isStored).length;
+      if (keptOutside) outsideKeptLine(keptOutside);
+      // A gone file that is no longer stored (an earlier batch committed, or
+      // its answer was lost) must not keep its accepted version: if it came
+      // back at that version it would never reload.
+      let forgotten = 0;
+      for (const uid of gone) {
+        if (isStored(uid) || !Object.prototype.hasOwnProperty.call(state.done, uid)) continue;
+        delete state.done[uid];
+        forgotten++;
+      }
+      if (forgotten) saveState(statePath, state);
+      const targets = [...gone].filter(isStored).sort();
       if (targets.length) {
         let removal;
         try {
           removal = await removeDriveFamilies({
             families: targets.map((uid) => ({ base_doc_uid: uid, keep_doc_uids: [], family_kind: "structural" })),
             base, adminKey, assertOwned: assertLockOwned, request: options.removalPlanRequest, onProgress: info,
+            // Each batch forgets its files as it commits, so a later batch
+            // that fails cannot leave an earlier one looking stored.
+            onBatchRemoved: (families) => {
+              for (const { base_doc_uid: uid } of families) {
+                delete state.done[uid];
+                delete state.skipped[uid];
+                if (state.removed) delete state.removed[uid];
+              }
+              saveState(statePath, state);
+            },
           });
         } catch (error) {
           // Nothing asks for a review: the files stay pending, the cursor is
           // held, and the next run replays the same window and retries them.
           throw removalRetryPending(error, { count: targets.length, what: "trashed, moved-out or excluded Drive file(s)" });
         }
-        for (const uid of targets) {
-          delete state.done[uid];
-          delete state.skipped[uid];
-          if (state.removed) delete state.removed[uid];
-        }
-        saveState(statePath, state);
         info(`removed ${removal.removed} stored Drive document(s) for ${targets.length} trashed, moved-out or excluded file(s)`);
       }
     }
@@ -18184,6 +18257,7 @@ const cmdIngestRemoteRun = async (
         drive_policy_fingerprint: policyFingerprint,
         credential_scanner_fingerprint: scannerFingerprint,
         drive_folders: folders,
+        drive_file_parents: fileParents,
       },
       deleteKeysOnScannerCommit: [],
     };
