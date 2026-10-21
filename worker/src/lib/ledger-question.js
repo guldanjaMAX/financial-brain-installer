@@ -601,9 +601,10 @@ export const paymentQualifiers = Object.freeze(['any', 'latest', 'last', 'recent
 export const paymentChannels = Object.freeze(['ach', 'zelle', 'wire', 'check', 'venmo', 'paypal']);
 const questionRefused = Symbol('question refused at classification');
 // Answer 5 says "anywhere": after a comma, semicolon or dash, or in brackets.
-// The separator or the bracket pair goes with the phrase.
-const exactNamesOnlyBracketed = /[\s,;\-\u2013\u2014]*\(\s*exact\s+names\s+only\s*\)/giu;
-const exactNamesOnlyPhrase = /(?:^\s*|[\s,;\-\u2013\u2014]+)exact\s+names\s+only\b(?:\s*[:;](?=\s)|[\s,;\-\u2013\u2014]*)/giu;
+// The separator or the bracket pair goes with the phrase, and so does the one
+// word that introduces it in a sentence, "with" or "using" (R5-QUESTION-3).
+const exactNamesOnlyBracketed = /[\s,;\-\u2013\u2014]*\(\s*(?:(?:with|using)\s+)?exact\s+names\s+only\s*\)/giu;
+const exactNamesOnlyPhrase = /(?:^\s*|[\s,;\-\u2013\u2014]+)(?:(?:with|using)\s+)?exact\s+names\s+only\b(?:\s*[:;](?=\s)|[\s,;\-\u2013\u2014]*)/giu;
 const slotArticles = new Set(['the', 'my', 'our', 'a', 'an']);
 // A word that can name a payer: not grammar (months, connectors, date words,
 // arrival verbs, quarters), not an article, not a number or an amount.
@@ -619,8 +620,11 @@ const slotAuxiliaries = new Set(['did', 'has', 'have', 'was', 'is', 'were', 'are
 // the one exception before FROM: it is a closed statement sender phrase, and
 // the committed name-retention generators pin "via wire from <name>" as the
 // complete requested name "wire from <name>", so that reading stays (held).
+// The question's own tail grammar, the words the payment grammar consumes
+// after the arrival verb ("yet", "please", "and when"), is a boundary too
+// (R5-QUESTION-1).
 const clauseBoundary = `(?=\\s*(?:[?!.,;:)]|$)|\\s+(?:${[...payerTerminalWords].filter(word => !['from', 'via', 'by', 'of'].includes(word)).join('|')})\\b|` +
-  `\\s+(?:of|for)\\s+(?:${paymentAmount.source}))`;
+  `\\s+(?:yet|please|and\\s+when)\\b|\\s+(?:of|for)\\s+(?:${paymentAmount.source}))`;
 const channelPhrase = new RegExp(`(?:\\s*,)?\\s+via\\s+(?:${paymentChannels.join('|')})\\b${clauseBoundary}`, 'giu');
 const channelBeforeFrom = new RegExp(`(?:\\s*,)?\\s+via\\s+(?:${paymentChannels.filter(channel => channel !== 'wire').join('|')})(?=\\s+from\\b)`, 'giu');
 // Answer-9 qualifiers that are also closed statement vocabulary (channels and
@@ -637,7 +641,13 @@ const paymentQualifierSet = new Set(paymentQualifiers);
 const slotPeriod = `\\d{4}-\\d{2}-\\d{2}|\\d{1,2}/\\d{1,2}/\\d{4}|q[1-4](?: +\\d{4})?|` +
   `(?:${MONTHS.join('|')})(?: +\\d{1,2}(?:st|nd|rd|th)?)?(?:,? +\\d{4})?|\\d{1,2}(?:st|nd|rd|th)? +(?:${MONTHS.join('|')})(?: +\\d{4})?|` +
   `(?:last|this) +month|last +\\d+ +days|so far this year|\\d{4} so far`;
-const slotToken = new RegExp(`(?<![\\p{L}\\p{N}])(?:${slotPeriod}|${paymentAmount.source})(?![\\p{L}\\p{N}])|([\\p{L}\\p{N}]+)`, 'giu');
+// A hyphenated run ("e-check", "pre-paid") is one slot word, and a digit-led
+// ordinal outside a date or period ("2nd", "10th") is a slot word too: each
+// is one unlisted qualifier beside a named payer, never grammar and never a
+// second payer clause (R5-QUESTION-2).
+const slotToken = new RegExp(`(?<![\\p{L}\\p{N}])(?:${slotPeriod}|${paymentAmount.source})(?![\\p{L}\\p{N}])|([\\p{L}\\p{N}]+(?:-[\\p{L}\\p{N}]+)*)`, 'giu');
+const slotOrdinal = /^\d+(?:st|nd|rd|th)$/;
+const statementQualifier = (slot, token) => statementQualifiers.has(slot.slice(token.start, token.end).normalize('NFKC').toLowerCase());
 function paymentSlot(slot) {
   // Words are classified in the grammar's own form (NFKC, lower case), so a
   // compatibility spelling of an auxiliary or article stays grammar.
@@ -645,18 +655,27 @@ function paymentSlot(slot) {
     const word = m[1]?.normalize('NFKC').toLowerCase();
     return { start: m.index, end: m.index + m[0].length,
       kind: !m[1] ? 'scope' : paymentQualifierSet.has(word) ? 'qualifier'
-        : payerSlotWord(word) && !slotAuxiliaries.has(word) ? 'payer' : 'grammar' };
+        : (payerSlotWord(word) || slotOrdinal.test(word)) && !slotAuxiliaries.has(word) ? 'payer' : 'grammar' };
   });
   const without = list => list.reduceRight((text, token) => text.slice(0, token.start) + text.slice(token.end), slot)
     .replace(/\s+/g, ' ').trim();
   const leading = [];
   for (const token of tokens) {
-    if (token.kind !== 'qualifier' || statementQualifiers.has(slot.slice(token.start, token.end).normalize('NFKC').toLowerCase())) break;
+    if (token.kind !== 'qualifier' || statementQualifier(slot, token)) break;
     leading.push(token);
+  }
+  // The same closed run directly before "payment", after the last payer word
+  // ("the Payer One monthly payment"; R5-FIDELITY-1). The statement
+  // vocabulary (ach, wire, invoice) is held there as it is at the front.
+  const trailing = [];
+  if (tokens.some(token => token.kind === 'payer')) for (const token of tokens.toReversed()) {
+    if (token.kind !== 'qualifier' || statementQualifier(slot, token)) break;
+    trailing.push(token);
   }
   const payerWords = tokens.filter(token => token.kind === 'payer').length;
   return { payer: payerWords > 0, payerWords, qualified: tokens.some(token => token.kind === 'qualifier'),
-    stripped: without(tokens.filter(token => token.kind === 'qualifier')), leading: leading.length > 0, leadingStripped: without(leading) };
+    stripped: without(tokens.filter(token => token.kind === 'qualifier')),
+    nounQualified: leading.length + trailing.length > 0, nounStripped: without([...leading, ...trailing.toReversed()]) };
 }
 const ownPaymentNoun = new RegExp(`\\bpayment\\b(?=\\s*(?:[?!.,;:]|$)|\\s+(?:${ARRIVAL}|from|via|of|for|by|in|on|into|to|yet|and|during|over|before|after|between)\\b|\\s+(?:${paymentAmount.source}))`, 'iu');
 const amountAfterName = new RegExp(`\\bfrom\\s+(\\S(?:[\\s\\S]*?\\S)?)(?:\\s+(?:of|for)\\s+(${paymentAmount.source})\\s*,?|\\s*,\\s*(${paymentAmount.source})\\s*,)` +
@@ -667,7 +686,18 @@ function rewriteLedgerQuestion(question, { nounLead = true } = {}) {
   // Same whole-question cap as the span parser, which refuses longer text
   // anyway; it also bounds the rewrite patterns below.
   if (original.length > 1024) return question;
-  let text = original, exactNamesOnly = false;
+  // The rewrites read the compatibility form the grammar reads (R5-QUESTION-4):
+  // a code point whose NFKC form is plain ASCII letters, digits, "$" or spaces
+  // (full-width Latin, a ligature) is read in that form, and comma variants
+  // are commas. Other punctuation keeps its raw spelling, since the
+  // unsupported-punctuation decision is made before normalization. Every
+  // parse normalizes again, so the forms are equivalent there; a question no
+  // rewrite changes is still passed on unchanged.
+  const read = normalizePayerCommas(original).replace(/[^\x00-\x7f]/gu, char => {
+    const form = char.normalize('NFKC');
+    return form !== char && /^[A-Za-z0-9$ ]+$/.test(form) ? form : char;
+  });
+  let text = read, exactNamesOnly = false;
   // Answer 5: "exact names only" anywhere is removed, then restated once at
   // the end of the question, the one place every parse already reads it.
   const flip = () => { exactNamesOnly = true; return ' '; };
@@ -714,10 +744,11 @@ function rewriteLedgerQuestion(question, { nounLead = true } = {}) {
           if (slot.qualified) replacement = slot.stripped;
         } else if (!slot.payer) {
           if (slot.qualified) replacement = slot.stripped;
-        } else if (nounLead && slot.leading) {
-          // A noun payer that begins with closed qualifiers ("the latest Payer
-          // One payment"). The unstripped slot remains a competing reading.
-          replacement = slot.leadingStripped;
+        } else if (nounLead && slot.nounQualified) {
+          // A noun payer that begins or ends with closed qualifiers ("the
+          // latest Payer One payment", "the Payer One monthly payment";
+          // R5-FIDELITY-1). The unstripped slot remains a competing reading.
+          replacement = slot.nounStripped;
         }
         if (replacement !== null) text = `${head.slice(0, start)}${replacement ? `${replacement} ` : ''}${tail}`;
       }
@@ -738,7 +769,7 @@ function rewriteLedgerQuestion(question, { nounLead = true } = {}) {
     }
   }
   if (exactNamesOnly) text = text.replace(/^\s+/, '').replace(/[\s,]*([?!.]*)\s*$/u, ', exact names only$1');
-  return text === original ? question : text;
+  return text === read ? question : text;
 }
 
 // Cleanup is an alternative interpretation, not authority to edit a name.

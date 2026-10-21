@@ -46,7 +46,10 @@ function questionFact(question, owner) {
 // are dropped (they join), every other non-letter is a separator (it joins),
 // and a run of letters is kept as a splitting word unless it is one letter
 // that is either not an ASCII letter in the cited value or directly between
-// two digits. Only digit runs matter to the caller.
+// two digits, or it is a run with no ASCII letter directly between two
+// digits ("4111ǀǀ1111", "4111ǀ́ǀ1111": doubled punctuation-shaped letters
+// read as a separator; round 5, R5-LEAK-1). Only digit runs matter to the
+// caller.
 function codePointRunText(value) {
   const tokens = [];
   for (const char of value) {
@@ -62,11 +65,11 @@ function codePointRunText(value) {
     const token = tokens[index];
     if (token.kind === 'digit') { out += token.text; continue; }
     if (token.kind === 'separator') continue;
-    let end = index;
-    while (tokens[end + 1]?.kind === 'letter') end++;
+    let end = index, ascii = token.ascii;
+    while (tokens[end + 1]?.kind === 'letter') { end++; ascii ||= tokens[end].ascii; }
     const lone = end === index;
     const touching = tokens[index - 1]?.kind === 'digit' && tokens[end + 1]?.kind === 'digit';
-    if (!(lone && (!token.ascii || touching))) out += ' ';
+    if (!((lone && (!token.ascii || touching)) || (touching && !ascii))) out += ' ';
     index = end;
   }
   return out;

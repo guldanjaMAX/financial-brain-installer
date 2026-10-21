@@ -61,7 +61,20 @@ test('R4 QF1 structural nonmatch mutation restores a complete false zero; matchi
       const prefix = `How much did I spend ${selector} in September 2026`;
       assert.equal((await reached(f, `${prefix}?`)).ledger.total_minor, 30000);
       assert.equal((await reached(f, `${prefix}, please?`)).ledger.total_minor, 30000);
-      const body = await reached(f, `In September 2026, how much did I spend ${selector} unknownword?`);
+      // Round 5 (R5-MONEY-3, triage decided): the payee "Vendor One" is a
+      // whole-word prefix of "Vendor One unknownword", a shortened-name
+      // possible match, so that selector is no longer a structural nonmatch:
+      // it is never found, never a total and never complete. The structural
+      // nonmatch arm uses a selector that shares no whole-word run with the
+      // payee, and keeps every assertion below.
+      const nonmatch = selector === 'at Vendor One' ? 'at Vendor Two' : selector;
+      if (nonmatch !== selector) {
+        const variant = await reached(f, `In September 2026, how much did I spend ${selector} unknownword?`);
+        assert.notEqual(variant.ledger.found, true, 'a possible match is never found');
+        assert.equal(variant.ledger.total_minor, null);
+        assert.equal(variant.evidence_gate.complete, false);
+      }
+      const body = await reached(f, `In September 2026, how much did I spend ${nonmatch} unknownword?`);
       assert.equal(body.ledger.found, false, 'same selector nonmatch reaches both renderers');
       const breached = answer === mutant && selector === 'on Office';
       assert.equal(body.ledger.total_minor, breached ? 0 : null);

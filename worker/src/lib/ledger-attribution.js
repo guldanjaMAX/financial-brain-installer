@@ -726,6 +726,10 @@ export function payerFieldsAgree(left, right) {
 // alike. `longer: false` leaves out the field that only extends the name: on
 // the outflow side an explicit longer payee is a different merchant identity
 // (money-rereview R02), while a suffix or a shortened payee stays possible.
+// A trailing or inner whole-word run ("Supply" for "Again Supply") is held
+// for a decision (round 5, R5-MONEY-4): the committed partner tests
+// partner-r7-review R6-F1/R6-F2 and partner-r7-exact R7 seeded invariants pin
+// such a shorter payee beside the exact one as a complete exact answer.
 export function payerNameVariant(field, labels, { longer = true } = {}) {
   const fieldKey = normalizeMerchantText(field), fieldBase = agreementName(field);
   if (!fieldKey) return false;

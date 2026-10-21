@@ -245,15 +245,20 @@ function chooseLiteralSelector(intent, identities, rows, budget) {
       // suffix apart, or a shortened, whole-word prefix of it) or is an alias
       // the requested entity shares with another is a possible match, never
       // hidden behind an exact row (round 4, R4-MONEY-5 and R4-MONEY-6). A
-      // payee registered to one other entity is not, and neither is a longer
-      // payee (money-rereview R02: a different merchant identity).
+      // payee registered to one other entity is not when the question itself
+      // names a registered entity, and neither is a longer payee
+      // (money-rereview R02: a different merchant identity). When the question
+      // names no registered entity there is no "other" to compare: a payee
+      // registered to one entity is possible when it, or any registered
+      // spelling of that entity, is such a variant of the question (R5-MONEY-1).
       let spellings = null;
       const possiblePayee = row => {
         if (!row.payee || row.payee_has_nul || String(row.payee).includes('\0')) return false;
         const field = normalizeMerchantText(row.payee), owners = identities.get(field);
         if (field === key) return false;
         if (slug && owners?.has(slug)) return owners.size > 1 || payerKeyDamaged(identities, row.payee);
-        if (owners?.size === 1) return false;
+        if (owners?.size === 1) return !slug && [row.payee, ...spellingsOf(identities, [...owners][0])]
+          .some(spelling => payerNameVariant(spelling, [label], { longer: false }));
         spellings ??= [label, ...spellingsOf(identities, slug)];
         return payerNameVariant(row.payee, spellings, { longer: false });
       };
@@ -262,13 +267,17 @@ function chooseLiteralSelector(intent, identities, rows, budget) {
         const field = normalizeMerchantText(row.payee), aliases = identities.get(field);
         return field === key || slug && aliases?.size === 1 && aliases.has(slug) && !payerKeyDamaged(identities, row.payee);
       });
-      // Beside exact rows only: alone, such a row keeps the established
-      // nonmatch answer (incomplete, "may appear under a different name";
-      // partner-r4-mutations QF1 pins it). A zero-amount row cannot change
-      // the spend total, so it is no doubt about it (partner-r6-literals pins
-      // a $0 shortened payee beside an exact RAW name as an exact total).
-      const possible = scoped.filter(row => matchesMerchant(row, label) ||
-        (matched.length > 0 && row.amount_minor > 0 && possiblePayee(row)));
+      // A row with no payee whose description contains, by whole words, the
+      // question or any registered spelling of the requested entity is a
+      // description-containment match of that entity (answer 1; R5-MONEY-5).
+      const contained = slug ? [label, ...spellingsOf(identities, slug)] : [label];
+      // A variant payee is a possible match beside exact rows and alone, the
+      // same as on the inflow side (R5-MONEY-3); a selector with no variant
+      // row keeps the nonmatch refusal. A zero-amount row cannot change the
+      // spend total, so it is no doubt about it (partner-r6-literals pins a
+      // $0 shortened payee beside an exact RAW name as an exact total).
+      const possible = scoped.filter(row => contained.some(spelling => matchesMerchant(row, spelling)) ||
+        (row.amount_minor > 0 && possiblePayee(row)));
       return { exact: matched.length > 0, matched, possible, ids,
         conflict: ids.size > 1 || damagedName || payerRegistryHasDamage(identities) && !slug };
     }
@@ -306,10 +315,18 @@ function chooseLiteralSelector(intent, identities, rows, budget) {
     // and, when its attribution is unknown, its statement does not name the
     // requested payer in shorthand (R4-MONEY-4). Those are possible matches:
     // they stay listed and keep the exact rows a partial subtotal.
+    // A field registered to one other entity is a known other only when the
+    // question itself resolved to a registered entity. With no resolved
+    // entity there is no "other": that field is possible when it, or any
+    // registered spelling of its entity, is a variant of the question
+    // (R5-MONEY-1), so registering a spelling never removes the doubt its
+    // unregistered variants carry.
     let spellings = null;
     const possibleField = row => fields.get(row.id)?.fields.some(field => {
       const fieldKey = normalizeMerchantText(field), owners = identities.get(fieldKey);
-      if (fieldKey === key || (owners?.size === 1 && !(slug && owners.has(slug)))) return false;
+      if (fieldKey === key) return false;
+      if (owners?.size === 1 && !(slug && owners.has(slug))) return !slug &&
+        [field, ...spellingsOf(identities, [...owners][0])].some(spelling => payerNameVariant(spelling, [label]));
       spellings ??= [label, ...spellingsOf(identities, slug)];
       return payerNameVariant(field, spellings);
     });
@@ -367,7 +384,18 @@ function chooseLiteralSelector(intent, identities, rows, budget) {
   }
   if (literal.blockedLiteral && cleaned) return { refusal: 'ambiguous', labels };
   const possible = [...new Map([...literal.possible, ...alternate.possible, ...(alternate.matched || [])].map(row => [row.id, row])).values()];
-  if (possible.length) return { intent: raw, possible, labels, attributions: new Map([
+  // A payer's possible-match answer also lists every deposit in scope that
+  // is neither a known other nor a possible match as an unattributed deposit,
+  // as the exact path does (R5-MONEY-2): the useful part stays visible
+  // whichever branch answers. A payment's amount is part of its scope: a
+  // deposit of another amount cannot be the requested payment, and the
+  // possible-match answer cites only receipts of that amount (ledger-answer
+  // "payment edges" pins it).
+  const possibleIds = new Set(possible.map(row => row.id));
+  const amountScoped = row => raw.kind !== 'payment' || raw.amountMinor === null || row.amount_minor === raw.amountMinor;
+  const unattributed = payer && literal.knownRows ? rows.filter(row => row.direction === 'inflow' && amountScoped(row) &&
+    row.posted_on >= raw.from && row.posted_on <= raw.to && !literal.knownRows.has(row.id) && !possibleIds.has(row.id)) : [];
+  if (possible.length) return { intent: raw, possible, unattributed, labels, attributions: new Map([
     ...(literal.attributions || []), ...(alternate.attributions || [])]) };
   // Keep the established uncertainty detail for ordinary unresolved payers.
   // Cleanup nonmatches use the explicit null-total contract.
@@ -386,7 +414,10 @@ function possibleSelectorAnswer(selection, accounts, inventory, scopedRows, allR
   const exactTotal = sumMinor(exactRows), exactSubtotal = exactTotal > 0 ? exactTotal : null;
   const bySlug = new Map(inventory.map(account => [account.account_slug, account]));
   const listedRows = [...exactRows, ...rows].slice(0, 10);
-  const citations = listedRows.map((row, i) => citation(row, bySlug.get(row.effective_account_slug), i));
+  // Deposits in scope that are neither known others nor possible matches are
+  // listed after them, as the exact path lists them (R5-MONEY-2).
+  const unattributed = selection.unattributed || [], listedUnattributed = unattributed.slice(0, 10);
+  const citations = [...listedRows, ...listedUnattributed].map((row, i) => citation(row, bySlug.get(row.effective_account_slug), i));
   const note = 'matched by name similarity, not an exact merchant/payer name; say "exact names only" to exclude these possible matches.';
   const excluded = selection.possible.length;
   const detail = mixed
@@ -394,6 +425,16 @@ function possibleSelectorAnswer(selection, accounts, inventory, scopedRows, allR
       : 'Some rows match the exact name and others are possible matches. No complete total or absence is confirmed.'
     : intent.exactNamesOnly ? 'Exact names only excludes the possible matches. No complete total, presence or absence is confirmed.'
     : 'These are possible matches. No complete total, presence or absence is confirmed.';
+  const unattributedCitations = listedUnattributed.map((_, i) => listedRows.length + i + 1);
+  const attributions = selection.attributions || new Map();
+  const wantedKey = normalizeMerchantText(intent.kind === 'payment' ? intent.counterparty : intent.match);
+  const uncertainCandidates = listedUnattributed.map((row, i) => ({
+    posted_on: row.posted_on, amount_minor: row.amount_minor,
+    field: row.payee ? 'bank_payee' : 'description', label: safeDescription(row.payee || row.description),
+    reason: attributions.get(row.id) ? attributionUncertainty(row, attributions.get(row.id), false, intent.exactNamesOnly,
+      shorthandNames(attributions.get(row.id), null, wantedKey)) : 'sender identity is not confirmed', citation: unattributedCitations[i],
+  }));
+  const unattributedDetail = unattributed.length ? `I found ${unattributed.length} ${unattributed.length === 1 ? "deposit that doesn't" : "deposits that don't"} show who paid between ${intent.from} and ${intent.to}; I can't confirm whether any came from the requested payer.` : null;
   const assumed = withPayerAssumptions({ answer: '', citations, ledger: {} },
     rows.filter(row => row.amount_minor > 0), selection.attributions || new Map());
   const assumptions = assumed.assumptions || [];
@@ -408,22 +449,29 @@ function possibleSelectorAnswer(selection, accounts, inventory, scopedRows, allR
   ];
   const notes = [...(assumed.notes || []), note, ...transferNotes];
   const exactCitations = citations.slice(0, exactRows.length).map(c => c.n);
-  const possibleCitations = citations.slice(exactRows.length).map(c => c.n);
+  const possibleCitations = citations.slice(exactRows.length, listedRows.length).map(c => c.n);
   return { answer: `${detail}${mixed && exactSubtotal !== null ? ` Exact-name subtotal (partial; before exclusions): ${money(exactSubtotal)}.` : ''}` +
       `${subtotal === null ? '' : ` ${mixed ? 'Possible-match subtotal' : 'Partial subtotal'} before exclusions: ${money(subtotal)}.`}\nNote: ${notes.join('; ')}.` +
-      citations.filter(c => c.amount_minor > 0).map(c => `\n${exactCitations.includes(c.n) ? 'Exact match' : 'Possible match'}: ${money(c.amount_minor)} posted ${c.posted_on} [${c.n}].`).join(''),
+      citations.slice(0, listedRows.length).filter(c => c.amount_minor > 0).map(c => `\n${exactCitations.includes(c.n) ? 'Exact match' : 'Possible match'}: ${money(c.amount_minor)} posted ${c.posted_on} [${c.n}].`).join('') +
+      (unattributedDetail ? `\n${unattributedDetail}` : '') +
+      uncertainCandidates.map(candidate => `\nUnattributed deposit: ${money(candidate.amount_minor)} posted ${candidate.posted_on}; ${candidate.field === 'bank_payee' ? "bank's payer field" : 'statement description'}: ${candidate.label}; uncertain because ${candidate.reason} [${candidate.citation}].`).join('') +
+      (unattributed.length > listedUnattributed.length ? `\nShowing ${listedUnattributed.length} of ${unattributed.length} candidate deposits; ${unattributed.length - listedUnattributed.length} more are not listed.` : ''),
     citations, assumptions: assumptions.length ? assumptions : [{ type: 'name_similarity', count: rows.length, flip: 'exact names only' }], notes,
-    gaps: [{ type: 'ledger_selector_possible', reason: 'name_similarity', detail }],
+    gaps: [{ type: 'ledger_selector_possible', reason: 'name_similarity', detail },
+      ...(unattributedDetail ? [{ type: 'ledger_attribution_unknown', reason: 'sender_attribution_unknown',
+        from: intent.from, to: intent.to, count: unattributed.length, citations: unattributedCitations, detail: unattributedDetail }] : [])],
     evidence_gate: { supported: true, complete: false, partial: true, reason: 'name_similarity' },
     ledger: { kind: intent.kind, found: mixed ? true : null, total_minor: null, lead_total_minor: null, total_is_exact: false,
       inflow_total_minor: sumMinor(scopedRows.filter(row => row.direction === 'inflow')),
       subtotal_is_partial: true, attributed_subtotal_minor: mixed ? exactSubtotal : subtotal, confirmed_subtotal_minor: mixed ? exactSubtotal : null,
       ...(mixed ? { exact_count: exactRows.length, exact_citations: exactCitations, possible_count: excluded,
         possible_subtotal_minor: subtotal, possible_citations: possibleCitations } : {}),
+      ...(unattributed.length ? { unattributed_count: unattributed.length, unattributed_citations: unattributedCitations,
+        unattributed_candidates: uncertainCandidates, unattributed_omitted_count: unattributed.length - listedUnattributed.length } : {}),
       from: intent.from, to: intent.to, accounts: accountCoverage(accounts), rows: citations,
       candidate_transfer_count: candidates.length, default_exclusions: summary,
       groups: [{ total_minor: null, total_is_exact: false, if_own_transfers_total_minor: null }],
-      omitted_count: Math.max(0, exactRows.length + rows.length - citations.length), flip: ['exact names only'], if_own_transfers: { total_minor: null } } };
+      omitted_count: Math.max(0, exactRows.length + rows.length - listedRows.length), flip: ['exact names only'], if_own_transfers: { total_minor: null } } };
 }
 
 async function ledgerAnswer(env, intent, accounts, inventory) {
