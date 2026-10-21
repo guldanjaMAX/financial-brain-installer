@@ -17001,11 +17001,15 @@ function driveRootUnavailableDetail(error) {
  * some are not found, it is most likely a different Google account (a root
  * both accounts can see resolves either way). As the Gmail sweep does, it
  * warns and removes nothing. Each removal batch forgets its files' accepted
- * versions as it commits, so a later failed batch leaves no stale state.
+ * versions, and saves that, before it is applied, so a batch that fails or
+ * commits unconfirmed leaves no stale state.
  *
  * Every configured root must resolve before anything is classified: a root in
  * the trash, no longer shared, or not visible to this account stops the
- * command with nothing removed. A stored identity the inventory quarantined
+ * command with nothing removed. With loose My Drive files on, so does a
+ * connected My Drive that is not the one this source recorded: a different
+ * account that can see one stored file, or a root both accounts share, would
+ * otherwise make the rest look gone. A stored identity the inventory quarantined
  * as malformed is never looked up or removed; it is counted on its own line
  * and saved for brain diagnose.
  */
@@ -17033,7 +17037,9 @@ export async function cmdDriveCleanup(m, manifestPath, flags, options = {}) {
       loadStore: dry ? options.loadGoogleTokensReadOnly ?? loadTokensReadOnly : options.loadGoogleTokens ?? loadTokens,
     });
     const drive = options.drive ?? await import("./connectors/google-drive.mjs");
-    const { driveFileIdOf, findDriveCleanupTargets, removeDriveFamilies } = await import("./operations/drive-sync.mjs");
+    const {
+      driveFileIdOf, findDriveCleanupTargets, removeDriveFamilies, unavailableDriveRoots,
+    } = await import("./operations/drive-sync.mjs");
     const lib = await (options.ingestLib ?? ingestLib)();
     const priorState = lib.loadState(statePath);
     const scannerOn = m.safety?.credential_scanner?.enabled !== false;
@@ -17059,6 +17065,22 @@ export async function cmdDriveCleanup(m, manifestPath, flags, options = {}) {
     const malformed = inventory instanceof Set ? [] : [...(inventory.malformedIdentities || [])].sort();
     info(`Drive cleanup${dry ? " (dry run)" : ""}: ${stored.size} stored Drive document(s); walking ` +
       `${sourcePolicy.rootFolderIds.length} root folder(s)${sourcePolicy.includeMyDriveRootFiles ? " plus direct My Drive files" : ""}`);
+    // With loose My Drive files on, the recorded My Drive is this source's
+    // account. A different account can still see a root both accounts share,
+    // or one stored file shared with it, so the none-visible check below
+    // passes and every stored file it cannot see looks gone. Checked before
+    // anything is walked or classified, on the dry run too, as the daily run
+    // checks before its at-once removals.
+    const recordedMyDrive = sourcePolicy.includeMyDriveRootFiles ? priorState.drive_my_drive_root_id || null : null;
+    if (recordedMyDrive) {
+      const unavailable = await unavailableDriveRoots({ drive, getToken, rootFolderIds: [], myDriveRootId: recordedMyDrive });
+      if (unavailable.length) {
+        dieDriveRootsUnavailable(
+          `Drive root folder(s) not available to this account: ${unavailable.map(({ id, reason }) => `${id} (${reason})`).join(", ")}`,
+          { next: "run --cleanup again" },
+        );
+      }
+    }
     // A malformed stored identity never becomes a Google lookup or a removal
     // target. It is held, counted, and saved for brain diagnose to show.
     if (malformed.length) {
@@ -17131,6 +17153,14 @@ export async function cmdDriveCleanup(m, manifestPath, flags, options = {}) {
     // The markers --cleanup reads stay on an excluded or refused file.
     const keepMarker = new Set([...excluded, ...refused]);
     const state = !dry && targets.length ? lib.loadState(statePath) : null;
+    // Write-ahead, as on the daily path: a batch's accepted versions are
+    // forgotten and saved before it is applied, so a removal that commits
+    // unconfirmed still lets a file restored at the same version reload.
+    const forgetBeforeApply = (families) => {
+      for (const { base_doc_uid: uid } of families) delete state.done?.[uid];
+      assertLockOwned?.();
+      lib.saveState(statePath, state);
+    };
     const forgetBatch = (families) => {
       for (const { base_doc_uid: uid } of families) {
         delete state.done?.[uid];
@@ -17147,6 +17177,7 @@ export async function cmdDriveCleanup(m, manifestPath, flags, options = {}) {
           families: targets.map((uid) => ({ base_doc_uid: uid, keep_doc_uids: [], family_kind: "structural" })),
           base, adminKey, dryRun: dry, assertOwned: assertLockOwned,
           request: options.removalPlanRequest, onProgress: info,
+          beforeBatchApply: dry ? null : forgetBeforeApply,
           onBatchRemoved: dry ? null : forgetBatch,
         })
       : { matched: 0, removed: 0, preserved: 0 };
@@ -18287,9 +18318,10 @@ const cmdIngestRemoteRun = async (
       if (keptNotVisible) notVisibleLine(keptNotVisible);
       const keptOutside = [...outsideKept].filter(isStored).length;
       if (keptOutside) outsideKeptLine(keptOutside);
-      // A gone file that is no longer stored (an earlier batch committed, or
-      // its answer was lost) must not keep its accepted version: if it came
-      // back at that version it would never reload.
+      // A gone file that is no longer stored must not keep its accepted
+      // version: if it came back at that version it would never reload. The
+      // write-ahead below already forgets it before each apply; this covers
+      // state an older build left after a removal it could not confirm.
       let forgotten = 0;
       for (const uid of gone) {
         if (isStored(uid) || !Object.prototype.hasOwnProperty.call(state.done, uid)) continue;
@@ -18304,8 +18336,19 @@ const cmdIngestRemoteRun = async (
           removal = await removeDriveFamilies({
             families: targets.map((uid) => ({ base_doc_uid: uid, keep_doc_uids: [], family_kind: "structural" })),
             base, adminKey, assertOwned: assertLockOwned, request: options.removalPlanRequest, onProgress: info,
-            // Each batch forgets its files as it commits, so a later batch
-            // that fails cannot leave an earlier one looking stored.
+            // Write-ahead: each batch forgets its files' accepted versions,
+            // and saves that, before it is applied. An apply can commit
+            // without this run learning it (a lost answer, a failed readback,
+            // a stopped process). A removal that did not land is retried
+            // because the file is still stored, and a file restored at the
+            // same version reloads.
+            beforeBatchApply: (families) => {
+              for (const { base_doc_uid: uid } of families) delete state.done[uid];
+              saveState(statePath, state);
+            },
+            // Each batch forgets the rest of its files' state as it commits,
+            // so a later batch that fails cannot leave an earlier one looking
+            // stored.
             onBatchRemoved: (families) => {
               for (const { base_doc_uid: uid } of families) {
                 delete state.done[uid];

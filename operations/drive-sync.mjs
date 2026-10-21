@@ -133,10 +133,18 @@ export function driveFailureText(error) {
  * spam message, and Google and Outlook Calendar for a cancelled or deleted
  * event.
  *
+ * `beforeBatchApply(families)` runs after a batch's preview finds something
+ * to remove and before its first apply, so a caller can forget that batch's
+ * accepted versions, and save that, before anything is removed. An apply can
+ * commit without this run learning it: its answer is lost, the readback after
+ * it fails, or the process stops. A file restored at the same version must
+ * still reload, and a removal that did not land is retried because the file is
+ * still stored.
+ *
  * `onBatchRemoved(families)` runs as each batch is proved gone, before the
  * next batch starts, so a caller can forget that batch's local state at once.
  * A later batch that fails then cannot leave an earlier, committed batch
- * looking stored. It never runs on a dry run.
+ * looking stored. Neither hook runs on a dry run.
  */
 export async function removeDriveFamilies({
   families,
@@ -146,6 +154,7 @@ export async function removeDriveFamilies({
   assertOwned = null,
   request = requestIngestRemovalPlan,
   onProgress = (line) => console.log(line),
+  beforeBatchApply = null,
   onBatchRemoved = null,
 }) {
   let matched = 0;
@@ -165,6 +174,7 @@ export async function removeDriveFamilies({
     preserved += Number(preview.excluded_documents || 0);
     let marker = preview.marker;
     if (!dryRun) {
+      if (preview.targets.length) await beforeBatchApply?.(group);
       for (let at = 0; at < preview.targets.length; at += 50) {
         const targets = preview.targets.slice(at, at + 50);
         const out = await send({ action: "apply", targets, marker });

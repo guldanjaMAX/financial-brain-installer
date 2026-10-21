@@ -115,8 +115,15 @@ function scenario(t, entries, { driveConfig = {}, myDriveId = null } = {}) {
   const refuseLoads = new Set();
   // `fail` makes the Worker's apply step fail the way the authenticated route
   // does. `failAfterApplies` lets that many applies land first, so a later
-  // batch fails after an earlier one committed.
-  const removal = { fail: false, failAfterApplies: null, applies: 0 };
+  // batch fails after an earlier one committed. `loseAnswerAfterApplies` lets
+  // that many applies answer; each later apply commits at the Worker and then
+  // its answer is lost. `readbackFailures` makes that many readbacks after a
+  // committed apply fail. `savedAtApply` holds the state as last saved when
+  // each apply was sent: what a process stopped right then restarts from.
+  const removal = { fail: false, failAfterApplies: null, loseAnswerAfterApplies: null, readbackFailures: 0,
+    awaitingReadback: false, applies: 0, savedAtApply: [] };
+  // The state as the last save wrote it, as on disk.
+  let saved = null;
   let inventoryReads = 0;
   // `failures` makes that many stored-inventory reads fail the way an
   // unavailable Worker route does.
@@ -139,19 +146,30 @@ function scenario(t, entries, { driveConfig = {}, myDriveId = null } = {}) {
     resolveAdminKey: () => "fixture-admin-key",
     getAccessToken: async () => "fixture-access-token",
     removalPlanRequest: async (input) => {
-      const failApply = input.body.action === "apply" && (removal.fail ||
+      const { action } = input.body;
+      const workerFailure = () => new DriveRemovalReviewRequired("Authenticated removal request failed. HTTP 503. " +
+        "Some approved removals may have completed. The source cursor was not advanced. " +
+        "Rerun the same approved command if the stored inventory is unchanged. If it changed, run ingestion " +
+        "again and review the new removal plan; an old approval cannot resume a completed batch.");
+      if (action === "apply") removal.savedAtApply.push(saved);
+      const failApply = action === "apply" && (removal.fail ||
         (removal.failAfterApplies != null && removal.applies >= removal.failAfterApplies));
-      if (input.body.action === "apply" && !failApply) removal.applies++;
-      if (failApply) {
-        throw new DriveRemovalReviewRequired("Authenticated removal request failed. HTTP 503. " +
-          "Some approved removals may have completed. The source cursor was not advanced. " +
-          "Rerun the same approved command if the stored inventory is unchanged. If it changed, run ingestion " +
-          "again and review the new removal plan; an old approval cannot resume a completed batch.");
+      if (failApply) throw workerFailure();
+      if (action === "preview" && removal.awaitingReadback && removal.readbackFailures > 0) {
+        removal.readbackFailures--;
+        removal.awaitingReadback = false;
+        throw new Error("removal readback was not accepted (503): synthetic outage");
       }
-      return store.request(input);
+      const out = await store.request(input);
+      removal.awaitingReadback = action === "apply";
+      if (action === "apply" && ++removal.applies > (removal.loseAnswerAfterApplies ?? Infinity)) throw workerFailure();
+      return out;
     },
     removalPlanRuntime: () => "fixture-runtime",
-    ingestLib: async () => ({ batchStream, splitOversized, prefetch, loadState: () => state, saveState() {} }),
+    ingestLib: async () => ({
+      batchStream, splitOversized, prefetch, loadState: () => state,
+      saveState: (_path, value) => { saved = JSON.parse(JSON.stringify(value)); },
+    }),
     drive: google.connector,
     listStoredSourceFamilies: inventory,
     sendBatches: async ({ groups, onResult }) => {
@@ -212,8 +230,13 @@ function scenario(t, entries, { driveConfig = {}, myDriveId = null } = {}) {
       store.put(`drive:${entry.id}`);
     }
   };
+  // A process stopped mid-run: the next run starts from the state a save wrote.
+  const restartFrom = (snapshot) => {
+    for (const key of Object.keys(state)) delete state[key];
+    Object.assign(state, JSON.parse(JSON.stringify(snapshot)));
+  };
   return { ...google, manifest, store, state, sent, receipts, failLoads, refuseLoads, removal, run, seedSynced,
-    inventoryFault, inventoryReads: () => inventoryReads };
+    inventoryFault, inventoryReads: () => inventoryReads, restartFrom };
 }
 
 const baseEntries = () => [
@@ -667,7 +690,11 @@ test("a trashed or moved-out file whose at-once removal fails stays pending with
   assert.equal(s.receipts.at(-1).issue_code, "REMOVAL_RETRY_PENDING");
   assert.equal(s.state.sync_token, "token-1", "the cursor is held");
   assert.ok(s.store.uids().includes("drive:trash-file") && s.store.uids().includes("drive:move-file"), "both are still stored");
-  assert.ok(s.state.done["drive:trash-file"], "the accepted version stays until the removal lands");
+  // The accepted version is forgotten before the apply is sent: an apply can
+  // commit without the run learning it. The retry below still finds the file
+  // stored, and a file restored before it would reload.
+  assert.equal(s.state.done["drive:trash-file"], undefined, "the accepted version is forgotten before the removal is sent");
+  assert.equal(s.state.done["drive:move-file"], undefined);
 
   s.removal.fail = false;
   const retried = await s.run();
@@ -800,6 +827,50 @@ test("removal batches preview, apply with the preview marker, then read back", a
     onProgress: () => {} }), /Removal readback found remaining targets/);
 });
 
+test("each removal batch runs its write-ahead hook after the preview and before the apply, and neither hook on a dry run", async () => {
+  const events = [];
+  const gone = new Set();
+  const request = async ({ body }) => {
+    events.push(body.action);
+    if (body.action === "preview") {
+      return { marker: { at: events.length }, targets: body.families.map((f) => f.base_doc_uid).filter((uid) => !gone.has(uid)) };
+    }
+    for (const uid of body.targets) gone.add(uid);
+    return { documents: body.targets.length, marker: { at: events.length } };
+  };
+  const families = Array.from({ length: 60 }, (_, i) => ({ base_doc_uid: `drive:w${i}`, keep_doc_uids: [] }));
+  const hooks = {
+    beforeBatchApply: (group) => events.push(`before ${group.length}`),
+    onBatchRemoved: (group) => events.push(`removed ${group.length}`),
+  };
+  await removeDriveFamilies({ families, base: "b", adminKey: "k", request, onProgress: () => {}, ...hooks });
+  assert.deepEqual(events, ["preview", "before 50", "apply", "preview", "removed 50",
+    "preview", "before 10", "apply", "preview", "removed 10"]);
+
+  // An apply that throws after the hook ran: the hook already ran, the
+  // removed hook never does.
+  events.length = 0;
+  gone.clear();
+  const lost = async (input) => {
+    const out = await request(input);
+    if (input.body.action === "apply") throw new Error("synthetic lost answer");
+    return out;
+  };
+  await assert.rejects(removeDriveFamilies({ families: families.slice(0, 1), base: "b", adminKey: "k", request: lost,
+    onProgress: () => {}, ...hooks }), /synthetic lost answer/);
+  assert.deepEqual(events, ["preview", "before 1", "apply"]);
+
+  // Nothing stored in the batch: nothing to apply, so no write-ahead.
+  events.length = 0;
+  await removeDriveFamilies({ families: families.slice(0, 1), base: "b", adminKey: "k", request, onProgress: () => {}, ...hooks });
+  assert.deepEqual(events, ["preview", "removed 1"]);
+
+  events.length = 0;
+  gone.clear();
+  await removeDriveFamilies({ families, base: "b", adminKey: "k", request, dryRun: true, onProgress: () => {}, ...hooks });
+  assert.deepEqual(events, ["preview", "preview"], "a dry run never runs either hook");
+});
+
 // Review item 1. On the daily path a changed file outside the roots is removed
 // only when this source recorded it under a current root before. A stored file
 // that never was (an older, wider scope, or a shared-with-me loose file) is
@@ -859,7 +930,10 @@ test("a removal that fails after an earlier batch committed clears that batch's 
   assert.equal(failed.error?.code, "REMOVAL_RETRY_PENDING", `${failed.error?.name}: ${failed.error?.message}`);
   assert.equal(s.store.uids().length, 10, "the first batch of 50 committed, the second did not");
   assert.equal(s.state.sync_token, "token-1", "the cursor is held");
-  assert.equal(accepted(), 10, "the committed batch no longer carries accepted versions");
+  // Each batch forgets its accepted versions before it is applied, so the
+  // failed batch carries none either; its 10 files are still stored, and the
+  // retry below removes them.
+  assert.equal(accepted(), 0, "neither the committed batch nor the failed one carries accepted versions");
 
   s.removal.failAfterApplies = null;
   const retried = await s.run();
@@ -913,9 +987,96 @@ test("a cleanup that fails after an earlier batch committed clears that batch's 
   const failed = await s.run({ cleanup: true });
   assert.ok(failed.error, "the failed batch is reported");
   assert.equal(s.store.uids().length, 11, "the first batch of 50 committed");
-  assert.equal(outsideFiles.filter((entry) => s.state.done[`drive:${entry.id}`]).length, 10,
-    "the committed batch no longer carries accepted versions");
+  // Each batch forgets its accepted versions before it is applied, the failed
+  // one included; a file that is not a target keeps its own.
+  assert.equal(outsideFiles.filter((entry) => s.state.done[`drive:${entry.id}`]).length, 0,
+    "neither the committed batch nor the failed one carries accepted versions");
   assert.ok(s.state.done["drive:in-root"]);
+});
+
+// Review item 2, residual. A removal can commit at the Worker without the run
+// learning it: the apply's answer is lost, the readback after a committed apply
+// fails, or the process stops before its next save. Each batch therefore
+// forgets its files' accepted versions, and saves that, before it is applied.
+// A failed removal retries because the file is still stored, and a file
+// restored at the same version before the replay reloads.
+for (const { label, count, arrange, replayTrashFirst = false, restart = false } of [
+  { label: "the second batch's answer was lost", count: 60, arrange: (s) => { s.removal.loseAnswerAfterApplies = 1; } },
+  { label: "the readback after a committed apply failed", count: 1, arrange: (s) => { s.removal.readbackFailures = 1; } },
+  { label: "the replayed window lists each trash and then its restore", count: 3, replayTrashFirst: true,
+    arrange: (s) => { s.removal.loseAnswerAfterApplies = 0; } },
+  { label: "the process stopped right after the last apply committed", count: 60, restart: true,
+    arrange: (s) => { s.removal.loseAnswerAfterApplies = 1; } },
+]) {
+  test(`an at-once removal that committed unconfirmed (${label}) leaves no accepted version, so every restored file reloads`, async (t) => {
+    const many = Array.from({ length: count }, (_, index) => file(`r-${String(index).padStart(3, "0")}`));
+    const s = scenario(t, [folder("owner-drive", "Owner Drive"), folder(ROOT, "Folder Alpha", "owner-drive"), ...many]);
+    s.seedSynced(many);
+    const trashWindow = many.map((entry) => ({ fileId: entry.id, removed: false, file: { ...entry, trashed: true } }));
+    s.world.changes = trashWindow;
+    arrange(s);
+    const failed = await s.run();
+    assert.equal(failed.error?.code, "REMOVAL_RETRY_PENDING", `${failed.error?.name}: ${failed.error?.message}`);
+    assert.deepEqual(s.store.uids(), [], "the Worker removed every file, but the run could not confirm all of them");
+    assert.equal(s.state.sync_token, "token-1", "the cursor is held");
+    if (restart) {
+      const atApply = s.removal.savedAtApply.at(-1);
+      assert.ok(atApply, "the state was saved before the last apply was sent");
+      s.restartFrom(atApply);
+    }
+    assert.equal(many.filter((entry) => s.state.done[`drive:${entry.id}`]).length, 0,
+      "no removed file keeps its accepted version");
+
+    // Every file is restored at the version it had before the replay runs.
+    s.removal.loseAnswerAfterApplies = null;
+    const restoreWindow = many.map((entry) => ({ fileId: entry.id, removed: false, file: entry }));
+    s.world.changes = replayTrashFirst ? [...trashWindow, ...restoreWindow] : restoreWindow;
+    const replay = await s.run();
+    assert.equal(replay.error, undefined, `${replay.error?.message}\n${replay.output.slice(-1200)}`);
+    assert.equal(s.sent.length, count, "every restored file reloads");
+    assert.equal(s.store.uids().length, count);
+    assert.equal(s.receipts.at(-1).status, "ready");
+    assert.equal(s.state.sync_token, "token-2");
+
+    // Control: a later quiet run changes nothing.
+    s.world.changes = [];
+    const quiet = await s.run();
+    assert.equal(quiet.error, undefined, quiet.error?.message);
+    assert.equal(s.store.uids().length, count);
+    assert.equal(s.sent.length, count, "nothing reloads twice");
+  });
+}
+
+test("a cleanup removal whose answer was lost leaves no accepted version, so a file restored from the trash reloads", async (t) => {
+  const entries = [folder("owner-drive", "Owner Drive"), folder(ROOT, "Folder Alpha", "owner-drive"),
+    file("keep-file"), file("trash-a"), file("trash-b")];
+  const s = scenario(t, entries);
+  s.seedSynced(entries.filter((entry) => entry.mimeType !== drive.FOLDER_MIME));
+  // Both were trashed at Google; --cleanup is what removes them here.
+  for (const id of ["trash-a", "trash-b"]) s.world.byId.set(id, { ...s.world.byId.get(id), trashed: true });
+  s.removal.loseAnswerAfterApplies = 0;
+  const failed = await s.run({ cleanup: true });
+  assert.ok(failed.error, "the unconfirmed removal is reported");
+  assert.deepEqual(s.store.uids(), ["drive:keep-file"], "the Worker removed both");
+  const atApply = s.removal.savedAtApply[0];
+  assert.ok(atApply, "the state was saved before the apply was sent");
+  for (const id of ["trash-a", "trash-b"]) {
+    assert.equal(atApply.done[`drive:${id}`], undefined, `${id} was forgotten before the apply`);
+    assert.equal(s.state.done[`drive:${id}`], undefined, `${id} keeps no accepted version`);
+  }
+  assert.ok(s.state.done["drive:keep-file"], "a file that is not a target keeps its accepted version");
+
+  // The owner restores both at the version they had: the daily run reloads them.
+  s.removal.loseAnswerAfterApplies = null;
+  s.world.changes = ["trash-a", "trash-b"].map((id) => {
+    s.world.byId.set(id, { ...s.world.byId.get(id), trashed: false });
+    return { fileId: id, removed: false, file: s.world.byId.get(id) };
+  });
+  const daily = await s.run();
+  assert.equal(daily.error, undefined, `${daily.error?.message}\n${daily.output.slice(-1200)}`);
+  assert.deepEqual([...s.sent].sort(), ["trash-a", "trash-b"]);
+  assert.deepEqual(s.store.uids(), ["drive:keep-file", "drive:trash-a", "drive:trash-b"]);
+  assert.equal(s.receipts.at(-1).status, "ready");
 });
 
 // Review item 3. A refusal is not a removal trigger: a changed file the
@@ -989,12 +1150,72 @@ for (const [label, entries, driveConfig, myDriveId] of [
     assert.deepEqual(s.store.uids(), ["drive:stored-a", "drive:stored-b", "drive:stored-c"]);
 
     // Control: once one stored file is visible, the not-found ones are removed.
+    // No My Drive is recorded here, so nothing says which account this is; the
+    // tests below record the owner's and connect a different one.
     s.store.put("drive:other-account-file");
     const control = await s.run({ cleanup: true });
     assert.equal(control.error, undefined, control.error?.message);
     assert.equal(control.result.account_mismatch, 0);
     assert.equal(control.result.removed, 3);
     assert.deepEqual(s.store.uids(), ["drive:other-account-file"]);
+  });
+}
+
+// Review items 5 and 9, the gap the none-visible check leaves. With loose My
+// Drive files on, this source recorded the owner's My Drive. A different Google
+// account that can see one stored file (shared with it), or a root both
+// accounts can see, passes the none-visible check, and every stored file it
+// cannot see would look gone. --cleanup checks the connected My Drive against
+// the recorded one before it walks or classifies anything, on the dry run and
+// the real run, as the daily run does before its at-once removals.
+for (const [label, driveConfig, loaded, makeOtherAccount] of [
+  ["a My-Drive-only scope, with one stored file shared with the other account",
+    { root_folder_ids: [], include_my_drive_root_files: true }, ["loose-a", "loose-b", "loose-c"],
+    // The shared file shows no parent: the other account cannot see the owner's My Drive.
+    (s) => { s.world.byId.set("loose-a", { ...s.world.byId.get("loose-a"), parents: [] }); s.world.missing.add("loose-b"); s.world.missing.add("loose-c"); }],
+  ["a root both accounts can see, plus loose My Drive files",
+    { include_my_drive_root_files: true }, ["in-root", "loose-a", "loose-b", "loose-c"],
+    (s) => { for (const id of ["loose-a", "loose-b", "loose-c"]) s.world.missing.add(id); }],
+]) {
+  test(`cleanup removes nothing when the connected My Drive is not the one this source recorded (${label})`, async (t) => {
+    const entries = [folder("owner-drive", "Owner Drive"), folder("other-drive", "Other Drive"),
+      folder(ROOT, "Folder Alpha", "owner-drive"), file("in-root"),
+      file("loose-a", "owner-drive"), file("loose-b", "owner-drive"), file("loose-c", "owner-drive")];
+    const s = scenario(t, entries, { driveConfig, myDriveId: "owner-drive" });
+    const first = await s.run();
+    assert.equal(first.error, undefined, first.error?.message);
+    assert.deepEqual([...s.sent].sort(), loaded);
+    assert.equal(s.state.drive_my_drive_root_id, "owner-drive", "the owner's pass recorded the owner's My Drive");
+    const before = s.store.uids();
+
+    // A different Google account is connected.
+    s.world.myDriveId = "other-drive";
+    makeOtherAccount(s);
+    const lookupsBefore = s.calls.length;
+    const routeCallsBefore = s.store.calls.preview + s.store.calls.apply;
+    const preview = await s.run({ cleanup: true, "dry-run": true });
+    const applied = await s.run({ cleanup: true });
+    for (const [name, run] of [["dry run", preview], ["real run", applied]]) {
+      assert.equal(run.error?.supportCode, "REMOTE_PERMISSION_DENIED", `${name}: ${run.error?.message}\n${run.output.slice(-1200)}`);
+      assert.ok(run.error.message.startsWith("Drive root folder(s) not available to this account: " +
+        "My Drive (not the My Drive this source recorded). Nothing was removed: "), `${name}: ${run.error.message}`);
+    }
+    assert.deepEqual(s.store.uids(), before, "nothing is removed under the other account");
+    assert.equal(s.store.calls.preview + s.store.calls.apply, routeCallsBefore, "the removal route is never reached");
+    assert.deepEqual(s.calls.slice(lookupsBefore).map((call) => call.path), ["/files/root", "/files/root"],
+      "only the My Drive check runs: nothing is walked and no stored file is looked up");
+    assert.equal(s.state.drive_my_drive_root_id, "owner-drive", "the recorded My Drive is unchanged");
+
+    // Control: the owner's account again. A file the owner trashed is removed;
+    // every other stored file is kept.
+    s.world.myDriveId = "owner-drive";
+    s.world.missing.clear();
+    s.world.byId.set("loose-a", file("loose-a", "owner-drive"));
+    s.world.byId.set("loose-c", { ...s.world.byId.get("loose-c"), trashed: true });
+    const control = await s.run({ cleanup: true });
+    assert.equal(control.error, undefined, control.error?.message);
+    assert.equal(control.result.removed, 1);
+    assert.deepEqual(s.store.uids(), before.filter((uid) => uid !== "drive:loose-c"));
   });
 }
 
