@@ -1,4 +1,4 @@
-import { createInflowAttributionBudget, createInflowAttributor, boundedPayerFields, damagedSpellingsOf, exactPayerFieldAdmitted, payerFieldsAgree, payerKeyDamaged, payerNameVariant, payerRegistryHasDamage, payerRegistry, payerQuestionRegistry, resolveRequestedPayer, selectAttributedInflows, shorthandNames, inflowScopeConfirmed, payerAmount } from "./ledger-attribution.js";
+import { createInflowAttributionBudget, createInflowAttributor, boundedPayerFields, damagedSpellingsOf, descriptionNamesPayer, exactPayerFieldAdmitted, payerFieldsAgree, payerKeyDamaged, payerNameVariant, payerRegistryHasDamage, payerRegistry, payerQuestionRegistry, resolveRequestedPayer, selectAttributedInflows, shorthandNames, inflowScopeConfirmed, payerAmount } from "./ledger-attribution.js";
 import { scopeIsUnrestricted } from "./grants.js";
 import { classifyLedgerQuestion, ledgerDay, shiftLedgerDay, payerMentionsCoverQuestion, payerQuestionGrammar } from "./ledger-question.js";
 import { accountLinkPairsInWindow, accountLinkRequiredInWindow, effectivePeriodCovered, readEffectiveAccounts, readEffectiveBalances, readEffectiveTransactions } from "./ledger-reader.js";
@@ -301,6 +301,17 @@ function chooseLiteralSelector(intent, identities, rows, budget) {
     const attribute = createInflowAttributor(payerQuestionRegistry(reading, identities), { budget });
     const attributions = new Map(scoped.map(row => [row.id, attribute(row)]));
     const fields = new Map(scoped.map(row => [row.id, boundedPayerFields(row, attributions.get(row.id), identities)]));
+    // Partner ruling 12 (round 7): bounded fields that cannot be resolved to
+    // one identity make the row unknown, so no answer path (the literal
+    // conflict fallback included) treats it as confirmed. A fresh object: the
+    // attributor may share one cached statement decision between rows.
+    for (const row of scoped) {
+      const attribution = attributions.get(row.id);
+      if (!fields.get(row.id).conflict || attribution.state === 'unknown') continue;
+      const evidence = { ...attribution.evidence, ambiguous: true, candidates: [...new Set(fields.get(row.id).fields)] };
+      delete evidence.query_phrases;
+      attributions.set(row.id, { ...attribution, state: 'unknown', entity_slug: null, reading: null, evidence });
+    }
     const wanted = resolveRequestedPayer(reading, identities, [...attributions.values()]);
     const coversName = payerMentionsCoverQuestion(reading, (reading.payerReadings || []).filter(span =>
       Number.isInteger(span.start) && normalizeMerchantText(span.label) === key));
@@ -351,12 +362,36 @@ function chooseLiteralSelector(intent, identities, rows, budget) {
       spellings ??= [label, ...spellingsOf(identities, slug), ...ownDamaged];
       return payerNameVariant(field, spellings);
     });
+    // Partner ruling 9 (round 7, R5-FIDELITY-2): beside a bounded payee, an
+    // unlabelled description that names the requested registered payer in
+    // full keeps the row a possible match for it, never a known other, so
+    // that payer gets no certified absence or $0. The payee still decides who
+    // paid: the row's attribution, and every other payer's answer, are
+    // unchanged.
+    const requestedSpellings = slug && typeof slug !== 'symbol' ? spellingsOf(identities, slug) : [];
+    const named = new Map();
+    const namesRequested = row => {
+      if (!named.has(row.id)) named.set(row.id, requestedSpellings.length > 0 && !literal(row) && !fields.get(row.id)?.conflict &&
+        descriptionNamesPayer(row, identities, slug, requestedSpellings));
+      return named.get(row.id);
+    };
     // The shorthand clause covers a row whose attribution is unknown (its
     // fields cannot say who paid); a row confirmed by its own fields, such as
     // a payee that the shorthand spells out, keeps that attribution.
     const possibleRow = row => !sameIdentity(row) && (possibleField(row) || (attributions.get(row.id)?.state === 'unknown' &&
-      shorthandNames(attributions.get(row.id), wanted.state === 'unique' ? wanted : { state: slug ? 'unique' : 'missing', slug }, key)));
-    return { exact: registered || matched.length > 0, matched, possible, ids, conflict,
+      shorthandNames(attributions.get(row.id), wanted.state === 'unique' ? wanted : { state: slug ? 'unique' : 'missing', slug }, key)) ||
+      namesRequested(row));
+    // A row confirmed to another entity is hidden from this payer's
+    // attributed selection; when its description names this payer it joins
+    // the possible matches (with no exact row the answer is a possible match;
+    // beside an exact row it is listed and keeps the exact rows a partial
+    // subtotal). A row whose attribution is unknown is listed already.
+    const mentioned = scoped.filter(row => amountMatches(row) && attributions.get(row.id)?.state === 'confirmed' &&
+      !sameIdentity(row) && !possibleField(row) && namesRequested(row));
+    const possibleIds = new Set(possible.map(row => row.id));
+    return { exact: registered || matched.length > 0, matched,
+      possible: [...possible, ...mentioned.filter(row => !possibleIds.has(row.id))], ids, conflict,
+      mentionedRows: new Set(mentioned.map(row => row.id)),
       // Rows whose bounded field shares the requested name (a variant, or the
       // requested entity's damaged spelling) without being an exact field.
       variants: scoped.filter(row => amountMatches(row) && !fields.get(row.id)?.conflict && !literal(row) && possibleRow(row)),
@@ -419,7 +454,7 @@ function chooseLiteralSelector(intent, identities, rows, budget) {
         damaged: chosen.result.damaged };
     }
     return { intent: chosen.reading, exact: true, attributions: chosen.result.attributions, knownRows: chosen.result.knownRows,
-      exactRows: new Set(chosen.result.matched.map(row => row.id)) };
+      exactRows: new Set(chosen.result.matched.map(row => row.id)), mentionedRows: chosen.result.mentionedRows };
   }
   if (literal.blockedLiteral && cleaned) return { refusal: 'ambiguous', labels };
   const possible = [...new Map([...literal.possible, ...alternate.possible, ...(alternate.matched || [])].map(row => [row.id, row])).values()];
@@ -676,8 +711,11 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
       const uncertainCandidates = listedUnattributed.map((row, i) => ({
         posted_on: row.posted_on, amount_minor: row.amount_minor,
         field: row.payee ? 'bank_payee' : 'description', label: safeDescription(row.payee || row.description),
-        reason: attributionUncertainty(row, payers.get(row.id), selectorAmbiguous, intent.exactNamesOnly,
-          shorthandNames(payers.get(row.id), wanted, requestedKey)), citation: unattributedCitations[i],
+        // Partner ruling 9: the payee names another payer, but the statement
+        // description names the requested payer too.
+        reason: selection.mentionedRows?.has(row.id) ? 'the statement description also names the requested payer'
+          : attributionUncertainty(row, payers.get(row.id), selectorAmbiguous, intent.exactNamesOnly,
+            shorthandNames(payers.get(row.id), wanted, requestedKey)), citation: unattributedCitations[i],
       }));
       const payerCandidates = [...new Set(unattributed.flatMap(row => payers.get(row.id)?.evidence.ambiguous ? payers.get(row.id).evidence.candidates : []))].slice(0, 10).map(safeDescription);
       if (unattributed.length || selectorAmbiguous || (phraseOnly && (!matched.length || namedIncome)) ||
@@ -1021,8 +1059,11 @@ export async function withLedgerAnswer({ env, question, access, grantScope, scop
       if (!reason) {
         const answer = await ledgerAnswer(env, intent, accounts, inventory);
         reason = answer.reason;
+        // The possible-match answer already carries its Note line in the
+        // text; append the notes only when that exact line is not there yet.
+        const noteLine = answer.notes?.length ? `\nNote: ${answer.notes.join('; ')}.` : '';
         if (!reason) return new Response(JSON.stringify({ mode: "think",
-          answer: answer.answer + (answer.notes?.length ? `\nNote: ${answer.notes.join('; ')}.` : ''),
+          answer: answer.answer + (noteLine && !answer.answer.includes(noteLine) ? noteLine : ''),
           ...(answer.assumptions?.length ? { assumptions: answer.assumptions, notes: answer.notes } : {}),
           ...(answer.payer_evidence?.length ? { payer_evidence: answer.payer_evidence } : {}),
           citations: answer.citations, results: [], gaps: answer.gaps || [], ledger: answer.ledger,

@@ -36,8 +36,16 @@ function shuffle(values, seed) {
   }
   return out;
 }
+// Partner ruling 10 (round 7, R5-MONEY-4): a shorter payee that is a
+// trailing or inner whole-word run of the requested name ("May" beside
+// "please May") is a possible match that blocks completeness. On the inflow
+// side it is listed beside the exact receipt, whatever its amount, unless
+// it is registered to an entity other than the one the question resolves
+// to (both names registered). On the outflow side a $0 row cannot change the
+// spend total (partner-r6-literals), so the exact answer stays complete.
+// "Unit TOKEN Supply" has no contiguous shorter run ("Unit Supply").
 for (const seed of [7, 41]) test(`R7 seeded exact selection invariant ${seed}`, async t => {
-  const stats = { complete: 0, possible: 0, refused: 0 };
+  const stats = { complete: 0, run: 0, possible: 0, refused: 0 };
   const f = ledgerFixture(t, { knownPayers: false });
   for (const token of shuffle([...payerQuestionGrammar.filler, ...amounts], seed)) {
     for (const boundary of ['Unit TOKEN Supply', 'TOKEN May', 'TOKEN Today', 'TOKEN From', 'TOKEN 2026-10-01', '(TOKEN Supply)', 'TOKEN Supply/']) {
@@ -57,11 +65,18 @@ for (const seed of [7, 41]) test(`R7 seeded exact selection invariant ${seed}`, 
         assert.equal(control.ledger.found, true, q('Control Unit'));
         assert.equal(control.evidence_gate.complete, true);
         const exact = await reached(f, q(full));
-        assert.equal(exact.evidence_gate.complete, true, q(full));
+        const run = direction === 'inflow' && boundary !== 'Unit TOKEN Supply' && registered !== 'both';
+        assert.equal(exact.evidence_gate.complete, !run, q(full));
         assert.equal(exact.ledger.found, true);
-        assert.deepEqual(exact.citations.map(c => c.amount_minor), [53123]);
-        if (direction === 'outflow') assert.equal(exact.ledger.total_minor, 53123);
-        stats.complete++;
+        assert.deepEqual(exact.citations.map(c => c.amount_minor), run ? [53123, 0] : [53123]);
+        if (run) {
+          assert.equal(exact.ledger.unattributed_count, 1, q(full));
+          assert.match(exact.answer, /\nUnattributed deposit: \$0\.00 posted [^\n]*\[2\]\./, q(full));
+          stats.run++;
+        } else {
+          if (direction === 'outflow') assert.equal(exact.ledger.total_minor, 53123);
+          stats.complete++;
+        }
         // Removing the only exact field cannot promote cleanup or its zero.
         f.raw("UPDATE fin_transactions SET payee=NULL,description=? WHERE txn_uid='long'", `Other ${full} Outlet`);
         f.raw("DELETE FROM fin_entities WHERE entity_slug='long'");
@@ -79,7 +94,8 @@ for (const seed of [7, 41]) test(`R7 seeded exact selection invariant ${seed}`, 
       }
     }
   }
-  assert.equal(stats.complete, 1736);
+  assert.equal(stats.complete + stats.run, 1736);
+  assert.equal(stats.run, 558);
   assert.ok(stats.possible > 0 && stats.refused > 0, 'distinct evidence arms exercise different decisions');
   t.diagnostic(JSON.stringify(stats));
 });

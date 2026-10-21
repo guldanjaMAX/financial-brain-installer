@@ -136,23 +136,81 @@ test('R5-FIDELITY-1 control: the same qualifier before the noun payer, beside a 
 // partner's principle says a doubtful answer is never absence or zero.
 // Whether a registered name inside a payee-prefixed unlabelled description
 // is such doubt (versus "Vendor Alpha Holdings ID 1", decided in round 4 as
-// the payee's own name extended) is for the partner to decide.
+// the payee's own name extended) was for the partner to decide.
+// Partner ruling 9 (round 7, verbatim): "The payee field still decides who
+// paid. But for the OTHER payer named in full in an unlabelled description
+// (Beta), never certify absence or $0: answer it as a possible match, not
+// complete. Alpha's attribution is unchanged. Bare names only; "for <name>
+// invoice" prose counts too." The row stays confirmed to Vendor Alpha (the
+// repro's "not confirmed" expectation is rewritten to that), and Vendor
+// Beta's answers list it as a possible match.
 const twoPayers = () => payerRegistry([{ entity_slug: 'alpha', legal_name: 'Vendor Alpha' }, { entity_slug: 'beta', legal_name: 'Vendor Beta' }]);
 
-test('R5-FIDELITY-2 repro (contract question): a second registered name after the payee name in one unlabelled description is never compared, so the other payer is certified absent and zero', {
-  todo: 'contract question for the partner: beside bank payee "Vendor Alpha", should an unlabelled description "Vendor Alpha Vendor Beta" (another payer\'s complete registered name after the payee\'s) make the row unknown and listed for Vendor Beta, never absent or $0? Committed tests (triage-0417-money C17/C18/PM02/PM03, money-rereview R02) pin that a memo naming another payer does not change who paid; should only a bare name count, not "for <name> invoice" prose, or does the payee field decide as today?',
-}, async t => {
+test('R5-FIDELITY-2 (ruling 9) beside the payee, an unlabelled description naming another registered payer in full keeps the row the payee\'s, and that payer gets a possible match, never absence or $0', async t => {
+  // Ruling 9: "The payee field still decides who paid ... Alpha's
+  // attribution is unchanged" (was: the row must not be confirmed).
   const decided = attributeInflow({ description: 'Vendor Alpha Vendor Beta', payee: 'Vendor Alpha' }, twoPayers());
-  assert.notEqual(decided.state, 'confirmed',
-    `confirmed to ${String(decided.entity_slug)} although the statement line names Vendor Beta: candidates ${JSON.stringify(decided.evidence.candidates)}`);
+  assert.equal(decided.state, 'confirmed', `the payee decides who paid: candidates ${JSON.stringify(decided.evidence.candidates)}`);
+  assert.equal(decided.entity_slug, 'alpha');
+  // "Bare names only; 'for <name> invoice' prose counts too."
+  for (const description of ['Vendor Alpha Vendor Beta', 'Vendor Alpha for Vendor Beta invoice', 'Vendor Alpha remittance for Vendor Beta']) {
+    const f = ledgerFixture(t, { knownPayers: false });
+    seedKnownPayers(f, ['Vendor Alpha', 'Vendor Beta'], NOW);
+    f.add('row', description, 'Vendor Alpha', { cents: 2500 });
+    const absent = await f.ask('did the payment from Vendor Beta arrive in October 2026?');
+    assert.notEqual(absent.ledger?.found, false, `${description}: certified absence: ${absent.answer}`);
+    const zero = await f.ask('how much income came from Vendor Beta in October 2026?');
+    assert.ok(!(zero.evidence_gate?.complete === true && zero.ledger?.total_minor === 0), `${description}: certified $0: ${zero.answer}`);
+    assert.deepEqual(zero.citations.map(c => c.amount_minor), [2500], `${description}: the row stays visible as a possible match for Vendor Beta`);
+    // "answer it as a possible match, not complete"
+    for (const body of [absent, zero]) {
+      assert.equal(body.evidence_gate?.complete, false, `${description}: ${body.answer}`);
+      assert.equal(body.ledger?.found, null, description);
+      assert.equal(body.ledger?.total_minor ?? null, null, description);
+      assert.deepEqual(body.citations.map(c => c.amount_minor), [2500], description);
+      assert.match(body.answer, /\nPossible match: \$25\.00 posted [^\n]*\[1\]\./, description);
+    }
+    // Alpha's attribution is unchanged: its answer stays complete.
+    const alpha = await f.ask('how much income came from Vendor Alpha in October 2026?');
+    assert.equal(alpha.evidence_gate?.complete, true, `${description}: ${alpha.answer}`);
+    assert.equal(alpha.ledger?.total_minor, 2500, description);
+    // Beside an exact Vendor Beta receipt the row is listed with its reason
+    // and the exact receipt is a partial figure, never a complete total.
+    f.add('beta', 'Deposit', 'Vendor Beta', { cents: 1000 });
+    const beside = await f.ask('how much income came from Vendor Beta in October 2026?');
+    assert.equal(beside.evidence_gate?.complete, false, `${description}: ${beside.answer}`);
+    assert.equal(beside.ledger?.found, true, description);
+    assert.equal(beside.ledger?.total_minor, null, description);
+    assert.deepEqual(beside.citations.map(c => c.amount_minor), [1000, 2500], description);
+    assert.match(beside.answer, /\nUnattributed deposit: \$25\.00 posted [^\n]*uncertain because the statement description also names the requested payer \[2\]\./, description);
+  }
+});
+
+test('R5-FIDELITY-2 (ruling 9) scope control: only a complete registered name counts, the payee\'s own name never counts, and a description with a sender label names its sender', async t => {
+  for (const [description, payee] of [
+    // Not named in full: a shortened name of the other payer.
+    ['Vendor Alpha Beta', 'Vendor Alpha'],
+    // A labelled description names its sender; the committed
+    // triage-0417-money C17/C18/PM02/PM03 shape keeps its answers.
+    ['Zelle from Vendor Alpha for Vendor Beta invoice', 'Vendor Alpha'],
+    // No other payer at all.
+    ['Vendor Alpha deposit', 'Vendor Alpha']]) {
+    const f = ledgerFixture(t, { knownPayers: false });
+    seedKnownPayers(f, ['Vendor Alpha', 'Vendor Beta'], NOW);
+    f.add('row', description, payee, { cents: 2500 });
+    const absent = await f.ask('did the payment from Vendor Beta arrive in October 2026?');
+    assert.equal(absent.ledger?.found, false, `${description}: ${absent.answer}`);
+    const alpha = await f.ask('how much income came from Vendor Alpha in October 2026?');
+    assert.equal(alpha.evidence_gate?.complete, true, `${description}: ${alpha.answer}`);
+    assert.equal(alpha.ledger?.total_minor, 2500, description);
+  }
+  // A registered name inside the payee's own longer name is the payee's name.
   const f = ledgerFixture(t, { knownPayers: false });
-  seedKnownPayers(f, ['Vendor Alpha', 'Vendor Beta'], NOW);
-  f.add('row', 'Vendor Alpha Vendor Beta', 'Vendor Alpha', { cents: 2500 });
-  const absent = await f.ask('did the payment from Vendor Beta arrive in October 2026?');
-  assert.notEqual(absent.ledger?.found, false, `certified absence: ${absent.answer}`);
-  const zero = await f.ask('how much income came from Vendor Beta in October 2026?');
-  assert.ok(!(zero.evidence_gate?.complete === true && zero.ledger?.total_minor === 0), `certified $0: ${zero.answer}`);
-  assert.deepEqual(zero.citations.map(c => c.amount_minor), [2500], 'the row stays visible as a possible match for Vendor Beta');
+  seedKnownPayers(f, ['Vendor Alpha Group', 'Vendor Alpha'], NOW);
+  f.add('row', 'Vendor Alpha Group', 'Vendor Alpha Group', { cents: 2500 });
+  const own = await f.ask('did the payment from Vendor Alpha arrive in October 2026?');
+  assert.equal(own.ledger?.found, false, own.answer);
+  assert.equal((await f.ask('how much income came from Vendor Alpha Group in October 2026?')).ledger?.total_minor, 2500);
 });
 
 test('R5-FIDELITY-2 control: the other order, a labelled sender, a field-start name and a delimited name beside the payee are unknown; the payee name extended by its own words, or alone, stays confirmed', async t => {

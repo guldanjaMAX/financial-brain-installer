@@ -9,13 +9,18 @@ import { card, mutatedModule } from './partner-r2-helpers.mjs';
 const encoded = source => `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
 const absolutize = (source, url) => source.replace(/from (['"])(\.\.?\/[^'"]+)\1/g,
   (_, quote, path) => `from ${quote}${new URL(path, url).href}${quote}`);
-async function mutatedAnswer(file, before, after) {
+async function mutatedAnswer(file, before, after, answerBefore = null, answerAfter = null) {
   const url = new URL(`../src/lib/${file}`, import.meta.url);
   const source = readFileSync(url, 'utf8');
   assert.equal(source.split(before).length, 2, 'one guard decision is disabled');
   const target = encoded(absolutize(source.replace(before, after), url));
   const answerURL = new URL('../src/lib/ledger-answer.js', import.meta.url);
-  const answer = readFileSync(answerURL, 'utf8').replace(`"./${file}"`, JSON.stringify(target));
+  let answer = readFileSync(answerURL, 'utf8');
+  if (answerBefore !== null) {
+    assert.equal(answer.split(answerBefore).length, 2, 'one answer guard decision is disabled');
+    answer = answer.replace(answerBefore, answerAfter);
+  }
+  answer = answer.replace(`"./${file}"`, JSON.stringify(target));
   return (await import(encoded(absolutize(answer, answerURL)))).withLedgerAnswer;
 }
 async function reached(f, question) {
@@ -32,7 +37,25 @@ function fixture(t, answer) {
 }
 
 test('R4 A3 mutation restores absence and a complete payee total on a conflicting row', async t => {
-  const mutant = await mutatedAnswer('ledger-attribution.js', 'if (conflict) {', 'if (false) {');
+  // Partner ruling 12 (round 7) added a second, independent guard: a row
+  // whose bounded fields conflict is made unknown in ledger-answer.js
+  // before any answer path reads it. Disabling attributeRow's conflict
+  // decision alone therefore no longer restores absence (the `single` arm);
+  // disabling both guards does (the `mutant` arm, as before).
+  const guard = "if (!fields.get(row.id).conflict || attribution.state === 'unknown') continue;";
+  const single = await mutatedAnswer('ledger-attribution.js', 'if (conflict) {', 'if (false) {');
+  const mutant = await mutatedAnswer('ledger-attribution.js', 'if (conflict) {', 'if (false) {', guard, 'continue;');
+  {
+    const f = fixture(t, single);
+    for (const [slug, name] of [['one', 'Payer One'], ['two', 'Payer Two']])
+      f.raw(`INSERT INTO fin_entities(entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at)
+        VALUES (?,?,'business','owned','owner_stated','confirmed',?)`, slug, name, NOW);
+    f.add('receipt', 'FROM: Payer Two', 'Payer One');
+    assert.equal((await reached(f, 'Did the payment from Payer Two arrive in October 2026?')).ledger.found, null);
+    const total = await reached(f, 'How much income came from Payer One in October 2026?');
+    assert.equal(total.ledger.total_minor, null);
+    assert.equal(total.evidence_gate.complete, false);
+  }
   for (const answer of [withLedgerAnswer, mutant]) {
     const f = fixture(t, answer);
     for (const [slug, name] of [['one', 'Payer One'], ['two', 'Payer Two']])

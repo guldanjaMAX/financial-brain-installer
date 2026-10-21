@@ -26,8 +26,19 @@ for(const id of ['R6-F1','R6-F2','R6-F3'])test(`${id} Worker and both MCP surfac
  else {assert.equal(control.evidence_gate.complete,true);assert.equal(control.ledger.total_minor,id==='R6-F1'?0:40000);}
  const remote=await remoteBody(q,body),local=localBodies(t,[{q:controlQ,body:control},{q,body}])[1];
  evidence.push({id,q,body,local_note:local.note,remote});t.diagnostic(JSON.stringify({id,complete:body.evidence_gate.complete,found:body.ledger.found}));
- if(id!=='R6-F3')assertExactSelection(body,40000);
- else {
+ if(id==='R6-F1')assertExactSelection(body,40000);
+ else if(id==='R6-F2'){
+  // Partner ruling 10 (round 7, R5-MONEY-4): "Payer Unit" is a trailing
+  // whole-word run of "Again Payer Unit", a possible match that blocks
+  // completeness: the exact receipt stays found and first, the shorter
+  // payee's receipt is listed, and nothing is complete on any surface.
+  assert.equal(body.evidence_gate.complete,false);assert.equal(body.ledger.found,true);
+  assert.deepEqual(body.citations.map(c=>c.amount_minor),[40000,12300]);assert.equal(body.ledger.unattributed_count,1);
+  assert.match(body.answer,/^Found a deposit of \$400\.00 /m);assert.doesNotMatch(body.answer,/^Found a deposit of \$123\.00 /m);
+  assert.match(body.answer,/\nUnattributed deposit: \$123\.00 posted [^\n]*\[2\]\./);
+  assert.match(local.note,/uncertainty/);
+  assert.doesNotMatch(local.note,/Preserve the ledger answer's exact amounts/);
+ }else {
   assertPossibleMatch(body,40000);
   assert.match(local.note,/uncertainty/);
   assert.doesNotMatch(local.note,/Preserve the ledger answer's exact amounts/);

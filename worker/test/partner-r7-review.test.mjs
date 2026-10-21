@@ -16,12 +16,29 @@ async function reached(f,q){
  assert.equal(f.first('SELECT total_changes() n').n,w,'read-only answer');assert.equal(f.documentCalls,d);assert.ok(b.ledger);return b;
 }
 const summary=b=>({found:b.ledger.found,total:b.ledger.total_minor,subtotal:b.ledger.attributed_subtotal_minor,complete:b.evidence_gate.complete,reason:b.evidence_gate.reason,answer:b.answer});
+// Partner ruling 10 (round 7, R5-MONEY-4): a shorter payee that is a trailing
+// or inner whole-word run of the requested name ("Supply" beside "Again
+// Supply", "Payer Unit" beside "Again Payer Unit") is a possible match that
+// blocks completeness, per the contract's "a shortened name, a substring".
+// The exact row stays found and cited first; the shorter row stays listed.
+function assertExactBesideRunSpend(b){
+ assert.equal(b.evidence_gate.complete,false);assert.equal(b.ledger.found,true);assert.equal(b.ledger.total_minor,null);
+ assert.equal(b.ledger.confirmed_subtotal_minor,40000);assert.equal(b.ledger.possible_count,1);
+ assert.deepEqual(b.citations.map(c=>c.amount_minor),[40000,12300]);
+ assert.match(b.answer,/Exact match: \$400\.00 posted [^\n]*\[1\]\./);assert.match(b.answer,/Possible match: \$123\.00 posted [^\n]*\[2\]\./);
+}
+function assertExactBesideRunPayer(b){
+ assert.equal(b.evidence_gate.complete,false);assert.equal(b.ledger.found,true);assert.equal(b.ledger.total_minor??null,null);
+ assert.equal(b.ledger.unattributed_count,1);assert.deepEqual(b.citations.map(c=>c.amount_minor),[40000,12300]);
+ assert.match(b.answer,/^Found a deposit of \$400\.00 /m);assert.doesNotMatch(b.answer,/^Found a deposit of \$123\.00 /m);
+ assert.match(b.answer,/\nUnattributed deposit: \$123\.00 posted [^\n]*\[2\]\./);
+}
 function spend(t){const f=ledgerFixture(t,{knownPayers:false});f.add('short','Purchase','Supply',{direction:'outflow',cents:12300});f.add('long','Purchase','Again Supply',{direction:'outflow',cents:40000});return f;}
 test('R6-F1 green: exact RAW spans select only equal fields and plain merchant answers remain exact',async t=>{
  const f=spend(t),control=await reached(f,'How much did I spend at Supply in October 2026?');
  assert.equal(control.evidence_gate.complete,true);assert.equal(control.ledger.total_minor,12300);
  const b=await reached(f,'How much did I spend at Again Supply in October 2026?');
- assertExactSelection(b,40000);
+ assertExactBesideRunSpend(b);
 });
 test('R6-F1 repro: rejected RAW candidate must never return a complete shortened-selector total',async t=>{
  const f=spend(t),bad=[];let controls=0;
@@ -42,7 +59,7 @@ function payers(t,full='Again Payer Unit'){
 }
 test('R6-F2 green: unregistered full fields retain their exact receipt and a plain registered alias identifies its own receipt',async t=>{
  const f=payers(t),q='Did the payment from Again Payer Unit arrive in October 2026?';
- const both=await reached(f,q);assertExactSelection(both,40000);
+ const both=await reached(f,q);assertExactBesideRunPayer(both);
  identity(f,'short','Payer Unit','Plain Alias');
  const b=await reached(f,'Did the payment from Plain Alias arrive in October 2026?');
  assert.equal(b.ledger.found,true);assert.match(b.answer,/^Found a deposit of \$123\.00 /);assert.doesNotMatch(b.answer,/^Found a deposit of \$400\.00 /m);
@@ -52,12 +69,14 @@ test('R6-F2 repro: a shorter registered identity must not erase a competing lite
  for(const filler of payerQuestionGrammar.filler){
   const full=`${filler} Payer Unit`,f=payers(t,full);
   const q=`Did the payment from ${full} arrive in October 2026?`;
-  const green=await reached(f,q);assertExactSelection(green,40000);controls++;
+  const green=await reached(f,q);assertExactBesideRunPayer(green);controls++;
   identity(f,'short','Payer Unit','Plain Alias');
   const row=f.first("SELECT payee FROM fin_transactions WHERE txn_uid='full'");assert.equal(row.payee,full,'literal covered bank field remains present');
   for(const question of [q,`How much income from ${full} in October 2026?`]){
    const b=await reached(f,question),intent=classifyLedgerQuestion(question,{now:Date.parse(NOW)});assert.equal(intent.selectorReadings.labels[0],full.toLowerCase());
-   if(b.ledger.found===true && b.citations.some(c=>c.amount_minor!==40000))bad.push({q:question,literal_cents:40000,selected_cents:12300,...summary(b)});
+   // Ruling 10: the shorter payer's row is listed, never presence for it.
+   if(b.evidence_gate.complete || /^Found a deposit of \$123\.00 /m.test(b.answer) || b.citations[0]?.amount_minor!==40000 ||
+     !/\nUnattributed deposit: \$123\.00 /.test(b.answer))bad.push({q:question,literal_cents:40000,selected_cents:12300,...summary(b)});
   }
  }
  evidence.f2={arms:14,controls,bad};save();assert.deepEqual(bad,[],'registered substring changed RAW collision into presence for the shorter payer');

@@ -272,17 +272,13 @@ test('R5-MONEY-3 control: the inflow side lists the lone variant; a name with no
 // an exact row it is hidden and the total is complete, on both sides. The
 // contract's "shortened name" and "substring" do not say which whole-word
 // substrings count. The asymmetry (a one-word leading fragment is a possible
-// match, the two-word tail is not) is what this pins. Triage (round 5)
-// decided the tail (and an inner run) is a possible match on both sides, but
-// that decision is HELD: whole-word containment in payerNameVariant fails
-// committed partner tests that pin a shorter trailing-run payee beside the
-// exact one as a complete exact answer (partner-r7-review.test.mjs R6-F1
-// green "Supply" beside "Again Supply", R6-F2 green and repro "Payer Unit"
-// beside "Again Payer Unit" / "<filler> Payer Unit", and partner-r7-exact
-// R7 seeded exact selection invariants 7 and 41, "May" beside "please May").
-test('R5-MONEY-4 a whole-word trailing substring payee is a known other beside an exact row while a leading-word payee is a possible match', {
-  todo: 'held for a decision: treating a trailing or inner whole-word run as a possible match conflicts with committed partner tests partner-r7-review.test.mjs R6-F1 green and R6-F2 green/repro, and partner-r7-exact.test.mjs R7 seeded exact selection invariants 7 and 41, which pin "Supply" beside "Again Supply" (and "Payer Unit" beside "Again Payer Unit", "May" beside "please May") as a complete exact answer',
-}, async t => {
+// match, the two-word tail is not) is what the repro showed. Partner ruling
+// 10 (round 7): "Yes, it's a possible match that blocks completeness, per 'a
+// shortened name, a substring'. Update R6-F1/F2 and invariants 7 and 41."
+// A trailing or inner whole-word run is a possible match on both sides,
+// exactly like a leading one (partner-r7-review R6-F1/R6-F2 and the
+// partner-r7-exact R7 seeded invariants 7 and 41 now pin it too).
+test('R5-MONEY-4 (ruling 10) a whole-word trailing or inner substring payee beside an exact row is a possible match that blocks completeness, like a leading-word payee', async t => {
   const f = ledgerFixture(t, { knownPayers: false });
   identity(f, 'alpha', 'Acme Payer One');
   f.add('exact', 'Deposit', 'Acme Payer One', { cents: 2500 });
@@ -301,6 +297,26 @@ test('R5-MONEY-4 a whole-word trailing substring payee is a known other beside a
   // partial subtotal and $40 the one possible match on the outflow side.
   assert.equal(outflow.ledger.possible_count, 1);
   assert.equal(outflow.ledger.confirmed_subtotal_minor, 2500);
+  // The inflow side lists the trailing run beside the exact receipt.
+  assert.deepEqual(cents(income), [2500, 4000]);
+  assert.equal(income.ledger.unattributed_count, 1);
+  // An inner run ("Payer One" inside "Acme Payer One Group") is the same
+  // shortened name on both sides.
+  const h = ledgerFixture(t, { knownPayers: false });
+  identity(h, 'alpha', 'Acme Payer One Group');
+  h.add('exact', 'Deposit', 'Acme Payer One Group', { cents: 2500 });
+  h.add('inner', 'Deposit', 'Payer One', { cents: 4000 });
+  const inner = await h.ask('How much income came from Acme Payer One Group in October 2026?');
+  listed(inner, 4000, 'inflow, inner substring payee');
+  notComplete(inner, 'inflow, inner substring payee');
+  const k = ledgerFixture(t, { knownPayers: false });
+  k.add('exact', 'Purchase', 'Acme Vendor Alpha Group', { direction: 'outflow', cents: 2500 });
+  k.add('inner', 'Purchase', 'Vendor Alpha', { direction: 'outflow', cents: 4000 });
+  const innerOut = await k.ask('How much did I spend at Acme Vendor Alpha Group in October 2026?');
+  listed(innerOut, 4000, 'outflow, inner substring payee');
+  notComplete(innerOut, 'outflow, inner substring payee');
+  assert.equal(innerOut.ledger.possible_count, 1);
+  assert.equal(innerOut.ledger.confirmed_subtotal_minor, 2500);
 });
 
 // ---------------------------------------------------------------------------

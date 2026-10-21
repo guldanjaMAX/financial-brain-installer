@@ -705,6 +705,45 @@ function senderLabelPresent(description) {
   return false;
 }
 
+// Partner ruling 9 (round 7, R5-FIDELITY-2): "The payee field still decides
+// who paid. But for the OTHER payer named in full in an unlabelled
+// description (Beta), never certify absence or $0: answer it as a possible
+// match, not complete. Alpha's attribution is unchanged. Bare names only;
+// "for <name> invoice" prose counts too." True when, beside a bounded payee,
+// a description with no sender label at any field start carries a complete
+// registered spelling of `slug` as whole words (prose such as "for <name>
+// invoice" included), outside the payee's own name and not inside a longer
+// registered name. The row's attribution is not changed here; the answer
+// lists the row as a possible match for that entity only. A labelled
+// description ("from <sender> for <name> invoice") names its sender, as the
+// committed triage-0417-money pins C17/C18/PM02/PM03 keep, and outflow
+// merchants keep money-rereview R02.
+// `spellings` are the entity's registered spellings (normalized keys); a
+// description holding none of them as whole words skips the full scan.
+export function descriptionNamesPayer(row, registry, slug, spellings = null) {
+  if (!slug || typeof slug === 'symbol' || !row.payee || row.payee_has_nul || String(row.payee).includes('\0')) return false;
+  const description = String(row.description || '');
+  if (!description || row.description_has_nul || description.includes('\0') ||
+      description.length > statementGrammar.limits.codepoints * 2) return false;
+  const descriptionKey = ` ${normalizeMerchantText(description)} `;
+  const entitySpellings = spellings || [...registry].filter(([, slugs]) => slugs.has(slug)).map(([key]) => key);
+  if (!entitySpellings.some(key => key && descriptionKey.includes(` ${key} `)) || senderLabelPresent(description)) return false;
+  const mentions = requestedPayerMentions(description, registry).filter(mention => mention.slugs.has(slug));
+  if (!mentions.length) return false;
+  // Occurrences of the payee's own name: a registered name inside it is the
+  // payee's name, never a second payer.
+  const text = normalizePayerQuestion(description);
+  const tokens = [...text.matchAll(/[\p{L}\p{N}]+|&/gu)];
+  const words = normalizeMerchantText(row.payee).split(' ').filter(Boolean);
+  const own = [];
+  for (let i = 0; words.length && i + words.length <= tokens.length; i++) {
+    if (!words.every((word, j) => tokens[i + j][0] === word)) continue;
+    const last = tokens[i + words.length - 1];
+    own.push([tokens[i].index, last.index + last[0].length]);
+  }
+  return mentions.some(mention => !own.some(([start, end]) => start <= mention.start && mention.end <= end));
+}
+
 function descriptionIsPayee(description, payee) {
   const text = String(description || ''), name = String(payee || '');
   // The comparison is linear, but stays inside the same order of size as the
@@ -726,18 +765,19 @@ export function payerFieldsAgree(left, right) {
 
 // A bounded field that shares a requested name without equalling it: the two
 // agree only after one closed company suffix is removed, the field extends
-// the requested name with trailing words, or the field is a whole-word prefix
-// of it (each read with and without the requested name's own closed suffix).
-// Each is a shortened-name or substring match, so a possible match, never
-// EXACT and never proof that the row is someone else (R4-MONEY-5). `labels`
-// are every spelling of the requested entity, so all of its aliases decide
-// alike. `longer: false` leaves out the field that only extends the name: on
-// the outflow side an explicit longer payee is a different merchant identity
-// (money-rereview R02), while a suffix or a shortened payee stays possible.
-// A trailing or inner whole-word run ("Supply" for "Again Supply") is held
-// for a decision (round 5, R5-MONEY-4): the committed partner tests
-// partner-r7-review R6-F1/R6-F2 and partner-r7-exact R7 seeded invariants pin
-// such a shorter payee beside the exact one as a complete exact answer.
+// the requested name with trailing words, or the field is a shorter
+// whole-word run of it, leading, trailing or inner (each read with and
+// without the requested name's own closed suffix). Each is a shortened-name
+// or substring match, so a possible match, never EXACT and never proof that
+// the row is someone else (R4-MONEY-5). `labels` are every spelling of the
+// requested entity, so all of its aliases decide alike. `longer: false`
+// leaves out the field that only extends the name: on the outflow side an
+// explicit longer payee is a different merchant identity (money-rereview
+// R02), while a suffix or a shortened payee stays possible.
+// Partner ruling 10 (round 7, R5-MONEY-4): a trailing or inner whole-word
+// run ("Payer One" for "Acme Payer One", "Supply" for "Again Supply") is a
+// possible match that blocks completeness, per the contract's "a shortened
+// name, a substring", exactly like a leading one.
 export function payerNameVariant(field, labels, { longer = true } = {}) {
   const fieldKey = normalizeMerchantText(field), fieldBase = agreementName(field);
   if (!fieldKey) return false;
@@ -745,7 +785,8 @@ export function payerNameVariant(field, labels, { longer = true } = {}) {
     const key = normalizeMerchantText(label), base = agreementName(label);
     if (!key || fieldKey === key) return false;
     return Boolean(fieldBase && fieldBase === base) ||
-      [key, base].some(name => name && ((longer && fieldKey.startsWith(`${name} `)) || name.startsWith(`${fieldKey} `)));
+      [key, base].some(name => name && ((longer && fieldKey.startsWith(`${name} `)) ||
+        ` ${name} `.includes(` ${fieldKey} `)));
   });
 }
 
@@ -803,16 +844,42 @@ export function boundedPayerFields(row, attribution, registry) {
     payeeSlugs?.size === 1 ? payeeSlugs.values().next().value : null).map(reading => reading.identity) : [];
   const compared = [...fields, ...(payee.length ? (attribution.evidence.confirmed_readings || []).map(reading => reading.identity) : []),
     ...foreignShorthand, ...(payee.length ? (attribution.evidence.field_start_readings || []).map(reading => reading.identity) : [])];
-  // Agreement is the attributeRow() rule: normalized names equal after one
-  // closed trailing company suffix is removed. A name that is only a suffix
-  // keeps its own normalized key, so two different bare suffixes still differ.
-  const keys = new Set(compared.map(field => agreementName(field) || `\0${normalizeMerchantText(field)}`));
-  const slugs = new Set(compared.flatMap(field => [...(registry.get(normalizeMerchantText(field)) || [])]));
-  const aliases = compared.length > 0 && compared.every(field => registry.get(normalizeMerchantText(field))?.size === 1) && slugs.size === 1;
   // A refused description may hold a sender that disagrees with the payee,
   // so an unread statement is competing evidence, never agreement.
   return { fields, conflict: Boolean(row.payee_has_nul || String(row.payee || '').includes('\0') ||
-    attribution.evidence.sender_unread || slugs.size > 1 || keys.size > 1 && !aliases) };
+    attribution.evidence.sender_unread || !boundedFieldsAgree(compared, registry, payee.length > 0)) };
+}
+
+// Agreement is the attributeRow() rule. Partner ruling 12 (round 7): "A
+// registered alias and a suffix variant of the same identity agree. Make
+// boundedPayerFields resolve aliases through the registry the way attributeRow
+// does; if it can't resolve them, the row is unknown." Beside a payee, each
+// other field is compared with the payee, as attributeRow() compares each
+// reading: two registered spellings agree when they name the same entity
+// (aliases resolve through the registry), otherwise the normalized names must
+// be equal after one closed trailing company suffix is removed, and a name
+// that is only a suffix agrees with nothing. So "Alpha Unit" (a registered
+// alias) and "Vendor Alpha Inc" (a suffix variant) both agree with payee
+// "Vendor Alpha", although they would disagree with each other by name. A
+// field registered to more than one entity, or fields naming two registered
+// entities, never agree. With no payee the labelled senders keep their
+// earlier rule: one normalized name after suffix removal, or one registered
+// entity throughout. ledger-answer.js treats a bounded conflict as an
+// unknown attribution, so a row whose fields cannot be resolved to one
+// identity is never confirmed on any answer path.
+function boundedFieldsAgree(compared, registry, hasPayee) {
+  const slugs = new Set(compared.flatMap(field => [...(registry.get(normalizeMerchantText(field)) || [])]));
+  if (slugs.size > 1) return false;
+  const registered = field => registry.get(normalizeMerchantText(field))?.size === 1;
+  if (!hasPayee) {
+    // A name that is only a suffix keeps its own normalized key, so two
+    // different bare suffixes still differ.
+    const keys = new Set(compared.map(field => agreementName(field) || `\0${normalizeMerchantText(field)}`));
+    return keys.size <= 1 || (compared.length > 0 && compared.every(registered));
+  }
+  const [payee, ...others] = compared;
+  const payeeKey = agreementName(payee);
+  return others.every(field => (registered(payee) && registered(field)) || (Boolean(payeeKey) && agreementName(field) === payeeKey));
 }
 
 // Only a confirmed row can eliminate a payer. An assumption supports a
