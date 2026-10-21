@@ -316,6 +316,74 @@ test("unknown failures redact planted secrets and log each failed source indepen
   assert.deepEqual(failures.map((record) => record.issue_code), ["UNKNOWN", "UNKNOWN"]);
 });
 
+test("daily failure details redact canonical credential and bounded path views before persistence", async () => {
+  const pathTail = "records/private-note.txt";
+  const lineWrapped = `sk-${"a".repeat(16)}\n${"b".repeat(16)}`;
+  const formatSplit = `sk-${"c".repeat(16)}\u200b${"d".repeat(16)}`;
+  const ordinary = `sk-${"e".repeat(32)}`;
+  const arms = [
+    {
+      label: "absolute path containing a space",
+      message: `unable to read /private/fixture/client ${pathTail}`,
+      check(detail) {
+        assert.equal(detail.includes(pathTail), false, "the bounded path tail must not survive");
+        assert.match(detail, /\[REDACTED:path\]/u);
+      },
+    },
+    {
+      label: "line-wrapped credential",
+      message: `provider returned ${lineWrapped}`,
+      check(detail) {
+        assert.equal(detail.replace(/\s/gu, "").includes(lineWrapped.replace(/\s/gu, "")), false,
+          "joining persisted whitespace must not reconstruct the credential");
+      },
+    },
+    {
+      label: "format-control-split credential",
+      message: `provider returned ${formatSplit}`,
+      check(detail) {
+        assert.equal(detail.replace(/\u200b/gu, "").includes(formatSplit.replace(/\u200b/gu, "")), false,
+          "removing persisted format controls must not reconstruct the credential");
+      },
+    },
+    {
+      label: "ordinary credential control",
+      message: `provider returned ${ordinary}`,
+      check(detail) {
+        assert.equal(detail.includes(ordinary), false);
+        assert.match(detail, /\[REDACTED:openai_legacy_key\]/u,
+          "the ordinary scanner path remains the green control");
+      },
+    },
+  ];
+
+  let sourceCalls = 0;
+  for (const arm of arms) {
+    const logged = [];
+    const result = await runDailyRefresh({
+      plan: {
+        ...plan,
+        sources: [{
+          key: "fixture", class: "machine-pull", owner: "daily-task", status: "ready",
+          run_key: "fixture", source_names: ["fixture"],
+        }],
+      },
+      acquireLock: () => ({ assertOwned() {}, release() {} }),
+      runSource: async () => { sourceCalls += 1; throw new Error(arm.message); },
+      readFreshness: async () => ({}),
+      writeReceipt() {},
+      writeFailureLog: (record) => logged.push(record),
+      now: () => new Date("2026-10-21T18:00:00.000Z"),
+    });
+    assert.equal(result.status, "failed", `${arm.label}: the failure decision was reached`);
+    assert.equal(logged.length, 1, `${arm.label}: exactly one persisted log detail was produced`);
+    assert.equal(logged[0].detail, result.sources[0].detail,
+      `${arm.label}: the receipt and journal share the sanitized detail`);
+    arm.check(result.sources[0].detail);
+  }
+  assert.equal(sourceCalls, arms.length, "all adversarial and control source decisions were reached");
+});
+
 test("complete and partial source receipts remain byte-identical to the 60afb222 contract", async () => {
   const observedAt = "2026-10-21T18:00:00.000Z";
   const before = "2026-10-20T18:00:00.000Z";

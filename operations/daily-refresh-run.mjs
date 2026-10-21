@@ -55,21 +55,73 @@ function dailyIssueCode(error) {
   return "UNKNOWN";
 }
 
+const FIXED_SENSITIVE_DIAGNOSTIC = "the source refresh failed; sensitive diagnostic text was redacted";
+
+function redactAndScanDiagnostic(value) {
+  // Every transform comes back through both layers. A later canonicalization
+  // must not create a scanner-visible credential after the earlier pass ran.
+  const sanitized = sanitizeSensitiveLinks(String(value));
+  const redacted = redactAll(sanitized);
+  return scan(redacted).shouldFlag ? null : redacted;
+}
+
+function transformDiagnostic(value, transform) {
+  return redactAndScanDiagnostic(transform(value));
+}
+
 function safeDiagnosticText(value, maxLength = 200) {
-  let detail = redactAll(sanitizeSensitiveLinks(String(value || "the source refresh failed")));
-  detail = detail
-    .replace(/file:\/\/\/[^\s"'`]+/giu, "[REDACTED:path]")
-    .replace(/(?:[A-Za-z]:\\|\\\\)[^\s"'`]+/gu, "[REDACTED:path]")
-    .replace(/(^|[\s("'`])\/(?:[^/\s"'`]+\/)+[^,;\s)"'`]*/gu, "$1[REDACTED:path]")
-    .replace(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+){2,}\b/gu, "[REDACTED:private_value]")
-    .replace(/[\u0000-\u001f\u007f]+/gu, " ")
-    .replace(/\s+/gu, " ")
-    .trim();
+  let detail = redactAndScanDiagnostic(String(value || "the source refresh failed"));
+  const failClosed = () => FIXED_SENSITIVE_DIAGNOSTIC.slice(0, maxLength);
+  if (detail === null) return failClosed();
+
+  // Format and bidi controls can split one credential into scanner-clean
+  // fragments. Remove them before any text is eligible for persistence.
+  detail = transformDiagnostic(detail, (text) => text.replace(
+    /[\p{Cf}\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu,
+    "",
+  ));
+  if (detail === null) return failClosed();
+
+  const beforeLineJoin = detail;
+  detail = transformDiagnostic(detail, (text) => text.replace(
+    /(?<=[A-Za-z0-9_+./=\-])[ \t]*[\r\n\u2028\u2029]+[ \t]*(?=[A-Za-z0-9_+./=\-])/gu,
+    "",
+  ));
+  if (detail === null) return failClosed();
+
+  // Also scan the aggressive join view. It is deliberately not persisted
+  // because joining ordinary prose damages the diagnostic; a credential found
+  // only in that view is ambiguous, so the fixed text is safer than attempting
+  // to map its span back across line boundaries.
+  const joinedView = beforeLineJoin.replace(/[\r\n\u2028\u2029]+[ \t]*/gu, "");
+  const joinedSanitized = sanitizeSensitiveLinks(joinedView);
+  const joinedRedacted = redactAll(joinedSanitized);
+  if (joinedRedacted !== joinedSanitized || scan(joinedRedacted).shouldFlag) return failClosed();
+
+  // Diagnostic paths have no schema of their own. Bound unquoted values by a
+  // line or punctuation delimiter, never by whitespace, so a path containing
+  // spaces cannot leave its tail behind in the journal.
+  for (const [pattern, replacement] of [
+    [/file:\/\/\/[^,;\r\n)\]}'"`]*/giu, "[REDACTED:path]"],
+    [/(^|[\s("'`])(?:[A-Za-z]:\\|\\\\)[^,;\r\n)\]}'"`]*/gu, "$1[REDACTED:path]"],
+    [/(^|[\s("'`])\/(?!\/)[^,;\r\n)\]}'"`]*/gu, "$1[REDACTED:path]"],
+  ]) {
+    detail = transformDiagnostic(detail, (text) => text.replace(pattern, replacement));
+    if (detail === null) return failClosed();
+  }
+
+  for (const transform of [
+    (text) => text.replace(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+){2,}\b/gu, "[REDACTED:private_value]"),
+    (text) => text.replace(/[\u0000-\u001f\u007f]+/gu, " "),
+    (text) => text.replace(/\s+/gu, " "),
+    (text) => text.trim(),
+  ]) {
+    detail = transformDiagnostic(detail, transform);
+    if (detail === null) return failClosed();
+  }
   if (!detail) detail = "the source refresh failed";
-  // Redaction is fail-closed: a scanner hit that survived replacement becomes
-  // a fixed diagnostic rather than a second chance to persist credential text.
-  if (scan(detail).shouldFlag) detail = "the source refresh failed; sensitive diagnostic text was redacted";
-  return detail.slice(0, maxLength);
+  detail = transformDiagnostic(detail, (text) => text.slice(0, maxLength));
+  return detail === null || !detail ? failClosed() : detail;
 }
 
 function safeRemovalReview(error, source) {
