@@ -17,6 +17,14 @@ const ownerQuestions = [
   ["What wages are on my 2025 W-2?", "w-2"],
 ];
 
+const ordinaryMoneyQuestions = [
+  "How much did I pay Comcast in 2025?",
+  "What was our revenue last year?",
+  "What did we spend on rent in 2025?",
+  "How much did I make in 2024?",
+  "What did I pay the IRS in 2025?",
+];
+
 test("AR-07 assessment resolves owner tax questions without widening named-entity grammar", async () => {
   const { taxQuestionScope, taxQuestionScopeAssessment } = await moduleAt("worker/src/lib/tax-evidence-scope.js");
   for (const [question, form] of ownerQuestions) {
@@ -43,11 +51,34 @@ test("AR-07 assessment resolves owner tax questions without widening named-entit
     null,
     "a named form elsewhere in a named-entity question does not remove adjacency",
   );
-  assert.equal(
-    taxQuestionScopeAssessment("How much were my taxes?", { owner: OWNER, now: NOW }).applicable,
-    false,
-    "generic owner tax wording does not enter the return-evidence gate",
-  );
+  const genericOwnerTax = taxQuestionScopeAssessment("How much were my taxes?", { owner: OWNER, now: NOW });
+  assert.equal(genericOwnerTax.applicable, true, "owner-linked tax wording remains tax intent");
+  assert.equal(genericOwnerTax.resolved, false);
+  assert.equal(genericOwnerTax.missing, "year");
+});
+
+test("AR-07 ordinary owner money questions with years stay outside tax-return scope", async () => {
+  const { taxQuestionScopeAssessment } = await moduleAt("worker/src/lib/tax-evidence-scope.js");
+  for (const question of ordinaryMoneyQuestions) {
+    assert.deepEqual(
+      taxQuestionScopeAssessment(question, { owner: OWNER, now: NOW, timeZone: "UTC" }),
+      { applicable: false, resolved: false, scope: null },
+      question,
+    );
+  }
+
+  for (const [question, year, form] of [
+    ["What did I owe on my 2024 taxes?", "2024", "1040"],
+    ["What income is on my 2024 tax return?", "2024", "1040"],
+    ["What is line 9 on my 2023 1040?", "2023", "1040"],
+  ]) {
+    const assessment = taxQuestionScopeAssessment(question, { owner: OWNER, now: NOW, timeZone: "UTC" });
+    assert.equal(assessment.applicable, true, question);
+    assert.equal(assessment.resolved, true, question);
+    assert.deepEqual(assessment.scope, {
+      form, year, entity: ["fixture", "owner"], kind: "owner",
+    }, question);
+  }
 });
 
 test("AR-07 relative years and unresolved owner pieces fail closed with a specific notice", async () => {
@@ -61,7 +92,6 @@ test("AR-07 relative years and unresolved owner pieces fail closed with a specif
   for (const [question, missing] of [
     ["What wages are on my this year's W-2?", "year"],
     ["Compare my 2024 and 2025 tax returns.", "year"],
-    ["What income is on my 2025 filing?", "form"],
     ["Compare my 2025 Form 1040 and W-2.", "form"],
   ]) {
     const assessment = taxQuestionScopeAssessment(question, { owner: OWNER, now: NOW, timeZone: "UTC" });
@@ -70,6 +100,11 @@ test("AR-07 relative years and unresolved owner pieces fail closed with a specif
     assert.equal(assessment.missing, missing, question);
     assert.match(assessment.notice, new RegExp(missing, "i"), question);
   }
+  assert.deepEqual(
+    taxQuestionScopeAssessment("What income is on my 2025 filing?", { owner: OWNER, now: NOW }),
+    { applicable: false, resolved: false, scope: null },
+    "owner wording plus a generic filing is not explicit tax-return intent",
+  );
   for (const owner of ["", "owner", "the owner"]) {
     const assessment = taxQuestionScopeAssessment(ownerQuestions[0][0], { owner, now: NOW });
     assert.equal(assessment.resolved, false, owner || "empty owner");
@@ -197,4 +232,50 @@ test("AR-07 tax preparation fees remain outside the tax-return evidence gate", a
     taxQuestionScopeAssessment("How much did I pay my tax preparer for my 2025 return?", { owner: OWNER, now: NOW }),
     { applicable: false, resolved: false, scope: null },
   );
+});
+
+test("AR-07 a dated owner money question reaches the real ledger while owner-tax wording bypasses it", async (t) => {
+  t.mock.method(Date, "now", () => NOW);
+  const fixture = await createProductFixture({
+    productRoot: productRoot(),
+    env: { BRAIN_OWNER: OWNER, BRAIN_TIMEZONE: "UTC" },
+  });
+  try {
+    const recordedAt = new Date(NOW).toISOString();
+    fixture.raw(`INSERT INTO fin_entities
+      (entity_slug,legal_name,display_label,kind,status,relationship,provenance,basis_state,recorded_at)
+      VALUES ('fixture-owner','Fixture Owner','Fixture Owner','household','active','owned','owner_stated','confirmed',?)`, recordedAt);
+    fixture.raw(`INSERT INTO fin_accounts
+      (account_slug,entity_slug,account_kind,balance_role,mask,feed_mode,provenance,basis_state,recorded_at,institution)
+      VALUES ('fixture-checking','fixture-owner','checking','asset','0100','manual','owner_stated','confirmed',?,'Fixture Bank')`, recordedAt);
+    fixture.raw(`INSERT INTO fin_account_coverage
+      (account_slug,coverage_status,covered_from,covered_to,computed_at,provenance,basis_state,recorded_at)
+      VALUES ('fixture-checking','complete','2025-01-01','2025-12-31',?,'owner_stated','confirmed',?)`, recordedAt, recordedAt);
+    fixture.raw(`INSERT INTO fin_transactions
+      (txn_uid,account_slug,posted_on,amount_minor,direction,description,payee,provenance,basis_state,recorded_at)
+      VALUES ('fixture-income','fixture-checking','2025-09-15',12345,'inflow','Invoice payment','Example Customer','owner_stated','confirmed',?)`, recordedAt);
+
+    const moneyQuestion = "How much income came from Example Customer in September 2025 for my checking account ending 0100?";
+    const beforeMoney = fixture.seen.sql.length;
+    const money = await (await fixture.post("/api/rag/think", { q: moneyQuestion }, headers(fixture))).json();
+    const moneySql = fixture.seen.sql.slice(beforeMoney);
+    assert.equal(money.ledger?.kind, "merchant", "the real ledger answered the dated owner-money question");
+    assert.equal(money.ledger.attributed_subtotal_minor, 12345,
+      "the ledger reports the matched payer subtotal without claiming complete payer labeling");
+    assert.equal(money.evidence_gate?.supported, true, "the ledger money evidence gate approved the answer");
+    assert.ok(moneySql.some((sql) => /JOIN fin_transactions/.test(sql)), "the transaction decision point was reached");
+    assert.equal(money.status, undefined);
+    assert.equal(money.gaps.some((gap) => gap.type === "tax_question_scope_unresolved"), false);
+
+    const beforeTax = fixture.seen.sql.length;
+    const tax = await (await fixture.post("/api/rag/think", {
+      q: "What income is on my 2024 tax return?",
+    }, headers(fixture))).json();
+    const taxSql = fixture.seen.sql.slice(beforeTax);
+    assert.equal(tax.ledger, undefined, "the true owner-tax control does not consult the ledger");
+    assert.equal(taxSql.some((sql) => /JOIN fin_transactions/.test(sql)), false);
+    assert.notEqual(tax.evidence_gate?.reason, "tax question scope is unresolved");
+  } finally {
+    fixture.close();
+  }
 });

@@ -238,14 +238,36 @@ const ownerTimeZone = (value) => {
   }
 };
 
+const explicitOwnerTaxWording = (value) => {
+  const text = String(value || "");
+  const possessive = /\b(?:my|our)\b[^?!.]{0,80}\b(?:tax(?:es)?|(?:tax\s+)?returns?)\b/i;
+  const subject = /\b(?:i|we)\b[^?!.]{0,80}\b(?:tax(?:es)?|(?:tax\s+)?returns?)\b/i;
+  return possessive.test(text) || subject.test(text);
+};
+
+function adjacentOwnerYearForm(text, yearMatch) {
+  if (!yearMatch) return null;
+  const yearEnd = yearMatch.index + yearMatch[0].length;
+  const matches = [];
+  for (const [form, pattern] of DOCUMENT_FORM_PATTERNS) {
+    const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
+    for (const match of String(text || "").matchAll(new RegExp(pattern.source, flags))) {
+      if (match.index >= yearEnd && /^\s*$/.test(text.slice(yearEnd, match.index))) matches.push(form);
+    }
+  }
+  const forms = [...new Set(matches)];
+  return forms.length === 1 ? forms[0] : null;
+}
+
 function ownerQuestionState(question, { owner, now = Date.now(), timeZone = "UTC" } = {}) {
   const text = String(question || "");
   const ownerBeforeYear = /\b(?:my|our)\s+(?=(?:(?:19|20)\d{2}\b|(?:last|this)\s+year(?:[’']s)?\b))/i.test(text);
   const ownerInSubject = /\b(?:did|do|does|for|of|from|on|are|is|was|were)\s+(?:i|we|my|our)\b/i.test(text);
-  if (!ownerBeforeYear && !ownerInSubject) return { active: false };
+  if (!ownerBeforeYear && !ownerInSubject && !explicitOwnerTaxWording(text)) return { active: false };
 
   const years = [...text.matchAll(/\b(?:19|20)\d{2}\b/g)];
-  let year = years.length === 1 ? years[0][0] : null;
+  const yearMatch = years.length === 1 ? years[0] : null;
+  let year = yearMatch?.[0] || null;
   let missing = years.length > 1 || /\bthis\s+year(?:[’']s)?\b/i.test(text) ? "year" : null;
   if (!year && !missing && /\blast\s+year(?:[’']s)?\b/i.test(text)) {
     const instant = Number(now);
@@ -261,6 +283,8 @@ function ownerQuestionState(question, { owner, now = Date.now(), timeZone = "UTC
 
   const forms = exactQuestionFormMatch(text);
   let form = forms?.[0]?.form || null;
+  const recognizedQuestionForm = QUESTION_FORM_PATTERNS.some(([, pattern]) => pattern.test(text));
+  if (!form && !recognizedQuestionForm) form = adjacentOwnerYearForm(text, yearMatch);
   if (!form && year && (
     /\b(?:individual|federal\s+income)?\s*tax\s+return\b/i.test(text) ||
     new RegExp(`\\b${year}\\s+(?:federal\\s+income\\s+)?return\\b`, "i").test(text) ||
@@ -319,9 +343,12 @@ export function taxQuestionScopeAssessment(question = "", options = {}) {
   const returnFactIntent = /\b(?:amount|balance|basis|credit|deduction|distribution|expense|income|liabilit(?:y|ies)|line\s+\d+|loss|ordinary\s+business|owe(?:d|s)?|owing|paid|pay(?:ment|ments|s)?|refund|report(?:ed|s|ing)?|revenue|show(?:ed|n|s|ing)?|state(?:d|s|ing)?|tax(?:es)?\s+(?:due|withheld)|wages?)\b/i.test(text);
   const namedTaxLineFactIntent = hasNamedTaxLineFactQuestion(text);
   const ownerState = ownerQuestionState(text, options);
-  const ownerReturnIntent = ownerState.active && (returnFactIntent || /\bcompare\b/i.test(text)) && (
-    formIntent || bareFormIntent || adjacentYearBareFormIntent || returnIntent ||
-    /\b(?:19|20)\d{2}\b/.test(text) || /\b(?:last|this)\s+year\b/i.test(text)
+  const ownerTaxWordIntent = explicitOwnerTaxWording(text);
+  const ownerReturnIntent = ownerState.active && (
+    ownerTaxWordIntent ||
+    (returnFactIntent || /\bcompare\b/i.test(text)) && (
+      formIntent || adjacentYearBareFormIntent || (bareFormIntent && taxContext) || returnIntent
+    )
   );
   const applicable = returnFactIntent && (
     formIntent || adjacentYearBareFormIntent || (bareFormIntent && taxContext) ||
