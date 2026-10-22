@@ -293,16 +293,21 @@ export async function ownerSystemStatus(env, deps) {
   }
 
   if (vectors) {
-    const expected = Number(vectors.expected_vectors || 0);
-    const visible = Number(vectors.actual_vectors || 0);
+    const expected = Number.isSafeInteger(vectors.expected_vectors) && vectors.expected_vectors >= 0
+      ? vectors.expected_vectors
+      : null;
+    const visible = Number.isSafeInteger(vectors.actual_vectors) && vectors.actual_vectors >= 0
+      ? vectors.actual_vectors
+      : null;
     out.vectors = {
       ready: !!vectors.ready,
       expected,
       visible,
       pending: Number(vectors.pending || 0),
       pending_is_capped: vectors.pending_is_capped === true,
-      // The one number an owner actually asks for on install day.
-      percent_visible: expected > 0 ? Math.floor((visible / expected) * 100) : null,
+      percent_visible: expected !== null && expected > 0 && visible !== null
+        ? Math.floor((visible / expected) * 100)
+        : null,
     };
   } else {
     unavailable.push("vectors");

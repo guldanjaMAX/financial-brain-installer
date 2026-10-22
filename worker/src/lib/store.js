@@ -34,6 +34,7 @@ import { embedText, supabaseRpc } from "./supabase.js";
 import { sanitizeEnvelope, sanitizeSensitiveLinks } from "./secret-scan.js";
 import { scopeIsUnrestricted } from "./grants.js";
 import { parseCanonicalEvidenceDate } from "./query-intent.js";
+import { evidenceTextBasis } from "./evidence-authority.js";
 import {
   attachEvidenceLineage, evidenceLineageFor, evidenceLineageRootIds,
 } from "./evidence-lineage.js";
@@ -754,11 +755,7 @@ const d1Backend = {
   }) {
     let embedding = null;
     if (access?.kind !== "grant" && scopeIsUnrestricted(scope)) {
-      try {
-        embedding = await embedText(env, query, timing);
-      } catch {
-        // Degrade to keyword rather than fail. store-d1 reports which side answered.
-      }
+      embedding = embedText(env, query, timing).catch(() => null);
     }
     const r = await d1.search(env, {
       query, embedding, limit, filters, weights, rrfK, access, scope, projectionReadiness,
@@ -805,6 +802,10 @@ const d1Backend = {
           text_reliable: x.text_reliable === undefined || x.text_reliable === null
             ? false
             : x.text_reliable === true || x.text_reliable === 1 || x.text_reliable === "1",
+          ...(x.text_basis === "legacy_native"
+            ? { text_basis: "legacy_native", provenance_assessed: false }
+            : {}),
+          ...(evidenceTextBasis(x) === "ocr" ? { scanned: true } : {}),
           // Query-time, claim-specific authority is derived from the durable D1
           // row. It is additive public metadata, kept beside date and text
           // provenance so a citation never presents a tier without its reason.
@@ -820,6 +821,8 @@ const d1Backend = {
       })),
       degraded: r.degraded,
       degraded_reason: r.degraded_reason ?? null,
+      retrieval_receipt: r.retrieval_receipt,
+      meaning_search: r.meaning_search,
       ignored_filters: r.ignored_filters,
       counts: r.counts,
     };

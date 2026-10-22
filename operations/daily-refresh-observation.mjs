@@ -100,6 +100,35 @@ export function appendDailyObservation(identity, record, options = {}) {
       (record.error !== null && !ERRORS.has(record.error))) throw new Error("invalid daily observation");
   const bytes = Buffer.from(`${JSON.stringify({ schema_version: 1, started_at: record.started_at,
     completed_at: record.completed_at, result: record.result, error: record.error })}\n`);
+  return appendDailyRecord(identity, bytes, settings);
+}
+
+/** Persist one bounded, already-redacted source failure beside the run result. */
+export function appendDailySourceFailure(identity, record, options = {}) {
+  const settings = { ...options, platform: options.platform ?? process.platform };
+  if (!validTime(record.observed_at) || typeof record.source !== "string" ||
+      !record.source || record.source.length > 128 || /[\u0000-\u001f\u007f]/u.test(record.source) ||
+      !/^[A-Z][A-Z0-9_]{0,63}$/u.test(String(record.issue_code || "")) ||
+      typeof record.detail !== "string" || !record.detail || record.detail.length > 200 ||
+      /[\u0000-\u001f\u007f]/u.test(record.detail) ||
+      (record.attention !== null && record.attention !== undefined &&
+        (typeof record.attention !== "string" || !record.attention || record.attention.length > 400 ||
+          /[\u0000-\u001f\u007f]/u.test(record.attention)))) {
+    throw new Error("invalid daily source failure");
+  }
+  const bytes = Buffer.from(`${JSON.stringify({
+    schema_version: 1,
+    kind: "source_failure",
+    observed_at: record.observed_at,
+    source: record.source,
+    issue_code: record.issue_code,
+    detail: record.detail,
+    ...(record.attention ? { attention: record.attention } : {}),
+  })}\n`);
+  return appendDailyRecord(identity, bytes, settings);
+}
+
+function appendDailyRecord(identity, bytes, settings) {
   const paths = prepare(identity, settings);
   return withLogAppendLock(paths.directory, settings, () => {
     const prior = assertFile(paths.log_path, settings);
@@ -145,6 +174,7 @@ export function readDailyObservation(identity, options = {}) {
       if (!info.isDirectory()) throw new Error("unsafe log directory");
     }
     const records = [];
+    let sourceFailures = [];
     for (const path of [paths.history_path, paths.log_path]) {
       const info = assertFile(path, { platform: options.platform ?? process.platform });
       if (!info) continue;
@@ -162,13 +192,39 @@ export function readDailyObservation(identity, options = {}) {
       } finally { closeSync(fd); }
       for (const line of text.trim().split("\n").filter(Boolean)) {
         const record = JSON.parse(line);
+        if (record.kind === "source_failure") {
+          if (record.schema_version !== 1 || !validTime(record.observed_at) ||
+              typeof record.source !== "string" || !record.source || record.source.length > 128 ||
+              /[\u0000-\u001f\u007f]/u.test(record.source) ||
+              !/^[A-Z][A-Z0-9_]{0,63}$/u.test(String(record.issue_code || "")) ||
+              typeof record.detail !== "string" || !record.detail || record.detail.length > 200 ||
+              /[\u0000-\u001f\u007f]/u.test(record.detail) ||
+              (record.attention !== undefined &&
+                (typeof record.attention !== "string" || !record.attention || record.attention.length > 400 ||
+                  /[\u0000-\u001f\u007f]/u.test(record.attention)))) {
+            throw new Error("invalid source failure record");
+          }
+          sourceFailures.push({
+            source: record.source,
+            issue_code: record.issue_code,
+            detail: record.detail,
+            ...(record.attention ? { attention: record.attention } : {}),
+          });
+          continue;
+        }
         if (record.schema_version !== 1 || !RESULTS.has(record.result) || !validTime(record.started_at) ||
             (record.completed_at !== null && !validTime(record.completed_at)) ||
             (record.error !== null && !ERRORS.has(record.error))) throw new Error("invalid log record");
+        if (record.result === "running") sourceFailures = [];
         records.push({ started_at: record.started_at, completed_at: record.completed_at, result: record.result, error: record.error });
       }
     }
-    return { ...paths, record: records.at(-1) || null, last_error: records.findLast((row) => row.error)?.error || null };
+    return {
+      ...paths,
+      record: records.at(-1) || null,
+      last_error: records.findLast((row) => row.error)?.error || null,
+      ...(sourceFailures.length ? { source_failures: sourceFailures } : {}),
+    };
   } catch {
     return { ...paths, record: null, last_error: "Daily run diagnostics could not be read safely.", unreadable: true };
   }
@@ -225,11 +281,18 @@ export function dailyObservationStatus(plan, schedule, runtime, runnerUsable, op
     if (date <= now) date.setDate(date.getDate() + 1);
     next = date.toISOString();
   }
+  const sourceIssues = (observed.source_failures || []).map(({ source, issue_code, detail }) => ({
+    source, issue_code, detail,
+  }));
+  const scheduleAttention = [...new Set((observed.source_failures || [])
+    .map((record) => record.attention).filter(Boolean))];
   return { log_path: observed.log_path, last_run_at: newerNativeRun ? nativeTime : row?.started_at || nativeTime,
     last_result: result, next_run_at: schedule.enabled ? next : null,
     next_run: !schedule.enabled ? "not scheduled" : next || (schedule.plan_matches_registered_definition
       ? `${plan.cron} ${plan.timezone} (planned)` : "unknown (schedule needs repair)"),
-    last_error_line: error, registered_runner_usable: runnerUsable };
+    last_error_line: error, registered_runner_usable: runnerUsable,
+    ...(sourceIssues.length ? { schedule_attention: scheduleAttention, source_issues: sourceIssues } : {}),
+  };
 }
 
 export function renderDailyObservation(schedule, log) {
@@ -237,5 +300,9 @@ export function renderDailyObservation(schedule, log) {
   log(`Last daily result: ${schedule.last_result === "partial" ? "partial (coverage omissions)" : schedule.last_result || "unknown"}`);
   log(`Next daily run: ${schedule.next_run || "not scheduled"}`);
   log(`Last daily error: ${schedule.last_error_line || "none recorded"}`);
+  for (const attention of schedule.schedule_attention || []) log(`Daily attention: ${attention}`);
+  for (const issue of schedule.source_issues || []) {
+    log(`Daily source issue: ${issue.source} | ${issue.issue_code} | ${issue.detail}`);
+  }
   if (schedule.log_path) log(`Daily log: ${schedule.log_path}`);
 }

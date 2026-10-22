@@ -221,6 +221,21 @@ const deps = { health: okHealth, diagnose: okDiagnose, freshness: okFresh, vecto
   check("broken vectors are NAMED", s.unavailable.includes("vectors"));
   check("vectors is ABSENT, so no false 0%", !("vectors" in s));
 }
+{
+  const s = await ownerSystemStatus({}, {
+    ...deps,
+    vectorReadiness: async () => ({
+      ready: false,
+      actual_vectors: 12_400,
+      pending: 10_001,
+      pending_is_capped: true,
+    }),
+  });
+  check("a missing expected-vector count stays unknown instead of becoming zero",
+    s.vectors.expected === null && s.vectors.visible === 12_400 &&
+      s.vectors.percent_visible === null,
+    JSON.stringify(s.vectors));
+}
 
 /* ------------------------------------------ coverage never becomes one percent */
 {

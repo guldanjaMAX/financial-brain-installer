@@ -240,7 +240,7 @@ test('rejecting every synthesis item remains failed verification, never a claim 
   assert.equal(checked.calls.verifier, 1);
   assert.equal(result.results.length, 1);
   assert.equal(result.answer, null);
-  assert.equal(result.status, 'search_unavailable');
+  assert.equal(result.status, 'answer_withheld');
   assert.equal(result.citations.length, 0);
-  assert.match(result.notice || '', /did not pass the evidence check/i);
+  assert.match(result.notice || '', /evidence check did not support the draft/i);
 });

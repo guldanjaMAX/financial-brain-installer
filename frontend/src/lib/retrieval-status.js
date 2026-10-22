@@ -30,8 +30,29 @@ export const SEARCH_UNAVAILABLE = "search_unavailable";
 /** Wire value when retrieval ran but declared source coverage is not complete. */
 export const COVERAGE_INCOMPLETE = "coverage_incomplete";
 
+/** Wire value when retrieval found records but an answer gate withheld the draft. */
+export const ANSWER_WITHHELD = "answer_withheld";
+
 /** Wire value for `status` when the search completed and matched nothing. */
 export const NO_RESULTS = "no_results";
+const PROJECTION_PENDING_REASONS = new Set(["projection-catching-up", "projection-incomplete"]);
+
+export function projectionPending(degraded, reason) {
+  return degraded === "vector" && PROJECTION_PENDING_REASONS.has(reason);
+}
+
+const nonNegativeCount = (value) => Number.isSafeInteger(value) && value >= 0 ? value : null;
+
+/** Owner-facing progress uses the two measured counts, never a percentage. */
+export function meaningSearchLine({ visible, total } = {}) {
+  const visibleCount = nonNegativeCount(visible);
+  const totalCount = nonNegativeCount(total);
+  if (visibleCount !== null && totalCount !== null && visibleCount === totalCount) return null;
+  if (visibleCount === null || totalCount === null) {
+    return "Meaning search is still counting chunks; keyword search covers all";
+  }
+  return `Meaning search covers ${visibleCount.toLocaleString("en-US")} of ${totalCount.toLocaleString("en-US")} chunks; keyword search covers all`;
+}
 
 /**
  * The genuine no-match gap, verbatim.
@@ -69,6 +90,39 @@ const CAUSES = {
 };
 
 const UNKNOWN_REMEDY = "Try again. If it keeps happening, ask your installer to check search.";
+
+const ANSWER_WITHHELD_NOTICES = Object.freeze({
+  uncited_draft: "The answer was withheld because the draft did not cite its supporting records.",
+  money_check: "The answer was withheld because it did not pass the money evidence check.",
+  date_check: "The answer was withheld because it did not pass the date evidence check.",
+  conflicting_records: "The answer was withheld because retrieved records conflict and require review.",
+  unreadable_check_reply: "The answer was withheld because the evidence check reply could not be read twice.",
+  unsupported: "The answer was withheld because the evidence check did not support the draft.",
+});
+
+export function answerWithheldNotice(gate = "unsupported") {
+  return ANSWER_WITHHELD_NOTICES[gate] || ANSWER_WITHHELD_NOTICES.unsupported;
+}
+
+/** Closed, reviewed actions for every refusal state a /think response emits. */
+export const REFUSAL_NEXT_ACTIONS = Object.freeze({
+  no_results: "Next: ask again with a name, date or exact phrase the record would contain.",
+  coverage_incomplete: "Next: open Brain status to see which source is still loading, then ask again.",
+  search_unavailable: 'Next: ask again in a minute; if it fails twice, say "check my Brain".',
+  "answer_withheld:uncited_draft": "Next: ask about one record at a time, naming its title or date.",
+  "answer_withheld:unsupported": "Next: ask about one record at a time, naming its title or date.",
+  "answer_withheld:money_check": "Next: ask for one amount with its payer, payee and date.",
+  "answer_withheld:date_check": "Next: ask again with the exact date range you mean.",
+  "answer_withheld:conflicting_records": "Next: ask which record is newest on this; the records found disagree.",
+  "answer_withheld:unreadable_check_reply": "Next: ask the same question again in a minute.",
+});
+
+export function refusalNextAction({ status, withheldGate } = {}) {
+  const key = status === ANSWER_WITHHELD
+    ? `${ANSWER_WITHHELD}:${withheldGate || "unsupported"}`
+    : status || NO_RESULTS;
+  return REFUSAL_NEXT_ACTIONS[key] || null;
+}
 
 /** Normalise whatever the store reported into a short, safe token. */
 function degradedToken(degraded) {
@@ -186,6 +240,7 @@ export function emptyRetrievalDisclosure(degraded) {
 export function retrievalUnavailable(body) {
   if (!body || typeof body !== "object") return false;
   if (body.status === SEARCH_UNAVAILABLE) return true;
+  if (body.status === ANSWER_WITHHELD) return false;
   if (body.status === COVERAGE_INCOMPLETE) return false;
   if (!degradedToken(body.degraded)) return false;
   const answered = typeof body.answer === "string" && body.answer.trim().length > 0;
@@ -196,5 +251,5 @@ export function retrievalUnavailable(body) {
 
 /** Whether an empty response is allowed to support a whole-corpus absence. */
 export function absenceUnproven(body) {
-  return body?.status === COVERAGE_INCOMPLETE || retrievalUnavailable(body);
+  return body?.status === ANSWER_WITHHELD || body?.status === COVERAGE_INCOMPLETE || retrievalUnavailable(body);
 }

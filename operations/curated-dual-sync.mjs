@@ -40,6 +40,7 @@ import {
   readAdminKeyDurably,
 } from "./admin-key-persistence.mjs";
 import { sanitizeEnvelope, scanEnvelope } from "../worker/src/lib/secret-scan.js";
+import { withFirstPartySourceProvenance } from "../worker/src/lib/provenance-receipt.js";
 
 export const CURATED_SYNC_PLAN_VERSION = 1;
 export const CURATED_SYNC_LEDGER_VERSION = 3;
@@ -599,11 +600,11 @@ export function prepareCuratedCorpus(planInput, options = {}) {
       content,
       metadata,
     });
-    const cloudflareEnvelope = {
+    const cloudflareEnvelope = withFirstPartySourceProvenance({
       ...legacyEnvelope,
       source_type: "curated",
       source_id: `brain:${document.sourceType}:${document.sourceId}`,
-    };
+    }, { textSource: "native", textReliable: true });
     const neutralEnvelope = Object.freeze({
       title: legacyEnvelope.title,
       content: legacyEnvelope.content,

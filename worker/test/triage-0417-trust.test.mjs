@@ -8,7 +8,10 @@ import { refusalConfidence, confidenceLine } from '../src/lib/confidence.js';
 import * as retrieval from '../src/lib/retrieval-status.js';
 import { profileHas } from '../src/lib/agent-authority.js';
 import { ownerSystemStatus } from '../src/lib/system-status.js';
-import { ANSWER_ERROR_MESSAGES, safeAnswerErrorText, answerText, confidenceText } from '../../frontend/src/lib/answer-render.js';
+import { nextActionText as workerNextActionText } from '../src/lib/answer-render.js';
+import {
+  ANSWER_ERROR_MESSAGES, safeAnswerErrorText, answerText, confidenceText, scannedEvidenceNotice,
+} from '../../frontend/src/lib/answer-render.js';
 import { sourceCoverageFromEvidence, provisionalCoverageNotice } from '../src/lib/source-coverage.js';
 
 // No sockets, CLI, subprocesses, credentials, or model calls. These probes call
@@ -243,6 +246,7 @@ test('T08 control: local search and think carry document text under the existing
   class FixedDate extends Date { constructor(...args) { super(...(args.length ? args : [NOW])); } static now() { return NOW; } }
   const runTool = runInNewContext(`${exact}\nrunTool`, {
     ...retrieval, Date: FixedDate, PROFILE: 'owner-assistant', profileHas,
+    nextActionText: workerNextActionText, scannedEvidenceNotice,
     call: async (path, request) => {
       calls.push({ path, body: request.body });
       return { answer: 'The documents do not answer the question.', results: [{ ...doc, snippet: payload }], citations: [], gaps: [] };
@@ -295,7 +299,8 @@ function localFixture(transport, toolOverride) {
   const replies = [];
   let reached = 0;
   const functions = runInNewContext(`${http}\n${tools}\n${toolOverride ? 'runTool = injectedTool;' : ''}\n${handle}\n({ call, runTool, handle })`, {
-    ...retrieval, safeAnswerErrorText, ANSWER_ERROR_MESSAGES,
+    ...retrieval, safeAnswerErrorText, scannedEvidenceNotice, ANSWER_ERROR_MESSAGES,
+    nextActionText: workerNextActionText,
     PROFILE: 'librarian', profileHas, BASE: 'https://fixture.invalid', TIMEOUT_MS: 120000, UA: 'fixture',
     AbortController, setTimeout: () => 1, clearTimeout: () => {}, fetch: globalThis.fetch,
     CREDENTIALS: { redact: value => value },

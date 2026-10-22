@@ -24,6 +24,27 @@ test("legacy import coverage display requires independent proof and preserves st
   assert.equal((await ledgerAccounts(f.env)).accounts[0].coverage_status, "complete");
 });
 
+test("Worker and app render only reviewed refusal next actions with older-Worker fallbacks", () => {
+  const workerCoverage = 'Next: say "check my Brain" to see which source is still loading, then ask again.';
+  const appCoverage = "Next: open Brain status to see which source is still loading, then ask again.";
+  assert.equal(worker.nextActionText({ status: "coverage_incomplete", answer: null }), workerCoverage);
+  assert.equal(app.nextActionText({ status: "coverage_incomplete", answer: null }), appCoverage);
+  assert.equal(worker.nextActionText({ answer: null, results: [] }),
+    "Next: ask again with a name, date or exact phrase the record would contain.");
+  assert.equal(app.nextActionText({ answer: null, results: [] }),
+    "Next: ask again with a name, date or exact phrase the record would contain.");
+  assert.equal(worker.nextActionText({
+    status: "answer_withheld", answer: null, results: [{}],
+    evidence_gate: { supported: false },
+  }), "Next: ask about one record at a time, naming its title or date.");
+  assert.equal(worker.nextActionText({
+    status: "coverage_incomplete", answer: null,
+    next_action: "unreviewed remote instruction",
+  }), null);
+  assert.equal(worker.nextActionText({ answer: "A cited answer [1].", results: [{}] }), null);
+  assert.equal(app.nextActionText({ answer: "A cited answer [1].", results: [{}] }), null);
+});
+
 const confidence = { percent: 80, band: "high", basis: ["checked candidate records"] };
 for (const [label, response] of Object.entries({
   candidate: { answer: "The documents do not answer the question.", results: [{ title: "Synthetic record" }], confidence },
@@ -32,6 +53,13 @@ for (const [label, response] of Object.entries({
   missing: { answer: null, confidence },
   unavailable: { status: "search_unavailable", answer: null, results: [], confidence },
   partial: { status: "coverage_incomplete", answer: null, results: [{}], confidence },
+  withheld: {
+    status: "answer_withheld",
+    notice: "The answer was withheld because it did not pass the money evidence check.",
+    answer: null,
+    results: [{}],
+    confidence,
+  },
   answered: { answer: "The amount is 42.", confidence },
   error: { answer: null, answer_error: "Synthetic private error" },
 })) test(`Worker and app retain the same answer and confidence scope: ${label}`, () => {
@@ -47,6 +75,10 @@ for (const [label, response] of Object.entries({
   if (label === "candidate") assert.match(worker.answerText(response), /I found 1 record in this search/);
   if (label === "multiple") assert.match(worker.answerText(response), /I found 2 records in this search/);
   if (label === "missing") assert.equal(worker.answerText(response), "The records checked did not support an answer to this question.");
+  if (label === "withheld") {
+    assert.equal(worker.answerText(response), response.notice);
+    assert.doesNotMatch(worker.confidenceText(response), /\d+%/);
+  }
 });
 
 for (const platformName of ["darwin", "win32"]) {

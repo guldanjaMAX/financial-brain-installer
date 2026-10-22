@@ -67,19 +67,19 @@ import { installedSchemaVersion, acceleratedVectorBootstrap, drainOutbox, outbox
 import { embedText, embedTexts } from "./lib/supabase.js";
 import {
   currentEvidenceCandidates, hasExplicitCurrentIntent, newestCurrentEvidence,
-  parseCanonicalEvidenceDate,
+  parseCanonicalEvidenceDate, reliableDocumentTime, retrievalTimeWindow,
 } from "./lib/query-intent.js";
 import { computeAnswerConfidence, refusalConfidence } from "./lib/confidence.js";
 import { answerSentences } from "./lib/answer-sentences.js";
 import { quickBooksMoneyPolicy } from "./lib/quickbooks-money.js";
-import { applyMoneyVeto, isMoneyAnswer } from "./lib/money-veto.js";
+import { applyMoneyVeto, isMoneyQuestion } from "./lib/money-veto.js";
 import { MONEY_RECALL_INSTRUCTION, moneyDraftRepair, moneyRecordQualification, applyMoneyRecallVeto } from "./lib/money-recall.js";
 import { applyTemporalVeto } from "./lib/temporal-guard.js";
 import { quickBooksBalanceAnswer, quickBooksBalanceRequest } from "./lib/quickbooks-balance.js";
 import { quickBooksOpenItemsAnswer } from "./lib/quickbooks-open-items.js";
 import {
   answerUsesOperativeValue, answerUsesSupersededValue, authorityFor,
-  documentMatchesOperativeClaim, documentUsesOperativeValue,
+  documentMatchesOperativeClaim, documentUsesOperativeValue, evidenceTextBasis,
 } from "./lib/evidence-authority.js";
 import {
   taxEvidenceScope, taxQuestionScope, taxQuestionScopeAssessment,
@@ -93,9 +93,11 @@ import {
   normalizeIngestEnvelopeProvenance, restampFirstPartySourceProvenance,
 } from "./lib/provenance-receipt.js";
 import {
-  COVERAGE_INCOMPLETE, SEARCH_UNAVAILABLE, coverageIncompleteNotice, emptyRetrievalDisclosure,
+  ANSWER_WITHHELD, COVERAGE_INCOMPLETE, SEARCH_UNAVAILABLE, answerWithheldNotice,
+  coverageIncompleteNotice, emptyRetrievalDisclosure, meaningSearchLine, projectionCatchupGap,
+  projectionPending, refusalNextAction,
 } from "./lib/retrieval-status.js";
-import { answerGenerationError } from "./lib/answer-render.js";
+import { answerGenerationError, scannedEvidenceGap } from "./lib/answer-render.js";
 import {
   handleOwnerAuth, handleAdminInvite, handleAdminDevices, handleAdminGrants, handleZones,
   ownerSessionPrincipal,
@@ -303,6 +305,7 @@ function strongestEvidenceAuthority(results) {
     name: strongest.name,
     reason: strongest.reason,
     claim: strongest.claim,
+    ...(strongest.scanned === true ? { scanned: true } : {}),
   } : null;
 }
 
@@ -320,6 +323,7 @@ function citationCandidateForResult(result, index) {
     date_source: result.date_source || null,
     text_source: result.text_source || "unknown",
     text_reliable: result.text_reliable === true,
+    ...(evidenceTextBasis(result) === "ocr" ? { scanned: true } : {}),
     current_authoritative: result.current_authoritative === true,
     authority: result.authority || null,
     lineage: result.lineage || evidenceLineageFor(result).lineage,
@@ -341,6 +345,7 @@ function citationForDocument(document) {
     // a text layer. Preserve the exact public answer-path projection here so a
     // result-family proof exercises the same citation contract.
     text_source: document.text_source, text_reliable: document.text_reliable,
+    ...(document.scanned === true ? { scanned: true } : {}),
     authority: document.authority,
     lineage: document.lineage,
     ...(document.query_variant ? { query_variant: document.query_variant } : {}),
@@ -381,6 +386,8 @@ async function unifiedRetrieve(env, url, {
   const matches = measureQueryStage(timing, "authority_lineage", () => normalizeRetrievedDocuments(r.results));
   return {
     matches,
+    retrievalReceipt: r.retrieval_receipt,
+    meaningSearch: r.meaning_search,
     evidenceAuthority: strongestEvidenceAuthority(matches),
     degraded: r.degraded,
     degradedReason: r.degraded_reason || null,
@@ -641,8 +648,8 @@ function documentDirectlySupportsStatus(sentence, doc, question = "") {
   });
 }
 
-function authoritativeCurrentEvidence(sentence, doc, question = "") {
-  return authorityFor(doc, { query: question, claimText: sentence, current: true }).authoritative;
+function authoritativeCurrentEvidence(sentence, doc, question = "", taxOptions = {}) {
+  return authorityFor(doc, { query: question, claimText: sentence, current: true, ...taxOptions }).authoritative;
 }
 
 function hasMatchingAsOfDate(sentence, docs) {
@@ -668,6 +675,71 @@ function modelRefusedAnswer(answer) {
   return /^(?:the )?(?:documents|sources|provided (?:documents|sources)) (?:do not|don't|cannot|can't|does not|doesn't) (?:actually )?(?:answer|contain|provide)|^there (?:is|isn't|is not) (?:not )?enough (?:information|evidence)/i.test(firstLine);
 }
 
+function questionRetrievalWindow(env, url, question) {
+  // One caller-supplied boundary means the caller owns the range. Filling its
+  // missing half from prose would silently change an explicit request.
+  if (url.searchParams.get("from") || url.searchParams.get("to")) return null;
+  // Document-backed money has a stricter refuse-only contract that must see
+  // outside-window and unreliably dated candidates in order to reject them.
+  // Ledger questions have already had their chance to answer before this path.
+  if (isMoneyQuestion(question)) return null;
+  const window = retrievalTimeWindow(question, {
+    now: Date.now(),
+    timeZone: env.BRAIN_TIMEZONE,
+  });
+  if (!window) return null;
+  const from = new Date(window.start).toISOString();
+  const to = new Date(window.end - 1).toISOString();
+  url.searchParams.set("from", from);
+  url.searchParams.set("to", to);
+  return {
+    ...window,
+    public: { from, to, time_zone: window.timeZone, basis: "question" },
+  };
+}
+
+function applyQuestionRetrievalWindow(rows, window) {
+  if (!window) return { rows, dropped: 0 };
+  let dropped = 0;
+  const filtered = rows.filter((row) => {
+    const time = reliableDocumentTime(row);
+    const keep = time !== null && time >= window.start && time < window.end;
+    if (!keep) dropped++;
+    return keep;
+  });
+  return { rows: filtered, dropped };
+}
+
+function localWindowDay(instant, timeZone) {
+  const values = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
+    timeZone, year: "numeric", month: "2-digit", day: "2-digit",
+  }).formatToParts(new Date(instant)).filter((part) => part.type !== "literal")
+    .map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+function questionRetrievalWindowGap(window, resultCount, dropped) {
+  if (!window) return null;
+  const shared = {
+    from: window.public.from,
+    to: window.public.to,
+    time_zone: window.public.time_zone,
+    unreliable_records_dropped: dropped,
+  };
+  if (resultCount === 0) {
+    return {
+      type: "time_window_empty",
+      ...shared,
+      detail: `No reliably dated records were found from ${localWindowDay(window.start, window.timeZone)} through ${localWindowDay(window.end - 1, window.timeZone)} in ${window.timeZone}.`,
+    };
+  }
+  return {
+    type: "question_time_window",
+    ...shared,
+    detail: "Only reliably dated records inside the question's time range were searched.",
+  };
+}
+
 /* -------------------------------------------------------------- routes */
 
 async function handleUnified(
@@ -681,6 +753,7 @@ async function handleUnified(
   const scope = await measureQueryStage(timing, "scope", () => applyBusinessScope(env, url));
   if (!scope.ok) return scope.response;
   const entityScope = scope.entityScope;
+  const timeWindow = questionRetrievalWindow(env, url, q);
 
   const limit = Math.min(parseInt(url.searchParams.get("limit")) || 10, 50);
   // Reranking is an explicit variant. Merely configuring a provider key must
@@ -690,6 +763,7 @@ async function handleUnified(
   const {
     matches: retrieved, evidenceAuthority, degraded, degradedReason, retrievalScope, access: accessSummary, ignoredFilters,
   } = await unifiedRetrieve(env, url, { limit, access, scope: grantScope, scopePrincipalKind, timing });
+  const windowed = applyQuestionRetrievalWindow(Array.isArray(retrieved) ? retrieved : [], timeWindow);
   const accessStatus = {
     retrieval_scope: retrievalScope,
     degraded_reason: degradedReason || undefined,
@@ -713,7 +787,7 @@ async function handleUnified(
   // up, or when declared source history is incomplete.
   // Keep both conditions on the raw route so its UI, MCP, and check consumers
   // do not have to infer corpus coverage from a result count.
-  const searchTruth = (rows) => {
+  const searchState = (rows) => {
     const disclosure = emptyRetrievalDisclosure(degraded, degradedReason, {
       candidatesFound: rows.length > 0,
     });
@@ -733,13 +807,26 @@ async function handleUnified(
     }
     return {};
   };
+  const searchTruth = (rows) => {
+    const truth = searchState(rows);
+    const scanned = scannedEvidenceGap(rows, { results: true });
+    return scanned ? { ...truth, gaps: [...(truth.gaps || []), scanned] } : truth;
+  };
+  const searchTruthWithTimeWindow = (rows) => {
+    const truth = searchTruth(rows);
+    if (!timeWindow) return truth;
+    return {
+      ...truth,
+      gaps: [...(truth.gaps || []), questionRetrievalWindowGap(timeWindow, rows.length, windowed.dropped)],
+    };
+  };
 
   if (degraded === "fts") {
-    const rows = retrieved.slice(0, limit);
-    return jsonResponse({ mode: "unified", entity_scope: entityScope, degraded, evidence_authority: evidenceAuthority || undefined, ...accessStatus, ...searchTruth(rows), ...ignored, results: rows });
+    const rows = windowed.rows.slice(0, limit);
+    return jsonResponse({ mode: "unified", entity_scope: entityScope, ...(timeWindow ? { time_window: timeWindow.public } : {}), degraded, evidence_authority: evidenceAuthority || undefined, ...accessStatus, ...searchTruthWithTimeWindow(rows), ...ignored, results: rows });
   }
 
-  let matches = retrieved;
+  let matches = windowed.rows;
 
   if (doRerank && Array.isArray(matches) && matches.length > 1) {
     matches = await rerank(env, q, matches, limit, timing);
@@ -747,8 +834,8 @@ async function handleUnified(
   if (Array.isArray(matches)) matches = matches.slice(0, limit);
 
   return jsonResponse({
-    mode: "unified", entity_scope: entityScope, reranked: doRerank,
-    degraded: degraded || undefined, ...searchTruth(Array.isArray(matches) ? matches : []),
+    mode: "unified", entity_scope: entityScope, ...(timeWindow ? { time_window: timeWindow.public } : {}), reranked: doRerank,
+    degraded: degraded || undefined, ...searchTruthWithTimeWindow(Array.isArray(matches) ? matches : []),
     evidence_authority: strongestEvidenceAuthority(matches) || evidenceAuthority || undefined,
     ...accessStatus, ...ignored, results: matches,
   });
@@ -790,12 +877,15 @@ const TAX_QUESTION_SCOPE_UNRESOLVED_GAP = Object.freeze({
 });
 const TAX_EVIDENCE_UNREADABLE_NOTICE = "The requested tax filing was found, but its text could not be read reliably. This is not proof that the filing omits the answer. Unlock the file or provide a readable copy before treating the result as complete.";
 const TAX_DOCUMENT_INVENTORY_NOTICE = "The requested tax filing could not be checked against the complete document inventory. This is not proof that the filing is absent or omits the answer. Finish document extraction or use an exact business scope before treating the result as complete.";
+const SCANNED_PROMPT_LABEL =
+  "SCANNED COPY READ BY OCR (every page read): if you rely on it say the fact comes from a scanned copy; figures may be misread";
 const ANSWER_VALIDATION_UNAVAILABLE_NOTICE = "The search could not be completed safely because the generated answer did not pass the evidence check. This is not proof that your brain has nothing on this question. Review the evidence-check reason or try again.";
 
 async function taxDocumentCoverageForRead(env, {
   question, filters, access, scope,
 }) {
-  const requested = taxQuestionScope(question);
+  const taxOptions = { owner: env.BRAIN_OWNER, now: Date.now(), timeZone: env.BRAIN_TIMEZONE };
+  const requested = taxQuestionScope(question, taxOptions);
   if (!requested) return { applicable: false, unreadable: false, complete: true };
 
   // Do not narrow this legacy recovery probe by the modern entity_slug column.
@@ -814,7 +904,7 @@ async function taxDocumentCoverageForRead(env, {
       scope,
     });
     const unreadable = (lookup.results || []).some((row) => {
-      const receipt = taxEvidenceScope(row, question);
+      const receipt = taxEvidenceScope(row, question, taxOptions);
       return receipt?.matched === true || receipt?.title_candidate_matched === true;
     });
     const complete = lookup?.complete === true;
@@ -910,7 +1000,9 @@ async function handleThink(
     }, { tax: { env } }));
     return jsonResponse(cfo);
   }
-  const taxQuestion = measureQueryStage(timing, "premise_temporal", () => taxQuestionScopeAssessment(q));
+  const taxQuestion = measureQueryStage(timing, "premise_temporal", () => taxQuestionScopeAssessment(q, {
+    owner: env.BRAIN_OWNER, now: Date.now(), timeZone: env.BRAIN_TIMEZONE,
+  }));
   return withLedgerAnswer({ env, question: q, access, grantScope, scopePrincipalKind,
     filters: filtersFrom(url), entityScope, ledgerEligible: !taxQuestion.applicable }, (ledgerGap) => handleDocumentThink(
     env, url, q, entityScope, access, grantScope, scopePrincipalKind, timing, ledgerGap, taxQuestion));
@@ -923,8 +1015,9 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
       mode: "think",
       entity_scope: entityScope,
       status: COVERAGE_INCOMPLETE,
-      notice: "Name one exact entity, tax year, and form before using Brain records for this tax question. No nearby filing was treated as an answer.",
+      notice: taxQuestion.notice || "Name one exact entity, tax year, and form before using Brain records for this tax question. No nearby filing was treated as an answer.",
       answer: null,
+      next_action: refusalNextAction({ status: COVERAGE_INCOMPLETE }),
       citations: [],
       results: [],
       gaps: [TAX_QUESTION_SCOPE_UNRESOLVED_GAP],
@@ -936,6 +1029,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
       },
     });
   }
+  const timeWindow = questionRetrievalWindow(env, url, q);
   const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit")) || 8, 1), 20);
 
   const mapState = measureQueryStage(timing, "financial_map", () => financialMapStateFor(env, q, {
@@ -943,9 +1037,14 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
   }));
 
   const {
+    retrievalReceipt, meaningSearch,
     matches, evidenceAuthority, degraded, degradedReason, retrievalScope, access: accessSummary, ignoredFilters,
   } = await unifiedRetrieve(env, url, { limit, access, scope: grantScope, scopePrincipalKind, timing });
-  const results = Array.isArray(matches) ? matches : [];
+  const windowed = applyQuestionRetrievalWindow(Array.isArray(matches) ? matches : [], timeWindow);
+  const results = windowed.rows;
+  const meaningSearchStatus = meaningSearch
+    ? { ...meaningSearch, line: meaningSearchLine(meaningSearch) }
+    : null;
   const requestedFilters = filtersFrom(url);
   const [coverage, taxDocumentCoverage] = await Promise.all([
     measureQueryStage(timing, "coverage", () => coverageForRead(env, {
@@ -979,18 +1078,22 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
     // knows nothing about the corpus; a completed search during proportional
     // projection catch-up has incomplete coverage. Both gaps must forbid the
     // absence claim rather than issue it. See worker/src/lib/retrieval-status.js.
-    const disclosure = emptyRetrievalDisclosure(degraded, degradedReason);
+    const disclosure = emptyRetrievalDisclosure(degraded, degradedReason, {
+      meaningSearch: meaningSearchStatus,
+    });
     let gaps = disclosure.unavailable || disclosure.incomplete
       ? [...sourceCoverageGaps, ...disclosure.gaps]
       : sourceCoverageGaps.length
         ? sourceCoverageGaps
         : disclosure.gaps;
     if (documentTaxGap) gaps = [documentTaxGap, ...gaps];
+    if (timeWindow) gaps.push(questionRetrievalWindowGap(timeWindow, 0, windowed.dropped));
     const coverageIncomplete = disclosure.incomplete || (!disclosure.unavailable &&
       (sourceCoverageGaps.length > 0 || Boolean(documentTaxGap)));
     return jsonResponse({
       mode: "think",
       entity_scope: entityScope,
+      ...(timeWindow ? { time_window: timeWindow.public } : {}),
       degraded: degraded || undefined,
       degraded_reason: degradedReason || undefined,
       retrieval_scope: retrievalScope,
@@ -1013,6 +1116,13 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
               : coverageIncompleteNotice(coverage.unavailable)
           : undefined,
       answer: null,
+      next_action: refusalNextAction({
+        status: disclosure.unavailable || disclosure.incomplete
+          ? disclosure.status
+          : coverageIncomplete ? COVERAGE_INCOMPLETE : undefined,
+      }),
+      retrieval_receipt: retrievalReceipt || undefined,
+      meaning_search: meaningSearchStatus || undefined,
       citations: [],
       results: [],
       gaps,
@@ -1034,6 +1144,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
   }
 
   const gaps = measureQueryStage(timing, "gaps", () => computeGaps(results));
+  if (timeWindow) gaps.push(questionRetrievalWindowGap(timeWindow, results.length, windowed.dropped));
   if (ledgerGap) {
     for (const gap of gaps) if (gap.type === "stale") {
       gap.detail = gap.detail.replace("Newest source", "Newest retrieved document") + " This does not measure bank-feed freshness.";
@@ -1061,12 +1172,18 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
       ? "Exact document authorization was applied in D1. The unscoped semantic index was deliberately not queried, so differently phrased evidence inside the allowed documents may be missing; this is not proof that the allowed documents contain nothing."
       : "Registered-source zone authorization was applied in D1. The unscoped semantic index was deliberately not queried, so differently phrased evidence inside the allowed zones may be missing; this is not proof that the allowed zones contain nothing.";
     gaps.unshift({
-      type: degraded === "scoped-vector" ? "scoped_vector_unavailable" : "vector_unavailable",
+      type: projectionPending(degraded, degradedReason)
+        ? "keyword_only_indexing"
+        : degraded === "scoped-vector" ? "scoped_vector_unavailable" : "vector_unavailable",
       detail: degraded === "scoped-vector"
         ? scopedDetail
+        : projectionPending(degraded, degradedReason)
+          ? projectionCatchupGap(meaningSearchStatus).detail
         : degradedReason === "vector-query-failed"
           ? "Meaning-based search failed. Keyword evidence remains available, but differently phrased evidence may be missing. Try again shortly, and run `brain health` if it keeps happening."
-          : "The vector index is not fully query-ready. Keyword evidence remains available, but new or differently phrased evidence may be missing until the index catches up. It is still building in the background and finishes on its own; running `brain drain` by hand does not speed it up.",
+          : degradedReason === "projection-count-mismatch"
+            ? "Meaning-based search is not fully query-ready because the provider and database vector counts differ. Keyword evidence remains available, but differently phrased evidence may be missing. Run `brain health` to inspect the mismatch before attempting recovery."
+            : "The vector index is not fully query-ready. Keyword evidence remains available, but new or differently phrased evidence may be missing until the index catches up. It is still building in the background and finishes on its own; running `brain drain` by hand does not speed it up.",
     });
   }
   if (degraded === "fts") {
@@ -1076,11 +1193,15 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
     });
   }
   const docs = results.slice(0, 12).map(citationCandidateForResult);
-  const unreadableRequestedTaxEvidence = taxDocumentCoverage.unreadable || docs.some((doc) =>
+  const requestedTaxFiling = (doc) =>
     doc.authority?.tax_scope?.applicable === true &&
     (doc.authority.tax_scope.matched === true ||
-      doc.authority.tax_scope.title_candidate_matched === true) &&
-    (doc.text_source !== "native" || doc.text_reliable !== true)
+      doc.authority.tax_scope.title_candidate_matched === true);
+  const unreadableRequestedTaxEvidence = taxDocumentCoverage.unreadable || docs.some((doc) =>
+    requestedTaxFiling(doc) && evidenceTextBasis(doc) === null
+  );
+  const scannedRequestedTaxEvidence = docs.some((doc) =>
+    requestedTaxFiling(doc) && doc.scanned === true
   );
   if (unreadableRequestedTaxEvidence) documentTaxGap = TAX_EVIDENCE_UNREADABLE_GAP;
   if (documentTaxGap) gaps.unshift(documentTaxGap);
@@ -1092,9 +1213,11 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
         : null;
       // The answering model is told when a passage was read off a picture, so
       // it can hedge a figure it was handed rather than repeat it as printed.
-      const read = d.text_source === "ocr" || d.text_source === "ocr_partial"
-        ? "READ BY OCR FROM A SCAN, may be misread"
-        : null;
+      const read = d.scanned === true
+        ? SCANNED_PROMPT_LABEL
+        : d.text_source === "ocr" || d.text_source === "ocr_partial"
+          ? "READ BY OCR FROM A SCAN, may be misread"
+          : null;
       const authority = d.authority
         ? `authority ${d.authority.tier} ${d.authority.name}: ${d.authority.reason}`
         : "authority unavailable";
@@ -1198,7 +1321,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
     "16. A QuickBooks balance snapshot observes the displayed balance at its exact as-of date, even if the transaction or provider last-change date is older. State that as-of date with each account balance and cite that account's own record. For a negative Credit Card balance, say the owner owes the positive amount; retain the minus sign if also quoting the provider balance. Individual retrieved records do not establish a complete list or company-wide total.",
     synthesisIntent(q) ? SYNTHESIS_INSTRUCTION : "",
     datedInstruction,
-    isMoneyAnswer(q, "") ? MONEY_RECALL_INSTRUCTION : "",
+    isMoneyQuestion(q) ? MONEY_RECALL_INSTRUCTION : "",
     docs.some(doc => doc.query_variant) ? "A spelling variant rescued some candidates. Use and cite the record's spelling. A similar spelling alone does not establish identity; verify the surrounding subject and context." : "",
     env.BRAIN_STYLE_RULE || "",
   ]
@@ -1210,7 +1333,9 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
   const currentBlock = currentEvidence.length
     ? `\n\nCURRENT-STATUS CHECK:\nThe controlling current evidence for the named subject is document ${currentEvidence.map((doc) => `[${doc.n}]`).join(" and ")}. It may establish only the status it explicitly states. Older documents may explain history, and non-authoritative sources require an exact as-of date.${operativeConflict ? " Equally current owner-confirmed operative sections disagree. Do not choose a current value." : newerAuthoritativeEvidence.length ? " A newer authoritative record discusses this fact without repeating the owner-confirmed operative value and may supersede it. Do not choose a current value until they are reconciled." : operativeCurrentEvidence.length ? ` Document ${operativeCurrentEvidence.map((doc) => `[${doc.n}]`).join(" and ")} contains the newest owner-confirmed operative section for this question. Use only its Operative value as current; every Supersedes value is historical. A newer non-operative record does not replace it.` : ""}`
     : "";
-  const moneyPolicy = quickBooksMoneyPolicy({ question: q, docs, candidates: results.map(citationCandidateForResult) });
+  const moneyPolicy = (isMoneyQuestion(q) || /\b(?:quick[\s-]*books|qbo)\b/i.test(q))
+    ? quickBooksMoneyPolicy({ question: q, docs, candidates: results.map(citationCandidateForResult) })
+    : null;
   const userMsg = `Question: ${q}\n\nDOCUMENTS:\n${docBlock}${currentBlock}${moneyPolicy ? `\n\n${moneyPolicy.instruction}` : ""}\n\nKNOWN GAPS (computed from the data, not inferred, do not contradict these):\n${gapBlock}\n\n${moneyPolicy ? "Write the answer using only the relevant exact contract lines. Do not write a Heads up line; the application appends the computed gaps after verification." : 'Write the answer. Then, only if one of the gaps above materially affects how much the reader should trust that answer, add a final line starting with "Heads up:" naming that one gap in a single sentence. If none do, omit the Heads up line entirely.'}`;
 
   // Direct observed amounts need no generated prose. This replaces only the
@@ -1257,7 +1382,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
       } catch (error) {
         // This is the pinned local adapter's empty-completion error, not an
         // arbitrary provider outage. One retry still needs full verification.
-        if (attempt === 0 && isMoneyAnswer(q, "") && !moneyPolicy &&
+        if (attempt === 0 && isMoneyQuestion(q) && !moneyPolicy &&
             error?.message === "Workers AI: Workers AI returned no answer text") {
           repairInstruction = `${MONEY_RECALL_INSTRUCTION}\nThe first completion was empty. Answer only from the supplied evidence, or state that it does not support an answer.`;
           continue;
@@ -1288,7 +1413,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
       if (attempt !== 0 || !answer || modelRefusedAnswer(answer)) break;
       const citedNumbers = new Set([...answer.matchAll(/\[(\d+)\]/g)].map((match) => Number(match[1])));
       const cited = docs.filter((doc) => citedNumbers.has(doc.n));
-      if (!cited.length && docs.some((doc) => doc.source_kind === "quickbooks")) {
+      if (!cited.length) {
         repairInstruction = "The first draft did not cite a supplied document. Regenerate from the same DOCUMENTS. Cite every factual claim inline with its exact supplied document number, like [3]. Do not invent citation numbers or facts. If the documents cannot support a claim, omit it or say the documents do not answer that part.";
       } else break;
     }
@@ -1351,7 +1476,19 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
           ? "draft cited an unavailable document" : "draft made claims without document citations" };
       } else {
         try {
-          const check = (observedAnswer || factAnswer || (synthesis && !datedStatus.evidence.length)) ? null : await callLLM(env, {
+          const parseVerifierReply = (response) => {
+            const text = response?.content?.[0]?.text || "";
+            const first = text.indexOf("{");
+            const last = text.lastIndexOf("}");
+            if (first < 0 || last <= first) return null;
+            try {
+              const parsed = JSON.parse(text.slice(first, last + 1));
+              return parsed && typeof parsed === "object" ? parsed : null;
+            } catch {
+              return null;
+            }
+          };
+          const verifierRequest = {
             model: env.ANSWER_MODEL || "claude-sonnet-4-5",
             max_tokens: datedStatus.evidence.length ? 1000 : 300,
             label: "rag-evidence-gate",
@@ -1381,10 +1518,17 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
               datedStatusInstruction(datedStatus.evidence),
             ].join("\n"),
             messages: [{ role: "user", content: `Question: ${q}\n\nPROPOSED ANSWER:\n${answer}\n\nCITED DOCUMENTS:\n${renderDocs(citedDocs)}${datedStatus.evidence.length ? `\n\nALL RETRIEVED EVIDENCE FOR CONFLICT REVIEW:\n${renderDocs(docs)}` : ""}${currentEvidence.length ? `\n\nNEWEST RELIABLE-DATED DIRECT EVIDENCE:\n${renderDocs(currentEvidence)}` : ""}` }],
-          });
+          };
+          let check = null;
+          let verifierUnreadableTwice = false;
+          if (!(observedAnswer || factAnswer || (synthesis && !datedStatus.evidence.length))) {
+            check = await callLLM(env, verifierRequest);
+            if (!parseVerifierReply(check)) {
+              check = await callLLM(env, verifierRequest);
+              verifierUnreadableTwice = !parseVerifierReply(check);
+            }
+          }
           const raw = check?.content?.[0]?.text || "";
-          const start = raw.indexOf("{");
-          const end = raw.lastIndexOf("}");
           const verdict = observedAnswer
             ? { supported: true, complete: true, evidence: observedAnswer.evidence, reason: balanceAnswer
               ? "exact observed account balances; full inventory explicitly not established"
@@ -1392,7 +1536,9 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
             : factAnswer
               ? { supported: true, complete: true, evidence: factAnswer.evidence, reason: "exact native contact field with dated direct evidence" }
               : synthesis && !datedStatus.evidence.length ? synthesis.verdict
-              : start >= 0 && end > start ? JSON.parse(raw.slice(start, end + 1)) : null;
+              : verifierUnreadableTwice
+                ? { supported: false, complete: false, evidence: [], reason: "The evidence check reply could not be read, twice." }
+                : parseVerifierReply(check);
           const conflicts = datedStatusConflicts(verdict, docs, datedStatus);
           if (synthesis && synthesis.dropped && verdict) verdict.complete = false;
           const allowed = new Set((Array.isArray(verdict?.evidence) ? verdict.evidence : [])
@@ -1406,7 +1552,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
             evidence: [...allowed],
             reason: String(verdict?.reason || "").slice(0, 240) || undefined,
             ...(datedStatus.spans?.length ? { quoted_spans: datedStatus.spans } : {}),
-            ...(!verdict && raw ? { invalid_response: raw.replace(/\s+/g, " ").slice(0, 240) } : {}),
+            ...(verifierUnreadableTwice && raw ? { invalid_response: raw.replace(/\s+/g, " ").slice(0, 240) } : {}),
           };
           if (evidenceGate.supported && evidenceGate.complete && allowed.size !== citedDocs.length) {
             evidenceGate.supported = false;
@@ -1423,7 +1569,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
           }
           const unreadableTaxEvidence = allowedDocs.some((doc) =>
             doc.authority?.tax_scope?.matched === true &&
-            (doc.text_source !== "native" || doc.text_reliable !== true)
+            evidenceTextBasis(doc) === null
           );
           if (evidenceGate.supported && unreadableTaxEvidence) {
             evidenceGate.supported = false;
@@ -1491,7 +1637,9 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
                 temporalFailure = "newest cited evidence did not itself support the present-status claim";
                 break;
               }
-              if (directlySupporting.every((doc) => !authoritativeCurrentEvidence(sentence, doc, q)) &&
+              if (directlySupporting.every((doc) => !authoritativeCurrentEvidence(sentence, doc, q, {
+                owner: env.BRAIN_OWNER, now: Date.now(), timeZone: env.BRAIN_TIMEZONE,
+              })) &&
                   !hasMatchingAsOfDate(sentence, directlySupporting)) {
                 temporalFailure = "non-authoritative current-status evidence requires an exact as-of date";
                 break;
@@ -1547,11 +1695,16 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
           // The money contract only vetoes; it never sets supported/complete.
           // Observed proposals use the same label boundary and must survive
           // unchanged. They are never admitted as generated model statements.
+          const draftNamesQuickBooks = /\b(?:quick[\s-]*books|qbo)\b/i.test(answer);
+          const draftCitesQuickBooks = citedDocs.some((doc) => doc.source_kind === "quickbooks" ||
+            String(doc.date_source || "").startsWith("quickbooks:"));
           const draftMoneyPolicy = observedAnswer ? quickBooksMoneyPolicy({
             docs, candidates: results.map(citationCandidateForResult), observedAnswer,
-          }) : moneyPolicy || quickBooksMoneyPolicy({
-            draft: answer, docs, candidates: results.map(citationCandidateForResult),
-          });
+          }) : moneyPolicy || (isMoneyQuestion(q) || draftNamesQuickBooks || draftCitesQuickBooks
+            ? quickBooksMoneyPolicy({
+                draft: answer, docs, candidates: results.map(citationCandidateForResult),
+              })
+            : null);
           const moneyRefusal = draftMoneyPolicy?.refusal(answer);
           if (moneyRefusal && evidenceGate.supported) {
             evidenceGate.supported = false;
@@ -1633,6 +1786,29 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
   if (temporal.gap) gaps.unshift(temporal.gap);
   if (answer === null) approvedDocs = [];
 
+  const scannedApproved = approvedDocs.filter((doc) => doc.scanned === true);
+  if (scannedApproved.length && answer && answer !== unsupportedAnswer) {
+    gaps.unshift(scannedEvidenceGap(approvedDocs));
+    if (evidenceGate?.supported === true) {
+      evidenceGate.scanned_evidence = scannedApproved.map((doc) => doc.n);
+    }
+  }
+
+  const answeredFromEvidence = !answerError && Boolean(answer) &&
+    answer !== unsupportedAnswer && approvedDocs.length > 0;
+  let scannedTaxEvidenceNotRelied = false;
+  if (scannedRequestedTaxEvidence && !answeredFromEvidence &&
+      documentTaxGap !== TAX_EVIDENCE_UNREADABLE_GAP) {
+    // Later gates append their own diagnostics. Replace only the exact tax gap
+    // object established above; positional counts can otherwise consume a
+    // money-veto or recall gap that was added after retrieval.
+    const taxGapIndex = documentTaxGap ? gaps.indexOf(documentTaxGap) : -1;
+    if (taxGapIndex >= 0) gaps.splice(taxGapIndex, 1, TAX_EVIDENCE_UNREADABLE_GAP);
+    else gaps.unshift(TAX_EVIDENCE_UNREADABLE_GAP);
+    documentTaxGap = TAX_EVIDENCE_UNREADABLE_GAP;
+    scannedTaxEvidenceNotRelied = true;
+  }
+
   // Computed coverage warnings describe retrieval, not account facts. Append
   // them only after the exact claims pass the shared gates, and keep `gaps` in
   // the response. No model gets to dismiss or rewrite these warnings.
@@ -1655,11 +1831,17 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
   const categoricalRefusal = !answerError &&
     (!answer || answer === unsupportedAnswer || !approvedDocs.length);
   const refusalSearchDisclosure = categoricalRefusal && degraded
-    ? emptyRetrievalDisclosure(degraded, degradedReason, { candidatesFound: results.length > 0 })
+    ? emptyRetrievalDisclosure(degraded, degradedReason, {
+        candidatesFound: results.length > 0,
+        meaningSearch: meaningSearchStatus,
+      })
     : null;
   if (refusalSearchDisclosure?.incomplete &&
       !gaps.some((gap) => gap?.type === COVERAGE_INCOMPLETE)) {
-    gaps.unshift(...refusalSearchDisclosure.gaps);
+    // The retrieval step already added its keyword-only indexing gap; a
+    // second identical gap reads to a consumer as two separate problems.
+    const presentGapTypes = new Set(gaps.map((gap) => gap?.type));
+    gaps.unshift(...refusalSearchDisclosure.gaps.filter((gap) => !presentGapTypes.has(gap?.type)));
   }
   const sourceCoverageBlocksAbsence = categoricalRefusal && !refusalSearchDisclosure &&
     sourceCoverageGaps.length > 0;
@@ -1669,6 +1851,22 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
   const evidenceConflictBlocksAbsence = operativeConflict || newerAuthoritativeEvidence.length > 0;
   const answerValidationBlocksAbsence = categoricalRefusal &&
     (!modelDeclaredNoEvidence || evidenceConflictBlocksAbsence);
+  const answerWithheld = categoricalRefusal && !answerError && results.length > 0 &&
+    answerValidationBlocksAbsence;
+  const refusalReason = String(evidenceGate?.reason || "");
+  const answerWithheldGate = refusalReason === "draft made claims without document citations"
+    ? "uncited_draft"
+    : evidenceGate?.invalid_response && refusalReason === "The evidence check reply could not be read, twice."
+      ? "unreadable_check_reply"
+      : gaps.some((gap) => ["money_veto", "money_recall"].includes(gap?.type)) ||
+          /\b(?:money|QuickBooks)\b/i.test(refusalReason)
+        ? "money_check"
+        : gaps.some((gap) => gap?.type === "temporal_conflict")
+          ? "date_check"
+          : evidenceConflictBlocksAbsence || gaps.some((gap) =>
+              ["status_conflict", "status_conflict_check_unavailable"].includes(gap?.type))
+            ? "conflicting_records"
+            : "unsupported";
   const confidence = answerError || refusalSearchDisclosure || incompleteCoverageBlocksAbsence || answerValidationBlocksAbsence
     ? undefined
     : answer === unsupportedAnswer || !approvedDocs.length
@@ -1678,31 +1876,50 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
           resultCount: results.length,
           sources: [...new Set(results.map((r) => r.source).filter(Boolean))],
         })
-      : computeAnswerConfidence({ approvedDocs, gaps, degraded, partial: evidenceGate?.partial === true ? (evidenceGate.reason || "one part not covered") : null });
+      : computeAnswerConfidence({
+          approvedDocs,
+          gaps,
+          degraded: projectionPending(degraded, degradedReason) ? null : degraded,
+          partial: evidenceGate?.partial === true ? (evidenceGate.reason || "one part not covered") : null,
+        });
+  const refusalStatus = categoricalRefusal
+    ? answerWithheld && !incompleteCoverageBlocksAbsence
+      ? ANSWER_WITHHELD
+      : refusalSearchDisclosure?.status || (incompleteCoverageBlocksAbsence
+        ? COVERAGE_INCOMPLETE
+        : answerValidationBlocksAbsence
+          ? SEARCH_UNAVAILABLE
+          : undefined)
+    : undefined;
 
   return jsonResponse({
     mode: "think",
     entity_scope: entityScope,
+    ...(timeWindow ? { time_window: timeWindow.public } : {}),
     degraded: degraded || undefined,
     degraded_reason: degradedReason || undefined,
     retrieval_scope: retrievalScope,
     access: accessSummary,
-    status: refusalSearchDisclosure?.status || (incompleteCoverageBlocksAbsence
-      ? COVERAGE_INCOMPLETE
-      : answerValidationBlocksAbsence
-        ? SEARCH_UNAVAILABLE
-        : undefined),
-    notice: refusalSearchDisclosure?.notice || (taxDocumentCoverageBlocksAbsence && unreadableRequestedTaxEvidence
-      ? TAX_EVIDENCE_UNREADABLE_NOTICE
-      : taxDocumentCoverageBlocksAbsence
-        ? TAX_DOCUMENT_INVENTORY_NOTICE
-      : sourceCoverageBlocksAbsence
-        ? coverageIncompleteNotice(coverage.unavailable, results.length > 0)
-        : answerValidationBlocksAbsence
-          ? ANSWER_VALIDATION_UNAVAILABLE_NOTICE
-          : undefined),
+    status: refusalStatus,
+    notice: answerWithheld && !incompleteCoverageBlocksAbsence
+      ? answerWithheldNotice(answerWithheldGate)
+      : refusalSearchDisclosure?.notice || (taxDocumentCoverageBlocksAbsence &&
+          (unreadableRequestedTaxEvidence || scannedTaxEvidenceNotRelied)
+        ? TAX_EVIDENCE_UNREADABLE_NOTICE
+        : taxDocumentCoverageBlocksAbsence
+          ? TAX_DOCUMENT_INVENTORY_NOTICE
+        : sourceCoverageBlocksAbsence
+          ? coverageIncompleteNotice(coverage.unavailable, results.length > 0)
+          : answerValidationBlocksAbsence
+            ? ANSWER_VALIDATION_UNAVAILABLE_NOTICE
+            : undefined),
     answer: refusalSearchDisclosure || incompleteCoverageBlocksAbsence || answerValidationBlocksAbsence ? null : answer,
     answer_error: answerError || undefined,
+    next_action: categoricalRefusal && !answerError
+      ? refusalNextAction({ status: refusalStatus, withheldGate: answerWithheldGate })
+      : undefined,
+    retrieval_receipt: retrievalReceipt || undefined,
+    meaning_search: meaningSearchStatus || undefined,
     model: model || undefined,
     evidence_gate: evidenceGate || undefined,
     gaps,
@@ -3155,13 +3372,14 @@ export default {
       const activeD1 = !paused && backendOf(env) === D1;
       const schemaVersion = activeD1 ? await installedSchemaVersion(env) : null;
       const sourceCounts = activeD1 ? await sourceFreshnessCounts(env) : null;
-      const sourceCountsAvailable = sourceCounts &&
+      const sourceCountsAvailable = Boolean(sourceCounts &&
         [sourceCounts.total, sourceCounts.stale, sourceCounts.unscheduled].every((value) =>
           Number.isSafeInteger(value) && value >= 0) &&
-        sourceCounts.stale + sourceCounts.unscheduled <= sourceCounts.total;
+        sourceCounts.stale + sourceCounts.unscheduled <= sourceCounts.total);
+      const storageAvailable = !activeD1 || (schemaVersion !== null && sourceCountsAvailable);
       return jsonResponse({
-        ok: !paused,
-        status: paused ? "paused-for-upgrade" : "ok",
+        ok: !paused && storageAvailable,
+        status: paused ? "paused-for-upgrade" : storageAvailable ? "ok" : "storage-unavailable",
         ...(paused
           ? {
             reason: "This brain cannot accept documents right now. An update " +
@@ -3169,7 +3387,12 @@ export default {
               "while it is paused is refused rather than stored.",
             accepting_documents: false,
           }
-          : { accepting_documents: true }),
+          : {
+            ...(storageAvailable ? {} : {
+              reason: "This brain's database could not be read. The Worker is running, but storage health is unavailable.",
+            }),
+            accepting_documents: true,
+          }),
         brain: env.BRAIN_NAME || "brain",
         // The code's own version is authoritative. The deploy-time variable is
         // reported only when it disagrees, because a silent disagreement is how

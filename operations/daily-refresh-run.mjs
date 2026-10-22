@@ -4,9 +4,12 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dailyRefreshIdentity, dailyRefreshPrincipal } from "./daily-refresh-plan.mjs";
-import { observeDailyRun } from "./daily-refresh-observation.mjs";
+import { appendDailySourceFailure, observeDailyRun } from "./daily-refresh-observation.mjs";
 import { acquireBrainLifecycleLock } from "./brain-lifecycle-lock.mjs";
+import { DriveRemovalReviewRequired } from "./drive-removal-plan.mjs";
+import { SUPPORT_ERROR_CODES } from "../support-journal.mjs";
 import { providerNoChangeCheckAt, providerWithheldCheckAt } from "../worker/src/lib/source-receipt.js";
+import { redactAll, sanitizeSensitiveLinks, scan } from "../worker/src/lib/secret-scan.js";
 import {
   buildDailyRefreshDefinition,
   readDailyRefreshUpdateTransaction,
@@ -23,6 +26,126 @@ function validTimestamp(value) {
   return typeof value === "string" && value.length <= 64 && Number.isFinite(Date.parse(value))
     ? value
     : null;
+}
+
+function dailyIssueCode(error) {
+  if (error instanceof DriveRemovalReviewRequired) return "SAFETY_REVIEW_REQUIRED";
+  const declaredCode = typeof error?.supportCode === "string" ? error.supportCode : error?.code;
+  const typedCode = typeof declaredCode === "string" ? declaredCode.trim().toUpperCase() : "";
+  if (SUPPORT_ERROR_CODES.includes(typedCode)) return typedCode;
+  const message = String(error?.message || "");
+  if (error?.credentialSource !== "wrangler-session" &&
+      /\b9109\b/u.test(message) && /(?:invalid access token|failed \((?:401|403)\))/iu.test(message)) {
+    return "CLOUDFLARE_TOKEN_NOT_ACTIVE";
+  }
+  if (/PDF.*tim(?:e|ed) out/iu.test(message)) return "PDF_PROCESS_TIMEOUT";
+  if (/PDF.*process/iu.test(message)) return "PDF_PROCESS_FAILED";
+  if (/timed out|ETIMEDOUT|ECONNRESET|EAI_AGAIN|ENOTFOUND/iu.test(`${declaredCode} ${message}`)) return "NETWORK_UNREACHABLE";
+  if (/rate.?limit|\b429\b/iu.test(message)) return "RATE_LIMITED";
+  if (/\b401\b|expired.*(?:auth|token)|reauthori[sz]/iu.test(message)) return "AUTH_EXPIRED";
+  if (/\b403\b|forbidden|permission denied|not permitted/iu.test(message)) return "REMOTE_PERMISSION_DENIED";
+  if (/admin key|credential.*(?:missing|required)|token is not set|sign.?in|required.*auth|Keychain.*(?:missing|empty)/iu.test(message)) {
+    return "AUTH_REQUIRED";
+  }
+  if (/not found|\b404\b/iu.test(message)) return "REMOTE_NOT_FOUND";
+  if (/extract/iu.test(message)) return "EXTRACTION_FAILED";
+  if (/needs --|no such folder|could not read manifest|usage:|must be one of|invalid|does not match/iu.test(message)) {
+    return "CONFIG_INVALID";
+  }
+  return "UNKNOWN";
+}
+
+const FIXED_SENSITIVE_DIAGNOSTIC = "the source refresh failed; sensitive diagnostic text was redacted";
+
+function redactAndScanDiagnostic(value) {
+  // Every transform comes back through both layers. A later canonicalization
+  // must not create a scanner-visible credential after the earlier pass ran.
+  const sanitized = sanitizeSensitiveLinks(String(value));
+  const redacted = redactAll(sanitized);
+  return scan(redacted).shouldFlag ? null : redacted;
+}
+
+function transformDiagnostic(value, transform) {
+  return redactAndScanDiagnostic(transform(value));
+}
+
+function safeDiagnosticText(value, maxLength = 200) {
+  let detail = redactAndScanDiagnostic(String(value || "the source refresh failed"));
+  const failClosed = () => FIXED_SENSITIVE_DIAGNOSTIC.slice(0, maxLength);
+  if (detail === null) return failClosed();
+
+  // Format and bidi controls can split one credential into scanner-clean
+  // fragments. Remove them before any text is eligible for persistence.
+  detail = transformDiagnostic(detail, (text) => text.replace(
+    /[\p{Cf}\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu,
+    "",
+  ));
+  if (detail === null) return failClosed();
+
+  const beforeLineJoin = detail;
+  detail = transformDiagnostic(detail, (text) => text.replace(
+    /(?<=[A-Za-z0-9_+./=\-])[ \t]*[\r\n\u2028\u2029]+[ \t]*(?=[A-Za-z0-9_+./=\-])/gu,
+    "",
+  ));
+  if (detail === null) return failClosed();
+
+  // Also scan the aggressive join view. It is deliberately not persisted
+  // because joining ordinary prose damages the diagnostic; a credential found
+  // only in that view is ambiguous, so the fixed text is safer than attempting
+  // to map its span back across line boundaries.
+  const joinedView = beforeLineJoin.replace(/[\r\n\u2028\u2029]+[ \t]*/gu, "");
+  const joinedSanitized = sanitizeSensitiveLinks(joinedView);
+  const joinedRedacted = redactAll(joinedSanitized);
+  if (joinedRedacted !== joinedSanitized || scan(joinedRedacted).shouldFlag) return failClosed();
+
+  // Diagnostic paths have no schema of their own. Bound unquoted values by a
+  // line or punctuation delimiter, never by whitespace, so a path containing
+  // spaces cannot leave its tail behind in the journal.
+  for (const [pattern, replacement] of [
+    [/file:\/\/\/[^,;\r\n)\]}'"`]*/giu, "[REDACTED:path]"],
+    [/(^|[\s("'`])(?:[A-Za-z]:\\|\\\\)[^,;\r\n)\]}'"`]*/gu, "$1[REDACTED:path]"],
+    [/(^|[\s("'`])\/(?!\/)[^,;\r\n)\]}'"`]*/gu, "$1[REDACTED:path]"],
+  ]) {
+    detail = transformDiagnostic(detail, (text) => text.replace(pattern, replacement));
+    if (detail === null) return failClosed();
+  }
+
+  for (const transform of [
+    (text) => text.replace(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+){2,}\b/gu, "[REDACTED:private_value]"),
+    (text) => text.replace(/[\u0000-\u001f\u007f]+/gu, " "),
+    (text) => text.replace(/\s+/gu, " "),
+    (text) => text.trim(),
+  ]) {
+    detail = transformDiagnostic(detail, transform);
+    if (detail === null) return failClosed();
+  }
+  if (!detail) detail = "the source refresh failed";
+  detail = transformDiagnostic(detail, (text) => text.slice(0, maxLength));
+  return detail === null || !detail ? failClosed() : detail;
+}
+
+function safeRemovalReview(error, source) {
+  const review = error?.removal_review;
+  const count = (key) => Number.isSafeInteger(review?.[key]) && review[key] >= 0 ? review[key] : null;
+  const stored = count("stored_documents_to_remove");
+  const sourceRemovals = count("source_removals");
+  const replacementReviews = count("replacement_family_reviews");
+  const percentage = Number.isFinite(review?.source_cleanup_percentage) &&
+    review.source_cleanup_percentage >= 0 && review.source_cleanup_percentage <= 100
+    ? review.source_cleanup_percentage : null;
+  const fingerprint = /^[a-f0-9]{64}$/u.test(String(review?.fingerprint || "")) ? review.fingerprint : null;
+  if ([stored, sourceRemovals, replacementReviews, percentage].some((value) => value === null) || !fingerprint) {
+    return {
+      reason: "a removal review is waiting. Nothing was removed.",
+      attention: `${source}: a removal review is waiting. Nothing was removed.`,
+    };
+  }
+  return {
+    reason: `a removal review is waiting: ${stored} stored documents would be removed across ` +
+      `${sourceRemovals} source removals and ${replacementReviews} replacement family reviews; ` +
+      `source cleanup is ${percentage.toFixed(1)}% of stored documents; plan fingerprint ${fingerprint}. Nothing was removed.`,
+    attention: `${source}: a removal review is waiting (${stored} stored parts, ${sourceRemovals} source removals). Nothing was removed.`,
+  };
 }
 
 function sourceFreshness(inventory, source) {
@@ -55,6 +178,7 @@ export async function runDailyRefresh({
   platform = process.platform,
   recoveryRequired = () => false,
   scheduleAttention = [],
+  writeFailureLog = () => {},
 } = {}) {
   if (!plan?.ready || !plan?.enabled) throw new Error("the daily refresh plan is not enabled and ready");
   if (typeof runSource !== "function" || typeof readFreshness !== "function" || typeof writeReceipt !== "function") {
@@ -89,6 +213,7 @@ export async function runDailyRefresh({
   }
 
   const sourceResults = [];
+  const attentionEntries = [...scheduleAttention];
   try {
     lock.assertOwned();
     if (await recoveryRequired()) {
@@ -101,7 +226,7 @@ export async function runDailyRefresh({
         completed_at: timestamp(now),
         reason_code: "update_recovery_required",
         reason: "a prior update still requires verified schedule recovery",
-        schedule_attention: Object.freeze([...scheduleAttention]),
+        schedule_attention: Object.freeze([...attentionEntries]),
         sources: [],
       });
       await writeReceipt(receipt);
@@ -287,20 +412,36 @@ export async function runDailyRefresh({
         sourceResults.push(receipt);
         await writeReceipt(receipt);
       } catch (error) {
+        const sourceName = source.source_names?.[0] || source.key;
+        const safeSource = safeDiagnosticText(sourceName, 128);
+        const issueCode = dailyIssueCode(error);
+        const detail = safeDiagnosticText(error?.message || error);
+        const removalReview = issueCode === "SAFETY_REVIEW_REQUIRED"
+          ? safeRemovalReview(error, safeSource) : null;
+        if (removalReview) attentionEntries.push(removalReview.attention);
         const receipt = Object.freeze({
           schema_version: 1,
           kind: "daily_refresh_source",
           identity: plan.identity.id,
-          source: source.source_names?.[0] || source.key,
+          source: sourceName,
           status: "failed",
           started_at: sourceStartedAt,
           completed_at: timestamp(now),
           freshness_advanced: false,
-          reason_code: "source_execution_failed",
-          reason: "the source refresh failed; retry this source or inspect its private local diagnostics",
+          issue_code: issueCode,
+          detail,
+          reason_code: removalReview ? "removal_review_required" : "source_execution_failed",
+          reason: removalReview?.reason || "the source refresh failed; retry this source or inspect its private local diagnostics",
         });
         sourceResults.push(receipt);
         await writeReceipt(receipt);
+        await writeFailureLog({
+          observed_at: timestamp(now),
+          source: safeSource,
+          issue_code: issueCode,
+          detail,
+          ...(removalReview ? { attention: removalReview.attention } : {}),
+        });
       }
     }
     const result = Object.freeze({
@@ -311,7 +452,7 @@ export async function runDailyRefresh({
         : sourceResults.some((entry) => ["partial", "held"].includes(entry.status)) ? "partial" : "complete",
       started_at: startedAt,
       completed_at: timestamp(now),
-      schedule_attention: Object.freeze([...scheduleAttention]),
+      schedule_attention: Object.freeze([...attentionEntries]),
       sources: Object.freeze(sourceResults),
     });
     await writeReceipt(result);
@@ -429,6 +570,7 @@ async function executeDailyRefreshCli(path, m, options, observationStarted) {
       home: options.home,
       platform: options.platform,
       scheduleAttention,
+      writeFailureLog: options.writeFailureLog ?? ((record) => appendDailySourceFailure(plan.identity, record, options)),
       recoveryRequired: () => Boolean(readUpdateTransaction(plan.identity, {
         home: options.home,
         manifestPath: path,

@@ -20,6 +20,25 @@ function patchedMetadata(value) {
     .map(([key, item]) => [key, patchedMetadata(item)]));
 }
 
+function curatedNeutralMetadata(envelope) {
+  const metadata = envelope?.metadata;
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return metadata;
+  const root = `curated:${envelope.source_id}`;
+  const lineage = metadata.evidence_lineage;
+  const receipt = metadata.provenance_receipt;
+  const stamped = envelope.text_source === "native" && envelope.text_reliable === true &&
+    lineage?.version === 1 && lineage?.kind === "source_record" &&
+    JSON.stringify(lineage.root_ids) === JSON.stringify([root]) &&
+    receipt?.version === 1 && receipt?.status === "complete" &&
+    receipt?.reason === "lineage_and_text_recorded" &&
+    JSON.stringify(receipt.root_ids) === JSON.stringify([root]);
+  if (!stamped) return metadata;
+  const neutral = { ...metadata };
+  delete neutral.evidence_lineage;
+  delete neutral.provenance_receipt;
+  return neutral;
+}
+
 async function readEnvelope(request) {
   if (!request.body || Number(request.headers.get("content-length")) > MAX_BYTES) throw new Error();
   const reader = request.body.getReader();
@@ -48,7 +67,9 @@ export async function handleCuratedVerify(env, request) {
   try { submitted = await readEnvelope(request); }
   catch { return respond({ error: "invalid curated verification body" }, 400); }
   if (!submitted || typeof submitted !== "object" || Array.isArray(submitted) ||
-      Object.keys(submitted).some(key => !["source_type", "source_id", "title", "content", "metadata"].includes(key)) ||
+      Object.keys(submitted).some(key => ![
+        "source_type", "source_id", "title", "content", "metadata", "text_source", "text_reliable",
+      ].includes(key)) ||
       submitted.source_type !== "curated" || typeof submitted.title !== "string") {
     return respond({ error: "invalid curated verification envelope" }, 400);
   }
@@ -66,7 +87,11 @@ export async function handleCuratedVerify(env, request) {
     const confirmed = row?.doc_uid === uid && row?.source === "curated" &&
       row?.source_id === envelope.source_id && row?.content_hash === hash &&
       row?.title === envelope.title && canonical(metadata) === canonical(patchedMetadata(envelope.metadata));
-    const neutral = { title: safe.title, content: safe.content, metadata: safe.metadata };
+    const neutral = {
+      title: safe.title,
+      content: safe.content,
+      metadata: curatedNeutralMetadata(safe),
+    };
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(
       `curated-sync-envelope-v1\0${canonical(neutral)}`));
     const envelopeHash = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");

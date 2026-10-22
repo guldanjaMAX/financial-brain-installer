@@ -134,13 +134,15 @@ test('real think route records stages after a supported answer and verifier deci
   assert.equal(body.evidence_gate.supported, true);
   assert.equal(body.citations.length, 1);
   assert.ok(body.timing, 'admin response carries bounded timing');
-  assert.equal(body.timing.total_ms, 13500);
+  // Keyword retrieval starts while the embedding is pending, removing the
+  // fixture's formerly serialized 500 ms without changing either stage span.
+  assert.equal(body.timing.total_ms, 13000);
   const { stages, models } = body.timing;
   assert.equal(stages.embedding.ms, 800);
   assert.equal(stages.keyword.ms, 1200);
   assert.equal(stages.vector.ms, 700);
   assert.equal(stages.vector_query.ms, 600);
-  assert.equal(stages.retrieval.ms, 2000);
+  assert.equal(stages.retrieval.ms, 1500);
   assert.equal(stages.coverage.ms, 500);
   assert.equal(stages.answer_llm.ms, 7000);
   assert.equal(stages.verifier_llm.ms, 4000);
@@ -170,7 +172,7 @@ test('unified records the same concurrent retrieval, without answer-model work',
   assert.equal(f.counts.keyword, 1);
   assert.equal(f.counts.vector, 1);
   assert.equal(f.counts.answer, 0);
-  assert.equal(body.timing.total_ms, 2500);
+  assert.equal(body.timing.total_ms, 2000);
   assert.equal(body.timing.stages.answer_llm.calls, 0);
   assert.equal(body.timing.route, 'unified');
   assertCoherent(body.timing);
@@ -252,7 +254,7 @@ test('actual remote MCP ask uses one backend and keeps diagnostics out of render
     assert.equal(f.counts.verifier, 1);
     const timing = body.result._meta.timing;
     assert.equal(timing.route, 'mcp.ask');
-    assert.equal(timing.total_ms, 13500);
+    assert.equal(timing.total_ms, 13000);
     assert.equal(timing.stages.mcp_wrapping.calls, 2);
     assert.equal(timing.stages.mcp_wrapping.ms, 0);
     assert.equal(timing.outcome, approve ? 'ok' : 'refused');
@@ -280,7 +282,7 @@ test('remote MCP search and answer errors retain the actual backend spans', asyn
   assert.equal(search.counts.keyword, 1);
   assert.equal(search.counts.answer, 0);
   assert.equal(found.body.result._meta.timing.route, 'mcp.search');
-  assert.equal(found.body.result._meta.timing.total_ms, 2500);
+  assert.equal(found.body.result._meta.timing.total_ms, 2000);
   assert.equal(found.body.result._meta.timing.stages.mcp_wrapping.calls, 2);
   assert.equal(JSON.parse(found.body.result.content[0].text).results.length, 1);
   const failed = fixture({ verifierFails: true });

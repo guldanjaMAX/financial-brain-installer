@@ -28,8 +28,8 @@ const ACCOUNT_HEADING = "## My accounts (fill in once, after the owner confirms)
 const SAVE_HEADING = "## Financial Brain: at the end of a working session";
 const hashes = {
   "answer-contract-v1.md": "32f9b8e6c23347651b3246fa42d2f93aef9d4f291651e5b5b8425d84f46f39cf",
-  "money-rules-v3.md": "25d23c9214c74a05acdbdf6d44f35b62468a647a43d91f854d80d1ed3717824a",
-  "money-rules-v3-windows.md": "32d72c590be98bf8a00ac48085d6bdb6610b3567f042d63f3b40255799317394",
+  "money-rules-v3.md": "f0137fd965471782c7cb844bb0dd9a05d76a5df9227f700c935691650f0d9f68",
+  "money-rules-v3-windows.md": "9e4b56bb572310f6efe8273a55e0ab58b30a5e2da974a51eafcd2d61e303aac2",
 };
 // Repeated writer/race tests exercise real filesystem checks. Native reparse
 // detection has separate refusal/control and one bounded Windows smoke test;
@@ -411,7 +411,7 @@ function updateClosingBoundary({ platform = "win32", platformName, folder = "ord
   const bindings = {
     updateAttention: [guidance, guidance],
     options: { platform, platformName, ...(raw ? { reportUpdateFinish: message => reports.push(message) } : {}) },
-    pin: { target }, PRODUCT_VERSION: "0.4.17", mailTransition: null,
+    pin: { target }, PRODUCT_VERSION: "0.4.18", mailTransition: null,
     ownerSessionFolderLabel: () => "another folder",
     ownerBrainFolderWarning: () => locator,
     dirname: win32.dirname, quotePowerShellArgument, quotePosixArgument,
@@ -813,7 +813,7 @@ test("R2/R5 installed money rules use the Brain lead and preserve the parser men
   assert.equal(resolving("money-rules-v3.md"), resolving("money-rules-v3-windows.md"), "shared account guidance is byte-aligned");
   for (const platformName of ["darwin", "win32"]) {
     const rules = workspace.renderOwnerRulesSection({ platformName });
-    assert.match(rules, /Financial Brain 0\.4\.17/);
+    assert.match(rules, /Financial Brain 0\.4\.18/);
     assert.match(rules, /Never subtract.*already left out/);
     assert.match(rules, /Note:/);
     assert.match(rules, /What was my profit <period>\?/);
@@ -1400,7 +1400,7 @@ for (const arm of ["duplicate", "before-accounts", "misplaced-only", "fenced", "
 });
 
 for (const arm of ["none", "install", "after-return"]) test(`R4 original descriptor remains reachable: ${arm}`, {
-  skip: process.platform === "win32" ? "the 0.4.17 update path does not refresh an existing guide on Windows; see CHANGELOG known limitations" : false,
+  skip: process.platform === "win32" ? "the 0.4.18 update path does not refresh an existing guide on Windows; see CHANGELOG known limitations" : false,
 }, t => {
   const { root, manifest } = fixture(t), target = join(root, "AGENTS.md");
   const before = `${CODEX}\n# Older guide\n`, note = "\nRetain this concurrent owner annotation.\n";

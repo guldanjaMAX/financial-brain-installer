@@ -112,10 +112,11 @@ test("the shipped enrollment screen explains the passkey window before the owner
   assert.ok(!APP_JS.includes("Works on every device you own"));
 });
 
-test("the shipped owner app renders a capped vector backlog as a lower bound", () => {
-  // The Worker marks a sampled backlog with pending_is_capped; the served bundle
-  // (not just frontend/src) must read that flag, or a capped count shows as exact.
-  assert.ok(APP_JS.includes("pending_is_capped"), "shipped app bundle ignores pending_is_capped");
+test("the shipped owner app uses two meaning-search counts without the old progress percentage", () => {
+  assert.ok(APP_JS.includes("Meaning search covers "));
+  assert.ok(APP_JS.includes(" chunks; keyword search covers all"));
+  assert.ok(APP_JS.includes("Meaning search is still counting chunks; keyword search covers all"));
+  assert.equal(APP_JS.includes("percent_visible"), false);
 });
 
 test("the shell is never cached, so an upgrade actually reaches the client", async () => {

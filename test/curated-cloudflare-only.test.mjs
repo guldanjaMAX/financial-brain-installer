@@ -681,7 +681,9 @@ test("F4 authenticated verification reads exact durable content title and metada
   const { DatabaseSync } = await import("node:sqlite");
   const { default: worker } = await import("../worker/src/index.js");
   const { expectedD1ContentHash } = await import("../worker/src/lib/store.js");
-  const { normalizeIngestEnvelopeProvenance } = await import("../worker/src/lib/provenance-receipt.js");
+  const {
+    normalizeIngestEnvelopeProvenance, withFirstPartySourceProvenance,
+  } = await import("../worker/src/lib/provenance-receipt.js");
   const db = new DatabaseSync(":memory:");
   const key = randomBytes(32).toString("hex");
   let selects = 0;
@@ -699,7 +701,12 @@ test("F4 authenticated verification reads exact durable content title and metada
   const envelope = { source_type: "curated", source_id: "brain:custom:fixture-alpha", title: "Current fixture",
     content: "Current fixture body.", metadata: { role: "authoritative", nested: { marker: "current" } } };
   const normalized = normalizeIngestEnvelopeProvenance(envelope);
+  const stamped = withFirstPartySourceProvenance(envelope, {
+    textSource: "native",
+    textReliable: true,
+  });
   const hash = await expectedD1ContentHash(env, normalized);
+  const stampedHash = await expectedD1ContentHash(env, stamped);
   const uid = `curated:${envelope.source_id}`;
   const expectedEnvelopeHash = createHash("sha256").update(`curated-sync-envelope-v1\0${canonicalForTest({ title: envelope.title, content: envelope.content, metadata: envelope.metadata })}`).digest("hex");
   db.exec("CREATE TABLE documents(doc_uid TEXT, source TEXT, source_id TEXT, title TEXT, content_hash TEXT, meta TEXT, deleted_at INTEGER)");
@@ -707,6 +714,11 @@ test("F4 authenticated verification reads exact durable content title and metada
     db.exec("DELETE FROM documents");
     db.prepare("INSERT INTO documents VALUES(?,?,?,?,?,?,NULL)").run(uid, "curated", envelope.source_id,
       envelope.title, hash, JSON.stringify(normalized.metadata));
+  };
+  const restoreStamped = () => {
+    db.exec("DELETE FROM documents");
+    db.prepare("INSERT INTO documents VALUES(?,?,?,?,?,?,NULL)").run(uid, "curated", envelope.source_id,
+      envelope.title, stampedHash, JSON.stringify(stamped.metadata));
   };
   const request = (body = envelope, extras = {}) => worker.fetch(new Request("https://fixture.invalid/api/admin/brain/curated-verify", {
     method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Key": key },
@@ -728,6 +740,14 @@ test("F4 authenticated verification reads exact durable content title and metada
       assert.deepEqual(await refused.json(), { doc_uid: uid, confirmed: false, envelope_sha256: null });
     }
     assert.equal(primarySessions, 10);
+    restoreStamped();
+    const stampedControl = await request(stamped);
+    assert.equal(stampedControl.status, 200, "the verification route accepts the stamped curated envelope");
+    assert.deepEqual(await stampedControl.json(), {
+      doc_uid: uid,
+      confirmed: true,
+      envelope_sha256: expectedEnvelopeHash,
+    }, "provenance stamping does not change the curated envelope digest definition");
     restore();
     const beforeInvalid = selects;
     assert.equal((await request({ ...envelope, source_type: "drive" })).status, 400);

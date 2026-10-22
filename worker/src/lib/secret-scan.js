@@ -205,7 +205,7 @@ const STRUCTURAL = [
   },
   {
     label: "url_query_secret",
-    pattern: /[?&](?:token|key|api[_-]?key|secret|access[_-]?token|password)=([A-Za-z0-9._\-]{16,})/gi,
+    pattern: /[?&](?:token|key|api[_-]?key|secret|access[_-]?token|password|passwd|pwd)=([A-Za-z0-9._\-]{16,})/gi,
     severity: CONFIRMED,
     group: 1,
     allowlist: true,

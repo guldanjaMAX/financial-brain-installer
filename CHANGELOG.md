@@ -4,11 +4,106 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
-## Unreleased
+## 0.4.18 (2026-10-22)
 
+Candidate only. This version has not been released. The changes below still
+need the full host gate, CI and separately reviewed field acceptance for the
+exact sealed package. This version bump verifies no incident.
+
+- **A scan that OCR read cleanly can now answer a question, and the answer
+  always says it came from a scanned copy.** It carries the note "Part of this
+  answer comes from a scanned document read by OCR. Check the original for
+  exact figures." and marks the source "(scanned)". A scan counts only when
+  the OCR record stored with it shows every page was read, with none
+  unreadable, and the passage the answer relies on has no spot OCR marked as
+  illegible. Any other scan can still be found and cited, exactly as before,
+  but it cannot be the proof behind an answer. When the tax filing you asked
+  about is found as a scan and no answer comes from it, you still see "The
+  requested tax filing was found, but its text could not be read reliably",
+  never a plain "the documents do not answer the question".
+- **Older native-text records regain their intended evidence status without a
+  reload.** Recognized older email, Drive, upload and curated records can use
+  their native text at read time while remaining visibly unassessed. Older
+  non-note Drive and upload documents can regain original-record lineage;
+  scans, Markdown notes and text notes are never upgraded by this rule.
+- **Signed court orders rank with other original records while drafts do not.**
+  Executed orders, rulings, minute entries and parenting plans can ground an
+  answer. Draft, unsigned, proposed, redline, template and review copies stay
+  below the signed record. Correspondence and plain-text notes are not
+  promoted merely because they mention an order.
 - **Windows updates no longer stop at the restore-bookmark step on a second
   update.** Later updates reuse the private recovery folder safely. Check that
   the update saves its restore bookmark and continues to verification.
+- **Fewer questions are refused, and every refusal says what to do next.** Money
+  checks no longer block unrelated document questions. Missing citations and
+  an unreadable evidence-check reply each get one bounded retry. When evidence
+  still cannot support an answer, the reply says why it was withheld and gives
+  a specific next step. Check that a refusal contains both `Why:` and `Next:`
+  instead of a vague error or an invented answer.
+- **Questions with a time window use that window.** Document questions such as
+  "this week" or "in 2024" use the requested dates instead of returning a
+  generally relevant record from another period. If the matching window is
+  empty or records do not have reliable dates, the answer says so. Check the
+  reported window and cited dates.
+- **Tax-return questions about "my taxes" use the owner's identity.** A request
+  for the owner's return can resolve the owner wording, year and supported tax
+  form without confusing another filer, a preparation bill or a business form
+  for the owner's own return. Ambiguous identity, year or form still produces
+  a specific refusal. Check the filer, year and form in the cited evidence.
+- **Health is honest when the database cannot be read.** The health route stays
+  reachable, but an active Brain now reports `storage-unavailable` and not
+  healthy if its schema or source state cannot be read. Setup stops instead of
+  replacing that uncertainty with a cutover. Check the database-specific reason
+  before retrying or changing anything.
+- **Keyword answers work while the meaning index is still building.** Records
+  already read into the database can support a cited keyword answer while
+  semantic indexing catches up. The answer includes a visible meaning-search
+  line with the indexed and total counts; it does not show a made-up percentage.
+  A real embedding or index failure remains a failure.
+- **Calendar events survive Zoom passcode cleanup.** An event that contains a
+  Zoom passcode is kept, with the passcode removed before the event text is
+  indexed. The meeting details remain searchable without retaining the
+  credential. Check that the event is present and the passcode is absent.
+- **Long documents can be fetched one page at a time.** Connector fetch accepts
+  an offset, returns exact page metadata and tells the caller when another page
+  is available. This lets an assistant reach the final section of a document
+  without truncating it at the first response.
+
+### Technical changes
+
+- Evidence authority derives scanned and native text basis from reviewed
+  extraction receipts instead of trusting a stored label. Categorical evidence
+  refusals use `answer_withheld` with closed reason and next-action text.
+- Retrieval infers supported owner-zone time windows only when the caller did
+  not provide bounds, preserves the ledger path, and filters on reliable
+  document dates. Owner tax scope keeps exact filer and form guards.
+- Keyword search starts before embedding completes. Pending projections can
+  return cited keyword evidence with `keyword_only_indexing` and an exact
+  meaning-search count line; genuine vector failures retain their prior gap.
+- Active D1 health requires readable schema and source-state results. Long MCP
+  fetches page at the existing character limit without splitting a Unicode
+  surrogate pair.
+- Calendar sanitization removes the Zoom passcode field while retaining the
+  event. URL query scanning also recognizes dotted `pwd` and `passwd` keys.
+
+### Known issues
+
+- Physical Windows x64 and Mac owner acceptance is still required for the
+  exact sealed package. Synthetic tests and CI do not establish either
+  platform's owner acceptance.
+- Partner apps that pin the connector need a helper update before adopting
+  0.4.18. The shared Brain remains compatible after that reviewed helper bump.
+- Removal of rows the Worker cannot verify still needs the technician.
+
+### This release does NOT cover
+
+- **UPDATE-012:** Windows x64 is the only supported Windows runtime in this
+  release. Windows ARM64 ships unproven.
+- **UPDATE-044:** Bank breadth ships unproven. Bank invitations stay closed.
+- Money-answer correctness work is planned for 0.4.19 and is not part of
+  0.4.18.
+- Email attachments, Drive images and Drive simple sync are planned for 0.4.19
+  and are not part of 0.4.18.
 
 ## 0.4.17 (2026-10-16)
 

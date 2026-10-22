@@ -75,7 +75,6 @@ export function derivePhase(s: SystemStatus | null): BrainPhase {
 
 /** One sentence per phase, in the owner's terms, said identically everywhere. */
 export function phraseFor(phase: BrainPhase, s: SystemStatus | null): string {
-  const pct = s?.vectors?.percent_visible;
   switch (phase) {
     case "unreachable":
       return "The brain's document and source status could not be reached. Financial sections below still say whether their own reads succeeded.";
@@ -96,9 +95,7 @@ export function phraseFor(phase: BrainPhase, s: SystemStatus | null): string {
     case "preparing":
       return "Your brain is preparing starter context. Useful questions can begin before every source finishes loading its history.";
     case "indexing":
-      return pct === null || pct === undefined
-        ? "Your brain is still working through what it has been given. Answers will be incomplete until it finishes."
-        : `Your brain can search ${pct}% of what it holds. It is still working through the rest, so an answer may be missing things it already has.`;
+      return "Your brain is still adding meaning search. Keyword search covers everything it has read, but differently worded records may not appear until indexing finishes.";
     case "problems":
       return "Your brain is working, and there is something your installer should look at.";
     case "backfilling":

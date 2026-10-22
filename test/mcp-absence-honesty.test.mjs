@@ -21,14 +21,15 @@ import { handleMcp } from "../worker/src/lib/mcp-endpoint.js";
 import { createProductFixture, seedOwnedEntity } from "../worker/test/product-contract-fixture.mjs";
 import { withLedgerAnswer } from "../worker/src/lib/ledger-answer.js";
 import { createServer } from "node:http";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const MCP = fileURLToPath(new URL("../components/brain-mcp.mjs", import.meta.url));
 
 const ABSENCE = 'No match in this search. Say "I didn\'t find a matching record in this search", name what you searched, and name the next search you would run (another source, a wider date window, sort "newest", or a distinctive name or number). Do not turn one search into a claim that no such record exists. Do not substitute inference.';
 const NO_HITS = 'No hits in this search. This is not proof that no such record exists. Say "I didn\'t find a matching record in this search" and name the next search you would run.';
 const SCOPED_GAP = "No match in this search. This is not proof that no such record exists.";
-const REFUSAL = "I didn't find a matching record in this search. Next, search with alternate subject terms or a distinctive name or number. Remote search is relevance-ranked and cannot filter or sort by date.";
+const REFUSAL = "I didn't find a matching record in this search.";
+const NEXT_NO_MATCH = "Next: ask again with a name, date or exact phrase the record would contain.";
 const PRESERVE = "Preserve the ledger answer's exact amounts, account masks, dates, and coverage bounds.";
 const LATEST = 'Before any status, "latest", or absence claim, run one brain_search for the subject with sort "newest", read newest_record, and say "as of <record date>" for the record you relied on.';
 const MONEY = "For a money question the bank ledger answers (a balance, a payment received, money in and out, largest expenses, deposits, spend by merchant or category, transfers between the owner's own accounts, recurring charges, profit, net income, withdrawals, loan proceeds), use brain_think: it reads the ledger directly. Cash flow is unsupported: relay cash_flow_unsupported with no figure or model fallback. The profit and net-income view is money in minus money out, not accounting profit or cash flow. Keep its exact amounts, account masks, dates and coverage bounds.";
@@ -69,6 +70,47 @@ async function localMessages(runtime, messages) {
   const replies = stdout.split("\n").filter(Boolean).map(JSON.parse);
   assert.equal(replies.length, messages.length, "every MCP request must receive a reply");
   return replies;
+}
+
+async function localThinkBodies(bodies) {
+  const runtime = fixtureRuntime("https://fixture.invalid");
+  const hook = join(runtime.env.TMPDIR, "fetch-hook.mjs");
+  writeFileSync(hook, `
+const bodies = ${JSON.stringify(bodies)};
+globalThis.fetch = async (input, init = {}) => {
+  const url = new URL(String(input));
+  if (url.origin !== "https://fixture.invalid" || url.pathname !== "/api/rag/think") {
+    throw new Error("unexpected synthetic fetch target");
+  }
+  const request = JSON.parse(String(init.body || "{}"));
+  if (!Object.hasOwn(bodies, request.q)) throw new Error("unexpected synthetic question");
+  return new Response(JSON.stringify(bodies[request.q]), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+};
+`);
+  runtime.env.NODE_OPTIONS = `--import=${pathToFileURL(hook).href}`;
+  try {
+    const names = Object.keys(bodies);
+    const replies = await localMessages(runtime, [
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: {
+        protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fixture", version: "1" },
+      } },
+      ...names.map((q, index) => ({
+        jsonrpc: "2.0", id: index + 2, method: "tools/call",
+        params: { name: "brain_think", arguments: { q } },
+      })),
+    ]);
+    return {
+      instructions: replies[0].result.instructions,
+      results: Object.fromEntries(names.map((q, index) => {
+        const reply = replies[index + 1];
+        assert.equal(reply.result?.isError, undefined, reply.result?.content?.[0]?.text);
+        return [q, JSON.parse(reply.result.content[0].text)];
+      })),
+    };
+  } finally { runtime.close(); }
 }
 
 /** Serve one canned body; every assertion must first reach the requested route. */
@@ -147,6 +189,54 @@ function assertMapOpeningSequence(text, label) {
     /Activation requires another separate owner decision[\s\S]{0,260}?fresh passkey/i,
     cursor, label);
 }
+
+test("local MCP rebuilds meaning_search from closed counts and omits invalid values", async () => {
+  const arbitrary = ["synthetic", "remote", "private", "text"].join("-");
+  const base = {
+    status: "coverage_incomplete", answer: null, citations: [], results: [], gaps: [],
+  };
+  const { instructions, results } = await localThinkBodies({
+    "version-skew": {
+      ...base,
+      next_action: "unreviewed remote instruction",
+      meaning_search: { visible: 1, total: 2, line: arbitrary, private_note: arbitrary },
+    },
+    control: {
+      ...base,
+      meaning_search: { visible: 1234, total: 5678 },
+    },
+    invalid: {
+      ...base,
+      meaning_search: { visible: -1, total: 2, line: arbitrary },
+    },
+  });
+
+  assert.equal(results["version-skew"].search_status, "coverage_incomplete",
+    "the version-skew response reached the provisional-result decision");
+  assert.equal(results["version-skew"].next_action, undefined,
+    "the adjacent unreviewed action remains rejected");
+  assert.deepEqual(results["version-skew"].meaning_search, {
+    visible: 1,
+    total: 2,
+    line: "Meaning search covers 1 of 2 chunks; keyword search covers all",
+  }, "remote line text and unknown siblings cannot cross the closed schema");
+
+  assert.equal(results.control.search_status, "coverage_incomplete",
+    "the ordinary response reached the same decision as a green control");
+  assert.deepEqual(results.control.meaning_search, {
+    visible: 1234,
+    total: 5678,
+    line: "Meaning search covers 1,234 of 5,678 chunks; keyword search covers all",
+  });
+
+  assert.equal(results.invalid.search_status, "coverage_incomplete",
+    "the invalid response reached the omission decision");
+  assert.equal(Object.hasOwn(results.invalid, "meaning_search"), false,
+    "one invalid count omits the complete meaning_search object");
+  assert.doesNotMatch(instructions,
+    /When meaning_search\.line is present, relay that line once, verbatim\./u);
+  assert.match(instructions, /meaning_search\.line is present, it was rendered locally/u);
+});
 
 // Optimize ordering must live in the MCP initialize response, because that is
 // what the owner-facing assistant actually reads. Keep its anchors aligned
@@ -260,6 +350,26 @@ await test("found-but-uncited keeps three rows", async () => {
   assert.equal(out.results[0].text_source, "ocr_partial", "extraction provenance must survive the MCP boundary");
   assert.equal(out.results[0].text_reliable, false, "extraction trust must survive the MCP boundary");
   console.log("PASS documents found but none cited is not reported as absence");
+});
+
+await test("answer_withheld keeps the reviewed notice, reason, and candidate rows", async () => {
+  const out = await thinkReturns({
+    status: "answer_withheld",
+    notice: "The answer was withheld because it did not pass the money evidence check.",
+    answer: null,
+    confidence: { percent: 50, band: "low", basis: ["must not cross"] },
+    evidence_gate: { supported: false, reason: "synthetic evidence detail" },
+    citations: [],
+    results: [{ title: "Synthetic payment record", snippet: "Synthetic amount" }],
+    gaps: [],
+  });
+  assert.equal(out.search_status, "answer_withheld");
+  assert.equal(out.answer, null);
+  assert.equal(out.confidence, undefined, "withheld answers have no percentage");
+  assert.equal(out.results?.length, 1, "the held-back candidate remains available");
+  assert.match(out.note || "", /money evidence check/i);
+  assert.match(out.note || "", /FOUND 1 document/);
+  assert.equal(out.evidence_gate?.reason, "synthetic evidence detail");
 });
 
 // 3. A cited answer stays clean: no scolding note bolted onto a good result.
@@ -376,6 +486,7 @@ await test("local tool descriptions route money and require newest-record eviden
   assert.ok(search.includes(NEWEST_DESCRIPTION), "search explains the whole matched window");
   assert.ok(instructions.includes(LATEST), "initialize requires a newest search and an as-of date");
   assert.ok(instructions.includes(MONEY), "initialize routes ledger questions to think");
+  assert.match(instructions, /answer_withheld/);
   assert.match(instructions, /To answer, search, read, then write\./);
   assert.doesNotMatch(instructions, /Call brain_think first/);
 });
@@ -551,7 +662,7 @@ await test("remote incomplete coverage retains newest metadata and unavailable s
 await test("remote refused ask scopes its line and confidence beside an unchanged cited control", async () => {
   const confidence = { percent: 80, band: "high", basis: ["fixture evidence"] };
   const refused = await remoteCall({ answer: "The documents do not answer the question.", confidence, results: [], citations: [], gaps: [] }, "ask");
-  assert.equal(refused, `${REFUSAL}\n\nConfidence in this search result: 80% (high). fixture evidence.`);
+  assert.equal(refused, `${REFUSAL}\n${NEXT_NO_MATCH}\n\nConfidence in this search result: 80% (high). fixture evidence.`);
   assert.doesNotMatch(refused, /Confidence nothing is recorded|The documents do not answer/);
   const cited = await remoteCall({ answer: "Fixture answer [1].", confidence,
     citations: [{ n: 1, title: "Fixture record", source: "fixture", lineage: { status: "known" } }], results: [], gaps: [] }, "ask");
@@ -559,6 +670,17 @@ await test("remote refused ask scopes its line and confidence beside an unchange
   const unavailable = await remoteCall({ status: "search_unavailable", answer: "The documents do not answer the question.", confidence, results: [], citations: [], gaps: [] }, "ask");
   assert.match(unavailable, /could not be completed/i);
   assert.doesNotMatch(unavailable, /\d+%|Confidence nothing is recorded|I didn't find a matching record/);
+});
+
+await test("remote refusal renders Why before the exact reviewed Next action", async () => {
+  const next = "Next: ask about one record at a time, naming its title or date.";
+  const out = await remoteCall({
+    status: "answer_withheld", answer: null, results: [reliable], citations: [], gaps: [],
+    evidence_gate: { supported: false, reason: "synthetic support was insufficient" },
+    next_action: next,
+  }, "ask");
+  assert.match(out, /Why: synthetic support was insufficient\nNext: ask about one record at a time/);
+  assert.equal(out.split(next).length - 1, 1, "the reviewed action is rendered once");
 });
 
 await test("remote descriptions and initialize route money and newest-record reading", async () => {

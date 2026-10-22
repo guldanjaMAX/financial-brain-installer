@@ -30,10 +30,31 @@ export const SEARCH_UNAVAILABLE = "search_unavailable";
 /** Wire value when retrieval ran but declared source coverage is not complete. */
 export const COVERAGE_INCOMPLETE = "coverage_incomplete";
 
+/** Wire value when retrieval found records but an answer gate withheld the draft. */
+export const ANSWER_WITHHELD = "answer_withheld";
+
 /** Wire value for `status` when the search completed and matched nothing. */
 export const NO_RESULTS = "no_results";
 
 export const PROJECTION_CATCHING_UP = "projection-catching-up";
+const PROJECTION_PENDING_REASONS = new Set([PROJECTION_CATCHING_UP, "projection-incomplete"]);
+
+export function projectionPending(degraded, reason) {
+  return degraded === "vector" && PROJECTION_PENDING_REASONS.has(reason);
+}
+
+const nonNegativeCount = (value) => Number.isSafeInteger(value) && value >= 0 ? value : null;
+
+/** Owner-facing progress uses the two measured counts, never a percentage. */
+export function meaningSearchLine({ visible, total } = {}) {
+  const visibleCount = nonNegativeCount(visible);
+  const totalCount = nonNegativeCount(total);
+  if (visibleCount !== null && totalCount !== null && visibleCount === totalCount) return null;
+  if (visibleCount === null || totalCount === null) {
+    return "Meaning search is still counting chunks; keyword search covers all";
+  }
+  return `Meaning search covers ${visibleCount.toLocaleString("en-US")} of ${totalCount.toLocaleString("en-US")} chunks; keyword search covers all`;
+}
 
 /**
  * The genuine no-match gap, verbatim.
@@ -84,6 +105,10 @@ const CAUSES = {
 // Only known token/reason pairs select copy, so an arbitrary provider message
 // can never enter an owner-facing response through this path.
 const CAUSES_BY_REASON = {
+  "vector:projection-count-mismatch": {
+    cause: "the provider and database vector counts differ, so meaning-based search cannot be certified complete",
+    remedy: "Run `brain health` to inspect the count mismatch before attempting recovery.",
+  },
   "vector:vector-query-failed": {
     cause: "meaning-based search failed, so only keyword search completed",
     remedy: "Try again in a moment. Run `brain health` if it keeps happening.",
@@ -99,6 +124,39 @@ const CAUSES_BY_REASON = {
 };
 
 const UNKNOWN_REMEDY = "Run `brain health` to see which subsystem is down.";
+
+const ANSWER_WITHHELD_NOTICES = Object.freeze({
+  uncited_draft: "The answer was withheld because the draft did not cite its supporting records.",
+  money_check: "The answer was withheld because it did not pass the money evidence check.",
+  date_check: "The answer was withheld because it did not pass the date evidence check.",
+  conflicting_records: "The answer was withheld because retrieved records conflict and require review.",
+  unreadable_check_reply: "The answer was withheld because the evidence check reply could not be read twice.",
+  unsupported: "The answer was withheld because the evidence check did not support the draft.",
+});
+
+export function answerWithheldNotice(gate = "unsupported") {
+  return ANSWER_WITHHELD_NOTICES[gate] || ANSWER_WITHHELD_NOTICES.unsupported;
+}
+
+/** Closed, reviewed actions for every refusal state a /think response emits. */
+export const REFUSAL_NEXT_ACTIONS = Object.freeze({
+  no_results: "Next: ask again with a name, date or exact phrase the record would contain.",
+  coverage_incomplete: 'Next: say "check my Brain" to see which source is still loading, then ask again.',
+  search_unavailable: 'Next: ask again in a minute; if it fails twice, say "check my Brain".',
+  "answer_withheld:uncited_draft": "Next: ask about one record at a time, naming its title or date.",
+  "answer_withheld:unsupported": "Next: ask about one record at a time, naming its title or date.",
+  "answer_withheld:money_check": "Next: ask for one amount with its payer, payee and date.",
+  "answer_withheld:date_check": "Next: ask again with the exact date range you mean.",
+  "answer_withheld:conflicting_records": "Next: ask which record is newest on this; the records found disagree.",
+  "answer_withheld:unreadable_check_reply": "Next: ask the same question again in a minute.",
+});
+
+export function refusalNextAction({ status, withheldGate } = {}) {
+  const key = status === ANSWER_WITHHELD
+    ? `${ANSWER_WITHHELD}:${withheldGate || "unsupported"}`
+    : status || NO_RESULTS;
+  return REFUSAL_NEXT_ACTIONS[key] || null;
+}
 
 /** Normalise whatever the store reported into a short, safe token. */
 function degradedToken(degraded) {
@@ -165,18 +223,22 @@ export function coverageIncompleteNotice(unavailable = false, candidatesFound = 
     : `${outcome} One or more source histories are not yet proven complete, so treat this result as provisional while records may still be loading.`;
 }
 
-/** Copy for a completed hybrid search whose small recent projection is catching up. */
-export function projectionCatchupNotice(candidatesFound = false) {
+/** Copy for a completed hybrid search whose semantic projection is pending. */
+export function projectionCatchupNotice(candidatesFound = false, meaningSearch = null) {
   const outcome = candidatesFound
     ? "The search completed and found candidate records, but they did not support an answer."
     : "The search completed with zero matches.";
-  return `${outcome} A small recent slice of meaning-based search is still catching up, so treat this result as provisional until projection finishes.`;
+  const line = meaningSearchLine(meaningSearch || {}) ||
+    "Meaning search is still counting chunks; keyword search covers all";
+  return `${outcome} ${line}, so treat this result as provisional.`;
 }
 
-export function projectionCatchupGap(candidatesFound = false) {
+export function projectionCatchupGap(meaningSearch = null) {
+  const line = meaningSearchLine(meaningSearch || {}) ||
+    "Meaning search is still counting chunks; keyword search covers all";
   return {
-    type: COVERAGE_INCOMPLETE,
-    detail: `${candidatesFound ? "Candidate records were checked" : "Both keyword and meaning-based search completed"}, but a small recent projection backlog remains. Do not treat this provisional result as a complete-corpus finding.`,
+    type: "keyword_only_indexing",
+    detail: `${line}. Cited answers rest on keyword evidence; a record worded differently may not be found yet, so a missing result is provisional.`,
   };
 }
 
@@ -205,7 +267,11 @@ export function unavailableGap(degraded, degradedReason = null) {
  * One call decides status, gaps and sentence together so no surface can pick up
  * half of it.
  */
-export function emptyRetrievalDisclosure(degraded, degradedReason = null, { candidatesFound = false } = {}) {
+export function emptyRetrievalDisclosure(
+  degraded,
+  degradedReason = null,
+  { candidatesFound = false, meaningSearch = null } = {},
+) {
   const token = degradedToken(degraded);
   if (!token) {
     return {
@@ -218,15 +284,15 @@ export function emptyRetrievalDisclosure(degraded, degradedReason = null, { cand
       gaps: [NO_RESULTS_GAP],
     };
   }
-  if (token === "vector" && degradedReason === PROJECTION_CATCHING_UP) {
+  if (projectionPending(token, degradedReason)) {
     return {
       unavailable: false,
       incomplete: true,
       status: COVERAGE_INCOMPLETE,
       degraded: token,
       cause: null,
-      notice: projectionCatchupNotice(candidatesFound),
-      gaps: [projectionCatchupGap(candidatesFound)],
+      notice: projectionCatchupNotice(candidatesFound, meaningSearch),
+      gaps: [projectionCatchupGap(meaningSearch)],
     };
   }
   return {
@@ -252,6 +318,7 @@ export function emptyRetrievalDisclosure(degraded, degradedReason = null, { cand
 export function retrievalUnavailable(body) {
   if (!body || typeof body !== "object") return false;
   if (body.status === SEARCH_UNAVAILABLE) return true;
+  if (body.status === ANSWER_WITHHELD) return false;
   if (body.status === COVERAGE_INCOMPLETE) return false;
   if (!degradedToken(body.degraded)) return false;
   const answered = typeof body.answer === "string" && body.answer.trim().length > 0;
@@ -262,5 +329,5 @@ export function retrievalUnavailable(body) {
 
 /** Whether an empty response is allowed to support a whole-corpus absence. */
 export function absenceUnproven(body) {
-  return body?.status === COVERAGE_INCOMPLETE || retrievalUnavailable(body);
+  return body?.status === ANSWER_WITHHELD || body?.status === COVERAGE_INCOMPLETE || retrievalUnavailable(body);
 }

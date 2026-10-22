@@ -699,6 +699,7 @@ test("the remote MCP renders the guidance above the refusal and leaves the incom
     evidence_gate: { supported: false, complete: false, evidence: [], reason: "answer model found no direct support" },
     map_guidance: guidance,
   };
+  let askCalls = 0;
   const call = async (thought, question = FLAGSHIP) => (await (await handleMcp(
     { BRAIN_NAME: "fixture" },
     new Request(`${ORIGIN}/mcp`, {
@@ -710,17 +711,24 @@ test("the remote MCP renders the guidance above the refusal and leaves the incom
       }),
     }),
     new URL(`${ORIGIN}/mcp`),
-    { think: async () => thought, search: async () => thought },
+    { think: async () => { askCalls += 1; return thought; }, search: async () => thought },
   )).json()).result.content[0].text;
 
   const rendered = await call(refused);
+  assert.equal(askCalls, 1, "the remote ask refusal decision point was not reached");
   assert.match(rendered, /financial map isn't set up yet/i);
   assert.ok(rendered.includes(COPY.not_established.one_step), "the one step renders verbatim");
   assert.match(rendered, /possible mentions/i);
   assert.match(rendered, /possible_mention/);
   assert.ok(rendered.includes(ENTITY_LABEL) && rendered.includes(ACCOUNT_LABEL));
+  const refusalBlock = [
+    "I didn't find a matching record in this search.",
+    "Why: answer model found no direct support",
+    "Next: ask again with a name, date or exact phrase the record would contain.",
+  ].join("\n");
+  assert.ok(rendered.includes(refusalBlock), "the healthy refusal keeps its reviewed Why and Next lines");
   assert.ok(
-    rendered.indexOf("financial map isn't set up") < rendered.indexOf("I didn't find a matching record in this search. Next, search with alternate subject terms or a distinctive name or number. Remote search is relevance-ranked and cannot filter or sort by date."),
+    rendered.indexOf("financial map isn't set up") < rendered.indexOf(refusalBlock),
     "the guidance goes above the search-scoped refusal",
   );
 
@@ -739,9 +747,15 @@ test("the remote MCP renders the guidance above the refusal and leaves the incom
     answer: null, citations: [], results: [], map_guidance: guidance,
   };
   const withGuidance = await call(incomplete);
-  const noticeBlock = [answerText(incomplete), "", confidenceText(incomplete)].join("\n");
+  assert.equal(askCalls, 2, "the incomplete-search decision point was not reached");
+  const noticeBlock = [
+    answerText(incomplete),
+    'Next: ask again in a minute; if it fails twice, say "check my Brain".',
+    "",
+    confidenceText(incomplete),
+  ].join("\n");
 
-  // The notice is byte-identical and still the last thing said.
+  // The notice is byte-identical, and the reviewed Next line follows it.
   assert.ok(withGuidance.endsWith(noticeBlock), "the incomplete-search notice must not be reworded");
   assert.equal(withGuidance, `${financialMapGuidanceLines(guidance).join("\n")}\n\n${noticeBlock}`);
   assert.ok(
@@ -755,6 +769,7 @@ test("the remote MCP renders the guidance above the refusal and leaves the incom
   // Without guidance the path is exactly what it always was, byte for byte.
   const { map_guidance: _none, ...bare } = incomplete;
   assert.equal(await call(bare), noticeBlock);
+  assert.equal(askCalls, 3, "the bare incomplete-search control did not reach remote ask");
 });
 
 test("the local MCP carries the guidance to the client instead of relaying a bare refusal", async () => {

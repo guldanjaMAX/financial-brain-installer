@@ -8,7 +8,7 @@ store. Pinned Wrangler 4.131.1 cannot request Vectorize permission for that
 profile, so the read-only preflight routes that exact refusal to an explicit,
 account-scoped recovery API-token choice before any mutation.
 
-**Package identity: brain-installer 0.4.17, schema48.** Publication, supported
+**Package identity: brain-installer 0.4.18, schema48.** Publication, supported
 platforms and field acceptance are established by the reviewed evidence for
 the exact package bytes, not by this README or its version number. Before an
 install or update, match the package to the current approved guide and release
@@ -22,7 +22,7 @@ until reviewed evidence closes it; a deferred capability remains unproven.
 Earlier candidate identities and their planning records remain historical and
 must not be reused as proof for changed bytes.
 
-The 41-row release audit has 37 unresolved incidents, two 0.4.17 deferrals, and four
+The 41-row release audit has 37 unresolved incidents, two 0.4.18 deferrals, and four
 rows closed on reviewed evidence.
 
 Engineering changes follow [the code, test, documentation, and tracking
@@ -682,6 +682,15 @@ migration 0020's `native/1` column backfill remain unproven until a receipt
 validates against the row's source or recorded family identity. Inventory and
 authority code must use `storedProvenanceAssessment(row)` rather than trusting
 those columns directly.
+
+Retrieval has one bounded read-time compatibility rule that does not change
+that receipt contract. A row whose assessed basis is unknown can be exposed as
+native with `text_basis: "legacy_native"` only for recognized older Gmail,
+Drive, upload, and `curated:brain:` producer shapes, a recognized native
+extractor, and no OCR, migration, incomplete-extraction, banner, or unreadable
+marker. The row remains `provenance_assessed: false` and is never rewritten.
+Only non-note Drive and upload artifacts derive the single source-record root
+their producer would stamp today. Gmail and Markdown or text notes do not.
 
 CSV and TSV are rendered row-wise as `Header: value` rather than as a bare grid,
 because `15234.11` on its own is unretrievable while `Balance: 15234.11` answers
@@ -1389,18 +1398,27 @@ proof and exact scheduler reconciliation succeed.
 `daily on` and `daily off` save owner intent in `operations.daily_refresh`
 while holding the same lifecycle lease.
 
-Every scheduled runner writes a content-free run journal at
+Every scheduled runner writes a bounded private run journal at
 `~/.brain/logs/<brain-and-user-identity>/daily.log` on both platforms. The
 identity is the same one used by the native schedule. The directory is private
 to the owner (0700 on POSIX, current-user DACL on Windows), and each log file is
 0600 or current-user-only. The active log and one rotated history file each
 have a 64 KiB limit. Unsafe links, invalid records, or a failed permissions
 operation stop logging and execution instead of accepting an unprotected log.
-Entries contain only timestamps, a result, and a fixed diagnostic sentence.
-Source names, raw stdout/stderr, exception text, and credentials are excluded.
+Run entries contain only timestamps, a result, and a fixed diagnostic sentence.
+Each failed source also gets one bounded record with its source label, mapped
+issue code, and a single-line detail capped at 200 characters. That detail is
+passed through the shared credential scanner and redaction, absolute paths are
+removed, and scanner findings that survive replacement fail closed to fixed
+text. Removal-review records may also carry aggregate counts and the exact plan
+fingerprint in the private receipt, but never document identities, raw
+stdout/stderr, source content, credentials, or an instruction to apply removal.
 
 `daily status` reports the last observed start time, result, next planned run,
-last error line, and log path. A native nonzero exit or terminating signal
+last error line, log path, and any mapped source issue from the latest run. A
+pending removal review appears as schedule attention with aggregate counts and
+a plain statement that nothing was removed. Text and JSON expose the same
+bounded issue and attention fields. A native nonzero exit or terminating signal
 cannot be hidden by an older successful journal entry. Windows obtains last
 and next run times from Task Scheduler's locale-independent task-info object.
 Mac status combines launchd exit evidence with journal timestamps and the next
@@ -1760,9 +1778,11 @@ written that ledger, so these counts do not prove target coverage.
 `--dry-run` reads no credential and
 makes no request. `--audit` reads the Cloudflare Drive-family inventory but
 writes no document. `--sync` builds every transformed envelope once and sends
-the same title, content and metadata independently to any configured legacy endpoint and
-to the Cloudflare identity `curated:brain:<legacy source type>:<legacy source
-id>`. The legacy write stays in place while its target is declared. Cloudflare-only
+the same title, content and metadata independently to any configured legacy endpoint. The
+Cloudflare copy adds the first-party native-text receipt and lineage expected
+of a current write, without changing the neutral `envelope_sha256`, and uses
+the identity `curated:brain:<legacy source type>:<legacy source id>`. The legacy
+write stays in place while its target is declared. Cloudflare-only
 receipts and coverage contain only the Cloudflare target; historical raw Drive
 evidence keeps the same meaning and never permits deletion.
 
@@ -2157,7 +2177,7 @@ inode stay there, including after success, so an editor with an open original
 file descriptor cannot lose a later edit. These local recovery directories are
 never automatically deleted. Interrupted writes likewise require explicit
 recovery; never automatically clear their lock.
-In 0.4.17, Windows setup, tools handoff and update leave existing assistant
+In 0.4.18, Windows setup, tools handoff and update leave existing assistant
 guides untouched without entering the writer. One notice is printed per run,
 even when both assistants are connected. Setup and tools still create missing
 guides; update retains its existing-only policy, including verified Codex
@@ -2167,8 +2187,8 @@ launching Claude with an existing Windows guide. macOS/Linux behavior is unchang
 This avoids the Windows open-file refusal of the final directory rename for
 guides present at the check. A concurrent creator between that check and the
 writer's snapshot can still leave a retained lock, with no data loss. That race
-is accepted for 0.4.17; the existence check stays immediately beside the writer
-call. Refreshed Windows answer rules are deferred to 0.4.18, whose design needs
+is accepted for 0.4.18; the existence check stays immediately beside the writer
+call. Refreshed Windows answer rules are deferred to 0.4.19, whose design needs
 a create-only writer mode or separately reviewed lock recovery.
 Native Windows filesystem behavior remains a separate host/CI gate.
 Repeated writer tests inject only the native attribute probe, keeping filesystem
@@ -2664,6 +2684,10 @@ receipts on new writes, and it refuses a later write that weakens established
 proof. Migration defaults and legacy `native/1` columns are still explicitly
 unassessed. Inventory labels that debt as partial or unavailable rather than
 retrospectively upgrading it.
+Retrieval alone may label a narrowly recognized older producer row
+`text_basis: "legacy_native"` under the fail-closed rule above. Financial
+Picture, document access, stored receipt validation, transitions, migrations,
+and durable rows remain unchanged.
 
 `brain provenance-repair <manifest> --source <name>` schema 1 is now a legacy
 inventory preview only. The canonical semantic plan still binds every source

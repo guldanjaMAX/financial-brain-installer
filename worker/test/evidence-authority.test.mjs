@@ -21,7 +21,7 @@ import {
   evidenceLineageValidationError,
 } from "../src/lib/evidence-lineage.js";
 import { hasExplicitCurrentIntent, queryEntityAnchors } from "../src/lib/query-intent.js";
-import { SEARCH_UNAVAILABLE } from "../src/lib/retrieval-status.js";
+import { ANSWER_WITHHELD, REFUSAL_NEXT_ACTIONS } from "../src/lib/retrieval-status.js";
 import { search, unchunkedTaxDocumentCandidates } from "../src/lib/store-d1.js";
 import {
   taxQuestionScope, taxQuestionScopeAssessment,
@@ -674,6 +674,57 @@ test("lineage is metadata-backed, title-blind and fail-closed", async () => {
   }), /required/);
 });
 
+test("executed court orders are primary while drafts, correspondence, and notes stay below T1", () => {
+  const sourceRecord = {
+    source: "drive",
+    source_kind: "drive",
+    doc_uid: "drive:fixture-order",
+    text_source: "native",
+    text_reliable: true,
+    authority_meta: JSON.stringify({
+      evidence_lineage: { version: 1, kind: "source_record", root_ids: [] },
+    }),
+  };
+
+  const executed = tierOf({ ...sourceRecord, title: "Executed Temporary Orders.pdf" });
+  assert.equal(executed.tier, "T1", "an executed court order reached the primary-record decision");
+  assert.match(executed.reason, /direct source artifact \(Temporary Order/i);
+
+  const draftOrder = tierOf({ ...sourceRecord, title: "DRAFT Temporary Orders.pdf" });
+  assert.equal(draftOrder.tier, "T3", "a draft order reached the demotion decision");
+  assert.match(draftOrder.reason, /draft/i);
+
+  const signedAgreement = tierOf({ ...sourceRecord, title: "Signed Storage Agreement.pdf" });
+  assert.equal(signedAgreement.tier, "T1", "a signed agreement remains a primary control");
+  const draftAgreement = tierOf({ ...sourceRecord, title: "DRAFT Storage Agreement v2.docx" });
+  assert.equal(draftAgreement.tier, "T3", "the draft marker prevents an agreement title from reaching T1");
+  assert.match(draftAgreement.reason, /draft/i);
+  assert.equal(tierOf({ ...sourceRecord, title: "Not-Signed Custody Order.pdf" }).tier, "T3");
+  assert.equal(tierOf({ ...sourceRecord, title: "Storage Agreement-for-review.docx" }).tier, "T3");
+
+  const purchaseOrder = tierOf({ ...sourceRecord, title: "Purchase Order 0001.pdf" });
+  assert.equal(purchaseOrder.tier, "T3", "the bare word order is not a court-order phrase");
+
+  const correspondence = tierOf({
+    ...sourceRecord,
+    source: "owner-mail",
+    source_kind: "gmail",
+    doc_uid: "owner-mail:fixture-message",
+    title: "temporary orders hearing",
+  });
+  assert.equal(correspondence.tier, "T3", "correspondence reached and kept correspondence authority");
+  assert.match(correspondence.reason, /written at the time/);
+
+  const note = tierOf({
+    ...sourceRecord,
+    doc_uid: "drive:fixture-note",
+    title: "temporary-orders-summary.md",
+    uri: "notes/temporary-orders-summary.md",
+  });
+  assert.equal(note.tier, "T3", "a Markdown note reached and kept the note exclusion");
+  assert.doesNotMatch(note.reason, /direct source artifact/);
+});
+
 test("Gmail authority follows the recorded artifact, lineage, and carried-tier ladder", () => {
   const reliable = {
     source: "gmail", text_source: "native", text_reliable: 1,
@@ -971,8 +1022,8 @@ test("the answer route selects the operative value and keeps superseded history 
 test("the answer route fails closed when a draft substitutes the superseded value", async () => {
   const body = await askRoute(routeEnv("Taylor's mailing address is 50 Old Road [1]."));
   assert.equal(body.answer, null);
-  assert.equal(body.status, SEARCH_UNAVAILABLE);
-  assert.match(body.notice || "", /search could not be completed/i);
+  assert.equal(body.status, ANSWER_WITHHELD);
+  assert.match(body.notice || "", /evidence check did not support the draft/i);
   assert.match(body.evidence_gate?.reason || "", /did not use the matching owner-confirmed operative value|superseded value/);
 });
 
@@ -984,17 +1035,18 @@ test("equally newest disagreeing owner confirmations fail as an operative confli
     { rows: [first, second] },
   ));
   assert.equal(body.answer, null);
-  assert.equal(body.status, SEARCH_UNAVAILABLE);
-  assert.match(body.notice || "", /search could not be completed/i);
+  assert.equal(body.status, ANSWER_WITHHELD);
+  assert.match(body.notice || "", /records conflict/i);
   assert.equal(body.evidence_gate?.reason, "equally current owner-confirmed operative records disagree");
   assert.equal(body.gaps?.some((gap) => gap.type === "operative_conflict"), true);
+  assert.equal(body.next_action, REFUSAL_NEXT_ACTIONS["answer_withheld:conflicting_records"]);
 
   const refused = await askRoute(routeEnv(
     "The documents do not answer the question.",
     { rows: [first, second] },
   ));
   assert.equal(refused.answer, null, "a model refusal cannot relabel a known evidence conflict as absence");
-  assert.equal(refused.status, SEARCH_UNAVAILABLE);
+  assert.equal(refused.status, ANSWER_WITHHELD);
   assert.equal(refused.confidence, undefined);
   assert.equal(refused.gaps?.some((gap) => gap.type === "operative_conflict"), true);
 });
@@ -1034,8 +1086,8 @@ test("newer claim-authoritative evidence fails closed against an older operative
     { rows: [operative, newerPrimary] },
   ));
   assert.equal(body.answer, null);
-  assert.equal(body.status, SEARCH_UNAVAILABLE);
-  assert.match(body.notice || "", /search could not be completed/i);
+  assert.equal(body.status, ANSWER_WITHHELD);
+  assert.match(body.notice || "", /records conflict/i);
   assert.equal(body.evidence_gate?.reason, "newer authoritative evidence may supersede the older owner-confirmed operative value");
   assert.equal(body.gaps?.some((gap) => gap.type === "newer_authoritative_evidence"), true);
   assert.equal(body.evidence_authority, undefined, "a refusal does not present retrieved authority as its approved basis");

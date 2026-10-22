@@ -49,7 +49,11 @@ const CANONICAL_REFUSAL = "The documents do not answer the question.";
 const answerIsRefusal = (answer) => String(answer || "").trim() === CANONICAL_REFUSAL;
 const responseObject = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
 const nonemptyResponseText = (value) => typeof value === "string" && value.trim().length > 0;
-const ANSWER_UNAVAILABLE_STATUSES = new Set(["search_unavailable", "coverage_incomplete"]);
+const ANSWER_UNAVAILABLE_STATUSES = new Set([
+  "search_unavailable",
+  "coverage_incomplete",
+  "answer_withheld",
+]);
 
 function normalizedEvidenceNumbers(value, resultCount) {
   if (!Array.isArray(value)) return false;

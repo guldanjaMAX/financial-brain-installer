@@ -10,6 +10,7 @@ import {
   unsupportedFilters,
 } from "../src/lib/store-d1.js";
 import { ANSWER_ERROR_MESSAGES } from "../src/lib/answer-render.js";
+import { REFUSAL_NEXT_ACTIONS } from "../src/lib/retrieval-status.js";
 import { DRIVE_STORED_FAMILY_UID_MAX_BYTES } from "../src/lib/stored-family-identity.js";
 import { WORKER_VERSION } from "../src/lib/version.js";
 
@@ -24,12 +25,12 @@ const knownLimitation = (n, stillRecorded, d = "") => {
     (stillRecorded ? "" : "  the recorded output changed; replace this with a real check  " + d));
   if (!stillRecorded) fail++;
 };
-const isUnavailableRefusal = (body) =>
-  body?.status === "search_unavailable" &&
+const isWithheldRefusal = (body) =>
+  body?.status === "answer_withheld" &&
   body?.answer === null &&
   body?.confidence === undefined &&
   body?.evidence_gate?.supported === false &&
-  /search could not be completed/i.test(body?.notice || "");
+  /answer was withheld because/i.test(body?.notice || "");
 
 /* A D1 env that records what SQL it was asked to run, so a filter that never
    reached the database is a visible failure rather than a silent one. */
@@ -644,18 +645,15 @@ const call = (env, path) => {
     unified.degraded === "vector" && unified.results.length > 0,
     JSON.stringify(unified));
   const think = await (await call(env, "/api/rag/think?q=context&limit=5")).json();
-  check("think warns that partial projection can miss paraphrased current context",
+  check("think names keyword-only indexing while partial projection can miss paraphrased context",
     think.degraded === "vector" && (think.gaps || []).some((gap) =>
-      gap.type === "vector_unavailable" && /not fully query-ready/.test(gap.detail || "")),
+      gap.type === "keyword_only_indexing" &&
+        gap.detail === "Meaning search covers 1 of 2 chunks; keyword search covers all. Cited answers rest on keyword evidence; a record worded differently may not be found yet, so a missing result is provisional."),
     JSON.stringify(think.gaps));
 }
 
-/* The "not yet ready" gap must tell the reader the build finishes on its own
-   in the background, and that running `brain drain` by hand does not speed
-   it up -- a looped `brain drain` measured 31/min against 61/min sustained
-   idle, because it takes over the server's own drain lease instead of
-   helping it. The old wording pointed the reader at `brain drain` as though
-   running it would confirm or hasten completion; it does neither. */
+/* The pending-projection gap names the two search modes and makes the narrower
+   recall limit explicit without sending the owner to an operator command. */
 {
   const newer = {
     ...ROW,
@@ -682,16 +680,12 @@ const call = (env, path) => {
     },
   });
   const think = await (await call(env, "/api/rag/think?q=context&limit=5")).json();
-  const gap = (think.gaps || []).find((g) => g.type === "vector_unavailable");
-  check("the not-yet-ready gap says the index still builds in the background and finishes on its own",
-    /still building in the background/i.test(gap?.detail || "") &&
-      /finishes on its own/i.test(gap?.detail || ""),
+  const gap = (think.gaps || []).find((g) => g.type === "keyword_only_indexing");
+  check("the pending-projection gap names exact visible and total chunk counts",
+    gap?.detail === "Meaning search covers 1 of 2 chunks; keyword search covers all. Cited answers rest on keyword evidence; a record worded differently may not be found yet, so a missing result is provisional.",
     JSON.stringify(gap));
-  check("the not-yet-ready gap says a manual `brain drain` does not speed it up",
-    /brain drain.*does not speed it up/i.test(gap?.detail || ""),
-    JSON.stringify(gap));
-  check("the not-yet-ready gap no longer tells the reader `brain drain` confirms completion",
-    !/confirms the complete projection/i.test(gap?.detail || ""),
+  check("the pending-projection gap has no retry or operator-command detour",
+    !/brain drain|try again shortly/i.test(gap?.detail || ""),
     JSON.stringify(gap));
 }
 
@@ -928,7 +922,7 @@ const call = (env, path) => {
   const question = encodeURIComponent("What is going on with billing with Taylor? Are they still a client?");
   const body = await (await call(env, `/api/rag/think?q=${question}&limit=2`)).json();
   check("newest billing-only evidence cannot establish an ongoing client relationship",
-    isUnavailableRefusal(body) &&
+    isWithheldRefusal(body) &&
       /did not itself support/.test(body.evidence_gate?.reason || ""), JSON.stringify(body));
 }
 
@@ -965,7 +959,7 @@ const call = (env, path) => {
     `/api/rag/think?q=${encodeURIComponent("Is Taylor still a client?")}&limit=1`,
   )).json();
   check("a Stripe customer or subscription cannot prove an active client relationship",
-    isUnavailableRefusal(stripeRelationship) &&
+    isWithheldRefusal(stripeRelationship) &&
       /did not itself support/.test(stripeRelationship.evidence_gate?.reason || ""),
     JSON.stringify(stripeRelationship));
 
@@ -977,7 +971,7 @@ const call = (env, path) => {
     `/api/rag/think?q=${encodeURIComponent("Is Taylor still a client?")}&limit=1`,
   )).json();
   check("an implied relationship claim cannot bypass Stripe's claim scope",
-    isUnavailableRefusal(stripeImpliedRelationship) &&
+    isWithheldRefusal(stripeImpliedRelationship) &&
       /did not itself support/.test(stripeImpliedRelationship.evidence_gate?.reason || ""),
     JSON.stringify(stripeImpliedRelationship));
 
@@ -989,7 +983,7 @@ const call = (env, path) => {
     `/api/rag/think?q=${encodeURIComponent("Is Taylor still a client?")}&limit=1`,
   )).json();
   check("a transaction clause cannot hide an unsupported relationship claim",
-    isUnavailableRefusal(stripeMixedRelationship) &&
+    isWithheldRefusal(stripeMixedRelationship) &&
       /did not itself support/.test(stripeMixedRelationship.evidence_gate?.reason || ""),
     JSON.stringify(stripeMixedRelationship));
 
@@ -1012,7 +1006,7 @@ const call = (env, path) => {
     `/api/rag/think?q=${encodeURIComponent("Is Taylor still an active client?")}&limit=1`,
   )).json();
   check("an authoritative CRM record must support the claimed status polarity",
-    isUnavailableRefusal(oppositeCrmRelationship) &&
+    isWithheldRefusal(oppositeCrmRelationship) &&
       /did not itself support/.test(oppositeCrmRelationship.evidence_gate?.reason || ""),
     JSON.stringify(oppositeCrmRelationship));
 
@@ -1073,14 +1067,14 @@ const call = (env, path) => {
     `/api/rag/think?q=${question}&limit=2`,
   )).json();
   check("no-longer status language cannot rely on stale evidence",
-    isUnavailableRefusal(negative) &&
+    isWithheldRefusal(negative) &&
       /older evidence/.test(negative.evidence_gate?.reason || ""), JSON.stringify(negative));
   const unqualified = await (await call(
     answerEnv("Taylor is still an active client [1].", [1]),
     `/api/rag/think?q=${question}&limit=2`,
   )).json();
   check("a non-authoritative current-status claim requires an exact as-of date",
-    isUnavailableRefusal(unqualified) &&
+    isWithheldRefusal(unqualified) &&
       /exact as-of date/.test(unqualified.evidence_gate?.reason || ""), JSON.stringify(unqualified));
 }
 
@@ -1113,7 +1107,7 @@ const call = (env, path) => {
     `/api/rag/think?q=${encodeURIComponent("Is Taylor still a client right now?")}&limit=1`,
   )).json();
   check("a present-status claim fails closed when no reliable-dated evidence exists",
-    isUnavailableRefusal(body) &&
+    isWithheldRefusal(body) &&
       /no reliable-dated evidence/.test(body.evidence_gate?.reason || ""),
     JSON.stringify(body));
 }
@@ -1151,7 +1145,7 @@ const call = (env, path) => {
   const question = encodeURIComponent("What is Taylor's current client status? Are they still active?");
   const body = await (await call(env, `/api/rag/think?q=${question}&limit=2`)).json();
   check("a stale-only citation cannot establish present status when newer direct evidence exists",
-    isUnavailableRefusal(body) &&
+    isWithheldRefusal(body) &&
       /newer direct evidence/.test(body.evidence_gate?.reason || ""), JSON.stringify(body));
   check("the semantic verifier receives the newest direct evidence for comparison",
     /NEWEST RELIABLE-DATED DIRECT EVIDENCE/.test(gatePrompts[0]?.messages?.at(-1)?.content || ""),
@@ -1176,7 +1170,7 @@ const call = (env, path) => {
     },
   });
   const body = await (await call(env, "/api/rag/think?q=What+is+our+parental+leave+policy")).json();
-  check("unsupported evidence replaces the generated draft with an unavailable refusal", modelCalls === 2 && isUnavailableRefusal(body), JSON.stringify(body));
+  check("unsupported evidence replaces the generated draft with a withheld refusal", modelCalls === 2 && isWithheldRefusal(body), JSON.stringify(body));
   check("unsupported candidates are not exposed as answer citations", body.citations?.length === 0, JSON.stringify(body.citations));
   check("the refusal exposes its short support decision", body.evidence_gate?.supported === false && /different company/.test(body.evidence_gate?.reason || ""), JSON.stringify(body.evidence_gate));
 }
@@ -1199,7 +1193,7 @@ const call = (env, path) => {
     },
   });
   const body = await (await call(env, "/api/rag/think?q=What+happened+to+the+retainer%3F")).json();
-  check("a partial evidence approval fails closed", isUnavailableRefusal(body), JSON.stringify(body));
+  check("a partial evidence approval fails closed", isWithheldRefusal(body), JSON.stringify(body));
   check("the partial approval identifies the citation mismatch", /every citation/.test(body.evidence_gate?.reason || ""), JSON.stringify(body.evidence_gate));
 }
 
@@ -1237,7 +1231,7 @@ const call = (env, path) => {
   const question = "What ordinary business income did Example Orchard LLC's 2023 Form 1065 report?";
   const body = await (await call(env, `/api/rag/think?q=${encodeURIComponent(question)}`)).json();
   check("a D1-injected matching filename fails closed without claiming no evidence",
-    isUnavailableRefusal(body),
+    isWithheldRefusal(body),
     JSON.stringify(body));
   check("the misnamed same-form return fails the deterministic entity boundary",
     /tax evidence does not match the requested entity, tax year, and form/.test(body.evidence_gate?.reason || ""),
@@ -1719,12 +1713,12 @@ const zeroChunkExpectedReturn = {
   }).env;
   };
   const unrelated = await (await call(answerEnv(newsletter), "/api/rag/think?q=What+valuation+was+on+the+Series+A+term+sheet%3F")).json();
-  check("an unrelated newsletter cannot answer an unnamed term sheet question", isUnavailableRefusal(unrelated), JSON.stringify(unrelated));
+  check("an unrelated newsletter cannot answer an unnamed term sheet question", isWithheldRefusal(unrelated), JSON.stringify(unrelated));
   check("the owner-link refusal states the structural reason", /no explicit link/.test(unrelated.evidence_gate?.reason || ""), JSON.stringify(unrelated.evidence_gate));
 
   const ownerOnly = { ...newsletter, chunk_uid: "owner-profile#0", doc_uid: "owner-profile", source_id: "owner-profile", title: "Morgan Diaz profile", text: "Morgan Diaz owns this brain. No financing terms appear here." };
   const split = await (await call(answerEnv([newsletter, ownerOnly]), "/api/rag/think?q=What+valuation+was+on+the+Series+A+term+sheet%3F")).json();
-  check("owner identity and the high-risk fact cannot come from different documents", isUnavailableRefusal(split), JSON.stringify(split));
+  check("owner identity and the high-risk fact cannot come from different documents", isWithheldRefusal(split), JSON.stringify(split));
 
   const owned = { ...newsletter, source_kind: "bank", chunk_uid: "owned-term-sheet#0", doc_uid: "owned-term-sheet", source_id: "owned-term-sheet", title: "Morgan's Series A Term Sheet", text: "Morgan's Series A term sheet states a $150M valuation." };
   const linked = await (await call(answerEnv(owned), "/api/rag/think?q=What+valuation+was+on+the+Series+A+term+sheet%3F")).json();
@@ -1760,7 +1754,7 @@ const zeroChunkExpectedReturn = {
     },
   });
   const body = await (await call(env, "/api/rag/think?q=What+am+I+actually+bound+by+under+the+ownership+agreement%3F")).json();
-  check("non-final planning notes cannot establish binding legal obligations", isUnavailableRefusal(body), JSON.stringify(body));
+  check("non-final planning notes cannot establish binding legal obligations", isWithheldRefusal(body), JSON.stringify(body));
   check("the legal refusal says why it failed closed", /non-final planning material/.test(body.evidence_gate?.reason || ""), JSON.stringify(body.evidence_gate));
 }
 
@@ -4433,8 +4427,7 @@ async function postConfirmedSourceForget(env, source = "meeting") {
   // Whether a published update may touch a brain is decided by its schema
   // version, not its version string, and until 2026-09-03 that number could
   // only be read by standing at the owner's machine. /health reports it so a
-  // fleet is checkable from one place. A D1 that cannot answer must not take
-  // /health down with it: the field is simply absent.
+  // fleet is checkable from one place.
   check("a paused brain reports health without reading its database for the schema",
     !("schema_version" in health) && !("sources_total" in health) &&
       !("sources_stale" in health) && !("sources_unscheduled" in health) &&
@@ -4442,22 +4435,86 @@ async function postConfirmedSourceForget(env, source = "meeting") {
     JSON.stringify({ health, forbiddenCalls }));
 
   {
+    const freshnessRows = [{
+      name: "fixture-source",
+      kind: "folder",
+      zone: "private",
+      status: "ready",
+      last_ingest_at: "2026-01-01T00:00:00.000Z",
+      last_complete_sweep_at: "2026-01-01T00:00:00.000Z",
+      expected_refresh_seconds: null,
+      stale_reason: null,
+      document_count: 1,
+      indexing_started_at: null,
+      retired_at: null,
+      registered: 1,
+    }];
+    const healthDb = ({ schemaVersion = 32, registryError = false, calls }) => ({
+      prepare(sql) {
+        if (/install_state/.test(sql)) {
+          return { first: async () => { calls.schema++; return { schema_version: schemaVersion }; } };
+        }
+        return {
+          all: async () => {
+            calls.registry++;
+            if (registryError) throw new Error("fixture registry unavailable");
+            return { results: freshnessRows };
+          },
+        };
+      },
+    });
+
+    const healthyCalls = { schema: 0, registry: 0 };
     const readable = {
       ...env,
       VECTOR_DRAIN_MODE: undefined,
-      DB: { prepare: () => ({ first: async () => ({ schema_version: 32 }), bind: () => ({ first: async () => ({ schema_version: 32 }) }) }) },
+      DB: healthDb({ calls: healthyCalls }),
     };
-    const live = await (await worker.fetch(new Request("https://b.example/health"), readable, {})).json();
-    check("health reports the schema version, so a brain ahead of a release is visible remotely",
-      live.schema_version === 32 && live.ok === true, JSON.stringify(live));
-    check("health omits every source count when the registry statement cannot run",
-      !("sources_total" in live) && !("sources_stale" in live) && !("sources_unscheduled" in live),
-      JSON.stringify(live));
+    const liveResponse = await worker.fetch(new Request("https://b.example/health"), readable, {});
+    const live = await liveResponse.json();
+    check("active D1 health is ok when schema and registry reads are valid",
+      liveResponse.status === 200 && live.ok === true && live.status === "ok" &&
+        live.schema_version === 32 && live.sources_total === 1 &&
+        live.sources_stale === 0 && live.sources_unscheduled === 1 &&
+        healthyCalls.schema === 1 && healthyCalls.registry === 1,
+      JSON.stringify({ live, healthyCalls }));
 
-    const broken = { ...readable, DB: { prepare: () => ({ first: async () => ({ schema_version: "not a number" }) }) } };
-    const soft = await (await worker.fetch(new Request("https://b.example/health"), broken, {})).json();
-    check("an unreadable schema version is omitted rather than guessed",
-      soft.ok === true && !("schema_version" in soft), JSON.stringify(soft));
+    const storageReason = "This brain's database could not be read. The Worker is running, but storage health is unavailable.";
+    const registryCalls = { schema: 0, registry: 0 };
+    const registryUnavailable = {
+      ...readable,
+      DB: healthDb({ registryError: true, calls: registryCalls }),
+    };
+    const registryResponse = await worker.fetch(
+      new Request("https://b.example/health"), registryUnavailable, {});
+    const registryHealth = await registryResponse.json();
+    // Health reports whether the brain can do its job, so missing required D1
+    // evidence is reachable over HTTP but cannot truthfully report ok.
+    check("an unreadable source registry keeps health reachable but not healthy",
+      registryResponse.status === 200 && registryHealth.ok === false &&
+        registryHealth.status === "storage-unavailable" && registryHealth.reason === storageReason &&
+        registryHealth.schema_version === 32 && registryCalls.schema === 1 && registryCalls.registry === 1,
+      JSON.stringify({ registryHealth, registryCalls }));
+    check("health omits every source count when the registry statement cannot run",
+      !("sources_total" in registryHealth) && !("sources_stale" in registryHealth) &&
+        !("sources_unscheduled" in registryHealth),
+      JSON.stringify(registryHealth));
+
+    const schemaCalls = { schema: 0, registry: 0 };
+    const unreadableSchema = {
+      ...readable,
+      DB: healthDb({ schemaVersion: "not a number", calls: schemaCalls }),
+    };
+    const schemaResponse = await worker.fetch(
+      new Request("https://b.example/health"), unreadableSchema, {});
+    const schemaHealth = await schemaResponse.json();
+    check("an unreadable schema keeps health reachable but not healthy and is never guessed",
+      schemaResponse.status === 200 && schemaHealth.ok === false &&
+        schemaHealth.status === "storage-unavailable" && schemaHealth.reason === storageReason &&
+        !("schema_version" in schemaHealth) && schemaHealth.sources_total === 1 &&
+        schemaHealth.sources_stale === 0 && schemaHealth.sources_unscheduled === 1 &&
+        schemaCalls.schema === 1 && schemaCalls.registry === 1,
+      JSON.stringify({ schemaHealth, schemaCalls }));
   }
 
   const manual = await post(env, "/api/admin/brain/drain", {});
@@ -5448,9 +5505,11 @@ async function postConfirmedSourceForget(env, source = "meeting") {
       : ({ response: "You offer twelve weeks of parental leave [1].", usage: {} }) } } });
   const body = await (await call(env, "/api/rag/think?q=What+is+our+parental+leave+policy")).json();
   check("unsupported generated text fails closed without claiming no evidence",
-    isUnavailableRefusal(body), JSON.stringify(body));
+    isWithheldRefusal(body), JSON.stringify(body));
   check("the refusal reason rides beside the sentence, never inside it",
     /another company/.test(body.evidence_gate?.reason || "") && body.evidence_gate?.partial !== true, JSON.stringify(body.evidence_gate));
+  check("an unsupported refusal gives the exact record-scoping next action",
+    body.next_action === REFUSAL_NEXT_ACTIONS["answer_withheld:unsupported"], String(body.next_action));
 }
 
 /* ---- a partial answer never cuts a sentence at a decimal point ----
