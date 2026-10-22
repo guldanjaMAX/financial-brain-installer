@@ -1204,9 +1204,6 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
     requestedTaxFiling(doc) && doc.scanned === true
   );
   if (unreadableRequestedTaxEvidence) documentTaxGap = TAX_EVIDENCE_UNREADABLE_GAP;
-  // Counted from the end, so a tax gap settled after the model pass lands
-  // exactly where it would have landed here.
-  const documentTaxGapTail = gaps.length;
   if (documentTaxGap) gaps.unshift(documentTaxGap);
 
   const renderDocs = (items) => items
@@ -1802,8 +1799,12 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
   let scannedTaxEvidenceNotRelied = false;
   if (scannedRequestedTaxEvidence && !answeredFromEvidence &&
       documentTaxGap !== TAX_EVIDENCE_UNREADABLE_GAP) {
-    const replacing = documentTaxGap ? 1 : 0;
-    gaps.splice(gaps.length - documentTaxGapTail - replacing, replacing, TAX_EVIDENCE_UNREADABLE_GAP);
+    // Later gates append their own diagnostics. Replace only the exact tax gap
+    // object established above; positional counts can otherwise consume a
+    // money-veto or recall gap that was added after retrieval.
+    const taxGapIndex = documentTaxGap ? gaps.indexOf(documentTaxGap) : -1;
+    if (taxGapIndex >= 0) gaps.splice(taxGapIndex, 1, TAX_EVIDENCE_UNREADABLE_GAP);
+    else gaps.unshift(TAX_EVIDENCE_UNREADABLE_GAP);
     documentTaxGap = TAX_EVIDENCE_UNREADABLE_GAP;
     scannedTaxEvidenceNotRelied = true;
   }

@@ -5,6 +5,7 @@ import { demoteScaffolding } from "../src/index.js";
 import { evidenceLineageFor } from "../src/lib/evidence-lineage.js";
 import { applyMoneyVeto } from "../src/lib/money-veto.js";
 import { tierOf } from "../src/lib/evidence-authority.js";
+import { assembleOcr } from "../../ingest/ocr.mjs";
 
 const NOW = Date.parse("2026-10-11T12:00:00Z");
 const CONTENT = "Card ending 4242 charged USD 120.00 on 2026-10-10. Statement months: January, February, March.";
@@ -14,6 +15,7 @@ async function run(t, {
   question = "What did card ending 4242 charge in the last 60 days?",
   answer = ANSWER, content = CONTENT, date = "2026-10-10", reliable = true,
   title = "Card statement", lineage = "source_record", kind = "bank", verdict = {}, expectedVerifiers = 1,
+  textSource = "native", zeroChunkDocuments = 0, additionalDocuments = [],
 } = {}) {
   t.mock.method(Date, "now", () => NOW);
   let drafts = 0, verifiers = 0, network = 0;
@@ -29,14 +31,23 @@ async function run(t, {
   } } } });
   try {
     fixture.raw("INSERT INTO sources(name,kind,status,created_at) VALUES ('records',?,'ready',?)", kind, "2026-10-10");
-    const response = await fixture.post("/api/admin/brain/ingest/batch", { docs: [{
+    for (let index = 0; index < zeroChunkDocuments; index++) {
+      fixture.raw(`INSERT INTO documents
+        (doc_uid,source,source_id,title,ingested_at,content_hash,meta,text_source,text_reliable)
+        VALUES (?, 'records', ?, ?, ?, ?, '{}', 'native', 1)`,
+      `zero-chunk-${index}`, `zero-chunk-${index}`, `Unrelated archive ${index}`, NOW, `hash-${index}`);
+    }
+    const documents = [{
       source_type: "records", source_id: "record-one", title, content,
       occurred_at: date, date_reliable: reliable, date_source: "fixture:record_date",
-      text_source: "native", text_reliable: true,
+      text_source: textSource, text_reliable: true,
       metadata: lineage ? { evidence_lineage: { version: 1, kind: lineage } } : {},
-    }] }, { "X-Admin-Key": fixture.env.ADMIN_KEY });
+    }, ...additionalDocuments];
+    const response = await fixture.post("/api/admin/brain/ingest/batch", { docs: documents },
+      { "X-Admin-Key": fixture.env.ADMIN_KEY });
     assert.equal(response.status, 200);
-    assert.equal((await response.json()).results[0].status, "created");
+    assert.deepEqual((await response.json()).results.map((row) => row.status),
+      documents.map(() => "created"));
     fixture.env.VECTORIZE.query = async () => ({ matches: fixture.rows("SELECT chunk_uid AS id FROM chunks") });
     const result = await fixture.post("/api/rag/think", { q: question }, { "X-Admin-Key": fixture.env.ADMIN_KEY });
     assert.equal(result.status, 200);
@@ -334,6 +345,43 @@ test("calibration qualification reports only a fixed rule and count", async t =>
   assert.equal(body.evidence_gate.complete, false);
   assert.deepEqual(body.gaps.filter(gap => gap.type === "money_veto"), [{ type: "money_veto",
     rule: "incomplete_claim", count: 1, detail: "The money evidence check qualified an incomplete answer." }]);
+});
+
+test("a money veto and a later scanned-tax gap both survive the real think route", async t => {
+  const scan = assembleOcr([{
+    page: 1,
+    text: "Taxpayer: Fixture Owner\n2025 Form 1040\nThis complete scanned filing page contains general synthetic filing notes and enough legible text for a complete OCR receipt.",
+  }], { totalPages: 1, model: "fixture-ocr-model" });
+  assert.equal(scan.ok, true, "the scan control carries a real complete OCR receipt");
+  const body = await run(t, {
+    question: "What income is on my 2025 tax return?",
+    title: "Fixture Owner 2025 Form 1040",
+    content: "Taxpayer: Fixture Owner\n2025 Form 1040\nIncome was USD 120.00.",
+    answer: "Income was USD 121.00 [1].",
+    kind: "upload",
+    zeroChunkDocuments: 21,
+    additionalDocuments: [{
+      source_type: "records",
+      source_id: "record-scan",
+      title: "Fixture Owner 2025 Form 1040 scanned copy",
+      content: scan.text,
+      occurred_at: "2026-10-10",
+      date_reliable: true,
+      date_source: "fixture:record_date",
+      text_source: "ocr",
+      text_reliable: false,
+      metadata: {
+        evidence_lineage: { version: 1, kind: "source_record" },
+        ocr: scan.provenance,
+      },
+    }],
+  });
+  assert.equal(body.answer, null, "the mismatched money figure was refused");
+  assert.ok(body.gaps.some((gap) => gap.type === "money_veto"),
+    `the money-veto decision remains visible: ${JSON.stringify(body)}`);
+  assert.ok(body.gaps.some((gap) => gap.type === "tax_evidence_unreadable"), "the scanned-tax gap remains visible");
+  assert.equal(body.gaps.some((gap) => gap.type === "tax_document_inventory_unverified"), false,
+    "the unreadable scanned filing replaces only the earlier tax-inventory gap");
 });
 
 test("calibration an amount cannot stand in for an account identifier", () => {
