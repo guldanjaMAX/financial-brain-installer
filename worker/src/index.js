@@ -1838,7 +1838,10 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
     : null;
   if (refusalSearchDisclosure?.incomplete &&
       !gaps.some((gap) => gap?.type === COVERAGE_INCOMPLETE)) {
-    gaps.unshift(...refusalSearchDisclosure.gaps);
+    // The retrieval step already added its keyword-only indexing gap; a
+    // second identical gap reads to a consumer as two separate problems.
+    const presentGapTypes = new Set(gaps.map((gap) => gap?.type));
+    gaps.unshift(...refusalSearchDisclosure.gaps.filter((gap) => !presentGapTypes.has(gap?.type)));
   }
   const sourceCoverageBlocksAbsence = categoricalRefusal && !refusalSearchDisclosure &&
     sourceCoverageGaps.length > 0;

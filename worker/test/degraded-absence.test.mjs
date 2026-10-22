@@ -365,6 +365,8 @@ const unified = async (env, q = "the") => {
   check("no no_results gap survives", !gapTypes.includes("no_results"), JSON.stringify(gapTypes));
   check("the gap is typed as keyword-only indexing",
     gapTypes.includes("keyword_only_indexing"), JSON.stringify(gapTypes));
+  check("exactly one keyword-only indexing gap (no duplicate from the refusal disclosure)",
+    gapTypes.filter((type) => type === "keyword_only_indexing").length === 1, JSON.stringify(gapTypes));
 
   const gapText = (body.gaps || []).map((g) => g.detail).join(" ");
   check("THE DEFECT: the gap must not instruct anyone to state an absence",
@@ -455,6 +457,23 @@ const unified = async (env, q = "the") => {
       oldestQueuedAt: now - 60 * 60 * 1000,
       supportedAnswer: true,
     });
+    const refusedWithCandidates = mkEnv({
+      rows: [supportedRow],
+      vectorIds: [supportedRow.chunk_uid],
+      projectionReady: false,
+      expectedVectors: 1_795_309,
+      actualVectors: 1_793_009,
+      pending: 10_001,
+      oldestQueuedAt: now - 60 * 60 * 1000,
+    });
+    const refusedWithCandidatesBody = (await think(refusedWithCandidates, "what does the synthetic record support")).body;
+    const refusedGapTypes = (refusedWithCandidatesBody.gaps || []).map((gap) => gap.type);
+    check("probe: a refusal with candidates during catch-up reached the refusal path",
+      refusedWithCandidatesBody.answer === null && refusedWithCandidatesBody.degraded_reason === "projection-catching-up",
+      JSON.stringify({ answer: refusedWithCandidatesBody.answer, reason: refusedWithCandidatesBody.degraded_reason }));
+    check("a refusal during catch-up carries exactly one keyword-only indexing gap",
+      refusedGapTypes.filter((type) => type === "keyword_only_indexing").length === 1,
+      JSON.stringify(refusedGapTypes));
     const supportedBody = (await think(supported, "what does the synthetic record support")).body;
     const healthySupported = mkEnv({
       rows: [supportedRow], vectorIds: [supportedRow.chunk_uid], supportedAnswer: true,
