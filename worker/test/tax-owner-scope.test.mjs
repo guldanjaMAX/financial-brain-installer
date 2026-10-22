@@ -17,6 +17,14 @@ const ownerQuestions = [
   ["What wages are on my 2025 W-2?", "w-2"],
 ];
 
+const ownerTaxProcessQuestions = [
+  "when is my next quarterly tax payment due",
+  "when are my taxes due",
+  "did I file my taxes",
+  "what is my estimated tax payment for Q3",
+  "my taxes",
+];
+
 const ordinaryMoneyQuestions = [
   "How much did I pay Comcast in 2025?",
   "What was our revenue last year?",
@@ -59,6 +67,13 @@ test("AR-07 assessment resolves owner tax questions without widening named-entit
 
 test("AR-07 ordinary owner money questions with years stay outside tax-return scope", async () => {
   const { taxQuestionScopeAssessment } = await moduleAt("worker/src/lib/tax-evidence-scope.js");
+  for (const question of ownerTaxProcessQuestions) {
+    assert.equal(
+      taxQuestionScopeAssessment(question, { owner: OWNER, now: NOW, timeZone: "UTC" }).applicable,
+      false,
+      `a deadline or filing question is not a return-fact question: ${question}`,
+    );
+  }
   for (const question of ordinaryMoneyQuestions) {
     assert.deepEqual(
       taxQuestionScopeAssessment(question, { owner: OWNER, now: NOW, timeZone: "UTC" }),

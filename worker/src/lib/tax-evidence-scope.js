@@ -344,8 +344,14 @@ export function taxQuestionScopeAssessment(question = "", options = {}) {
   const namedTaxLineFactIntent = hasNamedTaxLineFactQuestion(text);
   const ownerState = ownerQuestionState(text, options);
   const ownerTaxWordIntent = explicitOwnerTaxWording(text);
+  // Owner tax wording alone is not a return-fact question: "when are my taxes
+  // due", "did I file my taxes" and "my next quarterly tax payment" ask about
+  // deadlines or filing, and belong to ordinary search, not the strict
+  // owner/year/form return scope.
+  const taxProcessIntent = /\b(?:when|due|deadlines?|file[ds]?|filing|extensions?|estimated|quarterly|next)\b/i.test(text);
   const ownerReturnIntent = ownerState.active && (
-    ownerTaxWordIntent ||
+    ownerTaxWordIntent && (returnFactIntent || /\bhow\s+much\b/i.test(text) || /\bcompare\b/i.test(text)) &&
+      !taxProcessIntent ||
     (returnFactIntent || /\bcompare\b/i.test(text)) && (
       formIntent || adjacentYearBareFormIntent || (bareFormIntent && taxContext) || returnIntent
     )
