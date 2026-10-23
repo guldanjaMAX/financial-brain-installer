@@ -25,7 +25,12 @@ import { tokenStorageStatus, verifyTokenStorageReadable } from "./connectors/goo
 import { probeWindowsDpapi } from "./operations/admin-key-file.mjs";
 import { REVIEWED_WRANGLER_SPEC } from "./operations/wrangler-runtime-contract.mjs";
 import { manifestBankFeedProvider } from "./worker/src/lib/bank-feed-profiles.js";
-import { answerSetupJournalPath, answerSetupOf, resolvedAnswerModels } from "./operations/answer-setup.mjs";
+import {
+  ANTHROPIC_SECRET_NAME,
+  answerSetupJournalPath,
+  answerSetupOf,
+  resolvedAnswerModels,
+} from "./operations/answer-setup.mjs";
 import {
   HALF_RUN,
   SETUP_BUILT_IN,
@@ -888,6 +893,34 @@ export function checkAnthropicKey(manifest = {}, { manifestPath = null, pathExis
     return check("Answer model", WARN, HALF_RUN(manifestPath), setupLine);
   }
   return check("Answer model", OK, setupLine);
+}
+
+/** A configured Claude path is ready only when the deployed Worker names its key. */
+export function checkAnthropicWorkerSecret(manifest = {}, {
+  workerSecretNames = null,
+  inspectionError = null,
+} = {}) {
+  if (answerSetupOf(manifest) === "built-in") {
+    return check("Anthropic Worker key", OK, "not required by the built-in answer models");
+  }
+  if (inspectionError || !Array.isArray(workerSecretNames)) {
+    return check(
+      "Anthropic Worker key",
+      FAIL,
+      `the Worker's ${ANTHROPIC_SECRET_NAME} secret name could not be verified`,
+      "Run `brain doctor <manifest>` again. If it still cannot inspect Worker secret names, repair Cloudflare access before acceptance.",
+    );
+  }
+  const names = new Set(workerSecretNames.filter((name) => typeof name === "string"));
+  if (!names.has(ANTHROPIC_SECRET_NAME)) {
+    return check(
+      "Anthropic Worker key",
+      FAIL,
+      `the Worker's ${ANTHROPIC_SECRET_NAME} secret name is missing`,
+      "Run `brain connect anthropic <manifest>` to verify and deploy the owner-provided key, then rerun `brain doctor`.",
+    );
+  }
+  return check("Anthropic Worker key", OK, `the Worker reports the ${ANTHROPIC_SECRET_NAME} secret name`);
 }
 
 export function checkGoogleConnection(storageStatus, verify = verifyTokenStorageReadable) {

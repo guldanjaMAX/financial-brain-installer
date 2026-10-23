@@ -542,6 +542,8 @@ const expected = [
   "operations/daily-refresh-observation.mjs",
   // Content-free durable dispatch intent is required by the migration runner.
   "operations/migration-statement-intent.mjs",
+  // One structural validator keeps update, migrate, status, and repair honest.
+  "operations/migration-ledger.mjs",
   "operations/upgrade-bookmark.mjs",
   "operations/daily-refresh-plan.mjs",
   "operations/daily-refresh-run.mjs",

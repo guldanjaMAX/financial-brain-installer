@@ -17,11 +17,12 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, resolve, win32 as pathWin32 } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { restrictWindowsDirectoryToCurrentUser } from "./current-user-file.mjs";
 
-const CURRENT_PROCESS_INSTANCE = `${Math.round(Date.now() - process.uptime() * 1000)}`;
+const CURRENT_PROCESS_STARTED_MS = Math.round(Date.now() - process.uptime() * 1000);
 
 const OWNER_RE = /^owner-(\d+)-([a-f0-9]{32})\.json$/u;
 const MIN_STALE_MS = 60_000;
@@ -38,6 +39,68 @@ export class BrainLifecycleLockError extends Error {
 
 function failure(code, message, options) {
   return new BrainLifecycleLockError(code, message, options);
+}
+
+function boundedEnvironment(environment, names) {
+  return Object.fromEntries(names.flatMap((name) =>
+    typeof environment?.[name] === "string" && environment[name]
+      ? [[name, environment[name]]]
+      : []));
+}
+
+/** Stable process ownership without PATH lookup or inherited credentials. */
+export function processStartIdentity(pid, {
+  platform = process.platform,
+  environment = process.env,
+  run = spawnSync,
+} = {}) {
+  const numericPid = Number(pid);
+  if (!Number.isSafeInteger(numericPid) || numericPid <= 0) return null;
+  try {
+    if (platform === "win32") {
+      const systemRoot = String(environment?.SystemRoot || environment?.WINDIR || "");
+      if (!/^[A-Za-z]:\\/u.test(systemRoot)) return null;
+      const executable = pathWin32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+      const command = `$p = Get-Process -Id ${numericPid} -ErrorAction Stop; [Console]::Out.Write($p.StartTime.ToUniversalTime().Ticks)`;
+      const result = run(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command], {
+        encoding: "utf8",
+        env: boundedEnvironment(environment, ["SystemRoot", "WINDIR"]),
+        timeout: 5_000,
+        windowsHide: true,
+      });
+      const ticks = String(result?.stdout || "").trim();
+      return result?.status === 0 && /^\d{15,20}$/u.test(ticks) ? `win32:${ticks}` : null;
+    }
+    if (platform === "linux" || platform === "darwin") {
+      const result = run("/bin/ps", ["-o", "lstart=", "-p", String(numericPid)], {
+        encoding: "utf8",
+        env: {},
+        timeout: 5_000,
+      });
+      const started = Date.parse(String(result?.stdout || "").trim());
+      return result?.status === 0 && Number.isFinite(started) ? `epoch:${started}` : null;
+    }
+  } catch {}
+  return null;
+}
+
+function identityEpochMs(identity) {
+  const value = String(identity || "");
+  if (/^\d{10,14}$/u.test(value)) return Number(value);
+  if (/^epoch:\d+$/u.test(value)) return Number(value.slice(6));
+  if (/^win32:\d+$/u.test(value)) {
+    const ticks = BigInt(value.slice(6));
+    return Number((ticks - 621355968000000000n) / 10000n);
+  }
+  return null;
+}
+
+function sameProcessIdentity(stored, observed) {
+  if (!stored || !observed) return true;
+  if (stored === observed) return true;
+  const storedEpoch = identityEpochMs(stored);
+  const observedEpoch = identityEpochMs(observed);
+  return storedEpoch !== null && observedEpoch !== null && Math.abs(storedEpoch - observedEpoch) <= 2_000;
 }
 
 function assertPrivateDirectory(path, label, platform) {
@@ -230,14 +293,16 @@ function readOwner(path, platform) {
   }
   const pid = Number(match[1]);
   const token = match[2];
+  const createdAt = typeof value?.created_at === "string" ? value.created_at : "";
   if (value?.schema_version !== 2 || value?.pid !== pid || value?.token !== token ||
-      typeof value?.operation !== "string") {
+      typeof value?.operation !== "string" || !Number.isFinite(Date.parse(createdAt))) {
     throw failure("brain_lifecycle_unsafe", "the Brain lifecycle lock owner is malformed");
   }
   return {
     pid,
     token,
     operation: value.operation,
+    created_at: createdAt,
     process_instance: typeof value.process_instance === "string" ? value.process_instance : null,
     path: ownerPath,
     mtimeMs: state.mtimeMs,
@@ -267,8 +332,8 @@ export function acquireBrainLifecycleLock({
   staleMs = DEFAULT_STALE_MS,
   isOwnerAlive = ownerAlive,
   processInstance = (pid) => pid === process.pid
-    ? CURRENT_PROCESS_INSTANCE
-    : null,
+    ? `epoch:${CURRENT_PROCESS_STARTED_MS}`
+    : processStartIdentity(pid, { platform }),
   now = () => new Date(),
   // Real ACLs only exist on a Windows host; a simulated win32 platform on POSIX has nothing to restrict.
   restrictWindowsDirectory = (path, options) => (process.platform === "win32"
@@ -339,13 +404,13 @@ export function acquireBrainLifecycleLock({
       const owner = readOwner(path, platform);
       const live = isOwnerAlive(owner.pid);
       const observedInstance = live ? processInstance(owner.pid) : null;
-      const sameProcess = live && (!owner.process_instance || !observedInstance || owner.process_instance === observedInstance);
-      if (currentTime().getTime() - owner.mtimeMs > staleAfter && !sameProcess) {
+      const sameProcess = live && sameProcessIdentity(owner.process_instance, observedInstance);
+      if (!sameProcess) {
         const current = readOwner(path, platform);
         const currentLive = isOwnerAlive(current.pid);
         const currentInstance = currentLive ? processInstance(current.pid) : null;
         const currentSameProcess = currentLive &&
-          (!current.process_instance || !currentInstance || current.process_instance === currentInstance);
+          sameProcessIdentity(current.process_instance, currentInstance);
         if (current.token === owner.token && current.mtimeMs === owner.mtimeMs && !currentSameProcess) {
           unlinkSync(current.path);
           rmdirSync(path);
@@ -354,7 +419,8 @@ export function acquireBrainLifecycleLock({
       }
       throw failure(
         "brain_lifecycle_busy",
-        `the Brain is already running ${owner.operation}; wait for it to finish before starting ${operation}`,
+        `the Brain lifecycle lock is held by ${owner.operation} since ${owner.created_at}. ` +
+          `That process is still running. Wait for it to finish, then run brain ${operation} again.`,
         { retryable: true },
       );
     }

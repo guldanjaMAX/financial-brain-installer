@@ -77,6 +77,12 @@ import { BANK_ACCESS_WRAPPING_KEY_SECRET } from "./operations/bank-access-wrappi
 import { withBrainLifecycleLock, withBrainLifecycleLockWait } from "./operations/brain-lifecycle-lock.mjs";
 import { renderDailyObservation } from "./operations/daily-refresh-observation.mjs";
 import { createMigrationStatementIntentStore } from "./operations/migration-statement-intent.mjs";
+import {
+  MigrationLedgerReadError,
+  MigrationLedgerValidationError,
+  formatPendingMigrations,
+  readMigrationLedger,
+} from "./operations/migration-ledger.mjs";
 import { createWindowsUpdateBridgeGuard, WindowsDailyTaskRepairRequired } from "./operations/windows-update-bridge.mjs";
 import { planDailyRefresh } from "./operations/daily-refresh-plan.mjs";
 import {
@@ -235,6 +241,7 @@ import {
   bankFeedRedirectUri,
   plaidOwnerReturnAddressCard,
   checkBankFeedRedirect,
+  checkAnthropicWorkerSecret,
   checkPrioritySlice,
   checkClaudeCode,
   checkWrangler,
@@ -5212,15 +5219,6 @@ export async function runRestartSafeMigrationStatements(
   }
 }
 
-async function appliedVersions(acctId, dbId, queryDatabase = d1Query) {
-  try {
-    const r = await queryDatabase(acctId, dbId, "SELECT version, checksum, name FROM schema_migrations");
-    return r?.results || [];
-  } catch {
-    return []; // table does not exist yet, so nothing is applied
-  }
-}
-
 /**
  * Say why a database read failed, instead of only that it did.
  *
@@ -5259,25 +5257,44 @@ export async function cmdMigrate(manifestPath, options = {}) {
 
   const all = loadMigrations();
   if (!all.length) die("no migrations found.");
-  const applied = await appliedVersions(acct.id, dbId, queryDatabase);
-  const appliedMap = new Map(applied.map((a) => [a.version, a]));
+  let ledger;
+  try {
+    ledger = await readMigrationLedger({
+      accountId: acct.id,
+      databaseId: dbId,
+      query: queryDatabase,
+      migrations: all,
+    });
+  } catch (error) {
+    if (error instanceof MigrationLedgerReadError) {
+      die(
+        "migration ledger could not be read. Nothing was migrated. The Brain may still be paused from an update.\n" +
+          databaseReadFailureDetail(error.cause || error) +
+          "\n      When the database is readable, run brain update again; it safely resumes or retries the update.",
+      );
+    }
+    if (error instanceof MigrationLedgerValidationError) {
+      die(
+        `${error.message}. Nothing was migrated.\n` +
+          "      The Brain may still be paused. Run brain update again after the ledger is repaired.",
+      );
+    }
+    throw error;
+  }
 
   // A migration whose content changed after being applied is a hard stop.
   // Editing an applied migration means two installs silently have different
   // schemas under the same version number, which is the worst possible state
   // to debug: everything reports as up to date and nothing matches.
-  for (const mig of all) {
-    const prev = appliedMap.get(mig.version);
-    if (prev && prev.checksum !== mig.checksum) {
-      die(
-        `migration ${mig.name} was already applied but its content has changed.\n` +
-          `      applied checksum ${prev.checksum}, file checksum ${mig.checksum}\n` +
-          "      Applied migrations stay as history. Add a new migration for the next change."
-      );
-    }
+  for (const mismatch of ledger.checksumMismatches) {
+    die(
+      `migration ${mismatch.migration.name} was already applied but its content has changed.\n` +
+        `      applied checksum ${mismatch.row.checksum}, file checksum ${mismatch.migration.checksum}\n` +
+        "      Applied migrations stay as history. Add a new migration for the next change."
+    );
   }
 
-  const pending = all.filter((mig) => !appliedMap.has(mig.version));
+  const pending = ledger.pending;
   if (!pending.length) {
     if (!silent) ok(`schema up to date (${all.length} migration(s) applied)`);
   }
@@ -5599,48 +5616,68 @@ export async function cmdCheck(manifestPath, options = {}) {
   return { ...resultBase, wrote: true, confirmed: answers.length, doc_uid: receipt.doc_uid };
 }
 
-async function cmdStatus(manifestPath) {
-  const { m } = loadManifest(manifestPath);
-  const acct = await resolveAccount(m);
+export async function cmdStatus(manifestPath, options = {}) {
+  const { m } = (options.loadManifest ?? loadManifest)(manifestPath);
+  const acct = await (options.resolveAccount ?? resolveAccount)(m);
+  const queryDatabase = options.d1Query ?? d1Query;
+  const write = options.write ?? console.log;
+  const reportWarning = options.warn ?? warn;
   const dbId = m.infrastructure?.cloudflare?.d1_database_id;
   if (!dbId) die("no d1_database_id in the manifest.");
 
-  const st = await d1Query(acct.id, dbId, "SELECT * FROM install_state WHERE id = 1").catch(
+  const st = await queryDatabase(acct.id, dbId, "SELECT * FROM install_state WHERE id = 1").catch(
     () => null
   );
   const row = st?.results?.[0];
   if (!row) {
-    warn("no install_state row. This install has never been migrated.");
+    reportWarning("no install_state row. This install has never been migrated.");
   } else {
-    console.log(`  client          ${row.client_slug}`);
-    console.log(`  product version ${row.product_version}`);
-    console.log(`  schema version  ${row.schema_version}`);
-    console.log(`  gate version    ${row.gate_version}`);
-    console.log(`  ring            ${row.ring}`);
-    console.log(`  installed       ${row.installed_at}`);
-    console.log(`  last upgraded   ${row.last_upgraded_at || "never"}`);
+    write(`  client          ${row.client_slug}`);
+    write(`  product version ${row.product_version}`);
+    write(`  schema version  ${row.schema_version}`);
+    write(`  gate version    ${row.gate_version}`);
+    write(`  ring            ${row.ring}`);
+    write(`  installed       ${row.installed_at}`);
+    write(`  last upgraded   ${row.last_upgraded_at || "never"}`);
   }
 
-  const runs = await d1Query(
+  const runs = await queryDatabase(
     acct.id,
     dbId,
     "SELECT started_at, from_version, to_version, status FROM upgrade_runs ORDER BY started_at DESC LIMIT 5"
   ).catch(() => null);
   const rows = runs?.results || [];
   if (rows.length) {
-    console.log("\n  recent upgrades:");
+    write("\n  recent upgrades:");
     for (const r of rows) {
       const mark = r.status === "verified" ? "ok" : r.status === "rolled_back" ? "!!" : "  ";
-      console.log(`    ${mark} ${r.started_at.slice(0, 19)}  ${r.from_version || "?"} -> ${r.to_version || "?"}  ${r.status}`);
+      write(`    ${mark} ${r.started_at.slice(0, 19)}  ${r.from_version || "?"} -> ${r.to_version || "?"}  ${r.status}`);
     }
   }
 
-  const local = loadMigrations();
-  const applied = await appliedVersions(acct.id, dbId);
-  const pending = local.filter((l) => !applied.some((a) => a.version === l.version));
-  console.log(
-    `\n  migrations: ${applied.length} applied, ${pending.length} pending${pending.length ? " (" + pending.map((p) => p.name).join(", ") + ")" : ""}`
+  const local = (options.loadMigrations ?? loadMigrations)();
+  let ledger;
+  try {
+    ledger = await readMigrationLedger({
+      accountId: acct.id,
+      databaseId: dbId,
+      query: queryDatabase,
+      migrations: local,
+    });
+  } catch (error) {
+    reportWarning(`migration ledger could not be verified: ${String(error?.message || error).slice(0, 180)}`);
+    return;
+  }
+  write(
+    `\n  migrations: ${ledger.applied.length} applied, ${ledger.pending.length} pending${ledger.pending.length ? " (" + ledger.pending.map((p) => p.name).join(", ") + ")" : ""}`
   );
+  const recordedSchema = Number(row?.schema_version);
+  if (Number.isSafeInteger(recordedSchema) && recordedSchema < ledger.maxAppliedVersion) {
+    reportWarning(
+      `recorded schema ${recordedSchema} is below ledger maximum ${ledger.maxAppliedVersion}. ` +
+        "An older CLI may have lowered the recorded value. Run brain update to repair and verify it.",
+    );
+  }
 }
 
 /**
@@ -6787,6 +6824,7 @@ export async function cmdUpgrade(manifestPath, options = {}) {
   const verifyAcceptance = options.cmdTest ?? cmdTest;
   const commitVersion = options.commitManifestVersion ?? commitManifestVersion;
   const persistBookmark = options.saveUpgradeBookmark ?? saveUpgradeBookmark;
+  const reportWarning = options.warn ?? warn;
   const waitForVectorDrainQuiescence = options.waitForVectorDrainQuiescence ??
     ((milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)));
   let originalPin = pinUpdateManifest(manifestPath);
@@ -6877,6 +6915,7 @@ export async function cmdUpgrade(manifestPath, options = {}) {
       die("update stopped because the manifest product version is invalid. Nothing was changed.");
     }
     const recordedVersions = [...new Set([stateVersion, manifestVersion].filter(Boolean))];
+    const sealedMigrations = loadMigrations();
     let newestRecordedVersion = null;
     try {
       parseSemver(toVersion);
@@ -6885,7 +6924,7 @@ export async function cmdUpgrade(manifestPath, options = {}) {
         if (!newestRecordedVersion || compareSemver(recordedVersion, newestRecordedVersion) > 0) {
           newestRecordedVersion = recordedVersion;
         }
-        const schemaRefusal = schemaAheadOfReleaseRefusal(before?.schema_version, loadMigrations(), toVersion);
+        const schemaRefusal = schemaAheadOfReleaseRefusal(before?.schema_version, sealedMigrations, toVersion);
         if (schemaRefusal) die(schemaRefusal);
         const direction = compareSemver(recordedVersion, toVersion);
         if (direction > 0) {
@@ -6901,6 +6940,49 @@ export async function cmdUpgrade(manifestPath, options = {}) {
     }
     const fromVersion = stateVersion || newestRecordedVersion || "legacy-unrecorded";
     if (!before) info("legacy install_state is absent; migrations will create it after the safety snapshot");
+
+    // The complete durable ledger is proved before the first remote mutation.
+    // An install_state singleton cannot expose unknown rows, gaps, renamed
+    // migrations, or checksum drift, and a failed read is not an empty ledger.
+    let ledger;
+    try {
+      ledger = await readMigrationLedger({
+        accountId,
+        databaseId: dbId,
+        query: queryDatabase,
+        migrations: sealedMigrations,
+      });
+    } catch (error) {
+      if (error instanceof MigrationLedgerReadError) {
+        die(
+          "update stopped because the migration ledger could not be read. Nothing was changed by this run. " +
+            "If the Brain was already paused, it remains paused.\n" +
+            databaseReadFailureDetail(error.cause || error) +
+            "\n      Run brain update again when the database is readable; the retry is safe.",
+        );
+      }
+      if (error instanceof MigrationLedgerValidationError) {
+        die(`update stopped before the pause because ${error.message}. Nothing was changed.`);
+      }
+      throw error;
+    }
+    if (ledger.checksumMismatches.length) {
+      const mismatch = ledger.checksumMismatches[0];
+      die(
+        `migration ${mismatch.migration.name} was already applied but its content has changed.\n` +
+          `      applied checksum ${mismatch.row.checksum}, file checksum ${mismatch.migration.checksum}\n` +
+          "      Nothing was changed. Run brain doctor <manifest> --repair-checksum to preview the repair.",
+      );
+    }
+    (options.reportMigrationPlan ?? info)(formatPendingMigrations(ledger.pending));
+    const recordedSchema = Number(before?.schema_version);
+    if (Number.isSafeInteger(recordedSchema) && recordedSchema < ledger.maxAppliedVersion) {
+      reportWarning(
+        `recorded schema ${recordedSchema} is below ledger maximum ${ledger.maxAppliedVersion}. ` +
+          "An older CLI lowered the recorded value. This brain update will repair and verify it; " +
+          "if this run stops, run brain update again.",
+      );
+    }
 
     // Snapshot first. A bookmark taken after a migration is worthless.
     await assertStageContext("D1 bookmark capture");
@@ -21167,31 +21249,6 @@ export async function diagnoseChecksumDrift(manifestPath, options = {}) {
     };
   }
 
-  // Deliberately NOT reusing the shared appliedVersions() helper here: it
-  // swallows every query failure into an empty list ("table does not exist
-  // yet, so nothing is applied" — correct for cmdMigrate, which only cares
-  // whether it is safe to proceed). This check exists to REPORT drift
-  // honestly, so a real query failure must degrade to checked:false, not to
-  // a confident "zero drift found" — the exact "degraded state presented as
-  // a confident negative" the product's honesty rules forbid. A missing
-  // table is the one failure that legitimately does mean zero applied
-  // migrations (a brand new install, never yet migrated), so that specific
-  // case alone is treated as empty rather than as a check failure.
-  const queryDatabase = options.d1Query ?? d1Query;
-  let applied;
-  try {
-    const r = await queryDatabase(acct.id, dbId, "SELECT version, checksum, name FROM schema_migrations");
-    applied = r?.results || [];
-  } catch (error) {
-    const message = String(error?.message || error);
-    if (/no such table/i.test(message)) {
-      applied = [];
-    } else {
-      return { checked: false, reason: `could not read schema_migrations: ${message.slice(0, 160)}` };
-    }
-  }
-  const appliedMap = new Map(applied.map((a) => [a.version, a]));
-
   let migrations;
   try {
     migrations = (options.loadMigrations ?? loadMigrations)();
@@ -21199,13 +21256,24 @@ export async function diagnoseChecksumDrift(manifestPath, options = {}) {
     return { checked: false, reason: `could not read local migration files: ${String(error?.message || error).slice(0, 160)}` };
   }
 
-  const drift = [];
-  for (const mig of migrations) {
-    const prev = appliedMap.get(mig.version);
-    if (prev && prev.checksum !== mig.checksum) {
-      drift.push(describeChecksumDrift(mig, prev));
-    }
+  const queryDatabase = options.d1Query ?? d1Query;
+  let ledger;
+  try {
+    ledger = await readMigrationLedger({
+      accountId: acct.id,
+      databaseId: dbId,
+      query: queryDatabase,
+      migrations,
+    });
+  } catch (error) {
+    const reason = error instanceof MigrationLedgerReadError
+      ? `could not read schema_migrations: ${String(error.cause?.message || error.message).slice(0, 160)}`
+      : String(error?.message || error).slice(0, 160);
+    return { checked: false, reason };
   }
+
+  const drift = ledger.checksumMismatches.map(({ migration, row }) =>
+    describeChecksumDrift(migration, row));
 
   return { checked: true, drift, acctId: acct.id, dbId };
 }
@@ -21407,6 +21475,40 @@ async function buildChecksumDriftCheck(manifestPath, options = {}) {
   return { name: "migration checksums", status: D_OK, detail: "every applied migration matches its file" };
 }
 
+/**
+ * Verify only the deployed Worker's secret-name inventory. Secret values are
+ * neither requested nor accepted here, and the local process environment is
+ * intentionally irrelevant to this deployed-readiness decision.
+ */
+export async function buildAnthropicWorkerSecretCheck(manifestPath, options = {}) {
+  let manifest;
+  try {
+    ({ m: manifest } = (options.loadManifest ?? loadManifest)(manifestPath));
+  } catch (error) {
+    return checkAnthropicWorkerSecret({}, { inspectionError: error });
+  }
+  if (answerSetupOf(manifest) === "built-in") {
+    return checkAnthropicWorkerSecret(manifest, { workerSecretNames: [] });
+  }
+  try {
+    const account = await (options.resolveAccount ?? resolveAccount)(manifest);
+    if (!account?.id) throw new Error("the Cloudflare account identity is unavailable");
+    const scriptName = manifest.brain?.worker_name || `${manifest.client?.slug || "client"}-brain`;
+    const inventory = await (options.cf ?? cf)(
+      `/accounts/${account.id}/workers/scripts/${scriptName}/secrets`,
+    );
+    if (!Array.isArray(inventory) || inventory.some((entry) =>
+      !entry || typeof entry !== "object" || typeof entry.name !== "string")) {
+      throw new Error("the Worker secret-name inventory is malformed");
+    }
+    return checkAnthropicWorkerSecret(manifest, {
+      workerSecretNames: inventory.map((entry) => entry.name),
+    });
+  } catch (error) {
+    return checkAnthropicWorkerSecret(manifest, { inspectionError: error });
+  }
+}
+
 export function doctorClosingMessage(existingBrain, warnings) {
   const suffix = warnings ? ` (${warnings} optional item(s) not set up)` : "";
   return `${existingBrain ? "checkup complete" : "ready to install"}${suffix}`;
@@ -21468,6 +21570,15 @@ export async function cmdDoctor(manifestPath, options = {}) {
       checks.push(upgradeCheck);
       const mark = upgradeCheck.status === D_OK ? c.green("ok  ") : upgradeCheck.status === D_WARN ? c.yellow("warn") : c.red("FAIL");
       console.log(`  ${mark}  ${upgradeCheck.name.padEnd(18)}  ${upgradeCheck.detail}`);
+
+      const anthropicCheck = await (
+        options.buildAnthropicWorkerSecretCheck ?? buildAnthropicWorkerSecretCheck
+      )(manifestPath);
+      checks.push(anthropicCheck);
+      const anthropicMark = anthropicCheck.status === D_OK
+        ? c.green("ok  ")
+        : anthropicCheck.status === D_WARN ? c.yellow("warn") : c.red("FAIL");
+      console.log(`  ${anthropicMark}  ${anthropicCheck.name.padEnd(18)}  ${anthropicCheck.detail}`);
 
       const checksumCheck = await (options.buildChecksumDriftCheck ?? buildChecksumDriftCheck)(manifestPath);
       checks.push(checksumCheck);

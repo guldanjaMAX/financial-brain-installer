@@ -607,7 +607,7 @@ refresh, the owner approves the official browser prompt. The bounded hidden
 token path appears only when the released CLI offers recovery and the owner
 chooses it.
 
-For every migration that no longer matches, it prints when it was applied, both checksums, the current file's size in lines and bytes, and whether the difference is only line endings. That last line is a proof rather than a guess: it converts the current file to LF and to CRLF and checks each against the recorded checksum. If neither reproduces it, it says `not confirmable as a pure line-ending change` and tells you to review the file by hand, because the bytes that originally ran were never kept, only their checksum was.
+For every migration that no longer matches, it prints the recorded applied time, both checksums, the current file's size in lines and bytes, and whether the difference is only line endings. Older ledger rows may show `applied at: unknown` because that time was not recorded. It never claims the repair applied a migration. That last line is a proof rather than a guess: it converts the current file to LF and to CRLF and checks each against the recorded checksum. If neither reproduces it, it says `not confirmable as a pure line-ending change` and tells you to review the file by hand, because the bytes that originally ran were never kept, only their checksum was.
 
 When the preview is right, confirm it:
 
@@ -618,9 +618,13 @@ node brain.mjs doctor <manifest> --repair-checksum --yes
 That records the current file's checksum for each drifted migration and does nothing else. No migration SQL runs. Then confirm normal work is unblocked:
 
 ```
-node brain.mjs status <manifest>
-node brain.mjs migrate <manifest>
+brain status <manifest>
+brain update <manifest>
 ```
+
+`brain update` is the supported repair path. It validates the complete migration
+ledger, prints the computed pending range, and coordinates the paused Worker
+before it changes D1. Do not run the internal migration step directly.
 
 **`--repair` will not fix this, and it is the wrong reach.** It replays the same update path, which runs the same check and stops in the same place. `--rollback` does not fit either, because there is no bad change to restore away from.
 
