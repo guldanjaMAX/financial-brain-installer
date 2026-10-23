@@ -436,8 +436,16 @@ something".
 checks; when it is absent, those calls use `ANSWER_MODEL` exactly as before.
 Each call routes from its configured model, so a mixed Cloudflare and Anthropic
 pair is permitted only when both provider paths are available. A configured
-Anthropic model without its key retains the built-in-model fallback, but
-`/think` returns an `answer_provider_fallback` gap and `brain health` warns.
+Anthropic answer or check model without its key refuses those calls without a
+Workers AI fallback; `/think` returns an `anthropic_key_missing` gap while
+search stays available. Reranking retains its existing fallback behavior.
+
+`brain connect anthropic` has an eight-minute elapsed-time guard checked
+between its version, preflight, manifest, scheduler, secret, deploy, and Worker
+proof operations. The injected operation contracts are not cancellable. If one
+operation itself never returns, the guard cannot run again until that operation
+settles; this release does not claim an abort contract for an in-flight
+dependency.
 
 For a narrow contact lookup, `/think` can extract an address, email, phone,
 company, or role directly from one explicitly labelled contact record or a
@@ -2075,8 +2083,10 @@ Read this before scoping an engagement.
   real-account proven. A WhatsApp Business App account does not make that
   connector official.
 - **Some manifest declarations are still inert.** Google Drive source policy
-  and the macOS `operations.ingest_cron` scheduler are wired. Other undeveloped
-  corpora, health/report/webhook operations, most of `retrieval`,
+  and the macOS `operations.ingest_cron` scheduler are wired. Retrieval's
+  `answer_model` and optional `gate_model` are deployed Worker configuration;
+  an omitted gate model uses the answer model. Other undeveloped corpora,
+  health/report/webhook operations, most remaining `retrieval`,
   `access.authorized_emails`, `kv_namespace` and `r2_bucket` are read by nothing.
   `manifest.schema.json` marks the important boundaries. Do not tell a client an
   unwired declaration takes effect.

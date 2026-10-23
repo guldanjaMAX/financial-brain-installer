@@ -6623,7 +6623,7 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
     const requiredBindingNames = [
       "AI", "ANSWER_MODEL", "BRAIN_NAME", "BRAIN_OWNER", "BRAIN_VERSION",
       "CHUNK_OVERLAP", "CHUNK_SIZE", "CREDENTIAL_SCANNER", "DAILY_LLM_CAP_USD",
-      "DB", "OCR_ENABLED", "OCR_MODEL", "STORAGE", "VECTORIZE",
+      "DB", "GATE_MODEL", "OCR_ENABLED", "OCR_MODEL", "STORAGE", "VECTORIZE",
     ];
     const actualNonSecretNames = bindings
       .filter((entry) => entry.type !== "secret_text" && entry.name !== "VECTOR_DRAIN_MODE")
@@ -6677,6 +6677,7 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
         chunkOverlap !== binding.chunkOverlap || dailyCap !== binding.dailyLlmCapUsd ||
         plainText("BRAIN_OWNER") !== binding.clientDisplayName ||
         plainText("ANSWER_MODEL") !== binding.answerModel ||
+        plainText("GATE_MODEL") !== (binding.gateModel || binding.answerModel) ||
         plainText("CREDENTIAL_SCANNER") !== binding.credentialScanner) {
       refuse("RECOVERY_WORKER_BINDINGS_INVALID");
     }

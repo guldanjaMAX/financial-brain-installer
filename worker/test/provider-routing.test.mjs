@@ -126,6 +126,7 @@ try {
       { max_tokens: 1000, anthropic_max_tokens: 4000 },
     ),
     (error) => error?.name === "AnthropicEmptyResponseError" &&
+      error?.code === "ANTHROPIC_EMPTY_TEXT" &&
       error?.output_budget_exhausted === true &&
       /used its whole output budget before writing an answer/.test(error.message),
   );

@@ -265,16 +265,19 @@ export function workersAiRate(model) {
 /**
  * Per-model Anthropic rates, in dollars per million tokens.
  *
- * Prefixes cover dated model IDs. Each listed price is as of 2026-10-22 and
- * comes from third-party sources; unknown IDs retain the prior conservative
- * Sonnet 4.5 estimate rather than assuming a cheaper family. Thinking tokens
- * are already included in Anthropic's output_tokens total.
+ * These list prices are from Anthropic's first-party pricing page, checked
+ * 2026-10-22. Opus 5.5 is $4/$20, Sonnet 5.5 is $2/$10, and Haiku 5.5 is
+ * $0.10/$0.50 per million input/output tokens for prompts up to 100k tokens
+ * ($0.50/$2.50 above that; Brain prompts are far below it). Prefix matching
+ * covers dated model IDs. Unknown Claude IDs retain the conservative $3/$15
+ * estimate so a new model cannot weaken the cap. Thinking tokens are already
+ * included in `usage.output_tokens` and must not be added a second time.
  */
 const ANTHROPIC_RATES = [
-  ["claude-haiku-5-5", { in: 0.1, out: 0.5 }], // 2026-10-22, third-party sources.
-  ["claude-haiku-4-5", { in: 1, out: 5 }], // 2026-10-22, third-party sources.
-  ["claude-sonnet-5-5", { in: 2, out: 10 }], // 2026-10-22, third-party sources.
-  ["claude-opus-5-5", { in: 4, out: 20 }], // 2026-10-22, third-party sources.
+  ["claude-haiku-5-5", { in: 0.1, out: 0.5 }],
+  ["claude-haiku-4-5", { in: 1, out: 5 }],
+  ["claude-sonnet-5-5", { in: 2, out: 10 }],
+  ["claude-opus-5-5", { in: 4, out: 20 }],
 ];
 const ANTHROPIC_FALLBACK_RATE = { in: 3, out: 15 };
 
@@ -305,8 +308,10 @@ export class AnthropicEmptyResponseError extends Error {
       ? "The Anthropic answer model used its whole output budget before writing an answer."
       : "Anthropic returned no answer text.");
     this.name = "AnthropicEmptyResponseError";
+    this.code = "ANTHROPIC_EMPTY_TEXT";
     this.anthropic_empty_response = true;
     this.output_budget_exhausted = budgetExhausted;
+    this.stop_reason = stopReason || null;
   }
 }
 
@@ -317,6 +322,22 @@ export class AnthropicIncompleteResponseError extends Error {
     this.anthropic_incomplete_response = true;
     this.stop_reason = stopReason || null;
   }
+}
+
+export const ANSWER_AND_CHECK_LABELS = Object.freeze([
+  "rag-think",
+  "rag-think-repair",
+  "rag-synthesis-gate",
+  "rag-evidence-gate",
+  "answer-model-check",
+]);
+const ANSWER_AND_CHECK_LABEL_SET = new Set(ANSWER_AND_CHECK_LABELS);
+
+function anthropicEffort(model) {
+  const id = String(model || "");
+  if (id === "claude-opus-5-5" || id.startsWith("claude-opus-5-5-")) return "medium";
+  if (id === "claude-sonnet-5-5" || id.startsWith("claude-sonnet-5-5-")) return "high";
+  return null;
 }
 
 function isAbortLike(error) {
@@ -391,11 +412,9 @@ async function callLLMImpl(env, {
   timingStage,
 }) {
   const apiKey = env.ANTHROPIC_API_KEY;
-  if (!apiKey && !env.AI) {
-    const e = new Error("no LLM key configured");
-    e.no_key = true;
-    throw e;
-  }
+  const modelIsCloudflare = !model || String(model).startsWith("@cf/");
+  const missingAnswerKey = !apiKey && !modelIsCloudflare &&
+    ANSWER_AND_CHECK_LABEL_SET.has(label);
 
   // An image is a page of the client's own scanned document. It has exactly one
   // legal destination: the Workers AI binding inside their own Cloudflare
@@ -424,6 +443,18 @@ async function callLLMImpl(env, {
 
   await ensureLogTable(env);
 
+  if (missingAnswerKey) {
+    await logCall(env, { label, model, status: "blocked", micros: 0 });
+    const error = new Error("the configured Anthropic answer or check model has no Anthropic key");
+    error.no_anthropic_key = true;
+    throw error;
+  }
+  if (!apiKey && !env.AI) {
+    const error = new Error("no LLM key configured");
+    error.no_key = true;
+    throw error;
+  }
+
   const capUsd = capUsdFor(env);
   const { micros: spent, degraded } = await readSpend(env);
   const budgetUsd = degraded ? degradedBudgetUsd(capUsd) : capUsd;
@@ -450,7 +481,6 @@ async function callLLMImpl(env, {
   // key alone silently promoted Anthropic from "reranking only" to "every
   // answer", so a client's document text reached a provider their own manifest
   // did not name. That is a custody claim, not a preference.
-  const modelIsCloudflare = !model || String(model).startsWith("@cf/");
   if (!apiKey || (modelIsCloudflare && env.AI)) {
     const workersModel = String(model || "").startsWith("@cf/")
       ? model
@@ -512,6 +542,9 @@ async function callLLMImpl(env, {
         model: workersModel,
         usage: data?.usage || {},
         provider: "cloudflare-workers-ai",
+        ...(!apiKey && !modelIsCloudflare
+          ? { provider_fallback: "anthropic_key_missing" }
+          : {}),
       };
     } catch (error) {
       await logCall(env, { label, model: workersModel, status: "error", micros: 0 });
@@ -562,6 +595,9 @@ async function callLLMImpl(env, {
           max_tokens: effectiveAnthropicMaxTokens,
           system,
           messages,
+          ...(anthropicEffort(anthropicModel)
+            ? { output_config: { effort: anthropicEffort(anthropicModel) } }
+            : {}),
         }),
         signal: AbortSignal.timeout(timeoutMs || 45_000),
       });
@@ -573,7 +609,12 @@ async function callLLMImpl(env, {
     if (!res.ok) {
       const text = await res.text();
       await logCall(env, { label, model, status: "error", micros: 0 });
-      throw new Error(`Anthropic ${res.status}: ${text.slice(0, 300)}`);
+      let message = "";
+      try { message = String(JSON.parse(text)?.error?.message || ""); } catch { /* protected log only */ }
+      const error = new Error(`Anthropic ${res.status}: ${text.slice(0, 300)}`);
+      error.anthropic_status = res.status;
+      error.provider_error_class = classifyAnthropicFailure(res.status, message);
+      throw error;
     }
 
     try {
@@ -601,4 +642,14 @@ async function callLLMImpl(env, {
     stop_reason: data?.stop_reason,
     provider: "anthropic",
   };
+}
+
+export function classifyAnthropicFailure(status, message = "") {
+  const code = Number(status);
+  if (code === 401 || code === 403) return "key_rejected";
+  if (code === 402 || (code === 400 && /credit balance/i.test(String(message)))) return "billing";
+  if (code === 400) return "error";
+  if (code === 404) return "model_unavailable";
+  if (code === 429 || code === 529 || code >= 500) return "busy";
+  return "error";
 }

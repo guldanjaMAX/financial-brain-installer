@@ -546,6 +546,8 @@ other homework.
    update, tell the owner to quit Claude Code (and Codex, if they use it), open
    it again, type `/exit`, then `claude --continue`, and ask: "check my Brain."
 
+For an existing Brain, set up Claude answers only when the owner asks for it, for example 'set up Claude answers'. Never offer it on your own after an update. An update never changes the answer model.
+
 ## Offer Claude Code concierge browser help
 
 Claude Code is the primary install surface. At the start of an install,
@@ -586,6 +588,8 @@ For every browser-assisted account ceremony:
    any failure into ordinary language, say whether anything changed, and
    resume the same safe step rather than starting over.
 
+Anthropic Console (answer setup). With approval and browser control, open the Claude Console, navigate, read the Data retention settings, and on API keys start Create Key and type the name Financial Brain. Confirm the Development Partner Program button reads Join and HIPAA is off; if either differs, stop and explain. If the owner is sharing a screen or recording a call, ask them to stop sharing and pause the recording before the key is created, and to resume only after the key window is closed. The owner signs in, approves billing or credit, clicks Create and Copy, and keeps the key window open until the command reports success; then the owner closes it. Do not look at the screen while the key window is open. Never read, screenshot, transcribe or paste the key; a key that appears in chat, a screenshot or a recording is exposed and must be deleted in the Console and replaced.
+
 Fresh Cloudflare setup uses the Brain CLI's browser sign-in and needs no API
 token. Let the CLI open the page, use browser control for ordinary navigation,
 then hand over for Cloudflare sign-in, 2FA, account confirmation, and the final
@@ -622,6 +626,8 @@ private credential entry on Windows. This release does not ship or claim a
 verified PowerShell secret-entry bridge for Claude Code. Leave those connectors
 unconfigured on that computer instead of falling back to a direct hidden prompt,
 command argument, or persistent environment variable.
+
+The Anthropic answer step is the exception on Windows: it uses the reviewed clipboard route (--from-clipboard, cleared afterwards) or the masked Cloudflare dashboard field (--key-set-in-dashboard), never a hidden prompt.
 
 This is a handoff, not an exam. Keep the owner oriented and encouraged, give
 one decision at a time, and quietly handle every safe technical detail the
@@ -857,6 +863,20 @@ must stop before resource creation.
    token. The owner still performs sign-in, 2FA, billing acceptance, and final
    consent in the browser.
 
+   After the smoke step on install day, give the owner one decision with your pick, using the decision text below: Opus answers, Sonnet checks (recommended), or keep the built-in model. Fill in the reset time in the owner's time zone. On yes, follow the Anthropic Console paragraph, then run the plan's anthropic command with a 10-minute Bash timeout. On no, move on and do not offer it again.
+
+> Before we connect your sources, one choice: who writes your Brain's answers.
+>
+> My pick: Opus answers, Sonnet checks. Claude Opus writes each answer from your records, and Claude Sonnet checks it before you see it. It runs on your own Anthropic account and card. We never see your key or pay for it. In our testing Claude Opus was the clear winner: none of the 48 answers this setup gave was graded wrong, though about 1 in 10 had a small mistaken detail. It is not a guarantee, so every answer still shows its sources.
+>
+> Cost: each Brain answer costs about 5.5 cents. At 5 to 20 questions a day that is roughly $8 to $33 a month, up to double when a question needs a retry. Your Brain stops answering for the day if its estimated spend reaches $5, and starts again at <reset time in your time zone>.
+>
+> Privacy: for each question, your Brain sends Anthropic your question, your name, and about a dozen matching record excerpts. Under its commercial terms Anthropic may not train on them. It deletes them within 30 days, except content its safety checks flag (up to 2 years) or where the law requires longer.
+>
+> The other choice is the built-in Cloudflare model: no second account and almost no cost, but in the same test 16 of its 43 answers were wrong.
+>
+> If you say yes, your part is: sign in to Anthropic, add a card if it asks, click Create and Copy when I say, and approve one command. I do the rest. Shall I set it up?
+
 ## Answer from the Brain
 
 Every answer that uses the Brain follows the answer rules the installer keeps
@@ -874,11 +894,20 @@ Brain's own answer only when the owner asks or a brain_financial_map flow calls
 for it. Add account names under
 "My accounts" only after the owner approves the exact lines.
 
+If answers are paused:
+
+- If a gap has type anthropic_key_missing, tell the owner once that answers are paused until the Anthropic key is reconnected, and offer to run `brain connect anthropic <manifest> --from-clipboard` after they copy a new key. brain_search still works meanwhile.
+- If answer_error says the Anthropic account needs attention, say once that the key was not accepted or the credit ran out, and offer to open the Claude Console. Do not retry the same question.
+- If answer_error says today's spending limit was reached, give the time answers start again in the owner's own time zone (answer_resumes_at, which is midnight UTC), and say the limit can be raised with `brain connect anthropic <manifest> --keep-key --daily-cap <usd>`. The same limit also covers reading scanned pages. Do not retry.
+- If answer_error says answers are paused for a few minutes, wait a few minutes before asking again.
+
 Brain conversations belong in the Financial Brain folder: open Claude Code (or
 Codex) there. If this conversation runs in Desktop, Downloads, or a synced
 folder, say so once and suggest that folder for next time.
 
 ## Credential boundary
+
+Anthropic API keys: entered only through brain connect anthropic (clipboard or the masked Cloudflare field). Never in chat, an environment variable, a command argument or a file.
 
 - Normal fresh Cloudflare setup uses the owner's official browser sign-in and
   the Brain's named protected local profile. Do not send a fresh owner to the

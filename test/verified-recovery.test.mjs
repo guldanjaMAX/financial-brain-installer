@@ -376,10 +376,31 @@ try {
     assert.equal(binding.chunkOverlap, "300");
     assert.equal(binding.dailyLlmCapUsd, "10");
     assert.equal(binding.answerModel, "@cf/meta/llama-3.3-70b-instruct-fp8-fast");
+    assert.equal(binding.gateModel, binding.answerModel,
+      "an older contract without gate_model restores checks on its answer model");
     assert.equal(binding.credentialScanner, "on");
     assert.equal(binding.ocrEnabled, "0");
     assert.equal(binding.ocrModel, "@cf/meta/llama-4-scout-17b-16e-instruct");
   }
+
+  const pairedSourcePath = join(sandbox, "paired-source.manifest.json");
+  const pairedTargetPath = join(sandbox, "paired-target.manifest.json");
+  const pairedSource = structuredClone(sourceManifest);
+  const pairedTarget = structuredClone(targetManifest);
+  for (const value of [pairedSource, pairedTarget]) {
+    value.retrieval.answer_model = "claude-opus-5-5";
+    value.retrieval.gate_model = "claude-sonnet-5-5";
+  }
+  writeJson(pairedSourcePath, pairedSource);
+  writeJson(pairedTargetPath, pairedTarget);
+  const pairedPlan = buildVerifiedRecoveryPlan(pairedSourcePath, pairedTargetPath, { now: createdAt });
+  const pairedBindings = inspectVerifiedRecoveryManifestBindings(
+    pairedPlan,
+    pairedSourcePath,
+    pairedTargetPath,
+  );
+  assert.equal(pairedBindings.target.answerModel, "claude-opus-5-5");
+  assert.equal(pairedBindings.target.gateModel, "claude-sonnet-5-5");
 
   const exactCampaignSourcePath = join(sandbox, "v048-source.manifest.json");
   const exactCampaignTargetPath = join(sandbox, "v048-target.manifest.json");

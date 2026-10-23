@@ -18,6 +18,7 @@ import * as workspace from "../operations/claude-workspace.mjs";
 import * as cli from "../brain.mjs";
 import { reviewedSkillContent } from "../operations/claude-skill.mjs";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
+import { MONEY_RULES_LINE } from "../operations/answer-setup-copy.mjs";
 
 const BEGIN = '<!-- BEGIN Financial Brain answer rules (written by Financial Brain setup and update; running either again replaces this section and keeps your "My accounts" lines) -->';
 const END = "<!-- END Financial Brain answer rules -->";
@@ -27,9 +28,9 @@ const ACCOUNTS = ["- ****0001 = business checking", "- ****0002 = personal card"
 const ACCOUNT_HEADING = "## My accounts (fill in once, after the owner confirms)";
 const SAVE_HEADING = "## Financial Brain: at the end of a working session";
 const hashes = {
-  "answer-contract-v1.md": "5579e399875fdd360f0e32e32b4cefe14e7ecdb624822e0bb3c38771222a7fb4",
-  "money-rules-v3.md": "39ef0112870be93fbf100175e1c8f77b536e341c511292499661a506ec2ffddb",
-  "money-rules-v3-windows.md": "dcdba35ae84661933d1bc241c26cf3fc83eaf4d284bcdff790c60f07f32f36b6",
+  "answer-contract-v1.md": "440a931d73efce5e226e7e44da5d84b52ca8497754f7fd40526c8736348f2451",
+  "money-rules-v3.md": "7edd72150a8382a566ea1993330ac5db3229905faedfd536b80c30f4d4232c6c",
+  "money-rules-v3-windows.md": "647097ae52a4c32ce78828a24092b6a9c5b53581884e7439080be52770a5703e",
 };
 // Repeated writer/race tests exercise real filesystem checks. Native reparse
 // detection has separate refusal/control and one bounded Windows smoke test;
@@ -136,6 +137,20 @@ test("a: verbatim inputs, platform control, assistant substitution and one sessi
   assert.match(skill, /Search again with other wording, or sort\s+"newest" for status/);
   assert.match(skill, /give\s+each fact's source title and date/);
   assert.match(skill, /owner asks or a brain_financial_map flow calls\s+for it/);
+});
+
+test("answer pause rules render the exact manifest-bound connect and cap commands", () => {
+  const connectCommand = renderCopyableCommand("/fixture/brain", [
+    "connect", "anthropic", "/fixture/brain.manifest.json", "--from-clipboard",
+  ]);
+  const capCommand = renderCopyableCommand("/fixture/brain", [
+    "connect", "anthropic", "/fixture/brain.manifest.json", "--keep-key", "--daily-cap", "<usd>",
+  ]);
+  const text = workspace.renderOwnerRulesSection({ connectCommand, capCommand });
+  assert.ok(text.includes(connectCommand));
+  assert.ok(text.includes(capCommand));
+  assert.doesNotMatch(text, /\{\{(?:CONNECT|CAP)_COMMAND\}\}/);
+  assert.ok(text.includes(MONEY_RULES_LINE));
 });
 
 for (const [assistant, filename, marker, write] of writers) {
@@ -637,17 +652,20 @@ for (const [assistant, filename] of writers) test(`WIN R4 setup creates a missin
   assert.equal(result.output.includes(WINDOWS_GUIDE_NOTICE), false);
 });
 
-test("i: skill insertion is exact, bounded and inert under Windows command rendering", () => {
+test("i: skill insertion is exact, bounded and renders answer-setup commands on Windows", () => {
   const skillPath = new URL("../skills/financial-brain-technician/SKILL.md", import.meta.url);
   const skill = readFileSync(skillPath, "utf8");
   assert.equal(count(skill, "## Answer from the Brain\n"), 1);
   const section = skill.slice(skill.indexOf("## Answer from the Brain\n"), skill.indexOf("## Credential boundary\n"));
-  assert.equal(sha(section), "25277107aee708d61ef39170b5d267c7d778c7e7bcd6379fffd108b67ddd3bd4");
-  assert.ok(Buffer.byteLength(skill) <= 65_000);
+  assert.equal(sha(section), "5c9b64c1f19c6abeaa525250486350c45d458c15b947aa0a07f3d3ac21beab10");
+  assert.ok(Buffer.byteLength(skill) <= 72 * 1024);
   for (const platform of ["darwin", "win32"]) {
     const rendering = { platform, nodePath: "C:\\Runtime\\node.exe", scriptPath: "C:\\Brain\\brain.mjs", env: {}, existsSync: () => false };
-    assert.equal(renderCliCommands(section, rendering), section);
-    assert.ok(reviewedSkillContent(skillPath, rendering).includes(section));
+    const expected = section
+      .replace("brain connect anthropic <manifest> --from-clipboard", renderCliCommands("brain connect anthropic <manifest> --from-clipboard", rendering))
+      .replace("brain connect anthropic <manifest> --keep-key --daily-cap <usd>", renderCliCommands("brain connect anthropic <manifest> --keep-key --daily-cap <usd>", rendering));
+    assert.equal(renderCliCommands(section, rendering), expected);
+    assert.ok(reviewedSkillContent(skillPath, rendering).includes(expected));
     if (platform === "win32") assert.notEqual(renderCliCommands("brain doctor", rendering), renderCliCommands("brain doctor", { platform: "darwin" }), "Windows rendering control actually rewrites commands");
   }
 });
@@ -1560,7 +1578,8 @@ for (const suffix of ["ordinary space", "$UNSET_FIXTURE", "$(printf SUBSTITUTED)
     const opts = { brainCliPath: location === "runtime" ? join(root, "entry.mjs") : recorder, nodePath: location === "runtime" ? recorder : null, platformName: "darwin" };
     const result = workspace.writeCodexWorkspaceGuide(manifest, opts);
     assert.equal(result.status, "written");
-    const command = readFileSync(result.path, "utf8").match(/## If brain_think gives no answer\n[^\n]+\n`([^`]+)`/)[1];
+    const command = readFileSync(result.path, "utf8")
+      .match(/## If brain_think gives no answer\n[\s\S]{0,700}?`([^`]+)`/)[1];
     const child = spawnSync("/bin/sh", ["-c", command], { encoding: "utf8", env: shellEnv(root) });
     assert.equal(child.status, 0, "emitted invocation reaches the argument recorder");
     const argv = child.stdout.trimEnd().split("\n");

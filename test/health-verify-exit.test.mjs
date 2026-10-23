@@ -12,6 +12,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
+import { HEALTH_KEY_MISSING, HEALTH_NEXT_STEP } from "../operations/answer-setup-copy.mjs";
 
 const SCENARIO = String(process.env.BRAIN_HEALTH_VERIFY_SCENARIO || "");
 const FIXTURE_ADMIN = "fixture-admin-label";
@@ -350,10 +351,7 @@ if (SCENARIO) {
         },
       });
       if (SCENARIO === "health-answer-provider-fallback") {
-        healthyReceipt.answer_provider_fallback = {
-          active: true,
-          reason: "anthropic_key_missing",
-        };
+        healthyReceipt.anthropic_key_missing = true;
       }
       return json(healthyReceipt);
     }
@@ -504,7 +502,7 @@ if (SCENARIO) {
 
   {
     const { cmdHealth } = await import("../brain.mjs");
-    const runCountReceipt = async (countFields) => {
+    const runCountReceipt = async (countFields, providerFields = {}) => {
       const directory = mkdtempSync(join(tmpdir(), "brain-health-source-counts-"));
       const manifestPath = join(directory, "fixture.manifest.json");
       writeFileSync(manifestPath, JSON.stringify({
@@ -529,6 +527,7 @@ if (SCENARIO) {
             return json(boundedDocumentsReceipt({
               backend: "d1",
               rows: [{ source_type: "synthetic", has_documents: true }],
+              ...providerFields,
               vector_backlog: {
                 pending: 0, upserts: 0, deletes: 0, submitted: 0, oldest_queued_at: null,
               },
@@ -546,7 +545,7 @@ if (SCENARIO) {
         console.log = originalLog;
         rmSync(directory, { recursive: true, force: true });
       }
-      return { logged, failure };
+      return { logged, failure, manifestPath };
     };
 
     const valid = await runCountReceipt({
@@ -615,6 +614,14 @@ if (SCENARIO) {
       sourceLines.length === 1 && runnerPatterns.every((pattern) => !pattern.test(sourceLines[0])) &&
         typeof inventoryLine === "string",
       JSON.stringify({ sourceLine: sourceLines[0], inventoryLine }));
+
+    const providerWarning = await runCountReceipt(null, { anthropic_key_missing: true });
+    check("health reports paused Claude answers and the manifest-bound reconnect step",
+      providerWarning.failure === null && providerWarning.logged.some((line) =>
+        line.includes(HEALTH_KEY_MISSING)) && providerWarning.logged.some((line) =>
+        line.includes(HEALTH_NEXT_STEP(providerWarning.manifestPath))) && providerWarning.logged.every((line) =>
+        !/using the built-in model/i.test(line)),
+      JSON.stringify({ failure: providerWarning.failure?.message, logged: providerWarning.logged }));
   }
 
   const invalidDocuments = runScenario("health-documents-invalid", "health", { adminKey: true });
@@ -628,9 +635,11 @@ if (SCENARIO) {
       /vector index is query-ready/.test(healthy.output), healthy.output);
 
   const providerFallback = runScenario("health-answer-provider-fallback", "health", { adminKey: true });
-  check("health warns when the configured Anthropic model is using the built-in fallback",
+  check("health warns when configured Claude answers are paused for a missing key",
     providerFallback.code === 0 &&
-      /answered by the built-in model because the Anthropic key is not set/i.test(providerFallback.output) &&
+      providerFallback.output.includes(HEALTH_KEY_MISSING) &&
+      /brain connect anthropic .* --from-clipboard/i.test(providerFallback.output) &&
+      !/using the built-in model/i.test(providerFallback.output) &&
       /vector index is query-ready/.test(providerFallback.output),
     providerFallback.output);
 

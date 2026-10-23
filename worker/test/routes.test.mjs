@@ -9,7 +9,7 @@ import {
   SOURCE_FAMILY_UID_FILTER_MAX,
   unsupportedFilters,
 } from "../src/lib/store-d1.js";
-import { ANSWER_ERROR_MESSAGES } from "../src/lib/answer-render.js";
+import { ANSWER_ERROR_MESSAGES, GAP_DETAIL } from "../src/lib/answer-render.js";
 import { REFUSAL_NEXT_ACTIONS } from "../src/lib/retrieval-status.js";
 import { DRIVE_STORED_FAMILY_UID_MAX_BYTES } from "../src/lib/stored-family-identity.js";
 import { WORKER_VERSION } from "../src/lib/version.js";
@@ -748,9 +748,9 @@ for (const firstGateReply of [
     JSON.stringify(body).slice(0, 300));
 }
 
-/* A configured Anthropic model without its Worker secret follows the existing
-   built-in-model fallback, but the response must make that provider change
-   visible. The call count proves the negative assertion reached generation. */
+/* A bound Anthropic model without its Worker secret refuses answer calls.
+   The embedding call remains the green control, while the zero generation
+   count proves there was no Workers AI fallback. */
 {
   let generationCalls = 0;
   const { env } = mkEnv([ROW], {
@@ -770,10 +770,11 @@ for (const firstGateReply of [
     },
   });
   const body = await (await call(env, "/api/rag/think?q=retainer&limit=5")).json();
-  const providerGap = body.gaps?.find((gap) => gap?.type === "answer_provider_fallback");
-  check("a missing Anthropic key leaves a visible built-in-model fallback gap",
-    generationCalls === 2 && body.evidence_gate?.supported === true &&
-      /answered by the built-in model because the Anthropic key is not set/i.test(providerGap?.detail || ""),
+  const missingKeyGap = body.gaps?.find((gap) => gap?.type === "anthropic_key_missing");
+  check("a bound Claude answer model without its key refuses instead of falling back",
+    generationCalls === 0 && body.answer === null &&
+      body.answer_error === ANSWER_ERROR_MESSAGES.keyMissing &&
+      missingKeyGap?.detail === GAP_DETAIL,
     JSON.stringify({ generationCalls, gaps: body.gaps, answer: body.answer }).slice(0, 600));
 
   const { env: controlEnv } = mkEnv([ROW], {
@@ -781,9 +782,9 @@ for (const firstGateReply of [
     extra: { ANSWER_MODEL: "@cf/meta/llama-3.3-70b-instruct-fp8-fast" },
   });
   const control = await (await call(controlEnv, "/api/rag/think?q=retainer&limit=5")).json();
-  check("a configured Workers AI answer has no provider-fallback gap",
+  check("a configured Workers AI answer has no Anthropic-key gap",
     control.evidence_gate?.supported === true &&
-      !control.gaps?.some((gap) => gap?.type === "answer_provider_fallback"),
+      !control.gaps?.some((gap) => gap?.type === "anthropic_key_missing"),
     JSON.stringify(control.gaps));
 
   let unboundGenerationCalls = 0;
@@ -803,10 +804,37 @@ for (const firstGateReply of [
     },
   });
   const unbound = await (await call(unboundEnv, "/api/rag/think?q=retainer&limit=5")).json();
-  check("an unbound compatibility fixture does not claim a configured-provider fallback",
+  check("an unbound compatibility fixture keeps its built-in answer path",
     unboundGenerationCalls === 2 && unbound.evidence_gate?.supported === true &&
-      !unbound.gaps?.some((gap) => gap?.type === "answer_provider_fallback"),
+      !unbound.gaps?.some((gap) => gap?.type === "anthropic_key_missing"),
     JSON.stringify({ unboundGenerationCalls, gaps: unbound.gaps, answer: unbound.answer }).slice(0, 700));
+}
+
+/* A cap refusal carries an exact machine-readable UTC reset. The embedding
+   call is the green control; answer generation must stop at the spend gate. */
+{
+  let answerCalls = 0;
+  const before = Date.now();
+  const { env } = mkEnv([ROW], {
+    vectorIds: ["meeting:123#0"],
+    extra: {
+      DAILY_LLM_CAP_USD: "0",
+      AI: {
+        run: async (model) => {
+          if (model.includes("bge-")) return { data: [[0.1, 0.2, 0.3]] };
+          answerCalls++;
+          return { response: "must not run", usage: {} };
+        },
+      },
+    },
+  });
+  const body = await (await call(env, "/api/rag/think?q=retainer&limit=5")).json();
+  const reset = Date.parse(body.answer_resumes_at || "");
+  check("a daily-limit refusal carries the next UTC midnight",
+    answerCalls === 0 && body.answer_error === ANSWER_ERROR_MESSAGES.dailyLimit &&
+      Number.isFinite(reset) && reset > before && reset - before <= 24 * 60 * 60 * 1000 &&
+      new Date(reset).getUTCHours() === 0 && new Date(reset).getUTCMinutes() === 0,
+    JSON.stringify({ answerCalls, body }).slice(0, 700));
 }
 
 /* The public source-weight contract is live on D1, including an explicit zero. */
@@ -3738,15 +3766,14 @@ const labelProjectionParityRows = [
     /no-store/.test(documentsResponse.headers.get("cache-control") || ""),
     documentsResponse.headers.get("cache-control") || "missing");
 
-  const providerFallbackDocuments = await call({
+  const missingKeyDocuments = await call({
     ...env,
     ANSWER_MODEL: "claude-opus-5-5",
   }, "/api/admin/brain/documents");
-  const providerFallbackBody = await providerFallbackDocuments.json();
+  const missingKeyBody = await missingKeyDocuments.json();
   check("authenticated health evidence reports a configured Anthropic model without its key",
-    providerFallbackBody.answer_provider_fallback?.active === true &&
-      providerFallbackBody.answer_provider_fallback?.reason === "anthropic_key_missing",
-    JSON.stringify(providerFallbackBody.answer_provider_fallback));
+    missingKeyBody.anthropic_key_missing === true,
+    JSON.stringify(missingKeyBody));
 
   const pausedDocuments = await call({ ...env, VECTOR_DRAIN_MODE: "paused-for-upgrade" }, "/api/admin/brain/documents");
   const pausedBody = await pausedDocuments.json();

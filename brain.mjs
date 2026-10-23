@@ -96,6 +96,31 @@ import {
   readCustomApiClipboard,
 } from "./operations/custom-api-clipboard.mjs";
 import {
+  RECOMMENDED_ANSWER_SETUP,
+  RECOMMENDED_CLAUDE_DAILY_CAP_USD,
+  REVIEWED_CLAUDE_ANSWER_MODELS,
+  answerSetupOf,
+  assertReviewedAnswerModels as assertReviewedAnswerModelsConfig,
+  answerSetupJournalPath,
+  preflightAnthropicKey,
+  resolvedAnswerModels,
+  runAnthropicAnswerSetup,
+  saveManifestAtomically as saveAnswerManifestAtomically,
+} from "./operations/answer-setup.mjs";
+import {
+  CONSOLE_REVOKE_LINE,
+  DISCONNECT_LINE,
+  ENV_IGNORED,
+  HEALTH_KEY_MISSING,
+  HEALTH_NEXT_STEP,
+  HALF_RUN,
+  INSECURE_PROMPT,
+  KEY_KEPT_FOR_RERANK,
+  SETUP_BUILT_IN,
+  SETUP_CUSTOM,
+  SETUP_RECOMMENDED,
+} from "./operations/answer-setup-copy.mjs";
+import {
   ensureBankFeedWrappingKey,
   ensureBankFeedWorkerSecrets,
   validatePlaidApplicationKeys,
@@ -486,6 +511,29 @@ function dieWithSupportCode(message, supportCode) {
   const error = new Fatal(message);
   error.supportCode = supportCode;
   throw error;
+}
+
+export {
+  RECOMMENDED_ANSWER_SETUP,
+  RECOMMENDED_CLAUDE_DAILY_CAP_USD,
+  REVIEWED_CLAUDE_ANSWER_MODELS,
+  answerSetupOf,
+};
+
+export function assertReviewedAnswerModels(manifest, { manifestPath = "<manifest>" } = {}) {
+  try {
+    return assertReviewedAnswerModelsConfig(manifest, { manifestPath });
+  } catch (error) {
+    dieWithSupportCode(error.message, "ANSWER_MODEL_NOT_REVIEWED");
+  }
+}
+
+function answerSetupLine(manifest) {
+  const setup = answerSetupOf(manifest);
+  if (setup === "built-in") return SETUP_BUILT_IN;
+  if (setup === "opus-sonnet") return SETUP_RECOMMENDED;
+  const models = resolvedAnswerModels(manifest);
+  return SETUP_CUSTOM(models.answer_model, models.gate_model);
 }
 
 function dieInputRefused(message, reason = null) {
@@ -2943,7 +2991,9 @@ export function bankFeedWorkerVars(m) {
 
 /** Every binding this manifest puts on the worker. Exported so a test can read the artifact. */
 export function workerBindings(m, cfg, options = {}) {
+  assertReviewedAnswerModels(m, { manifestPath: options.manifestPath });
   const customApiBinding = customApiWorkerBinding(m);
+  const { answer_model: answerModel, gate_model: gateModel } = resolvedAnswerModels(m);
   return [
       { type: "d1", name: "DB", id: cfg.d1_database_id },
       { type: "ai", name: "AI" },
@@ -2983,11 +3033,13 @@ export function workerBindings(m, cfg, options = {}) {
       {
         type: "plain_text",
         name: "ANSWER_MODEL",
-        text: String(m.retrieval?.answer_model || "@cf/meta/llama-3.3-70b-instruct-fp8-fast"),
+        text: answerModel,
       },
-      ...(typeof m.retrieval?.gate_model === "string" && m.retrieval.gate_model
-        ? [{ type: "plain_text", name: "GATE_MODEL", text: m.retrieval.gate_model }]
-        : []),
+      {
+        type: "plain_text",
+        name: "GATE_MODEL",
+        text: gateModel,
+      },
       {
         type: "plain_text",
         name: "CREDENTIAL_SCANNER",
@@ -3013,6 +3065,7 @@ export function workerBindings(m, cfg, options = {}) {
 
 async function cmdDeployWithPrompts(manifestPath, options = {}) {
   const { m } = loadManifest(manifestPath);
+  assertReviewedAnswerModels(m, { manifestPath });
   // Validate the complete named/custom bank-feed profile before any account
   // lookup or Worker upload. workerBindings renders the same values below.
   bankFeedWorkerVars(m);
@@ -3046,7 +3099,7 @@ async function cmdDeployWithPrompts(manifestPath, options = {}) {
   const metadata = {
     main_module: "index.js",
     compatibility_date: "2026-01-01",
-    bindings: workerBindings(m, cfg, options),
+    bindings: workerBindings(m, cfg, { ...options, manifestPath }),
     // Without this, every secret set by `brain secrets` is wiped on the next
     // deploy. It is the single most destructive omission in a Workers deploy
     // and it fails silently: the worker deploys fine and then 500s on use.
@@ -3277,17 +3330,15 @@ function bankFeedRequiredSecretNames(m) {
     : HELD_BANK_FEED_SECRET_NAMES;
 }
 
-export function optionalWorkerSecretNames(m) {
+export function optionalWorkerSecretNames(m, options = {}) {
+  assertReviewedAnswerModels(m, { manifestPath: options.manifestPath });
   // Never harvest unrelated credentials merely because they happen to be in
   // the operator's shell. A standard D1 + Workers AI install needs only its
   // ADMIN_KEY. Supabase credentials are eligible only when the manifest
   // explicitly selects that backend. Anthropic is eligible only when the
   // manifest explicitly selects a non-Cloudflare answer model or reranking.
   const storage = m.infrastructure?.cloudflare?.storage || "d1";
-  const answerModel = String(
-    m.retrieval?.answer_model || "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-  );
-  const gateModel = String(m.retrieval?.gate_model || answerModel);
+  const { answer_model: answerModel, gate_model: gateModel } = resolvedAnswerModels(m);
   // An enabled bank feed allows already-present provider credentials and its
   // independent wrapping key to remain on the Worker. This is a preservation
   // allowlist only: generic `brain secrets` must never source or replace these
@@ -3455,13 +3506,18 @@ async function reconcileWorkerProviderSecrets(m, acct, scriptName, optional, {
         "Rerun `brain secrets` before treating this install as reconciled."
     );
   }
-  for (const name of unwanted) ok(`removed unexpected Worker secret ${name}`);
+  for (const name of unwanted) {
+    ok(`removed unexpected Worker secret ${name}`);
+    if (name === "ANTHROPIC_API_KEY") say(CONSOLE_REVOKE_LINE);
+  }
   return remaining;
 }
 
 export async function cmdSecrets(manifestPath, options = {}) {
   const { m } = loadManifest(manifestPath);
   const scriptName = m.brain?.worker_name || `${m.client?.slug || "client"}-brain`;
+  const environment = options.env ?? process.env;
+  if (Object.hasOwn(environment, "ANTHROPIC_API_KEY")) warn(ENV_IGNORED(manifestPath));
 
   // Bank application values have no reviewed generic entry path in this
   // release. Refuse their mere presence before durable-key planning,
@@ -3485,7 +3541,7 @@ export async function cmdSecrets(manifestPath, options = {}) {
   // "needed" in the same sense: available exactly when the admin key is. Until
   // it is set, any UI proxy has to carry the admin key, which can drain.
   const needed = ["ADMIN_KEY", "RAG_PROXY_KEY", "SESSION_SIGNING_KEY"];
-  const optional = optionalWorkerSecretNames(m);
+  const optional = optionalWorkerSecretNames(m, { manifestPath });
   // Injectable so a test can prove the timeout path in milliseconds rather
   // than actually waiting 90 seconds for a stubbed transport to give up.
   const secretsWriteTimeout = {
@@ -3593,7 +3649,7 @@ export async function cmdSecrets(manifestPath, options = {}) {
   const provided = [
     ...(adminKey ? needed : []),
     ...optional.filter((name) =>
-      !HELD_BANK_FEED_SECRET_NAMES.includes(name) && process.env[name]),
+      name !== "ANTHROPIC_API_KEY" && !HELD_BANK_FEED_SECRET_NAMES.includes(name) && environment[name]),
   ];
   const missing = adminKey ? [] : needed;
 
@@ -3614,13 +3670,17 @@ export async function cmdSecrets(manifestPath, options = {}) {
   // provider credentials may remain absent until the owner uses the reviewed
   // browser or hidden-prompt flow. Read the exact Worker inventory before any
   // local or remote mutation so a missing wrapping key still stops safely.
-  await reconcileWorkerProviderSecrets(m, acct, scriptName, optional, {
+  const providerInventory = await reconcileWorkerProviderSecrets(m, acct, scriptName, optional, {
     required: m.corpora?.bank_feed?.enabled === true
       ? [BANK_ACCESS_WRAPPING_KEY_SECRET]
       : [],
     timeoutMs: secretsWriteTimeout.timeoutMs,
     waitEveryMs: secretsWriteTimeout.waitEveryMs,
   });
+  if (answerSetupOf(m) !== "built-in" && !providerInventory.has("ANTHROPIC_API_KEY")) {
+    warn(HEALTH_KEY_MISSING);
+    info(HEALTH_NEXT_STEP(manifestPath));
+  }
 
   // A crash between staging and replacement can leave the key module's exact
   // temporary or rollback basename behind. Put every private key basename in
@@ -3665,7 +3725,7 @@ export async function cmdSecrets(manifestPath, options = {}) {
         ? deriveRagProxyKey(adminKey)
         : name === "SESSION_SIGNING_KEY"
           ? deriveSessionSigningKey(adminKey)
-          : process.env[name];
+          : environment[name];
     try {
       await withSecretsWriteTimeout(
         () => cf(`/accounts/${acct.id}/workers/scripts/${scriptName}/secrets`, {
@@ -4220,12 +4280,11 @@ export async function cmdHealth(manifestPath, {
       }
       ok(`/health and authenticated inventory agree on ${boundVersion}/${boundDrainMode}`);
       ok(`documents endpoint ${docs.status}; authenticated inventory confirmed`);
-      if (inventory.answer_provider_fallback?.active === true &&
-          inventory.answer_provider_fallback?.reason === "anthropic_key_missing") {
-        warn(
-          "Answers or evidence checks are being answered by the built-in model because the Anthropic key is not set. " +
-          "Restore the configured provider secret, then rerun `brain health <manifest>`."
-        );
+      info(answerSetupLine(m));
+      if (existsSync(answerSetupJournalPath(manifestPath))) warn(HALF_RUN(manifestPath));
+      if (inventory.anthropic_key_missing === true) {
+        warn(HEALTH_KEY_MISSING);
+        info(HEALTH_NEXT_STEP(manifestPath));
       }
       if (reachOnly && !requireProjectionReady) return;
 
@@ -4436,7 +4495,23 @@ export async function cmdAsk(manifestPath, options = {}) {
   }
   const nextAction = nextActionText(body);
   if (nextAction) console.log(`  ${c.dim(nextAction)}\n`);
-  if (body.answer_error) warn(`answer generation reported: ${String(body.answer_error).slice(0, 160)}`);
+  if (body.answer_error) {
+    let resumes = "";
+    if (typeof body.answer_resumes_at === "string" && Number.isFinite(Date.parse(body.answer_resumes_at))) {
+      const timezone = String(m.client?.timezone || "UTC");
+      try {
+        const local = new Intl.DateTimeFormat(undefined, {
+          dateStyle: "medium",
+          timeStyle: "short",
+          timeZone: timezone,
+        }).format(new Date(body.answer_resumes_at));
+        resumes = ` Answers start again at ${local} (${timezone}).`;
+      } catch {
+        resumes = ` Answers start again at ${body.answer_resumes_at}.`;
+      }
+    }
+    warn(`answer generation reported: ${String(body.answer_error).slice(0, 160)}${resumes}`);
+  }
   const searchLine = body.meaning_search && typeof body.meaning_search === "object"
     ? meaningSearchLine({
         visible: body.meaning_search.visible,
@@ -19449,6 +19524,15 @@ export async function cmdConnect(target, options = {}) {
     }
     return (options.connectOnline || cmdConnectProvider)("quickbooks", manifestPath, flags, options.providerOptions || {});
   }
+  if (which === "anthropic") {
+    const runManifestControl = options.withManifestControl ?? withManifestCloudflareControl;
+    const connectAnthropic = options.connectAnthropic ?? cmdConnectAnthropic;
+    return runManifestControl(
+      manifestPath,
+      () => connectAnthropic(manifestPath, flags, options.anthropicOptions || {}),
+      options.controlOptions || {},
+    );
+  }
   if (which === "custom-api") {
     const runManifestControl = options.withManifestControl ?? withManifestCloudflareControl;
     const connectCustomApi = options.connectCustomApi ?? cmdConnectCustomApi;
@@ -19484,8 +19568,9 @@ export async function cmdConnect(target, options = {}) {
   if (PROVIDER_CONNECTOR_IDS.includes(which)) return cmdConnectProvider(which, manifestPath, flags, options.providerOptions || {});
   if (which !== "google") {
     die(
-      "brain connect supports bank, custom-api, google, imap, imessage, whatsapp, zoom, quickbooks, slack, notion, microsoft, dropbox and hubspot.\n" +
-        "  Usage: brain connect bank <manifest>\n" +
+      "brain connect supports anthropic, bank, custom-api, google, imap, imessage, whatsapp, zoom, quickbooks, slack, notion, microsoft, dropbox and hubspot.\n" +
+        "  Usage: brain connect anthropic <manifest> [--from-clipboard|--key-set-in-dashboard|--keep-key] [--daily-cap <usd>] [--json]\n" +
+        "         brain connect bank <manifest>\n" +
         "         brain connect custom-api <manifest>\n" +
         "         brain connect google --scopes drive,gmail,calendar\n" +
         "         brain connect imap <manifest> --host imap.example.com --user you@example.com\n" +
@@ -19512,6 +19597,128 @@ export async function cmdConnect(target, options = {}) {
       dieWithSupportCode("The provider sign-in timed out. Nothing changed in your Brain and no new connection was saved. Run the same command again and complete sign-in.", "OAUTH_SIGN_IN_TIMEOUT");
     }
     throw error;
+  }
+}
+
+/** Configure the reviewed owner-account answer pair without exposing the key. */
+export async function cmdConnectAnthropic(manifestPath, flags = {}, options = {}) {
+  let m;
+  try {
+    ({ m } = (options.loadManifest ?? loadManifest)(manifestPath));
+  } catch (error) {
+    if (flags.json === true) {
+      throw new JsonFatal({
+        schema_version: 1,
+        operation: "answer_setup.connect",
+        status: "error",
+        error_code: "manifest_unavailable",
+        rolled_back: false,
+        rollback_target: null,
+      });
+    }
+    throw error;
+  }
+  const scriptName = m.brain?.worker_name || `${m.client?.slug || "client"}-brain`;
+  let accountReceipt = null;
+  const account = async () => (accountReceipt ??= await (options.resolveAccount ?? resolveAccount)(m));
+  const secretPath = async () =>
+    `/accounts/${(await account()).id}/workers/scripts/${scriptName}/secrets`;
+  const listSecretNames = options.listSecretNames ?? (async () => {
+    const inventory = await cf(await secretPath());
+    if (!Array.isArray(inventory) || inventory.some((entry) => typeof entry?.name !== "string")) {
+      throw new Error("Cloudflare returned an invalid Worker secret inventory");
+    }
+    return inventory.map((entry) => entry.name);
+  });
+  const putSecret = options.putSecret ?? (async (name, text) =>
+    cf(await secretPath(), { method: "PUT", body: { name, text, type: "secret_text" } }));
+  const deleteSecret = options.deleteSecret ?? (async (name) =>
+    cf(`${await secretPath()}/${encodeURIComponent(name)}`, { method: "DELETE" }));
+  const baseUrl = async () => (options.baseUrl ?? await (options.resolveBaseUrl ?? resolveBaseUrl)(
+    m,
+    m.brain?.domain ? null : await account(),
+  ));
+  const request = options.http ?? http;
+  const verifyVersion = options.verifyVersion ?? (async () => {
+    const response = await request(`${await baseUrl()}/health`, {}, {
+      timeoutMs: 30_000,
+      what: "the Brain version check",
+    });
+    let body = null;
+    try { body = await response.json(); } catch { /* exact version remains unproven */ }
+    if (!response.ok || body?.version !== PRODUCT_VERSION) throw new Error("worker version differs");
+  });
+  const checkWorker = options.checkWorker ?? (async () => {
+    const adminKey = (options.resolveAdminKey ?? resolveAdminKey)(manifestPath);
+    if (!adminKey) throw new Error("the durable admin key is unavailable");
+    const response = await request(`${await baseUrl()}/api/admin/brain/answer-check`, {
+      method: "POST",
+      headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" },
+      body: "{}",
+    }, { timeoutMs: 30_000, what: "the answer model check" });
+    let body = null;
+    try { body = await response.json(); } catch { /* provider text is never copied */ }
+    if (!response.ok || !body?.answer || !body?.check) throw new Error("the answer model check did not return a valid receipt");
+    return body;
+  });
+  const platform = options.platform ?? process.platform;
+  const output = [];
+  try {
+    const result = await runAnthropicAnswerSetup({ manifestPath, flags }, {
+      platform,
+      stdinIsTTY: options.stdinIsTTY ?? process.stdin.isTTY,
+      loadManifest: (path) => (options.loadManifest ?? loadManifest)(path).m,
+      saveManifestAtomically: options.saveManifestAtomically ?? saveAnswerManifestAtomically,
+      acquireLock: options.acquireLock ?? ((input, action) =>
+        (options.withBrainLifecycleLock ?? withBrainLifecycleLock)(input, action)),
+      verifyVersion,
+      readClipboard: options.readClipboard ?? (() => readCustomApiClipboard({ platform })),
+      clearClipboard: options.clearClipboard ?? (() => clearCustomApiClipboard({ platform })),
+      readSecret: options.readSecret ?? (() => readHiddenSecret("  Anthropic API key (hidden): ", {
+        noun: "Anthropic API key",
+        insecure: INSECURE_PROMPT.replace("<manifest>", manifestPath),
+      })),
+      preflight: options.preflight ?? ((key, preflightOptions = {}) => preflightAnthropicKey(key, {
+        fetchImpl: options.anthropicFetch ?? fetch,
+        sleep: options.sleep,
+        checkBound: preflightOptions.checkBound,
+      })),
+      listSecretNames,
+      putSecret,
+      deleteSecret,
+      reconcileDaily: options.reconcileDaily ?? ((path, reconcileOptions) =>
+        reconcileDailyDefinitionAfterManifestEdit(path, {
+          ...reconcileOptions,
+          ...(options.dailyRefreshOptions || {}),
+        })),
+      deploy: options.deploy ?? ((path) => cmdDeploy(path, { nextSteps: false })),
+      checkWorker,
+      sleep: options.sleep,
+      now: options.now,
+      journalExists: options.journalExists,
+      writeJournal: options.writeJournal,
+      removeJournal: options.removeJournal,
+      log: (line) => output.push(line),
+    });
+    if (flags.json === true) console.log(JSON.stringify(result));
+    else for (const line of output) say(line);
+    return result;
+  } catch (error) {
+    if (flags.json === true) {
+      const declaredCode = String(error?.supportCode || error?.code || "ANTHROPIC_CHECK_FAILED");
+      throw new JsonFatal({
+        schema_version: 1,
+        operation: "answer_setup.connect",
+        status: "error",
+        error_code: declaredCode.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, ""),
+        rolled_back: error?.rolledBack === true,
+        rollback_target: error?.rollbackTarget || null,
+      });
+    }
+    for (const line of output) say(line);
+    if (error instanceof Fatal) throw error;
+    if (error?.supportCode) dieWithSupportCode(error.message, error.supportCode);
+    die(error?.message || "the Anthropic answer setup did not finish");
   }
 }
 
@@ -20345,6 +20552,15 @@ export async function cmdDisconnect(target, options = {}) {
   const which = (target || "").toLowerCase();
   const manifestPath = argv[4];
   if (which === "quickbooks-desktop") return cmdDisconnectQuickBooksDesktop(manifestPath, flags, options.desktopOptions || {});
+  if (which === "anthropic") {
+    const runManifestControl = options.withManifestControl ?? withManifestCloudflareControl;
+    const disconnectAnthropic = options.disconnectAnthropic ?? cmdDisconnectAnthropic;
+    return runManifestControl(
+      manifestPath,
+      () => disconnectAnthropic(manifestPath, flags, options.anthropicOptions || {}),
+      options.controlOptions || {},
+    );
+  }
   if (which === "whatsapp") return cmdDisconnectWhatsapp(manifestPath, flags);
   if (which === "zoom") {
     const runManifestControl = options.withManifestControl ?? withManifestCloudflareControl;
@@ -20359,8 +20575,9 @@ export async function cmdDisconnect(target, options = {}) {
   if (PROVIDER_CONNECTOR_IDS.includes(which)) return cmdDisconnectProvider(which, manifestPath, flags);
   if (which !== "imessage") {
     die(
-      "brain disconnect supports imap, imessage, whatsapp, zoom, quickbooks, slack, notion, microsoft, dropbox and hubspot.\n" +
-        "  Usage: brain disconnect imap <manifest>\n" +
+      "brain disconnect supports anthropic, imap, imessage, whatsapp, zoom, quickbooks, slack, notion, microsoft, dropbox and hubspot.\n" +
+        "  Usage: brain disconnect anthropic <manifest>\n" +
+        "         brain disconnect imap <manifest>\n" +
         "         brain disconnect imessage <manifest>\n" +
         "         brain disconnect whatsapp <manifest>\n" +
         "         brain disconnect zoom <manifest>\n" +
@@ -20368,6 +20585,57 @@ export async function cmdDisconnect(target, options = {}) {
     );
   }
   return cmdDisconnectImessage(manifestPath, flags);
+}
+
+export async function cmdDisconnectAnthropic(manifestPath, flags = {}, options = {}) {
+  if (!manifestPath || String(manifestPath).startsWith("--")) die("usage: brain disconnect anthropic <manifest>");
+  if (Object.keys(flags).length) die("brain disconnect anthropic does not accept options");
+  const lock = options.acquireLock ?? ((input, action) =>
+    (options.withBrainLifecycleLock ?? withBrainLifecycleLock)(input, action));
+  const report = options.log ?? say;
+  return lock({ manifestPath, operation: "answer-setup-disconnect" }, async () => {
+    const { m: before } = (options.loadManifest ?? loadManifest)(manifestPath);
+    const after = structuredClone(before);
+    after.retrieval ||= {};
+    delete after.retrieval.answer_model;
+    delete after.retrieval.gate_model;
+    await (options.saveManifestAtomically ?? saveAnswerManifestAtomically)(manifestPath, after);
+    await (options.reconcileDaily ?? reconcileDailyDefinitionAfterManifestEdit)(manifestPath, {
+      previousManifest: before,
+      ...(options.dailyRefreshOptions || {}),
+    });
+    await (options.deploy ?? ((path) => cmdDeploy(path, { nextSteps: false })))(manifestPath);
+
+    let deleted = false;
+    if (after.retrieval.rerank === true) {
+      report(KEY_KEPT_FOR_RERANK);
+    } else {
+      const scriptName = before.brain?.worker_name || `${before.client?.slug || "client"}-brain`;
+      let accountReceipt = null;
+      const account = async () => (accountReceipt ??= await (options.resolveAccount ?? resolveAccount)(before));
+      const path = async () => `/accounts/${(await account()).id}/workers/scripts/${scriptName}/secrets`;
+      const listNames = options.listSecretNames ?? (async () => {
+        const rows = await cf(await path());
+        if (!Array.isArray(rows)) throw new Error("invalid Worker secret inventory");
+        return rows.map((row) => row?.name).filter((name) => typeof name === "string");
+      });
+      const names = new Set(await listNames());
+      if (names.has("ANTHROPIC_API_KEY")) {
+        await (options.deleteSecret ?? (async (name) =>
+          cf(`${await path()}/${encodeURIComponent(name)}`, { method: "DELETE" })))("ANTHROPIC_API_KEY");
+        const remaining = new Set(await listNames());
+        if (remaining.has("ANTHROPIC_API_KEY")) die("the Anthropic secret removal did not read back");
+        deleted = true;
+      }
+    }
+    const journalPath = answerSetupJournalPath(manifestPath);
+    if ((options.journalExists ?? existsSync)(journalPath)) {
+      await (options.removeJournal ?? unlinkSync)(journalPath);
+    }
+    report(DISCONNECT_LINE);
+    if (deleted) report(CONSOLE_REVOKE_LINE);
+    return { disconnected: true, secret_deleted: deleted, key_kept_for_rerank: after.retrieval.rerank === true };
+  });
 }
 
 export async function cmdDisconnectImessage(manifestPath, flags = {}, options = {}) {
@@ -21091,9 +21359,11 @@ export async function cmdDoctor(manifestPath, options = {}) {
   let accountId;
   let cloudflareAuthProfile;
   let existingBrain = false;
+  let doctorManifest = {};
   if (manifestPath && existsSync(manifestPath)) {
     try {
       const manifest = loadManifest(manifestPath).m;
+      doctorManifest = manifest;
       const cloudflare = manifest?.infrastructure?.cloudflare;
       accountId = cloudflare?.account_id;
       cloudflareAuthProfile = cloudflare?.auth_profile;
@@ -21119,6 +21389,8 @@ export async function cmdDoctor(manifestPath, options = {}) {
       // these read-only checks without making Claude a false health stop.
       allowCodexForExistingBrain:
         options.allowCodexForExistingBrain ?? existingBrain,
+      manifest: doctorManifest,
+      manifestPath: manifestPath && existsSync(manifestPath) ? manifestPath : null,
       onResult: (x) => {
         const mark = x.status === D_OK ? c.green("ok  ") : x.status === D_WARN ? c.yellow("warn") : c.red("FAIL");
         console.log(`  ${mark}  ${x.name.padEnd(18)}  ${x.detail}`);
@@ -26885,6 +27157,60 @@ export async function buildConfiguredDailyPlan(m, manifestPath, options = {}) {
   });
 }
 
+/**
+ * Rebind an installed daily definition after a non-source manifest edit.
+ *
+ * Answer-model and spend-cap edits change the manifest hash carried by the
+ * native task. They must not silently change which sources the owner approved.
+ */
+export async function reconcileDailyDefinitionAfterManifestEdit(manifestPath, options = {}) {
+  const previousManifest = options.previousManifest;
+  if (!previousManifest || typeof previousManifest !== "object") {
+    throw new Error("DAILY_RECONCILE_FAILED: the prior manifest is required");
+  }
+  const planOptions = options.dailyRefreshOptions || options;
+  const schedulerOptions = {
+    platform: planOptions.platform ?? process.platform,
+    ...(planOptions.schedulerOptions || {}),
+    ...(planOptions.schedulerAdapter ? { adapter: planOptions.schedulerAdapter } : {}),
+  };
+  const before = options.beforePlan ?? await buildConfiguredDailyPlan(previousManifest, manifestPath, planOptions);
+  const status = options.beforeStatus ?? statusDailyRefreshSchedule(before, schedulerOptions);
+  if (status.installed !== true) return Object.freeze({ installed: false, changed: false });
+
+  const afterManifest = options.afterPlan
+    ? null
+    : (options.loadManifest ?? loadManifest)(manifestPath).m;
+  const after = options.afterPlan ?? await buildConfiguredDailyPlan(afterManifest, manifestPath, planOptions);
+  if (before.source_plan_hash !== after.source_plan_hash) {
+    const error = new Error("DAILY_RECONCILE_FAILED: the source plan changed during an answer setup edit");
+    error.code = "DAILY_RECONCILE_FAILED";
+    throw error;
+  }
+
+  if (status.enabled === true && after.ready === true) {
+    const installed = (options.installDailyRefreshSchedule ?? installDailyRefreshSchedule)(after, schedulerOptions);
+    if (installed?.verified !== true) {
+      const error = new Error("DAILY_RECONCILE_FAILED: the daily definition did not pass exact readback");
+      error.code = "DAILY_RECONCILE_FAILED";
+      throw error;
+    }
+    return Object.freeze({ installed: true, enabled: true, changed: installed.changed !== false, verified: true });
+  }
+
+  const paused = (options.reconcileDailyRefreshSchedule ?? reconcileDailyRefreshSchedule)(after, {
+    ...schedulerOptions,
+    enabled: false,
+    ...(status.state?.definition ? { authorizedDefinition: status.state.definition } : {}),
+  });
+  if (paused?.verified !== true || paused?.enabled !== false) {
+    const error = new Error("DAILY_RECONCILE_FAILED: the daily definition could not remain safely paused");
+    error.code = "DAILY_RECONCILE_FAILED";
+    throw error;
+  }
+  return Object.freeze({ installed: true, enabled: false, changed: paused.changed !== false, verified: true });
+}
+
 export function dailyFreshnessRows(plan, inventory, schedule = null) {
   const inventoryRows = new Map((inventory?.sources || []).map((row) => [row.name, row]));
   return plan.sources.map((source) => {
@@ -28194,6 +28520,7 @@ export async function cmdTechnician(manifestPath, flags = {}, options = {}) {
       "intent",
       "browser-sign-in", "name", "slug", "cloudflare-account", "cloudflare-account-id",
       "workers-paid-confirmed", "no-connect",
+      "from-clipboard", "key-set-in-dashboard", "keep-key", "daily-cap",
     ],
     "brain technician",
   );
@@ -28217,7 +28544,7 @@ export async function cmdTechnician(manifestPath, flags = {}, options = {}) {
   // it immediately before the one-time link is minted. Every other ceremony
   // is introduced here before a provider page, hidden prompt, or child command
   // can appear.
-  if (step !== "passkey") {
+  if (!["passkey", "anthropic"].includes(step)) {
     const writeBriefing = options.writeBriefing || ((text) => console.log(renderCliCommands(text)));
     writeBriefing(renderTechnicianStepBriefing(
       plan.steps.find((candidate) => candidate.id === step) || step,

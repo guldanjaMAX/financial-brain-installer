@@ -25,6 +25,13 @@ import { tokenStorageStatus, verifyTokenStorageReadable } from "./connectors/goo
 import { probeWindowsDpapi } from "./operations/admin-key-file.mjs";
 import { REVIEWED_WRANGLER_SPEC } from "./operations/wrangler-runtime-contract.mjs";
 import { manifestBankFeedProvider } from "./worker/src/lib/bank-feed-profiles.js";
+import { answerSetupJournalPath, answerSetupOf, resolvedAnswerModels } from "./operations/answer-setup.mjs";
+import {
+  HALF_RUN,
+  SETUP_BUILT_IN,
+  SETUP_CUSTOM,
+  SETUP_RECOMMENDED,
+} from "./operations/answer-setup-copy.mjs";
 
 export const OK = "ok";
 export const WARN = "warn";
@@ -871,13 +878,16 @@ export function checkCodex({
   };
 }
 
-export function checkAnthropicKey() {
-  if (process.env.ANTHROPIC_API_KEY) return check("Anthropic key", OK, "present in the environment");
-  return check(
-    "Answer model",
-    OK,
-    "Cloudflare Workers AI is the standard; no external model key is required"
-  );
+export function checkAnthropicKey(manifest = {}, { manifestPath = null, pathExists = existsSync } = {}) {
+  const setup = answerSetupOf(manifest);
+  const models = resolvedAnswerModels(manifest);
+  const setupLine = setup === "built-in" ? SETUP_BUILT_IN
+    : setup === "opus-sonnet" ? SETUP_RECOMMENDED
+      : SETUP_CUSTOM(models.answer_model, models.gate_model);
+  if (manifestPath && pathExists(answerSetupJournalPath(manifestPath))) {
+    return check("Answer model", WARN, HALF_RUN(manifestPath), setupLine);
+  }
+  return check("Answer model", OK, setupLine);
 }
 
 export function checkGoogleConnection(storageStatus, verify = verifyTokenStorageReadable) {
@@ -1388,6 +1398,8 @@ export async function runAll({
   cliPath = process.argv[1],
   statfsImpl = statfsSync,
   getEffectiveUserId = process.geteuid,
+  manifest = {},
+  manifestPath = null,
 } = {}) {
   const out = [];
   // Each result is handed to the caller the moment it exists, so a slow check
@@ -1425,7 +1437,7 @@ export async function runAll({
       }
     }
   }
-  push(checkAnthropicKey());
+  push(checkAnthropicKey(manifest, { manifestPath }));
   const codex = checkCodex({ runCommand: localRun, environment });
   const codexCanGuideExistingBrain = allowCodexForExistingBrain && codex.status === OK && codex.available === true;
   let claude = checkClaudeCode({

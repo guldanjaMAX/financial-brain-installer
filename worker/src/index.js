@@ -106,7 +106,12 @@ import {
   coverageIncompleteNotice, emptyRetrievalDisclosure, meaningSearchLine, projectionCatchupGap,
   projectionPending, refusalNextAction,
 } from "./lib/retrieval-status.js";
-import { answerGenerationError, scannedEvidenceGap } from "./lib/answer-render.js";
+import {
+  ANSWER_ERROR_MESSAGES,
+  GAP_DETAIL,
+  answerGenerationError,
+  scannedEvidenceGap,
+} from "./lib/answer-render.js";
 import {
   handleOwnerAuth, handleAdminInvite, handleAdminDevices, handleAdminGrants, handleZones,
   ownerSessionPrincipal,
@@ -155,32 +160,15 @@ import { supplementalRetrievalFilters } from "./lib/retrieval-routing.js";
 import { dispatchCfoWorkflow } from "./lib/cfo-workflow.js";
 import { entityFactAnswer } from "./lib/entity-fact-answer.js";
 
-// Supported deploys always bind ANSWER_MODEL through workerBindings(). This
-// third-party model id remains only for compatibility with unbound Workers and
-// local fixtures; it is not the product default selected by the installer.
-const UNBOUND_ANSWER_MODEL = "claude-sonnet-4-5";
+// Packaged deploys set this binding explicitly. The same built-in default here
+// keeps direct and unbound invocations on the public no-key path.
+const DIRECT_INVOCATION_ANSWER_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 const ANTHROPIC_ANSWER_MAX_TOKENS = 4000;
 const ANTHROPIC_EVIDENCE_GATE_MAX_TOKENS = 4000;
 const ANTHROPIC_SYNTHESIS_GATE_MAX_TOKENS = 8000;
-const ANSWER_PROVIDER_FALLBACK_GAP = Object.freeze({
-  type: "answer_provider_fallback",
-  detail: "This request was answered by the built-in model because the Anthropic key is not set.",
-});
-
-function usedBuiltInProviderFallback(configuredModel, response) {
-  return Boolean(configuredModel) && !String(configuredModel).startsWith("@cf/") &&
-    response?.provider === "cloudflare-workers-ai";
-}
 
 function isUnreadableAnthropicReply(error) {
   return error instanceof AnthropicEmptyResponseError || error instanceof AnthropicIncompleteResponseError;
-}
-
-function configuredAnswerProviderFallback(env) {
-  if (env.ANTHROPIC_API_KEY) return false;
-  return [env.ANSWER_MODEL, env.GATE_MODEL]
-    .filter((model) => typeof model === "string" && model)
-    .some((model) => !model.startsWith("@cf/"));
 }
 
 /* ------------------------------------------------------------ retrieval */
@@ -513,6 +501,52 @@ async function rerank(env, q, results, limit, timing = null) {
   } catch {
     return results;
   }
+}
+
+const answerModelFor = (env) => env.ANSWER_MODEL || DIRECT_INVOCATION_ANSWER_MODEL;
+const gateModelFor = (env) => env.GATE_MODEL || answerModelFor(env);
+
+function nextUtcMidnight() {
+  const now = new Date();
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)).toISOString();
+}
+
+function answerCheckStatus(error) {
+  if (error instanceof AnthropicEmptyResponseError && error.output_budget_exhausted) return "ok";
+  if (error?.no_anthropic_key) return "key_missing";
+  if (error?.llm_cap_exceeded && error?.spend_guard_degraded) return "spend_check_paused";
+  if (error?.llm_cap_exceeded) return "daily_limit";
+  if (["key_rejected", "billing", "model_unavailable", "busy", "error"].includes(error?.provider_error_class)) {
+    return error.provider_error_class;
+  }
+  return "error";
+}
+
+async function checkAnswerModel(env, model) {
+  if (String(model).startsWith("@cf/")) return { model, status: "built_in" };
+  try {
+    await callLLM(env, {
+      model,
+      label: "answer-model-check",
+      system: "Reply with the word OK.",
+      messages: [{ role: "user", content: "OK?" }],
+      max_tokens: 128,
+      timeoutMs: 30_000,
+    });
+    return { model, status: "ok" };
+  } catch (error) {
+    return { model, status: answerCheckStatus(error) };
+  }
+}
+
+export async function handleAnswerCheck(env) {
+  const answerModel = answerModelFor(env);
+  const gateModel = gateModelFor(env);
+  const answer = await checkAnswerModel(env, answerModel);
+  const check = gateModel === answerModel
+    ? { ...answer }
+    : await checkAnswerModel(env, gateModel);
+  return jsonResponse({ answer, check });
 }
 
 /**
@@ -1402,9 +1436,9 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
   let answerError = null;
   let model = null;
   let modelDeclaredNoEvidence = false;
-  const answerModel = env.ANSWER_MODEL || UNBOUND_ANSWER_MODEL;
-  const gateModel = env.GATE_MODEL || answerModel;
-  let answerProviderFallback = false;
+  const answerModel = answerModelFor(env);
+  const gateModel = gateModelFor(env);
+  let anthropicKeyMissing = false;
   try {
     let repairInstruction = "";
     for (let attempt = 0; !observedAnswer && !factAnswer && attempt < 2; attempt++) {
@@ -1430,7 +1464,6 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
         }
         throw error;
       }
-      if (usedBuiltInProviderFallback(env.ANSWER_MODEL, data)) answerProviderFallback = true;
       answer = llmText(data).trim() || null;
       model = data?.model || null;
       if (!answer) approvedDocs = [];
@@ -1460,6 +1493,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
       } else break;
     }
   } catch (e) {
+    if (e?.no_anthropic_key) anthropicKeyMissing = true;
     answerError = answerGenerationError(e);
     // A failed repair must never return the unverified first draft.
     answer = null;
@@ -1482,9 +1516,6 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
               label: "rag-synthesis-gate", timing, timingStage: "verifier_llm", timeoutMs: 45_000,
               system, messages: [{ role: "user", content: prompt }],
             });
-            if (usedBuiltInProviderFallback(env.GATE_MODEL || env.ANSWER_MODEL, response)) {
-              answerProviderFallback = true;
-            }
             return llmText(response);
           } catch (error) {
             if (isUnreadableAnthropicReply(error)) return "";
@@ -1502,6 +1533,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
       datedStatus = moneyHistory.evidence.length ? moneyHistory : qualifyDatedStatus({ question: q, answer, docs });
       answer = datedStatus.answer;
     } catch (error) {
+      if (error?.no_anthropic_key) anthropicKeyMissing = true;
       answer = null; approvedDocs = []; answerError = answerGenerationError(error, { verification: true });
     }
   }
@@ -1577,9 +1609,6 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
             const callVerifier = async () => {
               try {
                 const response = await callLLM(env, verifierRequest);
-                if (usedBuiltInProviderFallback(env.GATE_MODEL || env.ANSWER_MODEL, response)) {
-                  answerProviderFallback = true;
-                }
                 return { response, unreadable: false };
               } catch (error) {
                 if (isUnreadableAnthropicReply(error)) return { response: null, unreadable: true };
@@ -1825,6 +1854,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
             approvedDocs = citedDocs.filter((doc) => allowed.has(doc.n));
           }
         } catch (e) {
+          if (e?.no_anthropic_key) anthropicKeyMissing = true;
           answer = null;
           answerError = answerGenerationError(e, { verification: true });
           approvedDocs = [];
@@ -1888,9 +1918,6 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
     const spellings = approvedDocs.filter(doc => doc.query_variant)
       .map(doc => `${doc.query_variant.matched} [${doc.n}]`);
     answer += `\n\nRecord spelling: ${[...new Set(spellings)].join(', ')}.`;
-  }
-  if (answerProviderFallback && !gaps.some((gap) => gap?.type === ANSWER_PROVIDER_FALLBACK_GAP.type)) {
-    gaps.push({ ...ANSWER_PROVIDER_FALLBACK_GAP });
   }
   finishEvidenceGate(Boolean(answerError));
 
@@ -1961,6 +1988,13 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
           : undefined)
     : undefined;
 
+  if (anthropicKeyMissing && !gaps.some((gap) => gap?.type === "anthropic_key_missing")) {
+    gaps.unshift({
+      type: "anthropic_key_missing",
+      detail: GAP_DETAIL,
+    });
+  }
+
   return jsonResponse({
     mode: "think",
     entity_scope: entityScope,
@@ -1984,6 +2018,9 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
             : undefined),
     answer: refusalSearchDisclosure || incompleteCoverageBlocksAbsence || answerValidationBlocksAbsence ? null : answer,
     answer_error: answerError || undefined,
+    answer_resumes_at: answerError === ANSWER_ERROR_MESSAGES.dailyLimit
+      ? nextUtcMidnight()
+      : undefined,
     next_action: categoricalRefusal && !answerError
       ? refusalNextAction({ status: refusalStatus, withheldGate: answerWithheldGate })
       : undefined,
@@ -3273,8 +3310,11 @@ async function handleDocuments(env) {
     rows: rows || [],
     ...(summary ? { summary } : {}),
     vector_drain_mode: upgradePauseHolds(env) ? "paused-for-upgrade" : "active",
-    ...(configuredAnswerProviderFallback(env)
-      ? { answer_provider_fallback: { active: true, reason: "anthropic_key_missing" } }
+    ...(!env.ANTHROPIC_API_KEY &&
+        [env.ANSWER_MODEL, env.GATE_MODEL]
+          .filter((model) => typeof model === "string" && model)
+          .some((model) => !model.startsWith("@cf/"))
+      ? { anthropic_key_missing: true }
       : {}),
   };
   if (backendOf(env) === D1) {
@@ -3872,6 +3912,9 @@ export default {
       }
       if (path === "/api/admin/brain/zones") {
         return handleZones(env, request);
+      }
+      if (path === "/api/admin/brain/answer-check" && request.method === "POST") {
+        return handleAnswerCheck(env);
       }
       // A bank export the owner downloaded, landing as ledger rows rather than
       // as prose. Operator-only and INSIDE the key gate, unlike the hosted

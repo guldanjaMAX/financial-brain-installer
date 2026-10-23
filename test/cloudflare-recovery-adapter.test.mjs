@@ -2160,6 +2160,13 @@ function providerHarness({
               text: plainTextOverrides.ANSWER_MODEL ??
                 "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
             },
+            {
+              type: "plain_text",
+              name: "GATE_MODEL",
+              text: plainTextOverrides.GATE_MODEL ??
+                plainTextOverrides.ANSWER_MODEL ??
+                "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+            },
             { type: "plain_text", name: "CREDENTIAL_SCANNER",
               text: plainTextOverrides.CREDENTIAL_SCANNER ?? "on" },
             {

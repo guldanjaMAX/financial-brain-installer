@@ -10,6 +10,7 @@ import {
          summarize, runAll as runDoctorChecks, OK, WARN, FAIL } from "../doctor.mjs";
 import { readFileSync } from "node:fs";
 import { doctorDependencies } from "./fixtures/doctor-cli-dependencies.mjs";
+import { HALF_RUN, SETUP_BUILT_IN, SETUP_RECOMMENDED } from "../operations/answer-setup-copy.mjs";
 // A local diagnostic may invoke an installed assistant's credential helper.
 // Every runAll arm starts isolated, including simulated Windows DPAPI checks.
 const runAll = (options) => runDoctorChecks({ ...doctorDependencies(), ...options });
@@ -516,9 +517,21 @@ const EMPTY_WRANGLER_ENV_ARG = process.platform === "win32" ? "--env-file=NUL" :
   const k = process.env.ANTHROPIC_API_KEY;
   delete process.env.ANTHROPIC_API_KEY;
   const a = checkAnthropicKey();
-  check("without a key Workers AI remains the standard", a.status === OK && /Workers AI/.test(a.detail), a.detail);
+  check("the built-in answer setup is derived from the manifest", a.status === OK && a.detail === SETUP_BUILT_IN, a.detail);
   process.env.ANTHROPIC_API_KEY = "x";
-  check("with a key it passes", checkAnthropicKey().status === OK);
+  check("an ambient Anthropic key does not change doctor", checkAnthropicKey().detail === a.detail);
+  const recommended = checkAnthropicKey({ retrieval: {
+    answer_model: "claude-opus-5-5",
+    gate_model: "claude-sonnet-5-5",
+  } });
+  check("the recommended pair is reported from the manifest",
+    recommended.status === OK && recommended.detail === SETUP_RECOMMENDED, recommended.detail);
+  const half = checkAnthropicKey({}, {
+    manifestPath: "/fixture/brain.manifest.json",
+    pathExists: () => true,
+  });
+  check("doctor reports a half-run journal",
+    half.status === WARN && half.detail === HALF_RUN("/fixture/brain.manifest.json"), JSON.stringify(half));
   if (k) process.env.ANTHROPIC_API_KEY = k; else delete process.env.ANTHROPIC_API_KEY;
 }
 

@@ -26,6 +26,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve, win32, posix } from "node:path";
 import { CLOUDFLARE_OAUTH_WRANGLER_PACKAGE } from "./cloudflare-oauth-session.mjs";
 import { windowsFileChildEnvironment } from "./current-user-file.mjs";
+import { SKILL_CREDENTIAL_LINE } from "./answer-setup-copy.mjs";
 
 export const CLAUDE_WORKSPACE_MARKER = "<!-- financial-brain-installer:claude-workspace:v1 -->";
 
@@ -64,6 +65,7 @@ registered Financial Brain MCP server before reaching for Cloudflare directly.
 - Before any provider page, hidden prompt, or system window, explain what will appear, why it is needed, the smallest access requested, and exactly what the owner should do next.
 - When browser control is available, offer to handle official-page navigation and non-secret fields after approval. Stop and clearly explain every sign-in, 2FA, credential reveal or entry, consent, billing, financial-provider handoff, and passkey window before asking for the owner's click.
 - Keep Cloudflare tokens, Brain keys, OAuth secrets, app passwords, passkey material, and authentication codes in provider pages or hidden terminal prompts.
+- ${SKILL_CREDENTIAL_LINE}
 - Never read, screenshot, copy, transcribe, paste, or store a secret shown by a provider or secure device window.
 - Keep Claude Code's normal approval prompts enabled.
 - When the owner directly asks to remember or add durable information, use \`brain_remember\`, show the proposed title and body in plain language, and wait for the normal write approval.
@@ -77,7 +79,7 @@ registered Financial Brain MCP server before reaching for Cloudflare directly.
 - Preview only that canonical source-relative file with the held \`ingest-file\` command form. The matching apply needs the unchanged source and file plus the preview's exact 64-character approval fingerprint. OCR, removal, reconciliation, scheduling, and a full-source walk remain excluded.
 - The held candidate's \`update --preview\` form is read-only and diagnostic. It finishes exact runtime, package, manifest, version, D1, and bare-domain checks before credential or network access. Only then may it ignore any ambient administrator credential, read the durable credential selected by the pinned manifest, and make one authenticated HTTP 200 read from the saved Brain's existing \`/api/admin/brain/documents\` route. It retains no document rows, makes no Cloudflare control-plane request, reports pending work as non-ready, and calls a shortfall recoverable only when queued upserts cover its full numeric deficit; insufficient or delete-only queues stop. It binds that sanitized aggregate verdict into its fingerprint. The hostname is only the pinned manifest's assertion; the preview does not independently prove Cloudflare account or domain ownership. It does not update the Brain, authorize an update, or carry approval into another command. Package, CI, field, and live proof remain separate.
 - Call any protected recovery export an encrypted provenance artifact in owner-facing copy.
-- Pause for the owner's specific approval before a deploy, deletion, data-forget action, key rotation, access revocation, or billing change.
+- Pause for the owner's specific approval before a deploy, deletion, data-forget action, key rotation, access revocation, or billing change. Buying Anthropic credit, changing auto-reload, or changing a Console spend limit is a billing change.
 - Optimize has one total owner-question budget per response across the optional goal, evidence clarification, and zoning. Resolve the installed Brain first. If discovery needs a choice, use this response's one question there and defer every audit blocker. Otherwise, ask only the highest-priority pending blocker: a material evidence conflict, then a whole-source zoning decision, then the optional goal. Skip the goal whenever a material evidence conflict or any zoning decision is pending. Only when neither is pending and the owner has not already stated a goal may you ask: "What would you most like your Financial Brain to help you understand or keep current?" Once one question is asked, state and defer every other blocker. Never split goal, clarification, and zoning into separate question budgets. Keep the audit read-only.
 - For zoning, recommend a mapping only when source-specific evidence supports the whole source. A source label, connector kind, document count, or plausible guess is not enough. Without that evidence, do not propose or recommend a zone. State the available whole-source choices and consequences, including leaving it unzoned, and say the records do not determine the choice. If zoning is the highest-priority blocker, ask the owner to choose with the response's one question. If a material evidence conflict has higher priority, defer zoning to the next response.
 - Default Optimize compares actual records, receipts, and provenance. Do not run Golden Questions, a Golden evaluation, a canned refusal exercise, a known-answer control question, or require the owner to prepare test content.
@@ -96,6 +98,9 @@ registered Financial Brain MCP server before reaching for Cloudflare directly.
 - Source status: \`${commandFor(["sources", manifest])}\`
 - Watched folder off: \`${commandFor(["folder", manifest, "off"])}\` keeps every document and removes nothing.
 - Ask privately: \`${commandFor(["ask", manifest])}\`
+- Connect Claude answers from the clipboard: \`${commandFor(["connect", "anthropic", manifest, "--from-clipboard"])}\`
+- Change the Claude answer limit while keeping the stored key: \`${commandFor(["connect", "anthropic", manifest, "--keep-key", "--daily-cap", "<usd>"])}\`
+- Return answers to the built-in model: \`${commandFor(["disconnect", "anthropic", manifest])}\`
 - Held update diagnostic: \`${commandFor(["update", manifest, "--preview", "--expect-runtime-sha256", "<64hex>", "--json"])}\`
 - Exact first-source preview: \`${commandFor(["ingest-file", manifest, "--source", "<id>", "--file", "<canonical-relative>", "--expect-runtime-sha256", "<64hex>", "--json"])}\`
 - Exact first-source apply after matching approval: \`${commandFor(["ingest-file", manifest, "--source", "<id>", "--file", "<canonical-relative>", "--expect-runtime-sha256", "<64hex>", "--apply", "--approve", "<64hex>"])}\`
@@ -136,8 +141,24 @@ function markerIndices(lines, marker) {
   return lines.flatMap((line, index) => withoutCR(line) === marker ? [index] : []);
 }
 
-export function renderOwnerRulesSection({ platformName = process.platform, assistant = "claude", accountLines = [], askCommand = null } = {}) {
-  const contract = readFileSync(new URL("../templates/owner-contract/answer-contract-v1.md", import.meta.url), "utf8");
+export function renderOwnerRulesSection({
+  platformName = process.platform,
+  assistant = "claude",
+  accountLines = [],
+  askCommand = null,
+  connectCommand = null,
+  capCommand = null,
+} = {}) {
+  let contract = readFileSync(new URL("../templates/owner-contract/answer-contract-v1.md", import.meta.url), "utf8");
+  for (const [placeholder, command] of [
+    ["{{CONNECT_COMMAND}}", connectCommand],
+    ["{{CAP_COMMAND}}", capCommand],
+  ]) {
+    if (contract.split(placeholder).length !== 2) {
+      throw new Error(`the packaged answer contract must have one ${placeholder} invocation`);
+    }
+    if (command) contract = contract.replace(placeholder, () => command);
+  }
   const money = readFileSync(platformName === "win32"
     ? new URL("../templates/owner-contract/money-rules-v3-windows.md", import.meta.url)
     : new URL("../templates/owner-contract/money-rules-v3.md", import.meta.url), "utf8");
@@ -478,7 +499,16 @@ function writeWorkspaceGuide(manifestPath, options, assistant) {
   if (stat && !existing.startsWith(marker)) return result("preserved_unrelated_existing_file");
   const { manifest, commandFor } = guideLocators(manifestPath, options);
   const askCommand = commandFor(["ask", manifest]);
-  const merged = mergeOwnerRules(existing, ({ accountLines }) => renderOwnerRulesSection({ ...options, assistant, accountLines, askCommand }));
+  const connectCommand = commandFor(["connect", "anthropic", manifest, "--from-clipboard"]);
+  const capCommand = commandFor(["connect", "anthropic", manifest, "--keep-key", "--daily-cap", "<usd>"]);
+  const merged = mergeOwnerRules(existing, ({ accountLines }) => renderOwnerRulesSection({
+    ...options,
+    assistant,
+    accountLines,
+    askCommand,
+    connectCommand,
+    capCommand,
+  }));
   if (merged.status === "damaged") return result("preserved_damaged_section");
   const guide = assistant === "codex" ? renderCodexWorkspaceGuide(manifestPath, options) : renderClaudeWorkspaceGuide(manifestPath, options);
   // The whole preamble is managed. Preserve the merged section and its suffix.

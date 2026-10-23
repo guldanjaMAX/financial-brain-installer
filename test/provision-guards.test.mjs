@@ -924,7 +924,8 @@ check("a fully accepted batch may advance its source cursor", sourceCursorCanAdv
   check("deploy sends the manifest chunk size to every Worker", /name: "CHUNK_SIZE"[\s\S]{0,160}m\.retrieval\?\.chunk_size/.test(brain));
   check("deploy sends the manifest overlap to every Worker", /name: "CHUNK_OVERLAP"[\s\S]{0,160}m\.retrieval\?\.chunk_overlap/.test(brain));
   check("the manifest schema declares the optional gate model",
-    manifestSchema.properties?.retrieval?.properties?.gate_model?.type === "string");
+    Array.isArray(manifestSchema.properties?.retrieval?.properties?.gate_model?.anyOf) &&
+      manifestSchema.properties.retrieval.properties.gate_model.anyOf.some((branch) => branch.type === "string"));
   check("the public template names an explicit gate model",
     typeof templateManifest.retrieval?.gate_model === "string" &&
       templateManifest.retrieval.gate_model === templateManifest.retrieval.answer_model,
@@ -939,9 +940,10 @@ check("a fully accepted batch may advance its source cursor", sourceCursorCanAdv
     configured.find((binding) => binding.name === "GATE_MODEL")?.text === "claude-opus-5-5",
     JSON.stringify(configured));
   const defaults = workerBindings({}, config);
-  check("deploy always binds an answer model and leaves an unset gate model absent",
+  check("deploy always binds an answer model and defaults an unset gate to it",
     defaults.some((binding) => binding.name === "ANSWER_MODEL") &&
-      !defaults.some((binding) => binding.name === "GATE_MODEL"),
+      defaults.find((binding) => binding.name === "GATE_MODEL")?.text ===
+        defaults.find((binding) => binding.name === "ANSWER_MODEL")?.text,
     JSON.stringify(defaults));
   check("a Claude gate with a Workers AI answer preserves the Anthropic Worker secret",
     optionalWorkerSecretNames({ retrieval: {

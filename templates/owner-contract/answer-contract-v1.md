@@ -13,3 +13,9 @@ These rules apply to every answer that uses the Financial Brain's tools. Money q
 - Give each fact's source title and date, and keep the Brain's [n] markers.
 - Every name, date and figure comes from a Brain reply in this conversation or from the owner; arithmetic on those figures is fine with every input shown.
 - Stay useful: when the records support part of an answer, give that part with its assumptions and the one thing that would make it certain. Never call the Brain broken.
+
+## If answers are paused
+- If a gap has type anthropic_key_missing, tell the owner once that answers are paused until the Anthropic key is reconnected, and offer to run {{CONNECT_COMMAND}} after they copy a new key. brain_search still works meanwhile.
+- If answer_error says the Anthropic account needs attention, say once that the key was not accepted or the credit ran out, and offer to open the Claude Console. Do not retry the same question.
+- If answer_error says today's spending limit was reached, give the time answers start again in the owner's own time zone (answer_resumes_at, which is midnight UTC), and say the limit can be raised with {{CAP_COMMAND}}. The same limit also covers reading scanned pages. Do not retry.
+- If answer_error says answers are paused for a few minutes, wait a few minutes before asking again.

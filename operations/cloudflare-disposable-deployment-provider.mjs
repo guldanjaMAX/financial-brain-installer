@@ -479,6 +479,7 @@ function nonSecretBindings(binding, mode) {
     { type: "plain_text", name: "CHUNK_OVERLAP", text: binding.chunkOverlap },
     { type: "plain_text", name: "DAILY_LLM_CAP_USD", text: binding.dailyLlmCapUsd },
     { type: "plain_text", name: "ANSWER_MODEL", text: binding.answerModel },
+    { type: "plain_text", name: "GATE_MODEL", text: binding.gateModel || binding.answerModel },
     { type: "plain_text", name: "CREDENTIAL_SCANNER", text: binding.credentialScanner },
     { type: "plain_text", name: "OCR_ENABLED", text: binding.ocrEnabled },
     { type: "plain_text", name: "OCR_MODEL", text: binding.ocrModel },

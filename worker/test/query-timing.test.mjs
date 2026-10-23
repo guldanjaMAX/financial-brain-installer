@@ -403,6 +403,19 @@ test('untrusted labels, identifiers and error text cannot enter timing', async (
   assertCoherent(timing.finish());
 });
 
+test('reviewed Claude 5.5 model ids retain their exact timing labels', () => {
+  for (const id of ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5']) {
+    const timing = createQueryTiming({ route: 'think', now: () => 0 });
+    timing.model('answer_llm', 'anthropic', id)();
+    const receipt = timing.finish();
+    assert.equal(receipt.models.length, 1, `${id} reached the model-label decision`);
+    assert.equal(receipt.models[0].id, id);
+  }
+  const control = createQueryTiming({ route: 'think', now: () => 0 });
+  control.model('answer_llm', 'anthropic', 'untrusted-model')();
+  assert.equal(control.finish().models[0].id, 'unrecognized');
+});
+
 test('thrown and rejected operations count errors and preserve the original failure', async () => {
   const timing = createQueryTiming({ route: 'think', now: () => 0 });
   const failure = new Error('synthetic failure');

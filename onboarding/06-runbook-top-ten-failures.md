@@ -756,6 +756,14 @@ A bad import being one command instead of a support call is the reason you can a
 
 ## Things that look like failures and are not
 
+### Claude answer setup support codes
+
+- `ANTHROPIC_KEY_NOT_ACCEPTED`: Anthropic did not accept this key. In the Claude Console (API keys), create a new key named Financial Brain, click Copy, and rerun the same command. You can delete the earlier key there. Nothing was changed.
+- `ANTHROPIC_ACCOUNT_NEEDS_CREDIT`: Your Anthropic account needs credit before it can answer. Add credit in the Claude Console (Billing), then click Copy again in the key window, or create a new key, and rerun the same command. Nothing was changed.
+- `ANTHROPIC_CHECK_FAILED`: Anthropic refused the test message for a reason this installer does not recognize. Nothing was changed. Support code: ANTHROPIC_CHECK_FAILED.
+- `ANTHROPIC_ROLLBACK_INCOMPLETE`: Your Brain could not be put back automatically. To return it to the built-in model, run: brain disconnect anthropic <manifest>
+- `ANSWER_MODEL_NOT_REVIEWED`: retrieval.<field> is set to <id>, which this installer has not reviewed. Nothing was changed. For the recommended setup run brain connect anthropic <manifest> --from-clipboard, or for the built-in model run brain disconnect anthropic <manifest>.
+
 ### Cleanup says `review required`
 
 This is an intentional safety stop, not an installer crash. It has four
