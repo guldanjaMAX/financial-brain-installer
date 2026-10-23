@@ -30,7 +30,16 @@ import { createQueryTiming, queryTimingResponse, measureQueryStage, startQuerySt
 
 import { handleCuratedVerify } from "./lib/curated-verify.js";
 import { WORKER_VERSION } from "./lib/version.js";
-import { jsonResponse, privateNoStore, validateAdminKey, validateReadKey, callLLM, llmText } from "./lib/core.js";
+import {
+  AnthropicEmptyResponseError,
+  AnthropicIncompleteResponseError,
+  jsonResponse,
+  privateNoStore,
+  validateAdminKey,
+  validateReadKey,
+  callLLM,
+  llmText,
+} from "./lib/core.js";
 import { resolvePrincipal, principalMay, scopeIsUnrestricted } from "./lib/grants.js";
 import { withLedgerAnswer } from "./lib/ledger-answer.js";
 import { handleBankFeed, bankFeedEnabled } from "./lib/bank-feed.js";
@@ -151,15 +160,20 @@ import { entityFactAnswer } from "./lib/entity-fact-answer.js";
 // local fixtures; it is not the product default selected by the installer.
 const UNBOUND_ANSWER_MODEL = "claude-sonnet-4-5";
 const ANTHROPIC_ANSWER_MAX_TOKENS = 4000;
-const ANTHROPIC_GATE_MAX_TOKENS = 2000;
+const ANTHROPIC_EVIDENCE_GATE_MAX_TOKENS = 4000;
+const ANTHROPIC_SYNTHESIS_GATE_MAX_TOKENS = 8000;
 const ANSWER_PROVIDER_FALLBACK_GAP = Object.freeze({
   type: "answer_provider_fallback",
   detail: "This request was answered by the built-in model because the Anthropic key is not set.",
 });
 
-function usedBuiltInProviderFallback(requestedModel, response) {
-  return Boolean(requestedModel) && !String(requestedModel).startsWith("@cf/") &&
+function usedBuiltInProviderFallback(configuredModel, response) {
+  return Boolean(configuredModel) && !String(configuredModel).startsWith("@cf/") &&
     response?.provider === "cloudflare-workers-ai";
+}
+
+function isUnreadableAnthropicReply(error) {
+  return error instanceof AnthropicEmptyResponseError || error instanceof AnthropicIncompleteResponseError;
 }
 
 function configuredAnswerProviderFallback(env) {
@@ -1416,7 +1430,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
         }
         throw error;
       }
-      if (usedBuiltInProviderFallback(answerModel, data)) answerProviderFallback = true;
+      if (usedBuiltInProviderFallback(env.ANSWER_MODEL, data)) answerProviderFallback = true;
       answer = llmText(data).trim() || null;
       model = data?.model || null;
       if (!answer) approvedDocs = [];
@@ -1461,14 +1475,21 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
     try {
       synthesis = await verifySynthesis({ question: q, answer, docs, owner,
         verify: async ({ system, prompt }) => {
-          const response = await callLLM(env, {
-            model: gateModel, max_tokens: 2000,
-            anthropic_max_tokens: ANTHROPIC_GATE_MAX_TOKENS,
-            label: "rag-synthesis-gate", timing, timingStage: "verifier_llm", timeoutMs: 45_000,
-            system, messages: [{ role: "user", content: prompt }],
-          });
-          if (usedBuiltInProviderFallback(gateModel, response)) answerProviderFallback = true;
-          return llmText(response);
+          try {
+            const response = await callLLM(env, {
+              model: gateModel, max_tokens: 2000,
+              anthropic_max_tokens: ANTHROPIC_SYNTHESIS_GATE_MAX_TOKENS,
+              label: "rag-synthesis-gate", timing, timingStage: "verifier_llm", timeoutMs: 45_000,
+              system, messages: [{ role: "user", content: prompt }],
+            });
+            if (usedBuiltInProviderFallback(env.GATE_MODEL || env.ANSWER_MODEL, response)) {
+              answerProviderFallback = true;
+            }
+            return llmText(response);
+          } catch (error) {
+            if (isUnreadableAnthropicReply(error)) return "";
+            throw error;
+          }
         } });
       if (synthesis) {
         gaps.push({ type: "synthesis_scope", detail: "The list covers supported items in the retrieved records; a complete inventory has not been established." });
@@ -1521,7 +1542,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
           const verifierRequest = {
             model: gateModel,
             max_tokens: datedStatus.evidence.length ? 1000 : 300,
-            anthropic_max_tokens: ANTHROPIC_GATE_MAX_TOKENS,
+            anthropic_max_tokens: ANTHROPIC_EVIDENCE_GATE_MAX_TOKENS,
             label: "rag-evidence-gate",
             timing, timingStage: "verifier_llm",
             timeoutMs: 45_000,
@@ -1553,12 +1574,24 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
           let check = null;
           let verifierUnreadableTwice = false;
           if (!(observedAnswer || factAnswer || (synthesis && !datedStatus.evidence.length))) {
-            check = await callLLM(env, verifierRequest);
-            if (usedBuiltInProviderFallback(gateModel, check)) answerProviderFallback = true;
-            if (!parseVerifierReply(check)) {
-              check = await callLLM(env, verifierRequest);
-              if (usedBuiltInProviderFallback(gateModel, check)) answerProviderFallback = true;
-              verifierUnreadableTwice = !parseVerifierReply(check);
+            const callVerifier = async () => {
+              try {
+                const response = await callLLM(env, verifierRequest);
+                if (usedBuiltInProviderFallback(env.GATE_MODEL || env.ANSWER_MODEL, response)) {
+                  answerProviderFallback = true;
+                }
+                return { response, unreadable: false };
+              } catch (error) {
+                if (isUnreadableAnthropicReply(error)) return { response: null, unreadable: true };
+                throw error;
+              }
+            };
+            const firstCheck = await callVerifier();
+            check = firstCheck.response;
+            if (firstCheck.unreadable || !parseVerifierReply(check)) {
+              const secondCheck = await callVerifier();
+              check = secondCheck.response;
+              verifierUnreadableTwice = secondCheck.unreadable || !parseVerifierReply(check);
             }
           }
           const raw = llmText(check);

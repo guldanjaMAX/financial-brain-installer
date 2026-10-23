@@ -332,7 +332,7 @@ const call = (env, path) => {
     providerCalls === 2 && evidenceGateReached &&
       JSON.stringify(providerRequests) === JSON.stringify([
         { kind: "answer", model: "claude-answer-fixture", max_tokens: 4000 },
-        { kind: "evidence", model: "claude-gate-fixture", max_tokens: 2000 },
+        { kind: "evidence", model: "claude-gate-fixture", max_tokens: 4000 },
       ]) &&
       body.answer === "The retainer was deferred [1]." &&
       body.evidence_gate?.supported === true && body.citations.length === 1,
@@ -485,12 +485,232 @@ const call = (env, path) => {
   } finally {
     globalThis.fetch = originalFetch;
   }
-  check("the synthesis gate uses GATE_MODEL and the 2000-token Anthropic cap",
+  check("the synthesis gate uses GATE_MODEL and the 8000-token Anthropic cap",
     JSON.stringify(requests) === JSON.stringify([
       { kind: "answer", model: "claude-answer-fixture", max_tokens: 4000 },
-      { kind: "synthesis", model: "claude-gate-fixture", max_tokens: 2000 },
+      { kind: "synthesis", model: "claude-gate-fixture", max_tokens: 8000 },
     ]) && body.evidence_gate?.supported === true,
     JSON.stringify({ requests, body }).slice(0, 700));
+}
+
+/* Workers AI keeps the established budgets even though Anthropic now receives
+   separate room for adaptive thinking. Exercise both gate kinds through the
+   real route so a shared constant cannot silently widen Workers AI. */
+{
+  const workerRequests = [];
+  const { env } = mkEnv([ROW], {
+    vectorIds: ["meeting:123#0"],
+    extra: {
+      ANSWER_MODEL: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+      GATE_MODEL: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+      AI: {
+        run: async (model, input) => {
+          if (model.includes("bge-")) return { data: [[0.1, 0.2, 0.3]] };
+          const system = String(input?.messages?.[0]?.content || "");
+          const kind = /verify each synthesis item/.test(system)
+            ? "synthesis" : /verify a proposed answer/.test(system) ? "evidence" : "answer";
+          workerRequests.push({ kind, max_tokens: input.max_tokens });
+          if (kind === "synthesis") {
+            return { response: { items: [{ item: 1, supported: true,
+              evidence: [{ n: 1, quote: "agreed to defer the retainer" }] }] }, usage: {} };
+          }
+          if (kind === "evidence") {
+            return { response: { supported: true, complete: true, evidence: [1], reason: "direct support" }, usage: {} };
+          }
+          return { response: "The retainer was deferred [1].", usage: {} };
+        },
+      },
+    },
+  });
+  const ordinary = await (await call(env, "/api/rag/think?q=retainer&limit=5")).json();
+  const synthesis = await (await call(env, "/api/rag/think?q=list+all+retainer+decisions&limit=5")).json();
+  check("Workers AI answer and gate caps remain byte-for-byte at 1000, 300, and 2000",
+    ordinary.evidence_gate?.supported === true && synthesis.evidence_gate?.supported === true &&
+      JSON.stringify(workerRequests) === JSON.stringify([
+        { kind: "answer", max_tokens: 1000 },
+        { kind: "evidence", max_tokens: 300 },
+        { kind: "answer", max_tokens: 1000 },
+        { kind: "synthesis", max_tokens: 2000 },
+      ]),
+    JSON.stringify({ workerRequests, ordinary, synthesis }).slice(0, 900));
+}
+
+/* A provider can emit plausible text and still declare it incomplete. Neither
+   max_tokens nor refusal text may reach answer verification or publication. */
+for (const stopReason of ["max_tokens", "refusal"]) {
+  const originalFetch = globalThis.fetch;
+  let providerCalls = 0;
+  let body;
+  try {
+    globalThis.fetch = async (_url, init) => {
+      providerCalls++;
+      const request = JSON.parse(init?.body || "{}");
+      return new Response(JSON.stringify({
+        content: [{ type: "text", text: "The retainer was deferred [1]." }],
+        model: request.model, usage: { input_tokens: 1, output_tokens: request.max_tokens },
+        stop_reason: stopReason,
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const { env } = mkEnv([ROW], {
+      vectorIds: ["meeting:123#0"],
+      extra: { ANTHROPIC_API_KEY: "fixture", ANSWER_MODEL: "claude-answer-fixture" },
+    });
+    body = await (await call(env, "/api/rag/think?q=retainer&limit=5")).json();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  check(`a partial Anthropic answer with stop_reason ${stopReason} becomes answer_error`,
+    providerCalls === 1 && body.answer === null && body.answer_error === ANSWER_ERROR_MESSAGES.unavailable &&
+      body.citations.length === 0 && body.results.length === 1,
+    JSON.stringify({ providerCalls, body }).slice(0, 700));
+}
+
+/* A truncated repair must also erase the first unverified draft. */
+{
+  const originalFetch = globalThis.fetch;
+  let providerCalls = 0;
+  let body;
+  try {
+    globalThis.fetch = async (_url, init) => {
+      providerCalls++;
+      const request = JSON.parse(init?.body || "{}");
+      return new Response(JSON.stringify({
+        content: [{ type: "text", text: providerCalls === 1
+          ? "The retainer was deferred."
+          : "The retainer was deferred [1]." }],
+        model: request.model, usage: {}, stop_reason: providerCalls === 1 ? "end_turn" : "max_tokens",
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const { env } = mkEnv([ROW], {
+      vectorIds: ["meeting:123#0"],
+      extra: { ANTHROPIC_API_KEY: "fixture", ANSWER_MODEL: "claude-answer-fixture" },
+    });
+    body = await (await call(env, "/api/rag/think?q=retainer&limit=5")).json();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  check("a partial max-token repair produces answer_error and never returns the first draft",
+    providerCalls === 2 && body.answer === null && body.answer_error === ANSWER_ERROR_MESSAGES.unavailable &&
+      body.citations.length === 0,
+    JSON.stringify({ providerCalls, body }).slice(0, 700));
+}
+
+/* An incomplete synthesis reply is an unreadable check, not a verified list
+   and not an answer-provider outage. */
+{
+  const originalFetch = globalThis.fetch;
+  let providerCalls = 0;
+  let body;
+  try {
+    globalThis.fetch = async (_url, init) => {
+      providerCalls++;
+      const request = JSON.parse(init?.body || "{}");
+      const synthesis = /verify each synthesis item/.test(request.system || "");
+      return new Response(JSON.stringify({
+        content: [{ type: "text", text: synthesis
+          ? '{"items":[{"item":1,"supported":true,"evidence":[{"n":1,"quote":"agreed to defer the retainer"}]}]}'
+          : "The retainer was deferred [1]." }],
+        model: request.model, usage: {}, stop_reason: synthesis ? "max_tokens" : "end_turn",
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const { env } = mkEnv([ROW], {
+      vectorIds: ["meeting:123#0"],
+      extra: {
+        ANTHROPIC_API_KEY: "fixture",
+        ANSWER_MODEL: "claude-answer-fixture",
+        GATE_MODEL: "claude-gate-fixture",
+      },
+    });
+    body = await (await call(env, "/api/rag/think?q=list+all+retainer+decisions&limit=5")).json();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  check("partial synthesis text is withheld as an unreadable check",
+    providerCalls === 2 && body.answer === null && body.answer_error === undefined &&
+      body.evidence_gate?.supported === false,
+    JSON.stringify({ providerCalls, body }).slice(0, 800));
+}
+
+/* Empty and incomplete evidence replies consume the existing one retry. The
+   controls assert the gate decision point was reached on every attempt. */
+for (const firstGateReply of [
+  { label: "empty", content: [{ type: "thinking", thinking: "" }], stop_reason: "end_turn" },
+  { label: "partial", content: [{ type: "text", text: '{"supported":true,"complete":true,"evidence":[1],"reason":"partial"}' }], stop_reason: "max_tokens" },
+]) {
+  const originalFetch = globalThis.fetch;
+  let providerCalls = 0;
+  let gateCalls = 0;
+  let body;
+  try {
+    globalThis.fetch = async (_url, init) => {
+      providerCalls++;
+      const request = JSON.parse(init?.body || "{}");
+      const verification = /verify a proposed answer/.test(request.system || "");
+      if (verification) gateCalls++;
+      const payload = !verification
+        ? { content: [{ type: "text", text: "The retainer was deferred [1]." }], stop_reason: "end_turn" }
+        : gateCalls === 1
+          ? firstGateReply
+          : { content: [{ type: "text", text: '{"supported":true,"complete":true,"evidence":[1],"reason":"direct support"}' }], stop_reason: "end_turn" };
+      return new Response(JSON.stringify({ ...payload, model: request.model, usage: {} }), {
+        status: 200, headers: { "content-type": "application/json" },
+      });
+    };
+    const { env } = mkEnv([ROW], {
+      vectorIds: ["meeting:123#0"],
+      extra: {
+        ANTHROPIC_API_KEY: "fixture",
+        ANSWER_MODEL: "claude-answer-fixture",
+        GATE_MODEL: "claude-gate-fixture",
+      },
+    });
+    body = await (await call(env, "/api/rag/think?q=retainer&limit=5")).json();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  check(`a first-attempt ${firstGateReply.label} evidence reply recovers on the one retry`,
+    providerCalls === 3 && gateCalls === 2 && body.answer === "The retainer was deferred [1]." &&
+      body.evidence_gate?.supported === true && body.answer_error === undefined,
+    JSON.stringify({ providerCalls, gateCalls, body }).slice(0, 800));
+}
+
+/* If the retry is incomplete too, preserve today's unreadable-check refusal
+   instead of converting it to answer_error or publishing either partial. */
+{
+  const originalFetch = globalThis.fetch;
+  let providerCalls = 0;
+  let gateCalls = 0;
+  let body;
+  try {
+    globalThis.fetch = async (_url, init) => {
+      providerCalls++;
+      const request = JSON.parse(init?.body || "{}");
+      const verification = /verify a proposed answer/.test(request.system || "");
+      if (verification) gateCalls++;
+      return new Response(JSON.stringify({
+        content: [{ type: "text", text: verification
+          ? '{"supported":true,"complete":true,"evidence":[1],"reason":"partial"}'
+          : "The retainer was deferred [1]." }],
+        model: request.model, usage: {}, stop_reason: verification
+          ? (gateCalls === 1 ? "max_tokens" : "refusal") : "end_turn",
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const { env } = mkEnv([ROW], {
+      vectorIds: ["meeting:123#0"],
+      extra: {
+        ANTHROPIC_API_KEY: "fixture",
+        ANSWER_MODEL: "claude-answer-fixture",
+        GATE_MODEL: "claude-gate-fixture",
+      },
+    });
+    body = await (await call(env, "/api/rag/think?q=retainer&limit=5")).json();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  check("two incomplete evidence replies keep the existing withheld unreadable-check outcome",
+    providerCalls === 3 && gateCalls === 2 && body.answer === null && body.answer_error === undefined &&
+      body.evidence_gate?.reason === "The evidence check reply could not be read, twice.",
+    JSON.stringify({ providerCalls, gateCalls, body }).slice(0, 900));
 }
 
 /* A completed provider call that spends its whole output budget on thinking is
@@ -565,6 +785,28 @@ const call = (env, path) => {
     control.evidence_gate?.supported === true &&
       !control.gaps?.some((gap) => gap?.type === "answer_provider_fallback"),
     JSON.stringify(control.gaps));
+
+  let unboundGenerationCalls = 0;
+  const { env: unboundEnv } = mkEnv([ROW], {
+    vectorIds: ["meeting:123#0"],
+    extra: {
+      AI: {
+        run: async (model, input) => {
+          if (model.includes("bge-")) return { data: [[0.1, 0.2, 0.3]] };
+          unboundGenerationCalls++;
+          const verification = /verify a proposed answer/.test(input?.messages?.[0]?.content || "");
+          return { response: verification
+            ? { supported: true, complete: true, evidence: [1], reason: "direct support" }
+            : "The retainer was deferred [1].", usage: {} };
+        },
+      },
+    },
+  });
+  const unbound = await (await call(unboundEnv, "/api/rag/think?q=retainer&limit=5")).json();
+  check("an unbound compatibility fixture does not claim a configured-provider fallback",
+    unboundGenerationCalls === 2 && unbound.evidence_gate?.supported === true &&
+      !unbound.gaps?.some((gap) => gap?.type === "answer_provider_fallback"),
+    JSON.stringify({ unboundGenerationCalls, gaps: unbound.gaps, answer: unbound.answer }).slice(0, 700));
 }
 
 /* The public source-weight contract is live on D1, including an explicit zero. */

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { callLLM } from "../src/lib/core.js";
+import { callLLM, spendGuardStatus } from "../src/lib/core.js";
 
 /* Issue #19. The provider must follow the CONFIGURED MODEL, never whichever key
    happens to exist. Before this, an install with an Anthropic key for reranking
@@ -16,7 +16,7 @@ const call = (env, model, options = {}) => callLLM(env, {
 // D1 logging is fire-and-forget in this path; a stub keeps the test offline.
 const db = () => ({ prepare: () => ({ bind: () => ({ run: async () => {}, first: async () => ({}) }), run: async () => {}, first: async () => ({}) }) });
 
-let aiCalls, fetchCalls, anthropicReply;
+let aiCalls, fetchCalls, anthropicReply, anthropicError;
 const aiBinding = () => ({
   run: async (model, input) => {
     aiCalls.push({ model, input });
@@ -34,9 +34,11 @@ function reset() {
     usage: {},
     stop_reason: "end_turn",
   };
+  anthropicError = null;
 }
 globalThis.fetch = async (url, opts) => {
   fetchCalls.push({ url: String(url), body: JSON.parse(opts?.body || "{}") });
+  if (anthropicError) throw anthropicError;
   return { ok: true, status: 200, json: async () => anthropicReply, text: async () => "" };
 };
 
@@ -131,6 +133,31 @@ try {
   assert.equal(fetchCalls[0].body.max_tokens, 4000,
     "the named max_tokens error is exercised at the new Anthropic answer cap");
 
+  /* A non-empty max-token or refusal completion is still incomplete. The
+     provider boundary names it so answer and gate callers can fail closed
+     without parsing provider prose. */
+  for (const stopReason of ["max_tokens", "refusal"]) {
+    reset();
+    anthropicReply = {
+      content: [{ type: "text", text: "partial text that must not escape" }],
+      model: "claude-opus-5-5-20261001",
+      usage: { input_tokens: 5, output_tokens: 4000 },
+      stop_reason: stopReason,
+    };
+    await assert.rejects(
+      () => call(
+        { DB: db(), ANTHROPIC_API_KEY: "fixture" },
+        "claude-opus-5-5-20261001",
+        { anthropic_max_tokens: 4000 },
+      ),
+      (error) => error?.name === "AnthropicIncompleteResponseError" &&
+        error?.anthropic_incomplete_response === true &&
+        error?.stop_reason === stopReason,
+      `${stopReason} text must be discarded as an incomplete provider reply`,
+    );
+    assert.equal(fetchCalls.length, 1, `${stopReason} reached the provider decision point`);
+  }
+
   /* Provider-specific caps affect Anthropic only. */
   reset();
   await call(
@@ -148,6 +175,45 @@ try {
   );
   assert.equal(aiCalls[0].input.max_tokens, 300,
     "the Anthropic cap must never alter a Workers AI request");
+
+  /* Once a timed request has been dispatched, an abort can still have billed
+     input and output. Charge the conservative upper estimate and preserve a
+     typed timeout row so the daily cap cannot forget the call. */
+  const timeoutLogs = [];
+  const timeoutDb = {
+    exec: async () => {},
+    prepare: (sql) => ({
+      bind: (...args) => ({
+        first: async () => ({ m: 0 }),
+        run: async () => {
+          if (/INSERT INTO llm_call_log/.test(sql)) timeoutLogs.push(args);
+        },
+      }),
+    }),
+  };
+  reset();
+  anthropicError = Object.assign(new Error("synthetic dispatched timeout"), { name: "TimeoutError" });
+  const spentBeforeTimeout = spendGuardStatus().isolate_spent_micros;
+  await assert.rejects(
+    () => call(
+      { DB: timeoutDb, ANTHROPIC_API_KEY: "fixture" },
+      "claude-sonnet-5-5-20261001",
+      {
+        system: "abcdef",
+        messages: [{ role: "user", content: "123456789" }],
+        anthropic_max_tokens: 4000,
+      },
+    ),
+    (error) => error?.name === "TimeoutError",
+  );
+  const expectedTimeoutMicros = 5 * 2 + 4000 * 10;
+  const timeoutLog = timeoutLogs.at(-1);
+  assert.equal(fetchCalls.length, 1, "the timeout estimate is charged only after dispatch was attempted");
+  assert.equal(timeoutLog?.[4], "timeout", "the call log keeps a distinct timeout status");
+  assert.equal(timeoutLog?.[5], expectedTimeoutMicros,
+    "timeout cost uses input chars/3 plus the full effective output budget");
+  assert.equal(spendGuardStatus().isolate_spent_micros - spentBeforeTimeout, expectedTimeoutMicros,
+    "the same conservative timeout estimate binds the isolate spend cap");
 
   /* Published model-family prices are selected by prefix. A captured log cost
      below exercises the actual billing expression so restoring 3/15 fails. */

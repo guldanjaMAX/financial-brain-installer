@@ -310,6 +310,31 @@ export class AnthropicEmptyResponseError extends Error {
   }
 }
 
+export class AnthropicIncompleteResponseError extends Error {
+  constructor(stopReason) {
+    super(`Anthropic returned an incomplete ${stopReason || "unknown"} response.`);
+    this.name = "AnthropicIncompleteResponseError";
+    this.anthropic_incomplete_response = true;
+    this.stop_reason = stopReason || null;
+  }
+}
+
+function isAbortLike(error) {
+  return error?.name === "AbortError" || error?.name === "TimeoutError" || error?.code === "ABORT_ERR";
+}
+
+function anthropicInputCharacterCount(system, messages) {
+  const messageChars = Array.isArray(messages)
+    ? messages.reduce((sum, message) => {
+        if (typeof message?.content === "string") return sum + message.content.length;
+        if (message?.content === undefined || message?.content === null) return sum;
+        const serialized = JSON.stringify(message.content);
+        return sum + (typeof serialized === "string" ? serialized.length : String(message.content).length);
+      }, 0)
+    : 0;
+  return String(system || "").length + messageChars;
+}
+
 /**
  * How an image is attached to a Workers AI chat request.
  *
@@ -512,22 +537,38 @@ async function callLLMImpl(env, {
     requestedAnthropicMaxTokens > 0
     ? Math.trunc(requestedAnthropicMaxTokens)
     : max_tokens || 1000;
+  const timeoutRate = anthropicRate(anthropicModel);
+  const timeoutMicros = Math.ceil(
+    Math.ceil(anthropicInputCharacterCount(system, messages) / 3) * timeoutRate.in +
+    effectiveAnthropicMaxTokens * timeoutRate.out,
+  );
+  const chargeTimeout = async (error) => {
+    if (!isAbortLike(error)) return;
+    chargeIsolate(timeoutMicros);
+    await logCall(env, { label, model: anthropicModel, status: "timeout", micros: timeoutMicros });
+  };
   const data = await measureQueryModel(timing, timingStage, "anthropic", anthropicModel, async () => {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        model: anthropicModel,
-        max_tokens: effectiveAnthropicMaxTokens,
-        system,
-        messages,
-      }),
-      signal: AbortSignal.timeout(timeoutMs || 45_000),
-    });
+    let res;
+    try {
+      res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model: anthropicModel,
+          max_tokens: effectiveAnthropicMaxTokens,
+          system,
+          messages,
+        }),
+        signal: AbortSignal.timeout(timeoutMs || 45_000),
+      });
+    } catch (error) {
+      await chargeTimeout(error);
+      throw error;
+    }
 
     if (!res.ok) {
       const text = await res.text();
@@ -535,7 +576,12 @@ async function callLLMImpl(env, {
       throw new Error(`Anthropic ${res.status}: ${text.slice(0, 300)}`);
     }
 
-    return res.json();
+    try {
+      return await res.json();
+    } catch (error) {
+      await chargeTimeout(error);
+      throw error;
+    }
   });
   const inTok = data?.usage?.input_tokens || 0;
   const outTok = data?.usage?.output_tokens || 0;
@@ -545,6 +591,9 @@ async function callLLMImpl(env, {
   await logCall(env, { label, model: data?.model || anthropicModel, status: "ok", micros });
   const text = llmText(data);
   if (!text.trim()) throw new AnthropicEmptyResponseError(data?.stop_reason);
+  if (data?.stop_reason === "max_tokens" || data?.stop_reason === "refusal") {
+    throw new AnthropicIncompleteResponseError(data.stop_reason);
+  }
   return {
     content: [{ type: "text", text }],
     model: data?.model || anthropicModel,
