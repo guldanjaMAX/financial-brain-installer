@@ -864,12 +864,14 @@ between the "BEGIN Financial Brain answer rules" and "END Financial Brain
 answer rules" markers in the CLAUDE.md (Claude Code) or AGENTS.md (Codex)
 beside the Brain manifest, normally in `~/Financial Brain`. If that section is
 not already in this conversation, read it before the first money question. In
-short: answer first; then `Confidence: N%` with a one-line reason; one asterisk
-line per assumption with its evidence and the words that flip it; "as of
-<record date>" on every status; one brain_search sorted newest for the subject
-before any status, latest, or absence claim; "not found in this search" plus
-the next place you would check, never "nothing recorded"; money questions go
-to brain_think in the money rules' template wording. Add account names under
+short: answer first; then `Confidence: N%` with a reason and one asterisk per
+assumption. For non-money, use brain_search first, read excerpts, and give
+each fact's source title and date. Search again with other wording, or sort
+"newest" for status, before saying no match. Put "as of <record
+date>" on every status. Never say "nothing recorded" from ordinary ranked
+searches. Money uses brain_think per the money rules. Use it for the
+Brain's own answer only when the owner asks or a brain_financial_map flow calls
+for it. Add account names under
 "My accounts" only after the owner approves the exact lines.
 
 Brain conversations belong in the Financial Brain folder: open Claude Code (or

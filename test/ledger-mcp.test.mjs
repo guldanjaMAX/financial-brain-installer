@@ -13,7 +13,7 @@ import { handleMcp } from "../worker/src/lib/mcp-endpoint.js";
 
 const NOW = "2026-10-11T12:00:00Z";
 const PRESERVE = "Preserve the ledger answer's exact amounts, account masks, dates, and coverage bounds.";
-const NO_MATCH = 'No match in this search. Say "I didn\'t find a matching record in this search", name what you searched, and name the next search you would run (another source, a wider date window, sort "newest", or a distinctive name or number). Do not turn one search into a claim that no such record exists. Do not substitute inference.';
+const NO_MATCH = 'No match in this search. Search again with different wording, or sort "newest" for status, before saying "I didn\'t find a matching record in these searches". Name both searches and the next place you would check (another source, a wider date window, or a distinctive name or number). Do not turn those searches into a claim that no such record exists. Say nothing is recorded only when a response explicitly establishes a complete search. Do not substitute inference.';
 const GLOBAL_ABSENCE = /brain has nothing|nothing recorded|Confidence nothing is recorded|documents do not answer|No (?:match|hits) in this search/i;
 
 const questions = [

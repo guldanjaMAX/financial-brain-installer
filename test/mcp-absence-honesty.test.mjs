@@ -25,8 +25,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const MCP = fileURLToPath(new URL("../components/brain-mcp.mjs", import.meta.url));
 
-const ABSENCE = 'No match in this search. Say "I didn\'t find a matching record in this search", name what you searched, and name the next search you would run (another source, a wider date window, sort "newest", or a distinctive name or number). Do not turn one search into a claim that no such record exists. Do not substitute inference.';
-const NO_HITS = 'No hits in this search. This is not proof that no such record exists. Say "I didn\'t find a matching record in this search" and name the next search you would run.';
+const ABSENCE = 'No match in this search. Search again with different wording, or sort "newest" for status, before saying "I didn\'t find a matching record in these searches". Name both searches and the next place you would check (another source, a wider date window, or a distinctive name or number). Do not turn those searches into a claim that no such record exists. Say nothing is recorded only when a response explicitly establishes a complete search. Do not substitute inference.';
+const NO_HITS = 'No hits in this search. This is not proof that no such record exists. Search again with different wording, or sort "newest" for status, before saying "I didn\'t find a matching record in these searches". Name both searches and the next place you would check.';
+const REMOTE_NO_HITS = 'No hits in this search. This is not proof that no such record exists. Say "I didn\'t find a matching record in this search" and name the next search you would run.';
 const SCOPED_GAP = "No match in this search. This is not proof that no such record exists.";
 const REFUSAL = "I didn't find a matching record in this search.";
 const NEXT_NO_MATCH = "Next: ask again with a name, date or exact phrase the record would contain.";
@@ -34,6 +35,81 @@ const PRESERVE = "Preserve the ledger answer's exact amounts, account masks, dat
 const LATEST = 'Before any status, "latest", or absence claim, run one brain_search for the subject with sort "newest", read newest_record, and say "as of <record date>" for the record you relied on.';
 const MONEY = "For a money question the bank ledger answers (a balance, a payment received, money in and out, largest expenses, deposits, spend by merchant or category, transfers between the owner's own accounts, recurring charges, profit, net income, withdrawals, loan proceeds), use brain_think: it reads the ledger directly. Cash flow is unsupported: relay cash_flow_unsupported with no figure or model fallback. The profit and net-income view is money in minus money out, not accounting profit or cash flow. Keep its exact amounts, account masks, dates and coverage bounds.";
 const NEWEST_DESCRIPTION = 'Before any status, "latest", or absence claim, search the subject once with sort "newest" and check newest_record, the newest reliably dated record among the results this search returned before pagination (at most 50), or the newest unverified date if none is reliable. Before a latest claim, re-search the subject with a recent date window; relevance ranking may omit newer matches.';
+const BROAD_PROMPT_FIXTURES = [
+  {
+    family: "all-sources double-check",
+    prompt: "Double-check all sources for every open obligation the owner may have missed.",
+    promptCue: /double-check all sources/i,
+    instructionCue: /double-check[\s\S]{0,100}?check all sources/i,
+  },
+  {
+    family: "business expenses paid personally",
+    prompt: "Which business expenses did the owner pay personally?",
+    promptCue: /business expenses[\s\S]*pa(?:id|y) personally/i,
+    instructionCue: /business expenses paid personally/i,
+  },
+  {
+    family: "intercompany obligations",
+    prompt: "Reconcile what the owner's entities owe one another.",
+    promptCue: /reconcile[\s\S]*entities owe/i,
+    instructionCue: /reconcile[\s\S]{0,180}?entities owe one another/i,
+  },
+  {
+    family: "complete current-status list",
+    prompt: "Give the owner a complete current-status list for every open item.",
+    promptCue: /complete current-status list/i,
+    instructionCue: /list current statuses/i,
+  },
+];
+const SINGLE_DOCUMENT_CONTROL = "What does the March agreement say about renewal?";
+
+function broadQuestionGuard(text, label) {
+  const start = text.indexOf("Broad-question guard:");
+  assert.ok(start >= 0, `${label}: broad-question guard is present`);
+  const endPhrase = "without this broad-question guard.";
+  const end = text.indexOf(endPhrase, start);
+  assert.ok(end > start, `${label}: single-document control closes the guard`);
+  const guard = text.slice(start, end + endPhrase.length);
+  let routed = 0;
+  for (const fixture of BROAD_PROMPT_FIXTURES) {
+    assert.match(fixture.prompt, fixture.promptCue, `${fixture.family}: fixture reaches its decision cue`);
+    assert.match(guard, fixture.instructionCue, `${label}: routes ${fixture.family} to the guard`);
+    routed++;
+  }
+  assert.equal(routed, BROAD_PROMPT_FIXTURES.length, `${label}: every broad fixture reached a route decision`);
+  assert.doesNotMatch(SINGLE_DOCUMENT_CONTROL,
+    /review|reconcile|double-check|compare|what am I missing|all sources|inventory|current-status|paid personally|entities owe/i,
+    `${label}: the single-document control does not reach a broad cue`);
+  assert.match(guard, /List what each record says, record by record, with its source title and date\./,
+    `${label}: broad output stays record by record`);
+  assert.match(guard,
+    /Never calculate or state a total from excerpts, reconcile the records, conclude how an entity was funded, or call the result all current or complete\./,
+    `${label}: excerpts cannot support synthesis verdicts`);
+  assert.match(guard,
+    /Use a money figure only from brain_think's deterministic ledger answer, or quote it verbatim from one cited record without combining it with another record\./,
+    `${label}: broad money stays on an exact evidence path`);
+  assert.match(guard,
+    /Say which sources and periods you did not search, and what evidence or completed search would make the list complete\./,
+    `${label}: broad output discloses unchecked scope and the completeness condition`);
+  assert.match(guard,
+    /Single-document questions are unchanged: if the question asks what one identified document says, use the plain search-first answer above without this broad-question guard\./,
+    `${label}: the single-document control keeps the plain route`);
+  return guard;
+}
+
+function broadGuardMutants(text, guard) {
+  return [
+    ["drop the guard", text.replace(guard, "")],
+    ["allow computed totals", text.replace(
+      "Never calculate or state a total from excerpts",
+      "You may calculate or state a total from excerpts",
+    )],
+    ["drop say what was not searched", text.replace(
+      "Say which sources and periods you did not search, and what evidence or completed search would make the list complete.",
+      "",
+    )],
+  ];
+}
 
 function fixtureRuntime(url, profile = "") {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "mcp-honesty-")));
@@ -307,8 +383,8 @@ await test("Optimize guidance remains map-first", async () => {
   console.log("PASS MCP Optimize guidance is map-first and keeps preview and activation separate");
 });
 
-// 1. F04 deliberately replaces the global absence claim with a search-scoped
-//    finding and a next search. Pin the new contract byte for byte.
+// 1. A healthy no-match requires a second search before the scoped finding.
+//    Pin the complete handoff contract byte for byte.
 await test("healthy empty think is search-scoped", async () => {
   const out = await thinkReturns({
     answer: "The documents do not answer the question.",
@@ -474,21 +550,71 @@ await test("unknown degraded reason stays private", async () => {
 
 
 
-await test("local tool descriptions route money and require newest-record evidence", async () => {
+await test("local MCP routes non-money answers through search and preserves explicit think exceptions", async () => {
   const { instructions, tools } = await initializeResponse("owner-assistant");
+  const readOnly = await initializeResponse("librarian");
+  assert.deepEqual(tools.map(tool => tool.name), [
+    "brain_think", "brain_search", "brain_remember", "brain_health", "brain_financial_map",
+  ], "the owner-assistant write profile keeps its exact five-tool surface");
+  assert.deepEqual(readOnly.tools.map(tool => tool.name), ["brain_think", "brain_search"],
+    "the librarian read-only profile keeps its exact two-tool surface");
   const think = tools.find(tool => tool.name === "brain_think").description;
   const search = tools.find(tool => tool.name === "brain_search").description;
-  assert.match(think, /^Money and short lookups\./);
-  assert.match(think, /For anything else use brain_search/);
-  for (const phrase of ["balance", "payment received", "money in and out", "largest expenses", "deposits", "merchant or category", "transfers", "recurring charges", "single-fact"])
+  assert.match(think, /^Ledger money and explicitly requested Brain answers\./);
+  assert.match(think, /For every other question, use brain_search/i);
+  assert.match(think, /owner explicitly asks for the Brain's own answer/i);
+  assert.match(think, /brain_financial_map flow calls for it/i);
+  assert.doesNotMatch(think, /short lookup|single-fact/i);
+  for (const phrase of ["balance", "payment received", "money in and out", "largest expenses", "deposits", "merchant or category", "transfers", "recurring charges", "profit", "net income", "withdrawals", "loan proceeds"])
     assert.ok(think.includes(phrase), `think routes ${phrase}`);
-  assert.match(search, /^Default tool for answering questions from the Brain\./);
+  assert.match(search, /^Default answer route for non-money questions\./);
+  assert.match(search, /read the returned excerpts/i);
+  assert.match(search, /each fact's source title and date/i);
+  assert.match(search, /Search again with other wording, or sort "newest" for status/i);
   assert.ok(search.includes(NEWEST_DESCRIPTION), "search explains the whole matched window");
+  assert.match(instructions, /For every non-money question, use brain_search first/i);
+  assert.match(instructions, /read the returned excerpts, and write the answer yourself with each fact's source title and date/i);
+  assert.match(instructions, /Search again with other wording, or sort "newest" for status/i);
+  assert.match(instructions, /owner explicitly asks for the Brain's own answer/i);
+  assert.match(instructions, /brain_financial_map flow calls for it/i);
   assert.ok(instructions.includes(LATEST), "initialize requires a newest search and an as-of date");
   assert.ok(instructions.includes(MONEY), "initialize routes ledger questions to think");
+  assert.doesNotMatch(instructions, /money questions (?:go|route|use) (?:to )?brain_search/i);
   assert.match(instructions, /answer_withheld/);
   assert.match(instructions, /To answer, search, read, then write\./);
   assert.doesNotMatch(instructions, /Call brain_think first/);
+});
+
+await test("broad search-first prompts use the guarded route while one-document questions stay plain", async () => {
+  const { instructions, tools } = await initializeResponse("owner-assistant");
+  assert.deepEqual(tools.map(tool => tool.name), [
+    "brain_think", "brain_search", "brain_remember", "brain_health", "brain_financial_map",
+  ], "the real MCP initialize and tool-list decision points were reached");
+  const renderedOwnerContract = readFileSync(
+    new URL("../templates/owner-contract/answer-contract-v1.md", import.meta.url),
+    "utf8",
+  );
+  const searchDescription = tools.find(tool => tool.name === "brain_search")?.description;
+  assert.ok(searchDescription, "the real brain_search description was returned");
+  const surfaces = [
+    ["MCP initialize instructions", instructions],
+    ["brain_search tool description", searchDescription],
+    ["owner answer contract", renderedOwnerContract],
+  ];
+  const guards = new Map();
+  for (const [label, text] of surfaces) guards.set(label, broadQuestionGuard(text, label));
+
+  let killed = 0;
+  for (const [mutantName] of broadGuardMutants(instructions, guards.get("MCP initialize instructions"))) {
+    for (const [label, text] of surfaces) {
+      const mutant = broadGuardMutants(text, guards.get(label)).find(([name]) => name === mutantName)?.[1];
+      assert.notEqual(mutant, text, `${mutantName}: ${label} bytes changed`);
+      assert.throws(() => broadQuestionGuard(mutant, `${label} ${mutantName} mutant`),
+        `${mutantName}: ${label} contract validator rejects the weakening`);
+    }
+    killed++;
+  }
+  assert.equal(killed, 3, "all specified broad-question mutants were killed");
 });
 
 await test("zero-row largest keeps the real ledger answer beside an empty-document control", async t => {
@@ -619,7 +745,7 @@ async function remoteCall(body, tool, args = {}) {
 await test("remote empty search is scoped with a populated answering control", async () => {
   const empty = await remoteCall({ results: [] }, "search");
   assert.deepEqual(empty.results, []);
-  assert.equal(empty.note, NO_HITS);
+  assert.equal(empty.note, REMOTE_NO_HITS, "the unchanged Worker MCP path retains its own scoped note");
   assert.equal(empty.newest_record, null);
   assert.equal(empty.newer_unreliably_dated, 0);
   const found = await remoteCall({ results: [unreliable, reliable] }, "search");

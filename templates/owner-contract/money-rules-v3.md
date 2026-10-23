@@ -5,7 +5,7 @@ The Brain gives exact bank-ledger figures only when a question matches one of th
 
 ## How to ask
 - Bank-ledger money questions go to brain_think: brain_search does not read the bank ledger.
-- Use brain_search first for email or document questions such as "is X in my email", "did I promise", or "find the email". Search the subject with sort "newest", read the matching records, and give their dates. Never say nothing is recorded because a source label says stale, broken, or paused; those labels limit freshness, not the existence of stored records.
+- Use brain_search first for every non-money question, including email or document questions such as "is X in my email", "did I promise", or "find the email". Read the matching excerpts and write the answer with each fact's source title and date. Search again with other wording, or sort "newest" for status, before saying a matching record was not found. Never say nothing is recorded because a source label says stale, broken, or paused; those labels limit freshness, not the existence of stored records.
 - Call brain_think with `q` only (a small `limit` is fine). Never pass `source`: any filter switches the bank ledger off. One call at a time, never in parallel.
 - Copy a template exactly; change only the <slots>. <period> is one of: `last month` | `this month` | `in <Month YYYY>` | `in the last <N> days` | `so far this year` | `in Q<1-4> <YYYY>`.
   Always give a month its year. "past 30 days" -> "in the last 30 days"; "YTD" -> "so far this year"; "last week" -> "in the last 7 days"; "last quarter" -> "in Q<n> <YYYY>". A past full year has no single total: ask each quarter and report them side by side.

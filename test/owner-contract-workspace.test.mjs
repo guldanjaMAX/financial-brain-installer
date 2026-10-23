@@ -27,9 +27,9 @@ const ACCOUNTS = ["- ****0001 = business checking", "- ****0002 = personal card"
 const ACCOUNT_HEADING = "## My accounts (fill in once, after the owner confirms)";
 const SAVE_HEADING = "## Financial Brain: at the end of a working session";
 const hashes = {
-  "answer-contract-v1.md": "32f9b8e6c23347651b3246fa42d2f93aef9d4f291651e5b5b8425d84f46f39cf",
-  "money-rules-v3.md": "f0137fd965471782c7cb844bb0dd9a05d76a5df9227f700c935691650f0d9f68",
-  "money-rules-v3-windows.md": "9e4b56bb572310f6efe8273a55e0ab58b30a5e2da974a51eafcd2d61e303aac2",
+  "answer-contract-v1.md": "5579e399875fdd360f0e32e32b4cefe14e7ecdb624822e0bb3c38771222a7fb4",
+  "money-rules-v3.md": "39ef0112870be93fbf100175e1c8f77b536e341c511292499661a506ec2ffddb",
+  "money-rules-v3-windows.md": "dcdba35ae84661933d1bc241c26cf3fc83eaf4d284bcdff790c60f07f32f36b6",
 };
 // Repeated writer/race tests exercise real filesystem checks. Native reparse
 // detection has separate refusal/control and one bounded Windows smoke test;
@@ -118,7 +118,24 @@ test("a: verbatim inputs, platform control, assistant substitution and one sessi
     assert.equal(count(codex, "in this AGENTS.md"), 1);
     assert.equal(count(text, SAVE_HEADING), 1);
     assert.equal(count(codex, SAVE_HEADING), 1);
+    assert.match(text, /For every non-money question, use brain_search first\./);
+    assert.match(text, /Read the returned excerpts and write the answer yourself with each fact's source title and date\./);
+    assert.match(text, /Search again with other wording, or sort "newest" for status/);
+    assert.match(text, /owner explicitly asks for the Brain's own answer/);
+    assert.match(text, /brain_financial_map flow calls for it/);
+    assert.match(text, /Broad-question guard:/);
+    assert.match(text, /List what each record says, record by record, with its source title and date\./);
+    assert.match(text, /Never calculate or state a total from excerpts/);
+    assert.match(text, /Say which sources and periods you did not search/);
+    assert.match(text, /Single-document questions are unchanged/);
+    assert.match(text, /Bank-ledger money questions go to brain_think/);
+    assert.doesNotMatch(text, /short single-fact lookup/i);
   }
+  const skill = readFileSync(new URL("../skills/financial-brain-technician/SKILL.md", import.meta.url), "utf8");
+  assert.match(skill, /For non-money, use brain_search first, read excerpts/);
+  assert.match(skill, /Search again with other wording, or sort\s+"newest" for status/);
+  assert.match(skill, /give\s+each fact's source title and date/);
+  assert.match(skill, /owner asks or a brain_financial_map flow calls\s+for it/);
 });
 
 for (const [assistant, filename, marker, write] of writers) {
@@ -625,7 +642,7 @@ test("i: skill insertion is exact, bounded and inert under Windows command rende
   const skill = readFileSync(skillPath, "utf8");
   assert.equal(count(skill, "## Answer from the Brain\n"), 1);
   const section = skill.slice(skill.indexOf("## Answer from the Brain\n"), skill.indexOf("## Credential boundary\n"));
-  assert.equal(sha(section), "1d81f55099c6f2d4f853eb2e48915963fd708901995d2a8ba1cf7432d315e528");
+  assert.equal(sha(section), "25277107aee708d61ef39170b5d267c7d778c7e7bcd6379fffd108b67ddd3bd4");
   assert.ok(Buffer.byteLength(skill) <= 65_000);
   for (const platform of ["darwin", "win32"]) {
     const rendering = { platform, nodePath: "C:\\Runtime\\node.exe", scriptPath: "C:\\Brain\\brain.mjs", env: {}, existsSync: () => false };
