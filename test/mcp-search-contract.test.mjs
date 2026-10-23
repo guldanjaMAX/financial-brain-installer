@@ -13,6 +13,7 @@ import { performance } from "node:perf_hooks";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { writeAdminKeyFile } from "../operations/admin-key-file.mjs";
+import { answerResumeAt } from "../components/brain-mcp-runtime.mjs";
 import { authorityFor } from "../worker/src/lib/evidence-authority.js";
 import worker from "../worker/src/index.js";
 
@@ -25,14 +26,19 @@ const RAG_PARAMETER_KEYS = new Set([
   "source", "entity_slug", "client", "category", "from", "to", "top_folder", "platform",
 ]);
 
-function makeRuntime() {
+function makeRuntime(answerSetup = "built-in") {
   const root = mkdtempSync(join(ROOT, ".tmp-mcp-search-"));
   const home = join(root, "home-fixture");
   mkdirSync(home, { recursive: true });
   const manifest = join(root, "brain.manifest.json");
   const keyFile = join(root, ".brain-admin-key");
   const launchctl = join(root, "launchctl-fixture");
-  writeFileSync(manifest, JSON.stringify({ operations: { admin_key_secret: null } }));
+  writeFileSync(manifest, JSON.stringify({
+    operations: { admin_key_secret: null },
+    ...(answerSetup === "opus-sonnet" ? {
+      retrieval: { answer_model: "claude-opus-5-5", gate_model: "claude-sonnet-5-5" },
+    } : {}),
+  }));
   writeAdminKeyFile(keyFile, FIXTURE_KEY, {
     environment: process.env,
     username: process.env.USERNAME || process.env.USER,
@@ -81,8 +87,9 @@ async function runMcp({
   messages,
   timeZone = "UTC",
   profile,
+  answerSetup = "built-in",
 }) {
-  const runtime = makeRuntime();
+  const runtime = makeRuntime(answerSetup);
   try {
     const env = {
       HOME: runtime.home,
@@ -877,6 +884,68 @@ test("initialize preserves the reviewed provisional instructions", async () => {
     instructions.includes(`\n\n${PROVISIONAL_PARAGRAPH}\n\n`),
     "provisional paragraph must survive word for word",
   );
+});
+
+test("local MCP routing follows the manifest answer pair", async () => {
+  const initialize = {
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fixture", version: "1" } },
+  };
+  const builtIn = await runMcp({
+    url: "https://brain.invalid",
+    messages: [initialize, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }],
+  });
+  const claude = await runMcp({
+    url: "https://brain.invalid",
+    answerSetup: "opus-sonnet",
+    messages: [initialize, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }],
+  });
+  const metadata = replies => ({
+    instructions: replies.find((reply) => reply.id === 1).result.instructions,
+    tools: replies.find((reply) => reply.id === 2).result.tools,
+  });
+  const builtInMetadata = metadata(builtIn);
+  const claudeMetadata = metadata(claude);
+  assert.match(builtInMetadata.instructions, /For every non-money question, use brain_search first/);
+  assert.match(builtInMetadata.tools.find((tool) => tool.name === "brain_search").description,
+    /^Default answer route for non-money questions\./);
+  assert.match(claudeMetadata.instructions,
+    /For every non-money question, use brain_think first.*Claude Opus.*Claude Sonnet/is);
+  assert.match(claudeMetadata.instructions,
+    /answer_error.*anthropic_key_missing.*brain_search/is);
+  assert.match(claudeMetadata.tools.find((tool) => tool.name === "brain_think").description,
+    /^Default answer route for non-money questions with Claude Opus answers and a Claude Sonnet check\./);
+  assert.match(claudeMetadata.tools.find((tool) => tool.name === "brain_search").description,
+    /^Fallback answer route when brain_think returns answer_error or anthropic_key_missing\./);
+  assert.notEqual(builtInMetadata.instructions, claudeMetadata.instructions,
+    "both setup arms reached distinct routing decisions");
+});
+
+test("local MCP reset receipts pass through without invention", () => {
+  const resumesAt = "2026-10-24T00:00:00.000Z";
+  assert.equal(answerResumeAt(resumesAt), resumesAt);
+  assert.equal(answerResumeAt(null), undefined, "the helper does not invent a reset receipt");
+});
+
+test("local MCP output carries the answer reset time", async () => {
+  const resumesAt = "2026-10-24T00:00:00.000Z";
+  const endpoint = await fixtureServer(() => ({
+    answer: null,
+    answer_error: "Today's answer limit has been reached.",
+    answer_resumes_at: resumesAt,
+    gaps: [], citations: [], results: [],
+  }));
+  try {
+    const output = await runMcp({
+      url: endpoint.url,
+      answerSetup: "opus-sonnet",
+      messages: [toolCall(3, "brain_think", { q: "synthetic status" })],
+    });
+    assert.equal(toolResult(output, 3).answer_resumes_at, resumesAt);
+    assert.equal(endpoint.requests.length, 1, "the reset-time control reached the real think route");
+  } finally {
+    await endpoint.close();
+  }
 });
 
 test("brain_think is optional, always returns candidates, and initialize teaches the search-first loop", async () => {

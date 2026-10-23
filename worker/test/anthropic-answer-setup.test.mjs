@@ -185,19 +185,34 @@ test("answer-check closes every provider and spend outcome to a typed status", a
       assert.equal(JSON.stringify(body).includes("detail"), false);
     }
 
+    for (const providerBody of [
+      { content: [], model: "claude-opus-5-5", usage: {}, stop_reason: "end_turn" },
+      { content: [{ type: "text", text: "OK" }], model: "claude-opus-5-5", usage: {}, stop_reason: "max_tokens" },
+      { content: [{ type: "text", text: "I cannot complete that." }], model: "claude-opus-5-5", usage: {}, stop_reason: "refusal" },
+    ]) {
+      globalThis.fetch = async () => new Response(JSON.stringify(providerBody), {
+        status: 200, headers: { "content-type": "application/json" },
+      });
+      const checkProblem = await (await handleAnswerCheck({
+        ANSWER_MODEL: "claude-opus-5-5",
+        GATE_MODEL: "claude-opus-5-5",
+        ANTHROPIC_API_KEY: "fixture",
+        DB: db(),
+      })).json();
+      assert.equal(checkProblem.answer.status, "check_problem");
+      assert.equal(checkProblem.check.status, "check_problem");
+    }
+
     globalThis.fetch = async () => new Response(JSON.stringify({
-      content: [{ type: "thinking", thinking: "" }],
-      model: "claude-opus-5-5",
-      usage: {},
-      stop_reason: "max_tokens",
+      content: [{ type: "text", text: "OK" }], model: "claude-opus-5-5", usage: {}, stop_reason: "end_turn",
     }), { status: 200, headers: { "content-type": "application/json" } });
-    const emptyAtLimit = await (await handleAnswerCheck({
+    const readable = await (await handleAnswerCheck({
       ANSWER_MODEL: "claude-opus-5-5",
       GATE_MODEL: "claude-opus-5-5",
       ANTHROPIC_API_KEY: "fixture",
       DB: db(),
     })).json();
-    assert.equal(emptyAtLimit.answer.status, "ok");
+    assert.equal(readable.answer.status, "ok", "a readable reply is the green control");
 
     let providerCalls = 0;
     globalThis.fetch = async () => { providerCalls++; throw new Error("must not call"); };

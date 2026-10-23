@@ -29,8 +29,8 @@ const ACCOUNT_HEADING = "## My accounts (fill in once, after the owner confirms)
 const SAVE_HEADING = "## Financial Brain: at the end of a working session";
 const hashes = {
   "answer-contract-v1.md": "440a931d73efce5e226e7e44da5d84b52ca8497754f7fd40526c8736348f2451",
-  "money-rules-v3.md": "7edd72150a8382a566ea1993330ac5db3229905faedfd536b80c30f4d4232c6c",
-  "money-rules-v3-windows.md": "647097ae52a4c32ce78828a24092b6a9c5b53581884e7439080be52770a5703e",
+  "money-rules-v3.md": "411ec3356279aa651f4b182f4faabc426ff11a9a851cf34cb1ccdc143cfff165",
+  "money-rules-v3-windows.md": "92c33420f14d1d885266c64d9c9d1410e014588ed9a8edda4aff60a49be1ccdc",
 };
 // Repeated writer/race tests exercise real filesystem checks. Native reparse
 // detection has separate refusal/control and one bounded Windows smoke test;
@@ -111,7 +111,11 @@ test("a: verbatim inputs, platform control, assistant substitution and one sessi
   for (const platformName of ["darwin", "linux", "win32"]) {
     const text = workspace.renderOwnerRulesSection({ platformName });
     const inner = moneyInner(platformName === "win32" ? "money-rules-v3-windows.md" : "money-rules-v3.md");
-    assert.equal(text, `${BEGIN}\n${template("answer-contract-v1.md")}\n${inner}${END}\n`);
+    const expectedContract = template("answer-contract-v1.md").replace(
+      /- If answer_error says today's spending limit was reached[^\n]+/,
+      "- If answer_error says today's spending limit was reached, give the time answers start again in the owner's own time zone (answer_resumes_at, which is midnight UTC). The same limit also covers reading scanned pages. Do not suggest an Anthropic key command for a built-in Brain, and do not retry.",
+    );
+    assert.equal(text, `${BEGIN}\n${expectedContract}\n${inner}${END}\n`);
     assert.equal(text.includes("ls -d ~/.financial-brain-v0.4."), false);
     assert.equal(text.includes("{{BRAIN_ASK_COMMAND}}"), platformName !== "win32");
     const codex = workspace.renderOwnerRulesSection({ platformName, assistant: "codex" });
@@ -146,11 +150,45 @@ test("answer pause rules render the exact manifest-bound connect and cap command
   const capCommand = renderCopyableCommand("/fixture/brain", [
     "connect", "anthropic", "/fixture/brain.manifest.json", "--keep-key", "--daily-cap", "<usd>",
   ]);
-  const text = workspace.renderOwnerRulesSection({ connectCommand, capCommand });
+  const text = workspace.renderOwnerRulesSection({ connectCommand, capCommand, answerSetup: "opus-sonnet" });
   assert.ok(text.includes(connectCommand));
   assert.ok(text.includes(capCommand));
   assert.doesNotMatch(text, /\{\{(?:CONNECT|CAP)_COMMAND\}\}/);
   assert.ok(text.includes(MONEY_RULES_LINE));
+});
+
+test("owner answer routing follows the selected model pair and keeps ledger templates during answer pauses", (t) => {
+  const builtIn = workspace.renderOwnerRulesSection({
+    answerSetup: "built-in",
+    capCommand: "brain connect anthropic /fixture/brain.manifest.json --keep-key --daily-cap <usd>",
+  });
+  const claude = workspace.renderOwnerRulesSection({
+    answerSetup: "opus-sonnet",
+    connectCommand: "brain connect anthropic /fixture/brain.manifest.json --from-clipboard",
+    capCommand: "brain connect anthropic /fixture/brain.manifest.json --keep-key --daily-cap <usd>",
+  });
+  assert.match(builtIn, /For every non-money question, use brain_search first/);
+  assert.doesNotMatch(builtIn, /--keep-key --daily-cap/,
+    "built-in guidance cannot offer a key-only cap command");
+  assert.match(claude, /For every non-money question, use brain_think first.*Claude Opus.*Claude Sonnet/is);
+  assert.match(claude, /answer_error.*anthropic_key_missing.*brain_search/is);
+  assert.notEqual(builtIn, claude, "both answer setups reached distinct owner routing decisions");
+  for (const rendered of [builtIn, claude]) {
+    const fallback = rendered.split("## If brain_think gives no answer")[1].split("## Hard rules")[0];
+    assert.match(fallback, /skip only the CLI fallback for that question/i);
+    assert.match(fallback, /ledger templates keep working/i);
+    assert.doesNotMatch(fallback, /skip this fallback and the other templates/i);
+  }
+
+  const installed = fixture(t);
+  writeFileSync(installed.manifest, JSON.stringify({
+    retrieval: { answer_model: "claude-opus-5-5", gate_model: "claude-sonnet-5-5" },
+  }));
+  const written = workspace.writeClaudeWorkspaceGuide(installed.manifest, options);
+  assert.equal(written.status, "written");
+  const installedText = readFileSync(join(installed.root, "CLAUDE.md"), "utf8");
+  assert.match(installedText, /For every non-money question, use brain_think first/,
+    "the guide writer reached the manifest-selected route");
 });
 
 for (const [assistant, filename, marker, write] of writers) {

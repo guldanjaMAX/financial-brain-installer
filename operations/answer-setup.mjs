@@ -12,6 +12,8 @@ import {
   BUSY,
   CHECK_FAILED,
   CHECK_PENDING,
+  CHECK_PROBLEM,
+  CLIPBOARD_CLEAR_WARNING,
   DAILY_RECONCILE_FAILED,
   DASHBOARD_STEPS,
   DONE_LINES,
@@ -80,6 +82,13 @@ export function validAnthropicKeyShape(value) {
   if (!value.startsWith("sk-ant-")) return false;
   if (value.startsWith("sk-ant-admin") || value.startsWith("sk-ant-oat")) return false;
   return true;
+}
+
+export function clipboardAnthropicKey(value) {
+  if (typeof value !== "string") return value;
+  if (value.endsWith("\r\n")) return value.slice(0, -2);
+  if (value.endsWith("\n")) return value.slice(0, -1);
+  return value;
 }
 
 export function classifyAnthropicResponse({ status, body, networkError = false } = {}) {
@@ -264,7 +273,7 @@ const asTime = (value) => {
   return date.getTime();
 };
 
-const failureLine = (status) => PREFLIGHT_COPY[status] || CHECK_FAILED;
+const failureLine = (status) => status === "check_problem" ? CHECK_PROBLEM : PREFLIGHT_COPY[status] || CHECK_FAILED;
 
 function chooseMode(parsed, { platform, stdinIsTTY }) {
   if (parsed.modeFlag === "from-clipboard") return "clipboard";
@@ -326,10 +335,18 @@ export async function runAnthropicAnswerSetup({ manifestPath, flags = {} }, deps
   const removeJournal = deps.removeJournal ?? (() => { if (existsSync(path)) unlinkSync(path); });
   const lock = deps.acquireLock ?? (async (_input, action) => action());
   let clearClipboard = mode === "clipboard";
+  let clipboardCleared = mode !== "clipboard";
   const clearClipboardNow = async () => {
-    if (!clearClipboard) return;
-    await deps.clearClipboard?.();
+    if (!clearClipboard) return clipboardCleared;
     clearClipboard = false;
+    try {
+      await deps.clearClipboard?.();
+      clipboardCleared = true;
+    } catch {
+      clipboardCleared = false;
+      log(CLIPBOARD_CLEAR_WARNING);
+    }
+    return clipboardCleared;
   };
   let journal = null;
   let currentManifest = null;
@@ -361,7 +378,7 @@ export async function runAnthropicAnswerSetup({ manifestPath, flags = {} }, deps
       let keyPreflightOk = false;
       if (!["dashboard", "keep"].includes(mode)) {
         key = mode === "clipboard"
-          ? await deps.readClipboard()
+          ? clipboardAnthropicKey(await deps.readClipboard())
           : await deps.readSecret?.();
         if (!validAnthropicKeyShape(key)) {
           const error = new Error(KEY_SHAPE);
@@ -395,8 +412,6 @@ export async function runAnthropicAnswerSetup({ manifestPath, flags = {} }, deps
 
       const skipMutation = mode === "keep" && parsed.dailyCap === undefined;
       if (!skipMutation) {
-        journal = answerSetupJournal(currentManifest, { mode, secretExisted });
-        await writeJournal(journal);
         const edited = structuredClone(currentManifest);
         edited.retrieval ||= {};
         edited.safety ||= {};
@@ -406,13 +421,34 @@ export async function runAnthropicAnswerSetup({ manifestPath, flags = {} }, deps
           log(`Daily limit kept at $${edited.safety.daily_llm_spend_cap_usd}.`);
         }
         edited.safety.daily_llm_spend_cap_usd = cap;
+        try {
+          await deps.prepareDaily?.(manifestPath, {
+            previousManifest: originalManifest,
+            afterManifest: edited,
+          });
+        } catch (cause) {
+          const error = new Error(
+            `${DAILY_RECONCILE_FAILED(manifestPath)} Support code: DAILY_RECONCILE_FAILED.`,
+            { cause },
+          );
+          error.code = "DAILY_RECONCILE_FAILED";
+          error.answerSetupClass = "error";
+          throw error;
+        }
+        checkBound();
+        journal = answerSetupJournal(currentManifest, { mode, secretExisted });
+        await writeJournal(journal);
         await writeManifest(manifestPath, edited);
         currentManifest = edited;
         checkBound();
         try {
           await deps.reconcileDaily?.(manifestPath, { previousManifest: originalManifest });
         } catch (cause) {
-          const error = new Error(DAILY_RECONCILE_FAILED(manifestPath), { cause });
+          const error = new Error(
+            `${DAILY_RECONCILE_FAILED(manifestPath)} Support code: DAILY_RECONCILE_FAILED.`,
+            { cause },
+          );
+          error.code = "DAILY_RECONCILE_FAILED";
           error.answerSetupClass = "error";
           throw error;
         }
@@ -430,6 +466,7 @@ export async function runAnthropicAnswerSetup({ manifestPath, flags = {} }, deps
           if (!names.has(ANTHROPIC_SECRET_NAME)) throw new Error("the Anthropic secret name was not present after write readback");
         }
         checkBound();
+        await deps.verifyDeploy?.(currentManifest);
         await deps.deploy?.(manifestPath);
       }
 
@@ -451,7 +488,8 @@ export async function runAnthropicAnswerSetup({ manifestPath, flags = {} }, deps
       const statuses = [workerCheck?.answer?.status, workerCheck?.check?.status];
       const allOk = echoMatched && statuses.every((status) => status === "ok");
       const dailyLimit = echoMatched && statuses.every((status) => ["ok", "daily_limit"].includes(status)) && statuses.includes("daily_limit");
-      const transient = !echoMatched || statuses.some((status) => ["busy", "spend_check_paused"].includes(status));
+      const transient = !echoMatched || statuses.some((status) =>
+        ["busy", "spend_check_paused", "check_problem"].includes(status));
       if (allOk || dailyLimit) {
         completed = true;
         await clearClipboardNow();
@@ -461,14 +499,18 @@ export async function runAnthropicAnswerSetup({ manifestPath, flags = {} }, deps
           String(currentManifest.client?.timezone || "UTC"),
         );
         if (dailyLimit) log(LIMIT_ALREADY_REACHED(manifestPath, reset));
-        for (const line of DONE_LINES({ cap: currentManifest.safety?.daily_llm_spend_cap_usd ?? 10, reset, clipboard: mode === "clipboard" })) log(line);
+        for (const line of DONE_LINES({
+          cap: currentManifest.safety?.daily_llm_spend_cap_usd ?? 10,
+          reset,
+          clipboard: mode === "clipboard" && clipboardCleared,
+        })) log(line);
         return resultReceipt(currentManifest, workerCheck, { keyWritten });
       }
-      if (transient && ["clipboard", "prompt"].includes(mode) && keyPreflightOk) {
+      if (transient && (!["clipboard", "prompt"].includes(mode) || keyPreflightOk)) {
         completed = true;
         await clearClipboardNow();
         if (journal) await removeJournal();
-        log(CHECK_PENDING(manifestPath));
+        log(statuses.includes("check_problem") ? CHECK_PROBLEM : CHECK_PENDING(manifestPath));
         return resultReceipt(currentManifest, workerCheck, { keyWritten });
       }
       const failureStatus = statuses.find((status) => status && status !== "ok") || "error";
@@ -482,12 +524,11 @@ export async function runAnthropicAnswerSetup({ manifestPath, flags = {} }, deps
     } catch (error) {
       if (!journal || completed) throw error;
       const failureClass = error?.answerSetupClass || error?.code || "error";
-      const storedKeyFailed = Boolean(error?.workerCheck) &&
-        ["key_rejected", "billing", "model_unavailable", "key_missing", "error"].includes(failureClass);
+      const writtenKeyRejected = keyWritten && Boolean(error?.workerCheck) && failureClass === "key_rejected";
       const previousManifest = restoreManifestFromAnswerSetupJournal(currentManifest, journal);
       const previousSetup = answerSetupOf(previousManifest);
       const keepPrevious = previousSetup === "built-in" ||
-        (previousSetup !== "built-in" && journal.secret_name_existed && keyWritten && !storedKeyFailed);
+        (previousSetup !== "built-in" && journal.secret_name_existed && !writtenKeyRejected);
       const rollbackManifest = keepPrevious
         ? previousManifest
         : restoreManifestFromAnswerSetupJournal(currentManifest, journal, { builtIn: true });
@@ -495,15 +536,21 @@ export async function runAnthropicAnswerSetup({ manifestPath, flags = {} }, deps
       try {
         await writeManifest(manifestPath, rollbackManifest);
         currentManifest = rollbackManifest;
-        const shouldDelete = !rollbackManifest.retrieval?.rerank && (!journal.secret_name_existed || storedKeyFailed);
+        const shouldDelete = !rollbackManifest.retrieval?.rerank &&
+          ((keyWritten && !journal.secret_name_existed) || writtenKeyRejected);
         if (shouldDelete) {
-          await deps.deleteSecret?.(ANTHROPIC_SECRET_NAME);
+          try {
+            await deps.deleteSecret?.(ANTHROPIC_SECRET_NAME);
+          } catch (deleteError) {
+            if (deleteError?.status !== 404) throw deleteError;
+          }
           const names = new Set(await deps.listSecretNames());
           if (names.has(ANTHROPIC_SECRET_NAME)) throw new Error("the Anthropic secret delete did not read back");
         } else if (rollbackManifest.retrieval?.rerank === true) {
           log(KEY_KEPT_FOR_RERANK);
         }
         await deps.reconcileDaily?.(manifestPath, { previousManifest: originalManifest, rollback: true });
+        await deps.verifyDeploy?.(currentManifest);
         await deps.deploy?.(manifestPath);
         rollbackComplete = true;
         await clearClipboardNow();

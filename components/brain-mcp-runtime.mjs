@@ -114,3 +114,8 @@ export async function fetchWithBrainCredential(fetchImpl, url, requestOptions, r
   }
   return response;
 }
+
+/** Keep the Worker's bounded reset receipt without inferring or reformatting it. */
+export function answerResumeAt(value) {
+  return typeof value === "string" ? value : undefined;
+}

@@ -206,20 +206,22 @@ function providerId(value, code = "CF_DISPOSABLE_PROVIDER_READBACK_INVALID") {
 
 function checkedBinding(value, role) {
   const fields = [
-    "accountId", "adminKeySecret", "answerModel", "bankFeedEnabled",
+    "accountId", "adminKeySecret", "answerModel", "bankFeedEnabled", "gateModel",
     "chunkOverlap", "chunkSize", "clientDisplayName", "clientSlug",
     "credentialScanner", "dailyLlmCapUsd", "databaseId", "databaseName",
     "domain", "embeddingDimensions", "embeddingModel", "enabledCorpora",
     "ocrEnabled", "ocrModel", "productVersion", "recoveryArtifactKeySecret",
     "recoveryFieldGate", "vectorizeIndex", "workerName",
   ];
+  const legacyFields = fields.filter((field) => field !== "gateModel");
   const exactTargetIsolation = role === "target" &&
     exactKeys(value.recoveryFieldGate, ["custom_domains", "routes"]) &&
     Array.isArray(value.recoveryFieldGate.custom_domains) &&
     value.recoveryFieldGate.custom_domains.length === 0 &&
     Array.isArray(value.recoveryFieldGate.routes) &&
     value.recoveryFieldGate.routes.length === 0;
-  if (!exactKeys(value, fields) || !["source", "target"].includes(role) ||
+  if ((!exactKeys(value, fields) && !exactKeys(value, legacyFields)) ||
+      !["source", "target"].includes(role) ||
       !Array.isArray(value.enabledCorpora) || value.enabledCorpora.length !== 0 ||
       value.bankFeedEnabled !== false ||
       (role === "source" ? value.recoveryFieldGate !== null : !exactTargetIsolation) ||
@@ -237,6 +239,10 @@ function checkedBinding(value, role) {
     if (typeof value[field] !== "string" || !value[field]) {
       refuse("CF_DISPOSABLE_PROVIDER_BINDING_INVALID");
     }
+  }
+  if (value.gateModel !== undefined &&
+      (typeof value.gateModel !== "string" || !value.gateModel)) {
+    refuse("CF_DISPOSABLE_PROVIDER_BINDING_INVALID");
   }
   return value;
 }
@@ -436,6 +442,7 @@ function fixedProvisionBinding(role, accountId, databaseId, domain) {
       ? PROVISION_LOCATORS.sourceAdmin
       : PROVISION_LOCATORS.targetAdmin,
     answerModel: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    gateModel: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
     bankFeedEnabled: false,
     chunkOverlap: "300",
     chunkSize: "1500",

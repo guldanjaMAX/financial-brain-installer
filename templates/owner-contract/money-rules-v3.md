@@ -75,7 +75,7 @@ Never refuse when the Brain's figures support an answer with stated assumptions.
 - Quote bank labels exactly as printed. Do not decode prefixes or codes; if you add your own reading, mark it as yours, for example: "this looks like a refund" (a credit with the same merchant and amount as an earlier charge).
 
 ## If brain_think gives no answer
-If answer_error says answers are paused or today's spending limit was reached, skip this fallback and the other templates: the same Brain refuses them too. Say when answers start again instead.
+If answer_error says answers are paused or today's spending limit was reached, skip only the CLI fallback for that question and say when answers start again. The ledger templates keep working through brain_think, so continue using them for supported money questions.
 If brain_think returns an empty answer for a template, use the exact installed invocation and manifest below with the same question:
 `{{BRAIN_ASK_COMMAND}}`
 Keep its printed figures and citations. Never select a different installation or manifest from a version glob.

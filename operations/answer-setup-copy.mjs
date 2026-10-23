@@ -9,13 +9,15 @@ export const ANTHROPIC_CONSOLE_URL = "https://platform.claude.com/";
 
 export const UPDATE_FIRST = (manifest) =>
   `Your Brain is on an older version than this installer. Update it first with: brain update ${manifest}. Nothing was changed.`;
-export const KEY_SHAPE = "That does not look like an Anthropic API key. If the key window is still open in the Claude Console, click Copy again and rerun the same command. Otherwise create a new key there. Nothing was changed.";
+export const KEY_SHAPE = "That does not look like an Anthropic API key. If the key window is still open in the Claude Console, click Copy again and rerun the same command. Otherwise create a new key there, or use --key-set-in-dashboard to enter it in Cloudflare's masked secret field. Nothing was changed.";
 export const KEY_REJECTED = "Anthropic did not accept this key. In the Claude Console (API keys), create a new key named Financial Brain, click Copy, and rerun the same command. You can delete the earlier key there. Nothing was changed.";
 export const BILLING = "Your Anthropic account needs credit before it can answer. Add credit in the Claude Console (Billing), then click Copy again in the key window, or create a new key, and rerun the same command. Nothing was changed.";
 export const MODEL_UNAVAILABLE = "Your Anthropic account cannot use Claude Opus or Claude Sonnet yet. Check the account in the Claude Console, then copy the key again and rerun the same command. Nothing was changed.";
 export const BUSY = "Anthropic is busy right now, or this account reached its per-minute limit (new accounts start low). Wait a minute, click Copy again in the key window, and rerun the same command. Nothing was changed.";
 export const UNREACHABLE = "This computer could not reach Anthropic. Check the internet connection, click Copy again in the key window, and rerun the same command. Nothing was changed.";
 export const CHECK_FAILED = "Anthropic refused the test message for a reason this installer does not recognize. Nothing was changed. Support code: ANTHROPIC_CHECK_FAILED.";
+export const CHECK_PROBLEM = "The answer model check could not be read completely. Your current answer setup was kept. In a few minutes, run the same check again. Support code: ANTHROPIC_CHECK_FAILED.";
+export const CLIPBOARD_CLEAR_WARNING = "Claude answers are connected, but this command could not clear the clipboard. Clear it now before closing the key window; a clipboard history app may still keep a copy.";
 export const ROLLED_BACK_BUILT_IN = "Your Brain could not answer with Claude using this key, so it was put back on the built-in model. Fix the item below, then rerun the same command.";
 export const ROLLED_BACK_PREVIOUS = "The change could not be finished, so your Brain was put back exactly as it was. Fix the item below, then rerun the same command.";
 export const ROLLBACK_INCOMPLETE = (manifest) =>
@@ -33,7 +35,7 @@ export const DAILY_RECONCILE_FAILED = (manifest) =>
   `Daily imports need one more step after this change. Run: brain daily on ${manifest}`;
 export const INSECURE_PROMPT = "This window cannot ask for the key privately. Copy the key, then run: brain connect anthropic <manifest> --from-clipboard";
 export const MODEL_NOT_REVIEWED = ({ field, id, manifest }) =>
-  `retrieval.${field} is set to ${id}, which this installer has not reviewed. Nothing was changed. For the recommended setup run brain connect anthropic ${manifest} --from-clipboard, or for the built-in model run brain disconnect anthropic ${manifest}.`;
+  `retrieval.${field} is set to ${id}, which this installer has not reviewed. Nothing was changed. First run brain disconnect anthropic ${manifest} to return to the built-in model. Then, if the owner wants the recommended setup, run brain connect anthropic ${manifest} --from-clipboard.`;
 export const ENV_IGNORED = (manifest) =>
   `ANTHROPIC_API_KEY in this terminal was ignored. To connect Claude answers, run: brain connect anthropic ${manifest} --from-clipboard`;
 export const HEALTH_KEY_MISSING = "Answers are paused: this Brain is set to answer with Claude, but its Anthropic key is missing.";
@@ -94,5 +96,5 @@ export const CONTRACT_SECTION = `## If answers are paused
 - If answer_error says the Anthropic account needs attention, say once that the key was not accepted or the credit ran out, and offer to open the Claude Console. Do not retry the same question.
 - If answer_error says today's spending limit was reached, give the time answers start again in the owner's own time zone (answer_resumes_at, which is midnight UTC), and say the limit can be raised with {{CAP_COMMAND}}. The same limit also covers reading scanned pages. Do not retry.
 - If answer_error says answers are paused for a few minutes, wait a few minutes before asking again.`;
-export const MONEY_RULES_LINE = "If answer_error says answers are paused or today's spending limit was reached, skip this fallback and the other templates: the same Brain refuses them too. Say when answers start again instead.";
+export const MONEY_RULES_LINE = "If answer_error says answers are paused or today's spending limit was reached, skip only the CLI fallback for that question and say when answers start again. The ledger templates keep working through brain_think, so continue using them for supported money questions.";
 

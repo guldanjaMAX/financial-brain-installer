@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import worker from "../worker/src/index.js";
 import {
   cmdConnectAnthropic,
   cmdDisconnectAnthropic,
@@ -27,8 +28,10 @@ import {
 import {
   BILLING,
   BUSY,
+  CLIPBOARD_CLEAR_WARNING,
   CHECK_FAILED,
   CHECK_PENDING,
+  CHECK_PROBLEM,
   DASHBOARD_STEPS,
   HALF_RUN,
   KEY_REJECTED,
@@ -39,6 +42,10 @@ import {
   ROLLBACK_INCOMPLETE,
   UNREACHABLE,
 } from "../operations/answer-setup-copy.mjs";
+
+const PRODUCT_VERSION = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+).version;
 
 const fixtureKey = () => ["sk", "ant", "api03", "fixture-value"].join("-");
 const manifest = (extra = {}) => ({
@@ -80,6 +87,37 @@ test("key shape rejects unsafe and non-owner API key classes", () => {
     ["sk", "ant", "oat01", "fixture"].join("-"),
     "wrong-prefix",
   ]) assert.equal(validAnthropicKeyShape(value), false, value ? KEY_SHAPE : "empty");
+});
+
+test("Windows clipboard input removes one line ending and keeps interior whitespace invalid", async () => {
+  const bare = fixtureKey();
+  for (const [clipboard, accepted] of [
+    [`${bare}\r\n`, true],
+    [`${bare}\n`, true],
+    [`${bare}\r\n\n`, false],
+    [`${bare}\ninside`, false],
+  ]) {
+    const calls = [];
+    const harness = setupHarness(manifest());
+    harness.deps.platform = "win32";
+    harness.deps.readClipboard = async () => clipboard;
+    harness.deps.putSecret = async (_name, value) => {
+      calls.push(value);
+    };
+    harness.deps.listSecretNames = async () => calls.length ? ["ANTHROPIC_API_KEY"] : [];
+    const outcome = await runAnthropicAnswerSetup({
+      manifestPath: "/fixture/brain.manifest.json",
+      flags: { "from-clipboard": true },
+    }, harness.deps).then(() => "accepted", (error) => error.message);
+    if (accepted) {
+      assert.equal(outcome, "accepted");
+      assert.deepEqual(calls, [bare], "putSecret receives only the bare key");
+    } else {
+      assert.equal(outcome, KEY_SHAPE);
+      assert.deepEqual(calls, [], "the invalid shape stops before the secret write");
+    }
+  }
+  assert.match(KEY_SHAPE, /--key-set-in-dashboard/);
 });
 
 test("Anthropic preflight response classes are closed and billing recognizes credit text", () => {
@@ -263,6 +301,19 @@ test("daily definition reconciliation reinstalls only the recomputed non-source 
     }),
     /DAILY_RECONCILE_FAILED.*source plan changed/,
   );
+
+  let pausedWrites = 0;
+  await assert.rejects(
+    reconcileDailyDefinitionAfterManifestEdit("/fixture/brain.manifest.json", {
+      previousManifest: manifest(),
+      beforePlan,
+      afterPlan: { ...afterPlan, ready: false },
+      beforeStatus: { installed: true, enabled: true },
+      reconcileDailyRefreshSchedule: () => { pausedWrites++; return { verified: true, enabled: false }; },
+    }),
+    /DAILY_RECONCILE_FAILED.*enabled daily imports/i,
+  );
+  assert.equal(pausedWrites, 0, "an enabled task is never disabled as an answer-setup side effect");
 });
 
 function setupHarness(before, { secretPresent = false, failDeploy = false, workerStatus = "ok", rerank = false } = {}) {
@@ -317,6 +368,172 @@ function setupHarness(before, { secretPresent = false, failDeploy = false, worke
   };
 }
 
+function healthBody(overrides = {}) {
+  return {
+    ok: true,
+    status: "ok",
+    version: PRODUCT_VERSION,
+    accepting_documents: true,
+    vector_drain_mode: "active",
+    ...overrides,
+  };
+}
+
+function healthResponse(body) {
+  return {
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify(body),
+    json: async () => structuredClone(body),
+  };
+}
+
+async function realPausedHealthBody() {
+  const response = await worker.fetch(new Request("https://fixture.invalid/health"), {
+    BRAIN_NAME: "fixture",
+    BRAIN_VERSION: PRODUCT_VERSION,
+    VECTOR_DRAIN_MODE: "paused-for-upgrade",
+  }, {});
+  assert.equal(response.status, 200, "the real paused Worker health route remains readable");
+  const body = await response.json();
+  assert.equal(body.vector_drain_mode, "paused-for-upgrade");
+  return body;
+}
+
+test("connect and disconnect read the live health body and refuse a paused or skewed Worker before writes", async () => {
+  const pausedHealth = await realPausedHealthBody();
+  for (const [label, body] of [
+    ["paused", pausedHealth],
+    ["version-skew", healthBody({ version: "0.0.0-fixture-old" })],
+  ]) {
+    const connectCalls = [];
+    const connectError = await cmdConnectAnthropic("/fixture/brain.manifest.json", {
+      "from-clipboard": true,
+    }, {
+      loadManifest: () => ({ m: manifest() }),
+      acquireLock: async (_input, action) => action(),
+      journalExists: () => false,
+      resolveBaseUrl: async () => "https://fixture.invalid",
+      http: async (url) => {
+        connectCalls.push(new URL(url).pathname);
+        return healthResponse(body);
+      },
+      readClipboard: async () => { connectCalls.push("clipboard"); return "invalid"; },
+      saveManifestAtomically: () => connectCalls.push("manifest"),
+      clearClipboard: async () => connectCalls.push("clear"),
+    }).then(() => null, (error) => error);
+    assert.match(connectError?.message || "", /update .*first/i, label);
+    assert.deepEqual(connectCalls, ["/health", "clear"], `${label}: connect stopped after the live health decision`);
+
+    const disconnectCalls = [];
+    const disconnectError = await cmdDisconnectAnthropic("/fixture/brain.manifest.json", {}, {
+      loadManifest: () => ({ m: manifest({ retrieval: { ...RECOMMENDED_ANSWER_SETUP } }) }),
+      acquireLock: async (_input, action) => action(),
+      resolveBaseUrl: async () => "https://fixture.invalid",
+      http: async (url) => {
+        disconnectCalls.push(new URL(url).pathname);
+        return healthResponse(body);
+      },
+      saveManifestAtomically: () => disconnectCalls.push("manifest"),
+    }).then(() => null, (error) => error);
+    assert.match(disconnectError?.message || "", /update .*first/i, label);
+    assert.deepEqual(disconnectCalls, ["/health"], `${label}: disconnect stopped before its first write`);
+  }
+
+  const activeCalls = [];
+  await cmdConnectAnthropic("/fixture/brain.manifest.json", { "from-clipboard": true }, {
+    loadManifest: () => ({ m: manifest() }),
+    acquireLock: async (_input, action) => action(),
+    journalExists: () => false,
+    resolveBaseUrl: async () => "https://fixture.invalid",
+    http: async () => { activeCalls.push("health"); return healthResponse(healthBody()); },
+    readClipboard: async () => { activeCalls.push("clipboard"); return "invalid"; },
+    clearClipboard: async () => activeCalls.push("clear"),
+  }).then(() => assert.fail("invalid clipboard control must refuse"), () => {});
+  assert.deepEqual(activeCalls, ["health", "clipboard", "clear"], "active health reaches the next decision point");
+});
+
+test("a recovery fence refusal uses the update-first remedy before answer setup work", async () => {
+  let ran = 0;
+  const error = await cmdConnectAnthropic("/fixture/brain.manifest.json", { "keep-key": true }, {
+    loadManifest: () => ({ m: manifest({ retrieval: { ...RECOMMENDED_ANSWER_SETUP } }) }),
+    withBrainLifecycleLock: async () => {
+      const refusal = new Error("synthetic recovery fence");
+      refusal.code = "brain_lifecycle_recovery_required";
+      throw refusal;
+    },
+    verifyVersion: async () => { ran++; },
+  }).then(() => null, (caught) => caught);
+  assert.match(error?.message || "", /update .*first/i);
+  assert.equal(ran, 0, "the recovery-fence decision stopped before the live probe");
+});
+
+test("rollback rechecks live health and refuses a deploy after the Worker becomes paused", async () => {
+  const live = [healthBody(), healthBody(), await realPausedHealthBody()];
+  const calls = [];
+  let secret = false;
+  let journal = false;
+  const error = await cmdConnectAnthropic("/fixture/brain.manifest.json", {
+    "from-clipboard": true,
+  }, {
+    loadManifest: () => ({ m: manifest() }),
+    saveManifestAtomically: () => calls.push("manifest"),
+    acquireLock: async (_input, action) => action(),
+    journalExists: () => false,
+    writeJournal: async () => { journal = true; },
+    removeJournal: async () => { journal = false; },
+    resolveBaseUrl: async () => "https://fixture.invalid",
+    http: async () => {
+      calls.push("health");
+      return healthResponse(live.shift());
+    },
+    readClipboard: async () => fixtureKey(),
+    clearClipboard: async () => {},
+    preflight: async () => ({ status: "ok" }),
+    listSecretNames: async () => secret ? ["ANTHROPIC_API_KEY"] : [],
+    putSecret: async () => { secret = true; },
+    deleteSecret: async () => { secret = false; },
+    prepareDaily: async () => {},
+    reconcileDaily: async () => {},
+    deploy: async () => { calls.push("deploy"); throw new Error("synthetic primary deploy failure"); },
+  }).then(() => null, (caught) => caught);
+  assert.match(error?.message || "", /rollback.*incomplete|put back automatically/i);
+  assert.equal(calls.filter((entry) => entry === "health").length, 3,
+    "initial, primary deploy, and rollback deploy decisions each read live health");
+  assert.equal(calls.filter((entry) => entry === "deploy").length, 1,
+    "the paused rollback decision stops the second deploy");
+  assert.equal(journal, true, "an unverified rollback retains its recovery journal");
+});
+
+test("an enabled daily task refuses an unready answer edit before journal, manifest, secret, or deploy writes", async () => {
+  const connect = setupHarness(manifest());
+  connect.deps.prepareDaily = async () => {
+    connect.calls.push("daily-plan-unready");
+    throw new Error("DAILY_RECONCILE_FAILED: enabled daily imports would be paused");
+  };
+  await assert.rejects(
+    runAnthropicAnswerSetup({ manifestPath: "/fixture/brain.manifest.json", flags: { "from-clipboard": true } }, connect.deps),
+    /DAILY_RECONCILE_FAILED/,
+  );
+  assert.ok(connect.calls.includes("daily-plan-unready"), "the daily readiness decision was reached");
+  for (const forbidden of ["journal", "manifest", "put-secret", "deploy"]) {
+    assert.equal(connect.calls.includes(forbidden), false, `${forbidden} stayed unreachable`);
+  }
+
+  const disconnectCalls = [];
+  await assert.rejects(cmdDisconnectAnthropic("/fixture/brain.manifest.json", {}, {
+    loadManifest: () => ({ m: manifest({ retrieval: { ...RECOMMENDED_ANSWER_SETUP } }) }),
+    acquireLock: async (_input, action) => action(),
+    verifyVersion: async () => disconnectCalls.push("version"),
+    prepareDaily: async () => {
+      disconnectCalls.push("daily-plan-unready");
+      throw new Error("DAILY_RECONCILE_FAILED: enabled daily imports would be paused");
+    },
+    saveManifestAtomically: () => disconnectCalls.push("manifest"),
+  }), /DAILY_RECONCILE_FAILED/);
+  assert.deepEqual(disconnectCalls, ["version", "daily-plan-unready"]);
+});
+
 test("a key-class Worker failure restores built-in and deletes the newly added secret", async () => {
   const harness = setupHarness(manifest(), { workerStatus: "key_rejected" });
   await assert.rejects(
@@ -370,6 +587,99 @@ test("a preflight-proven replacement can restore the prior Claude pair when an o
   assert.equal(harness.calls.includes("delete-secret"), false);
 });
 
+test("keep, dashboard, and clipboard failures preserve a working pair and a pre-existing secret", async () => {
+  for (const mode of ["keep-key", "key-set-in-dashboard", "from-clipboard"]) {
+    const before = manifest({ retrieval: { ...RECOMMENDED_ANSWER_SETUP } });
+    const harness = setupHarness(before, { secretPresent: true, workerStatus: "error" });
+    await assert.rejects(
+      runAnthropicAnswerSetup({
+        manifestPath: "/fixture/brain.manifest.json",
+        flags: { [mode]: true, ...(mode === "keep-key" ? { "daily-cap": "8" } : {}) },
+      }, harness.deps),
+      (error) => error?.rolledBack === true,
+    );
+    assert.ok(harness.calls.includes("answer-check"), `${mode}: the Worker decision point was reached`);
+    assert.equal(answerSetupOf(harness.saved.at(-1)), "opus-sonnet", `${mode}: the working pair survives`);
+    assert.equal(harness.secret(), true, `${mode}: the pre-existing secret survives`);
+    assert.equal(harness.calls.includes("delete-secret"), false, `${mode}: no secret delete was attempted`);
+  }
+
+  const rejected = setupHarness(
+    manifest({ retrieval: { ...RECOMMENDED_ANSWER_SETUP } }),
+    { secretPresent: true, workerStatus: "key_rejected" },
+  );
+  await assert.rejects(runAnthropicAnswerSetup({
+    manifestPath: "/fixture/brain.manifest.json",
+    flags: { "from-clipboard": true },
+  }, rejected.deps), /did not accept this key/);
+  assert.ok(rejected.calls.includes("put-secret"), "the rejected-key control wrote this run's key");
+  assert.ok(rejected.calls.includes("delete-secret"), "confirmed rejection may delete the key this run wrote");
+});
+
+test("a 404 while deleting a newly written rollback secret is treated as already absent", async () => {
+  const harness = setupHarness(manifest(), { workerStatus: "key_rejected" });
+  harness.deps.deleteSecret = async () => {
+    harness.calls.push("delete-secret-404");
+    const error = new Error("synthetic absent secret");
+    error.status = 404;
+    throw error;
+  };
+  harness.deps.listSecretNames = async () => harness.calls.includes("delete-secret-404")
+    ? []
+    : harness.calls.includes("put-secret") ? ["ANTHROPIC_API_KEY"] : [];
+  const error = await runAnthropicAnswerSetup({
+    manifestPath: "/fixture/brain.manifest.json",
+    flags: { "from-clipboard": true },
+  }, harness.deps).then(() => null, (caught) => caught);
+  assert.equal(error?.rolledBack, true);
+  assert.equal(error?.rollbackTarget, "built-in");
+  assert.equal(harness.journal(), false, "the confirmed rollback clears its journal");
+});
+
+test("clipboard clear failure after a successful connect is a warning, not a failed setup", async () => {
+  const harness = setupHarness(manifest());
+  harness.deps.clearClipboard = async () => {
+    harness.calls.push("clear-failed");
+    throw new Error("synthetic clipboard clear failure");
+  };
+  const receipt = await runAnthropicAnswerSetup({
+    manifestPath: "/fixture/brain.manifest.json",
+    flags: { "from-clipboard": true },
+  }, harness.deps);
+  assert.equal(receipt.rolled_back, false);
+  assert.ok(harness.calls.includes("clear-failed"), "the clipboard clear decision was reached");
+  assert.ok(harness.lines.includes(CLIPBOARD_CLEAR_WARNING));
+  assert.equal(harness.lines.some((line) => /clipboard was cleared/i.test(line)), false);
+});
+
+test("the CLI answer check timeout covers two sequential Worker model checks", async () => {
+  const timeoutRows = [];
+  let secret = true;
+  const result = await cmdConnectAnthropic("/fixture/brain.manifest.json", { "keep-key": true }, {
+    loadManifest: () => ({ m: manifest({ retrieval: { ...RECOMMENDED_ANSWER_SETUP } }) }),
+    acquireLock: async (_input, action) => action(),
+    journalExists: () => false,
+    verifyVersion: async () => {},
+    listSecretNames: async () => secret ? ["ANTHROPIC_API_KEY"] : [],
+    resolveAdminKey: () => "fixture-admin-key",
+    resolveBaseUrl: async () => "https://fixture.invalid",
+    http: async (url, _init, requestOptions) => {
+      assert.equal(new URL(url).pathname, "/api/admin/brain/answer-check");
+      timeoutRows.push(requestOptions.timeoutMs);
+      return {
+        ok: true,
+        json: async () => ({
+          answer: { model: RECOMMENDED_ANSWER_SETUP.answer_model, status: "ok" },
+          check: { model: RECOMMENDED_ANSWER_SETUP.gate_model, status: "ok" },
+        }),
+      };
+    },
+  });
+  assert.equal(result.rolled_back, false);
+  assert.equal(timeoutRows.length, 1, "the real CLI check boundary was reached");
+  assert.ok(timeoutRows[0] >= 60_000, `timeout was only ${timeoutRows[0]}ms`);
+});
+
 test("reranking keeps the secret on rollback and an incomplete rollback keeps the journal", async () => {
   const rerank = setupHarness(manifest(), { rerank: true, workerStatus: "key_rejected" });
   await assert.rejects(
@@ -408,6 +718,15 @@ test("transient and daily-limit Worker checks keep the proven setup", async () =
   assert.equal(limitReceipt.rolled_back, false);
   assert.ok(limited.lines.some((line) => line.startsWith(LIMIT_ALREADY_REACHED("/fixture/brain.manifest.json", "").split("so answers start again at ")[0])));
   assert.equal(limited.calls.includes("deploy-rollback"), false);
+
+  const unreadable = setupHarness(manifest(), { workerStatus: "check_problem" });
+  const checkProblem = await runAnthropicAnswerSetup({
+    manifestPath: "/fixture/brain.manifest.json",
+    flags: { "from-clipboard": true },
+  }, unreadable.deps);
+  assert.equal(checkProblem.rolled_back, false);
+  assert.ok(unreadable.lines.includes(CHECK_PROBLEM));
+  assert.equal(unreadable.calls.includes("deploy-rollback"), false);
 });
 
 test("a stale isolate may catch up inside the retry window", async () => {
@@ -534,6 +853,8 @@ test("disconnect clears both models, preserves the cap, reconciles, removes the 
     loadManifest: () => ({ m: structuredClone(current) }),
     saveManifestAtomically: async (_path, value) => { calls.push("manifest"); current = structuredClone(value); },
     acquireLock: async (_input, action) => { calls.push("lock"); try { return await action(); } finally { calls.push("unlock"); } },
+    verifyVersion: async () => calls.push("version"),
+    prepareDaily: async () => calls.push("daily-prepare"),
     reconcileDaily: async () => calls.push("daily"),
     deploy: async () => calls.push("deploy"),
     resolveAccount: async () => ({ id: "fixture-account" }),
@@ -572,6 +893,8 @@ test("disconnect keeps a reranking key and never reaches secret deletion", async
     loadManifest: () => ({ m: structuredClone(current) }),
     saveManifestAtomically: async (_path, value) => { current = structuredClone(value); },
     acquireLock: async (_input, action) => action(),
+    verifyVersion: async () => {},
+    prepareDaily: async () => {},
     reconcileDaily: async () => calls.push("daily"),
     deploy: async () => calls.push("deploy"),
     listSecretNames: async () => { calls.push("secret-list"); return ["ANTHROPIC_API_KEY"]; },
@@ -621,6 +944,7 @@ test("JSON failures always carry explicit rollback fields", async () => {
     listSecretNames: async () => secret ? ["ANTHROPIC_API_KEY"] : [],
     putSecret: async () => { secret = true; },
     deleteSecret: async () => { secret = false; },
+    prepareDaily: async () => {},
     reconcileDaily: async () => {},
     deploy: async () => {},
     checkWorker: async () => ({

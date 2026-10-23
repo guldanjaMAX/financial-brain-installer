@@ -32,6 +32,20 @@ export async function verifySynthesis({ question, answer, docs, owner = 'the own
     prompt: JSON.stringify({ question, items: proposal.map(item => ({ ...item,
       documents: docs.filter(doc => item.citations.includes(doc.n)) })) }),
   });
+  if (raw === null) {
+    return {
+      answer: '',
+      verdict: {
+        supported: false,
+        complete: false,
+        evidence: [],
+        reason: 'The evidence check reply could not be read.',
+        unreadable: true,
+      },
+      dropped: items.length,
+      unreadable: true,
+    };
+  }
   let verdict;
   try { verdict = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1)); } catch { verdict = null; }
   const kept = [], approved = new Set();

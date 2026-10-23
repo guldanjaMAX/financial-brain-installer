@@ -627,7 +627,10 @@ for (const stopReason of ["max_tokens", "refusal"]) {
   }
   check("partial synthesis text is withheld as an unreadable check",
     providerCalls === 2 && body.answer === null && body.answer_error === undefined &&
-      body.evidence_gate?.supported === false,
+      body.evidence_gate?.supported === false && body.evidence_gate?.unreadable === true &&
+      body.status === "answer_withheld" &&
+      body.notice === "The answer was withheld because the evidence check reply could not be read twice." &&
+      body.next_action === "Next: ask the same question again in a minute.",
     JSON.stringify({ providerCalls, body }).slice(0, 800));
 }
 
@@ -674,9 +677,13 @@ for (const firstGateReply of [
     JSON.stringify({ providerCalls, gateCalls, body }).slice(0, 800));
 }
 
-/* If the retry is incomplete too, preserve today's unreadable-check refusal
-   instead of converting it to answer_error or publishing either partial. */
-{
+/* If the retry is unreadable too, preserve the check-problem refusal instead
+   of converting it to answer_error or blaming the retrieved evidence. */
+for (const gateFailure of [
+  { label: "empty", content: [{ type: "thinking", thinking: "" }], stop_reason: "end_turn" },
+  { label: "cut off", content: [{ type: "text", text: '{"supported":true' }], stop_reason: "max_tokens" },
+  { label: "refused", content: [{ type: "text", text: "I cannot complete that." }], stop_reason: "refusal" },
+]) {
   const originalFetch = globalThis.fetch;
   let providerCalls = 0;
   let gateCalls = 0;
@@ -688,11 +695,10 @@ for (const firstGateReply of [
       const verification = /verify a proposed answer/.test(request.system || "");
       if (verification) gateCalls++;
       return new Response(JSON.stringify({
-        content: [{ type: "text", text: verification
-          ? '{"supported":true,"complete":true,"evidence":[1],"reason":"partial"}'
-          : "The retainer was deferred [1]." }],
-        model: request.model, usage: {}, stop_reason: verification
-          ? (gateCalls === 1 ? "max_tokens" : "refusal") : "end_turn",
+        content: verification
+          ? gateFailure.content
+          : [{ type: "text", text: "The retainer was deferred [1]." }],
+        model: request.model, usage: {}, stop_reason: verification ? gateFailure.stop_reason : "end_turn",
       }), { status: 200, headers: { "content-type": "application/json" } });
     };
     const { env } = mkEnv([ROW], {
@@ -707,9 +713,12 @@ for (const firstGateReply of [
   } finally {
     globalThis.fetch = originalFetch;
   }
-  check("two incomplete evidence replies keep the existing withheld unreadable-check outcome",
+  check(`two ${gateFailure.label} evidence replies keep the withheld unreadable-check outcome`,
     providerCalls === 3 && gateCalls === 2 && body.answer === null && body.answer_error === undefined &&
-      body.evidence_gate?.reason === "The evidence check reply could not be read, twice.",
+      body.evidence_gate?.reason === "The evidence check reply could not be read, twice." &&
+      body.evidence_gate?.unreadable === true && body.status === "answer_withheld" &&
+      body.notice === "The answer was withheld because the evidence check reply could not be read twice." &&
+      body.next_action === "Next: ask the same question again in a minute.",
     JSON.stringify({ providerCalls, gateCalls, body }).slice(0, 900));
 }
 

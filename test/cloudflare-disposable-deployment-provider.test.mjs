@@ -110,6 +110,7 @@ function manifestBinding(role) {
     accountId: source ? SOURCE_ACCOUNT : TARGET_ACCOUNT,
     adminKeySecret: `keychain://brain-test-v048-field-${role}-recovery-gate-a48f110${source ? 1 : 2}/owner`,
     answerModel: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    gateModel: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
     bankFeedEnabled: false,
     chunkOverlap: "300",
     chunkSize: "1500",

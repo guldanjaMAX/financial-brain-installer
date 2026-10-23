@@ -116,6 +116,7 @@ import {
   HALF_RUN,
   INSECURE_PROMPT,
   KEY_KEPT_FOR_RERANK,
+  UPDATE_FIRST,
   SETUP_BUILT_IN,
   SETUP_CUSTOM,
   SETUP_RECOMMENDED,
@@ -19600,6 +19601,31 @@ export async function cmdConnect(target, options = {}) {
   }
 }
 
+async function assertLiveAnswerSetupWorker(manifestPath, manifest, options = {}) {
+  let base = options.baseUrl;
+  if (!base) {
+    const resolveSetupAccount = options.resolveAccount ?? resolveAccount;
+    const account = manifest.brain?.domain ? null : await resolveSetupAccount(manifest);
+    base = await (options.resolveBaseUrl ?? resolveBaseUrl)(manifest, account);
+  }
+  const response = await (options.http ?? http)(`${base}/health`, {}, {
+    timeoutMs: 30_000,
+    what: "the Brain answer-setup health check",
+  });
+  let body = null;
+  try {
+    if (typeof response?.text === "function") body = JSON.parse(await response.text());
+    else if (typeof response?.json === "function") body = await response.json();
+  } catch { /* Every required live field stays unproven. */ }
+  if (response?.ok !== true || body?.ok !== true || body?.status !== "ok" ||
+      body?.vector_drain_mode !== "active" || body?.version !== PRODUCT_VERSION) {
+    const error = new Error("the live Worker is paused, unhealthy, or on a different product version");
+    error.code = "ANSWER_SETUP_UPDATE_REQUIRED";
+    throw error;
+  }
+  return body;
+}
+
 /** Configure the reviewed owner-account answer pair without exposing the key. */
 export async function cmdConnectAnthropic(manifestPath, flags = {}, options = {}) {
   let m;
@@ -19639,15 +19665,11 @@ export async function cmdConnectAnthropic(manifestPath, flags = {}, options = {}
     m.brain?.domain ? null : await account(),
   ));
   const request = options.http ?? http;
-  const verifyVersion = options.verifyVersion ?? (async () => {
-    const response = await request(`${await baseUrl()}/health`, {}, {
-      timeoutMs: 30_000,
-      what: "the Brain version check",
-    });
-    let body = null;
-    try { body = await response.json(); } catch { /* exact version remains unproven */ }
-    if (!response.ok || body?.version !== PRODUCT_VERSION) throw new Error("worker version differs");
-  });
+  const verifyVersion = options.verifyVersion ?? (async (liveManifest = m) => assertLiveAnswerSetupWorker(
+    manifestPath,
+    liveManifest,
+    { ...options, http: request },
+  ));
   const checkWorker = options.checkWorker ?? (async () => {
     const adminKey = (options.resolveAdminKey ?? resolveAdminKey)(manifestPath);
     if (!adminKey) throw new Error("the durable admin key is unavailable");
@@ -19655,7 +19677,7 @@ export async function cmdConnectAnthropic(manifestPath, flags = {}, options = {}
       method: "POST",
       headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" },
       body: "{}",
-    }, { timeoutMs: 30_000, what: "the answer model check" });
+    }, { timeoutMs: 75_000, what: "the answer model check" });
     let body = null;
     try { body = await response.json(); } catch { /* provider text is never copied */ }
     if (!response.ok || !body?.answer || !body?.check) throw new Error("the answer model check did not return a valid receipt");
@@ -19672,6 +19694,7 @@ export async function cmdConnectAnthropic(manifestPath, flags = {}, options = {}
       acquireLock: options.acquireLock ?? ((input, action) =>
         (options.withBrainLifecycleLock ?? withBrainLifecycleLock)(input, action)),
       verifyVersion,
+      verifyDeploy: options.verifyDeploy ?? verifyVersion,
       readClipboard: options.readClipboard ?? (() => readCustomApiClipboard({ platform })),
       clearClipboard: options.clearClipboard ?? (() => clearCustomApiClipboard({ platform })),
       readSecret: options.readSecret ?? (() => readHiddenSecret("  Anthropic API key (hidden): ", {
@@ -19686,6 +19709,12 @@ export async function cmdConnectAnthropic(manifestPath, flags = {}, options = {}
       listSecretNames,
       putSecret,
       deleteSecret,
+      prepareDaily: options.prepareDaily ?? ((path, prepareOptions) =>
+        reconcileDailyDefinitionAfterManifestEdit(path, {
+          ...prepareOptions,
+          prepareOnly: true,
+          ...(options.dailyRefreshOptions || {}),
+        })),
       reconcileDaily: options.reconcileDaily ?? ((path, reconcileOptions) =>
         reconcileDailyDefinitionAfterManifestEdit(path, {
           ...reconcileOptions,
@@ -19704,6 +19733,10 @@ export async function cmdConnectAnthropic(manifestPath, flags = {}, options = {}
     else for (const line of output) say(line);
     return result;
   } catch (error) {
+    if (error?.code === "brain_lifecycle_recovery_required") {
+      error = new Error(UPDATE_FIRST(manifestPath), { cause: error });
+      error.code = "UPDATE_FIRST";
+    }
     if (flags.json === true) {
       const declaredCode = String(error?.supportCode || error?.code || "ANTHROPIC_CHECK_FAILED");
       throw new JsonFatal({
@@ -20593,49 +20626,73 @@ export async function cmdDisconnectAnthropic(manifestPath, flags = {}, options =
   const lock = options.acquireLock ?? ((input, action) =>
     (options.withBrainLifecycleLock ?? withBrainLifecycleLock)(input, action));
   const report = options.log ?? say;
-  return lock({ manifestPath, operation: "answer-setup-disconnect" }, async () => {
-    const { m: before } = (options.loadManifest ?? loadManifest)(manifestPath);
-    const after = structuredClone(before);
-    after.retrieval ||= {};
-    delete after.retrieval.answer_model;
-    delete after.retrieval.gate_model;
-    await (options.saveManifestAtomically ?? saveAnswerManifestAtomically)(manifestPath, after);
-    await (options.reconcileDaily ?? reconcileDailyDefinitionAfterManifestEdit)(manifestPath, {
-      previousManifest: before,
-      ...(options.dailyRefreshOptions || {}),
-    });
-    await (options.deploy ?? ((path) => cmdDeploy(path, { nextSteps: false })))(manifestPath);
-
-    let deleted = false;
-    if (after.retrieval.rerank === true) {
-      report(KEY_KEPT_FOR_RERANK);
-    } else {
-      const scriptName = before.brain?.worker_name || `${before.client?.slug || "client"}-brain`;
-      let accountReceipt = null;
-      const account = async () => (accountReceipt ??= await (options.resolveAccount ?? resolveAccount)(before));
-      const path = async () => `/accounts/${(await account()).id}/workers/scripts/${scriptName}/secrets`;
-      const listNames = options.listSecretNames ?? (async () => {
-        const rows = await cf(await path());
-        if (!Array.isArray(rows)) throw new Error("invalid Worker secret inventory");
-        return rows.map((row) => row?.name).filter((name) => typeof name === "string");
-      });
-      const names = new Set(await listNames());
-      if (names.has("ANTHROPIC_API_KEY")) {
-        await (options.deleteSecret ?? (async (name) =>
-          cf(`${await path()}/${encodeURIComponent(name)}`, { method: "DELETE" })))("ANTHROPIC_API_KEY");
-        const remaining = new Set(await listNames());
-        if (remaining.has("ANTHROPIC_API_KEY")) die("the Anthropic secret removal did not read back");
-        deleted = true;
+  try {
+    return await lock({ manifestPath, operation: "answer-setup-disconnect" }, async () => {
+      const { m: before } = (options.loadManifest ?? loadManifest)(manifestPath);
+      try {
+        await (options.verifyVersion ?? (() => assertLiveAnswerSetupWorker(
+          manifestPath,
+          before,
+          options,
+        )))();
+      } catch (cause) {
+        const error = new Error(UPDATE_FIRST(manifestPath), { cause });
+        error.code = "UPDATE_FIRST";
+        throw error;
       }
+      const after = structuredClone(before);
+      after.retrieval ||= {};
+      delete after.retrieval.answer_model;
+      delete after.retrieval.gate_model;
+      await (options.prepareDaily ?? ((path, prepareOptions) =>
+        reconcileDailyDefinitionAfterManifestEdit(path, {
+          ...prepareOptions,
+          prepareOnly: true,
+          ...(options.dailyRefreshOptions || {}),
+        })))(manifestPath, { previousManifest: before, afterManifest: after });
+      await (options.saveManifestAtomically ?? saveAnswerManifestAtomically)(manifestPath, after);
+      await (options.reconcileDaily ?? reconcileDailyDefinitionAfterManifestEdit)(manifestPath, {
+        previousManifest: before,
+        ...(options.dailyRefreshOptions || {}),
+      });
+      await (options.deploy ?? ((path) => cmdDeploy(path, { nextSteps: false })))(manifestPath);
+
+      let deleted = false;
+      if (after.retrieval.rerank === true) {
+        report(KEY_KEPT_FOR_RERANK);
+      } else {
+        const scriptName = before.brain?.worker_name || `${before.client?.slug || "client"}-brain`;
+        let accountReceipt = null;
+        const account = async () => (accountReceipt ??= await (options.resolveAccount ?? resolveAccount)(before));
+        const path = async () => `/accounts/${(await account()).id}/workers/scripts/${scriptName}/secrets`;
+        const listNames = options.listSecretNames ?? (async () => {
+          const rows = await cf(await path());
+          if (!Array.isArray(rows)) throw new Error("invalid Worker secret inventory");
+          return rows.map((row) => row?.name).filter((name) => typeof name === "string");
+        });
+        const names = new Set(await listNames());
+        if (names.has("ANTHROPIC_API_KEY")) {
+          await (options.deleteSecret ?? (async (name) =>
+            cf(`${await path()}/${encodeURIComponent(name)}`, { method: "DELETE" })))("ANTHROPIC_API_KEY");
+          const remaining = new Set(await listNames());
+          if (remaining.has("ANTHROPIC_API_KEY")) die("the Anthropic secret removal did not read back");
+          deleted = true;
+        }
+      }
+      const journalPath = answerSetupJournalPath(manifestPath);
+      if ((options.journalExists ?? existsSync)(journalPath)) {
+        await (options.removeJournal ?? unlinkSync)(journalPath);
+      }
+      report(DISCONNECT_LINE);
+      if (deleted) report(CONSOLE_REVOKE_LINE);
+      return { disconnected: true, secret_deleted: deleted, key_kept_for_rerank: after.retrieval.rerank === true };
+    });
+  } catch (error) {
+    if (error?.code === "brain_lifecycle_recovery_required") {
+      die(UPDATE_FIRST(manifestPath));
     }
-    const journalPath = answerSetupJournalPath(manifestPath);
-    if ((options.journalExists ?? existsSync)(journalPath)) {
-      await (options.removeJournal ?? unlinkSync)(journalPath);
-    }
-    report(DISCONNECT_LINE);
-    if (deleted) report(CONSOLE_REVOKE_LINE);
-    return { disconnected: true, secret_deleted: deleted, key_kept_for_rerank: after.retrieval.rerank === true };
-  });
+    throw error;
+  }
 }
 
 export async function cmdDisconnectImessage(manifestPath, flags = {}, options = {}) {
@@ -27180,7 +27237,7 @@ export async function reconcileDailyDefinitionAfterManifestEdit(manifestPath, op
 
   const afterManifest = options.afterPlan
     ? null
-    : (options.loadManifest ?? loadManifest)(manifestPath).m;
+    : options.afterManifest ?? (options.loadManifest ?? loadManifest)(manifestPath).m;
   const after = options.afterPlan ?? await buildConfiguredDailyPlan(afterManifest, manifestPath, planOptions);
   if (before.source_plan_hash !== after.source_plan_hash) {
     const error = new Error("DAILY_RECONCILE_FAILED: the source plan changed during an answer setup edit");
@@ -27188,7 +27245,23 @@ export async function reconcileDailyDefinitionAfterManifestEdit(manifestPath, op
     throw error;
   }
 
-  if (status.enabled === true && after.ready === true) {
+  if (status.enabled === true && after.ready !== true) {
+    const error = new Error(
+      "DAILY_RECONCILE_FAILED: enabled daily imports would be paused by this answer setup edit",
+    );
+    error.code = "DAILY_RECONCILE_FAILED";
+    throw error;
+  }
+  if (options.prepareOnly === true) {
+    return Object.freeze({
+      installed: true,
+      enabled: status.enabled === true,
+      changed: false,
+      ready: after.ready === true,
+    });
+  }
+
+  if (status.enabled === true) {
     const installed = (options.installDailyRefreshSchedule ?? installDailyRefreshSchedule)(after, schedulerOptions);
     if (installed?.verified !== true) {
       const error = new Error("DAILY_RECONCILE_FAILED: the daily definition did not pass exact readback");
@@ -30748,8 +30821,10 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         "Run brain update <full path to brain.manifest.json> once; future updates will work from any folder."
     );
   }
+  const installedManifest = loadManifest(installed.path).m;
+  assertReviewedAnswerModels(installedManifest, { manifestPath: installed.path });
   const forceQueuedUpdate = options.forceQueuedUpdate === true;
-  const mailTransition = microsoftMailTransition(loadManifest(installed.path).m);
+  const mailTransition = microsoftMailTransition(installedManifest);
   let backlog = null;
   // Replacing adoption, verification, or upgrade is a dependency-injection
   // seam used by their existing focused tests, not an installed CLI path. A

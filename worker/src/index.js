@@ -512,7 +512,7 @@ function nextUtcMidnight() {
 }
 
 function answerCheckStatus(error) {
-  if (error instanceof AnthropicEmptyResponseError && error.output_budget_exhausted) return "ok";
+  if (isUnreadableAnthropicReply(error)) return "check_problem";
   if (error?.no_anthropic_key) return "key_missing";
   if (error?.llm_cap_exceeded && error?.spend_guard_degraded) return "spend_check_paused";
   if (error?.llm_cap_exceeded) return "daily_limit";
@@ -1518,7 +1518,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
             });
             return llmText(response);
           } catch (error) {
-            if (isUnreadableAnthropicReply(error)) return "";
+            if (isUnreadableAnthropicReply(error)) return null;
             throw error;
           }
         } });
@@ -1646,6 +1646,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
             complete: verdict?.complete === true || String(verdict?.complete).toLowerCase() === "true",
             evidence: [...allowed],
             reason: String(verdict?.reason || "").slice(0, 240) || undefined,
+            ...((verifierUnreadableTwice || verdict?.unreadable === true) ? { unreadable: true } : {}),
             ...(datedStatus.spans?.length ? { quoted_spans: datedStatus.spans } : {}),
             ...(verifierUnreadableTwice && raw ? { invalid_response: raw.replace(/\s+/g, " ").slice(0, 240) } : {}),
           };
@@ -1952,7 +1953,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
   const refusalReason = String(evidenceGate?.reason || "");
   const answerWithheldGate = refusalReason === "draft made claims without document citations"
     ? "uncited_draft"
-    : evidenceGate?.invalid_response && refusalReason === "The evidence check reply could not be read, twice."
+    : evidenceGate?.unreadable === true
       ? "unreadable_check_reply"
       : gaps.some((gap) => ["money_veto", "money_recall"].includes(gap?.type)) ||
           /\b(?:money|QuickBooks)\b/i.test(refusalReason)

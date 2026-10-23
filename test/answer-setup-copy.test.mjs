@@ -4,6 +4,7 @@ import { test } from "node:test";
 
 import {
   CONTRACT_SECTION,
+  CHECK_PROBLEM,
   GAP_DETAIL,
   MONEY_RULES_LINE,
   SKILL_CONSOLE_PARAGRAPH,
@@ -12,6 +13,8 @@ import {
   SKILL_DECISION_TEXT,
   SKILL_ON_REQUEST,
   SKILL_WINDOWS_LINE,
+  KEY_SHAPE,
+  MODEL_NOT_REVIEWED,
 } from "../operations/answer-setup-copy.mjs";
 import { GAP_DETAIL as WORKER_GAP_DETAIL } from "../worker/src/lib/answer-render.js";
 
@@ -47,4 +50,16 @@ test("the approved answer decision keeps the confirmed cap and measured unit cos
   assert.match(SKILL_DECISION_TEXT, /\$5\b/);
   assert.match(SKILL_DECISION_TEXT, /5\.5 cents/);
   assert.doesNotMatch(SKILL_DECISION_TEXT, /\$16\b|\$66\b/);
+});
+
+test("answer setup remedies name executable commands and honest check failures", () => {
+  assert.match(KEY_SHAPE, /--key-set-in-dashboard/);
+  const remedy = MODEL_NOT_REVIEWED({
+    field: "answer_model", id: "fixture-unreviewed", manifest: "/fixture/brain.manifest.json",
+  });
+  assert.match(remedy, /brain disconnect anthropic \/fixture\/brain\.manifest\.json/);
+  assert.ok(remedy.indexOf("brain disconnect anthropic") < remedy.indexOf("brain connect anthropic"),
+    "the executable cleanup step comes before the command that needs reviewed state");
+  assert.match(CHECK_PROBLEM, /check.*could not be read/i);
+  assert.doesNotMatch(CHECK_PROBLEM, /key|evidence did not support|refused the test message/i);
 });

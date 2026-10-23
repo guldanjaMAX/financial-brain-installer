@@ -833,6 +833,38 @@ await test("remote descriptions and initialize route money and newest-record rea
   assert.equal(backendCalls, 0, "metadata never reads records");
 });
 
+await test("remote connector routing follows the Worker answer pair", async () => {
+  const url = new URL("https://fixture.invalid/mcp");
+  const deps = {
+    think() { throw new Error("metadata must not call think"); },
+    search() { throw new Error("metadata must not call search"); },
+  };
+  const metadata = async env => {
+    const rpc = async method => (await (await handleMcp(env,
+      new Request(url, { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params: {} }) }),
+      url, deps)).json()).result;
+    return { tools: (await rpc("tools/list")).tools, instructions: (await rpc("initialize")).instructions };
+  };
+  const builtIn = await metadata({
+    ANSWER_MODEL: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    GATE_MODEL: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+  });
+  const claude = await metadata({ ANSWER_MODEL: "claude-opus-5-5", GATE_MODEL: "claude-sonnet-5-5" });
+  assert.match(builtIn.tools.find((tool) => tool.name === "ask").description,
+    /^Money and short lookups\./);
+  assert.match(builtIn.tools.find((tool) => tool.name === "search").description,
+    /^Default tool for questions about the owner's records\./);
+  assert.match(builtIn.instructions, /search and fetch read the underlying documents/);
+  assert.match(claude.tools.find((tool) => tool.name === "ask").description,
+    /^Default answer route for non-money questions with Claude Opus answers and a Claude Sonnet check\./);
+  assert.match(claude.tools.find((tool) => tool.name === "search").description,
+    /^Fallback route when ask returns answer_error or anthropic_key_missing\./);
+  assert.match(claude.instructions, /For non-money questions, use ask first.*Claude Opus.*Claude Sonnet/is);
+  assert.match(claude.instructions, /answer_error.*anthropic_key_missing.*search, then fetch/is);
+  assert.notEqual(builtIn.instructions, claude.instructions,
+    "the hosted metadata reached both routing arms");
+});
+
 await test("R4 remote refused ask reports candidates with titles and dates", async () => {
   const out = await remoteCall({ answer: "The documents do not answer the question.", results: [reliable, unreliable, datedRow("third", null, false)], citations: [], gaps: [] }, "ask");
   assert.match(out, /I found 3 records but none answered this directly/);
