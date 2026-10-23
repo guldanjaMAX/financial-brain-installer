@@ -30,7 +30,7 @@ import { createQueryTiming, queryTimingResponse, measureQueryStage, startQuerySt
 
 import { handleCuratedVerify } from "./lib/curated-verify.js";
 import { WORKER_VERSION } from "./lib/version.js";
-import { jsonResponse, privateNoStore, validateAdminKey, validateReadKey, callLLM } from "./lib/core.js";
+import { jsonResponse, privateNoStore, validateAdminKey, validateReadKey, callLLM, llmText } from "./lib/core.js";
 import { resolvePrincipal, principalMay, scopeIsUnrestricted } from "./lib/grants.js";
 import { withLedgerAnswer } from "./lib/ledger-answer.js";
 import { handleBankFeed, bankFeedEnabled } from "./lib/bank-feed.js";
@@ -145,6 +145,29 @@ import {
 import { supplementalRetrievalFilters } from "./lib/retrieval-routing.js";
 import { dispatchCfoWorkflow } from "./lib/cfo-workflow.js";
 import { entityFactAnswer } from "./lib/entity-fact-answer.js";
+
+// Supported deploys always bind ANSWER_MODEL through workerBindings(). This
+// third-party model id remains only for compatibility with unbound Workers and
+// local fixtures; it is not the product default selected by the installer.
+const UNBOUND_ANSWER_MODEL = "claude-sonnet-4-5";
+const ANTHROPIC_ANSWER_MAX_TOKENS = 4000;
+const ANTHROPIC_GATE_MAX_TOKENS = 2000;
+const ANSWER_PROVIDER_FALLBACK_GAP = Object.freeze({
+  type: "answer_provider_fallback",
+  detail: "This request was answered by the built-in model because the Anthropic key is not set.",
+});
+
+function usedBuiltInProviderFallback(requestedModel, response) {
+  return Boolean(requestedModel) && !String(requestedModel).startsWith("@cf/") &&
+    response?.provider === "cloudflare-workers-ai";
+}
+
+function configuredAnswerProviderFallback(env) {
+  if (env.ANTHROPIC_API_KEY) return false;
+  return [env.ANSWER_MODEL, env.GATE_MODEL]
+    .filter((model) => typeof model === "string" && model)
+    .some((model) => !model.startsWith("@cf/"));
+}
 
 /* ------------------------------------------------------------ retrieval */
 
@@ -466,7 +489,7 @@ async function rerank(env, q, results, limit, timing = null) {
       timeoutMs: 8000,
       messages: [{ role: "user", content: `Question: ${q}\n\nResults:\n${list}` }],
     });
-    const text = data?.content?.[0]?.text || "";
+    const text = llmText(data);
     const parsed = JSON.parse(text.slice(text.indexOf("["), text.lastIndexOf("]") + 1));
     const scored = parsed
       .filter((p) => candidates[p.idx])
@@ -1365,14 +1388,18 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
   let answerError = null;
   let model = null;
   let modelDeclaredNoEvidence = false;
+  const answerModel = env.ANSWER_MODEL || UNBOUND_ANSWER_MODEL;
+  const gateModel = env.GATE_MODEL || answerModel;
+  let answerProviderFallback = false;
   try {
     let repairInstruction = "";
     for (let attempt = 0; !observedAnswer && !factAnswer && attempt < 2; attempt++) {
       let data;
       try {
         data = await callLLM(env, {
-          model: env.ANSWER_MODEL || "claude-sonnet-4-5",
+          model: answerModel,
           max_tokens: 1000,
+          anthropic_max_tokens: ANTHROPIC_ANSWER_MAX_TOKENS,
           system,
           label: attempt === 0 ? "rag-think" : "rag-think-repair",
           timing, timingStage: "answer_llm",
@@ -1389,7 +1416,8 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
         }
         throw error;
       }
-      answer = (data?.content?.[0]?.text || "").trim() || null;
+      if (usedBuiltInProviderFallback(answerModel, data)) answerProviderFallback = true;
+      answer = llmText(data).trim() || null;
       model = data?.model || null;
       if (!answer) approvedDocs = [];
       if (answer) {
@@ -1434,11 +1462,13 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
       synthesis = await verifySynthesis({ question: q, answer, docs, owner,
         verify: async ({ system, prompt }) => {
           const response = await callLLM(env, {
-            model: env.ANSWER_MODEL || "claude-sonnet-4-5", max_tokens: 2000,
+            model: gateModel, max_tokens: 2000,
+            anthropic_max_tokens: ANTHROPIC_GATE_MAX_TOKENS,
             label: "rag-synthesis-gate", timing, timingStage: "verifier_llm", timeoutMs: 45_000,
             system, messages: [{ role: "user", content: prompt }],
           });
-          return response?.content?.[0]?.text || "";
+          if (usedBuiltInProviderFallback(gateModel, response)) answerProviderFallback = true;
+          return llmText(response);
         } });
       if (synthesis) {
         gaps.push({ type: "synthesis_scope", detail: "The list covers supported items in the retrieved records; a complete inventory has not been established." });
@@ -1477,7 +1507,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
       } else {
         try {
           const parseVerifierReply = (response) => {
-            const text = response?.content?.[0]?.text || "";
+            const text = llmText(response);
             const first = text.indexOf("{");
             const last = text.lastIndexOf("}");
             if (first < 0 || last <= first) return null;
@@ -1489,8 +1519,9 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
             }
           };
           const verifierRequest = {
-            model: env.ANSWER_MODEL || "claude-sonnet-4-5",
+            model: gateModel,
             max_tokens: datedStatus.evidence.length ? 1000 : 300,
+            anthropic_max_tokens: ANTHROPIC_GATE_MAX_TOKENS,
             label: "rag-evidence-gate",
             timing, timingStage: "verifier_llm",
             timeoutMs: 45_000,
@@ -1523,12 +1554,14 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
           let verifierUnreadableTwice = false;
           if (!(observedAnswer || factAnswer || (synthesis && !datedStatus.evidence.length))) {
             check = await callLLM(env, verifierRequest);
+            if (usedBuiltInProviderFallback(gateModel, check)) answerProviderFallback = true;
             if (!parseVerifierReply(check)) {
               check = await callLLM(env, verifierRequest);
+              if (usedBuiltInProviderFallback(gateModel, check)) answerProviderFallback = true;
               verifierUnreadableTwice = !parseVerifierReply(check);
             }
           }
-          const raw = check?.content?.[0]?.text || "";
+          const raw = llmText(check);
           const verdict = observedAnswer
             ? { supported: true, complete: true, evidence: observedAnswer.evidence, reason: balanceAnswer
               ? "exact observed account balances; full inventory explicitly not established"
@@ -1822,6 +1855,9 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
     const spellings = approvedDocs.filter(doc => doc.query_variant)
       .map(doc => `${doc.query_variant.matched} [${doc.n}]`);
     answer += `\n\nRecord spelling: ${[...new Set(spellings)].join(', ')}.`;
+  }
+  if (answerProviderFallback && !gaps.some((gap) => gap?.type === ANSWER_PROVIDER_FALLBACK_GAP.type)) {
+    gaps.push({ ...ANSWER_PROVIDER_FALLBACK_GAP });
   }
   finishEvidenceGate(Boolean(answerError));
 
@@ -3204,6 +3240,9 @@ async function handleDocuments(env) {
     rows: rows || [],
     ...(summary ? { summary } : {}),
     vector_drain_mode: upgradePauseHolds(env) ? "paused-for-upgrade" : "active",
+    ...(configuredAnswerProviderFallback(env)
+      ? { answer_provider_fallback: { active: true, reason: "anthropic_key_missing" } }
+      : {}),
   };
   if (backendOf(env) === D1) {
     // How far the vector index trails the text. A brain whose outbox is not

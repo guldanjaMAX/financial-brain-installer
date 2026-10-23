@@ -263,6 +263,54 @@ export function workersAiRate(model) {
 }
 
 /**
+ * Per-model Anthropic rates, in dollars per million tokens.
+ *
+ * Prefixes cover dated model IDs. Each listed price is as of 2026-10-22 and
+ * comes from third-party sources; unknown IDs retain the prior conservative
+ * Sonnet 4.5 estimate rather than assuming a cheaper family. Thinking tokens
+ * are already included in Anthropic's output_tokens total.
+ */
+const ANTHROPIC_RATES = [
+  ["claude-haiku-5-5", { in: 0.1, out: 0.5 }], // 2026-10-22, third-party sources.
+  ["claude-haiku-4-5", { in: 1, out: 5 }], // 2026-10-22, third-party sources.
+  ["claude-sonnet-5-5", { in: 2, out: 10 }], // 2026-10-22, third-party sources.
+  ["claude-opus-5-5", { in: 4, out: 20 }], // 2026-10-22, third-party sources.
+];
+const ANTHROPIC_FALLBACK_RATE = { in: 3, out: 15 };
+
+export function anthropicRate(model) {
+  const id = String(model || "");
+  let best = null;
+  for (const [prefix, rate] of ANTHROPIC_RATES) {
+    if (id.startsWith(prefix) && (!best || prefix.length > best.prefix.length)) best = { prefix, rate };
+  }
+  return best ? best.rate : ANTHROPIC_FALLBACK_RATE;
+}
+
+/** Join every model text block in provider order. Non-text blocks carry model
+ *  work, not answer copy, and must never displace a later answer block. */
+export function llmText(data) {
+  return Array.isArray(data?.content)
+    ? data.content
+        .filter((part) => part?.type === "text" && typeof part.text === "string")
+        .map((part) => part.text)
+        .join("")
+    : "";
+}
+
+export class AnthropicEmptyResponseError extends Error {
+  constructor(stopReason) {
+    const budgetExhausted = stopReason === "max_tokens";
+    super(budgetExhausted
+      ? "The Anthropic answer model used its whole output budget before writing an answer."
+      : "Anthropic returned no answer text.");
+    this.name = "AnthropicEmptyResponseError";
+    this.anthropic_empty_response = true;
+    this.output_budget_exhausted = budgetExhausted;
+  }
+}
+
+/**
  * How an image is attached to a Workers AI chat request.
  *
  * STATED PLAINLY: this shape is NOT verified against a live account in this
@@ -305,7 +353,18 @@ export function callLLM(env, options) {
   return measureQueryStage(options.timing, options.timingStage, () => callLLMImpl(env, options));
 }
 
-async function callLLMImpl(env, { model, system, messages, max_tokens, label, timeoutMs, image, timing = null, timingStage }) {
+async function callLLMImpl(env, {
+  model,
+  system,
+  messages,
+  max_tokens,
+  anthropic_max_tokens,
+  label,
+  timeoutMs,
+  image,
+  timing = null,
+  timingStage,
+}) {
   const apiKey = env.ANTHROPIC_API_KEY;
   if (!apiKey && !env.AI) {
     const e = new Error("no LLM key configured");
@@ -448,6 +507,11 @@ async function callLLMImpl(env, { model, system, messages, max_tokens, label, ti
     throw e;
   }
   const anthropicModel = model;
+  const requestedAnthropicMaxTokens = Number(anthropic_max_tokens);
+  const effectiveAnthropicMaxTokens = Number.isFinite(requestedAnthropicMaxTokens) &&
+    requestedAnthropicMaxTokens > 0
+    ? Math.trunc(requestedAnthropicMaxTokens)
+    : max_tokens || 1000;
   const data = await measureQueryModel(timing, timingStage, "anthropic", anthropicModel, async () => {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -456,7 +520,12 @@ async function callLLMImpl(env, { model, system, messages, max_tokens, label, ti
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
       },
-      body: JSON.stringify({ model: anthropicModel, max_tokens: max_tokens || 1000, system, messages }),
+      body: JSON.stringify({
+        model: anthropicModel,
+        max_tokens: effectiveAnthropicMaxTokens,
+        system,
+        messages,
+      }),
       signal: AbortSignal.timeout(timeoutMs || 45_000),
     });
 
@@ -468,11 +537,19 @@ async function callLLMImpl(env, { model, system, messages, max_tokens, label, ti
 
     return res.json();
   });
-  // Rough cost estimate. Precision is not the point; catching a runaway is.
   const inTok = data?.usage?.input_tokens || 0;
   const outTok = data?.usage?.output_tokens || 0;
-  const micros = Math.round(inTok * 3 + outTok * 15);
+  const rate = anthropicRate(data?.model || anthropicModel);
+  const micros = Math.ceil(inTok * rate.in + outTok * rate.out);
   chargeIsolate(micros);
   await logCall(env, { label, model: data?.model || anthropicModel, status: "ok", micros });
-  return data;
+  const text = llmText(data);
+  if (!text.trim()) throw new AnthropicEmptyResponseError(data?.stop_reason);
+  return {
+    content: [{ type: "text", text }],
+    model: data?.model || anthropicModel,
+    usage: data?.usage || {},
+    stop_reason: data?.stop_reason,
+    provider: "anthropic",
+  };
 }

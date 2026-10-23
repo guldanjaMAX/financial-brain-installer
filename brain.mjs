@@ -2985,6 +2985,9 @@ export function workerBindings(m, cfg, options = {}) {
         name: "ANSWER_MODEL",
         text: String(m.retrieval?.answer_model || "@cf/meta/llama-3.3-70b-instruct-fp8-fast"),
       },
+      ...(typeof m.retrieval?.gate_model === "string" && m.retrieval.gate_model
+        ? [{ type: "plain_text", name: "GATE_MODEL", text: m.retrieval.gate_model }]
+        : []),
       {
         type: "plain_text",
         name: "CREDENTIAL_SCANNER",
@@ -3284,6 +3287,7 @@ export function optionalWorkerSecretNames(m) {
   const answerModel = String(
     m.retrieval?.answer_model || "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
   );
+  const gateModel = String(m.retrieval?.gate_model || answerModel);
   // An enabled bank feed allows already-present provider credentials and its
   // independent wrapping key to remain on the Worker. This is a preservation
   // allowlist only: generic `brain secrets` must never source or replace these
@@ -3292,7 +3296,7 @@ export function optionalWorkerSecretNames(m) {
   const bankFeedSecrets = bankFeedRequiredSecretNames(m);
   return Object.freeze([
     ...(storage === "supabase" ? ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"] : []),
-    ...(m.retrieval?.rerank === true || !answerModel.startsWith("@cf/")
+    ...(m.retrieval?.rerank === true || !answerModel.startsWith("@cf/") || !gateModel.startsWith("@cf/")
       ? ["ANTHROPIC_API_KEY"]
       : []),
     ...bankFeedSecrets,
@@ -4216,6 +4220,13 @@ export async function cmdHealth(manifestPath, {
       }
       ok(`/health and authenticated inventory agree on ${boundVersion}/${boundDrainMode}`);
       ok(`documents endpoint ${docs.status}; authenticated inventory confirmed`);
+      if (inventory.answer_provider_fallback?.active === true &&
+          inventory.answer_provider_fallback?.reason === "anthropic_key_missing") {
+        warn(
+          "Answers or evidence checks are being answered by the built-in model because the Anthropic key is not set. " +
+          "Restore the configured provider secret, then rerun `brain health <manifest>`."
+        );
+      }
       if (reachOnly && !requireProjectionReady) return;
 
       // D1 and Vectorize cannot share a transaction. Both systems can be up

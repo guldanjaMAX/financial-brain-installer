@@ -154,6 +154,16 @@ test('real think route records stages after a supported answer and verifier deci
   assertCoherent(body.timing);
 });
 
+test('Claude 5.5 timing ids remain recognized and unknown ids stay bounded', () => {
+  const timing = createQueryTiming({ route: 'think', now: () => 0 });
+  const ids = ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5'];
+  for (const id of ids) timing.model('answer_llm', 'anthropic', id)();
+  timing.model('answer_llm', 'anthropic', 'private-model-label')();
+  const receipt = timing.finish();
+  assert.deepEqual(receipt.models.map(model => model.id), [...ids, 'unrecognized']);
+  assert.ok(receipt.models.every(model => model.calls === 1), 'each model decision was reached');
+});
+
 function assertCoherent(timing) {
   assert.match(timing.request_id, /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/);
   assert.deepEqual(Object.keys(timing.stages), VERSION_1_REQUIRED_STAGES);

@@ -337,7 +337,7 @@ if (SCENARIO) {
       if (SCENARIO === "health-default-backend-mismatch") {
         return json({ backend: "supabase", rows: [] });
       }
-      return json(boundedDocumentsReceipt({
+      const healthyReceipt = boundedDocumentsReceipt({
         backend: "d1",
         rows: [{ source_type: "synthetic", has_documents: true }],
         vector_backlog: {
@@ -348,7 +348,14 @@ if (SCENARIO) {
           expected_vectors: 0, actual_vectors: 0, pending: 0, submitted: 0,
           oldest_queued_at: null,
         },
-      }));
+      });
+      if (SCENARIO === "health-answer-provider-fallback") {
+        healthyReceipt.answer_provider_fallback = {
+          active: true,
+          reason: "anthropic_key_missing",
+        };
+      }
+      return json(healthyReceipt);
     }
 
     if (url.hostname === "api.cloudflare.com" && url.pathname === "/client/v4/accounts") {
@@ -619,6 +626,13 @@ if (SCENARIO) {
   check("health still succeeds after authenticated documents are proven",
     healthy.code === 0 && /documents endpoint 200/.test(healthy.output) &&
       /vector index is query-ready/.test(healthy.output), healthy.output);
+
+  const providerFallback = runScenario("health-answer-provider-fallback", "health", { adminKey: true });
+  check("health warns when the configured Anthropic model is using the built-in fallback",
+    providerFallback.code === 0 &&
+      /answered by the built-in model because the Anthropic key is not set/i.test(providerFallback.output) &&
+      /vector index is query-ready/.test(providerFallback.output),
+    providerFallback.output);
 
   const timeoutThenHealthy = runScenario("health-documents-timeout-once", "health", { adminKey: true });
   check("health retries one retryable documents transport timeout and then verifies normally",

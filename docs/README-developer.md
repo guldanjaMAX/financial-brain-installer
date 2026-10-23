@@ -431,6 +431,14 @@ brain holds nothing about still returns rows. `/api/rag/think` is the only guard
 and it holds. Never show raw `/api/rag/unified` output as proof the brain "found
 something".
 
+`retrieval.answer_model` is always deployed as `ANSWER_MODEL`. The optional
+`retrieval.gate_model` is deployed as `GATE_MODEL` for synthesis and evidence
+checks; when it is absent, those calls use `ANSWER_MODEL` exactly as before.
+Each call routes from its configured model, so a mixed Cloudflare and Anthropic
+pair is permitted only when both provider paths are available. A configured
+Anthropic model without its key retains the built-in-model fallback, but
+`/think` returns an `answer_provider_fallback` gap and `brain health` warns.
+
 For a narrow contact lookup, `/think` can extract an address, email, phone,
 company, or role directly from one explicitly labelled contact record or a
 matching owner-confirmed operative section. It requires a matching subject,

@@ -286,31 +286,285 @@ const call = (env, path) => {
     JSON.stringify(body).slice(0, 300));
 }
 
-/* A successful provider envelope with no text is still a null answer. The
-   retrieved rows remain useful diagnostics, but none was cited or approved. */
+/* Adaptive thinking may precede the answer block. Exercise the real think
+   route so a unit-only normalizer cannot hide a broken caller. */
 {
   const originalFetch = globalThis.fetch;
   let providerCalls = 0;
+  let evidenceGateReached = false;
+  const providerRequests = [];
   let body;
   try {
-    globalThis.fetch = async () => {
+    globalThis.fetch = async (_url, init) => {
       providerCalls++;
-      return new Response(JSON.stringify({
-        content: [], model: "claude-fixture", usage: { input_tokens: 1, output_tokens: 0 },
+      const request = JSON.parse(init?.body || "{}");
+      const verification = /verify a proposed answer/.test(request.system || "");
+      evidenceGateReached ||= verification;
+      providerRequests.push({
+        kind: verification ? "evidence" : "answer",
+        model: request.model,
+        max_tokens: request.max_tokens,
+      });
+      return new Response(JSON.stringify(verification ? {
+        content: [{ type: "text", text: '{"supported":true,"complete":true,"evidence":[1],"reason":"direct support"}' }],
+        model: request.model, usage: { input_tokens: 1, output_tokens: 1 }, stop_reason: "end_turn",
+      } : {
+        content: [
+          { type: "thinking", thinking: "" },
+          { type: "text", text: "The retainer was deferred [1]." },
+        ],
+        model: request.model, usage: { input_tokens: 1, output_tokens: 2 }, stop_reason: "end_turn",
       }), { status: 200, headers: { "content-type": "application/json" } });
     };
     const { env } = mkEnv([ROW], {
       vectorIds: ["meeting:123#0"],
-      extra: { ANTHROPIC_API_KEY: "fixture-key", ANSWER_MODEL: "claude-fixture" },
+      extra: {
+        ANTHROPIC_API_KEY: "fixture",
+        ANSWER_MODEL: "claude-answer-fixture",
+        GATE_MODEL: "claude-gate-fixture",
+      },
     });
     body = await (await call(env, "/api/rag/think?q=retainer&limit=5")).json();
   } finally {
     globalThis.fetch = originalFetch;
   }
-  check("an empty answer-model response keeps candidates but approves no citations",
-    providerCalls === 1 && body.answer === null && body.citations.length === 0 &&
-      body.results.length === 1 && body.results[0].chunk_uid === "meeting:123#0",
+  check("a thinking-first Anthropic answer reaches and survives the evidence gate",
+    providerCalls === 2 && evidenceGateReached &&
+      JSON.stringify(providerRequests) === JSON.stringify([
+        { kind: "answer", model: "claude-answer-fixture", max_tokens: 4000 },
+        { kind: "evidence", model: "claude-gate-fixture", max_tokens: 2000 },
+      ]) &&
+      body.answer === "The retainer was deferred [1]." &&
+      body.evidence_gate?.supported === true && body.citations.length === 1,
+    JSON.stringify({ providerCalls, evidenceGateReached, providerRequests, body }).slice(0, 700));
+}
+
+/* With no gate override, the answer and evidence calls retain the exact same
+   configured model. This control prevents an optional binding from changing
+   today's manifests. */
+{
+  const originalFetch = globalThis.fetch;
+  const models = [];
+  let body;
+  try {
+    globalThis.fetch = async (_url, init) => {
+      const request = JSON.parse(init?.body || "{}");
+      const verification = /verify a proposed answer/.test(request.system || "");
+      models.push(request.model);
+      return new Response(JSON.stringify({
+        content: [{ type: "text", text: verification
+          ? '{"supported":true,"complete":true,"evidence":[1],"reason":"direct support"}'
+          : "The retainer was deferred [1]." }],
+        model: request.model, usage: {}, stop_reason: "end_turn",
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const { env } = mkEnv([ROW], {
+      vectorIds: ["meeting:123#0"],
+      extra: { ANTHROPIC_API_KEY: "fixture", ANSWER_MODEL: "claude-answer-fixture" },
+    });
+    body = await (await call(env, "/api/rag/think?q=retainer&limit=5")).json();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  check("an unset gate model uses ANSWER_MODEL byte for byte on every gate call",
+    models.length === 2 && models.every((model) => model === "claude-answer-fixture") &&
+      body.evidence_gate?.supported === true,
+    JSON.stringify({ models, body }).slice(0, 500));
+}
+
+/* Mixed providers remain legal only through each provider's existing custody
+   path. These controls prove the gate override does not re-route the answer or
+   borrow the other provider merely because both bindings are available. */
+{
+  const originalFetch = globalThis.fetch;
+  const workerModels = [];
+  const anthropicModels = [];
+  let body;
+  try {
+    globalThis.fetch = async (_url, init) => {
+      const request = JSON.parse(init?.body || "{}");
+      anthropicModels.push(request.model);
+      return new Response(JSON.stringify({
+        content: [{ type: "text", text: '{"supported":true,"complete":true,"evidence":[1],"reason":"direct support"}' }],
+        model: request.model, usage: {}, stop_reason: "end_turn",
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const { env } = mkEnv([ROW], {
+      vectorIds: ["meeting:123#0"],
+      extra: {
+        ANTHROPIC_API_KEY: "fixture",
+        ANSWER_MODEL: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+        GATE_MODEL: "claude-opus-5-5",
+        AI: {
+          run: async (model) => {
+            if (model.includes("bge-")) return { data: [[0.1, 0.2, 0.3]] };
+            workerModels.push(model);
+            return { response: "The retainer was deferred [1].", usage: {} };
+          },
+        },
+      },
+    });
+    body = await (await call(env, "/api/rag/think?q=retainer&limit=5")).json();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  check("a Workers AI answer and Claude gate keep their separate custody routes",
+    JSON.stringify(workerModels) === JSON.stringify(["@cf/meta/llama-3.3-70b-instruct-fp8-fast"]) &&
+      JSON.stringify(anthropicModels) === JSON.stringify(["claude-opus-5-5"]) &&
+      body.evidence_gate?.supported === true,
+    JSON.stringify({ workerModels, anthropicModels, body }).slice(0, 600));
+}
+
+{
+  const originalFetch = globalThis.fetch;
+  const workerModels = [];
+  const anthropicModels = [];
+  let body;
+  try {
+    globalThis.fetch = async (_url, init) => {
+      const request = JSON.parse(init?.body || "{}");
+      anthropicModels.push(request.model);
+      return new Response(JSON.stringify({
+        content: [{ type: "text", text: "The retainer was deferred [1]." }],
+        model: request.model, usage: {}, stop_reason: "end_turn",
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const { env } = mkEnv([ROW], {
+      vectorIds: ["meeting:123#0"],
+      extra: {
+        ANTHROPIC_API_KEY: "fixture",
+        ANSWER_MODEL: "claude-opus-5-5",
+        GATE_MODEL: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+        AI: {
+          run: async (model) => {
+            if (model.includes("bge-")) return { data: [[0.1, 0.2, 0.3]] };
+            workerModels.push(model);
+            return { response: { supported: true, complete: true, evidence: [1], reason: "direct support" }, usage: {} };
+          },
+        },
+      },
+    });
+    body = await (await call(env, "/api/rag/think?q=retainer&limit=5")).json();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  check("a Claude answer and Workers AI gate keep their separate custody routes",
+    JSON.stringify(anthropicModels) === JSON.stringify(["claude-opus-5-5"]) &&
+      JSON.stringify(workerModels) === JSON.stringify(["@cf/meta/llama-3.3-70b-instruct-fp8-fast"]) &&
+      body.evidence_gate?.supported === true,
+    JSON.stringify({ workerModels, anthropicModels, body }).slice(0, 600));
+}
+
+/* The synthesis verifier is a separate gate call and must honor the same
+   override instead of accidentally retaining ANSWER_MODEL. */
+{
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  let body;
+  try {
+    globalThis.fetch = async (_url, init) => {
+      const request = JSON.parse(init?.body || "{}");
+      const synthesis = /verify each synthesis item/.test(request.system || "");
+      requests.push({ kind: synthesis ? "synthesis" : "answer", model: request.model, max_tokens: request.max_tokens });
+      return new Response(JSON.stringify({
+        content: [{ type: "text", text: synthesis
+          ? '{"items":[{"item":1,"supported":true,"evidence":[{"n":1,"quote":"agreed to defer the retainer"}]}]}'
+          : "The retainer was deferred [1]." }],
+        model: request.model, usage: {}, stop_reason: "end_turn",
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const { env } = mkEnv([ROW], {
+      vectorIds: ["meeting:123#0"],
+      extra: {
+        ANTHROPIC_API_KEY: "fixture",
+        ANSWER_MODEL: "claude-answer-fixture",
+        GATE_MODEL: "claude-gate-fixture",
+      },
+    });
+    body = await (await call(env, "/api/rag/think?q=list+all+retainer+decisions&limit=5")).json();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  check("the synthesis gate uses GATE_MODEL and the 2000-token Anthropic cap",
+    JSON.stringify(requests) === JSON.stringify([
+      { kind: "answer", model: "claude-answer-fixture", max_tokens: 4000 },
+      { kind: "synthesis", model: "claude-gate-fixture", max_tokens: 2000 },
+    ]) && body.evidence_gate?.supported === true,
+    JSON.stringify({ requests, body }).slice(0, 700));
+}
+
+/* A completed provider call that spends its whole output budget on thinking is
+   an answer error, not a silent evidence refusal. */
+{
+  const originalFetch = globalThis.fetch;
+  let providerCalls = 0;
+  let providerMaxTokens = null;
+  let body;
+  try {
+    globalThis.fetch = async (_url, init) => {
+      providerCalls++;
+      providerMaxTokens = JSON.parse(init?.body || "{}").max_tokens;
+      return new Response(JSON.stringify({
+        content: [{ type: "thinking", thinking: "" }],
+        model: "claude-fixture",
+        usage: { input_tokens: 1, output_tokens: 4000, output_tokens_details: { thinking_tokens: 4000 } },
+        stop_reason: "max_tokens",
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const { env } = mkEnv([ROW], {
+      vectorIds: ["meeting:123#0"],
+      extra: { ANTHROPIC_API_KEY: "fixture", ANSWER_MODEL: "claude-fixture" },
+    });
+    body = await (await call(env, "/api/rag/think?q=retainer&limit=5")).json();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  check("a thinking-only max-token reply becomes a named answer error, not a refusal",
+    providerCalls === 1 && providerMaxTokens === 4000 && body.answer === null &&
+      body.answer_error === ANSWER_ERROR_MESSAGES.unavailable &&
+      body.status !== "coverage_incomplete" && body.status !== "answer_withheld" &&
+      body.citations.length === 0 && body.results.length === 1 &&
+      body.results[0].chunk_uid === "meeting:123#0",
     JSON.stringify(body).slice(0, 300));
+}
+
+/* A configured Anthropic model without its Worker secret follows the existing
+   built-in-model fallback, but the response must make that provider change
+   visible. The call count proves the negative assertion reached generation. */
+{
+  let generationCalls = 0;
+  const { env } = mkEnv([ROW], {
+    vectorIds: ["meeting:123#0"],
+    extra: {
+      ANSWER_MODEL: "claude-opus-5-5",
+      AI: {
+        run: async (model, input) => {
+          if (model.includes("bge-")) return { data: [[0.1, 0.2, 0.3]] };
+          generationCalls++;
+          const verification = /verify a proposed answer/.test(input?.messages?.[0]?.content || "");
+          return { response: verification
+            ? { supported: true, complete: true, evidence: [1], reason: "direct support" }
+            : "The retainer was deferred [1].", usage: {} };
+        },
+      },
+    },
+  });
+  const body = await (await call(env, "/api/rag/think?q=retainer&limit=5")).json();
+  const providerGap = body.gaps?.find((gap) => gap?.type === "answer_provider_fallback");
+  check("a missing Anthropic key leaves a visible built-in-model fallback gap",
+    generationCalls === 2 && body.evidence_gate?.supported === true &&
+      /answered by the built-in model because the Anthropic key is not set/i.test(providerGap?.detail || ""),
+    JSON.stringify({ generationCalls, gaps: body.gaps, answer: body.answer }).slice(0, 600));
+
+  const { env: controlEnv } = mkEnv([ROW], {
+    vectorIds: ["meeting:123#0"],
+    extra: { ANSWER_MODEL: "@cf/meta/llama-3.3-70b-instruct-fp8-fast" },
+  });
+  const control = await (await call(controlEnv, "/api/rag/think?q=retainer&limit=5")).json();
+  check("a configured Workers AI answer has no provider-fallback gap",
+    control.evidence_gate?.supported === true &&
+      !control.gaps?.some((gap) => gap?.type === "answer_provider_fallback"),
+    JSON.stringify(control.gaps));
 }
 
 /* The public source-weight contract is live on D1, including an explicit zero. */
@@ -3242,6 +3496,16 @@ const labelProjectionParityRows = [
     /no-store/.test(documentsResponse.headers.get("cache-control") || ""),
     documentsResponse.headers.get("cache-control") || "missing");
 
+  const providerFallbackDocuments = await call({
+    ...env,
+    ANSWER_MODEL: "claude-opus-5-5",
+  }, "/api/admin/brain/documents");
+  const providerFallbackBody = await providerFallbackDocuments.json();
+  check("authenticated health evidence reports a configured Anthropic model without its key",
+    providerFallbackBody.answer_provider_fallback?.active === true &&
+      providerFallbackBody.answer_provider_fallback?.reason === "anthropic_key_missing",
+    JSON.stringify(providerFallbackBody.answer_provider_fallback));
+
   const pausedDocuments = await call({ ...env, VECTOR_DRAIN_MODE: "paused-for-upgrade" }, "/api/admin/brain/documents");
   const pausedBody = await pausedDocuments.json();
   check("paused documents bind the refusal mode to their own readiness receipt",
@@ -3257,6 +3521,47 @@ const labelProjectionParityRows = [
   check("private aggregate inventory failures cannot be cached",
     failedDocuments.status === 500 && /no-store/.test(failedDocuments.headers.get("cache-control") || ""),
     `${failedDocuments.status} ${failedDocuments.headers.get("cache-control") || "missing"}`);
+}
+
+/* The Anthropic reranker shares the normalized text reader. A thinking block
+   before its JSON must not turn reranking into the original-order fallback. */
+{
+  const first = {
+    ...ROW,
+    chunk_uid: "rerank-first#0", doc_uid: "rerank-first", source_id: "rerank-first",
+    title: "First result", text: "The first candidate mentions the retainer.",
+  };
+  const second = {
+    ...ROW,
+    chunk_uid: "rerank-second#0", doc_uid: "rerank-second", source_id: "rerank-second",
+    title: "Second result", text: "The second candidate records the retainer decision.",
+  };
+  const originalFetch = globalThis.fetch;
+  let rerankCalls = 0;
+  let body;
+  try {
+    globalThis.fetch = async (_url, init) => {
+      const request = JSON.parse(init?.body || "{}");
+      rerankCalls++;
+      return new Response(JSON.stringify({
+        content: [
+          { type: "thinking", thinking: "" },
+          { type: "text", text: '[{"idx":1,"score":10},{"idx":0,"score":1}]' },
+        ],
+        model: request.model, usage: {}, stop_reason: "end_turn",
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const { env } = mkEnv([first, second], {
+      vectorIds: ["rerank-first#0", "rerank-second#0"],
+      extra: { ANTHROPIC_API_KEY: "fixture", RERANK_MODEL: "claude-haiku-4-5-20251001" },
+    });
+    body = await (await call(env, "/api/rag/unified?q=retainer&limit=2&rerank=1")).json();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  check("rerank parses JSON after a leading thinking block",
+    rerankCalls === 1 && body.reranked === true && body.results[0]?.ref_key === "rerank-second",
+    JSON.stringify({ rerankCalls, body }).slice(0, 600));
 }
 
 {

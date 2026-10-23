@@ -766,6 +766,14 @@ reuse an old local approval.
 
 ## Retrieval and answer flow
 
+The installer always binds the manifest's `retrieval.answer_model` as
+`ANSWER_MODEL`. It binds optional `retrieval.gate_model` as `GATE_MODEL`; when
+that value is absent, synthesis and evidence checks use `ANSWER_MODEL` exactly.
+Provider custody is decided independently for each configured model. A missing
+Anthropic key keeps the existing built-in-model fallback visible through a
+computed `/think` gap and the authenticated documents receipt used by
+`brain health`.
+
 Think first offers unrestricted owner money questions to a read-only ledger
 path. `ledger-question.js` recognizes current balances, exact-cent deposits and
 account inflow/outflow periods, largest expenses/deposits, merchant/category
