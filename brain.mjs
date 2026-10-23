@@ -29701,7 +29701,7 @@ function writeAssistantWorkspaceGuide(manifestPath, assistant, options, writerOp
   const path = join(workspace, filename);
   // Windows can retain the writer's lock when an editor holds the original
   // guide open. Keep this check adjacent to the writer; a concurrent creator
-  // still needs a create-only writer mode or lock recovery in 0.4.18.
+  // still needs a create-only writer mode or lock recovery in 0.4.19.
   if (writerOptions.platformName !== "win32" || !existsSync(path)) {
     return writeGuide(manifestPath, writerOptions);
   }
