@@ -2,7 +2,7 @@
 
 ## Scope and conclusion
 
-Offline source study of `f8a7cd05a1e641d29d5b3af77fc91901a5281639` on
+Round 1 was an offline source study of `f8a7cd05a1e641d29d5b3af77fc91901a5281639` on
 `partner/vector-excess-plan-1`. The supplied observation is 1,922,668 provider
 vectors against 1,922,642 expected vectors, a net excess of 26. It was not
 independently observed against an installation.
@@ -13,15 +13,19 @@ complete ID sets under a proven writer exclusion boundary, preview their
 difference, and delete only approved provider-only IDs through durable outbox
 receipts. Reindex alone cannot identify those IDs.
 
-The study and implementation plan are complete. The lane is not ready for
-handoff because the required local commit is blocked by read-only Git metadata.
+The study and implementation plan are complete. Round 1's original commit
+restriction is historical: the operator subsequently committed that report.
+Round 2 leaves its reviewed changes in the working tree as instructed, with a
+prepared commit below for the operator. Read-only Git metadata is not a handoff
+blocker for this round.
 This report is not live repair authorization or a claim that a supported
 targeted-repair command exists.
 The current general CLI has no such command. Its disposable recovery adapter
 has useful enumeration checks but refuses more than 100,000 IDs. A separate
 reviewed implementation and field approval are prerequisites for live use.
-No new diagnostic is needed to establish these source findings, so this lane
-adds only this report, with no product, fixture, configuration, or test changes.
+Round 1 added only this report. Round 2 adds a synthetic characterization of
+the accelerated whole-corpus stored-ID remap and a canonical-ID control.
+Product behavior, shared fixtures and configuration remain unchanged.
 
 ## Exactly what the preview compares
 
@@ -93,12 +97,22 @@ provider inventory was available to attribute the supplied 26 to one branch.
 | Delete versus in-flight upsert ordering | `worker/src/lib/store-d1.js:2575`, `:2593`, `:2606`, `:2638`, `:2941` | Accepted work is confirmed first, the global fence survives row replacement, eligible deletes precede new upserts, and one lease serializes drains. A cached negative delete probe can defer a concurrently enqueued delete to the next invocation (`:2608`). Backoff and quarantine remain visible. |
 | Provider acceptance or receipt-write ambiguity | `worker/src/lib/store-d1.js:2495`, `:2497`, `:2761`, `:2768` | Provider acceptance precedes D1 receipt persistence. Current failures retain work. Confirmation requires a processed fence and exact absence for deletes (`:2386`, `:2423`); queue removal also matches ID, operation, generation and mutation receipt (`:2433`). Acceptance alone is insufficient. |
 | Reindex and accelerated bootstrap | `worker/src/lib/store-d1.js:7465`, `:7478`, `:7493`, `:7067`, `:7075` | Reindex enumerates D1, so it leaves unknown provider-only IDs intact. Bootstrap supersedes upserts but preserves and drains deletes. Rebuilding the known set cannot subtract unknown IDs. Existing synthetic evidence records this limitation at `test/client-upgrade-rehearsal.test.mjs:832`. That file was inspected, not run. |
+| Accelerated whole-corpus stored-ID remap | `worker/src/lib/store-d1.js:6306`, `:6461`, `:6473`, `:6483`, `:6577` | The batch queues the stored provider ID, upserts a recomputed canonical ID, moves D1 to that canonical ID, then clears the old-ID outbox row after canonical confirmation. It never queues deletion of a different old ID. Round 2 reproduces this with a preloaded provider: the old ID remains provider-only while its document and chunk still exist. The canonical-ID control converges. See `test/vector-bootstrap-stored-id.test.mjs:101` and `:123`. |
 | Historical deletion protocol | `migrations/d1/0008_vector_delete_outbox.sql:3` | The migration documents permanent orphans when D1 deletion loses the historical vector ID and provider deletion fails. Affected version/history would support this branch; current source retains the ID. |
 | Historical stale acknowledgement or concurrent drains | `migrations/d1/0010_vector_outbox_generation.sql:3`; `migrations/d1/0011_vector_drain_lease.sql:3`; `migrations/d1/0012_vector_visibility_receipts.sql:3` | Documented prior risks include same-millisecond replacement receipts, provider writes landing out of order, and acceptance preceding visibility. Current generation CAS, lease, and visibility checks address these classes; they do not discover already lost IDs. |
 | Conditional legacy ID remap residue | `worker/src/lib/store-d1.js:162`, `:1659`, `:1740`, `:2064`, `:2746`; `migrations/d1/0004_corpus.sql:121` | If an old stored provider ID differs from the canonical ID for the same chunk UID, the single-key outbox can replace delete(old ID) with upsert(new ID). Drain also computes canonical IDs and remaps D1 without separately deleting a different old provider ID. Requires legacy, imported, inconsistent, or changed-ID-contract state; it is not evidence that ordinary current ingest creates this mismatch. |
 | Conditional failed remap followed by forget | `worker/src/lib/store-d1.js:2761`, `:2133`, `:7838` | A canonical provider upsert can land before its mapping is durable. If that remap fails or loses a generation race, forget can retain a different stale stored ID. This is a source-derived hypothesis requiring a focused reproduction, not a proven cause of this observation. |
 | D1 restore without matching index recovery | `docs/ARCHITECTURE.md:157` | Restoring D1 does not rewind Vectorize. Post-bookmark provider IDs can outlive their authoritative chunks. Inspect restore and binding history. |
 | Wrong binding, direct SQL, shared index or external provider writer | `docs/ARCHITECTURE.md:167`, `:1274` | Direct queue clearing or D1 deletion can discard cleanup evidence; another writer can add IDs. Wrong resources invalidate the entire comparison. These are outside normal outbox guarantees and require resource and writer history. |
+
+The accelerated remap case is a demonstrated current defect under the synthetic
+precondition that a stored, provider-visible ID differs from the canonical ID.
+It does not explain how that mismatch originated or attribute the reported 26
+to this cause. The real batch confirms and empties its outbox, but exact
+verification still refuses completion because provider count exceeds D1 count
+(`worker/src/lib/store-d1.js:7287`). A later bootstrap poll leaves that excess
+intact. This is distinct from merely preserving an already provider-only ID:
+the old ID starts referenced by D1 and becomes provider-only during bootstrap.
 
 All direct current product chunk-removal SQL found by the audit is in the
 retention, atomic replacement, resumable replacement and forget paths above.
@@ -125,12 +139,16 @@ projection status/count, generation, mutation fence and processed watermark.
 Use owner-private evidence; public output contains counts and fingerprints.
 
 Stop for unknown ownership, incompatible schema/runtime, incorrect binding,
-unreadable state, pending or submitted work, incomplete bootstrap, or ambiguous
-provider mutations. Existing queued deletes are ordinary recoverable work,
-not permission to remove a separately guessed set. Allow separately authorized
-normal work to settle, then repeat diagnosis. A read-only preview must never
-pause writers, acquire a D1 write lease, enqueue, embed, probe by mutation, or
-change readiness.
+unreadable state, pending or submitted work, an unfinished bootstrap walk or
+batch, or ambiguous provider mutations. Existing queued deletes are
+ordinary recoverable work, not permission to remove a separately guessed set.
+Allow separately authorized normal work to settle, then repeat diagnosis.
+A read-only preview must never pause writers, acquire a D1 write lease,
+enqueue, embed, probe by mutation, or change readiness. A fully confirmed
+sweep awaiting exact readiness solely because of proven excess remains
+eligible for the separately approved inventory and repair path. Preserve its
+confirmed batch history; incomplete readiness alone must not be confused with
+unfinished bootstrap work.
 
 ### 2. Establish a separately approved maintenance boundary
 
@@ -171,6 +189,15 @@ missing, duplicated, malformed, noncanonical or conflicting mappings. Long
 chunk UIDs are hashed (`worker/src/lib/store-d1.js:162`), so they cannot replace
 the stored provider ID. Include retained chunks of soft-deleted documents.
 
+The provider inventory must also cover former stored IDs of still-retained
+chunks after a completed canonical remap. Such an old ID can carry metadata
+pointing to a document that still exists. Do not restrict candidates to deleted
+documents, missing chunk UIDs, or historical ID prefixes. Protect each current
+valid D1 mapping; consider the old ID only through complete `P \ D` subtraction
+and the same non-membership and ownership checks as every other candidate.
+An unresolved noncanonical D1 mapping remains a stop, not permission to delete
+either identity. This expands the causal coverage, not the approved delete set.
+
 Walk every provider page to an explicit terminal receipt. Require unique IDs,
 valid advancing cursors, consistent totals and complete coverage of the exact
 index. Never treat a page limit, timeout, rate limit, expired cursor, short
@@ -186,8 +213,9 @@ checkpoints to resource identities and opening fences; an expired or changed
 snapshot requires a fresh complete pass. Raw IDs, cursors, metadata and content
 must not enter this repository, command arguments, support records or logs.
 
-Bracket each pass with D1 corpus generation/nonce, outbox generation, queue and
-bootstrap emptiness, runtime/bindings, projection fence and provider watermark.
+Bracket each pass with D1 corpus generation/nonce, outbox generation, queue
+emptiness, absence of unfinished bootstrap work, runtime/bindings, projection
+fence and provider watermark.
 `operations/cloudflare-recovery-adapter.mjs:7680` and `:7717` provide examples
 of composite verification. Require two identical complete ID inventories and
 unchanged fences while the continuous writer exclusion remains proven.
@@ -250,7 +278,8 @@ with internal `allowPausedBootstrap: true`, `skipUpserts: true`, and
 `disableBootstrapAdvance: true` (`worker/src/lib/store-d1.js:2648`, `:2863`,
 `:2893`, `:2932`). These are not public repair flags. It must restrict every
 queue read, submission and acknowledgement to the exact approved tombstones,
-reject unrelated queue/batch state, and make embedding/upsert calls fail.
+reject unrelated queued/submitted work, preserve confirmed bootstrap history,
+and make embedding/upsert calls fail.
 It must also prevent the automatic ordering probe from issuing a delete
 outside the approved set; an unexpected fence requires reconciliation and
 a stop, not an undisclosed probe mutation.
@@ -283,8 +312,8 @@ Worker mutation fence.
 While writers remain excluded, re-enumerate both complete sets and require
 `P_after = D_before = D_after`; specifically `P_before \ P_after = E` and
 `P_after \ P_before` is empty. Recheck every approved ID's absence, zero
-outbox/submitted/batch residue, stable final watermark covering the recorded
-repair mutations, unchanged bindings and all D1 corpus fingerprints.
+outbox, no submitted or unfinished batch work, stable final watermark covering
+the recorded repair mutations, unchanged bindings and all D1 corpus fingerprints.
 
 Provider count must now be 1,922,642. The normal exact empty-queue verification
 must establish `projection_status = verified`, matching expected/actual and
@@ -311,10 +340,11 @@ proved, with its own preview and approval.
 
 ## Synthetic reproduction and proof recipe
 
-This is a recipe for the future diagnostic/executor tests. It was not added or
-executed in this documentation-only lane; the focused existing tests below
-are the evidence actually run. No real installation, account or source fixture
-is required.
+This remains a recipe for the future diagnostic/executor tests, not an executed
+repair. Round 1 ran only the existing focused tests recorded below. Round 2
+separately executes the accelerated whole-corpus remap characterization and
+control; it does not implement this diagnostic or executor. No real
+installation, account or source fixture is required.
 
 1. Use the real SQLite migration harness in
    `test/fixtures/vector-fence-env.mjs:6`. `seed(db, 256)` at `:93` provides
@@ -352,11 +382,12 @@ is required.
    26 durable deletes and fail orphan-preview eligibility. Restore the provider
    and prove ordinary processing removes that tail. This distinguishes queued
    cleanup from the intentionally stranded provider-only setup.
-8. For the conditional remap branch, seed a visible historical ID different
+8. For the conditional ordinary-drain remap branch, seed a visible historical ID different
    from a retained chunk's canonical ID, then replace/reindex that chunk and
    drain. Record whether the historical ID remains. A canonical-ID control
    must converge without residue. Treat this as a separate causal experiment,
-   not a fix or a result already obtained in this lane.
+   not a fix or a result already obtained in this lane. The separate accelerated
+   whole-corpus branch is now characterized in Round 2 below.
 
 Required negative cases and passing controls for the future implementation:
 
@@ -415,11 +446,11 @@ After the approved return to service:
 - Observe that expected new ingest work progresses without renewed unexplained
   excess. Investigate recurrence instead of repeating unbounded cleanup.
 
-## Changes and verification actually performed
+## Round 1 changes and verification history
 
-Only `partner-reports/vector-excess-plan.md:1` was added. It contains the
+In Round 1, only `partner-reports/vector-excess-plan.md:1` was added. It contains the
 comparison trace, cause tree, repair plan, synthetic recipe, operator checklist
-and verification record. Product behavior and all existing tests are unchanged.
+and verification record. That round changed no product behavior or tests.
 
 Focused tests ran offline on Node v24.18.0 on Friday, 2026-10-23, outside the
 specified Saturday and Sunday test pauses. All fixtures were synthetic.
@@ -455,21 +486,136 @@ only an LF-to-CRLF advisory. No dependency
 installation, full test chain, network, live account access, credential access,
 remote operation or push was performed.
 
-The required commit could not be created. `git add --
+Round 1 commit history, resolved by the operator: the original session could
+not create its required commit. `git add --
 partner-reports/vector-excess-plan.md` failed because Git could not create
 `.git/index.lock` (permission denied). The workspace explicitly exposes Git
 metadata as read-only, and this session cannot elevate permissions. No Git
-configuration was changed and no workaround was attempted. The operator must
-stage this report and create exactly one local commit on the current branch
-from a writable Git environment, then perform the separate push checks.
+configuration was changed and no workaround was attempted. The operator later
+created the commit as recorded below. This historical restriction does not
+block Round 2, which expressly requires an uncommitted working-tree handoff.
 
-Suggested commit subject: `docs: plan targeted repair for vector excess`
+Round 1 commit subject: `docs: plan targeted repair for vector excess`
 
-Suggested short body: `Trace projection refusal and deletion failure paths.
+Round 1 short body: `Trace projection refusal and deletion failure paths.
 Document exact-ID repair gates, synthetic coverage and operator checks.`
 
-## Operator note
+## Round 1 operator note
 
-The Codex sandbox on this Windows machine makes `.git` read-only, so the lane could not commit. The operator (Claude Code) spot-checked four cited lines (worker/src/index.js:3335, worker/src/lib/store-d1.js:7523, operations/update-preview.mjs:73 and :1870; all match), scanned the report for names and banned words (none), and made the suggested commit unchanged. This is a study-only lane: the report adds no product, fixture or test changes. No content was edited by the operator.
+The Codex sandbox on this Windows machine made `.git` read-only, so the original session could not commit. The operator spot-checked four cited lines (worker/src/index.js:3335, worker/src/lib/store-d1.js:7523, operations/update-preview.mjs:73 and :1870; all match), scanned the report for names and banned words (none), and made the suggested commit unchanged. Round 1 was a study-only lane: the report added no product, fixture or test changes. No content was edited by the operator.
 
-LANE VECTOR-EXCESS-PLAN: READY
+## Round 2
+
+### Scope and result
+
+Started from `1b2eec4` on `partner/vector-excess-plan-2`. The missing accelerated
+whole-corpus cause is now in the tree and repair plan. Its synthetic test uses
+the real `acceleratedVectorBootstrap`, real SQLite migrations and the existing
+in-memory provider fixture. `env.VECTORIZE`, `options.embed`, `options.embedBatch`
+and `options.now` are injected; no connector, real provider or fetch is used.
+
+One retained chunk begins with a different stored ID already visible at the
+provider. The real bootstrap copies that ID into its batch outbox row, submits
+the canonical ID, then changes D1's mapping. Before mock processing, acceptance
+does not change the visible set and a second poll retains the submitted row.
+After processing and exact canonical confirmation, the batch is confirmed and
+the outbox is empty, but both provider IDs remain. The old payload is unchanged,
+there are zero delete submissions, and a later poll neither deletes it nor
+re-embeds the chunk. There is one provider-only ID and zero missing IDs. The
+receipt stays incomplete and D1 stays pending with expected 1 versus actual 2.
+
+The adjacent control differs only in using the canonical stored ID from the
+start. It follows the same delayed-processing path, ends with identical D1 and
+provider sets, expected/actual 1, an empty outbox, verified status, and complete
+readiness. Both scenarios retain the same document and chunk content. This is
+characterization of an existing defect, not a repair or an accepted completion
+criterion. A future product fix must deliberately revise this test.
+
+### Changed files
+
+- `test/vector-bootstrap-stored-id.test.mjs:1`: adds the explicitly labeled
+  defect characterization. The shared synthetic driver starts at `:12`, the
+  old-ID case at `:101`, and the converging canonical control at `:123`.
+- `partner-reports/vector-excess-plan.md:16`: corrects the handoff status;
+  `:100` adds the missing cause; `:192` covers former IDs of retained chunks in
+  the repair inventory; `:489` marks the commit restriction as resolved history;
+  `:507` records Round 2 evidence and the prepared commit. No production file,
+  fixture, migration or package configuration is changed.
+
+### Red-then-green evidence and focused runs
+
+All runs used synthetic fixtures on 2026-10-24 before 07:00 MST, well before
+the 14:00 local cutoff. No dependency installation or full chain ran. Each row
+below records a separate invocation; the test command was exactly
+`node --test test/vector-bootstrap-stored-id.test.mjs`.
+
+| Run | Result |
+| --- | --- |
+| Diagnostic red, before the characterization assertion was finalized | Exit 1, 1 pass / 1 fail, 457.0086 ms. The deliberately desired assertion `visible.has(oldId) === false` failed with actual `true`; the canonical control passed. |
+| Characterization green | Exit 0, 2 pass / 0 fail, 272.1205 ms. Changed only that assertion and its message to document `visible.has(oldId) === true`. |
+| `BOOTSTRAP_REUSE_STORED_ID` mutant | Exit 1, 1 pass / 1 fail, 276.8219 ms. Defect case failed the canonical submission assertion; canonical control passed. |
+| `BOOTSTRAP_SKIP_D1_REMAP` mutant | Exit 1, 1 pass / 1 fail, 277.0322 ms. Defect case failed exact mapping readback with the ambiguous mutation-receipt error; canonical control passed. |
+| Restored-source green | Exit 0, 2 pass / 0 fail, 287.9154 ms. Both temporary source mutants removed and original bytes restored. |
+
+The red run establishes that the desired cleanup does not occur. The green run
+records that defect honestly; it does not claim a product fix. The report's
+historical blocked text was corrected as documentation, so it has no behavioral
+red test. The original ordinary-drain causal recipe remains unexecuted.
+
+### Named mutants and proof
+
+Both mutants were applied separately and only inside
+`submitAcceleratedBootstrapBatch`. PowerShell retained the original bytes in
+memory, restored them in `finally`, and verified their SHA-256 after each run.
+No scratch tree or Git write was needed.
+
+1. `BOOTSTRAP_REUSE_STORED_ID`: at `worker/src/lib/store-d1.js:6461`, replace
+   canonical derivation with a D1 lookup of that chunk's stored `vector_id`.
+   The new test fails at `test/vector-bootstrap-stored-id.test.mjs:69`, because
+   the submitted ID is the old ID instead of the canonical ID. Its paired
+   canonical control still passes, so the failure isolates the mismatch path.
+2. `BOOTSTRAP_SKIP_D1_REMAP`: at `worker/src/lib/store-d1.js:6484`, replace
+   `SELECT json_extract(value,'$.v') FROM json_each(?1)` with
+   `SELECT c.vector_id FROM json_each(?1)` in the mapping update. The old D1
+   ID then persists and exact readback throws at `:6529`; the characterization
+   fails on its first real bootstrap invocation at
+   `test/vector-bootstrap-stored-id.test.mjs:64`. The canonical control passes.
+
+These are mutation-sensitivity checks for the causal reproduction, not a claim
+that either mutant implements a repair. The three future-executor mutants in
+the Round 1 history remain planned only.
+
+### Additional checks and handoff
+
+`node --import file:///C:/offload/lanes-1023/no-network.mjs --check test/vector-bootstrap-stored-id.test.mjs`
+passed. Focused test files used the permitted closed-fixture exemption. There
+were no ad-hoc Node probes. Independent source and test review found no blocking
+gap. `git diff --check` and PowerShell checks of both changed files passed:
+no trailing whitespace, prohibited wording, em dash or user-profile path;
+all explicit file:line references exist and are within file bounds; the final
+line is exactly the required Round 2 READY marker. `git diff` confirms no
+production source change, and `git status --short` lists only the report and
+new test. Git emitted only its existing LF-to-CRLF advisory.
+
+No live account, credentials, network, runtime artifact or production state was
+accessed. No Git metadata write or push was attempted. The operator owns the
+focused-test rerun and commit. The lane is ready for that handoff; it does not
+authorize a live repair, release or deployment.
+
+### Prepared commit
+
+Subject: `test: characterize bootstrap stored-id vector excess`
+
+Body:
+
+```text
+Reproduce old provider IDs stranded by accelerated whole-corpus bootstrap.
+Add a canonical-ID control and extend the exact-ID repair cause coverage.
+Clarify prior commit history and record focused tests and killed mutants.
+```
+
+### Operator note (round 2)
+
+The Codex sandbox on this Windows machine makes `.git` read-only, so the lane could not commit. The operator (Claude Code) re-ran `node --test test/vector-bootstrap-stored-id.test.mjs` on the unchanged working tree: 2 passed, 0 failed (the defect characterization and the canonical-ID control). `git status` shows only this report and the new test; no product file changed. The new test is a characterization of a current defect and is deliberately not registered in the test chain. Names, banned-word, email, user-path and key scan: none. The operator made the prepared commit unchanged and added the Codex co-author trailer.
+
+LANE VECTOR-EXCESS-PLAN-2: READY
