@@ -421,7 +421,8 @@ function commitWorkspaceGuide(target, parent, snapshot, existing, content, owner
     fsyncSync(fd);
     const staged = fstatSync(fd);
     const closed = fd; fd = null; closeSync(closed);
-    if (!locked() || !unchangedWorkspaceFile(temporary, staged, content, ownership)) return notWritten();
+    // Revalidation runs before every attempt, including the first, so the
+    // staged guide is checked once per attempt without an extra native launch.
     renameWithRetrySync(temporary, ready, { revalidate: () => {
       if (!locked() || !unchangedWorkspaceFile(temporary, staged, content, ownership) ||
           !renameIdentityMatches(ready, null)) throw identityRefusal;

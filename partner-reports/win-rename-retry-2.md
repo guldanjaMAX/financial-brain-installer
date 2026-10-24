@@ -252,4 +252,53 @@ Windows-only, and document the contract. Add paired replacement-race tests,
 platform controls and two new killed mutants while retaining the three original
 mutants. Record focused verification and the complete caller proof inventory.
 
+## Operator verification and one operator fix
+
+The operator re-ran the checks outside the lane sandbox on the same Windows
+host (non-elevated, Developer Mode off), each suite in a fresh profile-shaped
+fence with the network guard. The lane's work is commit `93d6aa6c` unchanged.
+
+Regression found: `test/owner-contract-workspace.test.mjs`, "R2 Windows native
+launch counts stay at the pre-change baseline", fails on `93d6aa6c`. Each
+assistant workspace create and refresh launched one more native process
+(create 11 vs 10, refresh 16 vs 15, setup of both 23 vs 21, update of both 32
+vs 30). The test passes on the base and on round 1. Cause: in
+`operations/claude-workspace.mjs`, the line just before the staged rename
+already ran `unchangedWorkspaceFile` (which includes the Windows ownership
+check), and the new `revalidate` runs the same check again before attempt 0.
+The suites this lane ran do not include that test.
+
+Operator fix, in a separate commit so it can be dropped: remove the pre-check
+line, because `revalidate` now runs before the first attempt too. Attempt 0
+behaves the same: a failed check still returns `not_written` with no
+cleanup (the identity refusal is caught and mapped to the same result), and
+an I/O error from the check still reaches the existing ordinary-failure path.
+
+Operator results with the fix:
+
+- Helper 47/0, configuration 21/0, writers 44/0, Windows 44/0, no skips;
+  test-chain runner and complete both pass.
+- Launch counts back at baseline: create 10, refresh 15, setup of both 21,
+  update of both 30.
+- All 27 touched suites re-run on the fixed tree and compared with the base
+  by failing test names per suite: no new failures, none gone, at equal
+  temporary-path length. Five suites fail identically on the base on this
+  host (owner-contract-workspace 3, technician-setup 1, field-prepare 1,
+  upgrade-verify 1, quickbooks-desktop-connect 1); those are host limits
+  already reported, not this lane.
+- Path-length note: with a fence folder name 3 characters longer, a second
+  technician-setup test ("setup can create an owner-only Claude workspace
+  guide ...") returns `not_written` on the fixed tree and on the base alike,
+  and passes on both at the shorter length. This is the known Windows
+  long-path readback limit; this branch's parent predates the release
+  branch's long-path fix, so it is not caused by this lane.
+- Mutants, each with `MUTATION_APPLIED` and the guard active, all killed:
+  `no_retry` 20/27, `retry_every_error` 39/8, `unbounded_tries` 41/6,
+  `skip_retry_revalidation` 36/11 (helper), 24/20 (writers), 7/14
+  (configuration), `remove_platform_gate` 43/4.
+- `git diff --check` clean; names, secrets, email and user-path scan clean on
+  every added line and new file.
+
+Not run: the full test chain, any live or real-account path.
+
 LANE WIN-RENAME-RETRY-2: READY
