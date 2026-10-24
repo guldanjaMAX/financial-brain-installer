@@ -504,6 +504,7 @@ if (SCENARIO) {
   const CLI = join(HERE, "..", "brain.mjs");
   const THIS_FILE = import.meta.url;
   const SIDE_EFFECT_TRIPWIRE = new URL("./fixtures/cli-side-effect-tripwire.mjs", import.meta.url).href;
+  const SUPPORT_ACL = new URL("./fixtures/support-journal-acl-preload.mjs", import.meta.url).href;
   let fail = 0;
   let ran = 0;
   const check = (name, condition, detail = "") => {
@@ -514,7 +515,11 @@ if (SCENARIO) {
   };
   const strip = (text) => String(text).replace(/\x1b\[[0-9;]*m/g, "");
 
-  function runScenario(scenario, command, { adminKey = false, cloudflareToken = false } = {}) {
+  function runScenario(scenario, command, {
+    adminKey = false,
+    cloudflareToken = false,
+    platform = null,
+  } = {}) {
     const directory = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-health-verify-exit-")));
     const userRoot = join(directory, "isolated-user-root");
     const manifestPath = join(directory, "fixture.manifest.json");
@@ -540,8 +545,14 @@ if (SCENARIO) {
     if (adminKey) writeFileSync(adminKeyPath, FIXTURE_ADMIN, { mode: 0o600 });
     if (cloudflareToken) environment.CLOUDFLARE_API_TOKEN = FIXTURE_TOKEN;
 
+    const orderedPreload = `data:text/javascript,${encodeURIComponent(
+      `${platform ? `Object.defineProperty(process, "platform", { value: ${JSON.stringify(platform)} });\n` : ""}` +
+      `await import(${JSON.stringify(SIDE_EFFECT_TRIPWIRE)});\n` +
+      `await import(${JSON.stringify(SUPPORT_ACL)});\n` +
+      `await import(${JSON.stringify(THIS_FILE)});\n`,
+    )}`;
     const result = spawnSync(process.execPath, [
-      "--import", SIDE_EFFECT_TRIPWIRE, "--import", THIS_FILE, CLI, command, manifestPath,
+      "--import", orderedPreload, CLI, command, manifestPath,
     ], {
       encoding: "utf-8",
       env: environment,
@@ -549,6 +560,10 @@ if (SCENARIO) {
     });
     const output = strip(`${result.stdout || ""}${result.stderr || ""}`);
     rmSync(directory, { recursive: true, force: true });
+    if (!scenario.startsWith("isolation-") &&
+        (result.status === 86 || output.includes("TEST_SIDE_EFFECT_BLOCKED:"))) {
+      throw new Error(`health scenario ${scenario} reached an uninjected host boundary`);
+    }
     return { code: result.status, output, error: result.error, manifestPath };
   }
 
@@ -593,6 +608,22 @@ if (SCENARIO) {
         control.output.includes("TEST_ISOLATION_CONTROL_PASSED"),
       JSON.stringify({ scenario, refused, control }));
   }
+
+  const windowsFailure = runScenario("health-documents-unreachable", "health", {
+    adminKey: true,
+    platform: "win32",
+  });
+  const windowsControl = runScenario("health-ok", "health", {
+    adminKey: true,
+    platform: "win32",
+  });
+  check("simulated Windows support recording preserves the health refusal behind the tripwire",
+    windowsFailure.code === 1 &&
+      windowsFailure.output.includes("TEST_SUPPORT_ACL_REACHED") &&
+      /Brain is up but couldn't check its documents just now/isu.test(windowsFailure.output) &&
+      windowsControl.code === 0 &&
+      /documents endpoint 200/u.test(windowsControl.output),
+    JSON.stringify({ windowsFailure, windowsControl }));
 
   const missingKey = runScenario("health-ok", "health");
   check("health exits nonzero when no admin key is available",

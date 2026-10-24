@@ -6817,6 +6817,9 @@ export async function rebasePausedVerifiedProjection({
 }
 
 export async function cmdUpgrade(manifestPath, options = {}) {
+  if ((options.answerSetupNeedsRecovery ?? answerSetupNeedsRecovery)(manifestPath)) {
+    die(HALF_RUN(manifestPath));
+  }
   const resolveUpgradeAccount = options.resolveAccount ?? resolveAccount;
   const queryDatabase = options.d1Query ?? d1Query;
   const callCloudflare = options.cf ?? cf;
@@ -28661,8 +28664,17 @@ async function cmdSetupInteractive(manifestPath) {
   );
 }
 
-async function cmdUpgradeInteractive(manifestPath) {
-  return withManifestCloudflareControl(manifestPath, () => cmdUpgrade(manifestPath), { command: "upgrade" });
+export async function cmdUpgradeInteractive(manifestPath, options = {}) {
+  if ((options.answerSetupNeedsRecovery ?? answerSetupNeedsRecovery)(manifestPath)) {
+    die(HALF_RUN(manifestPath));
+  }
+  const runUpgrade = options.cmdUpgrade ?? cmdUpgrade;
+  const withManifestControl = options.withManifestControl ?? withManifestCloudflareControl;
+  return withManifestControl(
+    manifestPath,
+    () => runUpgrade(manifestPath, options.upgradeOptions || {}),
+    { command: "upgrade" },
+  );
 }
 
 /** Run a manifest-bound control-plane command through its exact saved custody. */

@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
 
-import { cmdConnect, cmdUpdate } from "../brain.mjs";
+import { cmdConnect, cmdUpdate, cmdUpgrade, cmdUpgradeInteractive } from "../brain.mjs";
 import {
   answerSetupJournalPath,
   answerSetupJournal,
@@ -35,6 +35,60 @@ import { renderCliCommands } from "../operations/cli-guidance.mjs";
 const fixedNow = new Date("2026-10-23T12:00:00.000Z");
 const holderStartedMs = fixedNow.getTime() - 25_000;
 let mutantSequence = 0;
+
+function realFilesystemLockPlatforms(hostPlatform, requested) {
+  return hostPlatform === "win32" ? requested.filter((platform) => platform === "win32") : [...requested];
+}
+
+function normalizeMutantSource(source) {
+  return source.replace(/\r\n/gu, "\n");
+}
+
+const JOURNAL_PRESENCE_CASES = Object.freeze([
+  {
+    name: "valid journal file",
+    create: (path) => writeFileSync(path, `${JSON.stringify(answerSetupJournal({
+      retrieval: {},
+      safety: {},
+    }, { mode: "keep", secretExisted: false }))}\n`, { mode: 0o600 }),
+  },
+  { name: "zero-byte journal file", create: (path) => writeFileSync(path, "", { mode: 0o600 }) },
+  { name: "malformed journal file", create: (path) => writeFileSync(path, "not-json\n", { mode: 0o600 }) },
+  { name: "journal directory", create: (path) => mkdirSync(path, { mode: 0o700 }) },
+]);
+
+function removeJournalEntry(path) {
+  const state = lstatSync(path);
+  if (state.isDirectory()) rmdirSync(path);
+  else unlinkSync(path);
+}
+
+test("real-filesystem lock rows keep every native Windows case and omit incompatible simulated POSIX cases", () => {
+  const rows = [
+    { host: "win32", requested: ["win32", "darwin", "linux"], expected: ["win32"] },
+    { host: "win32", requested: ["win32", "darwin"], expected: ["win32"] },
+    { host: "darwin", requested: ["win32", "darwin", "linux"], expected: ["win32", "darwin", "linux"] },
+    { host: "linux", requested: ["win32", "darwin", "linux"], expected: ["win32", "darwin", "linux"] },
+  ];
+  for (const row of rows) {
+    const selected = realFilesystemLockPlatforms(row.host, row.requested);
+    assert.deepEqual(selected, row.expected, `${row.host} selects only host-compatible filesystem rows`);
+    assert.ok(selected.includes("win32"), `${row.host} retains the real Windows control row`);
+  }
+});
+
+test("mutant source normalization makes LF and CRLF checkouts equivalent", () => {
+  const anchor = "first line\nsecond line";
+  for (const row of [
+    { name: "LF checkout", source: "first line\nsecond line\n" },
+    { name: "CRLF checkout", source: "first line\r\nsecond line\r\n" },
+  ]) {
+    const normalized = normalizeMutantSource(row.source);
+    assert.ok(normalized.includes(anchor), `${row.name} reaches the same multi-line mutant anchor`);
+    assert.ok(normalizeMutantSource("first line\nsecond line\n").includes(anchor),
+      `${row.name} retains the LF green control`);
+  }
+});
 
 function fixture(label = "partner-fix-") {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), label)));
@@ -88,7 +142,7 @@ function platformIdentity(platform, startedMs) {
 }
 
 test("a live holder with a 6,939 ms identity difference stays busy on every platform", () => {
-  for (const platform of ["win32", "darwin", "linux"]) {
+  for (const platform of realFilesystemLockPlatforms(process.platform, ["win32", "darwin", "linux"])) {
     const input = fixture(`partner-lock-live-${platform}-`);
     const storedIdentity = platformIdentity(platform, holderStartedMs);
     const contenderIdentity = platformIdentity(platform, holderStartedMs - 6_939);
@@ -130,7 +184,7 @@ test("a live holder with a 6,939 ms identity difference stays busy on every plat
 });
 
 test("a live holder with unknown identity stays busy on every platform", () => {
-  for (const platform of ["win32", "darwin", "linux"]) {
+  for (const platform of realFilesystemLockPlatforms(process.platform, ["win32", "darwin", "linux"])) {
     const input = fixture(`partner-lock-unknown-${platform}-`);
     const holder = acquireBrainLifecycleLock({
       ...input,
@@ -164,7 +218,7 @@ test("a live holder with unknown identity stays busy on every platform", () => {
 });
 
 test("a live holder older than the stale age stays busy with restart guidance on every platform", () => {
-  for (const platform of ["win32", "darwin", "linux"]) {
+  for (const platform of realFilesystemLockPlatforms(process.platform, ["win32", "darwin", "linux"])) {
     const input = fixture(`partner-lock-long-held-${platform}-`);
     const identity = platformIdentity(platform, holderStartedMs);
     const holder = acquireBrainLifecycleLock({
@@ -204,7 +258,7 @@ test("a live holder older than the stale age stays busy with restart guidance on
 });
 
 test("a dead holder stays busy while fresh and is reaped only after stale age on every platform", () => {
-  for (const platform of ["win32", "darwin", "linux"]) {
+  for (const platform of realFilesystemLockPlatforms(process.platform, ["win32", "darwin", "linux"])) {
     const input = fixture(`partner-lock-dead-${platform}-`);
     const holder = acquireBrainLifecycleLock({
       ...input,
@@ -247,7 +301,7 @@ test("a dead holder stays busy while fresh and is reaped only after stale age on
 });
 
 test("only a stale prior owner with the contender's own PID and a different identity may be reaped", () => {
-  for (const platform of ["win32", "darwin", "linux"]) {
+  for (const platform of realFilesystemLockPlatforms(process.platform, ["win32", "darwin", "linux"])) {
     const input = fixture(`partner-lock-self-pid-${platform}-`);
     const priorIdentity = platformIdentity(platform, holderStartedMs);
     const contenderIdentity = platformIdentity(platform, holderStartedMs + 10_000);
@@ -306,7 +360,7 @@ test("self-PID custody uses one process-wide instance across every observation t
     { label: "fallback-to-native", first: null, second: "native-a" },
     { label: "native-to-different-native", first: "native-a", second: "native-b" },
   ];
-  for (const platform of ["win32", "darwin", "linux"]) {
+  for (const platform of realFilesystemLockPlatforms(process.platform, ["win32", "darwin", "linux"])) {
     for (const transition of transitions) {
       const row = `${platform}-${transition.label}`;
       const input = fixture(`partner-lock-stable-self-${row}-`);
@@ -408,7 +462,7 @@ test("new owner receipts reuse one non-null process-wide instance", () => {
 });
 
 test("fresh empty lifecycle directories are retryable while stale empty directories remain recoverable", () => {
-  for (const platform of ["win32", "darwin"]) {
+  for (const platform of realFilesystemLockPlatforms(process.platform, ["win32", "darwin"])) {
     const input = fixture(`partner-lock-empty-${platform}-`);
     const seed = acquireBrainLifecycleLock({
       ...input,
@@ -603,25 +657,7 @@ test("brain update preserves the lifecycle holder message instead of classifying
 });
 
 test("brain update refuses every interrupted answer-setup journal shape before remote update work", async () => {
-  const journalCases = [
-    {
-      name: "valid journal file from an explicit manifest",
-      manifestArgument: true,
-      create: (path) => writeFileSync(path, `${JSON.stringify(answerSetupJournal({
-        retrieval: {},
-        safety: {},
-      }, { mode: "keep", secretExisted: false }))}\n`, { mode: 0o600 }),
-    },
-    {
-      name: "zero-byte journal file from the remembered manifest",
-      manifestArgument: false,
-      create: (path) => writeFileSync(path, "", { mode: 0o600 }),
-    },
-    { name: "malformed journal file", create: (path) => writeFileSync(path, "not-json\n", { mode: 0o600 }) },
-    { name: "journal directory", create: (path) => mkdirSync(path, { mode: 0o700 }) },
-  ];
-
-  for (const journalCase of journalCases) {
+  for (const [index, journalCase] of JOURNAL_PRESENCE_CASES.entries()) {
     const { manifestPath } = fixture("partner-update-journal-");
     const journalPath = answerSetupJournalPath(manifestPath);
     journalCase.create(journalPath);
@@ -634,7 +670,7 @@ test("brain update refuses every interrupted answer-setup journal shape before r
         throw new Error("synthetic remote boundary");
       },
     };
-    const updateTarget = journalCase.manifestArgument === false ? undefined : manifestPath;
+    const updateTarget = index === 1 ? undefined : manifestPath;
 
     await assert.rejects(cmdUpdate(updateTarget, options), (error) => {
       assert.match(error.message, /Claude setup was interrupted part way/i);
@@ -647,9 +683,7 @@ test("brain update refuses every interrupted answer-setup journal shape before r
     }, `${journalCase.name} refuses update`);
     assert.deepEqual(remoteEvents, [], `${journalCase.name} reached refusal before remote update work`);
 
-    const state = lstatSync(journalPath);
-    if (state.isDirectory()) rmdirSync(journalPath);
-    else unlinkSync(journalPath);
+    removeJournalEntry(journalPath);
     await assert.rejects(cmdUpdate(updateTarget, options), (error) => {
       assert.equal(error?.supportCode, "UPDATE_BRAIN_BUSY");
       return true;
@@ -658,12 +692,90 @@ test("brain update refuses every interrupted answer-setup journal shape before r
   }
 });
 
+test("the shared upgrade engine refuses every interrupted answer-setup journal shape before account work", async () => {
+  for (const journalCase of JOURNAL_PRESENCE_CASES) {
+    const { manifestPath } = fixture("partner-upgrade-journal-");
+    const journalPath = answerSetupJournalPath(manifestPath);
+    journalCase.create(journalPath);
+    const events = [];
+    let decisions = 0;
+    const options = {
+      answerSetupNeedsRecovery: (path) => {
+        decisions += 1;
+        return answerSetupNeedsRecovery(path);
+      },
+      resolveAccount: async () => {
+        events.push("account");
+        throw new Error("synthetic account boundary reached");
+      },
+    };
+
+    await assert.rejects(cmdUpgrade(manifestPath, options), (error) => {
+      assert.equal(error?.message, HALF_RUN(manifestPath));
+      return true;
+    }, `${journalCase.name} refuses the shared upgrade engine`);
+    assert.equal(decisions, 1, `${journalCase.name} reached the upgrade journal decision`);
+    assert.deepEqual(events, [], `${journalCase.name} stopped before account or remote work`);
+
+    const routeEvents = [];
+    let routeDecisions = 0;
+    const routeOptions = {
+      answerSetupNeedsRecovery: (path) => {
+        routeDecisions += 1;
+        return answerSetupNeedsRecovery(path);
+      },
+      withManifestControl: async () => {
+        routeEvents.push("credential-control");
+        throw new Error("synthetic credential boundary reached");
+      },
+    };
+    await assert.rejects(cmdUpgradeInteractive(manifestPath, routeOptions), (error) => {
+      assert.equal(error?.message, HALF_RUN(manifestPath));
+      return true;
+    }, `${journalCase.name} refuses the installed upgrade route`);
+    assert.equal(routeDecisions, 1, `${journalCase.name} reached the installed-route decision`);
+    assert.deepEqual(routeEvents, [], `${journalCase.name} stopped before credential control`);
+
+    removeJournalEntry(journalPath);
+    await assert.rejects(cmdUpgrade(manifestPath, options), /synthetic account boundary reached/u,
+      `${journalCase.name} absent-journal control reaches account resolution`);
+    assert.equal(decisions, 2, `${journalCase.name} absent control reached the same decision`);
+    assert.deepEqual(events, ["account"], `${journalCase.name} green control differs only by journal absence`);
+    await assert.rejects(cmdUpgradeInteractive(manifestPath, routeOptions), /synthetic credential boundary reached/u,
+      `${journalCase.name} absent-journal route control reaches credential control`);
+    assert.equal(routeDecisions, 2, `${journalCase.name} route control reached the same decision`);
+    assert.deepEqual(routeEvents, ["credential-control"],
+      `${journalCase.name} installed-route control differs only by journal absence`);
+  }
+});
+
+test("the 0.4.19 owner changelog describes the shipped live-and-dead PID lock rule", () => {
+  const changelog = readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8");
+  const entry = changelog.split("## 0.4.18", 1)[0];
+  const rows = [
+    {
+      name: "owner summary",
+      obsolete: /reused-process locks can recover safely/iu,
+      shipped: /live PID is always\s+busy/iu,
+    },
+    {
+      name: "technical summary",
+      obsolete: /process-start identity/iu,
+      shipped: /dead PID.*stale age.*second dead check/isu,
+    },
+  ];
+  for (const row of rows) {
+    assert.doesNotMatch(entry, row.obsolete, `${row.name} removes the unshipped claim`);
+    assert.match(entry, row.shipped, `${row.name} retains a positive shipped-behavior control`);
+  }
+});
+
 async function importMutant(relativePath, replacements, dependencyPaths) {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "partner-mutant-")));
   const operations = join(root, "operations");
   mkdirSync(operations, { recursive: true, mode: 0o700 });
   const sourcePath = new URL(`../${relativePath}`, import.meta.url);
-  let source = readFileSync(sourcePath, "utf8");
+  let source = normalizeMutantSource(readFileSync(sourcePath, "utf8"));
   for (const [before, after] of replacements) {
     assert.ok(source.includes(before), `mutant anchor exists in ${relativePath}`);
     source = source.replace(before, after);
@@ -886,6 +998,42 @@ test("the drop-update-journal-guard mutant is killed", async () => {
     (error) => error?.code === "ERR_ASSERTION",
     "the presence probe kills a guard that lets an interrupted setup reach update work",
   );
+});
+
+test("the remove-upgrade-journal-guard mutant is killed on the shared engine and installed route", async () => {
+  const { manifestPath } = fixture("partner-upgrade-guard-mutant-");
+  const journalPath = answerSetupJournalPath(manifestPath);
+  writeFileSync(journalPath, "{", { mode: 0o600 });
+  let directBoundary = 0;
+  const directOptions = {
+    resolveAccount: async () => {
+      directBoundary += 1;
+      throw new Error("mutant reached account work");
+    },
+  };
+  await assert.rejects(cmdUpgrade(manifestPath, directOptions), (error) => error?.message === HALF_RUN(manifestPath));
+  assert.equal(directBoundary, 0, "the real shared engine refuses before account work");
+  await assert.rejects(cmdUpgrade(manifestPath, {
+    ...directOptions,
+    answerSetupNeedsRecovery: () => false,
+  }), /mutant reached account work/u);
+  assert.equal(directBoundary, 1, "removing the shared-engine guard reaches the unsafe boundary");
+
+  let routeBoundary = 0;
+  const routeOptions = {
+    withManifestControl: async () => {
+      routeBoundary += 1;
+      throw new Error("mutant reached credential control");
+    },
+  };
+  await assert.rejects(cmdUpgradeInteractive(manifestPath, routeOptions),
+    (error) => error?.message === HALF_RUN(manifestPath));
+  assert.equal(routeBoundary, 0, "the real installed route refuses before credential control");
+  await assert.rejects(cmdUpgradeInteractive(manifestPath, {
+    ...routeOptions,
+    answerSetupNeedsRecovery: () => false,
+  }), /mutant reached credential control/u);
+  assert.equal(routeBoundary, 1, "removing the installed-route guard reaches the unsafe boundary");
 });
 
 function verifyStoredKeyCopy(api) {

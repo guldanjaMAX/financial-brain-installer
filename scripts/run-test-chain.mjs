@@ -293,6 +293,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --test test/machine-prep-installers.test.mjs",
   "node --no-warnings test/windows-dpapi-signing-workflow.test.mjs",
   "node --test test/owner-contract-workspace.test.mjs",
+  "node --test test/claude-workspace-windows-long-path.test.mjs",
   // Optional answers and update fail-safe regressions added for 0.4.19.
   "node --test test/answer-model-config.test.mjs",
   "node --test test/answer-setup-copy.test.mjs",
@@ -452,6 +453,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node test/cloudflare-token-prompt.test.mjs",
   "node test/technician-setup.test.mjs",
   "node --test test/owner-contract-workspace.test.mjs",
+  "node --test test/claude-workspace-windows-long-path.test.mjs",
   "node test/onboarding-sandbox.test.mjs",
   "node --test test/windows-onboarding-kit.test.mjs",
   "node test/cloudflare-token-store.test.mjs",

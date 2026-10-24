@@ -32,10 +32,10 @@ exact sealed package. This version bump verifies no incident.
   unreadable or invalid database migration list stops before any pause or
   change. The complete change list is checked before the Brain is paused, and
   acceptance now fails when a configured answer cannot be produced or checked.
-  Lock messages identify the operation holding the lock, while confirmed dead
-  or reused-process locks can recover safely. An older tool that lowered the
-  recorded version below the durable migration history is detected and routed
-  back through the supported update command.
+  Lock messages identify the operation holding the lock. A live PID is always
+  busy. A dead PID is reaped only after the stale age and a second dead check.
+  An older tool that lowered the recorded version below the durable migration
+  history is detected and routed back through the supported update command.
 
 ### Technical changes
 
@@ -51,9 +51,10 @@ exact sealed package. This version bump verifies no incident.
   diagnosis and repair. Update planning verifies the whole ordered ledger
   before bookmark capture or paused deployment. Acceptance verifies configured
   answer text, model receipts and the required Worker secret-name inventory.
-- Lifecycle locks include process-start identity and report the holding
-  operation, start time and safe retry action. Schema history detects a
-  recorded version that was lowered by an older tool.
+- Lifecycle locks report the holding operation, start time and safe retry
+  action. A live PID remains busy, while a dead PID is reaped only after the
+  stale age and a second dead check. Schema history detects a recorded version
+  that was lowered by an older tool.
 
 ### Known issues
 
