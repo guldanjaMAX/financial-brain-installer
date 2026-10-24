@@ -30,7 +30,16 @@ import { createQueryTiming, queryTimingResponse, measureQueryStage, startQuerySt
 
 import { handleCuratedVerify } from "./lib/curated-verify.js";
 import { WORKER_VERSION } from "./lib/version.js";
-import { jsonResponse, privateNoStore, validateAdminKey, validateReadKey, callLLM } from "./lib/core.js";
+import {
+  AnthropicEmptyResponseError,
+  AnthropicIncompleteResponseError,
+  jsonResponse,
+  privateNoStore,
+  validateAdminKey,
+  validateReadKey,
+  callLLM,
+  llmText,
+} from "./lib/core.js";
 import { resolvePrincipal, principalMay, scopeIsUnrestricted } from "./lib/grants.js";
 import { withLedgerAnswer } from "./lib/ledger-answer.js";
 import { handleBankFeed, bankFeedEnabled } from "./lib/bank-feed.js";
@@ -97,7 +106,12 @@ import {
   coverageIncompleteNotice, emptyRetrievalDisclosure, meaningSearchLine, projectionCatchupGap,
   projectionPending, refusalNextAction,
 } from "./lib/retrieval-status.js";
-import { answerGenerationError, scannedEvidenceGap } from "./lib/answer-render.js";
+import {
+  ANSWER_ERROR_MESSAGES,
+  GAP_DETAIL,
+  answerGenerationError,
+  scannedEvidenceGap,
+} from "./lib/answer-render.js";
 import {
   handleOwnerAuth, handleAdminInvite, handleAdminDevices, handleAdminGrants, handleZones,
   ownerSessionPrincipal,
@@ -145,6 +159,17 @@ import {
 import { supplementalRetrievalFilters } from "./lib/retrieval-routing.js";
 import { dispatchCfoWorkflow } from "./lib/cfo-workflow.js";
 import { entityFactAnswer } from "./lib/entity-fact-answer.js";
+
+// Packaged deploys set this binding explicitly. The same built-in default here
+// keeps direct and unbound invocations on the public no-key path.
+const DIRECT_INVOCATION_ANSWER_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+const ANTHROPIC_ANSWER_MAX_TOKENS = 4000;
+const ANTHROPIC_EVIDENCE_GATE_MAX_TOKENS = 4000;
+const ANTHROPIC_SYNTHESIS_GATE_MAX_TOKENS = 8000;
+
+function isUnreadableAnthropicReply(error) {
+  return error instanceof AnthropicEmptyResponseError || error instanceof AnthropicIncompleteResponseError;
+}
 
 /* ------------------------------------------------------------ retrieval */
 
@@ -466,7 +491,7 @@ async function rerank(env, q, results, limit, timing = null) {
       timeoutMs: 8000,
       messages: [{ role: "user", content: `Question: ${q}\n\nResults:\n${list}` }],
     });
-    const text = data?.content?.[0]?.text || "";
+    const text = llmText(data);
     const parsed = JSON.parse(text.slice(text.indexOf("["), text.lastIndexOf("]") + 1));
     const scored = parsed
       .filter((p) => candidates[p.idx])
@@ -476,6 +501,52 @@ async function rerank(env, q, results, limit, timing = null) {
   } catch {
     return results;
   }
+}
+
+const answerModelFor = (env) => env.ANSWER_MODEL || DIRECT_INVOCATION_ANSWER_MODEL;
+const gateModelFor = (env) => env.GATE_MODEL || answerModelFor(env);
+
+function nextUtcMidnight() {
+  const now = new Date();
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)).toISOString();
+}
+
+function answerCheckStatus(error) {
+  if (isUnreadableAnthropicReply(error)) return "check_problem";
+  if (error?.no_anthropic_key) return "key_missing";
+  if (error?.llm_cap_exceeded && error?.spend_guard_degraded) return "spend_check_paused";
+  if (error?.llm_cap_exceeded) return "daily_limit";
+  if (["key_rejected", "billing", "model_unavailable", "busy", "error"].includes(error?.provider_error_class)) {
+    return error.provider_error_class;
+  }
+  return "error";
+}
+
+async function checkAnswerModel(env, model) {
+  if (String(model).startsWith("@cf/")) return { model, status: "built_in" };
+  try {
+    await callLLM(env, {
+      model,
+      label: "answer-model-check",
+      system: "Reply with the word OK.",
+      messages: [{ role: "user", content: "OK?" }],
+      max_tokens: 128,
+      timeoutMs: 30_000,
+    });
+    return { model, status: "ok" };
+  } catch (error) {
+    return { model, status: answerCheckStatus(error) };
+  }
+}
+
+export async function handleAnswerCheck(env) {
+  const answerModel = answerModelFor(env);
+  const gateModel = gateModelFor(env);
+  const answer = await checkAnswerModel(env, answerModel);
+  const check = gateModel === answerModel
+    ? { ...answer }
+    : await checkAnswerModel(env, gateModel);
+  return jsonResponse({ answer, check });
 }
 
 /**
@@ -1365,14 +1436,18 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
   let answerError = null;
   let model = null;
   let modelDeclaredNoEvidence = false;
+  const answerModel = answerModelFor(env);
+  const gateModel = gateModelFor(env);
+  let anthropicKeyMissing = false;
   try {
     let repairInstruction = "";
     for (let attempt = 0; !observedAnswer && !factAnswer && attempt < 2; attempt++) {
       let data;
       try {
         data = await callLLM(env, {
-          model: env.ANSWER_MODEL || "claude-sonnet-4-5",
+          model: answerModel,
           max_tokens: 1000,
+          anthropic_max_tokens: ANTHROPIC_ANSWER_MAX_TOKENS,
           system,
           label: attempt === 0 ? "rag-think" : "rag-think-repair",
           timing, timingStage: "answer_llm",
@@ -1389,7 +1464,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
         }
         throw error;
       }
-      answer = (data?.content?.[0]?.text || "").trim() || null;
+      answer = llmText(data).trim() || null;
       model = data?.model || null;
       if (!answer) approvedDocs = [];
       if (answer) {
@@ -1418,6 +1493,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
       } else break;
     }
   } catch (e) {
+    if (e?.no_anthropic_key) anthropicKeyMissing = true;
     answerError = answerGenerationError(e);
     // A failed repair must never return the unverified first draft.
     answer = null;
@@ -1433,12 +1509,18 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
     try {
       synthesis = await verifySynthesis({ question: q, answer, docs, owner,
         verify: async ({ system, prompt }) => {
-          const response = await callLLM(env, {
-            model: env.ANSWER_MODEL || "claude-sonnet-4-5", max_tokens: 2000,
-            label: "rag-synthesis-gate", timing, timingStage: "verifier_llm", timeoutMs: 45_000,
-            system, messages: [{ role: "user", content: prompt }],
-          });
-          return response?.content?.[0]?.text || "";
+          try {
+            const response = await callLLM(env, {
+              model: gateModel, max_tokens: 2000,
+              anthropic_max_tokens: ANTHROPIC_SYNTHESIS_GATE_MAX_TOKENS,
+              label: "rag-synthesis-gate", timing, timingStage: "verifier_llm", timeoutMs: 45_000,
+              system, messages: [{ role: "user", content: prompt }],
+            });
+            return llmText(response);
+          } catch (error) {
+            if (isUnreadableAnthropicReply(error)) return null;
+            throw error;
+          }
         } });
       if (synthesis) {
         gaps.push({ type: "synthesis_scope", detail: "The list covers supported items in the retrieved records; a complete inventory has not been established." });
@@ -1451,6 +1533,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
       datedStatus = moneyHistory.evidence.length ? moneyHistory : qualifyDatedStatus({ question: q, answer, docs });
       answer = datedStatus.answer;
     } catch (error) {
+      if (error?.no_anthropic_key) anthropicKeyMissing = true;
       answer = null; approvedDocs = []; answerError = answerGenerationError(error, { verification: true });
     }
   }
@@ -1477,7 +1560,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
       } else {
         try {
           const parseVerifierReply = (response) => {
-            const text = response?.content?.[0]?.text || "";
+            const text = llmText(response);
             const first = text.indexOf("{");
             const last = text.lastIndexOf("}");
             if (first < 0 || last <= first) return null;
@@ -1489,8 +1572,9 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
             }
           };
           const verifierRequest = {
-            model: env.ANSWER_MODEL || "claude-sonnet-4-5",
+            model: gateModel,
             max_tokens: datedStatus.evidence.length ? 1000 : 300,
+            anthropic_max_tokens: ANTHROPIC_EVIDENCE_GATE_MAX_TOKENS,
             label: "rag-evidence-gate",
             timing, timingStage: "verifier_llm",
             timeoutMs: 45_000,
@@ -1522,13 +1606,24 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
           let check = null;
           let verifierUnreadableTwice = false;
           if (!(observedAnswer || factAnswer || (synthesis && !datedStatus.evidence.length))) {
-            check = await callLLM(env, verifierRequest);
-            if (!parseVerifierReply(check)) {
-              check = await callLLM(env, verifierRequest);
-              verifierUnreadableTwice = !parseVerifierReply(check);
+            const callVerifier = async () => {
+              try {
+                const response = await callLLM(env, verifierRequest);
+                return { response, unreadable: false };
+              } catch (error) {
+                if (isUnreadableAnthropicReply(error)) return { response: null, unreadable: true };
+                throw error;
+              }
+            };
+            const firstCheck = await callVerifier();
+            check = firstCheck.response;
+            if (firstCheck.unreadable || !parseVerifierReply(check)) {
+              const secondCheck = await callVerifier();
+              check = secondCheck.response;
+              verifierUnreadableTwice = secondCheck.unreadable || !parseVerifierReply(check);
             }
           }
-          const raw = check?.content?.[0]?.text || "";
+          const raw = llmText(check);
           const verdict = observedAnswer
             ? { supported: true, complete: true, evidence: observedAnswer.evidence, reason: balanceAnswer
               ? "exact observed account balances; full inventory explicitly not established"
@@ -1551,6 +1646,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
             complete: verdict?.complete === true || String(verdict?.complete).toLowerCase() === "true",
             evidence: [...allowed],
             reason: String(verdict?.reason || "").slice(0, 240) || undefined,
+            ...((verifierUnreadableTwice || verdict?.unreadable === true) ? { unreadable: true } : {}),
             ...(datedStatus.spans?.length ? { quoted_spans: datedStatus.spans } : {}),
             ...(verifierUnreadableTwice && raw ? { invalid_response: raw.replace(/\s+/g, " ").slice(0, 240) } : {}),
           };
@@ -1759,6 +1855,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
             approvedDocs = citedDocs.filter((doc) => allowed.has(doc.n));
           }
         } catch (e) {
+          if (e?.no_anthropic_key) anthropicKeyMissing = true;
           answer = null;
           answerError = answerGenerationError(e, { verification: true });
           approvedDocs = [];
@@ -1856,7 +1953,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
   const refusalReason = String(evidenceGate?.reason || "");
   const answerWithheldGate = refusalReason === "draft made claims without document citations"
     ? "uncited_draft"
-    : evidenceGate?.invalid_response && refusalReason === "The evidence check reply could not be read, twice."
+    : evidenceGate?.unreadable === true
       ? "unreadable_check_reply"
       : gaps.some((gap) => ["money_veto", "money_recall"].includes(gap?.type)) ||
           /\b(?:money|QuickBooks)\b/i.test(refusalReason)
@@ -1892,6 +1989,13 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
           : undefined)
     : undefined;
 
+  if (anthropicKeyMissing && !gaps.some((gap) => gap?.type === "anthropic_key_missing")) {
+    gaps.unshift({
+      type: "anthropic_key_missing",
+      detail: GAP_DETAIL,
+    });
+  }
+
   return jsonResponse({
     mode: "think",
     entity_scope: entityScope,
@@ -1915,6 +2019,9 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
             : undefined),
     answer: refusalSearchDisclosure || incompleteCoverageBlocksAbsence || answerValidationBlocksAbsence ? null : answer,
     answer_error: answerError || undefined,
+    answer_resumes_at: answerError === ANSWER_ERROR_MESSAGES.dailyLimit
+      ? nextUtcMidnight()
+      : undefined,
     next_action: categoricalRefusal && !answerError
       ? refusalNextAction({ status: refusalStatus, withheldGate: answerWithheldGate })
       : undefined,
@@ -3204,6 +3311,12 @@ async function handleDocuments(env) {
     rows: rows || [],
     ...(summary ? { summary } : {}),
     vector_drain_mode: upgradePauseHolds(env) ? "paused-for-upgrade" : "active",
+    ...(!env.ANTHROPIC_API_KEY &&
+        [env.ANSWER_MODEL, env.GATE_MODEL]
+          .filter((model) => typeof model === "string" && model)
+          .some((model) => !model.startsWith("@cf/"))
+      ? { anthropic_key_missing: true }
+      : {}),
   };
   if (backendOf(env) === D1) {
     // How far the vector index trails the text. A brain whose outbox is not
@@ -3800,6 +3913,9 @@ export default {
       }
       if (path === "/api/admin/brain/zones") {
         return handleZones(env, request);
+      }
+      if (path === "/api/admin/brain/answer-check" && request.method === "POST") {
+        return handleAnswerCheck(env);
       }
       // A bank export the owner downloaded, landing as ledger rows rather than
       // as prose. Operator-only and INSIDE the key gate, unlike the hosted

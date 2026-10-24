@@ -766,6 +766,14 @@ reuse an old local approval.
 
 ## Retrieval and answer flow
 
+The installer always binds the manifest's `retrieval.answer_model` as
+`ANSWER_MODEL`. It binds optional `retrieval.gate_model` as `GATE_MODEL`; when
+that value is absent, synthesis and evidence checks use `ANSWER_MODEL` exactly.
+Provider custody is decided independently for each configured model. A missing
+Anthropic key keeps the existing built-in-model fallback visible through a
+computed `/think` gap and the authenticated documents receipt used by
+`brain health`.
+
 Think first offers unrestricted owner money questions to a read-only ledger
 path. `ledger-question.js` recognizes current balances, exact-cent deposits and
 account inflow/outflow periods, largest expenses/deposits, merchant/category
@@ -1388,6 +1396,17 @@ receive a central corpus copy. Cloudflare Workers AI handles standard embedding
 and answer generation inside that account. An external answer or rerank provider
 is used only when the manifest explicitly selects it and its Worker secret is
 allowed.
+
+`retrieval.answer_model` selects answer generation. The optional
+`retrieval.gate_model` selects both synthesis and evidence checks and defaults
+to the answer model when omitted. Each call independently follows its configured
+model, so a mixed Cloudflare/Anthropic configuration is allowed only through the
+same binding and secret custody checks. If an Anthropic model is configured but
+its Worker secret is absent, the answer and evidence-check labels refuse without
+calling Workers AI. The think response carries the `anthropic_key_missing` gap,
+and search remains available. Reranking and OCR keep their existing routing:
+`rag-rerank` may use its historical fallback, while OCR stays confined to the
+configured Workers AI binding.
 
 One install has one operator boundary and multiple app principals. Anyone
 holding the install's admin key has whole-install authority. Owner passkeys can

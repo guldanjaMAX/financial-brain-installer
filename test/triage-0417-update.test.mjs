@@ -20,6 +20,7 @@ function scheduleFixture(arm) {
   const bindings = {
     join, relative, sep, HERE: "/fixture", FormData, Blob,
     loadManifest: () => ({ m: manifest }), bankFeedWorkerVars: () => [],
+    assertReviewedAnswerModels: () => {},
     resolveAccount: async () => ({ id: "fixture-account" }),
     collectWorkerFiles: root => [join(root, "index.js")], readFileSync: () => "export default {};",
     workerBindings: () => [], die: message => { throw new Error(message); },

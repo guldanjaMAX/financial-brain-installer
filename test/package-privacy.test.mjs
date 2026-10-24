@@ -536,10 +536,14 @@ const expected = [
   "onboarding/client-experience/support-profile.schema.json",
   "operations/admin-key-file.mjs",
   "operations/admin-key-persistence.mjs",
+  "operations/answer-setup-copy.mjs",
+  "operations/answer-setup.mjs",
   "operations/brain-lifecycle-lock.mjs",
   "operations/daily-refresh-observation.mjs",
   // Content-free durable dispatch intent is required by the migration runner.
   "operations/migration-statement-intent.mjs",
+  // One structural validator keeps update, migrate, status, and repair honest.
+  "operations/migration-ledger.mjs",
   "operations/upgrade-bookmark.mjs",
   "operations/daily-refresh-plan.mjs",
   "operations/daily-refresh-run.mjs",

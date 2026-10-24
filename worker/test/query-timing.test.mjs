@@ -154,6 +154,16 @@ test('real think route records stages after a supported answer and verifier deci
   assertCoherent(body.timing);
 });
 
+test('Claude 5.5 timing ids remain recognized and unknown ids stay bounded', () => {
+  const timing = createQueryTiming({ route: 'think', now: () => 0 });
+  const ids = ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5'];
+  for (const id of ids) timing.model('answer_llm', 'anthropic', id)();
+  timing.model('answer_llm', 'anthropic', 'private-model-label')();
+  const receipt = timing.finish();
+  assert.deepEqual(receipt.models.map(model => model.id), [...ids, 'unrecognized']);
+  assert.ok(receipt.models.every(model => model.calls === 1), 'each model decision was reached');
+});
+
 function assertCoherent(timing) {
   assert.match(timing.request_id, /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/);
   assert.deepEqual(Object.keys(timing.stages), VERSION_1_REQUIRED_STAGES);
@@ -391,6 +401,19 @@ test('untrusted labels, identifiers and error text cannot enter timing', async (
   assert.equal(timing.finish().models[0].id, 'unrecognized');
   assert.equal(JSON.stringify(timing.finish()).includes('untrusted-model'), false);
   assertCoherent(timing.finish());
+});
+
+test('reviewed Claude 5.5 model ids retain their exact timing labels', () => {
+  for (const id of ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5']) {
+    const timing = createQueryTiming({ route: 'think', now: () => 0 });
+    timing.model('answer_llm', 'anthropic', id)();
+    const receipt = timing.finish();
+    assert.equal(receipt.models.length, 1, `${id} reached the model-label decision`);
+    assert.equal(receipt.models[0].id, id);
+  }
+  const control = createQueryTiming({ route: 'think', now: () => 0 });
+  control.model('answer_llm', 'anthropic', 'untrusted-model')();
+  assert.equal(control.finish().models[0].id, 'unrecognized');
 });
 
 test('thrown and rejected operations count errors and preserve the original failure', async () => {

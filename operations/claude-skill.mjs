@@ -34,7 +34,10 @@ export const CLAUDE_TECHNICIAN_SKILL_NAME = "financial-brain-technician";
 export const CLAUDE_TECHNICIAN_SKILL_MARKER =
   "<!-- financial-brain-installer:claude-skill:v1 -->";
 const LOCAL_ASSISTANT_REPAIR_SKILL_ROOTS = Object.freeze([".claude", ".codex"]);
-const MAX_SOURCE_SKILL_BYTES = 64 * 1024;
+// The reviewed answer-setup ceremony and paused-answer contract take the
+// packaged guide beyond the earlier 64 KiB ceiling. Keep a bounded identity
+// check while leaving room for those exact owner-facing instructions.
+const MAX_SOURCE_SKILL_BYTES = 72 * 1024;
 // Windows replaces each command with this install's absolute executable paths.
 // Bound that expansion separately; install, inspection and rollback must accept
 // the same rendered bytes or a successful install becomes unrepairable.

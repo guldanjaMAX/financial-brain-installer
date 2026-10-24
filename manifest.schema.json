@@ -929,7 +929,7 @@
     },
     "retrieval": {
       "type": "object",
-      "description": "chunk_size, chunk_overlap and answer_model are deployed as Worker configuration. The standard answer model runs through the client-owned Cloudflare Workers AI binding. Other fields remain descriptive until their runtime wiring is documented.",
+      "description": "chunk_size, chunk_overlap, answer_model and gate_model are deployed as Worker configuration. The standard answer and gate models run through the client-owned Cloudflare Workers AI binding. Other fields remain descriptive until their runtime wiring is documented.",
       "properties": {
         "embed_model": {
           "const": "@cf/baai/bge-base-en-v1.5"
@@ -955,7 +955,18 @@
           "maximum": 50
         },
         "answer_model": {
-          "type": "string"
+          "description": "Answer model. The recommended pair is claude-opus-5-5 for answers and claude-sonnet-5-5 for checks, and it requires the owner's Anthropic key. A Claude model sends each question, the owner's name, and the retrieved excerpts to Anthropic under the owner's own key.",
+          "anyOf": [
+            { "type": "string", "pattern": "^@cf/" },
+            { "enum": ["claude-opus-5-5", "claude-sonnet-5-5"] }
+          ]
+        },
+        "gate_model": {
+          "description": "Optional model for synthesis and evidence checks. When omitted, it defaults byte for byte to answer_model. The recommended pair is claude-opus-5-5 for answers and claude-sonnet-5-5 for checks, and it requires the owner's Anthropic key. A Claude model sends each question, the owner's name, and the retrieved excerpts to Anthropic under the owner's own key.",
+          "anyOf": [
+            { "type": "string", "pattern": "^@cf/" },
+            { "enum": ["claude-opus-5-5", "claude-sonnet-5-5"] }
+          ]
         },
         "rerank": {
           "type": "boolean"
@@ -993,11 +1004,11 @@
         "daily_llm_spend_cap_usd": {
           "type": "number",
           "minimum": 0,
-          "description": "Legacy field name for the daily estimated LLM spend budget in USD. Calls reserve a conservative estimate atomically before provider use. It is a runaway-spend guard, not an invoice-exact ceiling because provider prices and receipts can change."
+          "description": "Legacy field name for the daily estimated LLM spend budget in USD. Before each call starts, the Brain checks today's logged estimated spend for the UTC day, shared by answers and OCR and cached for up to 60 seconds. Calls already running can finish past the cap. It is a runaway-spend guard, not an invoice-exact ceiling because provider prices and receipts can change."
         },
         "ocr": {
           "type": "object",
-          "description": "Read scanned PDFs by sending each page image to a vision model through THIS brain's own Workers AI binding. Off by default because it costs money on the client's own Cloudflare account, once per scanned page, and every page must reserve from the daily estimated-spend budget.",
+          "description": "Read scanned PDFs by sending each page image to a vision model through THIS brain's own Workers AI binding. Off by default because it costs money on the client's own Cloudflare account, once per scanned page. Before each call starts, the Brain checks today's logged estimated spend for the UTC day, shared by answers and OCR and cached for up to 60 seconds; calls already running can finish past the cap.",
           "properties": {
             "enabled": {
               "type": "boolean",

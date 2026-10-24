@@ -28,6 +28,7 @@ import {
   repairTechnicianSkillEverywhere,
 } from "../operations/claude-skill.mjs";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
+import { ANTHROPIC_CONSOLE_URL, RULE_LINE } from "../operations/answer-setup-copy.mjs";
 
 // The installer renders every `brain <subcommand>` in the packaged skill for the
 // machine it lands on: identity on macOS and Linux, a runnable invocation of the
@@ -531,6 +532,7 @@ test("the plan is read-only, ordered, honest about proof, and agent-readable", (
   assert.equal(plan.mode, "read_only_plan");
   assert.equal(plan.proof_level, "workflow_only");
   assert.deepEqual(plan.steps.map((step) => step.id), TECHNICIAN_RUN_STEPS);
+  assert.deepEqual(TECHNICIAN_RUN_STEPS.slice(2, 5), ["smoke", "anthropic", "google"]);
   assert.equal(plan.steps[0].state, "ready_to_start");
   assert.equal(plan.steps[0].dashboard_url, "https://financialbrain.ai/install");
   assert.equal(plan.steps[1].state, "fresh_setup_ready");
@@ -570,6 +572,12 @@ test("the plan is read-only, ordered, honest about proof, and agent-readable", (
   assert.match(renderTechnicianPlan(plan), /live proof arrives/i);
   assert.match(plan.rules.join("\n"), /offer browser help once/i);
   assert.match(plan.rules.join("\n"), /token creation as recovery only/i);
+  assert.ok(plan.rules.includes(RULE_LINE));
+  assert.ok(plan.coverage.guided_steps.includes("anthropic"));
+  const anthropic = plan.steps.find((step) => step.id === "anthropic");
+  assert.equal(anthropic.state, "waiting_for_install_record");
+  assert.equal(anthropic.dashboard_url, ANTHROPIC_CONSOLE_URL);
+  assert.match(anthropic.command, /'--run' 'anthropic' '--from-clipboard'/);
   const cloudflare = plan.steps.find((step) => step.id === "cloudflare");
   assert.equal(cloudflare.owner_only_command, undefined);
   assert.equal(cloudflare.agent_after_owner_approval.execution_boundary, "claude_after_explicit_owner_approval");
@@ -660,6 +668,28 @@ test("the CLI prints a provider briefing before the selected child command start
   });
   assert.deepEqual(order.map((event) => event.kind), ["briefing", "child"]);
   assert.match(order[0].text, /Before we start: Check this computer and install the owner tools/i);
+});
+
+test("the Anthropic technician step passes reviewed modes and caps without printing a duplicate briefing", async () => {
+  const calls = [];
+  let briefed = false;
+  await cmdTechnician(manifestPath, {
+    run: "anthropic",
+    "key-set-in-dashboard": true,
+    "daily-cap": "8",
+  }, {
+    scriptPath: fixtureScriptPath,
+    nodePath: fixtureNodePath,
+    baseEnv: { PATH: "/safe/bin" },
+    platformName: "win32",
+    writeBriefing: () => { briefed = true; },
+    spawn: (_node, args) => { calls.push(args); return { status: 0 }; },
+  });
+  assert.equal(briefed, false);
+  assert.deepEqual(calls, [[
+    fixtureScriptPath, "connect", "anthropic", resolve(manifestPath),
+    "--key-set-in-dashboard", "--daily-cap", "8",
+  ]]);
 });
 
 test("the direct invite path renders the passkey explanation before minting a link", () => {
@@ -1239,7 +1269,7 @@ for (const ending of ['\n', '\r\n']) test(`Windows rendered skill survives insta
     scriptPath: String.raw`C:\Users\Owner\AppData\Local\FinancialBrain\lib\node_modules\brain-installer\brain.mjs`,
     env: { PATH: '' }, existsSync: () => false };
   const desiredContent = reviewedSkillContent(sourcePath, windows);
-  assert.ok(Buffer.byteLength(source) < 64 * 1024, 'reviewed source fits the source bound');
+  assert.ok(Buffer.byteLength(source) < 72 * 1024, 'reviewed source fits the source bound');
   assert.ok(Buffer.byteLength(desiredContent) > 64 * 1024, 'Windows command expansion reaches the old refusal');
   assert.ok(desiredContent.includes(renderCliCommands('brain technician', windows)));
   const options = { home: join(sandbox, ending === '\n' ? 'render-lf' : 'render-crlf'), desiredContent };
@@ -1252,7 +1282,7 @@ for (const ending of ['\n', '\r\n']) test(`Windows rendered skill survives insta
     assert.throws(() => installClaudeTechnicianSkill({ ...options, desiredContent: invalid }), /content is invalid/);
     assert.equal(readFileSync(first.path, 'utf8'), desiredContent, 'refusal preserves the verified control');
   }
-  writeFileSync(sourcePath, 'x'.repeat(64 * 1024) + CLAUDE_TECHNICIAN_SKILL_MARKER);
+  writeFileSync(sourcePath, 'x'.repeat(72 * 1024) + CLAUDE_TECHNICIAN_SKILL_MARKER);
   assert.throws(() => reviewedSkillContent(sourcePath, windows), /identity check/);
   assert.equal(readFileSync(first.path, 'utf8'), desiredContent, 'the packaged-source bound remains independent');
 });

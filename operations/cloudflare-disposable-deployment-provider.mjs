@@ -206,24 +206,26 @@ function providerId(value, code = "CF_DISPOSABLE_PROVIDER_READBACK_INVALID") {
 
 function checkedBinding(value, role) {
   const fields = [
-    "accountId", "adminKeySecret", "answerModel", "bankFeedEnabled",
+    "accountId", "adminKeySecret", "answerModel", "bankFeedEnabled", "gateModel",
     "chunkOverlap", "chunkSize", "clientDisplayName", "clientSlug",
     "credentialScanner", "dailyLlmCapUsd", "databaseId", "databaseName",
     "domain", "embeddingDimensions", "embeddingModel", "enabledCorpora",
     "ocrEnabled", "ocrModel", "productVersion", "recoveryArtifactKeySecret",
     "recoveryFieldGate", "vectorizeIndex", "workerName",
   ];
+  const legacyFields = fields.filter((field) => field !== "gateModel");
   const exactTargetIsolation = role === "target" &&
     exactKeys(value.recoveryFieldGate, ["custom_domains", "routes"]) &&
     Array.isArray(value.recoveryFieldGate.custom_domains) &&
     value.recoveryFieldGate.custom_domains.length === 0 &&
     Array.isArray(value.recoveryFieldGate.routes) &&
     value.recoveryFieldGate.routes.length === 0;
-  if (!exactKeys(value, fields) || !["source", "target"].includes(role) ||
+  if ((!exactKeys(value, fields) && !exactKeys(value, legacyFields)) ||
+      !["source", "target"].includes(role) ||
       !Array.isArray(value.enabledCorpora) || value.enabledCorpora.length !== 0 ||
       value.bankFeedEnabled !== false ||
       (role === "source" ? value.recoveryFieldGate !== null : !exactTargetIsolation) ||
-      value.embeddingDimensions !== 768 || value.productVersion !== "0.4.18" ||
+      value.embeddingDimensions !== 768 || value.productVersion !== "0.4.19" ||
       (role === "source" && value.recoveryArtifactKeySecret !== null) ||
       (role === "target" && typeof value.recoveryArtifactKeySecret !== "string")) {
     refuse("CF_DISPOSABLE_PROVIDER_BINDING_INVALID");
@@ -237,6 +239,10 @@ function checkedBinding(value, role) {
     if (typeof value[field] !== "string" || !value[field]) {
       refuse("CF_DISPOSABLE_PROVIDER_BINDING_INVALID");
     }
+  }
+  if (value.gateModel !== undefined &&
+      (typeof value.gateModel !== "string" || !value.gateModel)) {
+    refuse("CF_DISPOSABLE_PROVIDER_BINDING_INVALID");
   }
   return value;
 }
@@ -436,6 +442,7 @@ function fixedProvisionBinding(role, accountId, databaseId, domain) {
       ? PROVISION_LOCATORS.sourceAdmin
       : PROVISION_LOCATORS.targetAdmin,
     answerModel: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    gateModel: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
     bankFeedEnabled: false,
     chunkOverlap: "300",
     chunkSize: "1500",
@@ -451,7 +458,7 @@ function fixedProvisionBinding(role, accountId, databaseId, domain) {
     enabledCorpora: Object.freeze([]),
     ocrEnabled: "0",
     ocrModel: "@cf/meta/llama-4-scout-17b-16e-instruct",
-    productVersion: "0.4.18",
+    productVersion: "0.4.19",
     recoveryArtifactKeySecret: role === "target" ? PROVISION_LOCATORS.targetArtifact : null,
     recoveryFieldGate: null,
     vectorizeIndex: resource,
@@ -479,6 +486,7 @@ function nonSecretBindings(binding, mode) {
     { type: "plain_text", name: "CHUNK_OVERLAP", text: binding.chunkOverlap },
     { type: "plain_text", name: "DAILY_LLM_CAP_USD", text: binding.dailyLlmCapUsd },
     { type: "plain_text", name: "ANSWER_MODEL", text: binding.answerModel },
+    { type: "plain_text", name: "GATE_MODEL", text: binding.gateModel || binding.answerModel },
     { type: "plain_text", name: "CREDENTIAL_SCANNER", text: binding.credentialScanner },
     { type: "plain_text", name: "OCR_ENABLED", text: binding.ocrEnabled },
     { type: "plain_text", name: "OCR_MODEL", text: binding.ocrModel },
@@ -522,7 +530,7 @@ function workerCampaignTag(role, campaignFingerprint) {
 }
 
 function bootstrapMessage(role) {
-  return `Financial Brain 0.4.18 disposable ${role} maintenance bootstrap`;
+  return `Financial Brain 0.4.19 disposable ${role} maintenance bootstrap`;
 }
 
 
@@ -1499,7 +1507,7 @@ export function prepareCloudflareDisposableProvisioningProvider(
         `SELECT
           (SELECT COUNT(*) FROM install_state) AS install_state_total_rows,
           (SELECT COUNT(*) FROM install_state WHERE id = 1 AND schema_version = 48
-             AND client_slug = 'v048-field-proof' AND product_version = '0.4.18'
+             AND client_slug = 'v048-field-proof' AND product_version = '0.4.19'
              AND gate_version = 5 AND ring = 'stable'
              AND vector_projection_status = 'verified') AS install_state_valid_rows,
           (SELECT COUNT(*) FROM owner_financial_map_key_state) AS owner_key_total_rows,
@@ -1555,7 +1563,7 @@ export function prepareCloudflareDisposableProvisioningProvider(
            vector_projection_bootstrap_cursor, vector_projection_bootstrap_high_water,
            source_original_retrieval_generation)
          VALUES (1,?,?,?,?,?,?,'verified',0,NULL,NULL,0)`,
-          ["v048-field-proof", "0.4.18", 48, 5, installedAt, "stable"],
+          ["v048-field-proof", "0.4.19", 48, 5, installedAt, "stable"],
         );
         state = await inspectSourcePostlude(query);
       }
@@ -1764,7 +1772,7 @@ export function prepareCloudflareDisposableProvisioningProvider(
             (SELECT COUNT(*) FROM vector_outbox) AS outbox,
             (SELECT COUNT(*) FROM install_state) AS install_state_total_rows,
             (SELECT COUNT(*) FROM install_state WHERE id = 1 AND schema_version = 48
-               AND client_slug = 'v048-field-proof' AND product_version = '0.4.18'
+               AND client_slug = 'v048-field-proof' AND product_version = '0.4.19'
                AND gate_version = 5 AND ring = 'stable'
                AND vector_projection_status = 'verified') AS install_state_valid_rows,
             (SELECT COUNT(*) FROM owner_financial_map_key_state) AS owner_key_total_rows,
@@ -2508,7 +2516,7 @@ export function prepareCloudflareDisposableDeploymentProvider(
         secret_names: secretNames(request.role),
         baseline_version_id: baselineVersionId,
         tag: request.tag,
-        message: `Financial Brain 0.4.18 disposable recovery ${request.role} ${request.mode}`,
+        message: `Financial Brain 0.4.19 disposable recovery ${request.role} ${request.mode}`,
       });
     };
 

@@ -41,16 +41,26 @@ const GENERIC_COVERAGE_NOTICE = coverageIncompleteNotice(false);
  */
 export const ANSWER_ERROR_MESSAGES = Object.freeze({
   notConfigured: "Answer generation is not configured yet. Ask your installer to finish setup.",
-  dailyLimit: "Answer generation has reached its daily limit. Try again after the limit resets.",
+  keyMissing: "Answers are paused: this Brain is set to answer with Claude, but its Anthropic key is missing. Search still works.",
+  providerAccount: "Answers are paused: your Anthropic account needs attention (its key or its credit balance). Search still works.",
+  dailyLimit: "Answers have reached today's spending limit. They start again at midnight UTC, or sooner if the limit is raised. Search still works.",
+  dailyLimitLegacy: "Answer generation has reached its daily limit. Try again after the limit resets.",
+  spendCheckPaused: "Answers are paused for a few minutes while your Brain rechecks its spending record. Try again shortly. Search still works.",
   verificationUnavailable: "The evidence check could not verify support, so no answer was shown. Try again in a moment.",
   unavailable: "Answer generation is unavailable right now. Try again in a moment.",
 });
+export const GAP_DETAIL = "Answers are paused until the Anthropic key is reconnected.";
 
 const REVIEWED_ANSWER_ERRORS = new Set(Object.values(ANSWER_ERROR_MESSAGES));
 
 /** Convert a caught model failure to copy that is safe on every answer surface. */
 export function answerGenerationError(error, { verification = false } = {}) {
   if (error?.no_key) return ANSWER_ERROR_MESSAGES.notConfigured;
+  if (error?.no_anthropic_key) return ANSWER_ERROR_MESSAGES.keyMissing;
+  if (["key_rejected", "billing", "model_unavailable"].includes(error?.provider_error_class)) {
+    return ANSWER_ERROR_MESSAGES.providerAccount;
+  }
+  if (error?.llm_cap_exceeded && error?.spend_guard_degraded) return ANSWER_ERROR_MESSAGES.spendCheckPaused;
   if (error?.llm_cap_exceeded) return ANSWER_ERROR_MESSAGES.dailyLimit;
   return verification
     ? ANSWER_ERROR_MESSAGES.verificationUnavailable

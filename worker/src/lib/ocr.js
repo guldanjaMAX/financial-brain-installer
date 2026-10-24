@@ -33,7 +33,7 @@
 // and indexing that as content is the fabrication this whole product exists to
 // refuse.
 
-import { jsonResponse, validateAdminKey, callLLM } from "./core.js";
+import { jsonResponse, validateAdminKey, callLLM, llmText } from "./core.js";
 import {
   OCR_REQUEST_ID,
   OCR_REPLAY_KEY,
@@ -235,7 +235,7 @@ export async function handleOcr(env, request, { now = () => new Date() } = {}) {
       // Its own label so OCR spend is separable from answering in llm_call_log.
       label: "ocr",
     });
-    const text = data?.content?.[0]?.text ?? "";
+    const text = llmText(data);
     const responseBody = {
       text,
       model: data?.model || model,

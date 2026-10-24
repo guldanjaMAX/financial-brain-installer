@@ -18,6 +18,7 @@ import * as workspace from "../operations/claude-workspace.mjs";
 import * as cli from "../brain.mjs";
 import { reviewedSkillContent } from "../operations/claude-skill.mjs";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
+import { MONEY_RULES_LINE } from "../operations/answer-setup-copy.mjs";
 
 const BEGIN = '<!-- BEGIN Financial Brain answer rules (written by Financial Brain setup and update; running either again replaces this section and keeps your "My accounts" lines) -->';
 const END = "<!-- END Financial Brain answer rules -->";
@@ -27,9 +28,9 @@ const ACCOUNTS = ["- ****0001 = business checking", "- ****0002 = personal card"
 const ACCOUNT_HEADING = "## My accounts (fill in once, after the owner confirms)";
 const SAVE_HEADING = "## Financial Brain: at the end of a working session";
 const hashes = {
-  "answer-contract-v1.md": "32f9b8e6c23347651b3246fa42d2f93aef9d4f291651e5b5b8425d84f46f39cf",
-  "money-rules-v3.md": "f0137fd965471782c7cb844bb0dd9a05d76a5df9227f700c935691650f0d9f68",
-  "money-rules-v3-windows.md": "9e4b56bb572310f6efe8273a55e0ab58b30a5e2da974a51eafcd2d61e303aac2",
+  "answer-contract-v1.md": "440a931d73efce5e226e7e44da5d84b52ca8497754f7fd40526c8736348f2451",
+  "money-rules-v3.md": "5413cfbf5eb5b796ce3a2c2dd29994443ed334ff1cbe62b7b1d64e650cd10f33",
+  "money-rules-v3-windows.md": "b2eee70b4bd10a94075d8c1cfcb7a5b8767d50b1803fe3e361fb404fc27dcb6b",
 };
 // Repeated writer/race tests exercise real filesystem checks. Native reparse
 // detection has separate refusal/control and one bounded Windows smoke test;
@@ -110,7 +111,11 @@ test("a: verbatim inputs, platform control, assistant substitution and one sessi
   for (const platformName of ["darwin", "linux", "win32"]) {
     const text = workspace.renderOwnerRulesSection({ platformName });
     const inner = moneyInner(platformName === "win32" ? "money-rules-v3-windows.md" : "money-rules-v3.md");
-    assert.equal(text, `${BEGIN}\n${template("answer-contract-v1.md")}\n${inner}${END}\n`);
+    const expectedContract = template("answer-contract-v1.md").replace(
+      /- If answer_error says today's spending limit was reached[^\n]+/,
+      "- If answer_error says today's spending limit was reached, give the time answers start again in the owner's own time zone (answer_resumes_at, which is midnight UTC). The same limit also covers reading scanned pages. Do not suggest an Anthropic key command for a built-in Brain, and do not retry.",
+    );
+    assert.equal(text, `${BEGIN}\n${expectedContract}\n${inner}${END}\n`);
     assert.equal(text.includes("ls -d ~/.financial-brain-v0.4."), false);
     assert.equal(text.includes("{{BRAIN_ASK_COMMAND}}"), platformName !== "win32");
     const codex = workspace.renderOwnerRulesSection({ platformName, assistant: "codex" });
@@ -118,7 +123,72 @@ test("a: verbatim inputs, platform control, assistant substitution and one sessi
     assert.equal(count(codex, "in this AGENTS.md"), 1);
     assert.equal(count(text, SAVE_HEADING), 1);
     assert.equal(count(codex, SAVE_HEADING), 1);
+    assert.match(text, /For every non-money question, use brain_search first\./);
+    assert.match(text, /Read the returned excerpts and write the answer yourself with each fact's source title and date\./);
+    assert.match(text, /Search again with other wording, or sort "newest" for status/);
+    assert.match(text, /owner explicitly asks for the Brain's own answer/);
+    assert.match(text, /brain_financial_map flow calls for it/);
+    assert.match(text, /Broad-question guard:/);
+    assert.match(text, /List what each record says, record by record, with its source title and date\./);
+    assert.match(text, /Never calculate or state a total from excerpts/);
+    assert.match(text, /Say which sources and periods you did not search/);
+    assert.match(text, /Single-document questions are unchanged/);
+    assert.match(text, /Bank-ledger money questions go to brain_think/);
+    assert.doesNotMatch(text, /short single-fact lookup/i);
   }
+  const skill = readFileSync(new URL("../skills/financial-brain-technician/SKILL.md", import.meta.url), "utf8");
+  assert.match(skill, /For non-money, use brain_search first, read excerpts/);
+  assert.match(skill, /Search again with other wording, or sort\s+"newest" for status/);
+  assert.match(skill, /give\s+each fact's source title and date/);
+  assert.match(skill, /owner asks or a brain_financial_map flow calls\s+for it/);
+});
+
+test("answer pause rules render the exact manifest-bound connect and cap commands", () => {
+  const connectCommand = renderCopyableCommand("/fixture/brain", [
+    "connect", "anthropic", "/fixture/brain.manifest.json", "--from-clipboard",
+  ]);
+  const capCommand = renderCopyableCommand("/fixture/brain", [
+    "connect", "anthropic", "/fixture/brain.manifest.json", "--keep-key", "--daily-cap", "<usd>",
+  ]);
+  const text = workspace.renderOwnerRulesSection({ connectCommand, capCommand, answerSetup: "opus-sonnet" });
+  assert.ok(text.includes(connectCommand));
+  assert.ok(text.includes(capCommand));
+  assert.doesNotMatch(text, /\{\{(?:CONNECT|CAP)_COMMAND\}\}/);
+  assert.ok(text.includes(MONEY_RULES_LINE));
+});
+
+test("owner answer routing follows the selected model pair and keeps ledger templates during answer pauses", (t) => {
+  const builtIn = workspace.renderOwnerRulesSection({
+    answerSetup: "built-in",
+    capCommand: "brain connect anthropic /fixture/brain.manifest.json --keep-key --daily-cap <usd>",
+  });
+  const claude = workspace.renderOwnerRulesSection({
+    answerSetup: "opus-sonnet",
+    connectCommand: "brain connect anthropic /fixture/brain.manifest.json --from-clipboard",
+    capCommand: "brain connect anthropic /fixture/brain.manifest.json --keep-key --daily-cap <usd>",
+  });
+  assert.match(builtIn, /For every non-money question, use brain_search first/);
+  assert.doesNotMatch(builtIn, /--keep-key --daily-cap/,
+    "built-in guidance cannot offer a key-only cap command");
+  assert.match(claude, /For every non-money question, use brain_think first.*Claude Opus.*Claude Sonnet/is);
+  assert.match(claude, /answer_error.*anthropic_key_missing.*brain_search/is);
+  assert.notEqual(builtIn, claude, "both answer setups reached distinct owner routing decisions");
+  for (const rendered of [builtIn, claude]) {
+    const fallback = rendered.split("## If brain_think gives no answer")[1].split("## Hard rules")[0];
+    assert.match(fallback, /skip only the CLI fallback for that question/i);
+    assert.match(fallback, /ledger templates keep working/i);
+    assert.doesNotMatch(fallback, /skip this fallback and the other templates/i);
+  }
+
+  const installed = fixture(t);
+  writeFileSync(installed.manifest, JSON.stringify({
+    retrieval: { answer_model: "claude-opus-5-5", gate_model: "claude-sonnet-5-5" },
+  }));
+  const written = workspace.writeClaudeWorkspaceGuide(installed.manifest, options);
+  assert.equal(written.status, "written");
+  const installedText = readFileSync(join(installed.root, "CLAUDE.md"), "utf8");
+  assert.match(installedText, /For every non-money question, use brain_think first/,
+    "the guide writer reached the manifest-selected route");
 });
 
 for (const [assistant, filename, marker, write] of writers) {
@@ -411,7 +481,7 @@ function updateClosingBoundary({ platform = "win32", platformName, folder = "ord
   const bindings = {
     updateAttention: [guidance, guidance],
     options: { platform, platformName, ...(raw ? { reportUpdateFinish: message => reports.push(message) } : {}) },
-    pin: { target }, PRODUCT_VERSION: "0.4.18", mailTransition: null,
+    pin: { target }, PRODUCT_VERSION: "0.4.19", mailTransition: null,
     ownerSessionFolderLabel: () => "another folder",
     ownerBrainFolderWarning: () => locator,
     dirname: win32.dirname, quotePowerShellArgument, quotePosixArgument,
@@ -620,17 +690,20 @@ for (const [assistant, filename] of writers) test(`WIN R4 setup creates a missin
   assert.equal(result.output.includes(WINDOWS_GUIDE_NOTICE), false);
 });
 
-test("i: skill insertion is exact, bounded and inert under Windows command rendering", () => {
+test("i: skill insertion is exact, bounded and renders answer-setup commands on Windows", () => {
   const skillPath = new URL("../skills/financial-brain-technician/SKILL.md", import.meta.url);
   const skill = readFileSync(skillPath, "utf8");
   assert.equal(count(skill, "## Answer from the Brain\n"), 1);
   const section = skill.slice(skill.indexOf("## Answer from the Brain\n"), skill.indexOf("## Credential boundary\n"));
-  assert.equal(sha(section), "1d81f55099c6f2d4f853eb2e48915963fd708901995d2a8ba1cf7432d315e528");
-  assert.ok(Buffer.byteLength(skill) <= 65_000);
+  assert.equal(sha(section), "5c9b64c1f19c6abeaa525250486350c45d458c15b947aa0a07f3d3ac21beab10");
+  assert.ok(Buffer.byteLength(skill) <= 72 * 1024);
   for (const platform of ["darwin", "win32"]) {
     const rendering = { platform, nodePath: "C:\\Runtime\\node.exe", scriptPath: "C:\\Brain\\brain.mjs", env: {}, existsSync: () => false };
-    assert.equal(renderCliCommands(section, rendering), section);
-    assert.ok(reviewedSkillContent(skillPath, rendering).includes(section));
+    const expected = section
+      .replace("brain connect anthropic <manifest> --from-clipboard", renderCliCommands("brain connect anthropic <manifest> --from-clipboard", rendering))
+      .replace("brain connect anthropic <manifest> --keep-key --daily-cap <usd>", renderCliCommands("brain connect anthropic <manifest> --keep-key --daily-cap <usd>", rendering));
+    assert.equal(renderCliCommands(section, rendering), expected);
+    assert.ok(reviewedSkillContent(skillPath, rendering).includes(expected));
     if (platform === "win32") assert.notEqual(renderCliCommands("brain doctor", rendering), renderCliCommands("brain doctor", { platform: "darwin" }), "Windows rendering control actually rewrites commands");
   }
 });
@@ -813,7 +886,7 @@ test("R2/R5 installed money rules use the Brain lead and preserve the parser men
   assert.equal(resolving("money-rules-v3.md"), resolving("money-rules-v3-windows.md"), "shared account guidance is byte-aligned");
   for (const platformName of ["darwin", "win32"]) {
     const rules = workspace.renderOwnerRulesSection({ platformName });
-    assert.match(rules, /Financial Brain 0\.4\.18/);
+    assert.match(rules, /Financial Brain 0\.4\.19/);
     assert.match(rules, /Never subtract.*already left out/);
     assert.match(rules, /Note:/);
     assert.match(rules, /What was my profit <period>\?/);
@@ -1400,7 +1473,7 @@ for (const arm of ["duplicate", "before-accounts", "misplaced-only", "fenced", "
 });
 
 for (const arm of ["none", "install", "after-return"]) test(`R4 original descriptor remains reachable: ${arm}`, {
-  skip: process.platform === "win32" ? "the 0.4.18 update path does not refresh an existing guide on Windows; see CHANGELOG known limitations" : false,
+  skip: process.platform === "win32" ? "the 0.4.19 update path does not refresh an existing guide on Windows; see CHANGELOG known limitations" : false,
 }, t => {
   const { root, manifest } = fixture(t), target = join(root, "AGENTS.md");
   const before = `${CODEX}\n# Older guide\n`, note = "\nRetain this concurrent owner annotation.\n";
@@ -1543,7 +1616,8 @@ for (const suffix of ["ordinary space", "$UNSET_FIXTURE", "$(printf SUBSTITUTED)
     const opts = { brainCliPath: location === "runtime" ? join(root, "entry.mjs") : recorder, nodePath: location === "runtime" ? recorder : null, platformName: "darwin" };
     const result = workspace.writeCodexWorkspaceGuide(manifest, opts);
     assert.equal(result.status, "written");
-    const command = readFileSync(result.path, "utf8").match(/## If brain_think gives no answer\n[^\n]+\n`([^`]+)`/)[1];
+    const command = readFileSync(result.path, "utf8")
+      .match(/## If brain_think gives no answer\n[\s\S]{0,700}?`([^`]+)`/)[1];
     const child = spawnSync("/bin/sh", ["-c", command], { encoding: "utf8", env: shellEnv(root) });
     assert.equal(child.status, 0, "emitted invocation reaches the argument recorder");
     const argv = child.stdout.trimEnd().split("\n");

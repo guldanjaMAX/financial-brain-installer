@@ -4,6 +4,76 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.19 (2026-10-24)
+
+Candidate only. This version has not been released. The changes below still
+need the full host gate, CI and separately reviewed field acceptance for the
+exact sealed package. This version bump verifies no incident.
+
+- **You can optionally have Claude write and check Brain answers.** Connect the
+  owner's own Anthropic account with `brain connect anthropic`. Opus writes the
+  answer and Sonnet checks it before it is returned. The recommended daily
+  limit is $5; when that limit is reached, Claude answers pause for the rest of
+  the day. Built-in Brain answers are unchanged, and no Anthropic account or
+  key is required unless the owner chooses this option.
+- **Your assistant follows the answer setup you chose.** When Claude answers
+  are set up, the assistant asks the Brain for its own checked answer first.
+  On a built-in Brain, the assistant searches first, reads the returned
+  excerpts, and writes the answer from those records. Broad reviews stay
+  record by record, and an empty ranked search is never turned into a claim
+  that no such record exists. Check the cited titles, dates and any unsearched
+  scope before relying on a broad answer.
+- **A pasted Anthropic key works on Windows.** The connect flow accepts the
+  secure pasted value without treating the clipboard's final line ending as
+  part of the key. It clears the clipboard when it can and reports when that
+  cleanup could not be confirmed. Keep the key out of chat, files and command
+  arguments.
+- **Updates stop earlier and explain more when safety proof is incomplete.** An
+  unreadable or invalid database migration list stops before any pause or
+  change. The complete change list is checked before the Brain is paused, and
+  acceptance now fails when a configured answer cannot be produced or checked.
+  Lock messages identify the operation holding the lock. A live PID is always
+  busy. A dead PID is reaped only after the stale age and a second dead check.
+  An older tool that lowered the recorded version below the durable migration
+  history is detected and routed back through the supported update command.
+
+### Technical changes
+
+- Optional Anthropic routing keeps the API key in owner custody, binds separate
+  answer and check models, normalizes multi-block responses, enforces the daily
+  spend limit, and exposes typed missing-key, provider and limit states without
+  leaking provider details.
+- Assistant MCP instructions select the Brain-authored answer route only for a
+  configured Claude answer pair. Built-in routing reads search excerpts first,
+  repeats a healthy empty search with different wording or newest sorting, and
+  bounds broad questions to cited record-by-record reporting.
+- Migration-ledger validation is shared across status, migrate, update,
+  diagnosis and repair. Update planning verifies the whole ordered ledger
+  before bookmark capture or paused deployment. Acceptance verifies configured
+  answer text, model receipts and the required Worker secret-name inventory.
+- Lifecycle locks report the holding operation, start time and safe retry
+  action. A live PID remains busy, while a dead PID is reaped only after the
+  stale age and a second dead check. Schema history detects a recorded version
+  that was lowered by an older tool.
+
+### Known issues
+
+- Physical Windows x64 and Mac owner acceptance is still required for the
+  exact sealed package. Synthetic tests and CI do not establish either
+  platform's owner acceptance.
+- On Windows, setup and update still leave an existing assistant workspace
+  guide unchanged. Setup still creates a missing guide.
+- Removal of rows the Worker cannot verify still needs the technician.
+
+### This release does NOT cover
+
+- **UPDATE-012:** Windows x64 is the only supported Windows runtime in this
+  release. Windows ARM64 ships unproven.
+- **UPDATE-044:** Bank breadth ships unproven. Bank invitations stay closed.
+- Money-answer correctness work moves to 0.4.20 and is not part of 0.4.19.
+- Email attachments, Drive images and Drive simple sync move to 0.4.20 and are
+  not part of 0.4.19.
+
 ## 0.4.18 (2026-10-22)
 
 Candidate only. This version has not been released. The changes below still

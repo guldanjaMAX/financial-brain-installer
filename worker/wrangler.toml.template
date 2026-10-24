@@ -11,6 +11,7 @@ BRAIN_NAME = "{{BRAIN_NAME}}"
 BRAIN_OWNER = "{{BRAIN_OWNER}}"
 BRAIN_VERSION = "{{BRAIN_VERSION}}"
 ANSWER_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+GATE_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
 RERANK_MODEL = "claude-haiku-4-5-20251001"
 DAILY_LLM_CAP_USD = "{{DAILY_LLM_CAP_USD}}"
 CREDENTIAL_SCANNER = "on"
@@ -32,6 +33,6 @@ database_id = "{{D1_ID}}"
 # Secrets, set with `wrangler secret put` and never written to this file:
 #   ADMIN_KEY
 #   RAG_PROXY_KEY                (optional, read-only retrieval proxy)
-#   ANTHROPIC_API_KEY            (optional nonstandard provider override)
+#   ANTHROPIC_API_KEY            (required when answer_model or gate_model is a Claude model; set only with brain connect anthropic)
 #   SUPABASE_URL
 #   SUPABASE_SERVICE_ROLE_KEY
