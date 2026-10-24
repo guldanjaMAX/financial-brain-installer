@@ -1,0 +1,11 @@
+{
+  "name": "financial-brain-quickbooks-broker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/broker.mjs"
+  },
+  "files": ["src/", "migrations/", "README.md"],
+  "engines": { "node": ">=22" }
+}

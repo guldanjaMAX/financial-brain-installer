@@ -1,15 +1,15 @@
 # Broker E2E gates
 
-These probes describe the observable behavior required of the future broker and
-owner Worker. They are **expected to fail** in this lane. The repository has no
-`protocol/quickbooks-broker/implementation-adapter.mjs`, and every scenario fails
-with `BROKER_IMPLEMENTATION_MISSING`. There are no skipped or todo tests. A red
-missing-adapter result is not evidence that any attack reached a real guard.
+These probes describe the broker and owner boundaries. All nine now pass using
+`implementation-adapter.mjs`, the actual separate broker package and an isolated
+test-only owner handler with SQLite and cryptography. No scenario is skipped or
+marked TODO. Production owner integration and the external design gates remain
+unproven. The original missing-adapter failures are recorded in the lane 5 report.
 
-Run the explicit red gate from the repository root:
+Run the explicit gate from the repository root with the offline network guard:
 
 ```text
-node --test protocol/quickbooks-broker/probes/broker.e2e.probe.mjs
+node --import <offline-network-guard-url> --test protocol/quickbooks-broker/probes/broker.e2e.probe.mjs
 ```
 
 The protocol/fake unit suite imports only the passing harness unit file:
@@ -22,9 +22,8 @@ node --test protocol/quickbooks-broker/probes/harness.unit.mjs
 this directory, and its registered protocol unit wrapper does not import the E2E
 file. The `.probe.mjs` suffix and `probes/` location also keep it outside the
 top-level test-file completeness pattern. Do not exempt a failing default test,
-convert these probes to skips, or import this red file into the default chain.
-The future implementation lane should explicitly promote the E2E command once
-the real in-memory adapter makes all nine scenarios pass.
+convert these probes to skips, or silently change the ordinary graph. This lane
+keeps integration verification explicit under its focused-test instruction.
 
 ## Scenario inventory
 
@@ -51,7 +50,7 @@ The owner performs the authoritative generation comparison and company binding
 check when it accepts an encrypted replacement. Another owner's valid delivery
 and changed authenticated bindings must never activate or overwrite a connection.
 
-## Future adapter contract
+## Adapter contract
 
 Add the one fixed adapter path only when binding the actual reviewed handlers.
 Export `async createProbeAdapter(dependencies)`. The adapter is glue: it must not
@@ -191,7 +190,8 @@ key. The owner returns `completionReceipt` only after it commits and reads back
 the matching local intent status. This carries cancellation visibility without
 putting a code, token, or owner identity into the completion URL.
 
-This lane proves only that the probe harness, schemas and provider double work.
-It does not prove deployed broker behavior, encryption implementation, public
-DNS/SSRF defenses, Cloudflare observability settings, provider acceptance or an
-owner-authorized field gate.
+The foundation proves the in-memory handler, encryption and SQLite decisions
+against injected boundaries. It does not prove deployed behavior, public DNS
+pinning, Cloudflare observability settings, provider acceptance or an
+owner-authorized field gate. Complete broker readiness metadata is exposed
+separately as `brokerReadiness`; traffic rows remain the three closed v1 shapes.
