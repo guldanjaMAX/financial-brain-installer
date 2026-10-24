@@ -3,7 +3,12 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { createFakeIntuit } from '../testing/fake-intuit.mjs';
 import { validates } from '../testing/schema-test-helper.mjs';
+import { parseStrictJson } from '../../../broker/quickbooks/src/validation.mjs';
 const schemas = JSON.parse(readFileSync(new URL('../v1/schemas/protocol.schema.json', import.meta.url), 'utf8'));
+function responseJson(text) {
+  try { return parseStrictJson(text, { canonicalRequired: false }); }
+  catch { assert.fail('response JSON must be unambiguous before granting a private field exception'); }
+}
 
 export const PROTOCOL = 'qbo-broker/1';
 export const BROKER = 'https://broker.invalid';
@@ -115,9 +120,15 @@ export async function createRig(factory) {
   const returned = [];
   const recordedResponses = new WeakMap();
   const auditOperations = [];
-  const callbackPrivate = new Set();
-  const privateValues = new Set([provider.config.clientSecret]);
-  const credentials = new Set([provider.config.clientSecret]);
+  const privateValues = new Map([[provider.config.clientSecret, null]]);
+  const rememberPrivate = (value, permission = null) => {
+    if (!privateValues.has(value)) privateValues.set(value, permission);
+    else if (permission) {
+      const existing = privateValues.get(value);
+      assert.ok(existing?.response === permission.response && existing?.field === permission.field,
+        'a private value may have only one exact response field exception');
+    }
+  };
   const outbound = { brokerAccounting: 0, ownerAccounting: 0, blocked: 0, delivery: 0 };
   let ownerDeliveryFault;
   let resolverAddress = '93.184.216.34';
@@ -144,8 +155,7 @@ export async function createRig(factory) {
       if (response.headers.get('content-type')?.includes('application/json')) {
         const body = await response.clone().json().catch(() => null);
         for (const key of ['access_token', 'refresh_token', 'realmId']) {
-          if (typeof body?.[key] === 'string') privateValues.add(body[key]);
-          if (key !== 'realmId' && typeof body?.[key] === 'string') credentials.add(body[key]);
+          if (typeof body?.[key] === 'string') rememberPrivate(body[key]);
         }
       }
       return response;
@@ -157,7 +167,7 @@ export async function createRig(factory) {
         outbound.delivery++;
         deliveries.push(request.clone());
         const envelope = await request.clone().json();
-        if (typeof envelope.ciphertext === 'string') privateValues.add(envelope.ciphertext);
+        if (typeof envelope.ciphertext === 'string') rememberPrivate(envelope.ciphertext);
         if (ownerDeliveryFault === 'unavailable') throw new Error('probe_delivery_unavailable');
         if (ownerDeliveryFault === 'redirect') {
           return new Response(null, { status: 307, headers: { location: 'https://elsewhere.invalid/collect' } });
@@ -190,9 +200,16 @@ export async function createRig(factory) {
   assert.ok(typeof adapter.inspect === 'function' && typeof adapter.armFault === 'function', 'adapter must expose storage observations and injected faults');
   assert.ok(typeof adapter.fixtures?.enroll === 'function' && typeof adapter.fixtures?.signedRequest === 'function', 'adapter must supply wire fixture builders');
   const recordResponse = async response => {
-    const recorded = { body: await response.clone().text(), headers: Object.fromEntries(response.headers), launchState: null };
-    returned.push(recorded);
-    recordedResponses.set(response, recorded);
+    let recorded = recordedResponses.get(response);
+    if (!recorded) {
+      recorded = { snapshots: [] };
+      returned.push(recorded);
+      recordedResponses.set(response, recorded);
+    }
+    // The owner forwards the same start Response. Preserve its one identity,
+    // but retain every observation because its headers can change in transit.
+    const snapshot = { body: await response.clone().text(), headers: Object.fromEntries(response.headers) };
+    if (JSON.stringify(recorded.snapshots.at(-1)) !== JSON.stringify(snapshot)) recorded.snapshots.push(snapshot);
     return response;
   };
   const auditRequest = async (route, invoke) => {
@@ -212,14 +229,21 @@ export async function createRig(factory) {
     })[route];
     const expected = successAudit && (success ? successAudit : [['failed']]);
     if (expected) auditOperations.push({ route, expected, ids: fresh.map(row => row.event_id_hash) });
-    return recordResponse(response);
+    await recordResponse(response);
+    if (route === START && response.ok) {
+      const body = responseJson(await response.clone().text());
+      assert.ok(validates(schemas, 'launchResponse', body), 'start response must match its exact wire shape');
+      const recorded = recordedResponses.get(response);
+      rememberPrivate(body.launch_capability, { response: recorded, field: 'body.launch_capability' });
+      rememberPrivate(body.transaction.ciphertext, { response: recorded, field: 'body.transaction.ciphertext' });
+    }
+    return response;
   };
   const brokerRequest = request => {
     const url = new URL(request.url);
     if (url.pathname === CALLBACK) for (const key of ['state', 'code', 'realmId']) {
       for (const value of url.searchParams.getAll(key)) if (value) {
-        callbackPrivate.add(value);
-        privateValues.add(value);
+        rememberPrivate(value);
       }
     }
     return auditRequest(url.pathname, () => adapter.broker.fetch(request));
@@ -253,8 +277,6 @@ export async function createRig(factory) {
       const result = await response.json();
       assert.ok(result.protocol === PROTOCOL && typeof result.launch_capability === 'string' &&
         typeof result.transaction?.ciphertext === 'string', 'start returns one launch capability and sealed transaction');
-      privateValues.add(result.launch_capability);
-      privateValues.add(result.transaction.ciphertext);
       return result;
     },
     async launch(start) {
@@ -272,11 +294,11 @@ export async function createRig(factory) {
         url.searchParams.get('scope') === 'com.intuit.quickbooks.accounting' &&
         [...url.searchParams.keys()].length === 5, 'launch uses the exact configured provider query');
       assert.ok(validates(schemas, 'capability', url.searchParams.get('state')), 'launch requires a valid state');
-      callbackPrivate.add(url.searchParams.get('state'));
-      privateValues.add(url.searchParams.get('state'));
       // Only this validated provider Location may carry state. Its other
       // headers and its entire body remain subject to the callback canaries.
-      recordedResponses.get(response).launchState = url.searchParams.get('state');
+      rememberPrivate(url.searchParams.get('state'), {
+        response: recordedResponses.get(response), field: 'headers.location.state',
+      });
       return { url, cookie: cookie.split(';')[0] };
     },
     async consent(launch, consent = true) {
@@ -287,8 +309,7 @@ export async function createRig(factory) {
       });
       for (const key of ['code', 'realmId', 'state']) {
         if (grant.callback.searchParams.has(key)) {
-          privateValues.add(grant.callback.searchParams.get(key));
-          callbackPrivate.add(grant.callback.searchParams.get(key));
+          rememberPrivate(grant.callback.searchParams.get(key));
         }
       }
       return new Request(grant.callback, { headers: { cookie: launch.cookie }, redirect: 'manual' });
@@ -321,26 +342,41 @@ export async function createRig(factory) {
           JSON.stringify(log) === JSON.stringify(row)), 'every stored audit witness requires an identical log witness');
       }
       const retained = JSON.stringify({ rows: snapshot.brokerRows, logs: snapshot.brokerLogs });
-      for (const value of privateValues) {
+      for (const value of privateValues.keys()) {
         assert.ok(!retained.includes(value), 'broker storage and logs must exclude transient credentials and ciphertext');
       }
       for (const origin of origins) {
         assert.ok(!retained.includes(origin), 'broker storage and logs must exclude callback origins');
       }
-      for (const value of credentials) {
-        assert.ok(returned.every(response => !JSON.stringify(response).includes(value)), 'responses must not return provider credentials');
-      }
-      for (const response of returned) {
-        const headers = { ...response.headers };
-        if (response.launchState !== null) {
-          const location = new URL(headers.location);
-          assert.ok(location.searchParams.get('state') === response.launchState, 'launch state exception must be exact');
-          location.searchParams.delete('state');
-          headers.location = location.href;
+      for (const response of returned) for (const snapshot of response.snapshots) {
+        const json = snapshot.headers['content-type']?.includes('application/json') || /^[\s]*[\[{\"]/.test(snapshot.body);
+        const parsed = json ? responseJson(snapshot.body) : undefined;
+        for (const [value, permission] of privateValues) {
+          const headers = { ...snapshot.headers };
+          const body = json ? structuredClone(parsed) : snapshot.body;
+          let rawBody = snapshot.body;
+          if (permission?.response === response) {
+            if (permission.field === 'headers.location.state') {
+              const location = new URL(headers.location);
+              assert.ok(location.searchParams.getAll('state').length === 1 &&
+                location.searchParams.get('state') === value, 'launch state exception must be exact');
+              location.searchParams.delete('state');
+              headers.location = location.href;
+            } else {
+              const fieldValue = permission.field === 'body.launch_capability'
+                ? body.launch_capability : body.transaction?.ciphertext;
+              assert.ok(fieldValue === value, 'start response field exception must be exact');
+              // Strict decoding rejects duplicate keys and exposes escaped
+              // echoes. Remove only this response's exact permitted field.
+              if (permission.field === 'body.launch_capability') delete body.launch_capability;
+              else delete body.transaction.ciphertext;
+              rawBody = '';
+            }
+          }
+          const bytes = JSON.stringify({ headers, body, rawBody });
+          assert.ok(!bytes.includes(value),
+            'every response header and body must exclude private values outside their exact allowed field');
         }
-        const bytes = JSON.stringify({ headers, body: response.body });
-        for (const value of callbackPrivate) assert.ok(!bytes.includes(value),
-          'every response header and body must exclude callback code, state and company');
       }
       assert.ok(Array.isArray(snapshot.brokerRows) && snapshot.brokerRows.every(row =>
         ['auditEvent', 'replayRow', 'quotaRow'].some(name => validates(schemas, name, row))) &&

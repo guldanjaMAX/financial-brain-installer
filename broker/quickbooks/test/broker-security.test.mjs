@@ -111,9 +111,17 @@ test('enrollment readback failure rolls back voucher and consumption before a re
   assert.equal((await control.enroll()).status, 202);
   const target = await enrollmentFixture({ readbackFailures: 3 });
   assert.equal((await target.enroll()).status, 503);
+  assert.equal(target.deliveries.length, 3);
+  assert.equal(target.events.filter(event => event === 'owner.enrollment.readback.attempted').length, 3);
+  assert.equal(target.owner.inspect().enrollmentReadbackAttemptCount, 3,
+    'each failed delivery must reach the injected readback decision');
   assert.equal(target.events.filter(event => event === 'owner.enrollment.committed').length, 0);
   assert.equal(target.events.filter(event => event === 'owner.enrollment.acknowledgement.replayed').length, 0);
+  assert.equal(control.events.filter(event => event === 'owner.enrollment.readback.attempted').length, 1);
+  assert.equal(control.owner.inspect().enrollmentReadbackAttemptCount, 1);
   assert.equal((await target.owner.fetch(target.deliveries[0].clone())).status, 200);
+  assert.equal(target.events.filter(event => event === 'owner.enrollment.readback.attempted').length, 4);
+  assert.equal(target.owner.inspect().enrollmentReadbackAttemptCount, 4);
   assert.equal(target.events.filter(event => event === 'owner.enrollment.committed').length, 1);
 });
 

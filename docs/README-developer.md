@@ -2020,7 +2020,7 @@ Read this before scoping an engagement.
 - **The separate QuickBooks broker foundation is offline-only.**
   `broker/quickbooks/` implements the control protocol with injected transports,
   its own append-only security schema and no import path to accounting record
-  processing. Its twelve integration tests use a test-only owner handler. It is
+  processing. Its integration probes use a test-only owner handler. It is
   excluded from installer publication and does not enable production OAuth.
   See [the foundation boundaries and operational gates](../broker/quickbooks/README.md).
 

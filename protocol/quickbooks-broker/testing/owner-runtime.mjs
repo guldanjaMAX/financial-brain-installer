@@ -43,7 +43,9 @@ export async function createOwnerRuntime({ origin, now, transport, apiOrigins, o
   let lease = false;
   let commitCount = 0;
   let readbackCount = 0;
+  let enrollmentReadbackAttemptCount = 0;
   let intentExpiryReadbackCount = 0;
+  let intentExpiryReadbackAttemptCount = 0;
   const get = kind => {
     const row = sqlite.prepare('SELECT value FROM state WHERE kind=?').get(kind);
     return row ? JSON.parse(row.value) : null;
@@ -54,6 +56,20 @@ export async function createOwnerRuntime({ origin, now, transport, apiOrigins, o
     return row ? JSON.parse(row.value) : null;
   };
   const intentPut = value => sqlite.prepare('INSERT OR REPLACE INTO intents VALUES (?,?)').run(value.intent, canonical(value));
+  // A terminal intent is only replay evidence. Project explicitly so active
+  // context and encrypted keys cannot survive as fields or null placeholders.
+  const terminalIntent = (intent, status, receipt = null) => ({
+    protocol: PROTOCOL, intent: intent.intent, status,
+    delivery_id: receipt?.claims.delivery_id ?? null,
+    envelope_hash: receipt?.claims.envelope_hash ?? null, receipt,
+  });
+  function storeTerminalIntent(record) {
+    assertSchema('ownerIntent', record);
+    intentPut(record);
+    const stored = intentGet(record.intent);
+    assertSchema('ownerIntent', stored);
+    return stored;
+  }
   const seal = (value, aad) => encryptLocal(wrappingKey, value, aad);
   const unseal = (value, aad) => decryptLocal(wrappingKey, value, aad);
   const privateKey = async () => crypto.subtle.importKey('jwk',
@@ -131,6 +147,8 @@ export async function createOwnerRuntime({ origin, now, transport, apiOrigins, o
     try {
       put('installation', record);
       put('enrollment', consumed);
+      enrollmentReadbackAttemptCount++;
+      observe('owner.enrollment.readback.attempted');
       if (faults.delete('owner.enrollment.readback') || !same(get('installation'), record) ||
           !same(get('enrollment'), consumed)) throw new Error('owner_enrollment_unverified');
       sqlite.exec('COMMIT');
@@ -178,9 +196,11 @@ export async function createOwnerRuntime({ origin, now, transport, apiOrigins, o
           AND json_extract(value, '$.expires_at') <= ?
         ORDER BY json_extract(value, '$.expires_at'), intent LIMIT 32`).all(now());
       for (const row of overdue) {
-        const expired = { ...JSON.parse(row.value), status: 'expired', private_key: null, auth_key: null };
-        intentPut(expired);
-        if (faults.delete('owner.intent.expiry.readback') || !same(intentGet(expired.intent), expired))
+        const expired = terminalIntent(JSON.parse(row.value), 'expired');
+        const stored = storeTerminalIntent(expired);
+        intentExpiryReadbackAttemptCount++;
+        observe('owner.intent.expiry.readback.attempted');
+        if (faults.delete('owner.intent.expiry.readback') || !same(stored, expired))
           throw new Error('owner_intent_readback_failed');
         expiredCount++;
       }
@@ -306,22 +326,25 @@ export async function createOwnerRuntime({ origin, now, transport, apiOrigins, o
       intent.status = 'committed';
     }
     const header = envelope.header;
-    const claims = Object.fromEntries(['protocol', 'delivery_id', 'request_id', 'install_fingerprint', 'intent',
-      'environment', 'key_generation', 'token_generation'].map(key => [key, header[key]]));
-    Object.assign(claims, { envelope_hash: hash, outcome, committed_at: now() });
-    const receipt = { claims, signature: await signObject(await privateKey(), 'qbo-broker/1/receipt', claims) };
-    intent.private_key = null;
-    intent.auth_key = null;
+    const receipt = await deliveryReceipt(header, hash, outcome);
+    const terminal = terminalIntent(intent, intent.status, receipt);
     sqlite.exec('BEGIN IMMEDIATE');
     try {
       if (connection) put('connection', connection);
-      intentPut(intent);
-      if ((connection && !same(get('connection'), connection)) || !same(intentGet(intent.intent), intent)) throw new Error('owner_readback_failed');
+      const stored = storeTerminalIntent(terminal);
+      if ((connection && !same(get('connection'), connection)) || !same(stored, terminal)) throw new Error('owner_readback_failed');
       sqlite.prepare('INSERT INTO receipts VALUES (?,?,?)').run(header.delivery_id, hash, canonical(receipt));
       sqlite.exec('COMMIT');
     } catch { sqlite.exec('ROLLBACK'); throw new Error('owner_commit_failed'); }
     if (connection) { commitCount++; readbackCount++; observe('owner.connection.readback'); }
     return response(receipt);
+  }
+
+  async function deliveryReceipt(header, hash, outcome) {
+    const claims = Object.fromEntries(['protocol', 'delivery_id', 'request_id', 'install_fingerprint', 'intent',
+      'environment', 'key_generation', 'token_generation'].map(key => [key, header[key]]));
+    Object.assign(claims, { envelope_hash: hash, outcome, committed_at: now() });
+    return { claims, signature: await signObject(await privateKey(), 'qbo-broker/1/receipt', claims) };
   }
 
   async function start() {
@@ -352,8 +375,14 @@ export async function createOwnerRuntime({ origin, now, transport, apiOrigins, o
       if (faults.delete('owner.refresh.readback') || !same(get('connection'), next)) throw new Error('owner_refresh_readback_failed');
       readbackCount++;
       observe('owner.refresh.readback');
+      const receipt = await deliveryReceipt(envelope.header, await sha256(envelope), 'committed_readback');
+      const terminal = terminalIntent(intent, 'committed', receipt);
+      sqlite.exec('BEGIN IMMEDIATE');
+      try {
+        if (!same(storeTerminalIntent(terminal), terminal)) throw new Error('owner_intent_readback_failed');
+        sqlite.exec('COMMIT');
+      } catch { sqlite.exec('ROLLBACK'); throw new Error('owner_intent_commit_failed'); }
       sqlite.prepare('DELETE FROM state WHERE kind=?').run('fence');
-      intent.status = 'committed'; intent.private_key = null; intent.auth_key = null; intentPut(intent);
       return response({ protocol: PROTOCOL, status: 'connected' });
     } catch {
       const retained = get('connection');
@@ -447,7 +476,7 @@ export async function createOwnerRuntime({ origin, now, transport, apiOrigins, o
       status: connection?.status ?? 'disconnected', intentStatus: intent?.status ?? null,
       intentKeyCount: ['private_key', 'auth_key'].filter(key => intent?.[key] != null).length,
       pendingIntentCount: intentCounts.pending, temporaryIntentKeyCount: intentCounts.keys,
-      intentExpiryReadbackCount,
+      enrollmentReadbackAttemptCount, intentExpiryReadbackCount, intentExpiryReadbackAttemptCount,
       tokenGeneration: connection?.token_generation ?? 0,
       tokenCiphertextCount: ['access_token', 'refresh_token', 'realm_id'].filter(key => connection?.[key]).length,
       connectionCommitCount: commitCount, connectionReadbackCount: readbackCount,
@@ -483,6 +512,9 @@ export async function createOwnerRuntime({ origin, now, transport, apiOrigins, o
 
   return {
     fetch, authHeaders, prepareEnrollment, inspect, runScheduledRead, runDirectRead,
+    // Private fixture inspection reads stored bytes without adding them to the
+    // owner status route or broker privacy snapshot.
+    inspectIntents: () => sqlite.prepare('SELECT value FROM intents ORDER BY intent').all().map(row => JSON.parse(row.value)),
     signedRequest: async ({ route, bodyOverrides = {} }) => new Request(BROKER + route, {
       method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/json' },
       body: canonical(await makeSigned(route, bodyOverrides)),

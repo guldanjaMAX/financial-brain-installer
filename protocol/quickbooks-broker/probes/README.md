@@ -1,6 +1,6 @@
 # Broker E2E gates
 
-These probes describe the broker and owner boundaries. All twelve tests pass using
+These probes describe the broker and owner boundaries. The tests run using
 `implementation-adapter.mjs`, the actual separate broker package and an isolated
 test-only owner handler with SQLite and cryptography. No scenario is skipped or
 marked TODO. Production owner integration and the external design gates remain
@@ -45,6 +45,7 @@ provider entry, and mutation; observations are fixed event names with no payload
 | Abuse | Valid signed start is the control. Refuses unavailable quota/replay storage, wrong content type, body larger than 12 KiB, expired proof, and the sixth start within ten minutes. |
 | Pending expiry | Unavailable delivery and an invalid callback leave pending intents. Status retains both keys at 599999 ms, then expires the intent and destroys both keys at 600000 ms without outbound contact. |
 | Cleanup recovery | Exact readback failure rolls back expiry. A backlog of 33 intents requires two status calls, with at most 32 records cleaned per call. Terminal polls are idempotent. |
+| Terminal storage | Actual SQLite rows for connect, refresh, cancellation, failure and expiry satisfy the closed owner-intent schema. Terminal rows omit both key fields and all active context; accepted deliveries retain signed receipt replay material. |
 | Key-retention mutant | Removes key destruction from the actual owner runtime. The same stored-key expiry invariant passes the real runtime and rejects the mutant. |
 
 The broker has no company/token registry. The refresh tampering checks therefore
@@ -56,9 +57,11 @@ and changed authenticated bindings must never activate or overwrite a connection
 Privacy checks require fresh, distinct audit witnesses for each observed broker
 operation, in both durable rows and captured logs. Empty sinks, stale evidence,
 or one concurrent operation borrowing another's witness cannot pass. Every
-response body and header is scanned for runtime credentials and callback code,
-state and company values, including altered callback input. Only the exact
-state parameter in a validated provider launch Location is exempt. A clean
+response body and header is scanned for runtime credentials, launch capabilities,
+transaction ciphertext and callback code, state and company values, including
+altered callback input. Each launch value is allowed only in its exact field
+of the response that issued it. Only the exact state parameter in its validated
+provider launch Location is exempt. A clean
 completion Location never exempts its body or other headers. An unavailable
 audit ledger leaves evidence unavailable; it cannot certify a privacy pass.
 
@@ -149,7 +152,8 @@ a successful fake-provider read. Neither is a deployed owner API in this lane.
   exchangeFences: integer,
   owners: [{
     status, intentStatus, intentKeyCount, pendingIntentCount,
-    temporaryIntentKeyCount, intentExpiryReadbackCount, tokenGeneration, tokenCiphertextCount,
+    temporaryIntentKeyCount, intentExpiryReadbackCount, intentExpiryReadbackAttemptCount,
+    enrollmentReadbackAttemptCount, tokenGeneration, tokenCiphertextCount,
     connectionCommitCount, connectionReadbackCount,
     scheduleEnabled, readsEnabled, importedRecordCount, outcomeUnknown, fenceFingerprint,
     remoteRevocation, noContactProofVerified
@@ -165,6 +169,13 @@ the safe owner summary. Counters must reflect actual store commits/readbacks.
 The owner `connected` status requires a committed token pair, encrypted company,
 and successful readback. `remoteRevocation` is `confirmed`, `rejected`, `uncertain`
 or unset; uncertainty cannot become confirmation through local destruction.
+Enrollment and expiry emit fixed `owner.enrollment.readback.attempted` and
+`owner.intent.expiry.readback.attempted` observations immediately before their
+readback comparisons. Attempt counters include failed decisions, while the
+expiry success counter advances only after the batch commits. Failing probes
+assert both witnesses so an earlier refusal cannot satisfy the readback test.
+The fixture's private `inspectIntents()` helper reads actual SQLite rows for
+schema assertions; those rows never enter the status response or safe summary.
 
 The adapter must inject these one-shot faults at the named real dependency:
 

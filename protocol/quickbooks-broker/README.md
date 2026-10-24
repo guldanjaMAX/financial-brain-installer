@@ -21,8 +21,8 @@ node --import <offline-network-guard-url> --test protocol/quickbooks-broker/prob
 ```
 
 The first is green and includes protocol, schema, state, fake provider, and
-probe-harness units. The second passes twelve tests, including pending-intent
-expiry, cleanup recovery and a key-retention mutant, with the
+probe-harness units. The second exercises pending-intent expiry, cleanup
+recovery, exact stored terminal schemas and a key-retention mutant with the
 foundation handler, injected fake provider and real SQLite stores. There are
 zero skipped tests and zero TODOs. This is offline implementation evidence,
 not deployed owner integration or provider acceptance.

@@ -3,7 +3,122 @@ import test from 'node:test';
 import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createProbeAdapter } from '../implementation-adapter.mjs';
-import { createRig, queryFree, REVOKE, rejected, refusedUnchanged } from '../probes/harness.mjs';
+import { BROKER, START, createRig, queryFree, REVOKE, rejected, refusedUnchanged } from '../probes/harness.mjs';
+
+async function startThrough(rig, entry) {
+  if (entry === 'helper') return rig.start();
+  const response = entry === 'owner' ? await rig.owner('/api/quickbooks/connect/start', { body: {} })
+    : await rig.broker(await rig.signed(START));
+  assert.ok(response.ok, 'raw start control must succeed');
+  return response.json();
+}
+
+test('clean starts keep capability and capsule private before launch through every entry point', async () => {
+  for (const entry of ['helper', 'owner', 'broker']) {
+    const rig = await createRig(createProbeAdapter);
+    await rig.enroll();
+    const start = await startThrough(rig, entry);
+    assert.ok(typeof start.launch_capability === 'string' && typeof start.transaction?.ciphertext === 'string');
+    await startThrough(rig, entry);
+    await rig.assertPrivate();
+  }
+});
+
+for (const surface of ['body', 'header']) {
+  test(`LATER_RESPONSE_${surface.toUpperCase()}_ECHO mutant is killed for capability and capsule`, async t => {
+    for (const entry of ['helper', 'owner', 'broker']) for (const field of ['launch_capability', 'transaction']) {
+      await t.test(`${entry} ${field}`, async () => {
+        const rig = await createRig(createProbeAdapter);
+        await rig.enroll();
+        const start = await startThrough(rig, entry);
+        await rig.assertPrivate();
+        const target = entry === 'owner' ? rig.adapter.owners[0] : rig.adapter.broker;
+        const original = target.fetch;
+        target.fetch = async request => {
+          const response = await original(request);
+          if (surface === 'header') {
+            // Owner fetch has already been observed by the harness. Mutating the
+            // same Response must not hide a later header behind identity dedupe.
+            response.headers.set('x-probe-echo', typeof start[field] === 'string' ? start[field] : JSON.stringify(start[field]));
+            return response;
+          }
+          const headers = new Headers(response.headers);
+          const body = await response.json();
+          body[field] = start[field];
+          return new Response(JSON.stringify(body), { status: response.status, headers });
+        };
+        const later = entry === 'owner' ? await rig.owner('/api/quickbooks/status')
+          : await rig.broker(new Request(BROKER + '/health'));
+        assert.ok(later.ok, 'later response must reach the mutated successful response');
+        await assert.rejects(() => rig.assertPrivate(), {
+          code: 'ERR_ASSERTION', message: /outside their exact allowed field/,
+        });
+      });
+    }
+    for (const field of ['launch_capability', 'transaction']) await t.test(`start field ${field}`, async () => {
+      const rig = await createRig(createProbeAdapter);
+      await rig.enroll();
+      const start = await rig.start();
+      await rig.assertPrivate();
+      const target = surface === 'header' ? rig.adapter.owners[0] : rig.adapter.broker;
+      const original = target.fetch;
+      target.fetch = async request => {
+        const response = await original(request);
+        const body = await response.clone().json();
+        if (surface === 'header') {
+          response.headers.set('x-probe-echo', typeof body[field] === 'string' ? body[field] : JSON.stringify(body[field]));
+          return response;
+        }
+        // A prior value cannot gain a second grant even in the same named field
+        // of another otherwise valid successful start response.
+        body[field] = start[field];
+        return new Response(JSON.stringify(body), { status: response.status, headers: response.headers });
+      };
+      if (surface === 'header') await startThrough(rig, 'owner');
+      else await assert.rejects(() => startThrough(rig, 'broker'), {
+        code: 'ERR_ASSERTION', message: /only one exact response field exception/,
+      });
+      await assert.rejects(() => rig.assertPrivate(), {
+        code: 'ERR_ASSERTION', message: /outside their exact allowed field/,
+      });
+    });
+    if (surface === 'body') for (const field of ['launch_capability', 'transaction']) {
+      await t.test(`escaped later ${field}`, async () => {
+        const rig = await createRig(createProbeAdapter);
+        await rig.enroll();
+        const start = await rig.start();
+        await rig.assertPrivate();
+        const value = field === 'launch_capability' ? start[field] : start[field].ciphertext;
+        const encoded = JSON.stringify(value).replace(value[0], `\\u${value.charCodeAt(0).toString(16).padStart(4, '0')}`);
+        rig.adapter.broker.fetch = async () => new Response(`{"echo":${encoded}}`, {
+          headers: { 'content-type': 'application/json' },
+        });
+        await rig.broker(new Request(BROKER + '/health'));
+        await assert.rejects(() => rig.assertPrivate(), {
+          code: 'ERR_ASSERTION', message: /outside their exact allowed field/,
+        });
+      });
+    }
+    if (surface === 'body') await t.test('duplicate start field with escaped value', async () => {
+      const rig = await createRig(createProbeAdapter);
+      await rig.enroll();
+      await rig.start();
+      await rig.assertPrivate();
+      const original = rig.adapter.broker.fetch;
+      rig.adapter.broker.fetch = async request => {
+        const response = await original(request);
+        const body = await response.json();
+        const value = body.launch_capability;
+        const encoded = JSON.stringify(value).replace(value[0], `\\u${value.charCodeAt(0).toString(16).padStart(4, '0')}`);
+        const duplicate = JSON.stringify(body).slice(0, -1) + `,"launch_capability":${encoded}}`;
+        return new Response(duplicate, { status: response.status, headers: response.headers });
+      };
+      await assert.rejects(() => startThrough(rig, 'broker'), {
+        code: 'ERR_ASSERTION', message: /response JSON must be unambiguous/,
+      });
+    });
+  });
+}
 
 test('REPLAY_FALSE_SUCCESS mutant is killed even when provider counters stay unchanged', async () => {
   for (const kind of ['refresh', 'revoke']) {

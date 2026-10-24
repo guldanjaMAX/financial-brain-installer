@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { readFile } from 'node:fs/promises';
+import { assertSchema } from '../../../broker/quickbooks/src/validation.mjs';
 import {
   PROTOCOL, BROKER, CALLBACK, OWNER_CALLBACK, START, REFRESH, REVOKE,
   loadImplementation, createRig, jsonRequest, launchRequest, rewriteJson, rejected,
@@ -525,6 +526,58 @@ async function expiredOwnerStatus(rig) {
   reached(rig, 'owner.intent.expiry.readback');
 }
 
+for (const scenario of ['connect', 'canceled', 'failed', 'expired', 'refresh']) {
+  test(`E2E terminal intent rows: ${scenario} retains only schema-valid receipt replay material`, async () => {
+    const rig = await createRig(await loadImplementation());
+    if (scenario === 'connect' || scenario === 'refresh') {
+      await rig.connect();
+      connected(rig);
+      if (scenario === 'refresh') {
+        rig.advance(3_000_000);
+        assert.ok((await rig.owner('/api/quickbooks/refresh', { body: {} })).ok,
+          'refresh control must save its replacement before terminal inspection');
+        reached(rig, 'owner.refresh.readback');
+      }
+    } else if (scenario === 'expired') {
+      await rig.pending();
+      assert.ok(rig.state().intentStatus === 'pending' && rig.state().intentKeyCount === 2,
+        'expiry control starts with both active delivery keys');
+      rig.advance(600_000);
+      await expiredOwnerStatus(rig);
+    } else {
+      if (scenario === 'failed') rig.provider.queueFault('exchange', 'reject');
+      queryFree(await rig.broker(await rig.consent(await rig.pending(), scenario !== 'canceled')));
+      assert.ok(rig.state().intentStatus === scenario,
+        'verified completion control must persist its terminal outcome');
+    }
+    const rows = rig.adapter.owners[0].inspectIntents();
+    assert.ok(rows.length === (scenario === 'refresh' ? 2 : 1), 'terminal inspection must read every actual stored intent');
+    for (const row of rows) {
+      assert.doesNotThrow(() => assertSchema('ownerIntent', row),
+        'actual terminal row must satisfy the closed ownerIntent schema');
+      assert.deepEqual(Object.keys(row).sort(), ['protocol', 'intent', 'status', 'delivery_id', 'envelope_hash', 'receipt'].sort(),
+        'terminal storage must omit every active field and both key placeholders');
+      if (scenario !== 'expired') {
+        assert.ok(row.delivery_id === row.receipt.claims.delivery_id && row.envelope_hash === row.receipt.claims.envelope_hash,
+          'terminal row retains the exact accepted delivery receipt binding');
+      }
+    }
+    if (['connect', 'canceled', 'failed'].includes(scenario)) {
+      rig.advance(600_000);
+      assert.ok((await rig.owner('/api/quickbooks/status')).ok, 'terminal status control remains readable after the old deadline');
+      const replay = await rig.adapter.owners[0].fetch(rig.deliveries[0].clone());
+      assert.ok(replay.ok && await replay.text() === JSON.stringify(rows[0].receipt),
+        'identical delivery after key destruction and deadline must return the exact stored receipt');
+      const changed = await rewriteJson(rig.deliveries[0], body => {
+        body.ciphertext = (body.ciphertext[0] === 'A' ? 'B' : 'A') + body.ciphertext.slice(1);
+      });
+      rejected(await rig.adapter.owners[0].fetch(changed));
+      assert.ok(JSON.stringify(rig.adapter.owners[0].inspectIntents()) === JSON.stringify(rows),
+        'changed delivery must preserve terminal replay rows');
+    }
+  });
+}
+
 test('E2E pending intents: unavailable delivery and invalid callback expire at the deadline', async () => {
   const factory = await loadImplementation();
   const control = await createRig(factory);
@@ -565,17 +618,24 @@ test('E2E pending cleanup: bounded backlog and failed readback remain recoverabl
   assert.ok(rig.state().pendingIntentCount === 33 && rig.state().temporaryIntentKeyCount === 66,
     'backlog control requires distinct pending intents with both stored keys');
   rig.advance(600_000);
+  const checkpoint = rig.events.length;
   rig.adapter.armFault('owner.intent.expiry.readback');
   rejected(await rig.owner('/api/quickbooks/status'));
+  reached(rig, 'owner.intent.expiry.readback.attempted', checkpoint);
+  assert.ok(rig.state().intentExpiryReadbackAttemptCount === 1,
+    'failed cleanup must reach exactly one stored-row comparison before rollback');
   assert.ok(rig.state().pendingIntentCount === 33 && rig.state().temporaryIntentKeyCount === 66 &&
     rig.state().intentExpiryReadbackCount === 0, 'unproven expiry must roll back and remain recoverable');
   assert.ok((await rig.owner('/api/quickbooks/status')).ok, 'cleanup retry must recover after the readback fault');
   assert.ok(rig.state().pendingIntentCount === 1 && rig.state().temporaryIntentKeyCount === 2 &&
-    rig.state().intentExpiryReadbackCount === 32, 'one status decision cleans at most 32 overdue records');
+    rig.state().intentExpiryReadbackCount === 32 && rig.state().intentExpiryReadbackAttemptCount === 33,
+    'one status decision cleans at most 32 overdue records after the failed comparison');
   assert.ok((await rig.owner('/api/quickbooks/status')).ok, 'next bounded cleanup must finish the backlog');
   assert.ok(rig.state().pendingIntentCount === 0 && rig.state().temporaryIntentKeyCount === 0 &&
-    rig.state().intentExpiryReadbackCount === 33, 'older intents must not retain orphaned keys');
-  assert.ok((await rig.owner('/api/quickbooks/status')).ok && rig.state().intentExpiryReadbackCount === 33,
+    rig.state().intentExpiryReadbackCount === 33 && rig.state().intentExpiryReadbackAttemptCount === 34,
+    'older intents must not retain orphaned keys');
+  assert.ok((await rig.owner('/api/quickbooks/status')).ok && rig.state().intentExpiryReadbackCount === 33 &&
+    rig.state().intentExpiryReadbackAttemptCount === 34,
     'repeated status must not rewrite terminal records');
 });
 
@@ -583,7 +643,7 @@ test('OVERDUE_INTENT_KEEPS_KEYS mutant is killed by the stored-key expiry invari
   const ownerUrl = new URL('../testing/owner-runtime.mjs', import.meta.url);
   const adapterUrl = new URL('../implementation-adapter.mjs', import.meta.url);
   const ownerSource = await readFile(ownerUrl, 'utf8');
-  const target = "status: 'expired', private_key: null, auth_key: null";
+  const target = "const expired = terminalIntent(JSON.parse(row.value), 'expired');";
   assert.ok(ownerSource.split(target).length === 2, 'mutant must alter exactly the expiry key destruction');
   const absoluteImports = (source, base, replaceOwner) => source.replace(/from '([^']+)'/g, (statement, specifier) => {
     if (!specifier.startsWith('.')) return statement;
@@ -591,7 +651,8 @@ test('OVERDUE_INTENT_KEEPS_KEYS mutant is killed by the stored-key expiry invari
       ? replaceOwner : new URL(specifier, base).href}'`;
   });
   const dataModule = source => `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
-  const mutantOwner = dataModule(absoluteImports(ownerSource.replace(target, "status: 'expired'"), ownerUrl));
+  const mutantOwner = dataModule(absoluteImports(ownerSource.replace(target,
+    "const expired = { ...JSON.parse(row.value), ...terminalIntent(JSON.parse(row.value), 'expired') };"), ownerUrl));
   const mutantAdapter = await import(dataModule(absoluteImports(await readFile(adapterUrl, 'utf8'), adapterUrl, mutantOwner)));
   const exercise = async factory => {
     const rig = await createRig(factory);
@@ -603,5 +664,6 @@ test('OVERDUE_INTENT_KEEPS_KEYS mutant is killed by the stored-key expiry invari
     await expiredOwnerStatus(rig);
   };
   await exercise(await loadImplementation());
-  await assert.rejects(() => exercise(mutantAdapter.createProbeAdapter), { code: 'ERR_ASSERTION' });
+  await assert.rejects(() => exercise(mutantAdapter.createProbeAdapter),
+    error => error.code === 'ERR_ASSERTION' && error.message === 'deadline cleanup must return verified status');
 });
