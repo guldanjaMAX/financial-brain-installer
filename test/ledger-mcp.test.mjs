@@ -13,6 +13,7 @@ import { handleMcp } from "../worker/src/lib/mcp-endpoint.js";
 
 const NOW = "2026-10-11T12:00:00Z";
 const PRESERVE = "Preserve the ledger answer's exact amounts, account masks, dates, and coverage bounds.";
+const SIDE_NOTE = "Side note: Gmail has been paused since Wed Oct 7, so anything only in Gmail after that date may be missing.";
 const NO_MATCH = 'No match in this search. Search again with different wording, or sort "newest" for status, before saying "I didn\'t find a matching record in these searches". Name both searches and the next place you would check (another source, a wider date window, or a distinctive name or number). Do not turn those searches into a claim that no such record exists. Say nothing is recorded only when a response explicitly establishes a complete search. Do not substitute inference.';
 const GLOBAL_ABSENCE = /brain has nothing|nothing recorded|Confidence nothing is recorded|documents do not answer|No (?:match|hits) in this search/i;
 
@@ -64,7 +65,11 @@ async function ledgerBodies(t) {
       const readPattern = kind === "balance" ? /JOIN fin_balance_snapshots/ : /JOIN fin_transactions/;
       const before = f.seen.sql.filter(sql => readPattern.test(sql)).length;
       const body = await (await withLedgerAnswer({ env: f.env, question, now: NOW,
-        grantScope: { all: true }, scopePrincipalKind: "owner" }, async () => {
+        grantScope: { all: true }, scopePrincipalKind: "owner",
+        sourceCoverage: kind === "totals" ? { unavailable: false, gaps: [{
+          type: "sync_review", source: "Gmail", source_kind: "gmail",
+          last_good_sync_at: "2026-10-07T12:00:00.000Z", detail: "Fixture pause.",
+        }] } : null }, async () => {
         documentCalls++;
         return new Response(JSON.stringify({ answer: null, gaps: [] }));
       })).json();
@@ -136,6 +141,7 @@ globalThis.fetch = async (url, init) => {
       assert.equal(out.answer, body.answer, "answer equals the real Worker ledger body");
       assert.deepEqual(out.ledger, body.ledger, "ledger metadata is unchanged");
       assert.equal(out.note, PRESERVE, "every supported complete ledger answer gets the preserve note");
+      assert.equal(out.side_note, body.side_note || undefined, "the local MCP preserves the Worker's side note field");
       assert.doesNotMatch(JSON.stringify(out), GLOBAL_ABSENCE, "no document absence or no-match instruction beside ledger answers");
     });
     await t.test(`remote ${key}`, async () => {
@@ -154,6 +160,10 @@ globalThis.fetch = async (url, init) => {
       assert.ok(!reply.result.isError);
       const text = reply.result.content[0].text;
       assert.ok(text.includes(body.answer), "remote ask contains the real Worker answer verbatim");
+      if (body.side_note) {
+        assert.ok(text.indexOf(body.answer) < text.indexOf(body.side_note), "remote ask renders the answer before its side note");
+        assert.ok(text.includes(SIDE_NOTE));
+      }
       assert.doesNotMatch(text, GLOBAL_ABSENCE);
     });
   }

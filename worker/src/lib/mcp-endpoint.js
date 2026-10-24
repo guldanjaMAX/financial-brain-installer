@@ -69,7 +69,7 @@ const rpcError = (id, code, message, status = 200) => new Response(
 const TOOLS = [
   {
     name: "ask",
-    description: "Money and short lookups. Use ask for a balance, a payment received, money in and out, largest expenses, deposits, spend by merchant or category, transfers between the owner's own accounts, recurring charges, profit, net income, withdrawals, loan proceeds, or a short single-fact lookup. It reads the bank ledger directly for supported money questions. Cash flow is unsupported: relay cash_flow_unsupported with no figure or model fallback. The profit and net-income view is money in minus money out, not accounting profit or cash flow. Keep exact ledger amounts, account masks, dates and coverage bounds. For anything else, use search, then fetch.",
+    description: "Money and short lookups. Use ask for a balance, a payment received, money in and out, largest expenses, deposits, spend by merchant or category, transfers between the owner's own accounts, recurring charges, profit, net income, withdrawals, loan proceeds, or a short single-fact lookup. It reads the bank ledger directly for supported money questions. Cash flow is unsupported: relay cash_flow_unsupported with no figure or model fallback. The profit and net-income view is money in minus money out, not accounting profit or cash flow. Keep exact ledger amounts, account masks, dates and coverage bounds. Give a supported answer first, then its short side note. Only a catastrophic gap in the question's primary source withholds the answer. For anything else, use search, then fetch.",
     inputSchema: {
       type: "object",
       properties: { question: { type: "string", description: "The question, in natural language." } },
@@ -111,7 +111,7 @@ function readToolsFor(env) {
   return TOOLS.map((tool) => {
     if (tool.name === "ask") return {
       ...tool,
-      description: "Default answer route for non-money questions with Claude Opus answers and a Claude Sonnet check. Also use ask for a balance, a payment received, money in and out, largest expenses, deposits, spend by merchant or category, transfers between the owner's own accounts, recurring charges, profit, net income, withdrawals, or loan proceeds. If ask returns answer_error or anthropic_key_missing for a non-money question, use search, then fetch, as the fallback. Cash flow is unsupported: relay cash_flow_unsupported with no figure or model fallback. Keep exact ledger amounts, account masks, dates and coverage bounds.",
+      description: "Default answer route for non-money questions with Claude Opus answers and a Claude Sonnet check. Also use ask for a balance, a payment received, money in and out, largest expenses, deposits, spend by merchant or category, transfers between the owner's own accounts, recurring charges, profit, net income, withdrawals, or loan proceeds. If ask returns answer_error or anthropic_key_missing for a non-money question, use search, then fetch, as the fallback. Cash flow is unsupported: relay cash_flow_unsupported with no figure or model fallback. Keep exact ledger amounts, account masks, dates and coverage bounds. Give a supported answer first, then its short side note. Only a catastrophic gap in the question's primary source withholds the answer.",
     };
     if (tool.name === "search") return {
       ...tool,
@@ -289,7 +289,10 @@ async function runAsk(deps, args) {
     }
     for (const gap of gaps) if (gap.type !== "no_results" && gap.detail) lines.push(gap.detail);
     if (gaps.some(gap => gap.type === "ledger_out_of_coverage")) lines.push("Try the last finished month if the feed covers it, or a past month ending on or before the covered-through date.");
-  } else lines.push(answerText(thought));
+  } else {
+    lines.push(answerText(thought));
+    if (typeof thought.side_note === "string" && thought.side_note) lines.push("", thought.side_note);
+  }
   if (refused) lines.push(...refusalExplanation());
   const scanned = scannedEvidenceNotice(thought);
   if (scanned) lines.push("", scanned);
@@ -354,12 +357,15 @@ async function runSearch(deps, args, origin) {
       results: found.status === COVERAGE_INCOMPLETE ? results : [],
       ...(found.status === COVERAGE_INCOMPLETE ? newestSearchRecord(results) : {}),
       note: answerText(found),
+      ...(typeof found.side_note === "string" && found.side_note ? { side_note: found.side_note } : {}),
       gaps: found.gaps || [],
     }));
   }
   return text(JSON.stringify({
     results,
     ...newestSearchRecord(results),
+    ...(typeof found.side_note === "string" && found.side_note ? { side_note: found.side_note } : {}),
+    ...(Array.isArray(found.gaps) && found.gaps.length ? { gaps: found.gaps } : {}),
     ...(results.length ? {} : {
       note: 'No hits in this search. This is not proof that no such record exists. Say "I didn\'t find a matching record in this search" and name the next search you would run.',
     }),

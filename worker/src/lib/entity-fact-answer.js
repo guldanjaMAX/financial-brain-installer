@@ -7,6 +7,7 @@
  */
 import { answerUsesOperativeValue, answerUsesSupersededValue, authorityFor } from "./evidence-authority.js";
 import { newestCurrentEvidence, reliableDocumentTime } from "./query-intent.js";
+import { classifyQuestionCoverage } from "./retrieval-status.js";
 
 const FIELDS = new Map([
   ["address", "address"], ["mailing address", "mailing address"],
@@ -110,7 +111,14 @@ export function entityFactAnswer({
 } = {}) {
   const requested = questionFact(question, owner);
   if (!requested || !Array.isArray(results) || !Array.isArray(docs) || !Number.isFinite(now)) return null;
-  if (degraded || coverageGaps.length || operativeConflict || newerAuthoritativeEvidence.length || gaps.some((gap) =>
+  const coverage = classifyQuestionCoverage({
+    question,
+    gaps: coverageGaps,
+    evidenceSources: docs.flatMap((doc) => [doc?.source_kind, doc?.source]).filter(Boolean),
+    now,
+  });
+  const nonCoverageGaps = gaps.filter((gap) => !coverageGaps.includes(gap));
+  if (degraded || coverage.refuse || operativeConflict || newerAuthoritativeEvidence.length || nonCoverageGaps.some((gap) =>
     /source_|coverage_unavailable|coverage_incomplete|filter_not_applied|unavailable|stale|operative_conflict|newer_/.test(gap.type || "")
   )) return null;
 

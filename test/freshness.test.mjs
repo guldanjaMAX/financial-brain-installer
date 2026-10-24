@@ -33,6 +33,8 @@ const DAILY = 86400;
     g.length === 2 && g[0].type === "coverage_stale" && g[1].type === "history_unproven",
     JSON.stringify(g));
   check("and says how long it has been", g[0].days_since_ingest === 40, JSON.stringify(g[0]));
+  check("answer policy receives the connector kind and exact last good sync",
+    g[0].source_kind === "drive" && g[0].last_good_sync_at === daysAgo(40), JSON.stringify(g[0]));
   check("and says material added since is invisible, not merely old",
     /not in the brain/.test(g[0].detail) && /would not show up as a missing answer/.test(g[0].detail), g[0].detail);
 }

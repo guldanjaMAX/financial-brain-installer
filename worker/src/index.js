@@ -103,7 +103,7 @@ import {
 } from "./lib/provenance-receipt.js";
 import {
   ANSWER_WITHHELD, COVERAGE_INCOMPLETE, SEARCH_UNAVAILABLE, answerWithheldNotice,
-  coverageIncompleteNotice, emptyRetrievalDisclosure, meaningSearchLine, projectionCatchupGap,
+  classifyQuestionCoverage, coverageIncompleteNotice, emptyRetrievalDisclosure, meaningSearchLine, projectionCatchupGap,
   projectionPending, refusalNextAction,
 } from "./lib/retrieval-status.js";
 import {
@@ -859,6 +859,13 @@ async function handleUnified(
   // Keep both conditions on the raw route so its UI, MCP, and check consumers
   // do not have to infer corpus coverage from a result count.
   const searchState = (rows) => {
+    const coverageDecision = classifyQuestionCoverage({
+      question: q,
+      periodStart: timeWindow ? new Date(timeWindow.start).toISOString().slice(0, 10) : null,
+      gaps: sourceCoverageGaps,
+      evidenceSources: rows.flatMap((row) => [row?.source_kind, row?.source]).filter(Boolean),
+      now: Date.now(),
+    });
     const disclosure = emptyRetrievalDisclosure(degraded, degradedReason, {
       candidatesFound: rows.length > 0,
     });
@@ -866,17 +873,21 @@ async function handleUnified(
       return {
         status: disclosure.status,
         notice: disclosure.notice,
+        ...(coverageDecision.side_note ? { side_note: coverageDecision.side_note } : {}),
         gaps: [...sourceCoverageGaps, ...disclosure.gaps],
       };
     }
-    if (sourceCoverageGaps.length) {
+    if (sourceCoverageGaps.length && (rows.length === 0 || coverageDecision.refuse)) {
       return {
         status: COVERAGE_INCOMPLETE,
         notice: coverageIncompleteNotice(coverage.unavailable, rows.length > 0),
+        ...(coverageDecision.side_note ? { side_note: coverageDecision.side_note } : {}),
         gaps: sourceCoverageGaps,
       };
     }
-    return {};
+    return sourceCoverageGaps.length
+      ? { ...(coverageDecision.side_note ? { side_note: coverageDecision.side_note } : {}), gaps: sourceCoverageGaps }
+      : {};
   };
   const searchTruth = (rows) => {
     const truth = searchState(rows);
@@ -1074,12 +1085,24 @@ async function handleThink(
   const taxQuestion = measureQueryStage(timing, "premise_temporal", () => taxQuestionScopeAssessment(q, {
     owner: env.BRAIN_OWNER, now: Date.now(), timeZone: env.BRAIN_TIMEZONE,
   }));
+  const requestedFilters = filtersFrom(url);
+  // An unresolved tax scope is refused before any corpus read. Preserve that
+  // boundary while sharing one coverage read between the ledger and document
+  // paths for every ordinary question.
+  const sourceCoverage = taxQuestion.applicable && !taxQuestion.resolved
+    ? null
+    : await measureQueryStage(timing, "coverage", () => coverageForRead(env, {
+      access,
+      scope: grantScope,
+      requestedSource: requestedFilters.source || null,
+    }));
   return withLedgerAnswer({ env, question: q, access, grantScope, scopePrincipalKind,
-    filters: filtersFrom(url), entityScope, ledgerEligible: !taxQuestion.applicable }, (ledgerGap) => handleDocumentThink(
-    env, url, q, entityScope, access, grantScope, scopePrincipalKind, timing, ledgerGap, taxQuestion));
+    filters: requestedFilters, entityScope, ledgerEligible: !taxQuestion.applicable,
+    sourceCoverage }, (ledgerGap) => handleDocumentThink(
+    env, url, q, entityScope, access, grantScope, scopePrincipalKind, timing, ledgerGap, taxQuestion, sourceCoverage));
 }
 
-async function handleDocumentThink(env, url, q, entityScope, access, grantScope, scopePrincipalKind, timing, ledgerGap, taxQuestion) {
+async function handleDocumentThink(env, url, q, entityScope, access, grantScope, scopePrincipalKind, timing, ledgerGap, taxQuestion, preloadedCoverage = null) {
   const unsupportedAnswer = "The documents do not answer the question.";
   if (taxQuestion.applicable && !taxQuestion.resolved) {
     return jsonResponse({
@@ -1118,7 +1141,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
     : null;
   const requestedFilters = filtersFrom(url);
   const [coverage, taxDocumentCoverage] = await Promise.all([
-    measureQueryStage(timing, "coverage", () => coverageForRead(env, {
+    preloadedCoverage || measureQueryStage(timing, "coverage", () => coverageForRead(env, {
       access,
       scope: grantScope,
       requestedSource: requestedFilters.source || null,
@@ -1893,6 +1916,25 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
 
   const answeredFromEvidence = !answerError && Boolean(answer) &&
     answer !== unsupportedAnswer && approvedDocs.length > 0;
+  const questionCoverage = classifyQuestionCoverage({
+    question: q,
+    periodStart: timeWindow ? new Date(timeWindow.start).toISOString().slice(0, 10) : null,
+    gaps: sourceCoverageGaps,
+    evidenceSources: approvedDocs.flatMap((doc) => [doc.source_kind, doc.source]).filter(Boolean),
+    now: Date.now(),
+  });
+  if (answeredFromEvidence && questionCoverage.refuse) {
+    answer = null;
+    approvedDocs = [];
+    evidenceGate = {
+      supported: false,
+      complete: false,
+      evidence: [],
+      reason: "the question's primary source does not cover the requested period",
+    };
+  } else if (answeredFromEvidence && questionCoverage.answer_prefix) {
+    answer = `${questionCoverage.answer_prefix} ${answer}`;
+  }
   let scannedTaxEvidenceNotRelied = false;
   if (scannedRequestedTaxEvidence && !answeredFromEvidence &&
       documentTaxGap !== TAX_EVIDENCE_UNREADABLE_GAP) {
@@ -1909,8 +1951,11 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
   // Computed coverage warnings describe retrieval, not account facts. Append
   // them only after the exact claims pass the shared gates, and keep `gaps` in
   // the response. No model gets to dismiss or rewrite these warnings.
-  if ((observedAnswer || moneyPolicy) && evidenceGate?.supported && approvedDocs.length && gaps.length) {
-    answer += `\n\nHeads up: ${gaps.map((gap) => String(gap.detail || "").replace(/\[\d+\]/g, "")).filter(Boolean).join(" ")}`;
+  if ((observedAnswer || moneyPolicy) && evidenceGate?.supported && approvedDocs.length) {
+    const nonCoverageGaps = gaps.filter((gap) => !sourceCoverageGaps.includes(gap));
+    if (nonCoverageGaps.length) {
+      answer += `\n\nHeads up: ${nonCoverageGaps.map((gap) => String(gap.detail || "").replace(/\[\d+\]/g, "")).filter(Boolean).join(" ")}`;
+    }
   }
   if (evidenceGate?.supported && synthesis) {
     answer += "\n\nThis list covers supported items found in the retrieved records; it may be incomplete.";
@@ -2018,6 +2063,9 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
             ? ANSWER_VALIDATION_UNAVAILABLE_NOTICE
             : undefined),
     answer: refusalSearchDisclosure || incompleteCoverageBlocksAbsence || answerValidationBlocksAbsence ? null : answer,
+    ...(evidenceGate?.supported === true && questionCoverage.side_note
+      ? { side_note: questionCoverage.side_note }
+      : {}),
     answer_error: answerError || undefined,
     answer_resumes_at: answerError === ANSWER_ERROR_MESSAGES.dailyLimit
       ? nextUtcMidnight()

@@ -2,6 +2,7 @@ import { scopeIsUnrestricted } from "./grants.js";
 import { classifyLedgerQuestion, ledgerDay, shiftLedgerDay } from "./ledger-question.js";
 import { accountLinkPairsInWindow, accountLinkRequiredInWindow, effectivePeriodCovered, readEffectiveAccounts, readEffectiveBalances, readEffectiveTransactions } from "./ledger-reader.js";
 import { categoryFor, detectRecurring, isDirectedOwnedTransfer, isLoanAdvance, matchesCategory, matchesMerchant, matchesSender, merchantFor, normalizeMerchantText, pairOwnTransfers, sumMinor } from "./ledger-analysis.js";
+import { classifyQuestionCoverage } from "./retrieval-status.js";
 
 const masked = account => /^\d{1,4}$/.test(account.mask || "") ? `account ****${account.mask}` : "account (mask unavailable)";
 const money = cents => `${cents < 0 ? "-" : ""}$${Math.floor(Math.abs(cents) / 100).toLocaleString("en-US")}.${String(Math.abs(cents) % 100).padStart(2, "0")}`;
@@ -37,9 +38,74 @@ function gapFor(reason, accounts = [], intent = {}) {
   return {
     type: reason === "period_outside_coverage" ? "ledger_out_of_coverage" : "ledger_not_consulted",
     reason, accounts: coverage,
+    ...(reason === "period_outside_coverage" ? {
+      source: "bank ledger",
+      source_kind: "ledger",
+      last_good_sync_at: accounts.map((account) => account.last_synced_at).filter(Boolean).sort()[0] || null,
+    } : {}),
     ...(intent.from ? { from: intent.from, to: intent.to } : {}),
     detail: `The bank ledger did not answer this question (${reason.replaceAll("_", " ")}). ${detail} Document dates do not measure bank-feed freshness.`,
   };
+}
+
+function instant(value) {
+  const parsed = Date.parse(String(value || ""));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function ledgerCoveragePlan(accounts, intent, now) {
+  if (!intent.from || !intent.to) return { intent, gaps: [], catastrophic: null };
+  // This is an integrity refusal, not ordinary staleness. Keep the existing
+  // named gate so a widened legacy interval cannot be treated as partially
+  // usable merely because its stored endpoints overlap the question.
+  if (accounts.some((account) => account.members.some((member) => member.coverage_review_required))) {
+    return { intent, gaps: [], catastrophic: null };
+  }
+  const requestedTo = intent.to;
+  const coveredThrough = accounts.map((account) => account.covered_to).filter((value) => /^\d{4}-\d{2}-\d{2}$/.test(value || "")).sort()[0] || null;
+  const boundedTo = coveredThrough && coveredThrough < requestedTo ? coveredThrough : requestedTo;
+  if (!coveredThrough || boundedTo < intent.from ||
+      accounts.some((account) => !effectivePeriodCovered(account, intent.from, boundedTo))) {
+    const catastrophic = gapFor("period_outside_coverage", accounts, intent);
+    return { intent, gaps: [catastrophic], catastrophic };
+  }
+
+  const nowMs = instant(now) ?? Date.now();
+  const lastGoodValues = accounts.map((account) => instant(account.last_synced_at) ??
+    instant(account.covered_to ? `${account.covered_to}T23:59:59.999Z` : null)).filter((value) => value !== null);
+  const lastGood = lastGoodValues.length ? Math.min(...lastGoodValues) : null;
+  const partial = boundedTo < requestedTo;
+  const stale = lastGood !== null && nowMs - lastGood >= 2 * 86_400_000;
+  const gaps = partial || stale ? [{
+    type: "ledger_coverage_stale",
+    source: "bank ledger",
+    source_kind: "ledger",
+    last_good_sync_at: lastGood === null ? null : new Date(lastGood).toISOString(),
+    days_since_ingest: lastGood === null ? null : Math.floor((nowMs - lastGood) / 86_400_000),
+    covered_through: boundedTo,
+    requested_through: requestedTo,
+    accounts: accountCoverage(accounts),
+    detail: `The bank ledger is covered through ${boundedTo}; activity after that date may be missing from the requested period through ${requestedTo}.`,
+  }] : [];
+  return { intent: { ...intent, to: boundedTo }, gaps, catastrophic: null };
+}
+
+function sourceCoverageGaps(sourceCoverage) {
+  if (sourceCoverage?.unavailable) return [{
+    type: "coverage_unavailable",
+    detail: "Source coverage could not be checked. The answer may omit material from a paused source.",
+  }];
+  return Array.isArray(sourceCoverage?.gaps) ? sourceCoverage.gaps : [];
+}
+
+async function fallbackWithGap(next, gap, allGaps = [gap]) {
+  const response = await next(gap);
+  if (!response.ok) return response;
+  const body = await response.json();
+  const leading = [gap, ...allGaps.filter((candidate) => candidate !== gap)];
+  const leadingTypes = new Set(leading.map((candidate) => candidate.type));
+  body.gaps = [...leading, ...(body.gaps || []).filter((candidate) => !leadingTypes.has(candidate.type))];
+  return new Response(JSON.stringify(body), { status: response.status, headers: response.headers });
 }
 
 function citation(row, account, index, balance = false) {
@@ -418,7 +484,7 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
 // responses return untouched, including their exact serialized bytes.
 
 export async function withLedgerAnswer({ env, question, access, grantScope, scopePrincipalKind,
-  filters = {}, entityScope, ledgerEligible = true, now = Date.now() }, next) {
+  filters = {}, entityScope, ledgerEligible = true, now = Date.now(), sourceCoverage = null }, next) {
   const intent = classifyLedgerQuestion(question, { now });
   // An unsupported question needs ordinary document retrieval. Inventory
   // coincidences cannot add a bank gap or interrupt that unrelated path.
@@ -445,10 +511,25 @@ export async function withLedgerAnswer({ env, question, access, grantScope, scop
         (intent.mask && accounts.length !== 1) ? "ambiguous_account" :
         accounts.some(a => a.currency !== "USD") ? "unsupported_currency" : !intent.kind ? "unsupported_question" : null;
       if (!reason) {
-        const answer = await ledgerAnswer(env, intent, accounts, inventory);
+        const plan = ledgerCoveragePlan(accounts, intent, now);
+        const allCoverageGaps = [...sourceCoverageGaps(sourceCoverage), ...plan.gaps];
+        const coverage = classifyQuestionCoverage({
+          question,
+          questionType: "money",
+          periodStart: intent.from || null,
+          gaps: allCoverageGaps,
+          evidenceSources: ["ledger"],
+          now,
+        });
+        if (plan.catastrophic || coverage.refuse) {
+          return fallbackWithGap(next, plan.catastrophic || coverage.catastrophic_gaps[0], allCoverageGaps);
+        }
+        const answer = await ledgerAnswer(env, plan.intent, accounts, inventory);
         reason = answer.reason;
-        if (!reason) return new Response(JSON.stringify({ mode: "think", answer: answer.answer,
-          citations: answer.citations, results: [], gaps: [], ledger: answer.ledger,
+        if (!reason) return new Response(JSON.stringify({ mode: "think",
+          answer: coverage.answer_prefix ? `${coverage.answer_prefix} ${answer.answer}` : answer.answer,
+          ...(coverage.side_note ? { side_note: coverage.side_note } : {}),
+          citations: answer.citations, results: [], gaps: allCoverageGaps, ledger: answer.ledger,
           evidence_gate: { supported: true, complete: !answer.ledger.attribution_incomplete,
             reason: answer.ledger.attribution_incomplete ? "payer attribution incomplete in covered ledger rows" : "read from covered ledger rows" } }),
         { headers: { "Content-Type": "application/json" } });
@@ -464,9 +545,5 @@ export async function withLedgerAnswer({ env, question, access, grantScope, scop
       gap = gapFor("ledger_unavailable", accounts, intent);
     }
   }
-  const response = await next(gap);
-  if (!response.ok) return response;
-  const body = await response.json();
-  body.gaps = [gap, ...(body.gaps || []).filter(g => g.type !== gap.type)];
-  return new Response(JSON.stringify(body), { status: response.status, headers: response.headers });
+  return fallbackWithGap(next, gap);
 }

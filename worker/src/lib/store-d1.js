@@ -3771,7 +3771,9 @@ function sourceOwnerRemedy(source, concern = "refresh") {
 
 function gapWithRemedy(source, concern, gap) {
   const remedy = sourceOwnerRemedy(source, concern);
-  return { ...gap, remedy, detail: `${gap.detail} Next: ${remedy}` };
+  return withCoverageGapContext(source, {
+    ...gap, remedy, detail: `${gap.detail} Next: ${remedy}`,
+  });
 }
 
 function timestampMs(value) {
@@ -3779,6 +3781,26 @@ function timestampMs(value) {
   if (typeof value === "number") return Number.isFinite(value) ? value : NaN;
   const parsed = Date.parse(String(value));
   return Number.isFinite(parsed) ? parsed : NaN;
+}
+
+function coverageGapContext(source) {
+  const lastGood = timestampMs(source?.last_ingest_at);
+  const lastComplete = timestampMs(source?.last_complete_sweep_at);
+  return {
+    source_kind: typeof source?.kind === "string" && source.kind ? source.kind : null,
+    last_good_sync_at: Number.isFinite(lastGood) ? new Date(lastGood).toISOString() : null,
+    last_complete_sync_at: Number.isFinite(lastComplete) ? new Date(lastComplete).toISOString() : null,
+  };
+}
+
+function withCoverageGapContext(source, gap) {
+  const result = { ...gap };
+  for (const [key, value] of Object.entries(coverageGapContext(source))) {
+    // Classification metadata stays available inside this Worker without
+    // changing the long-standing public gap receipt byte shape.
+    Object.defineProperty(result, key, { value, enumerable: false });
+  }
+  return result;
 }
 
 function missingCoverageRunColumns(error) {
@@ -4024,12 +4046,12 @@ function assessCoverageRows(rows, {
       if (!s.last_complete_sweep_at) {
         const count = Number(s.document_count || 0);
         const recordLabel = count === 1 ? "record" : "records";
-        gaps.push({
+        gaps.push(withCoverageGapContext(s, {
           type: "history_unproven",
           source: s.name,
           detail: `The "${s.name}" source is historical, retired by the owner on ${retirement.retiredAt.slice(0, 10)}. Its ${count} stored ${recordLabel} stay searchable and it is no longer refreshed; its history was never proven complete, so a missing result is not proof that those records hold no answer.`,
           remedy: "No action needed.",
-        });
+        }));
       }
       continue;
     }

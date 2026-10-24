@@ -7,11 +7,10 @@
  * false`, so the remedy the Brain printed for the gap it created ("run
  * iMessage with --reset and no --limit") could never clear it. The owner-notes
  * source — the one behind `brain_remember` — had no code path that ever wrote
- * `last_complete_sweep_at` at all. Either one alone is enough: `coverageGaps`
- * walks every row of the source registry on an unrestricted owner read, so a
- * single unprovable source attaches a `history_unproven` gap to every query,
- * `/api/rag/unified` answers `coverage_incomplete`, and `brain check` marks
- * all fourteen categories provisional.
+ * `last_complete_sweep_at` at all. `coverageGaps` walks every row of the
+ * source registry on an unrestricted owner read, so either source can attach
+ * a `history_unproven` gap. Empty categories remain provisional, while a
+ * category with usable evidence from the other source remains answerable.
  *
  * This runs the real route against a real migrated D1 and then hands its real
  * responses to the real `brain check` gather/partition, so a regression shows
@@ -181,7 +180,7 @@ test("a Brain whose only sources are imessage and owner-notes can finish a recor
   assert.equal(completed > 0 && grouped.provisional.length === 0 && grouped.failed.length === 0, true);
 });
 
-test("clearing either sweep receipt puts every check category back to provisional", async (t) => {
+test("clearing one sweep keeps unrelated found evidence usable and empty categories provisional", async (t) => {
   const fixture = await newBrain();
   t.after(() => fixture.close());
 
@@ -202,9 +201,12 @@ test("clearing either sweep receipt puts every check category back to provisiona
 
     const gathered = await gather(checkSearch(fixture), { probes: PROBES, limit: 25 });
     const grouped = partition(gathered);
-    assert.equal(grouped.provisional.length, PROBES.length,
-      `one unproven source must make all ${PROBES.length} categories provisional`);
-    assert.equal(grouped.structured.length + grouped.freeform.length, 0);
+    assert.equal(grouped.provisional.length, PROBES.length - 1,
+      "the gap still makes every empty category provisional");
+    assert.equal(grouped.structured.length + grouped.freeform.length, 1,
+      "one category with evidence from another source remains usable");
+    assert.ok([...grouped.structured, ...grouped.freeform].every((item) => item.rows.length > 0),
+      "the non-provisional control reached real returned evidence");
 
     fixture.raw(
       "UPDATE sources SET last_complete_sweep_at=last_ingest_at WHERE name=?", source,

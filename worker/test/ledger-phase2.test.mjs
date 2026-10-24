@@ -204,8 +204,13 @@ test("selected account still pairs with owned counterparts across month boundari
   assert.equal(out.ledger.accounts.length, 1);
   assert.equal(out.ledger.accounts[0].debits_minor, 5555);
   assert.equal(out.ledger.candidate_transfer_count, 1);
+  const beforePartial = transactionReads(f);
   const income = await f.ask("How much income by category in October 2026?", { now: "2026-11-01T00:00:00Z" });
-  assert.equal(income.gaps[0]?.reason, "period_outside_coverage");
+  assert.equal(income.ledger.total_minor, 5555);
+  assert.equal(income.gaps[0]?.type, "ledger_coverage_stale");
+  assert.match(income.answer, /^As of 2026-10-11,/);
+  assert.match(income.side_note || "", /bank ledger.*Oct 11.*may be missing/i);
+  assert.ok(transactionReads(f) > beforePartial, "partial coverage still reached the transaction decision");
   f.raw("UPDATE fin_account_coverage SET covered_to='2026-10-31'");
   const inResult = await f.ask("How much income by category in October 2026?");
   assert.equal(inResult.ledger.total_minor, 5555);

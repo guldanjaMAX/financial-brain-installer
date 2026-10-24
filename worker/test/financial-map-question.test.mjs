@@ -157,6 +157,12 @@ function seedAccount(fixture, slug, entitySlug, label) {
 function seedFormationDocument(fixture) {
   const docUid = "upload:synthetic-formation-packet";
   fixture.raw(
+    `INSERT INTO sources
+       (name,kind,status,created_at,last_ingest_at,last_complete_sweep_at)
+     VALUES ('upload','upload','ready',?,?,?)`,
+    "2026-01-05T00:00:00.000Z", "2026-01-05T00:00:00.000Z", "2026-01-05T00:00:00.000Z",
+  );
+  fixture.raw(
     `INSERT INTO documents
        (doc_uid,source,source_id,title,ingested_at,content_hash,meta)
      VALUES (?,'upload',?,?,?,?,'{}')`,

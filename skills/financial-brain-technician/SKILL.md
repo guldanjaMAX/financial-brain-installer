@@ -885,7 +885,11 @@ answer rules" markers in the CLAUDE.md (Claude Code) or AGENTS.md (Codex)
 beside the Brain manifest, normally in `~/Financial Brain`. If that section is
 not already in this conversation, read it before the first money question. In
 short: answer first; then `Confidence: N%` with a reason and one asterisk per
-assumption. For non-money, use brain_search first, read excerpts, and give
+assumption. When a supported reply includes `side_note`, give the answer first
+and then relay that one short note. A paused or stale source is not by itself a
+refusal. Refuse for coverage only when the question's primary source cannot be
+read, has never completed a sync, or stopped before the period asked about.
+Never use incomplete coverage to claim that something is absent. For non-money, use brain_search first, read excerpts, and give
 each fact's source title and date. Search again with other wording, or sort
 "newest" for status, before saying no match. Put "as of <record
 date>" on every status. Never say "nothing recorded" from ordinary ranked

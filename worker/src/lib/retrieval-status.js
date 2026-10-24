@@ -36,6 +36,162 @@ export const ANSWER_WITHHELD = "answer_withheld";
 /** Wire value for `status` when the search completed and matched nothing. */
 export const NO_RESULTS = "no_results";
 
+/** Coverage policy shared by Worker answers and both MCP renderers. */
+export const COVERAGE_FINE = "fine";
+export const COVERAGE_STALE_BUT_COVERING = "stale_but_covering";
+export const COVERAGE_CATASTROPHIC = "catastrophic";
+
+const QUESTION_PRIMARY_SOURCES = Object.freeze({
+  money: new Set(["ledger", "plaid", "bank", "bank-feed", "payment", "stripe", "square"]),
+  email: new Set(["gmail"]),
+  documents: new Set(["drive", "upload"]),
+  meetings: new Set(["zoom", "calendar"]),
+  store: new Set(["custom-api", "store", "shopify", "square"]),
+});
+
+const NEVER_COMPLETE_GAPS = new Set(["never_synced", "source_unregistered"]);
+const COVERAGE_GAP_TYPES = new Set([
+  ...NEVER_COMPLETE_GAPS,
+  "sync_broken", "sync_review", "sync_in_progress", "refresh_unscheduled", "coverage_stale",
+  "coverage_unavailable", "ledger_coverage_stale", "ledger_out_of_coverage",
+]);
+const DAY_MS = 86_400_000;
+
+function normalizedSource(value) {
+  return String(value || "").trim().toLowerCase().replaceAll("_", "-");
+}
+
+function coverageQuestionType(question, explicitType = null) {
+  if (QUESTION_PRIMARY_SOURCES[explicitType]) return explicitType;
+  const q = String(question || "").normalize("NFKC").toLowerCase();
+  if (/\b(?:money|bank|balance|payments?|paid|deposits?|income|spend|spent|expenses?|charges?|transactions?|credits?|debits?|transfers?|profit|revenue)\b|\$\s*\d/.test(q)) return "money";
+  if (/\b(?:email|gmail|inbox|sender|sent mail|mail thread)\b/.test(q)) return "email";
+  if (/\b(?:meeting|zoom|calendar|appointment|scheduled call|recording)\b/.test(q)) return "meetings";
+  if (/\b(?:store|shop|orders?|inventory|products?|units sold|store sales)\b/.test(q)) return "store";
+  if (/\b(?:drive|documents?|files?|uploads?|folders?|pdf|spreadsheet)\b/.test(q)) return "documents";
+  return "other";
+}
+
+function gapSourceKind(gap) {
+  const explicit = normalizedSource(gap?.source_kind);
+  if (explicit && explicit !== "unregistered") return explicit;
+  const source = normalizedSource(gap?.source);
+  if (/\bledger\b/.test(source)) return "ledger";
+  for (const kind of ["gmail", "drive", "upload", "zoom", "calendar", "plaid", "stripe", "square", "shopify", "store"]) {
+    if (source === kind || source.includes(kind)) return kind;
+  }
+  return source;
+}
+
+function safeInstant(value) {
+  const instant = Date.parse(String(value || ""));
+  return Number.isFinite(instant) ? instant : null;
+}
+
+function lastGoodInstant(gap) {
+  return safeInstant(gap?.last_good_sync_at ?? gap?.last_ingest_at ?? gap?.last_synced_at ?? gap?.covered_through);
+}
+
+function sourceLabel(gap) {
+  const source = typeof gap?.source === "string" ? gap.source.trim() : "";
+  if (source) return source;
+  const kind = gapSourceKind(gap);
+  return ({ gmail: "Gmail", drive: "Drive", upload: "uploads", zoom: "Zoom",
+    calendar: "calendar", ledger: "bank ledger", "custom-api": "store feed" })[kind] || "source";
+}
+
+function shortDate(instant) {
+  const date = new Date(instant);
+  const weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][date.getUTCDay()];
+  const month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][date.getUTCMonth()];
+  return `${weekday} ${month} ${date.getUTCDate()}`;
+}
+
+function renderCoverageSideNote(gaps, nowMs) {
+  const clauses = [];
+  const seen = new Set();
+  for (const gap of gaps) {
+    const label = sourceLabel(gap);
+    if (seen.has(label)) continue;
+    seen.add(label);
+    const lastGood = lastGoodInstant(gap);
+    if (lastGood === null || nowMs - lastGood < 2 * DAY_MS) continue;
+    const paused = gap?.type === "sync_review" || gap?.held_for_review === true;
+    clauses.push(`${label} ${paused ? "has been paused" : "has not refreshed"} since ${shortDate(lastGood)}, so anything only in ${label} after that date may be missing.`);
+  }
+  return clauses.length ? `Side note: ${clauses.join(" ")}` : null;
+}
+
+/**
+ * Decide whether source gaps can stop this answer. A gap outside the question's
+ * primary source can qualify the answer, but cannot turn supported evidence
+ * into a refusal. Missing primary history and a primary source that stopped
+ * before the requested period remain hard stops.
+ */
+export function classifyQuestionCoverage({
+  question,
+  questionType = null,
+  periodStart = null,
+  gaps = [],
+  evidenceSources = [],
+  now = Date.now(),
+} = {}) {
+  const type = coverageQuestionType(question, questionType);
+  const evidenceKinds = new Set((Array.isArray(evidenceSources) ? evidenceSources : [])
+    .map((source) => normalizedSource(source)).filter(Boolean));
+  const primarySourceKinds = QUESTION_PRIMARY_SOURCES[type] || evidenceKinds;
+  const nowMs = safeInstant(now) ?? Date.now();
+  const periodStartMs = safeInstant(periodStart && String(periodStart).length === 10
+    ? `${periodStart}T00:00:00.000Z`
+    : periodStart);
+  const coverageGaps = (Array.isArray(gaps) ? gaps : []).filter((gap) => COVERAGE_GAP_TYPES.has(gap?.type));
+  const catastrophicGaps = [];
+  const notable = [];
+  let oldestCoveringPrimary = null;
+
+  for (const gap of coverageGaps) {
+    const kind = gapSourceKind(gap);
+    const primary = primarySourceKinds.has(kind);
+    const lastGood = lastGoodInstant(gap);
+    // `history_unproven` can accompany usable records from a completed ingest
+    // whose full declared history has not yet been certified. That is a
+    // qualification, not the same fact as a source that has never synced.
+    const neverComplete = NEVER_COMPLETE_GAPS.has(gap.type) ||
+      (gap.type === "history_unproven" && lastGood === null);
+    const outsidePeriod = periodStartMs !== null && (lastGood === null || lastGood < periodStartMs);
+    const explicitlyUnreadable = gap.type === "ledger_out_of_coverage" ||
+      (gap.type === "coverage_unavailable" && gap.primary_source === true);
+    if (primary && (neverComplete || outsidePeriod || explicitlyUnreadable)) {
+      catastrophicGaps.push(gap);
+      continue;
+    }
+    if (lastGood !== null && nowMs - lastGood >= 2 * DAY_MS) {
+      notable.push(gap);
+      if (primary && nowMs - lastGood > 14 * DAY_MS &&
+          (oldestCoveringPrimary === null || lastGood < oldestCoveringPrimary)) {
+        oldestCoveringPrimary = lastGood;
+      }
+    }
+  }
+
+  const classification = catastrophicGaps.length
+    ? COVERAGE_CATASTROPHIC
+    : notable.length
+      ? COVERAGE_STALE_BUT_COVERING
+      : COVERAGE_FINE;
+  return {
+    question_type: type,
+    primary_sources: [...primarySourceKinds],
+    classification,
+    refuse: classification === COVERAGE_CATASTROPHIC,
+    catastrophic_gaps: catastrophicGaps,
+    side_note: renderCoverageSideNote(notable, nowMs),
+    answer_prefix: oldestCoveringPrimary === null
+      ? null
+      : `As of ${new Date(oldestCoveringPrimary).toISOString().slice(0, 10)},`,
+  };
+}
+
 export const PROJECTION_CATCHING_UP = "projection-catching-up";
 const PROJECTION_PENDING_REASONS = new Set([PROJECTION_CATCHING_UP, "projection-incomplete"]);
 

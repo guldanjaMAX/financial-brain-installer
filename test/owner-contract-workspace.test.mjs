@@ -28,9 +28,9 @@ const ACCOUNTS = ["- ****0001 = business checking", "- ****0002 = personal card"
 const ACCOUNT_HEADING = "## My accounts (fill in once, after the owner confirms)";
 const SAVE_HEADING = "## Financial Brain: at the end of a working session";
 const hashes = {
-  "answer-contract-v1.md": "440a931d73efce5e226e7e44da5d84b52ca8497754f7fd40526c8736348f2451",
-  "money-rules-v3.md": "5413cfbf5eb5b796ce3a2c2dd29994443ed334ff1cbe62b7b1d64e650cd10f33",
-  "money-rules-v3-windows.md": "b2eee70b4bd10a94075d8c1cfcb7a5b8767d50b1803fe3e361fb404fc27dcb6b",
+  "answer-contract-v1.md": "37ade37f9b10724687845868205f14795bf84d9b2ed5e95ec24c5e99ecee8c05",
+  "money-rules-v3.md": "7d38d56f4013b4fb180373d81e25559a1249473be7117c42ec96c54a1e0d1fcb",
+  "money-rules-v3-windows.md": "eab7dd6c3c0201f478a9a2029cac488a1b8b59e6763350e881c926dc0a69d6ff",
 };
 // Repeated writer/race tests exercise real filesystem checks. Native reparse
 // detection has separate refusal/control and one bounded Windows smoke test;
@@ -695,7 +695,7 @@ test("i: skill insertion is exact, bounded and renders answer-setup commands on 
   const skill = readFileSync(skillPath, "utf8");
   assert.equal(count(skill, "## Answer from the Brain\n"), 1);
   const section = skill.slice(skill.indexOf("## Answer from the Brain\n"), skill.indexOf("## Credential boundary\n"));
-  assert.equal(sha(section), "5c9b64c1f19c6abeaa525250486350c45d458c15b947aa0a07f3d3ac21beab10");
+  assert.equal(sha(section), "dae8c26f7aa4ccc47c004d110fcef18be7239e84214feee465493165fbc348f0");
   assert.ok(Buffer.byteLength(skill) <= 72 * 1024);
   for (const platform of ["darwin", "win32"]) {
     const rendering = { platform, nodePath: "C:\\Runtime\\node.exe", scriptPath: "C:\\Brain\\brain.mjs", env: {}, existsSync: () => false };
