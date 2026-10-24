@@ -65,6 +65,7 @@ export async function fixture(run, { scannerEnabled = true } = {}) {
           saveState: (_path, state) => { persisted = structuredClone(state); },
         }),
         gmail: {
+          listAttachmentCandidates: async () => ({ ids: [], nextPageToken: null }),
           listHistory: async (_token, history) => {
             f.histories.push(history);
             return { ids: f.ids, deletedIds: [], historyId: f.marker };

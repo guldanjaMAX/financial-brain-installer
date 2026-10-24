@@ -503,6 +503,9 @@ Follow the one printed `brain ingest <manifest> --source <source>
 --apply-removals <fingerprint>` command to apply the saved exact plan. Keep any
 additional `--approve-removals` argument in that command. Then rerun normal ingest
 to finish the source cursor. A dry run cannot authorize removal.
+Gmail's separate attachment backfill settles normal history first and keeps its
+replacement cleanup in a separate review. The same exact apply requirement
+holds, but pending backfill cleanup does not hold later history windows.
 
 QuickBooks Desktop uses the same boundary for every stored tombstone, including
 small removals. Its printed command retains `--from quickbooks-desktop` and
@@ -945,11 +948,43 @@ checked separately and `metadata.gmail_body` records its outcome. Missing
 provider or message MIME evidence still blocks the cursor, and systemic
 extractor failures still escape as operational errors. No attachment bytes
 are written to disk and parser diagnostics are not copied into exclusion text.
-Gmail extraction policy 2 stamps revisions with `gmail-extraction-2:`. Its
-current membership fingerprint coupling still triggers a full legacy sweep.
-This is an unresolved candidate blocker: a separate capped, resumable
-supported-attachment backfill is designed but not implemented. Current stamped
-revisions can resume an interrupted sweep without downloading the body again.
+Gmail extraction policy 2 stamps revisions with `gmail-extraction-2:`. The
+membership fingerprint retains its historical extraction value of `1`, so an
+extraction upgrade alone does not select a full membership sweep. Query, date
+floor, excluded labels and scanner changes retain their membership semantics.
+Current stamped revisions can resume an interrupted sweep without downloading
+the body again.
+
+After normal history settles, a separate backfill searches the eligible-mail
+query with `has:attachment {filename:xlsx filename:xls filename:csv filename:pdf}`.
+Each run processes at most 100 candidates and 10 provider pages. A separate
+2,000-token safety bound prevents an unbounded pagination chain.
+The private `gmail_attachment_backfill` checkpoint stores pending IDs before
+raw reads and resumes them before requesting another page. Exact family
+acceptance or a fixed terminal exclusion retires an ID; missing provider or
+MIME evidence and incomplete writes retain it. Ordinary mail is not fetched
+merely to add attachment metadata. A completed compatible checkpoint performs
+no further candidate reads, sends or replacement previews.
+
+The checkpoint binds extraction version, scanner fingerprint and candidate
+query. An incompatible binding restarts candidate enumeration. An expired page
+token restarts only this search and retains accepted extraction receipts.
+Malformed state or provider pages cannot grant completion. Search pagination
+is not a stable mailbox snapshot or proof of source absence; normal history
+handles mail that changes during the walk. No complete mailbox attachment
+census is claimed.
+
+Candidate replacement cleanup uses an isolated review state bound to exact
+accepted revisions, selected families, stored targets, source, manifest and
+runtime. Applying a saved plan still needs explicit approval and exact
+readback. Pending cleanup cannot mark the backfill complete, block subsequent
+normal history, or rewind its settled cursor. Candidate preview never requests
+the full stored-source inventory. A changed candidate revision or migration
+binding retains validated cleanup IDs, invalidates the old approval, and queues
+a fresh read and preview. An unrelated D1 mutation still invalidates the remote
+inventory marker and requires a fresh preview. The existing source lease covers both lanes;
+dry runs write neither checkpoint nor documents nor source receipts. There is
+no new manifest setting.
 Attachment coverage is synthetic and offline; real-mailbox acceptance remains
 a separate unproven field gate.
 
@@ -1118,6 +1153,9 @@ it never permits automatic deletion. The printed command includes the exact
 `--apply-removals` fingerprint and any required `--approve-removals` value.
 Pending deletions return through the same boundary. A fresh ordinary pass can
 clear restored candidates; a changed stored inventory invalidates saved apply.
+Gmail attachment backfill previews only its candidate families after normal
+history settles. Its isolated replacement plan can remain pending while later
+history advances; exact apply and stored-inventory fencing still apply.
 
 Any account-wide changed item is rebuilt through the reviewed-root traversal
 before content is read.

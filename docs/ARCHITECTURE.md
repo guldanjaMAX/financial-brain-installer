@@ -434,10 +434,25 @@ deliveries retain separate families. Explicit report dates remain distinct
 from receipt dates, with absent or conflicting evidence left unknown. This
 does not establish global report deduplication, latest-report selection or
 structured-ledger ingestion. Extraction policy 2 stamps accepted revisions.
-The current legacy migration still couples that version to membership and
-forces a full sweep. Replacing it with an independent capped attachment
-candidate checkpoint is an unresolved candidate blocker. Current stamped
-revisions retain the interrupted-sweep fast path.
+Membership keeps the historical extraction value of `1`; an extraction-only
+upgrade does not force a full mailbox sweep. After normal history settles,
+an independent backfill queries only supported-attachment candidates and
+processes at most 100 candidates and 10 provider pages per run, with a separate
+2,000-token pagination safety bound. Its private `gmail_attachment_backfill`
+checkpoint persists pending IDs before raw
+reads and binds the query, extraction version and scanner fingerprint.
+Unfinished candidates resume before another page, and incomplete writes or
+missing provider/MIME evidence remain pending. Expired pagination restarts
+only the candidate search while preserving accepted extraction receipts.
+Search results never establish source absence or a full attachment census.
+Candidate replacement cleanup has a separate exact approval binding for
+accepted revisions, families, targets, source, manifest and runtime. Pending
+cleanup keeps backfill coverage incomplete but cannot hold normal history or
+rewind its cursor. The source lease covers both lanes, and candidate preview
+never enumerates the full stored-source inventory. Current stamped revisions
+retain the interrupted-sweep fast path. Changed accepted revisions or migration
+bindings requeue validated cleanup identities for fresh reads and previews;
+the old approval never authorizes targets under the new binding.
 Gmail credential refusals remain measured in `docs_refused` but do not make a
 run fail when they are its only non-accepted outcome. The ready receipt records
 the count in its detail and keeps `complete_sweep` false, because the Worker

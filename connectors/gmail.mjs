@@ -27,6 +27,8 @@ export const API = "https://gmail.googleapis.com/gmail/v1";
 export const SOURCE_TYPE = "email";
 export const GMAIL_MAX_PAGES = 2_000;
 export const GMAIL_EXTRACTION_POLICY_VERSION = 2;
+export const GMAIL_ATTACHMENT_BACKFILL_LIMIT = 100;
+const ATTACHMENT_CANDIDATE_FILTER = "has:attachment {filename:xlsx filename:xls filename:csv filename:pdf}";
 export const gmailExtractionVersion = (value) => `gmail-extraction-${GMAIL_EXTRACTION_POLICY_VERSION}:${value}`;
 export function gmailRevisionIsCurrent(value) {
   const prefix = gmailExtractionVersion("");
@@ -102,13 +104,19 @@ export function gmailQuery({ since = null } = {}) {
   return floor ? `${DEFAULT_QUERY} after:${floor.replaceAll("-", "/")}` : DEFAULT_QUERY;
 }
 
+export function gmailAttachmentCandidateQuery({ since = null } = {}) {
+  return `${gmailQuery({ since })} ${ATTACHMENT_CANDIDATE_FILTER}`;
+}
+
 /** Stable identity for every choice that can change Gmail corpus membership. */
 export function gmailPolicyFingerprint({ credentialScannerFingerprint = "", since = null } = {}) {
   return createHash("sha256").update(JSON.stringify({
     version: 1,
     query: gmailQuery({ since }),
     excludedLabelIds: [...DEFAULT_EXCLUDED_LABEL_IDS].sort(),
-    extractionPolicyVersion: GMAIL_EXTRACTION_POLICY_VERSION,
+    // Retain the historical hash bytes. Extraction upgrades have their own
+    // candidate checkpoint and must not turn a live history cursor into a sweep.
+    extractionPolicyVersion: 1,
     credentialScannerFingerprint: String(credentialScannerFingerprint || ""),
   })).digest("hex");
 }
@@ -181,6 +189,65 @@ function requireMessageId(value, lane) {
   const id = typeof value === "string" ? value.trim() : "";
   if (!id) throw new DriveError(`Gmail returned an empty message id while reading ${lane}`, 200, "invalidMessageId");
   return id;
+}
+
+function attachmentPageToken(value) {
+  if (value == null) return null;
+  if (typeof value !== "string" || !value || value !== value.trim() ||
+      value.length > GMAIL_PAGE_TOKEN_MAX_LENGTH || /[\u0000-\u0020\u007f]/.test(value)) {
+    throw new DriveError("Gmail returned an invalid attachment page token", 200, "invalidPageToken");
+  }
+  return value;
+}
+
+/** One bounded candidate page, never an authoritative source inventory. */
+export async function listAttachmentCandidates(getAccessToken, {
+  query = gmailAttachmentCandidateQuery(), pageToken = null,
+  pageSize = GMAIL_ATTACHMENT_BACKFILL_LIMIT, opts = {},
+} = {}) {
+  try {
+    if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > GMAIL_ATTACHMENT_BACKFILL_LIMIT) {
+      throw new TypeError("Gmail attachment page size must be between 1 and 100");
+    }
+    if (typeof query !== "string" || !query.endsWith(` ${ATTACHMENT_CANDIDATE_FILTER}`)) {
+      throw new TypeError("Gmail attachment search must retain the supported-file filter");
+    }
+    const requestedToken = attachmentPageToken(pageToken);
+    let page;
+    try {
+      page = await api(getAccessToken, "/users/me/messages", {
+        ...opts, raw: false,
+        search: { q: query, maxResults: pageSize, pageToken: requestedToken },
+      });
+    } catch (error) {
+      // Search tokens are not durable history markers. A rejected saved token
+      // restarts only candidate enumeration; it never establishes completion.
+      if (requestedToken && error instanceof DriveError && error.providerStatus === 400 &&
+          ["invalidPageToken", "pageTokenExpired", "invalidArgument", "INVALID_ARGUMENT"].includes(error.providerReason)) {
+        throw new DriveError("Gmail attachment page token must be restarted", 400, "attachmentPageTokenExpired", {
+          cause: error, providerReason: error.providerReason, providerStatus: 400,
+        });
+      }
+      throw error;
+    }
+    if (!page || typeof page !== "object" || Array.isArray(page) ||
+        (Object.hasOwn(page, "messages") && !Array.isArray(page.messages)) ||
+        (page.messages || []).length > pageSize) {
+      throw new DriveError("Gmail returned an invalid attachment candidate page", 200, "invalidAttachmentCandidatePage");
+    }
+    const ids = (page.messages || []).map(message => message?.id);
+    if (ids.some(id => typeof id !== "string" || !/^[A-Za-z0-9_-]{1,256}$/.test(id)) ||
+        new Set(ids).size !== ids.length) {
+      throw new DriveError("Gmail returned an invalid attachment candidate identity", 200, "invalidAttachmentCandidateId");
+    }
+    const followingToken = attachmentPageToken(page.nextPageToken);
+    if (followingToken && followingToken === requestedToken) {
+      throw new DriveError("Gmail repeated an attachment candidate page token", 200, "repeatedPageToken");
+    }
+    return { ids, nextPageToken: followingToken };
+  } catch (error) {
+    throw gmailOperationError(error, GMAIL_OPERATIONS.list);
+  }
 }
 
 /** Message ids matching a query, newest first. */

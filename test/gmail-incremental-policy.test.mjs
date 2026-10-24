@@ -301,11 +301,11 @@ if (process.platform !== "win32") {
     sinceSchema?.type === "string" && sinceSchema?.format === "date" &&
     sinceSchema?.pattern === "^\\d{4}-\\d{2}-\\d{2}$",
     JSON.stringify(sinceSchema));
-  check("an absent Gmail floor preserves the default query under the attachment policy",
+  check("an absent Gmail floor preserves the legacy membership query and fingerprint",
     gmailQuery() === DEFAULT_QUERY &&
     gmailPolicyFingerprint({ credentialScannerFingerprint: "fixture-scanner" }) ===
       gmailPolicyFingerprint({ credentialScannerFingerprint: "fixture-scanner", since: null }) &&
-    gmailPolicyFingerprint({ credentialScannerFingerprint: "fixture-scanner" }) !==
+    gmailPolicyFingerprint({ credentialScannerFingerprint: "fixture-scanner" }) ===
       "7220687d0100ae90edf4a17419811b14a1c537a0fc55bbe005b161069424385a",
     gmailQuery());
   check("a Gmail floor changes both the full-list query and policy fingerprint",

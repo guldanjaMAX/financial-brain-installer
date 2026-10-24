@@ -59,6 +59,7 @@ async function sweep(savedRevision, { stored = true, refuse = false } = {}) {
           saveState: (_path, state) => { persistedState = structuredClone(state); },
         }),
         gmail: {
+          listAttachmentCandidates: async () => ({ ids: [], nextPageToken: null }),
           currentHistoryId: async () => "next-history",
           listMessages: async function* () { yield "report-message"; },
           listHistory: async () => { throw new Error("a changed policy requires a full sweep"); },

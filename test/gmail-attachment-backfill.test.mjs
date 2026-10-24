@@ -11,10 +11,8 @@ import {
 } from "../connectors/gmail.mjs";
 import * as ingest from "../ingest/run.mjs";
 
-// M1 acceptance tests. The candidate pager and checkpoint below are the proposed
-// contract in partner-reports/qbo-attach-backfill-design.md. They intentionally
-// remain red until the separate backfill is implemented; this file does not add
-// a test-only implementation or weaken the ordinary source runner.
+// Real runner acceptance tests for the separate candidate checkpoint. Provider
+// and Worker boundaries reject every route outside these synthetic fixtures.
 const scanner = credentialScannerFingerprint(true);
 const candidateQuery = `${gmailQuery()} has:attachment {filename:xlsx filename:xls filename:csv filename:pdf}`;
 const currentPolicy = () => gmailPolicyFingerprint({ credentialScannerFingerprint: scanner });
@@ -66,6 +64,7 @@ async function fixture(run, {
     fullLists: 0, inventories: 0, histories: 0, candidatePages: [],
     rawReads: [], sent: [], previewFamilies: [], receipts: [], saves: 0,
     historyIds: [], marker: "history-after", changed: [],
+    page: null, envelope: null, batch: null, preview: null, request: null, onSave: null,
   };
   const originalFetch = globalThis.fetch;
   const originalLog = console.log;
@@ -80,6 +79,7 @@ async function fixture(run, {
       const docs = JSON.parse(options.body).docs;
       assert.ok(Array.isArray(docs), "fixture batch must contain documents");
       observations.sent.push(...docs.map(doc => doc.source_id));
+      if (observations.batch) return json(observations.batch(docs));
       return json({ results: docs.map(doc => ({ source_id: doc.source_id, status: "updated", chunks: 1 })) });
     }
     if (parsed.pathname === "/api/admin/brain/documents") return json({ vector_backlog: { pending: 1 } });
@@ -87,15 +87,18 @@ async function fixture(run, {
   };
   const once = async (flags = {}) => {
     let failed = false;
+    let outcome = null;
     try {
-      await cmdIngestRemote(manifest, manifestPath, { from: "gmail", source: "gmail", ...flags }, {
+      outcome = await cmdIngestRemote(manifest, manifestPath, { from: "gmail", source: "gmail", ...flags }, {
         withSourceIngestLock: async (_options, task) => task({ assertOwned() {} }),
         resolveBaseUrl: async () => "https://fixture.invalid",
         resolveAdminKey: () => "synthetic-owner-authority",
         getAccessToken: async () => { throw new Error("provider credential seam must remain unused"); },
         ingestLib: async () => ({ ...ingest,
           loadState: () => structuredClone(persisted),
-          saveState: (_path, state) => { observations.saves++; persisted = structuredClone(state); },
+          saveState: (_path, state) => {
+            observations.saves++; persisted = structuredClone(state); observations.onSave?.(state);
+          },
         }),
         // A dependency-injected bound for a small resume rehearsal. Production
         // retains the fixed 100-candidate cap; this is not manifest configuration.
@@ -123,6 +126,7 @@ async function fixture(run, {
             assert.ok(Number.isInteger(pageSize) && pageSize > 0 && pageSize <= cap,
               "candidate provider page must honor the remaining run budget");
             observations.candidatePages.push(pageToken);
+            if (observations.page) return observations.page({ pageToken, pageSize });
             const offset = pageToken == null ? 0 : Number(pageToken.replace("candidate-page-", ""));
             assert.ok(Number.isSafeInteger(offset) && offset >= 0, "synthetic page token must be valid");
             const ids = reports.slice(offset, offset + pageSize);
@@ -132,6 +136,7 @@ async function fixture(run, {
           messagePolicy: async () => ({ allowed: true, cursor_blocking: false }),
           toEnvelope: async (_token, id) => {
             observations.rawReads.push(id);
+            if (observations.envelope) return observations.envelope(id);
             return { version: gmailExtractionVersion(`revision-${id}`), envelope: {
               source_type: "gmail", source_id: id, title: "Synthetic correspondence",
               content: reports.includes(id)
@@ -146,17 +151,21 @@ async function fixture(run, {
           return receipt;
         },
         removalPlanRequest: async ({ body }) => {
+          if (observations.request) return observations.request(body);
           assert.equal(body.action, "preview", "no removal is authorized by this fixture");
           observations.previewFamilies.push(...(body.families || []).map(family => family.base_doc_uid));
+          if (observations.preview) return observations.preview(body);
           return { marker: { instance: "fixture", nonce: "fixture", generation: 1, runtime: "fixture" },
             targets: [], documents: 0 };
         },
+        removalPlanRuntime: () => "synthetic-runtime",
       });
     } catch { failed = true; }
     // Return only closed evidence. Errors and envelopes are never test output.
-    return { failed, state: structuredClone(persisted) };
+    return { failed, state: structuredClone(persisted), outcome };
   };
-  try { await run({ observations, once, state: () => structuredClone(persisted) }); }
+  try { await run({ observations, once, state: () => structuredClone(persisted),
+    editState: change => change(persisted) }); }
   finally {
     globalThis.fetch = originalFetch;
     console.log = originalLog;
@@ -202,13 +211,13 @@ test("control: a completed-checkpoint dry run performs no state or receipt write
   });
 });
 
-test("M1 red: an extraction upgrade preserves the legacy Gmail membership fingerprint", () => {
+test("an extraction upgrade preserves the legacy Gmail membership fingerprint", () => {
   assert.equal(gmailQuery(), gmailQuery({ since: null }), "control: the membership query is unchanged");
   assert.equal(currentPolicy(), legacyPolicy(),
     "an extraction-only upgrade must not select an authoritative membership sweep");
 });
 
-test("M1 red: 140000 legacy messages fetch, send and preview only three report candidates", async () => {
+test("140000 legacy messages fetch, send and preview only three report candidates", async () => {
   const candidates = ["report-one", "report-two", "report-three"];
   await fixture(async ({ observations: seen, once }) => {
     const result = await once();
@@ -228,7 +237,7 @@ test("M1 red: 140000 legacy messages fetch, send and preview only three report c
   }, { mailboxSize: 140_000, reports: candidates, legacy: true, backfill: null });
 });
 
-test("M1 red: a capped backfill resumes pending candidates before requesting another page", async () => {
+test("a capped backfill resumes pending candidates before requesting another page", async () => {
   const reports = ["report-one", "report-two", "report-three"];
   await fixture(async ({ observations: seen, once }) => {
     const first = await once();
@@ -255,4 +264,292 @@ test("M1 red: a capped backfill resumes pending candidates before requesting ano
     assert.equal(third.state.history_id, "history-final");
     assert.equal(third.state.gmail_attachment_backfill.complete, true);
   }, { reports, cap: 1, backfill: checkpoint({ pending: reports.slice(0, 2), next: "candidate-page-2" }) });
+});
+
+test("a missing acknowledgement keeps the candidate pending while history stays live", async () => {
+  await fixture(async ({ observations: seen, once }) => {
+    seen.batch = () => ({ results: [] });
+    const failed = await once();
+    assert.equal(failed.failed, true);
+    assert.equal(failed.state.history_id, "history-after");
+    assert.deepEqual(failed.state.gmail_attachment_backfill.pending_ids, ["report-one"]);
+    assert.equal(failed.state.done["gmail:report-one"], "legacy-message-revision");
+    assert.equal(seen.previewFamilies.length, 0);
+    seen.batch = null;
+    seen.marker = "history-recovered";
+    const recovered = await once();
+    assert.equal(recovered.failed, false);
+    assert.equal(recovered.state.history_id, "history-recovered");
+    assert.equal(recovered.state.gmail_attachment_backfill.complete, true);
+    assert.deepEqual(seen.candidatePages, [null]);
+  }, { reports: ["report-one"], backfill: null });
+});
+
+test("missing MIME evidence retains a candidate and a recovered provider read finishes it", async () => {
+  await fixture(async ({ observations: seen, once }) => {
+    seen.envelope = id => ({ skip: { id, reason: "message evidence unavailable" }, cursor_blocking: true });
+    const held = await once();
+    assert.equal(held.failed, true);
+    assert.equal(held.state.history_id, "history-after");
+    assert.deepEqual(held.state.gmail_attachment_backfill.pending_ids, ["report-one"]);
+    assert.equal(seen.sent.length, 0);
+    seen.envelope = null;
+    const recovered = await once();
+    assert.equal(recovered.failed, false);
+    assert.equal(recovered.state.gmail_attachment_backfill.complete, true);
+    assert.deepEqual(seen.sent, ["report-one"]);
+  }, { reports: ["report-one"], backfill: null });
+});
+
+test("a candidate dry run is capped and changes no checkpoint, receipts or documents", async () => {
+  await fixture(async ({ observations: seen, once, state }) => {
+    const before = state();
+    const result = await once({ "dry-run": true });
+    assert.equal(result.failed, false);
+    assert.deepEqual(seen.rawReads, ["report-one"]);
+    assert.equal(result.outcome.would_send, 1);
+    assert.deepEqual(result.state, before);
+    assert.equal(seen.saves + seen.sent.length + seen.receipts.length + seen.previewFamilies.length, 0);
+  }, { cap: 1, backfill: null });
+});
+
+test("invalid provider pages cannot grant completion and a valid page recovers", async () => {
+  for (const page of [{ ids: null }, { ids: ["bad/id"], nextPageToken: null },
+    { ids: ["report-one", "report-two"], nextPageToken: null },
+    { ids: [], nextPageToken: "candidate-page-1" }]) {
+    await fixture(async ({ observations: seen, once }) => {
+      seen.page = () => page;
+      const held = await once();
+      assert.equal(held.failed, true);
+      assert.equal(held.state.history_id, "history-after");
+      assert.equal(held.state.gmail_attachment_backfill.complete, false);
+      assert.equal(seen.rawReads.length, 0);
+      seen.page = null;
+      const control = await once();
+      assert.equal(control.failed, false);
+      assert.equal(control.state.gmail_attachment_backfill.complete, true);
+    }, { reports: ["report-one", "report-two"], cap: 1,
+      backfill: checkpoint({ next: "candidate-page-1" }) });
+  }
+});
+
+test("expired candidate tokens restart candidate search without replaying accepted content", async () => {
+  await fixture(async ({ observations: seen, once }) => {
+    const first = await once();
+    assert.equal(first.failed, false);
+    assert.deepEqual(seen.sent, ["report-one"]);
+    seen.page = () => { const error = new Error("synthetic expired page"); error.reason = "attachmentPageTokenExpired"; throw error; };
+    seen.marker = "history-later";
+    const expired = await once();
+    assert.equal(expired.state.history_id, "history-later");
+    assert.equal(expired.state.gmail_attachment_backfill.complete, false);
+    assert.equal(expired.state.gmail_attachment_backfill.next_page_token, null);
+    seen.page = null;
+    await once();
+    const final = await once();
+    assert.equal(final.failed, false);
+    assert.equal(final.state.gmail_attachment_backfill.complete, true);
+    assert.deepEqual(seen.rawReads, ["report-one", "report-two"]);
+    assert.deepEqual(seen.sent, ["report-one", "report-two"]);
+    assert.equal(seen.fullLists + seen.inventories, 0);
+  }, { reports: ["report-one", "report-two"], cap: 1, backfill: null });
+});
+
+test("empty pages consume a separate provider page budget", async () => {
+  await fixture(async ({ observations: seen, once }) => {
+    seen.page = () => ({ ids: [], nextPageToken: `empty-${seen.candidatePages.length}` });
+    const bounded = await once();
+    assert.equal(bounded.failed, false);
+    assert.equal(seen.candidatePages.length, 10);
+    assert.equal(bounded.state.gmail_attachment_backfill.complete, false);
+    assert.equal(bounded.state.history_id, "history-after");
+    seen.page = () => ({ ids: [], nextPageToken: null });
+    const control = await once();
+    assert.equal(control.failed, false);
+    assert.equal(control.state.gmail_attachment_backfill.complete, true);
+  }, { backfill: null });
+});
+
+test("independent candidate cleanup keeps history live and applies only its exact approved targets", async () => {
+  await fixture(async ({ observations: seen, once }) => {
+    let removed = false;
+    const marker = () => ({ instance: "fixture", nonce: "fixture", generation: removed ? 2 : 1, runtime: "fixture" });
+    seen.request = body => {
+      if (body.action === "apply") {
+        assert.deepEqual(body.targets, ["gmail:report-one#part1of2"]);
+        assert.equal(body.marker.generation, 1);
+        removed = true;
+        return { documents: 1, marker: marker() };
+      }
+      assert.equal(body.action, "preview");
+      const targets = !removed && body.families.some(f => f.base_doc_uid === "gmail:report-one")
+        ? ["gmail:report-one#part1of2"] : [];
+      return { targets, documents: targets.length, marker: marker() };
+    };
+    const first = await once();
+    assert.equal(first.failed, true);
+    assert.equal(first.state.history_id, "history-after");
+    assert.ok(first.state.gmail_attachment_backfill.review.ingest_removal_plan);
+    assert.equal(first.state.ingest_removal_plan, undefined);
+    assert.equal(first.state.ingest_pending_families, undefined);
+    seen.marker = "history-later";
+    seen.changed = ["new-body"];
+    const second = await once();
+    assert.equal(second.failed, true);
+    assert.equal(second.state.history_id, "history-later");
+    assert.deepEqual(seen.rawReads, ["report-one", "new-body"]);
+    assert.equal(removed, false);
+    const fingerprint = second.state.gmail_attachment_backfill.review.ingest_removal_plan.fingerprint;
+    const applied = await once({ "apply-removals": fingerprint });
+    assert.equal(applied.failed, false);
+    assert.equal(removed, true);
+    assert.equal(applied.state.history_id, "history-later");
+    seen.changed = [];
+    const resumed = await once();
+    assert.equal(resumed.failed, false);
+    assert.equal(resumed.state.gmail_attachment_backfill.complete, true);
+    assert.deepEqual(seen.rawReads, ["report-one", "new-body"]);
+  }, { reports: ["report-one"], backfill: null });
+});
+
+test("a completed marker cannot conceal pending candidate cleanup", async () => {
+  await fixture(async ({ once, editState }) => {
+    editState(state => { state.gmail_attachment_backfill.review = { ingest_removal_plan: { fingerprint: "pending" } }; });
+    const blocked = await once();
+    assert.equal(blocked.failed, true);
+    assert.equal(blocked.state.history_id, "history-after");
+    assert.ok(blocked.state.gmail_attachment_backfill.review.ingest_removal_plan);
+    editState(state => { delete state.gmail_attachment_backfill.review; });
+    assert.equal((await once()).failed, false);
+  });
+});
+
+test("a rejected cleanup intent cannot become a resumable accepted candidate", async () => {
+  await fixture(async ({ observations: seen, once }) => {
+    seen.envelope = id => ({ version: gmailExtractionVersion("new"), envelope: {
+      source_type: "wrong-source", source_id: id, content: "Synthetic complete report content with readable accounts.",
+    } });
+    const blocked = await once();
+    assert.equal(blocked.failed, true);
+    assert.equal(blocked.state.done["gmail:report-one"], "legacy-message-revision");
+    assert.deepEqual(blocked.state.gmail_attachment_backfill.pending_ids, ["report-one"]);
+    seen.envelope = null;
+    const control = await once();
+    assert.equal(control.failed, false);
+    assert.equal(control.state.gmail_attachment_backfill.complete, true);
+    assert.deepEqual(seen.rawReads, ["report-one", "report-one"]);
+  }, { reports: ["report-one"], backfill: null });
+});
+
+test("malformed nested reviews cannot authorize an exhausted or completed checkpoint", async () => {
+  for (const complete of [true, false]) await fixture(async ({ once, editState }) => {
+    editState(state => {
+      state.gmail_attachment_backfill.enumeration_started = true;
+      state.gmail_attachment_backfill.review = { version: 1, done: [], skipped: {} };
+    });
+    const blocked = await once();
+    assert.equal(blocked.failed, true);
+    assert.equal(blocked.state.history_id, "history-after");
+    editState(state => { delete state.gmail_attachment_backfill.review; });
+    assert.equal((await once()).failed, false);
+  }, { backfill: checkpoint({ complete }) });
+});
+
+test("partial family acceptance stays pending until every split part is acknowledged", async () => {
+  await fixture(async ({ observations: seen, once }) => {
+    seen.batch = docs => ({ results: docs.map(doc => ({ source_id: doc.source_id,
+      status: doc.source_id.endsWith("#part2of3") ? "refused" : "updated", chunks: 1 })) });
+    // Three parts make the interrupted family cross the real batch boundary.
+    seen.envelope = id => ({ version: gmailExtractionVersion("split"), envelope: {
+      source_type: "gmail", source_id: id, title: "Synthetic long report",
+      content: "Operating account and report evidence. ".repeat(24_000),
+    } });
+    const blocked = await once();
+    assert.equal(blocked.failed, true);
+    assert.equal(blocked.state.history_id, "history-after");
+    assert.equal(blocked.state.done["gmail:report-one"], "legacy-message-revision");
+    assert.deepEqual(blocked.state.gmail_attachment_backfill.pending_ids, ["report-one"]);
+    assert.equal(seen.previewFamilies.length, 0);
+    seen.batch = null;
+    const accepted = await once();
+    assert.equal(accepted.failed, false);
+    assert.equal(accepted.state.gmail_attachment_backfill.complete, true);
+    assert.equal(accepted.state.done["gmail:report-one"], gmailExtractionVersion("split"));
+    assert.deepEqual(seen.previewFamilies, ["gmail:report-one"]);
+  }, { reports: ["report-one"], backfill: null });
+});
+
+test("a changed scanner binding restarts candidate enumeration and retains normal history", async () => {
+  await fixture(async ({ observations: seen, once, editState }) => {
+    editState(state => { state.gmail_attachment_backfill.scanner_fingerprint = "previous-scanner"; });
+    const result = await once();
+    assert.equal(result.failed, false);
+    assert.equal(result.state.history_id, "history-after");
+    assert.deepEqual(seen.sent, ["report-one"]);
+    assert.equal(result.state.gmail_attachment_backfill.scanner_fingerprint, scanner);
+    assert.equal(result.state.gmail_attachment_backfill.complete, true);
+    assert.equal((await once()).failed, false);
+    assert.deepEqual(seen.sent, ["report-one"]);
+  }, { reports: ["report-one"] });
+});
+
+test("a changed accepted revision or migration binding rebuilds pending candidate cleanup", async () => {
+  for (const change of ["revision", "scanner"]) await fixture(async ({ observations: seen, once, editState }) => {
+    let targets = ["gmail:report-one#part1of2"];
+    seen.preview = () => ({ targets, documents: targets.length,
+      marker: { instance: "fixture", nonce: "fixture", generation: 1, runtime: "fixture" } });
+    const first = await once();
+    assert.equal(first.failed, true);
+    assert.ok(first.state.gmail_attachment_backfill.review.ingest_removal_plan);
+    editState(state => {
+      if (change === "revision") state.done["gmail:report-one"] = gmailExtractionVersion("changed-by-history");
+      else state.gmail_attachment_backfill.scanner_fingerprint = "older-scanner";
+    });
+    seen.marker = "history-later";
+    targets = [];
+    const recovered = await once();
+    assert.equal(recovered.failed, false);
+    assert.equal(recovered.state.history_id, "history-later");
+    assert.equal(recovered.state.gmail_attachment_backfill.complete, true);
+    assert.equal(recovered.state.gmail_attachment_backfill.review?.ingest_removal_plan, undefined);
+    assert.deepEqual(seen.rawReads, ["report-one", "report-one"]);
+    assert.deepEqual(seen.sent, ["report-one", "report-one"]);
+    assert.equal(seen.fullLists + seen.inventories, 0);
+  }, { reports: ["report-one"], backfill: null });
+});
+
+test("an unfinished dry preview rejects malformed cleanup while a clean preview remains bounded", async () => {
+  await fixture(async ({ observations: seen, once, editState, state }) => {
+    editState(value => { value.gmail_attachment_backfill.review = { version: 1, done: [], skipped: {} }; });
+    const before = state();
+    const blocked = await once({ "dry-run": true });
+    assert.equal(blocked.failed, true);
+    assert.deepEqual(blocked.state, before);
+    assert.equal(seen.saves + seen.sent.length + seen.receipts.length + seen.rawReads.length, 0);
+    editState(value => { delete value.gmail_attachment_backfill.review; });
+    const control = await once({ "dry-run": true });
+    assert.equal(control.failed, false);
+    assert.deepEqual(seen.rawReads, ["report-one"]);
+  }, { cap: 1, backfill: checkpoint() });
+});
+
+test("an interruption after empty cleanup readback resumes without a stranded review receipt", async () => {
+  await fixture(async ({ observations: seen, once }) => {
+    let interrupted = false;
+    seen.onSave = state => {
+      const review = state.gmail_attachment_backfill?.review;
+      if (!interrupted && Object.keys(review?.done || {}).length && !review.ingest_pending_families) {
+        interrupted = true;
+        throw new Error("synthetic interruption after cleanup readback");
+      }
+    };
+    assert.equal((await once()).failed, true);
+    assert.equal(interrupted, true);
+    const recovered = await once();
+    assert.equal(recovered.failed, false);
+    assert.equal(recovered.state.gmail_attachment_backfill.complete, true);
+    assert.equal((await once()).failed, false);
+    assert.deepEqual(seen.rawReads, ["report-one"]);
+    assert.deepEqual(seen.sent, ["report-one"]);
+  }, { reports: ["report-one"], backfill: null });
 });
