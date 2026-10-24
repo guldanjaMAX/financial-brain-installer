@@ -488,7 +488,7 @@ erasing the durable operation fence.
 
 Unit tests establish schema shapes, state prerequisites, cryptographic fixture
 binding, fake provider behavior and probe harness checks. They do not establish
-an operating deployment. The twelve E2E tests pass against the separate broker
+an operating deployment. The E2E probes run against the separate broker
 foundation and a test-only owner handler. Their adapter requirements and attack inventory are in
 [the probe guide](../probes/README.md). Intuit acceptance, browser cookie
 behavior, Cloudflare routing/logging, DNS pinning, native D1 transactions and a

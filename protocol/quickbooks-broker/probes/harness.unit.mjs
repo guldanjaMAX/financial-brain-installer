@@ -7,6 +7,8 @@ import { fixture } from '../testing/schema-test-helper.mjs';
 import { createRig, jsonRequest, rewriteJson, queryFree } from './harness.mjs';
 const schema = JSON.parse(readFileSync(new URL('../v1/schemas/protocol.schema.json', import.meta.url), 'utf8'));
 const audit = () => fixture(schema, 'auditEvent', length => randomBytes(length).toString('base64url').slice(0, length));
+const startResponse = () => Response.json(fixture(schema, 'launchResponse',
+  length => randomBytes(length).toString('base64url').slice(0, length)));
 
 function transportSpy() {
   let dependencies;
@@ -23,7 +25,7 @@ function transportSpy() {
           const event = { ...audit(), route, phase: route === helpers.CALLBACK ? 'failed' : 'start',
             outcome: route === helpers.CALLBACK ? 'invalid_request' : 'accepted' };
           rows.push(event); logs.push({ ...event });
-          return new Response(null, { status: 204 });
+          return route === helpers.START ? startResponse() : new Response(null, { status: 204 });
         } },
         owners: [0, 1].map(() => ({ fetch: async () => new Response(null, { status: 204 }), authHeaders: {} })),
         inspect: () => ({ brokerRows: rows, brokerLogs: logs, owners: [] }),
@@ -138,7 +140,7 @@ test('EMPTY_AUDIT_SINKS mutant is killed for either sink and missing operation e
     await rig.broker(new Request(helpers.BROKER + helpers.START));
     await rig.assertPrivate();
     if (sink === 'operation') {
-      rig.adapter.broker.fetch = async () => new Response(null, { status: 204 });
+      rig.adapter.broker.fetch = async () => startResponse();
       await rig.broker(new Request(helpers.BROKER + helpers.START));
     } else if (sink === 'both') { spy.rows.length = 0; spy.logs.length = 0; }
     else spy[sink].length = 0;
@@ -153,7 +155,7 @@ test('EMPTY_AUDIT_SINKS mutant is killed for either sink and missing operation e
   let release;
   const gate = new Promise(resolve => { release = resolve; });
   rig.adapter.broker.fetch = async request => {
-    if (++calls === 2) { release(); return new Response(null, { status: 204 }); }
+    if (++calls === 2) { release(); return startResponse(); }
     await gate;
     return original(request);
   };

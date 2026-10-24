@@ -109,7 +109,11 @@ does not prove native D1 semantics, browser cookies, provider acceptance,
 Cloudflare Access, DNS pinning, platform logging or a real-account canary.
 The owner fixture expires overdue pending intents during authenticated status
 reads, at most 32 per call. Each expired record loses both temporary keys and
-must pass exact readback; failure rolls back the batch and refuses status.
+all active context. Terminal records retain only the protocol, intent, status
+and receipt replay fields. The intended stored row and its SQLite readback
+must satisfy the closed owner-intent schema before commit; failure rolls back
+the batch and refuses status. Enrollment and expiry readback attempts emit
+fixed observations and increment attempt counters before the comparison.
 Repeated polls finish older backlogs. This is not a deployed background task.
 
 A deployment must disable request/query/body/header logging, exception payload
