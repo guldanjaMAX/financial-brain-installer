@@ -13,6 +13,7 @@ import {
   validateBatchReceipt,
 } from "../brain.mjs";
 import { gmailRefusalReadyReceipt } from "./fixtures/gmail-refusal-receipt.mjs";
+import { gmailPolicyRunDiagnostics } from "./fixtures/gmail-policy-diagnostics.mjs";
 import {
   DEFAULT_QUERY,
   gmailExtractionVersion,
@@ -863,7 +864,7 @@ if (process.platform !== "win32") {
       /would remove 100 of 100 stored documents \(100\.0%\)/.test(retry.output) &&
       /Aggregate reasons:/.test(retry.output) &&
       retry.state.ingest_removal_plan.sourcePlan.stored === 100,
-      `${retry.output.slice(-1_400)}\n${JSON.stringify(retry.state)}`);
+      gmailPolicyRunDiagnostics({ first, retry }));
   } finally { rmSync(first.directory, { recursive: true, force: true }); }
 }
 
@@ -891,7 +892,7 @@ if (process.platform !== "win32") {
       /would remove 100 of 100 stored documents \(100\.0%\)/.test(retry.output) &&
       /Aggregate reasons:/.test(retry.output) &&
       retry.state.ingest_removal_plan.sourcePlan.stored === 100,
-      `${retry.output.slice(-1_400)}\n${JSON.stringify(retry.state)}`);
+      gmailPolicyRunDiagnostics({ first, retry }));
   } finally { rmSync(first.directory, { recursive: true, force: true }); }
 }
 
