@@ -39,6 +39,9 @@ const escapeForRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const renderedCommand = (text) => escapeForRegExp(renderCliCommands(text));
 
 const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-technician-test-")));
+// These workspaces belong to a synthetic profile, even when a harness places
+// TEMP outside the host profile. Keep native reparse and filesystem checks real.
+const fixtureOwnership = { profile: sandbox };
 const manifestPath = join(sandbox, "brain.manifest.json");
 const fixtureScriptPath = resolve("/fixture/brain.mjs");
 const fixtureNodePath = resolve("/fixture/node");
@@ -393,6 +396,7 @@ test("setup can create an owner-only Claude workspace guide with locators but no
   const first = writeClaudeWorkspaceGuide(manifest, {
     brainCliPath: safeBrainPath,
     nodePath: safeNodePath,
+    ownership: fixtureOwnership,
   });
   const content = readFileSync(first.path, "utf8");
   assert.equal(first.status, "written");
@@ -471,6 +475,7 @@ test("setup can create an owner-only Claude workspace guide with locators but no
     writeClaudeWorkspaceGuide(manifest, {
       brainCliPath: safeBrainPath,
       nodePath: safeNodePath,
+      ownership: fixtureOwnership,
     }).status,
     "verified",
   );
@@ -486,6 +491,7 @@ test("an unrelated Claude workspace guide is preserved byte-for-byte", () => {
   const result = writeClaudeWorkspaceGuide(manifest, {
     brainCliPath: "/safe/bin/brain",
     existingOnly: true,
+    ownership: fixtureOwnership,
   });
   assert.equal(result.status, "preserved_unrelated_existing_file");
   assert.equal(readFileSync(target, "utf8"), "owner instructions\n");
@@ -503,6 +509,7 @@ test("update refreshes only an existing installer-managed Claude workspace guide
     brainCliPath: safeBrainPath,
     nodePath: safeNodePath,
     existingOnly: true,
+    ownership: fixtureOwnership,
   });
   const content = readFileSync(target, "utf8");
   assert.equal(refreshed.status, "written");
@@ -520,6 +527,7 @@ test("update refreshes only an existing installer-managed Claude workspace guide
     brainCliPath: safeBrainPath,
     nodePath: safeNodePath,
     existingOnly: true,
+    ownership: fixtureOwnership,
   });
   assert.equal(skipped.status, "skipped_missing");
   assert.equal(existsSync(missingTarget), false);

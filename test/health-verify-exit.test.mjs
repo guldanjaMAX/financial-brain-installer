@@ -442,7 +442,7 @@ if (SCENARIO) {
     });
     const output = strip(`${result.stdout || ""}${result.stderr || ""}`);
     rmSync(directory, { recursive: true, force: true });
-    return { code: result.status, output, error: result.error };
+    return { code: result.status, output, error: result.error, manifestPath };
   }
 
   const missingKey = runScenario("health-ok", "health");
@@ -619,7 +619,7 @@ if (SCENARIO) {
     check("health reports paused Claude answers and the manifest-bound reconnect step",
       providerWarning.failure === null && providerWarning.logged.some((line) =>
         line.includes(HEALTH_KEY_MISSING)) && providerWarning.logged.some((line) =>
-        line.includes(HEALTH_NEXT_STEP(providerWarning.manifestPath))) && providerWarning.logged.every((line) =>
+        line.includes(renderCliCommands(HEALTH_NEXT_STEP(providerWarning.manifestPath)))) && providerWarning.logged.every((line) =>
         !/using the built-in model/i.test(line)),
       JSON.stringify({ failure: providerWarning.failure?.message, logged: providerWarning.logged }));
   }
@@ -638,7 +638,7 @@ if (SCENARIO) {
   check("health warns when configured Claude answers are paused for a missing key",
     providerFallback.code === 0 &&
       providerFallback.output.includes(HEALTH_KEY_MISSING) &&
-      /brain connect anthropic .* --from-clipboard/i.test(providerFallback.output) &&
+      providerFallback.output.includes(renderCliCommands(HEALTH_NEXT_STEP(providerFallback.manifestPath))) &&
       !/using the built-in model/i.test(providerFallback.output) &&
       /vector index is query-ready/.test(providerFallback.output),
     providerFallback.output);

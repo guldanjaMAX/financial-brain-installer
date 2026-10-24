@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, realpathSync, mkdirSync, readFileSync, lstatSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, realpathSync, mkdirSync, readFileSync, lstatSync, linkSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
@@ -168,9 +168,8 @@ test('Worker time ignores a PC two hours fast and refuses missing date after a r
   assert.equal(reads, 2);
 });
 
-test('binding is owner-only, exactly read back and rejects links without replacing them', async () => {
-  const root = join(process.env.HOME, 'binding-tests'); mkdirSync(root, { recursive: true, mode: 0o700 });
-  const home = realpathSync.native(mkdtempSync(join(root, 'case-')));
+test('binding is owner-only and exactly read back through native ACL protection', () => {
+  const home = realpathSync.native(mkdtempSync(join(tmpdir(), 'binding-tests-')));
   try {
     const aclCalls = [];
     const store = desktopBindingStore({ home, runAcl: (...args) => { aclCalls.push(args); return spawnSync(...args); } });
@@ -187,9 +186,62 @@ test('binding is owner-only, exactly read back and rejects links without replaci
       assert.equal(lstatSync(path).mode & 0o777, 0o600);
     }
     assert.equal(readFileSync(path, 'utf8').includes('Checking'), false);
-    store.remove(); const target = join(home, 'target'); writeFileSync(target, 'unchanged'); symlinkSync(target, path);
-    await assert.rejects(async () => store.write(value), { code: 'QB_BINDING_INVALID' });
-    assert.equal(readFileSync(target, 'utf8'), 'unchanged');
+  } finally { rmSync(home, { recursive: true }); }
+});
+
+test('binding rejects links without replacing them through an injected ACL boundary', async t => {
+  const home = realpathSync.native(mkdtempSync(join(tmpdir(), 'binding-links-')));
+  try {
+    let aclCalls = 0;
+    const store = desktopBindingStore({ home, runAcl: () => { aclCalls++; return { status: 0 }; } });
+    const value = makeDesktopBinding({ accounts: desktopFixture().AccountRet, country: 'US' });
+    store.write(value); assert.deepEqual(store.read(), value, 'a normal file is the passing control');
+    if (process.platform === 'win32') assert.equal(aclCalls, 4, 'the synthetic ACL boundary was reached');
+    const path = join(home, '.brain', 'quickbooks-desktop.json');
+    store.remove();
+    const exercised = [];
+    for (const kind of ['hard-link', 'file-symlink', 'junction']) await t.test(kind, async arm => {
+      const target = join(home, `target-${kind}`);
+      const directory = kind === 'junction';
+      if (directory) mkdirSync(target);
+      const content = directory ? join(target, 'unchanged.txt') : target;
+      writeFileSync(content, 'unchanged', { mode: 0o600 });
+      try {
+        if (kind === 'hard-link') linkSync(target, path);
+        else symlinkSync(target, path, directory ? 'junction' : 'file');
+      } catch (error) {
+        if (kind === 'file-symlink' && process.platform === 'win32' && error.code === 'EPERM' && process.env.GITHUB_ACTIONS !== 'true') {
+          arm.skip('file symlinks require Developer Mode or elevation; hard-link and junction arms remain mandatory');
+          return;
+        }
+        throw error;
+      }
+      try {
+        const before = lstatSync(path);
+        assert.ok(kind === 'hard-link' ? before.nlink > 1 : before.isSymbolicLink(), 'the intended link fixture was created');
+        await assert.rejects(async () => store.write(value), { code: 'QB_BINDING_INVALID' });
+        assert.throws(() => store.read(), { code: 'QB_BINDING_INVALID' });
+        assert.equal(lstatSync(path).ino, before.ino);
+        assert.equal(readFileSync(content, 'utf8'), 'unchanged');
+        exercised.push(kind);
+      } finally { rmSync(path); }
+    });
+    await t.test('junction at the binding directory', async () => {
+      const directory = join(home, '.brain'), target = join(home, 'directory-target');
+      rmSync(directory, { recursive: true }); mkdirSync(target);
+      const content = join(target, 'unchanged.txt'); writeFileSync(content, 'unchanged');
+      symlinkSync(target, directory, 'junction');
+      const before = lstatSync(directory);
+      assert.equal(before.isSymbolicLink(), true, 'the non-privileged directory junction was created');
+      await assert.rejects(async () => store.write(value), { code: 'QB_BINDING_INVALID' });
+      assert.throws(() => store.read(), { code: 'QB_BINDING_INVALID' });
+      assert.equal(lstatSync(directory).ino, before.ino);
+      assert.equal(readFileSync(content, 'utf8'), 'unchanged');
+      exercised.push('directory-junction');
+    });
+    for (const kind of ['hard-link', 'junction', 'directory-junction']) {
+      assert.ok(exercised.includes(kind), `the owner-PC ${kind} refusal arm actually ran`);
+    }
   } finally { rmSync(home, { recursive: true }); }
 });
 
@@ -227,7 +279,7 @@ test('configuration fingerprint binds Desktop company without changing other pro
   assert.equal(providerConfigurationFingerprint('slack', 'slack', { enabled: true }), providerConfigurationFingerprint('slack', 'slack', { enabled: true }, { qbo_company_fingerprint: 'a'.repeat(64) }));
 });
 
-test('public ingest and load legs forward the held lifecycle lease into Desktop', async () => {
+test('public ingest and load legs forward the held lifecycle lease into Desktop', async t => {
   const m = { client: { slug: 'owner' }, brain: { domain: 'brain.example.invalid' }, corpora: { quickbooks_desktop: { enabled: true } } };
   let reached = 0; let locks = 0;
   const options = { platform: 'win32', lifecycleLockHeld: true, assertOwned() {},
@@ -236,7 +288,9 @@ test('public ingest and load legs forward the held lifecycle lease into Desktop'
   const plan = await planLoad({ m, manifestPath, platform: 'win32', options, commands: { ingestQuickBooksDesktop: options.ingestQuickBooksDesktop } });
   assert.equal(plan[0].status, 'ready'); await plan[0].legs[0].run(); assert.equal(reached, 1);
   assert.equal(typeof brain.cmdIngest, 'function');
-  const path = join(process.env.HOME, 'nested-lock.manifest.json'); writeFileSync(path, JSON.stringify(m));
+  const home = realpathSync.native(mkdtempSync(join(tmpdir(), 'desktop-public-lock-')));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const path = join(home, 'nested-lock.manifest.json'); writeFileSync(path, JSON.stringify(m));
   const output = await brain.cmdIngest(path, { ...options, lifecycleLockHeld: false, flags: { from: 'quickbooks-desktop' } });
   assert.equal(output.code, 'fixture'); assert.equal(reached, 2); assert.equal(locks, 1);
 });

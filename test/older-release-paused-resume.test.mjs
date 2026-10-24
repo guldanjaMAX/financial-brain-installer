@@ -26,6 +26,7 @@ import { createHash } from "node:crypto";
 import fs, {
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -63,9 +64,21 @@ const BOOKMARK = "00000085-00000002-00004e1e-aaaaaaaabbbbccccddddeeeeffff0000";
 const EXCLUDED_FROM_RELEASE_COPY = new Set([".git", "node_modules", "test", "docs", "frontend", "onboarding", "evidence"]);
 
 const scratchReleases = [];
-after(() => {
-  for (const directory of scratchReleases) rmSync(directory, { recursive: true, force: true });
-});
+function cleanupScratchReleases(directories) {
+  for (const directory of directories) rmSync(directory, { recursive: true, force: true });
+  directories.length = 0;
+}
+after(() => cleanupScratchReleases(scratchReleases));
+
+async function withScratchCleanup(create, directories) {
+  try {
+    return await create();
+  } catch (error) {
+    // A module-level fixture failure happens before the test runner runs after().
+    cleanupScratchReleases(directories);
+    throw error;
+  }
+}
 
 /**
  * A scratch copy of this tree published as `version`: package.json and the
@@ -82,7 +95,11 @@ async function scratchRelease(version) {
     if (directory === sourcePath || directory.startsWith(`${sourcePath}${sep}`)) continue;
     cpSync(sourcePath, join(directory, entry), { recursive: true });
   }
-  symlinkSync(join(ROOT, "node_modules"), join(directory, "node_modules"), "dir");
+  const dependencyLink = join(directory, "node_modules");
+  const dependencyLinkType = process.platform === "win32" ? "junction" : "dir";
+  symlinkSync(join(ROOT, "node_modules"), dependencyLink, dependencyLinkType);
+  assert.equal(lstatSync(dependencyLink).isSymbolicLink(), true);
+  assert.equal(realpathSync.native(dependencyLink), realpathSync.native(join(ROOT, "node_modules")));
   const packagePath = join(directory, "package.json");
   const packageJson = JSON.parse(readFileSync(packagePath, "utf8"));
   writeFileSync(packagePath, `${JSON.stringify({ ...packageJson, version }, null, 2)}\n`);
@@ -96,15 +113,47 @@ async function scratchRelease(version) {
   writeFileSync(versionPath, relabeled);
   const cli = await import(pathToFileURL(join(directory, "brain.mjs")).href);
   const worker = (await import(pathToFileURL(join(directory, "worker", "src", "index.js")).href)).default;
-  return { version, cli, worker };
+  return { version, cli, worker, dependencyLinkType };
 }
 
 const CHECKED_OUT = { version: PRODUCT_VERSION, cli: checkedOutCli, worker: checkedOutWorker };
-const NEXT = await scratchRelease(NEXT_VERSION);
-const PREVIOUS = await scratchRelease(PREVIOUS_VERSION);
-const DOCUMENTED_V048 = PREVIOUS_VERSION === "0.4.8"
-  ? PREVIOUS
-  : await scratchRelease("0.4.8");
+const [NEXT, PREVIOUS, DOCUMENTED_V048] = await withScratchCleanup(async () => {
+  const next = await scratchRelease(NEXT_VERSION);
+  const previous = await scratchRelease(PREVIOUS_VERSION);
+  return [next, previous, PREVIOUS_VERSION === "0.4.8" ? previous : await scratchRelease("0.4.8")];
+}, scratchReleases);
+
+test("scratch releases use the non-privileged Windows dependency junction", (context) => {
+  for (const release of [NEXT, PREVIOUS, DOCUMENTED_V048]) {
+    assert.equal(release.dependencyLinkType, process.platform === "win32" ? "junction" : "dir");
+  }
+  context.diagnostic(`scratch_dependency_link_type=${NEXT.dependencyLinkType}`);
+});
+
+test("scratch setup failure removes earlier and partial copies while success retains its fixture", async () => {
+  const directories = [];
+  const allocate = () => {
+    const directory = mkdtempSync(join(tmpdir(), "older-release-cleanup-"));
+    directories.push(directory);
+    writeFileSync(join(directory, "fixture.txt"), "synthetic fixture\n");
+    return directory;
+  };
+  try {
+    const control = await withScratchCleanup(async () => allocate(), directories);
+    assert.equal(existsSync(control), true, "successful setup keeps its fixture until teardown");
+    const earlier = [...directories];
+    let partial;
+    const failure = new Error("synthetic setup failure");
+    await assert.rejects(withScratchCleanup(async () => {
+      partial = allocate();
+      throw failure;
+    }, directories), error => error === failure);
+    for (const directory of [...earlier, partial]) assert.equal(existsSync(directory), false);
+    assert.deepEqual(directories, []);
+  } finally {
+    cleanupScratchReleases(directories);
+  }
+});
 
 const migrationDir = join(ROOT, "migrations", "d1");
 const migrations = readdirSync(migrationDir)
@@ -370,6 +419,7 @@ async function update(brain, release, { force = false, duringAcceptance = null }
     }
     : kit.upgradeOptions;
   const run = await quietly(() => release.cli.cmdUpdate(brain.manifestPath, {
+    lifecycleLockOptions: { machineLockRoot: join(brain.sandbox, "lifecycle-locks") },
     discoverInstalledManifest: () => ({ path: brain.manifestPath, source: "remembered" }),
     readUpdateBacklog: release.cli.readUpdateBacklog,
     updateBacklogOptions: upgradeOptions.updateBacklogOptions,

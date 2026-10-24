@@ -269,36 +269,58 @@ for (const [assistant, filename, marker, write] of writers) {
       assert.equal(write(manifest, { ...options, existingOnly }).status, "written");
     }
   });
-  test(`e/f/h: unrelated, symlink and hard link stay intact; update missing is skipped (${assistant})`, (t) => {
+  test(`e/f/h: unrelated and linked guides stay intact; update missing is skipped (${assistant})`, async (t) => {
     const { root, manifest } = fixture(t);
     const target = join(root, filename);
-    const skipped = write(manifest, { ...options, existingOnly: true });
-    assert.equal(skipped.status, "skipped_missing");
-    assert.equal(skipped.workspace, root);
-    assert.equal(existsSync(target), false);
-    assert.equal(write(manifest, options).status, "written", "setup is the missing-file green control");
-    rmSync(target);
-    for (const kind of ["unrelated", "symlink", "dangling-symlink", "hard-link"]) {
+    await t.test("missing guide and setup control", child => {
+      const control = fixture(child), controlTarget = join(control.root, filename);
+      const skipped = write(control.manifest, { ...options, existingOnly: true });
+      assert.equal(skipped.status, "skipped_missing");
+      assert.equal(skipped.workspace, control.root);
+      assert.equal(existsSync(controlTarget), false);
+      assert.equal(write(control.manifest, options).status, "written", "setup is the missing-file green control");
+    });
+    const exercised = [];
+    for (const kind of ["unrelated", "hard-link", "junction", "dangling-junction", "symlink", "dangling-symlink"]) await t.test(kind, arm => {
       const source = join(root, `source-${kind}`);
       const bytes = kind === "unrelated" ? "owner instructions\r\n" : `${marker}\n# Old managed guide\n`;
+      const dangling = kind.startsWith("dangling-"), directory = kind.endsWith("junction");
+      const content = directory ? join(source, "guide.md") : target;
       if (kind === "unrelated") writeFileSync(target, bytes);
       else {
-        if (kind !== "dangling-symlink") writeFileSync(source, bytes);
+        if (!dangling) {
+          if (directory) { mkdirSync(source); writeFileSync(content, bytes); }
+          else writeFileSync(source, bytes);
+        }
         if (kind === "hard-link") linkSync(source, target);
-        else symlinkSync(source, target);
+        else {
+          try { symlinkSync(source, target, directory ? "junction" : "file"); }
+          catch (error) {
+            if (!directory && process.platform === "win32" && error.code === "EPERM" && process.env.GITHUB_ACTIONS !== "true") {
+              arm.skip("file symlinks require Developer Mode or elevation; hard-link and junction arms remain mandatory");
+              return;
+            }
+            throw error;
+          }
+        }
       }
-      const stat = lstatSync(target);
-      assert.ok(kind === "unrelated" || stat.isSymbolicLink() || stat.nlink > 1, "unsafe-file decision receives the intended fixture");
-      for (const existingOnly of [false, true]) {
-        const result = write(manifest, { ...options, existingOnly });
-        assert.equal(result.status, kind === "unrelated" ? "preserved_unrelated_existing_file" : "preserved_unsafe_existing_file");
-        assert.equal(result.changed, false);
-        assert.equal(result.workspace, root);
-        assert.equal(lstatSync(target).ino, stat.ino);
-        if (kind === "dangling-symlink") assert.equal(existsSync(source), false);
-        else assert.equal(readFileSync(target, "utf8"), bytes);
-      }
-      rmSync(target);
+      try {
+        const stat = lstatSync(target);
+        assert.ok(kind === "unrelated" || stat.isSymbolicLink() || stat.nlink > 1, "unsafe-file decision receives the intended fixture");
+        for (const existingOnly of [false, true]) {
+          const result = write(manifest, { ...options, existingOnly });
+          assert.equal(result.status, kind === "unrelated" ? "preserved_unrelated_existing_file" : "preserved_unsafe_existing_file");
+          assert.equal(result.changed, false);
+          assert.equal(result.workspace, root);
+          assert.equal(lstatSync(target).ino, stat.ino);
+          if (dangling) assert.equal(existsSync(source), false);
+          else assert.equal(readFileSync(content, "utf8"), bytes);
+        }
+        exercised.push(kind);
+      } finally { rmSync(target); }
+    });
+    for (const kind of ["hard-link", "junction", "dangling-junction"]) {
+      assert.ok(exercised.includes(kind), `the owner-PC ${kind} refusal arm actually ran`);
     }
   });
 }
@@ -812,7 +834,7 @@ for (const platformName of ["darwin", "linux"]) test(`both update refreshers rep
         reached++;
         assert.equal(opts.existingOnly, true);
         assert.equal(opts.platformName, platformName);
-        return write(path, opts);
+        return write(path, { ...opts, ownership: fixtureOwnership });
       },
       reportWarning: (m) => warnings.push(m), reportOk: (m) => good.push(m), reportInfo: () => {},
     };
@@ -982,19 +1004,38 @@ test("v3 menu expansions all reach the ledger parser", () => {
   }
 });
 
-test("Codex update requires a safe marker-owned sibling and current wiring proof", t => {
-  const { root, manifest } = fixture(t);
-  const sibling = join(root, "CLAUDE.md"), agents = join(root, "AGENTS.md"), source = join(root, "sibling-source");
-  writeFileSync(source, `${workspace.CLAUDE_WORKSPACE_MARKER}\n`);
-  for (const arm of ["unrelated", "symlink", "hard-link", "unverified", "verified"]) {
-    if (arm === "symlink") symlinkSync(source, sibling);
-    else if (arm === "hard-link") linkSync(source, sibling);
-    else writeFileSync(sibling, arm === "unrelated" ? "Owner instructions\n" : `${workspace.CLAUDE_WORKSPACE_MARKER}\n`);
+test("Codex update requires a safe marker-owned sibling and current wiring proof", async t => {
+  const exercised = [];
+  for (const arm of ["unrelated", "hard-link", "junction", "unverified", "verified", "symlink"]) await t.test(arm, child => {
+    const { root, manifest } = fixture(child);
+    const sibling = join(root, "CLAUDE.md"), agents = join(root, "AGENTS.md"), source = join(root, "sibling-source");
+    if (arm === "junction") {
+      mkdirSync(source); writeFileSync(join(source, "guide.md"), `${workspace.CLAUDE_WORKSPACE_MARKER}\n`);
+      symlinkSync(source, sibling, "junction");
+      assert.equal(lstatSync(sibling).isSymbolicLink(), true, "the non-privileged sibling junction was created");
+    } else if (arm === "symlink" || arm === "hard-link") {
+      writeFileSync(source, `${workspace.CLAUDE_WORKSPACE_MARKER}\n`);
+      if (arm === "hard-link") linkSync(source, sibling);
+      else {
+        try { symlinkSync(source, sibling, "file"); }
+        catch (error) {
+          if (process.platform === "win32" && error.code === "EPERM" && process.env.GITHUB_ACTIONS !== "true") {
+            child.skip("file symlinks require Developer Mode or elevation; hard-link and junction arms remain mandatory");
+            return;
+          }
+          throw error;
+        }
+      }
+    } else writeFileSync(sibling, arm === "unrelated" ? "Owner instructions\n" : `${workspace.CLAUDE_WORKSPACE_MARKER}\n`);
     assert.ok(lstatSync(sibling), "sibling ownership decision has an input");
     const result = workspace.writeCodexWorkspaceGuide(manifest, { ...options, existingOnly: true, verifiedCodexWiring: arm !== "unverified" });
     assert.equal(result.status, arm === "verified" ? "written" : "skipped_missing");
     assert.equal(existsSync(agents), arm === "verified");
     rmSync(sibling);
+    exercised.push(arm);
+  });
+  for (const arm of ["hard-link", "junction", "unverified", "verified"]) {
+    assert.ok(exercised.includes(arm), `the owner-PC ${arm} sibling arm actually ran`);
   }
 });
 
@@ -1446,7 +1487,7 @@ for (const [assistant, filename, , writer] of writers) test(`R3 review setup rep
   assert.match(blocked.output, /not written/i);
   assert.ok(blocked.output.includes(cli.displayPathForTesting(recoveryPath, process.cwd())));
   assert.doesNotMatch(blocked.output, /owner workspace ready/);
-  const control = await setup(t, wired, { [option]: writer });
+  const control = await setup(t, wired, { [option]: options[option] });
   assert.match(control.output, /owner workspace ready/);
 });
 

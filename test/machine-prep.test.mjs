@@ -67,7 +67,7 @@ function cleanEnv(fixture) {
 }
 
 function runMac(args, fixture = "mac-not-ready") {
-  const home = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-test-home-")));
+  const home = realpathSync.native(mkdtempSync(join(tmpdir(), ".machine-prep-test-home-")));
   try {
     const fixturePath = fixture.startsWith("/") ? fixture : join(FIXTURES, fixture);
     return spawnSync("bash", [MAC, ...args], {
@@ -92,8 +92,19 @@ function windowsPowerShell() {
     : "powershell.exe";
 }
 
+function fileSymlinkOrSkip(context, target, link) {
+  try {
+    symlinkSync(target, link, 'file');
+    return true;
+  } catch (error) {
+    if (process.platform !== 'win32' || error.code !== 'EPERM' || process.env.GITHUB_ACTIONS === 'true') throw error;
+    context.skip('file symlinks need Developer Mode or elevation; junction refusal coverage still runs');
+    return false;
+  }
+}
+
 function runWindows(args, fixture = "windows-not-ready") {
-  const home = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-test-home-")));
+  const home = realpathSync.native(mkdtempSync(join(tmpdir(), ".machine-prep-test-home-")));
   try {
     return spawnSync(windowsPowerShell(), [
       "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
@@ -143,7 +154,7 @@ function runWindowsScratch(script, args, home, { extraEnv = {}, ...options } = {
 }
 
 function runWindowsInstallOrchestration({ scenario, script = WINDOWS, kitSizeOffset = 0, kitShaOverride = null, diagnostic = null, logBlocked = false }) {
-  const directory = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-windows-install-")));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), ".machine-prep-windows-install-")));
   const home = join(directory, "home");
   const local = join(home, "local");
   const temp = join(home, "temp");
@@ -406,7 +417,7 @@ test("Mac npm diagnostics mutations are caught at each capture, privacy, retenti
     ['permission category', 'EACCES|EPERM|EAI_AGAIN|ENOTFOUND|ECONN|ETIMEDOUT|network|permission', 'never-permission-error', 'permission'],
     ['owner log path', '"$reason" "$LOG_FILE" >&2', '"$reason" "missing-log" >&2', 'cache'],
   ];
-  const directory = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-npm-mutants-")));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), ".machine-prep-npm-mutants-")));
   try {
     // The same full assertion is green on unmodified source before any mutant.
     const control = runMacInstallOrchestration({ scenario: "success", diagnostic: "cache" });
@@ -510,7 +521,7 @@ function mutateWindowsCleanupOwnership(source) {
 }
 
 function runMacInstallOrchestration({ scenario, script = MAC, kitSizeOffset = 0, kitShaOverride = null, diagnostic = null, logBlocked = false, evidenceCase = null }) {
-  const directory = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-install-test-")));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), ".machine-prep-install-test-")));
   const home = join(directory, "home");
   const kit = join(directory, "kit.tgz");
   const npm = join(directory, "npm-fixture");
@@ -735,7 +746,7 @@ test("Mac existing-install decision refuses version-only, changed, and redirecte
 });
 
 test("Mac readiness requires exact Brain version equality", macRuntimeOptions(), () => {
-  const directory = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-fixture-")));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), ".machine-prep-fixture-")));
   try {
     cpSync(join(FIXTURES, "mac-ready"), directory, { recursive: true });
     for (const mutant of ["0.4.100", "0.4.10-modified"]) {
@@ -765,7 +776,7 @@ test("Mac CLI-only preparation refuses fixtures after the session decision", mac
   assert.doesNotMatch(refused.stdout, /DOWNLOAD_STARTED|INSTALL_STARTED/);
   // Source the real script in help mode, then inject only its tool discovery
   // and install dependency. The same session/prerequisite body must pass.
-  const home = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-cli-home-")));
+  const home = realpathSync.native(mkdtempSync(join(tmpdir(), ".machine-prep-cli-home-")));
   try {
     const ready = spawnSync("bash", ["-c", '. "$1" --help >/dev/null\ntool_version() { printf "v24.13.1\\n"; }\ntool_paths() { printf "/synthetic/npm\\n"; }\ninstall_brain() { printf "CLI_INSTALL_DECISION_REACHED=1\\n"; }\nprepare_cli', "probe", MAC], {
       env: { PATH: "/usr/bin:/bin", HOME: home, BRAIN_NO_WRANGLER_LOGIN: "1" }, encoding: "utf8",
@@ -786,7 +797,7 @@ test("Windows CLI-only preparation refuses fixtures after the session decision",
   assert.match(refused.stdout, /CLI_PREPARATION_SESSION_DECISION_REACHED=1/);
   assert.match(refused.stderr, /REFUSED CLI preparation while fixture\/test mode is active/);
   assert.doesNotMatch(refused.stdout, /DOWNLOAD_STARTED|INSTALL_STARTED/);
-  const home = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-cli-home-")));
+  const home = realpathSync.native(mkdtempSync(join(tmpdir(), ".machine-prep-cli-home-")));
   const probe = join(home, "probe.ps1");
   mkdirSync(join(home, "temp"));
   writeFileSync(probe, `
@@ -869,7 +880,7 @@ const MAC_REAL_PROBE = [
 ].join("\n");
 
 function runMacRealProbe(changes = {}, { mergeStreams = false } = {}) {
-  const directory = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-real-probe-")));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), ".machine-prep-real-probe-")));
   const state = join(directory, "state");
   const home = join(directory, "home");
   cpSync(join(FIXTURES, "mac-ready"), state, { recursive: true });
@@ -944,7 +955,7 @@ const MAC_REAL_DISCOVERY_PROBE = [
 ].join("\n");
 
 function runMacRealDiscovery(layout) {
-  const directory = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-real-discovery-")));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), ".machine-prep-real-discovery-")));
   const home = join(directory, "home");
   const bin = join(home, ".local", "bin");
   const npmGlobal = join(directory, "npm-global-bin");
@@ -1037,7 +1048,7 @@ test("Mac real discovery accepts native Claude updates and every optional Codex 
 });
 
 test("Mac check uses the Claude floor and reports Codex without blocking", macRuntimeOptions(), () => {
-  const directory = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-fixture-")));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), ".machine-prep-fixture-")));
   try {
     cpSync(join(FIXTURES, "mac-ready"), directory, { recursive: true });
     for (const version of ["2.1.261", "2.1.300", "2.1.1000", "2.10.0", "3.0.0"]) {
@@ -1097,7 +1108,7 @@ test("Windows Claude version reads the canonical copy's metadata and runs nothin
 });
 
 test("Windows Claude metadata fixtures reach the real readiness decisions", { skip: process.platform !== "win32" }, () => {
-  const directory = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-claude-version-")));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), ".machine-prep-claude-version-")));
   const state = join(directory, "state");
   const home = join(directory, "home");
   const probe = join(directory, "probe.ps1");
@@ -1150,7 +1161,7 @@ foreach ($case in $cases) {
 });
 
 test("Windows Claude version is read from a real executable's metadata without running it", { skip: process.platform !== "win32", timeout: 150_000 }, () => {
-  const directory = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-claude-native-")));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), ".machine-prep-claude-native-")));
   const home = join(directory, "home");
   const probe = join(directory, "probe.ps1");
   mkdirSync(join(home, "temp"), { recursive: true });
@@ -1497,7 +1508,7 @@ test("Mac install verification-call mutation turns both bad-kit controls red", m
   const source = readFileSync(MAC, "utf8");
   const from = '  verify_brain_kit "$archive" || return 1\n';
   assert.equal(source.includes(from), true, "missing Mac install verification decision");
-  const directory = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-verify-mutant-")));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), ".machine-prep-verify-mutant-")));
   const script = join(directory, "prep-mac.sh");
   writeFileSync(script, source.replace(from, ""));
   chmodSync(script, 0o755);
@@ -1555,7 +1566,7 @@ test("Mac installer mutations disable real ownership, promotion, and environment
 
   for (const item of cases) {
     assert.equal(source.includes(item.from), true, `missing mutation target: ${item.name}`);
-    const directory = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-mutant-")));
+    const directory = realpathSync.native(mkdtempSync(join(tmpdir(), ".machine-prep-mutant-")));
     const script = join(directory, "prep-mac.sh");
     writeFileSync(script, source.replace(item.from, item.to));
     chmodSync(script, 0o755);
@@ -1672,7 +1683,7 @@ test("Windows installed-Brain readback recognizes an exact existing install with
 });
 
 test("Windows pinned stream writer succeeds through File.Open CreateNew and preserves collisions", { skip: process.platform !== "win32" }, () => {
-  const directory = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-windows-download-")));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), ".machine-prep-windows-download-")));
   const home = join(directory, "home");
   const source = join(directory, "source.bin");
   mkdirSync(join(home, "temp"), { recursive: true });
@@ -1729,7 +1740,7 @@ test("Windows install verification-call mutation turns both bad-kit controls red
   const source = readFileSync(WINDOWS, "utf8").replaceAll("\r\n", "\n");
   const from = "    Test-BrainKit $archive\n";
   assert.equal(source.includes(from), true, "missing Windows install verification decision");
-  const directory = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-windows-verify-mutant-")));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), ".machine-prep-windows-verify-mutant-")));
   const script = join(directory, "prep-windows.ps1");
   writeFileSync(script, source.replace(from, ""));
   try {
@@ -1845,7 +1856,7 @@ test('Windows standard npm layout kills each guarded-line mutation', (context) =
 });
 
 test('Windows standard npm layout refuses a forwarding shim before install or diagnostics execute it', { skip: process.platform !== 'win32', timeout: 300_000 }, (context) => {
-  const directory = realpathSync.native(mkdtempSync(join(ROOT, '.machine-prep-npm-layout-')));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), '.machine-prep-npm-layout-')));
   const home = join(directory, 'home'); const temp = join(home, 'temp');
   const bin = join(directory, 'node js %USERNAME%'); const npm = join(bin, 'npm.cmd');
   const marker = join(temp, 'entry-calls.txt');
@@ -1888,9 +1899,9 @@ test('Windows standard npm layout refuses a forwarding shim before install or di
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-for (const scenario of ['missing-node', 'missing-cli', 'directory-cli', 'linked-cli', 'linked-shim', 'renamed-shim', 'appended-forwarder']) {
-  test(`Windows standard npm layout refuses unsupported files: ${scenario}`, { skip: process.platform !== 'win32', timeout: 300_000 }, () => {
-    const directory = realpathSync.native(mkdtempSync(join(ROOT, '.machine-prep-npm-files-')));
+for (const scenario of ['missing-node', 'missing-cli', 'directory-cli', 'junction-cli', 'junction-shim', 'linked-cli', 'linked-shim', 'renamed-shim', 'appended-forwarder']) {
+  test(`Windows standard npm layout refuses unsupported files: ${scenario}`, { skip: process.platform !== 'win32', timeout: 300_000 }, (context) => {
+    const directory = realpathSync.native(mkdtempSync(join(tmpdir(), '.machine-prep-npm-files-')));
     const home = join(directory, 'home'); const temp = join(home, 'temp');
     const bin = join(directory, 'node js'); let npm = join(bin, 'npm.cmd');
     const cli = join(bin, 'node_modules', 'npm', 'bin', 'npm-cli.js');
@@ -1906,10 +1917,22 @@ for (const scenario of ['missing-node', 'missing-cli', 'directory-cli', 'linked-
       if (scenario === 'missing-node') rmSync(join(bin, 'node.exe'));
       if (scenario === 'missing-cli') rmSync(cli);
       if (scenario === 'directory-cli') { rmSync(cli); mkdirSync(cli); }
+      if (scenario === 'junction-cli' || scenario === 'junction-shim') {
+        const leaf = scenario === 'junction-cli' ? cli : npm;
+        const other = join(directory, 'junction-target');
+        mkdirSync(other);
+        writeFileSync(join(other, 'preserve.txt'), 'synthetic target\n');
+        rmSync(leaf);
+        symlinkSync(other, leaf, 'junction');
+        assert.equal(lstatSync(leaf).isSymbolicLink(), true, 'the owner-PC junction branch ran');
+        assert.equal(realpathSync.native(leaf), realpathSync.native(other));
+        context.diagnostic(`owner_pc_junction_created=${scenario}`);
+      }
       if (scenario === 'linked-cli' || scenario === 'linked-shim') {
         const leaf = scenario === 'linked-cli' ? cli : npm;
         const other = join(directory, scenario === 'linked-cli' ? 'other-cli.js' : 'other.cmd');
-        cpSync(leaf, other); rmSync(leaf); symlinkSync(other, leaf, 'file');
+        cpSync(leaf, other); rmSync(leaf);
+        if (!fileSymlinkOrSkip(context, other, leaf)) return;
         assert.equal(lstatSync(leaf).isSymbolicLink(), true, 'link fixture exists at the decision path');
       }
       if (scenario === 'renamed-shim') { npm = join(bin, 'custom.cmd'); cpSync(join(bin, 'npm.cmd'), npm); }
@@ -1924,6 +1947,9 @@ for (const scenario of ['missing-node', 'missing-cli', 'directory-cli', 'linked-
       assert.ok(log.includes(`npm_selected=${npm}`));
       assert.match(log, /npm_entry_point=unavailable/);
       assert.doesNotMatch(log, /(?:node|npm)_version=/);
+      if (scenario.startsWith('junction-')) {
+        assert.equal(readFileSync(join(directory, 'junction-target', 'preserve.txt'), 'utf8'), 'synthetic target\n');
+      }
     } finally { rmSync(directory, { recursive: true, force: true }); }
   });
 }
@@ -1976,7 +2002,7 @@ test('Windows legacy quoting probe reproduces the actual extra pair and complete
 
 for (const label of ['node js', 'literal-%USERNAME%-%SystemRoot%', 'amp&caret^(paren)!', 'non-ascii-\u00e9']) {
   test(`Windows direct npm preserves argv: ${label}`, { skip: process.platform !== 'win32', timeout: 300_000 }, (context) => {
-    const directory = realpathSync.native(mkdtempSync(join(ROOT, '.machine-prep-npm-quoting-')));
+    const directory = realpathSync.native(mkdtempSync(join(tmpdir(), '.machine-prep-npm-quoting-')));
     const home = join(directory, 'home'); const temp = join(home, 'temp');
     // The historical defect requires a space; every arm retains that trigger
     // as well as its distinct character case.
@@ -2041,7 +2067,7 @@ for (const label of ['node js', 'literal-%USERNAME%-%SystemRoot%', 'amp&caret^(p
 }
 
 test("Windows isolated npm drains output larger than pipe capacity without deadlock", { skip: process.platform !== "win32", timeout: 150_000 }, () => {
-  const directory = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-windows-pipes-")));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), ".machine-prep-windows-pipes-")));
   const home = join(directory, "home");
   const temp = join(home, "temp");
   const npm = join(directory, "npm.cmd");
@@ -2121,7 +2147,7 @@ test("Windows ownership mutation targets the cleanup guard with LF and CRLF", ()
 
 test("Windows ownership mutation turns the collision preservation control red", { skip: process.platform !== "win32", timeout: 180_000 }, () => {
   const source = readFileSync(WINDOWS, "utf8");
-  const directory = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-windows-mutant-")));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), ".machine-prep-windows-mutant-")));
   const mutant = join(directory, "prep-windows.ps1");
   writeFileSync(mutant, mutateWindowsCleanupOwnership(source));
   const probe = runWindowsInstallOrchestration({ scenario: "lock-collision", script: mutant });
@@ -2206,7 +2232,7 @@ test("Claude floor ignores a later unused copy but refuses a conflicting first c
 // definitions without dispatching --real; only discovery, session checking,
 // and the Brain install dependency are replaced with synthetic controls.
 function runWindowsRealProbe(changes = {}) {
-  const directory = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-windows-real-probe-")));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), ".machine-prep-windows-real-probe-")));
   const state = join(directory, "state");
   const home = join(directory, "home");
   const probe = join(directory, "probe.ps1");
@@ -2354,7 +2380,7 @@ test('Windows npm uses direct Node execution for literal percent paths, includin
 test('Mac evidence mutations expose parent links, leaf links, and destination overwrite', macInstallOrchestrationOptions(), (context) => {
   const source = readFileSync(MAC, 'utf8');
   context.diagnostic(`copied_source_sha256=${createHash('sha256').update(source).digest('hex')}`);
-  const directory = realpathSync.native(mkdtempSync(join(ROOT, '.machine-prep-evidence-mutants-')));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), '.machine-prep-evidence-mutants-')));
   const mutations = [
     ['parent nofollow', 'O_RDONLY | O_DIRECTORY | O_NOFOLLOW', 'O_RDONLY | O_DIRECTORY', 'logs-link'],
     ['cache nofollow', 'O_RDONLY | O_DIRECTORY | O_NOFOLLOW', 'O_RDONLY | O_DIRECTORY', 'cache-link'],
@@ -2464,7 +2490,7 @@ function assertWindowsLogCleanup(local) {
 }
 
 test('Windows log cleanup probe permits a host cache but rejects either remaining log directory', (context) => {
-  const directory = realpathSync.native(mkdtempSync(join(ROOT, '.machine-prep-cleanup-probe-')));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), '.machine-prep-cleanup-probe-')));
   try {
     assertWindowsLogCleanup(directory);
     mkdirSync(join(directory, 'Microsoft'));
@@ -2481,7 +2507,7 @@ test('Windows log cleanup probe permits a host cache but rejects either remainin
 
 test('Windows diagnostic ACL permits repeated I/O and immediate cleanup while PowerShell is still running',
   { skip: process.platform !== 'win32', timeout: 300_000 }, (context) => {
-    const directory = realpathSync.native(mkdtempSync(join(ROOT, '.machine-prep-log-access-')));
+    const directory = realpathSync.native(mkdtempSync(join(tmpdir(), '.machine-prep-log-access-')));
     const home = join(directory, 'home');
     mkdirSync(join(home, 'temp'), { recursive: true });
     const wrapper = join(directory, 'probe.ps1');
@@ -2565,7 +2591,7 @@ test('Windows evidence wrapper probe propagates the child exit code immediately'
 
 test('Windows evidence wrapper preserves child failure and success with a lost-exit mutation',
   { skip: process.platform !== 'win32', timeout: 420_000 }, (context) => {
-    const directory = realpathSync.native(mkdtempSync(join(ROOT, '.machine-prep-wrapper-exit-')));
+    const directory = realpathSync.native(mkdtempSync(join(tmpdir(), '.machine-prep-wrapper-exit-')));
     const home = join(directory, 'home');
     mkdirSync(join(home, 'temp'), { recursive: true });
     const child = join(directory, 'child.ps1');
@@ -2592,14 +2618,27 @@ test('Windows evidence wrapper preserves child failure and success with a lost-e
     } finally { rmSync(directory, { recursive: true, force: true }); }
   });
 
-for (const scenario of ['logs-link', 'cache-link', 'leaf-link', 'destination-link', 'destination-existing', 'log-dir-link', 'regular']) {
-  test(`Windows npm evidence boundary: ${scenario}`, { skip: process.platform !== 'win32', timeout: 300_000 }, () => {
-    const directory = realpathSync.native(mkdtempSync(join(ROOT, '.machine-prep-win-evidence-')));
+for (const scenario of ['logs-link', 'cache-link', 'leaf-junction', 'destination-junction', 'leaf-link', 'destination-link', 'destination-existing', 'log-dir-link', 'regular']) {
+  test(`Windows npm evidence boundary: ${scenario}`, { skip: process.platform !== 'win32', timeout: 300_000 }, (context) => {
+    const directory = realpathSync.native(mkdtempSync(join(tmpdir(), '.machine-prep-win-evidence-')));
     const home = join(directory, 'home'); const temp = join(home, 'temp');
     const npm = join(directory, 'npm.cmd'); const foreign = join(directory, 'foreign');
     const logDir = join(home, 'local', 'FinancialBrainMachinePrep');
     mkdirSync(temp, { recursive: true }); mkdirSync(foreign);
     writeFileSync(join(foreign, 'foreign.log'), 'foreign-preservation-marker\n');
+    if (scenario === 'leaf-link' || scenario === 'destination-link') {
+      const probe = join(directory, 'file-link-probe');
+      try {
+        if (!fileSymlinkOrSkip(context, join(foreign, 'foreign.log'), probe)) {
+          rmSync(directory, { recursive: true, force: true });
+          return;
+        }
+      } catch (error) {
+        rmSync(directory, { recursive: true, force: true });
+        throw error;
+      }
+      rmSync(probe);
+    }
     writeWindowsNpmFixture(directory, npm, `
       const foreign = ${JSON.stringify(foreign)}; const logDir = ${JSON.stringify(logDir)};
       const scenario = ${JSON.stringify(scenario)};
@@ -2612,9 +2651,14 @@ for (const scenario of ['logs-link', 'cache-link', 'leaf-link', 'destination-lin
       if (scenario === 'leaf-link') {
         rmSync(logs, { recursive: true }); mkdirSync(logs); symlinkSync(join(foreign, 'foreign.log'), join(logs, 'newest.log'), 'file');
       }
+      if (scenario === 'leaf-junction') {
+        rmSync(logs, { recursive: true }); mkdirSync(logs); symlinkSync(foreign, join(logs, 'newest.log'), 'junction');
+      }
       if (scenario === 'destination-link') symlinkSync(join(foreign, 'foreign.log'), join(logDir, 'npm-debug.log'), 'file');
+      if (scenario === 'destination-junction') symlinkSync(foreign, join(logDir, 'npm-debug.log'), 'junction');
       if (scenario === 'destination-existing') writeFileSync(join(logDir, 'npm-debug.log'), 'existing-debug-marker');
       if (scenario === 'log-dir-link') { rmSync(logDir, { recursive: true }); symlinkSync(foreign, logDir, 'junction'); }
+      writeFileSync(join(process.env.HOME, 'evidence-fixture-created.txt'), scenario);
     `, 'cache');
     const wrapper = join(directory, 'probe.ps1');
     writeFileSync(wrapper, windowsEvidenceWrapper(logDir, WINDOWS));
@@ -2626,9 +2670,10 @@ for (const scenario of ['logs-link', 'cache-link', 'leaf-link', 'destination-lin
       assert.match(combined(result), /NPM_LAYOUT_DECISION_REACHED=1/);
       assert.match(combined(result), /REDIRECTED_PROCESS_DECISION_REACHED=1 exit=1/);
       assert.equal(readFileSync(join(home, 'npm-calls.txt'), 'utf8').trim(), 'install');
+      assert.equal(readFileSync(join(home, 'evidence-fixture-created.txt'), 'utf8'), scenario, 'the fixture reached its intended link branch');
       assert.equal(readFileSync(join(foreign, 'foreign.log'), 'utf8'), 'foreign-preservation-marker\n');
       const saved = readdirSync(logDir).filter(name => /^npm-debug-.*\.log$/.test(name));
-      if (scenario.endsWith('s-link') || scenario === 'cache-link' || scenario === 'leaf-link') {
+      if (scenario.endsWith('s-link') || scenario === 'cache-link' || scenario === 'leaf-link' || scenario === 'leaf-junction') {
         assert.equal(saved.length, 0);
         assert.match(readFileSync(join(logDir, 'prep.log'), 'utf8'), /npm_debug_log=unavailable/);
       } else if (scenario === 'log-dir-link') {
