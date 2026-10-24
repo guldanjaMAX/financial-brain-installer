@@ -11,7 +11,8 @@ test('malformed callbacks count against the network limit before state parsing o
   const target = await createRig(createProbeAdapter);
   const pending = await target.pending();
   for (let count = 0; count < 30; count++) {
-    queryFree(await target.broker(new Request(BROKER + CALLBACK + '?unexpected=1', { redirect: 'manual' })));
+    queryFree(await target.broker(new Request(BROKER + CALLBACK + '?unexpected=1', { redirect: 'manual' }),
+      { expectInvalidRequest: true }));
   }
   queryFree(await target.broker(await target.consent(pending)));
   assert.equal(target.provider.snapshot().attempted.exchange, 0, 'the next callback must be refused before provider contact');

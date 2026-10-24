@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { assertSchema } from '../../../broker/quickbooks/src/validation.mjs';
 import { createProbeAdapter } from '../implementation-adapter.mjs';
-import { BROKER, START, createRig, queryFree, REFRESH, REVOKE, rejected, refusedUnchanged } from '../probes/harness.mjs';
+import { BROKER, START, createRig, queryFree, REFRESH, REVOKE, rejected, refusedUnchanged, rewriteJson } from '../probes/harness.mjs';
 
 async function startThrough(rig, entry) {
   if (entry === 'helper') return rig.start();
@@ -22,6 +23,126 @@ test('clean starts keep capability and capsule private before launch through eve
     await startThrough(rig, entry);
     await rig.assertPrivate();
   }
+});
+
+test('START_REQUEST_PRIVATE_ECHO mutant is killed inside a granted response field', async t => {
+  for (const entry of ['broker', 'owner']) for (const form of ['exact', 'embedded']) {
+    await t.test(`${entry} ${form} request key`, async () => {
+      const rig = await createRig(createProbeAdapter);
+      await rig.enroll();
+      const original = rig.adapter.broker.fetch;
+      let mutate = false;
+      let wrapperCalls = 0;
+      let handlerSuccesses = 0;
+      let mutatedResponses = 0;
+      rig.adapter.broker.fetch = async request => {
+        const input = await request.clone().json();
+        wrapperCalls++;
+        const response = await original(request);
+        assert.ok(response.status === 201, 'wrapper must reach the real successful start handler');
+        handlerSuccesses++;
+        const body = await response.clone().json();
+        assertSchema('launchResponse', body);
+        if (!mutate) return response;
+        // The key is also a valid capability. Embedding it in a distinct
+        // capability proves another value's field grant cannot hide this key.
+        body.launch_capability = input.body.delivery_auth_key + (form === 'embedded' ? 'A' : '');
+        assertSchema('launchResponse', body);
+        mutatedResponses++;
+        return new Response(JSON.stringify(body), { status: response.status, headers: response.headers });
+      };
+      await startThrough(rig, entry);
+      await rig.assertPrivate();
+      assert.ok(wrapperCalls === 1 && handlerSuccesses === 1 && mutatedResponses === 0,
+        'each mutant must first pass an unmodified real start through its wrapper');
+
+      mutate = true;
+      let result;
+      let failure;
+      try {
+        result = entry === 'owner' ? await rig.owner('/api/quickbooks/connect/start', { body: {} })
+          : await rig.broker(await rig.signed(START));
+      } catch (error) { failure = error; }
+      assert.ok(wrapperCalls === 2 && handlerSuccesses === 2 && mutatedResponses === 1,
+        'mutant must change exactly one schema-valid response after the real handler ran');
+      if (form === 'embedded') {
+        assert.ok(!failure && result?.ok, 'embedded key must reach the valid response field grant');
+      } else if (entry === 'owner') {
+        assert.ok(!failure && result?.status === 400, 'owner must catch the refused request-value grant');
+      } else {
+        assert.ok(failure?.code === 'ERR_ASSERTION' && /only one exact response field exception/.test(failure.message),
+          'request private value must not receive a response field grant');
+      }
+      await assert.rejects(() => rig.assertPrivate(), {
+        code: 'ERR_ASSERTION', message: /outside their exact allowed field/,
+      });
+    });
+  }
+  for (const surface of ['body', 'header']) await t.test(`malformed request ${surface} echo`, async () => {
+    const rig = await createRig(createProbeAdapter);
+    await rig.enroll();
+    const original = rig.adapter.broker.fetch;
+    let mutate = false;
+    let wrapperCalls = 0;
+    let handlerSuccesses = 0;
+    let handlerRefusals = 0;
+    rig.adapter.broker.fetch = async request => {
+      const input = await request.clone().json();
+      wrapperCalls++;
+      const response = await original(request);
+      if (!mutate) {
+        assert.ok(response.status === 201, 'malformed-request mutant needs a real successful start control');
+        handlerSuccesses++;
+        return response;
+      }
+      assert.ok(response.status === 400, 'malformed request must reach the real broker refusal');
+      handlerRefusals++;
+      if (surface === 'header') {
+        response.headers.set('x-probe-echo', input.body.delivery_auth_key);
+        return response;
+      }
+      const body = await response.json();
+      body.echo = input.body.delivery_auth_key;
+      return new Response(JSON.stringify(body), { status: response.status, headers: response.headers });
+    };
+    await startThrough(rig, 'broker');
+    await rig.assertPrivate();
+    assert.ok(wrapperCalls === 1 && handlerSuccesses === 1 && handlerRefusals === 0,
+      'malformed-request control must pass through the same real handler wrapper');
+    mutate = true;
+    const request = await rewriteJson(await rig.signed(START), body => { body.unrecognized = true; });
+    assert.ok((await rig.broker(request, { expectInvalidRequest: true })).status === 400);
+    assert.ok(wrapperCalls === 2 && handlerSuccesses === 1 && handlerRefusals === 1,
+      'malformed-request echo must follow one actual broker refusal');
+    await assert.rejects(() => rig.assertPrivate(), {
+      code: 'ERR_ASSERTION', message: /outside their exact allowed field/,
+    });
+  });
+});
+
+test('ENROLLMENT_REQUEST_PRIVATE_ECHO mutant is killed after the real handler', async () => {
+  const rig = await createRig(createProbeAdapter);
+  assert.ok((await rig.enroll()).status === 202, 'unmodified enrollment control must succeed');
+  await rig.assertPrivate();
+  const original = rig.adapter.broker.fetch;
+  let wrapperCalls = 0;
+  let handlerSuccesses = 0;
+  rig.adapter.broker.fetch = async request => {
+    const input = await request.clone().json();
+    assertSchema('enrollmentIssue', input);
+    wrapperCalls++;
+    const response = await original(request);
+    assert.ok(response.status === 202, 'wrapper must reach the real successful enrollment handler');
+    handlerSuccesses++;
+    response.headers.set('x-probe-echo', input.challenge);
+    return response;
+  };
+  assert.ok((await rig.enroll()).status === 202, 'enrollment echo must retain the successful status');
+  assert.ok(wrapperCalls === 1 && handlerSuccesses === 1,
+    'enrollment fixture must traverse the observed broker request boundary and real handler');
+  await assert.rejects(() => rig.assertPrivate(), {
+    code: 'ERR_ASSERTION', message: /outside their exact allowed field/,
+  });
 });
 
 async function successfulRefresh(rig, entry) {

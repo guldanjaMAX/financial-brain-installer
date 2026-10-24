@@ -9,6 +9,32 @@ const schema = JSON.parse(readFileSync(new URL('../v1/schemas/protocol.schema.js
 const audit = () => fixture(schema, 'auditEvent', length => randomBytes(length).toString('base64url').slice(0, length));
 const startResponse = () => Response.json(fixture(schema, 'launchResponse',
   length => randomBytes(length).toString('base64url').slice(0, length)));
+const startRequest = () => jsonRequest(helpers.BROKER + helpers.START, fixture(schema, 'startRequest',
+  length => randomBytes(length).toString('base64url').slice(0, length)));
+
+test('REQUEST_SCHEMA_BYPASS mutant is killed before the handler', async t => {
+  for (const attack of ['missing_private', 'unknown_field', 'duplicate_field', 'uninspectable_opt_in']) await t.test(attack, async () => {
+    const spy = transportSpy();
+    const rig = await createRig(spy.factory);
+    const source = startRequest();
+    assert.ok((await rig.broker(source.clone())).ok, 'unchanged schema-valid request must reach the handler');
+    await rig.assertPrivate();
+    const body = await source.clone().json();
+    if (attack === 'missing_private') delete body.body.delivery_auth_key;
+    if (attack === 'unknown_field') body.unrecognized = true;
+    const request = ['duplicate_field', 'uninspectable_opt_in'].includes(attack)
+      ? new Request(source, { body: JSON.stringify(body).replace('{', '{"protocol":"qbo-broker/1",') })
+      : jsonRequest(source.url, body);
+    let calls = 0;
+    const original = rig.adapter.broker.fetch;
+    rig.adapter.broker.fetch = async input => { calls++; return original(input); };
+    await assert.rejects(() => rig.broker(request, { expectInvalidRequest: attack === 'uninspectable_opt_in' }), {
+      code: 'ERR_ASSERTION', message: /broker request must match its exact wire schema before handler entry/,
+    });
+    assert.ok(calls === 0, 'invalid request must be rejected before the accepting handler runs');
+    await rig.assertPrivate();
+  });
+});
 
 test('private response fields follow schema references, branches and array paths', () => {
   assert.ok(typeof helpers.privateResponseFields === 'function', 'schema private-field traversal is required');
@@ -43,7 +69,7 @@ test('every successful broker JSON route declares a response schema', () => {
 test('successful response schema refusals remain visible after a caller catches them', async () => {
   const spy = transportSpy();
   const rig = await createRig(spy.factory);
-  await rig.broker(new Request(helpers.BROKER + helpers.START));
+  await rig.broker(startRequest());
   const healthy = fixture(schema, 'healthResponse', length => randomBytes(length).toString('base64url').slice(0, length));
   rig.adapter.broker.fetch = async () => Response.json(healthy);
   await rig.broker(new Request(helpers.BROKER + '/health'));
@@ -60,7 +86,7 @@ test('successful response schema refusals remain visible after a caller catches 
 test('reobserving a repaired response cannot erase a prior schema refusal', async () => {
   const spy = transportSpy();
   const rig = await createRig(spy.factory);
-  await rig.broker(new Request(helpers.BROKER + helpers.START));
+  await rig.broker(startRequest());
   const body = fixture(schema, 'healthResponse', length => randomBytes(length).toString('base64url').slice(0, length));
   const response = Response.json(body);
   rig.adapter.broker.fetch = async () => response;
@@ -163,7 +189,7 @@ test('probe transport permits owner control requests to the in-memory broker onl
 test('probe privacy scan rejects generated canaries and forbidden retained field names', async () => {
   const spy = transportSpy();
   const rig = await createRig(spy.factory);
-  await rig.broker(new Request(helpers.BROKER + helpers.CALLBACK));
+  await rig.broker(new Request(helpers.BROKER + helpers.CALLBACK + '?error=access_denied&state=' + rig.provider.opaque('state')));
   await rig.assertPrivate();
   const control = spy.rows[0];
   spy.rows.push({ metadata: rig.provider.config.clientSecret });
@@ -179,7 +205,7 @@ test('probe privacy scan rejects generated canaries and forbidden retained field
 test('probe privacy scan rejects fields outside the exact durable schema', async () => {
   const spy = transportSpy();
   const rig = await createRig(spy.factory);
-  await rig.broker(new Request(helpers.BROKER + helpers.START));
+  await rig.broker(startRequest());
   await rig.assertPrivate();
   spy.rows[0].unexpected_public_field = true;
   await assert.rejects(() => rig.assertPrivate(), { code: 'ERR_ASSERTION' });
@@ -196,7 +222,7 @@ test('probe event ordering requires both observed boundaries', () => {
 test('probe privacy scan rejects a generated credential returned to the browser', async () => {
   const spy = transportSpy();
   const rig = await createRig(spy.factory);
-  await rig.broker(new Request(helpers.BROKER + helpers.START));
+  await rig.broker(startRequest());
   await rig.assertPrivate();
   rig.adapter.broker.fetch = async () => new Response(rig.provider.config.clientSecret);
   await assert.rejects(() => rig.broker(new Request('https://broker.invalid/health')), {
@@ -211,18 +237,18 @@ test('EMPTY_AUDIT_SINKS mutant is killed for either sink and missing operation e
   for (const sink of ['rows', 'logs', 'both', 'operation']) {
     const spy = transportSpy();
     const rig = await createRig(spy.factory);
-    await rig.broker(new Request(helpers.BROKER + helpers.START));
+    await rig.broker(startRequest());
     await rig.assertPrivate();
     if (sink === 'operation') {
       rig.adapter.broker.fetch = async () => startResponse();
-      await rig.broker(new Request(helpers.BROKER + helpers.START));
+      await rig.broker(startRequest());
     } else if (sink === 'both') { spy.rows.length = 0; spy.logs.length = 0; }
     else spy[sink].length = 0;
     await assert.rejects(() => rig.assertPrivate(), { code: 'ERR_ASSERTION' });
   }
   const spy = transportSpy();
   const rig = await createRig(spy.factory);
-  await rig.broker(new Request(helpers.BROKER + helpers.START));
+  await rig.broker(startRequest());
   await rig.assertPrivate();
   const original = rig.adapter.broker.fetch;
   let calls = 0;
@@ -233,7 +259,7 @@ test('EMPTY_AUDIT_SINKS mutant is killed for either sink and missing operation e
     await gate;
     return original(request);
   };
-  await Promise.all([0, 1].map(() => rig.broker(new Request(helpers.BROKER + helpers.START))));
+  await Promise.all([0, 1].map(() => rig.broker(startRequest())));
   await assert.rejects(() => rig.assertPrivate(), { code: 'ERR_ASSERTION' });
 });
 
@@ -246,7 +272,7 @@ test('CALLBACK_RESPONSE_LEAK mutant is killed despite a clean redirect Location'
       const launch = { url: new URL(rig.provider.config.authorizationUrl), cookie: 'fixture=value' };
       launch.url.searchParams.set('state', state);
       const callback = await rig.consent(launch);
-      await rig.broker(new Request(helpers.BROKER + helpers.START));
+      await rig.broker(startRequest());
       await rig.assertPrivate();
       const callbackUrl = new URL(callback.url);
       if (surface === 'changed_callback') callbackUrl.searchParams.set(field, rig.provider.opaque('changed'));
@@ -267,7 +293,7 @@ test('CALLBACK_RESPONSE_LEAK mutant is killed despite a clean redirect Location'
 test('privacy audit expectations exclude read-only health and absent routes', async () => {
   const spy = transportSpy();
   const rig = await createRig(spy.factory);
-  await rig.broker(new Request(helpers.BROKER + helpers.START));
+  await rig.broker(startRequest());
   await rig.assertPrivate();
   for (const [path, status] of [['/health', 503], ['/absent', 404]]) {
     rig.adapter.broker.fetch = async () => new Response(null, { status });

@@ -30,14 +30,14 @@ test('E2E connect: enrollment, owner authentication, signed start and launch', a
     rejected(await rig.owner('/api/quickbooks/connect/start', { authenticated: false, body: {} }));
     noExchange(rig, 'owner.authentication.checked');
   }
-  for (const mutation of [
-    body => { body.signature = (body.signature[0] === 'A' ? 'B' : 'A') + body.signature.slice(1); },
-    body => { body.body.intent = (body.body.intent[0] === 'A' ? 'B' : 'A') + body.body.intent.slice(1); },
-    body => { body.unrecognized = true; },
+  for (const [mutation, expectInvalidRequest] of [
+    [body => { body.signature = (body.signature[0] === 'A' ? 'B' : 'A') + body.signature.slice(1); }, false],
+    [body => { body.body.intent = (body.body.intent[0] === 'A' ? 'B' : 'A') + body.body.intent.slice(1); }, false],
+    [body => { body.unrecognized = true; }, true],
   ]) {
     const rig = await createRig(factory);
     await rig.enroll();
-    rejected(await rig.broker(await rewriteJson(await rig.signed(START), mutation)));
+    rejected(await rig.broker(await rewriteJson(await rig.signed(START), mutation), { expectInvalidRequest }));
     noExchange(rig, 'start.proof.checked');
   }
   {
@@ -92,7 +92,9 @@ test('E2E callback: state, cookie, exact query, expiry and cancellation', async 
     if (attack === 'duplicate_code') url.searchParams.append('code', url.searchParams.get('code'));
     if (attack === 'extra_query') url.searchParams.set('return_to', 'https://elsewhere.invalid/');
     if (attack === 'expired') rig.advance(600_001);
-    queryFree(await rig.broker(new Request(url, { headers, redirect: 'manual' })));
+    queryFree(await rig.broker(new Request(url, { headers, redirect: 'manual' }), {
+      expectInvalidRequest: ['missing_state', 'duplicate_code', 'extra_query'].includes(attack),
+    }));
     noExchange(rig, 'callback.binding.checked');
     if (attack === 'wrong_cookie') reached(rig, 'callback.cookie.binding.checked');
     await rig.assertPrivate();
@@ -434,18 +436,18 @@ test('E2E SSRF and privacy: pinned callback, no redirects and no accounting prox
   await control.adapter.runScheduledRead({ owner: 0 });
   assert.ok(control.provider.snapshot().accountingReads > 0 && control.outbound.ownerAccounting > 0, 'read control must reach Intuit directly from the owner');
   assert.ok(control.outbound.brokerAccounting === 0, 'direct owner read must bypass the broker');
-  for (const callback of [
-    'http://owner-a.invalid/api/quickbooks/connect/callback',
-    'https://127.0.0.1/api/quickbooks/connect/callback',
-    'https://[::1]/api/quickbooks/connect/callback',
-    'https://localhost/api/quickbooks/connect/callback',
-    'https://owner-a.invalid:8443/api/quickbooks/connect/callback',
-    'https://fixture@owner-a.invalid/api/quickbooks/connect/callback',
-    'https://owner-a.invalid/api/quickbooks/connect/callback#fragment',
-    'https://owner-a.invalid/wrong-path',
+  for (const [callback, expectInvalidRequest] of [
+    ['http://owner-a.invalid/api/quickbooks/connect/callback', true],
+    ['https://127.0.0.1/api/quickbooks/connect/callback', false],
+    ['https://[::1]/api/quickbooks/connect/callback', true],
+    ['https://localhost/api/quickbooks/connect/callback', false],
+    ['https://owner-a.invalid:8443/api/quickbooks/connect/callback', true],
+    ['https://fixture@owner-a.invalid/api/quickbooks/connect/callback', true],
+    ['https://owner-a.invalid/api/quickbooks/connect/callback#fragment', true],
+    ['https://owner-a.invalid/wrong-path', true],
   ]) {
     const rig = await createRig(factory);
-    rejected(await rig.enroll(0, { callback }));
+    rejected(await rig.enroll(0, { callback, expectInvalidRequest }));
     noExchange(rig, 'enrollment.callback.checked');
   }
   for (const address of ['127.0.0.1', '10.0.0.1', '169.254.169.254', '::1', 'fc00::1']) {
@@ -491,7 +493,7 @@ test('E2E abuse: limits, request proof and replay-store failure close before con
     if (attack === 'wrong_type') request = new Request(valid, { headers: { 'content-type': 'text/plain' } });
     if (attack === 'oversized') request = jsonRequest(valid.url, { padding: 'x'.repeat(12 * 1024) });
     if (attack === 'expired_proof') rig.advance(60_001);
-    rejected(await rig.broker(request));
+    rejected(await rig.broker(request, { expectInvalidRequest: attack !== 'expired_proof' }));
     noExchange(rig, 'start.proof.checked');
   }
   {

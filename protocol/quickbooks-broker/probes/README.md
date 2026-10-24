@@ -61,6 +61,12 @@ response body and header is scanned for runtime credentials, launch capabilities
 transaction and refresh ciphertext, and callback code, state and company values,
 including altered callback input. Successful broker JSON responses are strictly
 decoded and validated against the response schema declared in the wire contract.
+Before handler entry, each declared broker request is decoded and validated
+against its request schema, including enrollment, JSON controls, form launch and
+callback queries. Every annotated request value is registered with no new
+response permission. A request key echoed inside a valid capability is still a
+leak, even when that response field has a grant for a different value. Prior
+exact grants survive legitimate capability, capsule and state round trips.
 The harness follows schema references, matching alternatives and array paths to
 register every `x-private` value. Each value is allowed only in its exact field
 of the one response that issued it. New private fields require no route-specific
@@ -72,8 +78,25 @@ Location is exempt. A clean
 completion Location never exempts its body or other headers. An unavailable
 audit ledger leaves evidence unavailable; it cannot certify a privacy pass.
 
+Malformed-input probes explicitly set `expectInvalidRequest: true`. The harness
+must first observe validation failure, then require a real broker refusal; the
+option cannot admit a valid request. Decoded private leaves remain registered
+even when another field invalidates the request, and all raw callback private
+query values remain covered, including duplicate fields. Unparseable JSON/form
+fixtures stop before the handler even with that option. Synthetic request
+snapshots use finite buffered fixture bytes so inspecting an oversized request
+does not wait for cancellation of its still-unread handler stream.
+
+The exact authenticated owner enrollment-challenge reply is a private
+owner-to-broker protocol exchange. Its schema requires the challenge value and
+is checked separately; it is not an outward response. Broker responses, direct
+owner calls, voucher acknowledgements and callback receipts remain scanned.
+Enrollment fixtures send their request through the same harness boundary as
+ordinary broker calls, before the real handler runs.
+
 Schema coverage combines a reviewed private-site inventory, sensitive field
-names and a closed inventory of reviewed public names. Unclassified new names,
+names and a closed inventory of reviewed public names across every schema
+definition, including request schemas. Unclassified new names,
 missing annotations and non-string annotations fail. Stored credential and key
 containers inherit their marker from the shared ciphertext leaf. Refresh controls
 exercise owner and raw broker entry points; body/header mutants echo ciphertext
@@ -120,7 +143,7 @@ Return this interface:
     { fetch(Request) -> Promise<Response>, authHeaders }
   ],
   fixtures: {
-    enroll({owner, authorized = true, challengeValid = true, callback?}) -> Response,
+    enroll({owner, authorized = true, challengeValid = true, callback?, send?}) -> Response,
     signedRequest({owner, route, bodyOverrides = {}}) -> Request
   },
   inspect() -> observations,
@@ -131,7 +154,8 @@ Return this interface:
 }
 ```
 
-`fixtures.enroll` sends an actual Access-authenticated issue request and serves
+`fixtures.enroll` sends an actual Access-authenticated issue request through its
+injected `send` transport (the harness boundary, defaulting to `ownerFetch`) and serves
 the owner's actual one-time ownership challenge. Its returned response is the
 issue route's response. The voucher is delivered only to that owner Worker.
 The negative options remove Access, fail challenge verification or propose the

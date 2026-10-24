@@ -64,9 +64,9 @@ export async function createProbeAdapter({ now, origins, brokerConfig, brokerFet
   return {
     broker: { fetch: async request => { await pendingRestart; return broker.fetch(request); } }, owners,
     fixtures: {
-      async enroll({ owner, authorized = true, challengeValid = true, callback }) {
+      async enroll({ owner, authorized = true, challengeValid = true, callback, send = ownerFetch }) {
         const issue = await owners[owner].prepareEnrollment({ challengeValid, callback });
-        return broker.fetch(new Request('https://broker.invalid/v1/quickbooks/installations/issue', {
+        return send(new Request('https://broker.invalid/v1/quickbooks/installations/issue', {
           method: 'POST', redirect: 'manual',
           headers: { 'content-type': 'application/json', ...(authorized ? { authorization: `Bearer ${access}` } : {}) },
           body: canonical(issue),

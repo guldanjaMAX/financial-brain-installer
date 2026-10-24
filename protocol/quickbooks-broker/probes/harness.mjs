@@ -15,17 +15,21 @@ function responseJson(text) {
 // leaves behind references or matching alternatives, need no route-specific code.
 export function privateResponseFields(root, name, value) {
   assert.ok(validates(root, name, value), 'successful broker response must match its exact wire schema');
+  return privateFields(root, name, value);
+}
+
+function privateFields(root, name, value, { invalid = false } = {}) {
   const fields = new Map();
   const matches = (rule, data) => validates({ ...root, $defs: { ...root.$defs, probeResponseBranch: rule } },
     'probeResponseBranch', data);
   function visit(rule, data, path) {
     if (rule.$ref) visit(root.$defs[rule.$ref.slice(8)], data, path);
     if (rule['x-private'] === true) {
-      assert.ok(typeof data === 'string' && data.length > 0, 'private response annotations require nonempty string values');
-      fields.set(JSON.stringify(path), { path, value: data });
+      if (!invalid) assert.ok(typeof data === 'string' && data.length > 0, 'private response annotations require nonempty string values');
+      if (typeof data === 'string' && data.length > 0) fields.set(JSON.stringify(path), { path, value: data });
     }
     for (const kind of ['oneOf', 'anyOf', 'allOf']) for (const branch of rule[kind] ?? []) {
-      if (matches(branch, data)) visit(branch, data, path);
+      if (invalid || matches(branch, data)) visit(branch, data, path);
     }
     for (const [key, child] of Object.entries(rule.properties ?? {})) {
       if (data !== null && typeof data === 'object' && Object.hasOwn(data, key)) visit(child, data[key], [...path, key]);
@@ -34,6 +38,19 @@ export function privateResponseFields(root, name, value) {
   }
   visit(root.$defs[name], value, []);
   return [...fields.values()];
+}
+
+function requestFields(encoded) {
+  const result = Object.create(null);
+  for (const pair of encoded.split('&')) {
+    const separator = pair.indexOf('=');
+    assert.ok(separator > 0);
+    const key = decodeURIComponent(pair.slice(0, separator).replaceAll('+', ' '));
+    const value = decodeURIComponent(pair.slice(separator + 1).replaceAll('+', ' '));
+    assert.ok(!Object.hasOwn(result, key));
+    result[key] = value;
+  }
+  return result;
 }
 
 export const PROTOCOL = 'qbo-broker/1';
@@ -160,6 +177,7 @@ export async function createRig(factory) {
   let ownerDeliveryFault;
   let resolverAddress = '93.184.216.34';
   let adapter;
+  let ownerChallengeHandlers;
   const providerOrigins = new Set([
     new URL(provider.config.authorizationUrl).origin,
     new URL(provider.config.tokenUrl).origin,
@@ -190,6 +208,16 @@ export async function createRig(factory) {
     const owner = origins.indexOf(url.origin);
     if (owner !== -1) {
       assert.ok(request.redirect === 'manual', 'owner delivery must prohibit redirect following');
+      if (caller === 'broker' && request.method === 'GET' &&
+          url.pathname === '/api/quickbooks/connect/enrollment/challenge') {
+        // This authenticated private protocol reply carries the challenge by
+        // contract. It is not returned to the owner/browser. Keep every broker
+        // response and every direct owner call in the outward privacy scan.
+        const response = await ownerChallengeHandlers[owner](request);
+        if (response.ok) assert.ok(validates(schemas, 'enrollmentChallenge',
+          responseJson(await response.clone().text())), 'private enrollment reply must match its exact wire schema');
+        return response;
+      }
       if (url.pathname === OWNER_CALLBACK) {
         outbound.delivery++;
         deliveries.push(request.clone());
@@ -226,6 +254,7 @@ export async function createRig(factory) {
   assert.ok(adapter.owners?.length === 2, 'adapter must expose two isolated owner Workers');
   assert.ok(typeof adapter.inspect === 'function' && typeof adapter.armFault === 'function', 'adapter must expose storage observations and injected faults');
   assert.ok(typeof adapter.fixtures?.enroll === 'function' && typeof adapter.fixtures?.signedRequest === 'function', 'adapter must supply wire fixture builders');
+  ownerChallengeHandlers = adapter.owners.map(owner => owner.fetch.bind(owner));
   const recordResponse = async response => {
     let recorded = recordedResponses.get(response);
     if (!recorded) {
@@ -285,14 +314,54 @@ export async function createRig(factory) {
     }
     return response;
   };
-  const brokerRequest = request => {
+  const brokerRequest = async (request, { expectInvalidRequest = false } = {}) => {
     const url = new URL(request.url);
     if (url.pathname === CALLBACK) for (const key of ['state', 'code', 'realmId']) {
       for (const value of url.searchParams.getAll(key)) if (value) {
         rememberPrivate(value);
       }
     }
-    return auditRequest(url.pathname, () => adapter.broker.fetch(request));
+    const declared = wire.routes.find(route => route.path === url.pathname);
+    if (declared?.request_schema) {
+      let body;
+      let decoded = false;
+      let valid = false;
+      try {
+        // Snapshot the finite synthetic request without consuming the handler's
+        // stream. Canceling a bounded reader on a tee can wait for that unread
+        // handler branch, so the harness checks its buffered fixture bytes.
+        const text = declared.method === 'GET' ? url.search.slice(1) : await request.clone().text();
+        const form = declared.request_schema === 'launchRequest';
+        // A bodyless wrong-method probe has no private payload to inspect.
+        body = text === '' && request.body === null ? null
+          : declared.method === 'GET' || form ? requestFields(text)
+            : parseStrictJson(text, { canonicalRequired: false });
+        if (form && body !== null) body.transaction = parseStrictJson(body.transaction ?? '');
+        decoded = true;
+        const type = form ? 'application/x-www-form-urlencoded' : 'application/json';
+        valid = request.method === declared.method && !url.hash &&
+          Buffer.byteLength(text) <= wire.limits.control_bytes &&
+          (declared.method === 'GET' || (request.headers.get('content-type') === type &&
+            !request.headers.has('content-encoding'))) && validates(schemas, declared.request_schema, body);
+      } catch { /* Malformed probes must opt in below and still reach the real refusal. */ }
+      // A malformed JSON/form body cannot proceed if its private leaves cannot
+      // be inspected. Callback duplicates are covered individually above.
+      assert.ok(expectInvalidRequest ? !valid && (decoded || url.pathname === CALLBACK) : valid,
+        'broker request must match its exact wire schema before handler entry');
+      if (body !== undefined) for (const { value } of privateFields(schemas, declared.request_schema, body, { invalid: !valid })) {
+        // A request can reuse a prior launch/state grant, but can never create
+        // a response permission. Register before an adapter can echo the input.
+        // Deliberately malformed probes still protect every decoded private
+        // leaf; their refusal does not make the request's credentials public.
+        rememberPrivate(value);
+      }
+    } else assert.ok(!expectInvalidRequest, 'malformed probe requires a declared request schema');
+    const response = await auditRequest(url.pathname, () => adapter.broker.fetch(request));
+    if (expectInvalidRequest) assert.ok(response.status >= 400 ||
+      (url.pathname === CALLBACK && response.status === 303 &&
+        response.headers.get('location') === BROKER + wire.generic_result_path),
+    'malformed request must reach a real broker refusal');
+    return response;
   };
   // Include callback receipts and direct fixture calls, not just rig.owner().
   for (const owner of adapter.owners) {
@@ -305,7 +374,9 @@ export async function createRig(factory) {
     advance: milliseconds => { time += milliseconds; },
     deliveryFault: fault => { ownerDeliveryFault = fault; },
     resolveTo: address => { resolverAddress = address; },
-    enroll: (owner = 0, options = {}) => auditRequest('/v1/quickbooks/installations/issue', () => adapter.fixtures.enroll({ owner, ...options })),
+    enroll: (owner = 0, { expectInvalidRequest = false, ...options } = {}) => adapter.fixtures.enroll({
+      owner, ...options, send: request => brokerRequest(request, { expectInvalidRequest }),
+    }),
     inspect: () => adapter.inspect(),
     state: (owner = 0) => adapter.inspect().owners[owner],
     broker: brokerRequest,

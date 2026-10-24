@@ -9,7 +9,9 @@ test('each route admits only its declared method, with a ready health control', 
   assert.equal((await rig.broker(new Request('https://broker.invalid/health'))).status, 200);
   for (const route of Object.values(ROUTES)) {
     const method = [ROUTES.callback, ROUTES.health, ROUTES.result].includes(route) ? 'POST' : 'GET';
-    assert.equal((await rig.broker(new Request('https://broker.invalid' + route, { method }))).status, 405);
+    assert.equal((await rig.broker(new Request('https://broker.invalid' + route, { method }), {
+      expectInvalidRequest: ![ROUTES.health, ROUTES.result].includes(route),
+    })).status, 405);
   }
   assert.equal(rig.provider.snapshot().attempted.exchange, 0);
   assert.equal(rig.provider.snapshot().attempted.refresh, 0);
