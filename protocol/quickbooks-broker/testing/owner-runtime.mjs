@@ -1,6 +1,7 @@
 // Offline owner fixture: real cryptographic boundaries and SQLite commits, no
 // deployment or substitute for the product owner's authentication integration.
 import { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 import {
   canonical, randomCapability, publicJwk, sha256, signObject, openEnvelope,
   encryptLocal, decryptLocal,
@@ -313,7 +314,7 @@ export async function createOwnerRuntime({ origin, now, transport, apiOrigins, o
     if (fence && (!retry || fence.purpose !== 'revoke' || !fence.proof)) return refuse(409);
     lease = true;
     try {
-      put('connection', { ...connection, status: 'disconnected', schedule_enabled: false });
+      put('connection', { ...connection, status: 'disconnecting', schedule_enabled: false });
       observe('owner.schedule.disabled');
       const operation = fence ?? { purpose: 'revoke', generation: connection.token_generation, intent: randomCapability(), outcome_unknown: true };
       put('fence', operation);
@@ -334,9 +335,11 @@ export async function createOwnerRuntime({ origin, now, transport, apiOrigins, o
             claims.key_generation !== get('installation').key_generation || claims.expires_at <= now() ||
             claims.operation_hash !== await sha256(unsignedBody)) return refuse(403);
         put('fence', { ...operation, proof: value.no_contact_proof, no_contact_proof_verified: true });
+        put('connection', { ...get('connection'), status: 'disconnected' });
         return response({ protocol: PROTOCOL, status: 'disconnected' });
       }
       connection = get('connection');
+      connection.status = 'disconnected';
       connection.remote_revocation = value.outcome;
       if (value.outcome === 'confirmed') {
         for (const field of ['access_token', 'refresh_token', 'realm_id']) delete connection[field];
@@ -383,15 +386,22 @@ export async function createOwnerRuntime({ origin, now, transport, apiOrigins, o
       tokenCiphertextCount: ['access_token', 'refresh_token', 'realm_id'].filter(key => connection?.[key]).length,
       connectionCommitCount: commitCount, connectionReadbackCount: readbackCount,
       scheduleEnabled: connection?.schedule_enabled ?? false,
+      readsEnabled: connection?.status === 'connected' && !fence,
       importedRecordCount: sqlite.prepare('SELECT count(*) AS count FROM imported_records').get().count,
       outcomeUnknown: fence?.outcome_unknown ?? false, remoteRevocation: connection?.remote_revocation ?? null,
+      fenceFingerprint: fence ? createHash('sha256').update(canonical(fence)).digest('hex') : null,
       noContactProofVerified: fence?.no_contact_proof_verified ?? false,
     };
   }
 
   async function runScheduledRead() {
+    if (!get('connection')?.schedule_enabled) return false;
+    return runDirectRead();
+  }
+
+  async function runDirectRead() {
     const connection = get('connection');
-    if (!connection?.schedule_enabled || connection.status !== 'connected' || get('fence')) return;
+    if (connection?.status !== 'connected' || get('fence')) return false;
     const realm = await credential('realm_id');
     if (!/^[A-Za-z0-9._~-]{1,128}$/.test(realm) || await companyFingerprint(realm) !== connection.company_fingerprint) throw new Error('owner_company_refused');
     const url = new URL(`/v3/company/${realm}/query`, apiOrigins[connection.environment]);
@@ -402,10 +412,11 @@ export async function createOwnerRuntime({ origin, now, transport, apiOrigins, o
     if (!result.ok) throw new Error('owner_read_unavailable');
     // The test fixture proves routing only. It does not import returned records.
     await result.arrayBuffer();
+    return true;
   }
 
   return {
-    fetch, authHeaders, prepareEnrollment, inspect, runScheduledRead,
+    fetch, authHeaders, prepareEnrollment, inspect, runScheduledRead, runDirectRead,
     signedRequest: async ({ route, bodyOverrides = {} }) => new Request(BROKER + route, {
       method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/json' },
       body: canonical(await makeSigned(route, bodyOverrides)),

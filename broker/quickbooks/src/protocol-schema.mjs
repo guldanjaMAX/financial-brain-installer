@@ -1468,213 +1468,408 @@ export const schema = {
       ]
     },
     "ownerIntent": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "protocol": {
-          "$ref": "#/$defs/protocol"
-        },
-        "intent": {
-          "$ref": "#/$defs/capability"
-        },
-        "request_id": {
-          "$ref": "#/$defs/capability"
-        },
-        "install_fingerprint": {
-          "$ref": "#/$defs/digest"
-        },
-        "callback": {
-          "$ref": "#/$defs/callback"
-        },
-        "environment": {
-          "$ref": "#/$defs/environment"
-        },
-        "key_generation": {
-          "$ref": "#/$defs/generation"
-        },
-        "delivery_public_key": {
-          "$ref": "#/$defs/publicKey"
-        },
-        "delivery_private_key": {
-          "$ref": "#/$defs/storedCiphertext"
-        },
-        "created_at": {
-          "$ref": "#/$defs/timestamp"
-        },
-        "expires_at": {
-          "$ref": "#/$defs/timestamp"
-        },
-        "status": {
-          "type": "string",
-          "enum": [
-            "pending",
-            "committed",
-            "canceled",
-            "failed",
-            "expired"
-          ]
-        },
-        "delivery_id": {
-          "anyOf": [
-            {
+      "description": "Active intents retain encrypted delivery keys. Terminal intents retain only the exact receipt replay material after key destruction.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "protocol": {
+              "$ref": "#/$defs/protocol"
+            },
+            "intent": {
               "$ref": "#/$defs/capability"
             },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "envelope_hash": {
-          "anyOf": [
-            {
+            "request_id": {
+              "$ref": "#/$defs/capability"
+            },
+            "install_fingerprint": {
               "$ref": "#/$defs/digest"
             },
-            {
-              "type": "null"
+            "callback": {
+              "$ref": "#/$defs/callback"
+            },
+            "environment": {
+              "$ref": "#/$defs/environment"
+            },
+            "key_generation": {
+              "$ref": "#/$defs/generation"
+            },
+            "delivery_public_key": {
+              "$ref": "#/$defs/publicKey"
+            },
+            "delivery_private_key": {
+              "$ref": "#/$defs/storedCiphertext"
+            },
+            "created_at": {
+              "$ref": "#/$defs/timestamp"
+            },
+            "expires_at": {
+              "$ref": "#/$defs/timestamp"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "saved"
+              ]
+            },
+            "delivery_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/capability"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "envelope_hash": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/digest"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "receipt": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/deliveryReceipt"
+                },
+                {
+                  "$ref": "#/$defs/completionReceipt"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "delivery_auth_key": {
+              "$ref": "#/$defs/storedCiphertext"
+            },
+            "source_binding": {
+              "$ref": "#/$defs/digest"
+            },
+            "expected_token_generation": {
+              "$ref": "#/$defs/generation"
             }
+          },
+          "required": [
+            "protocol",
+            "intent",
+            "request_id",
+            "install_fingerprint",
+            "callback",
+            "environment",
+            "key_generation",
+            "delivery_public_key",
+            "delivery_private_key",
+            "created_at",
+            "expires_at",
+            "status",
+            "delivery_id",
+            "envelope_hash",
+            "receipt",
+            "delivery_auth_key",
+            "source_binding",
+            "expected_token_generation"
           ]
         },
-        "receipt": {
-          "anyOf": [
-            {
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "protocol": {
+              "$ref": "#/$defs/protocol"
+            },
+            "intent": {
+              "$ref": "#/$defs/capability"
+            },
+            "status": {
+              "const": "committed"
+            },
+            "delivery_id": {
+              "$ref": "#/$defs/capability"
+            },
+            "envelope_hash": {
+              "$ref": "#/$defs/digest"
+            },
+            "receipt": {
               "$ref": "#/$defs/deliveryReceipt"
-            },
-            {
-              "$ref": "#/$defs/completionReceipt"
-            },
-            {
-              "type": "null"
             }
+          },
+          "required": [
+            "protocol",
+            "intent",
+            "status",
+            "delivery_id",
+            "envelope_hash",
+            "receipt"
           ]
         },
-        "delivery_auth_key": {
-          "$ref": "#/$defs/storedCiphertext"
-        },
-        "source_binding": {
-          "$ref": "#/$defs/digest"
-        },
-        "expected_token_generation": {
-          "$ref": "#/$defs/generation"
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "protocol": {
+              "$ref": "#/$defs/protocol"
+            },
+            "intent": {
+              "$ref": "#/$defs/capability"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "canceled",
+                "failed",
+                "expired"
+              ]
+            },
+            "delivery_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/capability"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "envelope_hash": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/digest"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "receipt": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/deliveryReceipt"
+                },
+                {
+                  "$ref": "#/$defs/completionReceipt"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "protocol",
+            "intent",
+            "status",
+            "delivery_id",
+            "envelope_hash",
+            "receipt"
+          ]
         }
-      },
-      "required": [
-        "protocol",
-        "intent",
-        "request_id",
-        "install_fingerprint",
-        "callback",
-        "environment",
-        "key_generation",
-        "delivery_public_key",
-        "delivery_private_key",
-        "created_at",
-        "expires_at",
-        "status",
-        "delivery_id",
-        "envelope_hash",
-        "receipt",
-        "delivery_auth_key",
-        "source_binding",
-        "expected_token_generation"
       ]
     },
     "ownerConnected": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "protocol": {
-          "$ref": "#/$defs/protocol"
-        },
-        "environment": {
-          "$ref": "#/$defs/environment"
-        },
-        "install_fingerprint": {
-          "$ref": "#/$defs/digest"
-        },
-        "source_binding": {
-          "$ref": "#/$defs/digest"
-        },
-        "company_fingerprint": {
-          "$ref": "#/$defs/companyFingerprint"
-        },
-        "token_generation": {
-          "$ref": "#/$defs/generation"
-        },
-        "status": {
-          "type": "string",
-          "enum": [
-            "connected",
-            "delayed",
-            "reauthorization_required",
-            "disconnecting"
-          ]
-        },
-        "access_token": {
-          "$ref": "#/$defs/storedCiphertext"
-        },
-        "refresh_token": {
-          "$ref": "#/$defs/storedCiphertext"
-        },
-        "realm_id": {
-          "$ref": "#/$defs/storedCiphertext"
-        },
-        "access_expires_at": {
-          "$ref": "#/$defs/timestamp"
-        },
-        "refresh_expires_at": {
-          "$ref": "#/$defs/timestamp"
-        },
-        "hard_refresh_expires_at": {
-          "anyOf": [
-            {
+      "description": "Only connected or delayed status can permit reads; all other states keep reads disabled.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "protocol": {
+              "$ref": "#/$defs/protocol"
+            },
+            "environment": {
+              "$ref": "#/$defs/environment"
+            },
+            "install_fingerprint": {
+              "$ref": "#/$defs/digest"
+            },
+            "source_binding": {
+              "$ref": "#/$defs/digest"
+            },
+            "company_fingerprint": {
+              "$ref": "#/$defs/companyFingerprint"
+            },
+            "token_generation": {
+              "$ref": "#/$defs/generation"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "connected",
+                "delayed"
+              ]
+            },
+            "access_token": {
+              "$ref": "#/$defs/storedCiphertext"
+            },
+            "refresh_token": {
+              "$ref": "#/$defs/storedCiphertext"
+            },
+            "realm_id": {
+              "$ref": "#/$defs/storedCiphertext"
+            },
+            "access_expires_at": {
               "$ref": "#/$defs/timestamp"
             },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "last_refresh_at": {
-          "anyOf": [
-            {
+            "refresh_expires_at": {
               "$ref": "#/$defs/timestamp"
             },
-            {
-              "type": "null"
+            "hard_refresh_expires_at": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/timestamp"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "last_refresh_at": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/timestamp"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "last_api_read_at": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/timestamp"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "reads_enabled": {
+              "type": "boolean"
             }
+          },
+          "required": [
+            "protocol",
+            "environment",
+            "install_fingerprint",
+            "source_binding",
+            "company_fingerprint",
+            "token_generation",
+            "status",
+            "access_token",
+            "refresh_token",
+            "realm_id",
+            "access_expires_at",
+            "refresh_expires_at",
+            "hard_refresh_expires_at",
+            "last_refresh_at",
+            "last_api_read_at",
+            "reads_enabled"
           ]
         },
-        "last_api_read_at": {
-          "anyOf": [
-            {
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "protocol": {
+              "$ref": "#/$defs/protocol"
+            },
+            "environment": {
+              "$ref": "#/$defs/environment"
+            },
+            "install_fingerprint": {
+              "$ref": "#/$defs/digest"
+            },
+            "source_binding": {
+              "$ref": "#/$defs/digest"
+            },
+            "company_fingerprint": {
+              "$ref": "#/$defs/companyFingerprint"
+            },
+            "token_generation": {
+              "$ref": "#/$defs/generation"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "reauthorization_required",
+                "disconnecting"
+              ]
+            },
+            "access_token": {
+              "$ref": "#/$defs/storedCiphertext"
+            },
+            "refresh_token": {
+              "$ref": "#/$defs/storedCiphertext"
+            },
+            "realm_id": {
+              "$ref": "#/$defs/storedCiphertext"
+            },
+            "access_expires_at": {
               "$ref": "#/$defs/timestamp"
             },
-            {
-              "type": "null"
+            "refresh_expires_at": {
+              "$ref": "#/$defs/timestamp"
+            },
+            "hard_refresh_expires_at": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/timestamp"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "last_refresh_at": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/timestamp"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "last_api_read_at": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/timestamp"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "reads_enabled": {
+              "const": false
             }
+          },
+          "required": [
+            "protocol",
+            "environment",
+            "install_fingerprint",
+            "source_binding",
+            "company_fingerprint",
+            "token_generation",
+            "status",
+            "access_token",
+            "refresh_token",
+            "realm_id",
+            "access_expires_at",
+            "refresh_expires_at",
+            "hard_refresh_expires_at",
+            "last_refresh_at",
+            "last_api_read_at",
+            "reads_enabled"
           ]
-        },
-        "reads_enabled": {
-          "type": "boolean"
         }
-      },
-      "required": [
-        "protocol",
-        "environment",
-        "install_fingerprint",
-        "source_binding",
-        "company_fingerprint",
-        "token_generation",
-        "status",
-        "access_token",
-        "refresh_token",
-        "realm_id",
-        "access_expires_at",
-        "refresh_expires_at",
-        "hard_refresh_expires_at",
-        "last_refresh_at",
-        "last_api_read_at",
-        "reads_enabled"
       ]
     },
     "ownerDisconnected": {
@@ -1797,66 +1992,126 @@ export const schema = {
       ]
     },
     "ownerStatus": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "protocol": {
-          "$ref": "#/$defs/protocol"
-        },
-        "status": {
-          "type": "string",
-          "enum": [
-            "not_connected",
-            "connecting",
-            "connected",
-            "delayed",
-            "reauthorization_required",
-            "disconnecting",
-            "disconnected",
-            "local_destroyed_remote_unknown"
+      "description": "Only connected or delayed status can permit reads; all other states keep reads disabled.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "protocol": {
+              "$ref": "#/$defs/protocol"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "connected",
+                "delayed"
+              ]
+            },
+            "reads_enabled": {
+              "type": "boolean"
+            },
+            "last_refresh_at": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/timestamp"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "last_api_read_at": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/timestamp"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "outcome": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/outcome"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "protocol",
+            "status",
+            "reads_enabled",
+            "last_refresh_at",
+            "last_api_read_at",
+            "outcome"
           ]
         },
-        "reads_enabled": {
-          "type": "boolean"
-        },
-        "last_refresh_at": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/timestamp"
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "protocol": {
+              "$ref": "#/$defs/protocol"
             },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "last_api_read_at": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/timestamp"
+            "status": {
+              "type": "string",
+              "enum": [
+                "not_connected",
+                "connecting",
+                "reauthorization_required",
+                "disconnecting",
+                "disconnected",
+                "local_destroyed_remote_unknown"
+              ]
             },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "outcome": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/outcome"
+            "reads_enabled": {
+              "const": false
             },
-            {
-              "type": "null"
+            "last_refresh_at": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/timestamp"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "last_api_read_at": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/timestamp"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "outcome": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/outcome"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
+          },
+          "required": [
+            "protocol",
+            "status",
+            "reads_enabled",
+            "last_refresh_at",
+            "last_api_read_at",
+            "outcome"
           ]
         }
-      },
-      "required": [
-        "protocol",
-        "status",
-        "reads_enabled",
-        "last_refresh_at",
-        "last_api_read_at",
-        "outcome"
       ]
     },
     "healthResponse": {

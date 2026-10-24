@@ -106,5 +106,6 @@ export async function createProbeAdapter({ now, origins, brokerConfig, brokerFet
       finally { await unlink(file).catch(() => {}); await rmdir(directory).catch(() => {}); }
     },
     runScheduledRead: ({ owner }) => owners[owner].runScheduledRead(),
+    runDirectRead: ({ owner }) => owners[owner].runDirectRead(),
   };
 }

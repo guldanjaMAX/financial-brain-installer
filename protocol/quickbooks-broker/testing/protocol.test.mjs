@@ -3,6 +3,7 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { createCipheriv, createDecipheriv, createHash, createHmac, generateKeyPairSync,
   hkdfSync, randomBytes, sign, verify, diffieHellman, timingSafeEqual } from 'node:crypto';
+import { canonical as brokerCanonical } from '../../../broker/quickbooks/src/crypto.mjs';
 
 const read = path => JSON.parse(readFileSync(new URL(path, import.meta.url), 'utf8'));
 const contract = () => read('../v1/wire-contract.json');
@@ -15,6 +16,8 @@ function canonical(value) {
     return String(value);
   }
   if (typeof value === 'string') {
+    // Unicode mode treats a valid pair as one non-BMP code point. Only lone
+    // surrogate code points match this range and must be refused.
     if (/[\uD800-\uDFFF]/u.test(value)) throw new Error('canonical_invalid');
     return JSON.stringify(value);
   }
@@ -51,6 +54,20 @@ test('canonical byte fixture is insertion-order independent and rejects ambiguou
   assert.equal(canonical({ b: 'text', a: 1 }), canonical({ a: 1, b: 'text' }));
   for (const invalid of [NaN, Infinity, 1.5, -0, undefined, '\ud800', new Date()]) assert.throws(() => canonical(invalid), /canonical_invalid/);
   assert.equal(Buffer.byteLength(canonical('é')), 4, 'wire caps count UTF-8 bytes, not code units');
+});
+
+test('canonical bytes preserve non-BMP values and keys while refusing only lone surrogates', () => {
+  const valid = { ['key-\uD83D\uDE80']: 'value-\uD834\uDD1E', nested: ['\uD800\uDC00', '\uDBFF\uDFFF'] };
+  for (const encode of [canonical, brokerCanonical]) {
+    const encoded = Buffer.from(encode(valid), 'utf8');
+    const decoded = JSON.parse(encoded.toString('utf8'));
+    assert.ok(JSON.stringify(decoded) === JSON.stringify(valid), 'non-BMP values and keys round-trip through UTF-8');
+    assert.ok(Buffer.from(encode(decoded), 'utf8').equals(encoded), 'round trip preserves canonical bytes');
+    for (const lone of ['\uD800', '\uDC00', '\uD800x', 'x\uDC00', '\uDC00\uD800', '\uD800\uD800', '\uDC00\uDC00']) {
+      assert.throws(() => encode(lone));
+      assert.throws(() => encode({ [lone]: 'value' }));
+    }
+  }
 });
 
 test('request ES256 proof binds route, timestamp, request ID, voucher and exact body hash', () => {

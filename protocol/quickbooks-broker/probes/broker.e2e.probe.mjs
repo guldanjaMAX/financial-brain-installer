@@ -3,11 +3,11 @@ import { test } from 'node:test';
 import {
   PROTOCOL, BROKER, CALLBACK, OWNER_CALLBACK, START, REFRESH, REVOKE,
   loadImplementation, createRig, jsonRequest, launchRequest, rewriteJson, rejected,
-  queryFree, reached, ordered, connected, noExchange,
+  queryFree, reached, ordered, connected, noExchange, refusedUnchanged, readsDisabled,
 } from './harness.mjs';
 
-// These are deliberately red until actual Worker handlers can be bound by the
-// fixed implementation adapter. No scenario treats a missing handler as a pass.
+// The fixed adapter binds actual broker handlers and the offline owner fixture.
+// No scenario treats a missing handler or an unobserved decision as a pass.
 test('E2E connect: enrollment, owner authentication, signed start and launch', async () => {
   const factory = await loadImplementation();
   const control = await createRig(factory);
@@ -67,6 +67,7 @@ test('E2E callback: state, cookie, exact query, expiry and cancellation', async 
   const control = await createRig(factory);
   await control.connect();
   reached(control, 'callback.binding.checked');
+  reached(control, 'callback.cookie.binding.checked');
   for (const attack of ['missing_state', 'wrong_state', 'missing_cookie', 'wrong_cookie', 'duplicate_code', 'extra_query', 'expired']) {
     const rig = await createRig(factory);
     const callback = await rig.consent(await rig.pending());
@@ -75,12 +76,23 @@ test('E2E callback: state, cookie, exact query, expiry and cancellation', async 
     if (attack === 'missing_state') url.searchParams.delete('state');
     if (attack === 'wrong_state') url.searchParams.set('state', rig.provider.opaque('state'));
     if (attack === 'missing_cookie') headers.delete('cookie');
-    if (attack === 'wrong_cookie') headers.set('cookie', rig.provider.opaque('cookie'));
+    if (attack === 'wrong_cookie') {
+      const [name, value] = callback.headers.get('cookie').split('=');
+      const pieces = value.split('.');
+      pieces[3] = (pieces[3][0] === 'A' ? 'B' : 'A') + pieces[3].slice(1);
+      headers.set('cookie', `${name}=${pieces.join('.')}`);
+    }
+    if (attack === 'wrong_cookie') {
+      assert.ok(headers.get('cookie').startsWith(callback.headers.get('cookie').split('=')[0] + '=') &&
+        headers.get('cookie').split('=')[1].split('.').length === 4,
+      'wrong-cookie probe must retain the real cookie name and sealed-cookie syntax');
+    }
     if (attack === 'duplicate_code') url.searchParams.append('code', url.searchParams.get('code'));
     if (attack === 'extra_query') url.searchParams.set('return_to', 'https://elsewhere.invalid/');
     if (attack === 'expired') rig.advance(600_001);
     queryFree(await rig.broker(new Request(url, { headers, redirect: 'manual' })));
     noExchange(rig, 'callback.binding.checked');
+    if (attack === 'wrong_cookie') reached(rig, 'callback.cookie.binding.checked');
     await rig.assertPrivate();
   }
   const canceled = await createRig(factory);
@@ -144,6 +156,8 @@ test('E2E refresh: rotation, generation lease, lost response and persistent unce
   assert.ok(!control.state().outcomeUnknown, 'only verified replacement readback clears the fence');
   ordered(control, 'owner.refresh.fenced', 'broker.refresh.sent');
   reached(control, 'owner.refresh.readback');
+  assert.ok(await control.adapter.runScheduledRead({ owner: 0 }) === true &&
+    await control.adapter.runDirectRead({ owner: 0 }) === true, 'connected valid controls must permit both read paths');
 
   for (const path of ['/api/quickbooks/refresh', '/api/quickbooks/disconnect']) {
     const rig = await createRig(factory);
@@ -166,7 +180,8 @@ test('E2E refresh: rotation, generation lease, lost response and persistent unce
     reached(rig, 'broker.refresh.sent');
     assert.ok(rig.state().status === 'reauthorization_required' && rig.state().outcomeUnknown, 'unproven refresh leaves a visible persistent fence');
     assert.ok(rig.state().tokenGeneration === generation, 'failure must not activate a new generation');
-    await rig.owner('/api/quickbooks/refresh', { body: {} });
+    await readsDisabled(rig);
+    await refusedUnchanged(rig, () => rig.owner('/api/quickbooks/refresh', { body: {} }));
     assert.ok(rig.provider.snapshot().attempted.refresh === 1, 'old refresh token must never be retried after uncertainty');
     await rig.assertPrivate();
   }
@@ -178,6 +193,8 @@ test('E2E refresh: rotation, generation lease, lost response and persistent unce
     rejected(await rig.owner('/api/quickbooks/refresh', { body: {} }));
     reached(rig, 'owner.refresh.readback.attempted');
     assert.ok(rig.state().outcomeUnknown, 'failed replacement readback must retain the fence');
+    await readsDisabled(rig);
+    await refusedUnchanged(rig, () => rig.owner('/api/quickbooks/refresh', { body: {} }));
   }
   {
     const rig = await createRig(factory);
@@ -203,6 +220,30 @@ test('E2E revoke: confirmed, rejected, uncertain and no-contact retry proof', as
   assert.ok(control.state().importedRecordCount === retained, 'disconnect must retain imported records');
   ordered(control, 'owner.revoke.fenced', 'broker.revoke.sent');
   ordered(control, 'owner.schedule.disabled', 'broker.revoke.sent');
+  await readsDisabled(control);
+
+  {
+    let release;
+    let entered;
+    const gate = new Promise(resolve => { release = resolve; });
+    const providerEntered = new Promise(resolve => { entered = resolve; });
+    const rig = await createRig(dependencies => factory({ ...dependencies, brokerFetch: async request => {
+      if (request.url === dependencies.brokerConfig.revokeUrl) { entered(); await gate; }
+      return dependencies.brokerFetch(request);
+    } }));
+    await rig.connect();
+    assert.ok(await rig.adapter.runScheduledRead({ owner: 0 }) === true &&
+      await rig.adapter.runDirectRead({ owner: 0 }) === true, 'valid connection reads are the in-flight control');
+    const pending = rig.owner('/api/quickbooks/disconnect', { body: {} });
+    try {
+      await providerEntered;
+      assert.ok(rig.state().status === 'disconnecting' && rig.state().outcomeUnknown,
+        'in-flight disconnect must expose its status and durable fence');
+      await readsDisabled(rig);
+    } finally { release(); await pending; }
+    assert.ok(rig.state().remoteRevocation === 'confirmed');
+    await readsDisabled(rig);
+  }
 
   for (const fault of ['reject', 'loss_before', 'loss_after']) {
     const rig = await createRig(factory);
@@ -211,7 +252,8 @@ test('E2E revoke: confirmed, rejected, uncertain and no-contact retry proof', as
     await rig.owner('/api/quickbooks/disconnect', { body: {} });
     reached(rig, 'broker.revoke.sent');
     assert.ok(!rig.state().scheduleEnabled && rig.state().remoteRevocation !== 'confirmed', 'unconfirmed revoke must keep all use disabled');
-    await rig.owner('/api/quickbooks/disconnect', { body: {} });
+    await readsDisabled(rig);
+    await refusedUnchanged(rig, () => rig.owner('/api/quickbooks/disconnect', { body: {} }));
     assert.ok(rig.provider.snapshot().attempted.revoke === 1, 'unproven provider contact must not be retried');
     await rig.assertPrivate();
   }
@@ -222,8 +264,38 @@ test('E2E revoke: confirmed, rejected, uncertain and no-contact retry proof', as
     await rig.owner('/api/quickbooks/disconnect', { body: {} });
     reached(rig, 'broker.revoke.fence.attempted');
     assert.ok(rig.provider.snapshot().attempted.revoke === 0 && rig.state().noContactProofVerified, 'safe retry requires verified proof of no provider contact');
+    await readsDisabled(rig);
     await rig.owner('/api/quickbooks/disconnect', { body: { retry_same_operation: true } });
     assert.ok(rig.provider.snapshot().attempted.revoke === 1 && rig.state().remoteRevocation === 'confirmed', 'same fenced operation may retry only after proof');
+  }
+  {
+    const rig = await createRig(factory);
+    await rig.connect();
+    const first = await rig.signed(REVOKE);
+    const operation = (await first.clone().json()).body;
+    rig.adapter.armFault('broker.revoke.before_fence');
+    const notSent = await rig.broker(first);
+    assert.ok(notSent.ok, 'no-contact control must return its proof');
+    const result = await notSent.json();
+    assert.ok(result.provider_contact === 'not_sent' && rig.provider.snapshot().attempted.revoke === 0);
+    const original = rig.inspect().brokerRows.find(row => row.route === REVOKE && row.phase === 'not_sent' && 'provider_attempts' in row);
+    assert.ok(original, 'no-contact control requires a retained replay row');
+    const bodyOverrides = { ...operation, no_contact_proof: result.no_contact_proof };
+    const retry = await rig.signed(REVOKE, { bodyOverrides });
+    const consumedReplay = await rig.signed(REVOKE, { bodyOverrides });
+    assert.ok((await retry.clone().json()).request_id !== (await consumedReplay.clone().json()).request_id,
+      'proof replay must reach consumption under a fresh request ID');
+    assert.ok((await rig.broker(retry)).ok && rig.provider.snapshot().attempted.revoke === 1,
+      'unconsumed proof must authorize exactly one fenced send');
+    const consumed = () => rig.inspect().brokerRows.find(row => row.request_id_hash === original.request_id_hash && 'provider_attempts' in row);
+    assert.ok(consumed()?.phase === 'proof_consumed' && consumed().provider_attempts === 0,
+      'successful retry must durably consume the original no-contact proof');
+    const before = JSON.stringify(consumed());
+    const replay = await refusedUnchanged(rig, () => rig.broker(consumedReplay));
+    assert.ok(replay.status === 409 && (await replay.json()).code === 'replayed', 'consumed proof must be refused');
+    assert.ok(consumed()?.phase === 'proof_consumed' && JSON.stringify(consumed()) === before,
+      'refusal must preserve proof_consumed and its original no-contact evidence');
+    await rig.assertPrivate();
   }
 });
 

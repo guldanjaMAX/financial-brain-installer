@@ -56,6 +56,29 @@ export function rejected(response) {
   assert.ok(response.status >= 400 && response.status < 600, 'request must be refused');
 }
 
+export async function refusedUnchanged(rig, operation) {
+  const before = rig.provider.snapshot();
+  const owner = rig.state();
+  const response = await operation();
+  rejected(response);
+  assert.ok(JSON.stringify(rig.provider.snapshot()) === JSON.stringify(before), 'refused replay must leave every provider outcome unchanged');
+  assert.ok(JSON.stringify(rig.state()) === JSON.stringify(owner),
+    'refused replay must preserve generation, fence, status, disabled reads and remote outcome');
+  return response;
+}
+
+export async function readsDisabled(rig) {
+  const before = rig.provider.snapshot();
+  const outbound = { ...rig.outbound };
+  const owner = rig.state();
+  assert.ok(!owner.scheduleEnabled && !owner.readsEnabled, 'both scheduled and direct reads must be disabled');
+  assert.ok(await rig.adapter.runScheduledRead({ owner: 0 }) === false, 'disabled schedule must refuse execution');
+  assert.ok(await rig.adapter.runDirectRead({ owner: 0 }) === false, 'disabled direct read must refuse execution');
+  assert.ok(JSON.stringify(rig.provider.snapshot()) === JSON.stringify(before) &&
+    JSON.stringify(rig.outbound) === JSON.stringify(outbound), 'disabled reads must never enter any outbound transport');
+  assert.ok(JSON.stringify(rig.state()) === JSON.stringify(owner), 'disabled reads must preserve the fenced owner state');
+}
+
 export function queryFree(response) {
   assert.ok(response.status === 303, 'completion must use a redirect');
   let target;
@@ -90,6 +113,9 @@ export async function createRig(factory) {
   const deliveries = [];
   const receipts = [];
   const returned = [];
+  const recordedResponses = new WeakMap();
+  const auditOperations = [];
+  const callbackPrivate = new Set();
   const privateValues = new Set([provider.config.clientSecret]);
   const credentials = new Set([provider.config.clientSecret]);
   const outbound = { brokerAccounting: 0, ownerAccounting: 0, blocked: 0, delivery: 0 };
@@ -107,7 +133,7 @@ export async function createRig(factory) {
     const url = new URL(request.url);
     if (url.origin === BROKER) {
       assert.ok(caller === 'owner', 'only an owner Worker may use the injected broker control transport');
-      return adapter.broker.fetch(request);
+      return brokerRequest(request);
     }
     if (providerOrigins.has(url.origin)) {
       if (url.pathname.startsWith('/v3/company/')) {
@@ -164,19 +190,55 @@ export async function createRig(factory) {
   assert.ok(typeof adapter.inspect === 'function' && typeof adapter.armFault === 'function', 'adapter must expose storage observations and injected faults');
   assert.ok(typeof adapter.fixtures?.enroll === 'function' && typeof adapter.fixtures?.signedRequest === 'function', 'adapter must supply wire fixture builders');
   const recordResponse = async response => {
-    returned.push(await response.clone().text(), JSON.stringify(Object.fromEntries(response.headers)));
+    const recorded = { body: await response.clone().text(), headers: Object.fromEntries(response.headers), launchState: null };
+    returned.push(recorded);
+    recordedResponses.set(response, recorded);
     return response;
   };
+  const auditRequest = async (route, invoke) => {
+    const before = new Set(adapter.inspect().brokerRows.map(row => row.event_id_hash).filter(Boolean));
+    const response = await invoke();
+    const snapshot = adapter.inspect();
+    const fresh = snapshot.brokerRows.filter(row => row.route === route && row.event_id_hash && !before.has(row.event_id_hash));
+    // Expectations come from the requested operation, never from whatever the
+    // sink happens to retain. Empty or unrelated evidence cannot certify privacy.
+    const success = response.ok || response.status === 303;
+    const successAudit = ({
+      '/v1/quickbooks/installations/issue': [['enrollment:accepted'], ['enrollment:delivered']],
+      [START]: [['start:accepted']], '/v1/quickbooks/launch': [['launched:accepted']],
+      [CALLBACK]: [['delivered:delivered', 'canceled:owner_canceled', 'failed']],
+      [REFRESH]: [['refresh_started:accepted'], ['refreshed:refreshed']],
+      [REVOKE]: [['not_sent:no_provider_contact', 'revoked:revoked', 'failed:provider_rejected', 'failed:provider_uncertain']],
+    })[route];
+    const expected = successAudit && (success ? successAudit : [['failed']]);
+    if (expected) auditOperations.push({ route, expected, ids: fresh.map(row => row.event_id_hash) });
+    return recordResponse(response);
+  };
+  const brokerRequest = request => {
+    const url = new URL(request.url);
+    if (url.pathname === CALLBACK) for (const key of ['state', 'code', 'realmId']) {
+      for (const value of url.searchParams.getAll(key)) if (value) {
+        callbackPrivate.add(value);
+        privateValues.add(value);
+      }
+    }
+    return auditRequest(url.pathname, () => adapter.broker.fetch(request));
+  };
+  // Include callback receipts and direct fixture calls, not just rig.owner().
+  for (const owner of adapter.owners) {
+    const original = owner.fetch;
+    owner.fetch = async request => recordResponse(await original(request));
+  }
 
   const rig = {
     adapter, provider, now, origins, events, deliveries, receipts, outbound,
     advance: milliseconds => { time += milliseconds; },
     deliveryFault: fault => { ownerDeliveryFault = fault; },
     resolveTo: address => { resolverAddress = address; },
-    enroll: (owner = 0, options = {}) => adapter.fixtures.enroll({ owner, ...options }),
+    enroll: (owner = 0, options = {}) => auditRequest('/v1/quickbooks/installations/issue', () => adapter.fixtures.enroll({ owner, ...options })),
     inspect: () => adapter.inspect(),
     state: (owner = 0) => adapter.inspect().owners[owner],
-    broker: async request => recordResponse(await adapter.broker.fetch(request)),
+    broker: brokerRequest,
     signed: (route, options = {}) => adapter.fixtures.signedRequest({ owner: 0, route, ...options }),
     owner: async (path, { owner = 0, authenticated = true, body } = {}) => {
       const headers = authenticated ? adapter.owners[owner].authHeaders : {};
@@ -209,6 +271,12 @@ export async function createRig(factory) {
         url.searchParams.get('response_type') === 'code' &&
         url.searchParams.get('scope') === 'com.intuit.quickbooks.accounting' &&
         [...url.searchParams.keys()].length === 5, 'launch uses the exact configured provider query');
+      assert.ok(validates(schemas, 'capability', url.searchParams.get('state')), 'launch requires a valid state');
+      callbackPrivate.add(url.searchParams.get('state'));
+      privateValues.add(url.searchParams.get('state'));
+      // Only this validated provider Location may carry state. Its other
+      // headers and its entire body remain subject to the callback canaries.
+      recordedResponses.get(response).launchState = url.searchParams.get('state');
       return { url, cookie: cookie.split(';')[0] };
     },
     async consent(launch, consent = true) {
@@ -218,7 +286,10 @@ export async function createRig(factory) {
         state: authorization.searchParams.get('state'), environment: 'sandbox', consent,
       });
       for (const key of ['code', 'realmId', 'state']) {
-        if (grant.callback.searchParams.has(key)) privateValues.add(grant.callback.searchParams.get(key));
+        if (grant.callback.searchParams.has(key)) {
+          privateValues.add(grant.callback.searchParams.get(key));
+          callbackPrivate.add(grant.callback.searchParams.get(key));
+        }
       }
       return new Request(grant.callback, { headers: { cookie: launch.cookie }, redirect: 'manual' });
     },
@@ -235,6 +306,20 @@ export async function createRig(factory) {
     },
     async assertPrivate() {
       const snapshot = rig.inspect();
+      assert.ok(auditOperations.length > 0, 'privacy requires an expected audited operation');
+      const witnessed = new Set();
+      for (const operation of auditOperations) {
+        const rows = snapshot.brokerRows.filter(row => operation.ids.includes(row.event_id_hash));
+        for (const alternatives of operation.expected) {
+          const witness = rows.find(row => !witnessed.has(row.event_id_hash) &&
+            (alternatives.includes(row.phase) || alternatives.includes(`${row.phase}:${row.outcome}`)));
+          assert.ok(witness,
+            `operation ${operation.route} requires audit ${alternatives.join('|')}`);
+          witnessed.add(witness.event_id_hash);
+        }
+        for (const row of rows) assert.ok(snapshot.brokerLogs.some(log =>
+          JSON.stringify(log) === JSON.stringify(row)), 'every stored audit witness requires an identical log witness');
+      }
       const retained = JSON.stringify({ rows: snapshot.brokerRows, logs: snapshot.brokerLogs });
       for (const value of privateValues) {
         assert.ok(!retained.includes(value), 'broker storage and logs must exclude transient credentials and ciphertext');
@@ -243,7 +328,19 @@ export async function createRig(factory) {
         assert.ok(!retained.includes(origin), 'broker storage and logs must exclude callback origins');
       }
       for (const value of credentials) {
-        assert.ok(returned.every(bytes => !bytes.includes(value)), 'responses must not return provider credentials');
+        assert.ok(returned.every(response => !JSON.stringify(response).includes(value)), 'responses must not return provider credentials');
+      }
+      for (const response of returned) {
+        const headers = { ...response.headers };
+        if (response.launchState !== null) {
+          const location = new URL(headers.location);
+          assert.ok(location.searchParams.get('state') === response.launchState, 'launch state exception must be exact');
+          location.searchParams.delete('state');
+          headers.location = location.href;
+        }
+        const bytes = JSON.stringify({ headers, body: response.body });
+        for (const value of callbackPrivate) assert.ok(!bytes.includes(value),
+          'every response header and body must exclude callback code, state and company');
       }
       assert.ok(Array.isArray(snapshot.brokerRows) && snapshot.brokerRows.every(row =>
         ['auditEvent', 'replayRow', 'quotaRow'].some(name => validates(schemas, name, row))) &&

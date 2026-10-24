@@ -208,7 +208,7 @@ export function createBroker({ config: suppliedConfig, store, providerTransport,
     const cookieText = cookieHeader(cookie, payload.expires_at);
     if (new TextEncoder().encode(cookieText).length >= 4096) refuse('invalid_request', 413);
     await store.transitionReplay(row.request_id_hash, 'start', 'launched');
-    await audit(row, 'launched', 'accepted', 303);
+    await audit({ ...row, route: ROUTES.launch }, 'launched', 'accepted', 303);
     const url = new URL(config.authorizationUrl);
     for (const [name, value] of Object.entries({ client_id: config.clientId, redirect_uri: config.redirectUri,
       response_type: 'code', scope: 'com.intuit.quickbooks.accounting', state: payload.state })) url.searchParams.set(name, value);
@@ -275,7 +275,9 @@ export function createBroker({ config: suppliedConfig, store, providerTransport,
       if (callbackUrl.origin !== brokerOrigin || callbackUrl.hash || !await ready()) refuse('ledger_unavailable', 503);
       await quota(request, ROUTES.callback, null, 'callback');
       const query = parseCallback(new URL(request.url));
-      payload = await crypt.open('cookie', callbackCookie(request));
+      const cookie = callbackCookie(request);
+      observe('callback.cookie.binding.checked');
+      payload = await crypt.open('cookie', cookie);
       if (query.state !== payload.state) refuse('binding_mismatch', 403);
       const row = { ...await context(payload, 'callback'), route: ROUTES.callback };
       target = new URL(payload.callback).origin + '/app/connect/quickbooks';
