@@ -9,7 +9,7 @@ import { acquireBrainLifecycleLock } from "./brain-lifecycle-lock.mjs";
 import { DriveRemovalReviewRequired } from "./drive-removal-plan.mjs";
 import { SUPPORT_ERROR_CODES } from "../support-journal.mjs";
 import { providerNoChangeCheckAt, providerWithheldCheckAt } from "../worker/src/lib/source-receipt.js";
-import { redactAll, sanitizeSensitiveLinks, scan } from "../worker/src/lib/secret-scan.js";
+import { DAILY_ISSUE_MESSAGES } from "./daily-refresh-messages.mjs";
 import {
   buildDailyRefreshDefinition,
   readDailyRefreshUpdateTransaction,
@@ -84,7 +84,7 @@ function preferredDailyError(errors) {
     dailyErrorPriority(candidate) < dailyErrorPriority(preferred) ? candidate : preferred);
 }
 
-function dailyErrorContext(error) {
+export function dailyErrorContext(error) {
   const active = new Set();
   const stops = [];
   let failures = 0;
@@ -124,92 +124,6 @@ function dailyErrorContext(error) {
   }
   visit(error, 0);
   return { error: preferredDailyError(stops), failures, truncated };
-}
-
-const FIXED_SENSITIVE_DIAGNOSTIC = "the source refresh failed; sensitive diagnostic text was redacted";
-const BARE_SPACED_RELATIVE_PATH = new RegExp(
-  /(^|[\s=("'`])/u.source + "(?:" +
-  /[\p{L}\p{N}_.-]+(?:[\\/][^\\/,;\r\n)\]}'"`]+)+[\\/][\p{L}\p{N}_.-]+(?:[ \t]+[\p{L}\p{N}_.-]+)+\.[\p{L}\p{N}]{1,16}(?=$|[\s,;)\]}'"`]|[.!?](?=$|[\s,;)\]}'"`]))/u.source + "|" +
-  /[\p{L}\p{N}_.-]+[\\/][\p{L}\p{N}_.-]+(?:[ \t]+[\p{L}\p{N}_.-]+)+\.[\p{L}\p{N}]{1,16}(?=$|[,;)\]}'"`]|[.!?](?=$|[\s,;)\]}'"`]))/u.source + ")", "gu",
-);
-
-function redactAndScanDiagnostic(value) {
-  // Every transform comes back through both layers. A later canonicalization
-  // must not create a scanner-visible credential after the earlier pass ran.
-  // Diagnostics need broader privacy than the ingest credential scanner:
-  // email identities and ordinary query URLs are private even without a key.
-  const sanitized = sanitizeSensitiveLinks(String(value))
-    .replace(/\bhttps?:\/\/[^\s<>"'`]+/giu, "[REDACTED:url]")
-    .replace(/[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9-]+(?:\.[A-Z0-9-]+)+/giu, "[REDACTED:email]")
-    // Explicit secret positions are private even when their values are too
-    // short or too low-entropy for the shared document scanner to refuse.
-    .replace(/\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=\-]+/giu, "[REDACTED:credential]")
-    .replace(/\b(?:authorization|(?:access|refresh|id)[_-]?token|(?:api|admin)[_-]?key|token|password|secret)["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/giu,
-      "[REDACTED:credential]");
-  const redacted = redactAll(sanitized);
-  return scan(redacted).shouldFlag ? null : redacted;
-}
-
-function transformDiagnostic(value, transform) {
-  return redactAndScanDiagnostic(transform(value));
-}
-
-function safeDiagnosticText(value, maxLength = 200) {
-  const failClosed = () => FIXED_SENSITIVE_DIAGNOSTIC.slice(0, maxLength);
-  // Canonicalize before the first redaction: replacing only the first half of
-  // a split credential would leave its remaining bytes without their context.
-  const beforeLineJoin = String(value || "the source refresh failed").replace(
-    /[\p{Cf}\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu,
-    "",
-  );
-  const canonical = beforeLineJoin.replace(
-    /(?<=[A-Za-z0-9_+./=\-])[ \t]*[\r\n\u2028\u2029]+[ \t]*(?=[A-Za-z0-9_+./=\-])/gu,
-    "",
-  );
-  let detail = redactAndScanDiagnostic(canonical);
-  if (detail === null) return failClosed();
-
-  // Also scan the aggressive join view. It is deliberately not persisted
-  // because joining ordinary prose damages the diagnostic; a credential found
-  // only in that view is ambiguous, so the fixed text is safer than attempting
-  // to map its span back across line boundaries.
-  const joinedView = beforeLineJoin.replace(/[\r\n\u2028\u2029]+[ \t]*/gu, "");
-  if (joinedView !== canonical && redactAndScanDiagnostic(joinedView) !== joinedView) return failClosed();
-
-  // Diagnostic paths have no schema of their own. Bound unquoted values by a
-  // line or punctuation delimiter, never by whitespace, so a path containing
-  // spaces cannot leave its tail behind in the journal.
-  for (const [pattern, replacement] of [
-    // A quoted path may itself contain the punctuation used to bound prose.
-    [/(["'`])(?:file:\/\/|[A-Za-z]:[\\/]|\\\\|\/|\.{1,2}[\\/]|~[\\/])[^\r\n]*?\1/gu, "[REDACTED:path]"],
-    [/file:\/\/[^,;\r\n)\]}'"`]*/giu, "[REDACTED:path]"],
-    [/(^|[\s=("'`])(?:[A-Za-z]:[\\/]|\\\\)[^,;\r\n)\]}'"`]*/gu, "$1[REDACTED:path]"],
-    [/(^|[\s=("'`])(?:\/(?![\/\s])|\.{1,2}[\\/]|~[\\/])[^,;\r\n)\]}'"`]*/gu, "$1[REDACTED:path]"],
-    // One separator needs an end or punctuation boundary after the spaced
-    // filename; whitespace alone would consume "and/or ... guide.md guide".
-    // Multiple separators retain the broader whitespace boundary.
-    [BARE_SPACED_RELATIVE_PATH, "$1[REDACTED:path]"],
-    // A bare path needs a final slash-adjacent filename and extension. Allow
-    // spaces in intermediate directories, but not in that filename: and/or
-    // followed by prose about a dotted filename is not itself a file path.
-    [/(^|[\s=("'`])[\p{L}\p{N}_.-]+(?:[\\/][^\\/,;\r\n)\]}'"`]+)*[\\/][\p{L}\p{N}_.-]+\.[\p{L}\p{N}]{1,16}(?=$|[\s,;)\]}'"`]|[.!?](?=$|[\s,;)\]}'"`]))/gu, "$1[REDACTED:path]"],
-  ]) {
-    detail = transformDiagnostic(detail, (text) => text.replace(pattern, replacement));
-    if (detail === null) return failClosed();
-  }
-
-  for (const transform of [
-    (text) => text.replace(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+){2,}\b/gu, "[REDACTED:private_value]"),
-    (text) => text.replace(/[\u0000-\u001f\u007f]+/gu, " "),
-    (text) => text.replace(/\s+/gu, " "),
-    (text) => text.trim(),
-  ]) {
-    detail = transformDiagnostic(detail, transform);
-    if (detail === null) return failClosed();
-  }
-  if (!detail) detail = "the source refresh failed";
-  detail = transformDiagnostic(detail, (text) => text.slice(0, maxLength));
-  return detail === null || !detail ? failClosed() : detail;
 }
 
 function safeRemovalReview(error, source) {
@@ -501,12 +415,11 @@ export async function runDailyRefresh({
         await writeReceipt(receipt);
       } catch (error) {
         const sourceName = source.source_names?.[0] || source.key;
-        const safeSource = safeDiagnosticText(sourceName, 128);
+        // The plan key is a fixed connector label, independent of provider text.
+        const safeSource = source.key;
         const context = dailyErrorContext(error);
         const issueCode = dailyIssueCode(context.error);
-        const detail = safeDiagnosticText((context.truncated ? "diagnostic graph limit reached; selected stop: " :
-          context.failures > 1 ? `${context.failures} source failures; first review or failure: ` : "") +
-          String(context.error?.message || context.error));
+        const detail = DAILY_ISSUE_MESSAGES[issueCode];
         const removalReview = isRemovalReview(context.error)
           ? safeRemovalReview(context.error, safeSource) : null;
         const stop = removalReview ? { code: "removal_review_required", reason: removalReview.reason }
@@ -517,7 +430,7 @@ export async function runDailyRefresh({
           } : issueCode === "NETWORK_UNREACHABLE" ? {
             code: "network_unreachable", reason: "a network failure stopped the source refresh; check the connection before retrying",
           } : {
-            code: "source_execution_failed", reason: "the source refresh failed; retry this source or inspect its private local diagnostics",
+            code: "source_execution_failed", reason: detail,
           };
         if (removalReview) attentionEntries.push(removalReview.attention);
         const receipt = Object.freeze({
@@ -665,7 +578,7 @@ async function executeDailyRefreshCli(path, m, options, observationStarted) {
         lifecycleLockHeld: true,
         allowPartialRefresh: true,
         // The interactive load report includes raw leg failures. Daily keeps
-        // typed causes in memory until its receipt and log redaction boundary.
+        // typed causes in memory and persists only fixed issue messages.
         log() {},
       })),
       readFreshness,

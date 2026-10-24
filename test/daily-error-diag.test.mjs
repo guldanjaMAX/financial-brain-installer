@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { runDailyRefreshCli } from "../operations/daily-refresh-run.mjs";
+import { dailyErrorContext, runDailyRefreshCli } from "../operations/daily-refresh-run.mjs";
+import { DAILY_ISSUE_MESSAGES } from "../operations/daily-refresh-messages.mjs";
+import { SUPPORT_ERROR_CODES } from "../support-journal.mjs";
 import { dailyObservationStatus } from "../operations/daily-refresh-observation.mjs";
 import { DriveRemovalReviewRequired } from "../operations/drive-removal-plan.mjs";
 import { SourceIngestLockError } from "../operations/source-ingest-lock.mjs";
@@ -74,6 +77,64 @@ test("daily diagnostics clean source control remains complete without an issue",
   assert.equal(failures.length, 0);
 });
 
+test("daily diagnostics fixed message replaces harmless provider prose control", async () => {
+  const { source, failures } = await observe(Object.assign(new Error("The connection closed while reading."), {
+    code: "NETWORK_UNREACHABLE",
+  }));
+  const message = "The source could not be reached; it will retry on the next run.";
+  assert.equal(source.detail === message, true, "receipt uses the fixed network message");
+  assert.equal(failures[0].detail === message, true, "log uses the fixed network message");
+});
+
+test("daily diagnostics fixed message excludes mixed private provider text", async () => {
+  const marker = randomUUID();
+  const path = `reports/quarterly ${marker}.xlsx`;
+  const credential = ["access", "token"].join("_") + "=" + marker;
+  const url = `https://provider.invalid/${marker}?cursor=private`;
+  for (const suffix of [": access denied", " during import"]) {
+    const error = Object.assign(new Error(`${path}${suffix}; ${credential}; ${url}`), { code: "NETWORK_UNREACHABLE" });
+    const { source, receiptText, logText } = await observe(error);
+    assert.equal(source.issue_code, "NETWORK_UNREACHABLE");
+    for (const text of [receiptText, logText]) {
+      for (const value of [marker, path, credential, url, "quarterly", "during import", "access denied"]) {
+        assert.equal(text.includes(value), false, "provider text must never be persisted");
+      }
+    }
+    assert.equal(source.detail === "The source could not be reached; it will retry on the next run.", true);
+  }
+});
+
+test("daily diagnostics message table covers every classifier code exactly once", () => {
+  const codes = [...SUPPORT_ERROR_CODES, "UNKNOWN"].sort();
+  assert.deepEqual(Object.keys(DAILY_ISSUE_MESSAGES).sort(), codes);
+  const tableSource = readFileSync(new URL("../operations/daily-refresh-messages.mjs", import.meta.url), "utf8");
+  const declaredKeys = [...tableSource.matchAll(/^  ([A-Z][A-Z0-9_]*):/gmu)].map(match => match[1]);
+  assert.deepEqual(declaredKeys.sort(), codes, "duplicate object keys must not silently replace a message");
+  const runnerSource = readFileSync(new URL("../operations/daily-refresh-run.mjs", import.meta.url), "utf8")
+    .replace(/\r\n/gu, "\n");
+  const classifier = runnerSource.match(/function dailyIssueCode\(error\) \{([\s\S]*?)\n\}/u)?.[1];
+  assert.ok(classifier, "the classifier contract must be inspected when it changes");
+  for (const [, code] of classifier.matchAll(/return "([A-Z][A-Z0-9_]*)"/gu)) {
+    assert.equal(Object.hasOwn(DAILY_ISSUE_MESSAGES, code), true, "every literal classifier return needs a message");
+  }
+  assert.equal(Object.isFrozen(DAILY_ISSUE_MESSAGES), true);
+  for (const message of Object.values(DAILY_ISSUE_MESSAGES)) {
+    assert.equal(typeof message, "string");
+    assert.ok(message.length > 0 && message.length <= 200);
+    assert.equal(/[\u0000-\u001f\u007f\u2014]/u.test(message), false);
+  }
+});
+
+for (const code of [...SUPPORT_ERROR_CODES, "UNKNOWN"]) {
+  test(`daily diagnostics fixed mapping persists ${code}`, async () => {
+    const error = Object.assign(new Error("The provider stopped with private prose."), { supportCode: code });
+    const { source, failures } = await observe(error);
+    assert.equal(source.issue_code, code);
+    assert.equal(source.detail === DAILY_ISSUE_MESSAGES[code], true, "receipt stores only the fixed message");
+    assert.equal(failures[0].detail === DAILY_ISSUE_MESSAGES[code], true, "log stores only the fixed message");
+  });
+}
+
 test("daily diagnostics removal approval retains its named stop and safe reason", async () => {
   for (const error of [
     new DriveRemovalReviewRequired("A removal plan is waiting for approval."),
@@ -83,7 +144,7 @@ test("daily diagnostics removal approval retains its named stop and safe reason"
     const { source, result } = await observe(error);
     assert.equal(source.issue_code, "SAFETY_REVIEW_REQUIRED");
     assert.equal(source.reason_code, "removal_review_required");
-    assert.match(source.detail, /removal plan is waiting for approval/u);
+    assert.equal(source.detail, DAILY_ISSUE_MESSAGES.SAFETY_REVIEW_REQUIRED);
     assert.match(result.schedule_attention[0], /removal review/u);
   }
 });
@@ -96,7 +157,7 @@ test("daily diagnostics safety review is distinct from a removal approval", asyn
   assert.equal(source.reason_code, "safety_review_required");
   assert.match(source.reason, /safety review/u);
   assert.equal(result.schedule_attention.some(text => /removal/u.test(text)), false);
-  assert.match(source.detail, /Source scope needs a safety review/u);
+  assert.equal(source.detail, DAILY_ISSUE_MESSAGES.SAFETY_REVIEW_REQUIRED);
 });
 
 test("daily diagnostics lock held uses a safe schedule issue and explicit stop reason", async () => {
@@ -108,7 +169,7 @@ test("daily diagnostics lock held uses a safe schedule issue and explicit stop r
     assert.equal(source.issue_code, "SCHEDULE_RUN_FAILED");
     assert.equal(source.reason_code, "source_lock_held");
     assert.match(source.reason, /lock/u);
-    assert.match(source.detail, /lock is held/u);
+    assert.equal(source.detail, DAILY_ISSUE_MESSAGES.SCHEDULE_RUN_FAILED);
   }
 });
 
@@ -131,20 +192,20 @@ test("daily diagnostics wrapper preserves the original stop and bounded multi-le
   const { source } = await observe(new Error("One source did not load.", { cause: review }));
   assert.equal(source.issue_code, "SAFETY_REVIEW_REQUIRED");
   assert.equal(source.reason_code, "removal_review_required");
-  assert.match(source.detail, /removal plan is waiting for approval/u);
+  assert.equal(source.detail, DAILY_ISSUE_MESSAGES.SAFETY_REVIEW_REQUIRED);
 
   const { source: multiple } = await observe(new Error("One source did not load.", {
     cause: new AggregateError([review, new TypeError("fetch failed")], "Source legs failed."),
   }));
   assert.equal(multiple.issue_code, "SAFETY_REVIEW_REQUIRED");
-  assert.match(multiple.detail, /2 source failures/u);
+  assert.equal(multiple.detail, DAILY_ISSUE_MESSAGES.SAFETY_REVIEW_REQUIRED);
 });
 
 test("daily diagnostics network wrapper retains the transport reason", async () => {
   const transport = Object.assign(new Error("Connection reset while reading provider response."), { code: "ECONNRESET" });
   const { source } = await observe(new Error("One source did not load.", { cause: transport }));
   assert.equal(source.issue_code, "NETWORK_UNREACHABLE");
-  assert.equal(source.detail, transport.message);
+  assert.equal(source.detail, DAILY_ISSUE_MESSAGES.NETWORK_UNREACHABLE);
 });
 
 test("daily diagnostics aggregate unknown then network retains the recognized stop", async () => {
@@ -154,8 +215,7 @@ test("daily diagnostics aggregate unknown then network retains the recognized st
   }));
   assert.equal(source.issue_code, "NETWORK_UNREACHABLE");
   assert.equal(source.reason_code, "network_unreachable");
-  assert.match(source.detail, /^2 source failures;/u);
-  assert.equal(source.detail.endsWith(network.message), true);
+  assert.equal(source.detail, DAILY_ISSUE_MESSAGES[source.issue_code]);
 });
 
 test("daily diagnostics aggregate unknown then lock retains the recognized stop", async () => {
@@ -166,8 +226,7 @@ test("daily diagnostics aggregate unknown then lock retains the recognized stop"
     ], "Source legs failed."));
     assert.equal(source.issue_code, "SCHEDULE_RUN_FAILED");
     assert.equal(source.reason_code, "source_lock_held");
-    assert.match(source.detail, /^2 source failures;/u);
-    assert.equal(source.detail.endsWith(lock.message), true);
+    assert.equal(source.detail, DAILY_ISSUE_MESSAGES[source.issue_code]);
   }
 });
 
@@ -179,8 +238,7 @@ test("daily diagnostics nested aggregate unknown then network retains the leaf s
   ], "Source legs failed."));
   assert.equal(source.issue_code, "NETWORK_UNREACHABLE");
   assert.equal(source.reason_code, "network_unreachable");
-  assert.match(source.detail, /^2 source failures;/u);
-  assert.equal(source.detail.endsWith(network.message), true);
+  assert.equal(source.detail, DAILY_ISSUE_MESSAGES[source.issue_code]);
 });
 
 test("daily diagnostics nested aggregate unknown then lock retains the leaf stop", async () => {
@@ -192,8 +250,7 @@ test("daily diagnostics nested aggregate unknown then lock retains the leaf stop
     ], "Source legs failed."));
     assert.equal(source.issue_code, "SCHEDULE_RUN_FAILED");
     assert.equal(source.reason_code, "source_lock_held");
-    assert.match(source.detail, /^2 source failures;/u);
-    assert.equal(source.detail.endsWith(lock.message), true);
+    assert.equal(source.detail, DAILY_ISSUE_MESSAGES[source.issue_code]);
   }
 });
 
@@ -207,7 +264,7 @@ test("daily diagnostics error graph handles cycles and aggregate causes", async 
   ]) {
     const { source } = await observe(error);
     assert.equal(source.issue_code, "NETWORK_UNREACHABLE");
-    assert.equal(source.detail.endsWith(network.message), true);
+    assert.equal(source.detail, DAILY_ISSUE_MESSAGES[source.issue_code]);
   }
 });
 
@@ -217,10 +274,12 @@ test("daily diagnostics error graph retains typed safety wrappers and deeper tra
   review.cause = network;
   const { source: safety } = await observe(review);
   assert.equal(safety.reason_code, "removal_review_required");
-  assert.equal(safety.detail, review.message);
+  assert.equal(safety.detail, DAILY_ISSUE_MESSAGES.SAFETY_REVIEW_REQUIRED);
+  assert.equal(dailyErrorContext(review).error, review);
   const { source: transport } = await observe(new TypeError("fetch failed", { cause: network }));
   assert.equal(transport.issue_code, "NETWORK_UNREACHABLE");
-  assert.equal(transport.detail, network.message);
+  assert.equal(transport.detail, DAILY_ISSUE_MESSAGES.NETWORK_UNREACHABLE);
+  assert.equal(dailyErrorContext(new TypeError("fetch failed", { cause: network })).error, network);
 });
 
 test("daily diagnostics error graph depth boundary has an in-bound control", async () => {
@@ -229,7 +288,8 @@ test("daily diagnostics error graph depth boundary has an in-bound control", asy
     for (let index = 0; index < depth; index++) error = new Error("Source stopped unexpectedly.", { cause: error });
     const { source } = await observe(error);
     assert.equal(source.issue_code, depth === 8 ? "NETWORK_UNREACHABLE" : "UNKNOWN");
-    assert.equal(source.detail.includes("diagnostic graph limit reached"), depth === 9);
+    assert.equal(dailyErrorContext(error).truncated, depth === 9);
+    assert.equal(source.detail, DAILY_ISSUE_MESSAGES[source.issue_code]);
   }
 });
 
@@ -244,7 +304,8 @@ test("daily diagnostics error graph size boundary counts repeated references", a
       const { source } = await observe(new AggregateError([...entries, network], "Source legs failed."));
       assert.equal(source.issue_code, preceding === 62 ? "NETWORK_UNREACHABLE" : "UNKNOWN");
       assert.equal(causeReads > 0, preceding === 62, "out-of-budget entries must not be inspected");
-      assert.equal(source.detail.includes("diagnostic graph limit reached"), preceding === 63);
+      assert.equal(dailyErrorContext(new AggregateError([...entries, network])).truncated, preceding === 63);
+      assert.equal(source.detail, DAILY_ISSUE_MESSAGES[source.issue_code]);
     }
   }
 });
@@ -252,11 +313,12 @@ test("daily diagnostics error graph size boundary counts repeated references", a
 test("daily diagnostics error graph shared leaf keeps the failed leg count", async () => {
   const network = Object.assign(new Error("Connection reset."), { code: "ECONNRESET" });
   const { source: single } = await observe(network);
-  assert.equal(single.detail, network.message);
+  assert.equal(single.detail, DAILY_ISSUE_MESSAGES.NETWORK_UNREACHABLE);
+  assert.equal(dailyErrorContext(network).failures, 1);
   const { source: multiple } = await observe(new AggregateError([network, network], "Source legs failed."));
   assert.equal(multiple.issue_code, "NETWORK_UNREACHABLE");
-  assert.match(multiple.detail, /^2 source failures;/u);
-  assert.equal(multiple.detail.endsWith(network.message), true);
+  assert.equal(dailyErrorContext(new AggregateError([network, network])).failures, 2);
+  assert.equal(multiple.detail, DAILY_ISSUE_MESSAGES.NETWORK_UNREACHABLE);
 });
 
 test("daily diagnostics aggregate priority is fixed regardless of leg order", async () => {
@@ -276,25 +338,28 @@ test("daily diagnostics aggregate priority is fixed regardless of leg order", as
         const { source } = await observe(new AggregateError(entries, "Source legs failed."));
         assert.equal(source.issue_code, issueCode);
         assert.equal(source.reason_code, reasonCode);
-        assert.equal(source.detail.endsWith(preferred.message), true);
+        assert.equal(source.detail, DAILY_ISSUE_MESSAGES[source.issue_code]);
       }
     }
   }
 });
 
-test("daily diagnostics aggregate equal-priority control retains the first detail", async () => {
+test("daily diagnostics aggregate equal-priority control retains the first stop", async () => {
   for (const errors of [
     [new TypeError("fetch failed"), new TypeError("network failure")],
-    [new Error("First source stopped unexpectedly."), new Error("Second source stopped unexpectedly.")],
+    [Object.assign(new Error("Source stopped."), { code: "RATE_LIMITED" }),
+      Object.assign(new Error("Source stopped."), { code: "REMOTE_UNAVAILABLE" })],
   ]) {
     for (const entries of [errors, errors.map(error => new AggregateError([error], "Source legs failed."))]) {
       const { source } = await observe(new AggregateError(entries, "Source legs failed."));
-      assert.equal(source.detail.endsWith(errors[0].message), true);
+      assert.equal(dailyErrorContext(new AggregateError(entries)).error, errors[0]);
+      assert.equal(source.issue_code, errors[0].code || "NETWORK_UNREACHABLE");
+      assert.equal(source.detail, DAILY_ISSUE_MESSAGES[source.issue_code]);
     }
   }
 });
 
-test("daily diagnostics safe slash prose control survives in receipt and daily log", async () => {
+test("daily diagnostics harmless slash prose control is replaced in receipt and daily log", async () => {
   for (const message of [
     "The owner can retry and/or inspect the next result.",
     "Read/write access needs review; the provider returned a success/failure result.",
@@ -302,9 +367,9 @@ test("daily diagnostics safe slash prose control survives in receipt and daily l
     "The owner can retry and/or read the troubleshooting.md guide.",
   ]) {
     const { source, failures, receiptText } = await observe(new Error(message));
-    assert.equal(source.detail, message);
-    assert.equal(JSON.parse(receiptText).sources[0].detail, message);
-    assert.equal(failures[0].detail, message);
+    assert.equal(source.detail, DAILY_ISSUE_MESSAGES.UNKNOWN);
+    assert.equal(JSON.parse(receiptText).sources[0].detail, DAILY_ISSUE_MESSAGES.UNKNOWN);
+    assert.equal(failures[0].detail, DAILY_ISSUE_MESSAGES.UNKNOWN);
   }
 });
 
@@ -316,37 +381,37 @@ const basicScheme = ["Bas", "ic"].join("");
 const shortValue = ["short", "secret"].join("-");
 const basicValue = ["c3ludGhl", "dGljOg=="].join("");
 const privateCases = [
-  ["email", "owner+mail@fixture.invalid", "[REDACTED:email]"],
-  ["query URL", "https://provider.invalid/mail?cursor=private-cursor&account=private-account", "[REDACTED:url]"],
-  ["query URL with punctuation", "https://provider.invalid/mail?state=a,b;c&cursor=private-cursor", "[REDACTED:url]"],
-  ["forward slash Windows path", "C:/private/mail archive/message.txt", "[REDACTED:path]"],
-  ["backslash Windows path", String.raw`C:\private\mail archive\message.txt`, "[REDACTED:path]"],
-  ["POSIX path", "/private/mail archive/message.txt", "[REDACTED:path]"],
-  ["relative path", "../mail archive/message.txt", "[REDACTED:path]"],
-  ["bare relative path", "records/mail archive/message.txt", "[REDACTED:path]"],
-  ["bare relative path with sentence punctuation", "records/mail archive/message.txt.", "[REDACTED:path]"],
-  ["bare relative path with dotted directory", "records/mail.archive private-folder-marker folder/message.txt", "[REDACTED:path]"],
-  ["bare relative path with spaced filename", "records/reports/quarterly report.xlsx", "[REDACTED:path]"],
-  ["bare relative backslash path with spaced filename", String.raw`records\reports\quarterly report.xlsx`, "[REDACTED:path]"],
-  ["bare relative path with spaced filename and punctuation", "records/reports/quarterly report.xlsx.", "[REDACTED:path]"],
-  ["bare relative path with spaced directory and filename", "records/private archive/quarterly report.xlsx", "[REDACTED:path]"],
-  ["one-separator path with spaced filename", "reports/quarterly report.xlsx", "[REDACTED:path]"],
-  ["one-separator backslash path with spaced filename", String.raw`reports\quarterly report.xlsx`, "[REDACTED:path]"],
-  ["one-separator path with spaced filename and punctuation", "reports/quarterly report.xlsx.", "[REDACTED:path]"],
-  ["bare relative backslash path", String.raw`records\mail archive\message.txt`, "[REDACTED:path]"],
-  ["home path", "~/mail archive/message.txt", "[REDACTED:path]"],
-  ["file URL", "file:///private/mail%20archive/message.txt", "[REDACTED:path]"],
-  ["file host URL", "file://host.invalid/share/mail%20archive/message.txt", "[REDACTED:path]"],
-  ["quoted path with punctuation", String.raw`'C:\private\mail,archive\message.txt'`, "[REDACTED:path]"],
-  ["double quoted path with apostrophe", `"/private/mail's archive/message.txt"`, "[REDACTED:path]"],
-  ["credential", ["sk", "a".repeat(32)].join("-"), "[REDACTED:openai_legacy_key]"],
-  ["short bearer credential", `${authorizationLabel}: ${bearerScheme} ${shortValue}`, "[REDACTED:credential]"],
-  ["short token assignment", `${accessLabel}=${shortValue}`, "[REDACTED:credential]"],
-  ["quoted token assignment", `"${refreshLabel}":"${shortValue}"`, "[REDACTED:credential]"],
-  ["basic authorization", `${authorizationLabel}: ${basicScheme} ${basicValue}`, "[REDACTED:credential]"],
+  ["email", "owner+mail@fixture.invalid"],
+  ["query URL", "https://provider.invalid/mail?cursor=private-cursor&account=private-account"],
+  ["query URL with punctuation", "https://provider.invalid/mail?state=a,b;c&cursor=private-cursor"],
+  ["forward slash Windows path", "C:/private/mail archive/message.txt"],
+  ["backslash Windows path", String.raw`C:\private\mail archive\message.txt`],
+  ["POSIX path", "/private/mail archive/message.txt"],
+  ["relative path", "../mail archive/message.txt"],
+  ["bare relative path", "records/mail archive/message.txt"],
+  ["bare relative path with sentence punctuation", "records/mail archive/message.txt."],
+  ["bare relative path with dotted directory", "records/mail.archive private-folder-marker folder/message.txt"],
+  ["bare relative path with spaced filename", "records/reports/quarterly report.xlsx"],
+  ["bare relative backslash path with spaced filename", String.raw`records\reports\quarterly report.xlsx`],
+  ["bare relative path with spaced filename and punctuation", "records/reports/quarterly report.xlsx."],
+  ["bare relative path with spaced directory and filename", "records/private archive/quarterly report.xlsx"],
+  ["one-separator path with spaced filename", "reports/quarterly report.xlsx"],
+  ["one-separator backslash path with spaced filename", String.raw`reports\quarterly report.xlsx`],
+  ["one-separator path with spaced filename and punctuation", "reports/quarterly report.xlsx."],
+  ["bare relative backslash path", String.raw`records\mail archive\message.txt`],
+  ["home path", "~/mail archive/message.txt"],
+  ["file URL", "file:///private/mail%20archive/message.txt"],
+  ["file host URL", "file://host.invalid/share/mail%20archive/message.txt"],
+  ["quoted path with punctuation", String.raw`'C:\private\mail,archive\message.txt'`],
+  ["double quoted path with apostrophe", `"/private/mail's archive/message.txt"`],
+  ["credential", ["sk", "a".repeat(32)].join("-")],
+  ["short bearer credential", `${authorizationLabel}: ${bearerScheme} ${shortValue}`],
+  ["short token assignment", `${accessLabel}=${shortValue}`],
+  ["quoted token assignment", `"${refreshLabel}":"${shortValue}"`],
+  ["basic authorization", `${authorizationLabel}: ${basicScheme} ${basicValue}`],
 ];
-for (const [label, value, marker] of privateCases) {
-  test(`daily diagnostics redaction removes ${label} from receipt and daily log`, async () => {
+for (const [label, value] of privateCases) {
+  test(`daily diagnostics fixed text excludes ${label} from receipt and daily log`, async () => {
     const { source, receiptText, logText } = await observe(new Error(`Provider stopped at ${value}; retry later.`));
     for (const text of [receiptText, logText]) {
       // Boolean assertions prevent synthetic private strings entering failure output.
@@ -358,10 +423,8 @@ for (const [label, value, marker] of privateCases) {
       assert.equal(text.includes("private-folder-marker"), false, "spaced path directory must be removed");
       assert.equal(text.includes("private-cursor"), false, "query tail must be removed");
       assert.equal(text.includes("short-secret"), false, "the entire credential must be removed");
-      assert.equal(text.includes(marker), true, "the redaction marker must be retained");
     }
-    assert.match(source.detail, /^Provider stopped at /u, "safe explanatory prose survives");
-    assert.match(source.detail, /retry later\.$/u);
+    assert.equal(source.detail === DAILY_ISSUE_MESSAGES[source.issue_code], true);
   });
 }
 
@@ -373,18 +436,18 @@ test("daily diagnostics one-separator spaced filename at end of text is removed"
     assert.equal(text.includes("quarterly"), false, "spaced filename start must be removed");
     assert.equal(text.includes("report.xlsx"), false, "spaced filename tail must be removed");
   }
-  assert.equal(source.detail, "Provider stopped at [REDACTED:path]");
+  assert.equal(source.detail, DAILY_ISSUE_MESSAGES.UNKNOWN);
 });
 
-test("daily diagnostics redaction occurs before bounding and after format normalization", async () => {
+test("daily diagnostics fixed text ignores long and format-split provider messages", async () => {
   const email = "owner@fixture.invalid";
   const { source, receiptText, logText } = await observe(new Error(
     `Provider stopped: ${email.slice(0, 3)}\u200b${email.slice(3)}; ` + "retry ".repeat(100),
   ));
-  assert.equal(source.detail.length, 200);
+  assert.equal(source.detail === DAILY_ISSUE_MESSAGES[source.issue_code], true);
   for (const text of [receiptText, logText]) {
     assert.equal(text.includes(email), false, "normalization cannot recreate a private email");
-    assert.equal(text.includes("[REDACTED:email]"), true);
+    assert.equal(text.includes("retry retry"), false);
   }
 });
 

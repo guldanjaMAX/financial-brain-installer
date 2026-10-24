@@ -473,9 +473,9 @@ const c = {
 export function successMark(isTTY = process.stdout.isTTY === true) {
   return isTTY ? c.green("ok") : "·";
 }
-const ok = (s) => console.log(`${successMark()}    ${renderCliCommands(s)}`);
-const info = (s) => console.log(`${c.dim("·")}     ${renderCliCommands(s)}`);
-const warn = (s) => console.log(`${c.yellow("warn")}  ${renderCliCommands(s)}`);
+const ok = (s, log = console.log) => log(`${successMark()}    ${renderCliCommands(s)}`);
+const info = (s, log = console.log) => log(`${c.dim("·")}     ${renderCliCommands(s)}`);
+const warn = (s, log = console.log) => log(`${c.yellow("warn")}  ${renderCliCommands(s)}`);
 /**
  * Human output with no status word in front of it, still rendered.
  *
@@ -16801,6 +16801,8 @@ export async function cmdLoad(manifestPath, options = {}) {
   }
   const { m } = loadManifest(manifestPath);
   const flags = options.flags || parseFlags(process.argv.slice(4));
+  // Progress and success helpers obey the same output boundary as failures.
+  // Daily refresh supplies a silent logger before any source labels can print.
   const log = options.log || console.log;
 
   if (flags.reset) {
@@ -16813,7 +16815,7 @@ export async function cmdLoad(manifestPath, options = {}) {
   }
   const dryRun = !!flags["dry-run"];
   if (flags.limit) {
-    warn(`--limit ${flags.limit} applies to EVERY source in this sweep. Nothing loaded under it is a complete load.`);
+    warn(`--limit ${flags.limit} applies to EVERY source in this sweep. Nothing loaded under it is a complete load.`, log);
   }
 
   const entries = await planLoad({
@@ -16831,7 +16833,7 @@ export async function cmdLoad(manifestPath, options = {}) {
   const client = m.client?.display_name || m.client?.slug || "this install";
   log("");
   log(`${c.bold("brain load")}  ${client}`);
-  info(`${entries.length} source(s) declared in this manifest; ${runnable.length} will run`);
+  info(`${entries.length} source(s) declared in this manifest; ${runnable.length} will run`, log);
   log("");
   log(`  ${c.bold(dryRun ? "what WOULD be read" : "what will be read")}`);
   for (const entry of entries) {
@@ -16847,7 +16849,7 @@ export async function cmdLoad(manifestPath, options = {}) {
   }
   if (dryRun) {
     log("");
-    info("dry run: each source below is READ so it can report what it holds. Nothing is sent to the brain, and no resume state is written.");
+    info("dry run: each source below is READ so it can report what it holds. Nothing is sent to the brain, and no resume state is written.", log);
   }
   log("");
 
@@ -16922,7 +16924,7 @@ export async function cmdLoad(manifestPath, options = {}) {
       if (legFailures.length) {
         log(`${c.yellow("warn")}  ${entry.label}: ${entry.summary}, and ${legFailures.length} did NOT load  ${c.dim(formatLoadElapsed(entry.elapsed_ms))}`);
       } else {
-        ok(`${entry.label}: ${entry.summary}  ${c.dim(formatLoadElapsed(entry.elapsed_ms))}`);
+        ok(`${entry.label}: ${entry.summary}  ${c.dim(formatLoadElapsed(entry.elapsed_ms))}`, log);
       }
     }
     log("");

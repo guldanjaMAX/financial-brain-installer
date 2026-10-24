@@ -1422,53 +1422,42 @@ to the owner (0700 on POSIX, current-user DACL on Windows), and each log file is
 have a 64 KiB limit. Unsafe links, invalid records, or a failed permissions
 operation stop logging and execution instead of accepting an unprotected log.
 Run entries contain only timestamps, a result, and a fixed diagnostic sentence.
-Each failed source also gets one bounded record with its source label, mapped
-issue code, and a single-line detail capped at 200 characters. That detail is
-passed through the shared credential scanner and diagnostic redaction. Explicit
-token assignments, authorization values, emails, HTTP URLs (including queries),
-and file URLs, absolute paths, explicitly relative paths, and bare relative
-file paths ending in a filename without spaces and with an extension are
-removed before bounding. Intermediate directories may contain spaces. A second
-bare-path rule accepts a final filename with spaces after slash or backslash
-separators, as in `records/reports/quarterly report.xlsx` and
-`reports/quarterly report.xlsx`.
-The first component uses letters, numbers, underscores, dots or hyphens;
-intermediate components cannot cross a separator or punctuation delimiter.
-The final component uses the same characters plus spaces or tabs, followed by
-a dot and a 1 to 16 character letter-or-number extension. The match starts at
-the beginning of text or after whitespace, `=`, `(` or a quote, and ends before
-whitespace, a closing delimiter, sentence punctuation or the end of text.
-For a single separator, the extension must end the text or be immediately
-followed by punctuation or a closing delimiter. Ordinary whitespace alone is
-not enough, so `and/or read the troubleshooting.md guide` stays readable.
-Ordinary slash prose such as `and/or`, `read/write`, a spaced
-slash, and a sentence mentioning a Markdown filename stays readable.
-Other slash prose that fits the bounded path shape may be redacted
-conservatively.
-Scanner findings that survive replacement fail closed to fixed text.
+Each failed source also gets one bounded record with the fixed connector key
+from the daily plan, a mapped issue code, and a single-line detail capped at
+200 characters. The detail comes only from the reviewed message table in
+`operations/daily-refresh-messages.mjs`, shared by the receipt and log. Every
+code accepted by the classifier, including `UNKNOWN`, has one fixed message.
+Provider text is never copied into either detail, even when it looks harmless.
+This path has no path or credential filtering rules: classification selects a
+code, and the table supplies the complete message. Log source and attention
+labels use the plan's fixed connector key; private receipts retain their
+existing source identity and bounded removal-review metadata.
 The default daily adapter passes an explicit no-output `options.log` callback
-to `cmdLoad`. This suppresses its immediate leg failure lines and consolidated
-load report before they can print raw failure reasons. The daily runner still
-writes its redacted receipt and log and prints its summary. This policy covers
-the loader report, not connector-owned output. Interactive `cmdLoad` callers
-retain their existing default logger.
+to `cmdLoad`. The loader's `info`, `ok`, and `warn` helpers use that same selected
+logger, as do its immediate failure lines and consolidated report. The daily
+runner writes its fixed receipt and log messages and prints its summary.
+Connector-owned output remains outside this loader policy. Interactive
+`cmdLoad` callers retain their existing default logger and formatting.
 The load report preserves original leg errors in a non-enumerable in-memory
 cause, so daily diagnostics can recover a typed stop instead of the aggregate
-"did not load" summary. Multiple failures retain a count and one bounded detail,
-using this priority: removal approval, other safety review, held lock, network
-failure, other recognized issue, then unknown. Approval and safety decisions
-come before retryable contention or transport failures. Equal priorities keep
-source order. A cycle-aware depth-first walk flattens nested aggregates and
-cause chains before ranking. It examines at most 64 entries including the root
-and repeated references, through depth 8 with root depth 0. Aggregate children
-precede their aggregate's cause. Aggregate summaries do not compete with real
-leaves; a higher-priority typed wrapper still preserves a safety refusal over a
-lower-priority cause. Equal-priority causes retain the deeper detail. The count
-describes terminal errors reached, including cycle-boundary fallbacks; separate
-legs sharing the same error object count separately.
-At either traversal limit the detail says `diagnostic graph limit reached`
-instead of claiming an exact failure count. No raw error objects enter a receipt
-or log.
+"did not load" summary. Classification retains this priority: removal approval,
+other safety review, held lock, network failure, other recognized issue, then
+unknown. Approval and safety decisions come before retryable contention or
+transport failures. Equal priorities keep source order. A cycle-aware
+depth-first walk flattens nested aggregates and cause chains before ranking.
+It examines at most 64 entries including the root and repeated references,
+through depth 8 with root depth 0. Aggregate children precede their aggregate's
+cause. Aggregate summaries do not compete with real leaves; a higher-priority
+typed wrapper still preserves a safety refusal over a lower-priority cause.
+Equal-priority causes retain the deeper stop. The count describes terminal
+errors reached, including cycle-boundary fallbacks; separate legs sharing the
+same error object count separately. Counts and traversal-limit observations
+remain in memory and never prefix the fixed message.
+There is no separate daily diagnostics sink for raw provider errors. The
+existing private support journal at `~/.brain/support/events/` accepts only
+bounded metadata and is not a raw-error store. Handled daily source failures
+do not write to that journal. Original typed causes remain in memory only;
+neither raw error objects nor their text enter a receipt or log.
 Removal approval uses `SAFETY_REVIEW_REQUIRED` with `removal_review_required`;
 other safety reviews use `safety_review_required`. A held source lock uses the
 existing `SCHEDULE_RUN_FAILED` code with `source_lock_held`, and network failures

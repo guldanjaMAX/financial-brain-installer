@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { buildDailyRefreshDefinition } from "../operations/daily-refresh-scheduler.mjs";
 import { runDailyRefresh, runDailyRefreshCli } from "../operations/daily-refresh-run.mjs";
+import { DAILY_ISSUE_MESSAGES } from "../operations/daily-refresh-messages.mjs";
 import { DriveRemovalReviewRequired } from "../operations/drive-removal-plan.mjs";
 
 const mkdtempSync = (...args) => realpathSync.native(makeTempDirectory(...args));
@@ -160,7 +161,7 @@ test("unavailable daily-owned work is retained as a failed source outcome", asyn
   assert.equal(result.sources[0].status, "unavailable");
 });
 
-test("unknown source exceptions retain only a safe diagnostic detail", async () => {
+test("unknown source exceptions retain only the fixed issue message", async () => {
   const privateSentinel = ["SYNTHETIC", "PRIVATE", "VALUE"].join("_");
   const receipts = [];
   let runCalls = 0;
@@ -175,9 +176,8 @@ test("unknown source exceptions retain only a safe diagnostic detail", async () 
   assert.equal(result.status, "failed");
   assert.equal(result.sources[0].reason_code, "source_execution_failed");
   assert.equal(result.sources[0].issue_code, "UNKNOWN");
-  assert.equal(typeof result.sources[0].detail, "string");
-  assert.ok(result.sources[0].detail.length > 0 && result.sources[0].detail.length <= 200);
-  assert.doesNotMatch(JSON.stringify(receipts), new RegExp(privateSentinel));
+  assert.equal(result.sources[0].detail === DAILY_ISSUE_MESSAGES.UNKNOWN, true);
+  assert.equal(JSON.stringify(receipts).includes(privateSentinel), false);
 });
 
 test("removal review failures retain safe cause, attention, status, and daily-log evidence", async () => {
@@ -227,8 +227,7 @@ test("removal review failures retain safe cause, attention, status, and daily-lo
   assert.equal(result.sources[0].reason,
     `a removal review is waiting: 2 stored documents would be removed across 0 source removals and 9 replacement family reviews; ` +
       `source cleanup is 0.0% of stored documents; plan fingerprint ${fingerprint}. Nothing was removed.`);
-  assert.ok(result.sources[0].detail.length > 0 && result.sources[0].detail.length <= 200);
-  assert.doesNotMatch(result.sources[0].detail, /[\r\n]/u);
+  assert.equal(result.sources[0].detail === DAILY_ISSUE_MESSAGES.SAFETY_REVIEW_REQUIRED, true);
   assert.deepEqual(result.schedule_attention, [
     "archive: a removal review is waiting (2 stored parts, 0 source removals). Nothing was removed.",
   ]);
@@ -240,7 +239,7 @@ test("removal review failures retain safe cause, attention, status, and daily-lo
   assert.equal(failures.length, 1, "the failed source wrote exactly one diagnostic log record");
   assert.equal(failures[0].source, "archive");
   assert.equal(failures[0].issue_code, "SAFETY_REVIEW_REQUIRED");
-  assert.equal(failures[0].detail, result.sources[0].detail);
+  assert.equal(failures[0].detail === DAILY_ISSUE_MESSAGES.SAFETY_REVIEW_REQUIRED, true);
 
   const { dailyObservationStatus, renderDailyObservation } = await import("../operations/daily-refresh-observation.mjs");
   const schedule = dailyObservationStatus(reviewPlan, {
@@ -259,8 +258,8 @@ test("removal review failures retain safe cause, attention, status, and daily-lo
   assert.ok(lines.includes(`Daily source issue: archive | SAFETY_REVIEW_REQUIRED | ${result.sources[0].detail}`));
 });
 
-test("unknown failures redact planted secrets and log each failed source independently", async () => {
-  const home = mkdtempSync(join(tmpdir(), "daily-failure-redaction-"));
+test("unknown failures omit planted secrets and log each fixed source message independently", async () => {
+  const home = mkdtempSync(join(tmpdir(), "daily-failure-message-"));
   const manifestPath = join(home, "brain.manifest.json");
   writeFileSync(manifestPath, "{}\n");
   const plantedSecret = ["sk", "abcdefghijklmnopqrstuvwxyzABCDEF"].join("-");
@@ -299,24 +298,23 @@ test("unknown failures redact planted secrets and log each failed source indepen
   ]);
   assert.deepEqual(result.sources.map((source) => source.source), ["first", "second"]);
   const receiptText = JSON.stringify(result);
-  assert.doesNotMatch(receiptText, new RegExp(plantedSecret));
-  assert.doesNotMatch(receiptText, new RegExp(outsidePath));
-  assert.match(result.sources[0].detail, /\[REDACTED:openai_legacy_key\]/u);
-  assert.match(result.sources[0].detail, /\[REDACTED:path\]/u);
-  assert.ok(result.sources.every((source) => source.detail.length <= 200 && !/[\r\n]/u.test(source.detail)));
+  assert.equal(receiptText.includes(plantedSecret), false);
+  assert.equal(receiptText.includes(outsidePath), false);
+  assert.equal(result.sources.every(source => source.detail === DAILY_ISSUE_MESSAGES.UNKNOWN), true);
 
   const logPath = join(home, ".brain", "logs", failurePlan.identity.id, "daily.log");
   const logText = readFileSync(logPath, "utf8");
-  assert.doesNotMatch(logText, new RegExp(plantedSecret));
-  assert.doesNotMatch(logText, new RegExp(outsidePath));
+  assert.equal(logText.includes(plantedSecret), false);
+  assert.equal(logText.includes(outsidePath), false);
   const failures = logText.trim().split("\n").map((line) => JSON.parse(line))
     .filter((record) => record.kind === "source_failure");
   assert.equal(failures.length, 2, "each failed source wrote its own diagnostic log record");
   assert.deepEqual(failures.map((record) => record.source), ["first", "second"]);
   assert.deepEqual(failures.map((record) => record.issue_code), ["UNKNOWN", "UNKNOWN"]);
+  assert.equal(failures.every(record => record.detail === DAILY_ISSUE_MESSAGES.UNKNOWN), true);
 });
 
-test("daily failure details redact canonical credential and bounded path views before persistence", async () => {
+test("daily fixed messages omit credential and path views before persistence", async () => {
   const pathTail = "records/private-note.txt";
   const lineWrapped = `sk-${"a".repeat(16)}\n${"b".repeat(16)}`;
   const formatSplit = `sk-${"c".repeat(16)}\u200b${"d".repeat(16)}`;
@@ -327,7 +325,6 @@ test("daily failure details redact canonical credential and bounded path views b
       message: `unable to read /private/fixture/client ${pathTail}`,
       check(detail) {
         assert.equal(detail.includes(pathTail), false, "the bounded path tail must not survive");
-        assert.match(detail, /\[REDACTED:path\]/u);
       },
     },
     {
@@ -347,12 +344,10 @@ test("daily failure details redact canonical credential and bounded path views b
       },
     },
     {
-      label: "ordinary credential control",
+      label: "ordinary credential",
       message: `provider returned ${ordinary}`,
       check(detail) {
         assert.equal(detail.includes(ordinary), false);
-        assert.match(detail, /\[REDACTED:openai_legacy_key\]/u,
-          "the ordinary scanner path remains the green control");
       },
     },
   ];
@@ -377,11 +372,13 @@ test("daily failure details redact canonical credential and bounded path views b
     });
     assert.equal(result.status, "failed", `${arm.label}: the failure decision was reached`);
     assert.equal(logged.length, 1, `${arm.label}: exactly one persisted log detail was produced`);
-    assert.equal(logged[0].detail, result.sources[0].detail,
-      `${arm.label}: the receipt and journal share the sanitized detail`);
+    assert.equal(result.sources[0].detail === DAILY_ISSUE_MESSAGES.UNKNOWN, true,
+      `${arm.label}: the receipt contains only the fixed issue message`);
+    assert.equal(logged[0].detail === DAILY_ISSUE_MESSAGES.UNKNOWN, true,
+      `${arm.label}: the journal contains only the fixed issue message`);
     arm.check(result.sources[0].detail);
   }
-  assert.equal(sourceCalls, arms.length, "all adversarial and control source decisions were reached");
+  assert.equal(sourceCalls, arms.length, "all adversarial source decisions were reached");
 });
 
 test("complete and partial source receipts remain byte-identical to the 60afb222 contract", async () => {
@@ -742,7 +739,7 @@ test("runtime exhaustion reaches the decision point and defers remaining sources
   assert.ok(result.sources.every((source) => /runtime budget/i.test(source.reason)));
 });
 
-test("daily CLI journals successful, refused, and failed runs with redacted source diagnostics", async () => {
+test("daily CLI journals successful, refused, and failed runs with fixed source diagnostics", async () => {
   const { readFileSync } = await import("node:fs");
   const home = mkdtempSync(join(tmpdir(), "daily-observation-"));
   const manifestPath = join(home, "brain.manifest.json");
@@ -765,7 +762,7 @@ test("daily CLI journals successful, refused, and failed runs with redacted sour
   let rows = readFileSync(logPath, "utf8").trim().split("\n").map(JSON.parse);
   assert.equal(rows.at(-1).result, "failed");
   assert.equal(rows.at(-1).started_at, "2026-10-07T16:00:00.000Z");
-  assert.doesNotMatch(JSON.stringify(rows), new RegExp(`${privateDiagnostic}|google_drive|fixtures`));
+  assert.equal(new RegExp(`${privateDiagnostic}|google_drive|fixtures`).test(JSON.stringify(rows)), false);
   assert.equal(rows.find((row) => row.kind === "source_failure")?.issue_code, "UNKNOWN");
   let reads = 0;
   const complete = await runDailyRefreshCli(manifestPath, {

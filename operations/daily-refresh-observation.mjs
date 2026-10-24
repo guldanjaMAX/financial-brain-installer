@@ -103,7 +103,7 @@ export function appendDailyObservation(identity, record, options = {}) {
   return appendDailyRecord(identity, bytes, settings);
 }
 
-/** Persist one bounded, already-redacted source failure beside the run result. */
+/** Persist one bounded source failure with the runner's fixed issue message. */
 export function appendDailySourceFailure(identity, record, options = {}) {
   const settings = { ...options, platform: options.platform ?? process.platform };
   if (!validTime(record.observed_at) || typeof record.source !== "string" ||

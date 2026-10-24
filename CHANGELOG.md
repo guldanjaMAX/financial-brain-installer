@@ -10,17 +10,14 @@ Candidate only. This version has not been released. The changes below still
 need the full host gate, CI and separately reviewed field acceptance for the
 exact sealed package. This version bump verifies no incident.
 
-- **Daily source failures retain their reason.** Daily status and the private
-  log now keep the source's redacted error through the load report. Removal
-  approval, another safety review, a held lock and a network failure have
-  distinct reasons. A later recognized stop stays visible even when the first
-  failure is unknown, including inside nested groups of failures. Relative
-  filenames and shared-file URLs are redacted, including spaced filenames in
-  paths such as `reports/quarterly report.xlsx`, while ordinary slash prose stays readable.
-  Daily imports also suppress the load report's raw failure lines before
-  writing the redacted diagnostic.
-  Check the issue and detail after a failed refresh; a failed source still does
-  not count as fresh.
+- **Daily source failures give clear, private guidance.** Daily status,
+  receipts and the private log now use a short, fixed message for each issue
+  code. Provider error text is never copied into the receipt or log. Removal
+  approval, another safety review, a held lock and a network failure keep
+  distinct reasons, including when several failures happen together. Daily
+  imports also suppress the load report's raw failure lines and progress
+  messages. Check the issue and guidance after a failed refresh; a failed
+  source still does not count as fresh.
 
 - **You can optionally have Claude write and check Brain answers.** Connect the
   owner's own Anthropic account with `brain connect anthropic`. Opus writes the

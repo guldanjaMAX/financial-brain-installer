@@ -8,6 +8,7 @@ import { format } from "node:util";
 
 import { cmdLoad, loadSourceRegistry } from "../brain.mjs";
 import { runDailyRefreshCli } from "../operations/daily-refresh-run.mjs";
+import { DAILY_ISSUE_MESSAGES } from "../operations/daily-refresh-messages.mjs";
 import { DriveRemovalReviewRequired } from "../operations/drive-removal-plan.mjs";
 
 const accepted = () => ({ created: 1, updated: 0, unchanged: 0 });
@@ -169,6 +170,9 @@ test(`daily load default adapter ${mode} source keeps raw leg diagnostics off ev
   const f = fixture(t, mode === "clean" ? [accepted] : [
     () => { throw review; }, ...(mode === "partial" ? [accepted] : []),
   ]);
+  // The success helper can print a source label even when every provider call
+  // succeeds. A failure-only marker would miss that output-policy bypass.
+  f.options.registry.google_drive.label = marker;
   const plan = {
     ready: true, enabled: true, identity: { id: "v1-load" }, manifest_path: f.manifestPath,
     sources: ["gmail", "google_drive"].map(key => ({
@@ -205,6 +209,8 @@ test(`daily load default adapter ${mode} source keeps raw leg diagnostics off ev
   assert.equal(output.length > 0, true, "the observation includes actual runner output");
   for (const { channel, text } of output) {
     assert.equal(text.includes(marker), false, `raw leg diagnostic escaped through ${channel}`);
+    assert.equal(text.includes("source(s) declared in this manifest"), false,
+      `loader progress escaped through ${channel}`);
   }
   const receiptText = readFileSync(join(f.home, ".brain", "daily-receipts", `${plan.identity.id}.json`), "utf8");
   assert.deepEqual(JSON.parse(receiptText), result);
@@ -224,9 +230,11 @@ test(`daily load default adapter ${mode} source keeps raw leg diagnostics off ev
     assert.equal(result.sources[0].freshness_advanced, false);
     assert.equal(result.sources[0].issue_code, "SAFETY_REVIEW_REQUIRED");
     assert.equal(result.sources[0].reason_code, "removal_review_required");
-    assert.match(result.sources[0].detail, /^approval pending for \[REDACTED:url\]$/);
+    assert.equal(result.sources[0].detail === DAILY_ISSUE_MESSAGES.SAFETY_REVIEW_REQUIRED, true,
+      "the receipt contains only the fixed safety message");
     assert.equal(failure?.issue_code, "SAFETY_REVIEW_REQUIRED");
-    assert.equal(failure?.detail, result.sources[0].detail);
+    assert.equal(failure?.detail === DAILY_ISSUE_MESSAGES.SAFETY_REVIEW_REQUIRED, true,
+      "the daily log contains only the fixed safety message");
     assert.equal(caught?.cause === review, true, "the typed cause remains available in memory");
     assert.equal(JSON.stringify(caught), "{}", "raw causes are not serializable summary fields");
   }
@@ -248,4 +256,24 @@ test("daily load interactive output control retains the default failure report",
   assert.equal(caught?.cause?.message === marker, true);
   assert.equal(output.filter(entry => entry.text.includes(marker)).length, 2,
     "interactive callers still receive both the immediate failure and consolidated report");
+  assert.equal(output.some(entry => entry.text.includes("source(s) declared in this manifest")), true,
+    "interactive callers still receive loader progress");
+  assert.equal(output.some(entry => entry.text.includes("Google Drive:") && entry.text.includes("created")), true,
+    "interactive callers still receive source success output");
+});
+
+test("daily load selected output policy receives progress, preview and limit notices", async (t) => {
+  const f = fixture(t, [accepted]);
+  const logged = [];
+  const { output } = await captureOutput(() => cmdLoad(f.manifestPath, {
+    ...f.options,
+    flags: { "dry-run": true, limit: 1 },
+    allowPartialRefresh: true,
+    log: line => logged.push(String(line)),
+  }));
+  assert.equal(output.length, 0, "every loader-owned line uses its selected logger");
+  assert.equal(logged.some(line => line.includes("source(s) declared in this manifest")), true);
+  assert.equal(logged.some(line => line.includes("dry run: each source below is READ")), true);
+  assert.equal(logged.some(line => line.includes("--limit 1 applies to EVERY source")), true);
+  assert.equal(logged.some(line => line.includes("Google Drive:") && line.includes("created")), true);
 });
