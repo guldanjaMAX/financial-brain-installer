@@ -103,7 +103,7 @@ import {
 } from "./lib/provenance-receipt.js";
 import {
   ANSWER_WITHHELD, COVERAGE_INCOMPLETE, SEARCH_UNAVAILABLE, answerWithheldNotice,
-  classifyQuestionCoverage, coverageIncompleteNotice, emptyRetrievalDisclosure, meaningSearchLine, projectionCatchupGap,
+  classifyQuestionCoverage, coverageIncompleteNotice, coveragePeriodStart, emptyRetrievalDisclosure, meaningSearchLine, projectionCatchupGap,
   projectionPending, refusalNextAction,
 } from "./lib/retrieval-status.js";
 import {
@@ -262,7 +262,7 @@ async function privateRagParameters(request, { allowWorkflow = false } = {}) {
   if (from !== null && to !== null && from > to) {
     return invalidRagParameters("reversed_date_range");
   }
-  return { searchParams };
+  return { searchParams, explicitFrom: from };
 }
 
 async function applyBusinessScope(env, url) {
@@ -819,11 +819,13 @@ async function handleUnified(
   const url = await privateRagParameters(request);
   if (!url) return jsonResponse({ error: "Expected a JSON request body" }, 400);
   if (url.parameter_error) return jsonResponse(url.parameter_error, 400);
-  const q = url.searchParams.get("q");
-  if (!q || !q.trim()) return jsonResponse({ error: "Missing q" }, 400);
+  const q = (url.searchParams.get("q") || "").trim();
+  if (!q) return jsonResponse({ error: "Missing q" }, 400);
+  url.searchParams.set("q", q);
   const scope = await measureQueryStage(timing, "scope", () => applyBusinessScope(env, url));
   if (!scope.ok) return scope.response;
   const entityScope = scope.entityScope;
+  const explicitFrom = url.explicitFrom ?? null;
   const timeWindow = questionRetrievalWindow(env, url, q);
 
   const limit = Math.min(parseInt(url.searchParams.get("limit")) || 10, 50);
@@ -861,16 +863,22 @@ async function handleUnified(
   const searchState = (rows) => {
     const coverageDecision = classifyQuestionCoverage({
       question: q,
-      periodStart: timeWindow ? new Date(timeWindow.start).toISOString().slice(0, 10) : null,
+      periodStart: coveragePeriodStart(explicitFrom, timeWindow),
       gaps: sourceCoverageGaps,
       evidenceSources: rows.flatMap((row) => [row?.source_kind, row?.source]).filter(Boolean),
       now: Date.now(),
+      timeZone: env.BRAIN_TIMEZONE,
     });
+    const coverageState = {
+      coverage_classification: coverageDecision.classification,
+      ...(coverageDecision.answer_prefix ? { answer_prefix: coverageDecision.answer_prefix } : {}),
+    };
     const disclosure = emptyRetrievalDisclosure(degraded, degradedReason, {
       candidatesFound: rows.length > 0,
     });
     if ((rows.length === 0 && disclosure.unavailable) || disclosure.incomplete) {
       return {
+        ...coverageState,
         status: disclosure.status,
         notice: disclosure.notice,
         ...(coverageDecision.side_note ? { side_note: coverageDecision.side_note } : {}),
@@ -879,6 +887,7 @@ async function handleUnified(
     }
     if (sourceCoverageGaps.length && (rows.length === 0 || coverageDecision.refuse)) {
       return {
+        ...coverageState,
         status: COVERAGE_INCOMPLETE,
         notice: coverageIncompleteNotice(coverage.unavailable, rows.length > 0),
         ...(coverageDecision.side_note ? { side_note: coverageDecision.side_note } : {}),
@@ -886,8 +895,8 @@ async function handleUnified(
       };
     }
     return sourceCoverageGaps.length
-      ? { ...(coverageDecision.side_note ? { side_note: coverageDecision.side_note } : {}), gaps: sourceCoverageGaps }
-      : {};
+      ? { ...coverageState, ...(coverageDecision.side_note ? { side_note: coverageDecision.side_note } : {}), gaps: sourceCoverageGaps }
+      : coverageState;
   };
   const searchTruth = (rows) => {
     const truth = searchState(rows);
@@ -1072,6 +1081,7 @@ async function handleThink(
   if (url.parameter_error) return jsonResponse(url.parameter_error, 400);
   const q = (url.searchParams.get("q") || "").trim();
   if (!q && url.action === undefined) return jsonResponse({ error: "Missing q" }, 400);
+  if (q) url.searchParams.set("q", q);
   const scope = await measureQueryStage(timing, "scope", () => applyBusinessScope(env, url));
   if (!scope.ok) return scope.response;
   const entityScope = scope.entityScope;
@@ -1123,6 +1133,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
       },
     });
   }
+  const explicitFrom = url.explicitFrom ?? null;
   const timeWindow = questionRetrievalWindow(env, url, q);
   const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit")) || 8, 1), 20);
 
@@ -1918,10 +1929,11 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
     answer !== unsupportedAnswer && approvedDocs.length > 0;
   const questionCoverage = classifyQuestionCoverage({
     question: q,
-    periodStart: timeWindow ? new Date(timeWindow.start).toISOString().slice(0, 10) : null,
-    gaps: sourceCoverageGaps,
+    periodStart: coveragePeriodStart(explicitFrom, timeWindow),
+    gaps: [...sourceCoverageGaps, ...(ledgerGap ? [ledgerGap] : [])],
     evidenceSources: approvedDocs.flatMap((doc) => [doc.source_kind, doc.source]).filter(Boolean),
     now: Date.now(),
+    timeZone: env.BRAIN_TIMEZONE,
   });
   if (answeredFromEvidence && questionCoverage.refuse) {
     answer = null;
@@ -2050,6 +2062,8 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
     retrieval_scope: retrievalScope,
     access: accessSummary,
     status: refusalStatus,
+    coverage_classification: questionCoverage.classification,
+    ...(questionCoverage.answer_prefix ? { answer_prefix: questionCoverage.answer_prefix } : {}),
     notice: answerWithheld && !incompleteCoverageBlocksAbsence
       ? answerWithheldNotice(answerWithheldGate)
       : refusalSearchDisclosure?.notice || (taxDocumentCoverageBlocksAbsence &&

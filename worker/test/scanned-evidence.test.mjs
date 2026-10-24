@@ -495,7 +495,7 @@ test("the native twin of that document answers exactly as main did", async () =>
   assertNoScannedTrace(text);
   assert.equal(prompts.some((prompt) => /SCANNED|OCR/.test(prompt.text)), false,
     "a native-only prompt says nothing about scans");
-  assert.equal(digest(text), "cd30c070e542098632e10e20c7708bce789ef7d7ac61e0b56c5fcb40a4f9baa7", "native /think response bytes");
+  assert.equal(digest(text), "73ce2689dc604e9b55aab603e2d4901ca90a9c13e75b9c4c5bf2968315f4a572", "native /think response bytes");
   assert.deepEqual(promptDigests(prompts), {
     answer: "ec0bd80439b3110553bf35b5108d28b352296c13c4d3837b841066353c2a94c6",
     verifier: "b5ddd5474942c231658d2af190c1d55813c5adaba94709e01db3f2d39fcd5065",
@@ -515,7 +515,7 @@ test("a partial OCR read keeps the merged refusal contract, byte for byte", asyn
   const answerPrompt = prompts.find((prompt) => prompt.pass === "answer")?.text || "";
   assert.ok(answerPrompt.includes(PARTIAL_PROMPT_LABEL), "the partial label is unchanged");
   assert.equal(answerPrompt.includes(SCANNED_PROMPT_LABEL), false);
-  assert.equal(digest(text), "3d83fa3f467e97b26c56ccee8c7fc792ca21a3737e484a210f544c9e6b8b6e72", "partial /think response bytes");
+  assert.equal(digest(text), "7746d50d598e0b4421b1d7badb686435fece1a0b6c3b7df6d53de4525fbe00e2", "partial /think response bytes");
   assert.deepEqual(promptDigests(prompts), {
     answer: "b2d2b3291e6348dc8242ead5e87e8719c6e8919453db3b7a73b3ffe42454dba7",
     verifier: "86cea81aa5bb96013201fbb614842fcd69ab8439ae7f32a33eab55ee0c523f9c",
@@ -530,7 +530,7 @@ test("an unknown text source keeps the merged refusal contract, byte for byte", 
   assert.equal(body.answer, null);
   assert.ok(String(body.notice).startsWith(COVERAGE_REFUSAL), String(body.notice));
   assertNoScannedTrace(text);
-  assert.equal(digest(text), "06dae8ae15a1e434b9fa10bfaa949f6df3f5f7f273739d7eac0216186e678cea", "unknown /think response bytes");
+  assert.equal(digest(text), "c1b78a1fbbf0865de205a6b1d69eb942955dd033de39afcdc47ae4c1f6f5a97f", "unknown /think response bytes");
   assert.deepEqual(promptDigests(prompts), {
     answer: "b171fe8d9fbb036326c9eb66950d94ba291dfb41beac04fa01d86cdc477c5152",
     verifier: "f80086afead02dd6290ce454901c75a554852f439568ffa2f5dd96e3fc384be5",
@@ -597,7 +597,7 @@ test("a partial OCR read of the exact filing keeps the merged unreadable refusal
   assert.equal(body.gaps.some((gap) => gap.type === "tax_evidence_unreadable"), true);
   assert.match(body.notice || "", /could not be read reliably/);
   assertNoScannedTrace(text);
-  assert.equal(digest(text), "9316f98d27cc3aec36bb2bd440d32656ec90b1194fd2aac032f169ac87ad1932", "partial tax /think response bytes");
+  assert.equal(digest(text), "b89df02734db453ebe5cc61c9b44b618aa0e9340e33ccb49b34729d2d1dc38d9", "partial tax /think response bytes");
   assert.deepEqual(promptDigests(prompts), {
     answer: "4925b7c2872d8bd917cc3043b5a54f7df08a65fa58342660818f4fb30a4b50d9",
     verifier: "02f741f0c66d5103766e4678d2b7848b25219bdac71a2251f11718242c8e4b44",
@@ -611,7 +611,7 @@ test("an unknown text source for the exact filing keeps the merged unreadable re
   assert.equal(body.evidence_gate?.reason, TAX_UNREADABLE_REASON);
   assert.equal(body.gaps.some((gap) => gap.type === "tax_evidence_unreadable"), true);
   assertNoScannedTrace(text);
-  assert.equal(digest(text), "9007e9cb76c27111fb46219fe4b41fe5d4d7a9fdd138c9f6a78163aa9b12a5d0", "unknown tax /think response bytes");
+  assert.equal(digest(text), "dbf76702d139cbcb7cf657ba3fe79c69a1ba1373c31b32d336d59ad1f46bb4f9", "unknown tax /think response bytes");
   assert.deepEqual(promptDigests(prompts), {
     answer: "6ce3566fbf62d8585b70b022843466b737adbdc2a5e3f9893b248aa7781a294c",
     verifier: "07b1f8359fed51608a8f52b7216df19348bee3563e293dac92c8ff3cd69c0262",
@@ -623,7 +623,7 @@ test("the native filing answers the tax question exactly as main did", async () 
   const { text, body } = await think({ rows: [taxReturnRow("native")], answer: A_TAX, prompts }, Q_TAX);
   assert.equal(body.answer, A_TAX);
   assertNoScannedTrace(text);
-  assert.equal(digest(text), "3e89cc9b966e910a787d09dce2781d3cbfa19073707dd208d7512512e2991d3e", "native tax /think response bytes");
+  assert.equal(digest(text), "acaf589d51ffc7a70a0739f616aa15cac990a5342b81a0dc24e03bf661c93e78", "native tax /think response bytes");
   assert.deepEqual(promptDigests(prompts), {
     answer: "5d2c4bdb43c139f5a3ec06b29b2be0438b26ebdf191198b873d4f0718b22d172",
     verifier: "8dfc28095856ab29287b7fc867bd96ec49e1ac6f0df6a9ccca49975d90428a2c",
@@ -646,11 +646,11 @@ test("native and partial ranked search responses are unchanged, byte for byte", 
   const native = await unified({ rows: [contractRow("native")] }, Q_SEARCH);
   assertNoScannedTrace(native.text);
   assert.equal(Object.hasOwn(native.body, "gaps"), false, "a healthy native search still has no gaps field");
-  assert.equal(digest(native.text), "4f664d9e97590ed52ceec3e294b2e5bc2ea52b26ce165697f1eea25bcd0b7746", "native /unified response bytes");
+  assert.equal(digest(native.text), "4440df55b43b8e4bf26c8fc734dd2710d4a04e167aa39681e507a0b62d25006d", "native /unified response bytes");
 
   const partial = await unified({ rows: [contractRow("ocr_partial")] }, Q_SEARCH);
   assertNoScannedTrace(partial.text);
-  assert.equal(digest(partial.text), "a1b19256cd59239697d732727737b2d7d4bc51377c83e9d3e43a746a81d617db", "partial /unified response bytes");
+  assert.equal(digest(partial.text), "682e0e9d3b166e6d40cf52b2cd8811dcbf495f59d32a06fc926f192afba65a17", "partial /unified response bytes");
 });
 
 /* ------------------------------------------ every surface that shows it */
@@ -830,40 +830,40 @@ const TAX_UNREADABLE_NOTICE =
   "The requested tax filing was found, but its text could not be read reliably. This is not proof that the filing omits the answer. Unlock the file or provide a readable copy before treating the result as complete.";
 const PAGE_UNREADABLE = { error: "the model returned nothing for this page" };
 
-// Prompt and unchanged-surface digests were captured on main 60afb222. Refusal
-// response digests include the merged status and next-action contract. Every
-// OCR read that does not count must still reach the same evidence decision.
+// Prompt digests retain the reviewed OCR contract. Response digests include
+// the merged status, coverage, and next-action contract. Every OCR read that
+// does not count must still reach the same evidence decision.
 const PINNED = Object.freeze({
   markedStatus: {
-    response: "f7e3e95e551ed8d09783cd0e5518ae3346d3180ec36fdb34fb1a091ef5ea359b",
+    response: "acc00ba84fe3e47df0c5ebada3971cef5f1f62d9c400062724d9b4cd47491e35",
     prompts: {
       answer: "7ff29f07090c325d46fe103893a679c5a8db6312fca20fa78afff9a7c6f55c70",
       verifier: "cfb28db768f53afdaccae0ab777e2f52382599d6731efd29b8c6239aad3d8718",
     },
   },
   unreadablePageStatus: {
-    response: "0ea79cebe1c9de25f3eeffb9724535965f25d2e68c03ceaa785b3e8145d20cb3",
+    response: "7c14e6dc94193ed9094b64d7844e4ea3b6360d0ff8c731047e17bc2ebde094fa",
     prompts: {
       answer: "85eb930617085d675edee3a9ddbb68e169e8492007627dca95bfe9bf1a203f7b",
       verifier: "e7ed1c263f27e3e6870d8c2b093de518bbd11d8d793cda6c04befd81108b2d0b",
     },
   },
   receiptlessStatus: {
-    response: "89f0f266dc2fec426952cb1c5bfc6c4192c1597892bc04fc419411032dcef3a6",
+    response: "4988e520531990627130109c17ed76ebe091c5111ff37dc692a546ab94765f29",
     prompts: {
       answer: "b2d2b3291e6348dc8242ead5e87e8719c6e8919453db3b7a73b3ffe42454dba7",
       verifier: "86cea81aa5bb96013201fbb614842fcd69ab8439ae7f32a33eab55ee0c523f9c",
     },
   },
   markedTax: {
-    response: "de3306691a648add31d3d06535045d90c7ade35072e96c7e8503d25b5de4ce14",
+    response: "f10f71fa3f14cdf2d91d4e4fea1fd3c78e9e22ce9fe9b394346e0c06411e92c4",
     prompts: {
       answer: "c4cfb0e1573e9477960e7f65d9708500913c5317c4cdd7dee8fe212d32f4bcba",
       verifier: "a191e680b3641aac01a71f68239e6765da2fea69c8a21ef4d85a0b4ccbab91f3",
     },
   },
-  markedUnified: "78414adf19b0fa6dd48c083bb1d5a9f776aaa47b1fb38c9454851b06da137c14",
-  markedGeneral: "6db28f02fca77a46b961336eb5a583abf329a95d9ed4ce6ac871595fe4b949e8",
+  markedUnified: "858839b319dae1b54c8a9a9a0f6bf5fe33f722432523368d3c9c778cd66c9db4",
+  markedGeneral: "0666b9440bf4152b817c1f2283605fb3bee61dea2c4bacebd61e9415f8c1aaaa",
   markedGeneralMcpAsk: "7bcf60627fa7808d5b8ca6467ec42fdc3ad6356f000e953c33bca6c3b327ed5f",
   markedGeneralCli: "5c6d078b783ed5993ae2296e778309ea39940991d5bfd7a83194bae867e45a42",
   scannedTaxModelRefusal: "194443c7bcd688031cf6e88c356dd43c0d46737ac11e37474c382ca980435b97",

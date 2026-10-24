@@ -50,10 +50,17 @@ export function fixture() {
   return { env: { DB }, DB, sqlite, raw, rows, first, seen, queries, close: () => sqlite.close() };
 }
 
-export function account(f, { slug = 'live-account', mask = '4321', mode = 'live', institution = 'Bank One', from = '2026-09-01', to = '2026-10-11', status = 'complete' } = {}) {
+export function account(f, { slug = 'live-account', mask = '4321', mode = 'live', institution = 'Bank One', from = '2026-09-01', to = '2026-10-11', status = 'complete', lastSyncedAt = NOW } = {}) {
+  const feedRef = mode === 'live' ? `money-fix-${slug}` : null;
+  if (feedRef) {
+    f.raw(`INSERT OR IGNORE INTO bank_feed_items
+      (item_ref,institution_label,access_ciphertext,access_iv,environment,connected_at,last_synced_at)
+      VALUES (?,?,'AAAAAAAAAAAAAAAA','BBBBBBBB','sandbox',?,?)`, feedRef, institution, NOW, lastSyncedAt);
+  }
   f.raw(`INSERT INTO fin_accounts
-    (account_slug,entity_slug,account_kind,balance_role,mask,institution,feed_mode,provenance,basis_state,recorded_at)
-    VALUES (?,'owner-company','checking','asset',?,?,?,'owner_stated','confirmed',?)`, slug, mask, institution, mode, NOW);
+    (account_slug,entity_slug,account_kind,balance_role,mask,institution,feed_mode,provenance,source_feed,basis_state,recorded_at)
+    VALUES (?,'owner-company','checking','asset',?,?,?,'owner_stated',?,'confirmed',?)`,
+  slug, mask, institution, mode, feedRef ? `bank-feed:${feedRef}` : null, NOW);
   f.raw(`INSERT INTO fin_account_coverage
     (account_slug,coverage_status,covered_from,covered_to,computed_at,provenance,basis_state,recorded_at)
     VALUES (?,?,?,?,?,'owner_stated','confirmed',?)`, slug, status, from, to, NOW, NOW);

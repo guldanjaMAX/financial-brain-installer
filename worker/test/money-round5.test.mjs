@@ -24,6 +24,7 @@ async function documentAnswer(t, { title = 'Card statement', content = 'Card end
   const ingested = await f.post('/api/admin/brain/ingest/batch', { docs: [{ source_type: 'records', source_id: 'synthetic-record',
     title, content, occurred_at: '2026-10-10', date_reliable: true, date_source: 'fixture:record_date', text_source: 'native', text_reliable: true, metadata }] }, { 'X-Admin-Key': f.env.ADMIN_KEY });
   assert.equal(ingested.status, 200); assert.equal((await ingested.json()).results[0].status, 'created');
+  f.raw('UPDATE sources SET last_ingest_at=?,last_complete_sweep_at=? WHERE name=?', NOW, NOW, 'records');
   f.env.VECTORIZE.query = async () => ({ matches: f.rows('SELECT chunk_uid AS id FROM chunks') });
   const response = await f.post('/api/rag/think', { q: 'What did card ending 4242 charge in the last 60 days?' }, { 'X-Admin-Key': f.env.ADMIN_KEY });
   assert.equal(response.status, 200); const body = await response.json();
@@ -193,23 +194,25 @@ test('P02 all collision edges are checked, including an earlier edge with unknow
   transaction(f, { slug: 'unrelated-account' });
   let documents = 0;
   const next = async gap => { documents++; return new Response(JSON.stringify({ answer: 'Document record.', gaps: [gap] })); };
-  assert.equal((await ask(f, question, next)).code, undefined);
-  assert.equal(documents, 1, 'all collisions outside the window allow retrieval');
+  const outsideCoverage = await ask(f, question, next);
+  assert.equal(outsideCoverage.coverage_classification, 'catastrophic');
+  assert.equal(outsideCoverage.gaps[0].reason, 'period_outside_coverage');
+  assert.equal(documents, 0, 'recognized ledger failure must not reach document retrieval');
   f.raw("UPDATE fin_account_coverage SET covered_from=NULL,covered_to=NULL,coverage_status='missing' WHERE account_slug IN ('manual-a','live-a')");
   const before = f.seen.length, blocked = await ask(f, question, next);
   assert.ok(f.seen.slice(before).some(sql => sql.includes('FROM fin_accounts')));
-  assert.equal(blocked.code, 'ledger_account_link_required'); assert.equal(documents, 1);
+  assert.equal(blocked.code, 'ledger_account_link_required'); assert.equal(documents, 0);
   assert.match(blocked.gaps[0].detail, /--manual manual-a --live live-a --preview/);
   const selected = await ask(f, 'How much money came in September 2026 for account ending 2468?', next);
   assert.equal(selected.ledger.accounts[0].credits_minor, 123450);
-  assert.equal(documents, 1);
+  assert.equal(documents, 0);
   const raw = '{"answer":"Human record", "gaps":[]}';
   const response = new Response(raw);
   const readCount = f.seen.length;
   assert.equal(await withLedgerAnswer({ env: f.env, question: 'How do I balance work and rest?', now: NOW }, async gap => {
     documents++; assert.equal(gap, null); return response;
   }), response);
-  assert.equal(await response.text(), raw); assert.equal(documents, 2);
+  assert.equal(await response.text(), raw); assert.equal(documents, 1);
   assert.equal(f.seen.length, readCount, 'non-ledger questions perform no ledger reads');
 });
 
@@ -224,7 +227,7 @@ test('N03 coverage controls keep overlapping and unknown collisions closed, outs
   assert.equal((await ask(f, question, next)).code, 'ledger_account_link_required');
   assert.equal(documents, 0);
   const outside = await ask(f, 'How much money came in January 2020?', next);
-  assert.equal(outside.code, undefined); assert.equal(documents, 1);
+  assert.equal(outside.coverage_classification, 'catastrophic'); assert.equal(documents, 0);
   assert.equal(outside.gaps[0].reason, 'period_outside_coverage');
 });
 
@@ -245,9 +248,10 @@ test('P02 real Think route: historical collisions cannot bypass the unresolved l
     title: 'Income record', content: 'Income was USD 1234.50 in September 2026.', occurred_at: '2026-09-30',
     date_reliable: true, date_source: 'fixture:record_date', text_source: 'native', text_reliable: true }] }, { 'X-Admin-Key': f.env.ADMIN_KEY });
   assert.equal(ingested.status, 200); assert.equal((await ingested.json()).results[0].status, 'created');
+  f.raw('UPDATE sources SET last_ingest_at=?,last_complete_sweep_at=? WHERE name=?', NOW, NOW, 'records');
   f.env.VECTORIZE.query = async () => ({ matches: f.rows('SELECT chunk_uid AS id FROM chunks') });
-  const read = () => f.post('/api/rag/think', { q: 'How much money came in September 2026?' }, { 'X-Admin-Key': f.env.ADMIN_KEY }).then(r => r.json());
-  const ordinary = await read();
+  const read = (q = 'How much money came in September 2026?') => f.post('/api/rag/think', { q }, { 'X-Admin-Key': f.env.ADMIN_KEY }).then(r => r.json());
+  const ordinary = await read('What does the income record say about September 2026?');
   assert.equal(ordinary.answer, answer); assert.equal(ordinary.evidence_gate.supported, true);
   assert.ok(ordinary.results.length); assert.equal(drafts, 1); assert.equal(verifiers, 1);
   drafts = 0; verifiers = 0;

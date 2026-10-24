@@ -54,6 +54,7 @@ async function documentAnswer(t, { title = 'Card statement', content = 'Card end
   const ingested = await f.post('/api/admin/brain/ingest/batch', { docs: [{ source_type: 'records', source_id: 'synthetic-record',
     title, content, occurred_at: '2026-10-10', date_reliable: dateReliable, date_source: dateReliable ? 'fixture:record_date' : 'fallback', text_source: 'native', text_reliable: true, metadata }] }, { 'X-Admin-Key': f.env.ADMIN_KEY });
   assert.equal(ingested.status, 200); assert.equal((await ingested.json()).results[0].status, 'created');
+  f.raw('UPDATE sources SET last_ingest_at=?,last_complete_sweep_at=? WHERE name=?', NOW, NOW, 'records');
   f.env.VECTORIZE.query = async () => ({ matches: f.rows('SELECT chunk_uid AS id FROM chunks') });
   const response = await f.post('/api/rag/think', { q: 'What did card ending 4242 charge in the last 60 days?' }, { 'X-Admin-Key': f.env.ADMIN_KEY });
   assert.equal(response.status, 200); const body = await response.json();
@@ -147,6 +148,7 @@ test('N03 real route: an expense policy remains answerable with an unrelated his
     title: 'Office expense reimbursement rules', content: 'Receipts are required for reimbursement.', occurred_at: '2026-10-10',
     date_reliable: true, date_source: 'fixture:record_date', text_source: 'native', text_reliable: true }] }, { 'X-Admin-Key': f.env.ADMIN_KEY });
   assert.equal(ingested.status, 200); assert.equal((await ingested.json()).results[0].status, 'created');
+  f.raw('UPDATE sources SET last_ingest_at=?,last_complete_sweep_at=? WHERE name=?', NOW, NOW, 'records');
   f.env.VECTORIZE.query = async () => ({ matches: f.rows('SELECT chunk_uid AS id FROM chunks') });
   const read = () => f.post('/api/rag/think', { q: 'What are the office expense reimbursement rules?' }, { 'X-Admin-Key': f.env.ADMIN_KEY }).then(r => r.json());
   const control = await read(); assert.equal(control.answer, answer); assert.ok(control.results.length);
@@ -297,7 +299,8 @@ test('N03 a supported question outside the collision window uses document fallba
   assert.equal(blocked.code, 'ledger_account_link_required'); assert.equal(calls, 0);
   const before = f.seen.length, b = await ask(f, 'How much money came in January 2020?', next);
   assert.ok(f.seen.slice(before).some(sql => sql.includes('FROM fin_accounts')));
-  assert.equal(calls, 1); assert.equal(b.answer, 'Archived record.');
+  assert.equal(calls, 0); assert.equal(b.answer, null);
+  assert.equal(b.coverage_classification, 'catastrophic');
   assert.equal(b.gaps[0].reason, 'period_outside_coverage'); assert.equal(b.code, undefined);
 });
 

@@ -19,9 +19,13 @@ async function fixture(t) {
   } });
   t.after(() => f.close());
   seedOwnedEntity(f, "owner", "Owner");
+  f.raw(`INSERT INTO bank_feed_items
+    (item_ref,institution_label,access_ciphertext,access_iv,environment,connected_at,last_synced_at)
+    VALUES ('fixture-feed','Fixture Bank','AAAAAAAAAAAAAAAA','BBBBBBBB','sandbox',?,?)`, stamp, stamp);
   f.account = (slug, mask, kind = "checking", mode = "live") => {
-    f.raw(`INSERT INTO fin_accounts (account_slug,entity_slug,account_kind,balance_role,mask,feed_mode,provenance,basis_state,recorded_at,institution)
-      VALUES (?,'owner',?,'asset',?,?,'owner_stated','confirmed',?,'Fixture Bank')`, slug, kind, mask, mode, stamp);
+    f.raw(`INSERT INTO fin_accounts (account_slug,entity_slug,account_kind,balance_role,mask,feed_mode,provenance,source_feed,basis_state,recorded_at,institution)
+      VALUES (?,'owner',?,'asset',?,?,'owner_stated',?,'confirmed',?,'Fixture Bank')`,
+    slug, kind, mask, mode, mode === "live" ? "bank-feed:fixture-feed" : null, stamp);
     f.raw(`INSERT INTO fin_account_coverage (account_slug,coverage_status,covered_from,covered_to,computed_at,provenance,basis_state,recorded_at)
       VALUES (?,'complete','2026-06-01','2026-10-11',?,'owner_stated','confirmed',?)`, slug, stamp, stamp);
   };

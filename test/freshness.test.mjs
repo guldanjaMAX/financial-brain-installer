@@ -14,6 +14,7 @@ import {
   freshnessReport,
   sourceFreshnessCounts,
 } from "../worker/src/lib/store-d1.js";
+import { classifyQuestionCoverage } from "../worker/src/lib/retrieval-status.js";
 
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
 
@@ -281,6 +282,57 @@ const DAILY = 86400;
   check("a registered zero-document message source blocks a categorical absence",
     g.some((gap) => gap.source === "whatsapp" && /no complete history sweep/i.test(gap.detail || "")),
     JSON.stringify(g));
+}
+
+/* ---- both durable history-unproven shapes reach the practical answer policy ---- */
+{
+  const unscheduled = await coverageGaps(mk([{
+    name: "gmail-manual", kind: "gmail", status: "ready", document_count: 4,
+    last_ingest_at: daysAgo(5), expected_refresh_seconds: null,
+    last_complete_sweep_at: null,
+  }]), { now: NOW });
+  const scheduled = await coverageGaps(mk([{
+    name: "gmail-daily", kind: "gmail", status: "ready", document_count: 4,
+    last_ingest_at: daysAgo(5), expected_refresh_seconds: DAILY,
+    last_complete_sweep_at: null,
+  }]), { now: NOW });
+  const history = [
+    unscheduled.find((gap) => gap.type === "history_unproven"),
+    scheduled.find((gap) => gap.type === "history_unproven"),
+  ];
+  check("both store producer arms emit history_unproven with the real last-good instant",
+    history.every((gap) => gap?.last_good_sync_at === daysAgo(5)), JSON.stringify(history));
+  for (const gap of history) {
+    const decision = classifyQuestionCoverage({
+      question: "What did Gmail say?", gaps: [gap], now: NOW,
+    });
+    check(`history_unproven from ${gap.source} follows the 48-hour rule`,
+      decision.classification === "stale_but_covering" && /Gmail/i.test(decision.side_note || ""),
+      JSON.stringify(decision));
+  }
+
+  const nullHistory = await coverageGaps(mk([{
+    name: "gmail-empty", kind: "gmail", status: "ready", document_count: 0,
+    last_ingest_at: null, expected_refresh_seconds: null,
+    last_complete_sweep_at: null,
+  }]), { now: NOW });
+  const refused = classifyQuestionCoverage({
+    question: "What did Gmail say?", gaps: nullHistory, now: NOW,
+  });
+  check("null last-good history on a mapped primary is catastrophic",
+    refused.refuse === true && refused.catastrophic_gaps.some((gap) => gap.type === "history_unproven"),
+    JSON.stringify(refused));
+
+  const oldHistory = await coverageGaps(mk([{
+    name: "gmail-old", kind: "gmail", status: "ready", document_count: 4,
+    last_ingest_at: daysAgo(20), expected_refresh_seconds: null,
+    last_complete_sweep_at: null,
+  }]), { now: NOW });
+  const oldDecision = classifyQuestionCoverage({
+    question: "What did Gmail say in July?", periodStart: daysAgo(30), gaps: oldHistory, now: NOW,
+  });
+  check("usable unproven history older than 14 days gets an as-of prefix when it covers the period",
+    oldDecision.refuse === false && /^As of /.test(oldDecision.answer_prefix || ""), JSON.stringify(oldDecision));
 }
 
 /* ---- coverage reports obey an explicit authorized-source allowlist ---- */

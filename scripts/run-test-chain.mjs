@@ -16,6 +16,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --test worker/test/ledger-answer.test.mjs",
   "node --test worker/test/ledger-conservative.test.mjs",
   "node --test worker/test/ledger-phase2.test.mjs",
+  "node --test worker/test/practical-gaps-0419.test.mjs",
   "node --test worker/test/ledger-phrasing.test.mjs",
   "node --test worker/test/ledger-review.test.mjs",
   "node --test test/ledger-mcp.test.mjs",

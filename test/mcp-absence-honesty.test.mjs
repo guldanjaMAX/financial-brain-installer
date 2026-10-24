@@ -35,6 +35,15 @@ const PRESERVE = "Preserve the ledger answer's exact amounts, account masks, dat
 const LATEST = 'Before any status, "latest", or absence claim, run one brain_search for the subject with sort "newest", read newest_record, and say "as of <record date>" for the record you relied on.';
 const MONEY = "For a money question the bank ledger answers (a balance, a payment received, money in and out, largest expenses, deposits, spend by merchant or category, transfers between the owner's own accounts, recurring charges, profit, net income, withdrawals, loan proceeds), use brain_think: it reads the ledger directly. Cash flow is unsupported: relay cash_flow_unsupported with no figure or model fallback. The profit and net-income view is money in minus money out, not accounting profit or cash flow. Keep its exact amounts, account masks, dates and coverage bounds.";
 const NEWEST_DESCRIPTION = 'Before any status, "latest", or absence claim, search the subject once with sort "newest" and check newest_record, the newest reliably dated record among the results this search returned before pagination (at most 50), or the newest unverified date if none is reliable. Before a latest claim, re-search the subject with a recent date window; relevance ranking may omit newer matches.';
+const SEARCH_SIDE_NOTE = "When brain_search returns a non-empty side_note, give the supported answer first and then relay that side_note verbatim.";
+const HOSTED_SEARCH_SIDE_NOTE = "When search returns a non-empty side_note, give the supported answer first and then relay that side_note verbatim.";
+function assertSearchSideNoteInstruction(text, instruction, label) {
+  const start = text.indexOf(instruction);
+  assert.ok(start >= 0, `${label}: search side-note instruction is present`);
+  const answer = text.indexOf("give the supported answer first", start);
+  const sideNote = text.indexOf("relay that side_note verbatim", start);
+  assert.ok(answer >= start && sideNote > answer, `${label}: answer instruction precedes the verbatim side note`);
+}
 const BROAD_PROMPT_FIXTURES = [
   {
     family: "all-sources double-check",
@@ -189,6 +198,40 @@ globalThis.fetch = async (input, init = {}) => {
   } finally { runtime.close(); }
 }
 
+async function localSearchBody(body, answerSetup, query = "fixture coverage") {
+  const runtime = fixtureRuntime("https://fixture.invalid");
+  const manifest = runtime.env.BRAIN_MANIFEST;
+  const parsed = JSON.parse(readFileSync(manifest, "utf8"));
+  if (answerSetup === "claude-pair") {
+    parsed.retrieval = { answer_model: "claude-opus-5-5", gate_model: "claude-sonnet-5-5" };
+  }
+  writeFileSync(manifest, JSON.stringify(parsed));
+  const hook = join(runtime.env.TMPDIR, `search-${answerSetup}-hook.mjs`);
+  const calls = join(runtime.env.TMPDIR, `search-${answerSetup}-calls.txt`);
+  writeFileSync(hook, `
+import { appendFileSync } from "node:fs";
+const body = ${JSON.stringify(body)};
+globalThis.fetch = async (input, init = {}) => {
+  const url = new URL(String(input));
+  if (url.origin !== "https://fixture.invalid" || url.pathname !== "/api/rag/unified") {
+    throw new Error("unexpected synthetic fetch target");
+  }
+  appendFileSync(${JSON.stringify(calls)}, String(init.body || "") + "\\n");
+  return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+};
+`);
+  runtime.env.NODE_OPTIONS = `--import=${pathToFileURL(hook).href}`;
+  try {
+    const [reply] = await localMessages(runtime, [{ jsonrpc: "2.0", id: 1,
+      method: "tools/call", params: { name: "brain_search", arguments: { q: query } } }]);
+    const callLog = readFileSync(calls, "utf8").trim().split("\n").map(JSON.parse);
+    assert.equal(callLog.length, 1, `${answerSetup}: raw search decision point was reached once`);
+    assert.equal(callLog[0].q, query.trim());
+    assert.ok(!reply.result?.isError, reply.result?.content?.[0]?.text);
+    return JSON.parse(reply.result.content[0].text);
+  } finally { runtime.close(); }
+}
+
 /** Serve one canned body; every assertion must first reach the requested route. */
 async function thinkReturns(body, tool = "brain_think", args = {}) {
   const requests = [];
@@ -223,8 +266,13 @@ async function thinkReturns(body, tool = "brain_think", args = {}) {
   }
 }
 
-async function initializeResponse(profile) {
+async function initializeResponse(profile, answerSetup = "built-in") {
   const runtime = fixtureRuntime("https://fixture.invalid", profile);
+  if (answerSetup === "claude-pair") {
+    const parsed = JSON.parse(readFileSync(runtime.env.BRAIN_MANIFEST, "utf8"));
+    parsed.retrieval = { answer_model: "claude-opus-5-5", gate_model: "claude-sonnet-5-5" };
+    writeFileSync(runtime.env.BRAIN_MANIFEST, JSON.stringify(parsed));
+  }
   try {
     const [initialized, listed] = await localMessages(runtime, [
       { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fixture", version: "1" } } },
@@ -448,6 +496,40 @@ await test("answer_withheld keeps the reviewed notice, reason, and candidate row
   assert.equal(out.evidence_gate?.reason, "synthetic evidence detail");
 });
 
+const nonCoverageLedgerRefusal = {
+    status: "answer_withheld",
+    coverage_classification: "fine",
+    ledger_refusal_class: "unsupported_request",
+    code: "cash_flow_unsupported",
+    notice: "Cash flow is not supported by this ledger path.",
+    next_action: "Next: ask for money in and money out, or for the bounded profit or net-income surplus.",
+    answer: null,
+    evidence_gate: { supported: false, complete: false, reason: "Cash flow is not supported by this ledger path." },
+    citations: [],
+    results: [],
+    gaps: [{ type: "ledger_not_consulted", reason: "cash_flow_unsupported",
+      detail: "Cash flow is not supported by this ledger path." }],
+};
+
+await test("hosted non-coverage ledger refusals keep their cause and remedy", async () => {
+  const hosted = await remoteCall(nonCoverageLedgerRefusal, "ask");
+  assert.match(hosted, /Cash flow is not supported by this ledger path/);
+  assert.match(hosted, /Why: Cash flow is not supported by this ledger path/);
+  assert.match(hosted, /Next: ask for money in and money out/);
+  assert.doesNotMatch(hosted, /primary source cannot cover|check my Brain/i);
+});
+
+await test("local non-coverage ledger refusals keep their cause and remedy", async () => {
+  const local = await thinkReturns(nonCoverageLedgerRefusal);
+  assert.equal(local.search_status, "answer_withheld", "the local MCP reached the hard-refusal branch");
+  assert.equal(local.coverage_classification, "fine");
+  assert.equal(local.ledger_refusal_class, "unsupported_request");
+  assert.equal(local.code, "cash_flow_unsupported");
+  assert.equal(local.next_action, nonCoverageLedgerRefusal.next_action);
+  assert.match(local.note || "", /ledger refusal, not a source-coverage outage/i);
+  assert.doesNotMatch(local.note || "", /FOUND 0 document|primary source cannot cover/i);
+});
+
 // 3. A cited answer stays clean: no scolding note bolted onto a good result.
 await test("cited answer stays clean", async () => {
   const out = await thinkReturns({
@@ -627,7 +709,7 @@ await test("zero-row largest keeps the real ledger answer beside an empty-docume
   t.after(() => f.close());
   seedOwnedEntity(f, "owner", "Owner");
   f.raw(`INSERT INTO fin_accounts (account_slug,entity_slug,account_kind,balance_role,mask,feed_mode,provenance,basis_state,recorded_at)
-    VALUES ('account-a','owner','checking','asset','1111','live','owner_stated','confirmed',?)`, now);
+    VALUES ('account-a','owner','checking','asset','1111','manual','owner_stated','confirmed',?)`, now);
   f.raw(`INSERT INTO fin_account_coverage (account_slug,coverage_status,covered_from,covered_to,computed_at,provenance,basis_state,recorded_at)
     VALUES ('account-a','complete','2026-06-01','2026-10-11',?,'owner_stated','confirmed',?)`, now, now);
   const before = f.seen.sql.filter(sql => /JOIN fin_transactions/.test(sql)).length;
@@ -725,22 +807,159 @@ await test("local empty search is scoped and unavailable search keeps its notice
   assert.notEqual(unavailable.note, NO_HITS);
 });
 
-async function remoteCall(body, tool, args = {}) {
+async function remoteCall(body, tool, args = {}, env = {}) {
   const calls = [];
   let fetchCalls = 0;
   const url = new URL("https://fixture.invalid/mcp");
-  const reply = await (await handleMcp({ DB: { prepare() { fetchCalls++; throw new Error("unexpected fetch"); } } },
+  const reply = await (await handleMcp({ ...env, DB: { prepare() { fetchCalls++; throw new Error("unexpected fetch"); } } },
     new Request(url, { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call",
       params: { name: tool, arguments: tool === "ask" ? { question: "fixture question", ...args } : { query: "fixture query", ...args } } }) }), url, {
       think: async request => { calls.push(["think", request]); return body; },
       search: async request => { calls.push(["search", request]); return body; },
     })).json();
-  assert.deepEqual(calls, [[tool === "ask" ? "think" : "search", { q: tool === "ask" ? "fixture question" : "fixture query", limit: tool === "ask" ? 12 : 10 }]],
+  const supplied = tool === "ask" ? (args.question ?? "fixture question") : (args.query ?? "fixture query");
+  assert.deepEqual(calls, [[tool === "ask" ? "think" : "search", { q: String(supplied).trim(), limit: tool === "ask" ? 12 : 10 }]],
     "remote tool reached exactly its injected decision point");
   assert.equal(fetchCalls, 0);
   assert.ok(!reply.result.isError);
   return tool === "search" ? JSON.parse(reply.result.content[0].text) : reply.result.content[0].text;
 }
+
+await test("raw-search catastrophic refusals and stale prefixes survive both MCPs and answer setups", async () => {
+  const row = datedRow("coverage-row", "2026-10-20T12:00:00Z", true);
+  const catastrophic = {
+    status: "coverage_incomplete",
+    coverage_classification: "catastrophic",
+    notice: "The primary source cannot cover this question.",
+    results: [row],
+    gaps: [{ type: "never_synced", source: "Gmail", detail: "Gmail has never completed a sync." }],
+  };
+  const stale = {
+    coverage_classification: "stale_but_covering",
+    answer_prefix: "As of 2026-10-01,",
+    side_note: "Side note: Gmail has not refreshed since Wed Oct 1, so newer messages may be missing.",
+    results: [row],
+    gaps: [{ type: "coverage_stale", source: "Gmail", detail: "Gmail has not refreshed recently." }],
+  };
+  const hostedSetups = [
+    ["built-in", { ANSWER_MODEL: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", GATE_MODEL: "@cf/meta/llama-3.3-70b-instruct-fp8-fast" }],
+    ["claude-pair", { ANSWER_MODEL: "claude-opus-5-5", GATE_MODEL: "claude-sonnet-5-5" }],
+  ];
+
+  for (const [answerSetup, env] of hostedSetups) {
+    const localMetadata = await initializeResponse("librarian", answerSetup);
+    const localSearchDescription = localMetadata.tools.find((tool) => tool.name === "brain_search")?.description || "";
+    assertSearchSideNoteInstruction(localSearchDescription, SEARCH_SIDE_NOTE, `${answerSetup}: local search tool`);
+    assertSearchSideNoteInstruction(localMetadata.instructions, SEARCH_SIDE_NOTE, `${answerSetup}: local initialize`);
+
+    const localRefusal = await localSearchBody(catastrophic, answerSetup);
+    assert.equal(localRefusal.coverage_classification, "catastrophic", `${answerSetup}: local classification is closed`);
+    assert.equal(localRefusal.search_status, "coverage_incomplete");
+    assert.deepEqual(localRefusal.results, [], `${answerSetup}: local raw-route refusal ignored mutant is killed`);
+    assert.match(localRefusal.note || "", /cannot answer|refus/i);
+
+    const localStale = await localSearchBody(stale, answerSetup);
+    assert.equal(localStale.answer_prefix, "As of 2026-10-01,");
+    assert.equal(localStale.side_note, stale.side_note, `${answerSetup}: local search relays the exact side note`);
+    assert.equal(localStale.results.length, 1, `${answerSetup}: local stale-but-covering rows remain usable`);
+    assert.match(localStale.note || "", /As of 2026-10-01,/);
+
+    const hostedRefusal = await remoteCall(catastrophic, "search", {}, env);
+    assert.equal(hostedRefusal.coverage_classification, "catastrophic", `${answerSetup}: hosted classification is closed`);
+    assert.deepEqual(hostedRefusal.results, [], `${answerSetup}: hosted raw-route refusal ignored mutant is killed`);
+    assert.match(hostedRefusal.note || "", /cannot answer|refus/i);
+
+    const hostedStale = await remoteCall(stale, "search", {}, env);
+    assert.equal(hostedStale.answer_prefix, "As of 2026-10-01,");
+    assert.equal(hostedStale.side_note, stale.side_note, `${answerSetup}: hosted search relays the exact side note`);
+    assert.equal(hostedStale.results.length, 1, `${answerSetup}: hosted stale-but-covering rows remain usable`);
+    assert.match(hostedStale.note || "", /As of 2026-10-01,/);
+
+    const url = new URL("https://fixture.invalid/mcp");
+    const deps = { think() { throw new Error("metadata must not call think"); }, search() { throw new Error("metadata must not call search"); } };
+    const rpc = async (method) => (await (await handleMcp(env, new Request(url, {
+      method: "POST",
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params: {} }),
+    }), url, deps)).json()).result;
+    const hostedTools = (await rpc("tools/list")).tools;
+    const hostedInstructions = (await rpc("initialize")).instructions;
+    const hostedDescription = hostedTools.find((tool) => tool.name === "search")?.description || "";
+    assertSearchSideNoteInstruction(hostedDescription, HOSTED_SEARCH_SIDE_NOTE, `${answerSetup}: hosted search tool`);
+    assertSearchSideNoteInstruction(hostedInstructions, HOSTED_SEARCH_SIDE_NOTE, `${answerSetup}: hosted initialize`);
+  }
+});
+
+await test("contact-field whitespace has local and hosted search parity", async () => {
+  const row = { ...datedRow("contact-row", "2026-10-22T12:00:00Z", true),
+    source: "upload",
+    source_kind: "upload",
+  };
+  const body = {
+    coverage_classification: "fine",
+    results: [row],
+    gaps: [{ type: "never_synced", source: "Gmail", source_kind: "gmail",
+      detail: "Gmail has never completed a sync." }],
+  };
+  const clean = "What is the email address for Example Contact?";
+  const padded = `  ${clean}  `;
+  const stable = (result) => ({
+    coverage_classification: result.coverage_classification,
+    result_ids: result.results.map((item) => item.id),
+    gap_types: [...(result.gaps || []), ...(result.other_source_gaps || [])].map((item) => item.type),
+  });
+
+  for (const answerSetup of ["built-in", "claude-pair"]) {
+    const localClean = await localSearchBody(body, answerSetup, clean);
+    const localPadded = await localSearchBody(body, answerSetup, padded);
+    assert.ok(localPadded.results.length > 0, `${answerSetup}: local route retains the matching upload row`);
+    assert.deepEqual(stable(localPadded), stable(localClean),
+      `${answerSetup}: local padded query matches the clean control`);
+  }
+
+  for (const env of [
+    { ANSWER_MODEL: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", GATE_MODEL: "@cf/meta/llama-3.3-70b-instruct-fp8-fast" },
+    { ANSWER_MODEL: "claude-opus-5-5", GATE_MODEL: "claude-sonnet-5-5" },
+  ]) {
+    const hostedClean = await remoteCall(body, "search", { query: clean }, env);
+    const hostedPadded = await remoteCall(body, "search", { query: padded }, env);
+    assert.ok(hostedPadded.results.length > 0, "hosted route retains the matching upload row");
+    assert.deepEqual(stable(hostedPadded), stable(hostedClean),
+      "hosted padded query matches the clean control");
+  }
+});
+
+await test("dropping the search side-note instruction is observable in both MCP contracts", async () => {
+  for (const answerSetup of ["built-in", "claude-pair"]) {
+    const local = await initializeResponse("librarian", answerSetup);
+    for (const text of [local.instructions, local.tools.find((tool) => tool.name === "brain_search")?.description || ""]) {
+      assertSearchSideNoteInstruction(text, SEARCH_SIDE_NOTE, `${answerSetup}: local contract`);
+      assert.throws(() => assertSearchSideNoteInstruction(
+        text.replace(SEARCH_SIDE_NOTE, ""), SEARCH_SIDE_NOTE, `${answerSetup}: local mutant`,
+      ), `${answerSetup}: local dropped-instruction mutant is killed`);
+    }
+  }
+
+  const url = new URL("https://fixture.invalid/mcp");
+  const deps = { think() { throw new Error("metadata must not call think"); }, search() { throw new Error("metadata must not call search"); } };
+  for (const env of [
+    { ANSWER_MODEL: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", GATE_MODEL: "@cf/meta/llama-3.3-70b-instruct-fp8-fast" },
+    { ANSWER_MODEL: "claude-opus-5-5", GATE_MODEL: "claude-sonnet-5-5" },
+  ]) {
+    const rpc = async (method) => (await (await handleMcp(env, new Request(url, {
+      method: "POST",
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params: {} }),
+    }), url, deps)).json()).result;
+    for (const text of [
+      (await rpc("initialize")).instructions,
+      (await rpc("tools/list")).tools.find((tool) => tool.name === "search")?.description || "",
+    ]) {
+      assertSearchSideNoteInstruction(text, HOSTED_SEARCH_SIDE_NOTE, "hosted contract");
+      assert.throws(() => assertSearchSideNoteInstruction(
+        text.replace(HOSTED_SEARCH_SIDE_NOTE, ""), HOSTED_SEARCH_SIDE_NOTE, "hosted mutant",
+      ), "hosted dropped-instruction mutant is killed");
+    }
+  }
+});
 
 await test("remote empty search is scoped with a populated answering control", async () => {
   const empty = await remoteCall({ results: [] }, "search");
@@ -818,16 +1037,20 @@ await test("remote descriptions and initialize route money and newest-record rea
   assert.equal(tools.length, 3, "read-only tool listing was reached");
   const ask = tools.find(tool => tool.name === "ask").description;
   const search = tools.find(tool => tool.name === "search").description;
-  assert.match(ask, /^Money and short lookups\./);
-  assert.match(ask, /For anything else, use search, then fetch\./);
-  assert.match(search, /^Default tool for questions about the owner's records\./);
+  assert.match(ask, /^Money questions only\./);
+  assert.match(ask, /For every non-money question, use search, then fetch\./);
+  assert.doesNotMatch(ask, /short (?:single-fact )?lookups?/i);
+  assert.match(search, /^Default route for every non-money question\./);
   assert.match(search, /newest_record/);
   assert.match(search, /among the results this search returned/);
   assert.match(search, /does not support date bounds or sorting/);
   assert.match(search, /Before any status, "latest", or absence claim, fetch the newest matching record returned here and state its date and these search limits\./);
-  assert.ok(search.endsWith("Relay any provisional coverage note and do not turn an incomplete empty result into a corpus-wide absence claim."));
+  assert.ok(search.includes("Relay any provisional coverage note and do not turn an incomplete empty result into a corpus-wide absence claim."));
+  assert.ok(search.endsWith(HOSTED_SEARCH_SIDE_NOTE));
   const { instructions } = await rpc("initialize");
-  assert.match(instructions, /ask is for money and short lookups/);
+  assert.match(instructions, /For every non-money question, use search, then fetch/);
+  assert.match(instructions, /ask is only for supported money questions/);
+  assert.doesNotMatch(instructions, /short (?:single-fact )?lookups?/i);
   assert.match(instructions, /relevance-ranked search and reading the returned records come before any status or absence claim/);
   assert.match(instructions, /a search with no match is not proof that no record exists/i);
   assert.equal(backendCalls, 0, "metadata never reads records");
@@ -845,16 +1068,34 @@ await test("remote connector routing follows the Worker answer pair", async () =
       url, deps)).json()).result;
     return { tools: (await rpc("tools/list")).tools, instructions: (await rpc("initialize")).instructions };
   };
+  const localBuiltIn = await initializeResponse("librarian", "built-in");
+  const localClaude = await initializeResponse("librarian", "claude-pair");
   const builtIn = await metadata({
     ANSWER_MODEL: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
     GATE_MODEL: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
   });
   const claude = await metadata({ ANSWER_MODEL: "claude-opus-5-5", GATE_MODEL: "claude-sonnet-5-5" });
+  assert.match(localBuiltIn.tools.find((tool) => tool.name === "brain_think").description,
+    /^Ledger money and explicitly requested Brain answers\./);
+  assert.match(localBuiltIn.tools.find((tool) => tool.name === "brain_search").description,
+    /^Default answer route for non-money questions\./);
   assert.match(builtIn.tools.find((tool) => tool.name === "ask").description,
-    /^Money and short lookups\./);
+    /^Money questions only\./);
   assert.match(builtIn.tools.find((tool) => tool.name === "search").description,
-    /^Default tool for questions about the owner's records\./);
-  assert.match(builtIn.instructions, /search and fetch read the underlying documents/);
+    /^Default route for every non-money question\./);
+  assert.match(builtIn.instructions, /For every non-money question, use search, then fetch/);
+  const builtInAsk = builtIn.tools.find((tool) => tool.name === "ask").description;
+  assert.doesNotMatch(`${builtIn.instructions}\n${builtInAsk}`,
+    /short (?:single-fact )?lookups?/i, "the hosted short-lookup invitation restored mutant is killed");
+  const restoredInvitation = builtInAsk.replace("Money questions only.",
+    "Money and short lookups. Use ask for a short single-fact lookup.");
+  assert.throws(() => assert.doesNotMatch(restoredInvitation, /short (?:single-fact )?lookups?/i),
+    "restoring the hosted short-lookup invitation is observable");
+  assert.match(localBuiltIn.instructions, /For every non-money question, use brain_search first/);
+  assert.match(localClaude.tools.find((tool) => tool.name === "brain_think").description,
+    /^Default answer route for non-money questions with Claude Opus answers and a Claude Sonnet check\./);
+  assert.match(localClaude.tools.find((tool) => tool.name === "brain_search").description,
+    /^Fallback answer route when brain_think returns answer_error or anthropic_key_missing\./);
   assert.match(claude.tools.find((tool) => tool.name === "ask").description,
     /^Default answer route for non-money questions with Claude Opus answers and a Claude Sonnet check\./);
   assert.match(claude.tools.find((tool) => tool.name === "search").description,

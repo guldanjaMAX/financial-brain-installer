@@ -5,7 +5,8 @@ import { readFileSync } from "node:fs";
 import { createProductFixture, seedOwnedEntity } from "./product-contract-fixture.mjs";
 import { classifyLedgerQuestion } from "../src/lib/ledger-question.js";
 import { withLedgerAnswer } from "../src/lib/ledger-answer.js";
-import { readEffectiveAccounts, readEffectiveTransactions } from "../src/lib/ledger-reader.js";
+import { readEffectiveAccounts, readEffectiveBalances, readEffectiveTransactions } from "../src/lib/ledger-reader.js";
+import * as retrievalStatus from "../src/lib/retrieval-status.js";
 
 import { linkAccounts } from "./fixtures/money-fix/fixture.mjs";
 
@@ -16,6 +17,15 @@ test.after(() => mock.restoreAll());
 const fallback = async () => new Response(JSON.stringify({ answer: null, citations: [], gaps: [] }));
 const direct = (f, question, extra = {}) => withLedgerAnswer({ env: f.env, question,
   grantScope: { all: true }, scopePrincipalKind: "owner", now: NOW, ...extra }, fallback).then(r => r.json());
+
+async function importLedgerAnswerMutant(from, to) {
+  const url = new URL("../src/lib/ledger-answer.js", import.meta.url);
+  const original = readFileSync(url, "utf8");
+  assert.equal(original.includes(from), true, `mutation marker exists: ${from.slice(0, 80)}`);
+  const source = original.replace(from, to).replace(/from "(\.\/[^\"]+)"/g,
+    (_match, specifier) => `from "${new URL(specifier, url).href}"`);
+  return import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}#${randomBytes(8).toString("hex")}`);
+}
 
 async function fixtureFor(t) {
   const fixture = await createProductFixture({ env: {
@@ -75,6 +85,356 @@ test("Think reads the latest balance directly, with ledger citation and no model
   assert.equal(body.citations[0].last_synced_at, stamp);
   assert.equal(body.citations[0].account_mask, "4321");
   assert.equal(modelCalls, 0);
+});
+
+test("current-balance answers apply the 48-hour and 14-day source-freshness boundaries", async (t) => {
+  const cases = [
+    ["fresh control", 60 * 60 * 1000, false, false],
+    ["just under 48 hours", 2 * 86400000 - 1, false, false],
+    ["exactly 48 hours", 2 * 86400000, true, false],
+    ["exactly 14 days", 14 * 86400000, true, false],
+    ["over 14 days", 14 * 86400000 + 1, true, true],
+  ];
+  for (const [label, age, sideNote, prefix] of cases) {
+    await t.test(label, async (t) => {
+      const f = await fixtureFor(t);
+      const observed = new Date(Date.parse(NOW) - age).toISOString();
+      f.raw("UPDATE bank_feed_items SET last_synced_at=? WHERE item_ref='fixture-feed'", observed);
+      f.raw("UPDATE fin_balance_snapshots SET as_of_date=? WHERE account_slug='live-account'", observed.slice(0, 10));
+      const before = f.seen.sql.filter((sql) => /JOIN fin_balance_snapshots/.test(sql)).length;
+      const body = await (await f.ask("What is my current balance?")).json();
+      assert.ok(f.seen.sql.filter((sql) => /JOIN fin_balance_snapshots/.test(sql)).length > before,
+        "the real /think balance decision read the selected snapshot");
+      assert.equal(body.ledger?.kind, "balance");
+      assert.equal(Boolean(body.side_note), sideNote);
+      assert.equal(/^As of \d{4}-\d{2}-\d{2},/.test(body.answer || ""), prefix);
+      if (sideNote) assert.match(body.side_note, /bank ledger has not refreshed since/i);
+    });
+  }
+});
+
+test("restoring the current-balance freshness skip is observable", async (t) => {
+  const mutant = await importLedgerAnswerMutant(
+    "  const observations = [...liveObservations, ...(Array.isArray(balances)",
+    "  const observations = [...[], ...(Array.isArray(balances)",
+  );
+  const f = await fixtureFor(t);
+  const observed = new Date(Date.parse(NOW) - 5 * 86400000).toISOString();
+  f.raw("UPDATE bank_feed_items SET last_synced_at=? WHERE item_ref='fixture-feed'", observed);
+  f.raw(`INSERT INTO fin_balance_snapshots
+    (account_slug,as_of_date,current_minor,available_minor,provenance,basis_state,recorded_at)
+    VALUES ('manual-account','2026-10-11',54321,54000,'owner_stated','confirmed',?)`,
+  "2026-10-11T11:00:00.000Z");
+  const args = { env: f.env, question: "What is my current balance?", now: NOW,
+    grantScope: { all: true }, scopePrincipalKind: "owner" };
+  const skipped = await (await mutant.withLedgerAnswer(args, fallback)).json();
+  const fixed = await (await withLedgerAnswer(args, fallback)).json();
+  assert.equal(skipped.ledger?.kind, "balance", "the selected-row-only mutant still reached the balance branch");
+  assert.match(skipped.answer || "", /\$543\.21/, "the mutant selected the same manual amount");
+  assert.equal(skipped.side_note, undefined);
+  assert.match(fixed.side_note || "", /bank ledger has not refreshed since/i,
+    "the current-balance freshness skip restored mutant is killed");
+});
+
+test("a live ledger without a completed sync refuses balances and transactions", async (t) => {
+  for (const [label, question, decisionRead, forbiddenMoneyRead] of [
+    ["balance", "What is my current balance?", /JOIN fin_balance_snapshots/, null],
+    ["transactions", "How much money came in September 2026?", /FROM fin_accounts/, /CROSS JOIN fin_transactions/],
+  ]) {
+    await t.test(label, async (t) => {
+      const refusedFixture = await fixtureFor(t);
+      refusedFixture.raw("UPDATE bank_feed_items SET last_synced_at=NULL WHERE item_ref='fixture-feed'");
+      const before = refusedFixture.seen.sql.length;
+      const refused = await direct(refusedFixture, question);
+      const refusalReads = refusedFixture.seen.sql.slice(before);
+      assert.ok(refusalReads.some((sql) => decisionRead.test(sql)),
+        `${label}: the real ledger decision read was reached`);
+      if (forbiddenMoneyRead) assert.equal(refusalReads.some((sql) => forbiddenMoneyRead.test(sql)), false,
+        `${label}: no transaction amount was read after the missing-sync decision`);
+      assert.equal(refused.answer, null);
+      assert.equal(refused.coverage_classification, "catastrophic");
+      assert.equal(refused.gaps[0]?.reason, "live_feed_never_synced");
+
+      const freshFixture = await fixtureFor(t);
+      const fresh = await direct(freshFixture, question);
+      assert.ok(fresh.answer, `${label}: the fresh-live control differs only in last_synced_at`);
+      assert.equal(fresh.evidence_gate?.supported, true);
+    });
+  }
+
+  await t.test("manual date-only control", async (t) => {
+    const f = await createProductFixture({ env: { BRAIN_TIMEZONE: "America/Phoenix" } });
+    t.after(() => f.close());
+    seedOwnedEntity(f, "owner", "Owner");
+    f.raw(`INSERT INTO fin_accounts
+      (account_slug,entity_slug,account_kind,balance_role,mask,feed_mode,provenance,basis_state,recorded_at,institution)
+      VALUES ('manual','owner','checking','asset','4321','manual','owner_stated','confirmed',?,'Fixture Bank')`,
+    "2026-09-30T12:00:00.000Z");
+    f.raw(`INSERT INTO fin_account_coverage
+      (account_slug,coverage_status,covered_from,covered_to,computed_at,provenance,basis_state,recorded_at)
+      VALUES ('manual','complete','2026-09-01','2026-09-30',?,'owner_stated','confirmed',?)`,
+    "2026-09-30T12:00:00.000Z", "2026-09-30T12:00:00.000Z");
+    f.raw(`INSERT INTO fin_balance_snapshots
+      (account_slug,as_of_date,current_minor,available_minor,provenance,basis_state,recorded_at)
+      VALUES ('manual','2026-09-30',98765,98000,'owner_stated','confirmed',?)`,
+    "2026-09-30T12:00:00.000Z");
+    f.raw(`INSERT INTO fin_transactions
+      (txn_uid,account_slug,posted_on,amount_minor,direction,description,provenance,basis_state,recorded_at)
+      VALUES ('deposit','manual','2026-09-15',12001,'inflow','Fixture deposit','owner_stated','confirmed',?)`,
+    "2026-09-30T12:00:00.000Z");
+    const balance = await direct(f, "What is my current balance?", { now: "2026-10-01T12:00:00.000Z" });
+    const transactions = await direct(f, "How much money came in September 2026?", { now: "2026-10-01T12:00:00.000Z" });
+    assert.equal(balance.ledger?.kind, "balance", "the manual selected balance remains eligible without a sync timestamp");
+    assert.equal(transactions.ledger?.kind, "totals", "manual covered rows remain eligible without a sync timestamp");
+    assert.match(balance.answer || "", /\$987\.65/);
+    assert.match(transactions.answer || "", /\$120\.01/);
+  });
+});
+
+test("a selected manual balance cannot hide a never-synced live member in its approved pair", async (t) => {
+  const addNewerManualBalance = (f) => f.raw(`INSERT INTO fin_balance_snapshots
+    (account_slug,as_of_date,current_minor,available_minor,provenance,basis_state,recorded_at)
+    VALUES ('manual-account','2026-10-11',54321,54000,'owner_stated','confirmed',?)`,
+  "2026-10-11T11:00:00.000Z");
+
+  const refusedFixture = await fixtureFor(t);
+  addNewerManualBalance(refusedFixture);
+  refusedFixture.raw("UPDATE bank_feed_items SET last_synced_at=NULL WHERE item_ref='fixture-feed'");
+  const refusedAccounts = await readEffectiveAccounts(refusedFixture.env);
+  const selectedManual = await readEffectiveBalances(refusedFixture.env, refusedAccounts);
+  assert.equal(selectedManual.length, 1, "the real balance reader returned a decision row");
+  assert.equal(selectedManual[0].source_account_slug, "manual-account",
+    "the newer manual snapshot won inside the approved pair");
+  const before = refusedFixture.seen.sql.length;
+  const refused = await direct(refusedFixture, "What is my current balance?");
+  const refusalReads = refusedFixture.seen.sql.slice(before);
+  assert.ok(refusalReads.some((sql) => /JOIN fin_balance_snapshots/.test(sql)),
+    "the real linked-pair balance decision was reached");
+  assert.equal(refused.answer, null);
+  assert.equal(refused.coverage_classification, "catastrophic");
+  assert.equal(refused.gaps[0]?.reason, "live_feed_never_synced");
+  assert.doesNotMatch(JSON.stringify(refused), /543\.21/,
+    "the selected manual amount was not returned after the live-member refusal");
+
+  const freshFixture = await fixtureFor(t);
+  addNewerManualBalance(freshFixture);
+  const freshAccounts = await readEffectiveAccounts(freshFixture.env);
+  const freshSelected = await readEffectiveBalances(freshFixture.env, freshAccounts);
+  assert.equal(freshSelected[0]?.source_account_slug, "manual-account",
+    "the green control selects the same manual snapshot");
+  const fresh = await direct(freshFixture, "What is my current balance?");
+  assert.equal(fresh.ledger?.kind, "balance",
+    "a completed live sync keeps the otherwise identical approved pair eligible");
+  assert.match(fresh.answer || "", /\$543\.21/);
+  assert.equal(fresh.evidence_gate?.supported, true);
+});
+
+test("a selected manual balance retains every approved live member's freshness", async (t) => {
+  const cases = [
+    ["fresh control", 60 * 60 * 1000, false, false],
+    ["just under 48 hours", 2 * 86400000 - 1, false, false],
+    ["exactly 48 hours", 2 * 86400000, true, false],
+    ["five days", 5 * 86400000, true, false],
+    ["exactly 14 days", 14 * 86400000, true, false],
+    ["just over 14 days", 14 * 86400000 + 1, true, true],
+    ["twenty days", 20 * 86400000, true, true],
+    ["sixty days", 60 * 86400000, true, true],
+  ];
+  for (const [label, age, sideNote, prefix] of cases) {
+    await t.test(label, async (t) => {
+      const f = await fixtureFor(t);
+      f.raw(`INSERT INTO fin_balance_snapshots
+        (account_slug,as_of_date,current_minor,available_minor,provenance,basis_state,recorded_at)
+        VALUES ('manual-account','2026-10-11',54321,54000,'owner_stated','confirmed',?)`,
+      "2026-10-11T11:00:00.000Z");
+      const observed = new Date(Date.parse(NOW) - age).toISOString();
+      f.raw("UPDATE bank_feed_items SET last_synced_at=? WHERE item_ref='fixture-feed'", observed);
+      const accounts = await readEffectiveAccounts(f.env);
+      const selected = await readEffectiveBalances(f.env, accounts);
+      assert.equal(selected[0]?.source_account_slug, "manual-account",
+        `${label}: the newer manual observation supplied the amount`);
+      const before = f.seen.sql.filter((sql) => /JOIN fin_balance_snapshots/.test(sql)).length;
+      const body = await direct(f, "What is my current balance?");
+      assert.ok(f.seen.sql.filter((sql) => /JOIN fin_balance_snapshots/.test(sql)).length > before,
+        `${label}: the real balance decision was reached`);
+      assert.equal(body.ledger?.kind, "balance");
+      assert.match(body.answer || "", /\$543\.21/);
+      assert.equal(Boolean(body.side_note), sideNote, `${label}: live-member note boundary`);
+      assert.equal(/^As of \d{4}-\d{2}-\d{2},/.test(body.answer || ""), prefix,
+        `${label}: live-member prefix boundary`);
+      if (sideNote) assert.match(body.side_note, /bank ledger has not refreshed since/i);
+    });
+  }
+});
+
+test("the missing live-sync refusal guard mutant is killed", async (t) => {
+  const mutant = await importLedgerAnswerMutant(
+    "  if (neverSyncedLive.length) {",
+    "  if (false && neverSyncedLive.length) {",
+  );
+  const f = await fixtureFor(t);
+  f.raw("UPDATE bank_feed_items SET last_synced_at=NULL WHERE item_ref='fixture-feed'");
+  const args = { env: f.env, question: "What is my current balance?", now: NOW,
+    grantScope: { all: true }, scopePrincipalKind: "owner" };
+  const fixed = await (await withLedgerAnswer(args, fallback)).json();
+  const unguarded = await (await mutant.withLedgerAnswer(args, fallback)).json();
+  assert.equal(fixed.gaps[0]?.reason, "live_feed_never_synced");
+  assert.equal(unguarded.ledger?.kind, "balance", "the guard-drop mutant returns the selected live amount");
+  assert.notDeepEqual(unguarded, fixed, "the missing live-sync guard is observable");
+});
+
+test("the selected-balance-only live-sync mutant is killed", async (t) => {
+  const accountInventoryScan = `  const neverSyncedLive = accounts.flatMap((account) => account.members || [account])
+    .filter((member) => member.feed_mode === "live" && instant(member.last_synced_at) === null);`;
+  const selectedRowsScan = `  const neverSyncedLive = balances === null
+    ? accounts.filter((account) => account.feed_mode === "live" && instant(account.last_synced_at) === null)
+    : balances.filter((row) => Number(row?.source_is_live) === 1 && instant(row?.last_synced_at) === null);`;
+  const mutant = await importLedgerAnswerMutant(accountInventoryScan, selectedRowsScan);
+  const f = await fixtureFor(t);
+  f.raw(`INSERT INTO fin_balance_snapshots
+    (account_slug,as_of_date,current_minor,available_minor,provenance,basis_state,recorded_at)
+    VALUES ('manual-account','2026-10-11',54321,54000,'owner_stated','confirmed',?)`,
+  "2026-10-11T11:00:00.000Z");
+  f.raw("UPDATE bank_feed_items SET last_synced_at=NULL WHERE item_ref='fixture-feed'");
+  const args = { env: f.env, question: "What is my current balance?", now: NOW,
+    grantScope: { all: true }, scopePrincipalKind: "owner" };
+  const fixed = await (await withLedgerAnswer(args, fallback)).json();
+  const selectedOnly = await (await mutant.withLedgerAnswer(args, fallback)).json();
+  assert.equal(fixed.gaps[0]?.reason, "live_feed_never_synced");
+  assert.equal(selectedOnly.ledger?.kind, "balance",
+    "the selected-row-only mutant returned the manual snapshot");
+  assert.match(selectedOnly.answer || "", /\$543\.21/);
+  assert.notDeepEqual(selectedOnly, fixed, "the selected-balance-only live-sync mutant is observable");
+});
+
+test("manual ledger coverage keeps its date-only boundary in negative, zero and positive owner offsets", async (t) => {
+  for (const timeZone of ["America/Phoenix", "UTC", "Asia/Tokyo"]) {
+    await t.test(timeZone, async (t) => {
+      const f = await createProductFixture({ env: { BRAIN_TIMEZONE: timeZone } });
+      t.after(() => f.close());
+      seedOwnedEntity(f, "owner", "Owner");
+      f.raw(`INSERT INTO fin_accounts
+        (account_slug,entity_slug,account_kind,balance_role,mask,feed_mode,provenance,basis_state,recorded_at,institution)
+        VALUES ('manual','owner','checking','asset','4321','manual','owner_stated','confirmed',?,'Fixture Bank')`,
+      "2026-09-30T12:00:00.000Z");
+      f.raw(`INSERT INTO fin_account_coverage
+        (account_slug,coverage_status,covered_from,covered_to,computed_at,provenance,basis_state,recorded_at)
+        VALUES ('manual','complete','2026-01-01','2026-09-30',?,'owner_stated','confirmed',?)`,
+      "2026-09-30T12:00:00.000Z", "2026-09-30T12:00:00.000Z");
+      f.raw(`INSERT INTO fin_balance_snapshots
+        (account_slug,as_of_date,current_minor,available_minor,provenance,basis_state,recorded_at)
+        VALUES ('manual','2026-09-30',98765,98000,'owner_stated','confirmed',?)`,
+      "2026-09-30T12:00:00.000Z");
+      f.raw(`INSERT INTO fin_transactions
+        (txn_uid,account_slug,posted_on,amount_minor,direction,description,provenance,basis_state,recorded_at)
+        VALUES ('deposit','manual','2026-09-15',12001,'inflow','Fixture deposit','owner_stated','confirmed',?)`,
+      "2026-09-30T12:00:00.000Z");
+      const body = await direct(f, "How much money came in September 2026?", {
+        now: "2026-10-20T12:00:00.000Z",
+      });
+      assert.equal(body.ledger?.kind, "totals", "the manual-account coverage fallback was reached");
+      assert.match(body.answer || "", /^As of 2026-09-30,/,
+        `${timeZone}: the prefix retains the ledger calendar day`);
+      assert.match(body.side_note || "", /since Wed Sep 30/,
+        `${timeZone}: the side note retains the ledger calendar day`);
+      assert.doesNotMatch(`${body.answer}\n${body.side_note}`, /Oct 1/,
+        `${timeZone}: the boundary never shifts to the next day`);
+      if (timeZone === "Asia/Tokyo") {
+        const mutant = await importLedgerAnswerMutant(
+          '    const day = /^\\d{4}-\\d{2}-\\d{2}$/.test(account.covered_to || "") ? account.covered_to : null;\n    const observed = coverageCalendarDayEnd(day, timeZone);\n    return observed === null ? null : { instant: observed, value: new Date(observed).toISOString(), calendarDay: day };',
+          '    const observed = instant(account.covered_to ? `${account.covered_to}T23:59:59.999Z` : null);\n    return observed === null ? null : { instant: observed, value: new Date(observed).toISOString(), calendarDay: null };',
+        );
+        const shifted = await (await mutant.withLedgerAnswer({ env: f.env,
+          question: "How much money came in September 2026?", now: "2026-10-20T12:00:00.000Z",
+          grantScope: { all: true }, scopePrincipalKind: "owner" }, fallback)).json();
+        assert.equal(shifted.ledger?.kind, "totals", "the date-shift mutant reached the manual ledger branch");
+        assert.match(shifted.answer || "", /^As of 2026-10-01,/,
+          "restoring the UTC end-of-day conversion shifts the positive-offset control");
+        assert.notEqual(shifted.answer, body.answer, "the date-only boundary shifted by one day mutant is killed");
+      }
+    });
+  }
+});
+
+test("manual date-only freshness starts at owner-local end of day", async (t) => {
+  const thresholdCases = [
+    ["before 48 hours", 2 * 86400000 - 1, false, false],
+    ["at 48 hours", 2 * 86400000, true, false],
+    ["after 48 hours", 2 * 86400000 + 1, true, false],
+    ["before 14 days", 14 * 86400000 - 1, true, false],
+    ["at 14 days", 14 * 86400000, true, false],
+    ["after 14 days", 14 * 86400000 + 1, true, true],
+  ];
+  for (const [timeZone, dayEnd] of [
+    ["America/Phoenix", Date.parse("2026-10-01T06:59:59.999Z")],
+    ["UTC", Date.parse("2026-09-30T23:59:59.999Z")],
+    ["Asia/Tokyo", Date.parse("2026-09-30T14:59:59.999Z")],
+  ]) {
+    await t.test(timeZone, async (t) => {
+      const f = await createProductFixture({ env: { BRAIN_TIMEZONE: timeZone } });
+      t.after(() => f.close());
+      seedOwnedEntity(f, "owner", "Owner");
+      f.raw(`INSERT INTO fin_accounts
+        (account_slug,entity_slug,account_kind,balance_role,mask,feed_mode,provenance,basis_state,recorded_at,institution)
+        VALUES ('manual','owner','checking','asset','4321','manual','owner_stated','confirmed',?,'Fixture Bank')`,
+      "2026-09-30T12:00:00.000Z");
+      f.raw(`INSERT INTO fin_account_coverage
+        (account_slug,coverage_status,covered_from,covered_to,computed_at,provenance,basis_state,recorded_at)
+        VALUES ('manual','complete','2026-09-01','2026-09-30',?,'owner_stated','confirmed',?)`,
+      "2026-09-30T12:00:00.000Z", "2026-09-30T12:00:00.000Z");
+      f.raw(`INSERT INTO fin_balance_snapshots
+        (account_slug,as_of_date,current_minor,available_minor,provenance,basis_state,recorded_at)
+        VALUES ('manual','2026-09-30',98765,98000,'owner_stated','confirmed',?)`,
+      "2026-09-30T12:00:00.000Z");
+      f.raw(`INSERT INTO fin_transactions
+        (txn_uid,account_slug,posted_on,amount_minor,direction,description,provenance,basis_state,recorded_at)
+        VALUES ('deposit','manual','2026-09-15',12001,'inflow','Fixture deposit','owner_stated','confirmed',?)`,
+      "2026-09-30T12:00:00.000Z");
+
+      for (const [label, age, sideNote, prefix] of thresholdCases) {
+        const now = new Date(dayEnd + age).toISOString();
+        for (const [route, question] of [
+          ["balance", "What is my current balance?"],
+          ["transactions", "How much money came in September 2026?"],
+        ]) {
+          const body = await direct(f, question, { now });
+          assert.ok(body.ledger, `${timeZone} ${route} ${label}: the manual ledger decision was reached`);
+          assert.equal(Boolean(body.side_note), sideNote, `${timeZone} ${route} ${label}: side-note boundary`);
+          assert.equal(/^As of 2026-09-30,/.test(body.answer || ""), prefix,
+            `${timeZone} ${route} ${label}: as-of boundary`);
+        }
+      }
+    });
+  }
+});
+
+test("the UTC-midnight date-only freshness mutant is killed", async (t) => {
+  const mutant = await importLedgerAnswerMutant(
+    "    const observed = coverageCalendarDayEnd(day, timeZone);",
+    "    const observed = instant(day);",
+  );
+  const f = await createProductFixture({ env: { BRAIN_TIMEZONE: "America/Phoenix" } });
+  t.after(() => f.close());
+  seedOwnedEntity(f, "owner", "Owner");
+  f.raw(`INSERT INTO fin_accounts
+    (account_slug,entity_slug,account_kind,balance_role,mask,feed_mode,provenance,basis_state,recorded_at,institution)
+    VALUES ('manual','owner','checking','asset','4321','manual','owner_stated','confirmed',?,'Fixture Bank')`,
+  "2026-09-30T12:00:00.000Z");
+  f.raw(`INSERT INTO fin_account_coverage
+    (account_slug,coverage_status,covered_from,covered_to,computed_at,provenance,basis_state,recorded_at)
+    VALUES ('manual','complete','2026-09-01','2026-09-30',?,'owner_stated','confirmed',?)`,
+  "2026-09-30T12:00:00.000Z", "2026-09-30T12:00:00.000Z");
+  f.raw(`INSERT INTO fin_balance_snapshots
+    (account_slug,as_of_date,current_minor,available_minor,provenance,basis_state,recorded_at)
+    VALUES ('manual','2026-09-30',98765,98000,'owner_stated','confirmed',?)`,
+  "2026-09-30T12:00:00.000Z");
+  const args = { env: f.env, question: "What is my current balance?", now: "2026-10-02T01:00:00.000Z",
+    grantScope: { all: true }, scopePrincipalKind: "owner" };
+  const fixed = await (await withLedgerAnswer(args, fallback)).json();
+  const utcMidnight = await (await mutant.withLedgerAnswer(args, fallback)).json();
+  assert.equal(fixed.side_note, undefined, "the owner-local day ended less than 48 hours ago");
+  assert.match(utcMidnight.side_note || "", /Side note:/,
+    "the UTC-midnight mutant crosses the 48-hour boundary early");
 });
 
 test("Think totals exclude the manual twin inside live coverage", async (t) => {
@@ -180,13 +540,18 @@ test("ambiguous and missing accounts, missing balances, unreadable and partial c
   assert.ok(f.seen.sql.some(sql => /fin_transactions/.test(sql)));
 });
 
-test("proxy, grant, excluded owner and filtered owner reach refusal without a ledger read", async (t) => {
+test("proxy, grant, excluded owner and filtered owner hard-refuse without ledger or document retrieval", async (t) => {
   const f = await fixtureFor(t);
   assert.equal((await (await f.ask("What is my balance?")).json()).ledger.kind, "balance");
   const start = f.seen.sql.length;
   const proxy = await (await f.ask("What is my balance?", {}, { "X-Admin-Key": f.env.RAG_PROXY_KEY })).json();
-  assert.equal(proxy.access.principal, "proxy");
   assert.equal(proxy.gaps[0].reason, "retrieval_scope_restricted");
+  assert.equal(proxy.coverage_classification, "fine");
+  assert.equal(proxy.status, "answer_withheld");
+  assert.equal(proxy.ledger_refusal_class, "unsupported_request");
+  assert.equal(proxy.answer, null);
+  assert.deepEqual(proxy.results, []);
+  assert.deepEqual(proxy.citations, []);
   assert.equal(f.seen.sql.slice(start).some(sql => /FROM fin_accounts/.test(sql)), false);
   for (const scope of [
     { scopePrincipalKind: "grant" }, { grantScope: { all: true, exclude: ["medical"] } },
@@ -197,6 +562,12 @@ test("proxy, grant, excluded owner and filtered owner reach refusal without a le
     const response = await direct(f, "What is my balance?", scope);
     assert.equal(response.gaps[0].reason, "retrieval_scope_restricted");
     assert.equal(response.gaps[0].accounts.length, 0);
+    assert.equal(response.coverage_classification, "fine");
+    assert.equal(response.status, "answer_withheld");
+    assert.equal(response.ledger_refusal_class, "unsupported_request");
+    assert.equal(response.answer, null);
+    assert.deepEqual(response.results, []);
+    assert.deepEqual(response.citations, []);
     assert.equal(f.seen.sql.length, before);
   }
 });
@@ -217,7 +588,7 @@ test("ordinary non-money Think response is byte-identical with and without a pop
   assert.equal(actual, expected);
 });
 
-test("money fallback gap leads even when documents carry an old reliable date", async (t) => {
+test("an unreadable ledger refuses before dated documents can answer", async (t) => {
   const f = await fixtureFor(t);
   const q = "How much money came in September 2026?";
   f.raw("UPDATE fin_transactions SET basis_state='proposed' WHERE txn_uid='live-deposit'");
@@ -227,10 +598,188 @@ test("money fallback gap leads even when documents carry an old reliable date", 
     VALUES ('fixture:money#0','fixture:money',0,'Money expenses historical record','upload','Money expenses',?)`, Date.parse("2026-01-01T00:00:00Z"));
   const body = await (await f.ask(q)).json();
   assert.equal(body.gaps[0].type, "ledger_not_consulted");
+  assert.equal(body.gaps[0].reason, "unreadable_transactions");
   assert.equal(body.gaps[0].accounts[0].last_synced_at, stamp);
-  const stale = body.gaps.find(g => g.type === "stale");
-  assert.ok(stale, "dated retrieval reached the stale-gap decision");
-  assert.match(stale.detail, /retrieved document.*does not measure bank-feed freshness/);
+  assert.equal(body.coverage_classification, "catastrophic");
+  assert.equal(body.answer, null);
+  assert.deepEqual(body.citations, []);
+  assert.deepEqual(body.results, [], "document retrieval did not answer the recognized ledger question");
+  assert.equal(body.evidence_gate.supported, false, "the ledger refusal decision point was reached");
+  assert.match(body.notice, /transactions cannot be read safely/);
+});
+
+test("every recognized ledger failure keeps its cause, remedy, and no-fallback boundary", async (t) => {
+  const expected = [
+    ["retrieval_scope_restricted", "unsupported_request", false],
+    ["unsupported_question", "unsupported_request", false],
+    ["no_accounts", "link_required", false],
+    ["live_feed_never_synced", "coverage_outage", true],
+    ["ledger_account_link_required", "link_required", false],
+    ["ambiguous_account", "ambiguous_selector", false],
+    ["unsupported_currency", "unsupported_request", false],
+    ["period_outside_coverage", "coverage_outage", true],
+    ["cash_flow_unsupported", "unsupported_request", false],
+    ["balance_unavailable", "coverage_outage", true],
+    ["coverage_review_required", "coverage_outage", true],
+    ["merchant_selector_unsupported", "ambiguous_selector", false],
+    ["bank_export_overlap_review_required", "coverage_outage", true],
+    ["unreadable_transactions", "coverage_outage", true],
+    ["merchant_selector_ambiguous", "ambiguous_selector", false],
+    ["ledger_unavailable", "coverage_outage", true],
+  ];
+  const expectedByReason = new Map(expected.map((row) => [row[0], row]));
+  const citedDocumentFallback = (calls) => async () => {
+    calls.count++;
+    return Response.json({
+      answer: "The dated statement says the balance was $987.65 [1].",
+      citations: [{ n: 1, title: "Synthetic dated statement" }],
+      results: [{ title: "Synthetic dated statement", snippet: "Balance: $987.65" }],
+      gaps: [],
+    });
+  };
+  const run = async (label, question, mutate = async () => {}, extra = {}) => {
+    await t.test(label, async (t) => {
+      const f = await fixtureFor(t);
+      await mutate(f);
+      f.raw(`INSERT INTO documents
+        (doc_uid,source,source_id,title,ingested_at,content_hash,meta,document_date,date_source,date_reliable)
+        VALUES ('fixture:cited-money','upload','cited-money','Synthetic dated statement',?,'fixture','{}',?,'content',1)`,
+      Date.parse("2026-10-01T00:00:00.000Z"), Date.parse("2026-10-01T00:00:00.000Z"));
+      f.raw(`INSERT INTO chunks (chunk_uid,doc_uid,chunk_ix,text,source,title,document_date)
+        VALUES ('fixture:cited-money#0','fixture:cited-money',0,
+          'The dated statement says the balance was $987.65.','upload','Synthetic dated statement',?)`,
+      Date.parse("2026-10-01T00:00:00.000Z"));
+      assert.match(f.sqlite.prepare("SELECT text FROM chunks WHERE chunk_uid='fixture:cited-money#0'").get().text,
+        /\$987\.65/, `${label}: the cited document money fixture was present`);
+      const calls = { count: 0 };
+      const before = f.seen.sql.length;
+      const body = await (await withLedgerAnswer({
+        env: f.env,
+        question,
+        grantScope: { all: true },
+        scopePrincipalKind: "owner",
+        now: NOW,
+        ...extra,
+      }, citedDocumentFallback(calls))).json();
+      assert.equal(body.gaps?.[0]?.reason, label, `${label}: the named refusal decision was reached`);
+      assert.equal(calls.count, 0, `${label}: cited document fallback stayed unreachable`);
+      assert.equal(body.answer, null);
+      assert.deepEqual(body.citations, []);
+      assert.deepEqual(body.results, []);
+      const [, causeClass, catastrophic] = expectedByReason.get(label);
+      assert.equal(body.ledger_refusal_class, causeClass, `${label}: cause class`);
+      assert.equal(body.coverage_classification, catastrophic ? "catastrophic" : "fine",
+        `${label}: only coverage outages are catastrophic`);
+      assert.equal(body.status, catastrophic ? "coverage_incomplete" : "answer_withheld",
+        `${label}: public status preserves the semantic boundary`);
+      const codedReasons = new Set([
+        "retrieval_scope_restricted", "unsupported_question", "no_accounts", "ledger_account_link_required",
+        "ambiguous_account", "unsupported_currency", "cash_flow_unsupported", "coverage_review_required",
+        "merchant_selector_unsupported", "bank_export_overlap_review_required", "merchant_selector_ambiguous",
+      ]);
+      assert.equal(body.code, codedReasons.has(label) ? label : undefined,
+        `${label}: support codes preserve their established boundary`);
+      assert.match(body.notice || "", /\S/, `${label}: owner wording is present`);
+      assert.match(body.next_action || "", /^Next: /, `${label}: reason-specific next action is present`);
+      assert.equal(body.evidence_gate?.supported, false);
+      assert.ok(f.seen.sql.length >= before, `${label}: the real ledger wrapper completed its decision path`);
+    });
+  };
+
+  await run("retrieval_scope_restricted", "What is my current balance?", async () => {}, {
+    filters: { source: "upload" },
+  });
+  await run("unsupported_question", "How much money came in September 2026?", async () => {}, {
+    ledgerEligible: false,
+  });
+  await run("no_accounts", "What is my current balance?", async (f) => {
+    f.env.BANK_FEED_TENANT = "fixture-with-no-accounts";
+  });
+  await run("live_feed_never_synced", "What is my current balance?", async (f) => {
+    f.raw("UPDATE bank_feed_items SET last_synced_at=NULL WHERE item_ref='fixture-feed'");
+  });
+  await run("ledger_account_link_required", "What is my current balance?", async (f) => {
+    f.raw("UPDATE fin_accounts SET feed_mode='live' WHERE account_slug='manual-account'");
+  });
+  await run("ambiguous_account", "What is my balance for account 4321?", async (f) => {
+    await linkAccounts(f, "manual-account", "live-account", true);
+    f.raw("UPDATE fin_accounts SET account_kind='savings' WHERE account_slug='manual-account'");
+  });
+  await run("unsupported_currency", "What is my current balance?", async (f) => {
+    f.raw("UPDATE fin_account_links SET unlinked_at=?", stamp);
+    f.raw("UPDATE fin_accounts SET superseded_by_id=999 WHERE account_slug='manual-account'");
+    f.raw("UPDATE fin_accounts SET currency='EUR' WHERE account_slug='live-account'");
+  });
+  await run("period_outside_coverage", "How much money came in September 2026?", async (f) => {
+    f.raw("UPDATE fin_account_coverage SET coverage_status='partial'");
+  });
+  await run("cash_flow_unsupported", "What was my cash flow in September 2026?");
+  await run("balance_unavailable", "What is my current balance?", async (f) => {
+    f.raw("DELETE FROM fin_balance_snapshots");
+  });
+  await run("coverage_review_required", "How much money came in September 2026?", async (f) => {
+    f.raw("UPDATE fin_account_coverage SET basis_note='Read from a bank export covering a synthetic interval'");
+  });
+  await run("merchant_selector_unsupported", "How much did I spend at unknown merchant in September 2026?");
+  await run("bank_export_overlap_review_required", "What deposits came in during September 2026?", async (f) => {
+    f.add("duplicate-live", "live-account", "2026-09-15", 12001);
+    f.raw(`UPDATE fin_transactions
+      SET provenance='extracted',source_doc_uid=txn_uid,
+          external_id=CASE WHEN txn_uid='live-deposit' THEN 'synthetic-external-id' ELSE NULL END
+      WHERE txn_uid IN ('live-deposit','duplicate-live')`);
+  });
+  await run("unreadable_transactions", "How much money came in September 2026?", async (f) => {
+    f.raw("UPDATE fin_transactions SET basis_state='unparsed',unparsed_reason='fixture',amount_minor=NULL,direction=NULL WHERE txn_uid='live-deposit'");
+  });
+  await run("merchant_selector_ambiguous", "How much did I spend at Tools & Supply in September 2026?", async (f) => {
+    f.raw("UPDATE fin_transactions SET description='Tools and Supply',payee='Tools and Supply' WHERE txn_uid='live-debit'");
+  });
+  await run("ledger_unavailable", "What is my current balance?", async (f) => {
+    f.control.failOn = /FROM fin_accounts/;
+  });
+
+  assert.deepEqual(
+    [...(retrievalStatus.LEDGER_REFUSAL_REASONS || [])],
+    expected.map((row) => row[0]),
+    "the shared inventory names every reason produced by the ledger answer path",
+  );
+  assert.equal(new Set(expected.map((row) => row[0])).size, expected.length,
+    "the refusal table covers every reason once");
+  assert.equal(new Set(expected.map(([reason]) => retrievalStatus.LEDGER_REFUSAL_POLICIES[reason]?.next_action)).size,
+    expected.length, "every ledger reason has distinct owner next-action wording");
+
+  await t.test("green readable ledger control", async (t) => {
+    const f = await fixtureFor(t);
+    const calls = { count: 0 };
+    const body = await (await withLedgerAnswer({
+      env: f.env,
+      question: "What is my current balance?",
+      grantScope: { all: true },
+      scopePrincipalKind: "owner",
+      now: NOW,
+    }, citedDocumentFallback(calls))).json();
+    assert.equal(body.ledger?.kind, "balance", "the readable scoped ledger branch was reached");
+    assert.match(body.answer || "", /\$987\.65/);
+    assert.equal(body.evidence_gate?.supported, true);
+    assert.equal(calls.count, 0);
+  });
+});
+
+test("the uniform-catastrophic ledger refusal mutant is killed", async (t) => {
+  const mutant = await importLedgerAnswerMutant(
+    "  const catastrophic = policy?.catastrophic === true;",
+    "  const catastrophic = true;",
+  );
+  const f = await fixtureFor(t);
+  const args = { env: f.env, question: "What was my cash flow in September 2026?", now: NOW,
+    grantScope: { all: true }, scopePrincipalKind: "owner" };
+  const fixed = await (await withLedgerAnswer(args, fallback)).json();
+  const widened = await (await mutant.withLedgerAnswer(args, fallback)).json();
+  assert.equal(fixed.gaps[0]?.reason, "cash_flow_unsupported", "the capability refusal was reached");
+  assert.equal(fixed.coverage_classification, "fine");
+  assert.equal(widened.coverage_classification, "catastrophic",
+    "restoring the uniform coverage label is observable");
+  assert.notDeepEqual(widened, fixed, "the uniform-catastrophic refusal mutant is killed");
 });
 
 test("pending, removed and superseded transactions never count; descriptions redact account numbers", async (t) => {

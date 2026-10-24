@@ -137,10 +137,21 @@ test("a: verbatim inputs, platform control, assistant substitution and one sessi
     assert.doesNotMatch(text, /short single-fact lookup/i);
   }
   const skill = readFileSync(new URL("../skills/financial-brain-technician/SKILL.md", import.meta.url), "utf8");
-  assert.match(skill, /For non-money, use brain_search first, read excerpts/);
-  assert.match(skill, /Search again with other wording, or sort\s+"newest" for status/);
-  assert.match(skill, /give\s+each fact's source title and date/);
-  assert.match(skill, /owner asks or a brain_financial_map flow calls\s+for it/);
+  const answerSection = skill.slice(skill.indexOf("## Answer from the Brain\n"), skill.indexOf("## Credential boundary\n"));
+  assert.match(answerSection,
+    /Inspect the\s+installed answer setup before routing/i,
+    "the skill reaches the model-pair decision point");
+  assert.match(answerSection,
+    /built-in[^.]*brain_search first[^.]*non-money/i,
+    "the built-in setup is search-first");
+  assert.match(answerSection,
+    /reviewed Claude pair[^.]*brain_think\s+first[^.]*non-money/i,
+    "the reviewed Claude pair is think-first");
+  assert.match(answerSection,
+    /brain_search only when brain_think\s+returns answer_error or anthropic_key_missing/i,
+    "the Claude-pair fallback is closed to the two reviewed conditions");
+  assert.match(answerSection, /Search again with other wording,\s+or sort\s+"newest" for status/);
+  assert.match(answerSection, /each\s+fact's source title and date/);
 });
 
 test("answer pause rules render the exact manifest-bound connect and cap commands", () => {
@@ -695,7 +706,7 @@ test("i: skill insertion is exact, bounded and renders answer-setup commands on 
   const skill = readFileSync(skillPath, "utf8");
   assert.equal(count(skill, "## Answer from the Brain\n"), 1);
   const section = skill.slice(skill.indexOf("## Answer from the Brain\n"), skill.indexOf("## Credential boundary\n"));
-  assert.equal(sha(section), "dae8c26f7aa4ccc47c004d110fcef18be7239e84214feee465493165fbc348f0");
+  assert.equal(sha(section), "4f2d00b7476476a259057ae313479914518b48a005b4a0c323c2e4c5e4949723");
   assert.ok(Buffer.byteLength(skill) <= 72 * 1024);
   for (const platform of ["darwin", "win32"]) {
     const rendering = { platform, nodePath: "C:\\Runtime\\node.exe", scriptPath: "C:\\Brain\\brain.mjs", env: {}, existsSync: () => false };
@@ -1661,7 +1672,7 @@ for (const platform of ["darwin", "win32"]) test(`R5 literal restart and support
 test("R5 unknown kind remains a connected account in both owner templates", async t => {
   const f = await createProductFixture(); t.after(() => f.close());
   seedOwnedEntity(f, "owner", "Fixture owner");
-  f.raw("INSERT INTO fin_accounts (account_slug,entity_slug,account_kind,balance_role,mask,feed_mode,provenance,basis_state,recorded_at) VALUES ('one','owner','other','asset','6842','live','owner_stated','confirmed','2028-04-15')");
+  f.raw("INSERT INTO fin_accounts (account_slug,entity_slug,account_kind,balance_role,mask,feed_mode,provenance,basis_state,recorded_at) VALUES ('one','owner','other','asset','6842','manual','owner_stated','confirmed','2028-04-15')");
   f.raw("INSERT INTO fin_balance_snapshots (account_slug,as_of_date,current_minor,provenance,basis_state,recorded_at) VALUES ('one','2028-04-14',48231,'owner_stated','confirmed','2028-04-15')");
   async function ask(question) {
     const before = f.seen.sql.length;

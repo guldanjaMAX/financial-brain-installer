@@ -2,7 +2,11 @@ import { scopeIsUnrestricted } from "./grants.js";
 import { classifyLedgerQuestion, ledgerDay, shiftLedgerDay } from "./ledger-question.js";
 import { accountLinkPairsInWindow, accountLinkRequiredInWindow, effectivePeriodCovered, readEffectiveAccounts, readEffectiveBalances, readEffectiveTransactions } from "./ledger-reader.js";
 import { categoryFor, detectRecurring, isDirectedOwnedTransfer, isLoanAdvance, matchesCategory, matchesMerchant, matchesSender, merchantFor, normalizeMerchantText, pairOwnTransfers, sumMinor } from "./ledger-analysis.js";
-import { classifyQuestionCoverage } from "./retrieval-status.js";
+import {
+  ANSWER_WITHHELD, COVERAGE_CATASTROPHIC, COVERAGE_FINE, COVERAGE_INCOMPLETE,
+  LEDGER_REFUSAL_REASONS, classifyQuestionCoverage, coverageCalendarDayEnd,
+  ledgerRefusalPolicy, refusalNextAction,
+} from "./retrieval-status.js";
 
 const masked = account => /^\d{1,4}$/.test(account.mask || "") ? `account ****${account.mask}` : "account (mask unavailable)";
 const money = cents => `${cents < 0 ? "-" : ""}$${Math.floor(Math.abs(cents) / 100).toLocaleString("en-US")}.${String(Math.abs(cents) % 100).padStart(2, "0")}`;
@@ -13,6 +17,7 @@ const accountCoverage = accounts => accounts.map(a => ({
 }));
 
 function gapFor(reason, accounts = [], intent = {}) {
+  const policy = ledgerRefusalPolicy(reason);
   const review = {
     cash_flow_unsupported: "Cash flow is not supported. Posted card purchases can be unpaid, and combining card charges with checking and savings activity is not a cash-flow measure. Ask for money in and money out, or the bounded profit/net income surplus; neither is accounting profit or cash flow.",
     merchant_selector_unsupported: "This printed merchant label is redacted, shortened or unknown and cannot identify an exact merchant safely. Quote the original by-merchant list line with its period and account scope; do not turn this refusal into zero or guess the hidden text.",
@@ -38,13 +43,12 @@ function gapFor(reason, accounts = [], intent = {}) {
   return {
     type: reason === "period_outside_coverage" ? "ledger_out_of_coverage" : "ledger_not_consulted",
     reason, accounts: coverage,
-    ...(reason === "period_outside_coverage" ? {
-      source: "bank ledger",
-      source_kind: "ledger",
-      last_good_sync_at: accounts.map((account) => account.last_synced_at).filter(Boolean).sort()[0] || null,
-    } : {}),
+    ...(policy?.catastrophic === false ? { code: reason } : {}),
+    source: "bank ledger",
+    source_kind: "ledger",
+    last_good_sync_at: accounts.map((account) => account.last_synced_at).filter(Boolean).sort()[0] || null,
     ...(intent.from ? { from: intent.from, to: intent.to } : {}),
-    detail: `The bank ledger did not answer this question (${reason.replaceAll("_", " ")}). ${detail} Document dates do not measure bank-feed freshness.`,
+    detail: `${policy?.notice || "The bank ledger could not answer this question."} ${detail} Document dates do not measure bank-feed freshness.`,
   };
 }
 
@@ -53,8 +57,59 @@ function instant(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function ledgerCoveragePlan(accounts, intent, now) {
+function neverSyncedLiveGap(accounts, intent, balances = null) {
+  // Balance ranking may select a newer manual snapshot from an approved pair.
+  // Eligibility still belongs to the whole effective account: a connected live
+  // member that has never synced cannot be hidden by the selected row.
+  const neverSyncedLive = accounts.flatMap((account) => account.members || [account])
+    .filter((member) => member.feed_mode === "live" && instant(member.last_synced_at) === null);
+  if (neverSyncedLive.length) {
+    return gapFor("live_feed_never_synced", accounts, intent);
+  }
+  return null;
+}
+
+function balanceCoveragePlan(accounts, intent, now, balances, timeZone) {
+  const neverSynced = neverSyncedLiveGap(accounts, intent, balances);
+  if (neverSynced) return { intent, gaps: [neverSynced], catastrophic: neverSynced };
+  // A selected manual observation may supply the amount, but every connected
+  // live member still supplies freshness for its approved effective account.
+  const liveObservations = accounts.flatMap((account) => account.members || [account])
+    .filter((member) => member.feed_mode === "live")
+    .map((member) => {
+      const synced = instant(member.last_synced_at);
+      return synced === null ? null : { instant: synced, value: new Date(synced).toISOString(), calendarDay: null };
+    });
+  const observations = [...liveObservations, ...(Array.isArray(balances) ? balances : []).map((row) => {
+    const synced = instant(row?.last_synced_at);
+    if (synced !== null) return { instant: synced, value: new Date(synced).toISOString(), calendarDay: null };
+    const day = /^\d{4}-\d{2}-\d{2}$/.test(row?.as_of_date || "") ? row.as_of_date : null;
+    const observed = coverageCalendarDayEnd(day, timeZone);
+    return observed === null ? null : { instant: observed, value: new Date(observed).toISOString(), calendarDay: day };
+  })].filter(Boolean);
+  if (!observations.length) return { intent, gaps: [], catastrophic: null };
+  const oldest = observations.sort((left, right) => left.instant - right.instant)[0];
+  const nowMs = instant(now) ?? Date.now();
+  if (nowMs - oldest.instant < 2 * 86_400_000) return { intent, gaps: [], catastrophic: null };
+  const coveredThrough = oldest.calendarDay || new Date(oldest.instant).toISOString().slice(0, 10);
+  return { intent, catastrophic: null, gaps: [{
+    type: "ledger_coverage_stale",
+    source: "bank ledger",
+    source_kind: "ledger",
+    last_good_sync_at: oldest.value,
+    ...(oldest.calendarDay ? { coverage_calendar_date: oldest.calendarDay } : {}),
+    days_since_ingest: Math.floor((nowMs - oldest.instant) / 86_400_000),
+    covered_through: coveredThrough,
+    accounts: accountCoverage(accounts),
+    detail: `The selected bank balance was last proved current on ${coveredThrough}; newer activity may be missing.`,
+  }] };
+}
+
+function ledgerCoveragePlan(accounts, intent, now, balances = null, timeZone = "UTC") {
+  if (intent.kind === "balance") return balanceCoveragePlan(accounts, intent, now, balances, timeZone);
   if (!intent.from || !intent.to) return { intent, gaps: [], catastrophic: null };
+  const neverSynced = neverSyncedLiveGap(accounts, intent);
+  if (neverSynced) return { intent, gaps: [neverSynced], catastrophic: neverSynced };
   // This is an integrity refusal, not ordinary staleness. Keep the existing
   // named gate so a widened legacy interval cannot be treated as partially
   // usable merely because its stored endpoints overlap the question.
@@ -71,18 +126,27 @@ function ledgerCoveragePlan(accounts, intent, now) {
   }
 
   const nowMs = instant(now) ?? Date.now();
-  const lastGoodValues = accounts.map((account) => instant(account.last_synced_at) ??
-    instant(account.covered_to ? `${account.covered_to}T23:59:59.999Z` : null)).filter((value) => value !== null);
-  const lastGood = lastGoodValues.length ? Math.min(...lastGoodValues) : null;
+  const lastGoodValues = accounts.map((account) => {
+    const synced = instant(account.last_synced_at);
+    if (synced !== null) return { instant: synced, value: new Date(synced).toISOString(), calendarDay: null };
+    const day = /^\d{4}-\d{2}-\d{2}$/.test(account.covered_to || "") ? account.covered_to : null;
+    const observed = coverageCalendarDayEnd(day, timeZone);
+    return observed === null ? null : { instant: observed, value: new Date(observed).toISOString(), calendarDay: day };
+  }).filter(Boolean);
+  const lastGood = lastGoodValues.length
+    ? lastGoodValues.sort((left, right) => left.instant - right.instant)[0]
+    : null;
   const partial = boundedTo < requestedTo;
-  const stale = lastGood !== null && nowMs - lastGood >= 2 * 86_400_000;
+  const stale = lastGood !== null && nowMs - lastGood.instant >= 2 * 86_400_000;
   const gaps = partial || stale ? [{
     type: "ledger_coverage_stale",
     source: "bank ledger",
     source_kind: "ledger",
-    last_good_sync_at: lastGood === null ? null : new Date(lastGood).toISOString(),
-    days_since_ingest: lastGood === null ? null : Math.floor((nowMs - lastGood) / 86_400_000),
+    last_good_sync_at: lastGood?.value || null,
+    ...(lastGood?.calendarDay ? { coverage_calendar_date: lastGood.calendarDay } : {}),
+    days_since_ingest: lastGood === null ? null : Math.floor((nowMs - lastGood.instant) / 86_400_000),
     covered_through: boundedTo,
+    ...(partial ? { missing_from: shiftLedgerDay(boundedTo, 1) } : {}),
     requested_through: requestedTo,
     accounts: accountCoverage(accounts),
     detail: `The bank ledger is covered through ${boundedTo}; activity after that date may be missing from the requested period through ${requestedTo}.`,
@@ -106,6 +170,41 @@ async function fallbackWithGap(next, gap, allGaps = [gap]) {
   const leadingTypes = new Set(leading.map((candidate) => candidate.type));
   body.gaps = [...leading, ...(body.gaps || []).filter((candidate) => !leadingTypes.has(candidate.type))];
   return new Response(JSON.stringify(body), { status: response.status, headers: response.headers });
+}
+
+function hardLedgerRefusal(gap, allGaps = [gap]) {
+  const policy = ledgerRefusalPolicy(gap?.reason);
+  const catastrophic = policy?.catastrophic === true;
+  const ordered = [gap, ...allGaps.filter((candidate) => candidate !== gap)];
+  const seen = new Set();
+  const gaps = ordered.filter((candidate) => {
+    const key = `${candidate?.type || "unknown"}:${candidate?.reason || ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return new Response(JSON.stringify({
+    mode: "think",
+    status: catastrophic ? COVERAGE_INCOMPLETE : ANSWER_WITHHELD,
+    coverage_classification: catastrophic ? COVERAGE_CATASTROPHIC : COVERAGE_FINE,
+    ledger_refusal_class: policy?.cause_class || "coverage_outage",
+    notice: gap.detail || policy?.notice,
+    code: gap.code || undefined,
+    answer: null,
+    next_action: refusalNextAction({
+      status: catastrophic ? COVERAGE_INCOMPLETE : ANSWER_WITHHELD,
+      ledgerReason: gap?.reason,
+    }),
+    citations: [],
+    results: [],
+    gaps,
+    evidence_gate: {
+      supported: false,
+      complete: false,
+      evidence: [],
+      reason: policy?.notice || gap.reason || "the recognized ledger question could not be answered from readable covered ledger rows",
+    },
+  }), { headers: { "Content-Type": "application/json" } });
 }
 
 function citation(row, account, index, balance = false) {
@@ -180,11 +279,11 @@ function leadExclusions(rows, pairs, selected, bySlug, intent) {
     loan_proceeds_count: loanProceeds.size, loan_proceeds_minor: sumMinor([...loanProceeds.values()]) } };
 }
 
-async function ledgerAnswer(env, intent, accounts, inventory) {
+async function ledgerAnswer(env, intent, accounts, inventory, preparedBalances = null) {
   if (intent.measure === "cash_flow") return { reason: "cash_flow_unsupported" };
   if (intent.measure && !accounts.some(a => moveKind(a.account_kind))) return { reason: "unsupported_question" };
   if (intent.kind === "balance") {
-    const balances = await readEffectiveBalances(env, accounts, intent);
+    const balances = preparedBalances || await readEffectiveBalances(env, accounts, intent);
     if (balances.length !== accounts.length || balances.some(b => b.basis_state !== "confirmed" ||
       !Number.isSafeInteger(b.current_minor) || b.currency !== "USD")) return { reason: "balance_unavailable" };
     const citations = balances.map((row, i) => citation(row, accounts.find(a => a.account_slug === row.effective_account_slug), i, true));
@@ -511,7 +610,10 @@ export async function withLedgerAnswer({ env, question, access, grantScope, scop
         (intent.mask && accounts.length !== 1) ? "ambiguous_account" :
         accounts.some(a => a.currency !== "USD") ? "unsupported_currency" : !intent.kind ? "unsupported_question" : null;
       if (!reason) {
-        const plan = ledgerCoveragePlan(accounts, intent, now);
+        const preparedBalances = intent.kind === "balance"
+          ? await readEffectiveBalances(env, accounts, intent)
+          : null;
+        const plan = ledgerCoveragePlan(accounts, intent, now, preparedBalances, env.BRAIN_TIMEZONE);
         const allCoverageGaps = [...sourceCoverageGaps(sourceCoverage), ...plan.gaps];
         const coverage = classifyQuestionCoverage({
           question,
@@ -520,11 +622,12 @@ export async function withLedgerAnswer({ env, question, access, grantScope, scop
           gaps: allCoverageGaps,
           evidenceSources: ["ledger"],
           now,
+          timeZone: env.BRAIN_TIMEZONE,
         });
         if (plan.catastrophic || coverage.refuse) {
-          return fallbackWithGap(next, plan.catastrophic || coverage.catastrophic_gaps[0], allCoverageGaps);
+          return hardLedgerRefusal(plan.catastrophic || coverage.catastrophic_gaps[0], allCoverageGaps);
         }
-        const answer = await ledgerAnswer(env, plan.intent, accounts, inventory);
+        const answer = await ledgerAnswer(env, plan.intent, accounts, inventory, preparedBalances);
         reason = answer.reason;
         if (!reason) return new Response(JSON.stringify({ mode: "think",
           answer: coverage.answer_prefix ? `${coverage.answer_prefix} ${answer.answer}` : answer.answer,
@@ -535,15 +638,10 @@ export async function withLedgerAnswer({ env, question, access, grantScope, scop
         { headers: { "Content-Type": "application/json" } });
       }
       gap = gapFor(reason, reason === 'ledger_account_link_required' ? disputed : accounts, intent);
-      // Documents cannot resolve a disputed ledger identity or authorize a
-      // financial total that this deterministic account decision refused.
-      if (['ledger_account_link_required', 'cash_flow_unsupported', 'merchant_selector_unsupported',
-        'merchant_selector_ambiguous', 'coverage_review_required', 'bank_export_overlap_review_required'].includes(reason)) return new Response(JSON.stringify({ mode: 'think',
-        code: reason, answer: null, citations: [], results: [], gaps: [gap],
-        evidence_gate: { supported: false, complete: false, reason } }), { headers: { 'Content-Type': 'application/json' } });
     } catch {
       gap = gapFor("ledger_unavailable", accounts, intent);
     }
   }
+  if (LEDGER_REFUSAL_REASONS.has(gap?.reason)) return hardLedgerRefusal(gap);
   return fallbackWithGap(next, gap);
 }

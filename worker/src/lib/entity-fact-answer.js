@@ -7,7 +7,7 @@
  */
 import { answerUsesOperativeValue, answerUsesSupersededValue, authorityFor } from "./evidence-authority.js";
 import { newestCurrentEvidence, reliableDocumentTime } from "./query-intent.js";
-import { classifyQuestionCoverage } from "./retrieval-status.js";
+import { classifyQuestionCoverage, contactFieldIntent } from "./retrieval-status.js";
 
 const FIELDS = new Map([
   ["address", "address"], ["mailing address", "mailing address"],
@@ -19,27 +19,28 @@ const FIELDS = new Map([
   ["role", "role"], ["job title", "role"],
 ]);
 const FIELD_PATTERN = [...FIELDS.keys()].sort((a, b) => b.length - a.length).join("|");
-const POSSESSIVE_QUESTION = new RegExp(`^what(?: is|'s) (.+?)['’]s (?:current )?(${FIELD_PATTERN})\\??$`, "i");
-const SUBJECT_QUESTION = new RegExp(`^what(?: is|'s) (?:the )?(?:current )?(${FIELD_PATTERN}) (?:of|for) (.+?)\\??$`, "i");
-const OWNER_QUESTION = new RegExp(`^what(?: is|'s) (?:my|our) (?:current )?(${FIELD_PATTERN})\\??$`, "i");
 const identity = (value) => String(value || "").normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
 const QUALIFIED_FACT = /\b(?:not|no longer|old|former|previous|unknown|unconfirmed|maybe|possibly|temporary|if|unless|until|historical|superseded|instead|ignore|instructions?|must|should|please|draft|proposed|or)\b/i;
 const safeSubject = (value) => typeof value === "string" && value.length <= 120 &&
   /^[\p{L}\p{N}][\p{L}\p{N} '&.,-]*$/u.test(value) &&
   !/\b(?:and|or|former|previous|old|not|unknown|my|our|the|their|this|that)\b/i.test(value);
 
-function questionFact(question, owner) {
-  const text = String(question || "").trim();
-  let subject, field;
-  let match = POSSESSIVE_QUESTION.exec(text);
-  if (match) [, subject, field] = match;
-  else if ((match = SUBJECT_QUESTION.exec(text))) [, field, subject] = match;
-  else if ((match = OWNER_QUESTION.exec(text)) && owner && identity(owner) !== "the owner") {
-    subject = owner;
-    field = match[1];
-  }
-  if (!safeSubject(subject) || !field) return null;
-  return { subject, field: FIELDS.get(field.toLowerCase()) };
+function resultNamesSubject(row, subject) {
+  if (row?.client) return identity(row.client) === subject;
+  const text = identity(row?.snippet);
+  return ["name", "contact", "subject", "entity"].some((label) =>
+    text.includes(`${label}: ${subject} `) || text.endsWith(`${label}: ${subject}`));
+}
+
+function questionFacts(question, owner) {
+  const intent = contactFieldIntent(question);
+  if (!intent?.field) return [];
+  const subjects = intent.owner && owner && identity(owner) !== "the owner"
+    ? [owner]
+    : Array.isArray(intent.subjects) && intent.subjects.length
+      ? intent.subjects
+      : [intent.subject];
+  return subjects.filter(safeSubject).map((subject) => ({ subject, field: intent.field }));
 }
 
 function safeValue(field, value) {
@@ -109,8 +110,8 @@ export function entityFactAnswer({
   operativeConflict = false, newerAuthoritativeEvidence = [], currentEvidence = [],
   now = Date.now(),
 } = {}) {
-  const requested = questionFact(question, owner);
-  if (!requested || !Array.isArray(results) || !Array.isArray(docs) || !Number.isFinite(now)) return null;
+  const requests = questionFacts(question, owner);
+  if (!requests.length || !Array.isArray(results) || !Array.isArray(docs) || !Number.isFinite(now)) return null;
   const coverage = classifyQuestionCoverage({
     question,
     gaps: coverageGaps,
@@ -125,15 +126,14 @@ export function entityFactAnswer({
   // Scan the full retrieved window, including records outside the model's
   // twelve citations. A same-name record without a parseable card is still a
   // possible identity or conflicting-fact candidate, never silently ignored.
-  const subject = identity(requested.subject);
+  const subjects = requests.map((requested) => identity(requested.subject));
   const related = results.map((row, index) => ({ row, index })).filter(({ row }) =>
-    [row.client, row.title, row.snippet].some((value) => identity(value).includes(subject))
+    subjects.some((subject) => resultNamesSubject(row, subject))
   );
   // Distinct records with an identical name do not prove identical identity.
   // Even agreeing values fall back until an explicit identity join exists.
   if (related.length !== 1) return null;
   const { row, index } = related[0];
-  if (row.client && identity(row.client) !== subject) return null;
   if (QUALIFIED_FACT.test(row.title || "")) return null;
   const doc = docs[index];
   if (!doc || doc.n !== index + 1 || !doc.ref) return null;
@@ -146,9 +146,18 @@ export function entityFactAnswer({
   const authority = authorityFor(doc, { query: question, current: true });
   if (!authority.eligible || doc.authority?.eligible === false) return null;
 
-  const fact = doc.authority?.owner_confirmed
-    ? factFromOperative(text, doc, requested)
-    : factFromCard(text, requested);
+  let requested = null;
+  let fact = null;
+  for (const candidate of requests) {
+    if (row.client && identity(row.client) !== identity(candidate.subject)) continue;
+    const candidateFact = doc.authority?.owner_confirmed
+      ? factFromOperative(text, doc, candidate)
+      : factFromCard(text, candidate);
+    if (!candidateFact) continue;
+    requested = candidate;
+    fact = candidateFact;
+    break;
+  }
   if (!fact || text.slice(fact.start, fact.end) !== fact.value) return null;
   // Reuse the same entity/date ordering as the general route. Implicit present
   // fact questions get an explicit current form solely for this evidence test.

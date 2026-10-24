@@ -243,6 +243,7 @@ export async function readEffectiveBalances(env, accounts, {
   return snapshotRows(env, accounts, `WITH observations AS (
     SELECT b.id,b.account_slug AS source_account_slug,b.as_of_date,b.current_minor,b.currency,b.basis_state,
       json_extract(m.value,'$.effective') AS effective_account_slug,
+      json_extract(m.value,'$.live') AS source_is_live,
       json_extract(m.value,'$.last_synced_at') AS last_synced_at,
       ROW_NUMBER() OVER (PARTITION BY json_extract(m.value,'$.effective')
         ORDER BY b.as_of_date DESC,b.recorded_at DESC,json_extract(m.value,'$.live') DESC,b.id DESC) AS rank

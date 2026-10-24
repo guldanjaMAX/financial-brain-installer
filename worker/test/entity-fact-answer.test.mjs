@@ -231,7 +231,7 @@ for (const collision of [false, true]) {
     assert.equal(clean.body.evidence_gate.method, "exact_contact_fact", "clean contact control");
     const probe = await observedProbe(t, { collision });
     const { body, counts } = await run(t, { route: probe.route,
-      question: "What are my bank balances?", rows: [balanceRecord(), record()],
+      question: "What are my QuickBooks bank balances?", rows: [balanceRecord(), record()],
     });
     assert.equal(counts.keyword, 1);
     assert.equal(body.results.length, 2, "both candidates reached scoped retrieval");
@@ -257,7 +257,7 @@ test("contact facts cannot approve money after observed admission refuses", asyn
   assert.equal(clean.body.evidence_gate.method, "exact_contact_fact", "eligible contact control");
   const probe = await observedProbe(t);
   const { body, counts } = await run(t, { route: probe.route,
-    question: "What are my bank balances?",
+    question: "What are my QuickBooks bank balances?",
     rows: [balanceRecord({ text_reliable: 0 }), record()],
     draft: '"Checking" (Bank): balance USD 9,999.00 as of 2026-10-07 [1].',
   });
@@ -455,6 +455,100 @@ test("recent usable source history keeps the exact answer and its coverage discl
   assert.equal(counts.answer + counts.verifier, 0, "the noncatastrophic gap does not degrade the answer path");
   assert.equal(body.evidence_gate?.method, "exact_contact_fact");
   assert.equal(body.side_note, undefined, "a pause under 48 hours stays quiet");
+});
+
+test("an exact contact field follows its evidence source instead of an unrelated field-name channel", async (t) => {
+  const healthy = (name, kind) => ({
+    name, kind, status: "active", registered: 1, document_count: 1,
+    last_ingest_at: "2026-10-07T14:00:00Z", expected_refresh_seconds: 86400,
+    last_complete_sweep_at: "2026-10-07T14:00:00Z",
+  });
+  const neverSynced = (name, kind) => ({
+    name, kind, status: "active", registered: 1, document_count: 1,
+    last_ingest_at: null, expected_refresh_seconds: 86400,
+    last_complete_sweep_at: null,
+  });
+
+  await t.test("unproven Drive evidence is withheld even when Gmail is healthy", async (t) => {
+    const { body, counts } = await run(t, {
+      question: "What is Example Contact's email address?",
+      rows: [record({ source: "drive", source_kind: "drive" })],
+      sourceRows: [neverSynced("drive", "drive"), healthy("gmail", "gmail")],
+    });
+    assert.ok(body.results.length > 0 && counts.coverage > 0,
+      "the real /think retrieval and source-coverage decisions were reached");
+    assert.equal(body.answer, null);
+    assert.equal(body.evidence_gate?.supported, false);
+    assert.match(body.evidence_gate?.reason || "", /primary source does not cover/i);
+    assert.ok(body.gaps.some((gap) => gap.type === "never_synced" && gap.source === "drive"));
+  });
+
+  await t.test("unrelated never-synced Gmail does not withhold supported upload evidence", async (t) => {
+    let clean = null;
+    const stable = (body) => ({
+      coverage_classification: body.coverage_classification,
+      answer: body.answer,
+      evidence_gate: body.evidence_gate,
+      gaps: body.gaps,
+      citations: body.citations,
+      results: body.results,
+    });
+    for (const question of [
+      "What is the email address for Example Contact?",
+      "  What is the email address for Example Contact?  ",
+      "What's the email address for Example Contact?",
+      "What’s the email address for Example Contact?",
+      "Find the email address for Example Contact.",
+      "Look up the email address for Example Contact.",
+      "Please give me the email address for Example Contact.",
+      "I need the email address for Example Contact.",
+      "Give me Example Contact's email address.",
+      "Find Example Contact’s email address.",
+      "What are the email addresses for Example Contact?",
+      "Example Contact's email?",
+    ]) {
+      await t.test(JSON.stringify(question), async (t) => {
+        const { body, counts } = await run(t, {
+          question,
+          rows: [record({ source: "upload", source_kind: "upload" })],
+          sourceRows: [healthy("upload", "upload"), neverSynced("gmail", "gmail")],
+        });
+        assert.ok(body.results.length > 0 && counts.coverage > 0,
+          "the real /think retrieval and source-coverage decisions were reached");
+        assert.equal(body.evidence_gate?.method, "exact_contact_fact");
+        assert.equal(body.evidence_gate?.supported, true);
+        assert.match(body.answer || "", /contact@example\.invalid/);
+        assert.ok(body.gaps.some((gap) => gap.type === "never_synced" && gap.source === "gmail"));
+        if (clean === null) clean = stable(body);
+        else assert.deepEqual(stable(body), clean, "surrounding whitespace matches the clean /think control");
+      });
+    }
+
+    for (const question of [
+      "Please show me the Gmail message from Example Contact.",
+      "Find the inbox message from Example Contact.",
+      "Who was the sender of the email message?",
+      "Look in sent mail for Example Contact.",
+      "Find the mail thread with Example Contact.",
+      "Show me the message from Example Contact.",
+      "Open the email thread with Example Contact.",
+      "What did Gmail say about Example Contact?",
+    ]) {
+      await t.test(`channel ${JSON.stringify(question)}`, async (t) => {
+        const { body, counts } = await run(t, {
+          question,
+          rows: [record({ source: "upload", source_kind: "upload" })],
+          sourceRows: [healthy("upload", "upload"), neverSynced("gmail", "gmail")],
+        });
+        assert.ok(body.results.length > 0 && counts.coverage > 0,
+          "the Gmail-message control reached nonempty retrieval and source coverage");
+        assert.equal(body.coverage_classification, "catastrophic");
+        assert.equal(body.answer, null);
+        assert.equal(body.evidence_gate?.supported, false);
+        assert.match(body.evidence_gate?.reason || "", /primary source does not cover/i);
+      });
+    }
+  });
 });
 
 test("an unavailable coverage registry does not discard exact retrieved evidence", async (t) => {

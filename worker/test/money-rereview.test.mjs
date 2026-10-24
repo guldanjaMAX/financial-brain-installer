@@ -92,6 +92,7 @@ async function documentAnswer(t, { title = 'Card statement', content = 'Card end
   const ingested = await f.post('/api/admin/brain/ingest/batch', { docs: [{ source_type: 'records', source_id: 'synthetic-record',
     title, content, occurred_at: '2026-10-10', date_reliable: true, date_source: 'fixture:record_date', text_source: 'native', text_reliable: true, metadata }] }, { 'X-Admin-Key': f.env.ADMIN_KEY });
   assert.equal(ingested.status, 200); assert.equal((await ingested.json()).results[0].status, 'created');
+  f.raw('UPDATE sources SET last_ingest_at=?,last_complete_sweep_at=? WHERE name=?', NOW, NOW, 'records');
   f.env.VECTORIZE.query = async () => ({ matches: f.rows('SELECT chunk_uid AS id FROM chunks') });
   const response = await f.post('/api/rag/think', { q: 'What did card ending 4242 charge in the last 60 days?' }, { 'X-Admin-Key': f.env.ADMIN_KEY });
   assert.equal(response.status, 200); const body = await response.json();

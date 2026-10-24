@@ -27,7 +27,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import worker from "../src/index.js";
 import {
-  ANSWER_WITHHELD, COVERAGE_INCOMPLETE, NO_RESULTS_GAP, REFUSAL_NEXT_ACTIONS,
+  ANSWER_WITHHELD, COVERAGE_INCOMPLETE, LEDGER_REFUSAL_POLICIES, NO_RESULTS_GAP, REFUSAL_NEXT_ACTIONS,
   SEARCH_UNAVAILABLE, absenceUnproven, answerWithheldNotice,
   coverageIncompleteNotice, degradedCause, emptyRetrievalDisclosure,
   meaningSearchLine, projectionPending, refusalNextAction, retrievalUnavailable, unavailableNotice,
@@ -121,10 +121,29 @@ const WORKER_NEXT_ACTIONS = [
   [ANSWER_WITHHELD, "unreadable_check_reply", "Next: ask the same question again in a minute."],
 ];
 {
+  const expectedActionKeys = [
+    "answer_withheld:conflicting_records", "answer_withheld:date_check",
+    "answer_withheld:money_check", "answer_withheld:uncited_draft",
+    "answer_withheld:unreadable_check_reply", "answer_withheld:unsupported",
+    "coverage_incomplete", "no_results", "search_unavailable",
+    "ledger:ambiguous_account", "ledger:balance_unavailable",
+    "ledger:bank_export_overlap_review_required", "ledger:cash_flow_unsupported",
+    "ledger:coverage_review_required", "ledger:ledger_account_link_required",
+    "ledger:ledger_unavailable", "ledger:live_feed_never_synced", "ledger:merchant_selector_ambiguous",
+    "ledger:merchant_selector_unsupported", "ledger:no_accounts", "ledger:period_outside_coverage",
+    "ledger:retrieval_scope_restricted", "ledger:unreadable_transactions",
+    "ledger:unsupported_currency", "ledger:unsupported_question",
+  ].sort();
   check("the refusal next-action map is closed and complete",
     Object.isFrozen(REFUSAL_NEXT_ACTIONS) &&
-      Object.keys(REFUSAL_NEXT_ACTIONS).sort().join(",") ===
-        "answer_withheld:conflicting_records,answer_withheld:date_check,answer_withheld:money_check,answer_withheld:uncited_draft,answer_withheld:unreadable_check_reply,answer_withheld:unsupported,coverage_incomplete,no_results,search_unavailable");
+      Object.keys(REFUSAL_NEXT_ACTIONS).sort().join(",") === expectedActionKeys.join(","));
+  for (const [reason, policy] of Object.entries(LEDGER_REFUSAL_POLICIES)) {
+    const action = refusalNextAction({ ledgerReason: reason });
+    check(`the ledger:${reason} refusal has its exact reviewed next action`,
+      REFUSAL_NEXT_ACTIONS[`ledger:${reason}`] === policy.next_action && action === policy.next_action &&
+        looksLikeRefusal(action) === false,
+      String(action));
+  }
   for (const [status, withheldGate, expected] of WORKER_NEXT_ACTIONS) {
     const action = refusalNextAction({ status, withheldGate });
     check(`the ${status || "no_results"}:${withheldGate || "default"} refusal has its exact next action`,

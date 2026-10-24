@@ -13,7 +13,6 @@ import { handleMcp } from "../worker/src/lib/mcp-endpoint.js";
 
 const NOW = "2026-10-11T12:00:00Z";
 const PRESERVE = "Preserve the ledger answer's exact amounts, account masks, dates, and coverage bounds.";
-const SIDE_NOTE = "Side note: Gmail has been paused since Wed Oct 7, so anything only in Gmail after that date may be missing.";
 const NO_MATCH = 'No match in this search. Search again with different wording, or sort "newest" for status, before saying "I didn\'t find a matching record in these searches". Name both searches and the next place you would check (another source, a wider date window, or a distinctive name or number). Do not turn those searches into a claim that no such record exists. Say nothing is recorded only when a response explicitly establishes a complete search. Do not substitute inference.';
 const GLOBAL_ABSENCE = /brain has nothing|nothing recorded|Confidence nothing is recorded|documents do not answer|No (?:match|hits) in this search/i;
 
@@ -38,9 +37,13 @@ async function ledgerBodies(t) {
   } });
   t.after(() => f.close());
   seedOwnedEntity(f, "owner", "Owner");
+  f.raw(`INSERT INTO bank_feed_items
+    (item_ref,institution_label,access_ciphertext,access_iv,environment,connected_at,last_synced_at)
+    VALUES ('fixture-feed','Fixture Bank',?,?,'sandbox',?,?)`,
+  randomBytes(32).toString("base64"), randomBytes(12).toString("base64"), NOW, NOW);
   for (const [slug, mask, kind] of [["account-a", "1111", "checking"], ["account-b", "2222", "savings"]]) {
-    f.raw(`INSERT INTO fin_accounts (account_slug,entity_slug,account_kind,balance_role,mask,feed_mode,provenance,basis_state,recorded_at,institution)
-      VALUES (?,'owner',?,'asset',?,'live','owner_stated','confirmed',?,'Fixture Bank')`, slug, kind, mask, NOW);
+    f.raw(`INSERT INTO fin_accounts (account_slug,entity_slug,account_kind,balance_role,mask,feed_mode,provenance,source_feed,basis_state,recorded_at,institution)
+      VALUES (?,'owner',?,'asset',?,'live','owner_stated','bank-feed:fixture-feed','confirmed',?,'Fixture Bank')`, slug, kind, mask, NOW);
     f.raw(`INSERT INTO fin_account_coverage (account_slug,coverage_status,covered_from,covered_to,computed_at,provenance,basis_state,recorded_at)
       VALUES (?,'complete','2026-06-01','2026-10-11',?,'owner_stated','confirmed',?)`, slug, NOW, NOW);
     f.raw(`INSERT INTO fin_balance_snapshots (account_slug,as_of_date,current_minor,available_minor,provenance,basis_state,recorded_at)
@@ -82,6 +85,25 @@ async function ledgerBodies(t) {
       assert.equal(body.citations.length > 0, !empty, `${kind}: populated/zero citations`);
       bodies.push({ key: `${kind}-${empty ? "zero" : "nonzero"}`, question, body });
     }
+  }
+  for (const [label, age, sideNote, prefix] of [
+    ["fresh", 60 * 60 * 1000, false, null],
+    ["under-48-hours", 2 * 86400000 - 1, false, null],
+    ["at-48-hours", 2 * 86400000, true, null],
+    ["at-14-days", 14 * 86400000, true, null],
+    ["over-14-days", 14 * 86400000 + 1, true, "As of 2026-09-27,"],
+  ]) {
+    const observed = new Date(Date.parse(NOW) - age).toISOString();
+    f.raw("UPDATE bank_feed_items SET last_synced_at=? WHERE item_ref='fixture-feed'", observed);
+    f.raw("UPDATE fin_balance_snapshots SET as_of_date=?", observed.slice(0, 10));
+    const question = "What is my current balance?";
+    const body = await (await withLedgerAnswer({ env: { ...f.env, BRAIN_TIMEZONE: "UTC" }, question, now: NOW,
+      grantScope: { all: true }, scopePrincipalKind: "owner" }, async () => {
+      documentCalls++;
+      return new Response(JSON.stringify({ answer: null, gaps: [] }));
+    })).json();
+    assert.equal(body.ledger?.kind, "balance", `${label}: current balance branch reached`);
+    bodies.push({ key: `balance-${label}`, question, body, freshness: { sideNote, prefix } });
   }
   assert.equal(modelCalls, 0, "covered ledger answers never call the model");
   assert.equal(documentCalls, 0, "every fixture reached the successful ledger branch");
@@ -135,13 +157,18 @@ globalThis.fetch = async (url, init) => {
     "every local question reached the injected fetch fixture");
   const messages = child.stdout.trim().split("\n").map(JSON.parse);
   const result = id => JSON.parse(messages.find(m => m.id === id).result.content[0].text);
-  for (const [index, { key, question, body }] of bodies.entries()) {
+  for (const [index, { key, question, body, freshness }] of bodies.entries()) {
     await t.test(`local ${key}`, () => {
       const out = result(index + 1);
       assert.equal(out.answer, body.answer, "answer equals the real Worker ledger body");
       assert.deepEqual(out.ledger, body.ledger, "ledger metadata is unchanged");
       assert.equal(out.note, PRESERVE, "every supported complete ledger answer gets the preserve note");
       assert.equal(out.side_note, body.side_note || undefined, "the local MCP preserves the Worker's side note field");
+      if (freshness) {
+        assert.equal(Boolean(out.side_note), freshness.sideNote, `${key}: local freshness side-note boundary`);
+        assert.equal(freshness.prefix ? out.answer.startsWith(freshness.prefix) : false,
+          Boolean(freshness.prefix), `${key}: local freshness prefix boundary`);
+      }
       assert.doesNotMatch(JSON.stringify(out), GLOBAL_ABSENCE, "no document absence or no-match instruction beside ledger answers");
     });
     await t.test(`remote ${key}`, async () => {
@@ -162,7 +189,12 @@ globalThis.fetch = async (url, init) => {
       assert.ok(text.includes(body.answer), "remote ask contains the real Worker answer verbatim");
       if (body.side_note) {
         assert.ok(text.indexOf(body.answer) < text.indexOf(body.side_note), "remote ask renders the answer before its side note");
-        assert.ok(text.includes(SIDE_NOTE));
+        assert.ok(text.includes(body.side_note), "the hosted MCP preserves the Worker's exact side note");
+      }
+      if (freshness) {
+        assert.equal(text.includes("Side note:"), freshness.sideNote, `${key}: hosted freshness side-note boundary`);
+        assert.equal(freshness.prefix ? text.includes(freshness.prefix) : false,
+          Boolean(freshness.prefix), `${key}: hosted freshness prefix boundary`);
       }
       assert.doesNotMatch(text, GLOBAL_ABSENCE);
     });
@@ -170,4 +202,55 @@ globalThis.fetch = async (url, init) => {
   await t.test("empty document answering control", () => {
     assert.equal(result(keys.length).note, NO_MATCH, "empty documents get the scoped no-match note");
   });
+});
+
+test("hosted MCP renders a partial ledger interval even after a recent connector attempt", async t => {
+  t.mock.method(Date, "now", () => Date.parse("2026-10-23T18:00:00.000Z"));
+  const f = await createProductFixture();
+  t.after(() => f.close());
+  seedOwnedEntity(f, "owner", "Owner");
+  f.raw(`INSERT INTO bank_feed_items
+    (item_ref,institution_label,access_ciphertext,access_iv,environment,connected_at,last_synced_at)
+    VALUES ('partial-feed','Fixture Bank',?,?,'sandbox',?,?)`,
+  randomBytes(32).toString("base64"), randomBytes(12).toString("base64"),
+  "2026-10-23T17:55:00.000Z", "2026-10-23T17:55:00.000Z");
+  f.raw(`INSERT INTO fin_accounts
+    (account_slug,entity_slug,account_kind,balance_role,mask,feed_mode,provenance,source_feed,basis_state,recorded_at,institution)
+    VALUES ('partial-account','owner','checking','asset','4321','live','feed','bank-feed:partial-feed','confirmed',?,'Fixture Bank')`,
+  "2026-10-23T17:55:00.000Z");
+  f.raw(`INSERT INTO fin_account_coverage
+    (account_slug,coverage_status,covered_from,covered_to,computed_at,provenance,basis_state,recorded_at)
+    VALUES ('partial-account','complete','2026-01-01','2026-09-30',?,'owner_stated','confirmed',?)`,
+  "2026-10-23T17:55:00.000Z", "2026-10-23T17:55:00.000Z");
+  f.raw(`INSERT INTO fin_transactions
+    (txn_uid,account_slug,posted_on,amount_minor,direction,description,provenance,source_feed,basis_state,recorded_at)
+    VALUES ('partial-deposit','partial-account','2026-09-15',12001,'inflow','Fixture deposit','feed','bank-feed:partial-feed','confirmed',?)`,
+  "2026-10-23T17:55:00.000Z");
+  let fallbackCalls = 0;
+  const body = await (await withLedgerAnswer({
+    env: f.env,
+    question: "How much money came in so far this year?",
+    now: "2026-10-23T18:00:00.000Z",
+    grantScope: { all: true },
+    scopePrincipalKind: "owner",
+  }, async () => { fallbackCalls++; return Response.json({ answer: null, gaps: [] }); })).json();
+  assert.equal(fallbackCalls, 0, "the bounded ledger answer decision was reached");
+  assert.match(body.side_note || "", /Oct 1 through Oct 23 may be missing/i);
+
+  let thinkCalls = 0;
+  const url = new URL("https://fixture.invalid/mcp");
+  const response = await handleMcp({}, new Request(url, {
+    method: "POST",
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call",
+      params: { name: "ask", arguments: { question: "How much money came in so far this year?" } } }),
+  }), url, {
+    think: async () => { thinkCalls++; return body; },
+    search: async () => { throw new Error("unexpected search"); },
+  });
+  const reply = await response.json();
+  const text = reply.result.content[0].text;
+  assert.equal(thinkCalls, 1, "the hosted ask renderer received the partial-period body");
+  assert.ok(text.indexOf(body.answer) < text.indexOf(body.side_note),
+    "the hosted MCP keeps the answer before the missing interval");
+  assert.match(text, /Oct 1 through Oct 23 may be missing/i);
 });

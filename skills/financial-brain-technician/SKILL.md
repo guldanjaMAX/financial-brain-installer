@@ -889,13 +889,15 @@ assumption. When a supported reply includes `side_note`, give the answer first
 and then relay that one short note. A paused or stale source is not by itself a
 refusal. Refuse for coverage only when the question's primary source cannot be
 read, has never completed a sync, or stopped before the period asked about.
-Never use incomplete coverage to claim that something is absent. For non-money, use brain_search first, read excerpts, and give
-each fact's source title and date. Search again with other wording, or sort
-"newest" for status, before saying no match. Put "as of <record
-date>" on every status. Never say "nothing recorded" from ordinary ranked
-searches. Money uses brain_think per the money rules. Use it for the
-Brain's own answer only when the owner asks or a brain_financial_map flow calls
-for it. Add account names under
+Never use incomplete coverage to claim that something is absent. Inspect the
+installed answer setup before routing. With the built-in setup, use
+brain_search first for every non-money question, read excerpts, and give each
+fact's source title and date. With the reviewed Claude pair, use brain_think
+first for every non-money question; use brain_search only when brain_think
+returns answer_error or anthropic_key_missing. Search again with other wording,
+or sort "newest" for status, before saying no match. Put "as of <record date>"
+on every status. Never say "nothing recorded" from ordinary ranked searches.
+Money uses brain_think per the money rules. Add account names under
 "My accounts" only after the owner approves the exact lines.
 
 If answers are paused:

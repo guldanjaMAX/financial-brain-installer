@@ -46,7 +46,8 @@ import {
   fetchWithBrainCredential,
 } from "./brain-mcp-runtime.mjs";
 import {
-  ANSWER_WITHHELD, COVERAGE_INCOMPLETE, coverageIncompleteNotice, retrievalUnavailable,
+  ANSWER_WITHHELD, COVERAGE_CATASTROPHIC, COVERAGE_FINE, COVERAGE_INCOMPLETE,
+  COVERAGE_STALE_BUT_COVERING, coverageIncompleteNotice, retrievalUnavailable,
   meaningSearchLine, SEARCH_UNAVAILABLE, unavailableGap, unavailableNotice,
 } from "../worker/src/lib/retrieval-status.js";
 import {
@@ -68,8 +69,24 @@ const SERVER_VERSION = "0.1.0";
 const DEFAULT_PROTOCOL = "2025-06-18";
 const TIMEOUT_MS = 120_000;
 const SEARCH_RETRY_MS = 2_000;
+const COVERAGE_CLASSIFICATIONS = new Set([
+  COVERAGE_FINE, COVERAGE_STALE_BUT_COVERING, COVERAGE_CATASTROPHIC,
+]);
 const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36";
+
+function publicCoverageClassification(body) {
+  return COVERAGE_CLASSIFICATIONS.has(body?.coverage_classification)
+    ? body.coverage_classification
+    : undefined;
+}
+
+function publicAnswerPrefix(body, classification) {
+  const value = typeof body?.answer_prefix === "string" ? body.answer_prefix : "";
+  return classification === COVERAGE_STALE_BUT_COVERING && /^As of \d{4}-\d{2}-\d{2},$/.test(value)
+    ? value
+    : undefined;
+}
 
 /* ------------------------------------------------------------------ */
 /* configuration                                                       */
@@ -214,9 +231,11 @@ async function call(path, { method = "GET", body } = {}, queryTiming = null) {
 const THINK_DESCRIPTION = CLAUDE_ANSWER_SETUP
   ? "Default answer route for non-money questions with Claude Opus answers and a Claude Sonnet check. Also use brain_think for a balance, a payment received, money in and out, largest expenses, deposits, spend by merchant or category, transfers between the owner's own accounts, recurring charges, profit, net income, withdrawals, or loan proceeds. It reads the bank ledger directly for supported money questions. If a non-money reply carries answer_error or anthropic_key_missing, use brain_search as the fallback, read the returned excerpts, and write the answer with each fact's source title and date. Cash flow is unsupported: relay cash_flow_unsupported with no figure or model fallback. The profit and net-income view is money in minus money out, not accounting profit or cash flow. Keep exact ledger amounts, account masks, dates and coverage bounds. When side_note is present, give the supported answer first and then relay that one short note. Only a catastrophic gap in the question's primary source withholds the answer."
   : "Ledger money and explicitly requested Brain answers. Use brain_think for a balance, a payment received, money in and out, largest expenses, deposits, spend by merchant or category, transfers between the owner's own accounts, recurring charges, profit, net income, withdrawals, or loan proceeds. It reads the bank ledger directly for supported money questions. Also use brain_think when the owner explicitly asks for the Brain's own answer, or when a brain_financial_map flow calls for it. For every other question, use brain_search, read the returned excerpts, and write the answer yourself. Cash flow is unsupported: relay cash_flow_unsupported with no figure or model fallback. The profit and net-income view is money in minus money out, not accounting profit or cash flow. Keep exact ledger amounts, account masks, dates and coverage bounds. When side_note is present, give the supported answer first and then relay that one short note. Only a catastrophic gap in the question's primary source withholds the answer. If search_status is \"search_unavailable\", the search did not run. If it is \"coverage_incomplete\", the search ran but declared source history is partial or unknown. In either state, relay the note instead of turning an empty result into a complete-corpus conclusion.";
-const SEARCH_DESCRIPTION = CLAUDE_ANSWER_SETUP
+const SEARCH_SIDE_NOTE_INSTRUCTION = "When brain_search returns a non-empty side_note, give the supported answer first and then relay that side_note verbatim.";
+const SEARCH_DESCRIPTION_BASE = CLAUDE_ANSWER_SETUP
   ? "Fallback answer route when brain_think returns answer_error or anthropic_key_missing. Search with brain_search, read the returned excerpts, and write the answer yourself with each fact's source title and date. Search again with other wording, or sort \"newest\" for status, before saying a matching record was not found. Broad-question guard: A request to review, reconcile, double-check, compare, find \"what am I missing\", inventory records, list current statuses, check all sources, identify business expenses paid personally, state what entities owe one another, or explain entity funding is broad unless it names one record. List what each record says, record by record, with its source title and date. Never calculate or state a total from excerpts, reconcile the records, conclude how an entity was funded, or call the result all current or complete. Use a money figure only from brain_think's deterministic ledger answer, or quote it verbatim from one cited record without combining it with another record. Say which sources and periods you did not search, and what evidence or completed search would make the list complete. Single-document questions are unchanged: if the question asks what one identified document says, use the fallback search answer above without this broad-question guard. Returns raw ranked excerpts for you to refine, inspect, and synthesize yourself. Use date and source filters, then page or re-sort when the first results do not answer the question. Before any status, \"latest\", or absence claim, search the subject once with sort \"newest\" and check newest_record, the newest reliably dated record among the results this search returned before pagination (at most 50), or the newest unverified date if none is reliable. Before a latest claim, re-search the subject with a recent date window; relevance ranking may omit newer matches. current_authoritative is true only when the evidence is authoritative and the query was evaluated as a present-state claim. A zero count with search_status \"search_unavailable\" means the search did not run. A \"coverage_incomplete\" status means declared source history is partial or unknown. Neither supports a complete-corpus absence claim. Say nothing is recorded only when a response explicitly establishes a complete search; an ordinary ranked search does not."
   : "Default answer route for non-money questions. Search with brain_search, read the returned excerpts, and write the answer yourself with each fact's source title and date. Search again with other wording, or sort \"newest\" for status, before saying a matching record was not found. Broad-question guard: A request to review, reconcile, double-check, compare, find \"what am I missing\", inventory records, list current statuses, check all sources, identify business expenses paid personally, state what entities owe one another, or explain entity funding is broad unless it names one record. List what each record says, record by record, with its source title and date. Never calculate or state a total from excerpts, reconcile the records, conclude how an entity was funded, or call the result all current or complete. Use a money figure only from brain_think's deterministic ledger answer, or quote it verbatim from one cited record without combining it with another record. Say which sources and periods you did not search, and what evidence or completed search would make the list complete. Single-document questions are unchanged: if the question asks what one identified document says, use the plain search-first answer above without this broad-question guard. Returns raw ranked excerpts for you to refine, inspect, and synthesize yourself. Use date and source filters, then page or re-sort when the first results do not answer the question. Before any status, \"latest\", or absence claim, search the subject once with sort \"newest\" and check newest_record, the newest reliably dated record among the results this search returned before pagination (at most 50), or the newest unverified date if none is reliable. Before a latest claim, re-search the subject with a recent date window; relevance ranking may omit newer matches. current_authoritative is true only when the evidence is authoritative and the query was evaluated as a present-state claim. A zero count with search_status \"search_unavailable\" means the search did not run. A \"coverage_incomplete\" status means declared source history is partial or unknown. Neither supports a complete-corpus absence claim. Say nothing is recorded only when a response explicitly establishes a complete search; an ordinary ranked search does not.";
+const SEARCH_DESCRIPTION = `${SEARCH_DESCRIPTION_BASE} ${SEARCH_SIDE_NOTE_INSTRUCTION}`;
 
 const ALL_TOOLS = [
   {
@@ -408,7 +427,7 @@ function searchRequest(args) {
   // A growing relevance window made page-one facets hide sources that were
   // present later in the Worker's fixed ranking. Always fetch that one ranking
   // window, then slice only the returned result page below.
-  const body = { q: args.q, limit: WORKER_RESULT_CAP };
+  const body = { q: String(args.q || "").trim(), limit: WORKER_RESULT_CAP };
   putFilter(body, "source", args.source);
   putFilter(body, "category", args.category);
   putFilter(body, "from", dateOnlyInstant(args.from, "from"));
@@ -595,13 +614,20 @@ async function runTool(name, args = {}, queryTiming = null) {
       // response that has it, answered or not. Without it this tool hands the
       // model an empty result and no way to tell the two apart.
       const unavailable = retrievalUnavailable(d);
-      const coverageIncomplete = d.status === COVERAGE_INCOMPLETE;
+      const coverageClassification = publicCoverageClassification(d);
+      const catastrophicCoverage = coverageClassification === COVERAGE_CATASTROPHIC;
+      const coverageIncomplete = d.status === COVERAGE_INCOMPLETE || catastrophicCoverage;
       const withheld = d.status === ANSWER_WITHHELD;
+      const ledgerRefusal = typeof d.ledger_refusal_class === "string" && d.ledger_refusal_class
+        ? d.ledger_refusal_class
+        : null;
       const cannotSupportAbsence = unavailable || coverageIncomplete || withheld;
       const { degraded, degradedReason } = publicDegradation(d);
       const refused = typeof d.answer === "string" && /^The documents do not answer/i.test(d.answer);
       const out = {
         answer: d.answer ?? null,
+        coverage_classification: coverageClassification,
+        answer_prefix: publicAnswerPrefix(d, coverageClassification),
         side_note: typeof d.side_note === "string" && d.side_note ? d.side_note : undefined,
         answer_error: d.answer_error ? safeAnswerErrorText(d.answer_error) : undefined,
         answer_resumes_at: answerResumeAt(d.answer_resumes_at),
@@ -625,6 +651,8 @@ async function runTool(name, args = {}, queryTiming = null) {
         // consumer, which is the opposite of citing your source.
         confidence: cannotSupportAbsence ? undefined : d.confidence ?? undefined,
         evidence_gate: d.evidence_gate ?? undefined,
+        ledger_refusal_class: ledgerRefusal ?? undefined,
+        code: ledgerRefusal && typeof d.code === "string" ? d.code : undefined,
         // "Which of my entities are still open?" has a structural answer the
         // documents cannot give. When the worker attached it, carry it: without
         // this the consumer sees only the refusal and reports an absence about
@@ -666,10 +694,15 @@ async function runTool(name, args = {}, queryTiming = null) {
         }));
       if (includeAllCandidates || candidates.length) out.results = candidates;
       if (withheld) {
-        const n = out.results?.length || 0;
-        out.note = `${d.notice || "The answer was withheld by an evidence check."} ` +
-          `The brain FOUND ${n} document${n === 1 ? "" : "s"} but could not write a supported answer from them. ` +
-          `This is NOT "nothing recorded". Report what was found (titles are in results) and the reason in evidence_gate.reason.`;
+        if (ledgerRefusal) {
+          out.note = `${d.notice || "The ledger could not answer this request."} ` +
+            "This is a ledger refusal, not a source-coverage outage. Do not answer from document excerpts. Relay the exact code and next action.";
+        } else {
+          const n = out.results?.length || 0;
+          out.note = `${d.notice || "The answer was withheld by an evidence check."} ` +
+            `The brain FOUND ${n} document${n === 1 ? "" : "s"} but could not write a supported answer from them. ` +
+            `This is NOT "nothing recorded". Report what was found (titles are in results) and the reason in evidence_gate.reason.`;
+        }
       } else if (unavailable) {
         // Deliberately rewritten rather than appended. A brain deployed before
         // the worker learned this distinction still sends the old no_results
@@ -686,8 +719,14 @@ async function runTool(name, args = {}, queryTiming = null) {
         const coverageUnavailable = out.gaps.some((gap) => gap?.type === "coverage_unavailable");
         out.answer = null;
         out.gaps = out.gaps.filter((gap) => gap?.type !== "no_results");
-        out.note = (d.notice || coverageIncompleteNotice(coverageUnavailable)) +
-          " Relay the source coverage gaps and describe the result as provisional.";
+        if (catastrophicCoverage) {
+          delete out.results;
+          out.note = "The question's primary source cannot cover this request, so this is a refusal. " +
+            "Do not answer from candidate excerpts. Relay the source coverage gaps.";
+        } else {
+          out.note = (d.notice || coverageIncompleteNotice(coverageUnavailable)) +
+            " Relay the source coverage gaps and describe the result as provisional.";
+        }
       } else if (typeof d.answer === "string" && d.ledger && typeof d.ledger === "object" &&
         typeof d.ledger.kind === "string" && d.evidence_gate?.supported === true && d.evidence_gate?.complete === true) {
         // A covered zero or a bounded deposit miss has no matching row to cite.
@@ -716,7 +755,11 @@ async function runTool(name, args = {}, queryTiming = null) {
     }
     case "brain_search": {
       const { response: d, body: requestBody, limit, offset } = await searchWorker(args, queryTiming);
-      const workerRows = Array.isArray(d.results) ? d.results : [];
+      const coverageClassification = publicCoverageClassification(d);
+      const catastrophicCoverage = coverageClassification === COVERAGE_CATASTROPHIC;
+      const answerPrefix = publicAnswerPrefix(d, coverageClassification);
+      const returnedRows = Array.isArray(d.results) ? d.results : [];
+      const workerRows = catastrophicCoverage ? [] : returnedRows;
       let windowRows = [...workerRows];
       if (args.reliable_dates_only === true) {
         windowRows = windowRows.filter((row) => row?.date_reliable === true);
@@ -727,13 +770,13 @@ async function runTool(name, args = {}, queryTiming = null) {
       }
       const facets = facetsFor(windowRows);
       const rows = windowRows.slice(offset, offset + limit);
-      const compactedGaps = compactSearchGaps(d.gaps, windowRows, args.source);
+      const compactedGaps = compactSearchGaps(d.gaps, catastrophicCoverage ? returnedRows : windowRows, args.source);
       const asOf = localAsOf();
       // Same hazard on the raw-excerpt tool: zero rows out of a half-run search
       // is not evidence of an empty corpus, and this note is what the model
       // acts on.
       const unavailable = retrievalUnavailable({ ...d, results: workerRows });
-      const coverageIncomplete = d.status === COVERAGE_INCOMPLETE;
+      const coverageIncomplete = d.status === COVERAGE_INCOMPLETE || catastrophicCoverage;
       const { degraded, degradedReason } = publicDegradation(d);
       // Absence is a fact about what the Worker found, never about this page.
       // An offset past the end, or the reliable-date filter, can empty a page
@@ -750,6 +793,8 @@ async function runTool(name, args = {}, queryTiming = null) {
       return {
         count: rows.length,
         ...newest,
+        coverage_classification: coverageClassification,
+        answer_prefix: answerPrefix,
         side_note: typeof d.side_note === "string" && d.side_note ? d.side_note : undefined,
         degraded,
         degraded_reason: degradedReason,
@@ -788,6 +833,10 @@ async function runTool(name, args = {}, queryTiming = null) {
             note: unavailableNotice(degraded || "unknown", degradedReason) +
               ' Do NOT report "nothing recorded on this". Report that the search could not be completed.',
           }
+          : catastrophicCoverage
+            ? {
+              note: "The question's primary source cannot cover this request, so this is a refusal. Do not answer from candidate excerpts. Relay the source coverage gaps.",
+            }
           : coverageIncomplete
             ? {
               note: searchSpecificNotice(d.notice || coverageIncompleteNotice(
@@ -796,6 +845,8 @@ async function runTool(name, args = {}, queryTiming = null) {
               )) + (excluded ? ` ${excluded}` : "") +
                 " Relay the source coverage gaps and describe the result as provisional.",
             }
+          : answerPrefix
+            ? { note: `${answerPrefix} Begin any supported answer with this exact prefix.` }
           : excluded
             ? { note: excluded }
           : rows.length
@@ -959,9 +1010,10 @@ const FINANCIAL_MAP_INSTRUCTIONS = profileHas(PROFILE, "diagnostics:read")
     ].join(" ")
   : "This profile cannot read whole-brain diagnostics.";
 
-const ANSWER_ROUTE_INSTRUCTIONS = CLAUDE_ANSWER_SETUP
+const ANSWER_ROUTE_INSTRUCTIONS_BASE = CLAUDE_ANSWER_SETUP
   ? "For every non-money question, use brain_think first. The Brain's Claude Opus model writes the answer from the records and Claude Sonnet checks it before it reaches you. If brain_think returns answer_error or a gap with type anthropic_key_missing, fall back to brain_search, read the returned excerpts, and write the answer yourself with each fact's source title and date. Search again with other wording, or sort \"newest\" for status, before saying a matching record was not found. Turn relative dates into from/to using `as_of` (\"this week\", \"Sunday\", \"Sept 30\", \"next\"). For fallback search, use names and distinctive words, not the whole question. When the question asks about present state, retain words such as `still`, `current`, or `latest` in the search query. Narrow by source when the question names a channel (calendar, Zoom call, email, text). If the first page does not hold the answer, refine: try another source, a tighter window, or the next offset. Read the strongest one or two excerpts closely before summarizing them. Excerpts are partial. If the answer may lie outside one, search again using its title or distinctive words, and say when you saw only an excerpt."
   : "To answer, search, read, then write. For every non-money question, use brain_search first, read the returned excerpts, and write the answer yourself with each fact's source title and date. Search again with other wording, or sort \"newest\" for status, before saying a matching record was not found. When the owner explicitly asks for the Brain's own answer, or a brain_financial_map flow calls for it, use brain_think instead. Turn relative dates into from/to using `as_of` (\"this week\", \"Sunday\", \"Sept 30\", \"next\"). Search with names and distinctive words, not the whole question. When the question asks about present state, retain words such as `still`, `current`, or `latest` in the search query. Narrow by source when the question names a channel (calendar, Zoom call, email, text). If the first page does not hold the answer, refine: try another source, a tighter window, or the next offset. Read the strongest one or two excerpts closely before summarizing them. Excerpts are partial. If the answer may lie outside one, search again using its title or distinctive words, and say when you saw only an excerpt.";
+const ANSWER_ROUTE_INSTRUCTIONS = `${ANSWER_ROUTE_INSTRUCTIONS_BASE} ${SEARCH_SIDE_NOTE_INSTRUCTION}`;
 
 const INSTRUCTIONS = `This server is ${OWNER}'s private knowledge record: their documents, meetings, correspondence and decisions.
 

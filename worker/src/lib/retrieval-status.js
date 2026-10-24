@@ -47,29 +47,170 @@ const QUESTION_PRIMARY_SOURCES = Object.freeze({
   documents: new Set(["drive", "upload"]),
   meetings: new Set(["zoom", "calendar"]),
   store: new Set(["custom-api", "store", "shopify", "square"]),
+  quickbooks: new Set(["quickbooks"]),
 });
+const CONTACT_FIELDS = new Map([
+  ["address", "address"], ["mailing address", "mailing address"],
+  ["home address", "home address"], ["business address", "business address"],
+  ["email", "email"], ["email address", "email"],
+  ["phone", "phone"], ["phone number", "phone"],
+  ["mobile", "mobile"], ["mobile number", "mobile"],
+  ["company", "company"], ["organization", "company"],
+  ["role", "role"], ["job title", "role"],
+  ["addresses", "address"], ["mailing addresses", "mailing address"],
+  ["home addresses", "home address"], ["business addresses", "business address"],
+  ["emails", "email"], ["email addresses", "email"],
+  ["phones", "phone"], ["phone numbers", "phone"],
+  ["mobiles", "mobile"], ["mobile numbers", "mobile"],
+  ["companies", "company"], ["organizations", "company"],
+  ["roles", "role"], ["job titles", "role"],
+]);
+const CONTACT_FIELD_PATTERN = [...CONTACT_FIELDS.keys()].sort((left, right) => right.length - left.length).join("|");
+const CONTACT_SUBJECT_PATTERN = "([\\p{L}\\p{N}][\\p{L}\\p{N} '&.,-]{0,119}?)";
+const CONTACT_FIELD_LOOKUPS = [
+  new RegExp(`(?:^|\\s)(?:the\\s+)?(?:current\\s+)?(${CONTACT_FIELD_PATTERN})\\s+(?:of|for)\\s+${CONTACT_SUBJECT_PATTERN}[.?!]*$`, "iu"),
+  new RegExp(`(?:^|\\s)(my|our)\\s+(?:current\\s+)?(${CONTACT_FIELD_PATTERN})[.?!]*$`, "iu"),
+  new RegExp(`${CONTACT_SUBJECT_PATTERN}['’]s?\\s+(?:current\\s+)?(${CONTACT_FIELD_PATTERN})[.?!]*$`, "iu"),
+];
+
+function possessiveSubjectCandidates(value) {
+  const words = String(value || "").trim().split(/\s+/).filter(Boolean);
+  // A relationship phrase such as "my accountant X's" is not an identity
+  // join. Keep it whole so the exact-fact path declines instead of dropping
+  // the relationship words and treating X as the directly requested subject.
+  if (/\b(?:my|our|their|his|her|its)\b/i.test(words.join(" "))) return [words.join(" ")];
+  const candidates = [];
+  for (let index = 0; index < words.length; index++) {
+    const candidate = words.slice(index).join(" ").replace(/^(?:the)\s+/i, "").trim();
+    if (candidate && candidate.length <= 120 && !candidates.includes(candidate)) candidates.push(candidate);
+  }
+  return candidates;
+}
+
+/** Shared field intent for coverage routing and exact contact-fact extraction. */
+export function contactFieldIntent(question) {
+  const text = String(question || "").normalize("NFKC").replace(/\s+/g, " ").trim();
+  let match = CONTACT_FIELD_LOOKUPS[0].exec(text);
+  if (match) return { subject: match[2], subjects: [match[2]], field: CONTACT_FIELDS.get(match[1].toLowerCase()), owner: false };
+  match = CONTACT_FIELD_LOOKUPS[1].exec(text);
+  if (match) return { subject: null, subjects: [], field: CONTACT_FIELDS.get(match[2].toLowerCase()), owner: true };
+  match = CONTACT_FIELD_LOOKUPS[2].exec(text);
+  if (match) {
+    const subjects = possessiveSubjectCandidates(match[1]);
+    return { subject: subjects[0] || null, subjects, field: CONTACT_FIELDS.get(match[2].toLowerCase()), owner: false };
+  }
+  return null;
+}
 
 const NEVER_COMPLETE_GAPS = new Set(["never_synced", "source_unregistered"]);
 const COVERAGE_GAP_TYPES = new Set([
   ...NEVER_COMPLETE_GAPS,
+  "history_unproven",
   "sync_broken", "sync_review", "sync_in_progress", "refresh_unscheduled", "coverage_stale",
-  "coverage_unavailable", "ledger_coverage_stale", "ledger_out_of_coverage",
+  "coverage_unavailable", "ledger_coverage_stale", "ledger_out_of_coverage", "ledger_not_consulted",
 ]);
+const ledgerRefusal = (causeClass, catastrophic, notice, nextAction) => Object.freeze({
+  cause_class: causeClass, catastrophic, notice, next_action: nextAction,
+});
+
+/** Every hard ledger stop has one stable cause class and owner remedy. */
+export const LEDGER_REFUSAL_POLICIES = Object.freeze({
+  retrieval_scope_restricted: ledgerRefusal("unsupported_request", false,
+    "This request does not have unrestricted owner ledger scope, so the ledger cannot answer it.",
+    "Next: ask again as the full owner without a source, document or entity filter."),
+  unsupported_question: ledgerRefusal("unsupported_request", false,
+    "This money request is outside the ledger's reviewed question types.",
+    "Next: ask for a balance, deposit, money in or out, expense, merchant, category, transfer or recurring charge."),
+  no_accounts: ledgerRefusal("link_required", false,
+    "No authorized ledger account is available for this request.",
+    "Next: connect or import the intended account, confirm its owner assignment, then ask again."),
+  live_feed_never_synced: ledgerRefusal("coverage_outage", true,
+    "A selected live bank feed has never completed a sync, so the ledger cannot establish current coverage.",
+    "Next: finish the bank feed's first sync and verify its covered dates, then ask again."),
+  ledger_account_link_required: ledgerRefusal("link_required", false,
+    "Manual and live records may represent the same account, but the owner has not approved that link.",
+    "Next: preview the named account link, approve it only if both records are the same account, then ask again."),
+  ambiguous_account: ledgerRefusal("ambiguous_selector", false,
+    "The account selector does not identify one confirmed ledger account.",
+    "Next: ask with one exact displayed account mask and account kind after resolving any duplicate account records."),
+  unsupported_currency: ledgerRefusal("unsupported_request", false,
+    "The selected ledger account uses a currency this answer path does not support.",
+    "Next: ask about a supported USD account or review the original statement for the other currency."),
+  period_outside_coverage: ledgerRefusal("coverage_outage", true,
+    "The ledger's proven history does not reach the start of the requested period.",
+    "Next: ask for a period beginning on or after the covered-from date, or complete the missing bank history."),
+  cash_flow_unsupported: ledgerRefusal("unsupported_request", false,
+    "Cash flow is not supported because posted card purchases and bank movements do not establish a cash-flow statement.",
+    "Next: ask for money in and money out, or for the bounded profit or net-income surplus."),
+  balance_unavailable: ledgerRefusal("coverage_outage", true,
+    "The selected account has no readable current balance observation.",
+    "Next: refresh or import a current balance for that account, then ask again."),
+  coverage_review_required: ledgerRefusal("coverage_outage", true,
+    "The stored coverage interval needs review before it can support a total or zero.",
+    "Next: independently review and re-establish that account's covered dates, then ask again."),
+  merchant_selector_unsupported: ledgerRefusal("ambiguous_selector", false,
+    "The merchant selector is redacted, shortened or unknown and cannot identify one stored merchant safely.",
+    "Next: quote the exact printed merchant label with the same period and account scope."),
+  bank_export_overlap_review_required: ledgerRefusal("coverage_outage", true,
+    "Overlapping bank-export rows have incompatible identities, so the requested ledger rows are not readable as one total.",
+    "Next: compare the original exports and statement, then use a separately approved reconciliation before asking again."),
+  unreadable_transactions: ledgerRefusal("coverage_outage", true,
+    "One or more required ledger transactions cannot be read safely.",
+    "Next: repair or re-import the unreadable rows and verify their dates, amounts and directions, then ask again."),
+  merchant_selector_ambiguous: ledgerRefusal("ambiguous_selector", false,
+    "The merchant selector differs from a stored label only by its literal conjunction, so the intended merchant is ambiguous.",
+    "Next: quote the exact printed merchant label, preserving and or &, then ask again."),
+  ledger_unavailable: ledgerRefusal("coverage_outage", true,
+    "The bank ledger could not be read for this request.",
+    "Next: retry once, then check the Brain's ledger health before asking again."),
+});
+export const LEDGER_REFUSAL_REASONS = new Set(Object.keys(LEDGER_REFUSAL_POLICIES));
+
+export function ledgerRefusalPolicy(reason) {
+  return LEDGER_REFUSAL_POLICIES[String(reason || "")] || null;
+}
 const DAY_MS = 86_400_000;
 
 function normalizedSource(value) {
   return String(value || "").trim().toLowerCase().replaceAll("_", "-");
 }
 
-function coverageQuestionType(question, explicitType = null) {
-  if (QUESTION_PRIMARY_SOURCES[explicitType]) return explicitType;
-  const q = String(question || "").normalize("NFKC").toLowerCase();
-  if (/\b(?:money|bank|balance|payments?|paid|deposits?|income|spend|spent|expenses?|charges?|transactions?|credits?|debits?|transfers?|profit|revenue)\b|\$\s*\d/.test(q)) return "money";
-  if (/\b(?:email|gmail|inbox|sender|sent mail|mail thread)\b/.test(q)) return "email";
-  if (/\b(?:meeting|zoom|calendar|appointment|scheduled call|recording)\b/.test(q)) return "meetings";
-  if (/\b(?:store|shop|orders?|inventory|products?|units sold|store sales)\b/.test(q)) return "store";
-  if (/\b(?:drive|documents?|files?|uploads?|folders?|pdf|spreadsheet)\b/.test(q)) return "documents";
-  return "other";
+function coverageQuestionSources(question, explicitType = null) {
+  const q = String(question || "").normalize("NFKC").toLowerCase().trim();
+  const contactFieldLookup = contactFieldIntent(q) !== null;
+  const explicitEmailChannel = /\b(?:gmail|inbox|senders?|messages?|sent[- ]mail|(?:mail|email) threads?)\b/.test(q);
+  const named = new Set();
+  const namedTypes = [];
+  const add = (type) => {
+    if (!namedTypes.includes(type)) namedTypes.push(type);
+    for (const source of QUESTION_PRIMARY_SOURCES[type]) named.add(source);
+  };
+  // Named channels identify where the owner asked us to look. They take
+  // precedence over generic words such as paid, balance, or revenue.
+  if (explicitEmailChannel ||
+      (!contactFieldLookup && /\bemail\b/.test(q))) add("email");
+  if (/\b(?:quickbooks|qbo)\b/.test(q)) named.add("quickbooks");
+  if (/\b(?:drive|uploads?|folders?|pdf|spreadsheet)\b/.test(q)) add("documents");
+  if (/\b(?:zoom|calendar)\b/.test(q)) add("meetings");
+  if (/\b(?:store|shop|shopify|orders?|inventory|products?|units sold|store sales)\b/.test(q)) add("store");
+  if (/\b(?:bank|bank feed|ledger|plaid)\b/.test(q)) add("money");
+  if (named.size) {
+    const types = [...namedTypes, ...(named.has("quickbooks") ? ["quickbooks"] : [])];
+    return { type: types.length === 1 ? types[0] : "mixed", sources: named };
+  }
+  if (QUESTION_PRIMARY_SOURCES[explicitType]) {
+    return { type: explicitType, sources: QUESTION_PRIMARY_SOURCES[explicitType] };
+  }
+  if (/\b(?:money|balance|payments?|paid|deposits?|income|spend|spent|expenses?|charges?|transactions?|credits?|debits?|transfers?|profit|revenue)\b|\$\s*\d/.test(q)) {
+    return { type: "money", sources: QUESTION_PRIMARY_SOURCES.money };
+  }
+  if (/\b(?:meeting|appointment|scheduled call|recording)\b/.test(q)) {
+    return { type: "meetings", sources: QUESTION_PRIMARY_SOURCES.meetings };
+  }
+  if (/\b(?:documents?|files?)\b/.test(q)) {
+    return { type: "documents", sources: QUESTION_PRIMARY_SOURCES.documents };
+  }
+  return { type: "other", sources: null };
 }
 
 function gapSourceKind(gap) {
@@ -84,12 +225,20 @@ function gapSourceKind(gap) {
 }
 
 function safeInstant(value) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
   const instant = Date.parse(String(value || ""));
   return Number.isFinite(instant) ? instant : null;
 }
 
 function lastGoodInstant(gap) {
   return safeInstant(gap?.last_good_sync_at ?? gap?.last_ingest_at ?? gap?.last_synced_at ?? gap?.covered_through);
+}
+
+function gapCalendarDay(gap) {
+  for (const value of [gap?.coverage_calendar_date, gap?.last_good_sync_at]) {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(String(value || ""))) return String(value);
+  }
+  return null;
 }
 
 function sourceLabel(gap) {
@@ -100,26 +249,104 @@ function sourceLabel(gap) {
     calendar: "calendar", ledger: "bank ledger", "custom-api": "store feed" })[kind] || "source";
 }
 
-function shortDate(instant) {
-  const date = new Date(instant);
-  const weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][date.getUTCDay()];
-  const month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][date.getUTCMonth()];
-  return `${weekday} ${month} ${date.getUTCDate()}`;
+function supportedTimeZone(timeZone) {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone }).format(0);
+    return timeZone;
+  } catch {
+    return "UTC";
+  }
 }
 
-function renderCoverageSideNote(gaps, nowMs) {
+function dateParts(instant, timeZone, fields) {
+  return Object.fromEntries(new Intl.DateTimeFormat("en-US", {
+    timeZone: supportedTimeZone(timeZone), ...fields,
+  }).formatToParts(new Date(instant)).filter((part) => part.type !== "literal")
+    .map((part) => [part.type, part.value]));
+}
+
+export function formatCoverageDate(instant, timeZone = "UTC") {
+  const parts = dateParts(instant, timeZone, { weekday: "short", month: "short", day: "numeric" });
+  return `${parts.weekday} ${parts.month} ${parts.day}`;
+}
+
+function coverageCalendarDate(instant, timeZone) {
+  const parts = dateParts(instant, timeZone, { year: "numeric", month: "2-digit", day: "2-digit" });
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+export function coverageCalendarDayEnd(day, timeZone = "UTC") {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(day || ""));
+  if (!match) return null;
+  const [, yearText, monthText, dayText] = match;
+  const year = Number(yearText), month = Number(monthText), dayOfMonth = Number(dayText);
+  const representedDay = new Date(Date.UTC(year, month - 1, dayOfMonth));
+  if (representedDay.getUTCFullYear() !== year || representedDay.getUTCMonth() + 1 !== month ||
+      representedDay.getUTCDate() !== dayOfMonth) return null;
+  const nextDay = Date.UTC(year, month - 1, dayOfMonth + 1);
+  const zone = supportedTimeZone(timeZone);
+  let instant = nextDay;
+  // A calendar-only ledger observation covers the whole owner-local day. Find
+  // the next local midnight so freshness does not start early in UTC.
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const parts = dateParts(instant, zone, {
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+    });
+    const represented = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day),
+      Number(parts.hour), Number(parts.minute), Number(parts.second));
+    const adjustment = nextDay - represented;
+    if (adjustment === 0) return instant - 1;
+    instant += adjustment;
+  }
+  return null;
+}
+
+function formatCoverageGapDate(gap, instant, timeZone) {
+  const day = gapCalendarDay(gap);
+  return day ? formatCoverageDate(Date.parse(`${day}T12:00:00.000Z`), "UTC")
+    : formatCoverageDate(instant, timeZone);
+}
+
+function shortLedgerDay(day) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(day || ""));
+  if (!match) return String(day || "unknown date");
+  const month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][Number(match[2]) - 1];
+  return `${month} ${Number(match[3])}`;
+}
+
+function renderCoverageSideNote(gaps, nowMs, timeZone) {
   const clauses = [];
   const seen = new Set();
-  for (const gap of gaps) {
+  const ordered = [...gaps].sort((left, right) =>
+    Number(Boolean(right?.type === "ledger_coverage_stale" && right?.missing_from && right?.requested_through)) -
+    Number(Boolean(left?.type === "ledger_coverage_stale" && left?.missing_from && left?.requested_through)));
+  for (const gap of ordered) {
     const label = sourceLabel(gap);
     if (seen.has(label)) continue;
     seen.add(label);
+    if (gap?.type === "ledger_coverage_stale" && gap?.missing_from && gap?.requested_through) {
+      clauses.push(`${label} is covered through ${shortLedgerDay(gap.covered_through)}, so activity from ${shortLedgerDay(gap.missing_from)} through ${shortLedgerDay(gap.requested_through)} may be missing.`);
+      continue;
+    }
     const lastGood = lastGoodInstant(gap);
     if (lastGood === null || nowMs - lastGood < 2 * DAY_MS) continue;
     const paused = gap?.type === "sync_review" || gap?.held_for_review === true;
-    clauses.push(`${label} ${paused ? "has been paused" : "has not refreshed"} since ${shortDate(lastGood)}, so anything only in ${label} after that date may be missing.`);
+    clauses.push(`${label} ${paused ? "has been paused" : "has not refreshed"} since ${formatCoverageGapDate(gap, lastGood, timeZone)}, so anything only in ${label} after that date may be missing.`);
   }
   return clauses.length ? `Side note: ${clauses.join(" ")}` : null;
+}
+
+export function coverageWindowStart(timeWindow) {
+  const start = timeWindow?.start;
+  const instant = typeof start === "number" ? start : Date.parse(String(start || ""));
+  if (!Number.isFinite(instant)) return null;
+  return new Date(instant).toISOString();
+}
+
+export function coveragePeriodStart(explicitFrom, timeWindow) {
+  const start = explicitFrom ?? timeWindow?.start;
+  return coverageWindowStart({ start });
 }
 
 /**
@@ -135,16 +362,23 @@ export function classifyQuestionCoverage({
   gaps = [],
   evidenceSources = [],
   now = Date.now(),
+  timeZone = "UTC",
 } = {}) {
-  const type = coverageQuestionType(question, questionType);
+  const questionSources = coverageQuestionSources(question, questionType);
+  const type = questionSources.type;
   const evidenceKinds = new Set((Array.isArray(evidenceSources) ? evidenceSources : [])
     .map((source) => normalizedSource(source)).filter(Boolean));
-  const primarySourceKinds = QUESTION_PRIMARY_SOURCES[type] || evidenceKinds;
+  // Retrieved evidence is always primary for the answer that relies on it.
+  // Genuine channel wording may add another required family, but can never
+  // replace the source of the supporting record. Contact-field nouns such as
+  // "email address" are not channel instructions.
+  const primarySourceKinds = new Set(evidenceKinds);
+  for (const source of questionSources.sources || []) primarySourceKinds.add(source);
   const nowMs = safeInstant(now) ?? Date.now();
-  const periodStartMs = safeInstant(periodStart && String(periodStart).length === 10
-    ? `${periodStart}T00:00:00.000Z`
-    : periodStart);
-  const coverageGaps = (Array.isArray(gaps) ? gaps : []).filter((gap) => COVERAGE_GAP_TYPES.has(gap?.type));
+  const periodStartMs = safeInstant(periodStart);
+  const coverageGaps = (Array.isArray(gaps) ? gaps : []).filter((gap) =>
+    COVERAGE_GAP_TYPES.has(gap?.type) &&
+    (gap.type !== "ledger_not_consulted" || LEDGER_REFUSAL_REASONS.has(gap.reason)));
   const catastrophicGaps = [];
   const notable = [];
   let oldestCoveringPrimary = null;
@@ -160,16 +394,18 @@ export function classifyQuestionCoverage({
       (gap.type === "history_unproven" && lastGood === null);
     const outsidePeriod = periodStartMs !== null && (lastGood === null || lastGood < periodStartMs);
     const explicitlyUnreadable = gap.type === "ledger_out_of_coverage" ||
+      (gap.type === "ledger_not_consulted" && ledgerRefusalPolicy(gap.reason)?.catastrophic === true) ||
       (gap.type === "coverage_unavailable" && gap.primary_source === true);
     if (primary && (neverComplete || outsidePeriod || explicitlyUnreadable)) {
       catastrophicGaps.push(gap);
       continue;
     }
-    if (lastGood !== null && nowMs - lastGood >= 2 * DAY_MS) {
+    const partialLedger = gap.type === "ledger_coverage_stale" && gap?.missing_from && gap?.requested_through;
+    if (partialLedger || (lastGood !== null && nowMs - lastGood >= 2 * DAY_MS)) {
       notable.push(gap);
       if (primary && nowMs - lastGood > 14 * DAY_MS &&
-          (oldestCoveringPrimary === null || lastGood < oldestCoveringPrimary)) {
-        oldestCoveringPrimary = lastGood;
+          (oldestCoveringPrimary === null || lastGood < oldestCoveringPrimary.instant)) {
+        oldestCoveringPrimary = { instant: lastGood, calendarDay: gapCalendarDay(gap) };
       }
     }
   }
@@ -185,10 +421,10 @@ export function classifyQuestionCoverage({
     classification,
     refuse: classification === COVERAGE_CATASTROPHIC,
     catastrophic_gaps: catastrophicGaps,
-    side_note: renderCoverageSideNote(notable, nowMs),
+    side_note: renderCoverageSideNote(notable, nowMs, timeZone),
     answer_prefix: oldestCoveringPrimary === null
       ? null
-      : `As of ${new Date(oldestCoveringPrimary).toISOString().slice(0, 10)},`,
+      : `As of ${oldestCoveringPrimary.calendarDay || coverageCalendarDate(oldestCoveringPrimary.instant, timeZone)},`,
   };
 }
 
@@ -305,9 +541,13 @@ export const REFUSAL_NEXT_ACTIONS = Object.freeze({
   "answer_withheld:date_check": "Next: ask again with the exact date range you mean.",
   "answer_withheld:conflicting_records": "Next: ask which record is newest on this; the records found disagree.",
   "answer_withheld:unreadable_check_reply": "Next: ask the same question again in a minute.",
+  ...Object.fromEntries(Object.entries(LEDGER_REFUSAL_POLICIES)
+    .map(([reason, policy]) => [`ledger:${reason}`, policy.next_action])),
 });
 
-export function refusalNextAction({ status, withheldGate } = {}) {
+export function refusalNextAction({ status, withheldGate, ledgerReason } = {}) {
+  const ledgerAction = ledgerRefusalPolicy(ledgerReason)?.next_action;
+  if (ledgerAction) return ledgerAction;
   const key = status === ANSWER_WITHHELD
     ? `${ANSWER_WITHHELD}:${withheldGate || "unsupported"}`
     : status || NO_RESULTS;

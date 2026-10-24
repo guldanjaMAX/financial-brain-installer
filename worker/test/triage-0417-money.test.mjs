@@ -52,9 +52,14 @@ export function fixture(t) {
         VALUES (?,?,?,'owned','owner_stated','confirmed',?)`, slug, slug, kind, NOW);
     },
     account(slug, mask, kind = 'checking', entity = 'business-one', mode = 'live') {
-      raw(`INSERT INTO fin_accounts (account_slug,entity_slug,account_kind,balance_role,mask,feed_mode,institution,provenance,basis_state,recorded_at)
-        VALUES (?,?,?,?,?,?,'Synthetic Institution','owner_stated','confirmed',?)`, slug, entity, kind,
-        ['card', 'loan', 'line_of_credit'].includes(kind) ? 'liability' : 'asset', mask, mode, NOW);
+      const feedRef = mode === 'live' ? `triage-${slug}` : null;
+      if (feedRef) raw(`INSERT INTO bank_feed_items
+        (item_ref,institution_label,access_ciphertext,access_iv,environment,connected_at,last_synced_at)
+        VALUES (?,'Synthetic Institution','AAAAAAAAAAAAAAAA','BBBBBBBB','sandbox',?,?)`, feedRef, NOW, NOW);
+      raw(`INSERT INTO fin_accounts (account_slug,entity_slug,account_kind,balance_role,mask,feed_mode,institution,provenance,source_feed,basis_state,recorded_at)
+        VALUES (?,?,?,?,?,?,'Synthetic Institution','owner_stated',?,'confirmed',?)`, slug, entity, kind,
+        ['card', 'loan', 'line_of_credit'].includes(kind) ? 'liability' : 'asset', mask, mode,
+        feedRef ? `bank-feed:${feedRef}` : null, NOW);
       raw(`INSERT INTO fin_account_coverage (account_slug,coverage_status,covered_from,covered_to,computed_at,provenance,basis_state,recorded_at)
         VALUES (?,'complete','2034-01-01','2034-07-15',?,'owner_stated','confirmed',?)`, slug, NOW, NOW);
       raw(`INSERT INTO fin_balance_snapshots (account_slug,as_of_date,current_minor,provenance,basis_state,recorded_at)
