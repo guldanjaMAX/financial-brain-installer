@@ -1,0 +1,67 @@
+{
+  "protocol": "qbo-broker/1",
+  "status": "offline-review-contract",
+  "routes": [
+    { "method": "POST", "path": "/v1/quickbooks/installations/issue", "request_schema": "enrollmentIssue", "response_schema": null, "success": 202 },
+    { "method": "POST", "path": "/v1/quickbooks/authorizations", "request_schema": "startRequest", "response_schema": "launchResponse", "success": 201 },
+    { "method": "POST", "path": "/v1/quickbooks/launch", "request_schema": "launchRequest", "response_schema": null, "success": 303 },
+    { "method": "GET", "path": "/v1/quickbooks/oauth/callback", "request_schema": "callbackQuery", "response_schema": null, "success": 303 },
+    { "method": "POST", "path": "/v1/quickbooks/tokens/refresh", "request_schema": "refreshRequest", "response_schema": "refreshResponse", "success": 200 },
+    { "method": "POST", "path": "/v1/quickbooks/tokens/revoke", "request_schema": "revokeRequest", "response_schema": "revokeResponse", "success": 200 },
+    { "method": "GET", "path": "/health", "request_schema": null, "response_schema": "healthResponse", "success": 200 }
+  ],
+  "owner_routes": {
+    "start": "/api/quickbooks/connect/start",
+    "callback": "/api/quickbooks/connect/callback",
+    "status": "/api/quickbooks/status",
+    "refresh": "/api/quickbooks/refresh",
+    "disconnect": "/api/quickbooks/disconnect",
+    "result": "/app/connect/quickbooks"
+  },
+  "generic_result_path": "/v1/quickbooks/result",
+  "limits": {
+    "control_bytes": 12288,
+    "delivery_bytes": 32768,
+    "cookie_bytes_exclusive": 4096,
+    "intent_ms": 600000,
+    "launch_ms": 120000,
+    "request_window_ms": 60000,
+    "future_clock_skew_ms": 30000,
+    "enrollment_challenge_ms": 120000,
+    "voucher_ms": 86400000,
+    "delivery_attempts": 3,
+    "delivery_budget_ms": 10000,
+    "no_contact_proof_ms": 120000,
+    "refresh_margin_ms": 600000,
+    "refresh_early_jitter_ms": 60000,
+    "security_retention_ms": 2592000000,
+    "network_quota_retention_ms": 1200000
+  },
+  "quotas": {
+    "start_per_install_10m": 5,
+    "start_per_address_10m": 20,
+    "callback_per_address_1m": 30,
+    "refresh_per_install_10m": 2,
+    "refresh_per_install_1h": 6,
+    "revoke_per_install_1h": 3
+  },
+  "domains": {
+    "request": "qbo-broker/1/request",
+    "voucher": "qbo-broker/1/voucher",
+    "challenge": "qbo-broker/1/challenge",
+    "receipt": "qbo-broker/1/receipt",
+    "no_contact": "qbo-broker/1/no-contact",
+    "envelope": "qbo-broker/1/envelope",
+    "sender_auth": "qbo-broker/1/sender-auth",
+    "launch": "qbo-broker/1/launch",
+    "cookie": "qbo-broker/1/cookie"
+  },
+  "broker_hkdf_labels": {
+    "launch": "qbo-broker/1/key/launch",
+    "cookie": "qbo-broker/1/key/cookie",
+    "voucher": "qbo-broker/1/key/voucher",
+    "audit": "qbo-broker/1/key/audit",
+    "quota": "qbo-broker/1/key/quota",
+    "no_contact": "qbo-broker/1/key/no-contact"
+  }
+}

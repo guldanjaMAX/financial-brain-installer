@@ -1,0 +1,197 @@
+# Broker E2E gates
+
+These probes describe the observable behavior required of the future broker and
+owner Worker. They are **expected to fail** in this lane. The repository has no
+`protocol/quickbooks-broker/implementation-adapter.mjs`, and every scenario fails
+with `BROKER_IMPLEMENTATION_MISSING`. There are no skipped or todo tests. A red
+missing-adapter result is not evidence that any attack reached a real guard.
+
+Run the explicit red gate from the repository root:
+
+```text
+node --test protocol/quickbooks-broker/probes/broker.e2e.probe.mjs
+```
+
+The protocol/fake unit suite imports only the passing harness unit file:
+
+```text
+node --test protocol/quickbooks-broker/probes/harness.unit.mjs
+```
+
+`scripts/run-test-chain.mjs` has an explicit command list. It does not discover
+this directory, and its registered protocol unit wrapper does not import the E2E
+file. The `.probe.mjs` suffix and `probes/` location also keep it outside the
+top-level test-file completeness pattern. Do not exempt a failing default test,
+convert these probes to skips, or import this red file into the default chain.
+The future implementation lane should explicitly promote the E2E command once
+the real in-memory adapter makes all nine scenarios pass.
+
+## Scenario inventory
+
+Each scenario first runs a successful control, then changes one boundary at a
+time. A negative must reach its named validation observation and show no forbidden
+provider mutation or owner commit. Provider counters distinguish attempts,
+provider entry, and mutation; observations are fixed event names with no payload.
+
+| Scenario | Controls and attacks |
+| --- | --- |
+| Connect | Approved Access enrollment and live ownership challenge; owner session; signed start; exact provider redirect and cookie flags. Refuses absent Access, bad challenge, unauthenticated owner, changed signature/body, extra JSON key, expired launch. Restarts the broker after start and launch with only its allowed durable rows, proving there is no hidden callback registry. |
+| Callback | Successful state/cookie binding. Refuses absent or wrong state/cookie, duplicate code, unknown query key, and expired intent before exchange; handles consent cancellation visibly; uses only exact query-free result pages. |
+| Code exchange | One provider exchange after a committed replay fence and one owner save after exact readback. Exercises provider refusal, malformed/missing token fields, inconsistent company echo, response loss, failed replay commit, unavailable owner callback, bounded identical-envelope retries, in-memory revoke, and lost receipt followed by idempotent delivery. |
+| Refresh | Due refresh rotates one generation and clears the owner fence only after readback. Exercises loss before/after provider mutation, refusal, malformed/missing replacement, inconsistent company echo, failed readback, no retry of the old token, safely valid-token no-op, and two competing refreshes under one lease. |
+| Revoke | Schedule disable and owner fence precede confirmed revoke; token ciphertext is removed and a preexisting synthetic imported record remains. Exercises rejected/uncertain outcomes and refusal to repeat contact; a verified no-contact proof alone permits retry of the same fenced operation. |
+| Replay | The same delivery returns the same signed receipt; changed ciphertext under the same delivery ID fails. Reuses launch capability, serial and concurrent callback state, and signed start/refresh/revoke request IDs. Provider mutation count remains one. |
+| Mix-up | Correct connection is the control. Tests signed callback/environment disagreement with voucher, another transaction's cookie, a valid envelope delivered to another owner, altered intent/environment/key/generations, missing or wrong broker sender tag, tampered refresh company/generation/realm fields, and rotated voucher generation. |
+| SSRF and privacy | Health and direct owner-to-provider accounting read are controls. Refuses HTTP, IP/localhost, userinfo, fragments, nonstandard port and wrong callback path at enrollment; refuses private DNS answers before delivery; never follows callback redirects. Data proxy, token lookup and token recovery routes are absent. Scans durable broker rows, logs and returned responses for generated credential canaries and validates exact non-content schemas. |
+| Abuse | Valid signed start is the control. Refuses unavailable quota/replay storage, wrong content type, body larger than 12 KiB, expired proof, and the sixth start within ten minutes. |
+
+The broker has no company/token registry. The refresh tampering checks therefore
+assert request-signature integrity, not knowledge of an owner's D1 generation.
+The owner performs the authoritative generation comparison and company binding
+check when it accepts an encrypted replacement. Another owner's valid delivery
+and changed authenticated bindings must never activate or overwrite a connection.
+
+## Future adapter contract
+
+Add the one fixed adapter path only when binding the actual reviewed handlers.
+Export `async createProbeAdapter(dependencies)`. The adapter is glue: it must not
+implement a second broker, fabricate status responses, synthesize guard events,
+insert successful vouchers directly, or use the state-machine oracle as a router.
+Every response comes from the actual handler under test. It may use real in-memory
+SQLite stores and test-only identity/key fixtures. Nothing opens a listener,
+resolves external DNS, reads ambient credentials, or falls back to global fetch.
+
+The probe injects:
+
+| Dependency | Contract |
+| --- | --- |
+| `protocol` | `qbo-broker/1`. |
+| `now()` | Milliseconds since epoch; the probe advances time without sleeping. |
+| `origins` | Two reserved `.invalid` owner origins. Each is an isolated install with its own keys, session, voucher, delivery key and wrapping key. Seed one clearly synthetic preexisting imported record per owner for disconnect retention checks. |
+| `brokerConfig` | The fake provider's generated client configuration and fixed `.invalid` endpoints. Bind the generated shared secret only to the broker. Do not copy it into owner fixtures, stores, request bodies or diagnostics. |
+| `brokerFetch` | In-memory provider/control transport for broker outbound requests. Rejects every unknown destination and every broker accounting request. |
+| `ownerFetch` | In-memory transport for owner-to-broker control traffic and direct owner-to-provider API traffic. |
+| `resolve(host)` | Injected DNS answers. The default public address is a synthetic resolver response only; no connection is made. The probe replaces it with private addresses to exercise delivery rejection. Pin the validated destination for the request and never use real DNS. |
+| `observe(name)` | Emit only the exact fixed observation name, after entry into the corresponding real guard or completed transaction. No request values, labels, errors, or objects. |
+
+Return this interface:
+
+```text
+{
+  broker: { fetch(Request) -> Promise<Response> },
+  owners: [
+    { fetch(Request) -> Promise<Response>, authHeaders },
+    { fetch(Request) -> Promise<Response>, authHeaders }
+  ],
+  fixtures: {
+    enroll({owner, authorized = true, challengeValid = true, callback?}) -> Response,
+    signedRequest({owner, route, bodyOverrides = {}}) -> Request
+  },
+  inspect() -> observations,
+  armFault(name),
+  restartBroker() -> Promise<void>,
+  runScheduledRead({owner}) -> Promise<void>
+}
+```
+
+`fixtures.enroll` sends an actual Access-authenticated issue request and serves
+the owner's actual one-time ownership challenge. Its returned response is the
+issue route's response. The voucher is delivered only to that owner Worker.
+The negative options remove Access, fail challenge verification or propose the
+specified callback. They do not replace route decisions with fixture decisions.
+
+`fixtures.signedRequest` constructs a fresh, otherwise valid signed wire request
+for one of the three broker routes. It uses the install's real synthetic signing
+key and voucher and current owner credentials; values remain only in memory. It
+applies `bodyOverrides` before computing the body hash and signature so callback
+and environment disagreements reach the voucher-binding decision. Tests using
+`rewriteJson` mutate bytes **after** signing and must fail proof verification.
+
+`restartBroker` discards all broker instance memory, then reconnects a fresh
+handler using the same current configuration and only the exact allowlisted
+durable audit/replay/quota rows. It preserves the owner Workers. An adapter that
+copies a callback map or encrypted token queue across restart violates the test.
+
+`runScheduledRead` invokes the owner's actual scheduled direct-read entry point.
+It cannot emulate a read by incrementing counters or calling the fake directly.
+The owner constructs the provider URL and request from its encrypted connection.
+
+`inspect()` reads actual stores and exposes safe observations:
+
+```text
+{
+  brokerRows: [auditEvent | replayRow | quotaRow],
+  brokerLogs: [auditEvent],
+  voucherIssueCount: integer,
+  exchangeFences: integer,
+  owners: [{
+    status, intentStatus, tokenGeneration, tokenCiphertextCount,
+    connectionCommitCount, connectionReadbackCount,
+    scheduleEnabled, importedRecordCount, outcomeUnknown,
+    remoteRevocation, noContactProofVerified
+  }, ...]
+}
+```
+
+Rows and logs are the complete retained broker records, without filtering or
+renaming fields to pass a scan. Every broker row must match exactly one of the
+three schema shapes; every application log must match `auditEvent`. Do not return
+owner ciphertext, credentials, paths, raw company values, or record content in
+the safe owner summary. Counters must reflect actual store commits/readbacks.
+The owner `connected` status requires a committed token pair, encrypted company,
+and successful readback. `remoteRevocation` is `confirmed`, `rejected`, `uncertain`
+or unset; uncertainty cannot become confirmation through local destruction.
+
+The adapter must inject these one-shot faults at the named real dependency:
+
+| Fault | Effect |
+| --- | --- |
+| `broker.replay.commit` | Fail the exchange fence transaction before provider contact. |
+| `broker.replay.unavailable` | Refuse the start replay-store operation. |
+| `broker.quota.unavailable` | Refuse start quota admission. |
+| `owner.refresh.readback` | Fail readback after the replacement commit attempt. |
+| `broker.revoke.before_fence` | Produce the reviewed, authenticated no-contact result before any provider send; only this proof permits the same operation retry. |
+| `broker.rotate_generation` | Rotate current broker key generation; leave the old owner voucher unchanged. |
+
+The harness separately injects callback unavailability, a 307 callback redirect,
+one lost owner receipt, and provider faults through the fake. Delivery attempts
+must be at most three and must reuse byte-identical encrypted envelopes during
+the same invocation. No job, queue, table or subsequent invocation can retain
+that envelope for redelivery.
+
+Required guard observations are visible in the assertions in
+`broker.e2e.probe.mjs`. Their groups are `enrollment.*`, `start.*`, `launch.*`,
+`callback.*`, `request.replay.checked`, `refresh.proof.checked`,
+`broker.exchange.*`, `broker.refresh.sent`, `broker.revoke.*`,
+`delivery.*`, and `owner.*`. `ordered` requires that **both** events occurred
+before comparing their positions. For already-used guards, negative checks use
+an event checkpoint so an earlier successful request cannot satisfy the attack's
+reached condition.
+
+The synthetic completion pages are exactly
+`https://broker.invalid/v1/quickbooks/result` for an untrusted callback and each
+owner's `/app/connect/quickbooks` for a trusted binding. No completion query or
+fragment is accepted. Provider consent navigation is simulated by fake Intuit;
+the launch response must still contain the exact client, fixed redirect, scope,
+state and authorization-code response type before the consent fixture runs.
+
+Launch uses a real top-level HTML form navigation in the eventual browser UI.
+The harness models its POST as exact `application/x-www-form-urlencoded` with
+exactly one each of `protocol`, `launch_capability`, and `transaction`. The last
+field contains the capsule's canonical compact JSON string. After form decoding
+and JSON parsing, the object must satisfy `launchRequest`; raw duplicate fields
+must be refused before constructing that object. `launchRequest()` builds this
+request for all probe launches. A JavaScript JSON fetch followed by a cross-origin
+303 is not an equivalent browser navigation. The harness uses manual redirect
+inspection only to simulate that navigation without opening a browser or network.
+
+Trusted cancellation and failure completion uses `completionEnvelope` carrying
+the token-free `completionResult`, authenticated with the one-time delivery auth
+key. The owner returns `completionReceipt` only after it commits and reads back
+the matching local intent status. This carries cancellation visibility without
+putting a code, token, or owner identity into the completion URL.
+
+This lane proves only that the probe harness, schemas and provider double work.
+It does not prove deployed broker behavior, encryption implementation, public
+DNS/SSRF defenses, Cloudflare observability settings, provider acceptance or an
+owner-authorized field gate.
