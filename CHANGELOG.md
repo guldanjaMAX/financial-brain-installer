@@ -14,9 +14,11 @@ exact sealed package. This version bump verifies no incident.
   log now keep the source's redacted error through the load report. Removal
   approval, another safety review, a held lock and a network failure have
   distinct reasons. A later recognized stop stays visible even when the first
-  failure is unknown. Relative filenames and shared-file URLs are redacted
-  while ordinary slash prose stays readable. Check the issue and detail after
-  a failed refresh; a failed source still does not count as fresh.
+  failure is unknown, including inside nested groups of failures. Relative
+  filenames and shared-file URLs are redacted, including spaced filenames in
+  paths with multiple folders, while ordinary slash prose stays readable.
+  Check the issue and detail after a failed refresh; a failed source still does
+  not count as fresh.
 
 - **You can optionally have Claude write and check Brain answers.** Connect the
   owner's own Anthropic account with `brain connect anthropic`. Opus writes the

@@ -9,7 +9,11 @@ const mutants = {
     "function safeDiagnosticText(value, maxLength = 200) {",
     "function safeDiagnosticText(value, maxLength = 200) { return String(value).slice(0, maxLength);"],
   first_aggregate_entry: ["operations/daily-refresh-run.mjs",
-    "error = preferredDailyError(error.errors);", "error = error.errors[0];"],
+    "error: preferredDailyError(stops),", "error: stops[0],"],
+  spaced_filename_boundary_removed: ["operations/daily-refresh-run.mjs",
+    '    [BARE_SPACED_RELATIVE_PATH, "$1[REDACTED:path]"],\n', ""],
+  nested_aggregate_not_flattened: ["operations/daily-refresh-run.mjs",
+    "visit(entries[index], depth + 1);", "stops.push(entries[index]); failures++;"],
   unregistered_daily_suites: ["scripts/run-test-chain.mjs",
     '  "node --test test/daily-error-diag.test.mjs",\n  "node --test test/daily-load-errors.test.mjs",\n', "", 2],
 };

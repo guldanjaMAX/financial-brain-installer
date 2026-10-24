@@ -1428,8 +1428,20 @@ passed through the shared credential scanner and diagnostic redaction. Explicit
 token assignments, authorization values, emails, HTTP URLs (including queries),
 and file URLs, absolute paths, explicitly relative paths, and bare relative
 file paths ending in a filename without spaces and with an extension are
-removed before bounding. Intermediate directories may contain spaces. Ordinary
-slash prose such as `and/or` and `read/write` stays readable.
+removed before bounding. Intermediate directories may contain spaces. A second
+bare-path rule accepts a final filename with spaces when at least two slash or
+backslash separators precede it, as in `records/reports/quarterly report.xlsx`.
+The first component uses letters, numbers, underscores, dots or hyphens;
+intermediate components cannot cross a separator or punctuation delimiter.
+The final component uses the same characters plus spaces or tabs, followed by
+a dot and a 1 to 16 character letter-or-number extension. The match starts at
+the beginning of text or after whitespace, `=`, `(` or a quote, and ends before
+whitespace, a closing delimiter, sentence punctuation or the end of text.
+Ambiguous single-separator text with a spaced final component is outside this
+broader rule. Ordinary slash prose such as `and/or`, `read/write`, a spaced
+slash, and a sentence mentioning a Markdown filename stays readable.
+Combined multi-slash prose that fits the path shape may be redacted
+conservatively.
 Scanner findings that survive replacement fail closed to fixed text.
 The load report preserves original leg errors in a non-enumerable in-memory
 cause, so daily diagnostics can recover a typed stop instead of the aggregate
@@ -1437,7 +1449,17 @@ cause, so daily diagnostics can recover a typed stop instead of the aggregate
 using this priority: removal approval, other safety review, held lock, network
 failure, other recognized issue, then unknown. Approval and safety decisions
 come before retryable contention or transport failures. Equal priorities keep
-source order. No raw error objects enter a receipt or log.
+source order. A cycle-aware depth-first walk flattens nested aggregates and
+cause chains before ranking. It examines at most 64 entries including the root
+and repeated references, through depth 8 with root depth 0. Aggregate children
+precede their aggregate's cause. Aggregate summaries do not compete with real
+leaves; a higher-priority typed wrapper still preserves a safety refusal over a
+lower-priority cause. Equal-priority causes retain the deeper detail. The count
+describes terminal errors reached, including cycle-boundary fallbacks; separate
+legs sharing the same error object count separately.
+At either traversal limit the detail says `diagnostic graph limit reached`
+instead of claiming an exact failure count. No raw error objects enter a receipt
+or log.
 Removal approval uses `SAFETY_REVIEW_REQUIRED` with `removal_review_required`;
 other safety reviews use `safety_review_required`. A held source lock uses the
 existing `SCHEDULE_RUN_FAILED` code with `source_lock_held`, and network failures

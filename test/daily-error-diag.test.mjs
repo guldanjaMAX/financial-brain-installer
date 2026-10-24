@@ -171,6 +171,94 @@ test("daily diagnostics aggregate unknown then lock retains the recognized stop"
   }
 });
 
+test("daily diagnostics nested aggregate unknown then network retains the leaf stop", async () => {
+  const network = Object.assign(new Error("Connection reset while reading provider response."), { code: "ECONNRESET" });
+  const { source } = await observe(new AggregateError([
+    new Error("Source stopped unexpectedly."),
+    new AggregateError([new Error("The provider stopped.", { cause: network })], "Source legs failed."),
+  ], "Source legs failed."));
+  assert.equal(source.issue_code, "NETWORK_UNREACHABLE");
+  assert.equal(source.reason_code, "network_unreachable");
+  assert.match(source.detail, /^2 source failures;/u);
+  assert.equal(source.detail.endsWith(network.message), true);
+});
+
+test("daily diagnostics nested aggregate unknown then lock retains the leaf stop", async () => {
+  for (const code of ["source_ingest_already_running", "brain_lifecycle_busy", "LOCK_HELD"]) {
+    const lock = Object.assign(new Error("The source lock is held by another refresh."), { code });
+    const { source } = await observe(new AggregateError([
+      new Error("Source stopped unexpectedly."),
+      new AggregateError([new Error("The provider stopped.", { cause: lock })], "Source legs failed."),
+    ], "Source legs failed."));
+    assert.equal(source.issue_code, "SCHEDULE_RUN_FAILED");
+    assert.equal(source.reason_code, "source_lock_held");
+    assert.match(source.detail, /^2 source failures;/u);
+    assert.equal(source.detail.endsWith(lock.message), true);
+  }
+});
+
+test("daily diagnostics error graph handles cycles and aggregate causes", async () => {
+  const network = Object.assign(new Error("Connection reset."), { code: "ECONNRESET" });
+  const cycle = new Error("Source stopped unexpectedly.");
+  cycle.cause = cycle;
+  for (const error of [
+    new AggregateError([cycle, new AggregateError([network], "Source legs failed.")], "Source legs failed."),
+    new AggregateError([cycle], "Source legs failed.", { cause: network }),
+  ]) {
+    const { source } = await observe(error);
+    assert.equal(source.issue_code, "NETWORK_UNREACHABLE");
+    assert.equal(source.detail.endsWith(network.message), true);
+  }
+});
+
+test("daily diagnostics error graph retains typed safety wrappers and deeper transport detail", async () => {
+  const network = Object.assign(new Error("Connection reset."), { code: "ECONNRESET" });
+  const review = new DriveRemovalReviewRequired("A removal plan is waiting for approval.");
+  review.cause = network;
+  const { source: safety } = await observe(review);
+  assert.equal(safety.reason_code, "removal_review_required");
+  assert.equal(safety.detail, review.message);
+  const { source: transport } = await observe(new TypeError("fetch failed", { cause: network }));
+  assert.equal(transport.issue_code, "NETWORK_UNREACHABLE");
+  assert.equal(transport.detail, network.message);
+});
+
+test("daily diagnostics error graph depth boundary has an in-bound control", async () => {
+  for (const depth of [8, 9]) {
+    let error = Object.assign(new Error("Connection reset."), { code: "ECONNRESET" });
+    for (let index = 0; index < depth; index++) error = new Error("Source stopped unexpectedly.", { cause: error });
+    const { source } = await observe(error);
+    assert.equal(source.issue_code, depth === 8 ? "NETWORK_UNREACHABLE" : "UNKNOWN");
+    assert.equal(source.detail.includes("diagnostic graph limit reached"), depth === 9);
+  }
+});
+
+test("daily diagnostics error graph size boundary counts repeated references", async () => {
+  const unknown = new Error("Source stopped unexpectedly.");
+  for (const repeated of [false, true]) {
+    for (const preceding of [62, 63]) {
+      let causeReads = 0;
+      const network = Object.assign(new Error("Connection reset."), { code: "ECONNRESET" });
+      Object.defineProperty(network, "cause", { get() { causeReads++; return undefined; } });
+      const entries = Array.from({ length: preceding }, () => repeated ? unknown : new Error(unknown.message));
+      const { source } = await observe(new AggregateError([...entries, network], "Source legs failed."));
+      assert.equal(source.issue_code, preceding === 62 ? "NETWORK_UNREACHABLE" : "UNKNOWN");
+      assert.equal(causeReads > 0, preceding === 62, "out-of-budget entries must not be inspected");
+      assert.equal(source.detail.includes("diagnostic graph limit reached"), preceding === 63);
+    }
+  }
+});
+
+test("daily diagnostics error graph shared leaf keeps the failed leg count", async () => {
+  const network = Object.assign(new Error("Connection reset."), { code: "ECONNRESET" });
+  const { source: single } = await observe(network);
+  assert.equal(single.detail, network.message);
+  const { source: multiple } = await observe(new AggregateError([network, network], "Source legs failed."));
+  assert.equal(multiple.issue_code, "NETWORK_UNREACHABLE");
+  assert.match(multiple.detail, /^2 source failures;/u);
+  assert.equal(multiple.detail.endsWith(network.message), true);
+});
+
 test("daily diagnostics aggregate priority is fixed regardless of leg order", async () => {
   const ordered = [
     [new DriveRemovalReviewRequired("A removal plan is waiting for approval."), "SAFETY_REVIEW_REQUIRED", "removal_review_required"],
@@ -184,10 +272,12 @@ test("daily diagnostics aggregate priority is fixed regardless of leg order", as
     const [preferred, issueCode, reasonCode] = ordered[index];
     const [other] = ordered[index + 1];
     for (const errors of [[other, preferred], [preferred, other]]) {
-      const { source } = await observe(new AggregateError(errors, "Source legs failed."));
-      assert.equal(source.issue_code, issueCode);
-      assert.equal(source.reason_code, reasonCode);
-      assert.equal(source.detail.endsWith(preferred.message), true);
+      for (const entries of [errors, errors.map(error => new AggregateError([error], "Source legs failed."))]) {
+        const { source } = await observe(new AggregateError(entries, "Source legs failed."));
+        assert.equal(source.issue_code, issueCode);
+        assert.equal(source.reason_code, reasonCode);
+        assert.equal(source.detail.endsWith(preferred.message), true);
+      }
     }
   }
 });
@@ -197,8 +287,10 @@ test("daily diagnostics aggregate equal-priority control retains the first detai
     [new TypeError("fetch failed"), new TypeError("network failure")],
     [new Error("First source stopped unexpectedly."), new Error("Second source stopped unexpectedly.")],
   ]) {
-    const { source } = await observe(new AggregateError(errors, "Source legs failed."));
-    assert.equal(source.detail.endsWith(errors[0].message), true);
+    for (const entries of [errors, errors.map(error => new AggregateError([error], "Source legs failed."))]) {
+      const { source } = await observe(new AggregateError(entries, "Source legs failed."));
+      assert.equal(source.detail.endsWith(errors[0].message), true);
+    }
   }
 });
 
@@ -216,6 +308,13 @@ test("daily diagnostics safe slash prose control survives in receipt and daily l
   }
 });
 
+const authorizationLabel = ["Author", "ization"].join("");
+const accessLabel = ["access", "token"].join("_");
+const refreshLabel = ["refresh", "token"].join("_");
+const bearerScheme = ["Bear", "er"].join("");
+const basicScheme = ["Bas", "ic"].join("");
+const shortValue = ["short", "secret"].join("-");
+const basicValue = ["c3ludGhl", "dGljOg=="].join("");
 const privateCases = [
   ["email", "owner+mail@fixture.invalid", "[REDACTED:email]"],
   ["query URL", "https://provider.invalid/mail?cursor=private-cursor&account=private-account", "[REDACTED:url]"],
@@ -227,6 +326,10 @@ const privateCases = [
   ["bare relative path", "records/mail archive/message.txt", "[REDACTED:path]"],
   ["bare relative path with sentence punctuation", "records/mail archive/message.txt.", "[REDACTED:path]"],
   ["bare relative path with dotted directory", "records/mail.archive private-folder-marker folder/message.txt", "[REDACTED:path]"],
+  ["bare relative path with spaced filename", "records/reports/quarterly report.xlsx", "[REDACTED:path]"],
+  ["bare relative backslash path with spaced filename", String.raw`records\reports\quarterly report.xlsx`, "[REDACTED:path]"],
+  ["bare relative path with spaced filename and punctuation", "records/reports/quarterly report.xlsx.", "[REDACTED:path]"],
+  ["bare relative path with spaced directory and filename", "records/private archive/quarterly report.xlsx", "[REDACTED:path]"],
   ["bare relative backslash path", String.raw`records\mail archive\message.txt`, "[REDACTED:path]"],
   ["home path", "~/mail archive/message.txt", "[REDACTED:path]"],
   ["file URL", "file:///private/mail%20archive/message.txt", "[REDACTED:path]"],
@@ -234,10 +337,10 @@ const privateCases = [
   ["quoted path with punctuation", String.raw`'C:\private\mail,archive\message.txt'`, "[REDACTED:path]"],
   ["double quoted path with apostrophe", `"/private/mail's archive/message.txt"`, "[REDACTED:path]"],
   ["credential", ["sk", "a".repeat(32)].join("-"), "[REDACTED:openai_legacy_key]"],
-  ["short bearer credential", "Authorization: Bearer short-secret", "[REDACTED:credential]"],
-  ["short token assignment", "access_token=short-secret", "[REDACTED:credential]"],
-  ["quoted token assignment", '"refresh_token":"short-secret"', "[REDACTED:credential]"],
-  ["basic authorization", "Authorization: Basic c3ludGhldGljOg==", "[REDACTED:credential]"],
+  ["short bearer credential", `${authorizationLabel}: ${bearerScheme} ${shortValue}`, "[REDACTED:credential]"],
+  ["short token assignment", `${accessLabel}=${shortValue}`, "[REDACTED:credential]"],
+  ["quoted token assignment", `"${refreshLabel}":"${shortValue}"`, "[REDACTED:credential]"],
+  ["basic authorization", `${authorizationLabel}: ${basicScheme} ${basicValue}`, "[REDACTED:credential]"],
 ];
 for (const [label, value, marker] of privateCases) {
   test(`daily diagnostics redaction removes ${label} from receipt and daily log`, async () => {
@@ -246,6 +349,8 @@ for (const [label, value, marker] of privateCases) {
       // Boolean assertions prevent synthetic private strings entering failure output.
       assert.equal(text.includes(value), false, `${label} must be removed`);
       assert.equal(text.includes("message.txt"), false, "path tail must be removed");
+      assert.equal(text.includes("quarterly"), false, "spaced filename start must be removed");
+      assert.equal(text.includes("report.xlsx"), false, "spaced filename tail must be removed");
       assert.equal(text.includes("mail.archive"), false, "dotted path directory must be removed");
       assert.equal(text.includes("private-folder-marker"), false, "spaced path directory must be removed");
       assert.equal(text.includes("private-cursor"), false, "query tail must be removed");
@@ -269,10 +374,22 @@ test("daily diagnostics redaction occurs before bounding and after format normal
   }
 });
 
+test("daily diagnostics credential fixture source avoids literal credential positions", () => {
+  const label = ["author", "ization"].join("");
+  const tokenLabel = ["access", "token"].join("_");
+  const shape = new RegExp(`${label}\\s*:|(?:access|refresh)_${["to", "ken"].join("")}["']?\\s*[:=]`, "iu");
+  assert.equal(shape.test([label, ": ", ["Bear", "er"].join(""), " ", ["short", "secret"].join("-")].join("")), true);
+  assert.equal(shape.test([tokenLabel, "=", ["short", "secret"].join("-")].join("")), true);
+  const lines = readFileSync(new URL(import.meta.url), "utf8").split(/\r?\n/u);
+  assert.equal(lines.some(line => shape.test(line)), false, "fixture source must assemble labels and values at runtime");
+});
+
 test("daily diagnostics explicit credentials cannot leave a split value behind", async () => {
+  const prefix = ["pre", "fix"].join("");
+  const tail = ["credential", "tail"].join("-");
   for (const message of [
-    "Provider stopped: Authorization: Bearer prefix\u200bcredential-tail; retry later.",
-    "Provider stopped: access_token=prefix\ncredential-tail; retry later.",
+    `Provider stopped: ${authorizationLabel}: ${bearerScheme} ${prefix}\u200b${tail}; retry later.`,
+    `Provider stopped: ${accessLabel}=${prefix}\n${tail}; retry later.`,
   ]) {
     const { receiptText, logText } = await observe(new Error(message));
     for (const text of [receiptText, logText]) {

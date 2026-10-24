@@ -85,23 +85,49 @@ function preferredDailyError(errors) {
 }
 
 function dailyErrorContext(error) {
-  const seen = new Set();
-  let failures = 1;
-  // Load preserves its report error while carrying the actual leg failures in
-  // cause. Inspect only a bounded chain in memory, never persist that object.
-  while (error && !seen.has(error) && seen.size < 8) {
-    seen.add(error);
-    if (error instanceof AggregateError && error.errors.length) {
-      failures += error.errors.length - 1;
-      error = preferredDailyError(error.errors);
-    } else if (dailyIssueCode(error) === "UNKNOWN" && error.cause && !seen.has(error.cause)) {
-      error = error.cause;
-    } else break;
+  const active = new Set();
+  const stops = [];
+  let failures = 0;
+  let examined = 0;
+  let truncated = false;
+  // Inspect at most 64 entries (including repeated/cyclic references and the
+  // root), down to depth 8 (root is 0). Bound work as well as unique objects so
+  // a huge aggregate of repeated references cannot stall failure reporting.
+  // Only the active path is cycle-guarded: separate failed legs may share the
+  // same Error object and must still contribute separately to the count.
+  // Depth-first source order keeps ties stable. Aggregate summaries do not
+  // compete with their leaves; a higher-priority typed wrapper still protects
+  // a safety refusal when its cause is a lower-priority transport failure.
+  function visit(current, depth) {
+    if (examined >= 64) { truncated = true; return; }
+    examined++;
+    if (active.has(current)) return;
+    active.add(current);
+    const aggregate = current instanceof AggregateError;
+    const entries = aggregate && Array.isArray(current.errors) ? current.errors : [];
+    const cause = current?.cause;
+    const firstStop = stops.length;
+    if (depth < 8) {
+      for (let index = 0; index < entries.length; index++) {
+        if (examined >= 64) { truncated = true; break; }
+        visit(entries[index], depth + 1);
+      }
+      if (cause != null) visit(cause, depth + 1);
+    } else if (entries.length || cause != null) truncated = true;
+    if (stops.length === firstStop) {
+      stops.push(current);
+      failures++;
+    } else if (!aggregate && dailyErrorPriority(current) < dailyErrorPriority(preferredDailyError(stops.slice(firstStop)))) {
+      stops.push(current);
+    }
+    active.delete(current);
   }
-  return { error, failures };
+  visit(error, 0);
+  return { error: preferredDailyError(stops), failures, truncated };
 }
 
 const FIXED_SENSITIVE_DIAGNOSTIC = "the source refresh failed; sensitive diagnostic text was redacted";
+const BARE_SPACED_RELATIVE_PATH = /(^|[\s=("'`])[\p{L}\p{N}_.-]+(?:[\\/][^\\/,;\r\n)\]}'"`]+)+[\\/][\p{L}\p{N}_.-]+(?:[ \t]+[\p{L}\p{N}_.-]+)+\.[\p{L}\p{N}]{1,16}(?=$|[\s,;)\]}'"`]|[.!?](?=$|[\s,;)\]}'"`]))/gu;
 
 function redactAndScanDiagnostic(value) {
   // Every transform comes back through both layers. A later canonicalization
@@ -155,6 +181,9 @@ function safeDiagnosticText(value, maxLength = 200) {
     [/file:\/\/[^,;\r\n)\]}'"`]*/giu, "[REDACTED:path]"],
     [/(^|[\s=("'`])(?:[A-Za-z]:[\\/]|\\\\)[^,;\r\n)\]}'"`]*/gu, "$1[REDACTED:path]"],
     [/(^|[\s=("'`])(?:\/(?![\/\s])|\.{1,2}[\\/]|~[\\/])[^,;\r\n)\]}'"`]*/gu, "$1[REDACTED:path]"],
+    // Two separators conservatively mark a spaced final filename as a path.
+    // Keep one-separator prose (and/or ... guide.md) out of this broader rule.
+    [BARE_SPACED_RELATIVE_PATH, "$1[REDACTED:path]"],
     // A bare path needs a final slash-adjacent filename and extension. Allow
     // spaces in intermediate directories, but not in that filename: and/or
     // followed by prose about a dotted filename is not itself a file path.
@@ -470,7 +499,8 @@ export async function runDailyRefresh({
         const safeSource = safeDiagnosticText(sourceName, 128);
         const context = dailyErrorContext(error);
         const issueCode = dailyIssueCode(context.error);
-        const detail = safeDiagnosticText((context.failures > 1 ? `${context.failures} source failures; first review or failure: ` : "") +
+        const detail = safeDiagnosticText((context.truncated ? "diagnostic graph limit reached; selected stop: " :
+          context.failures > 1 ? `${context.failures} source failures; first review or failure: ` : "") +
           String(context.error?.message || context.error));
         const removalReview = isRemovalReview(context.error)
           ? safeRemovalReview(context.error, safeSource) : null;
