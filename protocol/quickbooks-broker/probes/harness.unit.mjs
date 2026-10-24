@@ -11,15 +11,22 @@ const audit = () => fixture(schema, 'auditEvent', length => randomBytes(length).
 function transportSpy() {
   let dependencies;
   const rows = [];
+  const logs = [];
   return {
-    rows,
+    rows, logs,
     get dependencies() { return dependencies; },
     async factory(injected) {
       dependencies = injected;
       return {
-        broker: { fetch: async () => { throw new Error('spy_has_no_broker'); } },
+        broker: { fetch: async request => {
+          const route = new URL(request.url).pathname;
+          const event = { ...audit(), route, phase: route === helpers.CALLBACK ? 'failed' : 'start',
+            outcome: route === helpers.CALLBACK ? 'invalid_request' : 'accepted' };
+          rows.push(event); logs.push({ ...event });
+          return new Response(null, { status: 204 });
+        } },
         owners: [0, 1].map(() => ({ fetch: async () => new Response(null, { status: 204 }), authHeaders: {} })),
-        inspect: () => ({ brokerRows: rows, brokerLogs: [], owners: [] }),
+        inspect: () => ({ brokerRows: rows, brokerLogs: logs, owners: [] }),
         armFault() {},
         fixtures: { enroll() {}, signedRequest() {} },
       };
@@ -84,11 +91,14 @@ test('probe transport permits owner control requests to the in-memory broker onl
 test('probe privacy scan rejects generated canaries and forbidden retained field names', async () => {
   const spy = transportSpy();
   const rig = await createRig(spy.factory);
-  spy.rows.push({ ...audit(), route: '/v1/quickbooks/oauth/callback' });
+  await rig.broker(new Request(helpers.BROKER + helpers.CALLBACK));
   await rig.assertPrivate();
+  const control = spy.rows[0];
   spy.rows.push({ metadata: rig.provider.config.clientSecret });
   await assert.rejects(() => rig.assertPrivate(), { code: 'ERR_ASSERTION' });
   spy.rows.length = 0;
+  await assert.rejects(() => rig.assertPrivate(), { code: 'ERR_ASSERTION' });
+  spy.rows.push(control);
   await rig.assertPrivate();
   spy.rows.push({ callback: 'https://owner-a.invalid/api/quickbooks/connect/callback' });
   await assert.rejects(() => rig.assertPrivate(), { code: 'ERR_ASSERTION' });
@@ -97,7 +107,7 @@ test('probe privacy scan rejects generated canaries and forbidden retained field
 test('probe privacy scan rejects fields outside the exact durable schema', async () => {
   const spy = transportSpy();
   const rig = await createRig(spy.factory);
-  spy.rows.push(audit());
+  await rig.broker(new Request(helpers.BROKER + helpers.START));
   await rig.assertPrivate();
   spy.rows[0].unexpected_public_field = true;
   await assert.rejects(() => rig.assertPrivate(), { code: 'ERR_ASSERTION' });
@@ -114,8 +124,78 @@ test('probe event ordering requires both observed boundaries', () => {
 test('probe privacy scan rejects a generated credential returned to the browser', async () => {
   const spy = transportSpy();
   const rig = await createRig(spy.factory);
+  await rig.broker(new Request(helpers.BROKER + helpers.START));
   await rig.assertPrivate();
   rig.adapter.broker.fetch = async () => new Response(rig.provider.config.clientSecret);
   await rig.broker(new Request('https://broker.invalid/health'));
   await assert.rejects(() => rig.assertPrivate(), { code: 'ERR_ASSERTION' });
+});
+
+test('EMPTY_AUDIT_SINKS mutant is killed for either sink and missing operation evidence', async () => {
+  for (const sink of ['rows', 'logs', 'both', 'operation']) {
+    const spy = transportSpy();
+    const rig = await createRig(spy.factory);
+    await rig.broker(new Request(helpers.BROKER + helpers.START));
+    await rig.assertPrivate();
+    if (sink === 'operation') {
+      rig.adapter.broker.fetch = async () => new Response(null, { status: 204 });
+      await rig.broker(new Request(helpers.BROKER + helpers.START));
+    } else if (sink === 'both') { spy.rows.length = 0; spy.logs.length = 0; }
+    else spy[sink].length = 0;
+    await assert.rejects(() => rig.assertPrivate(), { code: 'ERR_ASSERTION' });
+  }
+  const spy = transportSpy();
+  const rig = await createRig(spy.factory);
+  await rig.broker(new Request(helpers.BROKER + helpers.START));
+  await rig.assertPrivate();
+  const original = rig.adapter.broker.fetch;
+  let calls = 0;
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  rig.adapter.broker.fetch = async request => {
+    if (++calls === 2) { release(); return new Response(null, { status: 204 }); }
+    await gate;
+    return original(request);
+  };
+  await Promise.all([0, 1].map(() => rig.broker(new Request(helpers.BROKER + helpers.START))));
+  await assert.rejects(() => rig.assertPrivate(), { code: 'ERR_ASSERTION' });
+});
+
+test('CALLBACK_RESPONSE_LEAK mutant is killed despite a clean redirect Location', async () => {
+  for (const field of ['code', 'state', 'realmId']) {
+    for (const surface of ['body', 'header', 'changed_callback']) {
+      const spy = transportSpy();
+      const rig = await createRig(spy.factory);
+      const state = rig.provider.opaque('state');
+      const launch = { url: new URL(rig.provider.config.authorizationUrl), cookie: 'fixture=value' };
+      launch.url.searchParams.set('state', state);
+      const callback = await rig.consent(launch);
+      await rig.broker(new Request(helpers.BROKER + helpers.START));
+      await rig.assertPrivate();
+      const callbackUrl = new URL(callback.url);
+      if (surface === 'changed_callback') callbackUrl.searchParams.set(field, rig.provider.opaque('changed'));
+      const secret = callbackUrl.searchParams.get(field);
+      const original = rig.adapter.broker.fetch;
+      rig.adapter.broker.fetch = async request => {
+        await original(request);
+        return new Response(surface !== 'header' ? secret : null, { status: 303,
+          headers: { location: 'https://broker.invalid/v1/quickbooks/result',
+            ...(surface === 'header' ? { 'x-leaked-value': secret } : {}) } });
+      };
+      queryFree(await rig.broker(new Request(callbackUrl, callback)));
+      await assert.rejects(() => rig.assertPrivate(), { code: 'ERR_ASSERTION' });
+    }
+  }
+});
+
+test('privacy audit expectations exclude read-only health and absent routes', async () => {
+  const spy = transportSpy();
+  const rig = await createRig(spy.factory);
+  await rig.broker(new Request(helpers.BROKER + helpers.START));
+  await rig.assertPrivate();
+  for (const [path, status] of [['/health', 503], ['/absent', 404]]) {
+    rig.adapter.broker.fetch = async () => new Response(null, { status });
+    await rig.broker(new Request(helpers.BROKER + path));
+    await rig.assertPrivate();
+  }
 });

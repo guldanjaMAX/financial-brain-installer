@@ -290,6 +290,18 @@ the non-secret owner receipt through intent cleanup long enough to serve these
 duplicates; it contains no plaintext credential. Keep its envelope hash local
 to the owner, never in the broker audit ledger.
 
+The ownerIntent schema distinguishes active `pending` and `saved` records from
+terminal `committed`, `canceled`, `failed` and `expired` records. Both encrypted
+delivery keys are required while active. Terminal records omit both key fields
+entirely, including null placeholders, and retain only protocol, intent, status,
+delivery ID, envelope hash and receipt for replay. If no delivery was accepted,
+the three receipt fields are null in canceled, failed or expired records.
+Committed records require a non-null delivery ID, envelope hash and token
+deliveryReceipt; a completionReceipt cannot establish a committed connection.
+Destruction removes the delivery public key,
+callback and other active-operation context as well. The separate connection
+record remains authoritative for source reservation and current credentials.
+
 For a verified cancellation or terminal failure, send completionEnvelope with
 purpose `completion` using the same ECDH and sender-MAC construction. Its
 plaintext completionResult contains only protocol and one of owner_canceled,
@@ -336,6 +348,13 @@ noncontact. Owner commit atomically preserves the newest ciphertext, advances
 generation exactly once, reads it back, then clears the fence. Failed readback
 retains the newest available ciphertext and fence. Rejection, expiry, invalid
 response or lost response moves the connection to reauthorization_required.
+Both scheduled and direct reads remain disabled while reauthorization is
+required and throughout disconnect. The ownerConnected and ownerStatus schemas
+require `reads_enabled: false` in those states. Owner status also disables reads
+when not connected, connecting, disconnected or locally destroyed with unknown
+remote outcome. Connected and delayed status may permit reads only while the
+credential remains valid and no unresolved mutation fence blocks its use;
+the schema alone does not prove those runtime prerequisites.
 No automatic loop on the old refresh token is allowed.
 
 After a direct API 401, refresh only if the rejected generation is still
@@ -447,6 +466,8 @@ cleanup decision. A token_request started phase maps to refresh_started or
 revoke_started according to its exact signed route; confirmed maps to refreshed
 or revoked. No-contact and proof-consumed phases map directly. Owner canceled,
 failed and complete intents permit exact receipt replay without a second write.
+The model's `complete` phase maps to the stored ownerIntent status `committed`;
+the intermediate `saved` phase retains its delivery keys until finalization.
 
 For a token request the response-delivery-key guard means a valid one-time key
 for refresh, and the exact key-free status response contract for revoke.

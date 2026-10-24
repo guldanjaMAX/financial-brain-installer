@@ -185,6 +185,94 @@ test('owner intent stores source reservation and expected generation for deliver
   }
 });
 
+test('pending and saved owner intents require both encrypted delivery keys', () => {
+  const pending = sample('ownerIntent');
+  for (const status of ['pending', 'saved']) {
+    const control = { ...pending, status };
+    check('ownerIntent', control, true);
+    for (const key of ['delivery_private_key', 'delivery_auth_key']) {
+      const missing = { ...control };
+      delete missing[key];
+      check('ownerIntent', missing, false);
+      check('ownerIntent', { ...control, [key]: null }, false);
+    }
+  }
+});
+
+test('terminal owner intents retain receipt replay material with delivery keys absent', () => {
+  const pending = sample('ownerIntent');
+  check('ownerIntent', pending, true);
+  for (const status of ['committed', 'canceled', 'failed', 'expired']) {
+    const receipt = status === 'expired' ? null
+      : sample(status === 'committed' ? 'deliveryReceipt' : 'completionReceipt');
+    if (receipt) {
+      receipt.claims.intent = pending.intent;
+      if (status !== 'committed') receipt.claims.outcome = status === 'canceled' ? 'owner_canceled' : 'failed';
+    }
+    // Terminal state is a replay receipt, not an encrypted-key tombstone.
+    const control = {
+      protocol: pending.protocol, intent: pending.intent, status,
+      delivery_id: receipt?.claims.delivery_id ?? null,
+      envelope_hash: receipt?.claims.envelope_hash ?? null, receipt,
+    };
+    check('ownerIntent', control, true);
+    for (const key of ['delivery_private_key', 'delivery_auth_key']) {
+      check('ownerIntent', { ...control, [key]: pending[key] }, false);
+      check('ownerIntent', { ...control, [key]: null }, false);
+    }
+    for (const key of ['delivery_id', 'envelope_hash', 'receipt']) {
+      const missing = { ...control };
+      delete missing[key];
+      check('ownerIntent', missing, false);
+    }
+    check('ownerIntent', { ...control, callback: pending.callback }, false);
+    check('ownerIntent', { ...control, delivery_public_key: pending.delivery_public_key }, false);
+    check('ownerIntent', { ...control, status: 'pending' }, false);
+    check('ownerIntent', { ...control, status: 'saved' }, false);
+  }
+});
+
+test('committed owner intent requires a complete token-delivery replay receipt', () => {
+  const receipt = sample('deliveryReceipt');
+  const control = {
+    protocol: receipt.claims.protocol, intent: receipt.claims.intent, status: 'committed',
+    delivery_id: receipt.claims.delivery_id, envelope_hash: receipt.claims.envelope_hash, receipt,
+  };
+  check('ownerIntent', control, true);
+  for (const key of ['delivery_id', 'envelope_hash', 'receipt']) {
+    check('ownerIntent', { ...control, [key]: null }, false);
+  }
+  check('ownerIntent', { ...control, delivery_id: null, envelope_hash: null, receipt: null }, false);
+  check('ownerIntent', { ...control, receipt: sample('completionReceipt') }, false);
+});
+
+test('owner connection schema disables reads during reauthorization and disconnect', () => {
+  const connection = sample('ownerConnected');
+  for (const name of ['ownerConnected', 'ownerConnection']) {
+    for (const status of ['connected', 'delayed']) {
+      check(name, { ...connection, status, reads_enabled: true }, true);
+      check(name, { ...connection, status, reads_enabled: false }, true);
+    }
+    for (const status of ['reauthorization_required', 'disconnecting']) {
+      check(name, { ...connection, status, reads_enabled: false }, true);
+      check(name, { ...connection, status, reads_enabled: true }, false);
+    }
+  }
+});
+
+test('owner status schema permits enabled reads only while connected or delayed', () => {
+  const statusRecord = sample('ownerStatus');
+  for (const status of ['connected', 'delayed']) {
+    check('ownerStatus', { ...statusRecord, status, reads_enabled: true }, true);
+    check('ownerStatus', { ...statusRecord, status, reads_enabled: false }, true);
+  }
+  for (const status of ['not_connected', 'connecting', 'reauthorization_required',
+    'disconnecting', 'disconnected', 'local_destroyed_remote_unknown']) {
+    check('ownerStatus', { ...statusRecord, status, reads_enabled: false }, true);
+    check('ownerStatus', { ...statusRecord, status, reads_enabled: true }, false);
+  }
+});
+
 test('signed start and sealed transaction preserve the owner target token generation', () => {
   const start = sample('startRequest');
   check('startRequest', start, true);

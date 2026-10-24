@@ -3,7 +3,44 @@ import test from 'node:test';
 import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createProbeAdapter } from '../implementation-adapter.mjs';
-import { createRig, queryFree, REVOKE } from '../probes/harness.mjs';
+import { createRig, queryFree, REVOKE, rejected, refusedUnchanged } from '../probes/harness.mjs';
+
+test('REPLAY_FALSE_SUCCESS mutant is killed even when provider counters stay unchanged', async () => {
+  for (const kind of ['refresh', 'revoke']) {
+    const rig = await createRig(createProbeAdapter);
+    await rig.connect();
+    rig.advance(3_000_000);
+    rig.provider.queueFault(kind, 'loss_after');
+    const path = kind === 'refresh' ? '/api/quickbooks/refresh' : '/api/quickbooks/disconnect';
+    await rig.owner(path, { body: {} });
+    rejected(await refusedUnchanged(rig, () => rig.owner(path, { body: {} })));
+    const original = rig.adapter.owners[0].fetch;
+    rig.adapter.owners[0].fetch = async request => {
+      await original(request);
+      return new Response(null, { status: 204 });
+    };
+    await assert.rejects(() => refusedUnchanged(rig, () => rig.owner(path, { body: {} })), { code: 'ERR_ASSERTION' });
+  }
+});
+
+test('launch state is private in retained audit evidence before provider consent', async () => {
+  const rig = await createRig(createProbeAdapter);
+  const launch = await rig.pending();
+  await rig.assertPrivate();
+  const inspect = rig.adapter.inspect;
+  rig.adapter.inspect = () => {
+    const snapshot = inspect();
+    const leak = row => row.event_id_hash ? { ...row, state_hash: launch.url.searchParams.get('state') } : row;
+    return { ...snapshot, brokerRows: snapshot.brokerRows.map(leak), brokerLogs: snapshot.brokerLogs.map(leak) };
+  };
+  await assert.rejects(() => rig.assertPrivate(), { code: 'ERR_ASSERTION' });
+});
+
+test('concurrent launch responses each keep only their own provider state exception', async () => {
+  const rig = await createRig(createProbeAdapter);
+  await Promise.all([0, 1].map(owner => rig.pending(owner)));
+  await rig.assertPrivate();
+});
 
 test('malformed exchange with a usable access token performs one fenced in-memory cleanup', async () => {
   const control = await createRig(createProbeAdapter);

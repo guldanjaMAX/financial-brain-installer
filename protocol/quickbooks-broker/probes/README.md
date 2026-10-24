@@ -50,6 +50,23 @@ The owner performs the authoritative generation comparison and company binding
 check when it accepts an encrypted replacement. Another owner's valid delivery
 and changed authenticated bindings must never activate or overwrite a connection.
 
+Privacy checks require fresh, distinct audit witnesses for each observed broker
+operation, in both durable rows and captured logs. Empty sinks, stale evidence,
+or one concurrent operation borrowing another's witness cannot pass. Every
+response body and header is scanned for runtime credentials and callback code,
+state and company values, including altered callback input. Only the exact
+state parameter in a validated provider launch Location is exempt. A clean
+completion Location never exempts its body or other headers. An unavailable
+audit ledger leaves evidence unavailable; it cannot certify a privacy pass.
+
+Refresh and disconnect replay checks require a refusal plus unchanged owner
+state and complete provider counters. The safe fence fingerprint detects a
+changed durable fence without exposing its contents. A fresh request ID using
+an already consumed no-contact proof must be refused with `replayed` while the
+original ledger row remains `proof_consumed`. Both scheduled and direct reads
+are exercised after uncertain refreshes and while provider revocation is held
+in flight, with connected valid reads as controls.
+
 ## Adapter contract
 
 Add the one fixed adapter path only when binding the actual reviewed handlers.
@@ -89,7 +106,8 @@ Return this interface:
   inspect() -> observations,
   armFault(name),
   restartBroker() -> Promise<void>,
-  runScheduledRead({owner}) -> Promise<void>
+  runScheduledRead({owner}) -> Promise<boolean>,
+  runDirectRead({owner}) -> Promise<boolean>
 }
 ```
 
@@ -114,6 +132,9 @@ copies a callback map or encrypted token queue across restart violates the test.
 `runScheduledRead` invokes the owner's actual scheduled direct-read entry point.
 It cannot emulate a read by incrementing counters or calling the fake directly.
 The owner constructs the provider URL and request from its encrypted connection.
+`runDirectRead` enters the same credential/status/fence guard without requiring
+the schedule to be enabled. Both return false when disabled and true only after
+a successful fake-provider read. Neither is a deployed owner API in this lane.
 
 `inspect()` reads actual stores and exposes safe observations:
 
@@ -126,7 +147,7 @@ The owner constructs the provider URL and request from its encrypted connection.
   owners: [{
     status, intentStatus, tokenGeneration, tokenCiphertextCount,
     connectionCommitCount, connectionReadbackCount,
-    scheduleEnabled, importedRecordCount, outcomeUnknown,
+    scheduleEnabled, readsEnabled, importedRecordCount, outcomeUnknown, fenceFingerprint,
     remoteRevocation, noContactProofVerified
   }, ...]
 }
@@ -173,6 +194,9 @@ owner's `/app/connect/quickbooks` for a trusted binding. No completion query or
 fragment is accepted. Provider consent navigation is simulated by fake Intuit;
 the launch response must still contain the exact client, fixed redirect, scope,
 state and authorization-code response type before the consent fixture runs.
+The wrong-cookie case retains the real cookie name and sealed-cookie shape,
+changes the authentication tag, and reaches `callback.cookie.binding.checked`
+after cookie parsing. It cannot pass by repeating the missing-cookie case.
 
 Launch uses a real top-level HTML form navigation in the eventual browser UI.
 The harness models its POST as exact `application/x-www-form-urlencoded` with
