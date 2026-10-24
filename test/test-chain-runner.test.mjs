@@ -5,6 +5,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import test from "node:test";
 
 import {
   RUNNER_TEST_COMMAND,
@@ -203,3 +204,14 @@ try {
 }
 
 console.log("test-chain runner: exact order, real child failures/signals, continuation, output, and short npm entry verified");
+
+for (const [label, command] of [
+  ["existing daily runner control", "node --test test/daily-refresh-run.test.mjs"],
+  ["daily diagnostic regression", "node --test test/daily-error-diag.test.mjs"],
+  ["daily loader regression", "node --test test/daily-load-errors.test.mjs"],
+]) {
+  test(`test chain registers ${label} exactly once in both lists`, () => {
+    assert.equal(POST_LAUNCHER_TEST_COMMANDS.filter(entry => entry === command).length, 1);
+    assert.equal(TEST_COMMANDS.filter(entry => entry === command).length, 1);
+  });
+}

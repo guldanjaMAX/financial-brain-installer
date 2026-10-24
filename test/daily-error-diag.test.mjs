@@ -147,6 +147,75 @@ test("daily diagnostics network wrapper retains the transport reason", async () 
   assert.equal(source.detail, transport.message);
 });
 
+test("daily diagnostics aggregate unknown then network retains the recognized stop", async () => {
+  const network = Object.assign(new Error("Connection reset while reading provider response."), { code: "ECONNRESET" });
+  const { source } = await observe(new Error("One source did not load.", {
+    cause: new AggregateError([new Error("Source stopped unexpectedly."), network], "Source legs failed."),
+  }));
+  assert.equal(source.issue_code, "NETWORK_UNREACHABLE");
+  assert.equal(source.reason_code, "network_unreachable");
+  assert.match(source.detail, /^2 source failures;/u);
+  assert.equal(source.detail.endsWith(network.message), true);
+});
+
+test("daily diagnostics aggregate unknown then lock retains the recognized stop", async () => {
+  for (const code of ["source_ingest_already_running", "brain_lifecycle_busy", "LOCK_HELD"]) {
+    const lock = Object.assign(new Error("The source lock is held by another refresh."), { code });
+    const { source } = await observe(new AggregateError([
+      new Error("Source stopped unexpectedly."), lock,
+    ], "Source legs failed."));
+    assert.equal(source.issue_code, "SCHEDULE_RUN_FAILED");
+    assert.equal(source.reason_code, "source_lock_held");
+    assert.match(source.detail, /^2 source failures;/u);
+    assert.equal(source.detail.endsWith(lock.message), true);
+  }
+});
+
+test("daily diagnostics aggregate priority is fixed regardless of leg order", async () => {
+  const ordered = [
+    [new DriveRemovalReviewRequired("A removal plan is waiting for approval."), "SAFETY_REVIEW_REQUIRED", "removal_review_required"],
+    [Object.assign(new Error("Source scope needs a safety review."), { code: "SAFETY_REVIEW_REQUIRED" }), "SAFETY_REVIEW_REQUIRED", "safety_review_required"],
+    [Object.assign(new Error("The source lock is held."), { code: "LOCK_HELD" }), "SCHEDULE_RUN_FAILED", "source_lock_held"],
+    [new TypeError("fetch failed"), "NETWORK_UNREACHABLE", "network_unreachable"],
+    [Object.assign(new Error("The provider request limit was reached."), { code: "RATE_LIMITED" }), "RATE_LIMITED", "source_execution_failed"],
+    [new Error("Source stopped unexpectedly."), "UNKNOWN", "source_execution_failed"],
+  ];
+  for (let index = 0; index < ordered.length - 1; index++) {
+    const [preferred, issueCode, reasonCode] = ordered[index];
+    const [other] = ordered[index + 1];
+    for (const errors of [[other, preferred], [preferred, other]]) {
+      const { source } = await observe(new AggregateError(errors, "Source legs failed."));
+      assert.equal(source.issue_code, issueCode);
+      assert.equal(source.reason_code, reasonCode);
+      assert.equal(source.detail.endsWith(preferred.message), true);
+    }
+  }
+});
+
+test("daily diagnostics aggregate equal-priority control retains the first detail", async () => {
+  for (const errors of [
+    [new TypeError("fetch failed"), new TypeError("network failure")],
+    [new Error("First source stopped unexpectedly."), new Error("Second source stopped unexpectedly.")],
+  ]) {
+    const { source } = await observe(new AggregateError(errors, "Source legs failed."));
+    assert.equal(source.detail.endsWith(errors[0].message), true);
+  }
+});
+
+test("daily diagnostics safe slash prose control survives in receipt and daily log", async () => {
+  for (const message of [
+    "The owner can retry and/or inspect the next result.",
+    "Read/write access needs review; the provider returned a success/failure result.",
+    "Review the provider response / retry later.",
+    "The owner can retry and/or read the troubleshooting.md guide.",
+  ]) {
+    const { source, failures, receiptText } = await observe(new Error(message));
+    assert.equal(source.detail, message);
+    assert.equal(JSON.parse(receiptText).sources[0].detail, message);
+    assert.equal(failures[0].detail, message);
+  }
+});
+
 const privateCases = [
   ["email", "owner+mail@fixture.invalid", "[REDACTED:email]"],
   ["query URL", "https://provider.invalid/mail?cursor=private-cursor&account=private-account", "[REDACTED:url]"],
@@ -155,8 +224,13 @@ const privateCases = [
   ["backslash Windows path", String.raw`C:\private\mail archive\message.txt`, "[REDACTED:path]"],
   ["POSIX path", "/private/mail archive/message.txt", "[REDACTED:path]"],
   ["relative path", "../mail archive/message.txt", "[REDACTED:path]"],
+  ["bare relative path", "records/mail archive/message.txt", "[REDACTED:path]"],
+  ["bare relative path with sentence punctuation", "records/mail archive/message.txt.", "[REDACTED:path]"],
+  ["bare relative path with dotted directory", "records/mail.archive private-folder-marker folder/message.txt", "[REDACTED:path]"],
+  ["bare relative backslash path", String.raw`records\mail archive\message.txt`, "[REDACTED:path]"],
   ["home path", "~/mail archive/message.txt", "[REDACTED:path]"],
   ["file URL", "file:///private/mail%20archive/message.txt", "[REDACTED:path]"],
+  ["file host URL", "file://host.invalid/share/mail%20archive/message.txt", "[REDACTED:path]"],
   ["quoted path with punctuation", String.raw`'C:\private\mail,archive\message.txt'`, "[REDACTED:path]"],
   ["double quoted path with apostrophe", `"/private/mail's archive/message.txt"`, "[REDACTED:path]"],
   ["credential", ["sk", "a".repeat(32)].join("-"), "[REDACTED:openai_legacy_key]"],
@@ -172,6 +246,8 @@ for (const [label, value, marker] of privateCases) {
       // Boolean assertions prevent synthetic private strings entering failure output.
       assert.equal(text.includes(value), false, `${label} must be removed`);
       assert.equal(text.includes("message.txt"), false, "path tail must be removed");
+      assert.equal(text.includes("mail.archive"), false, "dotted path directory must be removed");
+      assert.equal(text.includes("private-folder-marker"), false, "spaced path directory must be removed");
       assert.equal(text.includes("private-cursor"), false, "query tail must be removed");
       assert.equal(text.includes("short-secret"), false, "the entire credential must be removed");
       assert.equal(text.includes(marker), true, "the redaction marker must be retained");

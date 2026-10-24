@@ -1426,12 +1426,18 @@ Each failed source also gets one bounded record with its source label, mapped
 issue code, and a single-line detail capped at 200 characters. That detail is
 passed through the shared credential scanner and diagnostic redaction. Explicit
 token assignments, authorization values, emails, HTTP URLs (including queries),
-and absolute or explicitly relative file paths are removed before bounding.
+and file URLs, absolute paths, explicitly relative paths, and bare relative
+file paths ending in a filename without spaces and with an extension are
+removed before bounding. Intermediate directories may contain spaces. Ordinary
+slash prose such as `and/or` and `read/write` stays readable.
 Scanner findings that survive replacement fail closed to fixed text.
 The load report preserves original leg errors in a non-enumerable in-memory
 cause, so daily diagnostics can recover a typed stop instead of the aggregate
 "did not load" summary. Multiple failures retain a count and one bounded detail,
-giving a safety review priority. No raw error objects enter a receipt or log.
+using this priority: removal approval, other safety review, held lock, network
+failure, other recognized issue, then unknown. Approval and safety decisions
+come before retryable contention or transport failures. Equal priorities keep
+source order. No raw error objects enter a receipt or log.
 Removal approval uses `SAFETY_REVIEW_REQUIRED` with `removal_review_required`;
 other safety reviews use `safety_review_required`. A held source lock uses the
 existing `SCHEDULE_RUN_FAILED` code with `source_lock_held`, and network failures

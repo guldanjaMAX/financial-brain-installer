@@ -67,6 +67,23 @@ function dailyIssueCode(error) {
   return "UNKNOWN";
 }
 
+function dailyErrorPriority(error) {
+  // Approval and safety decisions come before retryable contention/transport:
+  // removal approval > safety review > held lock > network > other recognized
+  // issue > UNKNOWN. Equal priorities retain source order for a stable detail.
+  if (isRemovalReview(error)) return 0;
+  const code = dailyIssueCode(error);
+  if (code === "SAFETY_REVIEW_REQUIRED") return 1;
+  if (isSourceLockHeld(error)) return 2;
+  if (code === "NETWORK_UNREACHABLE") return 3;
+  return code === "UNKNOWN" ? 5 : 4;
+}
+
+function preferredDailyError(errors) {
+  return errors.reduce((preferred, candidate) =>
+    dailyErrorPriority(candidate) < dailyErrorPriority(preferred) ? candidate : preferred);
+}
+
 function dailyErrorContext(error) {
   const seen = new Set();
   let failures = 1;
@@ -76,7 +93,7 @@ function dailyErrorContext(error) {
     seen.add(error);
     if (error instanceof AggregateError && error.errors.length) {
       failures += error.errors.length - 1;
-      error = error.errors.find(entry => dailyIssueCode(entry) === "SAFETY_REVIEW_REQUIRED") || error.errors[0];
+      error = preferredDailyError(error.errors);
     } else if (dailyIssueCode(error) === "UNKNOWN" && error.cause && !seen.has(error.cause)) {
       error = error.cause;
     } else break;
@@ -135,9 +152,13 @@ function safeDiagnosticText(value, maxLength = 200) {
   for (const [pattern, replacement] of [
     // A quoted path may itself contain the punctuation used to bound prose.
     [/(["'`])(?:file:\/\/|[A-Za-z]:[\\/]|\\\\|\/|\.{1,2}[\\/]|~[\\/])[^\r\n]*?\1/gu, "[REDACTED:path]"],
-    [/file:\/\/\/[^,;\r\n)\]}'"`]*/giu, "[REDACTED:path]"],
+    [/file:\/\/[^,;\r\n)\]}'"`]*/giu, "[REDACTED:path]"],
     [/(^|[\s=("'`])(?:[A-Za-z]:[\\/]|\\\\)[^,;\r\n)\]}'"`]*/gu, "$1[REDACTED:path]"],
-    [/(^|[\s=("'`])(?:\/(?!\/)|\.{1,2}[\\/]|~[\\/])[^,;\r\n)\]}'"`]*/gu, "$1[REDACTED:path]"],
+    [/(^|[\s=("'`])(?:\/(?![\/\s])|\.{1,2}[\\/]|~[\\/])[^,;\r\n)\]}'"`]*/gu, "$1[REDACTED:path]"],
+    // A bare path needs a final slash-adjacent filename and extension. Allow
+    // spaces in intermediate directories, but not in that filename: and/or
+    // followed by prose about a dotted filename is not itself a file path.
+    [/(^|[\s=("'`])[\p{L}\p{N}_.-]+(?:[\\/][^\\/,;\r\n)\]}'"`]+)*[\\/][\p{L}\p{N}_.-]+\.[\p{L}\p{N}]{1,16}(?=$|[\s,;)\]}'"`]|[.!?](?=$|[\s,;)\]}'"`]))/gu, "$1[REDACTED:path]"],
   ]) {
     detail = transformDiagnostic(detail, (text) => text.replace(pattern, replacement));
     if (detail === null) return failClosed();
