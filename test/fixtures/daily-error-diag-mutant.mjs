@@ -8,22 +8,26 @@ const mutants = {
   raw_detail: ["operations/daily-refresh-run.mjs",
     "function safeDiagnosticText(value, maxLength = 200) {",
     "function safeDiagnosticText(value, maxLength = 200) { return String(value).slice(0, maxLength);"],
+  first_aggregate_entry: ["operations/daily-refresh-run.mjs",
+    "error = preferredDailyError(error.errors);", "error = error.errors[0];"],
+  unregistered_daily_suites: ["scripts/run-test-chain.mjs",
+    '  "node --test test/daily-error-diag.test.mjs",\n  "node --test test/daily-load-errors.test.mjs",\n', "", 2],
 };
 
 const id = process.env.DAILY_ERROR_DIAG_MUTANT;
 if (id) {
   const mutation = mutants[id];
   if (!mutation) throw new Error("unknown daily diagnostic mutant");
-  const [file, target, replacement] = mutation;
+  const [file, target, replacement, expectedMatches = 1] = mutation;
   const targetUrl = new URL(`../../${file}`, import.meta.url).href;
   registerHooks({
     load(url, context, nextLoad) {
       const loaded = nextLoad(url, context);
       if (url !== targetUrl) return loaded;
-      const source = String(loaded.source);
-      if (source.split(target).length !== 2) throw new Error("daily diagnostic mutant target is not unique");
+      const source = String(loaded.source).replace(/\r\n/gu, "\n");
+      if (source.split(target).length !== expectedMatches + 1) throw new Error("daily diagnostic mutant target count changed");
       process.stderr.write(`DAILY_DIAG_MUTANT_REACHED:${id}\n`);
-      return { ...loaded, source: source.replace(target, replacement) };
+      return { ...loaded, source: source.replaceAll(target, replacement) };
     },
   });
 }
