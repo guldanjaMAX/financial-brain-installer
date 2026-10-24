@@ -103,4 +103,3 @@ export async function fixture(run, { scannerEnabled = true } = {}) {
     rmSync(root, { recursive: true, force: true });
   }
 }
-
