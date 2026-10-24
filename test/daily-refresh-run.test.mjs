@@ -455,6 +455,8 @@ test("a restarted scheduled runner honors an update recovery-required receipt", 
   let transactionReads = 0;
   const receipts = [];
   const result = await runDailyRefreshCli(manifestPath, {
+    home: directory,
+    platform: "darwin",
     brainModule: {},
     buildPlan: async () => ({ ...plan, manifest_path: manifestPath }),
     readUpdateTransaction: () => {
@@ -484,6 +486,8 @@ test("a recovery fence created while the runner acquires its lease still defers 
   let releases = 0;
   const receipts = [];
   const result = await runDailyRefreshCli(manifestPath, {
+    home: directory,
+    platform: "darwin",
     brainModule: {},
     buildPlan: async () => ({ ...plan, manifest_path: manifestPath }),
     readUpdateTransaction: () => {
@@ -543,6 +547,7 @@ test("the runner accepts only Node-path drift and reports that the daily schedul
   let sourceRuns = 0;
   let freshnessReads = 0;
   const result = await runDailyRefreshCli(manifestPath, {
+    home: directory,
     brainModule: {},
     buildPlan: async () => currentPlan,
     expectedDefinitionHash: registered.definition_hash,
@@ -577,6 +582,7 @@ test("the runner accepts only Node-path drift and reports that the daily schedul
   const changedPlan = { ...currentPlan, source_plan_hash: "sha256:changed-sources" };
   let driftRuns = 0;
   await assert.rejects(() => runDailyRefreshCli(manifestPath, {
+    home: directory,
     brainModule: {},
     buildPlan: async () => changedPlan,
     expectedDefinitionHash: registered.definition_hash,
@@ -621,6 +627,7 @@ test("the runner names a missing registered Node binary before any source runs",
   let reads = 0;
   let runs = 0;
   await assert.rejects(() => runDailyRefreshCli(manifestPath, {
+    home: directory,
     brainModule: {},
     buildPlan: async () => currentPlan,
     expectedDefinitionHash: registered.definition_hash,
@@ -674,6 +681,7 @@ test("the runner refuses a present non-executable registered Node before any sou
   let reads = 0;
   let runs = 0;
   await assert.rejects(() => runDailyRefreshCli(manifestPath, {
+    home: directory,
     brainModule: {},
     buildPlan: async () => currentPlan,
     expectedDefinitionHash: registered.definition_hash,
@@ -794,11 +802,11 @@ test("daily logs rotate at a fixed bound, stay private, and refuse links or fail
     if (process.platform !== "win32") assert.equal(fs.statSync(path).mode & 0o777, 0o600);
   }
   if (process.platform !== "win32") assert.equal(fs.statSync(paths.directory).mode & 0o777, 0o700);
-  assert.equal(readDailyObservation(identity, { home }).record.result, "complete");
+  assert.equal(readDailyObservation(identity, { home, platform: "darwin" }).record.result, "complete");
   fs.renameSync(paths.log_path, join(home, "retained.log"));
   fs.linkSync(join(home, "retained.log"), paths.log_path);
-  assert.throws(() => appendDailyObservation(identity, row, { home }), /regular unlinked/);
-  assert.equal(readDailyObservation(identity, { home }).unreadable, true);
+  assert.throws(() => appendDailyObservation(identity, row, { home, platform: "darwin" }), /regular unlinked/);
+  assert.equal(readDailyObservation(identity, { home, platform: "darwin" }).unreadable, true);
   let aclCalls = 0;
   const windowsHome = mkdtempSync(join(tmpdir(), "daily-log-acl-"));
   const options = { home: windowsHome, platform: "win32", username: "fixture", environment: { SystemRoot: String.raw`C:\Windows` },
@@ -823,7 +831,7 @@ test("daily CLI records a planner authorization failure before source execution"
   await assert.rejects(runDailyRefreshCli(manifestPath, options), /authorization denied/);
   assert.equal(planned, 1);
   const identity = dailyRefreshIdentity(manifest, options.principal);
-  assert.equal(readDailyObservation(identity, { home }).record?.result, "failed");
+  assert.equal(readDailyObservation(identity, { home, platform: "darwin" }).record?.result, "failed");
   let reads = 0;
   let runs = 0;
   await runDailyRefreshCli(manifestPath, { ...options,
@@ -834,7 +842,7 @@ test("daily CLI records a planner authorization failure before source execution"
     runSource: async () => { runs++; }, writeReceipt: () => {},
   });
   assert.equal(runs, 1, "the green journal control executes verified work");
-  assert.equal(readDailyObservation(identity, { home }).record.result, "complete");
+  assert.equal(readDailyObservation(identity, { home, platform: "darwin" }).record.result, "complete");
 });
 
 test("daily log append refuses a live writer and recovers a proven dead writer", async () => {
@@ -909,6 +917,7 @@ test("daily CLI carries partial loader permission and durable refusal evidence t
   let reads = 0;
   const result = await runDailyRefreshCli(manifestPath, {
     home: directory,
+    platform: "darwin",
     silent: true,
     buildPlan: async () => ({ ...plan, manifest_path: manifestPath }),
     acquireLock: () => ({ assertOwned() {}, release() {} }),
@@ -934,12 +943,12 @@ test("daily CLI carries partial loader permission and durable refusal evidence t
   assert.equal(result.status, "partial");
   assert.equal(result.sources[0].docs_refused, 228);
   assert.equal(result.sources[0].docs_excluded, 2);
-  const observation = readDailyObservation(plan.identity, { home: directory });
+  const observation = readDailyObservation(plan.identity, { home: directory, platform: "darwin" });
   assert.equal(observation.record.result, "partial", "the successful partial run survives journal readback");
   assert.equal(observation.record.error, null, "omissions do not become a process failure");
   for (const exitCode of [0, 1]) {
     const status = dailyObservationStatus(plan, { enabled: false },
-      { known: true, running: false, exit_code: exitCode }, true, { home: directory });
+      { known: true, running: false, exit_code: exitCode }, true, { home: directory, platform: "darwin" });
     assert.equal(status.last_result, exitCode === 0 ? "partial" : "failed",
       "native failure still overrides a successful partial receipt");
   }

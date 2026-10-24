@@ -28,11 +28,22 @@ function validTimestamp(value) {
     : null;
 }
 
+function isRemovalReview(error) {
+  return error instanceof DriveRemovalReviewRequired || error?.name === "DriveRemovalReviewRequired" ||
+    ["removal_approval_required", "removal_review_required"].includes(String(error?.code || "").toLowerCase());
+}
+
+function isSourceLockHeld(error) {
+  return ["SOURCE_INGEST_ALREADY_RUNNING", "BRAIN_LIFECYCLE_BUSY", "LOCK_HELD"]
+    .includes(String(error?.code || "").toUpperCase());
+}
+
 function dailyIssueCode(error) {
-  if (error instanceof DriveRemovalReviewRequired) return "SAFETY_REVIEW_REQUIRED";
+  if (isRemovalReview(error)) return "SAFETY_REVIEW_REQUIRED";
   const declaredCode = typeof error?.supportCode === "string" ? error.supportCode : error?.code;
   const typedCode = typeof declaredCode === "string" ? declaredCode.trim().toUpperCase() : "";
   if (SUPPORT_ERROR_CODES.includes(typedCode)) return typedCode;
+  if (isSourceLockHeld(error)) return "SCHEDULE_RUN_FAILED";
   const message = String(error?.message || "");
   if (error?.credentialSource !== "wrangler-session" &&
       /\b9109\b/u.test(message) && /(?:invalid access token|failed \((?:401|403)\))/iu.test(message)) {
@@ -40,7 +51,8 @@ function dailyIssueCode(error) {
   }
   if (/PDF.*tim(?:e|ed) out/iu.test(message)) return "PDF_PROCESS_TIMEOUT";
   if (/PDF.*process/iu.test(message)) return "PDF_PROCESS_FAILED";
-  if (/timed out|ETIMEDOUT|ECONNRESET|EAI_AGAIN|ENOTFOUND/iu.test(`${declaredCode} ${message}`)) return "NETWORK_UNREACHABLE";
+  if (/fetch failed|network (?:error|failure)|timed out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EPIPE|EAI_AGAIN|ENOTFOUND|ENETUNREACH|EHOSTUNREACH|UND_ERR_(?:SOCKET|CONNECT_TIMEOUT|HEADERS_TIMEOUT|BODY_TIMEOUT)/iu
+    .test(`${declaredCode} ${message}`)) return "NETWORK_UNREACHABLE";
   if (/rate.?limit|\b429\b/iu.test(message)) return "RATE_LIMITED";
   if (/\b401\b|expired.*(?:auth|token)|reauthori[sz]/iu.test(message)) return "AUTH_EXPIRED";
   if (/\b403\b|forbidden|permission denied|not permitted/iu.test(message)) return "REMOTE_PERMISSION_DENIED";
@@ -55,12 +67,38 @@ function dailyIssueCode(error) {
   return "UNKNOWN";
 }
 
+function dailyErrorContext(error) {
+  const seen = new Set();
+  let failures = 1;
+  // Load preserves its report error while carrying the actual leg failures in
+  // cause. Inspect only a bounded chain in memory, never persist that object.
+  while (error && !seen.has(error) && seen.size < 8) {
+    seen.add(error);
+    if (error instanceof AggregateError && error.errors.length) {
+      failures += error.errors.length - 1;
+      error = error.errors.find(entry => dailyIssueCode(entry) === "SAFETY_REVIEW_REQUIRED") || error.errors[0];
+    } else if (dailyIssueCode(error) === "UNKNOWN" && error.cause && !seen.has(error.cause)) {
+      error = error.cause;
+    } else break;
+  }
+  return { error, failures };
+}
+
 const FIXED_SENSITIVE_DIAGNOSTIC = "the source refresh failed; sensitive diagnostic text was redacted";
 
 function redactAndScanDiagnostic(value) {
   // Every transform comes back through both layers. A later canonicalization
   // must not create a scanner-visible credential after the earlier pass ran.
-  const sanitized = sanitizeSensitiveLinks(String(value));
+  // Diagnostics need broader privacy than the ingest credential scanner:
+  // email identities and ordinary query URLs are private even without a key.
+  const sanitized = sanitizeSensitiveLinks(String(value))
+    .replace(/\bhttps?:\/\/[^\s<>"'`]+/giu, "[REDACTED:url]")
+    .replace(/[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9-]+(?:\.[A-Z0-9-]+)+/giu, "[REDACTED:email]")
+    // Explicit secret positions are private even when their values are too
+    // short or too low-entropy for the shared document scanner to refuse.
+    .replace(/\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=\-]+/giu, "[REDACTED:credential]")
+    .replace(/\b(?:authorization|(?:access|refresh|id)[_-]?token|(?:api|admin)[_-]?key|token|password|secret)["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/giu,
+      "[REDACTED:credential]");
   const redacted = redactAll(sanitized);
   return scan(redacted).shouldFlag ? null : redacted;
 }
@@ -70,23 +108,18 @@ function transformDiagnostic(value, transform) {
 }
 
 function safeDiagnosticText(value, maxLength = 200) {
-  let detail = redactAndScanDiagnostic(String(value || "the source refresh failed"));
   const failClosed = () => FIXED_SENSITIVE_DIAGNOSTIC.slice(0, maxLength);
-  if (detail === null) return failClosed();
-
-  // Format and bidi controls can split one credential into scanner-clean
-  // fragments. Remove them before any text is eligible for persistence.
-  detail = transformDiagnostic(detail, (text) => text.replace(
+  // Canonicalize before the first redaction: replacing only the first half of
+  // a split credential would leave its remaining bytes without their context.
+  const beforeLineJoin = String(value || "the source refresh failed").replace(
     /[\p{Cf}\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu,
     "",
-  ));
-  if (detail === null) return failClosed();
-
-  const beforeLineJoin = detail;
-  detail = transformDiagnostic(detail, (text) => text.replace(
+  );
+  const canonical = beforeLineJoin.replace(
     /(?<=[A-Za-z0-9_+./=\-])[ \t]*[\r\n\u2028\u2029]+[ \t]*(?=[A-Za-z0-9_+./=\-])/gu,
     "",
-  ));
+  );
+  let detail = redactAndScanDiagnostic(canonical);
   if (detail === null) return failClosed();
 
   // Also scan the aggressive join view. It is deliberately not persisted
@@ -94,17 +127,17 @@ function safeDiagnosticText(value, maxLength = 200) {
   // only in that view is ambiguous, so the fixed text is safer than attempting
   // to map its span back across line boundaries.
   const joinedView = beforeLineJoin.replace(/[\r\n\u2028\u2029]+[ \t]*/gu, "");
-  const joinedSanitized = sanitizeSensitiveLinks(joinedView);
-  const joinedRedacted = redactAll(joinedSanitized);
-  if (joinedRedacted !== joinedSanitized || scan(joinedRedacted).shouldFlag) return failClosed();
+  if (joinedView !== canonical && redactAndScanDiagnostic(joinedView) !== joinedView) return failClosed();
 
   // Diagnostic paths have no schema of their own. Bound unquoted values by a
   // line or punctuation delimiter, never by whitespace, so a path containing
   // spaces cannot leave its tail behind in the journal.
   for (const [pattern, replacement] of [
+    // A quoted path may itself contain the punctuation used to bound prose.
+    [/(["'`])(?:file:\/\/|[A-Za-z]:[\\/]|\\\\|\/|\.{1,2}[\\/]|~[\\/])[^\r\n]*?\1/gu, "[REDACTED:path]"],
     [/file:\/\/\/[^,;\r\n)\]}'"`]*/giu, "[REDACTED:path]"],
-    [/(^|[\s("'`])(?:[A-Za-z]:\\|\\\\)[^,;\r\n)\]}'"`]*/gu, "$1[REDACTED:path]"],
-    [/(^|[\s("'`])\/(?!\/)[^,;\r\n)\]}'"`]*/gu, "$1[REDACTED:path]"],
+    [/(^|[\s=("'`])(?:[A-Za-z]:[\\/]|\\\\)[^,;\r\n)\]}'"`]*/gu, "$1[REDACTED:path]"],
+    [/(^|[\s=("'`])(?:\/(?!\/)|\.{1,2}[\\/]|~[\\/])[^,;\r\n)\]}'"`]*/gu, "$1[REDACTED:path]"],
   ]) {
     detail = transformDiagnostic(detail, (text) => text.replace(pattern, replacement));
     if (detail === null) return failClosed();
@@ -414,10 +447,22 @@ export async function runDailyRefresh({
       } catch (error) {
         const sourceName = source.source_names?.[0] || source.key;
         const safeSource = safeDiagnosticText(sourceName, 128);
-        const issueCode = dailyIssueCode(error);
-        const detail = safeDiagnosticText(error?.message || error);
-        const removalReview = issueCode === "SAFETY_REVIEW_REQUIRED"
-          ? safeRemovalReview(error, safeSource) : null;
+        const context = dailyErrorContext(error);
+        const issueCode = dailyIssueCode(context.error);
+        const detail = safeDiagnosticText((context.failures > 1 ? `${context.failures} source failures; first review or failure: ` : "") +
+          String(context.error?.message || context.error));
+        const removalReview = isRemovalReview(context.error)
+          ? safeRemovalReview(context.error, safeSource) : null;
+        const stop = removalReview ? { code: "removal_review_required", reason: removalReview.reason }
+          : issueCode === "SAFETY_REVIEW_REQUIRED" ? {
+            code: "safety_review_required", reason: "the source refresh stopped for a safety review",
+          } : isSourceLockHeld(context.error) ? {
+            code: "source_lock_held", reason: "another operation holds the source lock; wait for it to finish before retrying",
+          } : issueCode === "NETWORK_UNREACHABLE" ? {
+            code: "network_unreachable", reason: "a network failure stopped the source refresh; check the connection before retrying",
+          } : {
+            code: "source_execution_failed", reason: "the source refresh failed; retry this source or inspect its private local diagnostics",
+          };
         if (removalReview) attentionEntries.push(removalReview.attention);
         const receipt = Object.freeze({
           schema_version: 1,
@@ -430,8 +475,8 @@ export async function runDailyRefresh({
           freshness_advanced: false,
           issue_code: issueCode,
           detail,
-          reason_code: removalReview ? "removal_review_required" : "source_execution_failed",
-          reason: removalReview?.reason || "the source refresh failed; retry this source or inspect its private local diagnostics",
+          reason_code: stop.code,
+          reason: stop.reason,
         });
         sourceResults.push(receipt);
         await writeReceipt(receipt);

@@ -1424,9 +1424,21 @@ operation stop logging and execution instead of accepting an unprotected log.
 Run entries contain only timestamps, a result, and a fixed diagnostic sentence.
 Each failed source also gets one bounded record with its source label, mapped
 issue code, and a single-line detail capped at 200 characters. That detail is
-passed through the shared credential scanner and redaction, absolute paths are
-removed, and scanner findings that survive replacement fail closed to fixed
-text. Removal-review records may also carry aggregate counts and the exact plan
+passed through the shared credential scanner and diagnostic redaction. Explicit
+token assignments, authorization values, emails, HTTP URLs (including queries),
+and absolute or explicitly relative file paths are removed before bounding.
+Scanner findings that survive replacement fail closed to fixed text.
+The load report preserves original leg errors in a non-enumerable in-memory
+cause, so daily diagnostics can recover a typed stop instead of the aggregate
+"did not load" summary. Multiple failures retain a count and one bounded detail,
+giving a safety review priority. No raw error objects enter a receipt or log.
+Removal approval uses `SAFETY_REVIEW_REQUIRED` with `removal_review_required`;
+other safety reviews use `safety_review_required`. A held source lock uses the
+existing `SCHEDULE_RUN_FAILED` code with `source_lock_held`, and network failures
+use `NETWORK_UNREACHABLE` with `network_unreachable`. These local reason codes
+do not add a support-journal category. Each stop remains failed and cannot
+advance freshness; later eligible sources still run.
+Removal-review records may also carry aggregate counts and the exact plan
 fingerprint in the private receipt, but never document identities, raw
 stdout/stderr, source content, credentials, or an instruction to apply removal.
 
