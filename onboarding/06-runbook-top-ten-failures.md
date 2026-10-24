@@ -607,7 +607,7 @@ refresh, the owner approves the official browser prompt. The bounded hidden
 token path appears only when the released CLI offers recovery and the owner
 chooses it.
 
-For every migration that no longer matches, it prints when it was applied, both checksums, the current file's size in lines and bytes, and whether the difference is only line endings. That last line is a proof rather than a guess: it converts the current file to LF and to CRLF and checks each against the recorded checksum. If neither reproduces it, it says `not confirmable as a pure line-ending change` and tells you to review the file by hand, because the bytes that originally ran were never kept, only their checksum was.
+For every migration that no longer matches, it prints the recorded applied time, both checksums, the current file's size in lines and bytes, and whether the difference is only line endings. Older ledger rows may show `applied at: unknown` because that time was not recorded. It never claims the repair applied a migration. That last line is a proof rather than a guess: it converts the current file to LF and to CRLF and checks each against the recorded checksum. If neither reproduces it, it says `not confirmable as a pure line-ending change` and tells you to review the file by hand, because the bytes that originally ran were never kept, only their checksum was.
 
 When the preview is right, confirm it:
 
@@ -618,9 +618,13 @@ node brain.mjs doctor <manifest> --repair-checksum --yes
 That records the current file's checksum for each drifted migration and does nothing else. No migration SQL runs. Then confirm normal work is unblocked:
 
 ```
-node brain.mjs status <manifest>
-node brain.mjs migrate <manifest>
+brain status <manifest>
+brain update <manifest>
 ```
+
+`brain update` is the supported repair path. It validates the complete migration
+ledger, prints the computed pending range, and coordinates the paused Worker
+before it changes D1. Do not run the internal migration step directly.
 
 **`--repair` will not fix this, and it is the wrong reach.** It replays the same update path, which runs the same check and stops in the same place. `--rollback` does not fit either, because there is no bad change to restore away from.
 
@@ -755,6 +759,14 @@ A bad import being one command instead of a support call is the reason you can a
 ---
 
 ## Things that look like failures and are not
+
+### Claude answer setup support codes
+
+- `ANTHROPIC_KEY_NOT_ACCEPTED`: Anthropic did not accept this key. In the Claude Console (API keys), create a new key named Financial Brain, click Copy, and rerun the same command. You can delete the earlier key there. Nothing was changed.
+- `ANTHROPIC_ACCOUNT_NEEDS_CREDIT`: Your Anthropic account needs credit before it can answer. Add credit in the Claude Console (Billing), then click Copy again in the key window, or create a new key, and rerun the same command. Nothing was changed.
+- `ANTHROPIC_CHECK_FAILED`: Anthropic refused the test message for a reason this installer does not recognize. Nothing was changed. Support code: ANTHROPIC_CHECK_FAILED.
+- `ANTHROPIC_ROLLBACK_INCOMPLETE`: The Claude setup did not finish every rollback step. Leave the saved connection and half-run journal unchanged. Ask the person who set up your Brain for help.
+- `ANSWER_MODEL_NOT_REVIEWED`: retrieval.<field> is set to <id>, which this installer has not reviewed. Nothing was changed. For the recommended setup run brain connect anthropic <manifest> --from-clipboard, or for the built-in model run brain disconnect anthropic <manifest>.
 
 ### Cleanup says `review required`
 

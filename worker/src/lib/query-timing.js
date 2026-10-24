@@ -20,6 +20,7 @@ const MODELS = new Set([
   '@cf/google/gemma-4-26b-a4b-it',
   'claude-sonnet-4-5', 'claude-sonnet-4-5-20250929',
   'claude-haiku-4-5', 'claude-haiku-4-5-20251001',
+  'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5',
 ]);
 const MAX_MS = 86_400_000;
 const MAX_COUNT = 65_535;

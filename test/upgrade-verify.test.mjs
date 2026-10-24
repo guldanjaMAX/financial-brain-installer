@@ -1498,6 +1498,10 @@ const drainResponse = (body, status) => new Response(JSON.stringify(body), {
           if (/^SELECT \* FROM install_state/i.test(sql)) {
             return { results: [{ client_slug: "fixture", product_version: "0.1.9" }] };
           }
+          // The migration-ledger read happens before the bookmark and is a read, not a mutation.
+          if (/^SELECT version, checksum, name, applied_at FROM schema_migrations\b/i.test(sql)) {
+            return { results: [] };
+          }
           mutations.push(`d1:${sql.slice(0, 12)}`);
           return { results: [] };
         },

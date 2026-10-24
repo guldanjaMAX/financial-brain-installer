@@ -34,6 +34,7 @@
  */
 
 import { fetchBrainWithAdminKey } from "./components/brain-http.mjs";
+import { answerSetupOf, resolvedAnswerModels } from "./operations/answer-setup.mjs";
 import { safeAnswerErrorText } from "./worker/src/lib/answer-render.js";
 
 const PASS = "pass";
@@ -1111,6 +1112,30 @@ export class Acceptance {
       // Worker ran the reviewed answer path, and must never turn acceptance
       // green merely because `answer` is truthy.
       const diagnostic = answerUnavailableDiagnostic(think.json);
+      const configuredAnswer = answerSetupOf(this.m) !== "built-in";
+      const expectedAnswerModel = resolvedAnswerModels(this.m).answer_model;
+      const answerPresent = typeof think.json?.answer === "string" && think.json.answer.trim().length > 0;
+      if (configuredAnswer && diagnostic.stage !== "response_contract") {
+        this.record(
+          t,
+          "configured answer model returned an answer",
+          answerPresent ? PASS : FAIL,
+          answerPresent
+            ? `${expectedAnswerModel} returned answer text`
+            : `expected ${expectedAnswerModel}, but no answer text was returned`,
+        );
+        if (answerPresent) {
+          const observedModel = typeof think.json?.model === "string" ? think.json.model : "none";
+          this.record(
+            t,
+            "configured answer model matches",
+            observedModel === expectedAnswerModel ? PASS : FAIL,
+            observedModel === expectedAnswerModel
+              ? `received the configured model ${expectedAnswerModel}`
+              : `expected ${expectedAnswerModel}; received ${observedModel}`,
+          );
+        }
+      }
       if (diagnostic.stage === "response_contract") {
         this.record(t, "think response contract", FAIL, diagnostic.detail);
       } else if (think.json?.answer) {
@@ -1136,12 +1161,14 @@ export class Acceptance {
         // A complete null-answer response proves the endpoint degraded rather
         // than crashed. Its reviewed fields identify the stage without
         // exposing model- or provider-generated private text.
-        this.record(
-          t,
-          "think degrades cleanly",
-          PASS,
-          `no answer; stage ${diagnostic.stage}: ${diagnostic.detail}`
-        );
+        if (!configuredAnswer) {
+          this.record(
+            t,
+            "think degrades cleanly",
+            PASS,
+            `no answer; stage ${diagnostic.stage}: ${diagnostic.detail}`
+          );
+        }
         this.record(
           t,
           `answer unavailable at ${diagnostic.stage}`,

@@ -11,6 +11,14 @@ import dgram from "node:dgram";
 import { writeSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 
+const INSTALLED = Symbol.for("brain.test.cli-side-effect-tripwire.installed");
+Object.defineProperty(globalThis, INSTALLED, {
+  configurable: false,
+  enumerable: false,
+  value: true,
+  writable: false,
+});
+
 function blocked(boundary) {
   // Never include command arguments, hostnames, paths, or credential values.
   writeSync(2, `TEST_SIDE_EFFECT_BLOCKED:${boundary}\n`);

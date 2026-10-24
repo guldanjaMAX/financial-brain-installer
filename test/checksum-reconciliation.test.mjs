@@ -70,7 +70,7 @@ function fakeDatabase(seedRows = []) {
   const d1Query = async (acctId, dbId, sql, params = []) => {
     const text = String(sql).trim();
     callLog.push({ sql: text, params });
-    if (text === "SELECT version, checksum, name FROM schema_migrations") {
+    if (text === "SELECT version, checksum, name, applied_at FROM schema_migrations ORDER BY version") {
       return { results: [...rows.values()] };
     }
     if (text === "UPDATE schema_migrations SET checksum = ? WHERE version = ?") {

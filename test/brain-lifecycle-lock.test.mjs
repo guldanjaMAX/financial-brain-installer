@@ -8,6 +8,7 @@ import {
   BrainLifecycleLockError,
   acquireBrainLifecycleLock,
   clearBrainRecoveryFence,
+  processStartIdentity,
   readBrainRecoveryFence,
   withBrainLifecycleLock,
   writeBrainRecoveryFence,
@@ -75,6 +76,110 @@ test("manifest lifecycle lock excludes update, load, and scheduled refresh", asy
   assert.equal(ran, 1, "green control acquires after release");
 });
 
+test("update lock contention names the holder, start time, and retry action", () => {
+  const { home, manifestPath, machineLockRoot } = fixture();
+  const createdAt = new Date("2026-10-23T12:34:56.000Z");
+  const first = acquireBrainLifecycleLock({
+    manifestPath,
+    home,
+    machineLockRoot,
+    operation: "ingest",
+    now: () => createdAt,
+    processInstance: () => "fixture-process-instance",
+  });
+  let contentionReached = 0;
+  assert.throws(
+    () => acquireBrainLifecycleLock({
+      manifestPath,
+      home,
+      machineLockRoot,
+      operation: "update",
+      retryCommand: "the update command",
+      now: () => createdAt,
+      isOwnerAlive: () => true,
+      processInstance: () => "fixture-process-instance",
+    }),
+    (error) => {
+      contentionReached += 1;
+      return error?.code === "brain_lifecycle_busy" &&
+        /lock is held by ingest since 2026-10-23T12:34:56\.000Z/iu.test(error.message) &&
+        /run the update command again/iu.test(error.message);
+    },
+  );
+  assert.equal(contentionReached, 1, "the actionable contention decision point was reached");
+  first.release();
+});
+
+test("a confirmed dead lock is recovered only after its stale boundary", () => {
+  const { home, manifestPath, machineLockRoot } = fixture();
+  const first = acquireBrainLifecycleLock({
+    manifestPath,
+    home,
+    machineLockRoot,
+    operation: "update",
+    now: () => new Date("2026-10-23T12:34:56.000Z"),
+    processInstance: () => "dead-process-instance",
+  });
+  const ownerPath = join(first.path, readdirSync(first.path)[0]);
+  const stale = new Date("2026-10-23T12:34:56.000Z");
+  utimesSync(ownerPath, stale, stale);
+  let livenessChecks = 0;
+  const recovered = acquireBrainLifecycleLock({
+    manifestPath,
+    home,
+    machineLockRoot,
+    operation: "update",
+    staleMs: 60_000,
+    now: () => new Date("2026-10-23T12:36:00.000Z"),
+    isOwnerAlive: () => { livenessChecks += 1; return false; },
+    processInstance: () => null,
+  });
+  assert.ok(livenessChecks >= 2, "dead ownership was confirmed again before recovery");
+  assert.equal(recovered.assertOwned(), true);
+  assert.equal(first.release(), false, "the dead owner's nonce cannot release the recovered lock");
+  recovered.release();
+});
+
+test("Windows process identity uses the native process start time without PATH or inherited secrets", () => {
+  let invocation = null;
+  const identity = processStartIdentity(4242, {
+    platform: "win32",
+    environment: {
+      SystemRoot: "C:\\Windows",
+      PATH: "C:\\untrusted",
+      ANTHROPIC_API_KEY: "must-not-inherit",
+    },
+    run: (command, args, options) => {
+      invocation = { command, args, options };
+      return { status: 0, stdout: "638968484960000000\r\n", stderr: "" };
+    },
+  });
+  assert.equal(identity, "win32:638968484960000000");
+  assert.match(invocation.command, /\\Windows\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe$/iu);
+  assert.ok(invocation.args.some((arg) => /Get-Process/iu.test(arg)));
+  assert.equal(Object.hasOwn(invocation.options.env, "PATH"), false);
+  assert.equal(Object.hasOwn(invocation.options.env, "ANTHROPIC_API_KEY"), false);
+});
+
+test("POSIX process identity preserves one native ps start token without inherited environment", () => {
+  const started = "Fri Oct 23 12:00:00 2026";
+  for (const platform of ["darwin", "linux"]) {
+    let invocation = null;
+    const identity = processStartIdentity(4242, {
+      platform,
+      environment: { PATH: "/untrusted", ANTHROPIC_API_KEY: "must-not-inherit" },
+      run: (command, args, options) => {
+        invocation = { command, args, options };
+        return { status: 0, stdout: `${started}\n`, stderr: "" };
+      },
+    });
+    assert.equal(identity, `posix:${Date.parse(started)}`);
+    assert.equal(invocation.command, "/bin/ps");
+    assert.deepEqual(invocation.args, ["-o", "lstart=", "-p", "4242"]);
+    assert.deepEqual(invocation.options.env, {});
+  }
+});
+
 test("the lifecycle lock is keyed by Brain identity across manifest aliases and homes", () => {
   const firstFixture = fixture();
   const secondFixture = fixture({ machineLockRoot: firstFixture.machineLockRoot });
@@ -132,29 +237,6 @@ test("old empty crash locks recover without adopting unexpected contents", () =>
   });
   assert.equal(recovered.assertOwned(), true, "the abandoned empty-directory decision recovered ownership");
   recovered.release();
-});
-
-test("a stale owner whose pid was reused cannot block the Brain forever", () => {
-  const { home, manifestPath, machineLockRoot } = fixture();
-  const first = acquireBrainLifecycleLock({
-    manifestPath, home, machineLockRoot, operation: "update", processInstance: () => "old-process-instance",
-  });
-  const ownerPath = join(first.path, readdirSync(first.path)[0]);
-  const old = new Date("2026-10-06T10:00:00.000Z");
-  utimesSync(ownerPath, old, old);
-  const replacement = acquireBrainLifecycleLock({
-    manifestPath,
-    home,
-    machineLockRoot,
-    operation: "load",
-    staleMs: 60_000,
-    now: () => new Date("2026-10-06T12:00:00.000Z"),
-    isOwnerAlive: () => true,
-    processInstance: () => "reused-pid-instance",
-  });
-  assert.equal(replacement.assertOwned(), true, "pid-reuse identity reached the stale recovery decision");
-  assert.equal(first.release(), false, "the prior process token cannot release its replacement");
-  replacement.release();
 });
 
 test("unsafe lifecycle lock contents fail closed instead of being adopted", () => {

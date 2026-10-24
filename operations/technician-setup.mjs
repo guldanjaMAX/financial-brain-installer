@@ -20,6 +20,12 @@ import {
 } from "./bootstrap-status.mjs";
 import { renderCopyableCommand } from "./command-display.mjs";
 import { manifestHasProvisionedResourceBindings } from "./machine-continuity.mjs";
+import { answerSetupOf } from "./answer-setup.mjs";
+import {
+  ANTHROPIC_CONSOLE_URL,
+  RULE_LINE,
+  TECHNICIAN_ANTHROPIC_COPY,
+} from "./answer-setup-copy.mjs";
 
 function ownerGuidance({ before_action, why, minimum_access, browser_help, owner_only, privacy }) {
   return Object.freeze({ before_action, why, minimum_access, browser_help, owner_only, privacy });
@@ -108,6 +114,16 @@ export const TECHNICIAN_STEPS = Object.freeze([
       owner_only: "The owner approves this exact test write and cost before it runs.",
       privacy: "No local file, private content, or source credential is read.",
     }),
+  }),
+  Object.freeze({
+    id: "anthropic",
+    title: TECHNICIAN_ANTHROPIC_COPY.title,
+    dashboard_url: ANTHROPIC_CONSOLE_URL,
+    // The Console's exact navigation and privacy labels are checked live by
+    // the release owner before this guidance is sealed.
+    human_boundary: TECHNICIAN_ANTHROPIC_COPY.human_boundary,
+    automated_proof: TECHNICIAN_ANTHROPIC_COPY.automated_proof,
+    owner_guidance: ownerGuidance(TECHNICIAN_ANTHROPIC_COPY),
   }),
   Object.freeze({
     id: "google",
@@ -287,6 +303,7 @@ function readManifestSummary(manifestPath, deps = {}) {
       final_hostname: null,
       final_hostname_invalid: false,
       enabled_connectors: [],
+      answer_setup: null,
     };
   }
   let manifest;
@@ -303,6 +320,7 @@ function readManifestSummary(manifestPath, deps = {}) {
       final_hostname: null,
       final_hostname_invalid: false,
       enabled_connectors: [],
+      answer_setup: null,
     };
   }
   const enabled = ["google_drive", "gmail", "calendar", "zoom", "imap"]
@@ -324,6 +342,7 @@ function readManifestSummary(manifestPath, deps = {}) {
     final_hostname: finalHostname,
     final_hostname_invalid: Boolean(declaredDomain && !finalHostname),
     enabled_connectors: enabled,
+    answer_setup: answerSetupOf(manifest),
   };
 }
 
@@ -606,15 +625,21 @@ export function technicianPlan(manifestPath, deps = {}) {
       "The owner handles login, 2FA, consent, billing, and physical-device prompts.",
       "An agent explains the passkey ceremony but never runs or captures brain invite because its output contains the private one-time link.",
       "Enroll the first passkey only after the final Brain hostname is fixed.",
+      RULE_LINE,
     ],
     steps: TECHNICIAN_STEPS.map((step, index) => {
       let state = "not_checked";
       if (step.id === "tools") state = "ready_to_start";
       if (step.id === "cloudflare") state = routing.status;
-      if (["smoke", "google", "zoom", "imap", "passkey", "verify"].includes(step.id) && !manifest.exists) {
+      if (["smoke", "anthropic", "google", "zoom", "imap", "passkey", "verify"].includes(step.id) && !manifest.exists) {
         state = "waiting_for_install_record";
       }
       if (step.id === "smoke" && manifest.exists) state = "ready_for_owner_approval";
+      if (step.id === "anthropic" && manifest.exists) {
+        state = manifest.answer_setup === "opus-sonnet"
+          ? "configured_in_manifest"
+          : "ready_for_owner_decision";
+      }
       if (step.id === "zoom" && manifest.exists && !manifest.enabled_connectors.includes("zoom")) {
         state = "requires_manifest_enablement";
       }
@@ -739,6 +764,7 @@ export function technicianDisplayCommand(
   const locator = cli || Object.freeze({ command: "<brain-cli>", args: Object.freeze([]) });
   const routed = ["technician", path, "--intent", normalizeBootstrapSetupIntent(intent), "--run"];
   if (step === "google") return exactCommand(locator, [...routed, "google"], platformName);
+  if (step === "anthropic") return exactCommand(locator, [...routed, "anthropic", "--from-clipboard"], platformName);
   if (step === "imap") return exactCommand(locator, [...routed, "imap", "--host", "<imap-host>", "--user", "<email-address>"], platformName);
   if (step === "passkey") return exactCommand(locator, [...routed, "passkey", "--confirm-host", "<final-hostname>"], platformName);
   return exactCommand(locator, [...routed, step], platformName);
@@ -878,6 +904,15 @@ function childCommands(step, manifestPath, flags, scriptPath, routing = null) {
       )];
     }
     case "smoke": return [];
+    case "anthropic": {
+      const modes = ["from-clipboard", "key-set-in-dashboard", "keep-key"]
+        .filter((name) => flags[name] === true);
+      if (modes.length > 1) throw new Error("choose one Anthropic key-entry mode");
+      const mode = modes[0] || "from-clipboard";
+      const args = ["connect", "anthropic", path, `--${mode}`];
+      if (flags["daily-cap"] !== undefined) args.push("--daily-cap", String(flags["daily-cap"]));
+      return [command(...args)];
+    }
     case "google": return [command("connect", "google", "--scopes", String(flags.scopes || "drive,gmail,calendar"))];
     case "zoom": return [command("connect", "zoom", path)];
     case "imap": {

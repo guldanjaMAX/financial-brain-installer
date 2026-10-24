@@ -115,7 +115,7 @@ test("cmdMigrate waits for one slow 0044 column and sends its ALTER once", async
     let targetInspections = 0;
     const d1Query = async (_account, _database, sql, params = [], requestOptions) => {
       calls.push({ sql: String(sql), params, requestOptions });
-      if (/SELECT version, checksum, name FROM schema_migrations/.test(sql)) return { results: applied };
+      if (/SELECT version, checksum, name, applied_at FROM schema_migrations ORDER BY version/.test(sql)) return { results: applied };
       if (/^PRAGMA table_info\(chunks\)/i.test(sql) && targetInspections++ === 0) return tableInfo();
       if (/^PRAGMA table_info\(chunks\)/i.test(sql) && scriptedPolls.length) {
         const next = scriptedPolls.shift();
@@ -624,7 +624,7 @@ test("only migration statements receive the longer request timeout", async () =>
       vectorDrainQuiesced: true,
       d1Query: async (_account, _database, sql, params = [], requestOptions) => {
         calls.push({ sql: String(sql), params, requestOptions });
-        if (/SELECT version, checksum, name FROM schema_migrations/.test(sql)) return { results: [] };
+        if (/SELECT version, checksum, name, applied_at FROM schema_migrations ORDER BY version/.test(sql)) return { results: [] };
         if (/^PRAGMA table_info|^SELECT sql FROM sqlite_master/i.test(sql)) return { results: database.prepare(sql).all() };
         database.prepare(sql).run(...params);
         return { results: [] };
@@ -638,7 +638,7 @@ test("only migration statements receive the longer request timeout", async () =>
     assert.ok(calls.filter((call) => /^PRAGMA|sqlite_master/i.test(call.sql.trim()))
       .every((call) => call.requestOptions === undefined));
     assert.ok(calls.filter((call) =>
-      /INSERT INTO schema_migrations|SELECT version, checksum, name FROM schema_migrations/.test(call.sql))
+      /INSERT INTO schema_migrations|SELECT version, checksum, name, applied_at FROM schema_migrations ORDER BY version/.test(call.sql))
       .every((call) => call.requestOptions === undefined));
   } finally {
     rmSync(sandbox, { recursive: true, force: true });
@@ -849,7 +849,7 @@ for (const version of [49, 50]) {
           vectorDrainQuiesced: true,
           resolveAccount: async () => ({ id: 'fixture-account' }),
           d1Query: async (_account, _database, sql, params = [], requestOptions) => {
-            if (/SELECT version, checksum, name FROM schema_migrations/.test(sql)) return { results: applied };
+            if (/SELECT version, checksum, name, applied_at FROM schema_migrations ORDER BY version/.test(sql)) return { results: applied };
             if (/INSERT INTO schema_migrations/.test(sql)) { receipts.push(params[0]); return { results: [] }; }
             // Later migrations may add columns. Their exact readback must use
             // the same SQLite database that accepted the fixture writes.

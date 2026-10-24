@@ -34,7 +34,11 @@ const GENERIC_COVERAGE_NOTICE = coverageIncompleteNotice(false);
 /** Reviewed messages a Worker may return instead of raw provider errors. */
 export const ANSWER_ERROR_MESSAGES = Object.freeze({
   notConfigured: "Answer generation is not configured yet. Ask your installer to finish setup.",
-  dailyLimit: "Answer generation has reached its daily limit. Try again after the limit resets.",
+  keyMissing: "Answers are paused: this Brain is set to answer with Claude, but its Anthropic key is missing. Search still works.",
+  providerAccount: "Answers are paused: your Anthropic account needs attention (its key or its credit balance). Search still works.",
+  dailyLimit: "Answers have reached today's spending limit. They start again at midnight UTC, or sooner if the limit is raised. Search still works.",
+  dailyLimitLegacy: "Answer generation has reached its daily limit. Try again after the limit resets.",
+  spendCheckPaused: "Answers are paused for a few minutes while your Brain rechecks its spending record. Try again shortly. Search still works.",
   verificationUnavailable: "The evidence check could not verify support, so no answer was shown. Try again in a moment.",
   unavailable: "Answer generation is unavailable right now. Try again in a moment.",
 });
@@ -63,7 +67,13 @@ export function unavailableSearch(r) {
 export function answerText(r) {
   if (r.status === COVERAGE_INCOMPLETE) return r.notice || GENERIC_COVERAGE_NOTICE;
   if (unavailableSearch(r)) return r.notice || GENERIC_UNAVAILABLE_NOTICE;
-  if (r.answer_error && !r.answer) return safeAnswerErrorText(r.answer_error);
+  if (r.answer_error && !r.answer) {
+    const message = safeAnswerErrorText(r.answer_error);
+    const reset = Date.parse(r.answer_resumes_at || "");
+    return message === ANSWER_ERROR_MESSAGES.dailyLimit && Number.isFinite(reset)
+      ? `${message} Answers start again ${new Date(reset).toLocaleString()}.`
+      : message;
+  }
   if (r.answer && !/^The documents do not answer/i.test(r.answer)) return r.answer;
   // A refusal is about the records checked, even when retrieval was healthy.
   // Missing result metadata must not become a fabricated zero count.

@@ -416,7 +416,7 @@ const RECOVERY_TEST_HUMAN_FIELD_GATES = Object.freeze([
 const RECOVERY_TEST_FIELD_IDENTITY = Object.freeze({
   clientSlug: "v048-field-proof",
   clientDisplayName: "Synthetic Field Gate v0.4.8",
-  productVersion: "0.4.18",
+  productVersion: "0.4.19",
   sourceResource: "brain-test-v048-field-source-recovery-gate-a48f1101",
   targetResource: "brain-test-v048-field-target-recovery-gate-a48f1102",
   sourceAdminKeySecret:
@@ -1570,7 +1570,7 @@ function inspectNpmPackedExecutionInventory(raw, code) {
       }
     }
     if (!packageJson || typeof packageJson !== "object" || Array.isArray(packageJson) ||
-        packageJson.name !== "brain-installer" || packageJson.version !== "0.4.18") refuse(code);
+        packageJson.name !== "brain-installer" || packageJson.version !== "0.4.19") refuse(code);
     return Object.freeze({
       name: packageJson.name,
       version: packageJson.version,
@@ -1846,7 +1846,7 @@ function inspectTestBootstrapCandidateEvidence(request, plan, pins) {
   ], code);
   if (!/^[0-9a-f]{40}$/.test(String(source.head_sha || "")) ||
       !/^[0-9a-f]{40}$/.test(String(source.tree_sha || "")) ||
-      source.package_name !== "brain-installer" || source.package_version !== "0.4.18" ||
+      source.package_name !== "brain-installer" || source.package_version !== "0.4.19" ||
       !SHA256_RE.test(String(source.package_json_sha256 || "")) ||
       !SHA256_RE.test(String(source.package_lock_sha256 || "")) ||
       source.working_tree_clean !== true || source.shallow_repository !== false ||
@@ -3077,7 +3077,7 @@ function readCompletedTestBootstrapCheckpoint(pins, plan) {
         candidateEvidence.seedVectorCount !== candidateEvidence.seedChunkCount ||
         candidateEvidence.seedReplayUnchangedDocuments !==
           DISPOSABLE_RECOVERY_SEED_DOCUMENTS ||
-        candidateEvidence.packageFilename !== "brain-installer-0.4.18.tgz" ||
+        candidateEvidence.packageFilename !== "brain-installer-0.4.19.tgz" ||
         candidateEvidence.wranglerRuntimeDirectory !==
           LOCKED_WRANGLER_RUNTIME_DIRECTORY ||
         candidateEvidence.wranglerRuntimeEntrypoint !== LOCKED_WRANGLER_ENTRYPOINT ||
@@ -6623,7 +6623,7 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
     const requiredBindingNames = [
       "AI", "ANSWER_MODEL", "BRAIN_NAME", "BRAIN_OWNER", "BRAIN_VERSION",
       "CHUNK_OVERLAP", "CHUNK_SIZE", "CREDENTIAL_SCANNER", "DAILY_LLM_CAP_USD",
-      "DB", "OCR_ENABLED", "OCR_MODEL", "STORAGE", "VECTORIZE",
+      "DB", "GATE_MODEL", "OCR_ENABLED", "OCR_MODEL", "STORAGE", "VECTORIZE",
     ];
     const actualNonSecretNames = bindings
       .filter((entry) => entry.type !== "secret_text" && entry.name !== "VECTOR_DRAIN_MODE")
@@ -6677,6 +6677,7 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
         chunkOverlap !== binding.chunkOverlap || dailyCap !== binding.dailyLlmCapUsd ||
         plainText("BRAIN_OWNER") !== binding.clientDisplayName ||
         plainText("ANSWER_MODEL") !== binding.answerModel ||
+        plainText("GATE_MODEL") !== (binding.gateModel || binding.answerModel) ||
         plainText("CREDENTIAL_SCANNER") !== binding.credentialScanner) {
       refuse("RECOVERY_WORKER_BINDINGS_INVALID");
     }

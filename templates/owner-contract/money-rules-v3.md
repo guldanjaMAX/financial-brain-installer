@@ -1,11 +1,11 @@
 <!-- BEGIN Financial Brain money-question rules (added by the Financial Brain morning kit; running the kit again replaces this section and keeps your "My accounts" lines) -->
-# Money questions: translate before you ask the Brain (Financial Brain 0.4.18)
+# Money questions: translate before you ask the Brain (Financial Brain 0.4.19)
 
 The Brain gives exact bank-ledger figures only when a question matches one of the phrasings below. Anything else is refused or answered from documents. Never pass the owner's words straight through: translate, ask, then answer only from what comes back.
 
 ## How to ask
 - Bank-ledger money questions go to brain_think: brain_search does not read the bank ledger.
-- Use brain_search first for email or document questions such as "is X in my email", "did I promise", or "find the email". Search the subject with sort "newest", read the matching records, and give their dates. Never say nothing is recorded because a source label says stale, broken, or paused; those labels limit freshness, not the existence of stored records.
+- Use brain_search first for every non-money question, including email or document questions such as "is X in my email", "did I promise", or "find the email". Read the matching excerpts and write the answer with each fact's source title and date. Search again with other wording, or sort "newest" for status, before saying a matching record was not found. Never say nothing is recorded because a source label says stale, broken, or paused; those labels limit freshness, not the existence of stored records.
 - Call brain_think with `q` only (a small `limit` is fine). Never pass `source`: any filter switches the bank ledger off. One call at a time, never in parallel.
 - Copy a template exactly; change only the <slots>. <period> is one of: `last month` | `this month` | `in <Month YYYY>` | `in the last <N> days` | `so far this year` | `in Q<1-4> <YYYY>`.
   Always give a month its year. "past 30 days" -> "in the last 30 days"; "YTD" -> "so far this year"; "last week" -> "in the last 7 days"; "last quarter" -> "in Q<n> <YYYY>". A past full year has no single total: ask each quarter and report them side by side.
@@ -13,7 +13,7 @@ The Brain gives exact bank-ledger figures only when a question matches one of th
 - These words switch the ledger off: tax, interest, average, budget, forecast, estimated, QuickBooks. Only the supported flip phrases below may use excluding, without or including; other qualifiers are unsupported.
 - <merchant>/<payer>: use only an unambiguous, unredacted bank label supported by the query grammar, at most 6 words. Do not reconstruct hidden digits or silently change a label. If a selector is ambiguous or redacted, quote the by-merchant list for that period and ask for clarification; never turn a refused or unmatched selector into zero.
 
-## Template menu (every one passes the 0.4.18 question parser)
+## Template menu (every one passes the 0.4.19 question parser)
 - Balances: `What are my account balances?` | `What are my <checking|savings|card|loan|investment> account balances?` | `What is my balance for account ending NNNN?`
 - In and out: `How much money came in and went out <period>?` | `How much money came in and went out of my <checking|savings|card|loan> account <period>?`
 - Measures: `What was my profit <period>?` | `What was my net income <period>?` (money in minus money out, not accounting profit or cash flow)
@@ -75,6 +75,7 @@ Never refuse when the Brain's figures support an answer with stated assumptions.
 - Quote bank labels exactly as printed. Do not decode prefixes or codes; if you add your own reading, mark it as yours, for example: "this looks like a refund" (a credit with the same merchant and amount as an earlier charge).
 
 ## If brain_think gives no answer
+If answer_error says answers are paused or today's spending limit was reached, skip only the CLI fallback for that question and say when answers start again. The ledger templates keep working through brain_think, so continue using them for supported money questions.
 If brain_think returns an empty answer for a template, use the exact installed invocation and manifest below with the same question:
 `{{BRAIN_ASK_COMMAND}}`
 Keep its printed figures and citations. Never select a different installation or manifest from a version glob.

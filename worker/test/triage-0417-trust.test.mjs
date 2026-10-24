@@ -247,6 +247,7 @@ test('T08 control: local search and think carry document text under the existing
   const runTool = runInNewContext(`${exact}\nrunTool`, {
     ...retrieval, Date: FixedDate, PROFILE: 'owner-assistant', profileHas,
     nextActionText: workerNextActionText, scannedEvidenceNotice,
+    answerResumeAt: value => typeof value === 'string' ? value : undefined,
     call: async (path, request) => {
       calls.push({ path, body: request.body });
       return { answer: 'The documents do not answer the question.', results: [{ ...doc, snippet: payload }], citations: [], gaps: [] };
@@ -301,6 +302,7 @@ function localFixture(transport, toolOverride) {
   const functions = runInNewContext(`${http}\n${tools}\n${toolOverride ? 'runTool = injectedTool;' : ''}\n${handle}\n({ call, runTool, handle })`, {
     ...retrieval, safeAnswerErrorText, scannedEvidenceNotice, ANSWER_ERROR_MESSAGES,
     nextActionText: workerNextActionText,
+    answerResumeAt: value => typeof value === 'string' ? value : undefined,
     PROFILE: 'librarian', profileHas, BASE: 'https://fixture.invalid', TIMEOUT_MS: 120000, UA: 'fixture',
     AbortController, setTimeout: () => 1, clearTimeout: () => {}, fetch: globalThis.fetch,
     CREDENTIALS: { redact: value => value },

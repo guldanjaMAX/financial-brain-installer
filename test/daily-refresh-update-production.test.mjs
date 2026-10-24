@@ -325,6 +325,38 @@ test("production update proves active propagation before convergence and schedul
   });
 });
 
+test("an update preserves the selected answer and gate models byte for byte", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const before = JSON.parse(readFileSync(manifestPath, "utf8"));
+    before.retrieval = {
+      answer_model: "claude-opus-5-5",
+      gate_model: "claude-sonnet-5-5",
+    };
+    writeFileSync(manifestPath, `${JSON.stringify(before, null, 2)}\n`);
+    const harness = productionHarness(manifestPath);
+    await cmdUpdate(manifestPath, harness.options);
+    const after = JSON.parse(readFileSync(manifestPath, "utf8"));
+    assert.deepEqual(after.retrieval, before.retrieval);
+    assert.ok(harness.events.includes("deploy:active"),
+      "the preservation assertion follows the real update deployment decision point");
+  });
+});
+
+test("a 0.4.8-era update does not opt the owner into an answer model", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const before = JSON.parse(readFileSync(manifestPath, "utf8"));
+    before.brain.version = "0.4.8";
+    delete before.retrieval;
+    writeFileSync(manifestPath, `${JSON.stringify(before, null, 2)}\n`);
+    const harness = productionHarness(manifestPath);
+    await cmdUpdate(manifestPath, harness.options);
+    const after = JSON.parse(readFileSync(manifestPath, "utf8"));
+    assert.equal(Object.hasOwn(after, "retrieval"), false);
+    assert.ok(harness.events.includes("provider-reconcile"),
+      "the no-opt-in assertion follows the update's provider reconciliation decision point");
+  });
+});
+
 test("production update pauses an identity-owned drifted definition before deployment and reconciles it after proof", async () => {
   await withFixture(async ({ manifestPath }) => {
     const harness = productionHarness(manifestPath, { registeredDefinitionDrift: true });
@@ -1659,7 +1691,9 @@ test("S2 active local ingest owns the update boundary until it releases custody"
     h.options.lifecycleLockWaitMs = 0;
     try {
       await assert.rejects(cmdUpdate(manifestPath, h.options), error => {
-        assert.equal(error.code, "brain_lifecycle_busy", "the real lifecycle custody decision was reached");
+        assert.equal(error.supportCode, "UPDATE_BRAIN_BUSY", "the real lifecycle custody decision was reached");
+        assert.match(error.message, /lock is held by ingest/i);
+        assert.doesNotMatch(error.message, /internet connection dropped/i);
         return true;
       });
       assert.equal(h.events.length, 0);

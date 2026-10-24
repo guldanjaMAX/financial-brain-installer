@@ -20,7 +20,7 @@
     "timezone": "America/Phoenix"
   },
   "brain": {
-    "version": "0.4.18",
+    "version": "0.4.19",
     "domain": "brain.acme.com",
     "worker_name": "acme-brain"
   },
@@ -410,8 +410,9 @@
     "chunk_overlap": 300,
     "default_result_limit": 8,
     "answer_model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    "gate_model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
     "rerank": false,
-    "_comment": "answer_model runs through the CLIENT's own Cloudflare Workers AI binding, so no external model credential is required."
+    "_comment": "The built-in @cf/ models need no external key and remain the default. Recommended owner-account option: answer_model claude-opus-5-5 and gate_model claude-sonnet-5-5. Set both safely with brain connect anthropic <manifest> --from-clipboard. A Claude model sends each question, the owner's name and the retrieved excerpts to Anthropic under the owner's own key. gate_model defaults to answer_model when omitted."
   },
   "safety": {
     "_comment": "Non-negotiable defaults. The scanner is what makes 'we store nothing dangerous' true rather than aspirational.",
@@ -427,7 +428,7 @@
     ],
     "daily_llm_spend_cap_usd": 10,
     "ocr": {
-      "_comment": "Read scanned PDFs by sending each page image to a vision model through THIS brain's own Workers AI binding. OFF by default on purpose: it spends money on the client's own Cloudflare account, once per scanned page, and nobody should discover that after the fact. Every page must atomically reserve a conservative amount from the daily estimated-spend budget, and every document read this way is MARKED as OCR so an answer resting on it says so.",
+      "_comment": "Read scanned PDFs by sending each page image to a vision model through THIS brain's own Workers AI binding. OFF by default on purpose: it spends money on the client's own Cloudflare account, once per scanned page, and nobody should discover that after the fact. Before each call starts, the Brain checks today's logged estimated spend for the UTC day, shared by answers and OCR and cached for up to 60 seconds; calls already running can finish past the cap. Every document read this way is MARKED as OCR so an answer resting on it says so.",
       "enabled": false,
       "model": "@cf/meta/llama-4-scout-17b-16e-instruct",
       "_model_note": "Must be a Cloudflare @cf/ model. OCR refuses anything else rather than send a picture of a client document to a provider this manifest does not name.",

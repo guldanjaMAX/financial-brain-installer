@@ -17,7 +17,7 @@ import {
   resolveAdminKey, recordAcceptedDocumentState, addLocalPathAliases, recordLocalSkippedDocumentState,
   ensureCredentialScannerProgress, recordCredentialScannerProgress, hasCredentialScannerProgress,
   commitCredentialScannerProgress, safeIngestDisplay, reportSkips,
-  VALUE_FLAGS,
+  VALUE_FLAGS, workerBindings, optionalWorkerSecretNames,
 } from "../brain.mjs";
 
 let fail = 0, ran = 0;
@@ -896,6 +896,7 @@ check("a fully accepted batch may advance its source cursor", sourceCursorCanAdv
     check(`${name} includes Vectorize Edit in the scoped token`, /Vectorize(?::)?\s+(?:Edit|edit)/.test(txt), `${name} omitted it`);
 
   const templateManifest = JSON.parse(tmpl);
+  const manifestSchema = JSON.parse(await fs.readFile(u("manifest.schema.json"), "utf-8"));
   check("the public template does not imply automatic email or webhook alerts exist",
     !("health_report_email" in templateManifest.operations) &&
       !("alert_webhook_secret" in templateManifest.operations) &&
@@ -922,6 +923,33 @@ check("a fully accepted batch may advance its source cursor", sourceCursorCanAdv
     "the derived <slug>-brain fallback went missing");
   check("deploy sends the manifest chunk size to every Worker", /name: "CHUNK_SIZE"[\s\S]{0,160}m\.retrieval\?\.chunk_size/.test(brain));
   check("deploy sends the manifest overlap to every Worker", /name: "CHUNK_OVERLAP"[\s\S]{0,160}m\.retrieval\?\.chunk_overlap/.test(brain));
+  check("the manifest schema declares the optional gate model",
+    Array.isArray(manifestSchema.properties?.retrieval?.properties?.gate_model?.anyOf) &&
+      manifestSchema.properties.retrieval.properties.gate_model.anyOf.some((branch) => branch.type === "string"));
+  check("the public template names an explicit gate model",
+    typeof templateManifest.retrieval?.gate_model === "string" &&
+      templateManifest.retrieval.gate_model === templateManifest.retrieval.answer_model,
+    JSON.stringify(templateManifest.retrieval));
+
+  const config = { d1_database_id: "fixture-d1", storage: "d1", vectorize_index: "fixture-vector" };
+  const configured = workerBindings({ retrieval: {
+    answer_model: "@cf/meta/fixture-answer",
+    gate_model: "claude-opus-5-5",
+  } }, config);
+  check("deploy sends a configured gate model to the Worker",
+    configured.find((binding) => binding.name === "GATE_MODEL")?.text === "claude-opus-5-5",
+    JSON.stringify(configured));
+  const defaults = workerBindings({}, config);
+  check("deploy always binds an answer model and defaults an unset gate to it",
+    defaults.some((binding) => binding.name === "ANSWER_MODEL") &&
+      defaults.find((binding) => binding.name === "GATE_MODEL")?.text ===
+        defaults.find((binding) => binding.name === "ANSWER_MODEL")?.text,
+    JSON.stringify(defaults));
+  check("a Claude gate with a Workers AI answer preserves the Anthropic Worker secret",
+    optionalWorkerSecretNames({ retrieval: {
+      answer_model: "@cf/meta/fixture-answer",
+      gate_model: "claude-opus-5-5",
+    } }).includes("ANTHROPIC_API_KEY"));
 }
 
 

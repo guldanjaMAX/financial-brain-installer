@@ -503,10 +503,13 @@ try {
   const anthropicDir = join(sandbox, "explicit-anthropic");
   mkdirSync(anthropicDir, { mode: 0o700 });
   const anthropicManifest = manifest();
-  anthropicManifest.retrieval = { answer_model: "claude-fixture" };
+  anthropicManifest.retrieval = {
+    answer_model: "claude-opus-5-5",
+    gate_model: "claude-sonnet-5-5",
+  };
   const anthropicManifestPath = writeManifest(anthropicDir, anthropicManifest);
   const anthropicEvents = [];
-  await isolatedRuntime({
+  const anthropicRun = await isolatedRuntime({
     fetchImpl: cloudflareHarness(anthropicEvents),
     env: {
       CLOUDFLARE_API_TOKEN: "fixture-token",
@@ -523,8 +526,9 @@ try {
     "remote:ADMIN_KEY",
     "remote:RAG_PROXY_KEY",
     "remote:SESSION_SIGNING_KEY",
-    "remote:ANTHROPIC_API_KEY",
   ]);
+  assert.match(anthropicRun.output, /ANTHROPIC_API_KEY in this terminal was ignored/);
+  assert.match(anthropicRun.output, /Answers are paused.*Anthropic key is missing/);
 
   const ignoreFailureEvents = [];
   await assert.rejects(

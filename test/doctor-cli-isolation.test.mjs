@@ -110,6 +110,7 @@ for (const platform of ["darwin", "win32"]) {
 
 for (const [name, code, marker] of [
   ["native credential command", `import { spawnSync } from 'node:child_process'; spawnSync('security', ['find-generic-password']);`, "child_process.spawnSync"],
+  ["process start observation", `import { spawnSync } from 'node:child_process'; spawnSync('/bin/ps', ['-o', 'lstart=', '-p', '4242']);`, "child_process.spawnSync"],
   ["Windows credential command", `import { execFileSync } from 'node:child_process'; execFileSync('powershell.exe', []);`, "child_process.execFileSync"],
   ["Wrangler login", `import { spawn } from 'node:child_process'; spawn('wrangler', ['login']);`, "child_process.spawn"],
   ["fetch", `await fetch('https://fixture.invalid');`, "fetch"],
@@ -122,6 +123,11 @@ for (const [name, code, marker] of [
   assert.equal(result.status, 86);
   assert.equal(result.stderr.trim(), `TEST_SIDE_EFFECT_BLOCKED:${marker}`);
   assert.doesNotMatch(result.stdout, /UNSAFE_CONTINUATION/);
+
+  const control = child(["-e", "console.log('TEST_CONTROL_REACHED')"]);
+  assert.equal(control.status, 0, control.stderr);
+  assert.match(control.stdout, /TEST_CONTROL_REACHED/);
+  assert.equal(control.stderr, "");
 });
 
 test("tripwire permits a harmless child control", () => {

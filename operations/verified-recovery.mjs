@@ -36,6 +36,7 @@ import {
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { RECOVERY_KEY_LINE } from "./answer-setup-copy.mjs";
 
 import {
   validateV048TargetEvalLlmAppendReceipt,
@@ -299,6 +300,10 @@ function recoveryResourceContract(manifest, label) {
     answer_model: String(
       manifest.retrieval?.answer_model || "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
     ),
+    gate_model: String(
+      manifest.retrieval?.gate_model || manifest.retrieval?.answer_model ||
+        "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    ),
     credential_scanner: manifest.safety?.credential_scanner?.enabled === false ? "off" : "on",
     ocr_enabled: manifest.safety?.ocr?.enabled === true ? "1" : "0",
     ocr_model: String(
@@ -320,6 +325,7 @@ function recoveryResourceContract(manifest, label) {
   }
   for (const [value, name] of [
     [runtime.answer_model, "answer model"],
+    [runtime.gate_model, "gate model"],
     [runtime.ocr_model, "OCR model"],
   ]) {
     if (!value || value.length > 256 || CONTROL_RE.test(value)) {
@@ -500,6 +506,7 @@ function ephemeralRecoveryProviderBinding(loaded, contract) {
     chunkOverlap: contract.runtime.chunk_overlap,
     dailyLlmCapUsd: contract.runtime.daily_llm_cap_usd,
     answerModel: contract.runtime.answer_model,
+    gateModel: contract.runtime.gate_model,
     credentialScanner: contract.runtime.credential_scanner,
     ocrEnabled: contract.runtime.ocr_enabled,
     ocrModel: contract.runtime.ocr_model,
@@ -1506,6 +1513,12 @@ async function main(argv = process.argv.slice(2)) {
         },
       );
       console.log(JSON.stringify(verifiedRecoveryStatus(result.plan, result.state), null, 2));
+      const restoredContract = readRecoveryManifest(parsed.targetManifestPath, "target").manifest;
+      const answerModel = String(restoredContract.retrieval?.answer_model || "@cf/meta/llama-3.3-70b-instruct-fp8-fast");
+      const gateModel = String(restoredContract.retrieval?.gate_model || answerModel);
+      if ([answerModel, gateModel].some((model) => !model.startsWith("@cf/"))) {
+        console.error(RECOVERY_KEY_LINE(parsed.targetManifestPath));
+      }
       return 0;
     }
     if (parsed.command === "derive-vectorize-mutation-quiescence") {

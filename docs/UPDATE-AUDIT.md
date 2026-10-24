@@ -161,16 +161,16 @@ login as a completed update. Never promise a duration without a measurement.
 
 ## Current candidate lineage
 
-The 0.4.18/schema48 audit tracks 41 stable incident rows. The earlier held
+The 0.4.19/schema48 audit tracks 41 stable incident rows. The earlier held
 0.4.7, 0.4.8 and 0.4.9 candidate records describe their own historical bytes;
 their evidence does not transfer to a changed package. Installation eligibility
 and publication status come from the current approved guide and reviewed
-receipt for the exact 0.4.18 artifact. The linked candidate evidence plan is a
+receipt for the exact 0.4.19 artifact. The linked candidate evidence plan is a
 planning record, not installation approval or proof of field acceptance.
 Four are `verified` on reviewed evidence: UPDATE-010, UPDATE-014, UPDATE-026,
 and UPDATE-032. Their evidence documents remain attached to the exact rows in
-`update-incidents.json`. Two carry exact-version 0.4.18 deferrals renewed on
-2026-10-22 and ship unproven, printed in the release note: UPDATE-012
+`update-incidents.json`. Two carry exact-version 0.4.19 deferrals renewed on
+2026-10-24 and ship unproven, printed in the release note: UPDATE-012
 (Windows ARM64, under the condition ADR 007 set) and UPDATE-044 (bank freshness
 account breadth, under
 [ADR 008](decisions/008-rehome-update-025-breadth-into-update-044.md), only while
@@ -187,9 +187,9 @@ exports remain unbound, and the legacy whole-source provenance repair remains
 unaccepted. Every narrow receipt states `whole_source_complete: false` and does
 not authorize OCR, reingest, deletion, deployment, or customer execution.
 One exact-version narrowing originally recorded on 2026-09-26 is renewed for
-0.4.18 only: ADR 008 defines UPDATE-044's scope, and the current candidate plan
-records the renewal for the answer-trust, refusal, time-window, health,
-long-document, first-hour and calendar changes in 0.4.18. That deferral prints
+0.4.19 only: ADR 008 defines UPDATE-044's scope, and the current candidate plan
+records the renewal for optional Claude answers, search-first assistant routing
+and update fail-safe changes in 0.4.19. That deferral prints
 in the release note. Nothing else in this candidate weakens the gate. The
 acceptance-text record depends on the reference point. Since the held 0.4.8
 candidate, three acceptance texts changed and one row was added, because two
@@ -217,7 +217,7 @@ stopping, and proof of zero writes and side effects. UPDATE-043 is a new row
 since v0.4.6, not a changed text. The eight v0.4.6 deferrals (UPDATE-012,
 UPDATE-017 through UPDATE-022, and UPDATE-025) named version 0.4.6 and have
 expired; none was renewed for 0.4.7 or 0.4.8. UPDATE-012 and UPDATE-044 received
-new exact-version records for 0.4.9 and are explicitly renewed for 0.4.18. No
+new exact-version records for 0.4.9 and are explicitly renewed for 0.4.19. No
 row changed status or
 evidence with either re-homing, and the release workflow still
 refuses to publish while any incident blocks. Earlier candidate

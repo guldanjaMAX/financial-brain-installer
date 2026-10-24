@@ -293,6 +293,16 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --test test/machine-prep-installers.test.mjs",
   "node --no-warnings test/windows-dpapi-signing-workflow.test.mjs",
   "node --test test/owner-contract-workspace.test.mjs",
+  "node --test test/claude-workspace-windows-long-path.test.mjs",
+  // Optional answers and update fail-safe regressions added for 0.4.19.
+  "node --test test/answer-model-config.test.mjs",
+  "node --test test/answer-setup-copy.test.mjs",
+  "node --test test/anthropic-connect.test.mjs",
+  "node --test worker/test/anthropic-answer-setup.test.mjs",
+  "node --test test/acceptance-answer-model.test.mjs",
+  "node --test test/doctor-anthropic-secret.test.mjs",
+  "node --test test/fix-update-0419-ledger.test.mjs",
+  "node --test test/fix-0419-partner-r1.test.mjs",
   // A Zoom passcode pasted into a calendar description or location is removed
   // before the credential gate sees it, so one event cannot fail the sync.
   "node --test test/google-calendar-url-passcode.test.mjs",
@@ -443,6 +453,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node test/cloudflare-token-prompt.test.mjs",
   "node test/technician-setup.test.mjs",
   "node --test test/owner-contract-workspace.test.mjs",
+  "node --test test/claude-workspace-windows-long-path.test.mjs",
   "node test/onboarding-sandbox.test.mjs",
   "node --test test/windows-onboarding-kit.test.mjs",
   "node test/cloudflare-token-store.test.mjs",
@@ -748,6 +759,15 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test test/custom-api-cli.test.mjs",
   "node --no-warnings --test test/custom-api-schema-compat.test.mjs",
   "node --no-warnings --test test/windows-dpapi-launch-retry.test.mjs",
+  // Optional answers and update fail-safe regressions added for 0.4.19.
+  "node --test test/answer-model-config.test.mjs",
+  "node --test test/answer-setup-copy.test.mjs",
+  "node --test test/anthropic-connect.test.mjs",
+  "node --test worker/test/anthropic-answer-setup.test.mjs",
+  "node --test test/acceptance-answer-model.test.mjs",
+  "node --test test/doctor-anthropic-secret.test.mjs",
+  "node --test test/fix-update-0419-ledger.test.mjs",
+  "node --test test/fix-0419-partner-r1.test.mjs",
 ]);
 
 export function parseTestCommand(command) {

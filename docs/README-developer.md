@@ -8,7 +8,7 @@ store. Pinned Wrangler 4.131.1 cannot request Vectorize permission for that
 profile, so the read-only preflight routes that exact refusal to an explicit,
 account-scoped recovery API-token choice before any mutation.
 
-**Package identity: brain-installer 0.4.18, schema48.** Publication, supported
+**Package identity: brain-installer 0.4.19, schema48.** Publication, supported
 platforms and field acceptance are established by the reviewed evidence for
 the exact package bytes, not by this README or its version number. Before an
 install or update, match the package to the current approved guide and release
@@ -22,7 +22,7 @@ until reviewed evidence closes it; a deferred capability remains unproven.
 Earlier candidate identities and their planning records remain historical and
 must not be reused as proof for changed bytes.
 
-The 41-row release audit has 37 unresolved incidents, two 0.4.18 deferrals, and four
+The 41-row release audit has 37 unresolved incidents, two 0.4.19 deferrals, and four
 rows closed on reviewed evidence.
 
 Engineering changes follow [the code, test, documentation, and tracking
@@ -430,6 +430,22 @@ least-irrelevant documents, however far away they are. A query on a topic the
 brain holds nothing about still returns rows. `/api/rag/think` is the only guard,
 and it holds. Never show raw `/api/rag/unified` output as proof the brain "found
 something".
+
+`retrieval.answer_model` is always deployed as `ANSWER_MODEL`. The optional
+`retrieval.gate_model` is deployed as `GATE_MODEL` for synthesis and evidence
+checks; when it is absent, those calls use `ANSWER_MODEL` exactly as before.
+Each call routes from its configured model, so a mixed Cloudflare and Anthropic
+pair is permitted only when both provider paths are available. A configured
+Anthropic answer or check model without its key refuses those calls without a
+Workers AI fallback; `/think` returns an `anthropic_key_missing` gap while
+search stays available. Reranking retains its existing fallback behavior.
+
+`brain connect anthropic` has an eight-minute elapsed-time guard checked
+between its version, preflight, manifest, scheduler, secret, deploy, and Worker
+proof operations. The injected operation contracts are not cancellable. If one
+operation itself never returns, the guard cannot run again until that operation
+settles; this release does not claim an abort contract for an in-flight
+dependency.
 
 For a narrow contact lookup, `/think` can extract an address, email, phone,
 company, or role directly from one explicitly labelled contact record or a
@@ -2067,8 +2083,10 @@ Read this before scoping an engagement.
   real-account proven. A WhatsApp Business App account does not make that
   connector official.
 - **Some manifest declarations are still inert.** Google Drive source policy
-  and the macOS `operations.ingest_cron` scheduler are wired. Other undeveloped
-  corpora, health/report/webhook operations, most of `retrieval`,
+  and the macOS `operations.ingest_cron` scheduler are wired. Retrieval's
+  `answer_model` and optional `gate_model` are deployed Worker configuration;
+  an omitted gate model uses the answer model. Other undeveloped corpora,
+  health/report/webhook operations, most remaining `retrieval`,
   `access.authorized_emails`, `kv_namespace` and `r2_bucket` are read by nothing.
   `manifest.schema.json` marks the important boundaries. Do not tell a client an
   unwired declaration takes effect.
@@ -2177,7 +2195,7 @@ inode stay there, including after success, so an editor with an open original
 file descriptor cannot lose a later edit. These local recovery directories are
 never automatically deleted. Interrupted writes likewise require explicit
 recovery; never automatically clear their lock.
-In 0.4.18, Windows setup, tools handoff and update leave existing assistant
+In 0.4.19, Windows setup, tools handoff and update leave existing assistant
 guides untouched without entering the writer. One notice is printed per run,
 even when both assistants are connected. Setup and tools still create missing
 guides; update retains its existing-only policy, including verified Codex
@@ -2187,8 +2205,8 @@ launching Claude with an existing Windows guide. macOS/Linux behavior is unchang
 This avoids the Windows open-file refusal of the final directory rename for
 guides present at the check. A concurrent creator between that check and the
 writer's snapshot can still leave a retained lock, with no data loss. That race
-is accepted for 0.4.18; the existence check stays immediately beside the writer
-call. Refreshed Windows answer rules are deferred to 0.4.19, whose design needs
+is accepted for 0.4.19; the existence check stays immediately beside the writer
+call. Refreshed Windows answer rules are deferred to 0.4.20, whose design needs
 a create-only writer mode or separately reviewed lock recovery.
 Native Windows filesystem behavior remains a separate host/CI gate.
 Repeated writer tests inject only the native attribute probe, keeping filesystem

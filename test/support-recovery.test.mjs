@@ -24,7 +24,10 @@ import {
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 function safeCliEnvironment() {
-  return hiccupLabEnvironment(process.env);
+  return {
+    ...hiccupLabEnvironment(process.env),
+    BRAIN_NO_WRANGLER_LOGIN: "1",
+  };
 }
 
 test("every stored issue code has one complete human recovery guide", () => {
