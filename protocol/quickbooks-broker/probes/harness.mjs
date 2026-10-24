@@ -1,6 +1,7 @@
 // Review probes only. This file does not implement either Worker.
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createFakeIntuit } from '../testing/fake-intuit.mjs';
 import { validates } from '../testing/schema-test-helper.mjs';
 import { parseStrictJson } from '../../../broker/quickbooks/src/validation.mjs';
@@ -51,6 +52,40 @@ function requestFields(encoded) {
     result[key] = value;
   }
   return result;
+}
+
+// A single visitor owns all wire channels, including empty ones. The recorder
+// builds the denominator before invoking this function, so a skipped channel
+// cannot also disappear from the completeness check.
+export function captureExchange(snapshot, visit) {
+  for (const [channel, value] of Object.entries(snapshot)) visit(channel, value);
+}
+
+function decodedBody(text, type) {
+  try {
+    if (type?.includes('application/x-www-form-urlencoded')) {
+      return [...new URLSearchParams(text)].map(([name, value]) => {
+        if (name === 'transaction') {
+          try { value = parseStrictJson(value, { canonicalRequired: false }); } catch { /* Validation refuses it later. */ }
+        }
+        return { [name]: value };
+      });
+    }
+    return [parseStrictJson(text, { canonicalRequired: false })];
+  } catch { return []; }
+}
+
+function cookieFields(headers) {
+  return headers.flatMap(([header, raw], index) => {
+    if (!['cookie', 'set-cookie'].includes(header)) return [];
+    const parts = header === 'set-cookie' ? [raw.split(';')[0]] : raw.split(';');
+    return parts.map(part => {
+      const pair = part.trim();
+      const separator = pair.indexOf('=');
+      return { index, pair, name: separator < 0 ? pair : pair.slice(0, separator),
+        value: separator < 0 ? '' : pair.slice(separator + 1) };
+    });
+  });
 }
 
 export const PROTOCOL = 'qbo-broker/1';
@@ -152,7 +187,7 @@ export function ordered(rig, before, after) {
 }
 
 // All external effects are injected. There is no global fetch or socket fallback.
-export async function createRig(factory) {
+export async function createRig(factory, { capture = captureExchange } = {}) {
   let time = Date.parse('2026-01-01T00:00:00Z');
   const now = () => time;
   const provider = createFakeIntuit({ now });
@@ -162,6 +197,8 @@ export async function createRig(factory) {
   const receipts = [];
   const returned = [];
   const recordedResponses = new WeakMap();
+  const exchanges = [];
+  const brokerInvocation = new AsyncLocalStorage();
   const auditOperations = [];
   const privateValues = new Map([[provider.config.clientSecret, null]]);
   const rememberPrivate = (value, permission = null) => {
@@ -169,7 +206,7 @@ export async function createRig(factory) {
     else if (permission) {
       const existing = privateValues.get(value);
       assert.ok(existing?.response === permission.response && existing?.field === permission.field &&
-        JSON.stringify(existing?.path) === JSON.stringify(permission.path),
+        JSON.stringify(existing?.path) === JSON.stringify(permission.path) && existing?.headerValue === permission.headerValue,
         'a private value may have only one exact response field exception');
     }
   };
@@ -178,6 +215,100 @@ export async function createRig(factory) {
   let resolverAddress = '93.184.216.34';
   let adapter;
   let ownerChallengeHandlers;
+  const captureMessage = async (message, { direction, scope, route, bodySchemas = [], recorded,
+    cookieGrant = false, privateChallenge = false, launchState } = {}) => {
+    const text = await message.clone().text();
+    // Headers iteration coalesces Set-Cookie in some runtimes. Its dedicated
+    // accessor preserves every physical cookie, including Expires commas.
+    const headers = [...message.headers].filter(([name]) => name !== 'set-cookie');
+    const setCookies = message.headers.getSetCookie?.() ??
+      (message.headers.has('set-cookie') ? [message.headers.get('set-cookie')] : []);
+    for (const value of setCookies) headers.push(['set-cookie', value]);
+    const channels = {
+      body: { text, decoded: decodedBody(text, message.headers.get('content-type')) },
+      headers: headers.map(([name, value]) => ({ name, value })),
+      cookies: cookieFields(headers),
+      query: message instanceof Request ? [...new URL(message.url).searchParams].map(([name, value]) => ({ name, value })) : [],
+    };
+    // Keep immutable expected bytes separate from the injected walker. Tests
+    // can omit a channel or entry, but cannot shrink the recorded denominator.
+    const expected = new Map(Object.entries(channels).map(([name, value]) => [name, JSON.stringify(value)]));
+    const coverage = new Map();
+    exchanges.push({ direction, scope, expected, coverage });
+    const snapshot = { body: text, headers: Object.fromEntries(message.headers), headerEntries: channels.headers,
+      cookies: channels.cookies, privateChallenge };
+    // Record before validation or registration can throw. A caller catching a
+    // refusal must not erase the response that caused that refusal.
+    if (recorded && JSON.stringify(recorded.snapshots.at(-1)) !== JSON.stringify(snapshot)) recorded.snapshots.push(snapshot);
+    const grant = index => cookieGrant && headers[index]?.[0] === 'set-cookie'
+      ? { response: recorded, field: 'headers.set-cookie', path: [index], headerValue: headers[index][1] } : null;
+    const visitChannel = (channel, data) => {
+      assert.ok(expected.has(channel) && !coverage.has(channel), 'exchange capture must visit each known channel once');
+      coverage.set(channel, JSON.stringify(data));
+      if (channel === 'body') {
+        if (direction === 'request' && scope === 'owner' && bodySchemas.length && message.body !== null) {
+          assert.ok(data.decoded.length > 0, 'private request body must be inspectable before handler entry');
+        }
+        if (privateChallenge) assert.ok(validates(schemas, 'enrollmentChallenge', responseJson(text)),
+          'private enrollment reply must match its exact wire schema');
+        if (direction === 'response' && scope === 'broker' && message.ok) {
+          if (bodySchemas.length) {
+            assert.ok(message.headers.get('content-type')?.includes('application/json'),
+              'successful broker response must match its exact wire schema');
+            for (const schema of bodySchemas) for (const { path, value } of
+              privateResponseFields(schemas, schema, responseJson(text))) {
+              rememberPrivate(value, { response: recorded, field: 'body', path });
+            }
+          } else assert.ok(route === wire.generic_result_path && message.headers.get('content-type')?.startsWith('text/html'),
+            'successful broker response must match its exact wire schema');
+          return;
+        }
+        for (const body of data.decoded) for (const schema of bodySchemas) {
+          for (const { value } of privateFields(schemas, schema, body, { invalid: true })) {
+            // Requests cannot grant a response exception, including malformed
+            // inspectable inputs. Existing issuance grants survive round trips.
+            rememberPrivate(value);
+          }
+        }
+      } else if (channel === 'headers') {
+        if (launchState) rememberPrivate(launchState, { response: recorded, field: 'headers.location.state' });
+        data.forEach((header, index) => {
+          assert.ok(validates(schemas, 'exchangeHeader', header), 'every header requires a reviewed channel model');
+          for (const { value } of header.value ? privateFields(schemas, 'exchangeHeader', header) : []) {
+            rememberPrivate(value, grant(index));
+            const bearer = /^Bearer\s+(.+)$/i.exec(value);
+            if (bearer) rememberPrivate(bearer[1]);
+            const basic = /^Basic\s+(.+)$/i.exec(value);
+            if (basic) rememberPrivate(basic[1]);
+          }
+        });
+      } else if (channel === 'cookies') {
+        for (const cookie of data) {
+          const model = { name: cookie.name, value: cookie.value };
+          assert.ok(validates(schemas, 'exchangeCookie', model), 'every cookie requires a reviewed channel model');
+          for (const { value } of privateFields(schemas, 'exchangeCookie', model, { invalid: true })) {
+            rememberPrivate(value, grant(cookie.index));
+            rememberPrivate(cookie.pair, grant(cookie.index));
+          }
+        }
+      } else if (channel === 'query') {
+        for (const { name, value } of data) for (const { value: secret } of
+          privateFields(schemas, 'callbackQuery', { [name]: value }, { invalid: true })) rememberPrivate(secret);
+      }
+    };
+    let captureFailure;
+    try {
+      capture(structuredClone(channels), (channel, data) => {
+        try { visitChannel(channel, data); }
+        catch (error) { captureFailure ??= error; }
+      });
+    } catch (error) { captureFailure ??= error; }
+    if (captureFailure) {
+      if (recorded) recorded.schemaFailure = true;
+      throw captureFailure;
+    }
+    return snapshot;
+  };
   const providerOrigins = new Set([
     new URL(provider.config.authorizationUrl).origin,
     new URL(provider.config.tokenUrl).origin,
@@ -196,13 +327,13 @@ export async function createRig(factory) {
         outbound[caller === 'broker' ? 'brokerAccounting' : 'ownerAccounting']++;
         assert.ok(caller === 'owner', 'broker must never contact accounting API');
       }
+      await captureMessage(request, { direction: 'request', scope: 'provider', route: url.pathname,
+        bodySchemas: ['callbackQuery', 'refreshBody', 'revokeBody'] });
       const response = await provider.fetch(request);
-      if (response.headers.get('content-type')?.includes('application/json')) {
-        const body = await response.clone().json().catch(() => null);
-        for (const key of ['access_token', 'refresh_token', 'realmId']) {
-          if (typeof body?.[key] === 'string') rememberPrivate(body[key]);
-        }
-      }
+      // Provider replies are private transport input, not outward responses.
+      // Capture even malformed replacements before the broker can catch them.
+      await captureMessage(response, { direction: 'response', scope: 'provider', route: url.pathname,
+        bodySchemas: ['tokenBundle', 'callbackQuery'] });
       return response;
     }
     const owner = origins.indexOf(url.origin);
@@ -213,21 +344,25 @@ export async function createRig(factory) {
         // This authenticated private protocol reply carries the challenge by
         // contract. It is not returned to the owner/browser. Keep every broker
         // response and every direct owner call in the outward privacy scan.
+        await captureMessage(request, { direction: 'request', scope: 'owner', route: url.pathname });
         const response = await ownerChallengeHandlers[owner](request);
-        if (response.ok) assert.ok(validates(schemas, 'enrollmentChallenge',
-          responseJson(await response.clone().text())), 'private enrollment reply must match its exact wire schema');
+        await recordResponse(response, { scope: 'owner', route: url.pathname,
+          bodySchemas: ['enrollmentChallenge'], privateChallenge: response.ok });
         return response;
       }
       if (url.pathname === OWNER_CALLBACK) {
         outbound.delivery++;
         deliveries.push(request.clone());
-        const envelope = await request.clone().json();
-        if (typeof envelope.ciphertext === 'string') rememberPrivate(envelope.ciphertext);
+        // Record before injected transport loss as well as successful receipt.
+        await captureMessage(request, { direction: 'request', scope: 'owner', route: url.pathname,
+          bodySchemas: ['ownerCallbackRequest'] });
         if (ownerDeliveryFault === 'unavailable') throw new Error('probe_delivery_unavailable');
         if (ownerDeliveryFault === 'redirect') {
-          return new Response(null, { status: 307, headers: { location: 'https://elsewhere.invalid/collect' } });
+          return recordResponse(new Response(null, { status: 307, headers: { location: 'https://elsewhere.invalid/collect' } }),
+            { scope: 'owner', route: url.pathname });
         }
-        const response = await adapter.owners[owner].fetch(request);
+        const response = await recordResponse(await adapter.owners[owner].fetch(request),
+          { scope: 'owner', route: url.pathname });
         receipts.push(response.clone());
         if (ownerDeliveryFault === 'lost_receipt_once') {
           ownerDeliveryFault = undefined;
@@ -235,7 +370,9 @@ export async function createRig(factory) {
         }
         return response;
       }
-      return adapter.owners[owner].fetch(request);
+      // Observe the transport receipt after fixture wrappers too. They may
+      // change a Response already captured by the inner owner entry point.
+      return recordResponse(await adapter.owners[owner].fetch(request), { scope: 'owner', route: url.pathname });
     }
     outbound.blocked++;
     throw new Error('probe_network_target_refused');
@@ -255,7 +392,13 @@ export async function createRig(factory) {
   assert.ok(typeof adapter.inspect === 'function' && typeof adapter.armFault === 'function', 'adapter must expose storage observations and injected faults');
   assert.ok(typeof adapter.fixtures?.enroll === 'function' && typeof adapter.fixtures?.signedRequest === 'function', 'adapter must supply wire fixture builders');
   ownerChallengeHandlers = adapter.owners.map(owner => owner.fetch.bind(owner));
-  const recordResponse = async response => {
+  const recordResponse = async (response, context = {}) => {
+    if (context.scope === 'owner' && !context.bodySchemas) {
+      const bodySchema = ({ '/api/quickbooks/connect/start': 'launchResponse',
+        '/api/quickbooks/connect/enrollment/challenge': 'enrollmentChallenge',
+        [OWNER_CALLBACK]: 'ownerCallbackReceipt' })[context.route];
+      context = { ...context, bodySchemas: bodySchema ? [bodySchema] : [] };
+    }
     let recorded = recordedResponses.get(response);
     if (!recorded) {
       recorded = { snapshots: [] };
@@ -264,8 +407,28 @@ export async function createRig(factory) {
     }
     // The owner forwards the same start Response. Preserve its one identity,
     // but retain every observation because its headers can change in transit.
-    const snapshot = { body: await response.clone().text(), headers: Object.fromEntries(response.headers) };
-    if (JSON.stringify(recorded.snapshots.at(-1)) !== JSON.stringify(snapshot)) recorded.snapshots.push(snapshot);
+    const launching = context.scope === 'broker' && context.route === '/v1/quickbooks/launch' && response.status === 303;
+    let cookieGrant = false;
+    let launchState;
+    if (launching) {
+      const cookie = response.headers.get('set-cookie');
+      let location;
+      try { location = new URL(response.headers.get('location')); } catch { /* Keep the invalid observation below. */ }
+      cookieGrant = typeof cookie === 'string' &&
+        /^__Secure-qbo_transaction=[A-Za-z0-9._-]+; Path=\/v1\/quickbooks\/oauth\/callback; HttpOnly; Secure; SameSite=Lax; Max-Age=[0-9]+$/.test(cookie) &&
+        location && location.origin + location.pathname === provider.config.authorizationUrl &&
+        location.searchParams.get('redirect_uri') === provider.config.redirectUri &&
+        location.searchParams.get('client_id') === provider.config.clientId &&
+        location.searchParams.get('response_type') === 'code' &&
+        location.searchParams.get('scope') === 'com.intuit.quickbooks.accounting' &&
+        [...location.searchParams].length === 5 && validates(schemas, 'capability', location.searchParams.get('state'));
+      if (cookieGrant) launchState = location.searchParams.get('state');
+    }
+    await captureMessage(response, { ...context, direction: 'response', recorded, cookieGrant, launchState });
+    if (launching && !cookieGrant) {
+      recorded.schemaFailure = true;
+      assert.fail('launch response grants require the exact provider redirect and transaction cookie');
+    }
     return response;
   };
   const auditRequest = async (route, invoke) => {
@@ -285,43 +448,15 @@ export async function createRig(factory) {
     })[route];
     const expected = successAudit && (success ? successAudit : [['failed']]);
     if (expected) auditOperations.push({ route, expected, ids: fresh.map(row => row.event_id_hash) });
-    await recordResponse(response);
-    if (response.ok) {
-      const recorded = recordedResponses.get(response);
-      // Owner handlers can catch a transport assertion and return a refusal.
-      // Keep failed validation visible even when that caller catches the error.
-      try {
-        const declared = wire.routes.find(candidate => candidate.path === route)?.response_schema;
-        if (declared) {
-          assert.ok(response.headers.get('content-type')?.includes('application/json'),
-            'successful broker response must match its exact wire schema');
-          const body = responseJson(await response.clone().text());
-          for (const { path, value } of privateResponseFields(schemas, declared, body)) {
-            rememberPrivate(value, { response: recorded, field: 'body', path });
-          }
-        } else {
-          // The result page is the only successful non-JSON body. Redirects are
-          // checked by launch/queryFree; none exempts a body or an extra header.
-          assert.ok(route === wire.generic_result_path && response.headers.get('content-type')?.startsWith('text/html'),
-            'successful broker response must match its exact wire schema');
-        }
-      } catch (error) {
-        // Repairing mutable headers or reusing the object on another route
-        // cannot erase an earlier invalid observation of this response.
-        recorded.schemaFailure = true;
-        throw error;
-      }
-    }
+    const declaredSchema = wire.routes.find(candidate => candidate.path === route)?.response_schema;
+    await recordResponse(response, { scope: 'broker', route, bodySchemas: declaredSchema ? [declaredSchema] : [] });
     return response;
   };
-  const brokerRequest = async (request, { expectInvalidRequest = false } = {}) => {
+  const brokerRequest = async (request, { expectInvalidRequest = false } = {}, invoke) => {
     const url = new URL(request.url);
-    if (url.pathname === CALLBACK) for (const key of ['state', 'code', 'realmId']) {
-      for (const value of url.searchParams.getAll(key)) if (value) {
-        rememberPrivate(value);
-      }
-    }
     const declared = wire.routes.find(route => route.path === url.pathname);
+    await captureMessage(request, { direction: 'request', scope: 'broker', route: url.pathname,
+      bodySchemas: declared?.request_schema ? [declared.request_schema] : [] });
     if (declared?.request_schema) {
       let body;
       let decoded = false;
@@ -348,25 +483,38 @@ export async function createRig(factory) {
       // be inspected. Callback duplicates are covered individually above.
       assert.ok(expectInvalidRequest ? !valid && (decoded || url.pathname === CALLBACK) : valid,
         'broker request must match its exact wire schema before handler entry');
-      if (body !== undefined) for (const { value } of privateFields(schemas, declared.request_schema, body, { invalid: !valid })) {
-        // A request can reuse a prior launch/state grant, but can never create
-        // a response permission. Register before an adapter can echo the input.
-        // Deliberately malformed probes still protect every decoded private
-        // leaf; their refusal does not make the request's credentials public.
-        rememberPrivate(value);
-      }
     } else assert.ok(!expectInvalidRequest, 'malformed probe requires a declared request schema');
-    const response = await auditRequest(url.pathname, () => adapter.broker.fetch(request));
+    const response = await auditRequest(url.pathname, () => brokerInvocation.run(
+      { request, delegated: Boolean(invoke) }, invoke ?? (() => adapter.broker.fetch(request))));
     if (expectInvalidRequest) assert.ok(response.status >= 400 ||
       (url.pathname === CALLBACK && response.status === 303 &&
         response.headers.get('location') === BROKER + wire.generic_result_path),
     'malformed request must reach a real broker refusal');
     return response;
   };
+  // Direct adapter calls are fixture entry points too. Requests already inside
+  // the rig boundary use its outer observation, preserving one audit witness
+  // and capturing any wrapper mutation before the response reaches the caller.
+  const brokerHandler = adapter.broker.fetch;
+  adapter.broker.fetch = request => {
+    const invocation = brokerInvocation.getStore();
+    if (invocation?.request === request && !invocation.delegated) {
+      invocation.delegated = true;
+      return brokerHandler(request);
+    }
+    return brokerRequest(request, {}, () => brokerHandler(request));
+  };
   // Include callback receipts and direct fixture calls, not just rig.owner().
   for (const owner of adapter.owners) {
     const original = owner.fetch;
-    owner.fetch = async request => recordResponse(await original(request));
+    owner.fetch = async request => {
+      const route = new URL(request.url).pathname;
+      const bodySchema = ({ [OWNER_CALLBACK]: 'ownerCallbackRequest',
+        '/api/quickbooks/connect/enrollment/voucher': 'enrollmentDelivery' })[route];
+      await captureMessage(request, { direction: 'request', scope: 'owner', route,
+        bodySchemas: bodySchema ? [bodySchema] : [] });
+      return recordResponse(await original(request), { scope: 'owner', route });
+    };
   }
 
   const rig = {
@@ -386,7 +534,9 @@ export async function createRig(factory) {
       const request = body === undefined
         ? new Request(origins[owner] + path, { headers, redirect: 'manual' })
         : jsonRequest(origins[owner] + path, body, headers);
-      return recordResponse(await adapter.owners[owner].fetch(request));
+      // Also observe after external fixture wrappers, which can mutate a
+      // Response already seen inside the owner boundary.
+      return recordResponse(await adapter.owners[owner].fetch(request), { scope: 'owner', route: path });
     },
     async start(owner = 0) {
       const response = await rig.owner('/api/quickbooks/connect/start', { owner, body: {} });
@@ -411,11 +561,6 @@ export async function createRig(factory) {
         url.searchParams.get('scope') === 'com.intuit.quickbooks.accounting' &&
         [...url.searchParams.keys()].length === 5, 'launch uses the exact configured provider query');
       assert.ok(validates(schemas, 'capability', url.searchParams.get('state')), 'launch requires a valid state');
-      // Only this validated provider Location may carry state. Its other
-      // headers and its entire body remain subject to the callback canaries.
-      rememberPrivate(url.searchParams.get('state'), {
-        response: recordedResponses.get(response), field: 'headers.location.state',
-      });
       return { url, cookie: cookie.split(';')[0] };
     },
     async consent(launch, consent = true) {
@@ -424,11 +569,6 @@ export async function createRig(factory) {
       const grant = await provider.grant({
         state: authorization.searchParams.get('state'), environment: 'sandbox', consent,
       });
-      for (const key of ['code', 'realmId', 'state']) {
-        if (grant.callback.searchParams.has(key)) {
-          rememberPrivate(grant.callback.searchParams.get(key));
-        }
-      }
       return new Request(grant.callback, { headers: { cookie: launch.cookie }, redirect: 'manual' });
     },
     async pending(owner = 0) {
@@ -443,6 +583,9 @@ export async function createRig(factory) {
       return response;
     },
     async assertPrivate() {
+      for (const exchange of exchanges) assert.ok(exchange.expected.size === exchange.coverage.size &&
+        [...exchange.expected].every(([name, value]) => exchange.coverage.get(name) === value),
+      'every recorded exchange channel must be traversed without omissions');
       const snapshot = rig.inspect();
       assert.ok(auditOperations.length > 0, 'privacy requires an expected audited operation');
       const witnessed = new Set();
@@ -472,6 +615,12 @@ export async function createRig(factory) {
           const headers = { ...snapshot.headers };
           let body = json ? structuredClone(parsed) : snapshot.body;
           let rawBody = snapshot.body;
+          // The exact schema-checked challenge body is private broker input.
+          // Do not erase other fields, headers, or any outward observation.
+          if (snapshot.privateChallenge && body?.challenge === value) {
+            delete body.challenge;
+            rawBody = '';
+          }
           if (permission?.response === response) {
             if (permission.field === 'headers.location.state') {
               const location = new URL(headers.location);
@@ -479,6 +628,14 @@ export async function createRig(factory) {
                 location.searchParams.get('state') === value, 'launch state exception must be exact');
               location.searchParams.delete('state');
               headers.location = location.href;
+            } else if (permission.field === 'headers.set-cookie') {
+              // Full header, transmitted pair and payload aliases share this
+              // single physical field. Other cookies and headers stay visible.
+              const entry = snapshot.headerEntries[permission.path[0]];
+              assert.ok(entry?.name === 'set-cookie' && entry.value === permission.headerValue,
+                'transaction cookie exception must be exact');
+              const remaining = snapshot.headerEntries.filter((_, index) => index !== permission.path[0]);
+              headers['set-cookie'] = remaining.filter(header => header.name === 'set-cookie').map(header => header.value).join(', ');
             } else {
               const path = permission.path;
               const parent = path.slice(0, -1).reduce((object, key) => object?.[key], body);

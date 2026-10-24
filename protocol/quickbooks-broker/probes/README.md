@@ -56,27 +56,53 @@ and changed authenticated bindings must never activate or overwrite a connection
 
 Privacy checks require fresh, distinct audit witnesses for each observed broker
 operation, in both durable rows and captured logs. Empty sinks, stale evidence,
-or one concurrent operation borrowing another's witness cannot pass. Every
-response body and header is scanned for runtime credentials, launch capabilities,
-transaction and refresh ciphertext, and callback code, state and company values,
-including altered callback input. Successful broker JSON responses are strictly
-decoded and validated against the response schema declared in the wire contract.
-Before handler entry, each declared broker request is decoded and validated
-against its request schema, including enrollment, JSON controls, form launch and
-callback queries. Every annotated request value is registered with no new
-response permission. A request key echoed inside a valid capability is still a
-leak, even when that response field has a grant for a different value. Prior
-exact grants survive legitimate capability, capsule and state round trips.
-The harness follows schema references, matching alternatives and array paths to
-register every `x-private` value. Each value is allowed only in its exact field
-of the one response that issued it. New private fields require no route-specific
-registration code. Rejected schema observations remain failed even if a caller
-catches the assertion or later reuses the response with repaired headers.
-Redirects and the static HTML result page remain subject to the same body and
-header scans; only the exact state parameter in its validated provider launch
-Location is exempt. A clean
-completion Location never exempts its body or other headers. An unavailable
-audit ledger leaves evidence unavailable; it cannot certify a privacy pass.
+or one concurrent operation borrowing another's witness cannot pass. One capture
+function walks every request and response exchange at the broker, owner and
+injected fake-provider boundaries. It visits these channels, including empty ones:
+
+- `body`: the full text and decoded JSON or form fields, including the launch
+  transaction's decoded capsule.
+- `headers`: every header, with repeated `Set-Cookie` fields retained separately
+  through `getSetCookie()`.
+- `cookies`: every `Cookie` pair and `Set-Cookie` pair and payload, tied to the
+  original physical header field. The full header is captured above.
+- `query`: all decoded name/value entries, preserving duplicate callback fields.
+
+The recorder snapshots each channel independently before calling the capture
+function. Completeness compares those contents with the traversal evidence, so
+omitting either a whole channel or one entry fails. Header-skip and cookie-skip
+mutants exercise both omissions with passing controls. Captured fixture values
+stay in memory and never enter assertion diagnostics.
+
+Requests register every `x-private` value before handler entry; responses do so
+on receipt, including callback receipts that are subsequently lost by a transport
+fault. The closed header models make every header name private except the
+reviewed transport and policy metadata allowlist. Authorization, proxy
+authorization, every Access header, cookie headers and unfamiliar future
+credential headers therefore remain private. Registration preserves both
+the full credential and its bearer payload. Cookie registration preserves the
+full header, transmitted pair and payload. Only the exact payload-free
+transaction-cookie clearing header is public in the schema.
+
+Each declared broker request is also decoded and validated against its request
+schema, including enrollment, JSON controls, form launch and callback queries.
+Successful broker JSON responses are strictly decoded and validated against
+their declared response schema. The harness follows schema references, matching
+alternatives and array paths when registering private fields. A request value
+cannot acquire a new response permission by appearing in an otherwise valid
+private response field. Embedded echoes remain leaks even if the containing
+field has a grant for a different value.
+
+Each grant names one exact field of one response identity. Forwarding the same
+Response preserves its identity and every observed snapshot; it does not create
+another grant. Prior exact grants survive legitimate capability, capsule, state
+and cookie round trips. A validated provider launch alone permits its exact
+Location state parameter and exact transaction `Set-Cookie` field. The cookie's
+full-header, pair and payload aliases all share that single physical field;
+other cookies, headers and body content remain scanned. Redirects, completion
+pages and static HTML have no general privacy exemption. Rejected schema
+observations remain failed even if a caller catches the assertion or later
+repairs the response. An unavailable audit ledger cannot certify a privacy pass.
 
 Malformed-input probes explicitly set `expectInvalidRequest: true`. The harness
 must first observe validation failure, then require a real broker refusal; the
@@ -89,16 +115,21 @@ does not wait for cancellation of its still-unread handler stream.
 
 The exact authenticated owner enrollment-challenge reply is a private
 owner-to-broker protocol exchange. Its schema requires the challenge value and
-is checked separately; it is not an outward response. Broker responses, direct
-owner calls, voucher acknowledgements and callback receipts remain scanned.
-Enrollment fixtures send their request through the same harness boundary as
-ordinary broker calls, before the real handler runs.
+is checked during the same capture. Only its exact challenge body field has a
+local transmission allowance; its headers and other fields remain scanned.
+Direct owner calls receive no such allowance. Broker responses, direct owner
+calls, voucher acknowledgements and callback receipts remain scanned. Enrollment
+fixtures send their request through the same harness boundary as ordinary broker
+calls. Fake-provider requests and replies also traverse every channel and add
+private values to the registry. Provider token replies are private transport
+input, not outward broker or owner responses.
 
 Schema coverage combines a reviewed private-site inventory, sensitive field
 names and a closed inventory of reviewed public names across every schema
-definition, including request schemas. Unclassified new names,
-missing annotations and non-string annotations fail. Stored credential and key
-containers inherit their marker from the shared ciphertext leaf. Refresh controls
+definition, including request, header and cookie schemas. All 24 reviewed scalar
+annotation sites have removal checks. Unclassified new names, missing annotations
+and non-string annotations fail. Stored credential and key containers inherit
+their marker from the shared ciphertext leaf. Refresh controls
 exercise owner and raw broker entry points; body/header mutants echo ciphertext
 through health, status and refusals, or try to reuse a grant in another response.
 

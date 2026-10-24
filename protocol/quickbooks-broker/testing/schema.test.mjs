@@ -7,7 +7,11 @@ import { quickBooksCompanyFingerprint } from '../../../connectors/quickbooks-onl
 
 const catalog = JSON.parse(readFileSync(new URL('../v1/schemas/protocol.schema.json', import.meta.url), 'utf8'));
 const opaque = length => randomBytes(Math.ceil(length * 3 / 4)).toString('base64url').slice(0, length);
-const sample = name => fixture(catalog, name, opaque);
+const sample = name => name === 'exchangeHeader' || name === 'exchangePrivateHeader'
+  ? { name: 'authorization', value: opaque(43) }
+  : name === 'exchangePublicHeader' ? { name: 'content-type', value: 'application/json' }
+    : name === 'exchangeCookie' ? { name: 'probe_cookie', value: opaque(43) }
+      : fixture(catalog, name, opaque);
 const check = (name, value, expected) => assert.equal(validates(catalog, name, value), expected, `schema ${name} decision`);
 const roots = ['enrollmentChallenge', 'enrollmentIssue', 'installationVoucher', 'startRequest',
   'refreshRequest', 'revokeRequest', 'launchRequest', 'launchResponse', 'callbackQuery',
@@ -16,7 +20,8 @@ const roots = ['enrollmentChallenge', 'enrollmentIssue', 'installationVoucher', 
   'ownerFence', 'ownerStatus', 'healthResponse', 'errorResponse', 'transactionPayload',
   'transactionCapsule', 'transactionCookie', 'enrollmentDelivery', 'ownerInstallation',
   'completionEnvelope', 'completionResult', 'completionReceipt', 'ownerCallbackRequest',
-  'ownerCallbackReceipt'];
+  'ownerCallbackReceipt', 'exchangeHeader', 'exchangePrivateHeader', 'exchangePublicHeader',
+  'exchangeCookie', 'exchangeCookieClearingHeader'];
 
 // Reviewed credential-bearing scalar sites. Shared capability/digest types also
 // encode public bindings, so their use alone must not create a privacy grant.
@@ -43,6 +48,8 @@ const privateSites = [
   'transactionPayload/properties/delivery_auth_key',
   'transactionCapsule/properties/ciphertext',
   'completionEnvelope/properties/ciphertext',
+  'exchangePrivateHeader/properties/value',
+  'exchangeCookie/properties/value',
 ].map(path => '$defs/' + path).sort();
 // These are reviewed non-credential fields, including public authentication
 // metadata and recurring bindings. They still obey broker retention schemas.
@@ -65,7 +72,7 @@ const publicFields = new Set([
   'request_id', 'request_id_hash', 'retention_ms', 'retry', 'route', 'salt',
   'signature', 'source_binding', 'start_hash', 'state_hash', 'status',
   'subject_hash', 'subject_kind', 'token_generation', 'token_type',
-  'transaction', 'voucher', 'voucher_id', 'window_ms', 'window_start', 'x', 'y',
+  'transaction', 'voucher', 'voucher_id', 'window_ms', 'window_start', 'x', 'y', 'name', 'value',
 ]);
 const privateName = /ciphertext|secret|private_key|(?:^|_)token$|capability$|^realm_?id$|^(state|challenge|code|delivery_auth_key)$/i;
 const schemaAt = (root, path) => path.split('/').reduce((node, key) => node[key], root);
@@ -80,7 +87,7 @@ function assertPrivateSchema(root) {
       const fieldPath = `${path}/properties/${name}`;
       if (fieldPath === '$defs/errorResponse/properties/code') {
         assert.equal(field.$ref, '#/$defs/outcome', 'public error code must remain a reviewed outcome');
-      } else if (privateName.test(name)) {
+      } else if (privateName.test(name) || privateSites.includes(fieldPath)) {
         const target = resolve(field);
         // Encrypted owner records inherit the scalar marker once from their
         // common storage shape; their IVs and tags are not secret values.
@@ -104,6 +111,68 @@ function assertPrivateSchema(root) {
 
 test('private schema fields carry reviewed scalar annotations through references', () => {
   assertPrivateSchema(catalog);
+});
+
+test('exchange channel schemas classify authentication headers and cookie values', () => {
+  for (const name of ['exchangeHeader', 'exchangePrivateHeader', 'exchangePublicHeader', 'exchangeCookie']) {
+    assert.ok(catalog.$defs[name], 'exchange channel model must exist');
+    check(name, sample(name), true);
+    check(name, { ...sample(name), unexpected: true }, false);
+  }
+  for (const name of ['authorization', 'proxy-authorization', 'cf-access-jwt-assertion',
+    'cf-access-client-id', 'cf-access-client-secret', 'x-custom-access-capability', 'cookie', 'set-cookie']) {
+    const header = { name, value: opaque(43) };
+    check('exchangeHeader', header, true);
+    check('exchangePrivateHeader', header, true);
+    check('exchangePublicHeader', header, false);
+  }
+  const publicHeader = { name: 'content-type', value: 'application/json' };
+  check('exchangeHeader', publicHeader, true);
+  check('exchangePublicHeader', publicHeader, true);
+  check('exchangePrivateHeader', publicHeader, false);
+  for (const name of ['', 'Authorization', 'invalid header']) {
+    check('exchangeHeader', { name, value: opaque(43) }, false);
+  }
+  check('exchangeCookie', { name: 'probe_cookie', value: '' }, true);
+  check('exchangeCookie', { name: '', value: opaque(43) }, false);
+  assert.equal(catalog.$defs.exchangePrivateHeader.properties.value['x-private'], true);
+  assert.equal(catalog.$defs.exchangeCookie.properties.value['x-private'], true);
+});
+
+test('exchange unknown headers remain private outside the reviewed public names', () => {
+  const publicNames = ['accept', 'cache-control', 'content-type', 'content-length',
+    'content-encoding', 'content-security-policy', 'location', 'referrer-policy',
+    'x-content-type-options', 'retry-after', 'origin'];
+  for (const name of publicNames) {
+    const header = { name, value: 'synthetic-public-metadata' };
+    check('exchangeHeader', header, true);
+    check('exchangePublicHeader', header, true);
+    check('exchangePrivateHeader', header, false);
+  }
+  for (const name of ['x-api-key', 'x-future-credential', 'x-probe-observation']) {
+    const header = { name, value: opaque(43) };
+    check('exchangeHeader', header, true);
+    check('exchangePrivateHeader', header, true);
+    check('exchangePublicHeader', header, false);
+  }
+  assert.deepEqual(catalog.$defs.exchangePublicHeader.properties.name.enum, publicNames);
+});
+
+test('exchange cookie clearing schema permits only the exact payload-free deletion header', () => {
+  const cleared = { name: 'set-cookie',
+    value: '__Secure-qbo_transaction=; Path=/v1/quickbooks/oauth/callback; HttpOnly; Secure; SameSite=Lax; Max-Age=0' };
+  check('exchangeHeader', cleared, true);
+  assert.ok(catalog.$defs.exchangeCookieClearingHeader, 'cookie clearing model must exist');
+  check('exchangeCookieClearingHeader', cleared, true);
+  check('exchangePrivateHeader', cleared, false);
+  for (const value of [cleared.value.replace('=;', '=' + opaque(43) + ';'),
+    cleared.value + '; extra=' + opaque(43), cleared.value.replace('Max-Age=0', 'Max-Age=120')]) {
+    const header = { name: 'set-cookie', value };
+    check('exchangeHeader', header, true);
+    check('exchangePrivateHeader', header, true);
+    check('exchangeCookieClearingHeader', header, false);
+  }
+  check('exchangeCookieClearingHeader', { ...cleared, name: 'cookie' }, false);
 });
 
 test('private schema classification refuses new names and malformed annotations', () => {

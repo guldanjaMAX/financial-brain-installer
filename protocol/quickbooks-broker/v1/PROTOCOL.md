@@ -40,15 +40,44 @@ The [wire contract](wire-contract.json) fixes paths, limits, domains and labels.
 The [schema catalog](schemas/protocol.schema.json) uses JSON Schema 2020-12.
 Each schema is addressed as `urn:financial-brain:qbo-broker:1:schemas#/$defs/NAME`.
 Credential-bearing string leaves carry `x-private: true`, inherited through
-schema references. Before invoking the broker, the offline harness validates
-each declared request and registers its annotated values without granting any
-response permission. It validates every successful broker JSON response against
-its declared schema and permits a newly issued annotated value only in that
-response's exact field. A private request value cannot acquire that permission
-by appearing in a field intended for a different private value. The schema tests
-require reviewed private sites and classify every field name across request and
-response definitions; a new field requires a privacy review. Public binding
-identifiers do not become credentials merely by sharing the capability encoding.
+schema references. The offline harness uses one capture function for every
+broker, owner and injected fake-provider request and response. It walks body text
+and decoded fields, all headers, Cookie and Set-Cookie entries, and query entries
+including duplicates. Repeated Set-Cookie fields retain their individual
+identities. An independent snapshot checks every channel and entry against the
+capture traversal, including empty channels; header-skip and cookie-skip mutants
+must fail that completeness check.
+
+Closed header and cookie models carry the same scalar annotations as bodies.
+Only an explicit allowlist of reviewed transport and policy metadata header
+names is public. Every other valid header name is private, including
+Authorization, proxy authorization, every Access header, cookie headers and
+unfamiliar future credential headers. Both a complete bearer credential and its
+payload enter the registry;
+cookies preserve their full header, transmitted pair and payload. The exact
+payload-free transaction-cookie clearing header is the only public cookie-header
+shape. Schema coverage checks all 24 private annotation sites and classifies
+every field name across request, response, header and cookie definitions. A new
+field requires a privacy review. Public binding identifiers do not become
+credentials merely by sharing the capability encoding.
+
+Requests register annotated values before handler entry without a new response
+permission. Responses register them on receipt. The harness validates each
+declared broker request and every successful broker JSON response against its
+exact schema. A newly issued private value is permitted only in its exact field
+of one response identity. Forwarding that Response preserves its original grant
+and all observed snapshots. A request value cannot obtain a new grant by
+appearing in a field intended for a different private value. A validated launch
+permits only its exact provider Location state field and transaction Set-Cookie
+field; cookie aliases share that one physical header grant. Other response
+fields remain scanned.
+
+The authenticated enrollment-challenge reply has a local allowance only for its
+exact schema-checked challenge body field. Its headers remain covered, and direct
+owner responses cannot borrow that allowance. Provider replies are private
+transport input rather than outward responses; their private values are still
+registered and checked against broker retention and outward responses. These
+are offline evidence boundaries, not additional protocol disclosure permissions.
 The enrollment route uses `errorResponse` for its existing status-only accepted
 acknowledgement; the voucher is delivered separately to the verified owner.
 All object shapes are closed; unknown or duplicate JSON keys, duplicate query

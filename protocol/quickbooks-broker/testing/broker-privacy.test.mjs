@@ -6,6 +6,9 @@ import { assertSchema } from '../../../broker/quickbooks/src/validation.mjs';
 import { createProbeAdapter } from '../implementation-adapter.mjs';
 import { BROKER, START, createRig, queryFree, REFRESH, REVOKE, rejected, refusedUnchanged, rewriteJson } from '../probes/harness.mjs';
 
+// Echo into a reviewed public header so detection proves source registration.
+// An unknown header would register its own value under the private default.
+
 async function startThrough(rig, entry) {
   if (entry === 'helper') return rig.start();
   const response = entry === 'owner' ? await rig.owner('/api/quickbooks/connect/start', { body: {} })
@@ -98,7 +101,7 @@ test('START_REQUEST_PRIVATE_ECHO mutant is killed inside a granted response fiel
       assert.ok(response.status === 400, 'malformed request must reach the real broker refusal');
       handlerRefusals++;
       if (surface === 'header') {
-        response.headers.set('x-probe-echo', input.body.delivery_auth_key);
+        response.headers.set('content-security-policy', input.body.delivery_auth_key);
         return response;
       }
       const body = await response.json();
@@ -134,7 +137,7 @@ test('ENROLLMENT_REQUEST_PRIVATE_ECHO mutant is killed after the real handler', 
     const response = await original(request);
     assert.ok(response.status === 202, 'wrapper must reach the real successful enrollment handler');
     handlerSuccesses++;
-    response.headers.set('x-probe-echo', input.challenge);
+    response.headers.set('content-security-policy', input.challenge);
     return response;
   };
   assert.ok((await rig.enroll()).status === 202, 'enrollment echo must retain the successful status');
@@ -143,6 +146,281 @@ test('ENROLLMENT_REQUEST_PRIVATE_ECHO mutant is killed after the real handler', 
   await assert.rejects(() => rig.assertPrivate(), {
     code: 'ERR_ASSERTION', message: /outside their exact allowed field/,
   });
+});
+
+test('HEADER_COOKIE_ECHO mutant is killed for authentication headers and transaction cookies', async t => {
+  for (const name of ['authorization', 'x-access-capability', 'set-cookie']) {
+    await t.test(`callback receipt response-only ${name}`, async () => {
+      let rig = await createRig(createProbeAdapter);
+      const secret = randomBytes(48).toString('base64url');
+      const credential = name === 'authorization' ? `Bearer ${secret}`
+        : name === 'set-cookie' ? `probe_cookie=${secret}; Path=/; HttpOnly; Secure; SameSite=Lax` : secret;
+      let mutate = false;
+      let wrapperCalls = 0;
+      let handlerSuccesses = 0;
+      let mutatedResponses = 0;
+      const wrap = current => {
+        const original = current.adapter.owners[0].fetch;
+        current.adapter.owners[0].fetch = async request => {
+          const response = await original(request);
+          if (new URL(request.url).pathname === '/api/quickbooks/connect/callback') {
+            wrapperCalls++;
+            assert.ok(response.ok, 'callback receipt mutant must follow the real successful owner handler');
+            handlerSuccesses++;
+            if (mutate) {
+              response.headers.set(name, credential);
+              mutatedResponses++;
+            }
+          }
+          return response;
+        };
+      };
+      wrap(rig);
+      await rig.connect();
+      await rig.assertPrivate();
+      assert.ok(wrapperCalls === 1 && handlerSuccesses === 1 && mutatedResponses === 0,
+        'callback receipt mutant requires an unchanged complete connection control');
+      mutate = true;
+      rig = await createRig(createProbeAdapter);
+      wrap(rig);
+      await rig.connect();
+      assert.ok(wrapperCalls === 2 && handlerSuccesses === 2 && mutatedResponses === 1,
+        'callback receipt mutant adds one header only after the real owner handler succeeds');
+      await assert.rejects(() => rig.assertPrivate(), {
+        code: 'ERR_ASSERTION', message: /outside their exact allowed field/,
+      });
+    });
+  }
+  await t.test('direct broker request authorization', async () => {
+    const rig = await createRig(createProbeAdapter);
+    assert.ok((await rig.enroll()).status === 202);
+    const credential = `Bearer ${randomBytes(48).toString('base64url')}`;
+    const original = rig.adapter.broker.fetch;
+    let mutate = false;
+    let wrapperCalls = 0;
+    let handlerSuccesses = 0;
+    let mutatedResponses = 0;
+    rig.adapter.broker.fetch = async request => {
+      wrapperCalls++;
+      const response = await original(request);
+      assert.ok(response.ok, 'direct broker probe must reach its actual successful health handler');
+      handlerSuccesses++;
+      if (mutate) {
+        response.headers.set('content-security-policy', credential.slice(7));
+        mutatedResponses++;
+      }
+      return response;
+    };
+    assert.ok((await rig.adapter.broker.fetch(new Request(BROKER + '/health', {
+      headers: { authorization: credential },
+    }))).ok, 'direct broker request must first pass an unchanged successful control');
+    await rig.assertPrivate();
+    assert.ok(wrapperCalls === 1 && handlerSuccesses === 1 && mutatedResponses === 0);
+    mutate = true;
+    assert.ok((await laterResponse(rig, 'health')).ok);
+    assert.ok(wrapperCalls === 2 && handlerSuccesses === 2 && mutatedResponses === 1,
+      'direct broker mutant echoes the earlier request only after the real later handler');
+    await assert.rejects(() => rig.assertPrivate(), {
+      code: 'ERR_ASSERTION', message: /outside their exact allowed field/,
+    });
+  });
+  await t.test('private enrollment challenge response header', async () => {
+    let mutate = false;
+    let wrapperCalls = 0;
+    let handlerSuccesses = 0;
+    let mutatedResponses = 0;
+    const rig = await createRig(async dependencies => {
+      const adapter = await createProbeAdapter(dependencies);
+      const original = adapter.owners[0].fetch;
+      adapter.owners[0].fetch = async request => {
+        const response = await original(request);
+        if (new URL(request.url).pathname === '/api/quickbooks/connect/enrollment/challenge') {
+          wrapperCalls++;
+          assert.ok(response.ok, 'challenge header probe must reach the real successful private reply');
+          handlerSuccesses++;
+          if (mutate) {
+            response.headers.set('content-security-policy', request.headers.get('authorization'));
+            mutatedResponses++;
+          }
+        }
+        return response;
+      };
+      return adapter;
+    });
+    assert.ok((await rig.enroll()).status === 202);
+    await rig.assertPrivate();
+    assert.ok(wrapperCalls === 1 && handlerSuccesses === 1 && mutatedResponses === 0);
+    mutate = true;
+    assert.ok((await rig.enroll()).status === 202);
+    assert.ok(wrapperCalls === 2 && handlerSuccesses === 2 && mutatedResponses === 1,
+      'challenge header mutant changes one private reply after real authentication');
+    await assert.rejects(() => rig.assertPrivate(), {
+      code: 'ERR_ASSERTION', message: /outside their exact allowed field/,
+    });
+  });
+  for (const source of ['enrollment', 'owner']) for (const form of ['full', 'payload']) {
+    await t.test(`${source} authorization ${form}`, async () => {
+      const rig = await createRig(createProbeAdapter);
+      if (source === 'owner') assert.ok((await rig.enroll()).status === 202);
+      const target = source === 'enrollment' ? rig.adapter.broker : rig.adapter.owners[0];
+      const original = target.fetch;
+      let mutate = false;
+      let wrapperCalls = 0;
+      let handlerSuccesses = 0;
+      let mutatedResponses = 0;
+      target.fetch = async request => {
+        const credential = request.headers.get('authorization');
+        assert.ok(typeof credential === 'string' && credential.startsWith('Bearer '),
+          'authentication echo must originate in the actual request header');
+        wrapperCalls++;
+        const response = await original(request);
+        assert.ok(response.ok, 'authentication mutant must reach a real successful handler');
+        handlerSuccesses++;
+        if (mutate) {
+          response.headers.set('content-security-policy', form === 'full' ? credential : credential.slice(7));
+          mutatedResponses++;
+        }
+        return response;
+      };
+      const operation = () => source === 'enrollment' ? rig.enroll() : rig.owner('/api/quickbooks/status');
+      assert.ok((await operation()).ok, 'authentication mutant requires an unchanged successful control');
+      await rig.assertPrivate();
+      assert.ok(wrapperCalls === 1 && handlerSuccesses === 1 && mutatedResponses === 0);
+      mutate = true;
+      assert.ok((await operation()).ok, 'authentication echo preserves the real successful response');
+      assert.ok(wrapperCalls === 2 && handlerSuccesses === 2 && mutatedResponses === 1,
+        'authentication mutant changes one response only after the real handler succeeds');
+      await assert.rejects(() => rig.assertPrivate(), {
+        code: 'ERR_ASSERTION', message: /outside their exact allowed field/,
+      });
+    });
+  }
+  for (const destination of ['health', 'status']) for (const form of ['set-cookie', 'cookie', 'value']) {
+    await t.test(`transaction ${form} then ${destination}`, async () => {
+      const rig = await createRig(createProbeAdapter);
+      const originalBroker = rig.adapter.broker.fetch;
+      let issuedCookie;
+      let launches = 0;
+      rig.adapter.broker.fetch = async request => {
+        const response = await originalBroker(request);
+        if (new URL(request.url).pathname === '/v1/quickbooks/launch') {
+          assert.ok(response.status === 303, 'cookie control must reach the real launch handler');
+          issuedCookie = response.headers.get('set-cookie');
+          launches++;
+        }
+        return response;
+      };
+      await rig.pending();
+      assert.ok(launches === 1 && typeof issuedCookie === 'string' && issuedCookie.includes('HttpOnly'),
+        'cookie mutant must use the cookie issued by the actual launch handler');
+      await rig.assertPrivate();
+      const pair = issuedCookie.split(';')[0];
+      const echo = form === 'set-cookie' ? issuedCookie : form === 'cookie' ? pair : pair.slice(pair.indexOf('=') + 1);
+      const target = destination === 'health' ? rig.adapter.broker : rig.adapter.owners[0];
+      const original = target.fetch;
+      let mutate = false;
+      let wrapperCalls = 0;
+      let handlerSuccesses = 0;
+      let mutatedResponses = 0;
+      target.fetch = async request => {
+        wrapperCalls++;
+        const response = await original(request);
+        assert.ok(response.ok, 'cookie echo must reach a real successful later handler');
+        handlerSuccesses++;
+        if (mutate) {
+          response.headers.set('content-security-policy', echo);
+          mutatedResponses++;
+        }
+        return response;
+      };
+      const operation = () => laterResponse(rig, destination);
+      assert.ok((await operation()).ok, 'cookie mutant requires an unchanged later-response control');
+      await rig.assertPrivate();
+      assert.ok(wrapperCalls === 1 && handlerSuccesses === 1 && mutatedResponses === 0);
+      mutate = true;
+      assert.ok((await operation()).ok, 'cookie echo preserves the real successful response');
+      assert.ok(wrapperCalls === 2 && handlerSuccesses === 2 && mutatedResponses === 1,
+        'cookie mutant changes one later response only after the real handler succeeds');
+      await assert.rejects(() => rig.assertPrivate(), {
+        code: 'ERR_ASSERTION', message: /outside their exact allowed field/,
+      });
+    });
+  }
+  for (const name of ['cf-access-jwt-assertion', 'cf-access-client-secret', 'x-access-capability',
+    'x-api-key', 'x-future-credential', 'cookie']) {
+    await t.test(`request-only ${name}`, async () => {
+      const rig = await createRig(createProbeAdapter);
+      assert.ok((await rig.enroll()).status === 202);
+      const secret = randomBytes(48).toString('base64url');
+      const credential = name === 'cookie'
+        ? `first=${randomBytes(48).toString('base64url')}; probe_cookie=${secret}; last=${randomBytes(48).toString('base64url')}` : secret;
+      const request = () => new Request(BROKER + '/health', { headers: { [name]: credential } });
+      const original = rig.adapter.broker.fetch;
+      let mutate = false;
+      let wrapperCalls = 0;
+      let handlerSuccesses = 0;
+      let mutatedResponses = 0;
+      rig.adapter.broker.fetch = async input => {
+        assert.ok(input.headers.get(name) === credential, 'channel probe must reach the unchanged request header');
+        wrapperCalls++;
+        const response = await original(input);
+        assert.ok(response.ok, 'channel echo must follow the actual successful health handler');
+        handlerSuccesses++;
+        if (mutate) {
+          response.headers.set('content-security-policy', secret);
+          mutatedResponses++;
+        }
+        return response;
+      };
+      assert.ok((await rig.broker(request())).ok, 'request-only channel requires a successful unchanged control');
+      await rig.assertPrivate();
+      assert.ok(wrapperCalls === 1 && handlerSuccesses === 1 && mutatedResponses === 0);
+      mutate = true;
+      assert.ok((await rig.broker(request())).ok);
+      assert.ok(wrapperCalls === 2 && handlerSuccesses === 2 && mutatedResponses === 1,
+        'request-only channel mutant changes one response after its real handler');
+      await assert.rejects(() => rig.assertPrivate(), {
+        code: 'ERR_ASSERTION', message: /outside their exact allowed field/,
+      });
+    });
+  }
+  for (const destination of ['health', 'status']) for (const name of ['authorization', 'x-access-capability', 'set-cookie']) {
+    await t.test(`${destination} response-only ${name}`, async () => {
+      const rig = await createRig(createProbeAdapter);
+      assert.ok((await rig.enroll()).status === 202);
+      const secret = randomBytes(48).toString('base64url');
+      const credential = name === 'authorization' ? `Bearer ${secret}`
+        : name === 'set-cookie' ? `probe_cookie=${secret}; Path=/; HttpOnly; Secure; SameSite=Lax` : secret;
+      const target = destination === 'health' ? rig.adapter.broker : rig.adapter.owners[0];
+      const original = target.fetch;
+      let mutate = false;
+      let wrapperCalls = 0;
+      let handlerSuccesses = 0;
+      let mutatedResponses = 0;
+      target.fetch = async request => {
+        wrapperCalls++;
+        const response = await original(request);
+        assert.ok(response.ok, 'new response credential follows the real successful handler');
+        handlerSuccesses++;
+        if (mutate) {
+          response.headers.set(name, credential);
+          mutatedResponses++;
+        }
+        return response;
+      };
+      const operation = () => laterResponse(rig, destination);
+      assert.ok((await operation()).ok);
+      await rig.assertPrivate();
+      assert.ok(wrapperCalls === 1 && handlerSuccesses === 1 && mutatedResponses === 0);
+      mutate = true;
+      assert.ok((await operation()).ok);
+      assert.ok(wrapperCalls === 2 && handlerSuccesses === 2 && mutatedResponses === 1,
+        'response-only mutant introduces one credential after a real successful handler');
+      await assert.rejects(() => rig.assertPrivate(), {
+        code: 'ERR_ASSERTION', message: /outside their exact allowed field/,
+      });
+    });
+  }
 });
 
 async function successfulRefresh(rig, entry) {
@@ -218,7 +496,7 @@ for (const surface of ['body', 'header']) {
           const response = await original(request);
           echoed = true;
           if (surface === 'header') {
-            response.headers.set('x-probe-echo', ciphertext);
+            response.headers.set('content-security-policy', ciphertext);
             return response;
           }
           const body = await response.json();
@@ -242,7 +520,7 @@ for (const surface of ['body', 'header']) {
         const response = await original(request);
         const body = await response.clone().json();
         if (surface === 'header') {
-          response.headers.set('x-probe-echo', body.ciphertext);
+          response.headers.set('content-security-policy', body.ciphertext);
           return response;
         }
         body.ciphertext = ciphertext;
@@ -275,7 +553,7 @@ for (const surface of ['body', 'header']) {
           if (surface === 'header') {
             // Owner fetch has already been observed by the harness. Mutating the
             // same Response must not hide a later header behind identity dedupe.
-            response.headers.set('x-probe-echo', typeof start[field] === 'string' ? start[field] : JSON.stringify(start[field]));
+            response.headers.set('content-security-policy', typeof start[field] === 'string' ? start[field] : JSON.stringify(start[field]));
             return response;
           }
           const headers = new Headers(response.headers);
@@ -302,7 +580,7 @@ for (const surface of ['body', 'header']) {
         const response = await original(request);
         const body = await response.clone().json();
         if (surface === 'header') {
-          response.headers.set('x-probe-echo', typeof body[field] === 'string' ? body[field] : JSON.stringify(body[field]));
+          response.headers.set('content-security-policy', typeof body[field] === 'string' ? body[field] : JSON.stringify(body[field]));
           return response;
         }
         // A prior value cannot gain a second grant even in the same named field

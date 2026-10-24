@@ -4,6 +4,65 @@
   "title": "QuickBooks broker protocol version 1",
   "description": "Review-only wire and custody schemas. This catalog is not a deployable broker. Each named $defs entry is independently addressable. Schema validity does not prove signatures, semantic bindings, TLS, DNS, storage transactions, retention, or provider behavior.",
   "$defs": {
+    "exchangeHeader": {
+      "oneOf": [
+        { "$ref": "#/$defs/exchangePrivateHeader" },
+        { "$ref": "#/$defs/exchangePublicHeader" },
+        { "$ref": "#/$defs/exchangeCookieClearingHeader" }
+      ]
+    },
+    "exchangePrivateHeader": {
+      "description": "Every valid header name is private unless the reviewed public metadata allowlist names it.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^(?!(?:accept|cache-control|content-type|content-length|content-encoding|content-security-policy|location|referrer-policy|x-content-type-options|retry-after|origin)$)[a-z0-9!#$%&'*+.^_`|~-]+$"
+        },
+        "value": {
+          "type": "string",
+          "pattern": "^(?!__Secure-qbo_transaction=; Path=/v1/quickbooks/oauth/callback; HttpOnly; Secure; SameSite=Lax; Max-Age=0$)",
+          "x-private": true
+        }
+      },
+      "required": ["name", "value"]
+    },
+    "exchangePublicHeader": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "enum": [
+            "accept", "cache-control", "content-type", "content-length",
+            "content-encoding", "content-security-policy", "location", "referrer-policy",
+            "x-content-type-options", "retry-after", "origin"
+          ]
+        },
+        "value": { "type": "string" }
+      },
+      "required": ["name", "value"]
+    },
+    "exchangeCookieClearingHeader": {
+      "description": "Only this exact payload-free transaction-cookie deletion header is public.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "const": "set-cookie" },
+        "value": { "const": "__Secure-qbo_transaction=; Path=/v1/quickbooks/oauth/callback; HttpOnly; Secure; SameSite=Lax; Max-Age=0" }
+      },
+      "required": ["name", "value"]
+    },
+    "exchangeCookie": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "value": { "type": "string", "x-private": true }
+      },
+      "required": ["name", "value"]
+    },
     "protocol": {
       "const": "qbo-broker/1"
     },

@@ -6,11 +6,116 @@ import * as helpers from './harness.mjs';
 import { fixture } from '../testing/schema-test-helper.mjs';
 import { createRig, jsonRequest, rewriteJson, queryFree } from './harness.mjs';
 const schema = JSON.parse(readFileSync(new URL('../v1/schemas/protocol.schema.json', import.meta.url), 'utf8'));
+// Header echo probes use the reviewed public CSP field, preventing the sink
+// from registering its own canary and concealing a missing source capture.
 const audit = () => fixture(schema, 'auditEvent', length => randomBytes(length).toString('base64url').slice(0, length));
 const startResponse = () => Response.json(fixture(schema, 'launchResponse',
   length => randomBytes(length).toString('base64url').slice(0, length)));
 const startRequest = () => jsonRequest(helpers.BROKER + helpers.START, fixture(schema, 'startRequest',
   length => randomBytes(length).toString('base64url').slice(0, length)));
+
+for (const channel of ['headers', 'cookies']) test(`CAPTURE_SKIP_${channel.toUpperCase()} mutant is killed by independent exchange coverage`, async t => {
+  const factory = await helpers.loadImplementation();
+  const control = await createRig(factory);
+  await control.connect();
+  await control.assertPrivate();
+  for (const omission of ['channel', 'entry']) await t.test(omission, async () => {
+    let skipped = 0;
+    const rig = await createRig(factory, { capture: (snapshot, visit) => helpers.captureExchange(snapshot, (name, value) => {
+      if (name === channel && omission === 'channel') { skipped++; return; }
+      if (name === channel && omission === 'entry' && value.length > 0) {
+        skipped++;
+        visit(name, value.slice(1));
+        return;
+      }
+      visit(name, value);
+    }) });
+    await rig.connect();
+    await assert.rejects(() => rig.assertPrivate(), {
+      code: 'ERR_ASSERTION', message: /every recorded exchange channel must be traversed/,
+    });
+    assert.ok(skipped > 0, 'mutant must omit actual recorded channel or entry observations');
+  });
+});
+
+test('schema-selected owner requests refuse uninspectable bodies before handler entry', async t => {
+  for (const [route, bodySchema] of [
+    [helpers.OWNER_CALLBACK, 'ownerCallbackRequest'],
+    ['/api/quickbooks/connect/enrollment/voucher', 'enrollmentDelivery'],
+  ]) await t.test(bodySchema, async () => {
+    const spy = transportSpy();
+    let calls = 0;
+    const rig = await createRig(async dependencies => {
+      const adapter = await spy.factory(dependencies);
+      const original = adapter.owners[0].fetch;
+      adapter.owners[0].fetch = request => { calls++; return original(request); };
+      return adapter;
+    });
+    await rig.broker(startRequest());
+    const body = fixture(schema, bodySchema, length => randomBytes(length).toString('base64url').slice(0, length));
+    const send = value => rig.adapter.owners[0].fetch(jsonRequest(rig.origins[0] + route, value));
+    assert.ok((await send(body)).status === 204 && calls === 1,
+      'schema-valid owner body must reach the unchanged accepting handler');
+    await rig.assertPrivate();
+    assert.ok((await send({ ...body, unexpected_public_field: true })).status === 204 && calls === 2,
+      'inspectable intentional-invalid owner body remains available to the real handler');
+    await rig.assertPrivate();
+    calls = 0;
+    const duplicate = new Request(rig.origins[0] + route, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body).replace('{', '{"duplicate_probe":0,"duplicate_probe":1,'),
+    });
+    await assert.rejects(() => rig.adapter.owners[0].fetch(duplicate), {
+      code: 'ERR_ASSERTION', message: /private request body must be inspectable before handler entry/,
+    });
+    assert.ok(calls === 0, 'uninspectable private owner body must never reach the accepting handler');
+    await rig.assertPrivate();
+  });
+});
+
+test('concurrent reuse of one broker Request preserves each capture boundary', async () => {
+  async function countedRig({ blockFirst = false } = {}) {
+    const spy = transportSpy();
+    let capturedRequests = 0;
+    let calls = 0;
+    let announce;
+    let release;
+    const entered = new Promise(resolve => { announce = resolve; });
+    const gate = new Promise(resolve => { release = resolve; });
+    const rig = await createRig(async dependencies => {
+      const adapter = await spy.factory(dependencies);
+      const original = adapter.broker.fetch;
+      adapter.broker.fetch = async request => {
+        if (++calls === 1 && blockFirst) { announce(); await gate; }
+        return original(request);
+      };
+      return adapter;
+    }, { capture: (snapshot, visit) => helpers.captureExchange(snapshot, (channel, value) => {
+      if (channel === 'body' && value.decoded.some(body => body?.route === helpers.START)) capturedRequests++;
+      visit(channel, value);
+    }) });
+    return { rig, entered, release, count: () => capturedRequests, calls: () => calls };
+  }
+  const control = await countedRig();
+  const sequential = startRequest();
+  assert.ok((await control.rig.adapter.broker.fetch(sequential)).ok);
+  assert.ok((await control.rig.adapter.broker.fetch(sequential)).ok);
+  assert.ok(control.count() === 2 && control.calls() === 2,
+    'sequential reuse must capture both successful broker invocations');
+  await control.rig.assertPrivate();
+
+  const target = await countedRig({ blockFirst: true });
+  const concurrent = startRequest();
+  const first = target.rig.broker(concurrent);
+  await target.entered;
+  let second;
+  try { second = await target.rig.adapter.broker.fetch(concurrent); }
+  finally { target.release(); }
+  assert.ok((await first).ok && second.ok && target.calls() === 2,
+    'both concurrent calls must reach their successful handlers');
+  assert.ok(target.count() === 2, 'each concurrent broker invocation requires its own request capture');
+  await target.rig.assertPrivate();
+});
 
 test('REQUEST_SCHEMA_BYPASS mutant is killed before the handler', async t => {
   for (const attack of ['missing_private', 'unknown_field', 'duplicate_field', 'uninspectable_opt_in']) await t.test(attack, async () => {
