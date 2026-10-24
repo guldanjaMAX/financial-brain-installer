@@ -1,6 +1,6 @@
 # Broker E2E gates
 
-These probes describe the broker and owner boundaries. All nine now pass using
+These probes describe the broker and owner boundaries. All twelve tests pass using
 `implementation-adapter.mjs`, the actual separate broker package and an isolated
 test-only owner handler with SQLite and cryptography. No scenario is skipped or
 marked TODO. Production owner integration and the external design gates remain
@@ -18,12 +18,12 @@ The protocol/fake unit suite imports only the passing harness unit file:
 node --test protocol/quickbooks-broker/probes/harness.unit.mjs
 ```
 
-`scripts/run-test-chain.mjs` has an explicit command list. It does not discover
-this directory, and its registered protocol unit wrapper does not import the E2E
-file. The `.probe.mjs` suffix and `probes/` location also keep it outside the
-top-level test-file completeness pattern. Do not exempt a failing default test,
-convert these probes to skips, or silently change the ordinary graph. This lane
-keeps integration verification explicit under its focused-test instruction.
+`scripts/run-test-chain.mjs` explicitly registers the eleven-file foundation
+command in both command lists. It includes this E2E file, the privacy test,
+eight broker tests and the protocol wrapper. The `.probe.mjs` suffix remains
+outside the completeness discovery pattern; positive coverage checks require
+its registration. No broker test is exempted from the completeness gate. Lane
+verification runs focused files directly without running the full chain.
 
 ## Scenario inventory
 
@@ -43,6 +43,9 @@ provider entry, and mutation; observations are fixed event names with no payload
 | Mix-up | Correct connection is the control. Tests signed callback/environment disagreement with voucher, another transaction's cookie, a valid envelope delivered to another owner, altered intent/environment/key/generations, missing or wrong broker sender tag, tampered refresh company/generation/realm fields, and rotated voucher generation. |
 | SSRF and privacy | Health and direct owner-to-provider accounting read are controls. Refuses HTTP, IP/localhost, userinfo, fragments, nonstandard port and wrong callback path at enrollment; refuses private DNS answers before delivery; never follows callback redirects. Data proxy, token lookup and token recovery routes are absent. Scans durable broker rows, logs and returned responses for generated credential canaries and validates exact non-content schemas. |
 | Abuse | Valid signed start is the control. Refuses unavailable quota/replay storage, wrong content type, body larger than 12 KiB, expired proof, and the sixth start within ten minutes. |
+| Pending expiry | Unavailable delivery and an invalid callback leave pending intents. Status retains both keys at 599999 ms, then expires the intent and destroys both keys at 600000 ms without outbound contact. |
+| Cleanup recovery | Exact readback failure rolls back expiry. A backlog of 33 intents requires two status calls, with at most 32 records cleaned per call. Terminal polls are idempotent. |
+| Key-retention mutant | Removes key destruction from the actual owner runtime. The same stored-key expiry invariant passes the real runtime and rejects the mutant. |
 
 The broker has no company/token registry. The refresh tampering checks therefore
 assert request-signature integrity, not knowledge of an owner's D1 generation.
@@ -145,7 +148,8 @@ a successful fake-provider read. Neither is a deployed owner API in this lane.
   voucherIssueCount: integer,
   exchangeFences: integer,
   owners: [{
-    status, intentStatus, tokenGeneration, tokenCiphertextCount,
+    status, intentStatus, intentKeyCount, pendingIntentCount,
+    temporaryIntentKeyCount, intentExpiryReadbackCount, tokenGeneration, tokenCiphertextCount,
     connectionCommitCount, connectionReadbackCount,
     scheduleEnabled, readsEnabled, importedRecordCount, outcomeUnknown, fenceFingerprint,
     remoteRevocation, noContactProofVerified
@@ -170,6 +174,8 @@ The adapter must inject these one-shot faults at the named real dependency:
 | `broker.replay.unavailable` | Refuse the start replay-store operation. |
 | `broker.quota.unavailable` | Refuse start quota admission. |
 | `owner.refresh.readback` | Fail readback after the replacement commit attempt. |
+| `owner.enrollment.readback` | Roll back installation and consumed-challenge acknowledgement if exact readback fails. |
+| `owner.intent.expiry.readback` | Roll back the bounded pending-intent expiry batch and refuse status. |
 | `broker.revoke.before_fence` | Produce the reviewed, authenticated no-contact result before any provider send; only this proof permits the same operation retry. |
 | `broker.rotate_generation` | Rotate current broker key generation; leave the old owner voucher unchanged. |
 

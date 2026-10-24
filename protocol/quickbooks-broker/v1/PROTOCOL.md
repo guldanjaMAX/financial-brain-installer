@@ -164,8 +164,12 @@ for its still confidential, unexpired one-use challenge and the exact pending
 key, callback and environment. Possession authenticates this direct delivery;
 public HTTPS alone would not authenticate the broker to the Worker. Atomically
 consume the owner challenge while saving the voucher and encrypted install
-private key with exact readback. Exact delivery retries return the same saved
-acknowledgement; different bytes refuse. The operator receives a status-only 202 after
+private key with exact readback. Store the canonical delivery hash and exact
+status-only acknowledgement with the consumed challenge. Exact delivery retries
+return that saved acknowledgement without another voucher save, including
+after the consumed challenge expires; different bytes refuse. The broker retries
+identical delivery bytes at most three times within ten seconds and the original
+challenge deadline, without minting another voucher. The operator receives a status-only 202 after
 verified delivery, never the voucher or an owner secret. The broker retains
 only a permitted enrollment audit/replay record. These enrollment paths are
 additional owner provisioning surfaces, not owner login APIs.
@@ -316,6 +320,11 @@ If the owner callback is unavailable, leave its pending intent to expire visibly
 the browser result never fabricates successful owner notification. Failure
 notification after a token delivery cannot overwrite an already connected
 intent; owner status remains authoritative.
+An authenticated owner status decision must expire overdue pending intents in
+a bounded batch, destroy both temporary keys, and read back the exact terminal
+record before reporting success. A failed readback must refuse and remain
+recoverable. The offline fixture processes at most 32 records per status call;
+later calls finish older backlogs without provider contact.
 
 Retry delivery at most three total attempts and ten seconds, only within the
 same active broker invocation and intent deadline, using the identical
@@ -479,7 +488,7 @@ erasing the durable operation fence.
 
 Unit tests establish schema shapes, state prerequisites, cryptographic fixture
 binding, fake provider behavior and probe harness checks. They do not establish
-an operating deployment. The nine E2E gates now pass against the separate broker
+an operating deployment. The twelve E2E tests pass against the separate broker
 foundation and a test-only owner handler. Their adapter requirements and attack inventory are in
 [the probe guide](../probes/README.md). Intuit acceptance, browser cookie
 behavior, Cloudflare routing/logging, DNS pinning, native D1 transactions and a

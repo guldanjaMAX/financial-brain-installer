@@ -145,12 +145,27 @@ export function createBroker({ config: suppliedConfig, store, providerTransport,
     const row = await replay(ROUTES.issue, value.request_id, issuedVoucher, null, value.challenge, 'enrollment');
     await store.createReplay(row);
     await audit(row, 'enrollment', 'accepted', 202);
-    const response = await pinned(new Request(callback.origin + '/api/quickbooks/connect/enrollment/voucher', {
-      method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/json', authorization: `Bearer ${value.challenge}` },
-      body: canonical({ protocol: PROTOCOL, challenge: value.challenge, voucher: issuedVoucher }) }), value.callback);
-    if (!response.ok) refuse('delivery_unconfirmed', 503);
-    const acknowledgement = await parseJson(response);
-    if (!same(acknowledgement, { protocol: PROTOCOL, outcome: 'committed_readback', install_fingerprint: await sha256(issuedVoucher) })) refuse('receipt_invalid', 503);
+    const deliveryBytes = canonical({ protocol: PROTOCOL, challenge: value.challenge, voucher: issuedVoucher });
+    const expectedAcknowledgement = { protocol: PROTOCOL, outcome: 'committed_readback', install_fingerprint: await sha256(issuedVoucher) };
+    const deadline = Math.min(now() + 10_000, challenge.expires_at);
+    let delivered = false;
+    let failure = 'delivery_unconfirmed';
+    // Reuse the one minted voucher and exact bytes only within this invocation.
+    // A lost acknowledgement must not restart challenge verification or issuance.
+    for (let attempt = 0; attempt < 3 && now() < deadline; attempt++) {
+      try {
+        const response = await pinned(new Request(callback.origin + '/api/quickbooks/connect/enrollment/voucher', {
+          method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(Math.max(1, deadline - now())),
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${value.challenge}` },
+          body: deliveryBytes }), value.callback);
+        if (!response.ok) continue;
+        const acknowledgement = await parseJson(response);
+        if (!same(acknowledgement, expectedAcknowledgement)) { failure = 'receipt_invalid'; continue; }
+        delivered = true;
+        break;
+      } catch { /* Lost acknowledgements are retried with identical bytes only. */ }
+    }
+    if (!delivered) refuse(failure, 503);
     await audit(row, 'enrollment', 'delivered', 202);
     observe('enrollment.voucher.delivered');
     return json({ protocol: PROTOCOL, code: 'accepted', retry: 'never' }, 202);
