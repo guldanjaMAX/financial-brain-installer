@@ -13,18 +13,19 @@ complete ID sets under a proven writer exclusion boundary, preview their
 difference, and delete only approved provider-only IDs through durable outbox
 receipts. Reindex alone cannot identify those IDs.
 
-The study and implementation plan are complete. Round 1's original commit
-restriction is historical: the operator subsequently committed that report.
-Round 2 leaves its reviewed changes in the working tree as instructed, with a
-prepared commit below for the operator. Read-only Git metadata is not a handoff
-blocker for this round.
+The study and implementation plan are complete. The pre-commit restrictions in
+Rounds 1 and 2 are historical: the operator subsequently committed both rounds.
+Round 3 leaves its reviewed changes in the working tree as instructed, with a
+prepared commit below for the operator. Read-only Git metadata is the expected
+handoff boundary for this round.
 This report is not live repair authorization or a claim that a supported
 targeted-repair command exists.
 The current general CLI has no such command. Its disposable recovery adapter
 has useful enumeration checks but refuses more than 100,000 IDs. A separate
 reviewed implementation and field approval are prerequisites for live use.
-Round 1 added only this report. Round 2 adds a synthetic characterization of
+Round 1 added only this report. Round 2 added a synthetic characterization of
 the accelerated whole-corpus stored-ID remap and a canonical-ID control.
+Round 3 registers that test in both test-chain lists and updates the history.
 Product behavior, shared fixtures and configuration remain unchanged.
 
 ## Exactly what the preview compares
@@ -489,11 +490,12 @@ remote operation or push was performed.
 Round 1 commit history, resolved by the operator: the original session could
 not create its required commit. `git add --
 partner-reports/vector-excess-plan.md` failed because Git could not create
-`.git/index.lock` (permission denied). The workspace explicitly exposes Git
-metadata as read-only, and this session cannot elevate permissions. No Git
+`.git/index.lock` (permission denied). That workspace exposed Git
+metadata as read-only, and that session could not elevate permissions. No Git
 configuration was changed and no workaround was attempted. The operator later
-created the commit as recorded below. This historical restriction does not
-block Round 2, which expressly requires an uncommitted working-tree handoff.
+created the commit as recorded below. This historical restriction did not
+block Round 2, which required an uncommitted working-tree handoff that the
+operator subsequently committed.
 
 Round 1 commit subject: `docs: plan targeted repair for vector excess`
 
@@ -585,7 +587,7 @@ These are mutation-sensitivity checks for the causal reproduction, not a claim
 that either mutant implements a repair. The three future-executor mutants in
 the Round 1 history remain planned only.
 
-### Additional checks and handoff
+### Additional checks and handoff (Round 2 history)
 
 `node --import file:///C:/offload/lanes-1023/no-network.mjs --check test/vector-bootstrap-stored-id.test.mjs`
 passed. Focused test files used the permitted closed-fixture exemption. There
@@ -598,9 +600,10 @@ production source change, and `git status --short` lists only the report and
 new test. Git emitted only its existing LF-to-CRLF advisory.
 
 No live account, credentials, network, runtime artifact or production state was
-accessed. No Git metadata write or push was attempted. The operator owns the
-focused-test rerun and commit. The lane is ready for that handoff; it does not
-authorize a live repair, release or deployment.
+accessed. No Git metadata write or push was attempted. At that handoff, the
+operator owned the focused-test rerun and commit, subsequently completed as
+recorded below. Round 2 was ready for that handoff; it did not authorize a live
+repair, release or deployment.
 
 ### Prepared commit
 
@@ -614,8 +617,102 @@ Add a canonical-ID control and extend the exact-ID repair cause coverage.
 Clarify prior commit history and record focused tests and killed mutants.
 ```
 
-### Operator note (round 2)
+### Operator note (Round 2 history)
 
-The Codex sandbox on this Windows machine makes `.git` read-only, so the lane could not commit. The operator (Claude Code) re-ran `node --test test/vector-bootstrap-stored-id.test.mjs` on the unchanged working tree: 2 passed, 0 failed (the defect characterization and the canonical-ID control). `git status` shows only this report and the new test; no product file changed. The new test is a characterization of a current defect and is deliberately not registered in the test chain. Names, banned-word, email, user-path and key scan: none. The operator made the prepared commit unchanged and added the Codex co-author trailer.
+The Codex sandbox on this Windows machine made `.git` read-only, so the lane could not commit. The operator (Claude Code) re-ran `node --test test/vector-bootstrap-stored-id.test.mjs` on the unchanged working tree: 2 passed, 0 failed (the defect characterization and the canonical-ID control). At that time, `git status` showed only this report and the new test; no product file changed. The test characterized a current defect and was left outside the test chain in Round 2. Round 3 corrects that omission below. Names, banned-word, email, user-path and key scan: none. The operator made the prepared commit unchanged and added the Codex co-author trailer.
 
-LANE VECTOR-EXCESS-PLAN-2: READY
+## Round 3
+
+### Scope and result
+
+Started from `3bda54c` on `partner/vector-excess-plan-3`. Registered
+`node --no-warnings --test test/vector-bootstrap-stored-id.test.mjs` exactly
+once in both `POST_LAUNCHER_TEST_COMMANDS` and `TEST_COMMANDS`. The existing
+graph checks now cover the characterization and retain the exact original
+172-command graph and order. The characterization still documents the existing
+stored-ID defect; this round changes no bootstrap behavior or test assertions.
+
+The opening handoff status and earlier commit restriction now explicitly
+describe history. The Round 2 operator note records its then-unregistered test
+as a past omission corrected here. The operator's commit reconstruction and
+trailer work were already complete before this round.
+
+### Changed files
+
+- `scripts/run-test-chain.mjs:170`: adds the exact command to
+  `POST_LAUNCHER_TEST_COMMANDS`; `scripts/run-test-chain.mjs:698` adds it to
+  `TEST_COMMANDS`, next to the other bootstrap tests.
+- `partner-reports/vector-excess-plan.md:16`: records prior commits as history
+  and the current working-tree handoff; `:26` distinguishes the three rounds;
+  `:490` makes the old commit restriction past tense; `:590` and `:620` mark
+  the Round 2 handoff and operator observations as history; `:624` records
+  this round's verification and prepared commit.
+
+### Red-then-green evidence and every focused run
+
+All six invocations below ran offline on Node v24.18.0 on 2026-10-24 and finished
+before 07:35 MST, well before the 14:00 local cutoff. Only the three requested
+focused files ran. Graph checks did not launch the full chain; runner checks
+used their bounded synthetic child fixtures. No dependencies were installed.
+
+| Run | Exact command | Result |
+| --- | --- | --- |
+| Baseline red before editing either list | `node --no-warnings --test test/test-chain-complete.test.mjs` | Exit 1, 0 passing / 1 failing file, 90.8263 ms. Exactly one orphan: `test/vector-bootstrap-stored-id.test.mjs`; the other four internal checks passed. |
+| `DROP_TEST_COMMAND_REGISTRATION` mutant | `node --no-warnings --test test/test-chain-complete.test.mjs` | Exit 1, 0 passing / 1 failing file, 82.6858 ms. The same exact orphan was detected; the other four internal checks passed. |
+| `DROP_POST_LAUNCHER_REGISTRATION` mutant | `node --no-warnings --test test/test-chain-runner.test.mjs` | Exit 1, 0 passing / 1 failing file, 51.1141 ms. The legacy-count assertion failed with actual 173 versus expected 172. |
+| Final stored-ID characterization and control | `node --no-warnings --test test/vector-bootstrap-stored-id.test.mjs` | Exit 0, 2 passing / 0 failing tests, 469.1238 ms. Both the defect characterization and canonical-ID control passed. |
+| Final runner control with both registrations | `node --no-warnings --test test/test-chain-runner.test.mjs` | Exit 0, 1 passing / 0 failing file, 828.8207 ms. Original 172-command count, hash and order preserved. |
+| Final completeness green with both registrations | `node --no-warnings --test test/test-chain-complete.test.mjs` | Exit 0, 1 passing / 0 failing file, 81.2469 ms. All five internal checks passed; all 452 tracked or new candidate test files were scheduled. |
+
+The baseline red and final completeness green prove the registration fix.
+The report-only history correction has no behavioral red test; its evidence is
+the reviewed wording diff. No new test or exemption was needed.
+
+### Named mutants and proof
+
+1. `DROP_TEST_COMMAND_REGISTRATION`: temporarily remove only the new entry at
+   `scripts/run-test-chain.mjs:698`, keeping the projection-list entry.
+   `test/test-chain-complete.test.mjs:74` detects the orphan and exits 1.
+   The final completeness run with both entries restored is its passing control.
+2. `DROP_POST_LAUNCHER_REGISTRATION`: temporarily remove only the new entry at
+   `scripts/run-test-chain.mjs:170`, keeping the executable-list entry.
+   `test/test-chain-runner.test.mjs:45` sees 173 legacy commands instead of 172
+   and exits 1. The final runner run is its passing control, including the
+   unchanged legacy-graph SHA-256 assertion.
+
+Each mutant was applied separately through PowerShell. The final two-entry
+source bytes were retained in memory, restored in `finally`, and their SHA-256
+was verified after each run. No mutant remains and no scratch tree was created.
+
+### Checks and handoff
+
+The existing README and developer guidance were reviewed. Independent review
+confirmed that the two-list registration preserves the legacy graph and that
+the previous handoff language needed historical framing. `git diff --check`
+and local content checks passed: the diff contains only this report and two
+command entries, with no prohibited wording, em dash, user-profile path or
+trailing whitespace. The final status line matches this round exactly.
+
+Focused test files used the permitted closed-fixture guard exemption. No ad-hoc
+Node probe or script ran, so there was no unguarded probe. There was no network,
+live account, credential, production-state or Git-metadata access for writes.
+No install, full chain, commit or push ran. All changes remain in the working
+tree for the operator's focused-test rerun and commit.
+
+### Prepared commit
+
+Subject: `test: register stored-id bootstrap characterization in chain`
+
+Body:
+
+```text
+Add the stored-ID characterization to both test-chain command lists.
+Mark prior handoff restrictions as history and record round 3 verification.
+Prove both omission mutants fail and all three focused checks pass.
+```
+
+### Operator note (round 3)
+
+The operator (Claude Code) re-ran `node --test test/vector-bootstrap-stored-id.test.mjs test/test-chain-runner.test.mjs test/test-chain-complete.test.mjs` on the unchanged working tree: 4 passed, 0 failed. The chain now lists the characterization test in both POST_LAUNCHER_TEST_COMMANDS and TEST_COMMANDS. The round 1 commit was recreated earlier with the same tree plus the Codex trailer (1b2eec4 became 0a85224, and ea2c1f7 became 3bda54c). Names, banned-word, em dash and user-path scan: none. The operator made the prepared commit unchanged and added the Codex co-author trailer.
+
+LANE VECTOR-EXCESS-PLAN-3: READY
