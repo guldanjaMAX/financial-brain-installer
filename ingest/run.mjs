@@ -2123,7 +2123,15 @@ export function loadState(path) {
   }
 }
 
-export function saveState(path, state) {
+/**
+ * Synchronously replace a private JSON checkpoint. Injected rename and sleep
+ * must also be synchronous. Failed writes clean up the sibling and rethrow
+ * the original error; checkpoint data is never logged.
+ */
+export function saveState(path, state, {
+  rename = renameSync,
+  sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms),
+} = {}) {
   mkdirSync(dirname(path), { recursive: true });
   // The Drive state contains private file ids, names, folder paths and the
   // incremental cursor. Keep it owner-only, and replace it atomically so a
@@ -2132,7 +2140,18 @@ export function saveState(path, state) {
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
   try {
     writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
-    renameSync(tmp, path);
+    // Windows readers can briefly deny replacement. Keep the staged bytes and
+    // retry only sharing/permission refusals, for at most 2,025 ms of backoff.
+    // Callers require persistence before advancing, so the wait stays synchronous.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        rename(tmp, path);
+        break;
+      } catch (error) {
+        if (!["EPERM", "EACCES", "EBUSY"].includes(error?.code) || attempt === 9) throw error;
+        sleep(225);
+      }
+    }
     // rename preserves the temp file's mode. chmod also repairs an older state
     // file that may have been created by the pre-hardening implementation.
     chmodSync(path, 0o600);
