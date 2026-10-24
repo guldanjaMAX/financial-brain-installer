@@ -15,6 +15,7 @@ import {
 import { gmailRefusalReadyReceipt } from "./fixtures/gmail-refusal-receipt.mjs";
 import {
   DEFAULT_QUERY,
+  gmailExtractionVersion,
   gmailLabelDecision,
   gmailPolicyFingerprint,
   gmailQuery,
@@ -144,9 +145,11 @@ function stateFor(mode) {
       accepted: { "gmail:migration-safe": "migration-safe-v1" },
     };
     if (mode === "scanner-v5-progress-missing") {
+      // Keep extraction current so only the absent stored family defeats resume.
+      state.done["gmail:migration-safe"] = gmailExtractionVersion("migration-safe-v1");
       state.credential_scanner_progress = {
         fingerprint: credentialScannerFingerprint(true, 5),
-        accepted: { "gmail:migration-safe": "migration-safe-v1" },
+        accepted: { "gmail:migration-safe": gmailExtractionVersion("migration-safe-v1") },
       };
     }
   }
@@ -289,9 +292,11 @@ if (process.platform !== "win32") {
     sinceSchema?.type === "string" && sinceSchema?.format === "date" &&
     sinceSchema?.pattern === "^\\d{4}-\\d{2}-\\d{2}$",
     JSON.stringify(sinceSchema));
-  check("an absent Gmail floor preserves the prior query and policy fingerprint",
+  check("an absent Gmail floor preserves the default query under the attachment policy",
     gmailQuery() === DEFAULT_QUERY &&
     gmailPolicyFingerprint({ credentialScannerFingerprint: "fixture-scanner" }) ===
+      gmailPolicyFingerprint({ credentialScannerFingerprint: "fixture-scanner", since: null }) &&
+    gmailPolicyFingerprint({ credentialScannerFingerprint: "fixture-scanner" }) !==
       "7220687d0100ae90edf4a17419811b14a1c537a0fc55bbe005b161069424385a",
     gmailQuery());
   check("a Gmail floor changes both the full-list query and policy fingerprint",
@@ -470,7 +475,7 @@ if (process.platform !== "win32") {
       first.evidence.batch_attempts?.["retry-clean"] === 1 &&
       first.state.history_id === "history-current" &&
       first.state.gmail_retry?.["gmail:retry-failed"] === true &&
-      first.state.done["gmail:retry-clean"] === "history-current" &&
+      first.state.done["gmail:retry-clean"] === gmailExtractionVersion("history-current") &&
       !Object.hasOwn(first.state.done, "gmail:retry-failed") &&
       first.evidence.final_receipt?.status === "error" &&
       first.evidence.final_receipt?.docs_failed === 1,
@@ -483,7 +488,7 @@ if (process.platform !== "win32") {
       retry.evidence.batch_attempts?.["retry-clean"] === 1 &&
       retry.evidence.ingested_ids.join(",") === "retry-failed,retry-clean,retry-failed" &&
       retry.state.history_id === "history-current" &&
-      retry.state.done["gmail:retry-failed"] === "history-current" &&
+      retry.state.done["gmail:retry-failed"] === gmailExtractionVersion("history-current") &&
       !Object.hasOwn(retry.state, "gmail_retry") &&
       retry.evidence.final_receipt?.status === "ready" &&
       retry.evidence.final_receipt?.docs_failed === 0,
@@ -499,7 +504,7 @@ if (process.platform !== "win32") {
       `${result.output.slice(-1_200)}\n${JSON.stringify(result.evidence)}`);
     check("query-proven mail without raw labelIds commits the full-sweep history cursor",
       result.state.history_id === "history-current" &&
-      result.state.done["gmail:sweep-inbox"] === "history-current" &&
+      result.state.done["gmail:sweep-inbox"] === gmailExtractionVersion("history-current") &&
       result.evidence.final_receipt?.status === "ready",
       `${JSON.stringify(result.state)}\n${JSON.stringify(result.evidence.final_receipt)}`);
   } finally { rmSync(result.directory, { recursive: true, force: true }); }
@@ -528,7 +533,7 @@ if (process.platform !== "win32") {
   try {
     check("a floor before the oldest stored Gmail message completes with zero removals",
       result.code === 0 && result.evidence.forget_targets.length === 0 &&
-      result.state.done["gmail:since-oldest"] === "since-oldest-v1" &&
+      result.state.done["gmail:since-oldest"] === gmailExtractionVersion("since-oldest-v1") &&
       result.state.history_id === "history-current" &&
       result.evidence.final_receipt?.complete_sweep === true,
       `${result.output.slice(-1_200)}\n${JSON.stringify(result.evidence)}`);
@@ -551,7 +556,7 @@ if (process.platform !== "win32") {
         approved.code === 0 &&
         approved.evidence.forget_targets.join(",") === "gmail:since-older" &&
         !Object.hasOwn(approved.state.done, "gmail:since-older") &&
-        approved.state.done["gmail:since-retained"] === "since-retained-v1" &&
+        approved.state.done["gmail:since-retained"] === gmailExtractionVersion("since-retained-v1") &&
         approved.state.history_id === "history-current",
         `${approved.output.slice(-1_400)}\n${JSON.stringify(approved.evidence)}`);
     }
@@ -578,7 +583,7 @@ if (process.platform !== "win32") {
     check("scanner v5 migration re-posts prior safe mail and forgets a newly sensitive family",
       result.evidence.ingested_ids.join(",") === "migration-safe" &&
       result.evidence.forget_targets.includes("gmail:migration-sensitive") &&
-      result.state.done["gmail:migration-safe"] === "migration-safe-v1" &&
+      result.state.done["gmail:migration-safe"] === gmailExtractionVersion("migration-safe-v1") &&
       !("gmail:migration-sensitive" in result.state.done),
       `${result.output.slice(-1_200)}\n${JSON.stringify(result.evidence)}`);
     check("scanner v5 migration commits Gmail history and replaces resumable progress with the v5 fingerprint",
@@ -622,7 +627,7 @@ if (process.platform !== "win32") {
   try {
     check("a scanner-resume receipt cannot hide a Gmail family missing from authoritative D1",
       result.code === 0 && result.evidence.ingested_ids.join(",") === "migration-safe" &&
-      result.state.done["gmail:migration-safe"] === "migration-safe-v1" &&
+      result.state.done["gmail:migration-safe"] === gmailExtractionVersion("migration-safe-v1") &&
       result.state.credential_scanner_fingerprint === credentialScannerFingerprint(true, 5) &&
       !("credential_scanner_progress" in result.state),
       `${result.output.slice(-1_200)}\n${JSON.stringify(result.state)}\n${JSON.stringify(result.evidence)}`);
@@ -671,7 +676,7 @@ if (process.platform !== "win32") {
     check("an active accepted Gmail message cancels its stale pending removal",
       result.code === 0 && result.evidence.forget_targets.length === 0 &&
       !Object.hasOwn(result.state.removed || {}, "gmail:pending-restored") &&
-      result.state.done["gmail:pending-restored"] === "history-current" &&
+      result.state.done["gmail:pending-restored"] === gmailExtractionVersion("history-current") &&
       result.state.history_id === "history-current",
       `${result.output.slice(-1_200)}\n${JSON.stringify(result.state)}\n${JSON.stringify(result.evidence)}`);
   } finally { rmSync(result.directory, { recursive: true, force: true }); }

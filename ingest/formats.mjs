@@ -71,10 +71,10 @@ function pdfOriginalObservation(state, {
 
 function pdfFailure(name = "unreadable") {
   const safeName = typeof name === "string" && name ? name.slice(0, 80) : "unreadable";
-  if (/Password/i.test(safeName)) {
+  if (/Password/i.test(safeName) || safeName === "EncryptedDocument") {
     return {
       text: null,
-      error: "the PDF is password protected",
+      error: safeName === "EncryptedDocument" ? "the PDF is encrypted" : "the PDF is password protected",
       observation: pdfOriginalObservation("password_protected", {
         reasonCode: "password_protected",
         extractionComplete: false,
@@ -128,6 +128,7 @@ export async function pdfPassIsolated(buf, {
   childPath = PDF_CHILD_PATH,
   timeoutMs = PDF_PROCESS_TIMEOUT_MS,
   maxOutputBytes = PDF_PROCESS_MAX_OUTPUT_BYTES,
+  rejectEncrypted = false,
   // Page images are asked for, never assumed. The child only renders when the
   // document turns out to have no text layer, so the 79% of PDFs that read
   // normally pay nothing for a feature they do not use.
@@ -136,6 +137,7 @@ export async function pdfPassIsolated(buf, {
   const bytes = Buffer.from(buf);
   const scriptPath = childPath instanceof URL ? fileURLToPath(childPath) : childPath;
   const args = withPageImages ? [scriptPath, `--images=${withPageImages}`] : [scriptPath];
+  if (rejectEncrypted) args.push("--reject-encrypted");
 
   return await new Promise((resolve, reject) => {
     let child;
@@ -360,7 +362,7 @@ async function ocrPdf(ocr, r, scanned, ocrDocument) {
  */
 export async function extractPdf(
   buf,
-  { reread, onRereadAccepted, ocr, ocrDocument } = {},
+  { reread, onRereadAccepted, ocr, ocrDocument, rejectEncrypted = false } = {},
   { pdfPassImpl = pdfPassIsolated } = {},
 ) {
   // Rendering is requested up front only when there is somewhere to send the
@@ -368,9 +370,13 @@ export async function extractPdf(
   // which is the point: a PDF with a text layer must never pay for a feature
   // aimed at the ones without.
   const wantImages = typeof ocr === "function" ? (ocr.maxPages || 0) || 1_000_000 : 0;
+  const pdfOptions = wantImages || rejectEncrypted ? {
+    ...(wantImages ? { withPageImages: wantImages } : {}),
+    ...(rejectEncrypted ? { rejectEncrypted: true } : {}),
+  } : undefined;
   let r;
   try {
-    r = await pdfPassImpl(buf, wantImages ? { withPageImages: wantImages } : undefined);
+    r = await pdfPassImpl(buf, pdfOptions);
   } catch (e) {
     if (e?.fatal === true) throw e;
     const name = e?.name || "";
@@ -392,7 +398,7 @@ export async function extractPdf(
     const fresh = await reread();
     if (fresh) {
       try {
-        const again = await pdfPassImpl(fresh, wantImages ? { withPageImages: wantImages } : undefined);
+        const again = await pdfPassImpl(fresh, pdfOptions);
         if (again.body && again.body.length) {
           // The caller's byte receipt must change only when this parse becomes
           // the result we actually retain. A changed reread that is empty or
@@ -580,8 +586,12 @@ register(".xls", (buf, { name } = {}) => sheetsToText(buf, name), "spreadsheet",
  * second mail parser next to this one is how two parts of the product start
  * disagreeing about what a message says.
  */
-export async function parseEmailMessage(buf) {
-  const mail = await new PostalMime().parse(buf);
+export async function parseEmailMessage(buf, { includeAttachments = false } = {}) {
+  const mail = await new PostalMime(includeAttachments ? {
+    forceRfc822Attachments: true,
+    maxNestingDepth: 32,
+    maxHeadersSize: 256 * 1024,
+  } : {}).parse(buf);
   const head = [
     mail.from ? `From: ${mail.from.name || ""} <${mail.from.address || ""}>`.trim() : null,
     mail.to?.length ? `To: ${mail.to.map((a) => a.address).join(", ")}` : null,
@@ -600,6 +610,7 @@ export async function parseEmailMessage(buf) {
     from: mail.from?.name || mail.from?.address || null,
     messageId: mail.messageId || null,
     occurredAt: date && Number.isFinite(date.getTime()) ? date.toISOString() : null,
+    ...(includeAttachments ? { attachments: mail.attachments || [] } : {}),
   };
 }
 

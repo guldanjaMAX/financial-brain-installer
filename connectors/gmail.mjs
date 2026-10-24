@@ -19,8 +19,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { extract } from "../ingest/extract.mjs";
-import "../ingest/formats.mjs";
+import { extractGmailMessage } from "./gmail-attachments.mjs";
 import { textQuality } from "../ingest/quality.mjs";
 import { api as driveApi, DriveError } from "./google-drive.mjs";
 import { withFirstPartySourceProvenance } from "../worker/src/lib/provenance-receipt.js";
@@ -28,7 +27,12 @@ import { withFirstPartySourceProvenance } from "../worker/src/lib/provenance-rec
 export const API = "https://gmail.googleapis.com/gmail/v1";
 export const SOURCE_TYPE = "email";
 export const GMAIL_MAX_PAGES = 2_000;
-export const GMAIL_EXTRACTION_POLICY_VERSION = 1;
+export const GMAIL_EXTRACTION_POLICY_VERSION = 2;
+export const gmailExtractionVersion = (value) => `gmail-extraction-${GMAIL_EXTRACTION_POLICY_VERSION}:${value}`;
+export function gmailRevisionIsCurrent(value) {
+  const prefix = gmailExtractionVersion("");
+  return typeof value === "string" && value.startsWith(prefix) && value.length > prefix.length;
+}
 const GMAIL_PAGE_TOKEN_MAX_LENGTH = 8_192;
 export const GMAIL_OPERATIONS = Object.freeze({
   profile: "gmail_profile_read",
@@ -225,8 +229,6 @@ export async function* listMessages(getAccessToken, {
     throw gmailOperationError(error, GMAIL_OPERATIONS.list);
   }
 }
-
-const fromB64Url = (s) => Buffer.from(String(s).replace(/-/g, "+").replace(/_/g, "/"), "base64");
 
 /** The current history id, saved so the NEXT run only fetches what arrived. */
 export async function currentHistoryId(getAccessToken, opts = {}) {
@@ -441,27 +443,34 @@ export async function toEnvelope(
     };
   }
 
-  const got = await extract(fromB64Url(msg.raw), "message.eml");
+  const ts = typeof msg.internalDate === "string" && /^\d+$/.test(msg.internalDate)
+    ? Number(msg.internalDate) : NaN;
+  const receivedAt = Number.isSafeInteger(ts) && Number.isFinite(new Date(ts).getTime())
+    ? new Date(ts).toISOString() : null;
+  const got = await extractGmailMessage(msg.raw, { messageId: id, receivedAt });
   if (got.error || got.text == null) {
     return {
       skip: { path: id, id, reason: got.error || "the message could not be parsed" },
       retain_existing: true,
-      cursor_blocking: false,
+      cursor_blocking: true,
+      attachment_failure: got.attachment_failure,
     };
   }
   const q = textQuality(got.text);
   if (!q.ok) {
     return {
-      skip: { path: id, id, reason: q.reason, metrics: q.metrics },
+      skip: { path: id, id, reason: `Gmail message was not indexed (unreadable_message): ${q.reason}`, metrics: q.metrics },
       retain_existing: true,
-      cursor_blocking: false,
+      // The runner clears a durable retry on a nonblocking skip. Even when
+      // each report was readable alone, the combined envelope may fail quality.
+      cursor_blocking: true,
+      attachment_failure: "unreadable_message",
     };
   }
 
-  const subject = (got.text.match(/^Subject:\s*(.+)$/m) || [])[1] || "(no subject)";
+  const subject = got.subject || "(no subject)";
   // internalDate is the RECEIPT time and is the honest document date for a
   // message: unlike a file mtime, nothing rewrites it later.
-  const ts = msg.internalDate ? Number(msg.internalDate) : null;
 
   return {
     envelope: withFirstPartySourceProvenance({
@@ -472,12 +481,13 @@ export async function toEnvelope(
       source_id: id,
       title: subject.slice(0, 200),
       content: got.text,
-      occurred_at: ts ? new Date(ts).toISOString() : null,
-      date_source: ts ? "gmail_internal" : "none",
-      date_reliable: !!ts,
+      occurred_at: receivedAt,
+      date_source: receivedAt ? "gmail_internal" : "none",
+      date_reliable: !!receivedAt,
       uri: `https://mail.google.com/mail/u/0/#all/${id}`,
-      metadata: { category: sourceName, extracted_as: "gmail", thread_id: msg.threadId, labels: msg.labelIds },
+      metadata: { category: sourceName, extracted_as: "gmail", thread_id: msg.threadId, labels: msg.labelIds,
+        gmail_attachments: got.attachments },
     }, { textSource: "native", textReliable: true }),
-    version: String(msg.historyId || id),
+    version: gmailExtractionVersion(String(msg.historyId || id)),
   };
 }

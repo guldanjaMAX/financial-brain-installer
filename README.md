@@ -905,6 +905,20 @@ refusals and delivery failures still stop the run and preserve its cursor.
 Promotions, Social, and Forums are excluded by default. Updates stays included
 so statements, confirmations, and reminders are not silently missed.
 
+Gmail also reads named `.xlsx`, `.xls` (OLE workbook), `.csv` and text-bearing
+`.pdf` attachments, including scheduled financial reports. Each message can
+have at most 10 attachments, 5 MiB each and 15 MiB combined. Other formats and
+nested messages are listed as excluded. An unreadable, encrypted, incomplete
+or oversized report holds that message for correction and keeps any prior
+accepted copy. Gmail attachment ingest does not use OCR or load figures into
+the structured ledger.
+
+Attachment text stays with its message citation and filename. Identical copies
+within one message render once; weekly deliveries keep separate provenance.
+The report date comes only from an explicit date in its text. A later email
+delivery never makes an older report current. Earlier body-only message
+revisions are rechecked when the attachment policy first runs.
+
 The local-folder guard matters because a folder that failed to mount looks
 exactly like a client who deleted everything in it.
 

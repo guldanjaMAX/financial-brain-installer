@@ -891,6 +891,55 @@ any stored family that falls outside the new floor remains subject to the
 ordinary exact removal-plan review and readback. Omitting the field preserves
 the prior query and fingerprint.
 
+Gmail report attachments use `connectors/gmail-attachments.mjs` and the shared
+file extractors. Eligible named extensions are `.xlsx`, `.xls` (OLE workbook),
+`.csv` and native-text `.pdf`, case-insensitively. There is no sender or subject
+allowlist. Unsupported types, unnamed attachments and nested messages have
+explicit exclusion records and content markers. The connector does not recurse
+into archives or nested messages, download links, run macros, perform OCR or
+populate the structured ledger. Local EML, MBOX and IMAP behavior is unchanged.
+
+The fixed inclusive bounds are 10 MIME attachments, 5 MiB decoded bytes per
+attachment, 15 MiB decoded attachment bytes per message, 25 MiB decoded raw
+message bytes and 1 MiB UTF-8 text from distinct extracted attachments. The
+count and byte limits include duplicates and exclusions. Names have a
+255-character bound and cannot contain control characters. The raw-message
+bound is checked before MIME parsing; existing Office archive expansion guards
+also apply. PostalMime is still a tolerant transport parser, so successful
+extraction is not proof that every MIME framing or encoding defect was detected.
+
+The bare Gmail message ID remains the logical family identity. Attachment
+sections pass through the same credential scan, structural splitting, exact
+acceptance and deletion paths as the message body. The private
+`metadata.gmail_attachments` record contains a policy version and each
+occurrence's index, decoded filename, exact-byte SHA-256, byte count, message
+ID, receipt date and read, duplicate or excluded status. Equal bytes with the
+same extension render once within that message, retaining every occurrence.
+Equal filenames with different bytes remain distinct. Re-sends retain separate
+message families with a comparable payload hash; storage and retrieval do not
+collapse duplicates across messages.
+
+`report_as_of` is separate from the envelope's Gmail `internalDate`. It accepts
+one consistent explicit `As of` or `Report as of` line date from extracted
+attachment text, in `YYYY-MM-DD` form or a full English month name followed by
+the day and four-digit year. Missing, invalid or conflicting evidence leaves
+it null, with an `unknown` or
+`ambiguous` status. Filenames, subjects, workbook properties, receipt dates and
+report period ranges never establish freshness or select a latest report.
+
+Encrypted, malformed, empty, unreadable, truncated or over-limit supported
+attachments refuse the whole replacement with a fixed local reason code.
+A readable body or sibling cannot produce a partial replacement. The prior
+family stays intact, the skip remains recoverable, and the history cursor and
+successful source receipt are withheld under the existing `INGEST_FAILED`
+contract. No attachment bytes are written to disk and parser diagnostics are
+not copied into refusal text. Gmail extraction policy 2 also stamps message
+revisions with `gmail-extraction-2:`. The policy change triggers a full sweep;
+body-only revisions must be fetched again, while already accepted current
+revisions can resume an interrupted sweep without downloading the body again.
+Attachment coverage is synthetic and offline; real-mailbox acceptance remains
+a separate unproven field gate.
+
 The ordinary Drive dry run is for a person reviewing individual files and may
 name files or paths. An assistant must add `--json`: that path validates every
 reviewed root, reads at most 25 Drive entries by default (and refuses a limit

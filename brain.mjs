@@ -18439,6 +18439,7 @@ const cmdIngestRemoteRun = async (
     };
   } else if (which === "gmail") {
     const gmail = options.gmail ?? await import("./connectors/gmail.mjs");
+    const { gmailRevisionIsCurrent } = await import("./connectors/gmail.mjs");
     let nextHistory = null;
     let ids;
     let policyById = null;
@@ -18561,6 +18562,9 @@ const cmdIngestRemoteRun = async (
       const key = `${sourceName}:${id}`;
       const version = state.done?.[key];
       if (typeof version !== "string" || !version || !storedBeforeSweep.has(key)) return null;
+      // A stored message body proves no attachment coverage. Re-read older
+      // extraction revisions even when the provider message is immutable.
+      if (!gmailRevisionIsCurrent(version)) return null;
       if (scannerPolicyChanged && !hasCredentialScannerProgress(
         state, scannerFingerprint, key, version
       )) return null;
@@ -19213,7 +19217,7 @@ const cmdIngestRemoteRun = async (
   } else if (pendingCursor) {
     const reason = which === "gmail" &&
       (gmailLabelGaps || gmailHistoryMarkerMissing || gmailPendingRemovalGaps)
-      ? `${gmailLabelGaps} message(s) lacked label evidence, ${gmailHistoryMarkerMissing} pre-sweep history marker(s) were unavailable, and ${gmailPendingRemovalGaps} active message(s) had unresolved pending removals`
+      ? `${gmailLabelGaps} message(s) lacked required policy or extraction evidence, ${gmailHistoryMarkerMissing} pre-sweep history marker(s) were unavailable, and ${gmailPendingRemovalGaps} active message(s) had unresolved pending removals`
       : which === "imap" && imapSnapshotGaps
         ? `${imapSnapshotGaps} IMAP source snapshot gap(s) remained unresolved`
         : retryableOcrSkips

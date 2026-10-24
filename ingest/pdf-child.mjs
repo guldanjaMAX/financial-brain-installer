@@ -8,7 +8,7 @@
  * stdout. No path or credential is needed here.
  */
 
-import { extractText, getResolvedPDFJS } from "unpdf";
+import { extractText, getDocumentProxy, getResolvedPDFJS } from "unpdf";
 import { renderPdfPageImages } from "./page-image.mjs";
 
 /**
@@ -24,6 +24,7 @@ import { renderPdfPageImages } from "./page-image.mjs";
 const imagesArg = process.argv.find((a) => a.startsWith("--images"));
 const wantImages = Boolean(imagesArg);
 const maxImagePages = imagesArg?.includes("=") ? Number(imagesArg.split("=")[1]) || 0 : 0;
+const rejectEncrypted = process.argv.includes("--reject-encrypted");
 
 await getResolvedPDFJS();
 await new Promise((resolve) => {
@@ -60,8 +61,27 @@ const bytesForImages = wantImages ? bytes.slice() : null;
 
 let message;
 let imageError = null;
+async function readText() {
+  if (!rejectEncrypted) return extractText(bytes, { mergePages: true });
+  const document = await getDocumentProxy(bytes);
+  try {
+    // Empty user passwords can open encrypted PDFs without PasswordException.
+    // Gmail's refusal policy therefore requires parsed encryption evidence,
+    // before text extraction, rather than guessing from the file's raw bytes.
+    const { info } = await document.getMetadata();
+    if (!info || !Object.prototype.hasOwnProperty.call(info, "EncryptFilterName")) {
+      throw Object.assign(new Error("PDF encryption metadata unavailable"), { name: "EncryptionMetadataUnavailable" });
+    }
+    if (info.EncryptFilterName !== null) {
+      throw Object.assign(new Error("PDF encryption is excluded"), { name: "EncryptedDocument" });
+    }
+    return await extractText(document, { mergePages: true });
+  } finally {
+    await document.loadingTask.destroy();
+  }
+}
 try {
-  const { text, totalPages } = await extractText(bytes, { mergePages: true });
+  const { text, totalPages } = await readText();
 
   // Let Node report end-of-turn promise failures before staging success. The
   // parent also waits for a clean process exit, so a still-later failure wins.
