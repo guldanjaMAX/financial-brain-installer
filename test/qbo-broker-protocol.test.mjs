@@ -1,5 +1,5 @@
 // Only passing offline units belong in the ordinary test graph. The separate
-// E2E probe file stays red until reviewed broker and owner handlers exist.
+// E2E probe file remains an explicit focused gate for the separate foundation.
 import '../protocol/quickbooks-broker/testing/protocol.test.mjs';
 import '../protocol/quickbooks-broker/testing/schema.test.mjs';
 import '../protocol/quickbooks-broker/testing/state-machine.test.mjs';
@@ -10,7 +10,7 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { TEST_COMMANDS } from '../scripts/run-test-chain.mjs';
 
-test('green protocol wrapper is registered and expected-red E2E remains explicit-only', () => {
+test('green protocol wrapper is registered and E2E remains explicit-only', () => {
   assert.ok(TEST_COMMANDS.includes('node --test test/qbo-broker-protocol.test.mjs'));
   assert.ok(TEST_COMMANDS.every(command => !command.includes('broker.e2e.probe')));
   const wrapper = readFileSync(new URL('./qbo-broker-protocol.test.mjs', import.meta.url), 'utf8');

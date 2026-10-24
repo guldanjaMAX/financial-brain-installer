@@ -458,8 +458,8 @@ erasing the durable operation fence.
 
 Unit tests establish schema shapes, state prerequisites, cryptographic fixture
 binding, fake provider behavior and probe harness checks. They do not establish
-an operating broker. The nine E2E gates deliberately remain red until actual
-handlers exist. Their adapter requirements and attack inventory are in
+an operating deployment. The nine E2E gates now pass against the separate broker
+foundation and a test-only owner handler. Their adapter requirements and attack inventory are in
 [the probe guide](../probes/README.md). Intuit acceptance, browser cookie
 behavior, Cloudflare routing/logging, DNS pinning, native D1 transactions and a
 separately approved production canary all remain external gates.

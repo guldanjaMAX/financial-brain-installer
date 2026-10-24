@@ -2017,6 +2017,13 @@ daily scheduling remains manifest-derived.
 
 Read this before scoping an engagement.
 
+- **The separate QuickBooks broker foundation is offline-only.**
+  `broker/quickbooks/` implements the control protocol with injected transports,
+  its own append-only security schema and no import path to accounting record
+  processing. Its nine integration probes use a test-only owner handler. It is
+  excluded from installer publication and does not enable production OAuth.
+  See [the foundation boundaries and operational gates](../broker/quickbooks/README.md).
+
 - **No owner-facing corpus deletion workflow.** The owner workspace can upload,
   approve, close periods, explore, manage targets and preferences, and use
   document grants. Corpus forget remains an operator-only, preview-first admin
