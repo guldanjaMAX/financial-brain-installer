@@ -44,9 +44,9 @@ This keeps the fast recovery of a dead lock (the test "confirmed dead lock is re
 4. Optional hardening: pass the `{assertOwned}` argument through in the default daily runSource (daily-refresh-run.mjs:562) into cmdLoad options, and on into the leg runners, so a lost lock stops writing at the next batch instead of at the next source.
 - Verification: All scratch files are in C:\offload\review-0419-scratch\verifier-lock-identity\. Nothing in C:\offload\review-0419 was changed.
 
-1. Deterministic check (probe.mjs). The real acquireBrainLifecycleLock from the release head was run against the base a85f564 module, copied to old-lock.mjs. The holder stored epoch:N. The contender used isOwnerAlive=true and observed a win32 start time N-Î”. The owner file's mtime was 0-1 ms old.
-   - Release head: Î”=500 and Î”=1999 gave brain_lifecycle_busy. Î”=2001, 3000 and 11401 gave contender ACQUIRED, then holder.assertOwned() threw brain_lifecycle_lost and holder.release() returned false.
-   - Base: brain_lifecycle_busy for every Î”.
+1. Deterministic check (probe.mjs). The real acquireBrainLifecycleLock from the release head was run against the base a85f564 module, copied to old-lock.mjs. The holder stored epoch:N. The contender used isOwnerAlive=true and observed a win32 start time N-Δ. The owner file's mtime was 0-1 ms old.
+   - Release head: Δ=500 and Δ=1999 gave brain_lifecycle_busy. Δ=2001, 3000 and 11401 gave contender ACQUIRED, then holder.assertOwned() threw brain_lifecycle_lost and holder.release() returned false.
+   - Base: brain_lifecycle_busy for every Δ.
 
 2. End to end with all real defaults (e2e.ps1, holder.mjs, contender.mjs; Node v24.18.0, 24 logical CPUs). The holder takes "daily-refresh" with `start /BELOWNORMAL`. After the load ends, a normal-priority contender takes "update", using real processStartIdentity through PowerShell and real ownerAlive.
    - No load: Node start minus Windows CreationTime was 15 ms. The contender got brain_lifecycle_busy. The holder kept the lock.
@@ -193,7 +193,7 @@ I also ran `node --test --test-name-pattern="remote connector routing follows|re
 
 Other checks:
 - A grep of worker/src finds no server-side broad-question guard.
-- In the 0.4.18â†’0.4.19 diff of mcp-endpoint.js, only the Claude arm was added; the built-in strings and the line-364 note are untouched.
+- In the 0.4.18→0.4.19 diff of mcp-endpoint.js, only the Claude arm was added; the built-in strings and the line-364 note are untouched.
 - CHANGELOG lines 21 and 47 and evidence-plan items 3 and 4 make the routing claims without excluding the hosted connector.
 
 No files in C:\offload\review-0419 were modified.
