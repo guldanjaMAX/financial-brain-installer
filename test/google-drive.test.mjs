@@ -916,9 +916,9 @@ const gm = await import("../connectors/gmail.mjs");
     fetchImpl: async () => json({ internalDate: "1", labelIds: ["INBOX"] }),
     sleep: async () => {},
   });
-  check("a message with no content is a reasoned skip, not a silent one",
+  check("a message missing raw MIME evidence retains its family and blocks history",
     !!r.skip && /no content/.test(r.skip.reason) && r.retain_existing === true &&
-      r.cursor_blocking === false, JSON.stringify(r));
+      r.cursor_blocking === true, JSON.stringify(r));
 }
 {
   const raw = Buffer.from(

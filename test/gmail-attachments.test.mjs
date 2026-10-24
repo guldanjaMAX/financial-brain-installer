@@ -97,6 +97,16 @@ function refused(result, code) {
   assert.ok(!result.skip.reason.includes("private-report"), "diagnostics must not expose attachment names");
 }
 
+function excluded(result, code) {
+  const item = items(result).find((item) => item.reason === code);
+  assert.ok(item, `attachment exclusion must record ${code}`);
+  assert.equal(item.status, "excluded");
+  assert.ok(result.envelope.content.includes(`Attachment excluded: ${code}`));
+  assert.ok(result.envelope.content.includes(BODY), "readable body remains searchable");
+  assert.notEqual(result.cursor_blocking, true);
+  return item;
+}
+
 test("passing control: an ordinary message still loads", async () => {
   const result = await read([]);
   assert.ok(result.envelope.content.includes(BODY));
@@ -198,22 +208,27 @@ for (const [label, attachment, code] of [
   ["binary CSV", { name: "private-report.csv", bytes: Buffer.from([0, 1, 2, 3]) }, "malformed_attachment"],
   ["oversized", { name: "private-report.csv", bytes: Buffer.alloc(5 * MIB + 1, 32) }, "attachment_size_limit"],
 ]) {
-  test(`${label} refuses the replacement despite a readable sibling`, async () => {
+  test(`${label} excludes only the bad part and keeps a readable sibling`, async () => {
     assert.ok((await read([{ name: "control.csv" }])).envelope, "passing readable control");
-    refused(await read([{ name: "control.csv" }, attachment]), code);
+    const result = await read([attachment, { name: "control.csv" }]);
+    excluded(result, code);
+    assert.equal(items(result)[1].status, "read");
+    assert.ok(result.envelope.content.includes("Service revenue"));
   });
 }
 
 test("count cap includes unsupported parts and accepts its exact boundary", async () => {
   const attachments = Array.from({ length: 10 }, (_, index) => ({ name: `logo-${index}.png`, bytes: Buffer.from("image") }));
   assert.equal(items(await read(attachments)).length, 10);
-  refused(await read([...attachments, { name: "eleventh.png", bytes: Buffer.from("image") }]), "attachment_count_limit");
+  const over = await read([...attachments, { name: "eleventh.png", bytes: Buffer.from("image") }]);
+  excluded(over, "attachment_count_limit");
+  assert.equal(items(over).length, 11);
 });
 
 test("individual and aggregate byte caps include exclusions and accept exact boundaries", async () => {
   const big = { name: "image.png", bytes: Buffer.alloc(5 * MIB, 1) };
   assert.equal(items(await read([big, big, big])).length, 3);
-  refused(await read([big, big, big, { name: "extra.png", bytes: Buffer.from("x") }]), "attachment_total_limit");
+  excluded(await read([big, big, big, { name: "extra.png", bytes: Buffer.from("x") }]), "attachment_total_limit");
 });
 
 test("raw message cap refuses before MIME decoding", async () => {
@@ -221,15 +236,17 @@ test("raw message cap refuses before MIME decoding", async () => {
   refused(await read([], { raw: Buffer.alloc(25 * MIB + 1, 32) }), "message_size_limit");
 });
 
-test("invalid filename is refused without exposing it", async () => {
+test("invalid filename is excluded without exposing it", async () => {
   assert.ok((await read([{ name: "valid.csv" }])).envelope);
-  refused(await read([{ name: "x".repeat(256) + ".csv" }]), "attachment_name_invalid");
+  const result = await read([{ name: "x".repeat(256) + ".csv" }]);
+  excluded(result, "attachment_name_invalid");
+  assert.ok(!JSON.stringify(result.envelope).includes("x".repeat(256)));
 });
 
-test("row truncation is refused instead of indexing a partial report", async () => {
+test("row truncation excludes the incomplete report", async () => {
   assert.ok((await read([{ name: "control.csv" }])).envelope);
   const rows = ["Account,Amount", ...Array.from({ length: 5001 }, (_, i) => `Account ${i},${i}`)];
-  refused(await read([{ name: "large.csv", bytes: Buffer.from(rows.join("\n")) }]), "incomplete_attachment");
+  excluded(await read([{ name: "large.csv", bytes: Buffer.from(rows.join("\n")) }]), "incomplete_attachment");
 });
 
 test("expanded report text is bounded independently of input bytes", async () => {
@@ -238,20 +255,35 @@ test("expanded report text is bounded independently of input bytes", async () =>
     `Account ${i},${(`entry-${i} detail `).repeat(25)}`)];
   const bytes = Buffer.from(rows.join("\n"));
   assert.ok(bytes.length < 5 * MIB);
-  refused(await read([{ name: "large.csv", bytes }]), "attachment_text_limit");
+  const result = await read([{ name: "large.csv", bytes }, { name: "control.csv" }]);
+  excluded(result, "attachment_text_limit");
+  assert.equal(items(result)[1].status, "read", "an excluded expansion does not consume the readable text budget");
 });
 
-test("invalid UTF-8 CSV is refused while a valid UTF-16 report loads", async () => {
+test("invalid UTF-8 CSV is excluded while a valid UTF-16 report loads", async () => {
   const utf16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(REPORT, "utf16le")]);
   assert.equal(items(await read([{ name: "utf16.csv", bytes: utf16 }]))[0].status, "read");
-  refused(await read([{ name: "invalid.csv", bytes: Buffer.concat([Buffer.from(REPORT), Buffer.from([0xff])]) }]), "malformed_attachment");
+  excluded(await read([{ name: "invalid.csv", bytes: Buffer.concat([Buffer.from(REPORT), Buffer.from([0xff])]) }]), "malformed_attachment");
 });
 
-test("combined message quality refusal keeps the message retryable", async () => {
+test("individually readable reports survive repetitive combined content", async () => {
   const attachments = Array.from({ length: 10 }, (_, index) => ({
     name: `report-${index}.csv`,
     bytes: Buffer.from("Account,Amount\n" + "Cash,100\n".repeat(80) + `Receivable,${index}\n`),
   }));
   assert.equal(items(await read(attachments.slice(0, 1)))[0].status, "read");
-  refused(await read(attachments), "unreadable_message");
+  const result = await read(attachments);
+  assert.ok(items(result).every((item) => item.status === "read"));
+  assert.notEqual(result.cursor_blocking, true);
+});
+
+test("unreadable body is excluded while a readable attachment remains", async () => {
+  assert.ok((await read([{ name: "control.csv" }])).envelope.content.includes(BODY));
+  const result = await read([{ name: "control.csv" }], { body: "duplicate words ".repeat(1000) });
+  assert.equal(items(result)[0].status, "read");
+  assert.equal(result.envelope.metadata.gmail_body.status, "excluded");
+  assert.equal(result.envelope.metadata.gmail_body.reason, "unreadable_body");
+  assert.ok(result.envelope.content.includes("Message body excluded: unreadable_body"));
+  assert.ok(!result.envelope.content.includes("duplicate words"));
+  assert.notEqual(result.cursor_blocking, true);
 });

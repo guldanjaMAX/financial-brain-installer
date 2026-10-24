@@ -602,7 +602,9 @@ export async function parseEmailMessage(buf, { includeAttachments = false } = {}
   const body = (mail.text || (mail.html ? stripMarkup(mail.html) : "") || "").trim();
   if (!head.length && !body) return { text: null, error: "the message had no readable headers or body" };
   const names = (mail.attachments || []).map((a) => a.filename).filter(Boolean);
-  if (names.length) head.push(`Attachments: ${names.join(", ")}`);
+  // Gmail renders and evaluates each attachment independently. Including its
+  // filename in the body would let a bad attachment contaminate that part.
+  if (names.length && !includeAttachments) head.push(`Attachments: ${names.join(", ")}`);
   const date = mail.date ? new Date(mail.date) : null;
   return {
     text: [...head, "", body].join("\n"),

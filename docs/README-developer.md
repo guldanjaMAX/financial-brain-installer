@@ -899,18 +899,27 @@ explicit exclusion records and content markers. The connector does not recurse
 into archives or nested messages, download links, run macros, perform OCR or
 populate the structured ledger. Local EML, MBOX and IMAP behavior is unchanged.
 
-The fixed inclusive bounds are 10 MIME attachments, 5 MiB decoded bytes per
-attachment, 15 MiB decoded attachment bytes per message, 25 MiB decoded raw
-message bytes and 1 MiB UTF-8 text from distinct extracted attachments. The
-count and byte limits include duplicates and exclusions. Names have a
+The fixed inclusive bounds are 10 MIME attachment positions, 5 MiB decoded
+bytes per admitted attachment, 15 MiB admitted decoded attachment bytes per
+message, 25 MiB decoded raw message bytes and 1 MiB UTF-8 text from distinct
+accepted attachments. Positions include duplicates and exclusions. In-bound
+duplicates and unsupported files consume the decoded-byte budget; rejected
+oversized parts do not consume the remaining admission budget. Excess parts
+receive explicit exclusion records. Names have a
 255-character bound and cannot contain control characters. The raw-message
 bound is checked before MIME parsing; existing Office archive expansion guards
 also apply. PostalMime is still a tolerant transport parser, so successful
 extraction is not proof that every MIME framing or encoding defect was detected.
 
 The bare Gmail message ID remains the logical family identity. Attachment
-sections pass through the same credential scan, structural splitting, exact
-acceptance and deletion paths as the message body. The private
+sections retain the same structural splitting, exact acceptance and deletion
+paths as the message body. Body and attachment text and filenames are scanned
+separately with the configured credential scanner before assembly. A withheld
+part gets a fixed `credential_detected` marker; a withheld filename is removed
+from metadata too. The assembled envelope is sanitized and scanned again,
+including its metadata. If no readable part survives a credential exclusion,
+the existing whole-family refusal and reviewed removal path still applies.
+The private
 `metadata.gmail_attachments` record contains a policy version and each
 occurrence's index, decoded filename, exact-byte SHA-256, byte count, message
 ID, receipt date and read, duplicate or excluded status. Equal bytes with the
@@ -928,14 +937,18 @@ it null, with an `unknown` or
 report period ranges never establish freshness or select a latest report.
 
 Encrypted, malformed, empty, unreadable, truncated or over-limit supported
-attachments refuse the whole replacement with a fixed local reason code.
-A readable body or sibling cannot produce a partial replacement. The prior
-family stays intact, the skip remains recoverable, and the history cursor and
-successful source receipt are withheld under the existing `INGEST_FAILED`
-contract. No attachment bytes are written to disk and parser diagnostics are
-not copied into refusal text. Gmail extraction policy 2 also stamps message
-revisions with `gmail-extraction-2:`. The policy change triggers a full sweep;
-body-only revisions must be fetched again, while already accepted current
+attachments are excluded individually with fixed reason codes and visible
+markers. Readable body and siblings remain in the accepted family. Gmail
+messages are immutable, so these exclusions do not hold the history cursor;
+the owner can send a corrected export in a new message. Body quality is also
+checked separately and `metadata.gmail_body` records its outcome. Missing
+provider or message MIME evidence still blocks the cursor, and systemic
+extractor failures still escape as operational errors. No attachment bytes
+are written to disk and parser diagnostics are not copied into exclusion text.
+Gmail extraction policy 2 stamps revisions with `gmail-extraction-2:`. Its
+current membership fingerprint coupling still triggers a full legacy sweep.
+This is an unresolved candidate blocker: a separate capped, resumable
+supported-attachment backfill is designed but not implemented. Current stamped
 revisions can resume an interrupted sweep without downloading the body again.
 Attachment coverage is synthetic and offline; real-mailbox acceptance remains
 a separate unproven field gate.

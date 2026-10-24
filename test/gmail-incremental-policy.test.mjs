@@ -22,6 +22,7 @@ import {
   normalizeGmailSince,
 } from "../connectors/gmail.mjs";
 import { readAdminKeyFile } from "../operations/admin-key-file.mjs";
+import { redactAll } from "../worker/src/lib/secret-scan.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
@@ -203,6 +204,8 @@ function runCase(mode, { approval = null, apply = null, directory = null, reset 
     BRAIN_GMAIL_POLICY_MODE: mode,
     BRAIN_GMAIL_POLICY_EVIDENCE: evidencePath,
     BRAIN_GMAIL_POLICY_USER_ROOT: userRoot,
+    BRAIN_LIFECYCLE_LOCK_ROOT: join(userRoot, "lifecycle-locks"),
+    BRAIN_TEST_USER_ROOT: userRoot,
   });
   const mutant = process.env.BRAIN_GMAIL_CURSOR_MUTANT === "1"
     ? CURSOR_MUTANT
@@ -240,7 +243,13 @@ function runApprovedCase(mode, options = {}) {
   const review = runCase(mode, options);
   const plan = review.state.ingest_removal_plan;
   assert.equal(review.code, 1, review.output);
-  assert.ok(plan?.targets.length > 0, "separate apply control must reach a nonempty plan");
+  // Exit 1 alone also describes an earlier operational failure. Preserve the
+  // stopping boundary without exposing credential-shaped fixture values.
+  const diagnostic = redactAll(review.output
+    .replaceAll(SYNTHETIC_OPENAI_KEY, "[withheld]")
+    .replaceAll(SYNTHETIC_ADMIN_KEY, "[withheld]"));
+  assert.ok(plan?.targets.length > 0,
+    `separate apply control must reach a nonempty plan (${mode}, exit ${review.code}):\n${diagnostic}`);
   assert.equal(review.evidence.forget_targets.length, priorRemovals);
   const applied = runCase(mode, { directory: review.directory, apply: plan.fingerprint,
     approval: plan.sourcePlan.tooLarge || plan.requireSourceApproval ? plan.sourcePlan.fingerprint : null });
@@ -705,20 +714,30 @@ if (process.platform !== "win32") {
 {
   const first = runCase("pending-absent-unreadable");
   try {
-    check("authenticated D1 absence settles an unreadable active Gmail pending marker",
+    check("authenticated D1 absence settles a pending marker without proving missing message MIME",
       first.code === 1 && first.evidence.forget_targets.length === 0 &&
-      first.state.history_id === "history-current" &&
+      first.state.history_id === "history-prior" &&
       !Object.hasOwn(first.state.removed || {}, "gmail:pending-absent-unreadable") &&
       !Object.hasOwn(first.state.done || {}, "gmail:pending-absent-unreadable") &&
       /(?:partial|refused) coverage/i.test(first.output),
       `${first.output.slice(-1_300)}\n${JSON.stringify(first.state)}\n${JSON.stringify(first.evidence)}`);
 
     const retry = runCase("pending-absent-unreadable", { directory: first.directory });
-    check("the settled absent Gmail pending marker cannot wedge the next empty history window",
-      retry.code === 0 && retry.evidence.forget_targets.length === 0 &&
-      retry.state.history_id === "history-current" &&
+    check("a repeated missing MIME read preserves history after the stale removal marker is settled",
+      retry.code === 1 && retry.evidence.forget_targets.length === 0 &&
+      retry.state.history_id === "history-prior" &&
       !Object.hasOwn(retry.state.removed || {}, "gmail:pending-absent-unreadable"),
       `${retry.output.slice(-1_300)}\n${JSON.stringify(retry.state)}\n${JSON.stringify(retry.evidence)}`);
+    const recovered = runCase("pending-absent-recovered", { directory: first.directory });
+    check("a provider retry with complete MIME evidence accepts the message and releases history",
+      recovered.code === 0 && recovered.state.history_id === "history-current" &&
+      recovered.evidence.ingested_ids.join(",") === "pending-absent-unreadable" &&
+      recovered.evidence.final_receipt?.status === "ready");
+    const quiet = runCase("pending-absent-recovered", { directory: first.directory });
+    check("the recovered message does not wedge or resend in the next empty history window",
+      quiet.code === 0 && quiet.state.history_id === "history-current" &&
+      quiet.evidence.ingested_ids.join(",") === "pending-absent-unreadable" &&
+      quiet.evidence.forget_targets.length === 0);
   } finally { rmSync(first.directory, { recursive: true, force: true }); }
 }
 

@@ -103,7 +103,7 @@
       "exclude_file_ids_file": null
     },
     "gmail": {
-      "_comment": "Optional: add \"since\": \"YYYY-MM-DD\" to bound full and incremental Gmail ingestion from that date forward. Reads bounded XLSX, OLE XLS, CSV and text-bearing PDF attachments: at most 10, 5 MiB each, 15 MiB combined. Other types and nested messages are explicitly excluded. No OCR or ledger import; unreadable supported reports hold the message and cursor. Real-mailbox field acceptance remains unproven.",
+      "_comment": "Optional: add \"since\": \"YYYY-MM-DD\" to bound full and incremental Gmail ingestion from that date forward. Reads bounded XLSX, OLE XLS, CSV and text-bearing PDF attachments: up to 10 positions, 5 MiB each, 15 MiB admitted combined. Other types, nested messages and unreadable reports are explicitly excluded while readable parts remain and history continues. Credential-bearing parts are omitted with safe markers. No OCR or ledger import. The capped legacy attachment backfill remains unimplemented in this candidate. Real-mailbox field acceptance remains unproven.",
       "enabled": false,
       "oauth_secret": "secret://GMAIL_OAUTH"
     },

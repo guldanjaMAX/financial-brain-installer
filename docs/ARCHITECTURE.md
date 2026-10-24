@@ -420,17 +420,24 @@ clears the entry; malformed retry state stops cursor settlement.
 Gmail report attachments remain inside that same message family. The connector
 reads bounded named CSV, XLSX, OLE XLS and native-text PDF attachments through
 the shared extractors; unsupported and nested attachments have explicit
-exclusion markers. A supported attachment's failed or incomplete extraction
-withholds the entire replacement, retains the prior family and blocks the
-cursor. Attachment bytes remain in memory. Per-occurrence metadata binds the
+exclusion markers. Failed or incomplete attachment extraction excludes that
+part while retaining readable body and siblings. These immutable-part
+exclusions do not block history. Missing message-wide MIME or provider evidence
+still holds the cursor. The configured credential scanner checks body and
+attachment parts separately, removes withheld filenames from metadata, then
+checks the assembled envelope again before splitting. If no readable part
+survives a credential exclusion, the existing whole-family refusal applies.
+Attachment bytes remain in memory. Per-occurrence metadata binds the
 decoded name, exact-byte hash, message identity and receipt date. Byte-identical
 attachments of the same type render once within a message, while separate
 deliveries retain separate families. Explicit report dates remain distinct
 from receipt dates, with absent or conflicting evidence left unknown. This
 does not establish global report deduplication, latest-report selection or
-structured-ledger ingestion. Extraction policy 2 stamps accepted revisions;
-a full policy sweep cannot reuse a body-only revision as proof that attachments
-were read. Current stamped revisions retain the interrupted-sweep fast path.
+structured-ledger ingestion. Extraction policy 2 stamps accepted revisions.
+The current legacy migration still couples that version to membership and
+forces a full sweep. Replacing it with an independent capped attachment
+candidate checkpoint is an unresolved candidate blocker. Current stamped
+revisions retain the interrupted-sweep fast path.
 Gmail credential refusals remain measured in `docs_refused` but do not make a
 run fail when they are its only non-accepted outcome. The ready receipt records
 the count in its detail and keeps `complete_sweep` false, because the Worker

@@ -20,7 +20,6 @@
 
 import { createHash } from "node:crypto";
 import { extractGmailMessage } from "./gmail-attachments.mjs";
-import { textQuality } from "../ingest/quality.mjs";
 import { api as driveApi, DriveError } from "./google-drive.mjs";
 import { withFirstPartySourceProvenance } from "../worker/src/lib/provenance-receipt.js";
 
@@ -399,7 +398,7 @@ export async function messagePolicy(getAccessToken, id, opts = {}) {
 export async function toEnvelope(
   getAccessToken,
   id,
-  { sourceName = SOURCE_TYPE, trustedEligible = false } = {},
+  { sourceName = SOURCE_TYPE, trustedEligible = false, scanCredentials = true } = {},
   opts = {},
 ) {
   let msg;
@@ -439,7 +438,7 @@ export async function toEnvelope(
     return {
       skip: { path: id, id, reason: "the message had no content" },
       retain_existing: true,
-      cursor_blocking: false,
+      cursor_blocking: true,
     };
   }
 
@@ -447,7 +446,15 @@ export async function toEnvelope(
     ? Number(msg.internalDate) : NaN;
   const receivedAt = Number.isSafeInteger(ts) && Number.isFinite(new Date(ts).getTime())
     ? new Date(ts).toISOString() : null;
-  const got = await extractGmailMessage(msg.raw, { messageId: id, receivedAt });
+  const got = await extractGmailMessage(msg.raw, { messageId: id, receivedAt, scanCredentials });
+  if (got.credential_refusal) {
+    return {
+      skip: { path: id, id, reason: "refused: credential_detected" },
+      credential_refusal: true,
+      retain_existing: false,
+      cursor_blocking: false,
+    };
+  }
   if (got.error || got.text == null) {
     return {
       skip: { path: id, id, reason: got.error || "the message could not be parsed" },
@@ -456,17 +463,8 @@ export async function toEnvelope(
       attachment_failure: got.attachment_failure,
     };
   }
-  const q = textQuality(got.text);
-  if (!q.ok) {
-    return {
-      skip: { path: id, id, reason: `Gmail message was not indexed (unreadable_message): ${q.reason}`, metrics: q.metrics },
-      retain_existing: true,
-      // The runner clears a durable retry on a nonblocking skip. Even when
-      // each report was readable alone, the combined envelope may fail quality.
-      cursor_blocking: true,
-      attachment_failure: "unreadable_message",
-    };
-  }
+  // Quality is decided per MIME part. Repeated readable reports must not turn
+  // the joined family into an immutable message-wide history barrier.
 
   const subject = got.subject || "(no subject)";
   // internalDate is the RECEIPT time and is the honest document date for a
@@ -486,7 +484,7 @@ export async function toEnvelope(
       date_reliable: !!receivedAt,
       uri: `https://mail.google.com/mail/u/0/#all/${id}`,
       metadata: { category: sourceName, extracted_as: "gmail", thread_id: msg.threadId, labels: msg.labelIds,
-        gmail_attachments: got.attachments },
+        gmail_body: got.body, gmail_attachments: got.attachments },
     }, { textSource: "native", textReliable: true }),
     version: gmailExtractionVersion(String(msg.historyId || id)),
   };

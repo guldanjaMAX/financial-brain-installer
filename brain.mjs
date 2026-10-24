@@ -18599,6 +18599,7 @@ const cmdIngestRemoteRun = async (
             id,
             fetched: await gmail.toEnvelope(getToken, id, {
               sourceName,
+              scanCredentials: scannerOn,
               // A full-list id matched DEFAULT_QUERY. An incremental id reached
               // this point only after its label/date preflight allowed it.
               trustedEligible: (!incremental && !gmailRetriesAtStart.has(id)) || policy?.allowed === true,
@@ -18638,7 +18639,10 @@ const cmdIngestRemoteRun = async (
           ? storedBeforeSweep.has(key)
           : Object.prototype.hasOwnProperty.call(state.done || {}, key);
         state.skipped[key] = r.skip.reason;
-        if (r.policy_skip === true) {
+        if (r.credential_refusal === true) {
+          localRefused++;
+          gmailIntentionalUids.push(key);
+        } else if (r.policy_skip === true) {
           policySkipped++;
           gmailPolicyUids.push(key);
         } else if (r.source_deleted === true) {
