@@ -1,5 +1,6 @@
 /** Sequential execution and per-source proof for the daily machine-pull plan. */
-import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { renameWithRetrySync } from "./rename-retry.mjs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -480,7 +481,7 @@ function dailyReceiptWriter(plan, { home = homedir() } = {}) {
     chmodSync(directory, 0o700);
     const staged = `${path}.tmp-${process.pid}`;
     writeFileSync(staged, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-    renameSync(staged, path);
+    renameWithRetrySync(staged, path);
     chmodSync(path, 0o600);
   };
 }

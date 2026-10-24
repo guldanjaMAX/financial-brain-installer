@@ -1,3 +1,4 @@
+import { renameWithRetrySync } from "./rename-retry.mjs";
 import {
   closeSync,
   constants as fsConstants,
@@ -203,7 +204,7 @@ export function writeManifestAtomically(manifestPath, intendedManifest, options 
         !sameFile(beforeSwap, afterSwapRead) || !beforeSwapBytes.equals(originalBytes)) {
       throw concurrentEditError();
     }
-    io.renameSync(temporaryPath, absolute);
+    renameWithRetrySync(temporaryPath, absolute, { rename: (from, to) => io.renameSync(from, to) });
     renamed = true;
     if (filesystemPlatform !== "win32") syncDirectory(directory);
 
@@ -228,7 +229,7 @@ export function writeManifestAtomically(manifestPath, intendedManifest, options 
     if (renamed) {
       try {
         writeExclusive(io, rollbackPath, originalBytes, mode);
-        io.renameSync(rollbackPath, absolute);
+        renameWithRetrySync(rollbackPath, absolute, { rename: (from, to) => io.renameSync(from, to) });
         if (filesystemPlatform !== "win32") {
           try { syncDirectory(directory); } catch { /* exact byte readback below remains authoritative */ }
         }

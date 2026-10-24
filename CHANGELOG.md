@@ -10,6 +10,10 @@ Candidate only. This version has not been released. The changes below still
 need the full host gate, CI and separately reviewed field acceptance for the
 exact sealed package. This version bump verifies no incident.
 
+- **Brief Windows file locks no longer stop local saves immediately.** State,
+  settings and receipt writes retry replacement for about two seconds. A lock
+  that persists still reports the existing failure. If a save stops, review
+  that failure before retrying the command.
 - **You can optionally have Claude write and check Brain answers.** Connect the
   owner's own Anthropic account with `brain connect anthropic`. Opus writes the
   answer and Sonnet checks it before it is returned. The recommended daily

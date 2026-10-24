@@ -1087,6 +1087,15 @@ aggregate counters rather than moving this scan into its request path.
 
 ## Local state and privacy boundaries
 
+Windows-reachable staged-file replacements use `operations/rename-retry.mjs`.
+Only rename is retried, for `EPERM`, `EACCES` or `EBUSY`, up to ten attempts
+separated by 225 ms waits. Synchronous writers block until persistence finishes;
+the asynchronous helper yields between attempts. Staging, permissions, exact
+readback and terminal cleanup remain each writer's responsibility. Exhaustion
+throws the last rename error into the writer's existing refusal path. This
+bounded retry also applies on other platforms; it never retries content writes,
+permission changes or unrelated filesystem errors.
+
 Durable secrets never belong in the manifest or MCP registration. The manifest
 contains only a non-secret locator when Keychain is used. Standard durable
 stores are macOS login Keychain, Windows DPAPI CurrentUser-protected files, and

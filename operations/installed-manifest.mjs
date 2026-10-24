@@ -4,6 +4,7 @@
  * but it identifies a private install, so it stays in an owner-only state file.
  */
 
+import { renameWithRetrySync } from "./rename-retry.mjs";
 import {
   chmodSync,
   closeSync,
@@ -15,7 +16,6 @@ import {
   openSync,
   readFileSync,
   realpathSync,
-  renameSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -329,7 +329,7 @@ export function rememberInstalledManifest(manifestPath, options = {}) {
     descriptor = undefined;
     // The private state directory is owner-only, so this atomic replacement
     // cannot be redirected between the safety check and rename.
-    renameSync(temporary, destination);
+    renameWithRetrySync(temporary, destination);
     created = false;
     syncRenamedPointer(directory, destination, options);
     const readback = readInstalledManifest(options);

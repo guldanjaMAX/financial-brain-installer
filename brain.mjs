@@ -30,7 +30,8 @@
  * read it. Ordinary owner setup creates and reveals no API token.
  */
 
-import { accessSync, chmodSync, closeSync, constants as fsConstants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdtempSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync, writeSync, appendFileSync } from "node:fs";
+import { renameWithRetrySync } from "./operations/rename-retry.mjs";
+import { accessSync, chmodSync, closeSync, constants as fsConstants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdtempSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmdirSync, statSync, unlinkSync, writeFileSync, writeSync, appendFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { saveUpgradeBookmark, WINDOWS_UPGRADE_BOOKMARK_ACL_TIMEOUT_MS } from "./operations/upgrade-bookmark.mjs";
 import { basename, delimiter, isAbsolute, join, dirname, relative, resolve, sep, posix } from "node:path";
@@ -5718,7 +5719,7 @@ export function commitManifestVersion(manifestPath, version) {
     closeSync(fd);
     fd = undefined;
     revalidateUpdateManifest(pin, "local manifest version commit");
-    renameSync(temporary, target);
+    renameWithRetrySync(temporary, target);
     const verifiedPin = pinUpdateManifest(target);
     const verified = verifiedPin.manifest;
     if (verified?.brain?.version !== version) {
@@ -14698,7 +14699,7 @@ function saveCalendarState(path, state) {
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
   try {
     writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
-    renameSync(tmp, path);
+    renameWithRetrySync(tmp, path);
     chmodSync(path, 0o600);
   } catch (error) {
     try { rmSync(tmp, { force: true }); } catch { /* original error wins */ }
@@ -23773,7 +23774,7 @@ function restoreAgentConfigFile(snapshot, current) {
         configOutsideTarget(snapshot, confirmed.bytes) !== snapshot.outsideTarget) {
       throw new Error("local assistant configuration changed before rollback");
     }
-    renameSync(temporary, snapshot.path);
+    renameWithRetrySync(temporary, snapshot.path);
     created = false;
   } catch {
     if (fd !== null) closeSync(fd);
@@ -23943,7 +23944,7 @@ function atomicReplaceAgentConfig(prepared, bytes) {
     if (!sameCapturedConfigState(snapshot, current)) {
       throw new Error("local assistant configuration changed before its approved write");
     }
-    renameSync(temporary, snapshot.path);
+    renameWithRetrySync(temporary, snapshot.path);
     created = false;
     const after = captureAgentConfigFile(snapshot.path);
     // As with the containing directory, Windows relies on the verified owner

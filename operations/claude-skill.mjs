@@ -5,6 +5,7 @@
  * only. It has no credential, instance locator, or customer-specific value.
  */
 
+import { renameWithRetrySync } from "./rename-retry.mjs";
 import {
   chmodSync,
   closeSync,
@@ -18,7 +19,6 @@ import {
   openSync,
   readFileSync,
   readdirSync,
-  renameSync,
   rmdirSync,
   unlinkSync,
   writeFileSync,
@@ -389,7 +389,7 @@ function restoreSkillSnapshot(snapshot) {
     if (!readFileSync(snapshot.path).equals(currentBytes)) {
       throw new Error("the skill changed before rollback");
     }
-    renameSync(temporary, snapshot.path);
+    renameWithRetrySync(temporary, snapshot.path);
     const restored = readFileSync(snapshot.path);
     return restored.equals(snapshot.bytes) && (lstatSync(snapshot.path).mode & 0o7777) === snapshot.mode;
   } catch {
@@ -693,7 +693,7 @@ export function installClaudeTechnicianSkill(options = {}) {
     fsyncSync(fd);
     closeSync(fd);
     fd = null;
-    renameSync(temporary, target);
+    renameWithRetrySync(temporary, target);
     chmodSync(target, 0o600);
   } catch (error) {
     if (fd !== null) closeSync(fd);

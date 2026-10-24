@@ -8,6 +8,7 @@
  * An ACL or DPAPI failure therefore leaves any prior working key untouched.
  */
 
+import { renameWithRetrySync } from "./rename-retry.mjs";
 import {
   chmodSync,
   closeSync,
@@ -865,7 +866,7 @@ export function writeAdminKeyFile(destination, secret, options = {}) {
     // that do not support directory fsync retain their platform guarantees.
     fsyncParent(path, platform, options, "prepared");
     try {
-      rename(temporary, path);
+      renameWithRetrySync(temporary, path, { rename });
     } catch {
       throw new Error("the admin key replacement could not be committed");
     }
@@ -898,7 +899,7 @@ export function writeAdminKeyFile(destination, secret, options = {}) {
         if (!sameFile(current, stagedIdentity) || !sameFile(saved, backupIdentity)) {
           throw new Error("transaction identities changed");
         }
-        rename(backup, path);
+        renameWithRetrySync(backup, path, { rename });
         const restoredIdentity = lstatIfPresent(path);
         if (!sameFile(restoredIdentity, backupIdentity)) {
           throw new Error("rollback identity did not become durable");

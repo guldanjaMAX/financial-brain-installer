@@ -1,4 +1,5 @@
 /** Cross-platform owned scheduler definitions and update pause/restore rules. */
+import { renameWithRetrySync } from "./rename-retry.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import { accessSync, chmodSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -683,7 +684,7 @@ export function writeDailyRefreshUpdateTransaction(input = {}, options = {}) {
   const temporary = `${path}.tmp-${process.pid}-${randomBytes(8).toString("hex")}`;
   try {
     writeFileSync(temporary, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-    renameSync(temporary, path);
+    renameWithRetrySync(temporary, path);
     chmodSync(path, 0o600);
     writeBrainRecoveryFence({
       manifestPath: plan.manifest_path,
@@ -795,7 +796,7 @@ export function clearDailyRefreshUpdateTransaction(identityOrPlan, options = {})
     const temporary = `${archive}.tmp-${randomBytes(8).toString("hex")}`;
     try {
       writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-      renameSync(temporary, archive);
+      renameWithRetrySync(temporary, archive);
     } finally {
       try { unlinkSync(temporary); } catch {}
     }

@@ -1005,6 +1005,10 @@ function makeCleanPlanFixture() {
     readFileSync(join(ROOT, "scripts", "field-prepare.mjs")),
   );
   writeFileSync(
+    join(root, "operations", "rename-retry.mjs"),
+    readFileSync(join(ROOT, "operations", "rename-retry.mjs")),
+  );
+  writeFileSync(
     join(root, "operations", "locked-wrangler-runtime.mjs"),
     readFileSync(join(ROOT, "operations", "locked-wrangler-runtime.mjs")),
   );

@@ -19,9 +19,10 @@
  * is where it becomes true.
  */
 
+import { renameWithRetrySync } from "../operations/rename-retry.mjs";
 import {
   closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readSync,
-  readdirSync, realpathSync, writeFileSync, existsSync, mkdirSync, renameSync,
+  readdirSync, realpathSync, writeFileSync, existsSync, mkdirSync,
   chmodSync, rmSync, statSync,
 } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep, basename, dirname } from "node:path";
@@ -2132,7 +2133,7 @@ export function saveState(path, state) {
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
   try {
     writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
-    renameSync(tmp, path);
+    renameWithRetrySync(tmp, path);
     // rename preserves the temp file's mode. chmod also repairs an older state
     // file that may have been created by the pre-hardening implementation.
     chmodSync(path, 0o600);

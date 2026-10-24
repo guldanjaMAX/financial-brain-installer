@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { existsSync, renameSync, writeFileSync } from "node:fs";
+import { renameWithRetrySync } from "../operations/rename-retry.mjs";
+import { existsSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -42,7 +43,7 @@ function writeManifest(path, manifest, replace) {
     flag: "wx",
     mode: 0o644,
   });
-  renameSync(temporary, output);
+  renameWithRetrySync(temporary, output);
 }
 
 async function main(argv) {

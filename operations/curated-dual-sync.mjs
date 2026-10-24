@@ -13,6 +13,7 @@
  * become another copy of filenames, source IDs, URLs, content, or credentials.
  */
 
+import { renameWithRetrySync } from "./rename-retry.mjs";
 import { acquireSourceIngestLock } from "./source-ingest-lock.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import {
@@ -27,7 +28,6 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
-  renameSync,
   statSync,
   unlinkSync,
   writeFileSync,
@@ -1223,7 +1223,7 @@ export function writeCuratedCoverageLedger(path, ledger, options = {}) {
     fsyncSync(descriptor);
     closeSync(descriptor);
     descriptor = undefined;
-    renameSync(temporary, absolute);
+    renameWithRetrySync(temporary, absolute);
     const readback = readFileSync(absolute);
     if (!readback.equals(bytes)) fail("coverage ledger did not read back exactly");
     const info = statSync(absolute);

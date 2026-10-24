@@ -6,6 +6,7 @@
  * receives a temporary home plus an allowlisted environment. Live field gates
  * are printed as human work only. They are never executed here.
  */
+import { renameWithRetrySync } from "../operations/rename-retry.mjs";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -18,7 +19,6 @@ import {
   openSync,
   readFileSync,
   realpathSync,
-  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -625,7 +625,7 @@ function replacePrivateFile(path, bytes) {
   } finally {
     closeSync(descriptor);
   }
-  renameSync(temporary, path);
+  renameWithRetrySync(temporary, path);
   if (!IS_WINDOWS) chmodSync(path, 0o600);
 }
 

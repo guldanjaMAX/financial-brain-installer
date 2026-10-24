@@ -57,6 +57,7 @@
  * is paired.
  */
 
+import { renameWithRetrySync } from "../operations/rename-retry.mjs";
 import {
   constants as fsConstants,
   closeSync,
@@ -68,7 +69,6 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
-  renameSync,
   rmSync,
   statSync,
   writeSync,
@@ -438,7 +438,7 @@ export function saveDrainState(path, state, options = {}) {
     fsyncSync(descriptor);
     closeSync(descriptor);
     descriptor = undefined;
-    renameSync(tmp, path);
+    renameWithRetrySync(tmp, path);
   } catch (error) {
     if (descriptor !== undefined) {
       try { closeSync(descriptor); } catch { /* original error wins */ }

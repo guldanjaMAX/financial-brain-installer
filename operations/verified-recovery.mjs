@@ -14,6 +14,7 @@
  * output.
  */
 
+import { renameWithRetrySync } from "./rename-retry.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import {
   chmodSync,
@@ -29,7 +30,6 @@ import {
   openSync,
   readFileSync,
   realpathSync,
-  renameSync,
   statSync,
   unlinkSync,
   writeFileSync,
@@ -1298,7 +1298,7 @@ function writePrivateControl(path, value, { replace = false, random = randomByte
       if (!sameFile(prior, current)) {
         fail("verified recovery control destination changed before replacement");
       }
-      renameSync(temporary, absolute);
+      renameWithRetrySync(temporary, absolute);
     } else {
       // A check-then-rename would overwrite a file created in the gap. Linking
       // the private staging inode into the final name gives first creation true

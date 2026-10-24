@@ -1,6 +1,7 @@
 /** Local scheduling evidence only. A source's ingest receipt remains authoritative. */
+import { renameWithRetrySync } from "./rename-retry.mjs";
 import { randomBytes } from 'node:crypto';
-import { chmodSync, constants, closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, constants, closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { restrictWindowsFileToCurrentUser, restrictWindowsDirectoryToCurrentUser } from './current-user-file.mjs';
@@ -60,7 +61,7 @@ export function writeQuickBooksScheduleState(plan, source, state, options = {}) 
   try { writeFileSync(fd, `${JSON.stringify(value)}\n`, 'utf8'); fsyncSync(fd); } finally { closeSync(fd); }
   try {
     if ((options.platform || process.platform) === 'win32') (options.protectFile || restrictWindowsFileToCurrentUser)(temporary, options);
-    renameSync(temporary, path);
+    renameWithRetrySync(temporary, path);
   } finally { try { unlinkSync(temporary); } catch (error) { if (error.code !== 'ENOENT') throw error; } }
   return value;
 }

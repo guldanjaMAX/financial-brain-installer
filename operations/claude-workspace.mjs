@@ -5,6 +5,7 @@
  * never credentials. Unrelated files and damaged account sections are preserved.
  */
 
+import { renameWithRetrySync } from "./rename-retry.mjs";
 import {
   closeSync,
   fstatSync,
@@ -419,7 +420,7 @@ function commitWorkspaceGuide(target, parent, snapshot, existing, content, owner
     const staged = fstatSync(fd);
     const closed = fd; fd = null; closeSync(closed);
     if (!locked() || !unchangedWorkspaceFile(temporary, staged, content, ownership)) return notWritten();
-    renameSync(temporary, ready);
+    renameWithRetrySync(temporary, ready);
     pendingPath = ready;
     if (!locked() || !unchangedWorkspaceFile(ready, staged, content, ownership)) return notWritten();
     // Finish every fallible content write before moving the active guide.

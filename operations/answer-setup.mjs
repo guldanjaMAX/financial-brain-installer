@@ -1,7 +1,7 @@
+import { renameWithRetrySync } from "./rename-retry.mjs";
 import {
   existsSync,
   readFileSync,
-  renameSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -223,7 +223,7 @@ export function answerSetupJournalPath(manifestPath) {
 function atomicJsonWrite(path, value) {
   const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
   writeFileSync(temp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-  renameSync(temp, path);
+  renameWithRetrySync(temp, path);
 }
 
 export function saveManifestAtomically(path, manifest) {

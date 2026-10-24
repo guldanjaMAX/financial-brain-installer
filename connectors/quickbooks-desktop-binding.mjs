@@ -1,6 +1,7 @@
 /** Private local company identity. Never serialize this record into an envelope. */
+import { renameWithRetrySync } from "../operations/rename-retry.mjs";
 import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, constants, closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, constants, closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { QBD_ID } from '../operations/quickbooks-desktop-bridge.mjs';
@@ -87,7 +88,7 @@ export function desktopBindingStore(options = {}) {
     const temporary = `${path}.${randomBytes(8).toString('hex')}.tmp`;
     const fd = openSync(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
     try { writeFileSync(fd, `${JSON.stringify(value)}\n`); fsyncSync(fd); } finally { closeSync(fd); }
-    try { protect(temporary); renameSync(temporary, path); }
+    try { protect(temporary); renameWithRetrySync(temporary, path); }
     finally { try { unlinkSync(temporary); } catch (error) { if (error.code !== 'ENOENT') throw error; } }
     if (JSON.stringify(read()) !== JSON.stringify(value)) throw qbdFailure('QB_BINDING_INVALID');
     return value;

@@ -25,6 +25,7 @@
  *    option left for an installed app, which is why this opens a local server.
  */
 
+import { renameWithRetrySync } from "../operations/rename-retry.mjs";
 import { createServer } from "node:http";
 import { createHash, randomBytes } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
@@ -912,7 +913,7 @@ function writeFileStore(path, store, options = {}) {
       throw new Error("the Google token destination changed before replacement");
     }
     syncTokenDirectory(path, platform, options, "prepared");
-    try { renameFile(temporary, path); } catch {
+    try { renameWithRetrySync(temporary, path, { rename: renameFile }); } catch {
       throw new Error("the Google token replacement could not be committed");
     }
     committed = true;
@@ -950,7 +951,7 @@ function writeFileStore(path, store, options = {}) {
             !sameFile(lstatIfPresent(backup), backupIdentity)) {
           throw new Error("transaction identities changed");
         }
-        renameFile(backup, path);
+        renameWithRetrySync(backup, path, { rename: renameFile });
         const restoredIdentity = lstatIfPresent(path);
         if (!sameFile(restoredIdentity, backupIdentity)) {
           throw new Error("rollback identity did not become durable");

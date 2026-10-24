@@ -5,6 +5,7 @@
  * response, account id, hostname, source name, or customer content.
  */
 
+import { renameWithRetrySync } from "./rename-retry.mjs";
 import {
   chmodSync,
   closeSync,
@@ -448,7 +449,7 @@ export function writeBootstrapStatusFile(manifestPath, status, options = {}) {
     (options.fsyncImpl ?? fsyncSync)(descriptor);
     (options.closeImpl ?? closeSync)(descriptor);
     descriptor = undefined;
-    (options.renameImpl ?? renameSync)(temporary, target);
+    renameWithRetrySync(temporary, target, { rename: options.renameImpl ?? renameSync });
     (options.chmodImpl ?? chmodSync)(target, 0o600);
   } catch (error) {
     if (descriptor !== undefined) {
