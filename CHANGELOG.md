@@ -36,6 +36,9 @@ exact sealed package. This version bump verifies no incident.
   or reused-process locks can recover safely. An older tool that lowered the
   recorded version below the durable migration history is detected and routed
   back through the supported update command.
+- **A busy store feed explains that an update is already running.** The message
+  says it will try again on the next run. Check the feed after that run. Invalid
+  data still receives the existing warning.
 
 ### Technical changes
 

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import worker from "../src/index.js";
-import { CUSTOM_API_RUN_PATH, CustomApiError, runCustomApiPull } from "../src/lib/custom-api.js";
+import { CUSTOM_API_RUN_PATH, CustomApiError, customApiOwnerMessage, runCustomApiPull } from "../src/lib/custom-api.js";
 
 const TOKEN = ["fixture", "worker", "sentinel", "42"].join("-");
 
@@ -40,6 +40,57 @@ function env() {
     },
   };
 }
+
+test("RUN_BUSY explains a deferred update using the configured source name", () => {
+  for (const [displayName, expectedName] of [
+    ["store dashboard", "store dashboard"],
+    ["  inventory   feed  ", "inventory feed"],
+    [undefined, "custom business API"],
+  ]) {
+    assert.equal(
+      customApiOwnerMessage("RUN_BUSY", displayName),
+      `The ${expectedName} was already updating. It will try again on the next run.`,
+    );
+  }
+});
+
+for (const code of ["INVALID_RESPONSE", "INVALID_ROW_KEY", "DUPLICATE_ROW_KEY", "SECRET_IN_RESPONSE"]) {
+  test(`${code} keeps the bad-data warning`, () => {
+    assert.equal(
+      customApiOwnerMessage(code, "store dashboard"),
+      "The store dashboard returned data the Brain could not safely understand. The saved data was left unchanged.",
+    );
+  });
+}
+
+test("a busy run returns retry guidance without fetching provider data", async () => {
+  const originalFetch = globalThis.fetch;
+  const fixture = env();
+  const originalPrepare = fixture.DB.prepare;
+  let leaseAttempts = 0;
+  let fetches = 0;
+  fixture.DB.prepare = (sql) => {
+    if (sql.includes("INSERT INTO custom_api_schedule_state")) leaseAttempts++;
+    return originalPrepare(sql);
+  };
+  globalThis.fetch = async () => { fetches++; throw new Error("must not fetch while busy"); };
+  try {
+    const response = await worker.fetch(new Request(`https://brain.invalid${CUSTOM_API_RUN_PATH}`, {
+      method: "POST",
+      headers: { "X-Admin-Key": "fixture-admin-key", "Content-Type": "application/json" },
+      body: JSON.stringify({ dry_run: false }),
+    }), fixture, { waitUntil() {} });
+    const body = await response.json();
+    assert.equal(leaseAttempts, 1, "the run reached the lease acquisition decision");
+    assert.equal(fetches, 0);
+    assert.equal(response.status, 409);
+    assert.equal(body.code, "RUN_BUSY");
+    assert.equal(body.retryable, true);
+    assert.equal(body.error, "The store dashboard was already updating. It will try again on the next run.");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test("admin-only dry run executes in the Worker, fetches the declared host, and performs no D1 write", async () => {
   const original = globalThis.fetch;

@@ -19,6 +19,7 @@ export function currentCustomApiDocumentSql(alias = "d") {
 export function customApiOwnerMessage(code, displayName = "custom business API") {
   const name = String(displayName || "custom business API").replace(/\s+/g, " ").trim().slice(0, 80) || "custom business API";
   if (code === "AUTH_REQUIRED") return `The ${name} refused the key. Ask its developer to check it.`;
+  if (code === "RUN_BUSY") return `The ${name} was already updating. It will try again on the next run.`;
   if (code === "RATE_LIMITED") return `The ${name} asked the Brain to wait. It will try again on the next scheduled pull.`;
   if (code === "REMOTE_UNAVAILABLE" || code === "NETWORK_UNREACHABLE") return `The ${name} could not be reached. The saved data was left unchanged.`;
   if (code === "RESPONSE_TOO_LARGE") return `The ${name} returned more data than this source allows. That endpoint was left unchanged. Ask its developer to add paging or narrow the endpoint.`;
