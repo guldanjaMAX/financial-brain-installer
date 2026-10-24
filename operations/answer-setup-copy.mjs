@@ -20,14 +20,17 @@ export const CHECK_PROBLEM = "The answer model check could not be read completel
 export const CLIPBOARD_CLEAR_WARNING = "Claude answers are connected, but this command could not clear the clipboard. Clear it now before closing the key window; a clipboard history app may still keep a copy.";
 export const ROLLED_BACK_BUILT_IN = "Your Brain could not answer with Claude using this key, so it was put back on the built-in model. Fix the item below, then rerun the same command.";
 export const ROLLED_BACK_PREVIOUS = "The change could not be finished, so your Brain was put back exactly as it was. Fix the item below, then rerun the same command.";
-export const ROLLBACK_INCOMPLETE = (manifest) =>
-  `Your Brain could not be put back automatically. To return it to the built-in model, run: brain disconnect anthropic ${manifest}`;
+const INTERRUPTED_WITH_STORED_KEY = "The Claude setup was interrupted part way. Do not remove the Claude connection, because that removes your stored key. Ask the person who set up your Brain for help.";
+export const ROLLBACK_INCOMPLETE = (manifest, secretNameExisted) => secretNameExisted === false
+  ? `Your Brain could not be put back automatically. To return it to the built-in model, run: brain disconnect anthropic ${manifest}`
+  : INTERRUPTED_WITH_STORED_KEY;
 export const CHECK_PENDING = (manifest) =>
   `Your key works, but your Brain's own test could not finish yet. In a few minutes, run: brain connect anthropic ${manifest} --keep-key`;
 export const LIMIT_ALREADY_REACHED = (manifest, reset) =>
   `Claude is connected, but today's spending limit is already used, so answers start again at ${reset}. To raise the limit, run: brain connect anthropic ${manifest} --keep-key --daily-cap <usd>`;
-export const HALF_RUN = (manifest) =>
-  `An earlier answer setup stopped halfway. To finish safely, run: brain disconnect anthropic ${manifest}. Then set it up again.`;
+export const HALF_RUN = (manifest, secretNameExisted) => secretNameExisted === false
+  ? `An earlier answer setup stopped halfway. To finish safely, run: brain disconnect anthropic ${manifest}. Then set it up again.`
+  : INTERRUPTED_WITH_STORED_KEY;
 export const KEEP_KEY_MISSING = (manifest) =>
   `No Anthropic key is stored in this Brain yet. Copy a key from the Claude Console and run: brain connect anthropic ${manifest} --from-clipboard`;
 export const DASHBOARD_STEPS = "In Cloudflare, open your Brain's Worker, then Settings, Variables and Secrets, Add. Choose Secret, name it ANTHROPIC_API_KEY, paste the key and click Save. Then rerun the same command. Nothing was changed.";

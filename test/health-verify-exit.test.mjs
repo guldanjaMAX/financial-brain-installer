@@ -5,18 +5,25 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import os from "node:os";
-import { syncBuiltinESMExports } from "node:module";
+import { registerHooks, syncBuiltinESMExports } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
 import { HEALTH_KEY_MISSING, HEALTH_NEXT_STEP } from "../operations/answer-setup-copy.mjs";
+import { cliTestEnvironment } from "./helpers/cli-test-environment.mjs";
 
 const SCENARIO = String(process.env.BRAIN_HEALTH_VERIFY_SCENARIO || "");
 const FIXTURE_ADMIN = "fixture-admin-label";
 const FIXTURE_TOKEN = "fixture-cloudflare-label";
+const CLAUDE_RETRIEVAL = Object.freeze({
+  answer_model: "claude-opus-5-5",
+  gate_model: "claude-sonnet-5-5",
+});
 const PRODUCT_VERSION = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf8"),
 ).version;
@@ -131,12 +138,116 @@ function requestUrl(input) {
   return new URL(typeof input === "string" || input instanceof URL ? String(input) : input.url);
 }
 
+function childIsolationFailures(environment, userRoot) {
+  const expected = [
+    ["HOME", userRoot],
+    ["USERPROFILE", userRoot],
+    ["BRAIN_NO_WRANGLER_LOGIN", "1"],
+    ["BRAIN_TEST_LAUNCHCTL", join(userRoot, "launchctl-refused")],
+    ["BRAIN_TEST_ADMIN_KEY_FILE", join(userRoot, ".brain-admin-key")],
+    ["ADMIN_KEY", undefined],
+  ];
+  return expected
+    .filter(([name, value]) => environment[name] !== value)
+    .map(([name]) => name);
+}
+
+function isolatedChildEnvironment(userRoot, overrides = {}) {
+  return cliTestEnvironment(userRoot, {
+    BRAIN_TEST_LAUNCHCTL: join(userRoot, "launchctl-refused"),
+    BRAIN_TEST_ADMIN_KEY_FILE: join(userRoot, ".brain-admin-key"),
+    ...overrides,
+  });
+}
+
 if (SCENARIO) {
   const userRoot = String(process.env.BRAIN_HEALTH_VERIFY_USER_ROOT || "");
   if (!userRoot) throw new Error("BRAIN_HEALTH_VERIFY_USER_ROOT is required");
+  const isolationFailures = childIsolationFailures(process.env, userRoot);
+  if (isolationFailures.length > 0) {
+    throw new Error(`health CLI child isolation guard missing: ${isolationFailures.join(",")}`);
+  }
+  if (globalThis[Symbol.for("brain.test.cli-side-effect-tripwire.installed")] !== true) {
+    throw new Error("health CLI child network and process tripwire is required");
+  }
+
+  const adminKeyPath = process.env.BRAIN_TEST_ADMIN_KEY_FILE;
+  if (existsSync(adminKeyPath)) process.env.ADMIN_KEY = readFileSync(adminKeyPath, "utf8");
+
+  const adminKeyFile = new URL("../operations/admin-key-file.mjs", import.meta.url).href;
+  const adminKeyPersistence = new URL("../operations/admin-key-persistence.mjs", import.meta.url).href;
+  registerHooks({
+    load(url, context, nextLoad) {
+      if (url === adminKeyFile) {
+        const original = `${adminKeyFile}?health-cli-isolated-file-store`;
+        return {
+          format: "module",
+          shortCircuit: true,
+          source: `export * from ${JSON.stringify(original)};
+            import { writeSync } from "node:fs";
+            const refused = () => {
+              writeSync(2, "TEST_CREDENTIAL_STORE_BLOCKED\\n");
+              process.exit(86);
+            };
+            export const readAdminKeyFile = refused;
+            export const writeAdminKeyFile = refused;`,
+        };
+      }
+      if (url === adminKeyPersistence) {
+        const original = `${adminKeyPersistence}?health-cli-isolated-keychain`;
+        return {
+          format: "module",
+          shortCircuit: true,
+          source: `export * from ${JSON.stringify(original)};
+            import { writeSync } from "node:fs";
+            const refused = () => {
+              writeSync(2, "TEST_KEYCHAIN_ADAPTER_BLOCKED\\n");
+              process.exit(86);
+            };
+            export const readAdminKeyFromKeychain = refused;
+            export const writeAdminKeyToKeychain = refused;
+            export const readAdminKeyDurably = refused;
+            export const persistAdminKeyDurably = refused;`,
+        };
+      }
+      return nextLoad(url, context);
+    },
+  });
+
+  if (SCENARIO.startsWith("isolation-")) {
+    console.log(`TEST_ISOLATION_DECISION_REACHED:${SCENARIO}`);
+    if (SCENARIO === "isolation-adapter-control") {
+      await import(adminKeyFile);
+      await import(adminKeyPersistence);
+      console.log("TEST_ISOLATION_CONTROL_PASSED");
+      process.exit(0);
+    }
+    if (SCENARIO === "isolation-credential-store-probe") {
+      const { readAdminKeyFile } = await import(adminKeyFile);
+      readAdminKeyFile(adminKeyPath);
+      throw new Error("credential-store probe continued past the refusing adapter");
+    }
+    if (SCENARIO === "isolation-keychain-probe") {
+      const { readAdminKeyFromKeychain } = await import(adminKeyPersistence);
+      readAdminKeyFromKeychain({ backend: "keychain", service: "fixture", account: "fixture" });
+      throw new Error("keychain probe continued past the refusing adapter");
+    }
+    if (SCENARIO === "isolation-launchctl-probe") {
+      spawnSync(process.env.BRAIN_TEST_LAUNCHCTL, ["print", "fixture"]);
+      throw new Error("launchctl probe continued past the process tripwire");
+    }
+    if (SCENARIO === "isolation-network-probe") {
+      const { get } = await import("node:https");
+      get("https://fixture.invalid");
+      throw new Error("network probe continued past the network tripwire");
+    }
+    throw new Error("unknown health CLI isolation probe");
+  }
+
   os.homedir = () => userRoot;
   syncBuiltinESMExports();
   let documentRequests = 0;
+  const blockUnexpectedFetch = globalThis.fetch;
 
   globalThis.fetch = async (input, options = {}) => {
     const url = requestUrl(input);
@@ -386,12 +497,13 @@ if (SCENARIO) {
       return json({ success: true, result: [] });
     }
 
-    throw new Error(`unexpected fixture request: ${url.origin}${url.pathname}`);
+    return blockUnexpectedFetch(input, options);
   };
 } else {
   const HERE = dirname(fileURLToPath(import.meta.url));
   const CLI = join(HERE, "..", "brain.mjs");
   const THIS_FILE = import.meta.url;
+  const SIDE_EFFECT_TRIPWIRE = new URL("./fixtures/cli-side-effect-tripwire.mjs", import.meta.url).href;
   let fail = 0;
   let ran = 0;
   const check = (name, condition, detail = "") => {
@@ -402,19 +514,12 @@ if (SCENARIO) {
   };
   const strip = (text) => String(text).replace(/\x1b\[[0-9;]*m/g, "");
 
-  function safeChildEnvironment() {
-    const environment = {};
-    for (const name of ["PATH", "SystemRoot", "ComSpec", "PATHEXT", "TEMP", "TMP", "TMPDIR", "LANG"]) {
-      if (process.env[name] !== undefined) environment[name] = process.env[name];
-    }
-    return environment;
-  }
-
   function runScenario(scenario, command, { adminKey = false, cloudflareToken = false } = {}) {
-    const directory = mkdtempSync(join(tmpdir(), "brain-health-verify-exit-"));
+    const directory = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-health-verify-exit-")));
     const userRoot = join(directory, "isolated-user-root");
     const manifestPath = join(directory, "fixture.manifest.json");
     mkdirSync(userRoot, { recursive: true });
+    const adminKeyPath = join(userRoot, ".brain-admin-key");
     const cloudflare = { account_id: "fixture-account" };
     if (scenario !== "health-default-backend-mismatch") cloudflare.storage = "d1";
     // Verify only probes R2 for a manifest that asks for a bucket (F-09). The
@@ -425,24 +530,68 @@ if (SCENARIO) {
       client: { slug: "fixture-brain" },
       brain: { domain: "fixture.invalid", worker_name: "fixture-brain" },
       infrastructure: { cloudflare },
+      ...(scenario === "health-answer-provider-fallback" ? { retrieval: CLAUDE_RETRIEVAL } : {}),
     }));
 
-    const environment = {
-      ...safeChildEnvironment(),
+    const environment = isolatedChildEnvironment(userRoot, {
       BRAIN_HEALTH_VERIFY_SCENARIO: scenario,
       BRAIN_HEALTH_VERIFY_USER_ROOT: userRoot,
-    };
-    if (adminKey) environment.ADMIN_KEY = FIXTURE_ADMIN;
+    });
+    if (adminKey) writeFileSync(adminKeyPath, FIXTURE_ADMIN, { mode: 0o600 });
     if (cloudflareToken) environment.CLOUDFLARE_API_TOKEN = FIXTURE_TOKEN;
 
-    const result = spawnSync(process.execPath, ["--import", THIS_FILE, CLI, command, manifestPath], {
+    const result = spawnSync(process.execPath, [
+      "--import", SIDE_EFFECT_TRIPWIRE, "--import", THIS_FILE, CLI, command, manifestPath,
+    ], {
       encoding: "utf-8",
       env: environment,
       timeout: 30_000,
     });
     const output = strip(`${result.stdout || ""}${result.stderr || ""}`);
     rmSync(directory, { recursive: true, force: true });
-    return { code: result.status, output, error: result.error };
+    return { code: result.status, output, error: result.error, manifestPath };
+  }
+
+  {
+    const directory = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-health-isolation-contract-")));
+    const userRoot = join(directory, "isolated-user-root");
+    mkdirSync(userRoot, { recursive: true });
+    const control = isolatedChildEnvironment(userRoot);
+    const guards = [
+      "HOME",
+      "USERPROFILE",
+      "BRAIN_NO_WRANGLER_LOGIN",
+      "BRAIN_TEST_LAUNCHCTL",
+      "BRAIN_TEST_ADMIN_KEY_FILE",
+      "ADMIN_KEY",
+    ];
+    for (const guard of guards) {
+      const mutant = { ...control };
+      if (guard === "ADMIN_KEY") mutant[guard] = "forbidden-direct-fixture";
+      else delete mutant[guard];
+      check(`health CLI isolation rejects a missing ${guard} and accepts the complete control`,
+        childIsolationFailures(mutant, userRoot).includes(guard) &&
+          childIsolationFailures(control, userRoot).length === 0,
+        JSON.stringify({ guard, mutant: childIsolationFailures(mutant, userRoot) }));
+    }
+    rmSync(directory, { recursive: true, force: true });
+  }
+
+  for (const [scenario, refusal, expectedCode] of [
+    ["isolation-credential-store-probe", "TEST_CREDENTIAL_STORE_BLOCKED", 86],
+    ["isolation-keychain-probe", "TEST_KEYCHAIN_ADAPTER_BLOCKED", 86],
+    ["isolation-launchctl-probe", "TEST_SIDE_EFFECT_BLOCKED:child_process.spawnSync", 86],
+    ["isolation-network-probe", "TEST_SIDE_EFFECT_BLOCKED:https.get", 86],
+  ]) {
+    const refused = runScenario(scenario, "health");
+    const control = runScenario("isolation-adapter-control", "health");
+    check(`${scenario} reaches and refuses its boundary with a green control`,
+      refused.code === expectedCode &&
+        refused.output.includes(`TEST_ISOLATION_DECISION_REACHED:${scenario}`) &&
+        refused.output.includes(refusal) &&
+        control.code === 0 &&
+        control.output.includes("TEST_ISOLATION_CONTROL_PASSED"),
+      JSON.stringify({ scenario, refused, control }));
   }
 
   const missingKey = runScenario("health-ok", "health");
@@ -502,18 +651,33 @@ if (SCENARIO) {
 
   {
     const { cmdHealth } = await import("../brain.mjs");
-    const runCountReceipt = async (countFields, providerFields = {}) => {
-      const directory = mkdtempSync(join(tmpdir(), "brain-health-source-counts-"));
-      const manifestPath = join(directory, "fixture.manifest.json");
+    const runCountReceipt = async (countFields, providerFields = {}, {
+      platform = process.platform,
+      retrieval = null,
+    } = {}) => {
+      const directory = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-health-source-counts-")));
+      const manifestLeaf = platform === "win32" && process.platform !== "win32"
+        ? String.raw`Owner Folder\fixture.manifest.json`
+        : platform === "win32"
+          ? join("Owner Folder", "fixture.manifest.json")
+          : "fixture.manifest.json";
+      const manifestPath = join(directory, manifestLeaf);
+      mkdirSync(dirname(manifestPath), { recursive: true });
       writeFileSync(manifestPath, JSON.stringify({
         client: { slug: "fixture" },
         brain: { domain: "fixture.invalid", worker_name: "fixture" },
         infrastructure: { cloudflare: { storage: "d1" } },
+        ...(retrieval ? { retrieval } : {}),
       }));
       const logged = [];
       const originalLog = console.log;
+      const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
       let failure = null;
       try {
+        Object.defineProperty(process, "platform", {
+          ...originalPlatform,
+          value: platform,
+        });
         console.log = (...values) => logged.push(strip(values.join(" ")));
         await cmdHealth(manifestPath, {
           resolveKey: () => FIXTURE_ADMIN,
@@ -543,6 +707,7 @@ if (SCENARIO) {
         failure = error;
       } finally {
         console.log = originalLog;
+        Object.defineProperty(process, "platform", originalPlatform);
         rmSync(directory, { recursive: true, force: true });
       }
       return { logged, failure, manifestPath };
@@ -615,13 +780,43 @@ if (SCENARIO) {
         typeof inventoryLine === "string",
       JSON.stringify({ sourceLine: sourceLines[0], inventoryLine }));
 
-    const providerWarning = await runCountReceipt(null, { anthropic_key_missing: true });
+    const providerWarning = await runCountReceipt(null, { anthropic_key_missing: true }, {
+      retrieval: CLAUDE_RETRIEVAL,
+    });
+    const providerWarningNextStep = renderCliCommands(HEALTH_NEXT_STEP(providerWarning.manifestPath));
     check("health reports paused Claude answers and the manifest-bound reconnect step",
       providerWarning.failure === null && providerWarning.logged.some((line) =>
         line.includes(HEALTH_KEY_MISSING)) && providerWarning.logged.some((line) =>
-        line.includes(HEALTH_NEXT_STEP(providerWarning.manifestPath))) && providerWarning.logged.every((line) =>
-        !/using the built-in model/i.test(line)),
+        line.includes(providerWarningNextStep)) && providerWarning.logged.some((line) =>
+        line.includes("Answer setup: Opus answers, Sonnet checks")) && providerWarning.logged.every((line) =>
+        !line.includes("Answer setup: built-in Cloudflare model")),
       JSON.stringify({ failure: providerWarning.failure?.message, logged: providerWarning.logged }));
+
+    for (const platform of ["darwin", "win32"]) {
+      const seam = await runCountReceipt(null, { anthropic_key_missing: true }, {
+        platform,
+        retrieval: CLAUDE_RETRIEVAL,
+      });
+      const rawNextStep = HEALTH_NEXT_STEP(seam.manifestPath);
+      const expectedNextStep = renderCliCommands(rawNextStep, { platform });
+      const rendererControl = platform === "win32"
+        ? seam.manifestPath.includes("\\") && expectedNextStep !== rawNextStep
+        : expectedNextStep === rawNextStep;
+      check(`health ${platform} seam keeps configured Claude answers and the reconnect step`,
+        rendererControl && seam.failure === null && seam.logged.some((line) =>
+          line.includes("authenticated inventory confirmed")) && seam.logged.some((line) =>
+          line.includes("Answer setup: Opus answers, Sonnet checks")) && seam.logged.some((line) =>
+          line.includes(HEALTH_KEY_MISSING)) && seam.logged.some((line) =>
+          line.includes(expectedNextStep)) && seam.logged.every((line) =>
+          !line.includes("Answer setup: built-in Cloudflare model")),
+        JSON.stringify({
+          platform,
+          manifestPath: seam.manifestPath,
+          rendererControl,
+          failure: seam.failure?.message,
+          logged: seam.logged,
+        }));
+    }
   }
 
   const invalidDocuments = runScenario("health-documents-invalid", "health", { adminKey: true });
@@ -635,11 +830,13 @@ if (SCENARIO) {
       /vector index is query-ready/.test(healthy.output), healthy.output);
 
   const providerFallback = runScenario("health-answer-provider-fallback", "health", { adminKey: true });
+  const providerFallbackNextStep = renderCliCommands(HEALTH_NEXT_STEP(providerFallback.manifestPath));
   check("health warns when configured Claude answers are paused for a missing key",
     providerFallback.code === 0 &&
       providerFallback.output.includes(HEALTH_KEY_MISSING) &&
-      /brain connect anthropic .* --from-clipboard/i.test(providerFallback.output) &&
-      !/using the built-in model/i.test(providerFallback.output) &&
+      providerFallback.output.includes(providerFallbackNextStep) &&
+      /Answer setup: Opus answers, Sonnet checks/i.test(providerFallback.output) &&
+      !/Answer setup: built-in Cloudflare model/i.test(providerFallback.output) &&
       /vector index is query-ready/.test(providerFallback.output),
     providerFallback.output);
 

@@ -1,5 +1,6 @@
 import {
   existsSync,
+  lstatSync,
   readFileSync,
   renameSync,
   unlinkSync,
@@ -218,6 +219,17 @@ export function displayResetTime(iso, timezone = "UTC") {
 
 export function answerSetupJournalPath(manifestPath) {
   return join(dirname(manifestPath), ANSWER_SETUP_JOURNAL);
+}
+
+/** Update blocks on presence alone, including an empty, malformed, or non-file journal. */
+export function answerSetupNeedsRecovery(manifestPath, { inspect = lstatSync } = {}) {
+  try {
+    inspect(answerSetupJournalPath(manifestPath));
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw new Error("the interrupted answer setup journal could not be inspected", { cause: error });
+  }
 }
 
 function atomicJsonWrite(path, value) {
@@ -560,7 +572,7 @@ export async function runAnthropicAnswerSetup({ manifestPath, flags = {} }, deps
         error.rolledBack = true;
         error.rollbackTarget = rollbackTarget;
       } catch (rollbackError) {
-        const incomplete = new Error(`${ROLLBACK_INCOMPLETE(manifestPath)} Support code: ANTHROPIC_ROLLBACK_INCOMPLETE.`, { cause: rollbackError });
+        const incomplete = new Error(`${ROLLBACK_INCOMPLETE(manifestPath, journal.secret_name_existed)} Support code: ANTHROPIC_ROLLBACK_INCOMPLETE.`, { cause: rollbackError });
         incomplete.supportCode = "ANTHROPIC_ROLLBACK_INCOMPLETE";
         throw incomplete;
       }

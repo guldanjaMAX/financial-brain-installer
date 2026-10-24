@@ -74,7 +74,11 @@ import {
   SOURCE_FAMILY_UID_FILTER_MAX,
 } from "./worker/src/lib/store-d1.js";
 import { BANK_ACCESS_WRAPPING_KEY_SECRET } from "./operations/bank-access-wrapping-key.mjs";
-import { withBrainLifecycleLock, withBrainLifecycleLockWait } from "./operations/brain-lifecycle-lock.mjs";
+import {
+  BrainLifecycleLockError,
+  withBrainLifecycleLock,
+  withBrainLifecycleLockWait,
+} from "./operations/brain-lifecycle-lock.mjs";
 import { renderDailyObservation } from "./operations/daily-refresh-observation.mjs";
 import { createMigrationStatementIntentStore } from "./operations/migration-statement-intent.mjs";
 import {
@@ -108,6 +112,7 @@ import {
   answerSetupOf,
   assertReviewedAnswerModels as assertReviewedAnswerModelsConfig,
   answerSetupJournalPath,
+  answerSetupNeedsRecovery,
   preflightAnthropicKey,
   resolvedAnswerModels,
   runAnthropicAnswerSetup,
@@ -19608,6 +19613,12 @@ export async function cmdConnect(target, options = {}) {
     return (options.connectOnline || cmdConnectProvider)("quickbooks", manifestPath, flags, options.providerOptions || {});
   }
   if (which === "anthropic") {
+    // A half-run journal is a local custody stop. Check it before manifest-bound
+    // Cloudflare control can inspect or refresh a stored credential.
+    const setupNeedsRecovery = options.answerSetupNeedsRecovery ?? answerSetupNeedsRecovery;
+    if (manifestPath && !String(manifestPath).startsWith("--") && setupNeedsRecovery(manifestPath)) {
+      die(HALF_RUN(manifestPath));
+    }
     const runManifestControl = options.withManifestControl ?? withManifestCloudflareControl;
     const connectAnthropic = options.connectAnthropic ?? cmdConnectAnthropic;
     return runManifestControl(
@@ -20709,7 +20720,11 @@ export async function cmdDisconnectAnthropic(manifestPath, flags = {}, options =
     (options.withBrainLifecycleLock ?? withBrainLifecycleLock)(input, action));
   const report = options.log ?? say;
   try {
-    return await lock({ manifestPath, operation: "answer-setup-disconnect" }, async () => {
+    return await lock({
+      manifestPath,
+      operation: "answer-setup-disconnect",
+      retryCommand: "brain disconnect anthropic <manifest>",
+    }, async () => {
       const { m: before } = (options.loadManifest ?? loadManifest)(manifestPath);
       try {
         await (options.verifyVersion ?? (() => assertLiveAnswerSetupWorker(
@@ -20772,6 +20787,9 @@ export async function cmdDisconnectAnthropic(manifestPath, flags = {}, options =
   } catch (error) {
     if (error?.code === "brain_lifecycle_recovery_required") {
       die(UPDATE_FIRST(manifestPath));
+    }
+    if (error instanceof BrainLifecycleLockError || /^brain_lifecycle_/u.test(String(error?.code || ""))) {
+      die(error.message);
     }
     throw error;
   }
@@ -24593,6 +24611,11 @@ function crash(err) {
   const supportEventId = recordSupportFailure(err, { unexpected: true });
   const write = (line) => console.log(line);
   const networkCode = String(err?.cause?.code || err?.code || "");
+  if (err instanceof BrainLifecycleLockError || /^brain_lifecycle_/u.test(networkCode)) {
+    write(`\n${c.red("fail")}  ${msg}`);
+    printSupportReceipt(supportEventId, write);
+    process.exit(1);
+  }
   if (err?.retryable === true || ["ECONNREFUSED", "ECONNRESET", "EPIPE", "ETIMEDOUT", "EAI_AGAIN", "ENOTFOUND", "UND_ERR_SOCKET"].includes(networkCode)) {
     write(`\n${c.red("fail")}  Your internet connection dropped while talking to Cloudflare.`);
     write("  Nothing was lost: everything that finished is saved.");
@@ -30932,6 +30955,9 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         "Run brain update <full path to brain.manifest.json> once; future updates will work from any folder."
     );
   }
+  if ((options.answerSetupNeedsRecovery ?? answerSetupNeedsRecovery)(installed.path)) {
+    die(HALF_RUN(installed.path));
+  }
   const installedManifest = loadManifest(installed.path).m;
   assertReviewedAnswerModels(installedManifest, { manifestPath: installed.path });
   const forceQueuedUpdate = options.forceQueuedUpdate === true;
@@ -31523,17 +31549,28 @@ export async function cmdUpdate(manifestPath, options = {}) {
       if (!lockManifestPath) return await cmdUpdateWithPrompts(manifestPath, options);
     }
     const lockTask = options.withBrainLifecycleLockWait ?? withBrainLifecycleLockWait;
-    return await lockTask({
-      manifestPath: lockManifestPath,
-      operation: "update",
-      waitMs: options.lifecycleLockWaitMs ?? 120_000,
-      retryMs: options.lifecycleLockRetryMs ?? 500,
-      ...(options.lifecycleLockOptions || {}),
-    }, () => cmdUpdateWithPrompts(manifestPath, {
-      ...options,
-      lifecycleLockHeld: true,
-      ...(preDiscoveredInstalled ? { preDiscoveredInstalled } : {}),
-    }));
+    try {
+      return await lockTask({
+        manifestPath: lockManifestPath,
+        operation: "update",
+        retryCommand: "brain update <manifest>",
+        waitMs: options.lifecycleLockWaitMs ?? 120_000,
+        retryMs: options.lifecycleLockRetryMs ?? 500,
+        ...(options.lifecycleLockOptions || {}),
+      }, () => cmdUpdateWithPrompts(manifestPath, {
+        ...options,
+        lifecycleLockHeld: true,
+        ...(preDiscoveredInstalled ? { preDiscoveredInstalled } : {}),
+      }));
+    } catch (error) {
+      if (error instanceof BrainLifecycleLockError || /^brain_lifecycle_/u.test(String(error?.code || ""))) {
+        dieWithSupportCode(
+          error.message,
+          error?.code === "brain_lifecycle_busy" ? "UPDATE_BRAIN_BUSY" : "UPGRADE_FAILED",
+        );
+      }
+      throw error;
+    }
   } finally {
     closePrompts();
   }

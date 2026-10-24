@@ -1,10 +1,18 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import worker from "../worker/src/index.js";
 import {
+  cmdConnect,
   cmdConnectAnthropic,
   cmdDisconnectAnthropic,
   reconcileDailyDefinitionAfterManifestEdit,
@@ -16,6 +24,8 @@ import {
   RECOMMENDED_CLAUDE_DAILY_CAP_USD,
   REVIEWED_CLAUDE_ANSWER_MODELS,
   answerSetupOf,
+  answerSetupJournalPath,
+  answerSetupNeedsRecovery,
   assertReviewedAnswerModels,
   classifyAnthropicResponse,
   displayResetTime,
@@ -25,6 +35,7 @@ import {
   runAnthropicAnswerSetup,
   validAnthropicKeyShape,
 } from "../operations/answer-setup.mjs";
+import { renderSupportRecovery, supportRecovery } from "../support-recovery.mjs";
 import {
   BILLING,
   BUSY,
@@ -690,14 +701,61 @@ test("reranking keeps the secret on rollback and an incomplete rollback keeps th
   assert.equal(rerank.calls.includes("delete-secret"), false);
   assert.ok(rerank.lines.includes(KEY_KEPT_FOR_RERANK));
 
-  const incomplete = setupHarness(manifest(), { failDeploy: true });
-  incomplete.deps.deploy = async () => { incomplete.calls.push("deploy-failed"); throw new Error("synthetic deploy failure"); };
+  for (const secretPresent of [false, true]) {
+    const incomplete = setupHarness(manifest(), { secretPresent, failDeploy: true });
+    incomplete.deps.deploy = async () => {
+      incomplete.calls.push("deploy-failed");
+      throw new Error("synthetic deploy failure");
+    };
+    await assert.rejects(
+      runAnthropicAnswerSetup({ manifestPath: "/fixture/brain.manifest.json", flags: { "from-clipboard": true } }, incomplete.deps),
+      (error) => error.supportCode === "ANTHROPIC_ROLLBACK_INCOMPLETE" &&
+        error.message.includes(ROLLBACK_INCOMPLETE("/fixture/brain.manifest.json", secretPresent)),
+    );
+    assert.equal(incomplete.journal(), true, `${secretPresent}: incomplete rollback keeps the journal`);
+    assert.ok(incomplete.calls.filter((call) => call === "deploy-failed").length >= 2,
+      `${secretPresent}: rollback redeploy decision was reached`);
+  }
+});
+
+test("a stored-key rollback failure leads only to conservative support guidance", async () => {
+  const incomplete = setupHarness(manifest(), { secretPresent: true, failDeploy: true });
+  incomplete.deps.deploy = async () => {
+    incomplete.calls.push("deploy-failed");
+    throw new Error("synthetic deploy failure");
+  };
+  let rollbackError = null;
   await assert.rejects(
-    runAnthropicAnswerSetup({ manifestPath: "/fixture/brain.manifest.json", flags: { "from-clipboard": true } }, incomplete.deps),
-    (error) => error.supportCode === "ANTHROPIC_ROLLBACK_INCOMPLETE" && error.message.includes(ROLLBACK_INCOMPLETE("/fixture/brain.manifest.json")),
+    runAnthropicAnswerSetup({
+      manifestPath: "/fixture/brain.manifest.json",
+      flags: { "from-clipboard": true },
+    }, incomplete.deps),
+    (error) => {
+      rollbackError = error;
+      return error.supportCode === "ANTHROPIC_ROLLBACK_INCOMPLETE";
+    },
   );
-  assert.equal(incomplete.journal(), true);
-  assert.ok(incomplete.calls.filter((call) => call === "deploy-failed").length >= 2, "rollback redeploy was attempted");
+  assert.ok(incomplete.calls.filter((call) => call === "deploy-failed").length >= 2,
+    "the stored-key rollback failure decision was reached");
+
+  const runbook = readFileSync(
+    new URL("../onboarding/06-runbook-top-ten-failures.md", import.meta.url),
+    "utf8",
+  );
+  const runbookEntry = runbook.match(/^- `ANTHROPIC_ROLLBACK_INCOMPLETE`: ([^\n]+)$/mu)?.[1];
+  assert.ok(runbookEntry, "the public runbook entry exists");
+  const surfaces = [
+    ["support explanation", renderSupportRecovery(supportRecovery(rollbackError.supportCode))],
+    ["public runbook", runbookEntry],
+  ];
+  for (const [surface, guidance] of surfaces) {
+    assert.match(guidance, /ask the person who set up your Brain for help/iu,
+      `${surface} keeps the safe help control`);
+    assert.doesNotMatch(guidance, /\bdisconnect\b/iu,
+      `${surface} cannot send the owner to destructive cleanup`);
+    assert.doesNotMatch(guidance, /\bbrain\s+[a-z][a-z-]*\b/u,
+      `${surface} contains no state-blind CLI command`);
+  }
 });
 
 test("transient and daily-limit Worker checks keep the proven setup", async () => {
@@ -769,14 +827,33 @@ test("dashboard, half-run, version, and Darwin input modes stop at their intende
   assert.deepEqual(dashboardCalls, ["version", "secret-list"]);
   assert.deepEqual(dashboardLines, [DASHBOARD_STEPS]);
 
-  const halfCalls = [];
-  await assert.rejects(runAnthropicAnswerSetup({ manifestPath: "/fixture/brain.manifest.json" }, {
-    acquireLock: async (_input, action) => action(),
-    journalExists: () => true,
-    clearClipboard: async () => halfCalls.push("clear"),
-    verifyVersion: async () => halfCalls.push("version"),
-  }), (error) => error.message === HALF_RUN("/fixture/brain.manifest.json"));
-  assert.deepEqual(halfCalls, ["clear"]);
+  for (const journalPresent of [true, false]) {
+    const halfCalls = [];
+    let journalDecisions = 0;
+    const outcome = await runAnthropicAnswerSetup({
+      manifestPath: "/fixture/brain.manifest.json",
+      flags: { "key-set-in-dashboard": true },
+    }, {
+      acquireLock: async (_input, action) => action(),
+      journalExists: () => { journalDecisions += 1; return journalPresent; },
+      loadManifest: () => manifest(),
+      verifyVersion: async () => halfCalls.push("version"),
+      listSecretNames: async () => { halfCalls.push("secret-list"); return []; },
+      log: (line) => halfCalls.push(`log:${line}`),
+    }).then(
+      (receipt) => ({ receipt, error: null }),
+      (error) => ({ receipt: null, error }),
+    );
+    assert.equal(journalDecisions, 1, `${journalPresent}: reached the journal decision`);
+    if (journalPresent) {
+      assert.equal(outcome.error?.message, HALF_RUN("/fixture/brain.manifest.json"));
+      assert.deepEqual(halfCalls, [], "present journal stops before manifest or remote work");
+    } else {
+      assert.equal(outcome.error, null, "absent journal is the green control");
+      assert.equal(outcome.receipt?.reason, "dashboard_secret_missing");
+      assert.deepEqual(halfCalls, ["version", "secret-list", `log:${DASHBOARD_STEPS}`]);
+    }
+  }
 
   const modes = [];
   for (const stdinIsTTY of [false, true]) {
@@ -788,6 +865,90 @@ test("dashboard, half-run, version, and Darwin input modes stop at their intende
     await runAnthropicAnswerSetup({ manifestPath: "/fixture/brain.manifest.json" }, harness.deps);
   }
   assert.deepEqual(modes, ["clipboard", "prompt"]);
+});
+
+test("the installed Anthropic connect route refuses every journal state before credential control", async () => {
+  const journalCases = [
+    ["valid regular file", (path) => writeFileSync(path, "{}\n", { mode: 0o600 })],
+    ["empty regular file", (path) => writeFileSync(path, "", { mode: 0o600 })],
+    ["malformed regular file", (path) => writeFileSync(path, "{", { mode: 0o600 })],
+    ["directory", (path) => mkdirSync(path, { mode: 0o700 })],
+  ];
+
+  for (const [label, createJournal] of journalCases) {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "answer-setup-route-")));
+    const manifestPath = join(root, "brain.manifest.json");
+    const journalPath = answerSetupJournalPath(manifestPath);
+    writeFileSync(manifestPath, JSON.stringify(manifest()), { mode: 0o600 });
+    createJournal(journalPath);
+    let journalDecisions = 0;
+    let credentialControls = 0;
+    let coreCalls = 0;
+    const options = {
+      argv: [process.execPath, "brain.mjs", "connect", "anthropic", manifestPath, "--key-set-in-dashboard"],
+      answerSetupNeedsRecovery: (path) => {
+        journalDecisions += 1;
+        return answerSetupNeedsRecovery(path);
+      },
+      withManifestControl: async () => {
+        credentialControls += 1;
+        throw new Error("fixture credential control reached");
+      },
+      connectAnthropic: async () => {
+        coreCalls += 1;
+        return { status: "fixture" };
+      },
+    };
+    try {
+      await assert.rejects(
+        cmdConnect("anthropic", options),
+        (error) => error.message === HALF_RUN(manifestPath),
+        `${label} refuses before credential control`,
+      );
+      assert.equal(journalDecisions, 1, `${label} reached the presence decision`);
+      assert.equal(credentialControls, 0, `${label} did not enter credential control`);
+      assert.equal(coreCalls, 0, `${label} did not enter answer setup`);
+
+      rmSync(journalPath, { recursive: true });
+      await assert.rejects(
+        cmdConnect("anthropic", options),
+        /fixture credential control reached/,
+        `${label} absent-journal control reaches credential control`,
+      );
+      assert.equal(journalDecisions, 2, `${label} control reached the same presence decision`);
+      assert.equal(credentialControls, 1, `${label} green control differs only by journal absence`);
+      assert.equal(coreCalls, 0, `${label} refusing credential control still protects setup`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  let journalDecisions = 0;
+  let credentialControls = 0;
+  const undecidable = {
+    argv: [process.execPath, "brain.mjs", "connect", "anthropic", "/fixture/brain.manifest.json"],
+    answerSetupNeedsRecovery: () => {
+      journalDecisions += 1;
+      throw new Error("fixture journal inspection unavailable");
+    },
+    withManifestControl: async () => {
+      credentialControls += 1;
+      throw new Error("fixture credential control reached");
+    },
+  };
+  await assert.rejects(cmdConnect("anthropic", undecidable), /journal inspection unavailable/,
+    "an undecidable journal inspection fails closed before credential control");
+  assert.equal(journalDecisions, 1, "the undecidable presence decision was reached");
+  assert.equal(credentialControls, 0, "an undecidable state cannot enter credential control");
+
+  undecidable.answerSetupNeedsRecovery = () => {
+    journalDecisions += 1;
+    return false;
+  };
+  await assert.rejects(cmdConnect("anthropic", undecidable), /fixture credential control reached/,
+    "the absent green control reaches credential control");
+  assert.equal(journalDecisions, 2, "the absent control reached the same decision point");
+  assert.equal(credentialControls, 1, "only a proven-absent journal enters credential control");
 });
 
 test("the eight-minute bound rolls a manifest edit back", async () => {

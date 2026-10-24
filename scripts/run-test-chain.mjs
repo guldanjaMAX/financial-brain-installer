@@ -301,6 +301,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --test test/acceptance-answer-model.test.mjs",
   "node --test test/doctor-anthropic-secret.test.mjs",
   "node --test test/fix-update-0419-ledger.test.mjs",
+  "node --test test/fix-0419-partner-r1.test.mjs",
   // A Zoom passcode pasted into a calendar description or location is removed
   // before the credential gate sees it, so one event cannot fail the sync.
   "node --test test/google-calendar-url-passcode.test.mjs",
@@ -764,6 +765,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node --test test/acceptance-answer-model.test.mjs",
   "node --test test/doctor-anthropic-secret.test.mjs",
   "node --test test/fix-update-0419-ledger.test.mjs",
+  "node --test test/fix-0419-partner-r1.test.mjs",
 ]);
 
 export function parseTestCommand(command) {

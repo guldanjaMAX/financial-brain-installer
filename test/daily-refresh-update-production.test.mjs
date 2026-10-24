@@ -1691,7 +1691,9 @@ test("S2 active local ingest owns the update boundary until it releases custody"
     h.options.lifecycleLockWaitMs = 0;
     try {
       await assert.rejects(cmdUpdate(manifestPath, h.options), error => {
-        assert.equal(error.code, "brain_lifecycle_busy", "the real lifecycle custody decision was reached");
+        assert.equal(error.supportCode, "UPDATE_BRAIN_BUSY", "the real lifecycle custody decision was reached");
+        assert.match(error.message, /lock is held by ingest/i);
+        assert.doesNotMatch(error.message, /internet connection dropped/i);
         return true;
       });
       assert.equal(h.events.length, 0);
