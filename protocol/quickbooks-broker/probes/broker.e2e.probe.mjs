@@ -1,0 +1,442 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import {
+  PROTOCOL, BROKER, CALLBACK, OWNER_CALLBACK, START, REFRESH, REVOKE,
+  loadImplementation, createRig, jsonRequest, launchRequest, rewriteJson, rejected,
+  queryFree, reached, ordered, connected, noExchange,
+} from './harness.mjs';
+
+// These are deliberately red until actual Worker handlers can be bound by the
+// fixed implementation adapter. No scenario treats a missing handler as a pass.
+test('E2E connect: enrollment, owner authentication, signed start and launch', async () => {
+  const factory = await loadImplementation();
+  const control = await createRig(factory);
+  await control.connect();
+  reached(control, 'enrollment.challenge.checked');
+  reached(control, 'start.signature.checked');
+  await control.assertPrivate();
+
+  for (const options of [{ authorized: false }, { challengeValid: false }]) {
+    const rig = await createRig(factory);
+    rejected(await rig.enroll(0, options));
+    noExchange(rig, options.authorized === false ? 'enrollment.access.checked' : 'enrollment.challenge.checked');
+    assert.ok(rig.inspect().voucherIssueCount === 0, 'refused enrollment must issue no voucher');
+  }
+  {
+    const rig = await createRig(factory);
+    await rig.enroll();
+    rejected(await rig.owner('/api/quickbooks/connect/start', { authenticated: false, body: {} }));
+    noExchange(rig, 'owner.authentication.checked');
+  }
+  for (const mutation of [
+    body => { body.signature = (body.signature[0] === 'A' ? 'B' : 'A') + body.signature.slice(1); },
+    body => { body.body.intent = (body.body.intent[0] === 'A' ? 'B' : 'A') + body.body.intent.slice(1); },
+    body => { body.unrecognized = true; },
+  ]) {
+    const rig = await createRig(factory);
+    await rig.enroll();
+    rejected(await rig.broker(await rewriteJson(await rig.signed(START), mutation)));
+    noExchange(rig, 'start.proof.checked');
+  }
+  {
+    const rig = await createRig(factory);
+    await rig.enroll();
+    const start = await rig.start();
+    rig.advance(120_001);
+    rejected(await rig.broker(launchRequest({
+      protocol: PROTOCOL, launch_capability: start.launch_capability,
+      transaction: start.transaction,
+    })));
+    noExchange(rig, 'launch.expiry.checked');
+  }
+  {
+    const rig = await createRig(factory);
+    await rig.enroll();
+    const start = await rig.start();
+    await rig.adapter.restartBroker();
+    const launch = await rig.launch(start);
+    await rig.adapter.restartBroker();
+    queryFree(await rig.broker(await rig.consent(launch)));
+    connected(rig);
+    await rig.assertPrivate();
+  }
+});
+
+test('E2E callback: state, cookie, exact query, expiry and cancellation', async () => {
+  const factory = await loadImplementation();
+  const control = await createRig(factory);
+  await control.connect();
+  reached(control, 'callback.binding.checked');
+  for (const attack of ['missing_state', 'wrong_state', 'missing_cookie', 'wrong_cookie', 'duplicate_code', 'extra_query', 'expired']) {
+    const rig = await createRig(factory);
+    const callback = await rig.consent(await rig.pending());
+    const url = new URL(callback.url);
+    const headers = new Headers(callback.headers);
+    if (attack === 'missing_state') url.searchParams.delete('state');
+    if (attack === 'wrong_state') url.searchParams.set('state', rig.provider.opaque('state'));
+    if (attack === 'missing_cookie') headers.delete('cookie');
+    if (attack === 'wrong_cookie') headers.set('cookie', rig.provider.opaque('cookie'));
+    if (attack === 'duplicate_code') url.searchParams.append('code', url.searchParams.get('code'));
+    if (attack === 'extra_query') url.searchParams.set('return_to', 'https://elsewhere.invalid/');
+    if (attack === 'expired') rig.advance(600_001);
+    queryFree(await rig.broker(new Request(url, { headers, redirect: 'manual' })));
+    noExchange(rig, 'callback.binding.checked');
+    await rig.assertPrivate();
+  }
+  const canceled = await createRig(factory);
+  queryFree(await canceled.broker(await canceled.consent(await canceled.pending(), false)));
+  noExchange(canceled, 'callback.binding.checked');
+  assert.ok(canceled.state().intentStatus === 'canceled', 'consent cancellation must be visible to the owner');
+});
+
+test('E2E code exchange: durable fence, required token fields and same-invocation delivery', async () => {
+  const factory = await loadImplementation();
+  const control = await createRig(factory);
+  await control.connect();
+  assert.ok(control.provider.snapshot().mutated.exchange === 1, 'control must reach exactly one provider exchange');
+  ordered(control, 'broker.exchange.fenced', 'broker.exchange.sent');
+
+  for (const fault of ['reject', 'malformed', 'missing_refresh', 'changed_company', 'loss_after']) {
+    const rig = await createRig(factory);
+    rig.provider.queueFault('exchange', fault);
+    queryFree(await rig.broker(await rig.consent(await rig.pending())));
+    reached(rig, 'broker.exchange.sent');
+    assert.ok(rig.provider.snapshot().attempted.exchange === 1, 'exchange failure must not cause automatic replay');
+    assert.ok(rig.state().status !== 'connected', 'invalid or lost token result must not activate');
+    assert.ok(rig.inspect().exchangeFences === 1, 'failed exchange remains consumed');
+    await rig.assertPrivate();
+  }
+  {
+    const rig = await createRig(factory);
+    const callback = await rig.consent(await rig.pending());
+    rig.adapter.armFault('broker.replay.commit');
+    queryFree(await rig.broker(callback));
+    noExchange(rig, 'broker.exchange.fence.attempted');
+  }
+  {
+    const rig = await createRig(factory);
+    rig.deliveryFault('unavailable');
+    queryFree(await rig.broker(await rig.consent(await rig.pending())));
+    assert.ok(rig.provider.snapshot().attempted.revoke === 1, 'unconfirmed delivery must attempt in-memory revocation');
+    assert.ok(rig.state().status !== 'connected', 'unavailable callback cannot be reported connected');
+    assert.ok(rig.deliveries.length >= 1 && rig.deliveries.length <= 3, 'delivery retries are bounded to the same invocation');
+    for (const delivery of rig.deliveries.slice(1))
+      assert.ok(await rig.deliveries[0].clone().text() === await delivery.clone().text(), 'delivery retry must reuse the identical encrypted envelope');
+    await rig.assertPrivate();
+  }
+  {
+    const rig = await createRig(factory);
+    rig.deliveryFault('lost_receipt_once');
+    await rig.connect();
+    assert.ok(rig.deliveries.length === 2 && rig.state().connectionCommitCount === 1, 'lost acknowledgement must reuse receipt without a second save');
+    assert.ok(rig.provider.snapshot().attempted.revoke === 0, 'confirmed idempotent delivery needs no revocation');
+  }
+});
+
+test('E2E refresh: rotation, generation lease, lost response and persistent uncertainty', async () => {
+  const factory = await loadImplementation();
+  const control = await createRig(factory);
+  await control.connect();
+  control.advance(3_000_000);
+  const initial = control.state().tokenGeneration;
+  const refreshed = await control.owner('/api/quickbooks/refresh', { body: {} });
+  assert.ok(refreshed.ok && control.state().tokenGeneration === initial + 1, 'refresh control replaces and reads back one new generation');
+  assert.ok(!control.state().outcomeUnknown, 'only verified replacement readback clears the fence');
+  ordered(control, 'owner.refresh.fenced', 'broker.refresh.sent');
+  reached(control, 'owner.refresh.readback');
+
+  for (const path of ['/api/quickbooks/refresh', '/api/quickbooks/disconnect']) {
+    const rig = await createRig(factory);
+    await rig.connect();
+    rig.advance(3_000_000);
+    const checkpoint = rig.events.length;
+    rejected(await rig.owner(path, { authenticated: false, body: {} }));
+    reached(rig, 'owner.authentication.checked', checkpoint);
+    assert.ok(rig.provider.snapshot().attempted.refresh === 0 && rig.provider.snapshot().attempted.revoke === 0,
+      'owner authentication must precede every credential mutation');
+  }
+
+  for (const fault of ['loss_before', 'loss_after', 'reject', 'malformed', 'missing_refresh', 'changed_company']) {
+    const rig = await createRig(factory);
+    await rig.connect();
+    rig.advance(3_000_000);
+    const generation = rig.state().tokenGeneration;
+    rig.provider.queueFault('refresh', fault);
+    rejected(await rig.owner('/api/quickbooks/refresh', { body: {} }));
+    reached(rig, 'broker.refresh.sent');
+    assert.ok(rig.state().status === 'reauthorization_required' && rig.state().outcomeUnknown, 'unproven refresh leaves a visible persistent fence');
+    assert.ok(rig.state().tokenGeneration === generation, 'failure must not activate a new generation');
+    await rig.owner('/api/quickbooks/refresh', { body: {} });
+    assert.ok(rig.provider.snapshot().attempted.refresh === 1, 'old refresh token must never be retried after uncertainty');
+    await rig.assertPrivate();
+  }
+  {
+    const rig = await createRig(factory);
+    await rig.connect();
+    rig.advance(3_000_000);
+    rig.adapter.armFault('owner.refresh.readback');
+    rejected(await rig.owner('/api/quickbooks/refresh', { body: {} }));
+    reached(rig, 'owner.refresh.readback.attempted');
+    assert.ok(rig.state().outcomeUnknown, 'failed replacement readback must retain the fence');
+  }
+  {
+    const rig = await createRig(factory);
+    await rig.connect();
+    await rig.owner('/api/quickbooks/refresh', { body: {} });
+    reached(rig, 'owner.refresh.due.checked');
+    assert.ok(rig.provider.snapshot().attempted.refresh === 0, 'safely valid access token must not cause refresh');
+    rig.advance(3_000_000);
+    await Promise.all([0, 1].map(() => rig.owner('/api/quickbooks/refresh', { body: {} })));
+    assert.ok(rig.provider.snapshot().attempted.refresh === 1, 'per-connection lease permits only one concurrent mutation');
+  }
+});
+
+test('E2E revoke: confirmed, rejected, uncertain and no-contact retry proof', async () => {
+  const factory = await loadImplementation();
+  const control = await createRig(factory);
+  await control.connect();
+  const retained = control.state().importedRecordCount;
+  assert.ok(retained > 0, 'retention control requires a preexisting synthetic imported record');
+  const response = await control.owner('/api/quickbooks/disconnect', { body: {} });
+  assert.ok(response.ok && control.state().remoteRevocation === 'confirmed', 'control must confirm remote revocation');
+  assert.ok(!control.state().scheduleEnabled && control.state().tokenCiphertextCount === 0, 'confirmed revoke destroys credentials and stops reads');
+  assert.ok(control.state().importedRecordCount === retained, 'disconnect must retain imported records');
+  ordered(control, 'owner.revoke.fenced', 'broker.revoke.sent');
+  ordered(control, 'owner.schedule.disabled', 'broker.revoke.sent');
+
+  for (const fault of ['reject', 'loss_before', 'loss_after']) {
+    const rig = await createRig(factory);
+    await rig.connect();
+    rig.provider.queueFault('revoke', fault);
+    await rig.owner('/api/quickbooks/disconnect', { body: {} });
+    reached(rig, 'broker.revoke.sent');
+    assert.ok(!rig.state().scheduleEnabled && rig.state().remoteRevocation !== 'confirmed', 'unconfirmed revoke must keep all use disabled');
+    await rig.owner('/api/quickbooks/disconnect', { body: {} });
+    assert.ok(rig.provider.snapshot().attempted.revoke === 1, 'unproven provider contact must not be retried');
+    await rig.assertPrivate();
+  }
+  {
+    const rig = await createRig(factory);
+    await rig.connect();
+    rig.adapter.armFault('broker.revoke.before_fence');
+    await rig.owner('/api/quickbooks/disconnect', { body: {} });
+    reached(rig, 'broker.revoke.fence.attempted');
+    assert.ok(rig.provider.snapshot().attempted.revoke === 0 && rig.state().noContactProofVerified, 'safe retry requires verified proof of no provider contact');
+    await rig.owner('/api/quickbooks/disconnect', { body: { retry_same_operation: true } });
+    assert.ok(rig.provider.snapshot().attempted.revoke === 1 && rig.state().remoteRevocation === 'confirmed', 'same fenced operation may retry only after proof');
+  }
+});
+
+test('E2E replay: launch, callback, signed request and concurrent exchange', async () => {
+  const factory = await loadImplementation();
+  const control = await createRig(factory);
+  await control.connect();
+  {
+    const receipt = await control.adapter.owners[0].fetch(control.deliveries[0].clone());
+    assert.ok(receipt.ok, 'same delivery retry must return the committed receipt');
+    assert.ok(await receipt.text() === await control.receipts[0].clone().text(), 'same delivery retry must return the exact stored receipt');
+    const changed = await rewriteJson(control.deliveries[0], body => {
+      body.ciphertext = (body.ciphertext[0] === 'A' ? 'B' : 'A') + body.ciphertext.slice(1);
+    });
+    const checkpoint = control.events.length;
+    rejected(await control.adapter.owners[0].fetch(changed));
+    reached(control, 'owner.delivery.binding.checked', checkpoint);
+    assert.ok(control.state().connectionCommitCount === 1, 'same ID with different bytes must not save or return success');
+  }
+  {
+    const rig = await createRig(factory);
+    await rig.enroll();
+    const start = await rig.start();
+    await rig.launch(start);
+    rejected(await rig.broker(launchRequest({ protocol: PROTOCOL, launch_capability: start.launch_capability, transaction: start.transaction })));
+    noExchange(rig, 'launch.replay.checked');
+  }
+  for (const concurrent of [false, true]) {
+    const rig = await createRig(factory);
+    const callback = await rig.consent(await rig.pending());
+    if (concurrent) await Promise.all([rig.broker(callback.clone()), rig.broker(callback.clone())]);
+    else { await rig.broker(callback.clone()); await rig.broker(callback.clone()); }
+    reached(rig, 'callback.replay.checked');
+    assert.ok(rig.provider.snapshot().attempted.exchange === 1, 'state uniqueness must fence one exchange across racing requests');
+    connected(rig);
+  }
+  for (const route of [START, REFRESH, REVOKE]) {
+    const rig = await createRig(factory);
+    if (route === START) await rig.enroll(); else await rig.connect();
+    const request = await rig.signed(route);
+    const first = await rig.broker(request.clone());
+    assert.ok(first.ok, 'signed request replay control must succeed once');
+    const before = rig.provider.snapshot();
+    const checkpoint = rig.events.length;
+    rejected(await rig.broker(request.clone()));
+    reached(rig, 'request.replay.checked', checkpoint);
+    const after = rig.provider.snapshot();
+    assert.ok(after.attempted.refresh === before.attempted.refresh && after.attempted.revoke === before.attempted.revoke, 'request replay must never repeat provider mutation');
+  }
+});
+
+test('E2E mix-up: install, callback, environment, key, intent, company and generation', async () => {
+  const factory = await loadImplementation();
+  const control = await createRig(factory);
+  await control.connect();
+  for (const bodyOverrides of [
+    { callback: 'https://owner-b.invalid/api/quickbooks/connect/callback' },
+    { environment: 'production' },
+  ]) {
+    const rig = await createRig(factory);
+    await rig.enroll();
+    rejected(await rig.broker(await rig.signed(START, { bodyOverrides })));
+    noExchange(rig, 'start.voucher.binding.checked');
+  }
+  {
+    const rig = await createRig(factory);
+    const first = await rig.pending(0);
+    const second = await rig.pending(1);
+    const callback = await rig.consent(first);
+    queryFree(await rig.broker(new Request(callback, { headers: { cookie: second.cookie }, redirect: 'manual' })));
+    noExchange(rig, 'callback.binding.checked');
+  }
+  {
+    const rig = await createRig(factory);
+    await rig.connect(0);
+    await rig.pending(1);
+    const body = await rig.deliveries[0].clone().json();
+    const checkpoint = rig.events.length;
+    rejected(await rig.adapter.owners[1].fetch(jsonRequest(rig.origins[1] + OWNER_CALLBACK, body)));
+    reached(rig, 'owner.delivery.binding.checked', checkpoint);
+    assert.ok(rig.state(1).connectionCommitCount === 0, 'valid envelope for another install must not activate');
+  }
+  for (const field of ['intent', 'environment', 'delivery_key_fingerprint', 'token_generation', 'key_generation']) {
+    const rig = await createRig(factory);
+    await rig.connect();
+    const delivered = rig.deliveries[0];
+    const altered = await rewriteJson(delivered, body => {
+      body.header[field] = typeof body.header[field] === 'number' ? body.header[field] + 1 : rig.provider.opaque('binding');
+    });
+    const checkpoint = rig.events.length;
+    rejected(await rig.adapter.owners[0].fetch(altered));
+    reached(rig, 'owner.delivery.binding.checked', checkpoint);
+    assert.ok(rig.state().connectionCommitCount === 1, 'changed authenticated binding must not overwrite the connection');
+  }
+  for (const field of ['company_fingerprint', 'token_generation', 'realm_id']) {
+    const rig = await createRig(factory);
+    await rig.connect();
+    const request = await rewriteJson(await rig.signed(REFRESH), body => {
+      body.body[field] = typeof body.body[field] === 'number' ? body.body[field] + 1 :
+        (body.body[field][0] === 'a' ? 'b' : 'a') + body.body[field].slice(1);
+    });
+    rejected(await rig.broker(request));
+    reached(rig, 'refresh.proof.checked');
+    assert.ok(rig.provider.snapshot().attempted.refresh === 0, 'tampered refresh binding must fail proof before contact');
+  }
+  for (const remove of [true, false]) {
+    const rig = await createRig(factory);
+    await rig.connect();
+    const request = await rewriteJson(rig.deliveries[0], body => {
+      if (remove) delete body.broker_authentication_tag;
+      else body.broker_authentication_tag = rig.provider.opaque('tag').slice(0, 43);
+    });
+    const checkpoint = rig.events.length;
+    rejected(await rig.adapter.owners[0].fetch(request));
+    reached(rig, 'owner.delivery.binding.checked', checkpoint);
+    assert.ok(rig.state().connectionCommitCount === 1, 'encryption without the broker sender proof cannot activate');
+  }
+  {
+    const rig = await createRig(factory);
+    await rig.enroll();
+    rig.adapter.armFault('broker.rotate_generation');
+    rejected(await rig.broker(await rig.signed(START)));
+    noExchange(rig, 'start.voucher.generation.checked');
+  }
+});
+
+test('E2E SSRF and privacy: pinned callback, no redirects and no accounting proxy', async () => {
+  const factory = await loadImplementation();
+  const control = await createRig(factory);
+  await control.connect();
+  await control.assertPrivate();
+  assert.ok((await control.broker(new Request(BROKER + '/health'))).ok, 'health route is the passing public route control');
+  await control.adapter.runScheduledRead({ owner: 0 });
+  assert.ok(control.provider.snapshot().accountingReads > 0 && control.outbound.ownerAccounting > 0, 'read control must reach Intuit directly from the owner');
+  assert.ok(control.outbound.brokerAccounting === 0, 'direct owner read must bypass the broker');
+  for (const callback of [
+    'http://owner-a.invalid/api/quickbooks/connect/callback',
+    'https://127.0.0.1/api/quickbooks/connect/callback',
+    'https://[::1]/api/quickbooks/connect/callback',
+    'https://localhost/api/quickbooks/connect/callback',
+    'https://owner-a.invalid:8443/api/quickbooks/connect/callback',
+    'https://fixture@owner-a.invalid/api/quickbooks/connect/callback',
+    'https://owner-a.invalid/api/quickbooks/connect/callback#fragment',
+    'https://owner-a.invalid/wrong-path',
+  ]) {
+    const rig = await createRig(factory);
+    rejected(await rig.enroll(0, { callback }));
+    noExchange(rig, 'enrollment.callback.checked');
+  }
+  for (const address of ['127.0.0.1', '10.0.0.1', '169.254.169.254', '::1', 'fc00::1']) {
+    const rig = await createRig(factory);
+    const callback = await rig.consent(await rig.pending());
+    rig.resolveTo(address);
+    queryFree(await rig.broker(callback));
+    reached(rig, 'delivery.destination.checked');
+    assert.ok(rig.outbound.delivery === 0 && rig.state().status !== 'connected', 'private DNS answer must prevent callback delivery');
+  }
+  {
+    const rig = await createRig(factory);
+    rig.deliveryFault('redirect');
+    queryFree(await rig.broker(await rig.consent(await rig.pending())));
+    reached(rig, 'delivery.response.checked');
+    assert.ok(rig.outbound.blocked === 0, 'broker must not follow callback redirects');
+    assert.ok(rig.provider.snapshot().attempted.revoke === 1, 'redirected delivery must revoke the undelivered token');
+  }
+  for (const route of ['/v3/company/fixture/query', '/v1/quickbooks/proxy', '/v1/quickbooks/tokens/lookup', '/v1/quickbooks/tokens/recover']) {
+    const before = control.provider.snapshot().accountingReads;
+    const response = await control.broker(new Request(BROKER + route));
+    assert.ok(response.status === 404 || response.status === 405, 'forbidden route must be absent');
+    assert.ok(control.provider.snapshot().accountingReads === before, 'forbidden route must not contact provider data APIs');
+  }
+});
+
+test('E2E abuse: limits, request proof and replay-store failure close before contact', async () => {
+  const factory = await loadImplementation();
+  const control = await createRig(factory);
+  await control.connect();
+  for (const fault of ['broker.quota.unavailable', 'broker.replay.unavailable']) {
+    const rig = await createRig(factory);
+    await rig.enroll();
+    rig.adapter.armFault(fault);
+    rejected(await rig.broker(await rig.signed(START)));
+    noExchange(rig, 'start.admission.checked');
+  }
+  for (const attack of ['wrong_type', 'oversized', 'expired_proof']) {
+    const rig = await createRig(factory);
+    await rig.enroll();
+    const valid = await rig.signed(START);
+    let request = valid;
+    if (attack === 'wrong_type') request = new Request(valid, { headers: { 'content-type': 'text/plain' } });
+    if (attack === 'oversized') request = jsonRequest(valid.url, { padding: 'x'.repeat(12 * 1024) });
+    if (attack === 'expired_proof') rig.advance(60_001);
+    rejected(await rig.broker(request));
+    noExchange(rig, 'start.proof.checked');
+  }
+  {
+    const rig = await createRig(factory);
+    await rig.enroll();
+    for (let count = 0; count < 5; count++) {
+      assert.ok((await rig.broker(await rig.signed(START))).ok, 'start quota control must admit the first five');
+    }
+    const response = await rig.broker(await rig.signed(START));
+    assert.ok(response.status === 429, 'sixth start in ten minutes must be limited');
+    noExchange(rig, 'start.quota.checked');
+  }
+  {
+    const rig = await createRig(factory);
+    await rig.connect();
+    const request = await rewriteJson(rig.deliveries[0], body => { body.ciphertext = 'x'.repeat(32 * 1024); });
+    const checkpoint = rig.events.length;
+    const response = await rig.adapter.owners[0].fetch(request);
+    assert.ok(response.status === 413, 'owner delivery must enforce its serialized 32 KiB byte limit');
+    reached(rig, 'owner.delivery.binding.checked', checkpoint);
+    assert.ok(rig.state().connectionCommitCount === 1, 'oversized envelope must not save a second connection');
+  }
+});

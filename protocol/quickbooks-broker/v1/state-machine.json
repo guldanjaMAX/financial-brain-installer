@@ -1,0 +1,84 @@
+{
+  "protocol": "qbo-broker/1",
+  "status": "offline-review-contract",
+  "semantics": "Each edge requires all named facts to be exactly true. Facts describe verified evidence, not caller claims. All other transitions refuse. Committed fences precede provider contact. This table is not a runtime implementation.",
+  "machines": {
+    "enrollment": {
+      "initial": "unenrolled",
+      "terminal": ["issued", "refused"],
+      "transitions": [
+        { "from": "unenrolled", "event": "challenge", "to": "challenged", "requires": ["operator_access_verified", "operator_role_permitted", "callback_safe", "challenge_fresh", "install_key_valid"] },
+        { "from": "challenged", "event": "issue", "to": "issued", "requires": ["live_challenge_exact", "challenge_signature_valid", "challenge_one_use_committed", "callback_origin_pinned", "voucher_delivered_to_worker", "audit_committed"] },
+        { "from": "challenged", "event": "refuse", "to": "refused", "requires": ["stable_failure_recorded"] }
+      ]
+    },
+    "authorization": {
+      "initial": "new",
+      "terminal": ["delivered", "canceled", "expired", "failed", "cleanup_confirmed", "cleanup_uncertain"],
+      "transitions": [
+        { "from": "new", "event": "start", "to": "launch_pending", "requires": ["voucher_current", "request_signature_valid", "callback_exact", "delivery_key_valid", "environment_exact", "request_fresh", "quota_available", "request_unique", "start_row_committed"] },
+        { "from": "launch_pending", "event": "launch", "to": "launched", "requires": ["launch_capability_valid", "launch_unexpired", "launch_one_use_committed", "transaction_cookie_set", "fixed_provider_target"] },
+        { "from": "launch_pending", "event": "expire", "to": "expired", "requires": ["deadline_reached", "expiry_committed"] },
+        { "from": "launched", "event": "expire", "to": "expired", "requires": ["deadline_reached", "expiry_committed"] },
+        { "from": "launched", "event": "cancel", "to": "canceled", "requires": ["state_cookie_exact", "callback_unexpired", "client_redirect_exact", "provider_canceled", "terminal_fence_committed"] },
+        { "from": "launched", "event": "refuse_callback", "to": "failed", "requires": ["trusted_transaction_identified", "callback_invalid", "terminal_fence_committed"] },
+        { "from": "launched", "event": "exchange", "to": "exchange_started", "requires": ["state_cookie_exact", "callback_unexpired", "client_redirect_exact", "voucher_current", "environment_exact", "exact_callback_shape", "quota_available", "state_unique", "exchange_fence_committed"] },
+        { "from": "exchange_started", "event": "exchange_success", "to": "delivery_pending", "requires": ["token_bundle_valid", "company_binding_valid", "delivery_binding_exact", "envelope_encrypted", "tokens_memory_only", "callback_origin_pinned", "no_redirects"] },
+        { "from": "exchange_started", "event": "exchange_failed", "to": "failed", "requires": ["stable_failure_recorded", "state_consumed"] },
+        { "from": "exchange_started", "event": "invalid_tokens", "to": "cleanup_pending", "requires": ["provider_response_invalid", "revocable_token_in_memory", "state_consumed"] },
+        { "from": "delivery_pending", "event": "retry_delivery", "to": "delivery_pending", "requires": ["same_invocation", "same_envelope_bytes", "delivery_attempt_budget", "callback_origin_pinned", "no_redirects", "tokens_memory_only"] },
+        { "from": "delivery_pending", "event": "accept_receipt", "to": "delivered", "requires": ["receipt_signature_valid", "receipt_binding_exact", "owner_readback_confirmed", "delivered_audit_committed", "tokens_dropped"] },
+        { "from": "delivery_pending", "event": "delivery_unconfirmed", "to": "cleanup_pending", "requires": ["same_invocation", "delivery_budget_exhausted", "tokens_memory_only"] },
+        { "from": "cleanup_pending", "event": "revoke_cleanup", "to": "cleanup_confirmed", "requires": ["cleanup_fence_committed", "revocation_confirmed", "tokens_dropped"] },
+        { "from": "cleanup_pending", "event": "cleanup_unknown", "to": "cleanup_uncertain", "requires": ["cleanup_outcome_unknown", "tokens_dropped", "manual_provider_removal_required"] }
+      ]
+    },
+    "token_request": {
+      "initial": "new",
+      "terminal": ["confirmed", "rejected", "uncertain", "proof_consumed"],
+      "transitions": [
+        { "from": "new", "event": "fence", "to": "started", "requires": ["voucher_current", "request_signature_valid", "body_hash_exact", "request_fresh", "request_unique", "generation_bound", "quota_available", "mutation_fence_committed", "environment_exact", "response_delivery_key_valid"] },
+        { "from": "new", "event": "reject_before_contact", "to": "not_sent", "requires": ["request_authenticated", "provider_not_contacted", "not_sent_record_committed", "proof_bound_to_request"] },
+        { "from": "not_sent", "event": "authorize_retry", "to": "proof_consumed", "requires": ["proof_verified", "proof_unexpired", "original_request_not_sent", "same_operation_hash", "new_request_unique", "retry_decision_atomic"] },
+        { "from": "started", "event": "confirmed", "to": "confirmed", "requires": ["provider_success_valid", "response_binding_exact", "outcome_committed", "tokens_dropped"] },
+        { "from": "started", "event": "rejected", "to": "rejected", "requires": ["provider_definitely_rejected", "outcome_committed", "tokens_dropped"] },
+        { "from": "started", "event": "lost", "to": "uncertain", "requires": ["provider_outcome_unknown", "fence_retained", "tokens_dropped"] }
+      ]
+    },
+    "owner_intent": {
+      "initial": "pending",
+      "terminal": ["expired"],
+      "transitions": [
+        { "from": "pending", "event": "delivery", "to": "saved", "requires": ["intent_unexpired", "envelope_authenticated", "all_bindings_exact", "company_binding_valid", "wrapping_key_present", "atomic_save_committed", "owner_readback_confirmed"] },
+        { "from": "saved", "event": "duplicate_delivery", "to": "saved", "requires": ["delivery_id_exact", "envelope_digest_exact", "stored_receipt_exact"] },
+        { "from": "saved", "event": "finalize", "to": "complete", "requires": ["receipt_saved", "ephemeral_private_key_destroyed"] },
+        { "from": "complete", "event": "duplicate_delivery", "to": "complete", "requires": ["delivery_id_exact", "envelope_digest_exact", "stored_receipt_exact"] },
+        { "from": "pending", "event": "expire", "to": "expired", "requires": ["deadline_reached", "ephemeral_private_key_destroyed"] },
+        { "from": "pending", "event": "cancel", "to": "canceled", "requires": ["authenticated_cancel", "all_bindings_exact", "completion_receipt_saved", "owner_readback_confirmed", "ephemeral_private_key_destroyed"] },
+        { "from": "pending", "event": "fail", "to": "failed", "requires": ["authenticated_failure", "all_bindings_exact", "completion_receipt_saved", "owner_readback_confirmed", "ephemeral_private_key_destroyed"] },
+        { "from": "canceled", "event": "duplicate_delivery", "to": "canceled", "requires": ["delivery_id_exact", "envelope_digest_exact", "stored_receipt_exact"] },
+        { "from": "failed", "event": "duplicate_delivery", "to": "failed", "requires": ["delivery_id_exact", "envelope_digest_exact", "stored_receipt_exact"] }
+      ]
+    },
+    "owner_connection": {
+      "initial": "active",
+      "terminal": ["revoked", "locally_destroyed"],
+      "transitions": [
+        { "from": "active", "event": "refresh", "to": "refresh_fenced", "requires": ["mutation_lease_held", "current_generation", "refresh_deadlines_valid", "refresh_needed", "wrapping_key_present", "outcome_unknown_committed"] },
+        { "from": "refresh_fenced", "event": "commit_refresh", "to": "active", "requires": ["response_authenticated", "replacement_present", "company_binding_exact", "generation_compare_and_swap", "newest_ciphertext_committed", "owner_readback_confirmed", "fence_clear_committed"] },
+        { "from": "refresh_fenced", "event": "refresh_lost", "to": "reauthorization_required", "requires": ["provider_outcome_unknown", "fence_retained"] },
+        { "from": "refresh_fenced", "event": "refresh_invalid", "to": "reauthorization_required", "requires": ["provider_response_invalid", "fence_retained"] },
+        { "from": "refresh_fenced", "event": "refresh_rejected", "to": "reauthorization_required", "requires": ["provider_definitely_rejected", "fence_retained"] },
+        { "from": "active", "event": "refresh_deadline_expired", "to": "reauthorization_required", "requires": ["refresh_deadline_reached", "reads_disabled_committed"] },
+        { "from": "refresh_fenced", "event": "refresh_commit_unverified", "to": "reauthorization_required", "requires": ["readback_failed", "newest_available_ciphertext_retained", "fence_retained"] },
+        { "from": "active", "event": "disconnect", "to": "revoke_fenced", "requires": ["owner_authenticated", "owner_confirmed_disconnect", "mutation_lease_held", "reads_disabled_committed", "outcome_unknown_committed"] },
+        { "from": "reauthorization_required", "event": "disconnect", "to": "revoke_fenced", "requires": ["owner_authenticated", "owner_confirmed_disconnect", "mutation_lease_held", "reads_disabled_committed", "outcome_unknown_committed"] },
+        { "from": "revoke_fenced", "event": "revoke_confirmed", "to": "revoked", "requires": ["provider_revocation_confirmed", "ciphertext_destroyed", "ephemeral_keys_destroyed", "source_reservation_retained", "imported_records_retained", "owner_readback_confirmed"] },
+        { "from": "revoke_fenced", "event": "revoke_unconfirmed", "to": "disabled_unconfirmed", "requires": ["reads_disabled_committed", "fence_retained"] },
+        { "from": "disabled_unconfirmed", "event": "retry_revoke_not_sent", "to": "revoke_fenced", "requires": ["owner_authenticated", "owner_confirmed_retry", "not_sent_proof_verified", "same_operation_binding", "proof_unexpired", "retry_fence_committed"] },
+        { "from": "disabled_unconfirmed", "event": "destroy_local", "to": "locally_destroyed", "requires": ["owner_authenticated", "owner_confirmed_destruction", "ciphertext_destroyed", "ephemeral_keys_destroyed", "source_reservation_retained", "imported_records_retained", "remote_revocation_not_claimed", "owner_readback_confirmed"] },
+        { "from": "reauthorization_required", "event": "fresh_consent", "to": "active", "requires": ["owner_authenticated", "new_intent", "new_verified_delivery", "prior_source_binding_exact", "owner_readback_confirmed"] }
+      ]
+    }
+  }
+}
