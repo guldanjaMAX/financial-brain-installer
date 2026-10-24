@@ -317,7 +317,13 @@ $ErrorActionPreference = 'Stop'
 try {
   $request = [Console]::In.ReadToEnd() | ConvertFrom-Json
   foreach ($path in $request.paths) {
-    if (([IO.File]::GetAttributes($path) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { exit 1 }
+    # Windows PowerShell 5.1 otherwise rejects long retained-guide paths as unsafe.
+    $attributePath = [string]$path
+    if (-not $attributePath.StartsWith('\\\\?\\')) {
+      if ($attributePath.StartsWith('\\\\')) { $attributePath = '\\\\?\\UNC\\' + $attributePath.Substring(2) }
+      else { $attributePath = '\\\\?\\' + $attributePath }
+    }
+    if (([IO.File]::GetAttributes($attributePath) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { exit 1 }
   }
   [Console]::Out.Write('safe')
 } catch { exit 1 }
