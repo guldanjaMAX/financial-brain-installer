@@ -30,6 +30,8 @@ export async function createOwnerRuntime({ origin, now, transport, apiOrigins, o
   sqlite.exec(`
     CREATE TABLE state (kind TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE TABLE intents (intent TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE INDEX intents_expiry ON intents (json_extract(value, '$.expires_at'), intent)
+      WHERE json_extract(value, '$.status') = 'pending';
     CREATE TABLE receipts (delivery_id TEXT PRIMARY KEY, envelope_hash TEXT NOT NULL, value TEXT NOT NULL);
     CREATE TABLE imported_records (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
     INSERT INTO imported_records VALUES (1, 'synthetic retained record');
@@ -41,6 +43,7 @@ export async function createOwnerRuntime({ origin, now, transport, apiOrigins, o
   let lease = false;
   let commitCount = 0;
   let readbackCount = 0;
+  let intentExpiryReadbackCount = 0;
   const get = kind => {
     const row = sqlite.prepare('SELECT value FROM state WHERE kind=?').get(kind);
     return row ? JSON.parse(row.value) : null;
@@ -96,9 +99,19 @@ export async function createOwnerRuntime({ origin, now, transport, apiOrigins, o
   async function receiveVoucher(request) {
     const body = await boundedJson(request, 12_288);
     assertSchema('enrollmentDelivery', body);
+    const deliveryHash = await sha256(body);
     const pending = pendingEnrollment;
-    if (!pending || pending.consumed || pending.challenge.expires_at <= now() ||
-        body.challenge !== pending.challenge.challenge) return refuse(403);
+    if (!pending || body.challenge !== pending.challenge.challenge) return refuse(403);
+    const replayAcknowledgement = () => {
+      const consumed = get('enrollment');
+      if (!consumed || consumed.challenge !== body.challenge || consumed.delivery_hash !== deliveryHash) return refuse(403);
+      observe('owner.enrollment.acknowledgement.replayed');
+      return response(consumed.acknowledgement);
+    };
+    // A replay grants no new authority and needs neither the destroyed key nor
+    // an unexpired challenge. Changed canonical bytes cannot reuse this receipt.
+    if (pending.consumed) return replayAcknowledgement();
+    if (pending.challenge.expires_at <= now()) return refuse(403);
     const claims = body.voucher.claims;
     if (claims.callback !== callback || claims.environment !== pending.challenge.environment ||
         claims.key_generation !== pending.challenge.key_generation ||
@@ -108,11 +121,27 @@ export async function createOwnerRuntime({ origin, now, transport, apiOrigins, o
       voucher: await seal(body.voucher, 'install-voucher'), private_key: await seal(pending.privateKey, 'install-key'),
       fingerprint, key_generation: claims.key_generation,
     };
-    put('installation', record);
-    if (!same(get('installation'), record)) return refuse(503);
+    const acknowledgement = { protocol: PROTOCOL, outcome: 'committed_readback', install_fingerprint: fingerprint };
+    const consumed = { challenge: body.challenge, consumed: true, delivery_hash: deliveryHash, acknowledgement };
+    // Encryption yields. Another delivery may have committed while it ran.
+    if (pending !== pendingEnrollment) return refuse(403);
+    if (pending.consumed) return replayAcknowledgement();
+    if (pending.challenge.expires_at <= now() || claims.expires_at <= now()) return refuse(403);
+    sqlite.exec('BEGIN');
+    try {
+      put('installation', record);
+      put('enrollment', consumed);
+      if (faults.delete('owner.enrollment.readback') || !same(get('installation'), record) ||
+          !same(get('enrollment'), consumed)) throw new Error('owner_enrollment_unverified');
+      sqlite.exec('COMMIT');
+    } catch {
+      sqlite.exec('ROLLBACK');
+      return refuse(503);
+    }
     pending.consumed = true;
     pending.privateKey = null;
-    return response({ protocol: PROTOCOL, outcome: 'committed_readback', install_fingerprint: fingerprint });
+    observe('owner.enrollment.committed');
+    return response(acknowledgement);
   }
 
   async function newIntent(purpose = 'connect') {
@@ -135,6 +164,33 @@ export async function createOwnerRuntime({ origin, now, transport, apiOrigins, o
     intentPut(record);
     put('last_intent', { intent });
     return record;
+  }
+
+  function expirePendingIntents() {
+    // An unavailable callback cannot report terminal status to this Worker.
+    // Owner status makes that timeout visible without retaining delivery keys.
+    // A fixed indexed batch also reaches older intents on subsequent polls.
+    sqlite.exec('BEGIN IMMEDIATE');
+    let expiredCount = 0;
+    try {
+      const overdue = sqlite.prepare(`SELECT value FROM intents
+        WHERE json_extract(value, '$.status') = 'pending'
+          AND json_extract(value, '$.expires_at') <= ?
+        ORDER BY json_extract(value, '$.expires_at'), intent LIMIT 32`).all(now());
+      for (const row of overdue) {
+        const expired = { ...JSON.parse(row.value), status: 'expired', private_key: null, auth_key: null };
+        intentPut(expired);
+        if (faults.delete('owner.intent.expiry.readback') || !same(intentGet(expired.intent), expired))
+          throw new Error('owner_intent_readback_failed');
+        expiredCount++;
+      }
+      sqlite.exec('COMMIT');
+    } catch {
+      sqlite.exec('ROLLBACK');
+      throw new Error('owner_intent_expiry_unavailable');
+    }
+    intentExpiryReadbackCount += expiredCount;
+    if (expiredCount) observe('owner.intent.expiry.readback');
   }
 
   async function signRequest(route, body, requestId = randomCapability()) {
@@ -363,7 +419,10 @@ export async function createOwnerRuntime({ origin, now, transport, apiOrigins, o
       if (url.pathname === VOUCHER && request.method === 'POST') return await receiveVoucher(request);
       if (url.pathname === CALLBACK && request.method === 'POST') return await receiveEnvelope(request);
       if (!authenticated(request)) return refuse(401);
-      if (request.method === 'GET' && url.pathname === '/api/quickbooks/status') return response(inspect());
+      if (request.method === 'GET' && url.pathname === '/api/quickbooks/status') {
+        try { expirePendingIntents(); return response(inspect()); }
+        catch { return refuse(503); }
+      }
       if (request.method !== 'POST') return refuse(405);
       // Owner requests in these probes use ordinary JSON, while the broker wire
       // writer always emits canonical bytes. Exact key checks guard controls.
@@ -380,8 +439,15 @@ export async function createOwnerRuntime({ origin, now, transport, apiOrigins, o
     const connection = get('connection');
     const fence = get('fence');
     const intent = get('last_intent') && intentGet(get('last_intent').intent);
+    const intentCounts = sqlite.prepare(`SELECT
+      count(CASE WHEN json_extract(value, '$.status') = 'pending' THEN 1 END) AS pending,
+      coalesce(sum((json_extract(value, '$.private_key') IS NOT NULL) +
+        (json_extract(value, '$.auth_key') IS NOT NULL)), 0) AS keys FROM intents`).get();
     return {
       status: connection?.status ?? 'disconnected', intentStatus: intent?.status ?? null,
+      intentKeyCount: ['private_key', 'auth_key'].filter(key => intent?.[key] != null).length,
+      pendingIntentCount: intentCounts.pending, temporaryIntentKeyCount: intentCounts.keys,
+      intentExpiryReadbackCount,
       tokenGeneration: connection?.token_generation ?? 0,
       tokenCiphertextCount: ['access_token', 'refresh_token', 'realm_id'].filter(key => connection?.[key]).length,
       connectionCommitCount: commitCount, connectionReadbackCount: readbackCount,

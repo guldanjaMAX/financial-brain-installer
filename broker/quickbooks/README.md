@@ -61,6 +61,12 @@ the exact callback and install public key, commits its one-use fence, then
 delivers the voucher only to the same owner Worker. The operator gets a status
 response. The owner acknowledgement is the exact canonical object containing
 `protocol`, `outcome: committed_readback` and the issued voucher fingerprint.
+The owner stores the canonical delivery hash and exact acknowledgement with
+the consumed challenge in the same transaction as the encrypted installation.
+An identical retry returns that acknowledgement without another save, even
+after challenge expiry; changed delivery bytes refuse. Enrollment delivery
+reuses one voucher and identical bytes for at most three attempts within ten
+seconds and the original challenge deadline.
 
 Every owner call validates all injected DNS answers and supplies the approved
 hostname and address set to `ownerTransport(request, destination)`. That
@@ -92,10 +98,19 @@ node --import <offline-network-guard-url> --test broker/quickbooks/test/broker-s
 node --import <offline-network-guard-url> --test protocol/quickbooks-broker/probes/broker.e2e.probe.mjs
 ```
 
+The ordinary test graph registers the complete eleven-file foundation command
+in both command lists, including all eight broker tests, the privacy test, the
+E2E probe and the protocol wrapper. The lane runs that focused group directly;
+registering it does not require running the full chain during lane work.
+
 The adapter uses actual broker handlers and a test-only owner handler backed by
 SQLite and authenticated encryption. It is not deployed owner integration. It
 does not prove native D1 semantics, browser cookies, provider acceptance,
 Cloudflare Access, DNS pinning, platform logging or a real-account canary.
+The owner fixture expires overdue pending intents during authenticated status
+reads, at most 32 per call. Each expired record loses both temporary keys and
+must pass exact readback; failure rolls back the batch and refuses status.
+Repeated polls finish older backlogs. This is not a deployed background task.
 
 A deployment must disable request/query/body/header logging, exception payload
 capture, tracing payloads and analytics labels that accept arbitrary data. The

@@ -21,17 +21,18 @@ node --import <offline-network-guard-url> --test protocol/quickbooks-broker/prob
 ```
 
 The first is green and includes protocol, schema, state, fake provider, and
-probe-harness units. The second now passes all nine scenarios with the
+probe-harness units. The second passes twelve tests, including pending-intent
+expiry, cleanup recovery and a key-retention mutant, with the
 foundation handler, injected fake provider and real SQLite stores. There are
 zero skipped tests and zero TODOs. This is offline implementation evidence,
 not deployed owner integration or provider acceptance.
 
-The normal ordered chain registers only the green wrapper. The `.probe.mjs`
-file is outside discovery roots, is not imported by that wrapper, and is not
-listed in `scripts/run-test-chain.mjs`. Do not add a stub adapter that returns
-expected observations just to make the probes green. The future adapter must
-bind real reviewed handlers to injected transports and stores. It must never
-use network fallback.
+The normal ordered chain registers one eleven-file command covering the eight
+broker tests, privacy tests, E2E probes and protocol wrapper. Both runner command
+lists include it, and positive coverage checks prevent these files from being
+omitted. The E2E file remains outside the completeness discovery pattern, so
+its explicit registration is required. The adapter binds actual reviewed
+handlers to injected transports and stores and never uses network fallback.
 
 `testing/` contains executable specification oracles, synthetic fakes, privacy
 tests and the isolated owner handler used by the adapter.

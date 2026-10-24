@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { readFile } from 'node:fs/promises';
 import {
   PROTOCOL, BROKER, CALLBACK, OWNER_CALLBACK, START, REFRESH, REVOKE,
   loadImplementation, createRig, jsonRequest, launchRequest, rewriteJson, rejected,
@@ -511,4 +512,96 @@ test('E2E abuse: limits, request proof and replay-store failure close before con
     reached(rig, 'owner.delivery.binding.checked', checkpoint);
     assert.ok(rig.state().connectionCommitCount === 1, 'oversized envelope must not save a second connection');
   }
+});
+
+async function expiredOwnerStatus(rig) {
+  const expired = await rig.owner('/api/quickbooks/status');
+  assert.ok(expired.ok, 'deadline cleanup must return verified status');
+  const status = await expired.json();
+  assert.ok(status.intentStatus === 'expired' && status.intentKeyCount === 0 &&
+    rig.state().intentStatus === 'expired' && rig.state().temporaryIntentKeyCount === 0,
+  'overdue pending intent must visibly expire and destroy both stored keys');
+  assert.ok(rig.state().intentExpiryReadbackCount === 1, 'expiry requires one exact stored-record readback');
+  reached(rig, 'owner.intent.expiry.readback');
+}
+
+test('E2E pending intents: unavailable delivery and invalid callback expire at the deadline', async () => {
+  const factory = await loadImplementation();
+  const control = await createRig(factory);
+  await control.connect();
+  connected(control);
+  for (const scenario of ['unavailable_delivery', 'invalid_callback']) {
+    const rig = await createRig(factory);
+    const callback = await rig.consent(await rig.pending());
+    if (scenario === 'unavailable_delivery') rig.deliveryFault('unavailable');
+    const request = scenario === 'invalid_callback'
+      ? new Request(callback, { headers: {}, redirect: 'manual' }) : callback;
+    queryFree(await rig.broker(request));
+    if (scenario === 'invalid_callback') noExchange(rig, 'callback.binding.checked');
+    else assert.ok(rig.provider.snapshot().attempted.exchange === 1 && rig.provider.snapshot().attempted.revoke === 1,
+      'unavailable delivery must reach exchange and in-memory revoke before owner cleanup');
+    assert.ok(rig.state().intentStatus === 'pending' && rig.state().connectionCommitCount === 0,
+      'an undelivered or invalid callback must leave a pending intent without a connection');
+    const providerBefore = JSON.stringify(rig.provider.snapshot());
+    const outboundBefore = JSON.stringify(rig.outbound);
+    rig.advance(599_999);
+    const beforeDeadline = await rig.owner('/api/quickbooks/status');
+    assert.ok(beforeDeadline.ok, 'status must admit a pending intent before the deadline');
+    assert.ok(rig.state().intentStatus === 'pending' && rig.state().intentKeyCount === 2 &&
+      rig.state().intentExpiryReadbackCount === 0, 'pending control keeps both keys before the deadline');
+    rig.advance(1);
+    await expiredOwnerStatus(rig);
+    assert.ok(JSON.stringify(rig.provider.snapshot()) === providerBefore && JSON.stringify(rig.outbound) === outboundBefore,
+      'status cleanup must not enter any outbound transport');
+    await rig.assertPrivate();
+  }
+});
+
+test('E2E pending cleanup: bounded backlog and failed readback remain recoverable', async () => {
+  const factory = await loadImplementation();
+  const rig = await createRig(factory);
+  await rig.enroll();
+  for (let count = 0; count < 33; count++) await rig.signed(START);
+  assert.ok(rig.state().pendingIntentCount === 33 && rig.state().temporaryIntentKeyCount === 66,
+    'backlog control requires distinct pending intents with both stored keys');
+  rig.advance(600_000);
+  rig.adapter.armFault('owner.intent.expiry.readback');
+  rejected(await rig.owner('/api/quickbooks/status'));
+  assert.ok(rig.state().pendingIntentCount === 33 && rig.state().temporaryIntentKeyCount === 66 &&
+    rig.state().intentExpiryReadbackCount === 0, 'unproven expiry must roll back and remain recoverable');
+  assert.ok((await rig.owner('/api/quickbooks/status')).ok, 'cleanup retry must recover after the readback fault');
+  assert.ok(rig.state().pendingIntentCount === 1 && rig.state().temporaryIntentKeyCount === 2 &&
+    rig.state().intentExpiryReadbackCount === 32, 'one status decision cleans at most 32 overdue records');
+  assert.ok((await rig.owner('/api/quickbooks/status')).ok, 'next bounded cleanup must finish the backlog');
+  assert.ok(rig.state().pendingIntentCount === 0 && rig.state().temporaryIntentKeyCount === 0 &&
+    rig.state().intentExpiryReadbackCount === 33, 'older intents must not retain orphaned keys');
+  assert.ok((await rig.owner('/api/quickbooks/status')).ok && rig.state().intentExpiryReadbackCount === 33,
+    'repeated status must not rewrite terminal records');
+});
+
+test('OVERDUE_INTENT_KEEPS_KEYS mutant is killed by the stored-key expiry invariant', async () => {
+  const ownerUrl = new URL('../testing/owner-runtime.mjs', import.meta.url);
+  const adapterUrl = new URL('../implementation-adapter.mjs', import.meta.url);
+  const ownerSource = await readFile(ownerUrl, 'utf8');
+  const target = "status: 'expired', private_key: null, auth_key: null";
+  assert.ok(ownerSource.split(target).length === 2, 'mutant must alter exactly the expiry key destruction');
+  const absoluteImports = (source, base, replaceOwner) => source.replace(/from '([^']+)'/g, (statement, specifier) => {
+    if (!specifier.startsWith('.')) return statement;
+    return `from '${specifier === './testing/owner-runtime.mjs' && replaceOwner
+      ? replaceOwner : new URL(specifier, base).href}'`;
+  });
+  const dataModule = source => `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
+  const mutantOwner = dataModule(absoluteImports(ownerSource.replace(target, "status: 'expired'"), ownerUrl));
+  const mutantAdapter = await import(dataModule(absoluteImports(await readFile(adapterUrl, 'utf8'), adapterUrl, mutantOwner)));
+  const exercise = async factory => {
+    const rig = await createRig(factory);
+    await rig.pending();
+    rig.advance(599_999);
+    assert.ok((await rig.owner('/api/quickbooks/status')).ok && rig.state().intentStatus === 'pending' &&
+      rig.state().intentKeyCount === 2, 'valid pending intent is the mutant control');
+    rig.advance(1);
+    await expiredOwnerStatus(rig);
+  };
+  await exercise(await loadImplementation());
+  await assert.rejects(() => exercise(mutantAdapter.createProbeAdapter), { code: 'ERR_ASSERTION' });
 });

@@ -4,16 +4,18 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const ALLOWED_NODE_FLAGS = new Set(["--no-warnings", "--test"]);
-const TEST_MODULE = /^(?:eval|scripts|test|worker\/test)\/[A-Za-z0-9._/-]+\.mjs$/u;
+const TEST_MODULE = /^(?:(?:eval|scripts|test|worker\/test)\/[A-Za-z0-9._/-]+|(?:broker\/quickbooks\/test|protocol\/quickbooks-broker\/(?:testing|probes))\/[A-Za-z0-9._-]+)\.mjs$/u;
 
 export const RUNNER_TEST_COMMAND = "node test/test-chain-runner.test.mjs";
+// Keep the offline broker handlers, privacy checks and protocol probes together.
+export const QBO_BROKER_TEST_COMMAND = "node --test broker/quickbooks/test/provider.test.mjs broker/quickbooks/test/crypto.test.mjs broker/quickbooks/test/store.test.mjs broker/quickbooks/test/boundary.test.mjs broker/quickbooks/test/broker-security.test.mjs broker/quickbooks/test/callback-quota.test.mjs broker/quickbooks/test/revoke-quota.test.mjs broker/quickbooks/test/routes.test.mjs protocol/quickbooks-broker/testing/broker-privacy.test.mjs protocol/quickbooks-broker/probes/broker.e2e.probe.mjs test/qbo-broker-protocol.test.mjs";
 // Commands added after the legacy 8,427-byte npm script was frozen. The graph
 // regression projects these out so it can keep asserting the exact original
 // 172-command chain and order. Add to this list when you add a test; never
 // weaken the projection itself.
 export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   RUNNER_TEST_COMMAND,
-  "node --test test/qbo-broker-protocol.test.mjs",
+  QBO_BROKER_TEST_COMMAND,
   "node --test worker/test/ledger-answer.test.mjs",
   "node --test worker/test/ledger-conservative.test.mjs",
   "node --test worker/test/ledger-phase2.test.mjs",
@@ -308,7 +310,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test worker/test/scanned-evidence.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
-  "node --test test/qbo-broker-protocol.test.mjs",
+  QBO_BROKER_TEST_COMMAND,
   "node --test test/daily-evidence.test.mjs",
   "node --test test/query-mcp-timing.test.mjs",
   "node --test test/query-spans-probe.test.mjs",

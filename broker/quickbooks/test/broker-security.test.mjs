@@ -7,12 +7,129 @@ import { createSqliteD1 } from './support/sqlite-d1.mjs';
 import { canonical, randomCapability, sha256, publicJwk, signObject, encode64 } from '../src/crypto.mjs';
 import { createFakeIntuit } from '../../../protocol/quickbooks-broker/testing/fake-intuit.mjs';
 import { assertSchema } from '../src/validation.mjs';
+import { createOwnerRuntime } from '../../../protocol/quickbooks-broker/testing/owner-runtime.mjs';
 
 const protocol = 'qbo-broker/1';
 const callback = 'https://owner.invalid/api/quickbooks/connect/callback';
 const json = value => new Response(canonical(value), { headers: { 'content-type': 'application/json' } });
 const request = (path, body, authorized = true) => new Request('https://broker.invalid' + path, {
   method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/json', ...(authorized ? { authorization: 'test-role' } : {}) }, body: canonical(body),
+});
+
+async function enrollmentFixture({ lost = 0, unavailable = false, concurrent = false,
+  readbackFailures = 0, ownerFactory = createOwnerRuntime } = {}) {
+  let instant = 1800000000000;
+  const now = () => instant;
+  const fake = createFakeIntuit({ now });
+  const { db, sqlite } = createSqliteD1();
+  const store = createBrokerStore(db, { now });
+  const buildId = randomCapability(), events = [], deliveries = [], acknowledgements = [], faults = new Set();
+  const owner = await ownerFactory({ origin: 'https://owner.invalid', now,
+    transport: () => { throw new Error('unexpected_owner_outbound'); },
+    apiOrigins: fake.config.apiOrigins, observe: event => events.push(event), faults });
+  await store.setReadiness({ build_id: buildId, key_generation: 1, ready: true, updated_at: now() });
+  const broker = createBroker({ config: { ...fake.config, buildId, keyGeneration: 1, offline: true }, store, now,
+    providerTransport: request => fake.fetch(request), resolve: async () => ['93.184.216.34'],
+    verifyAccess: async () => true,
+    ownerTransport: async request => {
+      if (new URL(request.url).pathname.endsWith('/challenge')) return owner.fetch(request);
+      deliveries.push(request.clone());
+      if (unavailable) throw new Error('synthetic_owner_unavailable');
+      if (readbackFailures-- > 0) faults.add('owner.enrollment.readback');
+      const replies = concurrent ? await Promise.all([owner.fetch(request.clone()), owner.fetch(request.clone())])
+        : [await owner.fetch(request)];
+      for (const reply of replies) acknowledgements.push({ status: reply.status, body: await reply.clone().text() });
+      if (lost-- > 0) throw new Error('synthetic_acknowledgement_lost');
+      return replies[0];
+    },
+  });
+  return { owner, events, deliveries, acknowledgements, fake,
+    advance: value => { instant += value; },
+    enroll: async () => broker.fetch(request(ROUTES.issue, await owner.prepareEnrollment())),
+    issued: () => sqlite.prepare('SELECT count(*) AS count FROM qbo_broker_replays').get().count };
+}
+
+async function assertEnrollmentReplay(target) {
+  assert.equal((await target.enroll()).status, 202);
+  assert.equal(target.deliveries.length, 2, 'one lost acknowledgement requires exactly one identical retry');
+  assert.equal(target.issued(), 1, 'retry must not mint another voucher or restart enrollment');
+  assert.equal(target.events.filter(event => event === 'owner.enrollment.committed').length, 1);
+  assert.equal(target.events.filter(event => event === 'owner.enrollment.acknowledgement.replayed').length, 1);
+  assert.ok(target.acknowledgements.length === 2 && target.acknowledgements.every(reply => reply.status === 200));
+  assert.ok(target.acknowledgements[0].body === target.acknowledgements[1].body, 'replay returns the exact saved status acknowledgement');
+  assert.ok(await target.deliveries[0].clone().text() === await target.deliveries[1].clone().text(), 'retry delivery bytes must be identical');
+  const acknowledgement = JSON.parse(target.acknowledgements[0].body);
+  assert.deepEqual(Object.keys(acknowledgement).sort(), ['install_fingerprint', 'outcome', 'protocol']);
+  assert.equal(target.fake.snapshot().attempted.exchange, 0);
+}
+
+test('enrollment lost acknowledgement replays once without saving a second voucher', async () => {
+  const control = await enrollmentFixture();
+  assert.equal((await control.enroll()).status, 202);
+  assert.equal(control.deliveries.length, 1);
+  const target = await enrollmentFixture({ lost: 1 });
+  await assertEnrollmentReplay(target);
+  target.advance(120_001);
+  const replay = await target.owner.fetch(target.deliveries[0].clone());
+  assert.equal(replay.status, 200, 'a consumed challenge can replay its acknowledgement after expiry');
+  assert.ok(await replay.text() === target.acknowledgements[0].body);
+  const changed = await target.deliveries[0].clone().json();
+  changed.voucher.claims.voucher_id = randomCapability();
+  const refused = await target.owner.fetch(new Request(target.deliveries[0].url, {
+    method: 'POST', headers: target.deliveries[0].headers, body: canonical(changed),
+  }));
+  assert.equal(refused.status, 403, 'changed delivery bytes must never reuse an acknowledgement');
+  assert.equal(target.events.filter(event => event === 'owner.enrollment.committed').length, 1);
+});
+
+test('enrollment delivery is bounded when unavailable or every acknowledgement is lost', async () => {
+  const control = await enrollmentFixture();
+  assert.equal((await control.enroll()).status, 202);
+  for (const options of [{ unavailable: true }, { lost: 3 }]) {
+    const target = await enrollmentFixture(options);
+    assert.equal((await target.enroll()).status, 503);
+    assert.equal(target.deliveries.length, 3);
+    assert.equal(target.issued(), 1);
+    assert.equal(target.events.filter(event => event === 'owner.enrollment.committed').length, options.unavailable ? 0 : 1);
+    for (const delivery of target.deliveries.slice(1))
+      assert.ok(await target.deliveries[0].clone().text() === await delivery.clone().text());
+  }
+});
+
+test('concurrent identical enrollment deliveries commit once and return the saved acknowledgement', async () => {
+  const control = await enrollmentFixture();
+  assert.equal((await control.enroll()).status, 202);
+  const target = await enrollmentFixture({ concurrent: true });
+  assert.equal((await target.enroll()).status, 202);
+  assert.equal(target.events.filter(event => event === 'owner.enrollment.committed').length, 1);
+  assert.ok(target.acknowledgements.length === 2 && target.acknowledgements.every(reply => reply.status === 200));
+  assert.ok(target.acknowledgements[0].body === target.acknowledgements[1].body);
+});
+
+test('enrollment readback failure rolls back voucher and consumption before a recoverable retry', async () => {
+  const control = await enrollmentFixture();
+  assert.equal((await control.enroll()).status, 202);
+  const target = await enrollmentFixture({ readbackFailures: 3 });
+  assert.equal((await target.enroll()).status, 503);
+  assert.equal(target.events.filter(event => event === 'owner.enrollment.committed').length, 0);
+  assert.equal(target.events.filter(event => event === 'owner.enrollment.acknowledgement.replayed').length, 0);
+  assert.equal((await target.owner.fetch(target.deliveries[0].clone())).status, 200);
+  assert.equal(target.events.filter(event => event === 'owner.enrollment.committed').length, 1);
+});
+
+test('mutant ENROLLMENT_ACK_NOT_REPLAYED is killed by the lost acknowledgement control', async () => {
+  await assertEnrollmentReplay(await enrollmentFixture({ lost: 1 }));
+  const sourceUrl = new URL('../../../protocol/quickbooks-broker/testing/owner-runtime.mjs', import.meta.url);
+  const source = readFileSync(sourceUrl, 'utf8');
+  const seam = 'if (pending.consumed) return replayAcknowledgement();';
+  assert.equal(source.split(seam).length - 1, 2);
+  const mutated = source.replaceAll(seam, 'if (pending.consumed) return refuse(403);')
+    .replace(/from '(\.\.?\/[^']+)'/g, (_, path) => `from '${new URL(path, sourceUrl).href}'`);
+  const { createOwnerRuntime: ownerFactory } = await import('data:text/javascript;base64,' + Buffer.from(mutated).toString('base64'));
+  const target = await enrollmentFixture({ lost: 1, ownerFactory });
+  await assert.rejects(() => assertEnrollmentReplay(target), { code: 'ERR_ASSERTION' });
+  assert.equal(target.events.filter(event => event === 'owner.enrollment.committed').length, 1);
+  assert.equal(target.deliveries.length, 3);
 });
 
 async function fixture({ hasChallenge = true, staleChallenge = false, missingSignature = false,
