@@ -1,9 +1,11 @@
 import { installRemovalPlanAdapter } from "./removal-plan-adapter.mjs";
+import "./support-journal-acl-preload.mjs";
 /** Offline Gmail incremental-policy and Worker fixture. Invented data only. */
 
 import { readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
-import { syncBuiltinESMExports } from "node:module";
+import { registerHooks, syncBuiltinESMExports } from "node:module";
+import { join } from "node:path";
 
 const evidencePath = String(process.env.BRAIN_GMAIL_POLICY_EVIDENCE || "");
 const userRoot = String(process.env.BRAIN_GMAIL_POLICY_USER_ROOT || "");
@@ -34,6 +36,7 @@ const MODES = [
   "pending-restored",
   "pending-retained",
   "pending-absent-unreadable",
+  "pending-absent-recovered",
   "pending-readback-failure",
   "readback-stale",
   "resume-progress",
@@ -53,6 +56,27 @@ const SYNTHETIC_ADMIN_KEY = "01234567".repeat(8);
 
 os.homedir = () => userRoot;
 syncBuiltinESMExports();
+
+// This policy suite exercises the real CLI, leases and checkpoint files, but
+// synthetic credentials must never enter host DPAPI or Keychain. Credential
+// custody and native ACL behavior have their own focused suites.
+const googleStorage = new URL("../../connectors/google-auth.mjs", import.meta.url).href;
+const storageOptions = { backend: "file", platform: process.platform, migrateLegacy: false,
+  path: join(userRoot, ".brain", "google-tokens.json"), env: {} };
+registerHooks({
+  load(url, context, nextLoad) {
+    if (url !== googleStorage) return nextLoad(url, context);
+    const original = `${googleStorage}?gmail-policy-storage`;
+    return {
+      format: "module", shortCircuit: true,
+      source: `export * from ${JSON.stringify(original)};
+        import * as original from ${JSON.stringify(original)};
+        const options = ${JSON.stringify(storageOptions)};
+        export const loadTokens = () => original.loadTokens(options);
+        export const loadTokensReadOnly = () => original.loadTokensReadOnly(options);`,
+    };
+  },
+});
 
 const blank = () => ({
   ingested_ids: [],
@@ -151,7 +175,7 @@ globalThis.fetch = async (input, options = {}) => {
         url.searchParams.get("startHistoryId") === "history-current") {
       return json({ historyId: "history-current", history: [] });
     }
-    if (["pending-retained", "pending-absent-unreadable"].includes(mode) &&
+    if (["pending-retained", "pending-absent-unreadable", "pending-absent-recovered"].includes(mode) &&
         url.searchParams.get("startHistoryId") === "history-current") {
       return json({ historyId: "history-current" });
     }
@@ -182,6 +206,7 @@ globalThis.fetch = async (input, options = {}) => {
       "pending-restored": ["pending-restored"],
       "pending-retained": ["pending-retained"],
       "pending-absent-unreadable": ["pending-absent-unreadable"],
+      "pending-absent-recovered": ["pending-absent-unreadable"],
       "incremental-precondition-failure": ["checkpoint-provider-failure"],
       "since-incremental": ["since-incremental-older", "since-incremental-current"],
     };
@@ -419,6 +444,9 @@ globalThis.fetch = async (input, options = {}) => {
     if (id === "pending-absent-unreadable") {
       return json({
         id, historyId: "pending-absent-unreadable-v1", internalDate: "1788030000000", labelIds: ["INBOX"],
+        ...(mode === "pending-absent-recovered" ? {
+          raw: rawMail("Recovered MIME evidence", "The provider retry now includes the complete readable message body for the owner."),
+        } : {}),
       });
     }
     if (massRefusalIds.includes(id)) {

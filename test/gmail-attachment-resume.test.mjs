@@ -65,7 +65,7 @@ async function sweep(savedRevision, { stored = true, refuse = false } = {}) {
           toEnvelope: async (_token, id) => {
             reads.push(id);
             return refuse
-              ? { skip: { id, path: id, reason: "attachment could not be read" }, retain_existing: true, cursor_blocking: true }
+              ? { skip: { id, path: id, reason: "message MIME evidence is unavailable" }, retain_existing: true, cursor_blocking: true }
               : { version: currentRevision, envelope: {
                   source_type: "gmail", source_id: id, title: "Scheduled report",
                   content: "Synthetic balance sheet attachment: cash 400, liabilities 100, equity 300.",
@@ -118,9 +118,9 @@ test("a missing stored family is reread even with a current extraction revision"
   assert.equal(result.sends.length, 1);
 });
 
-test("an attachment refusal during policy migration keeps the prior cursor and family", async () => {
+test("missing message MIME evidence during policy migration keeps the prior cursor and family", async () => {
   const result = await sweep("message-history", { refuse: true });
-  assert.ok(result.error, "a refused attachment cannot close a successful sweep");
+  assert.ok(result.error, "missing message MIME evidence cannot close a successful sweep");
   assert.deepEqual(result.reads, ["report-message"]);
   assert.deepEqual(result.sends, []);
   assert.equal(result.state.done["gmail:report-message"], "message-history");

@@ -96,7 +96,7 @@ test("Gmail refuses encrypted PDF even when an empty user password opens it", as
   assert.equal(result.observation.state, "password_protected");
 });
 
-test("Gmail's message boundary enables encrypted-PDF refusal", async () => {
+test("Gmail's message boundary excludes an encrypted PDF and keeps its body", async () => {
   const raw = Buffer.from([
     "From: reports@example.invalid", "To: owner@example.invalid", "Subject: Scheduled report",
     'Content-Type: multipart/mixed; boundary="synthetic-boundary"', "",
@@ -112,8 +112,8 @@ test("Gmail's message boundary enables encrypted-PDF refusal", async () => {
       id: "synthetic-delivery", labelIds: ["INBOX"], internalDate: "1792670400000", raw,
     })),
   });
-  assert.equal(result.envelope, undefined);
-  assert.equal(result.attachment_failure, "encrypted_attachment");
-  assert.equal(result.retain_existing, true);
-  assert.equal(result.cursor_blocking, true);
+  assert.ok(result.envelope.content.includes("scheduled report is attached"));
+  assert.equal(result.envelope.metadata.gmail_attachments.items[0].reason, "encrypted_attachment");
+  assert.equal(result.envelope.metadata.gmail_attachments.items[0].status, "excluded");
+  assert.notEqual(result.cursor_blocking, true);
 });

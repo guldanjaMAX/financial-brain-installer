@@ -122,12 +122,14 @@ Built as a connector. Connect your Google account with the Gmail scope, then run
 Scheduled reports attached as `.xlsx`, `.xls` (OLE workbook), `.csv` or
 text-bearing `.pdf` are read with the message. The limits are 10 attachments,
 5 MiB each and 15 MiB combined. Other types and nested messages are listed as
-excluded. Encrypted, unreadable, incomplete or oversized supported reports hold
-the whole message and its cursor for correction, keeping any prior accepted
-copy. This path does not use OCR or import figures into the structured ledger.
+excluded. Encrypted, unreadable, incomplete or oversized supported reports are
+excluded individually while readable parts remain and history continues.
+Credential-bearing parts are omitted with safe markers. This path does not
+use OCR or import figures into the structured ledger.
 An explicit report date stays separate from the email receipt date. Weekly
 re-sends retain their own message provenance and do not make an old report
-current. Earlier body-only revisions are rechecked under the attachment policy.
+current. The capped backfill for earlier body-only revisions is not implemented
+in this candidate and remains a migration blocker.
 
 **The honest production boundary:** the connector has passed the product test suite but has not yet completed a real-mailbox production run. The manifest-wide daily task can own Gmail on Windows or macOS when the connection is present. Treat Gmail as built but not yet production-proven.
 

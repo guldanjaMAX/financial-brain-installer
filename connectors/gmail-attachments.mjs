@@ -3,6 +3,7 @@ import { CFB } from "@e965/xlsx";
 import { extract, extensionOf } from "../ingest/extract.mjs";
 import { parseEmailMessage } from "../ingest/formats.mjs";
 import { isLikelyBinary, textQuality, utf16Encoding } from "../ingest/quality.mjs";
+import { scanEnvelope, sanitizeEnvelope } from "../worker/src/lib/secret-scan.js";
 
 export const GMAIL_ATTACHMENT_LIMITS = Object.freeze({
   count: 10,
@@ -16,11 +17,11 @@ const TYPES = new Set([".xlsx", ".xls", ".csv", ".pdf"]);
 const OLE = Buffer.from("d0cf11e0a1b11ae1", "hex");
 const MONTHS = "January February March April May June July August September October November December".split(" ");
 
-// These fixed codes are local extraction skips, under the existing INGEST_FAILED
-// contract. Parser diagnostics can contain source text and must never escape.
+// Only message-wide evidence failures block history. Immutable attachment
+// failures become fixed exclusions so a later resend remains reachable.
 function failure(code) {
   return { text: null, attachment_failure: code,
-    error: `Gmail report attachments were not indexed (${code}). Review the message and provide a readable export within the attachment limits, then retry.` };
+    error: `Gmail message could not be read (${code}). Required message evidence remains unavailable.` };
 }
 
 function validDate(value) {
@@ -85,7 +86,7 @@ function formatFailure(bytes, extension) {
 }
 
 /** One bounded MIME read; attachments never acquire a separate deletion owner. */
-export async function extractGmailMessage(raw, { messageId, receivedAt }) {
+export async function extractGmailMessage(raw, { messageId, receivedAt, scanCredentials = true }) {
   const limits = GMAIL_ATTACHMENT_LIMITS;
   // Guard the encoded value before allocating its decoded copy. Gmail's outer
   // transport is base64url; whitespace or a permissively decoded prefix is not
@@ -100,44 +101,57 @@ export async function extractGmailMessage(raw, { messageId, receivedAt }) {
   catch { return failure("malformed_message"); }
   if (parsed.error) return failure("malformed_message");
   const attachments = parsed.attachments;
-  if (attachments.length > limits.count) return failure("attachment_count_limit");
-
-  // Check every occurrence before extraction, including unsupported types and
-  // duplicates. Exclusions cannot carry unaccounted bytes past the budget.
-  let total = 0;
-  for (const attachment of attachments) {
-    const name = attachment.filename || "";
-    if (name.length > limits.nameChars || /[\u0000-\u001f\u007f]/.test(name)) return failure("attachment_name_invalid");
-    const size = attachment.content.byteLength;
-    if (size > limits.bytes) return failure("attachment_size_limit");
-    total += size;
-    if (total > limits.totalBytes) return failure("attachment_total_limit");
-  }
-
+  // Use the same scanner and capability-link sanitizer as the final envelope
+  // boundary, before a credential in one immutable part can poison its siblings.
+  const partRefused = (part) => scanCredentials && scanEnvelope(sanitizeEnvelope(part)).shouldRefuse;
+  const body = partRefused({ content: parsed.text, title: parsed.subject })
+    ? { status: "excluded", reason: "credential_detected" }
+    : textQuality(parsed.text).ok ? { status: "read" }
+      : { status: "excluded", reason: "unreadable_body" };
   const items = [];
-  const sections = [parsed.text];
+  const sections = [body.status === "read" ? parsed.text : `Message body excluded: ${body.reason}`];
   const seen = new Map();
+  let total = 0;
   let textBytes = 0;
+  const exclude = (item, reason) => {
+    Object.assign(item, { status: "excluded", reason });
+    // No filename or parser diagnostic can enter an exclusion marker.
+    sections.push(`Attachment ${item.index}\nAttachment excluded: ${reason}`);
+  };
   for (const [offset, attachment] of attachments.entries()) {
     const bytes = Buffer.from(attachment.content);
     const name = attachment.filename || "";
+    const invalidName = name.length > limits.nameChars || /[\u0000-\u001f\u007f]/.test(name);
     const extension = extensionOf(name);
     const mimeType = String(attachment.mimeType || "").toLowerCase();
-    const item = { index: offset + 1, name, message_id: messageId, received_at: receivedAt,
+    const item = { index: offset + 1, name: invalidName ? null : name, message_id: messageId, received_at: receivedAt,
       bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex"),
       report_as_of: null, report_as_of_status: "unknown" };
     items.push(item);
+    // A filename is part of its attachment, including unsupported and duplicate
+    // occurrences. Withheld names must disappear from metadata as well as text.
+    if (partRefused({ title: name })) {
+      item.name = null;
+      exclude(item, "credential_detected");
+      continue;
+    }
+    const bound = offset >= limits.count ? "attachment_count_limit"
+      : invalidName ? "attachment_name_invalid"
+        : bytes.length > limits.bytes ? "attachment_size_limit"
+          : total + bytes.length > limits.totalBytes ? "attachment_total_limit" : null;
+    if (bound) { exclude(item, bound); continue; }
+    // Admission budgets count every in-bound occurrence, even duplicates and
+    // unsupported files. A rejected large part cannot starve a later small one.
+    total += bytes.length;
     const exclusion = mimeType.startsWith("message/") ? "nested_message"
       : mimeType.startsWith("image/") ? "image_part"
         : !name ? "missing_filename" : !TYPES.has(extension) ? "unsupported_type" : null;
     if (exclusion) {
-      item.status = "excluded";
-      item.reason = exclusion;
-      sections.push(`Attachment ${item.index}: ${name || "(unnamed)"}\nAttachment excluded: ${item.reason}`);
+      exclude(item, exclusion);
       continue;
     }
     const invalid = formatFailure(bytes, extension);
-    if (invalid) return failure(invalid);
+    if (invalid) { exclude(item, invalid); continue; }
     const key = `${extension}:${item.sha256}`;
     const duplicate = seen.get(key);
     if (duplicate) {
@@ -148,24 +162,36 @@ export async function extractGmailMessage(raw, { messageId, receivedAt }) {
     }
     const got = await extract(bytes, name, { rejectEncrypted: true });
     if (got.error || got.text == null) {
-      return failure(got.observation?.state === "password_protected" || /password|encrypt/i.test(got.error || "")
+      exclude(item, got.observation?.state === "password_protected" || /password|encrypt/i.test(got.error || "")
         ? "encrypted_attachment" : got.observation?.state === "scan_only_ocr_needed"
           ? "incomplete_attachment" : "malformed_attachment");
+      continue;
     }
-    if (got.incomplete === true || got.provenance?.text_reliable === false) return failure("incomplete_attachment");
-    textBytes += Buffer.byteLength(got.text, "utf8");
-    if (textBytes > limits.textBytes) return failure("attachment_text_limit");
+    if (got.incomplete === true || got.provenance?.text_reliable === false) { exclude(item, "incomplete_attachment"); continue; }
+    const size = Buffer.byteLength(got.text, "utf8");
+    if (textBytes + size > limits.textBytes) { exclude(item, "attachment_text_limit"); continue; }
+    if (partRefused({ content: got.text, title: name })) {
+      exclude(item, "credential_detected");
+      continue;
+    }
     // A filename-generated table heading cannot prove that an empty CSV held
     // report data. Judge only the extracted rows, while keeping the label in
     // searchable content for provenance.
     const readableText = extension === ".csv" ? got.text.replace(/^Table:[^\n]*\n?/, "") : got.text;
-    if (!textQuality(readableText).ok) return failure("unreadable_attachment");
+    if (!textQuality(readableText).ok) { exclude(item, "unreadable_attachment"); continue; }
+    textBytes += size;
     Object.assign(item, { status: "read", ...attachmentReportDate(got.text) });
     seen.set(key, item);
     sections.push(`Attachment ${item.index}: ${name}\nMessage received: ${receivedAt || "unknown"}\n` +
       `Report as of: ${item.report_as_of || "unknown"} (attachment text)\n\n${got.text}`);
   }
-  return { text: sections.join("\n\n"), subject: parsed.subject,
+  // Preserve the established whole-family refusal when there is no readable
+  // part left. A marker alone must not turn credential-only mail into acceptance.
+  if (body.status !== "read" && !items.some((item) => item.status === "read") &&
+      (body.reason === "credential_detected" || items.some((item) => item.reason === "credential_detected"))) {
+    return { credential_refusal: true };
+  }
+  return { text: sections.join("\n\n"), subject: body.status === "read" ? parsed.subject : "Message with excluded body", body,
     attachments: { policy_version: 2, items,
       read_count: items.filter((item) => item.status === "read").length,
       duplicate_count: items.filter((item) => item.status === "duplicate").length,
