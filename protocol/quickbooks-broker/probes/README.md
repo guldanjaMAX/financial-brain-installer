@@ -58,12 +58,26 @@ Privacy checks require fresh, distinct audit witnesses for each observed broker
 operation, in both durable rows and captured logs. Empty sinks, stale evidence,
 or one concurrent operation borrowing another's witness cannot pass. Every
 response body and header is scanned for runtime credentials, launch capabilities,
-transaction ciphertext and callback code, state and company values, including
-altered callback input. Each launch value is allowed only in its exact field
-of the response that issued it. Only the exact state parameter in its validated
-provider launch Location is exempt. A clean
+transaction and refresh ciphertext, and callback code, state and company values,
+including altered callback input. Successful broker JSON responses are strictly
+decoded and validated against the response schema declared in the wire contract.
+The harness follows schema references, matching alternatives and array paths to
+register every `x-private` value. Each value is allowed only in its exact field
+of the one response that issued it. New private fields require no route-specific
+registration code. Rejected schema observations remain failed even if a caller
+catches the assertion or later reuses the response with repaired headers.
+Redirects and the static HTML result page remain subject to the same body and
+header scans; only the exact state parameter in its validated provider launch
+Location is exempt. A clean
 completion Location never exempts its body or other headers. An unavailable
 audit ledger leaves evidence unavailable; it cannot certify a privacy pass.
+
+Schema coverage combines a reviewed private-site inventory, sensitive field
+names and a closed inventory of reviewed public names. Unclassified new names,
+missing annotations and non-string annotations fail. Stored credential and key
+containers inherit their marker from the shared ciphertext leaf. Refresh controls
+exercise owner and raw broker entry points; body/header mutants echo ciphertext
+through health, status and refusals, or try to reuse a grant in another response.
 
 Refresh and disconnect replay checks require a refusal plus unchanged owner
 state and complete provider counters. The safe fence fingerprint detects a

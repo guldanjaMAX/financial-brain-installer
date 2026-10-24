@@ -2,7 +2,7 @@
   "protocol": "qbo-broker/1",
   "status": "offline-review-contract",
   "routes": [
-    { "method": "POST", "path": "/v1/quickbooks/installations/issue", "request_schema": "enrollmentIssue", "response_schema": null, "success": 202 },
+    { "method": "POST", "path": "/v1/quickbooks/installations/issue", "request_schema": "enrollmentIssue", "response_schema": "errorResponse", "success": 202 },
     { "method": "POST", "path": "/v1/quickbooks/authorizations", "request_schema": "startRequest", "response_schema": "launchResponse", "success": 201 },
     { "method": "POST", "path": "/v1/quickbooks/launch", "request_schema": "launchRequest", "response_schema": null, "success": 303 },
     { "method": "GET", "path": "/v1/quickbooks/oauth/callback", "request_schema": "callbackQuery", "response_schema": null, "success": 303 },

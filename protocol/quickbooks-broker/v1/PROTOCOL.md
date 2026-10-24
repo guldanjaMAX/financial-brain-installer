@@ -39,6 +39,14 @@ manifest, CLI argument, support record, URL, or browser-visible response.
 The [wire contract](wire-contract.json) fixes paths, limits, domains and labels.
 The [schema catalog](schemas/protocol.schema.json) uses JSON Schema 2020-12.
 Each schema is addressed as `urn:financial-brain:qbo-broker:1:schemas#/$defs/NAME`.
+Credential-bearing string leaves carry `x-private: true`, inherited through
+schema references. The offline harness validates every successful broker JSON
+response against its declared schema and permits each annotated value only in
+that response's exact field. The schema tests require reviewed private sites and
+classify every field name; a new field requires a privacy review. Public binding
+identifiers do not become credentials merely by sharing the capability encoding.
+The enrollment route uses `errorResponse` for its existing status-only accepted
+acknowledgement; the voucher is delivered separately to the verified owner.
 All object shapes are closed; unknown or duplicate JSON keys, duplicate query
 keys, invalid UTF-8, lone surrogates, noncanonical encodings, and unsupported
 versions refuse. Reject compressed request bodies. Bound streamed bytes before

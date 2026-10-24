@@ -5,7 +5,7 @@ const binary = new Set(['ciphertext', 'iv', 'salt', 'authentication_tag', 'broke
 const types = new Set(['object', 'array', 'integer', 'null', 'string', 'boolean']);
 const keywords = new Set(['$schema', '$id', '$defs', '$ref', 'title', 'description', 'type', 'const', 'enum',
   'properties', 'required', 'additionalProperties', 'oneOf', 'anyOf', 'allOf', 'minLength', 'maxLength',
-  'pattern', 'minimum', 'maximum', 'minItems', 'maxItems', 'items', 'uniqueItems']);
+  'pattern', 'minimum', 'maximum', 'minItems', 'maxItems', 'items', 'uniqueItems', 'x-private']);
 function resolve(ref) {
   if (!/^#\/\$defs\/[A-Za-z][A-Za-z0-9]*$/.test(ref) || !Object.hasOwn(schema.$defs, ref.slice(8))) refuse();
   return schema.$defs[ref.slice(8)];
@@ -14,6 +14,12 @@ function inspect(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) refuse();
   for (const key of Object.keys(value)) if (!keywords.has(key)) refuse();
   if (value.$ref) resolve(value.$ref);
+  if ('x-private' in value) {
+    if (value['x-private'] !== true) refuse();
+    let leaf = value;
+    while (leaf.$ref) leaf = resolve(leaf.$ref);
+    if (leaf.type !== 'string') refuse();
+  }
   if (value.type && !types.has(value.type)) refuse();
   if (value.type === 'object' && (value.additionalProperties !== false || !value.properties || !value.required)) refuse();
   for (const child of Object.values(value.$defs ?? {})) inspect(child);

@@ -10,6 +10,73 @@ const audit = () => fixture(schema, 'auditEvent', length => randomBytes(length).
 const startResponse = () => Response.json(fixture(schema, 'launchResponse',
   length => randomBytes(length).toString('base64url').slice(0, length)));
 
+test('private response fields follow schema references, branches and array paths', () => {
+  assert.ok(typeof helpers.privateResponseFields === 'function', 'schema private-field traversal is required');
+  const leaf = { type: 'string', minLength: 1, 'x-private': true };
+  const shape = { $defs: {
+    leaf,
+    response: { type: 'object', additionalProperties: false, required: ['nested', 'items', 'public'], properties: {
+      nested: { oneOf: [{ type: 'null' }, { $ref: '#/$defs/leaf' }] },
+      items: { type: 'array', items: { allOf: [{ $ref: '#/$defs/leaf' }, leaf] } },
+      public: { anyOf: [{ type: 'string', const: 'public' }, { type: 'string', const: 'private', 'x-private': true }] },
+    } },
+  } };
+  const value = { nested: 'nested-value', items: ['first-value', 'second-value'], public: 'public' };
+  const fields = helpers.privateResponseFields(shape, 'response', value);
+  assert.deepEqual(fields.map(field => field.path), [['nested'], ['items', 0], ['items', 1]]);
+  assert.ok(fields.every(field => typeof field.value === 'string'));
+  assert.deepEqual(helpers.privateResponseFields(shape, 'response', { ...value, nested: null }).map(field => field.path),
+    [['items', 0], ['items', 1]]);
+  assert.throws(() => helpers.privateResponseFields(shape, 'response', { ...value, extra: true }), {
+    code: 'ERR_ASSERTION', message: /successful broker response must match its exact wire schema/,
+  });
+});
+
+test('every successful broker JSON route declares a response schema', () => {
+  const wire = JSON.parse(readFileSync(new URL('../v1/wire-contract.json', import.meta.url), 'utf8'));
+  for (const route of wire.routes.filter(route => route.success < 300)) {
+    assert.ok(typeof route.response_schema === 'string' && schema.$defs[route.response_schema],
+      'successful broker JSON route requires its declared schema');
+  }
+});
+
+test('successful response schema refusals remain visible after a caller catches them', async () => {
+  const spy = transportSpy();
+  const rig = await createRig(spy.factory);
+  await rig.broker(new Request(helpers.BROKER + helpers.START));
+  const healthy = fixture(schema, 'healthResponse', length => randomBytes(length).toString('base64url').slice(0, length));
+  rig.adapter.broker.fetch = async () => Response.json(healthy);
+  await rig.broker(new Request(helpers.BROKER + '/health'));
+  await rig.assertPrivate();
+  rig.adapter.broker.fetch = async () => Response.json({ ...healthy, unexpected: true });
+  await assert.rejects(() => rig.broker(new Request(helpers.BROKER + '/health')), {
+    code: 'ERR_ASSERTION', message: /successful broker response must match its exact wire schema/,
+  });
+  await assert.rejects(() => rig.assertPrivate(), {
+    code: 'ERR_ASSERTION', message: /every successful broker response requires validated schema evidence/,
+  });
+});
+
+test('reobserving a repaired response cannot erase a prior schema refusal', async () => {
+  const spy = transportSpy();
+  const rig = await createRig(spy.factory);
+  await rig.broker(new Request(helpers.BROKER + helpers.START));
+  const body = fixture(schema, 'healthResponse', length => randomBytes(length).toString('base64url').slice(0, length));
+  const response = Response.json(body);
+  rig.adapter.broker.fetch = async () => response;
+  await rig.broker(new Request(helpers.BROKER + '/health'));
+  await rig.assertPrivate();
+  response.headers.set('content-type', 'text/plain');
+  await assert.rejects(() => rig.broker(new Request(helpers.BROKER + '/health')), {
+    code: 'ERR_ASSERTION', message: /successful broker response must match its exact wire schema/,
+  });
+  response.headers.set('content-type', 'application/json');
+  await rig.broker(new Request(helpers.BROKER + '/health'));
+  await assert.rejects(() => rig.assertPrivate(), {
+    code: 'ERR_ASSERTION', message: /every successful broker response requires validated schema evidence/,
+  });
+});
+
 function transportSpy() {
   let dependencies;
   const rows = [];
@@ -25,7 +92,9 @@ function transportSpy() {
           const event = { ...audit(), route, phase: route === helpers.CALLBACK ? 'failed' : 'start',
             outcome: route === helpers.CALLBACK ? 'invalid_request' : 'accepted' };
           rows.push(event); logs.push({ ...event });
-          return route === helpers.START ? startResponse() : new Response(null, { status: 204 });
+          return route === helpers.START ? startResponse() : new Response(null, {
+            status: 303, headers: { location: 'https://broker.invalid/v1/quickbooks/result' },
+          });
         } },
         owners: [0, 1].map(() => ({ fetch: async () => new Response(null, { status: 204 }), authHeaders: {} })),
         inspect: () => ({ brokerRows: rows, brokerLogs: logs, owners: [] }),
@@ -85,8 +154,9 @@ test('probe transport allows only in-memory destinations and refuses broker acco
 test('probe transport permits owner control requests to the in-memory broker only', async () => {
   const spy = transportSpy();
   const rig = await createRig(spy.factory);
-  rig.adapter.broker.fetch = async () => new Response(null, { status: 204 });
-  assert.ok((await spy.dependencies.ownerFetch('https://broker.invalid/health')).status === 204);
+  rig.adapter.broker.fetch = async () => Response.json(fixture(schema, 'healthResponse',
+    length => randomBytes(length).toString('base64url').slice(0, length)));
+  assert.ok((await spy.dependencies.ownerFetch('https://broker.invalid/health')).status === 200);
   await assert.rejects(() => spy.dependencies.brokerFetch('https://broker.invalid/health'), { code: 'ERR_ASSERTION' });
 });
 
@@ -129,8 +199,12 @@ test('probe privacy scan rejects a generated credential returned to the browser'
   await rig.broker(new Request(helpers.BROKER + helpers.START));
   await rig.assertPrivate();
   rig.adapter.broker.fetch = async () => new Response(rig.provider.config.clientSecret);
-  await rig.broker(new Request('https://broker.invalid/health'));
-  await assert.rejects(() => rig.assertPrivate(), { code: 'ERR_ASSERTION' });
+  await assert.rejects(() => rig.broker(new Request('https://broker.invalid/health')), {
+    code: 'ERR_ASSERTION', message: /successful broker response must match its exact wire schema/,
+  });
+  await assert.rejects(() => rig.assertPrivate(), {
+    code: 'ERR_ASSERTION', message: /outside their exact allowed field/,
+  });
 });
 
 test('EMPTY_AUDIT_SINKS mutant is killed for either sink and missing operation evidence', async () => {

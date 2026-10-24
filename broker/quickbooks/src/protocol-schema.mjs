@@ -81,7 +81,8 @@ export const schema = {
           "type": "string",
           "minLength": 22,
           "maxLength": 40000,
-          "pattern": "^[A-Za-z0-9_-]+$"
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "x-private": true
         },
         "iv": {
           "type": "string",
@@ -118,7 +119,8 @@ export const schema = {
           "$ref": "#/$defs/protocol"
         },
         "challenge": {
-          "$ref": "#/$defs/capability"
+          "$ref": "#/$defs/capability",
+          "x-private": true
         },
         "callback": {
           "$ref": "#/$defs/callback"
@@ -165,7 +167,8 @@ export const schema = {
           "$ref": "#/$defs/capability"
         },
         "challenge": {
-          "$ref": "#/$defs/capability"
+          "$ref": "#/$defs/capability",
+          "x-private": true
         },
         "callback": {
           "$ref": "#/$defs/callback"
@@ -258,7 +261,8 @@ export const schema = {
           "$ref": "#/$defs/protocol"
         },
         "challenge": {
-          "$ref": "#/$defs/capability"
+          "$ref": "#/$defs/capability",
+          "x-private": true
         },
         "voucher": {
           "$ref": "#/$defs/installationVoucher"
@@ -319,7 +323,8 @@ export const schema = {
           "$ref": "#/$defs/publicKey"
         },
         "delivery_auth_key": {
-          "$ref": "#/$defs/digest"
+          "$ref": "#/$defs/digest",
+          "x-private": true
         },
         "expected_token_generation": {
           "$ref": "#/$defs/generation"
@@ -359,13 +364,15 @@ export const schema = {
         "refresh_token": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 4096
+          "maxLength": 4096,
+          "x-private": true
         },
         "realm_id": {
           "$ref": "#/$defs/realmId"
         },
         "delivery_auth_key": {
-          "$ref": "#/$defs/digest"
+          "$ref": "#/$defs/digest",
+          "x-private": true
         }
       },
       "required": [
@@ -459,7 +466,8 @@ export const schema = {
         "token": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 4096
+          "maxLength": 4096,
+          "x-private": true
         },
         "token_type": {
           "type": "string",
@@ -645,7 +653,8 @@ export const schema = {
           "$ref": "#/$defs/protocol"
         },
         "launch_capability": {
-          "$ref": "#/$defs/capability"
+          "$ref": "#/$defs/capability",
+          "x-private": true
         },
         "transaction": {
           "$ref": "#/$defs/transactionCapsule"
@@ -666,7 +675,8 @@ export const schema = {
           "$ref": "#/$defs/protocol"
         },
         "launch_capability": {
-          "$ref": "#/$defs/capability"
+          "$ref": "#/$defs/capability",
+          "x-private": true
         },
         "expires_at": {
           "$ref": "#/$defs/timestamp"
@@ -687,12 +697,14 @@ export const schema = {
       "additionalProperties": false,
       "properties": {
         "state": {
-          "$ref": "#/$defs/capability"
+          "$ref": "#/$defs/capability",
+          "x-private": true
         },
         "code": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 4096
+          "maxLength": 4096,
+          "x-private": true
         },
         "realmId": {
           "$ref": "#/$defs/realmId"
@@ -709,7 +721,8 @@ export const schema = {
       "additionalProperties": false,
       "properties": {
         "state": {
-          "$ref": "#/$defs/capability"
+          "$ref": "#/$defs/capability",
+          "x-private": true
         },
         "error": {
           "const": "access_denied"
@@ -865,7 +878,8 @@ export const schema = {
           "type": "string",
           "minLength": 22,
           "maxLength": 40000,
-          "pattern": "^[A-Za-z0-9_-]+$"
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "x-private": true
         },
         "authentication_tag": {
           "type": "string",
@@ -910,7 +924,8 @@ export const schema = {
           "type": "string",
           "minLength": 22,
           "maxLength": 40000,
-          "pattern": "^[A-Za-z0-9_-]+$"
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "x-private": true
         },
         "authentication_tag": {
           "type": "string",
@@ -942,12 +957,14 @@ export const schema = {
         "access_token": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 4096
+          "maxLength": 4096,
+          "x-private": true
         },
         "refresh_token": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 4096
+          "maxLength": 4096,
+          "x-private": true
         },
         "token_type": {
           "const": "Bearer"
@@ -2194,7 +2211,8 @@ export const schema = {
       "type": "string",
       "minLength": 1,
       "maxLength": 128,
-      "pattern": "^[A-Za-z0-9._~-]{1,128}$"
+      "pattern": "^[A-Za-z0-9._~-]{1,128}$",
+      "x-private": true
     },
     "companyFingerprint": {
       "type": "string",
@@ -2234,7 +2252,8 @@ export const schema = {
           "$ref": "#/$defs/digest"
         },
         "state": {
-          "$ref": "#/$defs/capability"
+          "$ref": "#/$defs/capability",
+          "x-private": true
         },
         "launch_capability_hash": {
           "$ref": "#/$defs/digest"
@@ -2255,7 +2274,8 @@ export const schema = {
           "$ref": "#/$defs/digest"
         },
         "delivery_auth_key": {
-          "$ref": "#/$defs/digest"
+          "$ref": "#/$defs/digest",
+          "x-private": true
         },
         "expected_token_generation": {
           "$ref": "#/$defs/generation"
@@ -2300,7 +2320,8 @@ export const schema = {
           "type": "string",
           "minLength": 22,
           "maxLength": 3500,
-          "pattern": "^[A-Za-z0-9_-]+$"
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "x-private": true
         },
         "authentication_tag": {
           "type": "string",
@@ -2408,7 +2429,8 @@ export const schema = {
           "type": "string",
           "minLength": 22,
           "maxLength": 40000,
-          "pattern": "^[A-Za-z0-9_-]+$"
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "x-private": true
         },
         "authentication_tag": {
           "type": "string",

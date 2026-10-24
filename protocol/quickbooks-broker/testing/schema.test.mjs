@@ -18,6 +18,118 @@ const roots = ['enrollmentChallenge', 'enrollmentIssue', 'installationVoucher', 
   'completionEnvelope', 'completionResult', 'completionReceipt', 'ownerCallbackRequest',
   'ownerCallbackReceipt'];
 
+// Reviewed credential-bearing scalar sites. Shared capability/digest types also
+// encode public bindings, so their use alone must not create a privacy grant.
+const privateSites = [
+  'storedCiphertext/properties/ciphertext',
+  'enrollmentChallenge/properties/challenge',
+  'enrollmentIssue/properties/challenge',
+  'enrollmentDelivery/properties/challenge',
+  'startBody/properties/delivery_auth_key',
+  'refreshBody/properties/refresh_token',
+  'refreshBody/properties/delivery_auth_key',
+  'revokeBody/properties/token',
+  'launchRequest/properties/launch_capability',
+  'launchResponse/properties/launch_capability',
+  'callbackSuccess/properties/state',
+  'callbackSuccess/properties/code',
+  'callbackDenied/properties/state',
+  'deliveryEnvelope/properties/ciphertext',
+  'refreshResponse/properties/ciphertext',
+  'tokenBundle/properties/access_token',
+  'tokenBundle/properties/refresh_token',
+  'realmId',
+  'transactionPayload/properties/state',
+  'transactionPayload/properties/delivery_auth_key',
+  'transactionCapsule/properties/ciphertext',
+  'completionEnvelope/properties/ciphertext',
+].map(path => '$defs/' + path).sort();
+// These are reviewed non-credential fields, including public authentication
+// metadata and recurring bindings. They still obey broker retention schemas.
+// An unfamiliar name cannot silently classify itself as public.
+const publicFields = new Set([
+  'aad_hash', 'access_expires_at', 'attempt_count', 'authentication_tag', 'body',
+  'body_hash', 'broker_authentication_tag', 'build_id', 'callback', 'claims',
+  'committed_at', 'company_fingerprint', 'configuration', 'count', 'created_at',
+  'crv', 'delivery_id', 'delivery_key_fingerprint', 'delivery_public_key',
+  'dependencies', 'duration_ms', 'envelope_hash', 'environment',
+  'ephemeral_public_key', 'error', 'event_id_hash', 'expected_token_generation',
+  'expires_at', 'hard_refresh_expires_at', 'header', 'http_status_class',
+  'install_fingerprint', 'install_public_key', 'intent', 'intent_hash',
+  'issued_at', 'iv', 'key_generation', 'key_version', 'kty', 'last_api_read_at',
+  'last_refresh_at', 'launch_capability_hash', 'lease_expires_at', 'lease_id',
+  'mac', 'method', 'no_contact_proof', 'operation', 'operation_hash', 'outcome',
+  'phase', 'protocol', 'provider_attempts', 'provider_configuration_hash',
+  'provider_contact', 'purpose', 'reads_enabled', 'ready', 'receipt',
+  'receipt_hash', 'received_at', 'refresh_expires_at', 'replay_ledger',
+  'request_id', 'request_id_hash', 'retention_ms', 'retry', 'route', 'salt',
+  'signature', 'source_binding', 'start_hash', 'state_hash', 'status',
+  'subject_hash', 'subject_kind', 'token_generation', 'token_type',
+  'transaction', 'voucher', 'voucher_id', 'window_ms', 'window_start', 'x', 'y',
+]);
+const privateName = /ciphertext|secret|private_key|(?:^|_)token$|capability$|^realm_?id$|^(state|challenge|code|delivery_auth_key)$/i;
+const schemaAt = (root, path) => path.split('/').reduce((node, key) => node[key], root);
+
+function assertPrivateSchema(root) {
+  assert.equal(inspectSchema(root), true);
+  const annotated = [];
+  const resolve = schema => schema.$ref ? resolve(schemaAt(root, schema.$ref.slice(2))) : schema;
+  function visit(schema, path = '') {
+    if (schema['x-private'] === true) annotated.push(path);
+    for (const [name, field] of Object.entries(schema.properties ?? {})) {
+      const fieldPath = `${path}/properties/${name}`;
+      if (fieldPath === '$defs/errorResponse/properties/code') {
+        assert.equal(field.$ref, '#/$defs/outcome', 'public error code must remain a reviewed outcome');
+      } else if (privateName.test(name)) {
+        const target = resolve(field);
+        // Encrypted owner records inherit the scalar marker once from their
+        // common storage shape; their IVs and tags are not secret values.
+        const leaf = field.$ref === '#/$defs/storedCiphertext' ? target.properties.ciphertext : target;
+        assert.ok(field['x-private'] === true || leaf['x-private'] === true,
+          'private schema field requires x-private');
+      } else {
+        assert.ok(publicFields.has(name), 'new schema field requires privacy classification review');
+      }
+      visit(field, fieldPath);
+    }
+    for (const [name, child] of Object.entries(schema.$defs ?? {})) visit(child, `$defs/${name}`);
+    for (const kind of ['oneOf', 'anyOf', 'allOf']) {
+      for (const [index, child] of (schema[kind] ?? []).entries()) visit(child, `${path}/${kind}/${index}`);
+    }
+    if (schema.items) visit(schema.items, `${path}/items`);
+  }
+  visit(root);
+  assert.deepEqual(annotated.sort(), privateSites, 'private schema sites must match the reviewed inventory');
+}
+
+test('private schema fields carry reviewed scalar annotations through references', () => {
+  assertPrivateSchema(catalog);
+});
+
+test('private schema classification refuses new names and malformed annotations', () => {
+  assertPrivateSchema(catalog);
+  for (const name of ['recovery_secret', 'unreviewed_value']) {
+    const mutant = structuredClone(catalog);
+    mutant.$defs.healthResponse.properties[name] = { type: 'string' };
+    assert.throws(() => assertPrivateSchema(mutant), { code: 'ERR_ASSERTION' });
+  }
+  const notPrivate = structuredClone(catalog);
+  notPrivate.$defs.refreshResponse.properties.ciphertext['x-private'] = false;
+  assert.throws(() => inspectSchema(notPrivate), /schema_private_annotation_invalid/);
+  const notScalar = structuredClone(catalog);
+  notScalar.$defs.refreshResponse['x-private'] = true;
+  assert.throws(() => inspectSchema(notScalar), /schema_private_annotation_not_string/);
+});
+
+test('PRIVATE_ANNOTATION_REMOVED mutant is killed at every reviewed site with a passing control', () => {
+  assertPrivateSchema(catalog);
+  for (const path of privateSites) {
+    const mutant = structuredClone(catalog);
+    delete schemaAt(mutant, path)['x-private'];
+    assert.throws(() => assertPrivateSchema(mutant), { code: 'ERR_ASSERTION' });
+  }
+});
+
 test('schema catalog is versioned, supported, and exact-key at every object boundary', () => {
   assert.equal(catalog.$schema, 'https://json-schema.org/draft/2020-12/schema');
   assert.equal(catalog.$id, 'urn:financial-brain:qbo-broker:1:schemas');

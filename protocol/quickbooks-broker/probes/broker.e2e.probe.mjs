@@ -160,6 +160,7 @@ test('E2E refresh: rotation, generation lease, lost response and persistent unce
   reached(control, 'owner.refresh.readback');
   assert.ok(await control.adapter.runScheduledRead({ owner: 0 }) === true &&
     await control.adapter.runDirectRead({ owner: 0 }) === true, 'connected valid controls must permit both read paths');
+  await control.assertPrivate();
 
   for (const path of ['/api/quickbooks/refresh', '/api/quickbooks/disconnect']) {
     const rig = await createRig(factory);

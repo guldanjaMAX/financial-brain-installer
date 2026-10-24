@@ -3,7 +3,7 @@
 const allowed = new Set(['$schema', '$id', '$defs', '$ref', 'title', 'description',
   'type', 'const', 'enum', 'properties', 'required', 'additionalProperties',
   'oneOf', 'anyOf', 'allOf', 'minLength', 'maxLength', 'pattern', 'minimum',
-  'maximum', 'minItems', 'maxItems', 'items', 'uniqueItems']);
+  'maximum', 'minItems', 'maxItems', 'items', 'uniqueItems', 'x-private']);
 
 function resolve(root, ref) {
   if (!/^#\/\$defs\/[a-zA-Z][a-zA-Z0-9]*$/.test(ref)) throw new Error('schema_ref_unsupported');
@@ -17,6 +17,12 @@ export function inspectSchema(root) {
     if (!schema || typeof schema !== 'object' || Array.isArray(schema)) throw new Error('schema_shape_unsupported');
     for (const key of Object.keys(schema)) if (!allowed.has(key)) throw new Error('schema_keyword_unsupported');
     if (schema.$ref) resolve(root, schema.$ref);
+    if ('x-private' in schema) {
+      if (schema['x-private'] !== true) throw new Error('schema_private_annotation_invalid');
+      let leaf = schema;
+      while (leaf.$ref) leaf = resolve(root, leaf.$ref);
+      if (leaf.type !== 'string') throw new Error('schema_private_annotation_not_string');
+    }
     if (schema.type === 'object') {
       if (schema.additionalProperties !== false) throw new Error('schema_object_not_closed');
       if (!schema.properties || !Array.isArray(schema.required)) throw new Error('schema_object_incomplete');

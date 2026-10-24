@@ -5,9 +5,35 @@ import { createFakeIntuit } from '../testing/fake-intuit.mjs';
 import { validates } from '../testing/schema-test-helper.mjs';
 import { parseStrictJson } from '../../../broker/quickbooks/src/validation.mjs';
 const schemas = JSON.parse(readFileSync(new URL('../v1/schemas/protocol.schema.json', import.meta.url), 'utf8'));
+const wire = JSON.parse(readFileSync(new URL('../v1/wire-contract.json', import.meta.url), 'utf8'));
 function responseJson(text) {
   try { return parseStrictJson(text, { canonicalRequired: false }); }
   catch { assert.fail('response JSON must be unambiguous before granting a private field exception'); }
+}
+
+// The schema owns privacy classification. New annotated leaves, including
+// leaves behind references or matching alternatives, need no route-specific code.
+export function privateResponseFields(root, name, value) {
+  assert.ok(validates(root, name, value), 'successful broker response must match its exact wire schema');
+  const fields = new Map();
+  const matches = (rule, data) => validates({ ...root, $defs: { ...root.$defs, probeResponseBranch: rule } },
+    'probeResponseBranch', data);
+  function visit(rule, data, path) {
+    if (rule.$ref) visit(root.$defs[rule.$ref.slice(8)], data, path);
+    if (rule['x-private'] === true) {
+      assert.ok(typeof data === 'string' && data.length > 0, 'private response annotations require nonempty string values');
+      fields.set(JSON.stringify(path), { path, value: data });
+    }
+    for (const kind of ['oneOf', 'anyOf', 'allOf']) for (const branch of rule[kind] ?? []) {
+      if (matches(branch, data)) visit(branch, data, path);
+    }
+    for (const [key, child] of Object.entries(rule.properties ?? {})) {
+      if (data !== null && typeof data === 'object' && Object.hasOwn(data, key)) visit(child, data[key], [...path, key]);
+    }
+    if (Array.isArray(data) && rule.items) data.forEach((item, index) => visit(rule.items, item, [...path, index]));
+  }
+  visit(root.$defs[name], value, []);
+  return [...fields.values()];
 }
 
 export const PROTOCOL = 'qbo-broker/1';
@@ -125,7 +151,8 @@ export async function createRig(factory) {
     if (!privateValues.has(value)) privateValues.set(value, permission);
     else if (permission) {
       const existing = privateValues.get(value);
-      assert.ok(existing?.response === permission.response && existing?.field === permission.field,
+      assert.ok(existing?.response === permission.response && existing?.field === permission.field &&
+        JSON.stringify(existing?.path) === JSON.stringify(permission.path),
         'a private value may have only one exact response field exception');
     }
   };
@@ -230,12 +257,31 @@ export async function createRig(factory) {
     const expected = successAudit && (success ? successAudit : [['failed']]);
     if (expected) auditOperations.push({ route, expected, ids: fresh.map(row => row.event_id_hash) });
     await recordResponse(response);
-    if (route === START && response.ok) {
-      const body = responseJson(await response.clone().text());
-      assert.ok(validates(schemas, 'launchResponse', body), 'start response must match its exact wire shape');
+    if (response.ok) {
       const recorded = recordedResponses.get(response);
-      rememberPrivate(body.launch_capability, { response: recorded, field: 'body.launch_capability' });
-      rememberPrivate(body.transaction.ciphertext, { response: recorded, field: 'body.transaction.ciphertext' });
+      // Owner handlers can catch a transport assertion and return a refusal.
+      // Keep failed validation visible even when that caller catches the error.
+      try {
+        const declared = wire.routes.find(candidate => candidate.path === route)?.response_schema;
+        if (declared) {
+          assert.ok(response.headers.get('content-type')?.includes('application/json'),
+            'successful broker response must match its exact wire schema');
+          const body = responseJson(await response.clone().text());
+          for (const { path, value } of privateResponseFields(schemas, declared, body)) {
+            rememberPrivate(value, { response: recorded, field: 'body', path });
+          }
+        } else {
+          // The result page is the only successful non-JSON body. Redirects are
+          // checked by launch/queryFree; none exempts a body or an extra header.
+          assert.ok(route === wire.generic_result_path && response.headers.get('content-type')?.startsWith('text/html'),
+            'successful broker response must match its exact wire schema');
+        }
+      } catch (error) {
+        // Repairing mutable headers or reusing the object on another route
+        // cannot erase an earlier invalid observation of this response.
+        recorded.schemaFailure = true;
+        throw error;
+      }
     }
     return response;
   };
@@ -353,7 +399,7 @@ export async function createRig(factory) {
         const parsed = json ? responseJson(snapshot.body) : undefined;
         for (const [value, permission] of privateValues) {
           const headers = { ...snapshot.headers };
-          const body = json ? structuredClone(parsed) : snapshot.body;
+          let body = json ? structuredClone(parsed) : snapshot.body;
           let rawBody = snapshot.body;
           if (permission?.response === response) {
             if (permission.field === 'headers.location.state') {
@@ -363,13 +409,14 @@ export async function createRig(factory) {
               location.searchParams.delete('state');
               headers.location = location.href;
             } else {
-              const fieldValue = permission.field === 'body.launch_capability'
-                ? body.launch_capability : body.transaction?.ciphertext;
-              assert.ok(fieldValue === value, 'start response field exception must be exact');
+              const path = permission.path;
+              const parent = path.slice(0, -1).reduce((object, key) => object?.[key], body);
+              const fieldValue = path.length ? parent?.[path.at(-1)] : body;
+              assert.ok(fieldValue === value, 'response field exception must be exact');
               // Strict decoding rejects duplicate keys and exposes escaped
               // echoes. Remove only this response's exact permitted field.
-              if (permission.field === 'body.launch_capability') delete body.launch_capability;
-              else delete body.transaction.ciphertext;
+              if (path.length) delete parent[path.at(-1)];
+              else body = null;
               rawBody = '';
             }
           }
@@ -378,6 +425,8 @@ export async function createRig(factory) {
             'every response header and body must exclude private values outside their exact allowed field');
         }
       }
+      assert.ok(returned.every(response => !response.schemaFailure),
+        'every successful broker response requires validated schema evidence');
       assert.ok(Array.isArray(snapshot.brokerRows) && snapshot.brokerRows.every(row =>
         ['auditEvent', 'replayRow', 'quotaRow'].some(name => validates(schemas, name, row))) &&
         Array.isArray(snapshot.brokerLogs) && snapshot.brokerLogs.every(row => validates(schemas, 'auditEvent', row)),

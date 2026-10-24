@@ -3,7 +3,7 @@ import test from 'node:test';
 import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createProbeAdapter } from '../implementation-adapter.mjs';
-import { BROKER, START, createRig, queryFree, REVOKE, rejected, refusedUnchanged } from '../probes/harness.mjs';
+import { BROKER, START, createRig, queryFree, REFRESH, REVOKE, rejected, refusedUnchanged } from '../probes/harness.mjs';
 
 async function startThrough(rig, entry) {
   if (entry === 'helper') return rig.start();
@@ -23,6 +23,121 @@ test('clean starts keep capability and capsule private before launch through eve
     await rig.assertPrivate();
   }
 });
+
+async function successfulRefresh(rig, entry) {
+  rig.advance(3_000_000);
+  let ciphertext;
+  const original = rig.adapter.broker.fetch;
+  rig.adapter.broker.fetch = async request => {
+    const response = await original(request);
+    if (new URL(request.url).pathname === REFRESH && response.ok) {
+      ciphertext = (await response.clone().json()).ciphertext;
+    }
+    return response;
+  };
+  const generation = rig.state().tokenGeneration;
+  const response = entry === 'owner'
+    ? await rig.owner('/api/quickbooks/refresh', { body: {} })
+    : await rig.broker(await rig.signed(REFRESH));
+  rig.adapter.broker.fetch = original;
+  assert.ok(response.ok && typeof ciphertext === 'string' && ciphertext.length > 22,
+    'refresh control must return a real encrypted replacement from the fake provider');
+  assert.ok(rig.provider.snapshot().mutated.refresh === 1, 'refresh control must rotate exactly once');
+  if (entry === 'owner') assert.ok(rig.state().tokenGeneration === generation + 1 && !rig.state().outcomeUnknown,
+    'owner refresh control must commit and read back the replacement');
+  await rig.assertPrivate();
+  return ciphertext;
+}
+
+function laterResponse(rig, destination) {
+  if (destination === 'status') return rig.owner('/api/quickbooks/status');
+  return rig.broker(new Request(BROKER + (destination === 'health' ? '/health' : '/unrecognized')));
+}
+
+async function recordEcho(operation, schemaMayRefuse = false) {
+  try { return await operation(); }
+  catch (error) {
+    // Schema validation can reject an added health field before the scan.
+    // Every caller still requires the scan to catch the recorded private value.
+    assert.ok(schemaMayRefuse && error?.code === 'ERR_ASSERTION' &&
+      error.message === 'successful broker response must match its exact wire schema',
+    'only the exact successful-response schema refusal may precede the privacy assertion');
+  }
+}
+
+test('successful refresh keeps its ciphertext private through owner and raw broker entry points', async () => {
+  for (const entry of ['owner', 'broker']) {
+    const rig = await createRig(createProbeAdapter);
+    await rig.connect();
+    await successfulRefresh(rig, entry);
+    for (const destination of ['health', 'status', 'refusal']) {
+      const response = await laterResponse(rig, destination);
+      assert.ok(destination === 'refusal' ? response.status === 404 : response.ok,
+        'clean later response must reach its expected result');
+    }
+    await rig.assertPrivate();
+  }
+});
+
+for (const surface of ['body', 'header']) {
+  test(`REFRESH_CIPHERTEXT_${surface.toUpperCase()}_ECHO mutant is killed`, async t => {
+    for (const entry of ['owner', 'broker']) for (const destination of ['health', 'status', 'refusal']) {
+      await t.test(`${entry} refresh then ${destination}`, async () => {
+        const rig = await createRig(createProbeAdapter);
+        await rig.connect();
+        const ciphertext = await successfulRefresh(rig, entry);
+        const clean = await laterResponse(rig, destination);
+        assert.ok(destination === 'refusal' ? clean.status === 404 : clean.ok,
+          'each echo mutant requires a passing later-response control');
+        await rig.assertPrivate();
+        const target = destination === 'status' ? rig.adapter.owners[0] : rig.adapter.broker;
+        const original = target.fetch;
+        let echoed = false;
+        target.fetch = async request => {
+          const response = await original(request);
+          echoed = true;
+          if (surface === 'header') {
+            response.headers.set('x-probe-echo', ciphertext);
+            return response;
+          }
+          const body = await response.json();
+          body.echo = ciphertext;
+          return new Response(JSON.stringify(body), { status: response.status, headers: response.headers });
+        };
+        await recordEcho(() => laterResponse(rig, destination), surface === 'body' && destination === 'health');
+        assert.ok(echoed, 'echo mutant must reach the actual later response');
+        await assert.rejects(() => rig.assertPrivate(), {
+          code: 'ERR_ASSERTION', message: /outside their exact allowed field/,
+        });
+      });
+    }
+    await t.test(surface === 'body' ? 'second refresh cannot reuse a ciphertext grant' : 'same refresh header cannot reuse its body grant', async () => {
+      const rig = await createRig(createProbeAdapter);
+      await rig.connect();
+      const ciphertext = await successfulRefresh(rig, 'owner');
+      rig.advance(3_000_000);
+      const original = rig.adapter.broker.fetch;
+      rig.adapter.broker.fetch = async request => {
+        const response = await original(request);
+        const body = await response.clone().json();
+        if (surface === 'header') {
+          response.headers.set('x-probe-echo', body.ciphertext);
+          return response;
+        }
+        body.ciphertext = ciphertext;
+        return new Response(JSON.stringify(body), { status: response.status, headers: response.headers });
+      };
+      const refresh = await rig.signed(REFRESH);
+      if (surface === 'body') await assert.rejects(() => rig.broker(refresh), {
+        code: 'ERR_ASSERTION', message: /only one exact response field exception/,
+      });
+      else assert.ok((await rig.broker(refresh)).ok, 'same-response header mutant must return successful refresh');
+      await assert.rejects(() => rig.assertPrivate(), {
+        code: 'ERR_ASSERTION', message: /outside their exact allowed field/,
+      });
+    });
+  });
+}
 
 for (const surface of ['body', 'header']) {
   test(`LATER_RESPONSE_${surface.toUpperCase()}_ECHO mutant is killed for capability and capsule`, async t => {
@@ -47,9 +162,9 @@ for (const surface of ['body', 'header']) {
           body[field] = start[field];
           return new Response(JSON.stringify(body), { status: response.status, headers });
         };
-        const later = entry === 'owner' ? await rig.owner('/api/quickbooks/status')
-          : await rig.broker(new Request(BROKER + '/health'));
-        assert.ok(later.ok, 'later response must reach the mutated successful response');
+        const later = await recordEcho(() => entry === 'owner' ? rig.owner('/api/quickbooks/status')
+          : rig.broker(new Request(BROKER + '/health')), surface === 'body' && entry !== 'owner');
+        assert.ok(later === undefined || later.ok, 'later response must reach the mutated successful response');
         await assert.rejects(() => rig.assertPrivate(), {
           code: 'ERR_ASSERTION', message: /outside their exact allowed field/,
         });
@@ -93,7 +208,7 @@ for (const surface of ['body', 'header']) {
         rig.adapter.broker.fetch = async () => new Response(`{"echo":${encoded}}`, {
           headers: { 'content-type': 'application/json' },
         });
-        await rig.broker(new Request(BROKER + '/health'));
+        await recordEcho(() => rig.broker(new Request(BROKER + '/health')), true);
         await assert.rejects(() => rig.assertPrivate(), {
           code: 'ERR_ASSERTION', message: /outside their exact allowed field/,
         });
