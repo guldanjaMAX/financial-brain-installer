@@ -12,6 +12,281 @@ import { saveState } from "../ingest/run.mjs";
 import { writeManifestAtomically } from "../operations/folder-retirement.mjs";
 import { writeBootstrapStatusFile } from "../operations/bootstrap-status.mjs";
 import { CODEX_WORKSPACE_MARKER, writeCodexWorkspaceGuide } from "../operations/claude-workspace.mjs";
+import { writeAdminKeyFile } from "../operations/admin-key-file.mjs";
+import { saveTokens } from "../connectors/google-auth.mjs";
+import { writeDailyRefreshUpdateTransaction, clearDailyRefreshUpdateTransaction, dailyRefreshUpdateTransactionPath } from "../operations/daily-refresh-scheduler.mjs";
+import { runDailyRefreshCli } from "../operations/daily-refresh-run.mjs";
+import { initializeVerifiedRecovery, writeVerifiedRecoveryState } from "../operations/verified-recovery.mjs";
+
+// Synthetic protection is an in-memory storage boundary, never an OS helper or
+// provider call. Assertions below expose only outcome and identity metadata.
+function syntheticProtection() {
+  const saved = new Map();
+  return (_command, args, options) => {
+    const input = Buffer.from(options.input);
+    if (args[args.indexOf("-Operation") + 1] === "protect") {
+      const cipher = Buffer.from(`synthetic-protected-${saved.size}`);
+      saved.set(cipher.toString("hex"), input);
+      return { status: 0, stdout: cipher, stderr: Buffer.alloc(0) };
+    }
+    const plain = saved.get(input.toString("hex"));
+    return { status: plain ? 0 : 1, stdout: plain ? Buffer.from(plain) : Buffer.alloc(0), stderr: Buffer.alloc(0) };
+  };
+}
+
+const identityWriters = [
+  {
+    name: "manifest identity",
+    filename: "manifest.json",
+    prior: Buffer.from('{"version":1}\n'),
+    destinationRefusal: "The Brain manifest changed after folder off began, so nothing was replaced.",
+    stagingRefusal: "The Brain manifest changed after folder off began, so nothing was replaced.",
+    rollbackRefusal: /the original manifest could not be restored exactly/,
+    write(path, rename, rollback = false) {
+      let committed = false;
+      return writeManifestAtomically(path, { version: 2 }, { filesystemPlatform: "win32", fs: {
+        renameSync: (from, to) => {
+          const result = rename(from, to);
+          if (!from.endsWith(".rollback.tmp")) committed = true;
+          return result;
+        },
+        readFileSync: (...args) => {
+          if (rollback && committed && args[0] === path) { committed = false; return Buffer.from("invalid"); }
+          return fs.readFileSync(...args);
+        },
+      } });
+    },
+  },
+  {
+    name: "admin key identity",
+    filename: ".brain-admin-key",
+    prior: Buffer.from(`${"a".repeat(48)}\n`),
+    destinationRefusal: "the admin key destination changed before replacement",
+    stagingRefusal: "the admin key staged identity changed before verification",
+    rollbackRefusal: /rollback could not be verified/,
+    write(path, rename, rollback = false) {
+      return writeAdminKeyFile(path, "b".repeat(48), {
+        platform: "win32", username: "synthetic-owner", environment: { SystemRoot: process.env.SystemRoot || "C:\\Windows" },
+        runAcl: () => ({ status: 0 }), runPowerShell: syntheticProtection(), rename,
+        readFileForVerification: (_path, descriptor, phase) => rollback && phase === "persisted" ? Buffer.alloc(0) : readFileSync(descriptor),
+      });
+    },
+  },
+  {
+    name: "token store identity",
+    filename: "tokens.json",
+    prior: Buffer.from('{"google":{"scopes":["drive"]}}\n'),
+    destinationRefusal: "the Google token destination changed before replacement",
+    stagingRefusal: "the Google token staged identity changed before verification",
+    rollbackRefusal: /rollback could not be verified/,
+    write(path, rename, rollback = false) {
+      return saveTokens({ google: { scopes: ["drive", "gmail"] } }, {
+        backend: "file", platform: "win32", username: "synthetic-owner", path,
+        environment: { SystemRoot: process.env.SystemRoot || "C:\\Windows" },
+        runAcl: () => ({ status: 0 }), runPowerShell: syntheticProtection(), renameFile: rename,
+        fetchImpl: () => { throw new Error("unexpected provider request"); },
+        readFileForVerification: (_path, descriptor, phase) => rollback && phase === "persisted" ? Buffer.alloc(0) : readFileSync(descriptor),
+      });
+    },
+  },
+];
+
+for (const writer of identityWriters) {
+  for (const changed of ["control", "destination", "staging"]) {
+    test(`${writer.name}: ${changed} between attempts`, () => {
+      const root = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-rename-identity-")));
+      const path = join(root, writer.filename);
+      writeFileSync(path, writer.prior, { mode: 0o600 });
+      let calls = 0;
+      let replaced;
+      let replacement;
+      let refusal;
+      const rename = (from, to) => {
+        calls++;
+        if (calls === 1) {
+          if (changed !== "control") {
+            replaced = changed === "destination" ? to : from;
+            replacement = Buffer.from(readFileSync(replaced));
+            // Keep the displaced inode alive so the filesystem cannot reuse it.
+            nativeRename(replaced, join(root, "displaced"));
+            writeFileSync(replaced, replacement, { mode: 0o600, flag: "wx" });
+          }
+          throw Object.assign(new Error("synthetic sharing refusal"), { code: "EPERM" });
+        }
+        return nativeRename(from, to);
+      };
+      try {
+        try { writer.write(path, rename); } catch (error) { refusal = error; }
+        if (changed === "control") {
+          assert.ok(!refusal, "unchanged identities permit the second attempt");
+          assert.equal(calls, 2);
+          assert.ok(!readFileSync(path).equals(writer.prior), "control publishes the replacement");
+        } else {
+          assert.equal(calls, 1, "a changed identity must stop before the second rename");
+          assert.equal(refusal?.message, changed === "destination" ? writer.destinationRefusal : writer.stagingRefusal,
+            "identity drift preserves the caller's existing refusal");
+          assert.ok(readFileSync(path).equals(writer.prior), "refusal preserves the destination bytes");
+        }
+      } finally { rmSync(root, { recursive: true, force: true }); }
+    });
+  }
+}
+
+for (const writer of identityWriters) {
+  for (const changed of ["control", "destination", "staging"]) {
+    test(`${writer.name} rollback: ${changed} between attempts`, () => {
+      const root = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-rollback-rename-identity-")));
+      const path = join(root, writer.filename);
+      writeFileSync(path, writer.prior, { mode: 0o600 });
+      let calls = 0;
+      let committedBytes;
+      let refusal;
+      const rename = (from, to) => {
+        if (!from.endsWith(".bak") && !from.endsWith(".rollback.tmp")) {
+          const result = nativeRename(from, to);
+          committedBytes = readFileSync(to);
+          return result;
+        }
+        calls++;
+        if (calls === 1) {
+          if (changed !== "control") {
+            const target = changed === "destination" ? to : from;
+            const bytes = readFileSync(target);
+            nativeRename(target, join(root, "displaced"));
+            writeFileSync(target, bytes, { mode: 0o600, flag: "wx" });
+          }
+          throw Object.assign(new Error("synthetic rollback sharing refusal"), { code: "EPERM" });
+        }
+        return nativeRename(from, to);
+      };
+      try {
+        try { writer.write(path, rename, true); } catch (error) { refusal = error; }
+        assert.ok(refusal, "the injected persisted verification failure remains visible");
+        if (changed === "control") {
+          assert.equal(calls, 2, "unchanged rollback identities permit restoration");
+          if (writer.name === "manifest identity") assert.ok(readFileSync(path).equals(writer.prior));
+          else assert.match(refusal.message, /prior .* restored and verified/);
+        } else {
+          assert.equal(calls, 1, "rollback drift prevents another rename");
+          assert.match(refusal.message, writer.rollbackRefusal);
+          assert.ok(readFileSync(path).equals(committedBytes), "rollback refusal preserves the replacement bytes");
+        }
+      } finally { rmSync(root, { recursive: true, force: true }); }
+    });
+  }
+}
+
+const dailyWriters = [
+  {
+    name: "recovery state identity",
+    refusal: "verified recovery control destination changed before replacement",
+    prepare(root) {
+      const manifests = ["source", "target"].map(role => {
+        const path = join(root, `${role}.json`);
+        writeFileSync(path, JSON.stringify({
+          manifest_version: 1,
+          client: { slug: "synthetic-brain", display_name: "Synthetic Fixture" },
+          brain: { version: "0.0.1", worker_name: `synthetic-${role}`, domain: `${role}.example.invalid` },
+          infrastructure: { cloudflare: { storage: "d1", account_id: "synthetic-account", d1_database_id: `synthetic-${role}`, d1_database_name: `synthetic-${role}`, vectorize_index: `synthetic-${role}` } },
+        }), { mode: 0o600 });
+        return path;
+      });
+      const path = join(root, "state.json");
+      const initialized = initializeVerifiedRecovery(...manifests, join(root, "plan.json"), path);
+      return { path, write: () => writeVerifiedRecoveryState(path, initialized.state, initialized.plan, { platform: "win32" }) };
+    },
+  },
+  {
+    name: "daily transaction identity",
+    refusal: "the daily update transaction receipt is unsafe",
+    prepare(root, manifestPath, identity) {
+      const plan = { identity, manifest_path: manifestPath };
+      const options = { home: root, platform: "win32", machineLockRoot: join(root, "locks") };
+      const input = { plan, snapshot: { identity }, phase: "preparing" };
+      const path = dailyRefreshUpdateTransactionPath(identity, options);
+      fs.mkdirSync(join(root, ".brain", "daily-update-transactions"), { recursive: true });
+      writeFileSync(path, '{}\n', { mode: 0o600 });
+      return { path, write: () => writeDailyRefreshUpdateTransaction(input, options) };
+    },
+  },
+  {
+    name: "daily history identity",
+    refusal: "the daily update history is unsafe",
+    prepare(root, _manifestPath, identity) {
+      const options = { home: root, platform: "win32" };
+      const path = dailyRefreshUpdateTransactionPath(identity, options);
+      const transactionId = "a".repeat(32);
+      const history = join(root, ".brain", "daily-update-transactions", "history");
+      fs.mkdirSync(history, { recursive: true });
+      writeFileSync(path, JSON.stringify({ transaction_id: transactionId, bridge_snapshots: [{}] }), { mode: 0o600 });
+      const archive = join(history, `${transactionId}.json`);
+      writeFileSync(archive, '{}\n', { mode: 0o600 });
+      return { path: archive, write: () => clearDailyRefreshUpdateTransaction(identity, options) };
+    },
+  },
+  {
+    name: "daily receipt identity",
+    refusal: "the daily refresh receipt changed before replacement",
+    prepare(root, manifestPath, identity) {
+      const directory = join(root, ".brain", "daily-receipts");
+      fs.mkdirSync(directory, { recursive: true });
+      const path = join(directory, `${identity.id}.json`);
+      writeFileSync(path, '{}\n', { mode: 0o600 });
+      return { path, write: () => runDailyRefreshCli(manifestPath, {
+        brainModule: {}, buildPlan: async () => ({ ready: true, enabled: true, identity, manifest_path: manifestPath, sources: [] }),
+        acquireLock: () => ({ assertOwned() {}, release() {} }),
+        readFreshness: async () => ({}), runSource: async () => { throw new Error("unexpected source call"); },
+        readUpdateTransaction: () => null, appendObservation: () => {}, home: root, platform: "win32", silent: true,
+      }) };
+    },
+  },
+];
+
+for (const writer of dailyWriters) {
+  for (const changed of ["control", "destination", "staging"]) {
+    test(`${writer.name}: ${changed} between attempts`, async () => {
+      const root = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-daily-rename-identity-")));
+      const manifestPath = join(root, "manifest.json");
+      writeFileSync(manifestPath, '{}\n', { mode: 0o600 });
+      const fixture = writer.prepare(root, manifestPath, { id: "v1-abcdef1234567890" });
+      const prior = readFileSync(fixture.path);
+      const priorIdentity = fs.lstatSync(fixture.path);
+      let calls = 0;
+      let refusal;
+      fs.renameSync = (from, to) => {
+        if (to !== fixture.path) return nativeRename(from, to);
+        calls++;
+        if (calls === 1) {
+          if (changed !== "control") {
+            const target = changed === "destination" ? to : from;
+            const bytes = readFileSync(target);
+            nativeRename(target, join(root, "displaced"));
+            writeFileSync(target, bytes, { mode: 0o600, flag: "wx" });
+          }
+          throw Object.assign(new Error("synthetic sharing refusal"), { code: "EPERM" });
+        }
+        return nativeRename(from, to);
+      };
+      syncBuiltinESMExports();
+      try {
+        try { await fixture.write(); } catch (error) { refusal = error; }
+        if (changed === "control") {
+          assert.ok(!refusal, "unchanged identities permit daily persistence");
+          assert.equal(calls, 2);
+          assert.notEqual(fs.lstatSync(fixture.path).ino, priorIdentity.ino, "control publishes the staged inode");
+        } else {
+          assert.equal(calls, 1, "identity drift prevents the next daily rename");
+          assert.equal(refusal?.message, writer.refusal);
+          assert.ok(readFileSync(fixture.path).equals(prior), "refusal retains prior receipt bytes");
+        }
+      } finally {
+        fs.renameSync = nativeRename;
+        syncBuiltinESMExports();
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+}
 
 const nativeOptions = {
   skip: process.platform !== "win32" && "requires native Windows FileShare.Read handle semantics",

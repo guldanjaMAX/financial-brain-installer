@@ -30,7 +30,7 @@
  * read it. Ordinary owner setup creates and reveals no API token.
  */
 
-import { renameWithRetrySync } from "./operations/rename-retry.mjs";
+import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync } from "./operations/rename-retry.mjs";
 import { accessSync, chmodSync, closeSync, constants as fsConstants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdtempSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmdirSync, statSync, unlinkSync, writeFileSync, writeSync, appendFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { saveUpgradeBookmark, WINDOWS_UPGRADE_BOOKMARK_ACL_TIMEOUT_MS } from "./operations/upgrade-bookmark.mjs";
@@ -5716,10 +5716,15 @@ export function commitManifestVersion(manifestPath, version) {
       throw new Error("the manifest version write was incomplete");
     }
     fsyncSync(fd);
+    const staged = fstatSync(fd);
     closeSync(fd);
     fd = undefined;
-    revalidateUpdateManifest(pin, "local manifest version commit");
-    renameWithRetrySync(temporary, target);
+    renameWithRetrySync(temporary, target, { revalidate: () => {
+      revalidateUpdateManifest(pin, "local manifest version commit");
+      if (!renameIdentityMatches(temporary, staged)) {
+        throw new Error("the update manifest could not be revalidated during local manifest version commit");
+      }
+    } });
     const verifiedPin = pinUpdateManifest(target);
     const verified = verifiedPin.manifest;
     if (verified?.brain?.version !== version) {
@@ -14696,12 +14701,23 @@ function loadCalendarState(path) {
 
 function saveCalendarState(path, state) {
   mkdirSync(dirname(path), { recursive: true });
+  const predecessor = captureRenameIdentity(path);
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  let fd;
   try {
-    writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
-    renameWithRetrySync(tmp, path);
+    fd = openSync(tmp, "wx", 0o600);
+    writeFileSync(fd, JSON.stringify(state, null, 2));
+    const staged = fstatSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    renameWithRetrySync(tmp, path, { revalidate: () => {
+      if (!renameIdentityMatches(tmp, staged) || !renameIdentityMatches(path, predecessor)) {
+        throw new Error("the calendar state changed before its atomic write");
+      }
+    } });
     chmodSync(path, 0o600);
   } catch (error) {
+    if (fd !== undefined) closeSync(fd);
     try { rmSync(tmp, { force: true }); } catch { /* original error wins */ }
     throw error;
   }
@@ -23766,15 +23782,17 @@ function restoreAgentConfigFile(snapshot, current) {
     }
     fchmodSync(fd, mode);
     fsyncSync(fd);
+    const staged = fstatSync(fd);
     closeSync(fd);
     fd = null;
 
-    const confirmed = captureAgentConfigFile(snapshot.path, { allowAbsent: true });
-    if (!sameCapturedConfigState(current, confirmed) ||
-        configOutsideTarget(snapshot, confirmed.bytes) !== snapshot.outsideTarget) {
-      throw new Error("local assistant configuration changed before rollback");
-    }
-    renameWithRetrySync(temporary, snapshot.path);
+    renameWithRetrySync(temporary, snapshot.path, { revalidate: () => {
+      const confirmed = captureAgentConfigFile(snapshot.path, { allowAbsent: true });
+      if (!renameIdentityMatches(temporary, staged) || !sameCapturedConfigState(current, confirmed) ||
+          configOutsideTarget(snapshot, confirmed.bytes) !== snapshot.outsideTarget) {
+        throw new Error("local assistant configuration changed before rollback");
+      }
+    } });
     created = false;
   } catch {
     if (fd !== null) closeSync(fd);
@@ -23937,14 +23955,20 @@ function atomicReplaceAgentConfig(prepared, bytes) {
     }
     fchmodSync(fd, mode);
     fsyncSync(fd);
+    const staged = fstatSync(fd);
     closeSync(fd);
     fd = null;
 
-    const current = captureAgentConfigFile(snapshot.path, { allowAbsent: true });
-    if (!sameCapturedConfigState(snapshot, current)) {
-      throw new Error("local assistant configuration changed before its approved write");
-    }
-    renameWithRetrySync(temporary, snapshot.path);
+    renameWithRetrySync(temporary, snapshot.path, { revalidate: () => {
+      const expectedDirectory = directorySnapshot.exists ? directorySnapshot.stat : prepared.createdDirectoryStat;
+      if (!sameConfigDirectory(expectedDirectory, lstatSync(parent))) {
+        throw new Error("unsafe local assistant configuration directory");
+      }
+      const current = captureAgentConfigFile(snapshot.path, { allowAbsent: true });
+      if (!renameIdentityMatches(temporary, staged) || !sameCapturedConfigState(snapshot, current)) {
+        throw new Error("local assistant configuration changed before its approved write");
+      }
+    } });
     created = false;
     const after = captureAgentConfigFile(snapshot.path);
     // As with the containing directory, Windows relies on the verified owner

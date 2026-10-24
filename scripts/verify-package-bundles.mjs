@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { renameWithRetrySync } from "../operations/rename-retry.mjs";
-import { existsSync, writeFileSync } from "node:fs";
+import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync } from "../operations/rename-retry.mjs";
+import { closeSync, fstatSync, openSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -37,13 +37,20 @@ Generation never contacts a registry. Review the complete manifest diff before a
 
 function writeManifest(path, manifest, replace) {
   const output = resolve(path);
-  if (existsSync(output) && !replace) throw new Error("manifest_exists_use_replace");
+  const predecessor = captureRenameIdentity(output);
+  if (predecessor && !replace) throw new Error("manifest_exists_use_replace");
   const temporary = `${output}.tmp`;
-  writeFileSync(temporary, `${JSON.stringify(manifest, null, 2)}\n`, {
-    flag: "wx",
-    mode: 0o644,
-  });
-  renameWithRetrySync(temporary, output);
+  const descriptor = openSync(temporary, "wx", 0o644);
+  let staged;
+  try {
+    writeFileSync(descriptor, `${JSON.stringify(manifest, null, 2)}\n`);
+    staged = fstatSync(descriptor);
+  } finally { closeSync(descriptor); }
+  renameWithRetrySync(temporary, output, { revalidate() {
+    if (!renameIdentityMatches(temporary, staged) || !renameIdentityMatches(output, predecessor)) {
+      throw new Error("package_bundle_verification_failed");
+    }
+  } });
 }
 
 async function main(argv) {

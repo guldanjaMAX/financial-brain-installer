@@ -5,7 +5,7 @@
  * never credentials. Unrelated files and damaged account sections are preserved.
  */
 
-import { renameWithRetrySync } from "./rename-retry.mjs";
+import { renameIdentityMatches, renameWithRetrySync } from "./rename-retry.mjs";
 import {
   closeSync,
   fstatSync,
@@ -409,6 +409,8 @@ function commitWorkspaceGuide(target, parent, snapshot, existing, content, owner
   const pendingName = `${basename(target)}.financial-brain-pending-${id}`;
   const temporary = join(lock, `${pendingName}.tmp`), ready = join(lock, pendingName), previous = join(lock, "previous");
   const install = join(lock, `${pendingName}.install`);
+  // Identity refusal must keep the same no-cleanup outcome as the checks below.
+  const identityRefusal = {};
   let fd = null, displaced = false;
   try {
     if (!locked()) return notWritten();
@@ -420,7 +422,10 @@ function commitWorkspaceGuide(target, parent, snapshot, existing, content, owner
     const staged = fstatSync(fd);
     const closed = fd; fd = null; closeSync(closed);
     if (!locked() || !unchangedWorkspaceFile(temporary, staged, content, ownership)) return notWritten();
-    renameWithRetrySync(temporary, ready);
+    renameWithRetrySync(temporary, ready, { revalidate: () => {
+      if (!locked() || !unchangedWorkspaceFile(temporary, staged, content, ownership) ||
+          !renameIdentityMatches(ready, null)) throw identityRefusal;
+    } });
     pendingPath = ready;
     if (!locked() || !unchangedWorkspaceFile(ready, staged, content, ownership)) return notWritten();
     // Finish every fallible content write before moving the active guide.
@@ -465,7 +470,8 @@ function commitWorkspaceGuide(target, parent, snapshot, existing, content, owner
     if (recoveryPath) recoveryPath = join(retained, "previous");
     if (!sameIdentity(lstatSync(retained), lockStat) || !exact()) return notWritten();
     return { status: "written", changed: true, ...(recoveryPath ? { recoveryPath } : {}) };
-  } catch {
+  } catch (error) {
+    if (error === identityRefusal) return notWritten();
     // Ordinary preparation I/O failure has not displaced the active guide.
     // Retain the whole attempt and release our lock, allowing a later retry.
     // Races or failures after displacement still require explicit recovery.

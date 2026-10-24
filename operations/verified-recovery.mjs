@@ -1270,7 +1270,7 @@ function syncParent(path) {
   }
 }
 
-function writePrivateControl(path, value, { replace = false, random = randomBytes } = {}) {
+function writePrivateControl(path, value, { replace = false, random = randomBytes, platform = process.platform } = {}) {
   const absolute = resolve(path || "");
   ensureControlDirectory(dirname(absolute));
   const prior = assertControlDestination(absolute, { replace });
@@ -1288,17 +1288,21 @@ function writePrivateControl(path, value, { replace = false, random = randomByte
     writeFileSync(descriptor, bytes);
     fsyncSync(descriptor);
     fchmodSync(descriptor, 0o600);
+    const stagedIdentity = fstatSync(descriptor);
     closeSync(descriptor);
     descriptor = undefined;
     if (prior) {
-      let current;
-      try { current = lstatSync(absolute); } catch {
-        fail("verified recovery control destination changed before replacement");
-      }
-      if (!sameFile(prior, current)) {
-        fail("verified recovery control destination changed before replacement");
-      }
-      renameWithRetrySync(temporary, absolute);
+      renameWithRetrySync(temporary, absolute, { platform, revalidate: () => {
+        let current;
+        let staged;
+        try { current = lstatSync(absolute); staged = lstatSync(temporary); } catch {
+          fail("verified recovery control destination changed before replacement");
+        }
+        if (!sameFile(prior, current) || !sameFile(stagedIdentity, staged) ||
+            !staged.isFile() || staged.isSymbolicLink()) {
+          fail("verified recovery control destination changed before replacement");
+        }
+      } });
     } else {
       // A check-then-rename would overwrite a file created in the gap. Linking
       // the private staging inode into the final name gives first creation true

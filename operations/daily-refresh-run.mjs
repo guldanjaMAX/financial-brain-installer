@@ -1,6 +1,6 @@
 /** Sequential execution and per-source proof for the daily machine-pull plan. */
-import { renameWithRetrySync } from "./rename-retry.mjs";
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync } from "./rename-retry.mjs";
+import { chmodSync, closeSync, fstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -473,15 +473,25 @@ function freshnessMap(inventory) {
   }]));
 }
 
-function dailyReceiptWriter(plan, { home = homedir() } = {}) {
+function dailyReceiptWriter(plan, { home = homedir(), platform = process.platform } = {}) {
   const directory = join(resolve(home), ".brain", "daily-receipts");
   const path = join(directory, `${plan.identity.id}.json`);
   return async (receipt) => {
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     chmodSync(directory, 0o700);
+    const priorIdentity = captureRenameIdentity(path);
     const staged = `${path}.tmp-${process.pid}`;
-    writeFileSync(staged, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-    renameWithRetrySync(staged, path);
+    const descriptor = openSync(staged, "wx", 0o600);
+    let stagedIdentity;
+    try {
+      writeFileSync(descriptor, `${JSON.stringify(receipt, null, 2)}\n`);
+      stagedIdentity = fstatSync(descriptor);
+    } finally { closeSync(descriptor); }
+    renameWithRetrySync(staged, path, { platform, revalidate: () => {
+      if (!renameIdentityMatches(staged, stagedIdentity) || !renameIdentityMatches(path, priorIdentity)) {
+        throw new Error("the daily refresh receipt changed before replacement");
+      }
+    } });
     chmodSync(path, 0o600);
   };
 }

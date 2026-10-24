@@ -1,7 +1,7 @@
 /** Cross-platform owned scheduler definitions and update pause/restore rules. */
-import { renameWithRetrySync } from "./rename-retry.mjs";
+import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync } from "./rename-retry.mjs";
 import { createHash, randomBytes } from "node:crypto";
-import { accessSync, chmodSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { accessSync, chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, posix as posixPath, resolve, win32 as win32Path } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -625,6 +625,7 @@ export function writeDailyRefreshUpdateTransaction(input = {}, options = {}) {
   const directory = dirname(path);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   chmodSync(directory, 0o700);
+  const priorIdentity = captureRenameIdentity(path);
   let prior = null;
   if (existsSync(path)) {
     try { prior = JSON.parse(readFileSync(path, "utf8")); } catch {
@@ -683,8 +684,17 @@ export function writeDailyRefreshUpdateTransaction(input = {}, options = {}) {
   });
   const temporary = `${path}.tmp-${process.pid}-${randomBytes(8).toString("hex")}`;
   try {
-    writeFileSync(temporary, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-    renameWithRetrySync(temporary, path);
+    const descriptor = openSync(temporary, "wx", 0o600);
+    let stagedIdentity;
+    try {
+      writeFileSync(descriptor, `${JSON.stringify(receipt, null, 2)}\n`);
+      stagedIdentity = fstatSync(descriptor);
+    } finally { closeSync(descriptor); }
+    renameWithRetrySync(temporary, path, { platform: options.platform ?? process.platform, revalidate: () => {
+      if (!renameIdentityMatches(temporary, stagedIdentity) || !renameIdentityMatches(path, priorIdentity)) {
+        throw new Error("the daily update transaction receipt is unsafe");
+      }
+    } });
     chmodSync(path, 0o600);
     writeBrainRecoveryFence({
       manifestPath: plan.manifest_path,
@@ -793,10 +803,21 @@ export function clearDailyRefreshUpdateTransaction(identityOrPlan, options = {})
     }
     chmodSync(history, 0o700);
     const archive = join(history, `${value.transaction_id}.json`);
+    const archiveIdentity = captureRenameIdentity(archive);
     const temporary = `${archive}.tmp-${randomBytes(8).toString("hex")}`;
     try {
-      writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-      renameWithRetrySync(temporary, archive);
+      const descriptor = openSync(temporary, "wx", 0o600);
+      let stagedIdentity;
+      try {
+        writeFileSync(descriptor, `${JSON.stringify(value, null, 2)}\n`);
+        stagedIdentity = fstatSync(descriptor);
+      } finally { closeSync(descriptor); }
+      renameWithRetrySync(temporary, archive, { platform: options.platform ?? process.platform, revalidate: () => {
+        if (!renameIdentityMatches(temporary, stagedIdentity) || !renameIdentityMatches(archive, archiveIdentity) ||
+            !renameIdentityMatches(path, state)) {
+          throw new Error("the daily update history is unsafe");
+        }
+      } });
     } finally {
       try { unlinkSync(temporary); } catch {}
     }

@@ -1,6 +1,9 @@
-import { renameWithRetrySync } from "./rename-retry.mjs";
+import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync } from "./rename-retry.mjs";
 import {
+  closeSync,
   existsSync,
+  fstatSync,
+  openSync,
   readFileSync,
   unlinkSync,
   writeFileSync,
@@ -221,9 +224,19 @@ export function answerSetupJournalPath(manifestPath) {
 }
 
 function atomicJsonWrite(path, value) {
+  const predecessor = captureRenameIdentity(path);
   const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(temp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-  renameWithRetrySync(temp, path);
+  const descriptor = openSync(temp, "wx", 0o600);
+  let staged;
+  try {
+    writeFileSync(descriptor, `${JSON.stringify(value, null, 2)}\n`);
+    staged = fstatSync(descriptor);
+  } finally { closeSync(descriptor); }
+  renameWithRetrySync(temp, path, { revalidate() {
+    if (!renameIdentityMatches(temp, staged) || !renameIdentityMatches(path, predecessor)) {
+      throw new Error("the JSON file changed before it could be replaced");
+    }
+  } });
 }
 
 export function saveManifestAtomically(path, manifest) {

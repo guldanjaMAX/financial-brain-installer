@@ -907,13 +907,21 @@ function writeFileStore(path, store, options = {}) {
       verifyFilePayload(backup, backupIdentity, priorPayload, options, "rollback backup");
     }
 
-    const finalPrior = lstatIfPresent(path);
-    if ((prior === null) !== (finalPrior === null) ||
-        (prior && !sameFile(prior, finalPrior))) {
-      throw new Error("the Google token destination changed before replacement");
-    }
+    const destinationChanged = new Error("the Google token destination changed before replacement");
+    const stagingChanged = new Error("the Google token staged identity changed before verification");
+    let revalidationError;
+    const revalidate = () => {
+      try {
+        const finalPrior = lstatIfPresent(path);
+        if ((prior === null) !== (finalPrior === null) ||
+            (prior && !sameFile(prior, finalPrior))) throw destinationChanged;
+        const staged = lstatIfPresent(temporary);
+        if (!sameFile(stagedIdentity, staged) || !staged.isFile() || staged.nlink !== 1) throw stagingChanged;
+      } catch (error) { revalidationError = error; throw error; }
+    };
     syncTokenDirectory(path, platform, options, "prepared");
-    try { renameWithRetrySync(temporary, path, { rename: renameFile }); } catch {
+    try { renameWithRetrySync(temporary, path, { rename: renameFile, platform, revalidate }); } catch (error) {
+      if (error === revalidationError) throw error;
       throw new Error("the Google token replacement could not be committed");
     }
     committed = true;
@@ -947,11 +955,14 @@ function writeFileStore(path, store, options = {}) {
     let restored = false;
     if (prior && backupIdentity && priorPayload) {
       try {
-        if (!sameFile(lstatIfPresent(path), stagedIdentity) ||
-            !sameFile(lstatIfPresent(backup), backupIdentity)) {
-          throw new Error("transaction identities changed");
-        }
-        renameWithRetrySync(backup, path, { rename: renameFile });
+        renameWithRetrySync(backup, path, { rename: renameFile, platform, revalidate: () => {
+          const current = lstatIfPresent(path);
+          const saved = lstatIfPresent(backup);
+          if (!sameFile(current, stagedIdentity) || !sameFile(saved, backupIdentity) ||
+              !current.isFile() || current.nlink !== 1 || !saved.isFile() || saved.nlink !== 1) {
+            throw new Error("transaction identities changed");
+          }
+        } });
         const restoredIdentity = lstatIfPresent(path);
         if (!sameFile(restoredIdentity, backupIdentity)) {
           throw new Error("rollback identity did not become durable");

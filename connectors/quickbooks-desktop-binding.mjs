@@ -1,5 +1,5 @@
 /** Private local company identity. Never serialize this record into an envelope. */
-import { renameWithRetrySync } from "../operations/rename-retry.mjs";
+import { renameIdentityMatches, renameWithRetrySync } from "../operations/rename-retry.mjs";
 import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, constants, closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -84,11 +84,20 @@ export function desktopBindingStore(options = {}) {
   };
   return { read, write(value) {
     validate(value);
-    if (!checked(directory, true)) mkdirSync(directory, { mode: 0o700 }); protect(directory, true); checked(path);
+    if (!checked(directory, true)) mkdirSync(directory, { mode: 0o700 }); protect(directory, true);
+    const predecessor = checked(path);
     const temporary = `${path}.${randomBytes(8).toString('hex')}.tmp`;
     const fd = openSync(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
-    try { writeFileSync(fd, `${JSON.stringify(value)}\n`); fsyncSync(fd); } finally { closeSync(fd); }
-    try { protect(temporary); renameWithRetrySync(temporary, path); }
+    let staged;
+    try { writeFileSync(fd, `${JSON.stringify(value)}\n`); fsyncSync(fd); staged = fstatSync(fd); } finally { closeSync(fd); }
+    try {
+      protect(temporary);
+      renameWithRetrySync(temporary, path, { revalidate() {
+        if (!renameIdentityMatches(temporary, staged) || !renameIdentityMatches(path, predecessor)) {
+          throw qbdFailure('QB_BINDING_INVALID');
+        }
+      } });
+    }
     finally { try { unlinkSync(temporary); } catch (error) { if (error.code !== 'ENOENT') throw error; } }
     if (JSON.stringify(read()) !== JSON.stringify(value)) throw qbdFailure('QB_BINDING_INVALID');
     return value;

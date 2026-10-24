@@ -5,7 +5,7 @@
  * only. It has no credential, instance locator, or customer-specific value.
  */
 
-import { renameWithRetrySync } from "./rename-retry.mjs";
+import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync } from "./rename-retry.mjs";
 import {
   chmodSync,
   closeSync,
@@ -384,12 +384,15 @@ function restoreSkillSnapshot(snapshot) {
     }
     fchmodSync(fd, snapshot.mode);
     fsyncSync(fd);
+    const staged = fstatSync(fd);
     closeSync(fd);
     fd = undefined;
-    if (!readFileSync(snapshot.path).equals(currentBytes)) {
-      throw new Error("the skill changed before rollback");
-    }
-    renameWithRetrySync(temporary, snapshot.path);
+    renameWithRetrySync(temporary, snapshot.path, { revalidate: () => {
+      if (!renameIdentityMatches(temporary, staged) || !renameIdentityMatches(snapshot.path, current) ||
+          !readFileSync(snapshot.path).equals(currentBytes)) {
+        throw new Error("the skill changed before rollback");
+      }
+    } });
     const restored = readFileSync(snapshot.path);
     return restored.equals(snapshot.bytes) && (lstatSync(snapshot.path).mode & 0o7777) === snapshot.mode;
   } catch {
@@ -670,8 +673,9 @@ export function installClaudeTechnicianSkill(options = {}) {
   }
   ensureOwnedDirectory(dirname(target));
 
-  if (existsSync(target)) {
-    const stat = lstatSync(target);
+  const predecessor = captureRenameIdentity(target);
+  if (predecessor) {
+    const stat = predecessor;
     if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) {
       throw new Error("the existing Claude technician skill is not a safe regular file; it was left unchanged");
     }
@@ -691,9 +695,14 @@ export function installClaudeTechnicianSkill(options = {}) {
     fd = openSync(temporary, "wx", 0o600);
     writeFileSync(fd, content, "utf8");
     fsyncSync(fd);
+    const staged = fstatSync(fd);
     closeSync(fd);
     fd = null;
-    renameWithRetrySync(temporary, target);
+    renameWithRetrySync(temporary, target, { revalidate: () => {
+      if (!renameIdentityMatches(temporary, staged) || !renameIdentityMatches(target, predecessor)) {
+        throw new Error("the skill destination changed after preview");
+      }
+    } });
     chmodSync(target, 0o600);
   } catch (error) {
     if (fd !== null) closeSync(fd);

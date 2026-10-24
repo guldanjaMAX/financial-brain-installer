@@ -1,27 +1,34 @@
 import { registerHooks } from "node:module";
 
 const mutations = {
-  no_retry: [
+  no_retry: [[
     '["EPERM", "EACCES", "EBUSY"].includes(error?.code) && attempt < 9',
     "false",
-  ],
-  retry_every_error: [
+  ]],
+  retry_every_error: [[
     '["EPERM", "EACCES", "EBUSY"].includes(error?.code) && attempt < 9',
     "attempt < 9",
+  ]],
+  unbounded_tries: [[" && attempt < 9", ""]],
+  skip_retry_revalidation: [
+    ["    revalidate();", "    if (attempt === 0) revalidate();"],
+    ["    await revalidate();", "    if (attempt === 0) await revalidate();"],
   ],
-  unbounded_tries: [" && attempt < 9", ""],
+  remove_platform_gate: [['platform === "win32" && ', ""]],
 };
 const chosen = process.env.BRAIN_RENAME_MUTANT;
 if (!Object.hasOwn(mutations, chosen)) throw new Error("Unknown rename retry mutation");
-const [target, replacement] = mutations[chosen];
 const helperUrl = new URL("../../operations/rename-retry.mjs", import.meta.url).href;
 
 // Change only the module loaded by this test process, preserving product bytes.
 registerHooks({ load(url, context, nextLoad) {
   const result = nextLoad(url, context);
   if (url !== helperUrl) return result;
-  const source = String(result.source);
-  if (source.split(target).length !== 2) throw new Error("Rename retry mutation target missing or ambiguous");
+  let source = String(result.source);
+  for (const [target, replacement] of mutations[chosen]) {
+    if (source.split(target).length !== 2) throw new Error("Rename retry mutation target missing or ambiguous");
+    source = source.replace(target, replacement);
+  }
   process.stderr.write(`MUTATION_APPLIED ${chosen}\n`);
-  return { ...result, source: source.replace(target, replacement) };
+  return { ...result, source };
 } });

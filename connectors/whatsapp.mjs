@@ -57,7 +57,7 @@
  * is paired.
  */
 
-import { renameWithRetrySync } from "../operations/rename-retry.mjs";
+import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync } from "../operations/rename-retry.mjs";
 import {
   constants as fsConstants,
   closeSync,
@@ -399,6 +399,7 @@ function writeAll(descriptor, bytes) {
 
 export function saveDrainState(path, state, options = {}) {
   mkdirSync(dirname(path), { recursive: true });
+  const predecessor = captureRenameIdentity(path);
   // The snapshot carries message text from open conversations, so the file is
   // owner-only, and it is replaced atomically so a kill mid-write can never
   // leave half-written JSON that silently restarts the drain from zero.
@@ -436,9 +437,14 @@ export function saveDrainState(path, state, options = {}) {
     }
     writeAll(descriptor, bytes);
     fsyncSync(descriptor);
+    const staged = fstatSync(descriptor);
     closeSync(descriptor);
     descriptor = undefined;
-    renameWithRetrySync(tmp, path);
+    renameWithRetrySync(tmp, path, { revalidate() {
+      if (!renameIdentityMatches(tmp, staged) || !renameIdentityMatches(path, predecessor)) {
+        throw new Error("the WhatsApp drain state identity changed before its payload was written");
+      }
+    } });
   } catch (error) {
     if (descriptor !== undefined) {
       try { closeSync(descriptor); } catch { /* original error wins */ }

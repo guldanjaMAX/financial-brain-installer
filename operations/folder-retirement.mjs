@@ -67,6 +67,7 @@ function writeExclusive(io, path, bytes, mode) {
     writeAll(io, descriptor, bytes);
     io.fchmodSync(descriptor, mode);
     io.fsyncSync(descriptor);
+    return io.fstatSync(descriptor);
   } catch (error) {
     if (descriptor !== null) {
       try { io.closeSync(descriptor); } catch { /* preserve the write failure */ }
@@ -177,6 +178,7 @@ export function writeManifestAtomically(manifestPath, intendedManifest, options 
     ((path) => defaultSyncDirectory(path, io, filesystemPlatform));
   let backupCreated = false;
   let renamed = false;
+  let stagedIdentity;
   const concurrentEditError = () => {
     const error = new Error(
       `The Brain manifest changed after ${operationLabel} began, so nothing was replaced.`,
@@ -194,17 +196,26 @@ export function writeManifestAtomically(manifestPath, intendedManifest, options 
     if (expectedOriginalBytes !== null && !originalBytes.equals(expectedOriginalBytes)) {
       throw concurrentEditError();
     }
-    writeExclusive(io, temporaryPath, intendedBytes, mode);
+    stagedIdentity = writeExclusive(io, temporaryPath, intendedBytes, mode);
     options.beforeRename?.({ manifestPath: absolute, backupPath, temporaryPath });
-    const beforeSwap = io.lstatSync(absolute);
-    const beforeSwapBytes = io.readFileSync(absolute);
-    const afterSwapRead = io.lstatSync(absolute);
-    if (!beforeSwap.isFile() || beforeSwap.isSymbolicLink() ||
-        !linkCountIsOne(beforeSwap.nlink) || !sameFile(opened, beforeSwap) ||
-        !sameFile(beforeSwap, afterSwapRead) || !beforeSwapBytes.equals(originalBytes)) {
-      throw concurrentEditError();
-    }
-    renameWithRetrySync(temporaryPath, absolute, { rename: (from, to) => io.renameSync(from, to) });
+    renameWithRetrySync(temporaryPath, absolute, {
+      rename: (from, to) => io.renameSync(from, to), platform: filesystemPlatform,
+      revalidate: () => {
+        try {
+          const staged = io.lstatSync(temporaryPath);
+          const beforeSwap = io.lstatSync(absolute);
+          const beforeSwapBytes = io.readFileSync(absolute);
+          const afterSwapRead = io.lstatSync(absolute);
+          if (!staged.isFile() || staged.isSymbolicLink() || !linkCountIsOne(staged.nlink) ||
+              !sameFile(stagedIdentity, staged) ||
+              !beforeSwap.isFile() || beforeSwap.isSymbolicLink() ||
+              !linkCountIsOne(beforeSwap.nlink) || !sameFile(opened, beforeSwap) ||
+              !sameFile(beforeSwap, afterSwapRead) || !beforeSwapBytes.equals(originalBytes)) {
+            throw concurrentEditError();
+          }
+        } catch { throw concurrentEditError(); }
+      },
+    });
     renamed = true;
     if (filesystemPlatform !== "win32") syncDirectory(directory);
 
@@ -228,8 +239,21 @@ export function writeManifestAtomically(manifestPath, intendedManifest, options 
     let restorationError = null;
     if (renamed) {
       try {
-        writeExclusive(io, rollbackPath, originalBytes, mode);
-        renameWithRetrySync(rollbackPath, absolute, { rename: (from, to) => io.renameSync(from, to) });
+        const rollbackIdentity = writeExclusive(io, rollbackPath, originalBytes, mode);
+        renameWithRetrySync(rollbackPath, absolute, {
+          rename: (from, to) => io.renameSync(from, to), platform: filesystemPlatform,
+          revalidate: () => {
+            try {
+              const current = io.lstatSync(absolute);
+              const saved = io.lstatSync(rollbackPath);
+              if (!sameFile(current, stagedIdentity) || !sameFile(saved, rollbackIdentity) ||
+                  !current.isFile() || current.isSymbolicLink() || !linkCountIsOne(current.nlink) ||
+                  !saved.isFile() || saved.isSymbolicLink() || !linkCountIsOne(saved.nlink)) {
+                throw concurrentEditError();
+              }
+            } catch { throw concurrentEditError(); }
+          },
+        });
         if (filesystemPlatform !== "win32") {
           try { syncDirectory(directory); } catch { /* exact byte readback below remains authoritative */ }
         }

@@ -5,7 +5,7 @@ import { registerHooks, syncBuiltinESMExports } from "node:module";
 const target = process.env.BRAIN_RENAME_WRITER_TARGET;
 const eventsPath = process.env.BRAIN_RENAME_WRITER_EVENTS;
 const mode = process.env.BRAIN_RENAME_WRITER_MODE;
-assert.ok(target && eventsPath && ["control", "transient", "terminal"].includes(mode));
+assert.ok(target && eventsPath && ["control", "transient", "terminal", "race-destination", "race-staging"].includes(mode));
 const manifest = JSON.parse(fs.readFileSync(process.env.BRAIN_RENAME_WRITER_INPUT, "utf8"));
 const verifierUrl = new URL("../../operations/package-bundle-verifier.mjs", import.meta.url).href;
 
@@ -44,6 +44,12 @@ fs.renameSync = (from, to) => {
   stats.samePath &&= staged === from;
   stats.sameBytes &&= bytes.equals(fs.readFileSync(from));
   stats.sameInode &&= inode === fs.statSync(from).ino;
+  if (mode.startsWith("race-") && stats.calls === 1) {
+    const substitute = `${target}.substitute`;
+    fs.writeFileSync(substitute, "synthetic concurrent replacement\n", { flag: "wx" });
+    originalRename(substitute, mode === "race-destination" ? to : from);
+    throw Object.assign(new Error("synthetic rename refusal"), { code: "EACCES" });
+  }
   if (mode === "terminal" || (mode === "transient" && stats.calls === 1)) {
     throw Object.assign(new Error("synthetic rename refusal"), { code: "EACCES" });
   }

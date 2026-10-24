@@ -19,7 +19,7 @@
  * is where it becomes true.
  */
 
-import { renameWithRetrySync } from "../operations/rename-retry.mjs";
+import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync } from "../operations/rename-retry.mjs";
 import {
   closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readSync,
   readdirSync, realpathSync, writeFileSync, existsSync, mkdirSync,
@@ -2126,14 +2126,24 @@ export function loadState(path) {
 
 export function saveState(path, state) {
   mkdirSync(dirname(path), { recursive: true });
+  const predecessor = captureRenameIdentity(path);
   // The Drive state contains private file ids, names, folder paths and the
   // incremental cursor. Keep it owner-only, and replace it atomically so a
   // crash or laptop sleep cannot leave half-written JSON that silently forces
   // the next run back to a full walk.
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
   try {
-    writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
-    renameWithRetrySync(tmp, path);
+    const descriptor = openSync(tmp, "wx", 0o600);
+    let staged;
+    try {
+      writeFileSync(descriptor, JSON.stringify(state, null, 2));
+      staged = fstatSync(descriptor);
+    } finally { closeSync(descriptor); }
+    renameWithRetrySync(tmp, path, { revalidate() {
+      if (!renameIdentityMatches(tmp, staged) || !renameIdentityMatches(path, predecessor)) {
+        throw new Error("the ingest state changed before it could be replaced");
+      }
+    } });
     // rename preserves the temp file's mode. chmod also repairs an older state
     // file that may have been created by the pre-hardening implementation.
     chmodSync(path, 0o600);

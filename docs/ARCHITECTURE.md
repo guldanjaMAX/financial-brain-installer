@@ -1088,13 +1088,17 @@ aggregate counters rather than moving this scan into its request path.
 ## Local state and privacy boundaries
 
 Windows-reachable staged-file replacements use `operations/rename-retry.mjs`.
-Only rename is retried, for `EPERM`, `EACCES` or `EBUSY`, up to ten attempts
+Only Windows rename is retried, for `EPERM`, `EACCES` or `EBUSY`, up to ten attempts
 separated by 225 ms waits. Synchronous writers block until persistence finishes;
 the asynchronous helper yields between attempts. Staging, permissions, exact
 readback and terminal cleanup remain each writer's responsibility. Exhaustion
-throws the last rename error into the writer's existing refusal path. This
-bounded retry also applies on other platforms; it never retries content writes,
-permission changes or unrelated filesystem errors.
+throws the last rename error into the writer's existing refusal path. Other
+platforms make one attempt without waiting. Before the first attempt and every
+retry, an injected caller proof revalidates the staged file's identity and the
+expected predecessor or absence, or the caller's held lifecycle lock. A failed
+proof stops before rename with the caller's existing refusal, even when that
+refusal has a retryable code. Content writes, permission changes, proof failures
+and unrelated filesystem errors are never retried.
 
 Durable secrets never belong in the manifest or MCP registration. The manifest
 contains only a non-secret locator when Keychain is used. Standard durable

@@ -6,13 +6,14 @@
  * receives a temporary home plus an allowlisted environment. Live field gates
  * are printed as human work only. They are never executed here.
  */
-import { renameWithRetrySync } from "../operations/rename-retry.mjs";
+import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync } from "../operations/rename-retry.mjs";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
   closeSync,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -618,14 +619,21 @@ export function makeOutputDirectory(requested, { temporaryRoot = tmpdir() } = {}
 }
 
 function replacePrivateFile(path, bytes) {
+  const predecessor = captureRenameIdentity(path);
   const temporary = `${path}.tmp`;
   const descriptor = openSync(temporary, "wx", 0o600);
+  let staged;
   try {
     writeFileSync(descriptor, bytes);
+    staged = fstatSync(descriptor);
   } finally {
     closeSync(descriptor);
   }
-  renameWithRetrySync(temporary, path);
+  renameWithRetrySync(temporary, path, { revalidate() {
+    if (!renameIdentityMatches(temporary, staged) || !renameIdentityMatches(path, predecessor)) {
+      throw new Error("field_prepare_failed");
+    }
+  } });
   if (!IS_WINDOWS) chmodSync(path, 0o600);
 }
 

@@ -5,11 +5,12 @@
  * response, account id, hostname, source name, or customer content.
  */
 
-import { renameWithRetrySync } from "./rename-retry.mjs";
+import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync } from "./rename-retry.mjs";
 import {
   chmodSync,
   closeSync,
   existsSync,
+  fstatSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
@@ -434,9 +435,10 @@ export function writeBootstrapStatusFile(manifestPath, status, options = {}) {
     ? canonical.toLowerCase() === expected.toLowerCase()
     : canonical === expected;
   if (!sameDirectory) throw new Error("the bootstrap status directory must not pass through a linked path");
-  if ((options.existsImpl ?? existsSync)(target)) {
-    const identity = (options.lstatImpl ?? lstatSync)(target);
-    if (!identity.isFile() || identity.isSymbolicLink() || identity.nlink !== 1) {
+  const identityOptions = { lstat: options.lstatImpl ?? lstatSync };
+  const predecessor = captureRenameIdentity(target, identityOptions);
+  if (predecessor) {
+    if (!predecessor.isFile() || predecessor.isSymbolicLink() || predecessor.nlink !== 1) {
       throw new Error("the bootstrap status destination is not a safe regular file");
     }
   }
@@ -447,9 +449,18 @@ export function writeBootstrapStatusFile(manifestPath, status, options = {}) {
     descriptor = (options.openImpl ?? openSync)(temporary, "wx", 0o600);
     (options.writeFileImpl ?? writeFileSync)(descriptor, payload, "utf8");
     (options.fsyncImpl ?? fsyncSync)(descriptor);
+    const staged = (options.fstatImpl ?? fstatSync)(descriptor);
     (options.closeImpl ?? closeSync)(descriptor);
     descriptor = undefined;
-    renameWithRetrySync(temporary, target, { rename: options.renameImpl ?? renameSync });
+    renameWithRetrySync(temporary, target, {
+      rename: options.renameImpl ?? renameSync,
+      revalidate() {
+        if (!renameIdentityMatches(temporary, staged, identityOptions) ||
+            !renameIdentityMatches(target, predecessor, identityOptions)) {
+          throw new Error("the bootstrap status destination is not a safe regular file");
+        }
+      },
+    });
     (options.chmodImpl ?? chmodSync)(target, 0o600);
   } catch (error) {
     if (descriptor !== undefined) {

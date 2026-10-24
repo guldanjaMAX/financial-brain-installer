@@ -13,7 +13,7 @@
  * become another copy of filenames, source IDs, URLs, content, or credentials.
  */
 
-import { renameWithRetrySync } from "./rename-retry.mjs";
+import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync } from "./rename-retry.mjs";
 import { acquireSourceIngestLock } from "./source-ingest-lock.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import {
@@ -1180,8 +1180,8 @@ export function assertLedgerDoesNotCollide(path, protectedPaths = []) {
 }
 
 function assertLedgerDestination(path, options = {}) {
-  if (!existsSync(path)) return;
-  const info = lstatSync(path);
+  const info = captureRenameIdentity(path);
+  if (!info) return null;
   if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) {
     fail("coverage ledger destination is not a safe regular file");
   }
@@ -1199,6 +1199,7 @@ function assertLedgerDestination(path, options = {}) {
     fail("existing coverage ledger could not be parsed");
   }
   validateExistingLedger(existing);
+  return info;
 }
 
 /** Atomically replace the private ledger with canonical, owner-only bytes. */
@@ -1207,7 +1208,7 @@ export function writeCuratedCoverageLedger(path, ledger, options = {}) {
   const directory = dirname(absolute);
   assertLedgerDoesNotCollide(absolute, options.protectedPaths ?? []);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
-  assertLedgerDestination(absolute, options);
+  const predecessor = assertLedgerDestination(absolute, options);
   const bytes = Buffer.from(`${canonical(ledger)}\n`, "utf8");
   const suffix = (options.randomBytes ?? randomBytes)(8).toString("hex");
   const temporary = `${absolute}.tmp-${suffix}`;
@@ -1221,9 +1222,14 @@ export function writeCuratedCoverageLedger(path, ledger, options = {}) {
     );
     writeFileSync(descriptor, bytes);
     fsyncSync(descriptor);
+    const staged = fstatSync(descriptor);
     closeSync(descriptor);
     descriptor = undefined;
-    renameWithRetrySync(temporary, absolute);
+    renameWithRetrySync(temporary, absolute, { revalidate() {
+      if (!renameIdentityMatches(temporary, staged) || !renameIdentityMatches(absolute, predecessor)) {
+        fail("coverage ledger destination is not a safe regular file");
+      }
+    } });
     const readback = readFileSync(absolute);
     if (!readback.equals(bytes)) fail("coverage ledger did not read back exactly");
     const info = statSync(absolute);

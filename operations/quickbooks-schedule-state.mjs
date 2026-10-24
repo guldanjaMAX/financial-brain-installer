@@ -1,5 +1,5 @@
 /** Local scheduling evidence only. A source's ingest receipt remains authoritative. */
-import { renameWithRetrySync } from "./rename-retry.mjs";
+import { renameIdentityMatches, renameWithRetrySync } from "./rename-retry.mjs";
 import { randomBytes } from 'node:crypto';
 import { chmodSync, constants, closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -55,13 +55,17 @@ export function readQuickBooksScheduleState(plan, source, options = {}) {
 export function writeQuickBooksScheduleState(plan, source, state, options = {}) {
   const value = validate({ schema_version: 1, configuration_hash: source.configuration_hash,
     last_complete_snapshot_at: state.last_complete_snapshot_at, last_run_failed: state.last_run_failed });
-  const path = location(plan, source, options); checked(path);
+  const path = location(plan, source, options);
+  const predecessor = checked(path);
   const temporary = `${path}.${randomBytes(8).toString('hex')}.tmp`;
   const fd = openSync(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
-  try { writeFileSync(fd, `${JSON.stringify(value)}\n`, 'utf8'); fsyncSync(fd); } finally { closeSync(fd); }
+  let staged;
+  try { writeFileSync(fd, `${JSON.stringify(value)}\n`, 'utf8'); fsyncSync(fd); staged = fstatSync(fd); } finally { closeSync(fd); }
   try {
     if ((options.platform || process.platform) === 'win32') (options.protectFile || restrictWindowsFileToCurrentUser)(temporary, options);
-    renameWithRetrySync(temporary, path);
+    renameWithRetrySync(temporary, path, { revalidate() {
+      if (!renameIdentityMatches(temporary, staged) || !renameIdentityMatches(path, predecessor)) throw invalid();
+    } });
   } finally { try { unlinkSync(temporary); } catch (error) { if (error.code !== 'ENOENT') throw error; } }
   return value;
 }

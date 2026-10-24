@@ -4,7 +4,7 @@
  * but it identifies a private install, so it stays in an owner-only state file.
  */
 
-import { renameWithRetrySync } from "./rename-retry.mjs";
+import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync } from "./rename-retry.mjs";
 import {
   chmodSync,
   closeSync,
@@ -325,11 +325,18 @@ export function rememberInstalledManifest(manifestPath, options = {}) {
     }, null, 2)}\n`);
     if (process.platform !== "win32") chmodSync(temporary, 0o600);
     fsyncSync(descriptor);
+    const staged = fstatSync(descriptor);
     closeSync(descriptor);
     descriptor = undefined;
-    // The private state directory is owner-only, so this atomic replacement
-    // cannot be redirected between the safety check and rename.
-    renameWithRetrySync(temporary, destination);
+    // A concurrent owner process can replace a path even in a private folder.
+    // Explicit unsafe-pointer repair still binds the exact approved old entry.
+    renameWithRetrySync(temporary, destination, { revalidate() {
+      const current = captureRenameIdentity(destination);
+      if (!renameIdentityMatches(temporary, staged) ||
+          (existing ? !current || !sameFile(current, existing) : current !== null)) {
+        fail("INSTALLED_MANIFEST_POINTER_CHANGED", "the saved Brain location changed while it was opened");
+      }
+    } });
     created = false;
     syncRenamedPointer(directory, destination, options);
     const readback = readInstalledManifest(options);
