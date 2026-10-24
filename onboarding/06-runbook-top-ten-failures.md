@@ -60,6 +60,17 @@ It gives the same five answers for every problem: what happened, what stayed
 protected, whether retrying is safe, what to try next, and when a technician
 can help. The longer entries below add the provider-specific detail.
 
+For a failed daily source, run `brain daily status <manifest>` to read its issue
+code and bounded, redacted detail. The private `daily.log` and source receipt
+retain the same detail, including the original cause when the load report only
+says the source did not load. A removal plan waiting for approval is identified
+separately from another safety review. Review the exact plan with the technician;
+the daily task cannot approve it. A held lock uses `SCHEDULE_RUN_FAILED` and says
+to wait for the other operation. A network failure uses `NETWORK_UNREACHABLE`;
+check the connection before retrying. Neither stop proves fresh source data.
+Tokens, email addresses, URLs and file paths are redacted from these details.
+The shareable support journal still accepts typed metadata only.
+
 For `PROVENANCE_TARGET_REPAIR_INCOMPLETE`, the one-file repair could not verify
 its complete result. Nothing was lost. Accepted progress is saved and the
 original file is unchanged. Run a new read-only preview before retrying. If

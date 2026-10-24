@@ -10,6 +10,12 @@ Candidate only. This version has not been released. The changes below still
 need the full host gate, CI and separately reviewed field acceptance for the
 exact sealed package. This version bump verifies no incident.
 
+- **Daily source failures retain their reason.** Daily status and the private
+  log now keep the source's redacted error through the load report. Removal
+  approval, another safety review, a held lock and a network failure have
+  distinct reasons. Check the issue and detail after a failed refresh; a failed
+  source still does not count as fresh.
+
 - **You can optionally have Claude write and check Brain answers.** Connect the
   owner's own Anthropic account with `brain connect anthropic`. Opus writes the
   answer and Sonnet checks it before it is returned. The recommended daily

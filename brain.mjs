@@ -16851,6 +16851,9 @@ export async function cmdLoad(manifestPath, options = {}) {
   }
   log("");
 
+  // Keep typed failures only in memory. Daily refresh needs the original
+  // cause after this sweep finishes, but report entries remain serializable.
+  const sourceErrors = [];
   let index = 0;
   for (const entry of runnable) {
     index++;
@@ -16877,6 +16880,7 @@ export async function cmdLoad(manifestPath, options = {}) {
         legResults.push(described);
         if (entry.legs.length > 1) legLines.push(`${label}: ${described.text}`);
       } catch (error) {
+        sourceErrors.push(error);
         if (error instanceof DriveRemovalReviewRequired) review = true;
         const reason = String(error?.message || error).replace(/\s+/g, " ").trim();
         legFailures.push({ label, reason });
@@ -16992,14 +16996,19 @@ export async function cmdLoad(manifestPath, options = {}) {
     unavailable: unavailableCount,
     failed: failedCount,
   };
+  const failureOptions = sourceErrors.length ? {
+    cause: sourceErrors.length === 1 ? sourceErrors[0]
+      : new AggregateError(sourceErrors, "one or more source legs failed"),
+  } : undefined;
   if (failedCount) {
     // Non-zero, but only after the whole report has printed. The exit code is
     // for the script; the report above is for the person, and a partial load
     // with an honest list is still worth every line of it.
-    die(
+    throw new Fatal(
       `${failedCount} of ${runnable.length} source(s) ${dryRun ? "could not even be previewed" : "did not load"}`
         + (done.length ? `; the other ${done.length} ${dryRun ? "previewed fine" : "did"}.` : ".") + "\n"
-        + "      Fix the reported cause, then re-run just that one: brain load <manifest> --only <source>"
+        + "      Fix the reported cause, then re-run just that one: brain load <manifest> --only <source>",
+      failureOptions,
     );
   }
   // Daily refresh independently verifies each durable success timestamp. Let
@@ -17011,9 +17020,10 @@ export async function cmdLoad(manifestPath, options = {}) {
       unavailableCount ? `${unavailableCount} unavailable` : null,
       !dryRun && partialCount ? `${partialCount} partial` : null,
     ].filter(Boolean).join(" and ");
-    die(
+    throw new Fatal(
       `${parts} source outcome(s) were not complete, so this load is not a successful sweep.\n` +
-        "      The full report is above. Fix or reconnect the named source, then re-run only it with --only <source>."
+        "      The full report is above. Fix or reconnect the named source, then re-run only it with --only <source>.",
+      failureOptions,
     );
   }
   return summary;
