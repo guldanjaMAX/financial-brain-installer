@@ -12896,8 +12896,16 @@ export async function cmdApplyIngestRemovals(m, manifestPath, flags, options = {
     const base = await (options.resolveBaseUrl ?? resolveBaseUrl)(m, m.brain?.domain ? null : await (options.resolveAccount ?? resolveAccount)(m));
     const adminKey = (options.resolveAdminKey ?? resolveAdminKey)(manifestPath);
     if (!adminKey) die("Removal apply needs this Brain's durable admin key.");
-    const review = ingestRemovalReview(m, manifestPath, sourceName, state,
-      () => { assertOwned?.(); lib.saveState(statePath, state); }, base, adminKey, options, assertOwned);
+    const save = () => { assertOwned?.(); lib.saveState(statePath, state); };
+    const attachmentPlan = state.gmail_attachment_backfill?.review?.ingest_removal_plan;
+    const review = attachmentPlan?.fingerprint === flags["apply-removals"]
+      ? (await import("./operations/gmail-attachment-review.mjs")).createGmailAttachmentReview({
+          state, source: sourceName, manifest: m, manifestPath: resolve(manifestPath),
+          saveState: save, base, adminKey, assertOwned,
+          ...(options.removalPlanRequest ? { request: options.removalPlanRequest } : {}),
+          ...(options.removalPlanRuntime ? { runtime: options.removalPlanRuntime } : {}),
+        })
+      : ingestRemovalReview(m, manifestPath, sourceName, state, save, base, adminKey, options, assertOwned);
     const result = await review.apply(flags["apply-removals"], flags["approve-removals"]);
     ok(`${result.removed} planned document(s) removed from source ${sourceName}; exact readback passed. Run ingestion again to complete the source refresh.`);
     return result;
@@ -17309,6 +17317,9 @@ const cmdIngestRemoteRun = async (
         ...(savedState.gmail_retry && Object.keys(savedState.gmail_retry).length
           ? { gmail_retry: { ...savedState.gmail_retry } }
           : {}),
+        ...(savedState.gmail_attachment_backfill
+          ? { gmail_attachment_backfill: savedState.gmail_attachment_backfill }
+          : {}),
         ...Object.fromEntries(
           ["drive_removal_safety_baseline", "drive_removal_review", "gmail_removal_safety_baseline", "imap_removal_safety_baseline"]
             .filter((key) => savedState[key] != null)
@@ -19186,14 +19197,84 @@ const cmdIngestRemoteRun = async (
     gmailCredentialRefusalSkips - (which === "gmail" ? gmailDurableRetryFailures : 0)) +
     gmailHistoryMarkerMissing + imapSnapshotGaps;
 
+  let attachmentBackfill = null;
+  const runAttachmentBackfill = async () => {
+    const { runGmailAttachmentBackfill } = await import("./operations/gmail-attachment-backfill.mjs");
+    const { createGmailAttachmentReview } = await import("./operations/gmail-attachment-review.mjs");
+    const gmail = options.gmail ?? await import("./connectors/gmail.mjs");
+    const save = () => saveState(statePath, state);
+    return runGmailAttachmentBackfill({
+      state, source: sourceName, scannerFingerprint, since: gmailSince, dryRun: dry,
+      limit: Math.min(options.gmailAttachmentBackfillLimit ?? 100, dry ? limit : 100),
+      gmail, getToken, saveState: save, assertOwned: assertLockOwned ?? (() => {}),
+      recordAccepted: plan => recordAcceptedDocumentState(state, plan),
+      createReview: () => createGmailAttachmentReview({
+        state, source: sourceName, manifest: m, manifestPath: resolve(manifestPath),
+        base, adminKey, saveState: save, assertOwned: assertLockOwned,
+        ...(options.removalPlanRequest ? { request: options.removalPlanRequest } : {}),
+        ...(options.removalPlanRuntime ? { runtime: options.removalPlanRuntime } : {}),
+      }),
+      prepare: async id => {
+        const r = await gmail.toEnvelope(getToken, id, {
+          sourceName, scanCredentials: scannerOn, trustedEligible: false,
+        }, { since: gmailSince });
+        if (r.skip) {
+          if (r.cursor_blocking !== false) return null;
+          return { terminal: r.credential_refusal ? "attachment_backfill_credential_refused"
+            : r.policy_skip ? "attachment_backfill_policy_excluded"
+              : r.source_deleted ? "attachment_backfill_source_deleted" : "attachment_backfill_unreadable" };
+        }
+        const envelope = sanitizeIngestEnvelope(r.envelope);
+        if (credentialRefusalOf(envelope, scannerOn)) return { terminal: "attachment_backfill_credential_refused" };
+        const envelopes = splitOversized(envelope);
+        const key = `${sourceName}:${id}`;
+        return { hash: r.version, envelopes, rel: id, stateKey: key, deferState: true,
+          familyPlan: { stateKey: key, hash: r.version, expectedParts: envelopes.length,
+            base_doc_uid: key, keep_doc_uids: envelopes.map(e => `${e.source_type}:${e.source_id}`),
+            family_kind: "structural", skipKeys: [key, ...envelopes.map(e => e.source_id)], legacyPartRoot: id } };
+      },
+      send: async item => {
+        let accepted = 0;
+        for await (const group of batchStream([item], value => value)) {
+          let chunks = 0;
+          let validChunks = true;
+          const part = await sendPreparedBatches({ base, adminKey, groups: [group], state, statePath,
+            skips, quiet: true, saveState, assertOwned: assertLockOwned,
+            retryFinalization: true, retrySleep: options.ingestRetrySleep, retryBudget: finalizationRetryBudget,
+            onResult: (_item, result) => {
+              if (["created", "updated", "unchanged"].includes(result.status)) accepted++;
+              if (paceVectorsPerMinute !== null && ["created", "updated"].includes(result.status)) {
+                if (!Number.isSafeInteger(result.chunks) || result.chunks < 0) validChunks = false;
+                else chunks += result.chunks;
+              }
+            } });
+          addTally(part);
+          if (!validChunks) throw new Error("Gmail attachment pace receipt is incomplete.");
+          if (paceVectorsPerMinute !== null && chunks > 0) {
+            await paceSleep(Math.ceil(chunks * 60_000 / paceVectorsPerMinute));
+            assertLockOwned?.();
+          }
+        }
+        return accepted === item.familyPlan.expectedParts;
+      },
+    });
+  };
+
   if (dry) {
+    if (which === "gmail" && coverageGaps === 0 && gmailLabelGaps === 0) {
+      attachmentBackfill = await runAttachmentBackfill();
+      info(`Gmail attachment preview: ${attachmentBackfill.attempted} candidate(s) checked; ` +
+        (attachmentBackfill.complete ? "candidate search complete." : "more candidate work or cleanup remains."));
+      if (attachmentBackfill.error) throw attachmentBackfill.error;
+    }
     await reportSkips(skips);
     // A preview still has to be complete enough to trust. Report every isolated
     // item first, then refuse the success-shaped receipt before printing a green
     // dry-run result. Dry runs never persist the retry marker.
     assertNoIngestFailures(tally);
     ok("dry run, nothing was sent");
-    return { dry_run: true, would_send: prepared, unchanged, skipped: skips.length, failed: 0 };
+    return { dry_run: true, would_send: prepared + (attachmentBackfill?.would_send || 0),
+      unchanged, skipped: skips.length, failed: 0 };
   }
 
   await removalReview.finish();
@@ -19229,6 +19310,15 @@ const cmdIngestRemoteRun = async (
           : `${tally.failed} document(s) failed`;
     warn(`${reason}, so the source cursor was NOT advanced; the next run will retry them`);
   }
+  // Attachment migration cannot rewind a settled history window or put its
+  // replacement approvals into the source-wide review state above.
+  if (which === "gmail" && cursorCanAdvance && scannerProgressCanCommit && coverageGaps === 0) {
+    attachmentBackfill = await runAttachmentBackfill();
+    scanned += attachmentBackfill.attempted;
+    info(`Gmail attachment backfill: ${attachmentBackfill.attempted} candidate(s) checked, ` +
+      `${attachmentBackfill.accepted} accepted, ${attachmentBackfill.excluded} excluded; ` +
+      (attachmentBackfill.complete ? "candidate search complete." : "more work remains; normal history was saved."));
+  }
   // A non-policy skip remains visible as incomplete coverage. Gmail still
   // advances past deterministic credential, parse and quality outcomes so one
   // immutable message cannot poison every later history run. A failed Gmail
@@ -19241,7 +19331,7 @@ const cmdIngestRemoteRun = async (
     ? gmailRetryMessageIds(state, sourceName).filter((id) => !gmailRetriesAtStart.has(id)).length : 0;
   const driveReviewRequired = which === "drive" &&
     (protectedDriveUids().size > 0 || malformedDriveIdentityCount > 0);
-  const hasRemoteGap = sourceReceiptHasRemoteGap({
+  const hasRemoteGap = Boolean(attachmentBackfill && !attachmentBackfill.complete) || sourceReceiptHasRemoteGap({
     source: which, tally, totalRefused, coverageGaps, driveReviewRequired, retryableSkips: retryableOcrSkips,
     durableRetries: gmailRetryBacklog,
   });
@@ -19268,7 +19358,7 @@ const cmdIngestRemoteRun = async (
     // an issue code invites a reader to believe the happier of the two.
     ...(hasRemoteGap
       ? {
-          issue_code: driveReviewRequired
+          issue_code: driveReviewRequired || attachmentBackfill?.error instanceof DriveRemovalReviewRequired
             ? "SAFETY_REVIEW_REQUIRED"
             : totalRefused > 0 && which !== "gmail" ? "INPUT_REFUSED" : "INGEST_FAILED",
           ...(which === "gmail" && gmailOperationalFailure
@@ -19363,6 +19453,7 @@ const cmdIngestRemoteRun = async (
     warn(message);
   }
   await reportBacklog(manifestPath);
+  if (attachmentBackfill?.error) throw attachmentBackfill.error;
   if (which === "gmail" && (coverageGaps > 0 || gmailLabelGaps ||
       gmailHistoryMarkerMissing || gmailPendingRemovalGaps || retryableOcrSkips)) {
     die(

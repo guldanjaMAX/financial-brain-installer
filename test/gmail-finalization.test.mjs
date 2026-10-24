@@ -77,6 +77,7 @@ async function fixture(run, source = "gmail") {
           ingest.saveState(path, state);
         } }),
         gmail: {
+          listAttachmentCandidates: async () => ({ ids: [], nextPageToken: null }),
           currentHistoryId: async () => f.marker,
           listHistory: async () => ({ ids: f.ids, deletedIds: [], historyId: f.marker }),
           listMessages: async function* () { yield* f.ids; },

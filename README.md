@@ -880,8 +880,8 @@ Brain before rerunning Drive ingest.
 Gmail reads additions, deletions, and label changes from its typed history. A
 complete pass also compares the filtered mailbox snapshot with the live D1
 inventory, so a stale stored message cannot survive simply because history
-expired. Every planned Gmail removal is read back before its history cursor or
-credential-scanner version is marked complete. Scanner v5 makes local folders,
+expired. Every planned Gmail source removal is read back before its history
+cursor or credential-scanner version is marked complete. Scanner v5 makes local folders,
 Drive, Gmail, and IMAP recheck previously accepted documents with the corrected
 credential rules.
 If the Worker returns a recoverable failure for only some Gmail document parts,
@@ -917,9 +917,14 @@ OCR or load figures into the structured ledger.
 Attachment text stays with its message citation and filename. Identical copies
 within one message render once; weekly deliveries keep separate provenance.
 The report date comes only from an explicit date in its text. A later email
-delivery never makes an older report current. Migration of earlier body-only
-revisions remains under review; the capped attachment-only backfill is not
-implemented in this candidate.
+delivery never makes an older report current. Earlier body-only revisions are
+updated through a separate, resumable search for messages with supported
+attachments. Each run processes at most 100 candidates with bounded provider
+pages, while normal history continues. Its private checkpoint retains unfinished
+work. Any replacement cleanup requires its own exact review and approval;
+waiting for that review does not hold normal history. Search completion does
+not establish a complete mailbox attachment census. Real-mailbox acceptance
+remains a separate field gate.
 
 The local-folder guard matters because a folder that failed to mount looks
 exactly like a client who deleted everything in it.

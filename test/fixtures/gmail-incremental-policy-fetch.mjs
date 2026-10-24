@@ -224,6 +224,11 @@ globalThis.fetch = async (input, options = {}) => {
     });
   }
   if (url.hostname === "gmail.googleapis.com" && url.pathname === "/gmail/v1/users/me/messages") {
+    // These policy fixtures contain body-only mail. Candidate discovery is an
+    // independent query and cannot be served by the authoritative sweep rows.
+    if ((url.searchParams.get("q") || "").endsWith(" has:attachment {filename:xlsx filename:xls filename:csv filename:pdf}")) {
+      return json({ messages: [] });
+    }
     if (mode === "resume-precondition-failure") {
       return json({
         messages: [
