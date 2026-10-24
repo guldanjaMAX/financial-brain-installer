@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { format } from "node:util";
 
 import { cmdLoad, loadSourceRegistry } from "../brain.mjs";
 import { runDailyRefreshCli } from "../operations/daily-refresh-run.mjs";
@@ -120,32 +122,130 @@ test("daily load clean source control keeps its complete summary and runs all le
   assert.equal(JSON.stringify(result).includes('"errors"'), false);
 });
 
-test("daily load default runner preserves removal cause in its receipt and daily log", async (t) => {
-  const review = new DriveRemovalReviewRequired("a removal plan is waiting for approval");
+// Observe all public console methods as well as direct stream writes. Restore
+// even on rejection so neither the test runner nor a later test loses output.
+async function captureOutput(task) {
+  const output = [];
+  const methods = Object.getOwnPropertyNames(console).filter(name =>
+    !name.startsWith("_") && name !== "Console" && typeof console[name] === "function");
+  const saved = methods.map(name => [name, console[name]]);
+  const streams = [process.stdout, process.stderr].map(stream => [stream, stream.write]);
+  for (const name of methods) console[name] = (...args) => {
+    output.push({ channel: `console.${name}`, text: format(...args) });
+  };
+  for (const [stream] of streams) stream.write = (chunk, encoding, callback) => {
+    output.push({ channel: stream === process.stdout ? "stdout" : "stderr", text: String(chunk) });
+    const done = typeof encoding === "function" ? encoding : callback;
+    if (done) done();
+    return true;
+  };
+  try { return { value: await task(methods), output }; }
+  finally {
+    for (const [name, method] of saved) console[name] = method;
+    for (const [stream, write] of streams) stream.write = write;
+  }
+}
+
+test("daily load output capture control observes every console method and both streams", async () => {
+  const marker = randomUUID();
+  const { value: methods, output } = await captureOutput(async names => {
+    for (const name of names) console[name](marker);
+    process.stdout.write(marker);
+    process.stderr.write(Buffer.from(marker));
+    return names;
+  });
+  assert.deepEqual(output.map(entry => entry.channel), [...methods.map(name => `console.${name}`), "stdout", "stderr"]);
+  assert.equal(output.every(entry => entry.text.includes(marker)), true);
+});
+
+for (const mode of ["failed", "partial", "clean"]) {
+test(`daily load default adapter ${mode} source keeps raw leg diagnostics off every output channel`, async (t) => {
+  const marker = randomUUID();
+  const review = new DriveRemovalReviewRequired(`approval pending for https://${marker}.invalid/private`);
   review.removal_review = Object.freeze({
     stored_documents_to_remove: 2, source_removals: 1, replacement_family_reviews: 1,
     source_cleanup_percentage: 5, fingerprint: "b".repeat(64),
   });
-  const f = fixture(t, [() => { throw review; }]);
+  const f = fixture(t, mode === "clean" ? [accepted] : [
+    () => { throw review; }, ...(mode === "partial" ? [accepted] : []),
+  ]);
   const plan = {
     ready: true, enabled: true, identity: { id: "v1-load" }, manifest_path: f.manifestPath,
-    sources: [{ key: "gmail", run_key: "gmail", class: "machine-pull", owner: "daily-task", status: "ready" }],
+    sources: ["gmail", "google_drive"].map(key => ({
+      key, run_key: key, class: "machine-pull", owner: "daily-task", status: "ready",
+    })),
   };
-  const result = await quietRun(() => runDailyRefreshCli(f.manifestPath, {
-    brainModule: { cmdLoad: (path, options) => cmdLoad(path, { ...f.options, ...options, log() {} }) },
+  const forwarded = [];
+  let caught;
+  let reads = 0;
+  const { value: result, output } = await captureOutput(() => runDailyRefreshCli(f.manifestPath, {
+    // Only provider-free dependencies are injected here. Output policy must
+    // come from the default adapter; a fixture logger would hide its absence.
+    brainModule: { cmdLoad: async (path, options) => {
+      forwarded.push(options);
+      try {
+        return await cmdLoad(path, { registry: f.options.registry, probes: f.options.probes, ...options });
+      } catch (error) { caught = error; throw error; }
+    } },
     buildPlan: async () => plan,
     acquireLock: () => ({ assertOwned() {}, release() {} }),
-    readFreshness: async () => ({}), readUpdateTransaction: () => null,
-    home: f.home, platform: "linux", silent: true,
+    readFreshness: async () => {
+      const at = reads++ === 0 ? "2026-10-22T18:00:00.000Z" : "2026-10-23T17:59:00.000Z";
+      return Object.fromEntries(["gmail", "google_drive"].map(key => [key, { last_successful_run_at: at }]));
+    },
+    readUpdateTransaction: () => null,
+    home: f.home, platform: "linux",
     now: () => new Date("2026-10-23T18:00:00.000Z"),
   }));
-  assert.deepEqual(f.events, ["mail-1"], "the default adapter keeps the selected source scope");
-  assert.equal(result.status, "failed");
-  assert.equal(result.sources[0].issue_code, "SAFETY_REVIEW_REQUIRED");
-  assert.equal(result.sources[0].reason_code, "removal_review_required");
-  const records = readFileSync(join(f.home, ".brain", "logs", plan.identity.id, "daily.log"), "utf8")
+  assert.deepEqual(f.events, mode === "partial" ? ["mail-1", "mail-2", "files"] : ["mail-1", "files"],
+    "the default adapter reaches the failing leg and later clean work within the selected scope");
+  assert.deepEqual(forwarded.map(options => options.flags.only), ["gmail", "google_drive"]);
+  assert.equal(result.sources[1].status, "complete", "later clean work still verifies");
+  assert.equal(result.sources[1].freshness_advanced, true);
+  assert.equal(output.length > 0, true, "the observation includes actual runner output");
+  for (const { channel, text } of output) {
+    assert.equal(text.includes(marker), false, `raw leg diagnostic escaped through ${channel}`);
+  }
+  const receiptText = readFileSync(join(f.home, ".brain", "daily-receipts", `${plan.identity.id}.json`), "utf8");
+  assert.deepEqual(JSON.parse(receiptText), result);
+  const logText = readFileSync(join(f.home, ".brain", "logs", plan.identity.id, "daily.log"), "utf8");
+  for (const text of [receiptText, logText]) assert.equal(text.includes(marker), false);
+  const records = logText
     .trim().split("\n").map(line => JSON.parse(line));
   const failure = records.find(record => record.kind === "source_failure");
-  assert.equal(failure?.issue_code, "SAFETY_REVIEW_REQUIRED");
-  assert.equal(failure?.detail, result.sources[0].detail);
+  if (mode === "clean") {
+    assert.equal(result.status, "complete");
+    assert.equal(result.sources[0].freshness_advanced, true);
+    assert.equal(result.sources[0].issue_code, undefined);
+    assert.equal(failure, undefined);
+    assert.equal(caught, undefined);
+  } else {
+    assert.equal(result.status, "failed");
+    assert.equal(result.sources[0].freshness_advanced, false);
+    assert.equal(result.sources[0].issue_code, "SAFETY_REVIEW_REQUIRED");
+    assert.equal(result.sources[0].reason_code, "removal_review_required");
+    assert.match(result.sources[0].detail, /^approval pending for \[REDACTED:url\]$/);
+    assert.equal(failure?.issue_code, "SAFETY_REVIEW_REQUIRED");
+    assert.equal(failure?.detail, result.sources[0].detail);
+    assert.equal(caught?.cause === review, true, "the typed cause remains available in memory");
+    assert.equal(JSON.stringify(caught), "{}", "raw causes are not serializable summary fields");
+  }
+});
+}
+
+test("daily load interactive output control retains the default failure report", async (t) => {
+  const marker = randomUUID();
+  const f = fixture(t, [() => { throw new Error(marker); }]);
+  let caught;
+  const { output } = await captureOutput(async () => {
+    try {
+      await cmdLoad(f.manifestPath, {
+        flags: {}, lifecycleLockHeld: true, registry: f.options.registry, probes: f.options.probes,
+      });
+    } catch (error) { caught = error; }
+  });
+  assert.deepEqual(f.events, ["mail-1", "files"]);
+  assert.equal(caught?.cause?.message === marker, true);
+  assert.equal(output.filter(entry => entry.text.includes(marker)).length, 2,
+    "interactive callers still receive both the immediate failure and consolidated report");
 });

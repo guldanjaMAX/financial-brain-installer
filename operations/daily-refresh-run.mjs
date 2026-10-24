@@ -127,7 +127,11 @@ function dailyErrorContext(error) {
 }
 
 const FIXED_SENSITIVE_DIAGNOSTIC = "the source refresh failed; sensitive diagnostic text was redacted";
-const BARE_SPACED_RELATIVE_PATH = /(^|[\s=("'`])[\p{L}\p{N}_.-]+(?:[\\/][^\\/,;\r\n)\]}'"`]+)+[\\/][\p{L}\p{N}_.-]+(?:[ \t]+[\p{L}\p{N}_.-]+)+\.[\p{L}\p{N}]{1,16}(?=$|[\s,;)\]}'"`]|[.!?](?=$|[\s,;)\]}'"`]))/gu;
+const BARE_SPACED_RELATIVE_PATH = new RegExp(
+  /(^|[\s=("'`])/u.source + "(?:" +
+  /[\p{L}\p{N}_.-]+(?:[\\/][^\\/,;\r\n)\]}'"`]+)+[\\/][\p{L}\p{N}_.-]+(?:[ \t]+[\p{L}\p{N}_.-]+)+\.[\p{L}\p{N}]{1,16}(?=$|[\s,;)\]}'"`]|[.!?](?=$|[\s,;)\]}'"`]))/u.source + "|" +
+  /[\p{L}\p{N}_.-]+[\\/][\p{L}\p{N}_.-]+(?:[ \t]+[\p{L}\p{N}_.-]+)+\.[\p{L}\p{N}]{1,16}(?=$|[,;)\]}'"`]|[.!?](?=$|[\s,;)\]}'"`]))/u.source + ")", "gu",
+);
 
 function redactAndScanDiagnostic(value) {
   // Every transform comes back through both layers. A later canonicalization
@@ -181,8 +185,9 @@ function safeDiagnosticText(value, maxLength = 200) {
     [/file:\/\/[^,;\r\n)\]}'"`]*/giu, "[REDACTED:path]"],
     [/(^|[\s=("'`])(?:[A-Za-z]:[\\/]|\\\\)[^,;\r\n)\]}'"`]*/gu, "$1[REDACTED:path]"],
     [/(^|[\s=("'`])(?:\/(?![\/\s])|\.{1,2}[\\/]|~[\\/])[^,;\r\n)\]}'"`]*/gu, "$1[REDACTED:path]"],
-    // Two separators conservatively mark a spaced final filename as a path.
-    // Keep one-separator prose (and/or ... guide.md) out of this broader rule.
+    // One separator needs an end or punctuation boundary after the spaced
+    // filename; whitespace alone would consume "and/or ... guide.md guide".
+    // Multiple separators retain the broader whitespace boundary.
     [BARE_SPACED_RELATIVE_PATH, "$1[REDACTED:path]"],
     // A bare path needs a final slash-adjacent filename and extension. Allow
     // spaces in intermediate directories, but not in that filename: and/or
@@ -659,6 +664,9 @@ async function executeDailyRefreshCli(path, m, options, observationStarted) {
         flags: { only: source.run_key },
         lifecycleLockHeld: true,
         allowPartialRefresh: true,
+        // The interactive load report includes raw leg failures. Daily keeps
+        // typed causes in memory until its receipt and log redaction boundary.
+        log() {},
       })),
       readFreshness,
       writeReceipt: receiptWriter,

@@ -16,7 +16,9 @@ exact sealed package. This version bump verifies no incident.
   distinct reasons. A later recognized stop stays visible even when the first
   failure is unknown, including inside nested groups of failures. Relative
   filenames and shared-file URLs are redacted, including spaced filenames in
-  paths with multiple folders, while ordinary slash prose stays readable.
+  paths such as `reports/quarterly report.xlsx`, while ordinary slash prose stays readable.
+  Daily imports also suppress the load report's raw failure lines before
+  writing the redacted diagnostic.
   Check the issue and detail after a failed refresh; a failed source still does
   not count as fresh.
 

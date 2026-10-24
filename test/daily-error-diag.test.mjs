@@ -330,6 +330,9 @@ const privateCases = [
   ["bare relative backslash path with spaced filename", String.raw`records\reports\quarterly report.xlsx`, "[REDACTED:path]"],
   ["bare relative path with spaced filename and punctuation", "records/reports/quarterly report.xlsx.", "[REDACTED:path]"],
   ["bare relative path with spaced directory and filename", "records/private archive/quarterly report.xlsx", "[REDACTED:path]"],
+  ["one-separator path with spaced filename", "reports/quarterly report.xlsx", "[REDACTED:path]"],
+  ["one-separator backslash path with spaced filename", String.raw`reports\quarterly report.xlsx`, "[REDACTED:path]"],
+  ["one-separator path with spaced filename and punctuation", "reports/quarterly report.xlsx.", "[REDACTED:path]"],
   ["bare relative backslash path", String.raw`records\mail archive\message.txt`, "[REDACTED:path]"],
   ["home path", "~/mail archive/message.txt", "[REDACTED:path]"],
   ["file URL", "file:///private/mail%20archive/message.txt", "[REDACTED:path]"],
@@ -361,6 +364,17 @@ for (const [label, value, marker] of privateCases) {
     assert.match(source.detail, /retry later\.$/u);
   });
 }
+
+test("daily diagnostics one-separator spaced filename at end of text is removed", async () => {
+  const value = "reports/quarterly report.xlsx";
+  const { source, receiptText, logText } = await observe(new Error(`Provider stopped at ${value}`));
+  for (const text of [receiptText, logText]) {
+    assert.equal(text.includes(value), false, "the complete path must be removed");
+    assert.equal(text.includes("quarterly"), false, "spaced filename start must be removed");
+    assert.equal(text.includes("report.xlsx"), false, "spaced filename tail must be removed");
+  }
+  assert.equal(source.detail, "Provider stopped at [REDACTED:path]");
+});
 
 test("daily diagnostics redaction occurs before bounding and after format normalization", async () => {
   const email = "owner@fixture.invalid";

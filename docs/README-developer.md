@@ -1429,20 +1429,29 @@ token assignments, authorization values, emails, HTTP URLs (including queries),
 and file URLs, absolute paths, explicitly relative paths, and bare relative
 file paths ending in a filename without spaces and with an extension are
 removed before bounding. Intermediate directories may contain spaces. A second
-bare-path rule accepts a final filename with spaces when at least two slash or
-backslash separators precede it, as in `records/reports/quarterly report.xlsx`.
+bare-path rule accepts a final filename with spaces after slash or backslash
+separators, as in `records/reports/quarterly report.xlsx` and
+`reports/quarterly report.xlsx`.
 The first component uses letters, numbers, underscores, dots or hyphens;
 intermediate components cannot cross a separator or punctuation delimiter.
 The final component uses the same characters plus spaces or tabs, followed by
 a dot and a 1 to 16 character letter-or-number extension. The match starts at
 the beginning of text or after whitespace, `=`, `(` or a quote, and ends before
 whitespace, a closing delimiter, sentence punctuation or the end of text.
-Ambiguous single-separator text with a spaced final component is outside this
-broader rule. Ordinary slash prose such as `and/or`, `read/write`, a spaced
+For a single separator, the extension must end the text or be immediately
+followed by punctuation or a closing delimiter. Ordinary whitespace alone is
+not enough, so `and/or read the troubleshooting.md guide` stays readable.
+Ordinary slash prose such as `and/or`, `read/write`, a spaced
 slash, and a sentence mentioning a Markdown filename stays readable.
-Combined multi-slash prose that fits the path shape may be redacted
+Other slash prose that fits the bounded path shape may be redacted
 conservatively.
 Scanner findings that survive replacement fail closed to fixed text.
+The default daily adapter passes an explicit no-output `options.log` callback
+to `cmdLoad`. This suppresses its immediate leg failure lines and consolidated
+load report before they can print raw failure reasons. The daily runner still
+writes its redacted receipt and log and prints its summary. This policy covers
+the loader report, not connector-owned output. Interactive `cmdLoad` callers
+retain their existing default logger.
 The load report preserves original leg errors in a non-enumerable in-memory
 cause, so daily diagnostics can recover a typed stop instead of the aggregate
 "did not load" summary. Multiple failures retain a count and one bounded detail,

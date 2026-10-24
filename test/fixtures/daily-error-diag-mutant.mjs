@@ -2,6 +2,8 @@
 import { registerHooks } from "node:module";
 
 const mutants = {
+  daily_load_output_policy_removed: ["operations/daily-refresh-run.mjs",
+    "        log() {},\n", ""],
   lost_load_causes: ["brain.mjs", "sourceErrors.push(error);", "void error;"],
   unknown_issue_code: ["operations/daily-refresh-run.mjs",
     "const issueCode = dailyIssueCode(context.error);", 'const issueCode = "UNKNOWN";'],
