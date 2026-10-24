@@ -230,7 +230,7 @@
         },
         "gmail": {
           "type": "object",
-          "description": "Gmail correspondence selected by the built-in category policy, optionally bounded by a manifest date floor.",
+          "description": "Gmail correspondence selected by the built-in category policy, optionally bounded by a manifest date floor. Reads named XLSX, OLE XLS, CSV and text-bearing PDF attachments within fixed limits of 10 attachments, 5 MiB each and 15 MiB combined. Unsupported and nested attachments are explicitly excluded; an unreadable supported report retains the prior message and holds the cursor. Attachment dates remain separate from message receipt dates. No OCR or structured-ledger import. Real-mailbox field acceptance remains unproven.",
           "properties": {
             "enabled": {
               "type": "boolean",
