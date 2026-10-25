@@ -14,7 +14,7 @@ registerHooks({ load(url, context, nextLoad) {
   const loaded = nextLoad(url, context);
   if (url === helperUrl) {
     const parts = String(loaded.source).split("platform = process.platform,");
-    assert.equal(parts.length, 3, "both retry APIs retain their platform default");
+    assert.equal(parts.length, 4, "baseline capture and both rename APIs retain their platform default");
     return { ...loaded, source: parts.join("platform = globalThis.__brainRenameTestPlatform ?? process.platform,") };
   }
   const names = url === brainUrl

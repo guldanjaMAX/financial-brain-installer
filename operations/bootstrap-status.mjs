@@ -23,6 +23,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { randomBytes } from "node:crypto";
 
 export const BOOTSTRAP_STATUS_SCHEMA_VERSION = 2;
 export const BOOTSTRAP_STATUS_BASENAME = ".financial-brain-bootstrap-status.json";
@@ -445,7 +446,9 @@ export function writeBootstrapStatusFile(manifestPath, status, options = {}) {
   }
   const payload = `${JSON.stringify({ ...status, status_file: target }, null, 2)}\n`;
   const bytes = Buffer.from(payload, "utf8");
-  const temporary = `${target}.${process.pid}.tmp`;
+  // A terminated process can leave owned staging behind; PID reuse must not
+  // make that retained file the next run's exclusive-create destination.
+  const temporary = `${target}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
   const proofFs = {
     lstatSync: options.lstatImpl ?? lstatSync,
     openSync: options.openImpl ?? openSync,

@@ -3,6 +3,8 @@ import fs, { closeSync, fstatSync, lstatSync, mkdtempSync, openSync, readFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { spawn } from "node:child_process";
+import { setTimeout as delay } from "node:timers/promises";
 import { renameWithRetry, renameWithRetrySync } from "../operations/rename-retry.mjs";
 import * as renameHelpers from "../operations/rename-retry.mjs";
 import { rewriteStagingInPlace, STAGING_MTIME_SECONDS } from "./fixtures/rename-retry-staging.mjs";
@@ -106,6 +108,28 @@ test("staged proof refuses descriptor or pathname drift and close failures", t =
     };
     assert.equal(renameHelpers.stagedBytesMatch(path, identity, intended, { fs: io }), mode === "control", mode);
     assert.ok(closed >= opened, `every opened descriptor is closed: ${mode}`);
+  }
+});
+
+test("byte proof bounds requested reads even when frozen metadata hides a much larger file", t => {
+  const root = mkdtempSync(join(tmpdir(), "brain-rename-read-bound-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const path = join(root, "staged");
+  const intended = Buffer.from("intended bytes");
+  writeFileSync(path, intended);
+  const expected = lstatSync(path, { bigint: true });
+  for (const extra of [0, 64 * 1024]) {
+    writeFileSync(path, Buffer.concat([intended, Buffer.alloc(extra)]));
+    let requested = 0;
+    const matches = renameHelpers.stagedBytesMatch(path, expected, intended, { fs: {
+      lstatSync: () => expected, fstatSync: () => expected,
+      readSync(fd, buffer, offset, length, position) {
+        requested += length;
+        return fs.readSync(fd, buffer, offset, length, position);
+      },
+    } });
+    assert.equal(matches, extra === 0);
+    assert.ok(requested <= intended.length + 1, "requested bytes, including EOF, must stay bounded");
   }
 });
 
@@ -414,6 +438,7 @@ for (const [mode, replace] of [["sync", renameWithRetrySync], ["async", renameWi
         const stageIdentity = lstatSync(staged);
         const targetIdentity = lstatSync(target);
         const refusal = fault("EPERM");
+        const stagedRefusal = new Error("synthetic staged byte refusal");
         let calls = 0;
         let validations = 0;
         let waits = 0;
@@ -422,10 +447,11 @@ for (const [mode, replace] of [["sync", renameWithRetrySync], ["async", renameWi
           platform: "win32",
           revalidate() {
             validations++;
-            if (!renameHelpers.renameIdentityMatches(staged, stageIdentity)
+            const current = lstatSync(staged);
+            if (current.dev !== stageIdentity.dev || current.ino !== stageIdentity.ino
               || !renameHelpers.renameIdentityMatches(target, targetIdentity)) throw refusal;
           },
-          staged: { expected: stageIdentity, bytes: Buffer.from("staged bytes"), refuse() { throw refusal; } },
+          staged: { expected: stageIdentity, bytes: Buffer.from("staged bytes"), refuse() { throw stagedRefusal; } },
           rename(from, to) {
             if (++calls === 1) throw fault("EBUSY");
             renameSync(from, to);
@@ -438,7 +464,7 @@ for (const [mode, replace] of [["sync", renameWithRetrySync], ["async", renameWi
           },
         }))();
         if (replaced) {
-          await assert.rejects(result, error => error === refusal);
+          await assert.rejects(result, error => error === (changedPath === "staging-in-place" ? stagedRefusal : refusal));
           assert.equal(calls, 1, "replacement must be refused before a second rename");
           assert.equal(readFileSync(target, "utf8"), changedPath === "destination" ? "replacement bytes" : "previous bytes");
           if (rewritten) assert.deepEqual(readFileSync(staged), rewritten);
@@ -485,6 +511,241 @@ test("async: each refused rename and backoff settle before the next attempt", as
   ]);
 });
 
+for (const [mode, replace] of [["sync", renameWithRetrySync], ["async", renameWithRetry]]) {
+  for (const operation of ["openSync", "readSync"]) {
+    for (const code of ["EPERM", "EACCES", "EBUSY"]) {
+      for (const outcome of ["control", "released", "held"]) {
+        test(`${mode}: staged ${operation} ${code} ${outcome} shares the rename attempt budget`, async t => {
+          const root = mkdtempSync(join(tmpdir(), "brain-proof-retry-"));
+          t.after(() => rmSync(root, { recursive: true, force: true }));
+          const path = join(root, "staged");
+          const target = join(root, "target");
+          const bytes = Buffer.from("staged bytes");
+          writeFileSync(path, bytes);
+          const expected = lstatSync(path, { bigint: true });
+          const refusal = new Error("synthetic caller staging refusal");
+          let observations = 0, validations = 0, renames = 0;
+          const waits = [];
+          const result = (async () => await replace(path, target, {
+            platform: "win32", revalidate() { validations++; },
+            staged: { expected, bytes, refuse() { throw refusal; } },
+            fs: { [operation](...args) {
+              observations++;
+              assert.ok(observations <= 12, "proof retry must be bounded");
+              if (outcome === "held" || (outcome === "released" && observations <= 2)) throw fault(code);
+              return fs[operation](...args);
+            } },
+            rename(from, to) { renames++; return renameSync(from, to); },
+            sleep(ms) { waits.push(ms); },
+          }))();
+          if (outcome === "held") {
+            await assert.rejects(result, error => error === refusal);
+            assert.equal(observations, 10);
+            assert.equal(validations, 10);
+            assert.equal(renames, 0);
+            assert.deepEqual(waits, Array(9).fill(225));
+            assert.deepEqual(readFileSync(path), bytes);
+          } else {
+            await result;
+            assert.equal(validations, outcome === "released" ? 3 : 1);
+            assert.equal(renames, 1);
+            assert.deepEqual(waits, outcome === "released" ? [225, 225] : []);
+            assert.deepEqual(readFileSync(target), bytes);
+          }
+        });
+      }
+    }
+  }
+
+  for (const platform of ["win32", "darwin", "linux"]) {
+    for (const problem of ["mismatch", "unreadable", "io-error"]) {
+      test(`${mode}: staged ${problem} on ${platform} refuses without an unproved rename`, async t => {
+        const root = mkdtempSync(join(tmpdir(), "brain-proof-platform-"));
+        t.after(() => rmSync(root, { recursive: true, force: true }));
+        const path = join(root, "staged");
+        const bytes = Buffer.from("staged bytes");
+        writeFileSync(path, bytes);
+        const expected = lstatSync(path, { bigint: true });
+        const refusal = new Error("synthetic caller staging refusal");
+        let attempts = 0, waits = 0;
+        await assert.rejects(async () => await replace(path, join(root, "target"), {
+          platform, revalidate() { attempts++; },
+          staged: { expected, bytes: problem === "mismatch" ? Buffer.from("wrong bytes!") : bytes,
+            refuse() { throw refusal; } },
+          fs: problem === "mismatch" ? {} : { openSync() { throw fault(problem === "unreadable" ? "EBUSY" : "EIO"); } },
+          rename() { assert.fail("an unproved staging file must never be renamed"); },
+          sleep(ms) { assert.equal(ms, 225); waits++; assert.ok(waits <= 9); },
+        }), error => error === refusal);
+        const retries = platform === "win32" && problem === "unreadable";
+        assert.equal(attempts, retries ? 10 : 1);
+        assert.equal(waits, retries ? 9 : 0);
+      });
+    }
+  }
+
+  test(`${mode}: proof and rename refusals consume one shared ten-attempt budget`, async t => {
+    const root = mkdtempSync(join(tmpdir(), "brain-proof-shared-budget-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const path = join(root, "staged");
+    const bytes = Buffer.from("staged bytes");
+    writeFileSync(path, bytes);
+    const expected = lstatSync(path, { bigint: true });
+    let observations = 0, renames = 0, waits = 0;
+    const refusal = fault("EPERM");
+    await assert.rejects(async () => await replace(path, join(root, "target"), {
+      platform: "win32", revalidate() {},
+      staged: { expected, bytes, refuse() { assert.fail("final refusal came from rename"); } },
+      fs: { openSync(...args) { if (++observations <= 3) throw fault("EBUSY"); return fs.openSync(...args); } },
+      rename() { renames++; assert.ok(renames <= 7); throw refusal; },
+      sleep(ms) { assert.equal(ms, 225); waits++; },
+    }), error => error === refusal);
+    assert.equal(observations, 10);
+    assert.equal(renames, 7);
+    assert.equal(waits, 9);
+  });
+}
+
+for (const platform of ["win32", "darwin", "linux"]) {
+  for (const operation of ["openSync", "readSync"]) {
+    for (const outcome of ["control", "released", "held", "mismatch"]) {
+      test(`baseline: ${platform} ${operation} ${outcome} keeps the proof budget and refusal`, t => {
+        const root = mkdtempSync(join(tmpdir(), "brain-baseline-retry-"));
+        t.after(() => rmSync(root, { recursive: true, force: true }));
+        const path = join(root, "staged");
+        const bytes = Buffer.from("staged bytes");
+        writeFileSync(path, bytes);
+        const created = lstatSync(path, { bigint: true });
+        let observations = 0, waits = 0;
+        const proof = renameHelpers.captureStagedProofWithRetry(path,
+          outcome === "mismatch" ? Buffer.from("wrong bytes!") : bytes, created, {
+            platform, fs: { [operation](...args) {
+              observations++;
+              assert.ok(observations <= 12, "baseline attempts must remain bounded");
+              if (outcome === "held" || (outcome === "released" && observations <= 2)) throw fault("EBUSY");
+              return fs[operation](...args);
+            } },
+            sleep(ms) { assert.equal(ms, 225); waits++; },
+          });
+        const accepted = outcome === "control" || (outcome === "released" && platform === "win32");
+        assert.equal(Boolean(proof), accepted);
+        if (outcome === "held") assert.equal(observations, platform === "win32" ? 10 : 1);
+        if (platform !== "win32" && outcome === "released") assert.equal(observations, 1);
+        assert.equal(waits, platform !== "win32" ? 0 : outcome === "held" ? 9 : outcome === "released" ? 2 : 0);
+        assert.deepEqual(readFileSync(path), bytes);
+      });
+    }
+  }
+}
+
+for (const [mode, replace] of [["sync", renameWithRetrySync], ["async", renameWithRetry]]) {
+  test(`${mode}: baseline and publication spend at most nine waits together`, async t => {
+    const root = mkdtempSync(join(tmpdir(), "brain-baseline-shared-budget-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const path = join(root, "staged");
+    const bytes = Buffer.from("staged bytes");
+    writeFileSync(path, bytes);
+    const created = lstatSync(path, { bigint: true });
+    let observations = 0, waits = 0, attempts = 0;
+    const sleep = ms => { assert.equal(ms, 225); waits++; };
+    const proof = renameHelpers.captureStagedProofWithRetry(path, bytes, created, {
+      platform: "win32", sleep,
+      fs: { openSync(...args) { if (++observations < 4) throw fault("EBUSY"); return fs.openSync(...args); } },
+    });
+    assert.ok(proof);
+    assert.equal(waits, 3);
+    const refusal = fault("EPERM");
+    await assert.rejects(async () => await replace(path, join(root, "target"), {
+      platform: "win32", sleep, revalidate() {},
+      staged: { expected: proof, bytes, refuse() { assert.fail("unchanged baseline must prove bytes"); } },
+      rename() { attempts++; assert.ok(attempts <= 7); throw refusal; },
+    }), error => error === refusal);
+    assert.equal(attempts, 7);
+    assert.equal(waits, 9);
+  });
+}
+
+for (const phase of ["baseline", "sync", "async"]) {
+  for (const release of [0, 450, -1]) {
+    test(`native Windows staged FileShare.None ${phase} ${release === -1 ? "held" : release === 0 ? "control" : "released"}`, {
+      skip: process.platform !== "win32", timeout: 20_000,
+    }, async t => {
+      const root = mkdtempSync(join(tmpdir(), "brain-staged-handle-"));
+      const path = join(root, "staged");
+      const target = join(root, "target");
+      const bytes = Buffer.from("staged bytes");
+      writeFileSync(path, bytes);
+      const created = lstatSync(path, { bigint: true });
+      let proof = phase === "baseline" ? null : renameHelpers.captureStagedProof(path, bytes, created);
+      let child, exited;
+      const script = `
+$ErrorActionPreference = 'Stop'
+$root = $env:BRAIN_STAGED_HOLDER_ROOT
+$handle = [IO.File]::Open([IO.Path]::Combine($root, 'staged'), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+try {
+  [IO.File]::WriteAllText([IO.Path]::Combine($root, 'ready'), 'ready')
+  while (-not [IO.File]::Exists([IO.Path]::Combine($root, 'attempted')) -and -not [IO.File]::Exists([IO.Path]::Combine($root, 'stop'))) { Start-Sleep -Milliseconds 10 }
+  if ([int]$env:BRAIN_STAGED_HOLDER_DELAY -ge 0) { Start-Sleep -Milliseconds ([int]$env:BRAIN_STAGED_HOLDER_DELAY) }
+  else { while (-not [IO.File]::Exists([IO.Path]::Combine($root, 'stop'))) { Start-Sleep -Milliseconds 10 } }
+} finally { $handle.Dispose() }
+`;
+      try {
+        if (release !== 0) {
+          const systemRoot = process.env.SystemRoot;
+          assert.ok(systemRoot);
+          child = spawn(join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), [
+            "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64"),
+          ], { windowsHide: true, stdio: "ignore", env: {
+            SystemRoot: systemRoot, BRAIN_STAGED_HOLDER_ROOT: root, BRAIN_STAGED_HOLDER_DELAY: String(release),
+          } });
+          exited = new Promise(resolve => { child.once("error", () => resolve(-1)); child.once("exit", code => resolve(code)); });
+          const deadline = Date.now() + 10_000;
+          while (!fs.existsSync(join(root, "ready")) && Date.now() < deadline && child.exitCode === null) await delay(15);
+          assert.ok(fs.existsSync(join(root, "ready")), "native holder must acquire the staging file");
+          writeFileSync(join(root, "attempted"), "attempted");
+        }
+        const refusal = new Error("synthetic caller staging refusal");
+        let observations = 0, renames = 0;
+        const io = { openSync(...args) {
+          observations++;
+          // A removed retry ceiling must fail this fixture, never strand its
+          // synchronous held-handle row where the test timeout cannot interrupt.
+          assert.ok(observations <= 12, "native proof observations must remain bounded");
+          return openSync(...args);
+        } };
+        const started = Date.now();
+        const publish = async () => {
+          if (phase === "baseline") proof = renameHelpers.captureStagedProof(path, bytes, created, { fs: io });
+          const replace = phase === "async" ? renameWithRetry : renameWithRetrySync;
+          return await replace(path, target, { revalidate() {}, fs: io,
+            staged: { expected: proof, bytes, refuse() { throw refusal; } },
+            rename(from, to) { renames++; return renameSync(from, to); },
+          });
+        };
+        if (release === -1) {
+          await assert.rejects(publish, error => error === refusal);
+          assert.equal(renames, 0);
+          assert.equal(observations, 10, "held proof must spend exactly ten observations");
+          assert.ok(Date.now() - started >= 1_900, "held proof must spend the backoff budget");
+        } else {
+          await publish();
+          assert.equal(renames, 1);
+          if (release === 450) assert.ok(observations >= 3, "real sharing refusals precede release");
+          assert.deepEqual(readFileSync(target), bytes);
+        }
+      } finally {
+        if (child) {
+          writeFileSync(join(root, "stop"), "stop");
+          const timeout = delay(3_000, -2, { ref: false });
+          const code = await Promise.race([exited, timeout]);
+          if (code === -2) { child.kill(); await exited; }
+          assert.equal(code, 0, "native holder must release its handle and exit cleanly");
+        }
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+}
+
 test("async: the byte proof is followed by the rename call without yielding", async t => {
   const root = mkdtempSync(join(tmpdir(), "brain-rename-no-gap-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -513,3 +774,49 @@ test("async: the byte proof is followed by the rename call without yielding", as
   assert.equal(yielded, true);
   assert.deepEqual(readFileSync(target), bytes);
 });
+
+for (const mode of ["baseline", "sync", "async"]) {
+  for (const closeFailure of [false, true]) {
+    test(`${mode}: transient proof read ${closeFailure ? "refuses when cleanup close fails" : "retries after cleanup close succeeds"}`, async t => {
+      const root = mkdtempSync(join(tmpdir(), "brain-proof-close-refusal-"));
+      t.after(() => rmSync(root, { recursive: true, force: true }));
+      const path = join(root, "staged");
+      const target = join(root, "target");
+      const bytes = Buffer.from("staged bytes");
+      writeFileSync(path, bytes);
+      const expected = lstatSync(path, { bigint: true });
+      const refusal = new Error("synthetic caller staging refusal");
+      let reads = 0, closes = 0, waits = 0, renames = 0;
+      const io = {
+        readSync(...args) {
+          if (++reads === 1) throw fault("EBUSY");
+          return fs.readSync(...args);
+        },
+        closeSync(descriptor) {
+          closes++;
+          fs.closeSync(descriptor);
+          if (closeFailure) throw fault("EIO");
+        },
+      };
+      const sleep = ms => { assert.equal(ms, 225); waits++; };
+      if (mode === "baseline") {
+        const proof = renameHelpers.captureStagedProofWithRetry(path, bytes, expected, { fs: io, platform: "win32", sleep });
+        assert.equal(Boolean(proof), !closeFailure);
+      } else {
+        const replace = mode === "sync" ? renameWithRetrySync : renameWithRetry;
+        const publish = async () => await replace(path, target, {
+          revalidate() {}, platform: "win32", fs: io, sleep,
+          staged: { expected, bytes, refuse() { throw refusal; } },
+          rename(from, to) { renames++; return renameSync(from, to); },
+        });
+        if (closeFailure) await assert.rejects(publish, error => error === refusal);
+        else await publish();
+        assert.equal(renames, closeFailure ? 0 : 1);
+      }
+      assert.equal(reads, closeFailure ? 1 : 3);
+      assert.equal(closes, closeFailure ? 1 : 2);
+      assert.equal(waits, closeFailure ? 0 : 1);
+      assert.deepEqual(readFileSync(mode === "baseline" || closeFailure ? path : target), bytes);
+    });
+  }
+}

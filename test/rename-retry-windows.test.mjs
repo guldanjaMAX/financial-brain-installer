@@ -215,6 +215,77 @@ for (const writer of identityWriters) {
   }
 }
 
+for (const refused of [false, true]) {
+  test(`recovery first creation: ${refused ? "a refused staging proof prevents publication" : "a matching staging proof permits publication"}`, () => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-recovery-create-proof-")));
+    const manifests = ["source", "target"].map(role => {
+      const path = join(root, `${role}.json`);
+      writeFileSync(path, JSON.stringify({
+        manifest_version: 1,
+        client: { slug: "synthetic-brain", display_name: "Synthetic Fixture" },
+        brain: { version: "0.0.1", worker_name: `synthetic-${role}`, domain: `${role}.example.invalid` },
+        infrastructure: { cloudflare: { storage: "d1", account_id: "synthetic-account", d1_database_id: `synthetic-${role}`, d1_database_name: `synthetic-${role}`, vectorize_index: `synthetic-${role}` } },
+      }), { mode: 0o600 });
+      return path;
+    });
+    const planPath = join(root, "plan.json");
+    const statePath = join(root, "state.json");
+    const native = { open: fs.openSync, read: fs.readSync, close: fs.closeSync, link: fs.linkSync };
+    const proofDescriptors = new Set();
+    let proofReads = 0;
+    let publications = 0;
+    fs.openSync = (path, ...args) => {
+      const descriptor = native.open(path, ...args);
+      if (typeof path === "string" && path.startsWith(join(root, ".plan.json.")) && path.endsWith(".tmp")) {
+        proofDescriptors.add(descriptor);
+      }
+      return descriptor;
+    };
+    fs.readSync = (descriptor, buffer, offset, length, position) => {
+      const count = native.read(descriptor, buffer, offset, length, position);
+      if (proofDescriptors.has(descriptor) && count > 0) {
+        proofReads++;
+        // A definite byte mismatch must refuse before the exclusive link,
+        // even though the subsequent readback could see the intended bytes.
+        if (refused) buffer[offset] ^= 0xff;
+      }
+      return count;
+    };
+    fs.closeSync = descriptor => {
+      proofDescriptors.delete(descriptor);
+      return native.close(descriptor);
+    };
+    fs.linkSync = (from, to) => {
+      if (to === planPath || to === statePath) publications++;
+      return native.link(from, to);
+    };
+    syncBuiltinESMExports();
+    try {
+      const invoke = () => initializeVerifiedRecovery(...manifests, planPath, statePath);
+      if (refused) {
+        assert.throws(invoke, /verified recovery control staging proof was refused/);
+        assert.equal(publications, 0);
+        assert.equal(existsSync(planPath), false);
+        assert.equal(existsSync(statePath), false);
+      } else {
+        assert.ok(invoke());
+        assert.equal(publications, 2);
+        assert.equal(existsSync(planPath), true);
+        assert.equal(existsSync(statePath), true);
+      }
+      assert.ok(proofReads > 0, "the first-create writer must exercise the bounded staging read");
+      assert.equal(readdirSync(root).some(name => name.endsWith(".tmp")), false);
+    } finally {
+      fs.openSync = native.open;
+      fs.readSync = native.read;
+      fs.closeSync = native.close;
+      fs.linkSync = native.link;
+      syncBuiltinESMExports();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
 const dailyWriters = [
   {
     name: "recovery state identity",

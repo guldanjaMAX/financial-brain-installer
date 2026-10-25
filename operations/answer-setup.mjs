@@ -507,7 +507,19 @@ export async function runAnthropicAnswerSetup({ manifestPath, flags = {} }, deps
         }
         checkBound();
         await deps.verifyDeploy?.(currentManifest);
-        await deps.deploy?.(manifestPath);
+        await deps.deploy?.(manifestPath, {
+          // Deployment may save a verified domain. Keep that owned write inside
+          // this transaction instead of invalidating its rollback authority.
+          saveManifest: async (file, value) => {
+            if (file !== manifestPath || !manifestPublication?.isCurrent?.()) {
+              throw new Error("the answer setup manifest changed before deployment could save it");
+            }
+            await writeManifest(file, value, {
+              expectedPublication: manifestPublication,
+              onPublished(publication) { manifestPublication = publication; },
+            });
+          },
+        });
       }
 
       let workerCheck;
@@ -600,7 +612,8 @@ export async function runAnthropicAnswerSetup({ manifestPath, flags = {} }, deps
         }
         await deps.reconcileDaily?.(manifestPath, { previousManifest: originalManifest, rollback: true });
         await deps.verifyDeploy?.(currentManifest);
-        await deps.deploy?.(manifestPath);
+        // The rollback restores the original manifest, including domain absence.
+        await deps.deploy?.(manifestPath, { persistDomain: false });
         rollbackComplete = true;
         await clearClipboardNow();
         await removeJournal();

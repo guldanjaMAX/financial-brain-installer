@@ -16,6 +16,18 @@ const mutations = {
   ],
   remove_platform_gate: [['platform === "win32" && ', ""]],
   skip_byte_proof: [['    if (!timingSafeEqual(observed, intended)) return false;', "    // Mutation: accept same-length rewritten bytes."]],
+  skip_sync_byte_proof_call: [[
+    "    if (!requireStagedBytes(from, staged, fs, attempt, platform)) {\n      sleep(225);\n      continue;\n    }",
+    "    // Mutation: omit the synchronous staged byte proof.",
+  ]],
+  skip_async_byte_proof_call: [[
+    "    if (!requireStagedBytes(from, staged, fs, attempt, platform)) {\n      await sleep(225);\n      continue;\n    }",
+    "    // Mutation: omit the asynchronous staged byte proof.",
+  ]],
+  oversized_proof_read: [[
+    "    observed = Buffer.alloc(intended.length);",
+    "    observed = Buffer.alloc(intended.length);\n    io.readSync(descriptor, Buffer.alloc(intended.length + 65536), 0, intended.length + 65536, 0);",
+  ]],
   path_only_cleanup: [[
     "    if (current === null || !sameInode(current, created)) return false;",
     "    if (current === null) return false;",
@@ -33,7 +45,7 @@ const helperUrl = new URL("../../operations/rename-retry.mjs", import.meta.url).
 registerHooks({ load(url, context, nextLoad) {
   const result = nextLoad(url, context);
   if (url !== helperUrl) return result;
-  let source = String(result.source);
+  let source = String(result.source).replace(/\r\n/g, "\n");
   for (const [target, replacement] of mutations[chosen]) {
     if (source.split(target).length !== 2) throw new Error("Rename retry mutation target missing or ambiguous");
     source = source.replace(target, replacement);

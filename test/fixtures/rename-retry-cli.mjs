@@ -19,7 +19,7 @@ registerHooks({ load(url, context, nextLoad) {
   if (url === helperUrl && process.env.BRAIN_RENAME_TEST_PLATFORM) {
     const result = nextLoad(url, context);
     const parts = String(result.source).split("platform = process.platform,");
-    assert.equal(parts.length, 3);
+    assert.equal(parts.length, 4, "baseline capture and both rename APIs expose their platform default");
     return { ...result, source: parts.join("platform = process.env.BRAIN_RENAME_TEST_PLATFORM ?? process.platform,") };
   }
   if (url !== verifierUrl) return nextLoad(url, context);

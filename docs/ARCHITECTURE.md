@@ -648,6 +648,9 @@ Native task timeout is an unknown outcome, never proof of absence. An interrupte
 in place; a retry uses the saved definition as its authorization even after a
 manifest fingerprint change, and clears the fence only after current health
 proof and exact reconciliation.
+A validated receipt without its recovery fence remains recovery state with its
+exact predecessor proof; the next transaction write restores the fence under
+the update lock. Another writer's replacement receipt still refuses recovery.
 
 Windows bridge recovery additionally records remote mutation intent before the
 paused Worker deployment begins, or before migration in the non-outbox path.
@@ -1088,8 +1091,9 @@ aggregate counters rather than moving this scan into its request path.
 ## Local state and privacy boundaries
 
 Windows-reachable staged-file replacements use `operations/rename-retry.mjs`.
-Only Windows rename is retried, for `EPERM`, `EACCES` or `EBUSY`, up to ten attempts
-separated by 225 ms waits. Synchronous writers block until persistence finishes;
+Only Windows rename or an unobservable staging-byte open/read is retried, for
+`EPERM`, `EACCES` or `EBUSY`, up to ten attempts separated by 225 ms waits.
+Synchronous writers block until persistence finishes;
 the asynchronous helper yields between attempts. Staging, permissions, exact
 readback and terminal cleanup remain each writer's responsibility. Exhaustion
 throws the last rename error into the writer's existing refusal path. Other
@@ -1097,13 +1101,18 @@ platforms make one attempt without waiting. Before the first attempt and every
 retry, an injected caller proof revalidates the staged file's identity and the
 expected predecessor or absence, or the caller's held lifecycle lock. A failed
 proof stops before rename with the caller's existing refusal, even when that
-refusal has a retryable code. Content writes, permission changes, proof failures
-and unrelated filesystem errors are never retried.
+refusal has a retryable code. A definite byte or identity mismatch also refuses
+immediately. A sharing lock that prevents opening or reading the staged bytes
+spends the same attempt budget as rename; exhaustion returns the caller's proof
+refusal, and no rename runs without a positive byte match. Content writes,
+permission changes and unrelated filesystem errors are never retried.
 
 Each staged replacement also proves the exact intended bytes through a bounded
 descriptor read, including an EOF probe, bracketed by descriptor and pathname
 identity checks. The baseline follows writes, metadata changes and close;
-change time is compared, but bytes remain authoritative because Windows handles
+transient baseline observation failures use the same bounded Windows retry rule,
+and its waits count toward the subsequent publication's nine-wait ceiling.
+Change time is compared, but bytes remain authoritative because Windows handles
 can suppress or set timestamps. Proof and removal use bigint file identities.
 The asynchronous helper performs its synchronous byte proof immediately before
 invoking rename, with no intervening await. Cleanup is limited to the inode
@@ -1111,6 +1120,9 @@ captured from this attempt's exclusive-create descriptor and stops after publish
 Assistant repair, skill repair, manifest-intent and daily transaction rollback
 require a record of the authorized publication and fresh identity and byte proof;
 a matching payload from a different writer grants no restore right.
+Answer setup passes its guarded manifest writer through deployment's verified
+domain save, recording the new publication immediately. Its rollback deployment
+does not persist a domain, so an originally absent domain is restored exactly.
 Node has no unlink-by-handle operation, so an identity check followed by unlink
 still has a pathname race. These checks do not claim atomic compare-and-delete.
 

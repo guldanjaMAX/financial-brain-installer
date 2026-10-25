@@ -794,7 +794,10 @@ export function readDailyRefreshUpdateTransaction(identityOrPlan, options = {}) 
   if (fence && fence.transaction_id !== value.transaction_id) {
     throw new Error("the daily update transaction does not match the Brain recovery fence");
   }
-  if (manifestPath && !fence) return null;
+  // A crash can leave the receipt before fence creation or after fence removal.
+  // Keep its exact predecessor proof and resume conservatively; absence of the
+  // fence cannot turn an existing receipt into permission to overwrite a file.
+  // The next verified transaction write restores the fence under the update lock.
   const receipt = Object.freeze({
     ...value,
     remote_mutation_may_have_started: value.remote_mutation_may_have_started !== false,

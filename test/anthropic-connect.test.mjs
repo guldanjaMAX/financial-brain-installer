@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -24,6 +24,7 @@ import worker from "../worker/src/index.js";
 import {
   cmdConnectAnthropic,
   cmdDisconnectAnthropic,
+  persistWorkersDevDomain,
   reconcileDailyDefinitionAfterManifestEdit,
 } from "../brain.mjs";
 
@@ -33,6 +34,7 @@ import {
   RECOMMENDED_CLAUDE_DAILY_CAP_USD,
   REVIEWED_CLAUDE_ANSWER_MODELS,
   answerSetupOf,
+  answerSetupJournalPath,
   assertReviewedAnswerModels,
   classifyAnthropicResponse,
   displayResetTime,
@@ -565,6 +567,102 @@ test("a key-class Worker failure restores built-in and deletes the newly added s
   assert.ok(harness.calls.indexOf("clear") < harness.calls.indexOf("journal-remove"));
   assert.ok(harness.calls.indexOf("journal-remove") < harness.calls.indexOf("unlock"));
 });
+
+// Exercise the CLI adapter, actual domain saver and actual atomic publications.
+// Only the provider, deployment and Worker boundaries are synthetic.
+for (const domainPresent of [false, true]) {
+  for (const outcome of ["accepted", "rejected", "deploy-failure", "foreign-after-deploy", "foreign-before-save"]) {
+    test(`domain-save rollback: ${domainPresent ? "present" : "absent"} domain, ${outcome}`, async t => {
+      const root = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-answer-domain-")));
+      t.after(() => rmSync(root, { recursive: true, force: true }));
+      const manifestPath = join(root, "brain.manifest.json");
+      const before = manifest();
+      if (!domainPresent) delete before.brain.domain;
+      const originalBytes = `${JSON.stringify(before, null, 2)}\n`;
+      writeFileSync(manifestPath, originalBytes);
+      let secret = false;
+      let deploys = 0;
+      let checks = 0;
+      let foreignBytes;
+      const value = await cmdConnectAnthropic(manifestPath, { "from-clipboard": true, json: true }, {
+        loadManifest: path => ({ m: JSON.parse(readFileSync(path, "utf8")) }),
+        acquireLock: async (_input, action) => action(),
+        verifyVersion: async () => {},
+        readClipboard: async () => fixtureKey(),
+        clearClipboard: async () => {},
+        preflight: async () => ({ status: "ok" }),
+        listSecretNames: async () => secret ? ["ANTHROPIC_API_KEY"] : [],
+        putSecret: async () => { secret = true; },
+        deleteSecret: async () => { secret = false; },
+        prepareDaily: async () => {},
+        reconcileDaily: async () => {},
+        deploy: async (path, deployOptions = {}) => {
+          deploys++;
+          assert.equal(deployOptions.nextSteps, false, "the CLI forwards the transaction's deployment options");
+          const current = JSON.parse(readFileSync(path, "utf8"));
+          if (deploys === 1 && outcome === "foreign-before-save") {
+            const replacement = structuredClone(current);
+            replacement.safety.daily_llm_spend_cap_usd = 9;
+            foreignBytes = `${JSON.stringify(replacement, null, 2)}\n`;
+            writeFileSync(manifestPath, foreignBytes);
+            // The same callback is reusable for another legitimate deploy save.
+            await deployOptions.saveManifest(path, current);
+            assert.fail("a deployment save must not overwrite a foreign manifest");
+          }
+          if (!current.brain.domain && deployOptions.persistDomain !== false) {
+            await persistWorkersDevDomain(path, current, { id: "fixture-account" }, "fixture-brain", {
+              readSubdomain: async () => ({ subdomain: "fixture" }),
+              verifyWorkersDevCandidate: async () => ({ ok: true }),
+              saveManifest: deployOptions.saveManifest,
+            });
+          }
+          if (deploys === 1 && outcome === "deploy-failure") throw new Error("synthetic deployment failure after domain save");
+        },
+        checkWorker: async current => {
+          checks++;
+          assert.ok(JSON.parse(readFileSync(manifestPath, "utf8")).brain.domain,
+            "the forward deployment saved its verified domain before the Worker check");
+          if (outcome === "foreign-after-deploy") {
+            const replacement = JSON.parse(readFileSync(manifestPath, "utf8"));
+            replacement.safety.daily_llm_spend_cap_usd = 9;
+            foreignBytes = `${JSON.stringify(replacement, null, 2)}\n`;
+            writeFileSync(manifestPath, foreignBytes);
+          }
+          const status = outcome === "accepted" ? "ok" : "key_rejected";
+          return {
+            answer: { model: current.retrieval.answer_model, status },
+            check: { model: current.retrieval.gate_model, status },
+          };
+        },
+        now: () => new Date("2026-10-22T12:00:00.000Z"),
+      }).then(result => ({ result }), error => ({ error }));
+      assert.equal(checks, ["deploy-failure", "foreign-before-save"].includes(outcome) ? 0 : 1,
+        "the intended deployment or Worker-check boundary was reached");
+      if (outcome === "accepted") {
+        assert.ok(value.result, "the successful setup control completed");
+        assert.equal(deploys, 1);
+        assert.equal(secret, true);
+        assert.equal(existsSync(answerSetupJournalPath(manifestPath)), false);
+        const current = JSON.parse(readFileSync(manifestPath, "utf8"));
+        assert.equal(answerSetupOf(current), "opus-sonnet");
+        assert.ok(current.brain.domain);
+      } else if (["rejected", "deploy-failure"].includes(outcome)) {
+        assert.equal(value.error?.payload?.rolled_back, true, "the failed setup completes rollback");
+        assert.equal(value.error.payload.rollback_target, "built-in");
+        assert.equal(deploys, 2, "the restored configuration was deployed");
+        assert.equal(readFileSync(manifestPath, "utf8"), originalBytes, "the original manifest is restored exactly");
+        assert.equal(secret, false, "the rejected key is absent from the Worker fixture");
+        assert.equal(existsSync(answerSetupJournalPath(manifestPath)), false);
+      } else {
+        assert.equal(value.error?.payload?.error_code, "anthropic_rollback_incomplete");
+        assert.equal(deploys, 1, "no rollback step adopts the foreign manifest");
+        assert.equal(readFileSync(manifestPath, "utf8"), foreignBytes);
+        assert.equal(secret, true, "refusal preserves remote state for recovery");
+        assert.equal(existsSync(answerSetupJournalPath(manifestPath)), true);
+      }
+    });
+  }
+}
 
 test("a replacement key rejected by the Worker does not restore the prior Claude pair", async () => {
   const before = manifest({ retrieval: { ...RECOMMENDED_ANSWER_SETUP } });

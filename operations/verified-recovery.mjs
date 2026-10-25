@@ -1308,6 +1308,9 @@ function writePrivateControl(path, value, { replace = false, random = randomByte
       } });
       published = true;
     } else {
+      // First creation uses a link, so it must enforce the same positive
+      // staging proof required by the replacement helper before publication.
+      if (!stagedIdentity) fail("verified recovery control staging proof was refused");
       // A check-then-rename would overwrite a file created in the gap. Linking
       // the private staging inode into the final name gives first creation true
       // O_EXCL behavior on every supported local filesystem.

@@ -2875,7 +2875,7 @@ export async function persistWorkersDevDomain(manifestPath, m, acct, scriptName,
     );
   }
   m.brain = { ...(m.brain || {}), domain: candidateDomain };
-  saveManifest(manifestPath, m);
+  await (options.saveManifest ?? saveManifest)(manifestPath, m);
   ok(`confirmed ${candidateDomain} is this brain and saved it`);
   return m.brain.domain;
 }
@@ -3211,6 +3211,7 @@ async function cmdDeployWithPrompts(manifestPath, options = {}) {
   if (!m.brain?.domain && options.persistDomain !== false) {
     const domain = await persistWorkersDevDomain(manifestPath, m, acct, scriptName, {
       workersDevSubdomain: activeWorkersDevSubdomainReceipt(acct.id),
+      saveManifest: options.saveManifest,
       verifyWorkersDevCandidate: options.verifyWorkersDevCandidate,
       request: options.request,
       wait: options.wait,
@@ -19827,7 +19828,7 @@ export async function cmdConnectAnthropic(manifestPath, flags = {}, options = {}
           ...reconcileOptions,
           ...(options.dailyRefreshOptions || {}),
         })),
-      deploy: options.deploy ?? ((path) => cmdDeploy(path, { nextSteps: false })),
+      deploy: (path, deployOptions) => (options.deploy ?? cmdDeploy)(path, { nextSteps: false, ...deployOptions }),
       checkWorker,
       sleep: options.sleep,
       now: options.now,

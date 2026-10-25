@@ -12,7 +12,7 @@ registerHooks({ load(url, context, nextLoad) {
   const result = nextLoad(url, context);
   if (url !== helperUrl) return result;
   const parts = String(result.source).split("platform = process.platform,");
-  assert.equal(parts.length, 3, "both retry APIs must expose their platform default");
+  assert.equal(parts.length, 4, "baseline capture and both rename APIs must expose their platform default");
   return { ...result, source: parts.join("platform = globalThis.__brainRenameTestPlatform ?? process.platform,") };
 } });
 const {
@@ -131,6 +131,23 @@ const identityCases = [
     },
   },
 ];
+
+for (const residue of [false, true]) {
+  test(`bootstrap staging name: ${residue ? "a prior process-id residue does not block publication" : "an empty directory publishes"}`, t => {
+    const root = fixture(t);
+    const path = join(root, "bootstrap.json");
+    const stale = `${path}.${process.pid}.tmp`;
+    const staleBytes = Buffer.from("retained earlier attempt\n");
+    if (residue) fs.writeFileSync(stale, staleBytes, { flag: "wx", mode: 0o600 });
+    const priorIdentity = residue ? fs.lstatSync(stale, { bigint: true }) : null;
+    const result = writeBootstrapStatusFile(path, { status: "next" }, { path });
+    assert.equal(result.path, path);
+    assert.equal(JSON.parse(fs.readFileSync(path, "utf8")).status, "next");
+    if (residue) assertStagingSurvives(stale, priorIdentity, staleBytes);
+    assert.deepEqual(fs.readdirSync(root).sort(), residue
+      ? ["bootstrap.json", `bootstrap.json.${process.pid}.tmp`].sort() : ["bootstrap.json"]);
+  });
+}
 
 for (const site of identityCases) for (const replacement of ["none", "destination", "staging", "staging-in-place", "squat-after-success"]) {
   test(`${site.name} retry identity: ${replacement}`, t => {

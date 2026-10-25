@@ -2,7 +2,7 @@ import { createUpgradeBookmarkWriter } from "./fixtures/upgrade-bookmark-writer.
 import assert from "node:assert/strict";
 import { createHash as boundaryHash } from "node:crypto";
 import { createWindowsUpdateBridgeGuard as boundaryGuard } from "../operations/windows-update-bridge.mjs";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -12,7 +12,9 @@ import {
   buildDailyRefreshDefinition,
   dailyRefreshUpdateTransactionPath,
   readDailyRefreshUpdateTransaction,
+  writeDailyRefreshUpdateTransaction,
 } from "../operations/daily-refresh-scheduler.mjs";
+import { clearBrainRecoveryFence, readBrainRecoveryFence } from "../operations/brain-lifecycle-lock.mjs";
 
 const PRODUCT_VERSION = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf8"),
@@ -305,6 +307,69 @@ async function withFixture(run) {
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+}
+
+function seedUpdateReceipt(harness, manifestPath, state) {
+  // Receipt recovery exercises the real lifecycle lock, with native ACL work
+  // injected separately so the fixture is independent of the test user's SID.
+  harness.options.lifecycleLockOptions.restrictWindowsDirectory = () => {};
+  const options = {
+    home: dirname(manifestPath), manifestPath, platform: "win32", machineLockRoot: harness.machineLockRoot,
+  };
+  const input = {
+    plan: harness.plan,
+    snapshot: { ...harness.state(), identity: harness.plan.identity },
+    phase: "paused",
+    remoteMutationMayHaveStarted: true,
+  };
+  let receipt = null;
+  if (state !== "absent") {
+    receipt = writeDailyRefreshUpdateTransaction(input, { ...options, expectedPredecessor: null });
+    if (state === "fenceless") {
+      assert.equal(clearBrainRecoveryFence({ ...options, transactionId: receipt.transaction_id }), true);
+      assert.equal(readBrainRecoveryFence(options), null);
+    }
+  }
+  return { input, options, receipt };
+}
+
+for (const state of ["absent", "fenced", "fenceless"]) {
+  test(`production daily receipt ${state} permits two verified updates`, async () => {
+    await withFixture(async ({ manifestPath }) => {
+      const harness = productionHarness(manifestPath);
+      const { options } = seedUpdateReceipt(harness, manifestPath, state);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await cmdUpdate(manifestPath, harness.options);
+        assert.equal(harness.state().enabled, true);
+        assert.equal(readDailyRefreshUpdateTransaction(harness.plan.identity, options), null,
+          "a completed update removes the exact receipt it published");
+        assert.equal(readBrainRecoveryFence(options), null);
+        assert.equal(harness.finish.length, attempt + 1);
+      }
+      assert.ok(harness.events.includes("health:active-final"));
+    });
+  });
+}
+
+for (const state of ["fenced", "fenceless"]) {
+  test(`production daily receipt ${state} refuses a replacement after read`, async () => {
+    await withFixture(async ({ manifestPath }) => {
+      const harness = productionHarness(manifestPath);
+      const { input, options } = seedUpdateReceipt(harness, manifestPath, state);
+      const expected = readDailyRefreshUpdateTransaction(harness.plan.identity, options);
+      assert.ok(expected, "an existing receipt keeps its exact predecessor proof without requiring a fence");
+      const path = dailyRefreshUpdateTransactionPath(harness.plan.identity, options);
+      const bytes = readFileSync(path);
+      renameSync(path, `${path}.displaced`);
+      writeFileSync(path, bytes, { flag: "wx", mode: 0o600 });
+      const replacement = lstatSync(path, { bigint: true });
+      assert.throws(() => writeDailyRefreshUpdateTransaction(input, {
+        ...options, expectedPredecessor: expected,
+      }), /the daily update transaction receipt is unsafe/);
+      assert.equal(lstatSync(path, { bigint: true }).ino, replacement.ino);
+      assert.deepEqual(readFileSync(path), bytes, "the foreign content-equal receipt survives refusal");
+    });
+  });
 }
 
 test("production update proves active propagation before convergence and schedule restore", async () => {
