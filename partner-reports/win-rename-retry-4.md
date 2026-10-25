@@ -304,4 +304,121 @@ receipts without adopting another writer's replacement. Randomize bootstrap
 staging, refuse unproved recovery links, strengthen native and mutation tests,
 and record focused results plus sandbox verification limits.
 
-LANE WIN-RENAME-RETRY-4: READY
+## Operator verification and review
+
+The lane's work is commit `29bb8300`, unchanged; its own verdict was READY.
+The operator re-ran the checks outside the lane sandbox on the same Windows
+host (normal non-elevated user, Developer Mode off), each run in a fresh
+profile-shaped fence with the network guard, and ran an independent read-only
+review. Times are MST on 2026-10-24.
+
+### Blocker found by measurement (P1, present since round 3)
+
+Change time is compared at every staging proof, but on this host a file's
+change time moves on its own up to about a second after an ACL change. The
+credential writers apply their ACL before the identity baseline, so the later
+change-time bump makes the byte proof refuse the writer's own file at rename.
+Round 4's observation retry does not help: a change-time difference is a
+definite mismatch.
+
+- Probe: 20 files written, fsynced and closed, then polled for 3 s without
+  being touched. With `icacls` applied before the baseline, all 20 changed
+  ctime after the baseline (10 within about 60 ms, the other 10 together at
+  about 880 ms). Without an ACL change, 0 of 20 changed.
+- A/B, each run in a fresh fence, run directly with node: google-auth-storage
+  and admin-key-rotation fail 5 of 5 on this tree and 0 of 5 with the
+  checked-in `drop_ctime` mutant. The bundle manifest CLI writer rows in
+  rename-retry-writers fail 3 of 3 and 0 of 3 with `drop_ctime`.
+- The round 3 tree (`bdfcb99b`) fails google-auth-storage 3 of 3 the same
+  way; `ebec973f` passes 3 of 3.
+- Through the operator's chain harness (`BRAIN_TEST_CHAIN=1`) the same suites
+  fail only intermittently. That is why the round 3 operator section reported
+  the credential suites as passing; that statement is corrected here.
+- Owner impact: saving a Google token, writing or rotating the admin key, and
+  every local tool that writes the admin key first (the ledger and search MCP
+  suites fail this way) can refuse on a normal Windows PC.
+
+Fix options for the partner, since round 3 asked for change time to be
+compared: on Windows, bind staging attempts to the exact bytes plus dev, ino,
+size and link count and leave ctime out (the helper comment already says ctime
+does not bind bytes there); or take the baseline only after the ACL change has
+settled, which has no reliable bound; or compare ctime on POSIX only.
+
+### Tests on this tree (outside the sandbox, chain harness)
+
+- Rename suites: helper 159/0/1 (the one symlink EPERM skip), configuration
+  53/0/0, Windows 76/0/0, writers 92/1/0 (the bundle CLI row above).
+  Test-chain runner and complete pass.
+- Launch counts measured: create 10, refresh 15, setup of both 21, update of
+  both 30, the same as `ebec973f`.
+- Suites the sandbox could not complete: daily-refresh-update-production
+  104/0/0 (99/0/0 on `ebec973f`), daily-refresh-scheduler 45/0/0,
+  anthropic-connect 44/0/0, update-pending-refusal 58/0/0.
+- 140 suites compared with `ebec973f` by failing test names per suite: 130
+  identical. The ten that differ are admin-key-file, admin-key-rotation,
+  google-auth-storage, provider-oauth, gmail-incremental-policy,
+  cloudflare-recovery-adapter, ledger-mcp, mcp-search-contract,
+  mcp-absence-honesty (hung and was stopped at 15 minutes, then 32/0/0 on a
+  rerun) and the writers row; all trace to the change-time blocker above.
+- The checked-in mutants, each with `MUTATION_APPLIED` and the guard active,
+  are all killed with the counts in the table above (unmutated control
+  159/0/1). The two caller mutants were temporary files in the lane sandbox's
+  temporary folder and were not re-run.
+- `git diff --check` clean; names, secrets, email and user-path scan clean on
+  every added line and new file. The round 2 and round 3 reports are unchanged.
+- Test hygiene: when mcp-search-contract fails it leaves
+  `.tmp-mcp-search-*` folders in the repository root. 18 such folders from the
+  operator runs (synthetic manifests only) were deleted before the commit.
+
+### Review (read-only: three area reviewers, one refuter, one critic)
+
+Confirmed by the refuter:
+
+1. P2, new in round 4: `operations/daily-refresh-scheduler.mjs:797-809` with
+   `brain.mjs:31149-31162`, `:31360-31374` and the restore at
+   `operations/daily-refresh-scheduler.mjs:502-516`. A fenceless receipt is now
+   resumed as authoritative, although without a fence `brain daily` could have
+   changed the schedule after it was written. A later refusal then restores the
+   stale snapshot: a daily task the owner removed comes back, and on macOS a
+   newer definition is replaced. Docs line 651-653 says a replacement receipt
+   still refuses recovery; that holds only for a replacement after the read.
+2. P2, older and not added in round 4: after a successful `brain connect
+   anthropic` on a manifest with no saved domain, the run's domain save changes
+   the manifest after the daily definition was re-registered
+   (`operations/answer-setup.mjs:485`, `:510-522`;
+   `operations/daily-refresh-plan.mjs:262`), so later scheduled runs stop with
+   "the manifest or source plan changed after daily refresh registration".
+3. P3: `operations/claude-workspace.mjs:425-433` (with `:391`, `:479`, `:505`):
+   the workspace writer re-reads the staging file in its own revalidate, so a
+   read-blocking lock still refuses before the new observation retry runs, and
+   the kept lock directory makes later runs return not_written. Relevant to the
+   planned Claude-key reuse.
+4. P3: `operations/admin-key-file.mjs:902`, `:919-925` and
+   `connectors/google-auth.mjs:946`, `:972-977`: a sharing lock during backup
+   cleanup now rolls back a committed, verified credential, and the message
+   says the replacement was not verified.
+5. P3: daily runs now defer on any fenceless receipt, including one left by a
+   refused update that never paused anything
+   (`operations/daily-refresh-run.mjs:588-593`).
+6. P3: per-process-ID staging names remain at
+   `operations/daily-refresh-run.mjs:483` and `operations/claude-skill.mjs:696`,
+   the defect fixed here for bootstrap-status.
+
+Test gaps: the ten domain-save rows use a fake deploy, so the forwarding at
+`brain.mjs:3211-3214` is never executed (removing it leaves them green); the
+deploy-failure and foreign-before-save rows never ran red; no test asserts the
+fence is recreated under the update lock; the native FileShare.None rows are
+six, not nine (three are controls without a holder).
+
+Helper interface: every existing export keeps its signature, and
+`captureStagedProofWithRetry` is the only new one. Behavior changed under the
+same signatures: `captureStagedProof` now waits up to about 2 s on a Windows
+lock (not injectable) and also retries an initial lstat error; with `staged`,
+both rename APIs start at a proof-keyed attempt index and may run revalidate up
+to ten times with no rename.
+
+Operator verdict: not ready. The change-time blocker makes credential writes
+refuse on a normal Windows PC, and the fenceless-receipt adoption can restore a
+stale schedule.
+
+LANE WIN-RENAME-RETRY-4: NOT READY change-time comparison makes Windows credential writes refuse their own staging file after the ACL change (since round 3); fenceless receipt adoption can restore a stale daily schedule
