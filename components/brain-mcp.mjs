@@ -28,7 +28,7 @@
  * Zero dependencies. Node 22+ (matches the installer runtime requirement).
  */
 
-import { createMcpQueryTiming } from "./brain-mcp-timing.mjs";
+import { createMcpQueryTiming, partBRouteReceiptFromTiming } from "./brain-mcp-timing.mjs";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -1015,13 +1015,18 @@ async function handle(msg) {
       ? createMcpQueryTiming({ route: `mcp.${params.name}` }) : null;
     try {
       const result = await runTool(params?.name, params?.arguments ?? {}, queryTiming);
-      const content = [{ type: "text", text: JSON.stringify(result, null, 2) }];
-      return ok(id, { content, ...(queryTiming ? { _meta: { timing: queryTiming.finish() } } : {}) });
+      const timing = queryTiming?.finish();
+      const routeReceipt = params?.name === "brain_think"
+        ? partBRouteReceiptFromTiming(timing) : null;
+      const visible = routeReceipt ? { ...result, route_receipt: routeReceipt } : result;
+      const content = [{ type: "text", text: JSON.stringify(visible, null, 2) }];
+      return ok(id, { content, ...(timing ? { _meta: { timing } } : {}) });
     } catch (err) {
+      const timing = queryTiming?.finish("error");
       return ok(id, {
         content: [{ type: "text", text: renderCliCommands(safeMcpError(err)) }],
         isError: true,
-        ...(queryTiming ? { _meta: { timing: queryTiming.finish("error") } } : {}),
+        ...(timing ? { _meta: { timing } } : {}),
       });
     }
   }

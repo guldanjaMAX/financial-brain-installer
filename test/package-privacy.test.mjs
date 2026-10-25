@@ -648,6 +648,7 @@ const expected = [
   // Shared byte contract for a normalized install-state prefix plus one direct
   // D1 data export. It owns no credential, provider, or command transport.
   "operations/recovery-content-fingerprint.mjs",
+  "operations/rename-retry.mjs",
   // Reviewed v0.4.8 campaign contracts. Seven are dependency-free or pure
   // hash/shape validators. The teardown D1 proof accepts only an injected,
   // already approved Wrangler boundary, fixes every permitted read/export
@@ -899,6 +900,7 @@ const expected = [
   // filesystem, retry, or mutation implementation and receives one fixed
   // aggregate SELECT through injected read-only callbacks.
   "operations/aggregate-field-observer.mjs",
+  "operations/answer-route-proof.mjs",
   "operations/cloudflare-recovery-adapter.mjs",
   "operations/locked-wrangler-runtime.mjs",
   "operations/package-bundle-verifier.mjs",

@@ -300,6 +300,13 @@ import {
 } from "./operations/feed-folders.mjs";
 import { writeClaudeWorkspaceGuide, writeCodexWorkspaceGuide, classifySessionFolder } from "./operations/claude-workspace.mjs";
 import {
+  CLAUDE_CODE_FULL_EXIT_CARD,
+  openPartBMcpTransport,
+  PART_B_ROUTE_CONTROL,
+  proveClaudeCodeFullyExited,
+  provePartBRouteReadiness,
+} from "./operations/answer-route-proof.mjs";
+import {
   captureTechnicianSkillRepairSnapshot,
   inspectTechnicianSkillEverywhere,
   installTechnicianSkillEverywhere,
@@ -7732,6 +7739,37 @@ export async function cmdTest(manifestPath, options = {}) {
 
 /* ----------------------------------------------------------- mcp-config */
 
+function partBClaudeGuideRefreshReceipt(outcome) {
+  const accepted = ["written", "verified"].includes(outcome?.status) &&
+    Number.isSafeInteger(outcome?.guideGeneration) && outcome.guideGeneration > 0;
+  return Object.freeze({
+    schema_version: 1,
+    operation: "claude_workspace_guide.refresh",
+    outcome: accepted ? outcome.status : "refused",
+    managed: accepted,
+    answer_route: accepted ? "brain_think_first" : "unproven",
+    guide_generation: accepted ? outcome.guideGeneration : 0,
+  });
+}
+
+function refreshPartBClaudeGuide(manifestPath, options = {}, workspaceOptions = {}) {
+  let outcome;
+  try {
+    outcome = writeAssistantWorkspaceGuide(manifestPath, "claude", options, {
+      ...workspaceOptions,
+      brainCliPath: workspaceOptions.brainCliPath || options.brainCliPath || fileURLToPath(import.meta.url),
+      nodePath: workspaceOptions.nodePath || options.nodePath || process.execPath,
+      platformName: workspaceOptions.platformName ?? options.platformName ?? options.platform ?? process.platform,
+    }, {
+      action: "connect anthropic",
+      allowExistingWindowsRefresh: true,
+      reportInfo: options.reportInfo ?? info,
+    });
+  }
+  catch { outcome = null; }
+  return partBClaudeGuideRefreshReceipt(outcome);
+}
+
 /**
  * Print the config a client pastes into their own AI tools.
  *
@@ -7845,7 +7883,38 @@ export async function cmdMcpConfig(manifestPath, options = {}) {
     if (!result.wired.length && !result.skipped.length) {
       info("no supported assistant found on this computer. Install Claude Code or Codex first.");
     }
-    return result;
+    let routeReadiness = { ready: false, reason: "claude_apply_required" };
+    if (result.wired.includes("Claude Code")) {
+      const routeOptions = options.routeReadinessOptions || {};
+      const guideRefresh = refreshPartBClaudeGuide(
+        manifestPath,
+        { ...options, ...routeOptions },
+        routeOptions.claudeWorkspaceOptions || {},
+      );
+      if (["written", "verified"].includes(guideRefresh.outcome)) {
+        // This function-call seam is intentionally unavailable to CLI flags and
+        // the environment. Tests can fix only the host snapshot while leaving
+        // the installed guide, descriptor, transport, and route defaults real.
+        const stopMcpProcess = routeOptions.stopMcpProcess ?? (
+          Object.hasOwn(options, "processSnapshot")
+            ? () => proveClaudeCodeFullyExited({ readProcessList: options.processSnapshot })
+            : proveClaudeCodeFullyExited
+        );
+        routeReadiness = await provePartBRouteReadiness({
+          manifestPath,
+          guideRefresh,
+          control: routeOptions.control ?? PART_B_ROUTE_CONTROL,
+        }, {
+          stopMcpProcess,
+          openMcpTransport: routeOptions.openMcpTransport ?? openPartBMcpTransport,
+        });
+      } else routeReadiness = { ready: false, reason: "guide_refresh_refused" };
+    }
+    if (routeReadiness.reason === "claude_code_running") {
+      info(CLAUDE_CODE_FULL_EXIT_CARD.title);
+      info(CLAUDE_CODE_FULL_EXIT_CARD.message);
+    }
+    return { ...result, route_readiness: routeReadiness };
   }
 
   let base = m.brain?.domain ? `https://${m.brain.domain}` : null;
@@ -19825,9 +19894,37 @@ export async function cmdConnectAnthropic(manifestPath, flags = {}, options = {}
       removeJournal: options.removeJournal,
       log: (line) => output.push(line),
     });
-    if (flags.json === true) console.log(JSON.stringify(result));
-    else for (const line of output) say(line);
-    return result;
+    let configured = null;
+    try { configured = (options.loadManifest ?? loadManifest)(manifestPath).m; }
+    catch { /* Route readiness remains refused without exact post-setup readback. */ }
+    const modelPairAccepted = configured?.retrieval?.answer_model === "claude-opus-5-5" &&
+      configured?.retrieval?.gate_model === "claude-sonnet-5-5" &&
+      result?.answer_model === "claude-opus-5-5" && result?.gate_model === "claude-sonnet-5-5" &&
+      result?.worker_check?.answer?.model === "claude-opus-5-5" &&
+      result?.worker_check?.check?.model === "claude-sonnet-5-5";
+    const guideRefresh = modelPairAccepted
+      ? refreshPartBClaudeGuide(manifestPath, options, options.claudeWorkspaceOptions || {})
+      : partBClaudeGuideRefreshReceipt(null);
+    const guideAccepted = ["written", "verified"].includes(guideRefresh.outcome);
+    const completed = {
+      ...result,
+      guide_refresh: guideRefresh,
+      route_readiness: {
+        ready: false,
+        reason: guideAccepted ? "client_restart_required" :
+          modelPairAccepted ? "guide_refresh_refused" : "model_pair_unproven",
+        next_operation: "mcp-config.apply_after_full_exit",
+      },
+    };
+    if (flags.json === true) console.log(JSON.stringify(completed));
+    else {
+      for (const line of output) say(line);
+      if (guideAccepted) {
+        info("Fully exit Claude Code before continuing. Then relaunch it and run:");
+        info(renderCliCommands(`brain mcp-config ${JSON.stringify(manifestPath)} --apply`));
+      }
+    }
+    return completed;
   } catch (error) {
     if (error?.code === "brain_lifecycle_recovery_required") {
       error = new Error(UPDATE_FIRST(manifestPath), { cause: error });
@@ -29737,7 +29834,11 @@ function writeAssistantWorkspaceGuide(manifestPath, assistant, options, writerOp
   // Windows can retain the writer's lock when an editor holds the original
   // guide open. Keep this check adjacent to the writer; a concurrent creator
   // still needs a create-only writer mode or lock recovery in 0.4.19.
-  if (writerOptions.platformName !== "win32" || !existsSync(path)) {
+  // Part B refreshes an existing managed guide after exact model readback. It
+  // still enters this common ownership guard, then relies on the writer's
+  // foreign, link, damage, staging, and exact-readback refusals on Windows.
+  if (run.allowExistingWindowsRefresh === true ||
+      writerOptions.platformName !== "win32" || !existsSync(path)) {
     return writeGuide(manifestPath, writerOptions);
   }
   if (!run.noticeShown) {

@@ -2036,7 +2036,7 @@ test("WIN R5 every CLI writer reference is confined to the common guard", () => 
     .replace(/^import \{ writeClaudeWorkspaceGuide, writeCodexWorkspaceGuide, classifySessionFolder \}.*$/m, "")
     .replace(/\bwrite(?:Claude|Codex)WorkspaceGuide(?=\s*:)/g, "writerOption");
   assert.doesNotMatch(outside, /\bwrite(?:Claude|Codex)WorkspaceGuide\b/, "no direct or aliased writer remains outside the guard");
-  assert.equal((outside.match(/\bwriteAssistantWorkspaceGuide\(/g) || []).length, 4, "setup twice, tools, and the shared update refresher");
+  assert.equal((outside.match(/\bwriteAssistantWorkspaceGuide\(/g) || []).length, 5, "setup twice, tools, the shared update refresher, and connect anthropic");
 });
 
 for (const platform of ["win32", "darwin", "linux"]) {
