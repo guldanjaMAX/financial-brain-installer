@@ -648,9 +648,17 @@ Native task timeout is an unknown outcome, never proof of absence. An interrupte
 in place; a retry uses the saved definition as its authorization even after a
 manifest fingerprint change, and clears the fence only after current health
 proof and exact reconciliation.
-A validated receipt without its recovery fence remains recovery state with its
-exact predecessor proof; the next transaction write restores the fence under
-the update lock. Another writer's replacement receipt still refuses recovery.
+A validated receipt without its recovery fence has no schedule authority:
+the owner could have removed or changed the task while the fence was absent.
+Under the update lock, a new transaction captures the current daily, legacy and
+bridge schedules and atomically replaces that exact receipt, with a new ID.
+Prior possible remote dispatch remains durable across that replacement, and
+old bridge evidence is archived without granting it restore authority. A failed
+snapshot leaves the old receipt intact. A proven pre-dispatch refusal restores
+only the current snapshot; possible earlier dispatch keeps the current schedule
+paused for verified recovery. Another writer's replacement receipt still refuses
+recovery. Daily execution honors the live fence and lifecycle lease, but an
+explicitly fenceless receipt cannot defer otherwise valid work indefinitely.
 
 Windows bridge recovery additionally records remote mutation intent before the
 paused Worker deployment begins, or before migration in the non-outbox path.
@@ -1112,8 +1120,14 @@ descriptor read, including an EOF probe, bracketed by descriptor and pathname
 identity checks. The baseline follows writes, metadata changes and close;
 transient baseline observation failures use the same bounded Windows retry rule,
 and its waits count toward the subsequent publication's nine-wait ceiling.
-Change time is compared, but bytes remain authoritative because Windows handles
-can suppress or set timestamps. Proof and removal use bigint file identities.
+Staging byte proofs omit change time on every platform: Windows can update it
+after an ACL change and the post-close baseline, while POSIX chmod and sync
+clients can also change it without changing bytes. Device, inode, link count,
+size, modification time and mode still bind the descriptor and pathname checks,
+and every proof checks exact bounded bytes. The exported metadata-only identity
+comparators retain their change-time check. Credential and other native
+ACL-protected predecessor checks omit only change time; their inode, link count,
+size, modification time and mode checks remain. Proof and removal use bigint file identities.
 The asynchronous helper performs its synchronous byte proof immediately before
 invoking rename, with no intervening await. Cleanup is limited to the inode
 captured from this attempt's exclusive-create descriptor and stops after publish.
@@ -1125,6 +1139,13 @@ domain save, recording the new publication immediately. Its rollback deployment
 does not persist a domain, so an originally absent domain is restored exactly.
 Node has no unlink-by-handle operation, so an identity check followed by unlink
 still has a pathname race. These checks do not claim atomic compare-and-delete.
+
+Once an admin-key or Google-token replacement has passed exact readback and
+directory synchronization, a refused rollback-backup cleanup leaves that
+verified replacement stored. The error identifies unverified backup cleanup;
+it never claims the replacement failed verification or restores an older key.
+Staging names include random entropy so a stale per-process residue cannot
+block a subsequent attempt with the same process ID.
 
 Durable secrets never belong in the manifest or MCP registration. The manifest
 contains only a non-secret locator when Keychain is used. Standard durable

@@ -53,12 +53,22 @@ function proofIo(overrides) {
   return { lstatSync, openSync, fstatSync, readSync, closeSync, unlinkSync, ...overrides };
 }
 
+function sameStagedIdentity(actual, expected) {
+  if (!sameInode(actual, expected)) return false;
+  const keys = isBigintIdentity(expected) ? BIGINT_IDENTITY_KEYS : RENAME_IDENTITY_KEYS;
+  return keys.filter(key => key !== "ctimeMs" && key !== "ctimeNs").every(key =>
+    typeof actual[key] === typeof expected[key]
+    && (typeof expected[key] === "number" || typeof expected[key] === "bigint")
+    && actual[key] === expected[key]);
+}
+
 const sleepSync = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 const baselineRetries = new WeakMap();
 
-// Change time is useful metadata, but does not bind bytes on Windows: a
-// same-user handle can set or suppress timestamp updates. Exact bounded bytes
-// are the authority. Keep the descriptor and pathname brackets around the read.
+// ACL changes can move Windows change time after the post-close baseline;
+// POSIX chmod and sync clients also change it without changing owned bytes.
+// Keep ctime out of this byte-backed proof on every platform. Metadata-only
+// predecessor checks retain their existing stricter exported comparator.
 function observeStagedBytes(path, expected, bytes, { fs = {} } = {}) {
   let io, descriptor, observed, probe, operation;
   try {
@@ -68,11 +78,11 @@ function observeStagedBytes(path, expected, bytes, { fs = {} } = {}) {
     const bigint = isBigintIdentity(expected);
     const length = bigint ? BigInt(intended.length) : intended.length;
     const actual = io.lstatSync(path, { bigint });
-    if (actual.size !== length || !sameRenameIdentity(actual, expected)) return false;
+    if (actual.size !== length || !sameStagedIdentity(actual, expected)) return false;
     operation = "open";
     descriptor = io.openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
     operation = undefined;
-    if (!sameRenameIdentity(io.fstatSync(descriptor, { bigint }), expected)) return false;
+    if (!sameStagedIdentity(io.fstatSync(descriptor, { bigint }), expected)) return false;
     observed = Buffer.alloc(intended.length);
     let total = 0;
     while (total < intended.length) {
@@ -88,11 +98,11 @@ function observeStagedBytes(path, expected, bytes, { fs = {} } = {}) {
     operation = undefined;
     if (trailing !== 0) return false;
     if (!timingSafeEqual(observed, intended)) return false;
-    if (!sameRenameIdentity(io.fstatSync(descriptor, { bigint }), expected)) return false;
+    if (!sameStagedIdentity(io.fstatSync(descriptor, { bigint }), expected)) return false;
     const closing = descriptor;
     descriptor = undefined;
     io.closeSync(closing);
-    return sameRenameIdentity(io.lstatSync(path, { bigint }), expected);
+    return sameStagedIdentity(io.lstatSync(path, { bigint }), expected);
   } catch (error) {
     // A sharing lock denies observation; it does not prove changed bytes.
     // Only the retrying callers may spend their budget on this third outcome.

@@ -14,9 +14,11 @@ import {
   linkSync,
   mkdirSync,
   openSync,
+  readSync,
   readFileSync,
   realpathSync,
   renameSync,
+  rmdirSync,
   writeFileSync,
   unlinkSync,
 } from "node:fs";
@@ -382,14 +384,18 @@ function workspaceParentUnchanged(parent) {
       sameIdentity(lstatSync(parent.physical), parent.stat);
   } catch { return false; }
 }
-function unchangedWorkspaceFile(path, snapshot, text, ownership, links = 1) {
+function unchangedWorkspaceIdentity(path, snapshot, ownership, links = 1) {
   try {
     const now = lstatSync(path);
     return now.isFile() && !now.isSymbolicLink() && now.nlink === links &&
       sameIdentity(now, snapshot) && now.uid === snapshot.uid && now.gid === snapshot.gid &&
       now.mode === snapshot.mode && now.size === snapshot.size && now.mtimeMs === snapshot.mtimeMs &&
-      workspaceFileOwnedByUser(path, now, ownership) && readFileSync(path, "utf8") === text;
+      workspaceFileOwnedByUser(path, now, ownership);
   } catch { return false; }
+}
+function unchangedWorkspaceFile(path, snapshot, text, ownership, links = 1) {
+  try { return unchangedWorkspaceIdentity(path, snapshot, ownership, links) && readFileSync(path, "utf8") === text; }
+  catch { return false; }
 }
 
 function commitWorkspaceGuide(target, parent, snapshot, existing, content, ownership) {
@@ -399,21 +405,44 @@ function commitWorkspaceGuide(target, parent, snapshot, existing, content, owner
   if (!workspaceParentUnchanged(parent)) return notWritten();
   const physicalTarget = join(parent.physical, basename(target));
   const lock = `${physicalTarget}.lock`, id = randomUUID();
-  let lockStat;
+  let lockStat, preparingStat;
   try { mkdirSync(lock, { mode: 0o700 }); lockStat = lstatSync(lock); }
   catch (error) { if (error.code === "EEXIST") return notWritten(); throw error; }
   const locked = () => {
-    try { return workspaceParentUnchanged(parent) && sameIdentity(lstatSync(lock), lockStat); }
+    try { return workspaceParentUnchanged(parent) && sameIdentity(lstatSync(lock), lockStat) &&
+      (!preparingStat || sameIdentity(lstatSync(preparing), preparingStat)); }
     catch { return false; }
   };
   const pendingName = `${basename(target)}.financial-brain-pending-${id}`;
-  const temporary = join(lock, `${pendingName}.tmp`), ready = join(lock, pendingName), previous = join(lock, "previous");
+  // A Windows read lock also prevents renaming the containing directory.
+  // Keep the initial file outside the mutex so an exhausted observation can
+  // retain its exact path while the untouched mutex is released for a retry.
+  const preparing = `${physicalTarget}.financial-brain-preparing-${id}`;
+  const temporary = join(preparing, `${pendingName}.tmp`), ready = join(lock, pendingName), previous = join(lock, "previous");
   const install = join(lock, `${pendingName}.install`);
   // Identity refusal must keep the same no-cleanup outcome as the checks below.
   const identityRefusal = {};
   const bytes = Buffer.from(content, "utf8");
+  // Keep byte observation inside the helper's retry budget. A held reader is
+  // an ordinary preparation failure, so retain this unpublished attempt and
+  // release its lock; a definite identity or byte mismatch still keeps it.
+  let observationError;
+  const observe = operation => (...args) => {
+    try { return operation(...args); }
+    catch (error) { observationError = error; throw error; }
+  };
+  const proofFs = {
+    lstatSync: (...args) => { observationError = undefined; return lstatSync(...args); },
+    openSync: observe(openSync), readSync: observe(readSync),
+  };
+  const refuseStaging = () => {
+    if (["EPERM", "EACCES", "EBUSY"].includes(observationError?.code)) throw observationError;
+    throw identityRefusal;
+  };
   let fd = null, displaced = false;
   try {
+    if (!locked()) return notWritten();
+    mkdirSync(preparing, { mode: 0o700 }); preparingStat = lstatSync(preparing);
     if (!locked()) return notWritten();
     fd = openSync(temporary, "wx", 0o600);
     const created = fstatSync(fd, { bigint: true });
@@ -422,17 +451,21 @@ function commitWorkspaceGuide(target, parent, snapshot, existing, content, owner
     writeFileSync(fd, content, "utf8");
     fsyncSync(fd);
     const closed = fd; fd = null; closeSync(closed);
-    const stagedProof = captureStagedProof(temporary, bytes, created);
+    const stagedProof = captureStagedProof(temporary, bytes, created, { fs: proofFs });
+    if (!stagedProof) refuseStaging();
     const staged = lstatSync(temporary);
     // Revalidation runs before every attempt, including the first, so the
     // staged guide is checked once per attempt without an extra native launch.
-    renameWithRetrySync(temporary, ready, { staged: {
-      expected: stagedProof, bytes, refuse: () => { throw identityRefusal; },
+    renameWithRetrySync(temporary, ready, { fs: proofFs, staged: {
+      expected: stagedProof, bytes, refuse: refuseStaging,
     }, revalidate: () => {
-      if (!locked() || !unchangedWorkspaceFile(temporary, staged, content, ownership) ||
+      observationError = undefined;
+      if (!locked() || !unchangedWorkspaceIdentity(temporary, staged, ownership) ||
           !renameIdentityMatches(ready, null)) throw identityRefusal;
     } });
     pendingPath = ready;
+    if (!locked()) return notWritten();
+    rmdirSync(preparing); preparingStat = undefined;
     if (!locked() || !unchangedWorkspaceFile(ready, staged, content, ownership)) return notWritten();
     // Finish every fallible content write before moving the active guide.
     // Keep a separate pending copy so edits to the installed inode cannot
@@ -486,7 +519,7 @@ function commitWorkspaceGuide(target, parent, snapshot, existing, content, owner
       const retained = `${physicalTarget}.financial-brain-retained-${id}`;
       try {
         renameSync(lock, retained);
-        if (pendingPath) pendingPath = join(retained, basename(pendingPath));
+        if (pendingPath && dirname(pendingPath) === lock) pendingPath = join(retained, basename(pendingPath));
         if (snapshot) recoveryPath = physicalTarget;
       } catch { /* Keep the original recovery locators if releasing the lock fails. */ }
     }

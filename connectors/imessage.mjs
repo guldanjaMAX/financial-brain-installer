@@ -52,6 +52,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
+import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import {
   MESSAGE_SESSION_DEFAULTS,
@@ -381,7 +382,7 @@ export function saveCaptureState(path, state) {
   // The snapshot carries message text from open conversations, so the file is
   // owner-only, and it is replaced atomically so a kill mid-write can never
   // leave half-written JSON that silently restarts capture from zero.
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  const tmp = `${path}.tmp-${process.pid}-${randomBytes(12).toString("hex")}`;
   try {
     writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
     renameSync(tmp, path);

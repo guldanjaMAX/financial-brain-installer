@@ -1,5 +1,5 @@
 /** Local scheduling evidence only. A source's ingest receipt remains authoritative. */
-import { renameIdentityMatches, renameWithRetrySync, captureStagedProof, removeOwnedStaging } from "./rename-retry.mjs";
+import { renameWithRetrySync, captureStagedProof, removeOwnedStaging } from "./rename-retry.mjs";
 import { randomBytes } from 'node:crypto';
 import { chmodSync, constants, closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -8,6 +8,16 @@ import { restrictWindowsFileToCurrentUser, restrictWindowsDirectoryToCurrentUser
 
 const KEYS = new Set(['quickbooks', 'quickbooks_desktop']);
 const invalid = () => Object.assign(new Error('QuickBooks schedule state is unsafe or invalid'), { code: 'QB_SCHEDULE_STATE_INVALID' });
+function protectedPredecessorMatches(path, expected) {
+  // The previous private write can receive its ACL change-time update late.
+  // Keep all other predecessor metadata checks without opening a held file.
+  let actual;
+  try { actual = lstatSync(path); }
+  catch (error) { return error?.code === 'ENOENT' && expected === null; }
+  return Boolean(expected && actual.isFile() && !actual.isSymbolicLink()
+    && expected.isFile() && !expected.isSymbolicLink() && actual.nlink === 1
+    && ["dev", "ino", "nlink", "size", "mtimeMs", "mode"].every(key => actual[key] === expected[key]));
+}
 function checked(path, directory = false) {
   let info;
   try { info = lstatSync(path); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
@@ -72,7 +82,7 @@ export function writeQuickBooksScheduleState(plan, source, state, options = {}) 
     const staged = captureStagedProof(temporary, bytes, created);
     const refuse = () => { throw invalid(); };
     renameWithRetrySync(temporary, path, { staged: { expected: staged, bytes, refuse }, revalidate() {
-      if (!renameIdentityMatches(path, predecessor)) throw invalid();
+      if (!protectedPredecessorMatches(path, predecessor)) throw invalid();
     } });
     published = true;
   } finally { if (created && !published) removeOwnedStaging(temporary, created); }

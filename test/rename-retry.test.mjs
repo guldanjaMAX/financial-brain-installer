@@ -3,7 +3,7 @@ import fs, { closeSync, fstatSync, lstatSync, mkdtempSync, openSync, readFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { renameWithRetry, renameWithRetrySync } from "../operations/rename-retry.mjs";
 import * as renameHelpers from "../operations/rename-retry.mjs";
@@ -200,7 +200,7 @@ test("capture staged proof binds post-close bytes to the original exclusive-crea
   assert.equal(renameHelpers.captureStagedProof(path, bytes, created), null);
 });
 
-test("change-time-only drift refuses while the round 2 six-field snapshot stays equal", t => {
+test("change-time-only drift preserves staged bytes but still refuses metadata-only identity proof", t => {
   const root = mkdtempSync(join(tmpdir(), "brain-rename-ctime-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const path = join(root, "staged");
@@ -217,7 +217,94 @@ test("change-time-only drift refuses while the round 2 six-field snapshot stays 
     assert.equal(after[key], before[key], `ctime-only fixture must preserve ${key}`);
   }
   assert.notEqual(after.ctimeNs, before.ctimeNs, "ctime-only fixture must actually move change time");
-  assert.equal(renameHelpers.stagedBytesMatch(path, before, bytes), false);
+  assert.equal(renameHelpers.sameRenameIdentity(after, before), false);
+  assert.equal(renameHelpers.renameIdentityMatches(path, before), false);
+  assert.equal(renameHelpers.stagedBytesMatch(path, before, bytes), true);
+});
+
+for (const acl of [false, true]) {
+  test(`native Windows ACL before baseline ${acl ? "delayed change time still publishes" : "unchanged control publishes"}`, {
+    skip: process.platform !== "win32", timeout: 15_000,
+  }, async t => {
+    const root = mkdtempSync(join(tmpdir(), "brain-rename-acl-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const bytes = Buffer.from("synthetic staged bytes");
+    let sid;
+    const systemRoot = process.env.SystemRoot;
+    const options = { windowsHide: true, encoding: "utf8", env: { SystemRoot: systemRoot } };
+    let observedDelayedChange = !acl;
+    if (acl) {
+      assert.ok(systemRoot, "native ACL test requires SystemRoot");
+      const identity = spawnSync(join(systemRoot, "System32", "whoami.exe"), ["/user", "/fo", "csv", "/nh"], options);
+      assert.equal(identity.status, 0, "native identity lookup must succeed");
+      sid = identity.stdout.match(/S-1-[0-9-]+/)?.[0];
+      assert.ok(sid, "native identity lookup must return a SID");
+    }
+    const samples = [];
+    // Multiple independent files cover hosts that coalesce ACL timestamp work.
+    // Each proof is pinned immediately; none is captured after a settling wait.
+    for (let index = 0; index < (acl ? 16 : 1); index++) {
+      const path = join(root, `staged-${index}`);
+      const target = join(root, `target-${index}`);
+      const fd = openSync(path, "wx", 0o600);
+      const created = fstatSync(fd, { bigint: true });
+      fs.fsyncSync(fd);
+      closeSync(fd);
+      if (acl) {
+        const applied = spawnSync(join(systemRoot, "System32", "icacls.exe"), [path, "/inheritance:r", "/grant:r", `*${sid}:(F)`], options);
+        assert.equal(applied.status, 0, "native owner ACL must be applied before the baseline");
+      }
+      const secured = openSync(path, "r+");
+      writeFileSync(secured, bytes);
+      fs.fsyncSync(secured);
+      closeSync(secured);
+      const proof = renameHelpers.captureStagedProof(path, bytes, created);
+      assert.ok(proof, "baseline immediately after native ACL must capture the owned file");
+      samples.push({ path, target, proof });
+    }
+    if (acl) {
+      // Poll only after the baseline and never replace it. Waiting before the
+      // baseline would hide the delayed NTFS change-time defect being tested.
+      const deadline = Date.now() + 3_000;
+      const drifted = () => samples.some(({ path, proof }) => lstatSync(path, { bigint: true }).ctimeNs !== proof.ctimeNs);
+      while (!drifted() && Date.now() < deadline) await delay(10);
+      observedDelayedChange = drifted();
+    }
+    for (const { path, target, proof } of samples) {
+      renameWithRetrySync(path, target, {
+        revalidate() { assert.equal(renameHelpers.renameIdentityMatches(target, null), true); },
+        staged: { expected: proof, bytes, refuse() { assert.fail("native ACL drift must not refuse the owned bytes"); } },
+      });
+      assert.deepEqual(readFileSync(target), bytes);
+    }
+    if (!observedDelayedChange) {
+      // Some Windows identities/volumes complete the timestamp update before
+      // the baseline. Publication still ran, but this host observation cannot
+      // claim coverage of the delayed-change regression on this invocation.
+      t.skip("no delayed ACL change time observed in 16 files within the bounded poll");
+    }
+  });
+}
+
+test("POSIX chmod after baseline preserves staged publication", { skip: process.platform === "win32" }, t => {
+  const root = mkdtempSync(join(tmpdir(), "brain-rename-chmod-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const path = join(root, "staged");
+  const target = join(root, "target");
+  const bytes = Buffer.from("synthetic staged bytes");
+  writeFileSync(path, bytes, { mode: 0o600 });
+  const proof = renameHelpers.captureStagedProof(path, bytes, lstatSync(path, { bigint: true }));
+  assert.ok(proof);
+  assert.equal(renameHelpers.stagedBytesMatch(path, proof, bytes), true, "unchanged passing control");
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  fs.chmodSync(path, 0o400);
+  fs.chmodSync(path, 0o600);
+  assert.notEqual(lstatSync(path, { bigint: true }).ctimeNs, proof.ctimeNs);
+  renameWithRetrySync(path, target, {
+    revalidate() { assert.equal(renameHelpers.renameIdentityMatches(target, null), true); },
+    staged: { expected: proof, bytes, refuse() { assert.fail("chmod must not refuse unchanged owned bytes"); } },
+  });
+  assert.deepEqual(readFileSync(target), bytes);
 });
 
 test("owned cleanup refuses symlinks and preserves their targets", t => {

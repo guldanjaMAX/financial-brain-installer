@@ -2,6 +2,7 @@
 import { captureRenameIdentity, captureStagedProof, renameIdentityMatches, renameWithRetrySync } from "./rename-retry.mjs";
 import { chmodSync, closeSync, fstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { randomBytes } from "node:crypto";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dailyRefreshIdentity, dailyRefreshPrincipal } from "./daily-refresh-plan.mjs";
@@ -480,7 +481,7 @@ function dailyReceiptWriter(plan, { home = homedir(), platform = process.platfor
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     chmodSync(directory, 0o700);
     const priorIdentity = captureRenameIdentity(path);
-    const staged = `${path}.tmp-${process.pid}`;
+    const staged = `${path}.tmp-${process.pid}-${randomBytes(12).toString("hex")}`;
     const bytes = Buffer.from(`${JSON.stringify(receipt, null, 2)}\n`);
     const descriptor = openSync(staged, "wx", 0o600);
     let created;
@@ -585,12 +586,17 @@ async function executeDailyRefreshCli(path, m, options, observationStarted) {
       platform: options.platform,
       scheduleAttention,
       writeFailureLog: options.writeFailureLog ?? ((record) => appendDailySourceFailure(plan.identity, record, options)),
-      recoveryRequired: () => Boolean(readUpdateTransaction(plan.identity, {
-        home: options.home,
-        manifestPath: path,
-        platform: options.platform ?? process.platform,
-        machineLockRoot: options.machineLockRoot,
-      })),
+      recoveryRequired: () => {
+        const transaction = readUpdateTransaction(plan.identity, {
+          home: options.home,
+          manifestPath: path,
+          platform: options.platform ?? process.platform,
+          machineLockRoot: options.machineLockRoot,
+        });
+        // A fenceless receipt cannot authorize old schedules or indefinitely
+        // defer current work. The lifecycle lease still checks the live fence.
+        return Boolean(transaction && transaction.fenceless !== true);
+      },
     });
     if (!options.silent) {
       const log = options.log || console.log;

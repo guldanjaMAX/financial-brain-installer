@@ -51,7 +51,7 @@ if (mode === "fstat-refusal") {
   stats.createdDescriptorClosed = false;
   fs.openSync = (path, flags, ...args) => {
     const descriptor = nativeOpen(path, flags, ...args);
-    if (path === `${target}.tmp` && flags === "wx") createdDescriptor = descriptor;
+    if (typeof path === "string" && path.startsWith(`${target}.`) && path.endsWith(".tmp") && flags === "wx") createdDescriptor = descriptor;
     return descriptor;
   };
   fs.fstatSync = (descriptor, ...args) => {

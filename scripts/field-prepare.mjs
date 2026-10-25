@@ -621,7 +621,7 @@ export function makeOutputDirectory(requested, { temporaryRoot = tmpdir() } = {}
 function replacePrivateFile(path, bytes) {
   bytes = Buffer.from(bytes);
   const predecessor = captureRenameIdentity(path);
-  const temporary = `${path}.tmp`;
+  const temporary = `${path}.${randomUUID()}.tmp`;
   const descriptor = openSync(temporary, "wx", 0o600);
   let created;
   try {

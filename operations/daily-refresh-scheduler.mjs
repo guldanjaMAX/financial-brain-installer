@@ -623,6 +623,49 @@ function durableLegacySnapshots(entries = []) {
   })));
 }
 
+function archiveTransactionBridgeEvidence(path, state, receiptBytes, value, options) {
+  if (!value.bridge_snapshots?.length) return;
+  if (!stagedBytesMatch(path, state, receiptBytes)) unsafeTransaction();
+  const history = join(dirname(path), "history");
+  mkdirSync(history, { recursive: true, mode: 0o700 });
+  if (!lstatSync(history).isDirectory() || lstatSync(history).isSymbolicLink() ||
+      !/^[a-f0-9]{32}$/u.test(String(value.transaction_id))) {
+    throw new Error("the daily update history is unsafe");
+  }
+  chmodSync(history, 0o700);
+  const archive = join(history, `${value.transaction_id}.json`);
+  const archiveIdentity = captureRenameIdentity(archive);
+  const temporary = `${archive}.tmp-${randomBytes(8).toString("hex")}`;
+  const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
+  if (bytes.length > 1024 * 1024) unsafeTransaction();
+  let created;
+  let published = false;
+  try {
+    const descriptor = openSync(temporary, "wx", 0o600);
+    try {
+      created = fstatSync(descriptor, { bigint: true });
+      writeFileSync(descriptor, bytes);
+    } finally { closeSync(descriptor); }
+    const stagedIdentity = captureStagedProof(temporary, bytes, created);
+    renameWithRetrySync(temporary, archive, { platform: options.platform ?? process.platform,
+      staged: { expected: stagedIdentity, bytes, refuse: () => { throw new Error("the daily update history is unsafe"); } },
+      revalidate: () => {
+      if (!renameIdentityMatches(archive, archiveIdentity) ||
+          !stagedBytesMatch(path, state, receiptBytes)) {
+        throw new Error("the daily update history is unsafe");
+      }
+    } });
+    published = true;
+    // The active receipt remains the sole authority until this exact archive
+    // inode and its complete bytes read back after publication.
+    if (!captureStagedProof(archive, bytes, created)) {
+      throw new Error("the daily update history is unsafe");
+    }
+  } finally {
+    if (created && !published) removeOwnedStaging(temporary, created);
+  }
+}
+
 export function writeDailyRefreshUpdateTransaction(input = {}, options = {}) {
   const { plan, snapshot, phase, legacySnapshots = [] } = input;
   if (!new Set(["preparing", "paused", "recovery_required"]).has(phase)) {
@@ -655,19 +698,38 @@ export function writeDailyRefreshUpdateTransaction(input = {}, options = {}) {
   if (input.remoteMutationMayHaveStarted !== undefined && typeof input.remoteMutationMayHaveStarted !== "boolean") {
     throw new TypeError("the daily update remote mutation intent is invalid");
   }
+  const priorFence = prior ? readBrainRecoveryFence({
+    manifestPath: plan.manifest_path,
+    platform: options.platform,
+    machineLockRoot: options.machineLockRoot,
+  }) : null;
+  const fencelessPredecessor = prior !== null && priorFence === null;
+  // Even direct writer callers must supply the reader's exact custody proof
+  // before a fenceless receipt can be replaced. A changed fence also refuses.
+  if ((fencelessPredecessor && (!Object.hasOwn(options, "expectedPredecessor") || options.expectedPredecessor?.fenceless !== true)) ||
+      (priorFence && (priorFence.transaction_id !== prior.transaction_id || options.expectedPredecessor?.fenceless === true))) {
+    unsafeTransaction();
+  }
   // Monotonic across retries. Older receipts cannot prove that their update
   // stopped before dispatch, so absence of the marker must fail closed.
   const remoteMutationMayHaveStarted = input.remoteMutationMayHaveStarted === true ||
     (prior !== null && prior.remote_mutation_may_have_started !== false);
-  const transactionId = /^[a-f0-9]{32}$/u.test(String(prior?.transaction_id || ""))
-    ? prior.transaction_id
+  // A fenceless predecessor grants exact replacement custody, not schedule
+  // authority. Start a new transaction from current snapshots while retaining
+  // prior dispatch uncertainty until successful reconciliation clears it.
+  const priorAuthority = fencelessPredecessor ? null : prior;
+  if (prior && priorAuthority === null) {
+    archiveTransactionBridgeEvidence(path, priorIdentity, priorBytes, prior, options);
+  }
+  const transactionId = /^[a-f0-9]{32}$/u.test(String(priorAuthority?.transaction_id || ""))
+    ? priorAuthority.transaction_id
     : randomBytes(16).toString("hex");
   const authorizedDefinition = Object.hasOwn(input, "authorizedDefinition")
     ? input.authorizedDefinition
-    : prior?.authorized_definition ?? snapshot.definition ?? null;
+    : priorAuthority?.authorized_definition ?? snapshot.definition ?? null;
   const reconciliation = Object.freeze({
-    daily_definition: input.reconciliation?.daily_definition ?? prior?.reconciliation?.daily_definition ?? "pending",
-    source_expectations: input.reconciliation?.source_expectations ?? prior?.reconciliation?.source_expectations ?? "pending",
+    daily_definition: input.reconciliation?.daily_definition ?? priorAuthority?.reconciliation?.daily_definition ?? "pending",
+    source_expectations: input.reconciliation?.source_expectations ?? priorAuthority?.reconciliation?.source_expectations ?? "pending",
   });
   if ((authorizedDefinition !== null &&
        (authorizedDefinition?.identity?.id !== plan.identity.id ||
@@ -697,7 +759,7 @@ export function writeDailyRefreshUpdateTransaction(input = {}, options = {}) {
     authorized_definition: authorizedDefinition,
     reconciliation,
     legacy_snapshots: durableLegacySnapshots(legacySnapshots),
-    bridge_snapshots: input.bridgeSnapshots ?? prior?.bridge_snapshots ?? [],
+    bridge_snapshots: input.bridgeSnapshots ?? priorAuthority?.bridge_snapshots ?? [],
   });
   const temporary = `${path}.tmp-${process.pid}-${randomBytes(8).toString("hex")}`;
   const bytes = Buffer.from(`${JSON.stringify(receipt, null, 2)}\n`);
@@ -794,12 +856,12 @@ export function readDailyRefreshUpdateTransaction(identityOrPlan, options = {}) 
   if (fence && fence.transaction_id !== value.transaction_id) {
     throw new Error("the daily update transaction does not match the Brain recovery fence");
   }
-  // A crash can leave the receipt before fence creation or after fence removal.
-  // Keep its exact predecessor proof and resume conservatively; absence of the
-  // fence cannot turn an existing receipt into permission to overwrite a file.
-  // The next verified transaction write restores the fence under the update lock.
+  // Without the shared fence, daily commands may have changed the schedules.
+  // Keep exact custody proof for retirement, but never grant this snapshot
+  // recovery authority. This marker is derived here, never trusted from JSON.
   const receipt = Object.freeze({
     ...value,
+    fenceless: !fence,
     remote_mutation_may_have_started: value.remote_mutation_may_have_started !== false,
     authorized_definition: authorizedDefinition,
     reconciliation: Object.freeze(reconciliation),
@@ -834,41 +896,7 @@ export function clearDailyRefreshUpdateTransaction(identityOrPlan, options = {})
   }
   // Keep bridge recovery evidence after completion without leaving a fence
   // that would prevent the owner from approving the permanent daily task.
-  if (value.bridge_snapshots?.length) {
-    const history = join(dirname(path), "history");
-    mkdirSync(history, { recursive: true, mode: 0o700 });
-    if (!lstatSync(history).isDirectory() || lstatSync(history).isSymbolicLink() ||
-        !/^[a-f0-9]{32}$/u.test(String(value.transaction_id))) {
-      throw new Error("the daily update history is unsafe");
-    }
-    chmodSync(history, 0o700);
-    const archive = join(history, `${value.transaction_id}.json`);
-    const archiveIdentity = captureRenameIdentity(archive);
-    const temporary = `${archive}.tmp-${randomBytes(8).toString("hex")}`;
-    const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
-    if (bytes.length > 1024 * 1024) unsafeTransaction();
-    let created;
-    let published = false;
-    try {
-      const descriptor = openSync(temporary, "wx", 0o600);
-      try {
-        created = fstatSync(descriptor, { bigint: true });
-        writeFileSync(descriptor, bytes);
-      } finally { closeSync(descriptor); }
-      const stagedIdentity = captureStagedProof(temporary, bytes, created);
-      renameWithRetrySync(temporary, archive, { platform: options.platform ?? process.platform,
-        staged: { expected: stagedIdentity, bytes, refuse: () => { throw new Error("the daily update history is unsafe"); } },
-        revalidate: () => {
-        if (!renameIdentityMatches(archive, archiveIdentity) ||
-            !stagedBytesMatch(path, state, receiptBytes)) {
-          throw new Error("the daily update history is unsafe");
-        }
-      } });
-      published = true;
-    } finally {
-      if (created && !published) removeOwnedStaging(temporary, created);
-    }
-  }
+  archiveTransactionBridgeEvidence(path, state, receiptBytes, value, options);
   if (!stagedBytesMatch(path, state, receiptBytes) ||
       (Object.hasOwn(options, "expected") && !transactionExpectedMatches(path, options.expected))) unsafeTransaction();
   if (manifestPath) {
@@ -1015,7 +1043,7 @@ function macAdapter({ home, uid, spawn }) {
       return withScheduleMutationLock(home, definition.identity, () => {
         const path = pathOf(definition.identity);
         mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-        const staged = `${path}.tmp-${process.pid}`;
+        const staged = `${path}.tmp-${process.pid}-${randomBytes(12).toString("hex")}`;
         try {
           writeFileSync(staged, definition.serialized, { mode: 0o600, flag: "wx" });
           const current = read(definition.identity);
@@ -1263,7 +1291,7 @@ function windowsAdapter({ home, spawn, environment, taskSpec = null, onTaskXmlDe
       return withWindowsTaskMutationLock(home, definition.identity, () => {
         const directory = join(resolve(home), ".brain", "schedules");
         mkdirSync(directory, { recursive: true, mode: 0o700 });
-        const path = join(directory, `daily-${definition.identity.id}-${process.pid}.xml`);
+        const path = join(directory, `daily-${definition.identity.id}-${process.pid}-${randomBytes(12).toString("hex")}.xml`);
         try {
           writeFileSync(path, `\ufeff${definition.serialized.replace(/^\ufeff+/u, "")}`, { encoding: "utf16le", mode: 0o600, flag: "wx" });
           const current = read(definition.identity);

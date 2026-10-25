@@ -233,6 +233,144 @@ const sites = [
   },
 ];
 
+for (const name of ["calendar checkpoint", "technician skill commit"]) {
+  for (const residue of [false, true]) test(`${name} staging name: ${residue ? "retained legacy residue" : "empty directory"}`, t => {
+    const root = fs.realpathSync.native(fs.mkdtempSync(join(tmpdir(), "brain-staging-name-")));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const f = sites.find(site => site.name === name).prepare(root);
+    const now = Date.now;
+    Date.now = () => 1700000000000;
+    const stale = name === "calendar checkpoint" ? `${f.path}.tmp-${process.pid}-${Date.now()}` : `${f.path}.${process.pid}.tmp`;
+    const bytes = Buffer.from("retained earlier attempt\n");
+    if (residue) fs.writeFileSync(stale, bytes, { flag: "wx" });
+    const identity = residue ? fs.lstatSync(stale, { bigint: true }) : null;
+    try { f.run(); }
+    finally { Date.now = now; }
+    assert.ok(fs.existsSync(f.path));
+    if (residue) assertStagingSurvives(stale, identity, bytes);
+  });
+}
+
+for (const phase of ["baseline", "publication"]) for (const mode of ["control", "transient", "held"]) {
+  test(`workspace staging observation: ${phase} ${mode}`, t => {
+    const root = fs.realpathSync.native(fs.mkdtempSync(join(tmpdir(), "brain-workspace-observation-")));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const original = { open: fs.openSync, read: fs.readFileSync, close: fs.closeSync };
+    let staged, observations = 0, denials = 0;
+    const options = { brainCliPath: join(root, "brain.mjs"), nodePath: process.execPath,
+      platformName: "win32", ownership: { platform: "linux", userId: fs.lstatSync(root).uid } };
+    const manifest = join(root, "manifest.json"), target = join(root, "AGENTS.md");
+    const denied = () => mode !== "control" && (phase === "baseline" || observations > 1) &&
+      (mode === "held" || denials === 0);
+    fs.openSync = (path, flags, ...args) => {
+      if (typeof path === "string" && path.endsWith(".tmp") && path.includes(".financial-brain-pending-")) {
+        if (flags === "wx") staged = path;
+        else {
+          observations++;
+          if (denied()) { denials++; throw Object.assign(new Error("synthetic read sharing lock"), { code: "EPERM" }); }
+        }
+      }
+      return original.open(path, flags, ...args);
+    };
+    fs.readFileSync = (path, ...args) => {
+      if (path === staged && phase === "publication" && mode !== "control") {
+        denials++;
+        throw Object.assign(new Error("synthetic read sharing lock"), { code: "EPERM" });
+      }
+      return original.read(path, ...args);
+    };
+    globalThis.__brainRenameTestPlatform = "win32";
+    syncBuiltinESMExports();
+    let result;
+    try { result = writeCodexWorkspaceGuide(manifest, options); }
+    finally {
+      fs.openSync = original.open; fs.readFileSync = original.read;
+      syncBuiltinESMExports(); delete globalThis.__brainRenameTestPlatform;
+    }
+    if (mode === "held") {
+      assert.equal(result.status, "not_written");
+      assert.equal(fs.existsSync(target), false);
+      assert.equal(denials, 10, "the shared proof exhausts its bounded attempts");
+      assert.equal(fs.existsSync(`${target}.lock`), false, "an unreadable unpublished attempt does not strand the writer lock");
+      assert.ok(fs.existsSync(result.pendingPath), "the unreadable attempt stays retained for review");
+      assert.equal(writeCodexWorkspaceGuide(manifest, options).status, "written", "a later attempt succeeds after the sharing lock is released");
+    } else {
+      assert.equal(result.status, "written");
+      assert.equal(denials, mode === "transient" ? 1 : 0);
+      assert.equal(fs.existsSync(`${target}.lock`), false);
+    }
+  });
+}
+
+for (const boundary of ["preparation", "parent"]) for (const phase of ["baseline", "retry"]) {
+  for (const replaced of [false, true]) test(`workspace directory custody: ${boundary} ${phase} ${replaced ? "replacement refuses" : "unchanged control"}`, t => {
+    const root = fs.realpathSync.native(fs.mkdtempSync(join(tmpdir(), "brain-workspace-custody-")));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const folder = join(root, "workspace"); fs.mkdirSync(folder);
+    const manifest = join(folder, "manifest.json"), target = join(folder, "AGENTS.md");
+    const original = { open: fs.openSync, close: fs.closeSync };
+    let stagingPath, stagedDescriptor, changedPath, changedIdentity, observations = 0, reached = 0, renames = 0;
+    const marker = "synthetic replacement directory\n";
+    const replace = () => {
+      reached++;
+      if (!replaced) return;
+      changedPath = boundary === "preparation" ? dirname(stagingPath) : folder;
+      nativeRename(changedPath, `${changedPath}.displaced`);
+      fs.mkdirSync(changedPath);
+      fs.writeFileSync(join(changedPath, "owner-marker"), marker);
+      changedIdentity = fs.lstatSync(changedPath, { bigint: true });
+    };
+    fs.openSync = (path, flags, ...args) => {
+      if (typeof path === "string" && path.endsWith(".tmp") && path.includes(".financial-brain-pending-")) {
+        if (flags === "wx") {
+          stagingPath = path;
+          stagedDescriptor = original.open(path, flags, ...args);
+          return stagedDescriptor;
+        }
+        if (phase === "retry" && ++observations === 2) {
+          replace();
+          throw Object.assign(new Error("synthetic read sharing lock"), { code: "EPERM" });
+        }
+      }
+      return original.open(path, flags, ...args);
+    };
+    fs.closeSync = descriptor => {
+      const result = original.close(descriptor);
+      if (descriptor === stagedDescriptor) {
+        stagedDescriptor = undefined;
+        if (phase === "baseline") replace();
+      }
+      return result;
+    };
+    fs.renameSync = (from, to) => {
+      if (from === stagingPath) renames++;
+      return nativeRename(from, to);
+    };
+    globalThis.__brainRenameTestPlatform = "win32"; syncBuiltinESMExports();
+    let result;
+    try {
+      result = writeCodexWorkspaceGuide(manifest, { brainCliPath: join(root, "brain.mjs"), nodePath: process.execPath,
+        platformName: "win32", ownership: { platform: "linux", userId: fs.lstatSync(root).uid } });
+    } finally {
+      fs.openSync = original.open; fs.closeSync = original.close; fs.renameSync = nativeRename;
+      syncBuiltinESMExports(); delete globalThis.__brainRenameTestPlatform;
+    }
+    assert.equal(reached, 1, "the test reaches its selected custody boundary");
+    if (replaced) {
+      assert.equal(result.status, "not_written");
+      assert.equal(renames, 0, "replaced directories cannot authorize any staged rename");
+      assert.equal(fs.existsSync(target), false);
+      const current = fs.lstatSync(changedPath, { bigint: true });
+      assert.equal(current.dev, changedIdentity.dev); assert.equal(current.ino, changedIdentity.ino);
+      assert.equal(fs.readFileSync(join(changedPath, "owner-marker"), "utf8"), marker);
+    } else {
+      assert.equal(result.status, "written");
+      assert.equal(renames, 1);
+      assert.equal(fs.existsSync(`${target}.lock`), false);
+    }
+  });
+}
+
 for (const site of sites) {
   const mutations = ["control", "destination", "staging", "staging-in-place",
     ...(!site.notWritten ? ["staging-eexist", "success-squat"] : [])];

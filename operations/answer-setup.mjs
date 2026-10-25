@@ -8,6 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import { randomBytes } from "node:crypto";
 
 import {
   BILLING,
@@ -230,7 +231,7 @@ function atomicJsonWrite(path, value, options = {}) {
     ? stagedBytesMatch(path, priorPublication.proof, priorPublication.bytes)
     : renameIdentityMatches(path, predecessor);
   if (!predecessorMatches()) refuse();
-  const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  const temp = `${path}.tmp-${process.pid}-${randomBytes(12).toString("hex")}`;
   const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf8");
   const descriptor = openSync(temp, "wx", 0o600);
   let created;

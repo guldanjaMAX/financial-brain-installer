@@ -49,7 +49,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { printGuidance } from "./cli-guidance.mjs";
 import { recordSupportEvent } from "../support-journal.mjs";
@@ -914,7 +914,7 @@ ${intervals}
 }
 
 function stageAtomicWrite(path, text) {
-  const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  const temp = `${path}.tmp-${process.pid}-${randomBytes(12).toString("hex")}`;
   try {
     writeFileSync(temp, text, { mode: 0o600 });
     chmodSync(temp, 0o600);

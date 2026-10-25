@@ -314,9 +314,11 @@ const dailyWriters = [
       const options = { home: root, platform: "win32", machineLockRoot: join(root, "locks") };
       const input = { plan, snapshot: { identity }, phase: "preparing" };
       const path = dailyRefreshUpdateTransactionPath(identity, options);
-      fs.mkdirSync(join(root, ".brain", "daily-update-transactions"), { recursive: true });
-      writeFileSync(path, '{}\n', { mode: 0o600 });
-      return { path, write: () => writeDailyRefreshUpdateTransaction(input, options) };
+      writeDailyRefreshUpdateTransaction(input, { ...options, expectedPredecessor: null });
+      const predecessor = readDailyRefreshUpdateTransaction(plan, options);
+      return { path, write: () => writeDailyRefreshUpdateTransaction(input, {
+        ...options, expectedPredecessor: predecessor,
+      }) };
     },
   },
   {
@@ -420,6 +422,25 @@ for (const writer of dailyWriters) {
   }
 }
 
+for (const residue of [false, true]) {
+  test(`daily receipt staging name: ${residue ? "retained legacy residue" : "empty directory"}`, async () => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-daily-staging-name-")));
+    try {
+      const manifestPath = join(root, "manifest.json");
+      writeFileSync(manifestPath, '{}\n', { mode: 0o600 });
+      const f = dailyWriters.find(writer => writer.name === "daily receipt identity")
+        .prepare(root, manifestPath, { id: "v1-abcdef1234567890" });
+      const stale = `${f.path}.tmp-${process.pid}`;
+      const bytes = Buffer.from("retained earlier attempt\n");
+      if (residue) writeFileSync(stale, bytes, { flag: "wx", mode: 0o600 });
+      const identity = residue ? fs.lstatSync(stale, { bigint: true }) : null;
+      await f.write();
+      assert.equal(JSON.parse(readFileSync(f.path, "utf8")).kind, "daily_refresh");
+      if (residue) assertStagingSurvives(stale, identity, bytes);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+}
+
 for (const failStat of [false, true]) {
   test(`daily receipt descriptor: ${failStat ? "a create observation failure closes the handle" : "a successful observation closes the handle"}`, async () => {
     const root = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-daily-descriptor-")));
@@ -433,7 +454,7 @@ for (const failStat of [false, true]) {
     let failed = false;
     fs.openSync = (path, flags, ...args) => {
       const descriptor = native.open(path, flags, ...args);
-      if (path === `${fixture.path}.tmp-${process.pid}` && flags === "wx") created = descriptor;
+      if (typeof path === "string" && path.startsWith(`${fixture.path}.tmp-${process.pid}-`) && flags === "wx") created = descriptor;
       return descriptor;
     };
     fs.fstatSync = (descriptor, ...args) => {
@@ -572,14 +593,15 @@ function verify(fixture, expected, { failed = false } = {}) {
 const holderScript = `
 $ErrorActionPreference = 'Stop'
 $root = $env:BRAIN_RENAME_HOLDER_ROOT
-$targetPath = [IO.Path]::Combine($root, 'destination.json')
+$targetPath = if ($env:BRAIN_RENAME_HOLDER_TARGET) { $env:BRAIN_RENAME_HOLDER_TARGET } else { [IO.Path]::Combine($root, 'destination.json') }
 $readyPath = [IO.Path]::Combine($root, 'ready')
 $attemptPath = [IO.Path]::Combine($root, 'attempted')
 $stopPath = [IO.Path]::Combine($root, 'stop')
 $releaseDelay = [int]$env:BRAIN_RENAME_HOLDER_RELEASE_MS
 $handle = $null
 try {
-  $handle = [IO.File]::Open($targetPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+  $sharing = if ($env:BRAIN_RENAME_HOLDER_SHARING -eq 'None') { [IO.FileShare]::None } else { [IO.FileShare]::Read }
+  $handle = [IO.File]::Open($targetPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, $sharing)
   [IO.File]::WriteAllText($readyPath, 'ready')
   $deadline = [DateTime]::UtcNow.AddSeconds(12)
   while (-not [IO.File]::Exists($stopPath)) {
@@ -595,7 +617,7 @@ try {
 }
 `;
 
-function startHolder(root, releaseDelay) {
+function startHolder(root, releaseDelay, targetPath = "", sharing = "Read") {
   const systemRoot = process.env.SystemRoot;
   assert.ok(systemRoot, "native holder requires the Windows system directory");
   const child = spawn(join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), [
@@ -611,6 +633,8 @@ function startHolder(root, releaseDelay) {
       TMP: root,
       BRAIN_RENAME_HOLDER_ROOT: root,
       BRAIN_RENAME_HOLDER_RELEASE_MS: String(releaseDelay),
+      BRAIN_RENAME_HOLDER_TARGET: targetPath,
+      BRAIN_RENAME_HOLDER_SHARING: sharing,
     },
   });
   let finished = false;
@@ -619,6 +643,75 @@ function startHolder(root, releaseDelay) {
     child.once("close", code => { finished = true; resolve({ code, failedToStart: false }); });
   });
   return { child, exited, isFinished: () => finished };
+}
+
+for (const phase of ["baseline", "publication"]) for (const mode of ["control", "transient", "held"]) {
+  test(`native workspace staging observation: ${phase} ${mode}`, nativeOptions, async () => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-workspace-native-read-")));
+    const target = join(root, "AGENTS.md"), manifest = join(root, "manifest.json");
+    const original = { open: fs.openSync, read: fs.readFileSync };
+    const options = { brainCliPath: join(root, "brain.mjs"), nodePath: process.execPath,
+      platformName: "win32", ownership: { platform: "linux", userId: fs.lstatSync(root).uid } };
+    let holder, staged, observations = 0, denials = 0;
+    const hold = path => {
+      if (mode === "control" || holder) return;
+      holder = startHolder(root, mode === "transient" ? 450 : -1, path, "None");
+      const deadline = Date.now() + 5_000;
+      while (!existsSync(join(root, "ready")) && Date.now() < deadline) {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+      }
+      assert.equal(existsSync(join(root, "ready")), true, "the native holder acquired the staged file");
+    };
+    const observe = operation => (...args) => {
+      try { return operation(...args); }
+      catch (error) {
+        if (["EPERM", "EACCES", "EBUSY"].includes(error?.code)) {
+          denials++;
+          writeFileSync(join(root, "attempted"), "attempted");
+        }
+        throw error;
+      }
+    };
+    fs.openSync = (path, flags, ...args) => {
+      if (typeof path === "string" && path.endsWith(".tmp") && path.includes(".financial-brain-pending-")) {
+        if (flags === "wx") staged = path;
+        else if (++observations === (phase === "baseline" ? 1 : 2)) hold(path);
+      }
+      return observe(original.open)(path, flags, ...args);
+    };
+    fs.readFileSync = (path, ...args) => {
+      if (path === staged && phase === "publication") hold(path);
+      return observe(original.read)(path, ...args);
+    };
+    syncBuiltinESMExports();
+    let result;
+    try {
+      try { result = writeCodexWorkspaceGuide(manifest, options); }
+      finally {
+        fs.openSync = original.open; fs.readFileSync = original.read; syncBuiltinESMExports();
+      }
+      if (mode === "held") {
+        assert.equal(result.status, "not_written");
+        assert.equal(existsSync(target), false);
+        assert.equal(denials, 10);
+      } else {
+        assert.equal(result.status, "written");
+        assert.equal(existsSync(`${target}.lock`), false);
+        if (mode === "transient") assert.ok(denials >= 2, "the real read denial spans retry waits");
+        else assert.equal(denials, 0);
+      }
+      if (holder) { await stopHolder(root, holder); holder = null; }
+      if (mode === "held") {
+        assert.equal(existsSync(`${target}.lock`), false, "an unpublished read refusal releases the workspace lock");
+        assert.ok(existsSync(result.pendingPath));
+        assert.equal(writeCodexWorkspaceGuide(manifest, options).status, "written", "a later write recovers after the native handle closes");
+      }
+    } finally {
+      fs.openSync = original.open; fs.readFileSync = original.read; syncBuiltinESMExports();
+      if (holder) await stopHolder(root, holder);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 }
 
 async function waitUntilReady(root, holder) {

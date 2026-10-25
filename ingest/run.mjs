@@ -26,7 +26,7 @@ import {
   chmodSync, rmSync, statSync,
 } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep, basename, dirname } from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { extract, canExtract, extensionOf, isBinaryFormat } from "./extract.mjs";
 import {
   MAX_DOC_CHARS, batches, envelopeBytes, estimatedStatements, splitOversized,
@@ -2131,7 +2131,7 @@ export function saveState(path, state) {
   // incremental cursor. Keep it owner-only, and replace it atomically so a
   // crash or laptop sleep cannot leave half-written JSON that silently forces
   // the next run back to a full walk.
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  const tmp = `${path}.tmp-${process.pid}-${randomBytes(12).toString("hex")}`;
   const bytes = Buffer.from(JSON.stringify(state, null, 2), "utf8");
   let created;
   let published = false;

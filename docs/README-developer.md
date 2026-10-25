@@ -2173,7 +2173,12 @@ before My accounts blocks refresh with the whole original file preserved.
 Writes bind both the named and canonical parent to their inspected device/inode
 identities. An exclusive adjacent `.lock` directory serializes guide refreshes.
 A complete staged guide has a distinctive `AGENTS.md.financial-brain-pending-<id>`
-(or `CLAUDE.md` equivalent) name inside that directory. An existing guide is moved
+(or `CLAUDE.md` equivalent) name. Its initial temporary file lives in a separate
+random `financial-brain-preparing-<id>` sibling directory, whose identity is
+checked with the parent and mutex. This lets a held Windows read handle retain
+the unpublished file while the empty mutex is released after retry exhaustion.
+After the staged byte proof and rename succeed, the file is inside the mutex
+directory and the verified empty preparation directory is removed. An existing guide is moved
 to `previous` and checked against its inspected inode, ownership, metadata and
 exact bytes. Both content writes and flushes finish before moving the original.
 An exclusive hard link publishes the complete replacement inode without replacing

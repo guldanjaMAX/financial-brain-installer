@@ -2,14 +2,17 @@ import { createUpgradeBookmarkWriter } from "./fixtures/upgrade-bookmark-writer.
 import assert from "node:assert/strict";
 import { createHash as boundaryHash } from "node:crypto";
 import { createWindowsUpdateBridgeGuard as boundaryGuard } from "../operations/windows-update-bridge.mjs";
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import fs, { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
-import { cmdDrain, cmdHealth, cmdRollback, cmdUpdate } from "../brain.mjs";
+import { cmdDaily, cmdDrain, cmdHealth, cmdRollback, cmdUpdate } from "../brain.mjs";
+import { runDailyRefreshCli } from "../operations/daily-refresh-run.mjs";
 import {
   buildDailyRefreshDefinition,
+  clearDailyRefreshUpdateTransaction,
   dailyRefreshUpdateTransactionPath,
   readDailyRefreshUpdateTransaction,
   writeDailyRefreshUpdateTransaction,
@@ -89,6 +92,10 @@ function productionHarness(manifestPath, {
   let d1Version = "0.4.7";
   const adapter = {
     read: () => state,
+    remove: () => {
+      events.push("schedule:remove");
+      state = { exists: false, owned: true, enabled: false, definition: null };
+    },
     setEnabled: (_identity, enabled) => {
       events.push(`schedule:${enabled}`);
       if (enabled && failRestore) throw new Error("fixture native restore failed");
@@ -309,18 +316,19 @@ async function withFixture(run) {
   }
 }
 
-function seedUpdateReceipt(harness, manifestPath, state) {
+function seedUpdateReceipt(harness, manifestPath, state, inputOverrides = {}) {
   // Receipt recovery exercises the real lifecycle lock, with native ACL work
   // injected separately so the fixture is independent of the test user's SID.
   harness.options.lifecycleLockOptions.restrictWindowsDirectory = () => {};
   const options = {
-    home: dirname(manifestPath), manifestPath, platform: "win32", machineLockRoot: harness.machineLockRoot,
+    home: dirname(manifestPath), manifestPath, platform: harness.options.dailyRefreshOptions.platform, machineLockRoot: harness.machineLockRoot,
   };
   const input = {
     plan: harness.plan,
     snapshot: { ...harness.state(), identity: harness.plan.identity },
     phase: "paused",
     remoteMutationMayHaveStarted: true,
+    ...inputOverrides,
   };
   let receipt = null;
   if (state !== "absent") {
@@ -337,7 +345,25 @@ for (const state of ["absent", "fenced", "fenceless"]) {
   test(`production daily receipt ${state} permits two verified updates`, async () => {
     await withFixture(async ({ manifestPath }) => {
       const harness = productionHarness(manifestPath);
-      const { options } = seedUpdateReceipt(harness, manifestPath, state);
+      const { options, receipt } = seedUpdateReceipt(harness, manifestPath, state);
+      const deploy = harness.options.upgradeOptions.cmdDeploy;
+      let dispatchChecks = 0;
+      harness.options.upgradeOptions.cmdDeploy = async (...args) => {
+        const active = readDailyRefreshUpdateTransaction(harness.plan.identity, options);
+        const fence = readBrainRecoveryFence(options);
+        assert.equal(active.fenceless, false, "a current fence exists before deployment");
+        assert.equal(fence.transaction_id, active.transaction_id);
+        const locks = readdirSync(harness.machineLockRoot).filter(name => /^brain-lifecycle-.*\.lock$/u.test(name));
+        assert.equal(locks.length, 1, "the update lifecycle lock encloses receipt and fence creation");
+        const ownerPath = readdirSync(join(harness.machineLockRoot, locks[0])).find(name => /^owner-/u.test(name));
+        assert.equal(JSON.parse(readFileSync(join(harness.machineLockRoot, locks[0], ownerPath), "utf8")).operation, "update");
+        if (dispatchChecks === 0 && receipt) {
+          assert.equal(active.transaction_id === receipt.transaction_id, state === "fenced",
+            "only a fenced receipt continues the previous transaction");
+        }
+        dispatchChecks++;
+        return deploy(...args);
+      };
       for (let attempt = 0; attempt < 2; attempt++) {
         await cmdUpdate(manifestPath, harness.options);
         assert.equal(harness.state().enabled, true);
@@ -347,6 +373,168 @@ for (const state of ["absent", "fenced", "fenceless"]) {
         assert.equal(harness.finish.length, attempt + 1);
       }
       assert.ok(harness.events.includes("health:active-final"));
+      assert.ok(dispatchChecks >= 2, "both verified updates reached the fenced dispatch boundary");
+    });
+  });
+}
+
+for (const state of ["absent", "fenceless"]) {
+  test(`production daily receipt ${state} without managed schedules completes recovery`, async () => {
+    await withFixture(async ({ manifestPath }) => {
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+      delete manifest.operations.daily_refresh;
+      writeFileSync(manifestPath, JSON.stringify(manifest));
+      const harness = productionHarness(manifestPath);
+      harness.adapter.remove();
+      const { options } = seedUpdateReceipt(harness, manifestPath, state);
+      await cmdUpdate(manifestPath, harness.options);
+      assert.equal(harness.state().exists, false, "an obsolete receipt must not authorize creating a task");
+      assert.equal(readDailyRefreshUpdateTransaction(harness.plan.identity, options), null);
+      assert.equal(readBrainRecoveryFence(options), null);
+      assert.equal(harness.finish.length, 1);
+    });
+  });
+}
+
+for (const bridgeEvidence of [false, true]) {
+  test(`fenceless receipt archives prior bridge evidence: ${bridgeEvidence ? "retained evidence" : "no bridge control"}`, async () => {
+    await withFixture(async ({ manifestPath }) => {
+      const harness = productionHarness(manifestPath);
+      const { options, receipt } = seedUpdateReceipt(harness, manifestPath, "fenceless", {
+        bridgeSnapshots: bridgeEvidence ? [{ id: "synthetic-retired-bridge", state: "retired", prior_enabled: false }] : [],
+      });
+      const priorPath = dailyRefreshUpdateTransactionPath(harness.plan.identity, options);
+      const priorBytes = readFileSync(priorPath);
+      await cmdUpdate(manifestPath, harness.options);
+      const historyPath = join(dirname(priorPath), "history", `${receipt.transaction_id}.json`);
+      if (bridgeEvidence) assert.deepEqual(readFileSync(historyPath), priorBytes,
+        "old bridge evidence survives exact fresh replacement without supplying schedule authority");
+      else assert.throws(() => lstatSync(historyPath), { code: "ENOENT" });
+      assert.equal(readDailyRefreshUpdateTransaction(harness.plan.identity, options), null);
+      assert.equal(harness.state().enabled, true);
+    });
+  });
+}
+
+for (const operation of ["fresh replacement", "clear"]) {
+  for (const mode of ["control", "corrupt bytes", "replace inode"]) {
+    test(`fenceless receipt archive readback ${operation}: ${mode}`, async () => {
+      await withFixture(async ({ manifestPath }) => {
+        const harness = productionHarness(manifestPath);
+        const { options, input, receipt } = seedUpdateReceipt(harness, manifestPath, "fenceless", {
+          bridgeSnapshots: [{ id: "synthetic-retired-bridge", state: "retired", prior_enabled: false }],
+        });
+        const priorPath = dailyRefreshUpdateTransactionPath(harness.plan.identity, options);
+        const priorBytes = readFileSync(priorPath), priorIdentity = lstatSync(priorPath, { bigint: true });
+        const expected = readDailyRefreshUpdateTransaction(harness.plan.identity, options);
+        const archive = join(dirname(priorPath), "history", `${receipt.transaction_id}.json`);
+        const nativeRename = fs.renameSync;
+        let published = false, archiveIdentity, archiveBytes;
+        fs.renameSync = (from, to) => {
+          const result = nativeRename(from, to);
+          if (to === archive) {
+            published = true;
+            if (mode === "corrupt bytes") {
+              const corrupted = Buffer.from(priorBytes);
+              corrupted[0] ^= 1;
+              writeFileSync(archive, corrupted);
+            } else if (mode === "replace inode") {
+              nativeRename(archive, `${archive}.displaced`);
+              writeFileSync(archive, priorBytes, { flag: "wx", mode: 0o600 });
+            }
+            archiveIdentity = lstatSync(archive, { bigint: true });
+            archiveBytes = readFileSync(archive);
+          }
+          return result;
+        };
+        syncBuiltinESMExports();
+        const run = () => operation === "clear"
+          ? clearDailyRefreshUpdateTransaction(harness.plan.identity, { ...options, expected })
+          : writeDailyRefreshUpdateTransaction(input, { ...options, expectedPredecessor: expected });
+        try {
+          if (mode === "control") run();
+          else assert.throws(run, /daily update history is unsafe/);
+        } finally {
+          fs.renameSync = nativeRename;
+          syncBuiltinESMExports();
+        }
+        assert.equal(published, true, "the test reaches publication before injecting the archive fault");
+        if (mode === "control") {
+          assert.deepEqual(readFileSync(archive), priorBytes);
+          if (operation === "clear") assert.throws(() => lstatSync(priorPath), { code: "ENOENT" });
+          else assert.notEqual(readDailyRefreshUpdateTransaction(harness.plan.identity, options).transaction_id, receipt.transaction_id);
+        } else {
+          assert.equal(lstatSync(priorPath, { bigint: true }).ino, priorIdentity.ino);
+          assert.deepEqual(readFileSync(priorPath), priorBytes,
+            "unverified archive publication must preserve the active recovery evidence");
+          assert.equal(lstatSync(archive, { bigint: true }).ino, archiveIdentity.ino);
+          assert.deepEqual(readFileSync(archive), archiveBytes, "refusal must not remove a foreign or modified archive");
+          assert.equal(readBrainRecoveryFence(options), null);
+        }
+      });
+    });
+  }
+}
+
+for (const explicitProof of [false, true]) {
+  test(`fenceless receipt direct writer ${explicitProof ? "uses exact custody for current authority" : "refuses missing predecessor proof"}`, async () => {
+    await withFixture(async ({ manifestPath }) => {
+      const harness = productionHarness(manifestPath);
+      const { options, input, receipt } = seedUpdateReceipt(harness, manifestPath, "fenceless");
+      const path = dailyRefreshUpdateTransactionPath(harness.plan.identity, options);
+      const prior = lstatSync(path, { bigint: true }), bytes = readFileSync(path);
+      const expected = readDailyRefreshUpdateTransaction(harness.plan.identity, options);
+      const currentDefinition = buildDailyRefreshDefinition({ ...harness.plan, cron: "30 10 * * *" }, harness.options.dailyRefreshOptions.schedulerOptions);
+      const currentInput = { ...input, snapshot: { ...input.snapshot, definition: currentDefinition } };
+      const write = () => writeDailyRefreshUpdateTransaction(currentInput, {
+        ...options, ...(explicitProof ? { expectedPredecessor: expected } : {}),
+      });
+      if (explicitProof) {
+        const current = write();
+        assert.notEqual(current.transaction_id, receipt.transaction_id);
+        assert.deepEqual(current.authorized_definition, currentDefinition);
+      } else {
+        assert.throws(write, /daily update transaction receipt is unsafe/);
+        assert.equal(lstatSync(path, { bigint: true }).ino, prior.ino);
+        assert.deepEqual(readFileSync(path), bytes);
+        assert.equal(readBrainRecoveryFence(options), null);
+      }
+    });
+  });
+}
+
+for (const refusePublication of [false, true]) {
+  test(`fenceless receipt fresh publication ${refusePublication ? "refusal preserves predecessor" : "healthy control"}`, async () => {
+    await withFixture(async ({ manifestPath }) => {
+      const harness = productionHarness(manifestPath);
+      const { options, input, receipt } = seedUpdateReceipt(harness, manifestPath, "fenceless");
+      const path = dailyRefreshUpdateTransactionPath(harness.plan.identity, options);
+      const prior = lstatSync(path, { bigint: true }), bytes = readFileSync(path);
+      const expected = readDailyRefreshUpdateTransaction(harness.plan.identity, options);
+      const nativeRename = fs.renameSync;
+      let reached = false;
+      fs.renameSync = (from, to) => {
+        if (to === path && from.startsWith(`${path}.tmp-`)) {
+          reached = true;
+          if (refusePublication) throw Object.assign(new Error("fixture receipt publication refusal"), { code: "EIO" });
+        }
+        return nativeRename(from, to);
+      };
+      syncBuiltinESMExports();
+      const write = () => writeDailyRefreshUpdateTransaction(input, { ...options, expectedPredecessor: expected });
+      try {
+        if (refusePublication) assert.throws(write, /fixture receipt publication refusal/);
+        else assert.notEqual(write().transaction_id, receipt.transaction_id);
+      } finally {
+        fs.renameSync = nativeRename;
+        syncBuiltinESMExports();
+      }
+      assert.equal(reached, true);
+      if (refusePublication) {
+        assert.equal(lstatSync(path, { bigint: true }).ino, prior.ino);
+        assert.deepEqual(readFileSync(path), bytes);
+        assert.equal(readBrainRecoveryFence(options), null);
+      }
     });
   });
 }
@@ -366,8 +554,195 @@ for (const state of ["fenced", "fenceless"]) {
       assert.throws(() => writeDailyRefreshUpdateTransaction(input, {
         ...options, expectedPredecessor: expected,
       }), /the daily update transaction receipt is unsafe/);
+      assert.throws(() => clearDailyRefreshUpdateTransaction(harness.plan.identity, {
+        ...options, expected,
+      }), /the daily update transaction receipt is unsafe/);
       assert.equal(lstatSync(path, { bigint: true }).ino, replacement.ino);
       assert.deepEqual(readFileSync(path), bytes, "the foreign content-equal receipt survives refusal");
+    });
+  });
+}
+
+for (const platform of ["win32", "darwin"]) {
+  for (const change of ["unchanged", "removed", "newer definition"]) {
+    test(`fenceless daily receipt ${platform} preserves the current ${change} schedule after update refusal`, async () => {
+      await withFixture(async ({ manifestPath }) => {
+        const harness = productionHarness(manifestPath, { failStage: () => "preflight" });
+        const dailyOptions = harness.options.dailyRefreshOptions;
+        dailyOptions.platform = platform;
+        dailyOptions.driveScheduler = { statusDriveScheduler: () => ({ installed: false }) };
+        harness.plan.platform = platform;
+        if (platform === "darwin") {
+          Object.assign(dailyOptions.schedulerOptions, {
+            platform, nodePath: "/runtime/node", brainPath: "/runtime/brain.mjs",
+            runnerPath: "/runtime/daily-refresh-run.mjs",
+          });
+          harness.adapter.install(buildDailyRefreshDefinition(harness.plan, dailyOptions.schedulerOptions));
+        }
+        const { options } = seedUpdateReceipt(harness, manifestPath, "fenceless", {
+          remoteMutationMayHaveStarted: false,
+        });
+        const dailyCommandOptions = {
+          ...dailyOptions,
+          lifecycleLockOptions: harness.options.lifecycleLockOptions,
+          quiet: true,
+          readSourceInventory: async () => ({ sources: [] }),
+          writeManifestAtomically: (path, manifest) => writeFileSync(path, `${JSON.stringify(manifest)}\n`),
+        };
+        if (change === "removed") {
+          await cmdDaily(["off", manifestPath], dailyCommandOptions);
+          harness.plan.enabled = false;
+        } else if (change === "newer definition") {
+          harness.plan.cron = "30 10 * * *";
+          await cmdDaily(["on", manifestPath], dailyCommandOptions);
+        }
+        const current = structuredClone(harness.state());
+        harness.events.length = 0;
+        await assert.rejects(cmdUpdate(manifestPath, harness.options), /fixture preflight refusal/);
+        assert.deepEqual(harness.state(), current,
+          "refusal restores only the schedule observed after the owner's latest daily command");
+        assert.ok(harness.events.includes("install-state-preflight"), "the update reached its pre-dispatch refusal");
+        assert.equal(harness.events.includes("schedule:install"), false,
+          "neither a removed task nor an older saved definition may be installed during refusal");
+        assert.equal(readDailyRefreshUpdateTransaction(harness.plan.identity, options), null,
+          "the obsolete receipt is retired and the fresh pre-dispatch transaction clears");
+        assert.equal(readBrainRecoveryFence(options), null);
+      });
+    });
+  }
+}
+
+for (const remoteMutationMayHaveStarted of [false, true]) {
+  test(`fenceless receipt preserves remote mutation uncertainty ${remoteMutationMayHaveStarted} with a fresh current snapshot`, async () => {
+    await withFixture(async ({ manifestPath }) => {
+      const harness = productionHarness(manifestPath, { failStage: () => "preflight" });
+      const { options, receipt } = seedUpdateReceipt(harness, manifestPath, "fenceless", { remoteMutationMayHaveStarted });
+      harness.plan.cron = "30 10 * * *";
+      await cmdDaily(["on", manifestPath], {
+        ...harness.options.dailyRefreshOptions,
+        lifecycleLockOptions: harness.options.lifecycleLockOptions,
+        quiet: true, readSourceInventory: async () => ({ sources: [] }),
+      });
+      const current = structuredClone(harness.state());
+      const query = harness.options.upgradeOptions.d1Query;
+      let boundaryReached = false;
+      harness.options.upgradeOptions.d1Query = async (...args) => {
+        if (/SELECT \* FROM install_state/iu.test(args[2])) {
+          boundaryReached = true;
+          const active = readDailyRefreshUpdateTransaction(harness.plan.identity, options);
+          assert.notEqual(active.transaction_id, receipt.transaction_id);
+          assert.equal(active.remote_mutation_may_have_started, remoteMutationMayHaveStarted,
+            "fresh schedule authority must not erase earlier dispatch uncertainty");
+          assert.deepEqual(active.snapshot.definition, current.definition);
+          assert.equal(readBrainRecoveryFence(options).transaction_id, active.transaction_id);
+        }
+        return query(...args);
+      };
+      await assert.rejects(cmdUpdate(manifestPath, harness.options), /fixture preflight refusal/);
+      assert.equal(boundaryReached, true);
+      assert.deepEqual(harness.state().definition, current.definition);
+      assert.equal(harness.state().enabled, !remoteMutationMayHaveStarted);
+      const remaining = readDailyRefreshUpdateTransaction(harness.plan.identity, options);
+      if (remoteMutationMayHaveStarted) {
+        assert.equal(remaining.remote_mutation_may_have_started, true);
+        assert.equal(remaining.fenceless, false);
+      } else assert.equal(remaining, null);
+    });
+  });
+}
+
+for (const refuseCapture of [false, true]) {
+  test(`fenceless receipt survives before fresh publication: ${refuseCapture ? "snapshot refusal" : "healthy control"}`, async () => {
+    await withFixture(async ({ manifestPath }) => {
+      const harness = productionHarness(manifestPath);
+      const dailyOptions = harness.options.dailyRefreshOptions;
+      dailyOptions.platform = harness.plan.platform = "darwin";
+      Object.assign(dailyOptions.schedulerOptions, {
+        platform: "darwin", nodePath: "/runtime/node", brainPath: "/runtime/brain.mjs",
+        runnerPath: "/runtime/daily-refresh-run.mjs",
+      });
+      harness.adapter.install(buildDailyRefreshDefinition(harness.plan, dailyOptions.schedulerOptions));
+      dailyOptions.driveScheduler = { statusDriveScheduler: () => {
+        if (refuseCapture) throw new Error("fixture current snapshot refusal");
+        return { installed: false };
+      } };
+      const { options } = seedUpdateReceipt(harness, manifestPath, "fenceless", { remoteMutationMayHaveStarted: true });
+      const path = dailyRefreshUpdateTransactionPath(harness.plan.identity, options);
+      const prior = lstatSync(path, { bigint: true }), bytes = readFileSync(path);
+      if (refuseCapture) {
+        await assert.rejects(cmdUpdate(manifestPath, harness.options), /fixture current snapshot refusal/);
+        assert.equal(lstatSync(path, { bigint: true }).ino, prior.ino);
+        assert.deepEqual(readFileSync(path), bytes, "unpublished fresh state must leave all old uncertainty evidence intact");
+        assert.equal(readBrainRecoveryFence(options), null);
+      } else {
+        await cmdUpdate(manifestPath, harness.options);
+        assert.equal(readDailyRefreshUpdateTransaction(harness.plan.identity, options), null);
+        assert.equal(harness.state().enabled, true);
+      }
+    });
+  });
+}
+
+for (const remoteMutationMayHaveStarted of [false, true]) {
+  test(`fenceless receipt keeps uncertainty ${remoteMutationMayHaveStarted} when a current legacy pause fails`, async () => {
+    await withFixture(async ({ manifestPath }) => {
+      const harness = productionHarness(manifestPath);
+      const dailyOptions = harness.options.dailyRefreshOptions;
+      dailyOptions.platform = harness.plan.platform = "darwin";
+      Object.assign(dailyOptions.schedulerOptions, {
+        platform: "darwin", nodePath: "/runtime/node", brainPath: "/runtime/brain.mjs",
+        runnerPath: "/runtime/daily-refresh-run.mjs",
+      });
+      harness.adapter.install(buildDailyRefreshDefinition(harness.plan, dailyOptions.schedulerOptions));
+      const plistPath = join(dirname(manifestPath), "synthetic-legacy.plist");
+      writeFileSync(plistPath, "synthetic legacy definition\n");
+      dailyOptions.driveScheduler = {
+        statusDriveScheduler: () => ({ installed: true, definitionMatches: true, loaded: true, plistPath, service: "synthetic-legacy" }),
+        pauseDriveScheduler: () => { throw new Error("fixture legacy pause refusal"); },
+        restoreDriveScheduler: () => {},
+      };
+      const { options } = seedUpdateReceipt(harness, manifestPath, "fenceless", { remoteMutationMayHaveStarted });
+      const current = structuredClone(harness.state());
+      await assert.rejects(cmdUpdate(manifestPath, harness.options), /fixture legacy pause refusal/);
+      assert.deepEqual(harness.state().definition, current.definition);
+      assert.equal(harness.state().enabled, !remoteMutationMayHaveStarted);
+      const remaining = readDailyRefreshUpdateTransaction(harness.plan.identity, options);
+      if (remoteMutationMayHaveStarted) {
+        assert.equal(remaining.remote_mutation_may_have_started, true);
+        assert.equal(remaining.fenceless, false);
+      } else assert.equal(remaining, null);
+    });
+  });
+}
+
+for (const state of ["absent", "fenced", "fenceless"]) {
+  test(`daily run with ${state} receipt makes the current recovery decision twice`, async () => {
+    await withFixture(async ({ manifestPath }) => {
+      const harness = productionHarness(manifestPath);
+      const { options } = seedUpdateReceipt(harness, manifestPath, state);
+      let runs = 0;
+      let freshnessReads = 0;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const result = await runDailyRefreshCli(manifestPath, {
+          ...options,
+          brainModule: {},
+          buildPlan: async () => harness.plan,
+          acquireLock: () => ({ assertOwned: () => true, release: () => {} }),
+          runSource: async () => { runs++; return { status: "complete" }; },
+          readFreshness: async () => ({ drive: {
+            last_successful_run_at: new Date(Date.UTC(2026, 9, 24, 12, freshnessReads++)).toISOString(),
+          } }),
+          writeReceipt: () => {},
+          appendObservation: () => {},
+          silent: true,
+        });
+        assert.equal(result.status, state === "fenced" ? "deferred" : "complete");
+      }
+      assert.equal(runs, state === "fenced" ? 0 : 2);
+      if (state !== "absent") {
+        assert.equal(readDailyRefreshUpdateTransaction(harness.plan.identity, options).fenceless === true,
+          state === "fenceless", "the read result identifies missing fence authority without deleting evidence");
+      }
     });
   });
 }

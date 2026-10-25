@@ -149,6 +149,23 @@ for (const residue of [false, true]) {
   });
 }
 
+for (const name of ["answer manifest", "ingest checkpoint", "drain checkpoint"]) {
+  for (const residue of [false, true]) test(`${name} staging name: ${residue ? "retained legacy residue" : "empty directory"}`, t => {
+    const root = fixture(t);
+    const { path, write } = identityCases.find(site => site.name === name).prepare(root);
+    const now = Date.now;
+    Date.now = () => 1700000000000;
+    const stale = `${path}.tmp-${process.pid}-${Date.now()}`;
+    const bytes = Buffer.from("retained earlier attempt\n");
+    if (residue) fs.writeFileSync(stale, bytes, { flag: "wx", mode: 0o600 });
+    const identity = residue ? fs.lstatSync(stale, { bigint: true }) : null;
+    try { write(); }
+    finally { Date.now = now; }
+    assert.ok(fs.existsSync(path));
+    if (residue) assertStagingSurvives(stale, identity, bytes);
+  });
+}
+
 for (const site of identityCases) for (const replacement of ["none", "destination", "staging", "staging-in-place", "squat-after-success"]) {
   test(`${site.name} retry identity: ${replacement}`, t => {
     const root = fixture(t);
@@ -580,11 +597,13 @@ for (const mode of [...modes, "fstat-refusal"]) {
     });
     if (expectedRefusal(mode)) {
       assert.equal(fs.readFileSync(target, "utf8"), "prior manifest\n");
-      assert.equal(fs.readFileSync(`${target}.tmp`, "utf8"), json(expected), "terminal refusal keeps the staged manifest");
+      const retained = fs.readdirSync(root).filter(name => name.startsWith("reviewed.json.") && name.endsWith(".tmp"));
+      assert.equal(retained.length, 1);
+      assert.equal(fs.readFileSync(join(root, retained[0]), "utf8"), json(expected), "terminal refusal keeps the staged manifest");
       assert.match(child.stderr, /Package bundle verification failed: synthetic_rename_refusal/);
     } else {
       assert.equal(fs.readFileSync(target, "utf8"), json(expected));
-      assert.ok(!fs.existsSync(`${target}.tmp`));
+      assert.equal(fs.readdirSync(root).filter(name => name.startsWith("reviewed.json.") && name.endsWith(".tmp")).length, 0);
     }
   });
 }
@@ -659,8 +678,10 @@ for (const mode of ["race-destination", "race-staging", "race-staging-in-place"]
     assert.match(child.stderr, /package_bundle_verification_failed/);
     if (mode === "race-staging-in-place") assert.equal(events.inPlaceInvisible, true);
     if (mode === "race-staging") {
-      assert.equal(fs.lstatSync(`${target}.tmp`, { bigint: true }).ino.toString(), events.replacementInode);
-      assert.equal(fs.readFileSync(`${target}.tmp`, "utf8"), "synthetic concurrent replacement\n");
+      const retained = fs.readdirSync(root).filter(name => name.startsWith("reviewed.json.") && name.endsWith(".tmp"));
+      assert.equal(retained.length, 1);
+      assert.equal(fs.lstatSync(join(root, retained[0]), { bigint: true }).ino.toString(), events.replacementInode);
+      assert.equal(fs.readFileSync(join(root, retained[0]), "utf8"), "synthetic concurrent replacement\n");
     }
   });
 }

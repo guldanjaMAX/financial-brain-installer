@@ -36,6 +36,10 @@ const mutations = {
     ['"mtimeMs", "ctimeMs", "mode"', '"mtimeMs", "mode"'],
     ['"mtimeNs", "ctimeNs", "mode"', '"mtimeNs", "mode"'],
   ],
+  restore_staging_ctime: [[
+    'keys.filter(key => key !== "ctimeMs" && key !== "ctimeNs")',
+    'keys',
+  ]],
 };
 const chosen = process.env.BRAIN_RENAME_MUTANT;
 if (!Object.hasOwn(mutations, chosen)) throw new Error("Unknown rename retry mutation");

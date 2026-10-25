@@ -1,5 +1,5 @@
 /** Private local company identity. Never serialize this record into an envelope. */
-import { renameIdentityMatches, renameWithRetrySync, captureStagedProof, removeOwnedStaging } from "../operations/rename-retry.mjs";
+import { renameWithRetrySync, captureStagedProof, removeOwnedStaging } from "../operations/rename-retry.mjs";
 import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, constants, closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -23,6 +23,16 @@ const MESSAGES = Object.freeze({
   QB_HELPER_UNAVAILABLE: 'The reviewed signed helper is unavailable. Stop for package repair.',
   QB_BINDING_RECOVERY_REQUIRED: 'The local binding is missing while stored books remain. Review their company identity before reconnecting.',
 });
+function protectedPredecessorMatches(path, expected) {
+  // Both writes and reads protect this file. Their ACL change-time update can
+  // arrive later, so retain the other predecessor checks without a new read.
+  let actual;
+  try { actual = lstatSync(path); }
+  catch (error) { return error?.code === 'ENOENT' && expected === null; }
+  return Boolean(expected && actual.isFile() && !actual.isSymbolicLink()
+    && expected.isFile() && !expected.isSymbolicLink() && actual.nlink === 1
+    && ["dev", "ino", "nlink", "size", "mtimeMs", "mode"].every(key => actual[key] === expected[key]));
+}
 export function qbdOwnerMessage(code) {
   const safe = typeof code === 'string' && /^QB_[A-Z_]{1,48}$/.test(code) ? code : 'QB_OPERATION_FAILED';
   return `${safe}${MESSAGES[safe] ? `: ${MESSAGES[safe]}` : ''}`;
@@ -101,7 +111,7 @@ export function desktopBindingStore(options = {}) {
       const staged = captureStagedProof(temporary, bytes, created);
       const refuse = () => { throw qbdFailure('QB_BINDING_INVALID'); };
       renameWithRetrySync(temporary, path, { staged: { expected: staged, bytes, refuse }, revalidate() {
-        if (!renameIdentityMatches(path, predecessor)) {
+        if (!protectedPredecessorMatches(path, predecessor)) {
           throw qbdFailure('QB_BINDING_INVALID');
         }
       } });

@@ -3,6 +3,7 @@ import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync, capt
 import { closeSync, fstatSync, openSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
 import {
   PackageBundleVerificationError,
   REVIEWED_BUNDLE_MANIFEST_RELATIVE,
@@ -39,7 +40,7 @@ function writeManifest(path, manifest, replace) {
   const output = resolve(path);
   const predecessor = captureRenameIdentity(output);
   if (predecessor && !replace) throw new Error("manifest_exists_use_replace");
-  const temporary = `${output}.tmp`;
+  const temporary = `${output}.${randomUUID()}.tmp`;
   const bytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, "utf8");
   const descriptor = openSync(temporary, "wx", 0o644);
   let created;

@@ -58,6 +58,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -211,7 +212,7 @@ ${environment}
 }
 
 function stageAtomicWrite(path, text) {
-  const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  const temp = `${path}.tmp-${process.pid}-${randomBytes(12).toString("hex")}`;
   try {
     writeFileSync(temp, text, { mode: 0o600 });
     chmodSync(temp, 0o600);

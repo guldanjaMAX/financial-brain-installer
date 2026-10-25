@@ -8,7 +8,7 @@
  * An ACL or DPAPI failure therefore leaves any prior working key untouched.
  */
 
-import { captureStagedProof, renameWithRetrySync, removeOwnedStaging, sameRenameIdentity, stagedBytesMatch } from "./rename-retry.mjs";
+import { captureStagedProof, renameWithRetrySync, removeOwnedStaging, stagedBytesMatch } from "./rename-retry.mjs";
 import {
   chmodSync,
   closeSync,
@@ -61,6 +61,16 @@ function lstatIfPresent(path) {
 
 function sameFile(left, right) {
   return Boolean(left && right && left.dev === right.dev && left.ino === right.ino);
+}
+
+function sameCredentialPredecessor(actual, expected) {
+  // A prior credential can still receive the delayed Windows ACL change-time
+  // update from its own successful write. Its private byte snapshot is already
+  // captured; retain every other predecessor check without adding a read that
+  // would bypass rename retry when a reader holds the destination.
+  return sameFile(actual, expected) && actual.isFile() && !actual.isSymbolicLink()
+    && actual.nlink === 1 && ["dev", "ino", "nlink", "size", "mtimeMs", "mode"]
+      .every(key => actual[key] === expected[key]);
 }
 
 function assertParent(path, expectedUid, platform, options = {}) {
@@ -824,6 +834,7 @@ export function writeAdminKeyFile(destination, secret, options = {}) {
   let backupBytes;
   let priorSecret;
   let committed = false;
+  let replacementVerified = false;
   const rename = options.rename ?? renameSync;
   try {
     ({ identity: stagedIdentity, created: stagedCreated, proof: stagedProof } = createPrivatePayloadFile(
@@ -874,7 +885,7 @@ export function writeAdminKeyFile(destination, secret, options = {}) {
       try {
         const finalPrior = lstatIfPresent(path);
         if ((prior === null) !== (finalPrior === null) ||
-            (prior && !sameRenameIdentity(finalPrior, prior))) throw destinationChanged;
+            (prior && !sameCredentialPredecessor(finalPrior, prior))) throw destinationChanged;
         const staged = lstatIfPresent(temporary);
         if (!sameFile(stagedIdentity, staged) || !staged.isFile() || staged.nlink !== 1) throw stagingChanged;
       } catch (error) { revalidationError = error; throw error; }
@@ -897,6 +908,7 @@ export function writeAdminKeyFile(destination, secret, options = {}) {
       path, stagedIdentity, secret, expectedUid, platform, options, "persisted",
     );
     fsyncParent(path, platform, options, "persisted");
+    replacementVerified = true;
 
     if (backupIdentity) {
       if (!backupPublished && !removeOwnedStaging(backup, backupCreated, { proof: backupProof, bytes: backupBytes })) {
@@ -907,6 +919,11 @@ export function writeAdminKeyFile(destination, secret, options = {}) {
     }
     return Object.freeze({ path, replaced: prior !== null });
   } catch (error) {
+    // Cleanup is not part of credential verification. A sharing lock on the
+    // protected backup must not resurrect a superseded, possibly revoked key.
+    if (replacementVerified) {
+      throw new Error("the replacement admin key was verified and remains stored; cleanup of its protected rollback backup could not be verified");
+    }
     if (!committed) {
       if (stagedCreated) removeOwnedStaging(temporary, stagedCreated);
       if (backupCreated && !backupPublished) removeOwnedStaging(backup, backupCreated);

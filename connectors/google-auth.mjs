@@ -25,7 +25,7 @@
  *    option left for an installed app, which is why this opens a local server.
  */
 
-import { captureStagedProof, renameWithRetrySync, removeOwnedStaging, sameRenameIdentity, stagedBytesMatch } from "../operations/rename-retry.mjs";
+import { captureStagedProof, renameWithRetrySync, removeOwnedStaging, stagedBytesMatch } from "../operations/rename-retry.mjs";
 import { createServer } from "node:http";
 import { createHash, randomBytes } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
@@ -406,6 +406,15 @@ function lstatIfPresent(path) {
 
 function sameFile(left, right) {
   return Boolean(left && right && left.dev === right.dev && left.ino === right.ino);
+}
+
+function sameCredentialPredecessor(actual, expected) {
+  // An earlier successful ACL-protected write can still update change time.
+  // Preserve the other metadata checks after the private byte snapshot without
+  // adding a destination read that could evade the rename retry boundary.
+  return sameFile(actual, expected) && actual.isFile() && !actual.isSymbolicLink()
+    && actual.nlink === 1 && ["dev", "ino", "nlink", "size", "mtimeMs", "mode"]
+      .every(key => actual[key] === expected[key]);
 }
 
 function removeIfSame(path, identity) {
@@ -893,6 +902,7 @@ function writeFileStore(path, store, options = {}) {
   let priorPayload;
   let backupBytes;
   let committed = false;
+  let replacementVerified = false;
   try {
     ({ identity: stagedIdentity, created: stagedCreated, proof: stagedProof } = createPrivatePayloadFile(
       temporary, encoded, platform, options, "staging file",
@@ -925,7 +935,7 @@ function writeFileStore(path, store, options = {}) {
       try {
         const finalPrior = lstatIfPresent(path);
         if ((prior === null) !== (finalPrior === null) ||
-            (prior && !sameRenameIdentity(finalPrior, prior))) throw destinationChanged;
+            (prior && !sameCredentialPredecessor(finalPrior, prior))) throw destinationChanged;
         const staged = lstatIfPresent(temporary);
         if (!sameFile(stagedIdentity, staged) || !staged.isFile() || staged.nlink !== 1) throw stagingChanged;
       } catch (error) { revalidationError = error; throw error; }
@@ -941,6 +951,7 @@ function writeFileStore(path, store, options = {}) {
     publishedIdentity = captureStagedProof(path, encoded, stagedCreated);
     const verified = verifyFilePayload(path, stagedIdentity, payload, options, "persisted");
     syncTokenDirectory(path, platform, options, "persisted");
+    replacementVerified = true;
 
     if (backupIdentity) {
       if (!backupPublished && !removeOwnedStaging(backup, backupCreated, { proof: backupProof, bytes: backupBytes })) {
@@ -951,6 +962,12 @@ function writeFileStore(path, store, options = {}) {
     }
     return verified;
   } catch (error) {
+    // A verified replacement remains authoritative when only its protected
+    // backup cleanup is blocked. Restoring the old record can revive a token
+    // that the provider has already invalidated.
+    if (replacementVerified) {
+      throw new Error("the replacement Google token record was verified and remains stored; cleanup of its protected rollback backup could not be verified");
+    }
     if (!committed) {
       if (stagedCreated) removeOwnedStaging(temporary, stagedCreated);
       if (backupCreated && !backupPublished) removeOwnedStaging(backup, backupCreated);

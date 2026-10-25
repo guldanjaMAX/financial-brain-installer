@@ -7562,7 +7562,7 @@ export async function cmdRollback(manifestPath, bookmarkArg, options = {}) {
         platform: dailyPlatform,
         machineLockRoot: schedulerOptions.machineLockRoot,
       });
-      dailyImportsRecoveryRequired = Boolean(transaction);
+      dailyImportsRecoveryRequired = Boolean(transaction && !transaction.fenceless);
       if (dailyImportsRecoveryRequired) {
         warn("Daily imports remain paused with a recovery receipt. A verified brain update must restore them before unattended imports resume.");
       }
@@ -14708,7 +14708,7 @@ function loadCalendarState(path) {
 function saveCalendarState(path, state) {
   mkdirSync(dirname(path), { recursive: true });
   const predecessor = captureRenameIdentity(path, { bigint: true });
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  const tmp = `${path}.tmp-${process.pid}-${randomBytes(12).toString("hex")}`;
   const bytes = Buffer.from(JSON.stringify(state, null, 2));
   let fd, created;
   let published = false;
@@ -31143,12 +31143,21 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         dailyStatus.installed === true;
       existingDailyTransaction = readDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions);
       dailyTransactionExpected = existingDailyTransaction;
+      remoteMutationMayHaveStarted = existingDailyTransaction !== null &&
+        existingDailyTransaction.remote_mutation_may_have_started !== false;
+      if (existingDailyTransaction?.fenceless === true) {
+        // Only the current schedule can authorize a new pause or later restore:
+        // daily commands were free to change it while no shared fence existed.
+        // Retain the old receipt solely as the exact publication predecessor
+        // and conservative dispatch evidence. Fresh publication is atomic, so
+        // a failed snapshot or write cannot erase that uncertainty.
+        existingDailyTransaction = null;
+        info("A prior update receipt had no recovery fence. This update will use the current daily settings.");
+      }
       if (existingDailyTransaction?.shared_fence === true || (existingDailyTransaction && !existingDailyTransaction.snapshot)) {
         throw new Error("this Brain has an update recovery fence, but this user has no verified schedule snapshot; imports remain paused");
       }
       resumingDailyRecovery = Boolean(existingDailyTransaction);
-      remoteMutationMayHaveStarted = existingDailyTransaction !== null &&
-        existingDailyTransaction.remote_mutation_may_have_started !== false;
       if (bridgeGuard) bridgeSnapshots = bridgeGuard.capture(bridgeInventory, existingDailyTransaction?.bridge_snapshots);
       dailySnapshot = existingDailyTransaction?.snapshot || (dailyStatus.installed
         ? Object.freeze({
@@ -31184,7 +31193,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         dailyTransactionExpected = written;
         return written;
       };
-      manageAnyLocalSchedule = manageDailyDefinition || legacySnapshots.some((entry) => entry.snapshot?.exists) || bridgeSnapshots.length > 0;
+      manageAnyLocalSchedule = manageDailyDefinition || legacySnapshots.some((entry) => entry.snapshot?.exists) || bridgeSnapshots.length > 0 || dailyTransactionExpected !== null;
       if (manageAnyLocalSchedule) {
         persistDailyTransaction("preparing");
         dailyTransactionActive = true;
@@ -31210,7 +31219,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
           persistDailyTransaction("paused");
         }
       } catch (error) {
-        if (!resumingDailyRecovery) {
+        if (!resumingDailyRecovery && !remoteMutationMayHaveStarted) {
           if (dailySnapshot) restoreDailyRefreshSchedule(dailySnapshot, dailySchedulerOptions);
           if (dailyTransactionActive && !bridgeSnapshots.length) {
             clearDailyRefreshUpdateTransaction(dailyPlan.identity, { ...dailyTransactionOptions, expected: dailyTransactionExpected });

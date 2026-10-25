@@ -57,7 +57,8 @@
  * is paired.
  */
 
-import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync, captureStagedProof, removeOwnedStaging } from "../operations/rename-retry.mjs";
+import { captureRenameIdentity, renameWithRetrySync, captureStagedProof, removeOwnedStaging } from "../operations/rename-retry.mjs";
+import { randomBytes } from "node:crypto";
 import {
   constants as fsConstants,
   closeSync,
@@ -388,6 +389,17 @@ const sameFile = (left, right) => Boolean(
   left && right && left.dev === right.dev && left.ino === right.ino
 );
 
+function protectedPredecessorMatches(path, expected) {
+  // The previous private write can receive its ACL change-time update late.
+  // Keep all other predecessor metadata checks without opening a held file.
+  let actual;
+  try { actual = lstatSync(path); }
+  catch (error) { return error?.code === "ENOENT" && expected === null; }
+  return Boolean(expected && actual.isFile() && !actual.isSymbolicLink()
+    && expected.isFile() && !expected.isSymbolicLink() && actual.nlink === 1
+    && ["dev", "ino", "nlink", "size", "mtimeMs", "mode"].every(key => actual[key] === expected[key]));
+}
+
 function writeAll(descriptor, bytes) {
   let offset = 0;
   while (offset < bytes.length) {
@@ -403,7 +415,7 @@ export function saveDrainState(path, state, options = {}) {
   // The snapshot carries message text from open conversations, so the file is
   // owner-only, and it is replaced atomically so a kill mid-write can never
   // leave half-written JSON that silently restarts the drain from zero.
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  const tmp = `${path}.tmp-${process.pid}-${randomBytes(12).toString("hex")}`;
   const platform = options.platform || process.platform;
   const bytes = Buffer.from(JSON.stringify(state, null, 2), "utf8");
   let descriptor;
@@ -445,7 +457,7 @@ export function saveDrainState(path, state, options = {}) {
     const staged = captureStagedProof(tmp, bytes, created);
     const refuse = () => { throw new Error("the WhatsApp drain state identity changed before its payload was written"); };
     renameWithRetrySync(tmp, path, { staged: { expected: staged, bytes, refuse }, revalidate() {
-      if (!renameIdentityMatches(path, predecessor)) {
+      if (!protectedPredecessorMatches(path, predecessor)) {
         throw new Error("the WhatsApp drain state identity changed before its payload was written");
       }
     } });

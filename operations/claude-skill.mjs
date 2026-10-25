@@ -693,7 +693,7 @@ export function installClaudeTechnicianSkill(options = {}) {
     }
   }
 
-  const temporary = `${target}.${process.pid}.tmp`;
+  const temporary = `${target}.${process.pid}.${randomBytes(12).toString("hex")}.tmp`;
   const bytes = Buffer.from(content, "utf8");
   let fd = null;
   let created, published = false;
