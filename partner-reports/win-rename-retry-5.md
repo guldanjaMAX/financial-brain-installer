@@ -473,4 +473,95 @@ unpublished workspace attempts after held reads, and randomize remaining
 staging names. Add native regressions, persistent mutants and the round 5
 verification report with sandbox limits.
 
-LANE WIN-RENAME-RETRY-5: READY
+## Operator verification and review
+
+The lane's work is commit `0428e3e1`, unchanged; its own verdict was READY.
+The operator re-ran the checks outside the lane sandbox on the same Windows
+host (normal non-elevated user, Developer Mode off), each run in a fresh
+profile-shaped fence with the network guard, and ran an independent read-only
+review. Times are MST on 2026-10-24; all test runs ended by 22:41.
+
+### The partner's items, verified on this host
+
+- Change time: the credential suites run directly with node now pass 3 of 3
+  each (google-auth-storage, admin-key-file, admin-key-rotation; all three
+  failed 5 of 5 on round 4). acl-predecessor 9/0/0 and
+  credential-backup-cleanup 10/0/0, 3 of 3 each. The native ACL rows ran
+  without skipping: "native Windows ACL before baseline delayed change time
+  still publishes" passed (3/0/1 for the targeted rows; the skip is the POSIX
+  chmod control on Windows). Through the chain harness the same row also ran
+  and passed.
+- Helper interface: the export lines are identical to round 4. Change time is
+  removed only in a private staging comparator; `RENAME_IDENTITY_KEYS`,
+  `sameRenameIdentity` and `renameIdentityMatches` still compare it.
+- Launch counts measured: create 10, refresh 15, setup of both 21, update of
+  both 30.
+- Suites: rename-retry 161/0/2, configuration 71/0/0, Windows 84/0/0, writers
+  99/0/0, staging names 14/0/0, test-chain runner and complete pass,
+  daily-refresh-update-production 133/0/0, daily-refresh-run 55/0/0,
+  daily-refresh-scheduler 45/0/0, anthropic-connect 44/0/0, ledger-mcp
+  36/0/0, mcp-search-contract 17/0/0, update-pending-refusal 58/0/0.
+- 151 suites compared with `ebec973f` by failing test names per suite: 147
+  identical, the three new suites pass, and cloudflare-recovery-adapter fails
+  with RECOVERY_EXECUTION_SNAPSHOT_CHANGED. That suite fails the same way on
+  `ebec973f` 2 of 2 on this host tonight (it passed there at 19:41), so it is a
+  host issue outside lane 8; not traced. Suites failing identically on both
+  trees: field-prepare 1, older-release-paused-resume 1,
+  owner-contract-workspace 3, package-bundle-verifier 15, package-privacy 1,
+  quickbooks-desktop-connect 1, technician-setup 1, upgrade-verify 1.
+- Mutants, each with `MUTATION_APPLIED` and the guard active, all killed:
+  helper (unmutated control 161/0/2) `no_retry` 87/74, `retry_every_error`
+  151/10, `unbounded_tries` 131/29, `skip_retry_revalidation` 119/41,
+  `remove_platform_gate` 144/16, `skip_byte_proof` 144/16,
+  `path_only_cleanup` 158/2, `drop_ctime` 158/2,
+  `skip_sync_byte_proof_call` 132/28, `skip_async_byte_proof_call` 132/28,
+  `oversized_proof_read` 141/19, `restore_staging_ctime` 159/1 and 1/2 on the
+  native rows; daily (control 34/0) `resume_fenceless_authoritatively` 17/17,
+  `discard_fenceless_receipt` 9/25, `erase_fenceless_remote_intent` 32/2;
+  writer (control 14/0) `workspace_reread` 10/4, `workspace_keep_lock` 10/4,
+  `workspace_mutex_staging` 12/2, `pid_staging` 13/1; credential cleanup 8/2;
+  ACL predecessor 14/5; domain save (control 10/0) 8/2.
+- `git diff --check` clean; names, secrets, email and user-path scan clean on
+  every added line and new file; no `.tmp-*` folders left in the repository
+  root. The round 2, 3 and 4 reports are unchanged.
+
+### Review (read-only: three area reviewers, one refuter)
+
+Confirmed by the refuter:
+
+1. P2, from this round's credential cleanup change: `brain.mjs:3716-3727`
+   (cause `operations/admin-key-file.mjs:911`, `:922-926`). When the backup
+   cleanup fails after the new admin key is verified, `brain secrets` catches
+   the new "verified and remains stored" error with a bare catch and tells the
+   owner the remote key was not changed because the local file could not be
+   updated. In fact the local key is the new verified key and the Worker still
+   has the old one, so local calls get 401 until the owner reruns the command.
+2. P2, from the same change: `connectors/google-auth.mjs:954-970` (callers
+   `connectors/imap.mjs:118-125`, `connectors/provider-oauth.mjs:724`,
+   `brain.mjs:20637`) and `operations/admin-key-file.mjs:911-926`. After a
+   blocked backup cleanup, the protected backup of a removed or superseded
+   credential stays on disk with no sweeper, and a retried disconnect reports
+   that nothing was stored.
+3. P2, macOS: `brain.mjs:31148-31169`, `:31376-31383` with
+   `operations/brain-lifecycle-lock.mjs:166` and
+   `operations/daily-refresh-scheduler.mjs:627`, `:864`, `:910`. The macOS
+   fence lives under /tmp, so an interrupted update's real receipt can become
+   fenceless after a reboot. Round 5 then snapshots the update's own pause as
+   the current schedule, a later preflight refusal restores that pause, and the
+   receipt is deleted without archive, so the owner's daily and legacy
+   schedules stay off with no message. Not reproducible on this Windows host;
+   whether macOS clears /tmp at boot on the target version is unverified.
+4. P3: the native ACL row skips itself when no drift is observed, so a green
+   run on a host without drift does not prove native coverage
+   (`test/rename-retry.test.mjs:226-285`). It ran and passed on this host.
+5. P3: if receipt cleanup fails after this process cleared the fence, the
+   recovery write is refused and a completed update ends with a bare "the
+   daily update transaction receipt is unsafe"
+   (`operations/daily-refresh-scheduler.mjs:706-712`, `brain.mjs:31343-31356`).
+
+Operator verdict: not ready. Every item the partner listed for round 5 is done
+and verified on this host. Two new P2s come from this round's credential
+cleanup change (a misleading `brain secrets` message with mismatched keys, and
+an unswept protected backup), and one is a macOS fence-location P2.
+
+LANE WIN-RENAME-RETRY-5: NOT READY the partner's round 5 items are done and verified on this host; review found new P2s in the credential cleanup path (brain secrets misreports a verified local key; unswept protected backup) and a macOS fence-loss path
