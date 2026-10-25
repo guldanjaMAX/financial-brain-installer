@@ -110,10 +110,14 @@ import {
   RECOMMENDED_CLAUDE_DAILY_CAP_USD,
   REVIEWED_CLAUDE_ANSWER_MODELS,
   answerSetupOf,
+  answerSetupHasSchema2RecoveryJournal,
+  answerSetupInterruptedMessage,
   assertReviewedAnswerModels as assertReviewedAnswerModelsConfig,
   answerSetupJournalPath,
   answerSetupNeedsRecovery,
+  parseAnthropicConnectFlags,
   preflightAnthropicKey,
+  recoverAnthropicAnswerSetup,
   resolvedAnswerModels,
   runAnthropicAnswerSetup,
   saveManifestAtomically as saveAnswerManifestAtomically,
@@ -19658,6 +19662,29 @@ async function resolveBaseUrl(m, acct) {
 }
 
 
+/** Build the one fixed public failure for any interrupted answer setup. */
+function anthropicAnswerSetupInterruptedError(flags, preview = {}) {
+  const recoveryState = ["original", "changed", "ambiguous"].includes(preview.recovery_state)
+    ? preview.recovery_state
+    : "ambiguous";
+  if (flags.json === true) {
+    return new JsonFatal({
+      schema_version: 1,
+      operation: "answer_setup.recovery_preview",
+      status: "error",
+      error_code: "anthropic_rollback_incomplete",
+      recovery_state: recoveryState,
+      automatic_action: "none",
+    });
+  }
+  const error = new Fatal(answerSetupInterruptedMessage(recoveryState));
+  error.code = "ANTHROPIC_ROLLBACK_INCOMPLETE";
+  error.supportCode = "ANTHROPIC_ROLLBACK_INCOMPLETE";
+  error.recoveryState = recoveryState;
+  error.recoveryReceipt = preview.receipt ?? null;
+  return error;
+}
+
 /**
  * brain connect google — the client authorises their OWN Google account.
  *
@@ -19685,14 +19712,51 @@ export async function cmdConnect(target, options = {}) {
     return (options.connectOnline || cmdConnectProvider)("quickbooks", manifestPath, flags, options.providerOptions || {});
   }
   if (which === "anthropic") {
-    // A half-run journal is a local custody stop. Check it before manifest-bound
-    // Cloudflare control can inspect or refresh a stored credential.
+    // A schema-2 half-run journal is classified locally before manifest-bound
+    // credential control. Recovery flags use the same read-only path. Neither
+    // route can cross a mutation boundary.
     const setupNeedsRecovery = options.answerSetupNeedsRecovery ?? answerSetupNeedsRecovery;
-    if (manifestPath && !String(manifestPath).startsWith("--") && setupNeedsRecovery(manifestPath)) {
+    const explicitRecovery = flags.recover !== undefined || flags["confirm-recovery"] !== undefined;
+    if (!explicitRecovery) {
+      try { parseAnthropicConnectFlags(flags); }
+      catch (error) { die(error?.message || "the Anthropic answer setup arguments were not accepted"); }
+    }
+    const connectAnthropic = options.connectAnthropic ?? cmdConnectAnthropic;
+    if (explicitRecovery) {
+      if (manifestPath && !String(manifestPath).startsWith("--")) {
+        try { setupNeedsRecovery(manifestPath); } catch { /* The classifier maps this boundary closed. */ }
+      }
+      return connectAnthropic(manifestPath, flags, {
+        ...(options.anthropicOptions || {}),
+        interruptedRecovery: true,
+      });
+    }
+    let needsRecovery = false;
+    let hasSchema2RecoveryJournal = false;
+    if (manifestPath && !String(manifestPath).startsWith("--")) {
+      try {
+        needsRecovery = setupNeedsRecovery(manifestPath);
+        if (needsRecovery) {
+          const recognizeSchema2Journal = options.answerSetupHasSchema2RecoveryJournal ??
+            answerSetupHasSchema2RecoveryJournal;
+          hasSchema2RecoveryJournal = recognizeSchema2Journal(manifestPath);
+        }
+      } catch {
+        // Detection is read-only, but its raw error can carry a private path or
+        // journal detail. Stop on the same fixed ambiguous card as classification.
+        throw anthropicAnswerSetupInterruptedError(flags);
+      }
+    }
+    if (needsRecovery) {
+      if (hasSchema2RecoveryJournal) {
+        return connectAnthropic(manifestPath, flags, {
+          ...(options.anthropicOptions || {}),
+          interruptedRecovery: true,
+        });
+      }
       die(HALF_RUN(manifestPath));
     }
     const runManifestControl = options.withManifestControl ?? withManifestCloudflareControl;
-    const connectAnthropic = options.connectAnthropic ?? cmdConnectAnthropic;
     return runManifestControl(
       manifestPath,
       () => connectAnthropic(manifestPath, flags, options.anthropicOptions || {}),
@@ -19793,6 +19857,18 @@ async function assertLiveAnswerSetupWorker(manifestPath, manifest, options = {})
 
 /** Configure the reviewed owner-account answer pair without exposing the key. */
 export async function cmdConnectAnthropic(manifestPath, flags = {}, options = {}) {
+  const recoveryRequested = options.interruptedRecovery === true ||
+    flags.recover !== undefined || flags["confirm-recovery"] !== undefined;
+  if (recoveryRequested) {
+    const preview = await recoverAnthropicAnswerSetup({ manifestPath }, {
+      listSecretNames: options.listSecretNames,
+      journalFile: options.journalFile,
+      manifestFile: options.manifestFile,
+      stageFile: options.stageFile,
+    });
+    throw anthropicAnswerSetupInterruptedError(flags, preview);
+  }
+  const parsedFlags = parseAnthropicConnectFlags(flags);
   let m;
   try {
     ({ m } = (options.loadManifest ?? loadManifest)(manifestPath));
@@ -19855,7 +19931,9 @@ export async function cmdConnectAnthropic(manifestPath, flags = {}, options = {}
       platform,
       stdinIsTTY: options.stdinIsTTY ?? process.stdin.isTTY,
       loadManifest: (path) => (options.loadManifest ?? loadManifest)(path).m,
-      saveManifestAtomically: options.saveManifestAtomically ?? saveAnswerManifestAtomically,
+      ...(options.saveManifestAtomically
+        ? { saveManifestAtomically: options.saveManifestAtomically }
+        : {}),
       acquireLock: options.acquireLock ?? ((input, action) =>
         (options.withBrainLifecycleLock ?? withBrainLifecycleLock)(input, action)),
       verifyVersion,
@@ -19889,6 +19967,14 @@ export async function cmdConnectAnthropic(manifestPath, flags = {}, options = {}
       checkWorker,
       sleep: options.sleep,
       now: options.now,
+      deferDailyUntilAfterDeploy: options.deferDailyUntilAfterDeploy ?? !m.brain?.domain,
+      // The product loader proves deploy-time domain additions. An injected
+      // loader is not assumed to observe writes unless its caller also injects
+      // this readback seam explicitly.
+      readManifestAfterDeploy: options.readManifestAfterDeploy ??
+        (options.loadManifest === undefined ? (path) => loadManifest(path).m : undefined),
+      publicationOptions: options.publicationOptions,
+      removeRecoveryStagedFile: options.removeRecoveryStagedFile,
       journalExists: options.journalExists,
       writeJournal: options.writeJournal,
       removeJournal: options.removeJournal,
@@ -19931,6 +20017,15 @@ export async function cmdConnectAnthropic(manifestPath, flags = {}, options = {}
       error.code = "UPDATE_FIRST";
     }
     if (flags.json === true) {
+      if (error?.code === "ANTHROPIC_KEY_REPLACEMENT_UNSUPPORTED") {
+        throw new JsonFatal({
+          schema_version: 1,
+          operation: "answer_setup.connect",
+          status: "error",
+          error_code: "anthropic_key_replacement_unsupported",
+          automatic_action: "none",
+        });
+      }
       const declaredCode = String(error?.supportCode || error?.code || "ANTHROPIC_CHECK_FAILED");
       throw new JsonFatal({
         schema_version: 1,

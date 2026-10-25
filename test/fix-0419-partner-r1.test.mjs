@@ -20,6 +20,7 @@ import test from "node:test";
 
 import { cmdConnect, cmdUpdate, cmdUpgrade, cmdUpgradeInteractive } from "../brain.mjs";
 import {
+  answerSetupInterruptedMessage,
   answerSetupJournalPath,
   answerSetupJournal,
   answerSetupNeedsRecovery,
@@ -992,7 +993,7 @@ test("the drop-update-journal-guard mutant is killed", async () => {
   const mutant = await importMutant("operations/answer-setup.mjs", [[
     "inspect(answerSetupJournalPath(manifestPath));\n    return true;",
     "inspect(answerSetupJournalPath(manifestPath));\n    return false;",
-  ]], ["operations/answer-setup-copy.mjs"]);
+  ]], ["operations/answer-setup-copy.mjs", "operations/rename-retry.mjs"]);
   assert.throws(
     () => verifyJournalPresenceRule(mutant),
     (error) => error?.code === "ERR_ASSERTION",
@@ -1111,7 +1112,7 @@ async function verifyConnectJournalGuard(inspectJournal) {
   try {
     await assert.rejects(
       cmdConnect("anthropic", options),
-      (error) => error.message === HALF_RUN(input.manifestPath),
+      (error) => error.message === answerSetupInterruptedMessage("ambiguous"),
     );
     assert.equal(decisions, 1, "the malformed journal reached the normalized decision");
     assert.equal(credentialControls, 0, "the malformed journal stopped before credential control");
