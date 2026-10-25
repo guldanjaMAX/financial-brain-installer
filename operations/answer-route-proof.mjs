@@ -14,6 +14,40 @@ export const CLAUDE_CODE_FULL_EXIT_CARD = Object.freeze({
   title: "Claude Code is still open",
   message: "Close Claude completely, including Claude Code, the Claude desktop app, and any tray or background process, then rerun the same command.",
 });
+export const PART_B_ROUTE_READINESS_REASONS = Object.freeze([
+  "brain_url_unavailable",
+  "claude_apply_required",
+  "claude_code_running",
+  "content_invalid",
+  "control_invalid",
+  "descriptor_invalid",
+  "diagnostics_unauthorized",
+  "full_exit_boundary_absent",
+  "guide_refresh_refused",
+  "initialize_failed",
+  "json_duplicate_member",
+  "manifest_unavailable",
+  "model_pair_mismatch",
+  "process_stop_failed",
+  "receipt_accepted",
+  "receipt_conflicting",
+  "receipt_malformed",
+  "receipt_missing",
+  "receipt_nested",
+  "receipt_unrecognized",
+  "route_receipt_accepted",
+  "tool_failed",
+  "transport_close_failed",
+  "transport_invalid",
+  "transport_open_failed",
+  "transport_request_failed",
+]);
+
+const PART_B_ROUTE_READINESS_REASON_SET = new Set(PART_B_ROUTE_READINESS_REASONS);
+
+export function normalizePartBRouteReadinessReason(reason) {
+  return PART_B_ROUTE_READINESS_REASON_SET.has(reason) ? reason : "route_unproven";
+}
 
 const CLAUDE_CODE_RUNNING = "CLAUDE_CODE_RUNNING";
 const MAX_MCP_LINE_BYTES = 4 * 1024 * 1024;

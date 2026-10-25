@@ -10,7 +10,7 @@ import {
 import { join } from "node:path";
 import test from "node:test";
 
-import { cmdMcpConfig } from "../brain.mjs";
+import { cmdMcpConfig, successMark } from "../brain.mjs";
 import {
   CLAUDE_CODE_FULL_EXIT_CARD,
   PART_B_ROUTE_CONTROL,
@@ -102,7 +102,8 @@ async function captureConsole(action) {
   const original = console.log;
   const output = [];
   console.log = (...values) => output.push(values.map(String).join(" "));
-  try { return { value: await action(), output }; }
+  try { return { value: await action(), error: null, output }; }
+  catch (error) { return { value: null, error, output }; }
   finally { console.log = original; }
 }
 
@@ -135,6 +136,7 @@ test("installed mcp-config defaults use an empty process snapshot and the real d
 
   assert.equal(counters.apply, 1, "the installed apply decision was reached");
   assert.equal(counters.processSnapshots, 1, "the full-exit boundary read exactly one process snapshot");
+  assert.equal(result.error, null);
   assert.deepEqual(result.value.route_readiness?.route_events, EXPECTED_EVENTS);
   assert.equal(result.value.route_readiness?.ready, true);
   assert.equal(result.value.route_readiness?.reason, "route_receipt_accepted");
@@ -146,6 +148,11 @@ test("installed mcp-config defaults use an empty process snapshot and the real d
     authorized: true,
     question: PART_B_ROUTE_CONTROL.arguments.q,
   });
+  assert.equal(
+    result.output.filter((line) =>
+      line === `${successMark(false)}    Claude answer route ready: route_receipt_accepted`).length,
+    1,
+  );
   t.diagnostic("apply=1 process_queries=1 child_spawns=1 route_events=5 strict_receipts=1");
 });
 
@@ -159,10 +166,9 @@ test("installed defaults refuse one running Claude Code process without spawn or
 
   assert.equal(counters.apply, 1, "the installed apply decision was reached");
   assert.equal(counters.processSnapshots, 1, "the refusal read exactly one injected process snapshot");
-  assert.equal(result.value.route_readiness?.ready, false);
-  assert.equal(result.value.route_readiness?.reason, "claude_code_running");
-  assert.deepEqual(result.value.route_readiness?.route_events, ["stop"]);
-  assert.deepEqual(result.value.route_readiness?.card, CLAUDE_CODE_FULL_EXIT_CARD);
+  assert.equal(result.value, null);
+  assert.equal(result.error?.constructor?.name, "Fatal");
+  assert.equal(result.error?.message, "Claude answer route not ready: claude_code_running.");
   assert.equal(
     CLAUDE_CODE_FULL_EXIT_CARD.message,
     "Close Claude completely, including Claude Code, the Claude desktop app, and any tray or background process, then rerun the same command.",

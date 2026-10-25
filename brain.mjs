@@ -305,6 +305,7 @@ import {
 import { writeClaudeWorkspaceGuide, writeCodexWorkspaceGuide, classifySessionFolder } from "./operations/claude-workspace.mjs";
 import {
   CLAUDE_CODE_FULL_EXIT_CARD,
+  normalizePartBRouteReadinessReason,
   openPartBMcpTransport,
   PART_B_ROUTE_CONTROL,
   proveClaudeCodeFullyExited,
@@ -7774,6 +7775,30 @@ function refreshPartBClaudeGuide(manifestPath, options = {}, workspaceOptions = 
   return partBClaudeGuideRefreshReceipt(outcome);
 }
 
+function diePartBRouteNotReady(routeReadiness) {
+  const reason = normalizePartBRouteReadinessReason(routeReadiness?.reason);
+  if (reason === "claude_code_running") {
+    info(CLAUDE_CODE_FULL_EXIT_CARD.title);
+    info(CLAUDE_CODE_FULL_EXIT_CARD.message);
+    die(`Claude answer route not ready: ${reason}.`);
+  }
+  die(
+    `Claude answer route not ready: ${reason}.\n` +
+    "      Nothing was removed. Close Claude completely, including Claude Code, the Claude desktop app, and any tray or background process, then rerun the same command. If it stops again, send this line to your setup partner."
+  );
+}
+
+function reportPartBRouteReadiness(routeReadiness, options = {}) {
+  const reason = normalizePartBRouteReadinessReason(routeReadiness?.reason);
+  const ready = routeReadiness?.ready === true && reason === "route_receipt_accepted";
+  options.onPartBRouteDecision?.(Object.freeze({ ready, reason }));
+  if (ready) {
+    ok("Claude answer route ready: route_receipt_accepted");
+    return;
+  }
+  diePartBRouteNotReady({ reason });
+}
+
 /**
  * Print the config a client pastes into their own AI tools.
  *
@@ -7863,19 +7888,42 @@ export async function cmdMcpConfig(manifestPath, options = {}) {
   const { m } = loadManifest(manifestPath);
   const flags = options.flags ?? parseFlags(process.argv.slice(4));
   assertKnownFlags(flags, ["manifest", "apply"], "brain mcp-config");
+  const partBManifest = m.retrieval?.answer_model === "claude-opus-5-5" &&
+    m.retrieval?.gate_model === "claude-sonnet-5-5";
 
   // Printing a command someone then has to copy, paste and get right is how a
   // connected brain ends up unconnected. Setup already wires both assistants at
   // step 5; this exposes the same reconciler on its own, for a brain that is
   // already installed or an assistant that arrived afterwards.
   if (flags.apply) {
-    const result = await (options.wireAgents ?? wireAgents)(m, manifestPath, options.wireOptions || {});
+    let result;
+    try {
+      result = await (options.wireAgents ?? wireAgents)(m, manifestPath, options.wireOptions || {});
+    } catch (error) {
+      if (partBManifest) {
+        // A rejected reconciler has no trustworthy assistant result. Close the
+        // Part B gate before the dispatcher can misclassify it as an unrelated
+        // installer failure, regardless of which client or host caused it.
+        reportPartBRouteReadiness({ ready: false, reason: "route_unproven" }, options);
+      }
+      throw error;
+    }
     if (result.wired.length) {
       ok(`connected with Owner assistant access: ${result.wired.join(", ")}`);
       say("      It can read, add or correct information, check the connection, and review a financial map. It cannot activate that map, delete records, or change access.");
     }
     for (const name of result.skipped) info(`${name}: nothing to do`);
     if (result.failures.length) {
+      if (partBManifest) {
+        // A partial reconciliation is not route proof. Decide the Part B gate
+        // before any legacy assistant failure can bypass its closed status.
+        reportPartBRouteReadiness({
+          ready: false,
+          reason: result.wired.includes("Claude Code")
+            ? "route_unproven"
+            : "claude_apply_required",
+        }, options);
+      }
       die(
         `could not connect: ${result.failures.join(", ")}.\n` +
         "      The connection was not reported ready. A prior locator-only connection was preserved\n" +
@@ -7914,9 +7962,8 @@ export async function cmdMcpConfig(manifestPath, options = {}) {
         });
       } else routeReadiness = { ready: false, reason: "guide_refresh_refused" };
     }
-    if (routeReadiness.reason === "claude_code_running") {
-      info(CLAUDE_CODE_FULL_EXIT_CARD.title);
-      info(CLAUDE_CODE_FULL_EXIT_CARD.message);
+    if (partBManifest) {
+      reportPartBRouteReadiness(routeReadiness, options);
     }
     return { ...result, route_readiness: routeReadiness };
   }
@@ -20006,8 +20053,10 @@ export async function cmdConnectAnthropic(manifestPath, flags = {}, options = {}
     else {
       for (const line of output) say(line);
       if (guideAccepted) {
-        info("Fully exit Claude Code before continuing. Then relaunch it and run:");
+        info("Close Claude completely, including Claude Code, the Claude desktop app, and any tray or background process.");
+        info("With Claude closed, run:");
         info(renderCliCommands(`brain mcp-config ${JSON.stringify(manifestPath)} --apply`));
+        info("Then start Claude Code again.");
       }
     }
     return completed;

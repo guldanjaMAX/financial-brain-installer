@@ -7,6 +7,7 @@ import { handleMcp } from '../src/lib/mcp-endpoint.js';
 import { refusalConfidence, confidenceLine } from '../src/lib/confidence.js';
 import * as retrieval from '../src/lib/retrieval-status.js';
 import { profileHas } from '../src/lib/agent-authority.js';
+import { partBRouteReceiptFromTiming } from '../../components/brain-mcp-timing.mjs';
 import { ownerSystemStatus } from '../src/lib/system-status.js';
 import { nextActionText as workerNextActionText } from '../src/lib/answer-render.js';
 import {
@@ -301,6 +302,7 @@ function localFixture(transport, toolOverride) {
   let reached = 0;
   const functions = runInNewContext(`${http}\n${tools}\n${toolOverride ? 'runTool = injectedTool;' : ''}\n${handle}\n({ call, runTool, handle })`, {
     ...retrieval, safeAnswerErrorText, scannedEvidenceNotice, ANSWER_ERROR_MESSAGES,
+    partBRouteReceiptFromTiming,
     nextActionText: workerNextActionText,
     answerResumeAt: value => typeof value === 'string' ? value : undefined,
     PROFILE: 'librarian', profileHas, BASE: 'https://fixture.invalid', TIMEOUT_MS: 120000, UA: 'fixture',

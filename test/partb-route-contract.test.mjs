@@ -19,6 +19,7 @@ import {
   cmdConnectAnthropic,
   cmdMcpConfig,
   mcpRegistrationDescriptor,
+  successMark,
 } from "../brain.mjs";
 import {
   BUILT_IN_ANSWER_MODEL,
@@ -28,11 +29,51 @@ import {
   CLAUDE_WORKSPACE_MARKER,
   writeClaudeWorkspaceGuide,
 } from "../operations/claude-workspace.mjs";
+import { renderCliCommands } from "../operations/cli-guidance.mjs";
+import {
+  CLAUDE_CODE_FULL_EXIT_CARD,
+  PART_B_ROUTE_READINESS_REASONS,
+  normalizePartBRouteReadinessReason,
+  proveClaudeCodeFullyExited,
+  provePartBRouteReadiness,
+  validatePartBRouteReceiptContent,
+} from "../operations/answer-route-proof.mjs";
 import { createQueryTiming } from "../worker/src/lib/query-timing.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const PART_B_PROOF_MODULE = new URL("../operations/answer-route-proof.mjs", import.meta.url);
 const FIXTURE_ADMIN_KEY = "fixture-admin-key-not-a-credential";
+
+// Independent contract inventory. Do not derive this from the production
+// allowlist: an omitted proof or validator outcome must make this test red.
+const EXPECTED_PART_B_ROUTE_READINESS_REASONS = Object.freeze([
+  "brain_url_unavailable",
+  "claude_apply_required",
+  "claude_code_running",
+  "content_invalid",
+  "control_invalid",
+  "descriptor_invalid",
+  "diagnostics_unauthorized",
+  "full_exit_boundary_absent",
+  "guide_refresh_refused",
+  "initialize_failed",
+  "json_duplicate_member",
+  "manifest_unavailable",
+  "model_pair_mismatch",
+  "process_stop_failed",
+  "receipt_accepted",
+  "receipt_conflicting",
+  "receipt_malformed",
+  "receipt_missing",
+  "receipt_nested",
+  "receipt_unrecognized",
+  "route_receipt_accepted",
+  "tool_failed",
+  "transport_close_failed",
+  "transport_invalid",
+  "transport_open_failed",
+  "transport_request_failed",
+]);
 
 // This object is an assertion target only. It is never supplied to product
 // code as evidence and therefore cannot make a readiness decision pass.
@@ -50,6 +91,14 @@ const EXPECTED_ROUTE_RECEIPT = Object.freeze({
   check_calls: 1,
   check_errors: 0,
   fallback_search_calls: 0,
+});
+const ACCEPTED_GUIDE_REFRESH = Object.freeze({
+  schema_version: 1,
+  operation: "claude_workspace_guide.refresh",
+  outcome: "written",
+  managed: true,
+  answer_route: "brain_think_first",
+  guide_generation: 1,
 });
 
 function syntheticManifest(answerSetup = "built-in") {
@@ -322,6 +371,153 @@ async function captureConsole(action) {
   }
 }
 
+async function captureConsoleOutcome(action) {
+  const original = console.log;
+  const lines = [];
+  console.log = (...values) => lines.push(values.map(String).join(" "));
+  try {
+    return { value: await action(), error: null, output: lines.join("\n") };
+  } catch (error) {
+    return { value: null, error, output: lines.join("\n") };
+  } finally {
+    console.log = original;
+  }
+}
+
+const ROUTE_RETRY_GUIDANCE =
+  "Nothing was removed. Close Claude completely, including Claude Code, the Claude desktop app, and any tray or background process, then rerun the same command. If it stops again, send this line to your setup partner.";
+
+function acceptedRouteContent() {
+  return [{
+    type: "text",
+    text: JSON.stringify({ route_receipt: EXPECTED_ROUTE_RECEIPT }),
+  }];
+}
+
+async function runExitContractArm(t, label, reason = "route_receipt_accepted", { claudeWireFailure = false } = {}) {
+  const guideRefusal = reason === "guide_refresh_refused";
+  const state = fixture(t, label, guideRefusal ? "built-in" : "opus-sonnet");
+  const counters = {
+    apply: 0,
+    ownershipDecisions: 0,
+    stops: 0,
+    openAttempts: 0,
+    requests: [],
+    closes: 0,
+  };
+  const safeWriter = guideWriterOptions(state.root, counters);
+  assert.equal(writeClaudeWorkspaceGuide(state.manifest, safeWriter).status, "written");
+  if (guideRefusal) writeAnswerSetup(state.manifest, "opus-sonnet");
+
+  const noClaude = reason === "claude_apply_required";
+  const outcome = await captureConsoleOutcome(() => cmdMcpConfig(state.manifest, {
+    flags: { apply: true },
+    wireAgents: async () => {
+      counters.apply++;
+      return {
+        wired: noClaude ? [] : ["Claude Code"],
+        skipped: [],
+        failures: claudeWireFailure ? ["Claude Code"] : [],
+      };
+    },
+    routeReadinessOptions: {
+      claudeWorkspaceOptions: guideRefusal
+        ? guideWriterOptions(state.root, counters, { nativeSafe: false })
+        : safeWriter,
+      stopMcpProcess: async () => {
+        counters.stops++;
+        if (reason === "claude_code_running") {
+          await proveClaudeCodeFullyExited({ readProcessList: async () => ["claude"] });
+        }
+      },
+      openMcpTransport: async () => {
+        counters.openAttempts++;
+        if (reason === "transport_open_failed") throw new Error("synthetic open refusal");
+        return {
+          request: async (method) => {
+            counters.requests.push(method);
+            if (method === "initialize") return { result: {} };
+            if (reason === "tool_failed") return { result: { isError: true, content: [] } };
+            if (reason === "receipt_conflicting") {
+              return { result: { content: [...acceptedRouteContent(), ...acceptedRouteContent()] } };
+            }
+            return { result: { content: acceptedRouteContent() } };
+          },
+          close: async () => { counters.closes++; },
+        };
+      },
+    },
+  }));
+  return { counters, outcome };
+}
+
+async function runPartialWiringArm(t, label, wiringResult) {
+  const state = fixture(t, label, "opus-sonnet");
+  const counters = { apply: 0, ownershipDecisions: 0, proofAttempts: 0, routeDecisions: 0 };
+  const writerOptions = guideWriterOptions(state.root, counters);
+  assert.equal(writeClaudeWorkspaceGuide(state.manifest, writerOptions).status, "written");
+  const outcome = await captureConsoleOutcome(() => cmdMcpConfig(state.manifest, {
+    flags: { apply: true },
+    onPartBRouteDecision: () => { counters.routeDecisions++; },
+    wireAgents: async () => {
+      counters.apply++;
+      return wiringResult;
+    },
+    routeReadinessOptions: {
+      claudeWorkspaceOptions: writerOptions,
+      stopMcpProcess: async () => {},
+      openMcpTransport: async () => {
+        counters.proofAttempts++;
+        return {
+          request: async (method) => method === "initialize"
+            ? { result: {} }
+            : { result: { content: acceptedRouteContent() } },
+          close: async () => {},
+        };
+      },
+    },
+  }));
+  return { counters, outcome };
+}
+
+async function runWiringSettlementArm(t, label, row, settlement, answerSetup = "opus-sonnet") {
+  const state = fixture(t, label, answerSetup);
+  const counters = { apply: 0, ownershipDecisions: 0, proofAttempts: 0, routeDecisions: 0 };
+  const writerOptions = guideWriterOptions(state.root, counters);
+  assert.equal(writeClaudeWorkspaceGuide(state.manifest, writerOptions).status, "written");
+  const fulfilled = { wired: ["Claude Code"], skipped: [], failures: [] };
+  const outcome = await captureConsoleOutcome(() => cmdMcpConfig(state.manifest, {
+    flags: { apply: true },
+    wireOptions: { platform: row.platform },
+    onPartBRouteDecision: () => { counters.routeDecisions++; },
+    wireAgents: (_manifest, _manifestPath, wireOptions) => {
+      counters.apply++;
+      assert.equal(wireOptions.platform, row.platform, "the selected wiring surface was reached");
+      if (row.delivery === "throw") {
+        if (settlement === "rejected") throw row.rejection;
+        return fulfilled;
+      }
+      return settlement === "rejected"
+        ? Promise.reject(row.rejection)
+        : Promise.resolve(fulfilled);
+    },
+    routeReadinessOptions: {
+      claudeWorkspaceOptions: writerOptions,
+      stopMcpProcess: async () => {},
+      openMcpTransport: async () => {
+        counters.proofAttempts++;
+        return {
+          request: async (method) => method === "initialize"
+            ? { result: {} }
+            : { result: { content: acceptedRouteContent() } },
+          close: async () => {},
+        };
+      },
+    },
+  }));
+  return { counters, outcome };
+}
+
 async function applyMcpRegistration(state, counters) {
   const expected = descriptorFor(state);
   const run = await captureConsole(() => cmdMcpConfig(state.manifest, {
@@ -338,6 +534,18 @@ async function applyMcpRegistration(state, counters) {
         expected,
       );
       return { wired: ["Claude Code"], skipped: [], failures: [] };
+    },
+    routeReadinessOptions: {
+      stopMcpProcess: async () => {},
+      openMcpTransport: async (descriptor) => {
+        assert.deepEqual(descriptor, expected);
+        return {
+          request: async (method) => method === "initialize"
+            ? { result: {} }
+            : { result: { content: acceptedRouteContent() } },
+          close: async () => {},
+        };
+      },
     },
   }));
   assert.deepEqual(run.value.wired, ["Claude Code"]);
@@ -373,6 +581,336 @@ test("CONTROL: production MCP descriptor, Windows renderer, and apply decision a
   assert.ok(manual.output.includes(descriptor.command));
   assert.doesNotMatch(manual.output, / \\\n/, "the Windows registration is one PowerShell line");
   t.diagnostic("descriptor=1 mcp_apply=1 windows_renderer=1");
+});
+
+test("mcp-config Part B route status is one exact success line or a fatal closed refusal", async (t) => {
+  const refusals = [
+    "claude_code_running",
+    "guide_refresh_refused",
+    "transport_open_failed",
+    "tool_failed",
+    "receipt_conflicting",
+    "claude_apply_required",
+  ];
+  const readyLine = `${successMark(false)}    Claude answer route ready: route_receipt_accepted`;
+
+  for (const reason of refusals) {
+    await t.test(`${reason} has a paired ready control`, async (t) => {
+      const green = await runExitContractArm(t, `green-${reason}`);
+      assert.equal(green.outcome.error, null);
+      assert.equal(green.outcome.value.route_readiness?.ready, true);
+      assert.equal(green.outcome.value.route_readiness?.reason, "route_receipt_accepted");
+      assert.equal(
+        green.outcome.output.split("\n").filter((line) => line === readyLine).length,
+        1,
+        "the exact ready line was emitted once",
+      );
+      assert.equal(green.counters.apply, 1);
+      assert.ok(green.counters.ownershipDecisions > 0);
+      assert.equal(green.counters.stops, 1);
+      assert.equal(green.counters.openAttempts, 1);
+      assert.deepEqual(green.counters.requests, ["initialize", "tools/call"]);
+      assert.equal(green.counters.closes, 1);
+
+      const refused = await runExitContractArm(t, `refused-${reason}`, reason);
+      const expected = `Claude answer route not ready: ${reason}.` +
+        (reason === "claude_code_running" ? "" : `\n      ${ROUTE_RETRY_GUIDANCE}`);
+      assert.equal(refused.outcome.error?.constructor?.name, "Fatal", "die() made the command nonzero");
+      assert.equal(refused.outcome.error?.message, expected);
+      assert.equal(refused.counters.apply, 1, "the apply decision point was reached");
+
+      if (reason === "claude_code_running") {
+        assert.equal(refused.counters.stops, 1, "the full-exit decision point was reached");
+        assert.equal(refused.counters.openAttempts, 0);
+        assert.equal(
+          refused.outcome.output.split("\n").filter((line) =>
+            line.includes(CLAUDE_CODE_FULL_EXIT_CARD.message)).length,
+          1,
+          "the existing close card remained the only retry guidance",
+        );
+      } else if (reason === "guide_refresh_refused") {
+        assert.ok(refused.counters.ownershipDecisions > 1, "the guide ownership refusal was reached");
+        assert.equal(refused.counters.stops, 0);
+      } else if (reason === "transport_open_failed") {
+        assert.equal(refused.counters.stops, 1);
+        assert.equal(refused.counters.openAttempts, 1, "the transport-open refusal was reached");
+        assert.deepEqual(refused.counters.requests, []);
+      } else if (reason === "tool_failed" || reason === "receipt_conflicting") {
+        assert.deepEqual(refused.counters.requests, ["initialize", "tools/call"]);
+        assert.equal(refused.counters.closes, 1, "the transport close decision was reached");
+      } else {
+        assert.equal(refused.counters.stops, 0, "no Claude route was falsely attempted");
+        assert.match(refused.outcome.output, /no supported assistant found/);
+        const wireFailure = await runExitContractArm(
+          t,
+          "refused-claude-wire-failure",
+          reason,
+          { claudeWireFailure: true },
+        );
+        assert.equal(wireFailure.counters.apply, 1, "the failed wiring decision point was reached");
+        assert.equal(wireFailure.outcome.error?.constructor?.name, "Fatal");
+        assert.equal(wireFailure.outcome.error?.message, expected);
+      }
+    });
+  }
+});
+
+test("mcp-config Part B partial wiring always reaches one closed route decision", async (t) => {
+  const partialResults = [
+    {
+      label: "Claude wired while Codex failed",
+      wired: ["Claude Code"],
+      skipped: [],
+      failures: ["Codex"],
+    },
+    {
+      label: "Claude wired while Codex was skipped and failed",
+      wired: ["Claude Code"],
+      skipped: ["Codex"],
+      failures: ["Codex"],
+    },
+    {
+      label: "ambiguous duplicate Claude result",
+      wired: ["Claude Code"],
+      skipped: [],
+      failures: ["Claude Code"],
+    },
+    {
+      label: "ambiguous all-wired result with a failure",
+      wired: ["Claude Code", "Codex"],
+      skipped: [],
+      failures: ["Codex"],
+    },
+  ];
+
+  for (const [index, partial] of partialResults.entries()) {
+    await t.test(partial.label, async () => {
+      const refused = await runPartialWiringArm(t, `partial-refused-${index}`, partial);
+      assert.equal(refused.outcome.error?.constructor?.name, "Fatal");
+      assert.equal(
+        refused.outcome.error?.message,
+        `Claude answer route not ready: route_unproven.\n      ${ROUTE_RETRY_GUIDANCE}`,
+      );
+      assert.equal(refused.counters.apply, 1, "the partial wiring decision was reached");
+      assert.equal(refused.counters.proofAttempts, 0, "an ambiguous partial result cannot start route proof");
+      assert.equal(refused.counters.routeDecisions, 1, "the partial result reached the closed route gate");
+
+      const green = await runPartialWiringArm(t, `partial-green-${index}`, {
+        ...partial,
+        failures: [],
+      });
+      assert.equal(green.outcome.error, null);
+      assert.equal(green.outcome.value.route_readiness?.reason, "route_receipt_accepted");
+      assert.equal(green.counters.apply, 1);
+      assert.equal(green.counters.proofAttempts, 1);
+      assert.equal(green.counters.routeDecisions, 1, "the paired ready decision was reached");
+    });
+  }
+});
+
+test("mcp-config Part B converts every rejected wiring settlement into one closed route decision", async (t) => {
+  const rejectedWiringCases = [
+    {
+      label: "POSIX synchronous unsafe configuration read",
+      platform: "darwin",
+      delivery: "throw",
+      rejection: new Error("Codex's user configuration could not be read safely"),
+    },
+    {
+      label: "POSIX asynchronous ownership refusal",
+      platform: "linux",
+      delivery: "promise",
+      rejection: new TypeError("synthetic ownership refusal"),
+    },
+    {
+      label: "Windows asynchronous unreadable configuration",
+      platform: "win32",
+      delivery: "promise",
+      rejection: "synthetic unreadable configuration",
+    },
+    {
+      label: "adapter rejection without an Error instance",
+      platform: "win32",
+      delivery: "promise",
+      rejection: Object.freeze({ kind: "synthetic_adapter_refusal" }),
+    },
+  ];
+
+  for (const [index, row] of rejectedWiringCases.entries()) {
+    await t.test(row.label, async () => {
+      const refused = await runWiringSettlementArm(t, `wiring-rejected-${index}`, row, "rejected");
+      assert.equal(refused.outcome.error?.constructor?.name, "Fatal");
+      assert.equal(
+        refused.outcome.error?.message,
+        `Claude answer route not ready: route_unproven.\n      ${ROUTE_RETRY_GUIDANCE}`,
+      );
+      assert.equal(refused.counters.apply, 1, "the rejected wiring decision was reached");
+      assert.equal(refused.counters.proofAttempts, 0, "rejected wiring cannot start route proof");
+      assert.equal(refused.counters.routeDecisions, 1, "rejected wiring reached one closed route gate");
+      assert.doesNotMatch(refused.outcome.output, /synthetic/i, "rejection details stayed private");
+
+      const green = await runWiringSettlementArm(t, `wiring-fulfilled-${index}`, row, "fulfilled");
+      assert.equal(green.outcome.error, null);
+      assert.equal(green.outcome.value.route_readiness?.reason, "route_receipt_accepted");
+      assert.equal(green.counters.apply, 1);
+      assert.equal(green.counters.proofAttempts, 1);
+      assert.equal(green.counters.routeDecisions, 1, "the paired fulfilled result reached one ready gate");
+    });
+  }
+
+  for (const [index, row] of rejectedWiringCases.entries()) {
+    const preserved = await runWiringSettlementArm(
+      t,
+      `non-part-b-wiring-rejected-${index}`,
+      row,
+      "rejected",
+      "built-in",
+    );
+    assert.equal(preserved.outcome.error, row.rejection, "non-Part-B keeps the original rejection");
+    assert.equal(preserved.counters.apply, 1);
+    assert.equal(preserved.counters.proofAttempts, 0);
+    assert.equal(preserved.counters.routeDecisions, 0, "non-Part-B adds no route decision");
+  }
+});
+
+test("Part B route reason display is a closed allowlist with a nondisclosing fallback", () => {
+  assert.deepEqual(PART_B_ROUTE_READINESS_REASONS, EXPECTED_PART_B_ROUTE_READINESS_REASONS);
+  assert.equal(new Set(PART_B_ROUTE_READINESS_REASONS).size, PART_B_ROUTE_READINESS_REASONS.length);
+  for (const reason of EXPECTED_PART_B_ROUTE_READINESS_REASONS) {
+    assert.equal(normalizePartBRouteReadinessReason(reason), reason);
+  }
+  for (const value of [undefined, null, "", "provider text must not pass through"]) {
+    assert.equal(normalizePartBRouteReadinessReason(value), "route_unproven");
+  }
+});
+
+test("Part B proof and receipt-validator outcomes match the independent reason inventory", async (t) => {
+  const acceptedContent = acceptedRouteContent();
+  const unrecognizedReceipt = { ...EXPECTED_ROUTE_RECEIPT, outcome: "refused" };
+  const validatorCases = [
+    ["content_invalid", null, true],
+    ["receipt_malformed", [{ type: "text", text: '{"route_receipt":' }], true],
+    ["json_duplicate_member", [{ type: "text", text: '{"other":1,"other":2}' }], true],
+    ["receipt_missing", [], true],
+    ["receipt_conflicting", [...acceptedContent, ...acceptedContent], true],
+    ["receipt_nested", [{
+      type: "text",
+      text: JSON.stringify({ nested: { route_receipt: EXPECTED_ROUTE_RECEIPT } }),
+    }], true],
+    ["diagnostics_unauthorized", acceptedContent, false],
+    ["receipt_unrecognized", [{
+      type: "text",
+      text: JSON.stringify({ route_receipt: unrecognizedReceipt }),
+    }], true],
+    ["receipt_accepted", acceptedContent, true],
+  ];
+  for (const [reason, content, diagnosticsAuthorized] of validatorCases) {
+    const result = validatePartBRouteReceiptContent(content, { diagnosticsAuthorized });
+    assert.equal(result.reason, reason, `validator reason ${reason}`);
+    assert.equal(result.accepted, reason === "receipt_accepted");
+  }
+
+  const validTransport = () => ({
+    request: async (method) => method === "initialize"
+      ? { result: {} }
+      : { result: { content: acceptedRouteContent() } },
+    close: async () => {},
+  });
+  const proofCases = [
+    { reason: "manifest_unavailable", missingManifest: true },
+    { reason: "model_pair_mismatch", answerSetup: "built-in" },
+    { reason: "guide_refresh_refused", guideRefresh: {} },
+    { reason: "full_exit_boundary_absent", stopMcpProcess: null },
+    { reason: "control_invalid", control: { name: "brain_think", arguments: { q: "" } } },
+    {
+      reason: "brain_url_unavailable",
+      mutateManifest: (manifest) => { manifest.brain.domain = "fixture.invalid/path"; },
+    },
+    {
+      reason: "claude_code_running",
+      stopMcpProcess: async () => proveClaudeCodeFullyExited({ readProcessList: async () => ["claude"] }),
+    },
+    { reason: "process_stop_failed", stopMcpProcess: async () => { throw new Error("synthetic stop failure"); } },
+    {
+      reason: "descriptor_invalid",
+      mutateManifest: (manifest) => { manifest.client.slug = "fixture\u0000slug"; },
+    },
+    { reason: "transport_open_failed", openMcpTransport: async () => { throw new Error("synthetic open failure"); } },
+    { reason: "transport_invalid", openMcpTransport: async () => ({}) },
+    {
+      reason: "initialize_failed",
+      openMcpTransport: async () => ({ request: async () => ({ error: {} }), close: async () => {} }),
+    },
+    {
+      reason: "tool_failed",
+      openMcpTransport: async () => ({
+        request: async (method) => method === "initialize" ? { result: {} } : { result: { isError: true } },
+        close: async () => {},
+      }),
+    },
+    {
+      reason: "transport_request_failed",
+      openMcpTransport: async () => ({ request: async () => { throw new Error("synthetic request failure"); }, close: async () => {} }),
+    },
+    {
+      reason: "transport_close_failed",
+      openMcpTransport: async () => ({
+        ...validTransport(),
+        close: async () => { throw new Error("synthetic close failure"); },
+      }),
+    },
+    { reason: "route_receipt_accepted" },
+  ];
+
+  for (const [index, arm] of proofCases.entries()) {
+    await t.test(arm.reason, async (t) => {
+      const state = fixture(t, `proof-reason-${index}`, arm.answerSetup ?? "opus-sonnet");
+      if (arm.mutateManifest) {
+        const manifest = readManifest(state.manifest);
+        arm.mutateManifest(manifest);
+        writeFileSync(state.manifest, `${JSON.stringify(manifest, null, 2)}\n`);
+      }
+      const result = await provePartBRouteReadiness({
+        manifestPath: arm.missingManifest ? join(state.root, "missing.manifest.json") : state.manifest,
+        guideRefresh: arm.guideRefresh ?? ACCEPTED_GUIDE_REFRESH,
+        control: arm.control ?? { name: "brain_think", arguments: { q: "synthetic route proof" } },
+      }, {
+        stopMcpProcess: arm.stopMcpProcess === null ? undefined : (arm.stopMcpProcess ?? (async () => {})),
+        openMcpTransport: arm.openMcpTransport ?? (async () => validTransport()),
+      });
+      assert.equal(result.reason, arm.reason);
+      assert.equal(result.ready, arm.reason === "route_receipt_accepted");
+    });
+  }
+});
+
+test("mcp-config non-Part-B apply keeps its prior exact output and successful return", async (t) => {
+  const state = fixture(t, "non-part-b", "built-in");
+  const counters = { apply: 0, ownershipDecisions: 0, stops: 0 };
+  const writerOptions = guideWriterOptions(state.root, counters);
+  assert.equal(writeClaudeWorkspaceGuide(state.manifest, writerOptions).status, "written");
+  const applied = await captureConsoleOutcome(() => cmdMcpConfig(state.manifest, {
+    flags: { apply: true },
+    wireAgents: async () => {
+      counters.apply++;
+      return { wired: ["Claude Code"], skipped: [], failures: [] };
+    },
+    routeReadinessOptions: {
+      claudeWorkspaceOptions: writerOptions,
+      stopMcpProcess: async () => { counters.stops++; },
+      openMcpTransport: async () => { throw new Error("a non-Part-B route must stop before transport"); },
+    },
+  }));
+  assert.equal(applied.error, null);
+  assert.equal(applied.value.route_readiness?.reason, "model_pair_mismatch");
+  assert.equal(counters.apply, 1, "the non-Part-B apply decision was reached");
+  assert.equal(counters.stops, 0);
+  assert.equal(
+    applied.output,
+    `${successMark(false)}    connected with Owner assistant access: Claude Code\n` +
+      "      It can read, add or correct information, check the connection, and review a financial map. It cannot activate that map, delete records, or change access.",
+  );
+  assert.doesNotMatch(applied.output, /Claude answer route (?:ready|not ready):/);
 });
 
 test("CONTROL: real Windows guide ownership accepts safe managed refresh and preserves refused bytes", (t) => {
@@ -838,7 +1376,7 @@ async function runInstalledRouteArm(t, label, { duplicateActualContent = false }
   const oldMcp = startMcp(t, state, remoteTiming(), `${label}-old`);
   const oldInitial = await oldMcp.request("initialize", initializeParams());
   assert.match(oldInitial.result.instructions, /use brain_search first/);
-  const setupResult = await cmdConnect("anthropic", {
+  const connected = await captureConsole(() => cmdConnect("anthropic", {
     argv: [
       process.execPath,
       join(ROOT, "brain.mjs"),
@@ -853,7 +1391,23 @@ async function runInstalledRouteArm(t, label, { duplicateActualContent = false }
       return action();
     },
     anthropicOptions: setupOptions(state, counters, writerOptions),
-  });
+  }));
+  const setupResult = connected.value;
+  const plainConnectLines = connected.output.split("\n").map((line) =>
+    line.replace(/\x1b\[[0-9;]*m/gu, "").replace(/^·\s+/, ""));
+  const renderedApplyCommand = renderCliCommands(
+    `brain mcp-config ${JSON.stringify(state.manifest)} --apply`,
+  );
+  const routeGuidance = plainConnectLines.filter((line) =>
+    line.startsWith("Close Claude completely") || line === "With Claude closed, run:" ||
+    line === renderedApplyCommand || line === "Then start Claude Code again.");
+  assert.deepEqual(routeGuidance, [
+    "Close Claude completely, including Claude Code, the Claude desktop app, and any tray or background process.",
+    "With Claude closed, run:",
+    renderedApplyCommand,
+    "Then start Claude Code again.",
+  ]);
+  assert.doesNotMatch(connected.output, /Then relaunch it and run/);
   assert.equal(counters.connectControls, 1, "the installed connect route reached credential control");
   assert.equal(counters.setupLocks, 1);
   assert.equal(counters.workerChecks, 1);
@@ -872,7 +1426,7 @@ async function runInstalledRouteArm(t, label, { duplicateActualContent = false }
   const ownershipDecisionsBeforeApply = counters.ownershipDecisions;
   const expectedDescriptor = descriptorFor(state);
   const receivedDescriptors = [];
-  const applied = await captureConsole(() => cmdMcpConfig(state.manifest, {
+  const applied = await captureConsoleOutcome(() => cmdMcpConfig(state.manifest, {
     flags: { apply: true },
     wireAgents: async (manifest, manifestPath) => {
       applyCounters.applyDecisions++;
@@ -977,9 +1531,15 @@ async function runInstalledRouteArm(t, label, { duplicateActualContent = false }
 test("NAMED GAP R2-02/PB-04: installed route accepts one actual receipt from the production descriptor", async (t) => {
   const arm = await runInstalledRouteArm(t, "ordered-proof-single");
   assert.equal(arm.returnedToolContentCount, arm.actualFreshReply.result.content.length);
+  assert.equal(arm.applied.error, null);
   assert.equal(arm.applied.value.route_readiness?.ready, true);
   assert.deepEqual(arm.applied.value.route_readiness.route_receipt, arm.actualBody.route_receipt,
     "the installed caller returns the receipt from the actual fresh tool result");
+  assert.equal(
+    arm.applied.output.split("\n").filter((line) =>
+      line === `${successMark(false)}    Claude answer route ready: route_receipt_accepted`).length,
+    1,
+  );
 });
 
 test("NAMED GAP R3-01/PB-07: installed route refuses duplicated actual receipt content", async (t) => {
@@ -991,9 +1551,12 @@ test("NAMED GAP R3-01/PB-07: installed route refuses duplicated actual receipt c
     arm.actualFreshReply.result.content.length * 2,
     "the transport duplicated the actual fresh tool content before returning it",
   );
+  assert.equal(arm.applied.value, null);
+  assert.equal(arm.applied.error?.constructor?.name, "Fatal");
   assert.equal(
-    arm.applied.value.route_readiness?.ready,
-    false,
-    "the installed production decision must use the strict collector and refuse duplicates",
+    arm.applied.error?.message,
+    "Claude answer route not ready: receipt_conflicting.\n" +
+      `      ${ROUTE_RETRY_GUIDANCE}`,
+    "the installed production decision must use the strict collector and fail duplicates",
   );
 });
