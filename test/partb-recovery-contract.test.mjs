@@ -1579,6 +1579,8 @@ test("keep-key remains allowed for an existing Claude answer setup", async () =>
   current.retrieval = { ...RECOMMENDED_ANSWER_SETUP };
   current.safety.daily_llm_spend_cap_usd = 5;
   writeFileSync(manifestPath, jsonBytes(current), { mode: 0o600 });
+  // An unrelated guide-adjacent sibling must still be covered by the snapshot below.
+  writeFileSync(join(root, "CLAUDE.md.unrelated"), "unrelated sibling\n", { mode: 0o600 });
   const before = treeSnapshot(root);
   const counters = mutationCounters();
 
@@ -1602,8 +1604,21 @@ test("keep-key remains allowed for an existing Claude answer setup", async () =>
       stagedCleanups: 0,
       journalCleanups: 0,
     });
-    assert.deepEqual(treeSnapshot(root), before,
-      "keep-key left the manifest and recovery-artifact set unchanged");
+    // Integration with the route item: a successful connect also refreshes the
+    // Claude workspace guide, which the route suite owns. Only the exact active
+    // CLAUDE.md and the guide writer's own retained attempt (a strict UUID
+    // directory holding the pending file with the same UUID) may be new or changed.
+    const after = treeSnapshot(root);
+    const uuid = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+    const retained = new RegExp(`^CLAUDE\\.md\\.financial-brain-retained-(${uuid})(?:/CLAUDE\\.md\\.financial-brain-pending-\\1)?$`, "u");
+    const routeOwned = (name) => name === "CLAUDE.md" || retained.test(name);
+    const changedOrNew = Object.keys(after).filter((name) =>
+      !Object.hasOwn(before, name) || JSON.stringify(after[name]) !== JSON.stringify(before[name]));
+    assert.deepEqual(changedOrNew.filter((name) => !routeOwned(name)), [],
+      "keep-key changed only the route-owned guide paths");
+    assert.deepEqual(Object.keys(before).filter((name) => !Object.hasOwn(after, name)), [],
+      "keep-key removed nothing, including the manifest and the unrelated sibling");
+    assert.ok(Object.hasOwn(after, "CLAUDE.md.unrelated"), "the unrelated sibling was still compared");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
