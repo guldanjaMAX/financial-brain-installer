@@ -8,7 +8,7 @@ store. Pinned Wrangler 4.131.1 cannot request Vectorize permission for that
 profile, so the read-only preflight routes that exact refusal to an explicit,
 account-scoped recovery API-token choice before any mutation.
 
-**Package identity: brain-installer 0.4.19, schema48.** Publication, supported
+**Package identity: brain-installer 0.4.20, schema48.** Publication, supported
 platforms and field acceptance are established by the reviewed evidence for
 the exact package bytes, not by this README or its version number. Before an
 install or update, match the package to the current approved guide and release
@@ -22,7 +22,7 @@ until reviewed evidence closes it; a deferred capability remains unproven.
 Earlier candidate identities and their planning records remain historical and
 must not be reused as proof for changed bytes.
 
-The 41-row release audit has 37 unresolved incidents, two 0.4.19 deferrals, and four
+The 41-row release audit has 37 unresolved incidents, zero 0.4.20 deferrals, and four
 rows closed on reviewed evidence.
 
 Engineering changes follow [the code, test, documentation, and tracking
@@ -2195,19 +2195,21 @@ inode stay there, including after success, so an editor with an open original
 file descriptor cannot lose a later edit. These local recovery directories are
 never automatically deleted. Interrupted writes likewise require explicit
 recovery; never automatically clear their lock.
-In 0.4.19, Windows setup, tools handoff and update leave existing assistant
-guides untouched without entering the writer. One notice is printed per run,
-even when both assistants are connected. Setup and tools still create missing
-guides; update retains its existing-only policy, including verified Codex
-creation beside a safely managed Claude guide. Keeping a guide is not ownership
-verification, so tools handoff requires manual review instead of automatically
-launching Claude with an existing Windows guide. macOS/Linux behavior is unchanged.
-This avoids the Windows open-file refusal of the final directory rename for
-guides present at the check. A concurrent creator between that check and the
-writer's snapshot can still leave a retained lock, with no data loss. That race
-is accepted for 0.4.19; the existence check stays immediately beside the writer
-call. Refreshed Windows answer rules are deferred to 0.4.20, whose design needs
-a create-only writer mode or separately reviewed lock recovery.
+In 0.4.20, ordinary Windows setup, tools handoff and update leave existing
+assistant guides untouched without entering the writer. One notice is printed
+per run, even when both assistants are connected. Setup and tools still create
+missing guides; update retains its existing-only policy, including verified
+Codex creation beside a safely managed Claude guide. Keeping a guide is not
+ownership verification, so tools handoff requires manual review instead of
+automatically launching Claude with an existing Windows guide. macOS/Linux
+behavior is unchanged. The first `brain connect anthropic` is the narrow
+exception: after exact model readback, Part B refreshes an existing managed
+guide through the same ownership and damage guards, with bounded retry for a
+Windows replacement refusal. Key replacement remains deferred.
+The ordinary-path existence check avoids the Windows open-file refusal of the
+final directory rename for guides present at the check. A concurrent creator
+between that check and the writer's snapshot can still leave a retained lock,
+with no data loss. The check stays immediately beside the writer call.
 Native Windows filesystem behavior remains a separate host/CI gate.
 Repeated writer tests inject only the native attribute probe, keeping filesystem
 identity, content, link and race checks real. A separate bounded Windows test

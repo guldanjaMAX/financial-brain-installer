@@ -77,7 +77,7 @@ async function fixture(t, label, { withServer = true } = {}) {
     manifest_version: 1,
     client: { slug: "fixture", display_name: "Owner", timezone: "UTC" },
     brain: {
-      version: "0.4.19",
+      version: "0.4.20",
       worker_name: "fixture-brain",
       domain: server ? `http://127.0.0.1:${server.address().port}` : "fixture.invalid",
     },

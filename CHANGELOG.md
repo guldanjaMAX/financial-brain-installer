@@ -4,6 +4,74 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.20 (2026-10-25)
+
+Candidate only. This version has not been released. The changes below still
+need the full host gate, CI and separately reviewed field acceptance for the
+exact sealed package. This version bump verifies no incident.
+
+- **Store-feed answers can now see the per-store sales row.** The sales table
+  for each store is placed before the coverage notes, so the row stays inside
+  the answer input instead of being pushed out by the notes. Check the cited
+  store, dates and coverage before relying on a total.
+- **Claude Code uses the Brain's checked answers after the first Claude
+  connection.** After `brain connect anthropic` finishes, close Claude
+  completely, run `brain mcp-config <manifest> --apply`, then start Claude Code
+  again. It reads the refreshed workspace guide and asks the Brain for its
+  answer instead of following the older search-only route.
+- **The connection command says whether Claude answers are on.** On a Brain
+  that uses Claude answers, `brain mcp-config <manifest> --apply` prints
+  `Claude answer route ready` only after it has checked the route end to end.
+  If it cannot prove that, it stops with the reason. Close Claude completely
+  and run the same command again. A Brain on the built-in models sees no
+  change.
+- **Answer setup stops safely when a local replacement cannot finish.** On
+  Windows, the setup retries a temporary file-replacement refusal. If setup was
+  interrupted and a later command finds its journal, nothing more runs
+  automatically. The fixed card says the Brain keeps working as before and to
+  contact your Financial Brain partner. It does not print paths, file names,
+  secret state or provider details.
+- **This version supports the first Claude connection only.** It can move a
+  Brain from built-in models to the reviewed Claude answer pair. If a Claude
+  answer model is already configured, bringing in a new key stops before setup
+  work. Key replacement waits for a later version.
+
+### Technical changes
+
+- The store-feed formatter emits the per-store table before coverage notes and
+  keeps its existing coverage and refusal boundaries.
+- Part B proves the final manifest models, refreshes the managed workspace
+  guide, and verifies the installed defaults from a fresh-session fixture.
+- `mcp-config --apply` on a Claude answer manifest prints a fixed ready line
+  only after the route receipt is accepted, and otherwise exits nonzero with a
+  reason from a closed list. A rejected or partial assistant wiring result is
+  reported as `route_unproven`. Built-in manifests keep their output and exit
+  status.
+- Manifest publication and same-process rollback use a bounded Windows
+  `EPERM`/`EBUSY` replacement retry. A later process classifies a current
+  interrupted journal read-only and returns the fixed no-action card.
+- First-connect guards refuse a new key before manifest control when either
+  current answer model already selects Claude. The existing `--keep-key` path
+  remains available without authorizing key replacement.
+
+### Known issues
+
+- Physical Windows x64 and Mac owner acceptance is still required for the
+  exact sealed package. Synthetic tests and CI do not establish either
+  platform's owner acceptance.
+- An interrupted answer setup needs partner review. This release does not
+  provide automatic recovery from a later command.
+- Removal of rows the Worker cannot verify still needs the technician.
+
+### This release does NOT cover
+
+- Windows x64 is the only supported Windows runtime in this release. Windows
+  ARM64 ships unproven.
+- Bank breadth ships unproven. Bank invitations stay closed.
+- Replacing an existing Claude key is not supported in this release.
+- Email attachments, Drive images and Drive simple sync remain outside this
+  release.
+
 ## 0.4.19 (2026-10-24)
 
 Candidate only. This version has not been released. The changes below still

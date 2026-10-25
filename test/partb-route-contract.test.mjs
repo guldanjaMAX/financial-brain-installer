@@ -108,7 +108,7 @@ function syntheticManifest(answerSetup = "built-in") {
   return {
     manifest_version: 1,
     client: { slug: "fixture", display_name: "Owner", timezone: "UTC" },
-    brain: { version: "0.4.19", worker_name: "fixture-brain", domain: "fixture.invalid" },
+    brain: { version: "0.4.20", worker_name: "fixture-brain", domain: "fixture.invalid" },
     infrastructure: {
       cloudflare: {
         account_id: "fixture-account",
