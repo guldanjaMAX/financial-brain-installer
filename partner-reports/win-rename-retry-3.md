@@ -430,4 +430,102 @@ Keep the accepted workspace launch-check change. Add paired race, collision,
 rollback, descriptor and mutation tests, and record focused baseline comparison
 and remaining platform limits.
 
-LANE WIN-RENAME-RETRY-3: READY
+## Operator verification and review
+
+The lane's work is commit `a124fd61`, unchanged; its own verdict was READY.
+The operator re-ran the checks outside the lane sandbox on the same Windows
+host (normal non-elevated user, Developer Mode off), each run in a fresh
+profile-shaped fence with the network guard, and ran an independent read-only
+review. Times are MST on 2026-10-24.
+
+Tests on the round 3 tree:
+
+- Rename suites: helper 61/0/1 (the one symlink EPERM skip), configuration
+  53/0/0, writers 91/0/0, Windows 74/0/0. Test-chain runner and complete pass.
+- Launch counts measured: create 10, refresh 15, setup of both 21, update of
+  both 30, the same as `ebec973f`. The lane sandbox could not measure them.
+- The suites the sandbox could not complete pass here on both trees:
+  admin-key-file, admin-key-rotation, google-auth-storage and
+  daily-refresh-scheduler (45/0/0).
+- 140 suites (every test file that imports a changed module, plus the suites
+  for the changed brain.mjs paths) were run on this tree and on an exact
+  `ebec973f` worktree at the same path length, then compared by failing test
+  names per suite. 139 are identical. The 140th, update-pending-refusal
+  ("production recovery retry keeps imports paused through refusal and
+  reconciles manifest drift only after health proof"), is flaky on both trees:
+  it failed 1 of 3 runs here and 1 of 2 runs on `ebec973f`, both times with
+  EPERM on the daily receipt rename in about 130 ms. That is too fast for the
+  retry budget, so the retry seems not to engage there; not traced.
+- Suites failing identically on both trees on this host: field-prepare 1,
+  older-release-paused-resume 1, owner-contract-workspace 3,
+  package-bundle-verifier 15, package-privacy 1, quickbooks-desktop-connect 1,
+  technician-setup 1, upgrade-verify 1.
+- Mutants, each with `MUTATION_APPLIED` and the guard active, all killed with
+  the counts in the table above: `no_retry` 30/31, `retry_every_error` 53/8,
+  `unbounded_tries` 55/6, `skip_retry_revalidation` 46/15,
+  `remove_platform_gate` 57/4, `skip_byte_proof` 59/2, `path_only_cleanup`
+  59/2, `drop_ctime` 59/2. Unmutated control 61/0/1.
+- `git diff --check` clean; names, secrets, email and user-path scan clean on
+  every added line and new file. The round 2 report is unchanged.
+
+Review: four area reviewers, one refuter over all findings, one completeness
+critic, all read-only. Confirmed by the refuter; the operator also read the
+code for the third P2 and confirms it.
+
+1. P2 `operations/rename-retry.mjs:69`, `:86`, `:124-129`, `:144-146`,
+   `:166-168`. Any error opening or reading the staging file for the proof
+   returns false and is mapped straight to the caller's refusal, outside the
+   try that holds the retry decision. On Windows, a process holding the fresh
+   staging file without read sharing turns a transient lock, the case the
+   retry exists for, into a hard refusal on the first attempt. Round 2's
+   lstat-only check was not affected. Suggested fix: a three-way proof result
+   (match, mismatch, not observable); retry "not observable" within the same
+   ten-attempt budget and never rename without a positive match; add a native
+   test that holds the staging file with no read sharing for about 450 ms.
+2. P2 `operations/answer-setup.mjs:583-586`. When the manifest has no
+   `brain.domain`, the run's own forward deploy (`brain.mjs:19830` into
+   `persistWorkersDevDomain` at `:3211-3219`, then `saveManifest` at
+   `:2877-2878`) rewrites the manifest in place. The recorded publication
+   proof no longer matches, so any later failure stops rollback with
+   ANTHROPIC_ROLLBACK_INCOMPLETE before any step runs: the manifest keeps the
+   new model pair, a key the Worker rejected stays on the Worker, and the
+   journal is kept. Suggested fix: deploy with `persistDomain: false` in the
+   forward step, or re-record the publication after the run's own domain save.
+3. P2 `operations/daily-refresh-scheduler.mjs:641`, `:603-604`, `:797`, with
+   `brain.mjs:31143-31144` and `:31172-31188`. When a receipt exists but its
+   recovery fence does not, the read returns null, `brain update` passes null
+   as the expected predecessor, and the write requires the file to be absent.
+   Every later `brain update` then stops with "the daily update transaction
+   receipt is unsafe", and a retry cannot succeed. `ebec973f` had no such
+   check here. Suggested fix: carry the actual receipt identity and bytes from
+   the read as the expected predecessor, or give the fenceless receipt its own
+   recovery path.
+
+P3 and test findings:
+
+- `test/rename-retry.test.mjs:423-441`: the helper suite's in-place retry row
+  is refused by the test's own ctime-aware revalidate before the product byte
+  proof runs, so removing the proof call from `renameWithRetrySync` passes the
+  helper suite. Add a mutant that removes that call, and give `staged.refuse`
+  its own error.
+- `test/rename-retry.test.mjs:56-78`: the read-bound assertion counts returned
+  bytes, so an unbounded read-until-EOF regression would pass. Add a much
+  larger on-disk file with frozen stats and sum the requested lengths.
+- `operations/bootstrap-status.mjs:448`, `:461`, `:485`: the staging name is
+  per process ID only; a leftover temp from a killed run now blocks later runs
+  that reuse that ID, because EEXIST no longer clears it. Rare.
+- `operations/verified-recovery.mjs:1296`, `:1314`: the first-create link path
+  publishes even when the shared proof capture refused.
+- Uncertain: publication tokens bind ctime and mtime, so a metadata-only change
+  by a sync client refuses a legitimate daily or schedule rollback
+  (`operations/folder-retirement.mjs:198-202`). It fails closed.
+
+Report claims that need a qualifier: the "25 of 27 red on exact `ebec973f`"
+evidence used a module-substitution loader inside round 3 tests, not a checkout;
+the create-fstat descriptor-close tests cover 7 writers, the rest rest on code
+review; the launch counts were not measured in the sandbox (now measured above).
+
+Operator verdict: not ready. All three P2s fail closed (no data loss, no
+corruption), but each can stop a legitimate owner operation.
+
+LANE WIN-RENAME-RETRY-3: NOT READY operator review confirmed three fail-closed P2 regressions (proof read not retried on a Windows sharing lock; answer setup rollback refused after its own domain save; a fenceless daily receipt blocks every later update)
