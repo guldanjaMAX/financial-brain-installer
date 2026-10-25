@@ -6,7 +6,7 @@
  * receives a temporary home plus an allowlisted environment. Live field gates
  * are printed as human work only. They are never executed here.
  */
-import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync } from "../operations/rename-retry.mjs";
+import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync, captureStagedProof } from "../operations/rename-retry.mjs";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -619,18 +619,21 @@ export function makeOutputDirectory(requested, { temporaryRoot = tmpdir() } = {}
 }
 
 function replacePrivateFile(path, bytes) {
+  bytes = Buffer.from(bytes);
   const predecessor = captureRenameIdentity(path);
   const temporary = `${path}.tmp`;
   const descriptor = openSync(temporary, "wx", 0o600);
-  let staged;
+  let created;
   try {
+    created = fstatSync(descriptor, { bigint: true });
     writeFileSync(descriptor, bytes);
-    staged = fstatSync(descriptor);
   } finally {
     closeSync(descriptor);
   }
-  renameWithRetrySync(temporary, path, { revalidate() {
-    if (!renameIdentityMatches(temporary, staged) || !renameIdentityMatches(path, predecessor)) {
+  const staged = captureStagedProof(temporary, bytes, created);
+  const refuse = () => { throw new Error("field_prepare_failed"); };
+  renameWithRetrySync(temporary, path, { staged: { expected: staged, bytes, refuse }, revalidate() {
+    if (!renameIdentityMatches(path, predecessor)) {
       throw new Error("field_prepare_failed");
     }
   } });

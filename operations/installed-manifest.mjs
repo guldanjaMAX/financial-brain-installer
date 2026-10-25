@@ -4,7 +4,7 @@
  * but it identifies a private install, so it stays in an owner-only state file.
  */
 
-import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync } from "./rename-retry.mjs";
+import { captureRenameIdentity, renameWithRetrySync, captureStagedProof, removeOwnedStaging } from "./rename-retry.mjs";
 import {
   chmodSync,
   closeSync,
@@ -16,7 +16,6 @@ import {
   openSync,
   readFileSync,
   realpathSync,
-  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -310,7 +309,12 @@ export function rememberInstalledManifest(manifestPath, options = {}) {
     }
   }
   let descriptor;
-  let created = false;
+  let created;
+  let published = false;
+  const bytes = Buffer.from(`${JSON.stringify({
+    schema_version: POINTER_SCHEMA_VERSION,
+    manifest_path: canonical,
+  }, null, 2)}\n`, "utf8");
   try {
     descriptor = openSync(
       temporary,
@@ -318,26 +322,23 @@ export function rememberInstalledManifest(manifestPath, options = {}) {
         (fsConstants.O_NOFOLLOW || 0),
       0o600,
     );
-    created = true;
-    writeFileSync(descriptor, `${JSON.stringify({
-      schema_version: POINTER_SCHEMA_VERSION,
-      manifest_path: canonical,
-    }, null, 2)}\n`);
+    created = fstatSync(descriptor, { bigint: true });
+    writeFileSync(descriptor, bytes);
     if (process.platform !== "win32") chmodSync(temporary, 0o600);
     fsyncSync(descriptor);
-    const staged = fstatSync(descriptor);
     closeSync(descriptor);
     descriptor = undefined;
+    const staged = captureStagedProof(temporary, bytes, created);
+    const refuse = () => { fail("INSTALLED_MANIFEST_POINTER_CHANGED", "the saved Brain location changed while it was opened"); };
     // A concurrent owner process can replace a path even in a private folder.
     // Explicit unsafe-pointer repair still binds the exact approved old entry.
-    renameWithRetrySync(temporary, destination, { revalidate() {
+    renameWithRetrySync(temporary, destination, { staged: { expected: staged, bytes, refuse }, revalidate() {
       const current = captureRenameIdentity(destination);
-      if (!renameIdentityMatches(temporary, staged) ||
-          (existing ? !current || !sameFile(current, existing) : current !== null)) {
+      if (existing ? !current || !sameFile(current, existing) : current !== null) {
         fail("INSTALLED_MANIFEST_POINTER_CHANGED", "the saved Brain location changed while it was opened");
       }
     } });
-    created = false;
+    published = true;
     syncRenamedPointer(directory, destination, options);
     const readback = readInstalledManifest(options);
     if (readback !== canonical) {
@@ -346,9 +347,7 @@ export function rememberInstalledManifest(manifestPath, options = {}) {
     return { path: destination, manifestPath: canonical, replaced: Boolean(existing) };
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
-    if (created) {
-      try { unlinkSync(temporary); } catch { /* preserve the original failure */ }
-    }
+    if (created && !published) removeOwnedStaging(temporary, created);
   }
 }
 

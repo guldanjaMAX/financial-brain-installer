@@ -19,7 +19,7 @@
  * is where it becomes true.
  */
 
-import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync } from "../operations/rename-retry.mjs";
+import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync, captureStagedProof, removeOwnedStaging } from "../operations/rename-retry.mjs";
 import {
   closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readSync,
   readdirSync, realpathSync, writeFileSync, existsSync, mkdirSync,
@@ -2132,23 +2132,28 @@ export function saveState(path, state) {
   // crash or laptop sleep cannot leave half-written JSON that silently forces
   // the next run back to a full walk.
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  const bytes = Buffer.from(JSON.stringify(state, null, 2), "utf8");
+  let created;
+  let published = false;
   try {
     const descriptor = openSync(tmp, "wx", 0o600);
-    let staged;
     try {
-      writeFileSync(descriptor, JSON.stringify(state, null, 2));
-      staged = fstatSync(descriptor);
+      created = fstatSync(descriptor, { bigint: true });
+      writeFileSync(descriptor, bytes);
     } finally { closeSync(descriptor); }
-    renameWithRetrySync(tmp, path, { revalidate() {
-      if (!renameIdentityMatches(tmp, staged) || !renameIdentityMatches(path, predecessor)) {
+    const staged = captureStagedProof(tmp, bytes, created);
+    const refuse = () => { throw new Error("the ingest state changed before it could be replaced"); };
+    renameWithRetrySync(tmp, path, { staged: { expected: staged, bytes, refuse }, revalidate() {
+      if (!renameIdentityMatches(path, predecessor)) {
         throw new Error("the ingest state changed before it could be replaced");
       }
     } });
+    published = true;
     // rename preserves the temp file's mode. chmod also repairs an older state
     // file that may have been created by the pre-hardening implementation.
     chmodSync(path, 0o600);
   } catch (error) {
-    try { rmSync(tmp, { force: true }); } catch { /* original error wins */ }
+    if (created && !published) removeOwnedStaging(tmp, created);
     throw error;
   }
 }

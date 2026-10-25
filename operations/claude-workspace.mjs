@@ -5,7 +5,7 @@
  * never credentials. Unrelated files and damaged account sections are preserved.
  */
 
-import { renameIdentityMatches, renameWithRetrySync } from "./rename-retry.mjs";
+import { captureStagedProof, renameIdentityMatches, renameWithRetrySync } from "./rename-retry.mjs";
 import {
   closeSync,
   fstatSync,
@@ -411,19 +411,24 @@ function commitWorkspaceGuide(target, parent, snapshot, existing, content, owner
   const install = join(lock, `${pendingName}.install`);
   // Identity refusal must keep the same no-cleanup outcome as the checks below.
   const identityRefusal = {};
+  const bytes = Buffer.from(content, "utf8");
   let fd = null, displaced = false;
   try {
     if (!locked()) return notWritten();
     fd = openSync(temporary, "wx", 0o600);
+    const created = fstatSync(fd, { bigint: true });
     pendingPath = temporary;
     if (!locked()) return notWritten();
     writeFileSync(fd, content, "utf8");
     fsyncSync(fd);
-    const staged = fstatSync(fd);
     const closed = fd; fd = null; closeSync(closed);
+    const stagedProof = captureStagedProof(temporary, bytes, created);
+    const staged = lstatSync(temporary);
     // Revalidation runs before every attempt, including the first, so the
     // staged guide is checked once per attempt without an extra native launch.
-    renameWithRetrySync(temporary, ready, { revalidate: () => {
+    renameWithRetrySync(temporary, ready, { staged: {
+      expected: stagedProof, bytes, refuse: () => { throw identityRefusal; },
+    }, revalidate: () => {
       if (!locked() || !unchangedWorkspaceFile(temporary, staged, content, ownership) ||
           !renameIdentityMatches(ready, null)) throw identityRefusal;
     } });

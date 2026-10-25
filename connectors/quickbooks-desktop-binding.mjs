@@ -1,5 +1,5 @@
 /** Private local company identity. Never serialize this record into an envelope. */
-import { renameIdentityMatches, renameWithRetrySync } from "../operations/rename-retry.mjs";
+import { renameIdentityMatches, renameWithRetrySync, captureStagedProof, removeOwnedStaging } from "../operations/rename-retry.mjs";
 import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, constants, closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -87,18 +87,27 @@ export function desktopBindingStore(options = {}) {
     if (!checked(directory, true)) mkdirSync(directory, { mode: 0o700 }); protect(directory, true);
     const predecessor = checked(path);
     const temporary = `${path}.${randomBytes(8).toString('hex')}.tmp`;
-    const fd = openSync(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
-    let staged;
-    try { writeFileSync(fd, `${JSON.stringify(value)}\n`); fsyncSync(fd); staged = fstatSync(fd); } finally { closeSync(fd); }
+    const bytes = Buffer.from(`${JSON.stringify(value)}\n`, 'utf8');
+    const fd = openSync(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW || 0), 0o600);
+    let created;
+    let published = false;
     try {
+      try {
+        created = fstatSync(fd, { bigint: true });
+        writeFileSync(fd, bytes);
+        fsyncSync(fd);
+      } finally { closeSync(fd); }
       protect(temporary);
-      renameWithRetrySync(temporary, path, { revalidate() {
-        if (!renameIdentityMatches(temporary, staged) || !renameIdentityMatches(path, predecessor)) {
+      const staged = captureStagedProof(temporary, bytes, created);
+      const refuse = () => { throw qbdFailure('QB_BINDING_INVALID'); };
+      renameWithRetrySync(temporary, path, { staged: { expected: staged, bytes, refuse }, revalidate() {
+        if (!renameIdentityMatches(path, predecessor)) {
           throw qbdFailure('QB_BINDING_INVALID');
         }
       } });
+      published = true;
     }
-    finally { try { unlinkSync(temporary); } catch (error) { if (error.code !== 'ENOENT') throw error; } }
+    finally { if (created && !published) removeOwnedStaging(temporary, created); }
     if (JSON.stringify(read()) !== JSON.stringify(value)) throw qbdFailure('QB_BINDING_INVALID');
     return value;
   }, remove() {

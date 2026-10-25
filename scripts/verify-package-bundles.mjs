@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync } from "../operations/rename-retry.mjs";
+import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync, captureStagedProof } from "../operations/rename-retry.mjs";
 import { closeSync, fstatSync, openSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -40,14 +40,17 @@ function writeManifest(path, manifest, replace) {
   const predecessor = captureRenameIdentity(output);
   if (predecessor && !replace) throw new Error("manifest_exists_use_replace");
   const temporary = `${output}.tmp`;
+  const bytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, "utf8");
   const descriptor = openSync(temporary, "wx", 0o644);
-  let staged;
+  let created;
   try {
-    writeFileSync(descriptor, `${JSON.stringify(manifest, null, 2)}\n`);
-    staged = fstatSync(descriptor);
+    created = fstatSync(descriptor, { bigint: true });
+    writeFileSync(descriptor, bytes);
   } finally { closeSync(descriptor); }
-  renameWithRetrySync(temporary, output, { revalidate() {
-    if (!renameIdentityMatches(temporary, staged) || !renameIdentityMatches(output, predecessor)) {
+  const staged = captureStagedProof(temporary, bytes, created);
+  const refuse = () => { throw new Error("package_bundle_verification_failed"); };
+  renameWithRetrySync(temporary, output, { staged: { expected: staged, bytes, refuse }, revalidate() {
+    if (!renameIdentityMatches(output, predecessor)) {
       throw new Error("package_bundle_verification_failed");
     }
   } });

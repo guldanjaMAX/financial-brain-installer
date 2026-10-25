@@ -15,6 +15,15 @@ const mutations = {
     ["    await revalidate();", "    if (attempt === 0) await revalidate();"],
   ],
   remove_platform_gate: [['platform === "win32" && ', ""]],
+  skip_byte_proof: [['    if (!timingSafeEqual(observed, intended)) return false;', "    // Mutation: accept same-length rewritten bytes."]],
+  path_only_cleanup: [[
+    "    if (current === null || !sameInode(current, created)) return false;",
+    "    if (current === null) return false;",
+  ]],
+  drop_ctime: [
+    ['"mtimeMs", "ctimeMs", "mode"', '"mtimeMs", "mode"'],
+    ['"mtimeNs", "ctimeNs", "mode"', '"mtimeNs", "mode"'],
+  ],
 };
 const chosen = process.env.BRAIN_RENAME_MUTANT;
 if (!Object.hasOwn(mutations, chosen)) throw new Error("Unknown rename retry mutation");

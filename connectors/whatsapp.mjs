@@ -57,7 +57,7 @@
  * is paired.
  */
 
-import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync } from "../operations/rename-retry.mjs";
+import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync, captureStagedProof, removeOwnedStaging } from "../operations/rename-retry.mjs";
 import {
   constants as fsConstants,
   closeSync,
@@ -407,6 +407,8 @@ export function saveDrainState(path, state, options = {}) {
   const platform = options.platform || process.platform;
   const bytes = Buffer.from(JSON.stringify(state, null, 2), "utf8");
   let descriptor;
+  let created;
+  let published = false;
   try {
     descriptor = openSync(
       tmp,
@@ -414,6 +416,7 @@ export function saveDrainState(path, state, options = {}) {
         (fsConstants.O_NOFOLLOW || 0),
       0o600,
     );
+    created = fstatSync(descriptor, { bigint: true });
     const identity = fstatSync(descriptor);
     if (!identity.isFile() || identity.nlink !== 1) {
       throw new Error("the WhatsApp drain state was not created as a private regular file");
@@ -437,19 +440,21 @@ export function saveDrainState(path, state, options = {}) {
     }
     writeAll(descriptor, bytes);
     fsyncSync(descriptor);
-    const staged = fstatSync(descriptor);
     closeSync(descriptor);
     descriptor = undefined;
-    renameWithRetrySync(tmp, path, { revalidate() {
-      if (!renameIdentityMatches(tmp, staged) || !renameIdentityMatches(path, predecessor)) {
+    const staged = captureStagedProof(tmp, bytes, created);
+    const refuse = () => { throw new Error("the WhatsApp drain state identity changed before its payload was written"); };
+    renameWithRetrySync(tmp, path, { staged: { expected: staged, bytes, refuse }, revalidate() {
+      if (!renameIdentityMatches(path, predecessor)) {
         throw new Error("the WhatsApp drain state identity changed before its payload was written");
       }
     } });
+    published = true;
   } catch (error) {
     if (descriptor !== undefined) {
       try { closeSync(descriptor); } catch { /* original error wins */ }
     }
-    try { rmSync(tmp, { force: true }); } catch { /* original error wins */ }
+    if (created && !published) removeOwnedStaging(tmp, created);
     throw error;
   } finally {
     bytes.fill(0);

@@ -30,7 +30,7 @@
  * read it. Ordinary owner setup creates and reveals no API token.
  */
 
-import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync } from "./operations/rename-retry.mjs";
+import { captureRenameIdentity, captureStagedProof, removeOwnedStaging, stagedBytesMatch, renameIdentityMatches, renameWithRetrySync } from "./operations/rename-retry.mjs";
 import { accessSync, chmodSync, closeSync, constants as fsConstants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdtempSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmdirSync, statSync, unlinkSync, writeFileSync, writeSync, appendFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { saveUpgradeBookmark, WINDOWS_UPGRADE_BOOKMARK_ACL_TIMEOUT_MS } from "./operations/upgrade-bookmark.mjs";
@@ -5705,26 +5705,27 @@ export function commitManifestVersion(manifestPath, version) {
     dirname(target),
     `.${basename(target)}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`,
   );
-  let fd;
+  let fd, created;
+  let published = false;
   try {
     fd = openSync(
       temporary,
       fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW || 0),
       before.mode & 0o777,
     );
+    created = fstatSync(fd, { bigint: true });
     if (writeSync(fd, output, 0, output.length, 0) !== output.length) {
       throw new Error("the manifest version write was incomplete");
     }
     fsyncSync(fd);
-    const staged = fstatSync(fd);
     closeSync(fd);
     fd = undefined;
-    renameWithRetrySync(temporary, target, { revalidate: () => {
+    const staged = captureStagedProof(temporary, output, created);
+    const refuse = () => { throw new Error("the update manifest could not be revalidated during local manifest version commit"); };
+    renameWithRetrySync(temporary, target, { staged: { expected: staged, bytes: output, refuse }, revalidate: () => {
       revalidateUpdateManifest(pin, "local manifest version commit");
-      if (!renameIdentityMatches(temporary, staged)) {
-        throw new Error("the update manifest could not be revalidated during local manifest version commit");
-      }
     } });
+    published = true;
     const verifiedPin = pinUpdateManifest(target);
     const verified = verifiedPin.manifest;
     if (verified?.brain?.version !== version) {
@@ -5734,7 +5735,7 @@ export function commitManifestVersion(manifestPath, version) {
   } finally {
     output.fill(0);
     if (fd !== undefined) closeSync(fd);
-    if (existsSync(temporary)) unlinkSync(temporary);
+    if (created && !published) removeOwnedStaging(temporary, created);
   }
 }
 
@@ -8332,6 +8333,10 @@ function rollbackMcpBundleRepair(prepared) {
     if (sameCapturedConfigState(snapshot, current)) {
       configRestored = true;
     } else {
+      // A refused or unattempted write grants no authority over a concurrent
+      // registration, even when its bytes equal this transaction's candidate.
+      const publication = prepared.publication;
+      if (!publication || !stagedBytesMatch(snapshot.path, publication.identity, publication.bytes)) return false;
       const registration = isClaude
         ? readClaudeRegistration(desired, configOptions)
         : readCodexRegistration(desired, configOptions);
@@ -8340,7 +8345,7 @@ function rollbackMcpBundleRepair(prepared) {
           !mcpRegistrationIsExact(registration.entry, desired)) {
         return false;
       }
-      configRestored = restoreAgentConfigFile(snapshot, confirmed);
+      configRestored = restoreAgentConfigFile(snapshot, confirmed, publication);
     }
   } catch {
     return false;
@@ -14701,24 +14706,27 @@ function loadCalendarState(path) {
 
 function saveCalendarState(path, state) {
   mkdirSync(dirname(path), { recursive: true });
-  const predecessor = captureRenameIdentity(path);
+  const predecessor = captureRenameIdentity(path, { bigint: true });
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  let fd;
+  const bytes = Buffer.from(JSON.stringify(state, null, 2));
+  let fd, created;
+  let published = false;
   try {
     fd = openSync(tmp, "wx", 0o600);
-    writeFileSync(fd, JSON.stringify(state, null, 2));
-    const staged = fstatSync(fd);
+    created = fstatSync(fd, { bigint: true });
+    writeFileSync(fd, bytes);
     closeSync(fd);
     fd = undefined;
-    renameWithRetrySync(tmp, path, { revalidate: () => {
-      if (!renameIdentityMatches(tmp, staged) || !renameIdentityMatches(path, predecessor)) {
-        throw new Error("the calendar state changed before its atomic write");
-      }
+    const staged = captureStagedProof(tmp, bytes, created);
+    const refuse = () => { throw new Error("the calendar state changed before its atomic write"); };
+    renameWithRetrySync(tmp, path, { staged: { expected: staged, bytes, refuse }, revalidate: () => {
+      if (!renameIdentityMatches(path, predecessor)) refuse();
     } });
+    published = true;
     chmodSync(path, 0o600);
   } catch (error) {
     if (fd !== undefined) closeSync(fd);
-    try { rmSync(tmp, { force: true }); } catch { /* original error wins */ }
+    if (created && !published) removeOwnedStaging(tmp, created);
     throw error;
   }
 }
@@ -23350,7 +23358,7 @@ function captureAgentConfigFile(path, { allowAbsent = false } = {}) {
     if (bytes.length !== opened.size) {
       throw new Error("local assistant configuration changed while it was read");
     }
-    return Object.freeze({ path, exists: true, bytes, stat: opened });
+    return Object.freeze({ path, exists: true, bytes, stat: opened, renameIdentity: fstatSync(fd, { bigint: true }) });
   } finally {
     closeSync(fd);
   }
@@ -23738,8 +23746,11 @@ function sameCapturedConfigState(left, right) {
  * the pre-run snapshot. The replacement is written and flushed beside the
  * config, then renamed atomically after one final current-state check.
  */
-function restoreAgentConfigFile(snapshot, current) {
+function restoreAgentConfigFile(snapshot, current, publication = null) {
   if (!snapshot || !current) return false;
+  const currentIdentity = publication?.identity ?? current.renameIdentity;
+  const currentBytes = publication?.bytes ?? current.bytes;
+  if (current.exists && !stagedBytesMatch(snapshot.path, currentIdentity, currentBytes)) return false;
   try {
     if (configOutsideTarget(snapshot, current.bytes) !== snapshot.outsideTarget) return false;
   } catch {
@@ -23753,8 +23764,7 @@ function restoreAgentConfigFile(snapshot, current) {
           configOutsideTarget(snapshot, confirmed.bytes) !== snapshot.outsideTarget) {
         return false;
       }
-      unlinkSync(snapshot.path);
-      return !captureAgentConfigFile(snapshot.path, { allowAbsent: true }).exists;
+      return removeOwnedStaging(snapshot.path, currentIdentity, { proof: currentIdentity, bytes: currentBytes });
     } catch {
       return false;
     }
@@ -23768,7 +23778,8 @@ function restoreAgentConfigFile(snapshot, current) {
   const mode = snapshot.stat.mode & 0o7777;
   const temporary = `${snapshot.path}.${process.pid}.${randomBytes(12).toString("hex")}.rollback`;
   let fd = null;
-  let created = false;
+  let created;
+  let published = false;
   try {
     fd = openSync(
       temporary,
@@ -23776,29 +23787,28 @@ function restoreAgentConfigFile(snapshot, current) {
         (fsConstants.O_NOFOLLOW || 0),
       mode,
     );
-    created = true;
+    created = fstatSync(fd, { bigint: true });
     if (writeSync(fd, snapshot.bytes, 0, snapshot.bytes.length, 0) !== snapshot.bytes.length) {
       throw new Error("short local assistant configuration rollback write");
     }
     fchmodSync(fd, mode);
     fsyncSync(fd);
-    const staged = fstatSync(fd);
     closeSync(fd);
     fd = null;
-
-    renameWithRetrySync(temporary, snapshot.path, { revalidate: () => {
+    const staged = captureStagedProof(temporary, snapshot.bytes, created);
+    const refuse = () => { throw new Error("local assistant configuration changed before rollback"); };
+    renameWithRetrySync(temporary, snapshot.path, { staged: { expected: staged, bytes: snapshot.bytes, refuse }, revalidate: () => {
       const confirmed = captureAgentConfigFile(snapshot.path, { allowAbsent: true });
-      if (!renameIdentityMatches(temporary, staged) || !sameCapturedConfigState(current, confirmed) ||
+      if (!sameCapturedConfigState(current, confirmed) ||
+          (current.exists && !stagedBytesMatch(snapshot.path, currentIdentity, currentBytes)) ||
           configOutsideTarget(snapshot, confirmed.bytes) !== snapshot.outsideTarget) {
-        throw new Error("local assistant configuration changed before rollback");
+        refuse();
       }
     } });
-    created = false;
+    published = true;
   } catch {
     if (fd !== null) closeSync(fd);
-    if (created) {
-      try { unlinkSync(temporary); } catch { /* no rollback temporary remains */ }
-    }
+    if (created && !published) removeOwnedStaging(temporary, created);
     return false;
   }
 
@@ -23941,7 +23951,8 @@ function atomicReplaceAgentConfig(prepared, bytes) {
   const mode = snapshot.exists ? snapshot.stat.mode & 0o7777 : 0o600;
   const temporary = join(parent, `.${basename(snapshot.path)}.${process.pid}.${randomBytes(12).toString("hex")}.write`);
   let fd = null;
-  let created = false;
+  let created;
+  let published = false;
   try {
     fd = openSync(
       temporary,
@@ -23949,27 +23960,30 @@ function atomicReplaceAgentConfig(prepared, bytes) {
         (fsConstants.O_NOFOLLOW || 0),
       mode,
     );
-    created = true;
+    created = fstatSync(fd, { bigint: true });
     if (writeSync(fd, bytes, 0, bytes.length, 0) !== bytes.length) {
       throw new Error("short local assistant configuration write");
     }
     fchmodSync(fd, mode);
     fsyncSync(fd);
-    const staged = fstatSync(fd);
     closeSync(fd);
     fd = null;
-
-    renameWithRetrySync(temporary, snapshot.path, { revalidate: () => {
+    const staged = captureStagedProof(temporary, bytes, created);
+    const refuse = () => { throw new Error("local assistant configuration changed before its approved write"); };
+    renameWithRetrySync(temporary, snapshot.path, { staged: { expected: staged, bytes, refuse }, revalidate: () => {
       const expectedDirectory = directorySnapshot.exists ? directorySnapshot.stat : prepared.createdDirectoryStat;
       if (!sameConfigDirectory(expectedDirectory, lstatSync(parent))) {
         throw new Error("unsafe local assistant configuration directory");
       }
       const current = captureAgentConfigFile(snapshot.path, { allowAbsent: true });
-      if (!renameIdentityMatches(temporary, staged) || !sameCapturedConfigState(snapshot, current)) {
-        throw new Error("local assistant configuration changed before its approved write");
-      }
+      if (!sameCapturedConfigState(snapshot, current)) refuse();
     } });
-    created = false;
+    published = true;
+    // Rename changes ctime. Bind rollback to the just-published inode and bytes,
+    // before readback or any later scope can fail.
+    const identity = captureStagedProof(snapshot.path, bytes, created);
+    if (!identity) throw new Error("local assistant configuration did not pass exact readback");
+    prepared.publication = { identity, bytes: Buffer.from(bytes) };
     const after = captureAgentConfigFile(snapshot.path);
     // As with the containing directory, Windows relies on the verified owner
     // profile ACL. POSIX must still read back the exact approved file mode.
@@ -23980,9 +23994,7 @@ function atomicReplaceAgentConfig(prepared, bytes) {
     return after;
   } finally {
     if (fd !== null) closeSync(fd);
-    if (created) {
-      try { unlinkSync(temporary); } catch { /* no temporary is intentionally retained */ }
-    }
+    if (created && !published) removeOwnedStaging(temporary, created);
   }
 }
 
@@ -27574,6 +27586,7 @@ export async function cmdScheduleAllConfigured(manifestPath, action, options = {
   const intendedEnabled = action === "install" ? true : action === "remove" ? false : null;
   const priorManifest = m;
   let intentChanged = false;
+  let intentPublication;
   if (intendedEnabled !== null && m?.operations?.daily_refresh?.enabled !== intendedEnabled) {
     m = {
       ...m,
@@ -27586,11 +27599,12 @@ export async function cmdScheduleAllConfigured(manifestPath, action, options = {
       },
     };
     const writer = options.writeManifestAtomically ?? writeManifestAtomically;
-    writer(manifestPath, m, {
+    intentPublication = writer(manifestPath, m, {
       ...(options.dailyIntentWriteOptions || {}),
       backupLabel: "daily-refresh-intent",
     });
     intentChanged = true;
+    options.onManifestPublished?.(intentPublication);
   }
   let plan;
   let schedule;
@@ -27643,10 +27657,12 @@ export async function cmdScheduleAllConfigured(manifestPath, action, options = {
     if (intentChanged) {
       const writer = options.writeManifestAtomically ?? writeManifestAtomically;
       try {
-        writer(manifestPath, priorManifest, {
+        const restoredPublication = writer(manifestPath, priorManifest, {
           ...(options.dailyIntentRollbackOptions || {}),
           backupLabel: "daily-refresh-intent-rollback",
+          expectedPublication: intentPublication,
         });
+        options.onManifestPublished?.(restoredPublication);
       } catch (rollbackError) {
         throw new Error(`${error.message}; the daily import preference also could not be restored: ${rollbackError.message}`, { cause: error });
       }
@@ -31065,6 +31081,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
     let resumingDailyRecovery = false;
     let remoteMutationMayHaveStarted = false;
     let existingDailyTransaction = null;
+    let dailyTransactionExpected = null;
     let dailyAuthorizedDefinition = null;
     let dailyReconciliation = { daily_definition: "pending", source_expectations: "pending" };
     let persistDailyTransaction = null;
@@ -31124,6 +31141,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
       manageDailyDefinition = Object.hasOwn(beforeUpdateManifest?.operations || {}, "daily_refresh") ||
         dailyStatus.installed === true;
       existingDailyTransaction = readDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions);
+      dailyTransactionExpected = existingDailyTransaction;
       if (existingDailyTransaction?.shared_fence === true || (existingDailyTransaction && !existingDailyTransaction.snapshot)) {
         throw new Error("this Brain has an update recovery fence, but this user has no verified schedule snapshot; imports remain paused");
       }
@@ -31151,7 +31169,8 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
             pin.target,
             options.dailyRefreshOptions || {},
           );
-      persistDailyTransaction = (phase, remoteMutationMayHaveStarted) => writeDailyRefreshUpdateTransaction({
+      persistDailyTransaction = (phase, remoteMutationMayHaveStarted) => {
+        const written = writeDailyRefreshUpdateTransaction({
         plan: dailyPlan,
         snapshot: dailySnapshot,
         phase,
@@ -31160,7 +31179,10 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         authorizedDefinition: dailyAuthorizedDefinition,
         reconciliation: dailyReconciliation,
         remoteMutationMayHaveStarted,
-      }, dailyTransactionOptions);
+        }, { ...dailyTransactionOptions, expectedPredecessor: dailyTransactionExpected });
+        dailyTransactionExpected = written;
+        return written;
+      };
       manageAnyLocalSchedule = manageDailyDefinition || legacySnapshots.some((entry) => entry.snapshot?.exists) || bridgeSnapshots.length > 0;
       if (manageAnyLocalSchedule) {
         persistDailyTransaction("preparing");
@@ -31190,7 +31212,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         if (!resumingDailyRecovery) {
           if (dailySnapshot) restoreDailyRefreshSchedule(dailySnapshot, dailySchedulerOptions);
           if (dailyTransactionActive && !bridgeSnapshots.length) {
-            clearDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions);
+            clearDailyRefreshUpdateTransaction(dailyPlan.identity, { ...dailyTransactionOptions, expected: dailyTransactionExpected });
             dailyTransactionActive = false;
           }
         } else if (dailyTransactionActive) {
@@ -31309,7 +31331,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
           }
         }
         if (dailyTransactionActive) {
-          clearDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions);
+          clearDailyRefreshUpdateTransaction(dailyPlan.identity, { ...dailyTransactionOptions, expected: dailyTransactionExpected });
           dailyTransactionActive = false;
         }
       } catch (error) {
@@ -31337,7 +31359,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
       let provenPreMutation = !remoteMutationMayHaveStarted;
       if (dailyTransactionActive) {
         try {
-          provenPreMutation = provenPreMutation && readDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions)
+          provenPreMutation = provenPreMutation && readDailyRefreshUpdateTransaction(dailyPlan.identity, { ...dailyTransactionOptions, expected: dailyTransactionExpected })
             ?.remote_mutation_may_have_started === false;
         } catch { provenPreMutation = false; }
       }
@@ -31346,7 +31368,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
           restoreExistingOwnedSchedulers(pin.target, legacySnapshots, options.dailyRefreshOptions || {});
           if (dailySnapshot) restoreDailyRefreshSchedule(dailySnapshot, dailySchedulerOptions);
           if (dailyTransactionActive && !bridgeSnapshots.length) {
-            clearDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions);
+            clearDailyRefreshUpdateTransaction(dailyPlan.identity, { ...dailyTransactionOptions, expected: dailyTransactionExpected });
             dailyTransactionActive = false;
           }
         } catch (restoreError) {
@@ -31364,7 +31386,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         // current preflight refusal cannot undo an earlier ambiguous dispatch.
         let provenPreChange = false;
         try {
-          provenPreChange = readDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions)
+          provenPreChange = readDailyRefreshUpdateTransaction(dailyPlan.identity, { ...dailyTransactionOptions, expected: dailyTransactionExpected })
             ?.remote_mutation_may_have_started === false;
         } catch { /* Missing or unreadable intent is never restoration proof. */ }
         if (!provenPreChange) {

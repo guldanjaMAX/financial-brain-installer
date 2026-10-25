@@ -1,5 +1,5 @@
 /** Cross-platform owned scheduler definitions and update pause/restore rules. */
-import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync } from "./rename-retry.mjs";
+import { captureRenameIdentity, captureStagedProof, renameIdentityMatches, renameWithRetrySync, removeOwnedStaging, stagedBytesMatch } from "./rename-retry.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import { accessSync, chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -596,6 +596,18 @@ function updateTransactionPath(identity, { home = homedir() } = {}) {
 
 export { updateTransactionPath as dailyRefreshUpdateTransactionPath };
 
+// Ownership proofs stay process-local and never add bytes or filesystem IDs to
+// the public JSON receipt. A failed publish cannot adopt a later writer's file.
+const transactionPublications = new WeakMap();
+
+function transactionExpectedMatches(path, receipt) {
+  if (receipt === null) return renameIdentityMatches(path, null);
+  const expected = receipt && transactionPublications.get(receipt);
+  return Boolean(expected && stagedBytesMatch(path, expected.proof, expected.bytes));
+}
+
+function unsafeTransaction() { throw new Error("the daily update transaction receipt is unsafe"); }
+
 function transactionContext(identityOrPlan, options = {}) {
   const identity = identityOrPlan?.identity?.id ? identityOrPlan.identity : identityOrPlan;
   const manifestPath = identityOrPlan?.manifest_path || options.manifestPath || null;
@@ -625,10 +637,15 @@ export function writeDailyRefreshUpdateTransaction(input = {}, options = {}) {
   const directory = dirname(path);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   chmodSync(directory, 0o700);
-  const priorIdentity = captureRenameIdentity(path);
+  const priorIdentity = captureRenameIdentity(path, { bigint: true });
+  if (Object.hasOwn(options, "expectedPredecessor") && !transactionExpectedMatches(path, options.expectedPredecessor)) unsafeTransaction();
   let prior = null;
+  let priorBytes;
   if (existsSync(path)) {
-    try { prior = JSON.parse(readFileSync(path, "utf8")); } catch {
+    if (!priorIdentity?.isFile() || priorIdentity.isSymbolicLink() || priorIdentity.nlink !== 1n || priorIdentity.size > 1024n * 1024n) unsafeTransaction();
+    priorBytes = readFileSync(path);
+    if (!stagedBytesMatch(path, priorIdentity, priorBytes)) unsafeTransaction();
+    try { prior = JSON.parse(priorBytes.toString("utf8")); } catch {
       throw new Error("the daily update transaction receipt is malformed");
     }
     if (!prior || typeof prior !== "object" || Array.isArray(prior)) {
@@ -683,19 +700,30 @@ export function writeDailyRefreshUpdateTransaction(input = {}, options = {}) {
     bridge_snapshots: input.bridgeSnapshots ?? prior?.bridge_snapshots ?? [],
   });
   const temporary = `${path}.tmp-${process.pid}-${randomBytes(8).toString("hex")}`;
+  const bytes = Buffer.from(`${JSON.stringify(receipt, null, 2)}\n`);
+  if (bytes.length > 1024 * 1024) unsafeTransaction();
+  let created;
+  let published = false;
   try {
     const descriptor = openSync(temporary, "wx", 0o600);
-    let stagedIdentity;
     try {
-      writeFileSync(descriptor, `${JSON.stringify(receipt, null, 2)}\n`);
-      stagedIdentity = fstatSync(descriptor);
+      created = fstatSync(descriptor, { bigint: true });
+      writeFileSync(descriptor, bytes);
     } finally { closeSync(descriptor); }
-    renameWithRetrySync(temporary, path, { platform: options.platform ?? process.platform, revalidate: () => {
-      if (!renameIdentityMatches(temporary, stagedIdentity) || !renameIdentityMatches(path, priorIdentity)) {
-        throw new Error("the daily update transaction receipt is unsafe");
+    const stagedIdentity = captureStagedProof(temporary, bytes, created);
+    renameWithRetrySync(temporary, path, { platform: options.platform ?? process.platform,
+      staged: { expected: stagedIdentity, bytes, refuse: unsafeTransaction }, revalidate: () => {
+      if (!renameIdentityMatches(path, priorIdentity) ||
+          (priorBytes && !stagedBytesMatch(path, priorIdentity, priorBytes)) ||
+          (Object.hasOwn(options, "expectedPredecessor") && !transactionExpectedMatches(path, options.expectedPredecessor))) {
+        unsafeTransaction();
       }
     } });
+    published = true;
     chmodSync(path, 0o600);
+    const publishedIdentity = captureStagedProof(path, bytes, created);
+    if (!publishedIdentity) unsafeTransaction();
+    transactionPublications.set(receipt, { proof: publishedIdentity, bytes });
     writeBrainRecoveryFence({
       manifestPath: plan.manifest_path,
       transactionId,
@@ -703,7 +731,7 @@ export function writeDailyRefreshUpdateTransaction(input = {}, options = {}) {
       machineLockRoot: options.machineLockRoot,
     });
   } finally {
-    try { unlinkSync(temporary); } catch {}
+    if (created && !published) removeOwnedStaging(temporary, created);
   }
   return receipt;
 }
@@ -711,6 +739,7 @@ export function writeDailyRefreshUpdateTransaction(input = {}, options = {}) {
 export function readDailyRefreshUpdateTransaction(identityOrPlan, options = {}) {
   const { identity, manifestPath } = transactionContext(identityOrPlan, options);
   const path = updateTransactionPath(identity, options);
+  if (Object.hasOwn(options, "expected") && !transactionExpectedMatches(path, options.expected)) unsafeTransaction();
   const fence = manifestPath ? readBrainRecoveryFence({
     manifestPath,
     platform: options.platform,
@@ -726,15 +755,17 @@ export function readDailyRefreshUpdateTransaction(identityOrPlan, options = {}) 
       identity,
     }) : null;
   }
-  const state = lstatSync(path);
-  if (!state.isFile() || state.isSymbolicLink() || state.nlink !== 1 || state.size > 1024 * 1024) {
+  const state = lstatSync(path, { bigint: true });
+  if (!state.isFile() || state.isSymbolicLink() || state.nlink !== 1n || state.size > 1024n * 1024n) {
     throw new Error("the daily update transaction receipt is unsafe");
   }
-  if (process.platform !== "win32" && (state.mode & 0o077) !== 0) {
+  if (process.platform !== "win32" && (state.mode & 0o077n) !== 0n) {
     throw new Error("the daily update transaction receipt is not private");
   }
   let value;
-  try { value = JSON.parse(readFileSync(path, "utf8")); } catch {
+  const bytes = readFileSync(path);
+  if (!stagedBytesMatch(path, state, bytes)) unsafeTransaction();
+  try { value = JSON.parse(bytes.toString("utf8")); } catch {
     throw new Error("the daily update transaction receipt is malformed");
   }
   if (value?.schema_version !== 1 || value?.kind !== "daily_refresh_update_transaction" ||
@@ -764,17 +795,21 @@ export function readDailyRefreshUpdateTransaction(identityOrPlan, options = {}) 
     throw new Error("the daily update transaction does not match the Brain recovery fence");
   }
   if (manifestPath && !fence) return null;
-  return Object.freeze({
+  const receipt = Object.freeze({
     ...value,
     remote_mutation_may_have_started: value.remote_mutation_may_have_started !== false,
     authorized_definition: authorizedDefinition,
     reconciliation: Object.freeze(reconciliation),
   });
+  if (Object.hasOwn(options, "expected") && !transactionExpectedMatches(path, options.expected)) unsafeTransaction();
+  transactionPublications.set(receipt, { proof: state, bytes });
+  return receipt;
 }
 
 export function clearDailyRefreshUpdateTransaction(identityOrPlan, options = {}) {
   const { identity, manifestPath } = transactionContext(identityOrPlan, options);
   const path = updateTransactionPath(identity, options);
+  if (Object.hasOwn(options, "expected") && !transactionExpectedMatches(path, options.expected)) unsafeTransaction();
   if (!existsSync(path)) {
     const fence = manifestPath ? readBrainRecoveryFence({
       manifestPath,
@@ -784,12 +819,14 @@ export function clearDailyRefreshUpdateTransaction(identityOrPlan, options = {})
     if (fence) throw new Error("the Brain recovery fence has no local schedule transaction");
     return false;
   }
-  const state = lstatSync(path);
-  if (!state.isFile() || state.isSymbolicLink() || state.nlink !== 1) {
+  const state = lstatSync(path, { bigint: true });
+  if (!state.isFile() || state.isSymbolicLink() || state.nlink !== 1n || state.size > 1024n * 1024n) {
     throw new Error("the daily update transaction receipt is unsafe");
   }
   let value;
-  try { value = JSON.parse(readFileSync(path, "utf8")); } catch {
+  const receiptBytes = readFileSync(path);
+  if (!stagedBytesMatch(path, state, receiptBytes)) unsafeTransaction();
+  try { value = JSON.parse(receiptBytes.toString("utf8")); } catch {
     throw new Error("the daily update transaction receipt is malformed");
   }
   // Keep bridge recovery evidence after completion without leaving a fence
@@ -805,23 +842,32 @@ export function clearDailyRefreshUpdateTransaction(identityOrPlan, options = {})
     const archive = join(history, `${value.transaction_id}.json`);
     const archiveIdentity = captureRenameIdentity(archive);
     const temporary = `${archive}.tmp-${randomBytes(8).toString("hex")}`;
+    const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
+    if (bytes.length > 1024 * 1024) unsafeTransaction();
+    let created;
+    let published = false;
     try {
       const descriptor = openSync(temporary, "wx", 0o600);
-      let stagedIdentity;
       try {
-        writeFileSync(descriptor, `${JSON.stringify(value, null, 2)}\n`);
-        stagedIdentity = fstatSync(descriptor);
+        created = fstatSync(descriptor, { bigint: true });
+        writeFileSync(descriptor, bytes);
       } finally { closeSync(descriptor); }
-      renameWithRetrySync(temporary, archive, { platform: options.platform ?? process.platform, revalidate: () => {
-        if (!renameIdentityMatches(temporary, stagedIdentity) || !renameIdentityMatches(archive, archiveIdentity) ||
-            !renameIdentityMatches(path, state)) {
+      const stagedIdentity = captureStagedProof(temporary, bytes, created);
+      renameWithRetrySync(temporary, archive, { platform: options.platform ?? process.platform,
+        staged: { expected: stagedIdentity, bytes, refuse: () => { throw new Error("the daily update history is unsafe"); } },
+        revalidate: () => {
+        if (!renameIdentityMatches(archive, archiveIdentity) ||
+            !stagedBytesMatch(path, state, receiptBytes)) {
           throw new Error("the daily update history is unsafe");
         }
       } });
+      published = true;
     } finally {
-      try { unlinkSync(temporary); } catch {}
+      if (created && !published) removeOwnedStaging(temporary, created);
     }
   }
+  if (!stagedBytesMatch(path, state, receiptBytes) ||
+      (Object.hasOwn(options, "expected") && !transactionExpectedMatches(path, options.expected))) unsafeTransaction();
   if (manifestPath) {
     clearBrainRecoveryFence({
       manifestPath,
@@ -830,7 +876,7 @@ export function clearDailyRefreshUpdateTransaction(identityOrPlan, options = {})
       machineLockRoot: options.machineLockRoot,
     });
   }
-  unlinkSync(path);
+  if (!removeOwnedStaging(path, state, { proof: state, bytes: receiptBytes })) unsafeTransaction();
   return true;
 }
 

@@ -1100,6 +1100,20 @@ proof stops before rename with the caller's existing refusal, even when that
 refusal has a retryable code. Content writes, permission changes, proof failures
 and unrelated filesystem errors are never retried.
 
+Each staged replacement also proves the exact intended bytes through a bounded
+descriptor read, including an EOF probe, bracketed by descriptor and pathname
+identity checks. The baseline follows writes, metadata changes and close;
+change time is compared, but bytes remain authoritative because Windows handles
+can suppress or set timestamps. Proof and removal use bigint file identities.
+The asynchronous helper performs its synchronous byte proof immediately before
+invoking rename, with no intervening await. Cleanup is limited to the inode
+captured from this attempt's exclusive-create descriptor and stops after publish.
+Assistant repair, skill repair, manifest-intent and daily transaction rollback
+require a record of the authorized publication and fresh identity and byte proof;
+a matching payload from a different writer grants no restore right.
+Node has no unlink-by-handle operation, so an identity check followed by unlink
+still has a pathname race. These checks do not claim atomic compare-and-delete.
+
 Durable secrets never belong in the manifest or MCP registration. The manifest
 contains only a non-secret locator when Keychain is used. Standard durable
 stores are macOS login Keychain, Windows DPAPI CurrentUser-protected files, and

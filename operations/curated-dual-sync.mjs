@@ -13,7 +13,7 @@
  * become another copy of filenames, source IDs, URLs, content, or credentials.
  */
 
-import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync } from "./rename-retry.mjs";
+import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync, captureStagedProof, removeOwnedStaging } from "./rename-retry.mjs";
 import { acquireSourceIngestLock } from "./source-ingest-lock.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import {
@@ -29,7 +29,6 @@ import {
   readdirSync,
   realpathSync,
   statSync,
-  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
@@ -1213,6 +1212,8 @@ export function writeCuratedCoverageLedger(path, ledger, options = {}) {
   const suffix = (options.randomBytes ?? randomBytes)(8).toString("hex");
   const temporary = `${absolute}.tmp-${suffix}`;
   let descriptor;
+  let created;
+  let published = false;
   try {
     descriptor = openSync(
       temporary,
@@ -1220,16 +1221,19 @@ export function writeCuratedCoverageLedger(path, ledger, options = {}) {
         (fsConstants.O_NOFOLLOW || 0),
       0o600,
     );
+    created = fstatSync(descriptor, { bigint: true });
     writeFileSync(descriptor, bytes);
     fsyncSync(descriptor);
-    const staged = fstatSync(descriptor);
     closeSync(descriptor);
     descriptor = undefined;
-    renameWithRetrySync(temporary, absolute, { revalidate() {
-      if (!renameIdentityMatches(temporary, staged) || !renameIdentityMatches(absolute, predecessor)) {
+    const staged = captureStagedProof(temporary, bytes, created);
+    const refuse = () => { fail("coverage ledger destination is not a safe regular file"); };
+    renameWithRetrySync(temporary, absolute, { staged: { expected: staged, bytes, refuse }, revalidate() {
+      if (!renameIdentityMatches(absolute, predecessor)) {
         fail("coverage ledger destination is not a safe regular file");
       }
     } });
+    published = true;
     const readback = readFileSync(absolute);
     if (!readback.equals(bytes)) fail("coverage ledger did not read back exactly");
     const info = statSync(absolute);
@@ -1240,7 +1244,7 @@ export function writeCuratedCoverageLedger(path, ledger, options = {}) {
     if (descriptor !== undefined) {
       try { closeSync(descriptor); } catch { /* best effort */ }
     }
-    try { unlinkSync(temporary); } catch { /* absent or already renamed */ }
+    if (created && !published) removeOwnedStaging(temporary, created);
     if (error?.message?.startsWith("coverage ledger")) throw error;
     fail("coverage ledger could not be replaced safely");
   } finally {

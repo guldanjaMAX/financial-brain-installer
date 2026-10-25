@@ -1,5 +1,5 @@
 /** Sequential execution and per-source proof for the daily machine-pull plan. */
-import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync } from "./rename-retry.mjs";
+import { captureRenameIdentity, captureStagedProof, renameIdentityMatches, renameWithRetrySync } from "./rename-retry.mjs";
 import { chmodSync, closeSync, fstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -481,14 +481,17 @@ function dailyReceiptWriter(plan, { home = homedir(), platform = process.platfor
     chmodSync(directory, 0o700);
     const priorIdentity = captureRenameIdentity(path);
     const staged = `${path}.tmp-${process.pid}`;
+    const bytes = Buffer.from(`${JSON.stringify(receipt, null, 2)}\n`);
     const descriptor = openSync(staged, "wx", 0o600);
-    let stagedIdentity;
+    let created;
     try {
-      writeFileSync(descriptor, `${JSON.stringify(receipt, null, 2)}\n`);
-      stagedIdentity = fstatSync(descriptor);
+      created = fstatSync(descriptor, { bigint: true });
+      writeFileSync(descriptor, bytes);
     } finally { closeSync(descriptor); }
-    renameWithRetrySync(staged, path, { platform, revalidate: () => {
-      if (!renameIdentityMatches(staged, stagedIdentity) || !renameIdentityMatches(path, priorIdentity)) {
+    const stagedIdentity = captureStagedProof(staged, bytes, created);
+    const refuse = () => { throw new Error("the daily refresh receipt changed before replacement"); };
+    renameWithRetrySync(staged, path, { platform, staged: { expected: stagedIdentity, bytes, refuse }, revalidate: () => {
+      if (!renameIdentityMatches(path, priorIdentity)) {
         throw new Error("the daily refresh receipt changed before replacement");
       }
     } });

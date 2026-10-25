@@ -14,7 +14,7 @@
  * output.
  */
 
-import { renameWithRetrySync } from "./rename-retry.mjs";
+import { captureStagedProof, renameWithRetrySync, removeOwnedStaging } from "./rename-retry.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import {
   chmodSync,
@@ -1278,6 +1278,8 @@ function writePrivateControl(path, value, { replace = false, random = randomByte
   if (bytes.length > MAX_CONTROL_FILE_BYTES) fail("verified recovery control file is too large");
   const temporary = join(dirname(absolute), `.${basename(absolute)}.${random(8).toString("hex")}.tmp`);
   let descriptor;
+  let created;
+  let published = false;
   try {
     descriptor = openSync(
       temporary,
@@ -1285,30 +1287,40 @@ function writePrivateControl(path, value, { replace = false, random = randomByte
         (fsConstants.O_NOFOLLOW || 0),
       0o600,
     );
+    created = fstatSync(descriptor, { bigint: true });
     writeFileSync(descriptor, bytes);
     fsyncSync(descriptor);
     fchmodSync(descriptor, 0o600);
-    const stagedIdentity = fstatSync(descriptor);
     closeSync(descriptor);
     descriptor = undefined;
+    const stagedIdentity = captureStagedProof(temporary, bytes, created);
     if (prior) {
-      renameWithRetrySync(temporary, absolute, { platform, revalidate: () => {
+      renameWithRetrySync(temporary, absolute, { platform,
+        staged: { expected: stagedIdentity, bytes, refuse: () => { fail("verified recovery control destination changed before replacement"); } },
+        revalidate: () => {
         let current;
-        let staged;
-        try { current = lstatSync(absolute); staged = lstatSync(temporary); } catch {
+        try { current = lstatSync(absolute); } catch {
           fail("verified recovery control destination changed before replacement");
         }
-        if (!sameFile(prior, current) || !sameFile(stagedIdentity, staged) ||
-            !staged.isFile() || staged.isSymbolicLink()) {
+        if (!sameFile(prior, current)) {
           fail("verified recovery control destination changed before replacement");
         }
       } });
+      published = true;
     } else {
       // A check-then-rename would overwrite a file created in the gap. Linking
       // the private staging inode into the final name gives first creation true
       // O_EXCL behavior on every supported local filesystem.
       try { linkSync(temporary, absolute); } catch {
         fail("verified recovery control destination appeared before creation");
+      }
+      published = true;
+      // First creation deliberately has two links until this private name is
+      // retired. The ordinary one-link staging cleanup must not handle it.
+      const linked = lstatSync(temporary, { bigint: true });
+      if (!linked.isFile() || linked.isSymbolicLink() || linked.nlink !== 2n ||
+          linked.dev !== created.dev || linked.ino !== created.ino) {
+        fail("verified recovery control staging identity changed after creation");
       }
       unlinkSync(temporary);
     }
@@ -1324,7 +1336,7 @@ function writePrivateControl(path, value, { replace = false, random = randomByte
     if (descriptor !== undefined) {
       try { closeSync(descriptor); } catch { /* best effort */ }
     }
-    try { unlinkSync(temporary); } catch { /* absent or already renamed */ }
+    if (created && !published) removeOwnedStaging(temporary, created);
     if (String(error?.message || "").startsWith("verified recovery")) throw error;
     fail("verified recovery control file could not be written safely");
   } finally {

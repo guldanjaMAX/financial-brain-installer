@@ -8,7 +8,7 @@
  * An ACL or DPAPI failure therefore leaves any prior working key untouched.
  */
 
-import { renameWithRetrySync } from "./rename-retry.mjs";
+import { captureStagedProof, renameWithRetrySync, removeOwnedStaging, sameRenameIdentity, stagedBytesMatch } from "./rename-retry.mjs";
 import {
   chmodSync,
   closeSync,
@@ -618,12 +618,14 @@ function writeAll(descriptor, bytes) {
 function createPrivatePayloadFile(path, bytes, expectedUid, platform, username, options, label) {
   let descriptor;
   let identity;
+  let created;
   try {
     descriptor = openSync(
       path,
       fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW || 0),
       0o600,
     );
+    created = fstatSync(descriptor, { bigint: true });
     identity = fstatSync(descriptor);
     if (!identity.isFile() || identity.nlink !== 1 ||
         (platform !== "win32" && identity.uid !== expectedUid)) {
@@ -660,14 +662,17 @@ function createPrivatePayloadFile(path, bytes, expectedUid, platform, username, 
     assertPrivateIdentity(secured, expectedUid, platform, label);
     writeAll(descriptor, bytes);
     fsyncSync(descriptor);
+    identity = fstatSync(descriptor);
     closeSync(descriptor);
     descriptor = undefined;
-    return identity;
+    const proof = captureStagedProof(path, bytes, created);
+    if (!proof) throw new Error(`the admin key ${label} identity changed before verification`);
+    return { identity, created, proof };
   } catch (error) {
     if (descriptor !== undefined) {
       try { closeSync(descriptor); } catch { /* Preserve the persistence error. */ }
     }
-    if (identity) removeIfSame(path, identity);
+    if (created) removeOwnedStaging(path, created);
     throw error;
   }
 }
@@ -809,15 +814,21 @@ export function writeAdminKeyFile(destination, secret, options = {}) {
     : Buffer.from(`${secret}\n`, "utf8");
   let stagedIdentity;
   let backupIdentity;
+  let stagedCreated;
+  let stagedProof;
+  let backupCreated;
+  let backupProof;
+  let publishedIdentity;
+  let backupPublished = false;
   let priorBytes;
   let backupBytes;
   let priorSecret;
   let committed = false;
   const rename = options.rename ?? renameSync;
   try {
-    stagedIdentity = createPrivatePayloadFile(
+    ({ identity: stagedIdentity, created: stagedCreated, proof: stagedProof } = createPrivatePayloadFile(
       temporary, bytes, expectedUid, platform, username, options, "staging",
-    );
+    ));
     verifySecretPayload(
       temporary, stagedIdentity, secret, expectedUid, platform, options, "staged",
     );
@@ -842,9 +853,9 @@ export function writeAdminKeyFile(destination, secret, options = {}) {
       backupBytes = platform === "win32"
         ? protectAdminKeyForWindows(priorSecret, options)
         : Buffer.from(priorBytes);
-      backupIdentity = createPrivatePayloadFile(
+      ({ identity: backupIdentity, created: backupCreated, proof: backupProof } = createPrivatePayloadFile(
         backup, backupBytes, expectedUid, platform, username, options, "rollback backup",
-      );
+      ));
       if (platform === "win32") {
         verifySecretPayload(
           backup, backupIdentity, priorSecret, expectedUid, platform, options, "rollback backup",
@@ -863,7 +874,7 @@ export function writeAdminKeyFile(destination, secret, options = {}) {
       try {
         const finalPrior = lstatIfPresent(path);
         if ((prior === null) !== (finalPrior === null) ||
-            (prior && !sameFile(prior, finalPrior))) throw destinationChanged;
+            (prior && !sameRenameIdentity(finalPrior, prior))) throw destinationChanged;
         const staged = lstatIfPresent(temporary);
         if (!sameFile(stagedIdentity, staged) || !staged.isFile() || staged.nlink !== 1) throw stagingChanged;
       } catch (error) { revalidationError = error; throw error; }
@@ -873,19 +884,22 @@ export function writeAdminKeyFile(destination, secret, options = {}) {
     // that do not support directory fsync retain their platform guarantees.
     fsyncParent(path, platform, options, "prepared");
     try {
-      renameWithRetrySync(temporary, path, { rename, platform, revalidate });
+      renameWithRetrySync(temporary, path, { rename, platform, revalidate,
+        staged: { expected: stagedProof, bytes, refuse: () => { revalidationError = stagingChanged; throw stagingChanged; } },
+      });
     } catch (error) {
       if (error === revalidationError) throw error;
       throw new Error("the admin key replacement could not be committed");
     }
     committed = true;
+    publishedIdentity = captureStagedProof(path, bytes, stagedCreated);
     verifySecretPayload(
       path, stagedIdentity, secret, expectedUid, platform, options, "persisted",
     );
     fsyncParent(path, platform, options, "persisted");
 
     if (backupIdentity) {
-      if (!removeIfSame(backup, backupIdentity)) {
+      if (!backupPublished && !removeOwnedStaging(backup, backupCreated, { proof: backupProof, bytes: backupBytes })) {
         throw new Error("the prior admin key rollback backup could not be removed safely");
       }
       backupIdentity = undefined;
@@ -894,22 +908,22 @@ export function writeAdminKeyFile(destination, secret, options = {}) {
     return Object.freeze({ path, replaced: prior !== null });
   } catch (error) {
     if (!committed) {
-      if (stagedIdentity) removeIfSame(temporary, stagedIdentity);
-      if (backupIdentity) removeIfSame(backup, backupIdentity);
+      if (stagedCreated) removeOwnedStaging(temporary, stagedCreated);
+      if (backupCreated && !backupPublished) removeOwnedStaging(backup, backupCreated);
       throw error;
     }
 
     let restored = false;
     if (prior && backupIdentity && priorSecret) {
       try {
-        renameWithRetrySync(backup, path, { rename, platform, revalidate: () => {
-          const current = lstatIfPresent(path);
-          const saved = lstatIfPresent(backup);
-          if (!sameFile(current, stagedIdentity) || !sameFile(saved, backupIdentity) ||
-              !current.isFile() || current.nlink !== 1 || !saved.isFile() || saved.nlink !== 1) {
+        renameWithRetrySync(backup, path, { rename, platform,
+          staged: { expected: backupProof, bytes: backupBytes, refuse: () => { throw new Error("transaction identities changed"); } },
+          revalidate: () => {
+          if (!stagedBytesMatch(path, publishedIdentity, bytes)) {
             throw new Error("transaction identities changed");
           }
         } });
+        backupPublished = true;
         const restoredIdentity = lstatIfPresent(path);
         if (!sameFile(restoredIdentity, backupIdentity)) {
           throw new Error("rollback identity did not become durable");
@@ -924,7 +938,7 @@ export function writeAdminKeyFile(destination, secret, options = {}) {
         restored = false;
       }
     } else if (!prior) {
-      restored = removeIfSame(path, stagedIdentity) && lstatIfPresent(path) === null;
+      restored = removeOwnedStaging(path, stagedCreated, { proof: publishedIdentity, bytes }) && lstatIfPresent(path) === null;
       if (restored) {
         try {
           fsyncParent(path, platform, options, "absence rollback");

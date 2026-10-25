@@ -5,7 +5,7 @@
  * response, account id, hostname, source name, or customer content.
  */
 
-import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync } from "./rename-retry.mjs";
+import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync, captureStagedProof, removeOwnedStaging } from "./rename-retry.mjs";
 import {
   chmodSync,
   closeSync,
@@ -16,6 +16,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   realpathSync,
   renameSync,
   unlinkSync,
@@ -443,30 +444,45 @@ export function writeBootstrapStatusFile(manifestPath, status, options = {}) {
     }
   }
   const payload = `${JSON.stringify({ ...status, status_file: target }, null, 2)}\n`;
+  const bytes = Buffer.from(payload, "utf8");
   const temporary = `${target}.${process.pid}.tmp`;
+  const proofFs = {
+    lstatSync: options.lstatImpl ?? lstatSync,
+    openSync: options.openImpl ?? openSync,
+    fstatSync: options.fstatImpl ?? fstatSync,
+    readSync: options.readImpl ?? readSync,
+    closeSync: options.closeImpl ?? closeSync,
+    unlinkSync: options.unlinkImpl ?? unlinkSync,
+  };
   let descriptor;
+  let created;
+  let published = false;
   try {
     descriptor = (options.openImpl ?? openSync)(temporary, "wx", 0o600);
+    created = (options.fstatImpl ?? fstatSync)(descriptor, { bigint: true });
     (options.writeFileImpl ?? writeFileSync)(descriptor, payload, "utf8");
     (options.fsyncImpl ?? fsyncSync)(descriptor);
-    const staged = (options.fstatImpl ?? fstatSync)(descriptor);
     (options.closeImpl ?? closeSync)(descriptor);
     descriptor = undefined;
+    const staged = captureStagedProof(temporary, bytes, created, { fs: proofFs });
+    const refuse = () => { throw new Error("the bootstrap status destination is not a safe regular file"); };
     renameWithRetrySync(temporary, target, {
       rename: options.renameImpl ?? renameSync,
+      fs: proofFs,
+      staged: { expected: staged, bytes, refuse },
       revalidate() {
-        if (!renameIdentityMatches(temporary, staged, identityOptions) ||
-            !renameIdentityMatches(target, predecessor, identityOptions)) {
+        if (!renameIdentityMatches(target, predecessor, identityOptions)) {
           throw new Error("the bootstrap status destination is not a safe regular file");
         }
       },
     });
+    published = true;
     (options.chmodImpl ?? chmodSync)(target, 0o600);
   } catch (error) {
     if (descriptor !== undefined) {
       try { (options.closeImpl ?? closeSync)(descriptor); } catch {}
     }
-    try { (options.unlinkImpl ?? unlinkSync)(temporary); } catch {}
+    if (created && !published) removeOwnedStaging(temporary, created, { fs: proofFs });
     throw error;
   }
   if ((options.readFileImpl ?? readFileSync)(target, "utf8") !== payload) {

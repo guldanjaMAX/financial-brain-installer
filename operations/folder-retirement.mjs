@@ -1,4 +1,4 @@
-import { renameWithRetrySync } from "./rename-retry.mjs";
+import { captureStagedProof, renameWithRetrySync, removeOwnedStaging, stagedBytesMatch } from "./rename-retry.mjs";
 import {
   closeSync,
   constants as fsConstants,
@@ -8,6 +8,7 @@ import {
   lstatSync,
   openSync,
   readFileSync,
+  readSync,
   realpathSync,
   renameSync,
   statSync,
@@ -29,6 +30,7 @@ function fsApi(overrides = {}) {
     lstatSync,
     openSync,
     readFileSync,
+    readSync,
     realpathNative: nativeRealpath,
     renameSync,
     statSync,
@@ -58,22 +60,28 @@ function writeAll(io, descriptor, bytes) {
 function writeExclusive(io, path, bytes, mode) {
   const noFollow = fsConstants.O_NOFOLLOW || 0;
   let descriptor = null;
+  let created;
   try {
     descriptor = io.openSync(
       path,
       fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | noFollow,
       mode,
     );
+    created = io.fstatSync(descriptor, { bigint: true });
     writeAll(io, descriptor, bytes);
     io.fchmodSync(descriptor, mode);
     io.fsyncSync(descriptor);
-    return io.fstatSync(descriptor);
+    io.closeSync(descriptor);
+    descriptor = null;
+    const proof = captureStagedProof(path, bytes, created, { fs: io });
+    if (!proof) throw new Error("the manifest staging file changed before verification");
+    return { created, proof };
   } catch (error) {
     if (descriptor !== null) {
       try { io.closeSync(descriptor); } catch { /* preserve the write failure */ }
       descriptor = null;
-      try { io.unlinkSync(path); } catch { /* preserve the write failure */ }
     }
+    if (created) removeOwnedStaging(path, created, { fs: io });
     throw error;
   } finally {
     if (descriptor !== null) io.closeSync(descriptor);
@@ -102,13 +110,8 @@ function folderOffTimestamp(date, includeMilliseconds = false) {
     : iso.replace(/[-:]/gu, "").replace(/\.\d{3}Z$/u, "Z");
 }
 
-function unlinkIfPresent(io, path) {
-  try {
-    io.unlinkSync(path);
-  } catch (error) {
-    if (error?.code !== "ENOENT") throw error;
-  }
-}
+// Publication tokens remain in memory; receipts never contain manifest bytes.
+const manifestPublications = new WeakMap();
 
 /**
  * Replace a manifest without following a link, changing its mode, or exposing
@@ -151,8 +154,10 @@ export function writeManifestAtomically(manifestPath, intendedManifest, options 
   const descriptor = io.openSync(absolute, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0));
   let originalBytes;
   let opened;
+  let originalIdentity;
   try {
     opened = io.fstatSync(descriptor);
+    originalIdentity = io.fstatSync(descriptor, { bigint: true });
     if (!opened.isFile() || !linkCountIsOne(opened.nlink) || !sameFile(named, opened)) {
       throw new Error("the brain manifest changed while it was opened");
     }
@@ -166,6 +171,7 @@ export function writeManifestAtomically(manifestPath, intendedManifest, options 
   } finally {
     io.closeSync(descriptor);
   }
+  const originalProof = captureStagedProof(absolute, originalBytes, originalIdentity, { fs: io });
 
   const mode = Number(opened.mode) & 0o7777;
   const intendedBytes = Buffer.from(`${JSON.stringify(intendedManifest, null, 2)}\n`, "utf8");
@@ -176,9 +182,12 @@ export function writeManifestAtomically(manifestPath, intendedManifest, options 
   const rollbackPath = `${directory}/.${basename(absolute)}.${backupTag}-${nonce}.rollback.tmp`;
   const syncDirectory = options.syncDirectory ||
     ((path) => defaultSyncDirectory(path, io, filesystemPlatform));
-  let backupCreated = false;
+  let backup;
   let renamed = false;
-  let stagedIdentity;
+  let staged;
+  let rollback;
+  let rollbackPublished = false;
+  let publishedIdentity;
   const concurrentEditError = () => {
     const error = new Error(
       `The Brain manifest changed after ${operationLabel} began, so nothing was replaced.`,
@@ -186,37 +195,33 @@ export function writeManifestAtomically(manifestPath, intendedManifest, options 
     error.code = "FOLDER_MANIFEST_CHANGED";
     return error;
   };
+  const expectedPublication = Object.hasOwn(options, "expectedPublication")
+    ? manifestPublications.get(options.expectedPublication) : null;
+  const predecessorMatches = () => stagedBytesMatch(absolute, originalProof, originalBytes, { fs: io }) &&
+    (!Object.hasOwn(options, "expectedPublication") || (expectedPublication &&
+      stagedBytesMatch(absolute, expectedPublication.proof, expectedPublication.bytes, { fs: io })));
 
   try {
-    writeExclusive(io, backupPath, originalBytes, mode);
-    backupCreated = true;
+    if (!predecessorMatches()) throw concurrentEditError();
+    backup = writeExclusive(io, backupPath, originalBytes, mode);
     if (!io.readFileSync(backupPath).equals(originalBytes)) {
       throw new Error("the folder-off backup did not read back exactly");
     }
     if (expectedOriginalBytes !== null && !originalBytes.equals(expectedOriginalBytes)) {
       throw concurrentEditError();
     }
-    stagedIdentity = writeExclusive(io, temporaryPath, intendedBytes, mode);
+    staged = writeExclusive(io, temporaryPath, intendedBytes, mode);
     options.beforeRename?.({ manifestPath: absolute, backupPath, temporaryPath });
     renameWithRetrySync(temporaryPath, absolute, {
       rename: (from, to) => io.renameSync(from, to), platform: filesystemPlatform,
+      fs: io,
+      staged: { expected: staged.proof, bytes: intendedBytes, refuse: () => { throw concurrentEditError(); } },
       revalidate: () => {
-        try {
-          const staged = io.lstatSync(temporaryPath);
-          const beforeSwap = io.lstatSync(absolute);
-          const beforeSwapBytes = io.readFileSync(absolute);
-          const afterSwapRead = io.lstatSync(absolute);
-          if (!staged.isFile() || staged.isSymbolicLink() || !linkCountIsOne(staged.nlink) ||
-              !sameFile(stagedIdentity, staged) ||
-              !beforeSwap.isFile() || beforeSwap.isSymbolicLink() ||
-              !linkCountIsOne(beforeSwap.nlink) || !sameFile(opened, beforeSwap) ||
-              !sameFile(beforeSwap, afterSwapRead) || !beforeSwapBytes.equals(originalBytes)) {
-            throw concurrentEditError();
-          }
-        } catch { throw concurrentEditError(); }
+        if (!predecessorMatches()) throw concurrentEditError();
       },
     });
     renamed = true;
+    publishedIdentity = captureStagedProof(absolute, intendedBytes, staged.created, { fs: io });
     if (filesystemPlatform !== "win32") syncDirectory(directory);
 
     const readbackBytes = io.readFileSync(absolute);
@@ -234,26 +239,24 @@ export function writeManifestAtomically(manifestPath, intendedManifest, options 
         !linkCountIsOne(finalState.nlink) || (Number(finalState.mode) & 0o7777) !== mode) {
       throw new Error("the folder-off manifest mode or file identity is unsafe after replacement");
     }
-    return Object.freeze({ backupPath, manifestPath: absolute, mode });
+    if (!stagedBytesMatch(absolute, publishedIdentity, intendedBytes, { fs: io })) throw concurrentEditError();
+    const result = Object.freeze({ backupPath, manifestPath: absolute, mode });
+    manifestPublications.set(result, { proof: publishedIdentity, bytes: intendedBytes });
+    return result;
   } catch (error) {
     let restorationError = null;
     if (renamed) {
       try {
-        const rollbackIdentity = writeExclusive(io, rollbackPath, originalBytes, mode);
+        rollback = writeExclusive(io, rollbackPath, originalBytes, mode);
         renameWithRetrySync(rollbackPath, absolute, {
           rename: (from, to) => io.renameSync(from, to), platform: filesystemPlatform,
+          fs: io,
+          staged: { expected: rollback.proof, bytes: originalBytes, refuse: () => { throw concurrentEditError(); } },
           revalidate: () => {
-            try {
-              const current = io.lstatSync(absolute);
-              const saved = io.lstatSync(rollbackPath);
-              if (!sameFile(current, stagedIdentity) || !sameFile(saved, rollbackIdentity) ||
-                  !current.isFile() || current.isSymbolicLink() || !linkCountIsOne(current.nlink) ||
-                  !saved.isFile() || saved.isSymbolicLink() || !linkCountIsOne(saved.nlink)) {
-                throw concurrentEditError();
-              }
-            } catch { throw concurrentEditError(); }
+            if (!stagedBytesMatch(absolute, publishedIdentity, intendedBytes, { fs: io })) throw concurrentEditError();
           },
         });
+        rollbackPublished = true;
         if (filesystemPlatform !== "win32") {
           try { syncDirectory(directory); } catch { /* exact byte readback below remains authoritative */ }
         }
@@ -264,15 +267,15 @@ export function writeManifestAtomically(manifestPath, intendedManifest, options 
         restorationError = restoreError;
       }
     }
-    try { unlinkIfPresent(io, temporaryPath); } catch { /* preserve the primary error */ }
-    try { unlinkIfPresent(io, rollbackPath); } catch { /* preserve the primary error */ }
+    if (staged && !renamed) removeOwnedStaging(temporaryPath, staged.created, { fs: io });
+    if (rollback && !rollbackPublished) removeOwnedStaging(rollbackPath, rollback.created, { fs: io });
     // A concurrent edit remains live and is already its own durable recovery
     // point. Keeping this operation's older backup would make `folder status`
     // present a refused change as the newest successful settings backup, and
     // would make a same-second retry collide with the exclusive backup name.
     const keepBackup = Boolean(restorationError);
-    if (backupCreated && !keepBackup) {
-      try { unlinkIfPresent(io, backupPath); } catch { /* preserve the primary error */ }
+    if (backup && !keepBackup) {
+      removeOwnedStaging(backupPath, backup.created, { proof: backup.proof, bytes: originalBytes, fs: io });
     }
     if (restorationError) {
       throw new Error(

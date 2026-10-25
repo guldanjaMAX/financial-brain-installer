@@ -14,9 +14,10 @@ import { writeBootstrapStatusFile } from "../operations/bootstrap-status.mjs";
 import { CODEX_WORKSPACE_MARKER, writeCodexWorkspaceGuide } from "../operations/claude-workspace.mjs";
 import { writeAdminKeyFile } from "../operations/admin-key-file.mjs";
 import { saveTokens } from "../connectors/google-auth.mjs";
-import { writeDailyRefreshUpdateTransaction, clearDailyRefreshUpdateTransaction, dailyRefreshUpdateTransactionPath } from "../operations/daily-refresh-scheduler.mjs";
+import { writeDailyRefreshUpdateTransaction, readDailyRefreshUpdateTransaction, clearDailyRefreshUpdateTransaction, dailyRefreshUpdateTransactionPath } from "../operations/daily-refresh-scheduler.mjs";
 import { runDailyRefreshCli } from "../operations/daily-refresh-run.mjs";
 import { initializeVerifiedRecovery, writeVerifiedRecoveryState } from "../operations/verified-recovery.mjs";
+import { pinStagingMtime, rewriteStagingInPlace, assertStagingSurvives } from "./fixtures/rename-retry-staging.mjs";
 
 // Synthetic protection is an in-memory storage boundary, never an OS helper or
 // provider call. Assertions below expose only outcome and identity metadata.
@@ -92,55 +93,77 @@ const identityWriters = [
 ];
 
 for (const writer of identityWriters) {
-  for (const changed of ["control", "destination", "staging"]) {
+  for (const changed of ["control", "destination", "staging", "staging-in-place", "squat-after-success"]) {
     test(`${writer.name}: ${changed} between attempts`, () => {
       const root = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-rename-identity-")));
       const path = join(root, writer.filename);
       writeFileSync(path, writer.prior, { mode: 0o600 });
+      const restorePin = pinStagingMtime(root);
       let calls = 0;
       let replaced;
       let replacement;
+      let replacementIdentity;
       let refusal;
+      let fixtureFailure;
       const rename = (from, to) => {
         calls++;
         if (calls === 1) {
-          if (changed !== "control") {
+          if (changed === "staging-in-place") {
+            try { rewriteStagingInPlace(from); } catch (error) { fixtureFailure = error; throw error; }
+          }
+          else if (changed !== "control" && changed !== "squat-after-success") {
             replaced = changed === "destination" ? to : from;
             replacement = Buffer.from(readFileSync(replaced));
             // Keep the displaced inode alive so the filesystem cannot reuse it.
             nativeRename(replaced, join(root, "displaced"));
             writeFileSync(replaced, replacement, { mode: 0o600, flag: "wx" });
+            replacementIdentity = fs.lstatSync(replaced, { bigint: true });
           }
           throw Object.assign(new Error("synthetic sharing refusal"), { code: "EPERM" });
         }
-        return nativeRename(from, to);
+        const result = nativeRename(from, to);
+        if (changed === "squat-after-success") {
+          replaced = from;
+          replacement = Buffer.from("synthetic replacement");
+          writeFileSync(from, replacement, { flag: "wx", mode: 0o600 });
+          replacementIdentity = fs.lstatSync(from, { bigint: true });
+        }
+        return result;
       };
       try {
         try { writer.write(path, rename); } catch (error) { refusal = error; }
-        if (changed === "control") {
+        if (fixtureFailure) throw fixtureFailure;
+        if (changed === "control" || changed === "squat-after-success") {
           assert.ok(!refusal, "unchanged identities permit the second attempt");
           assert.equal(calls, 2);
           assert.ok(!readFileSync(path).equals(writer.prior), "control publishes the replacement");
+          if (changed === "squat-after-success") assertStagingSurvives(replaced, replacementIdentity, replacement);
         } else {
           assert.equal(calls, 1, "a changed identity must stop before the second rename");
           assert.equal(refusal?.message, changed === "destination" ? writer.destinationRefusal : writer.stagingRefusal,
             "identity drift preserves the caller's existing refusal");
           assert.ok(readFileSync(path).equals(writer.prior), "refusal preserves the destination bytes");
+          if (changed === "staging") assertStagingSurvives(replaced, replacementIdentity, replacement);
         }
-      } finally { rmSync(root, { recursive: true, force: true }); }
+      } finally { restorePin(); rmSync(root, { recursive: true, force: true }); }
     });
   }
 }
 
 for (const writer of identityWriters) {
-  for (const changed of ["control", "destination", "staging"]) {
+  for (const changed of ["control", "destination", "staging", "staging-in-place", "squat-after-success"]) {
     test(`${writer.name} rollback: ${changed} between attempts`, () => {
       const root = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-rollback-rename-identity-")));
       const path = join(root, writer.filename);
       writeFileSync(path, writer.prior, { mode: 0o600 });
+      const restorePin = pinStagingMtime(root);
       let calls = 0;
       let committedBytes;
       let refusal;
+      let replaced;
+      let replacement;
+      let replacementIdentity;
+      let fixtureFailure;
       const rename = (from, to) => {
         if (!from.endsWith(".bak") && !from.endsWith(".rollback.tmp")) {
           const result = nativeRename(from, to);
@@ -149,29 +172,45 @@ for (const writer of identityWriters) {
         }
         calls++;
         if (calls === 1) {
-          if (changed !== "control") {
+          if (changed === "staging-in-place") {
+            try { rewriteStagingInPlace(from); } catch (error) { fixtureFailure = error; throw error; }
+          }
+          else if (changed !== "control" && changed !== "squat-after-success") {
             const target = changed === "destination" ? to : from;
             const bytes = readFileSync(target);
             nativeRename(target, join(root, "displaced"));
             writeFileSync(target, bytes, { mode: 0o600, flag: "wx" });
+            replaced = target;
+            replacement = bytes;
+            replacementIdentity = fs.lstatSync(target, { bigint: true });
           }
           throw Object.assign(new Error("synthetic rollback sharing refusal"), { code: "EPERM" });
         }
-        return nativeRename(from, to);
+        const result = nativeRename(from, to);
+        if (changed === "squat-after-success") {
+          replaced = from;
+          replacement = Buffer.from("synthetic replacement");
+          writeFileSync(from, replacement, { flag: "wx", mode: 0o600 });
+          replacementIdentity = fs.lstatSync(from, { bigint: true });
+        }
+        return result;
       };
       try {
         try { writer.write(path, rename, true); } catch (error) { refusal = error; }
+        if (fixtureFailure) throw fixtureFailure;
         assert.ok(refusal, "the injected persisted verification failure remains visible");
-        if (changed === "control") {
+        if (changed === "control" || changed === "squat-after-success") {
           assert.equal(calls, 2, "unchanged rollback identities permit restoration");
           if (writer.name === "manifest identity") assert.ok(readFileSync(path).equals(writer.prior));
           else assert.match(refusal.message, /prior .* restored and verified/);
+          if (changed === "squat-after-success") assertStagingSurvives(replaced, replacementIdentity, replacement);
         } else {
           assert.equal(calls, 1, "rollback drift prevents another rename");
           assert.match(refusal.message, writer.rollbackRefusal);
           assert.ok(readFileSync(path).equals(committedBytes), "rollback refusal preserves the replacement bytes");
+          if (changed === "staging") assertStagingSurvives(replaced, replacementIdentity, replacement);
         }
-      } finally { rmSync(root, { recursive: true, force: true }); }
+      } finally { restorePin(); rmSync(root, { recursive: true, force: true }); }
     });
   }
 }
@@ -243,7 +282,7 @@ const dailyWriters = [
 ];
 
 for (const writer of dailyWriters) {
-  for (const changed of ["control", "destination", "staging"]) {
+  for (const changed of ["control", "destination", "staging", "staging-in-place", "squat-after-success"]) {
     test(`${writer.name}: ${changed} between attempts`, async () => {
       const root = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-daily-rename-identity-")));
       const manifestPath = join(root, "manifest.json");
@@ -251,41 +290,165 @@ for (const writer of dailyWriters) {
       const fixture = writer.prepare(root, manifestPath, { id: "v1-abcdef1234567890" });
       const prior = readFileSync(fixture.path);
       const priorIdentity = fs.lstatSync(fixture.path);
+      const restorePin = pinStagingMtime(root);
       let calls = 0;
       let refusal;
+      let replaced;
+      let replacement;
+      let replacementIdentity;
+      let fixtureFailure;
       fs.renameSync = (from, to) => {
         if (to !== fixture.path) return nativeRename(from, to);
         calls++;
         if (calls === 1) {
-          if (changed !== "control") {
+          if (changed === "staging-in-place") {
+            try { rewriteStagingInPlace(from); } catch (error) { fixtureFailure = error; throw error; }
+          }
+          else if (changed !== "control" && changed !== "squat-after-success") {
             const target = changed === "destination" ? to : from;
             const bytes = readFileSync(target);
             nativeRename(target, join(root, "displaced"));
             writeFileSync(target, bytes, { mode: 0o600, flag: "wx" });
+            replaced = target;
+            replacement = bytes;
+            replacementIdentity = fs.lstatSync(target, { bigint: true });
           }
           throw Object.assign(new Error("synthetic sharing refusal"), { code: "EPERM" });
         }
-        return nativeRename(from, to);
+        const result = nativeRename(from, to);
+        if (changed === "squat-after-success") {
+          replaced = from;
+          replacement = Buffer.from("synthetic replacement");
+          writeFileSync(from, replacement, { flag: "wx", mode: 0o600 });
+          replacementIdentity = fs.lstatSync(from, { bigint: true });
+        }
+        return result;
       };
       syncBuiltinESMExports();
       try {
         try { await fixture.write(); } catch (error) { refusal = error; }
-        if (changed === "control") {
+        if (fixtureFailure) throw fixtureFailure;
+        if (changed === "control" || changed === "squat-after-success") {
           assert.ok(!refusal, "unchanged identities permit daily persistence");
           assert.equal(calls, 2);
           assert.notEqual(fs.lstatSync(fixture.path).ino, priorIdentity.ino, "control publishes the staged inode");
+          if (changed === "squat-after-success") assertStagingSurvives(replaced, replacementIdentity, replacement);
         } else {
           assert.equal(calls, 1, "identity drift prevents the next daily rename");
           assert.equal(refusal?.message, writer.refusal);
           assert.ok(readFileSync(fixture.path).equals(prior), "refusal retains prior receipt bytes");
+          if (changed === "staging") assertStagingSurvives(replaced, replacementIdentity, replacement);
         }
       } finally {
         fs.renameSync = nativeRename;
         syncBuiltinESMExports();
+        restorePin();
         rmSync(root, { recursive: true, force: true });
       }
     });
   }
+}
+
+for (const failStat of [false, true]) {
+  test(`daily receipt descriptor: ${failStat ? "a create observation failure closes the handle" : "a successful observation closes the handle"}`, async () => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-daily-descriptor-")));
+    const manifestPath = join(root, "manifest.json");
+    writeFileSync(manifestPath, '{}\n', { mode: 0o600 });
+    const fixture = dailyWriters.find(writer => writer.name === "daily receipt identity")
+      .prepare(root, manifestPath, { id: "v1-abcdef1234567890" });
+    const native = { open: fs.openSync, stat: fs.fstatSync, close: fs.closeSync };
+    let created;
+    let closed = false;
+    let failed = false;
+    fs.openSync = (path, flags, ...args) => {
+      const descriptor = native.open(path, flags, ...args);
+      if (path === `${fixture.path}.tmp-${process.pid}` && flags === "wx") created = descriptor;
+      return descriptor;
+    };
+    fs.fstatSync = (descriptor, ...args) => {
+      if (failStat && descriptor === created && !failed) {
+        failed = true;
+        throw new Error("synthetic descriptor observation refusal");
+      }
+      return native.stat(descriptor, ...args);
+    };
+    fs.closeSync = descriptor => {
+      if (descriptor === created) closed = true;
+      return native.close(descriptor);
+    };
+    syncBuiltinESMExports();
+    try {
+      if (failStat) await assert.rejects(fixture.write);
+      else await fixture.write();
+      assert.equal(closed, true, "the exclusive-create descriptor must close even when its first observation fails");
+    } finally {
+      fs.openSync = native.open;
+      fs.fstatSync = native.stat;
+      fs.closeSync = native.close;
+      syncBuiltinESMExports();
+      if (created !== undefined && !closed) native.close(created);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const operation of ["clear", "persist", "read"]) {
+  for (const replaced of [false, true]) {
+    test(`daily receipt ownership: ${operation} ${replaced ? "refuses a same-bytes replacement" : "accepts its own publication"}`, () => {
+      const root = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-daily-ownership-")));
+      const identity = { id: "v1-abcdef1234567890" };
+      const manifestPath = join(root, "manifest.json");
+      writeFileSync(manifestPath, '{}\n', { mode: 0o600 });
+      const options = { home: root, platform: "win32", machineLockRoot: join(root, "locks") };
+      const input = { plan: { identity, manifest_path: manifestPath }, snapshot: { identity }, phase: "preparing" };
+      try {
+        const published = writeDailyRefreshUpdateTransaction(input, options);
+        const path = dailyRefreshUpdateTransactionPath(identity, options);
+        const bytes = readFileSync(path);
+        if (replaced) {
+          nativeRename(path, join(root, "displaced"));
+          writeFileSync(path, bytes, { flag: "wx", mode: 0o600 });
+        }
+        const current = fs.lstatSync(path, { bigint: true });
+        const invoke = operation === "clear"
+          ? () => clearDailyRefreshUpdateTransaction(identity, { ...options, manifestPath, expected: published })
+          : operation === "persist"
+            ? () => writeDailyRefreshUpdateTransaction({ ...input, phase: "paused" }, { ...options, expectedPredecessor: published })
+            : () => readDailyRefreshUpdateTransaction(identity, { ...options, manifestPath, expected: published });
+        if (replaced) {
+          assert.throws(invoke, /daily update transaction receipt is unsafe/);
+          assertStagingSurvives(path, current, bytes);
+        } else assert.ok(invoke(), "the original publication remains valid for its caller");
+      } finally { rmSync(root, { recursive: true, force: true }); }
+    });
+  }
+}
+
+for (const replaced of [false, true]) {
+  test(`manifest publication rollback: ${replaced ? "refuses a same-bytes replacement" : "accepts its own publication"}`, () => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-manifest-publication-")));
+    const path = join(root, "manifest.json");
+    writeFileSync(path, '{"version":1}\n', { mode: 0o600 });
+    try {
+      const published = writeManifestAtomically(path, { version: 2 }, { backupTag: "forward", filesystemPlatform: "win32" });
+      const bytes = readFileSync(path);
+      if (replaced) {
+        nativeRename(path, join(root, "displaced"));
+        writeFileSync(path, bytes, { flag: "wx", mode: 0o600 });
+      }
+      const current = fs.lstatSync(path, { bigint: true });
+      const rollback = () => writeManifestAtomically(path, { version: 1 }, {
+        backupTag: "restore", filesystemPlatform: "win32", expectedPublication: published,
+      });
+      if (replaced) {
+        assert.throws(rollback, { code: "FOLDER_MANIFEST_CHANGED" });
+        assertStagingSurvives(path, current, bytes);
+      } else {
+        rollback();
+        assert.equal(JSON.parse(readFileSync(path)).version, 1);
+      }
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
 }
 
 const nativeOptions = {

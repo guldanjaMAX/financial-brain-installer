@@ -3,6 +3,23 @@ import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+
+// These dependency fixtures store only in-memory manifests. Model the writer's
+// publication receipt explicitly; missing receipts must fail closed in product.
+function memoryManifestWriter(write) {
+  let current;
+  return async (path, value, options = {}) => {
+    if (options.expectedPublication && !options.expectedPublication.isCurrent()) {
+      throw new Error("synthetic manifest publication changed");
+    }
+    const result = await write(path, value);
+    const publication = {};
+    current = publication;
+    publication.isCurrent = () => current === publication;
+    options.onPublished?.(publication);
+    return result;
+  };
+}
 import worker from "../worker/src/index.js";
 import {
   cmdConnectAnthropic,
@@ -333,7 +350,7 @@ function setupHarness(before, { secretPresent = false, failDeploy = false, worke
     journal: () => journalPresent,
     deps: {
       loadManifest: () => structuredClone(starting),
-      saveManifestAtomically: (_path, value) => { calls.push("manifest"); saved.push(structuredClone(value)); },
+      saveManifestAtomically: memoryManifestWriter((_path, value) => { calls.push("manifest"); saved.push(structuredClone(value)); }),
       journalExists: () => false,
       writeJournal: () => { calls.push("journal"); journalPresent = true; },
       removeJournal: () => { calls.push("journal-remove"); journalPresent = false; },
@@ -477,7 +494,7 @@ test("rollback rechecks live health and refuses a deploy after the Worker become
     "from-clipboard": true,
   }, {
     loadManifest: () => ({ m: manifest() }),
-    saveManifestAtomically: () => calls.push("manifest"),
+    saveManifestAtomically: memoryManifestWriter(() => calls.push("manifest")),
     acquireLock: async (_input, action) => action(),
     journalExists: () => false,
     writeJournal: async () => { journal = true; },
@@ -932,7 +949,7 @@ test("JSON failures always carry explicit rollback fields", async () => {
     json: true,
   }, {
     loadManifest: () => ({ m: manifest() }),
-    saveManifestAtomically: async (_path, value) => saved.push(structuredClone(value)),
+    saveManifestAtomically: memoryManifestWriter(async (_path, value) => saved.push(structuredClone(value))),
     acquireLock: async (_input, action) => action(),
     journalExists: () => false,
     writeJournal: async () => {},

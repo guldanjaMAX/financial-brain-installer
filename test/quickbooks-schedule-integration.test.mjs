@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { buildProviderSchedulerPlan, runProviderScheduledIngest } from '../operations/provider-scheduler.mjs';
 import * as brain from '../brain.mjs';
 import * as qb from '../operations/quickbooks-schedule.mjs';
+import { writeManifestAtomically } from '../operations/folder-retirement.mjs';
 const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'qb-schedule-')));
 const path = join(root, 'brain.manifest.json');
 const fixture = () => ({ client: { slug: 'fixture', timezone: 'America/Phoenix' },
@@ -13,6 +14,64 @@ const fixture = () => ({ client: { slug: 'fixture', timezone: 'America/Phoenix' 
   operations: { quickbooks_schedule: { enabled: true }, daily_refresh: { enabled: true } } });
 const now = new Date('2026-07-01T14:00:00.000Z');
 const mac = { platform: 'darwin', uid: 501, home: root, localTimeZone: 'America/Phoenix', now };
+let publicationSequence = 0;
+function writeSyntheticManifest(file, value, options) {
+  return writeManifestAtomically(file, value, {
+    ...options, filesystemPlatform: 'win32', now: () => new Date(Date.UTC(2026, 9, 24, 1, 0, ++publicationSequence)),
+  });
+}
+
+for (const branch of ['command', 'connect', 'daily']) {
+  for (const replaced of [false, true]) {
+    test(`manifest rollback ownership: ${branch} ${replaced ? 'preserves another writer' : 'restores its own publication'}`, async () => {
+      const home = realpathSync.native(mkdtempSync(join(tmpdir(), 'qb-manifest-ownership-')));
+      const manifest = join(home, 'manifest.json');
+      const m = fixture();
+      if (branch === 'connect') delete m.operations.quickbooks_schedule;
+      writeFileSync(manifest, JSON.stringify(m));
+      let sequence = 0;
+      let other;
+      let otherBytes;
+      const writer = (file, value, writeOptions) => writeManifestAtomically(file, value, {
+        ...writeOptions, filesystemPlatform: 'win32', now: () => new Date(Date.UTC(2026, 9, 24, 0, 0, ++sequence)),
+      });
+      const opts = { platform: 'win32', principal: 'sid:S-1-5-21-100', localTimezone: 'America/Phoenix', now, quiet: true,
+        withBrainLifecycleLock: async (_input, run) => run({ assertOwned() {} }),
+        cli: { buildConfiguredDailyPlan: async () => ({ identity: { id: 'v1-abcdef1234567890' } }),
+          writeManifestAtomically: writer,
+          cmdDaily: async (_argv, dailyOptions) => {
+            if (branch === 'daily') {
+              const publication = writer(manifest, { ...m, operations: { ...m.operations, daily_refresh: { enabled: false } } }, { backupTag: 'daily-forward' });
+              dailyOptions.onManifestPublished?.(publication);
+            }
+            if (replaced) {
+              otherBytes = readFileSync(manifest);
+              renameSync(manifest, join(home, 'displaced'));
+              writeFileSync(manifest, otherBytes, { flag: 'wx', mode: 0o600 });
+              other = lstatSync(manifest, { bigint: true });
+            }
+            if (branch !== 'daily') throw new Error('synthetic daily failure');
+            return { schedule: { installed: true, enabled: true, verified: true } };
+          },
+        },
+        dailyStatus: () => ({ installed: false }), restoreDaily() {},
+        quickBooksStatus: () => ({ installed: false, state: null }),
+        quickBooksRegister() { throw new Error('synthetic registration failure'); },
+        quickBooksRestore() {}, syncExpectations: async () => {},
+      };
+      try {
+        const invoke = branch === 'command'
+          ? () => qb.commandQuickBooksSchedule(['schedule', 'off', manifest], opts)
+          : () => qb.reregisterAfterManifestChange(manifest, opts);
+        await assert.rejects(invoke);
+        if (replaced) {
+          assert.equal(lstatSync(manifest, { bigint: true }).ino, other.ino, 'rollback must preserve the other publication inode');
+          assert.deepEqual(readFileSync(manifest), otherBytes, 'rollback must preserve the other publication bytes');
+        } else assert.deepEqual(JSON.parse(readFileSync(manifest)), m, 'the unchanged publication can be rolled back');
+      } finally { rmSync(home, { recursive: true, force: true }); }
+    });
+  }
+}
 
 test('opted-in macOS provider uses two times and the guarded runner; legacy owners keep their old definition', () => {
   writeFileSync(path, JSON.stringify(fixture()));
@@ -152,7 +211,7 @@ test('macOS schedule-off verifies native removal and retains the previous defini
     withBrainLifecycleLock: async (_input, run) => run({ assertOwned() {} }), syncExpectations: async () => {},
     cli: { buildConfiguredDailyPlan: async () => ({ identity: { id: 'v1-fixture' } }),
       cmdDaily: async () => { daily++; return { schedule: { installed: true, enabled: true, verified: true } }; },
-      writeManifestAtomically: (p, value) => writeFileSync(p, JSON.stringify(value)) },
+      writeManifestAtomically: writeSyntheticManifest },
     dailyStatus: () => ({ installed: false }), restoreDaily() {},
     launchctl(args) {
       if (args[0] === 'print') {
@@ -284,7 +343,7 @@ test('schedule on/off/status uses the two-task transaction and persists only an 
   const options = { quiet: true, platform: 'win32', principal: 'sid:S-1-5-21-100', localTimezone: 'America/Phoenix', now,
     withBrainLifecycleLock: async (_input, run) => run({ assertOwned() {} }),
     cli: { buildConfiguredDailyPlan: async () => ({ identity: { id: 'v1-fixture' } }),
-      writeManifestAtomically: (p, value) => writeFileSync(p, JSON.stringify(value)),
+      writeManifestAtomically: writeSyntheticManifest,
       cmdDaily: async () => { daily++; return { schedule: { installed: true, enabled: true, verified: true } }; } },
     dailyStatus: () => ({ installed: false }), restoreDaily() {},
     quickBooksStatus: () => ({ installed, enabled: installed, verified: installed, state: null }),

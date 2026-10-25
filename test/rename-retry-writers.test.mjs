@@ -1,25 +1,43 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
-import { syncBuiltinESMExports } from "node:module";
+import { registerHooks, syncBuiltinESMExports } from "node:module";
+import { pinStagingMtime, rewriteStagingInPlace, assertStagingSurvives } from "./fixtures/rename-retry-staging.mjs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import {
+const helperUrl = new URL("../operations/rename-retry.mjs", import.meta.url).href;
+registerHooks({ load(url, context, nextLoad) {
+  const result = nextLoad(url, context);
+  if (url !== helperUrl) return result;
+  const parts = String(result.source).split("platform = process.platform,");
+  assert.equal(parts.length, 3, "both retry APIs must expose their platform default");
+  return { ...result, source: parts.join("platform = globalThis.__brainRenameTestPlatform ?? process.platform,") };
+} });
+const {
   ANTHROPIC_SECRET_NAME, answerSetupJournal, answerSetupJournalPath,
   resolvedAnswerModels, runAnthropicAnswerSetup, saveManifestAtomically,
-} from "../operations/answer-setup.mjs";
-import {
+} = await import("../operations/answer-setup.mjs");
+const {
   installedManifestPointerPath, readInstalledManifest, rememberInstalledManifest,
-} from "../operations/installed-manifest.mjs";
-import { persistReceiptArtifacts, renderFieldChecklist } from "../scripts/field-prepare.mjs";
-import { saveState } from "../ingest/run.mjs";
-import { saveDrainState } from "../connectors/whatsapp.mjs";
-import { desktopBindingStore, makeDesktopBinding } from "../connectors/quickbooks-desktop-binding.mjs";
-import { writeQuickBooksScheduleState } from "../operations/quickbooks-schedule-state.mjs";
-import { writeBootstrapStatusFile } from "../operations/bootstrap-status.mjs";
-import { writeCuratedCoverageLedger } from "../operations/curated-dual-sync.mjs";
+} = await import("../operations/installed-manifest.mjs");
+const { persistReceiptArtifacts, renderFieldChecklist } = await import("../scripts/field-prepare.mjs");
+const { saveState } = await import("../ingest/run.mjs");
+const { saveDrainState } = await import("../connectors/whatsapp.mjs");
+const { desktopBindingStore, makeDesktopBinding } = await import("../connectors/quickbooks-desktop-binding.mjs");
+const { writeQuickBooksScheduleState } = await import("../operations/quickbooks-schedule-state.mjs");
+const { writeBootstrapStatusFile } = await import("../operations/bootstrap-status.mjs");
+const { writeCuratedCoverageLedger } = await import("../operations/curated-dual-sync.mjs");
+
+function protectWithMetadataChange(path) {
+  const before = fs.lstatSync(path, { bigint: true });
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  fs.chmodSync(path, 0o400);
+  fs.chmodSync(path, Number(before.mode & 0o777n));
+  assert.notEqual(fs.lstatSync(path, { bigint: true }).ctimeNs, before.ctimeNs,
+    "the protection fixture must change staging metadata");
+}
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const json = value => `${JSON.stringify(value, null, 2)}\n`;
@@ -93,8 +111,8 @@ const identityCases = [
   },
   {
     name: "desktop binding", refusal: { code: "QB_BINDING_INVALID" },
-    prepare(root) {
-      const store = desktopBindingStore({ home: root, platform: "win32", protectFile() {}, protectDirectory() {} });
+    prepare(root, { protectFile = protectWithMetadataChange } = {}) {
+      const store = desktopBindingStore({ home: root, platform: "win32", protectFile, protectDirectory() {} });
       const value = makeDesktopBinding({ country: "US", accounts: [{ ListID: "80000001-1234567890", TimeCreated: "2026-01-01T00:00:00Z" }] });
       store.write(value);
       return { path: join(root, ".brain", "quickbooks-desktop.json"), write: () => store.write(value) };
@@ -102,10 +120,10 @@ const identityCases = [
   },
   {
     name: "schedule evidence", refusal: { code: "QB_SCHEDULE_STATE_INVALID" },
-    prepare(root) {
+    prepare(root, { protectFile = protectWithMetadataChange } = {}) {
       const plan = { identity: { id: "v1-0123456789abcdef" } };
       const source = { key: "quickbooks", configuration_hash: `sha256:${"a".repeat(64)}` };
-      const options = { home: root, platform: "win32", protectFile() {}, protectDirectory() {} };
+      const options = { home: root, platform: "win32", protectFile, protectDirectory() {} };
       const value = { last_complete_snapshot_at: null, last_run_failed: false };
       writeQuickBooksScheduleState(plan, source, value, options);
       return { path: join(root, ".brain", "quickbooks-schedule", plan.identity.id, "quickbooks.json"),
@@ -114,43 +132,171 @@ const identityCases = [
   },
 ];
 
-for (const site of identityCases) for (const replacement of ["none", "destination", "staging"]) {
-  test(`${site.name} retry identity: ${replacement}`, { skip: process.platform !== "win32" }, t => {
+for (const site of identityCases) for (const replacement of ["none", "destination", "staging", "staging-in-place", "squat-after-success"]) {
+  test(`${site.name} retry identity: ${replacement}`, t => {
     const root = fixture(t);
-    const { path, write } = site.prepare(root);
+    const restorePin = pinStagingMtime(root);
+    t.after(restorePin);
+    let fixtureError;
+    const runFixture = action => {
+      try { return action(); }
+      catch (error) { fixtureError = error; throw error; }
+    };
+    const { path, write } = site.prepare(root, {
+      protectFile: path => runFixture(() => protectWithMetadataChange(path)),
+    });
     const before = fs.existsSync(path) ? fs.readFileSync(path) : null;
     const originalRename = fs.renameSync;
     const substitute = join(root, "substitute.json");
     const substituteBytes = Buffer.from("synthetic concurrent replacement\n");
     fs.writeFileSync(substitute, substituteBytes, { mode: 0o600 });
+    let substituteIdentity = fs.lstatSync(substitute, { bigint: true });
     let calls = 0;
     let staged;
+    globalThis.__brainRenameTestPlatform = "win32";
     fs.renameSync = (from, to) => {
       if (to !== path) return originalRename(from, to);
       calls++;
       staged = from;
       if (calls === 1) {
-        if (replacement !== "none") originalRename(substitute, replacement === "destination" ? to : from);
+        if (replacement === "staging-in-place") runFixture(() => rewriteStagingInPlace(from));
+        else if (["destination", "staging"].includes(replacement)) {
+          const changed = replacement === "destination" ? to : from;
+          if (fs.existsSync(changed)) originalRename(changed, `${from}.displaced`);
+          originalRename(substitute, changed);
+          substituteIdentity = fs.lstatSync(changed, { bigint: true });
+        }
         throw Object.assign(new Error("synthetic rename refusal"), { code: "EPERM" });
       }
-      return originalRename(from, to);
+      const result = originalRename(from, to);
+      if (replacement === "squat-after-success") {
+        originalRename(substitute, from);
+        substituteIdentity = fs.lstatSync(from, { bigint: true });
+      }
+      return result;
     };
     syncBuiltinESMExports();
     try {
-      if (replacement === "none") {
+      if (["none", "squat-after-success"].includes(replacement)) {
         write();
         assert.equal(calls, 2, "unchanged identities permit the retry");
         assert.ok(fs.existsSync(path));
-        assert.ok(!fs.existsSync(staged));
+        if (replacement === "squat-after-success") assertStagingSurvives(staged, substituteIdentity, substituteBytes);
+        else assert.ok(!fs.existsSync(staged));
       } else {
         assert.throws(write, site.refusal);
         assert.equal(calls, 1, "identity drift must refuse before a second rename");
         if (replacement === "destination") assert.deepEqual(fs.readFileSync(path), substituteBytes);
         else if (before) assert.deepEqual(fs.readFileSync(path), before);
         else assert.ok(!fs.existsSync(path));
+        if (replacement === "staging") assertStagingSurvives(staged, substituteIdentity, substituteBytes);
       }
     } finally {
+      delete globalThis.__brainRenameTestPlatform;
       fs.renameSync = originalRename;
+      syncBuiltinESMExports();
+      // Product refusal wrappers must never turn a failed fixture precondition
+      // into a passing negative case.
+      if (fixtureError) throw fixtureError;
+    }
+  });
+}
+
+for (const site of identityCases.filter(site => ["answer manifest", "ingest checkpoint", "field checklist", "desktop binding", "schedule evidence"].includes(site.name))) {
+  for (const failStat of [false, true]) test(`${site.name} create identity fstat: ${failStat ? "failure closes descriptor" : "control closes descriptor"}`, t => {
+    const root = fixture(t);
+    const { write } = site.prepare(root);
+    const nativeOpen = fs.openSync, nativeStat = fs.fstatSync, nativeClose = fs.closeSync;
+    let descriptor, injected = false, closed = 0;
+    fs.openSync = (path, flags, ...args) => {
+      const fd = nativeOpen(path, flags, ...args);
+      const exclusive = typeof flags === "string" ? flags.includes("x")
+        : (flags & fs.constants.O_EXCL) !== 0 && (flags & fs.constants.O_CREAT) !== 0;
+      if (descriptor === undefined && exclusive && typeof path === "string" && path.startsWith(root)) descriptor = fd;
+      return fd;
+    };
+    fs.fstatSync = (fd, ...args) => {
+      if (failStat && fd === descriptor && !injected) {
+        injected = true;
+        throw Object.assign(new Error("synthetic staging stat refusal"), { code: "EIO" });
+      }
+      return nativeStat(fd, ...args);
+    };
+    fs.closeSync = fd => {
+      if (fd === descriptor) closed++;
+      return nativeClose(fd);
+    };
+    syncBuiltinESMExports();
+    try {
+      if (failStat) assert.throws(write);
+      else write();
+      assert.ok(descriptor !== undefined, "the fixture must create the staged descriptor");
+      assert.equal(injected, failStat);
+      assert.ok(closed >= 1, "a failed create-identity observation must still close its descriptor");
+    } finally {
+      fs.openSync = nativeOpen; fs.fstatSync = nativeStat; fs.closeSync = nativeClose;
+      syncBuiltinESMExports();
+      if (descriptor !== undefined && closed === 0) nativeClose(descriptor);
+    }
+  });
+}
+
+for (const site of identityCases) {
+  test(`${site.name} exclusive-create refusal preserves the existing staging file`, t => {
+    const root = fixture(t);
+    const { write } = site.prepare(root);
+    const nativeOpen = fs.openSync;
+    const bytes = Buffer.from("synthetic existing staging file");
+    let contested, identity;
+    fs.openSync = (path, flags, ...args) => {
+      const exclusive = typeof flags === "string" ? flags.includes("x")
+        : (flags & fs.constants.O_EXCL) !== 0 && (flags & fs.constants.O_CREAT) !== 0;
+      if (!contested && exclusive && typeof path === "string" && path.startsWith(root)) {
+        contested = path;
+        fs.writeFileSync(path, bytes);
+        identity = fs.lstatSync(path, { bigint: true });
+      }
+      return nativeOpen(path, flags, ...args);
+    };
+    syncBuiltinESMExports();
+    try {
+      assert.throws(write);
+      assert.ok(contested, "the fixture must reach exclusive staging creation");
+      assertStagingSurvives(contested, identity, bytes);
+    } finally {
+      fs.openSync = nativeOpen;
+      syncBuiltinESMExports();
+    }
+  });
+}
+
+for (const replace of [false, true]) {
+  test(`coverage ledger post-publish readback failure preserves ${replace ? "replacement" : "absence"} at staging path`, t => {
+    const root = fixture(t);
+    const path = join(root, "ledger.json");
+    const nativeRename = fs.renameSync;
+    const nativeRead = fs.readFileSync;
+    const bytes = Buffer.from("synthetic next staging owner");
+    let staged, identity, published = false;
+    fs.renameSync = (from, to) => {
+      const result = nativeRename(from, to);
+      if (to === path) {
+        published = true; staged = from;
+        if (replace) { fs.writeFileSync(from, bytes); identity = fs.lstatSync(from, { bigint: true }); }
+      }
+      return result;
+    };
+    fs.readFileSync = (file, ...args) => {
+      if (published && file === path) throw new Error("synthetic readback refusal");
+      return nativeRead(file, ...args);
+    };
+    syncBuiltinESMExports();
+    try {
+      assert.throws(() => writeCuratedCoverageLedger(path, { schema_version: 1 }), /coverage ledger could not be replaced safely/);
+      if (replace) assertStagingSurvives(staged, identity, bytes);
+      else assert.ok(!fs.existsSync(staged));
+    } finally {
+      fs.renameSync = nativeRename; fs.readFileSync = nativeRead;
       syncBuiltinESMExports();
     }
   });
@@ -281,6 +427,83 @@ for (const mode of modes) {
   });
 }
 
+function answerSetupDependencies(checkWorker) {
+  return {
+    platform: process.platform,
+    now: () => new Date("2026-01-01T00:00:00.000Z"),
+    listSecretNames: async () => [ANTHROPIC_SECRET_NAME],
+    verifyVersion: async () => {}, prepareDaily: async () => {}, reconcileDaily: async () => {},
+    verifyDeploy: async () => {}, deploy: async () => {},
+    checkWorker: checkWorker ?? (async current => {
+      const models = resolvedAnswerModels(current);
+      return { answer: { model: models.answer_model, status: "ok" }, check: { model: models.gate_model, status: "ok" } };
+    }),
+    preflight: async () => { assert.fail("dashboard fixture must not call a provider"); },
+    readClipboard: async () => { assert.fail("dashboard fixture must not read credentials"); },
+  };
+}
+
+for (const change of ["none", "journal-refused", "manifest-refused", "manifest-owned-rollback", "manifest-replaced", "journal-replaced"]) {
+  test(`answer setup published ownership: ${change}`, async t => {
+    const root = fixture(t);
+    const manifestPath = join(root, "manifest.json");
+    const journalPath = answerSetupJournalPath(manifestPath);
+    fs.writeFileSync(manifestPath, json({ retrieval: {}, safety: {} }));
+    const originalManifest = fs.readFileSync(manifestPath);
+    const restorePin = pinStagingMtime(root);
+    t.after(restorePin);
+    const nativeRename = fs.renameSync;
+    let replacement, replacementIdentity, replacementBytes, renameCalls = 0;
+    const substitute = (path, bytes) => {
+      const candidate = join(root, "other-writer.json");
+      fs.writeFileSync(candidate, bytes, { flag: "wx" });
+      if (fs.existsSync(path)) nativeRename(path, path + ".displaced");
+      nativeRename(candidate, path);
+      replacement = path; replacementIdentity = fs.lstatSync(path, { bigint: true }); replacementBytes = bytes;
+    };
+    globalThis.__brainRenameTestPlatform = "win32";
+    fs.renameSync = (from, to) => {
+      if ((change === "journal-refused" && to === journalPath) || (change === "manifest-refused" && to === manifestPath)) {
+        if (++renameCalls === 1) {
+          substitute(to, fs.readFileSync(from));
+          throw Object.assign(new Error("synthetic rename refusal"), { code: "EPERM" });
+        }
+      }
+      return nativeRename(from, to);
+    };
+    syncBuiltinESMExports();
+    const deps = answerSetupDependencies(async current => {
+      if (["manifest-owned-rollback", "manifest-replaced"].includes(change)) {
+        if (change === "manifest-replaced") substitute(manifestPath, fs.readFileSync(manifestPath));
+        throw new Error("synthetic check refusal");
+      }
+      if (change === "journal-replaced") substitute(journalPath, fs.readFileSync(journalPath));
+      const models = resolvedAnswerModels(current);
+      return { answer: { model: models.answer_model, status: "ok" }, check: { model: models.gate_model, status: "ok" } };
+    });
+    try {
+      const result = runAnthropicAnswerSetup({ manifestPath, flags: { "key-set-in-dashboard": true } }, deps);
+      if (change === "none") {
+        await result;
+        assert.ok(!fs.existsSync(journalPath), "successful setup removes its own journal");
+      } else if (change === "manifest-owned-rollback") {
+        await assert.rejects(result, error => error.rolledBack === true);
+        assert.deepEqual(fs.readFileSync(manifestPath), originalManifest);
+        assert.ok(!fs.existsSync(journalPath));
+      } else {
+        await assert.rejects(result);
+        assertStagingSurvives(replacement, replacementIdentity, replacementBytes);
+        if (change === "journal-refused") assert.deepEqual(fs.readFileSync(manifestPath), originalManifest);
+        if (change === "manifest-refused") assert.equal(renameCalls, 1, "an unpublished manifest must not be rolled back");
+      }
+    } finally {
+      delete globalThis.__brainRenameTestPlatform;
+      fs.renameSync = nativeRename;
+      syncBuiltinESMExports();
+    }
+  });
+}
+
 function inheritedImports() {
   const imports = [];
   for (let index = 0; index < process.execArgv.length; index++) {
@@ -291,7 +514,7 @@ function inheritedImports() {
   return imports;
 }
 
-for (const mode of modes) {
+for (const mode of [...modes, "fstat-refusal"]) {
   test(`bundle manifest CLI generation writer: ${mode}`, t => {
     const root = fixture(t);
     const expected = {
@@ -324,8 +547,16 @@ for (const mode of modes) {
       },
     });
     assert.ok(!child.error, "synthetic generation process must finish within its deadline");
-    assert.equal(child.status, expectedRefusal(mode) ? 1 : 0, "CLI must reflect publication success or failure");
     const events = JSON.parse(fs.readFileSync(eventsPath, "utf8"));
+    if (mode === "fstat-refusal") {
+      assert.equal(child.status, 1);
+      assert.equal(events.createFstatFailed, true);
+      assert.equal(events.createdDescriptorClosed, true, "a failed create-identity observation must still close its descriptor");
+      assert.equal(events.calls, 0);
+      assert.equal(fs.readFileSync(target, "utf8"), "prior manifest\n");
+      return;
+    }
+    assert.equal(child.status, expectedRefusal(mode) ? 1 : 0, "CLI must reflect publication success or failure");
     assert.deepEqual(events, {
       calls: expectedCalls(mode),
       samePath: true, sameBytes: true, sameInode: true,
@@ -378,8 +609,8 @@ for (const mode of modes) {
   });
 }
 
-for (const mode of ["race-destination", "race-staging"]) {
-  test(`bundle manifest CLI retry identity: ${mode}`, { skip: process.platform !== "win32" }, t => {
+for (const mode of ["race-destination", "race-staging", "race-staging-in-place"]) {
+  test(`bundle manifest CLI retry identity: ${mode}`, t => {
     const root = fixture(t);
     const inputPath = join(root, "generation-input.json");
     fs.writeFileSync(inputPath, json({ schema_version: 1, bundles: [] }));
@@ -398,6 +629,7 @@ for (const mode of ["race-destination", "race-staging"]) {
         HOME: root, USERPROFILE: root, TEMP: root, TMP: root,
         BRAIN_RENAME_WRITER_TARGET: target, BRAIN_RENAME_WRITER_EVENTS: eventsPath,
         BRAIN_RENAME_WRITER_MODE: mode, BRAIN_RENAME_WRITER_INPUT: inputPath,
+        BRAIN_RENAME_TEST_PLATFORM: "win32",
         ...(process.env.BRAIN_RENAME_MUTANT ? { BRAIN_RENAME_MUTANT: process.env.BRAIN_RENAME_MUTANT } : {}),
       },
     });
@@ -408,5 +640,10 @@ for (const mode of ["race-destination", "race-staging"]) {
     assert.equal(fs.readFileSync(target, "utf8"), mode === "race-destination"
       ? "synthetic concurrent replacement\n" : "prior manifest\n");
     assert.match(child.stderr, /package_bundle_verification_failed/);
+    if (mode === "race-staging-in-place") assert.equal(events.inPlaceInvisible, true);
+    if (mode === "race-staging") {
+      assert.equal(fs.lstatSync(`${target}.tmp`, { bigint: true }).ino.toString(), events.replacementInode);
+      assert.equal(fs.readFileSync(`${target}.tmp`, "utf8"), "synthetic concurrent replacement\n");
+    }
   });
 }

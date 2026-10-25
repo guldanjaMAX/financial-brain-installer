@@ -25,7 +25,7 @@
  *    option left for an installed app, which is why this opens a local server.
  */
 
-import { renameWithRetrySync } from "../operations/rename-retry.mjs";
+import { captureStagedProof, renameWithRetrySync, removeOwnedStaging, sameRenameIdentity, stagedBytesMatch } from "../operations/rename-retry.mjs";
 import { createServer } from "node:http";
 import { createHash, randomBytes } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
@@ -715,6 +715,7 @@ function runWindowsAcl(path, options, label) {
 function createPrivatePayloadFile(path, bytes, platform, options, label) {
   let descriptor;
   let identity;
+  let created;
   try {
     descriptor = openSync(
       path,
@@ -722,6 +723,7 @@ function createPrivatePayloadFile(path, bytes, platform, options, label) {
         (fsConstants.O_NOFOLLOW || 0),
       0o600,
     );
+    created = fstatSync(descriptor, { bigint: true });
     identity = fstatSync(descriptor);
     if (!identity.isFile() || identity.nlink !== 1) {
       throw new Error(`the Google token ${label} was not created as a private regular file`);
@@ -752,14 +754,17 @@ function createPrivatePayloadFile(path, bytes, platform, options, label) {
     }
     writeAll(descriptor, bytes);
     fsyncSync(descriptor);
+    identity = fstatSync(descriptor);
     closeSync(descriptor);
     descriptor = undefined;
-    return identity;
+    const proof = captureStagedProof(path, bytes, created);
+    if (!proof) throw new Error(`the Google token ${label} identity changed before verification`);
+    return { identity, created, proof };
   } catch (error) {
     if (descriptor !== undefined) {
       try { closeSync(descriptor); } catch { /* preserve the persistence error */ }
     }
-    if (identity) removeIfSame(path, identity);
+    if (created) removeOwnedStaging(path, created);
     throw error;
   }
 }
@@ -878,14 +883,20 @@ function writeFileStore(path, store, options = {}) {
   const renameFile = options.renameFile || renameSync;
   let stagedIdentity;
   let backupIdentity;
+  let stagedCreated;
+  let stagedProof;
+  let backupCreated;
+  let backupProof;
+  let publishedIdentity;
+  let backupPublished = false;
   let priorBytes;
   let priorPayload;
   let backupBytes;
   let committed = false;
   try {
-    stagedIdentity = createPrivatePayloadFile(
+    ({ identity: stagedIdentity, created: stagedCreated, proof: stagedProof } = createPrivatePayloadFile(
       temporary, encoded, platform, options, "staging file",
-    );
+    ));
     verifyFilePayload(temporary, stagedIdentity, payload, options, "staged");
 
     const currentPrior = lstatIfPresent(path);
@@ -901,9 +912,9 @@ function writeFileStore(path, store, options = {}) {
       backupBytes = platform === "win32"
         ? (priorDecoded.encrypted ? Buffer.from(priorBytes) : protectWindowsPayload(priorPayload, options))
         : Buffer.from(priorBytes);
-      backupIdentity = createPrivatePayloadFile(
+      ({ identity: backupIdentity, created: backupCreated, proof: backupProof } = createPrivatePayloadFile(
         backup, backupBytes, platform, options, "rollback backup",
-      );
+      ));
       verifyFilePayload(backup, backupIdentity, priorPayload, options, "rollback backup");
     }
 
@@ -914,22 +925,25 @@ function writeFileStore(path, store, options = {}) {
       try {
         const finalPrior = lstatIfPresent(path);
         if ((prior === null) !== (finalPrior === null) ||
-            (prior && !sameFile(prior, finalPrior))) throw destinationChanged;
+            (prior && !sameRenameIdentity(finalPrior, prior))) throw destinationChanged;
         const staged = lstatIfPresent(temporary);
         if (!sameFile(stagedIdentity, staged) || !staged.isFile() || staged.nlink !== 1) throw stagingChanged;
       } catch (error) { revalidationError = error; throw error; }
     };
     syncTokenDirectory(path, platform, options, "prepared");
-    try { renameWithRetrySync(temporary, path, { rename: renameFile, platform, revalidate }); } catch (error) {
+    try { renameWithRetrySync(temporary, path, { rename: renameFile, platform, revalidate,
+      staged: { expected: stagedProof, bytes: encoded, refuse: () => { revalidationError = stagingChanged; throw stagingChanged; } },
+    }); } catch (error) {
       if (error === revalidationError) throw error;
       throw new Error("the Google token replacement could not be committed");
     }
     committed = true;
+    publishedIdentity = captureStagedProof(path, encoded, stagedCreated);
     const verified = verifyFilePayload(path, stagedIdentity, payload, options, "persisted");
     syncTokenDirectory(path, platform, options, "persisted");
 
     if (backupIdentity) {
-      if (!removeIfSame(backup, backupIdentity)) {
+      if (!backupPublished && !removeOwnedStaging(backup, backupCreated, { proof: backupProof, bytes: backupBytes })) {
         throw new Error("the Google token rollback backup could not be removed safely");
       }
       backupIdentity = undefined;
@@ -938,8 +952,8 @@ function writeFileStore(path, store, options = {}) {
     return verified;
   } catch (error) {
     if (!committed) {
-      if (stagedIdentity) removeIfSame(temporary, stagedIdentity);
-      if (backupIdentity) removeIfSame(backup, backupIdentity);
+      if (stagedCreated) removeOwnedStaging(temporary, stagedCreated);
+      if (backupCreated && !backupPublished) removeOwnedStaging(backup, backupCreated);
       throw error;
     }
 
@@ -947,7 +961,7 @@ function writeFileStore(path, store, options = {}) {
       // The provider may have consumed the previous refresh token already.
       // The caller includes a reconnect fence in this replacement, so keeping
       // it is safe even when readback fails. Never resurrect the backup.
-      if (backupIdentity) removeIfSame(backup, backupIdentity);
+      if (backupCreated && !backupPublished) removeOwnedStaging(backup, backupCreated);
       syncTokenDirectory(path, platform, options, "retained replacement", false);
       throw new Error("the newest credential replacement was retained but could not be verified");
     }
@@ -955,14 +969,14 @@ function writeFileStore(path, store, options = {}) {
     let restored = false;
     if (prior && backupIdentity && priorPayload) {
       try {
-        renameWithRetrySync(backup, path, { rename: renameFile, platform, revalidate: () => {
-          const current = lstatIfPresent(path);
-          const saved = lstatIfPresent(backup);
-          if (!sameFile(current, stagedIdentity) || !sameFile(saved, backupIdentity) ||
-              !current.isFile() || current.nlink !== 1 || !saved.isFile() || saved.nlink !== 1) {
+        renameWithRetrySync(backup, path, { rename: renameFile, platform,
+          staged: { expected: backupProof, bytes: backupBytes, refuse: () => { throw new Error("transaction identities changed"); } },
+          revalidate: () => {
+          if (!stagedBytesMatch(path, publishedIdentity, encoded)) {
             throw new Error("transaction identities changed");
           }
         } });
+        backupPublished = true;
         const restoredIdentity = lstatIfPresent(path);
         if (!sameFile(restoredIdentity, backupIdentity)) {
           throw new Error("rollback identity did not become durable");
@@ -975,7 +989,7 @@ function writeFileStore(path, store, options = {}) {
         restored = false;
       }
     } else if (!prior) {
-      restored = removeIfSame(path, stagedIdentity) && lstatIfPresent(path) === null;
+      restored = removeOwnedStaging(path, stagedCreated, { proof: publishedIdentity, bytes: encoded }) && lstatIfPresent(path) === null;
       if (restored) {
         try { syncTokenDirectory(path, platform, options, "absence rollback"); }
         catch { restored = false; }

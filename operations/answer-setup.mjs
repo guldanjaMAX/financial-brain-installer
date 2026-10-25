@@ -1,11 +1,10 @@
-import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync } from "./rename-retry.mjs";
+import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync, captureStagedProof, removeOwnedStaging, stagedBytesMatch } from "./rename-retry.mjs";
 import {
   closeSync,
   existsSync,
   fstatSync,
   openSync,
   readFileSync,
-  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
@@ -223,24 +222,37 @@ export function answerSetupJournalPath(manifestPath) {
   return join(dirname(manifestPath), ANSWER_SETUP_JOURNAL);
 }
 
-function atomicJsonWrite(path, value) {
-  const predecessor = captureRenameIdentity(path);
+function atomicJsonWrite(path, value, options = {}) {
+  const predecessor = captureRenameIdentity(path, { bigint: true });
+  const refuse = () => { throw new Error("the JSON file changed before it could be replaced"); };
+  const priorPublication = options.expectedPublication;
+  const predecessorMatches = () => priorPublication
+    ? stagedBytesMatch(path, priorPublication.proof, priorPublication.bytes)
+    : renameIdentityMatches(path, predecessor);
+  if (!predecessorMatches()) refuse();
   const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf8");
   const descriptor = openSync(temp, "wx", 0o600);
-  let staged;
+  let created;
   try {
-    writeFileSync(descriptor, `${JSON.stringify(value, null, 2)}\n`);
-    staged = fstatSync(descriptor);
+    created = fstatSync(descriptor, { bigint: true });
+    writeFileSync(descriptor, bytes);
   } finally { closeSync(descriptor); }
-  renameWithRetrySync(temp, path, { revalidate() {
-    if (!renameIdentityMatches(temp, staged) || !renameIdentityMatches(path, predecessor)) {
-      throw new Error("the JSON file changed before it could be replaced");
-    }
+  const staged = captureStagedProof(temp, bytes, created);
+  renameWithRetrySync(temp, path, { staged: { expected: staged, bytes, refuse }, revalidate() {
+    if (!predecessorMatches()) refuse();
   } });
+  const proof = captureStagedProof(path, bytes, created);
+  const publication = Object.freeze({ created, proof, bytes,
+    isCurrent: () => stagedBytesMatch(path, proof, bytes),
+  });
+  options.onPublished?.(publication);
+  if (!proof) refuse();
+  return publication;
 }
 
-export function saveManifestAtomically(path, manifest) {
-  atomicJsonWrite(path, manifest);
+export function saveManifestAtomically(path, manifest, options = {}) {
+  atomicJsonWrite(path, manifest, options);
   return manifest;
 }
 
@@ -344,8 +356,15 @@ export async function runAnthropicAnswerSetup({ manifestPath, flags = {} }, deps
   const readManifest = deps.loadManifest ?? ((file) => JSON.parse(readFileSync(file, "utf8")));
   const writeManifest = deps.saveManifestAtomically ?? saveManifestAtomically;
   const journalExists = deps.journalExists ?? (() => existsSync(path));
-  const writeJournal = deps.writeJournal ?? ((value) => atomicJsonWrite(path, value));
-  const removeJournal = deps.removeJournal ?? (() => { if (existsSync(path)) unlinkSync(path); });
+  let journalPublication = null;
+  let manifestPublication = null;
+  let manifestPublished = false;
+  const writeJournal = deps.writeJournal ?? ((value, options) => atomicJsonWrite(path, value, options));
+  const removeJournal = deps.removeJournal ?? (() => {
+    if (!journalPublication?.proof || !removeOwnedStaging(path, journalPublication.created, {
+      proof: journalPublication.proof, bytes: journalPublication.bytes,
+    })) throw new Error("the answer setup journal changed before it could be removed");
+  });
   const lock = deps.acquireLock ?? (async (_input, action) => action());
   let clearClipboard = mode === "clipboard";
   let clipboardCleared = mode !== "clipboard";
@@ -449,9 +468,17 @@ export async function runAnthropicAnswerSetup({ manifestPath, flags = {} }, deps
           throw error;
         }
         checkBound();
-        journal = answerSetupJournal(currentManifest, { mode, secretExisted });
-        await writeJournal(journal);
-        await writeManifest(manifestPath, edited);
+        const intendedJournal = answerSetupJournal(currentManifest, { mode, secretExisted });
+        await writeJournal(intendedJournal, { onPublished(publication) {
+          journalPublication = publication;
+          journal = intendedJournal;
+        } });
+        journal = intendedJournal;
+        await writeManifest(manifestPath, edited, { onPublished(publication) {
+          manifestPublication = publication;
+          manifestPublished = true;
+        } });
+        manifestPublished = true;
         currentManifest = edited;
         checkBound();
         try {
@@ -536,6 +563,12 @@ export async function runAnthropicAnswerSetup({ manifestPath, flags = {} }, deps
       throw failure;
     } catch (error) {
       if (!journal || completed) throw error;
+      // A refused forward write gives no authority to replace a newer file.
+      // Only the journal was published in this branch, so undo only that item.
+      if (!manifestPublished) {
+        try { await removeJournal(); } catch { /* the refused publication remains the primary error */ }
+        throw error;
+      }
       const failureClass = error?.answerSetupClass || error?.code || "error";
       const writtenKeyRejected = keyWritten && Boolean(error?.workerCheck) && failureClass === "key_rejected";
       const previousManifest = restoreManifestFromAnswerSetupJournal(currentManifest, journal);
@@ -547,7 +580,10 @@ export async function runAnthropicAnswerSetup({ manifestPath, flags = {} }, deps
         : restoreManifestFromAnswerSetupJournal(currentManifest, journal, { builtIn: true });
       const rollbackTarget = keepPrevious && previousSetup !== "built-in" ? "previous" : "built-in";
       try {
-        await writeManifest(manifestPath, rollbackManifest);
+        if (!manifestPublication?.isCurrent?.()) {
+          throw new Error("the answer setup manifest changed before rollback");
+        }
+        await writeManifest(manifestPath, rollbackManifest, { expectedPublication: manifestPublication });
         currentManifest = rollbackManifest;
         const shouldDelete = !rollbackManifest.retrieval?.rerank &&
           ((keyWritten && !journal.secret_name_existed) || writtenKeyRejected);

@@ -265,6 +265,12 @@ export async function runQuickBooksSchedule({ plan, now = () => new Date(), stat
 function readManifest(path, options) {
   return (options.readManifest || (p => JSON.parse(readFileSync(p, 'utf8'))))(path);
 }
+function manifestChangedDuringWrite(error) {
+  for (let current = error, depth = 0; current && depth < 8; current = current.cause, depth++) {
+    if (current.code === 'FOLDER_MANIFEST_CHANGED') return true;
+  }
+  return false;
+}
 function schedulingOptions(options) {
   return { ...options, ...(options.schedulerOptions || {}), ...(options.quickBooksSchedulerOptions || {}) };
 }
@@ -309,9 +315,19 @@ export async function reregisterAfterManifestChange(manifestPath, options = {}) 
     // Existing installs never call it until a new path is explicitly enabled.
     const writer = options.writeManifestAtomically || cli.writeManifestAtomically;
     const intended = { ...m, operations: { ...m.operations, quickbooks_schedule: { enabled: true } } };
-    writer(manifestPath, intended, { backupLabel: 'quickbooks-connect-schedule' });
-    try { return await reregisterAfterManifestChange(manifestPath, options); }
-    catch (error) { writer(manifestPath, m, { backupLabel: 'quickbooks-connect-schedule-rollback' }); throw error; }
+    let publication = writer(manifestPath, intended, { backupLabel: 'quickbooks-connect-schedule' });
+    options.onManifestPublished?.(publication);
+    try { return await reregisterAfterManifestChange(manifestPath, { ...options, onManifestPublished: result => {
+      publication = result;
+      options.onManifestPublished?.(result);
+    } }); }
+    catch (error) {
+      if (publication && !manifestChangedDuringWrite(error)) {
+        const restored = writer(manifestPath, m, { backupLabel: 'quickbooks-connect-schedule-rollback', expectedPublication: publication });
+        options.onManifestPublished?.(restored);
+      }
+      throw error;
+    }
   }
   const plan = planQuickBooksSchedule({ m, manifestPath, ...options });
   if (!plan.ready) throw failure('SCHEDULE_INSTALL_FAILED', 'QuickBooks scheduling requires a supported platform and the same timezone as this machine.');
@@ -326,12 +342,17 @@ export async function reregisterAfterManifestChange(manifestPath, options = {}) 
   if (willSchedule) owners.push(...QUICKBOOKS_KEYS);
   let dailyAttempted = false; let quickBooksAttempted = false;
   let dailyReplacement;
+  let dailyPublication;
   try {
     dailyAttempted = true;
     // The lifecycle lease keeps the temporarily rebound daily runner from
     // starting before its dedicated QuickBooks owner is installed/read back.
     const daily = await cli.cmdDaily(['on', manifestPath], { ...options, flags: {}, quiet: true,
-      lifecycleLockHeld: true, existingSchedulerOwners: owners, allowQuickBooksOnly: true });
+      lifecycleLockHeld: true, existingSchedulerOwners: owners, allowQuickBooksOnly: true,
+      onManifestPublished: publication => {
+        dailyPublication = publication;
+        options.onManifestPublished?.(publication);
+      } });
     if (!daily?.schedule?.installed || !daily.schedule.enabled || !daily.schedule.verified) throw new Error('Daily readback failed');
     dailyReplacement = daily.schedule.readback;
     quickBooksAttempted = true;
@@ -350,8 +371,12 @@ export async function reregisterAfterManifestChange(manifestPath, options = {}) 
         { ...dailyOptions, expectedReplacement: dailyReplacement });
         else removeDailyRefreshSchedule(beforePlan, dailyOptions);
         const current = readManifest(manifestPath, options);
-        if (JSON.stringify(current.operations?.daily_refresh) !== JSON.stringify(m.operations?.daily_refresh)) {
-          (options.writeManifestAtomically || cli.writeManifestAtomically)(manifestPath, m, { backupLabel: 'quickbooks-daily-intent-rollback' });
+        if (dailyPublication && !manifestChangedDuringWrite(cause) &&
+            JSON.stringify(current.operations?.daily_refresh) !== JSON.stringify(m.operations?.daily_refresh)) {
+          const restored = (options.writeManifestAtomically || cli.writeManifestAtomically)(manifestPath, m, {
+            backupLabel: 'quickbooks-daily-intent-rollback', expectedPublication: dailyPublication,
+          });
+          options.onManifestPublished?.(restored);
         }
       } catch { restored = false; }
     }
@@ -359,6 +384,7 @@ export async function reregisterAfterManifestChange(manifestPath, options = {}) 
       ? 'Daily imports are installed, but their definition no longer matches this manifest. The previous safe schedule was preserved; daily schedule needs attention.'
       : 'Daily schedule needs attention. The prior native schedule could not be restored and must be inspected before retrying.');
     error.needs_attention = true; error.rollback_verified = restored;
+    Object.defineProperty(error, 'cause', { value: cause });
     // Do not include provider output or local paths in this public failure.
     throw error;
   }
@@ -386,13 +412,19 @@ export async function commandQuickBooksSchedule(argv, options = {}) {
     const m = readManifest(manifestPath, options);
     const next = { ...m, operations: { ...m.operations, quickbooks_schedule: { ...m.operations?.quickbooks_schedule, enabled: action === 'on' } } };
     const writer = options.writeManifestAtomically || cli.writeManifestAtomically;
-    writer(manifestPath, next, { backupLabel: 'quickbooks-schedule-intent' });
+    let publication = writer(manifestPath, next, { backupLabel: 'quickbooks-schedule-intent' });
+    options.onManifestPublished?.(publication);
     try {
-      const result = await reregisterAfterManifestChange(manifestPath, { ...options, cli, lifecycleLockHeld: true });
+      const result = await reregisterAfterManifestChange(manifestPath, { ...options, cli, lifecycleLockHeld: true,
+        onManifestPublished: result => { publication = result; options.onManifestPublished?.(result); },
+      });
       if (!options.quiet) console.log(JSON.stringify({ verified: result.verified, enabled: action === 'on' }));
       return result;
     } catch (error) {
-      writer(manifestPath, m, { backupLabel: 'quickbooks-schedule-intent-rollback' });
+      if (publication && !manifestChangedDuringWrite(error)) {
+        const restored = writer(manifestPath, m, { backupLabel: 'quickbooks-schedule-intent-rollback', expectedPublication: publication });
+        options.onManifestPublished?.(restored);
+      }
       throw error;
     }
   });

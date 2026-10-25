@@ -1,7 +1,7 @@
 /** Local scheduling evidence only. A source's ingest receipt remains authoritative. */
-import { renameIdentityMatches, renameWithRetrySync } from "./rename-retry.mjs";
+import { renameIdentityMatches, renameWithRetrySync, captureStagedProof, removeOwnedStaging } from "./rename-retry.mjs";
 import { randomBytes } from 'node:crypto';
-import { chmodSync, constants, closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, constants, closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { restrictWindowsFileToCurrentUser, restrictWindowsDirectoryToCurrentUser } from './current-user-file.mjs';
@@ -58,15 +58,24 @@ export function writeQuickBooksScheduleState(plan, source, state, options = {}) 
   const path = location(plan, source, options);
   const predecessor = checked(path);
   const temporary = `${path}.${randomBytes(8).toString('hex')}.tmp`;
-  const fd = openSync(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
-  let staged;
-  try { writeFileSync(fd, `${JSON.stringify(value)}\n`, 'utf8'); fsyncSync(fd); staged = fstatSync(fd); } finally { closeSync(fd); }
+  const bytes = Buffer.from(`${JSON.stringify(value)}\n`, 'utf8');
+  const fd = openSync(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW || 0), 0o600);
+  let created;
+  let published = false;
   try {
+    try {
+      created = fstatSync(fd, { bigint: true });
+      writeFileSync(fd, bytes);
+      fsyncSync(fd);
+    } finally { closeSync(fd); }
     if ((options.platform || process.platform) === 'win32') (options.protectFile || restrictWindowsFileToCurrentUser)(temporary, options);
-    renameWithRetrySync(temporary, path, { revalidate() {
-      if (!renameIdentityMatches(temporary, staged) || !renameIdentityMatches(path, predecessor)) throw invalid();
+    const staged = captureStagedProof(temporary, bytes, created);
+    const refuse = () => { throw invalid(); };
+    renameWithRetrySync(temporary, path, { staged: { expected: staged, bytes, refuse }, revalidate() {
+      if (!renameIdentityMatches(path, predecessor)) throw invalid();
     } });
-  } finally { try { unlinkSync(temporary); } catch (error) { if (error.code !== 'ENOENT') throw error; } }
+    published = true;
+  } finally { if (created && !published) removeOwnedStaging(temporary, created); }
   return value;
 }
 export function quickBooksScheduleState(options = {}) {

@@ -5,7 +5,7 @@
  * only. It has no credential, instance locator, or customer-specific value.
  */
 
-import { captureRenameIdentity, renameIdentityMatches, renameWithRetrySync } from "./rename-retry.mjs";
+import { captureRenameIdentity, captureStagedProof, removeOwnedStaging, stagedBytesMatch, renameIdentityMatches, renameWithRetrySync } from "./rename-retry.mjs";
 import {
   chmodSync,
   closeSync,
@@ -341,7 +341,12 @@ function captureRepairableSkill(observation) {
   }
 }
 
-function restoreSkillSnapshot(snapshot) {
+// These receipts exist only for writes this repair actually published. A later
+// content-equal installer never inherits rollback authority from the preview.
+const skillRepairPublications = new WeakMap();
+
+function restoreSkillSnapshot(snapshot, publication = skillRepairPublications.get(snapshot)) {
+  if (!publication || !stagedBytesMatch(snapshot.path, publication.identity, publication.bytes)) return false;
   let current;
   try {
     current = lstatSync(snapshot.path);
@@ -362,16 +367,14 @@ function restoreSkillSnapshot(snapshot) {
   if (currentBytes.toString("utf8") !== snapshot.desired) return false;
 
   if (!snapshot.exists) {
-    try {
-      unlinkSync(snapshot.path);
-      return !existsSync(snapshot.path);
-    } catch {
-      return false;
-    }
+    return removeOwnedStaging(snapshot.path, publication.identity, {
+      proof: publication.identity, bytes: publication.bytes,
+    });
   }
 
   const temporary = `${snapshot.path}.${process.pid}.${randomBytes(12).toString("hex")}.rollback`;
-  let fd;
+  let fd, created;
+  let published = false;
   try {
     fd = openSync(
       temporary,
@@ -379,25 +382,25 @@ function restoreSkillSnapshot(snapshot) {
         (fsConstants.O_NOFOLLOW || 0),
       snapshot.mode,
     );
+    created = fstatSync(fd, { bigint: true });
     if (writeSync(fd, snapshot.bytes, 0, snapshot.bytes.length, 0) !== snapshot.bytes.length) {
       throw new Error("short skill rollback write");
     }
     fchmodSync(fd, snapshot.mode);
     fsyncSync(fd);
-    const staged = fstatSync(fd);
     closeSync(fd);
     fd = undefined;
-    renameWithRetrySync(temporary, snapshot.path, { revalidate: () => {
-      if (!renameIdentityMatches(temporary, staged) || !renameIdentityMatches(snapshot.path, current) ||
-          !readFileSync(snapshot.path).equals(currentBytes)) {
-        throw new Error("the skill changed before rollback");
-      }
+    const staged = captureStagedProof(temporary, snapshot.bytes, created);
+    const refuse = () => { throw new Error("the skill changed before rollback"); };
+    renameWithRetrySync(temporary, snapshot.path, { staged: { expected: staged, bytes: snapshot.bytes, refuse }, revalidate: () => {
+      if (!stagedBytesMatch(snapshot.path, publication.identity, publication.bytes)) refuse();
     } });
+    published = true;
     const restored = readFileSync(snapshot.path);
     return restored.equals(snapshot.bytes) && (lstatSync(snapshot.path).mode & 0o7777) === snapshot.mode;
   } catch {
     if (fd !== undefined) closeSync(fd);
-    try { unlinkSync(temporary); } catch { /* no rollback temporary remains */ }
+    if (created && !published) removeOwnedStaging(temporary, created);
     return false;
   }
 }
@@ -579,6 +582,7 @@ export function repairTechnicianSkillEverywhere(options = {}) {
         ...options,
         agentRoot: snapshot.root,
         desiredContent: snapshot.desired,
+        onPublished: publication => skillRepairPublications.set(snapshot, publication),
       });
       let exact = false;
       try {
@@ -690,23 +694,29 @@ export function installClaudeTechnicianSkill(options = {}) {
   }
 
   const temporary = `${target}.${process.pid}.tmp`;
+  const bytes = Buffer.from(content, "utf8");
   let fd = null;
+  let created, published = false;
   try {
     fd = openSync(temporary, "wx", 0o600);
-    writeFileSync(fd, content, "utf8");
+    created = fstatSync(fd, { bigint: true });
+    writeFileSync(fd, bytes);
+    fchmodSync(fd, 0o600);
     fsyncSync(fd);
-    const staged = fstatSync(fd);
     closeSync(fd);
     fd = null;
-    renameWithRetrySync(temporary, target, { revalidate: () => {
-      if (!renameIdentityMatches(temporary, staged) || !renameIdentityMatches(target, predecessor)) {
-        throw new Error("the skill destination changed after preview");
-      }
+    const staged = captureStagedProof(temporary, bytes, created);
+    const refuse = () => { throw new Error("the skill destination changed after preview"); };
+    renameWithRetrySync(temporary, target, { staged: { expected: staged, bytes, refuse }, revalidate: () => {
+      if (!renameIdentityMatches(target, predecessor)) refuse();
     } });
-    chmodSync(target, 0o600);
+    published = true;
+    const identity = captureStagedProof(target, bytes, created);
+    if (!identity) throw new Error("the Claude technician skill could not be read back exactly after installation");
+    options.onPublished?.({ identity, bytes });
   } catch (error) {
     if (fd !== null) closeSync(fd);
-    try { unlinkSync(temporary); } catch { /* no temporary file to remove */ }
+    if (created && !published) removeOwnedStaging(temporary, created);
     throw error;
   }
 
