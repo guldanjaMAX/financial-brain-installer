@@ -34,6 +34,8 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --test test/gmail-finalization-mutations.test.mjs",
   "node --test test/curated-cloudflare-only.test.mjs",
   "node --test test/daily-evidence.test.mjs",
+  "node --test test/partb-route-contract.test.mjs",
+  "node --test test/partb-route-installed-defaults.test.mjs",
   "node --test test/query-mcp-timing.test.mjs",
   "node --test test/query-spans-probe.test.mjs",
   "node --test worker/test/query-timing.test.mjs",
@@ -298,6 +300,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --test test/answer-model-config.test.mjs",
   "node --test test/answer-setup-copy.test.mjs",
   "node --test test/anthropic-connect.test.mjs",
+  "node --test test/partb-recovery-contract.test.mjs",
   "node --test worker/test/anthropic-answer-setup.test.mjs",
   "node --test test/acceptance-answer-model.test.mjs",
   "node --test test/doctor-anthropic-secret.test.mjs",
@@ -310,6 +313,8 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node --test test/daily-evidence.test.mjs",
+  "node --test test/partb-route-contract.test.mjs",
+  "node --test test/partb-route-installed-defaults.test.mjs",
   "node --test test/query-mcp-timing.test.mjs",
   "node --test test/query-spans-probe.test.mjs",
   "node --test worker/test/query-timing.test.mjs",
@@ -763,6 +768,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node --test test/answer-model-config.test.mjs",
   "node --test test/answer-setup-copy.test.mjs",
   "node --test test/anthropic-connect.test.mjs",
+  "node --test test/partb-recovery-contract.test.mjs",
   "node --test worker/test/anthropic-answer-setup.test.mjs",
   "node --test test/acceptance-answer-model.test.mjs",
   "node --test test/doctor-anthropic-secret.test.mjs",

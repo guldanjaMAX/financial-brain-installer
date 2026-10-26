@@ -110,10 +110,14 @@ import {
   RECOMMENDED_CLAUDE_DAILY_CAP_USD,
   REVIEWED_CLAUDE_ANSWER_MODELS,
   answerSetupOf,
+  answerSetupHasSchema2RecoveryJournal,
+  answerSetupInterruptedMessage,
   assertReviewedAnswerModels as assertReviewedAnswerModelsConfig,
   answerSetupJournalPath,
   answerSetupNeedsRecovery,
+  parseAnthropicConnectFlags,
   preflightAnthropicKey,
+  recoverAnthropicAnswerSetup,
   resolvedAnswerModels,
   runAnthropicAnswerSetup,
   saveManifestAtomically as saveAnswerManifestAtomically,
@@ -299,6 +303,14 @@ import {
   uploadFolderEntriesOf,
 } from "./operations/feed-folders.mjs";
 import { writeClaudeWorkspaceGuide, writeCodexWorkspaceGuide, classifySessionFolder } from "./operations/claude-workspace.mjs";
+import {
+  CLAUDE_CODE_FULL_EXIT_CARD,
+  normalizePartBRouteReadinessReason,
+  openPartBMcpTransport,
+  PART_B_ROUTE_CONTROL,
+  proveClaudeCodeFullyExited,
+  provePartBRouteReadiness,
+} from "./operations/answer-route-proof.mjs";
 import {
   captureTechnicianSkillRepairSnapshot,
   inspectTechnicianSkillEverywhere,
@@ -7732,6 +7744,61 @@ export async function cmdTest(manifestPath, options = {}) {
 
 /* ----------------------------------------------------------- mcp-config */
 
+function partBClaudeGuideRefreshReceipt(outcome) {
+  const accepted = ["written", "verified"].includes(outcome?.status) &&
+    Number.isSafeInteger(outcome?.guideGeneration) && outcome.guideGeneration > 0;
+  return Object.freeze({
+    schema_version: 1,
+    operation: "claude_workspace_guide.refresh",
+    outcome: accepted ? outcome.status : "refused",
+    managed: accepted,
+    answer_route: accepted ? "brain_think_first" : "unproven",
+    guide_generation: accepted ? outcome.guideGeneration : 0,
+  });
+}
+
+function refreshPartBClaudeGuide(manifestPath, options = {}, workspaceOptions = {}) {
+  let outcome;
+  try {
+    outcome = writeAssistantWorkspaceGuide(manifestPath, "claude", options, {
+      ...workspaceOptions,
+      brainCliPath: workspaceOptions.brainCliPath || options.brainCliPath || fileURLToPath(import.meta.url),
+      nodePath: workspaceOptions.nodePath || options.nodePath || process.execPath,
+      platformName: workspaceOptions.platformName ?? options.platformName ?? options.platform ?? process.platform,
+    }, {
+      action: "connect anthropic",
+      allowExistingWindowsRefresh: true,
+      reportInfo: options.reportInfo ?? info,
+    });
+  }
+  catch { outcome = null; }
+  return partBClaudeGuideRefreshReceipt(outcome);
+}
+
+function diePartBRouteNotReady(routeReadiness) {
+  const reason = normalizePartBRouteReadinessReason(routeReadiness?.reason);
+  if (reason === "claude_code_running") {
+    info(CLAUDE_CODE_FULL_EXIT_CARD.title);
+    info(CLAUDE_CODE_FULL_EXIT_CARD.message);
+    die(`Claude answer route not ready: ${reason}.`);
+  }
+  die(
+    `Claude answer route not ready: ${reason}.\n` +
+    "      Nothing was removed. Close Claude completely, including Claude Code, the Claude desktop app, and any tray or background process, then rerun the same command. If it stops again, send this line to your setup partner."
+  );
+}
+
+function reportPartBRouteReadiness(routeReadiness, options = {}) {
+  const reason = normalizePartBRouteReadinessReason(routeReadiness?.reason);
+  const ready = routeReadiness?.ready === true && reason === "route_receipt_accepted";
+  options.onPartBRouteDecision?.(Object.freeze({ ready, reason }));
+  if (ready) {
+    ok("Claude answer route ready: route_receipt_accepted");
+    return;
+  }
+  diePartBRouteNotReady({ reason });
+}
+
 /**
  * Print the config a client pastes into their own AI tools.
  *
@@ -7821,19 +7888,42 @@ export async function cmdMcpConfig(manifestPath, options = {}) {
   const { m } = loadManifest(manifestPath);
   const flags = options.flags ?? parseFlags(process.argv.slice(4));
   assertKnownFlags(flags, ["manifest", "apply"], "brain mcp-config");
+  const partBManifest = m.retrieval?.answer_model === "claude-opus-5-5" &&
+    m.retrieval?.gate_model === "claude-sonnet-5-5";
 
   // Printing a command someone then has to copy, paste and get right is how a
   // connected brain ends up unconnected. Setup already wires both assistants at
   // step 5; this exposes the same reconciler on its own, for a brain that is
   // already installed or an assistant that arrived afterwards.
   if (flags.apply) {
-    const result = await (options.wireAgents ?? wireAgents)(m, manifestPath, options.wireOptions || {});
+    let result;
+    try {
+      result = await (options.wireAgents ?? wireAgents)(m, manifestPath, options.wireOptions || {});
+    } catch (error) {
+      if (partBManifest) {
+        // A rejected reconciler has no trustworthy assistant result. Close the
+        // Part B gate before the dispatcher can misclassify it as an unrelated
+        // installer failure, regardless of which client or host caused it.
+        reportPartBRouteReadiness({ ready: false, reason: "route_unproven" }, options);
+      }
+      throw error;
+    }
     if (result.wired.length) {
       ok(`connected with Owner assistant access: ${result.wired.join(", ")}`);
       say("      It can read, add or correct information, check the connection, and review a financial map. It cannot activate that map, delete records, or change access.");
     }
     for (const name of result.skipped) info(`${name}: nothing to do`);
     if (result.failures.length) {
+      if (partBManifest) {
+        // A partial reconciliation is not route proof. Decide the Part B gate
+        // before any legacy assistant failure can bypass its closed status.
+        reportPartBRouteReadiness({
+          ready: false,
+          reason: result.wired.includes("Claude Code")
+            ? "route_unproven"
+            : "claude_apply_required",
+        }, options);
+      }
       die(
         `could not connect: ${result.failures.join(", ")}.\n` +
         "      The connection was not reported ready. A prior locator-only connection was preserved\n" +
@@ -7845,7 +7935,37 @@ export async function cmdMcpConfig(manifestPath, options = {}) {
     if (!result.wired.length && !result.skipped.length) {
       info("no supported assistant found on this computer. Install Claude Code or Codex first.");
     }
-    return result;
+    let routeReadiness = { ready: false, reason: "claude_apply_required" };
+    if (result.wired.includes("Claude Code")) {
+      const routeOptions = options.routeReadinessOptions || {};
+      const guideRefresh = refreshPartBClaudeGuide(
+        manifestPath,
+        { ...options, ...routeOptions },
+        routeOptions.claudeWorkspaceOptions || {},
+      );
+      if (["written", "verified"].includes(guideRefresh.outcome)) {
+        // This function-call seam is intentionally unavailable to CLI flags and
+        // the environment. Tests can fix only the host snapshot while leaving
+        // the installed guide, descriptor, transport, and route defaults real.
+        const stopMcpProcess = routeOptions.stopMcpProcess ?? (
+          Object.hasOwn(options, "processSnapshot")
+            ? () => proveClaudeCodeFullyExited({ readProcessList: options.processSnapshot })
+            : proveClaudeCodeFullyExited
+        );
+        routeReadiness = await provePartBRouteReadiness({
+          manifestPath,
+          guideRefresh,
+          control: routeOptions.control ?? PART_B_ROUTE_CONTROL,
+        }, {
+          stopMcpProcess,
+          openMcpTransport: routeOptions.openMcpTransport ?? openPartBMcpTransport,
+        });
+      } else routeReadiness = { ready: false, reason: "guide_refresh_refused" };
+    }
+    if (partBManifest) {
+      reportPartBRouteReadiness(routeReadiness, options);
+    }
+    return { ...result, route_readiness: routeReadiness };
   }
 
   let base = m.brain?.domain ? `https://${m.brain.domain}` : null;
@@ -19589,6 +19709,29 @@ async function resolveBaseUrl(m, acct) {
 }
 
 
+/** Build the one fixed public failure for any interrupted answer setup. */
+function anthropicAnswerSetupInterruptedError(flags, preview = {}) {
+  const recoveryState = ["original", "changed", "ambiguous"].includes(preview.recovery_state)
+    ? preview.recovery_state
+    : "ambiguous";
+  if (flags.json === true) {
+    return new JsonFatal({
+      schema_version: 1,
+      operation: "answer_setup.recovery_preview",
+      status: "error",
+      error_code: "anthropic_rollback_incomplete",
+      recovery_state: recoveryState,
+      automatic_action: "none",
+    });
+  }
+  const error = new Fatal(answerSetupInterruptedMessage(recoveryState));
+  error.code = "ANTHROPIC_ROLLBACK_INCOMPLETE";
+  error.supportCode = "ANTHROPIC_ROLLBACK_INCOMPLETE";
+  error.recoveryState = recoveryState;
+  error.recoveryReceipt = preview.receipt ?? null;
+  return error;
+}
+
 /**
  * brain connect google — the client authorises their OWN Google account.
  *
@@ -19616,14 +19759,51 @@ export async function cmdConnect(target, options = {}) {
     return (options.connectOnline || cmdConnectProvider)("quickbooks", manifestPath, flags, options.providerOptions || {});
   }
   if (which === "anthropic") {
-    // A half-run journal is a local custody stop. Check it before manifest-bound
-    // Cloudflare control can inspect or refresh a stored credential.
+    // A schema-2 half-run journal is classified locally before manifest-bound
+    // credential control. Recovery flags use the same read-only path. Neither
+    // route can cross a mutation boundary.
     const setupNeedsRecovery = options.answerSetupNeedsRecovery ?? answerSetupNeedsRecovery;
-    if (manifestPath && !String(manifestPath).startsWith("--") && setupNeedsRecovery(manifestPath)) {
+    const explicitRecovery = flags.recover !== undefined || flags["confirm-recovery"] !== undefined;
+    if (!explicitRecovery) {
+      try { parseAnthropicConnectFlags(flags); }
+      catch (error) { die(error?.message || "the Anthropic answer setup arguments were not accepted"); }
+    }
+    const connectAnthropic = options.connectAnthropic ?? cmdConnectAnthropic;
+    if (explicitRecovery) {
+      if (manifestPath && !String(manifestPath).startsWith("--")) {
+        try { setupNeedsRecovery(manifestPath); } catch { /* The classifier maps this boundary closed. */ }
+      }
+      return connectAnthropic(manifestPath, flags, {
+        ...(options.anthropicOptions || {}),
+        interruptedRecovery: true,
+      });
+    }
+    let needsRecovery = false;
+    let hasSchema2RecoveryJournal = false;
+    if (manifestPath && !String(manifestPath).startsWith("--")) {
+      try {
+        needsRecovery = setupNeedsRecovery(manifestPath);
+        if (needsRecovery) {
+          const recognizeSchema2Journal = options.answerSetupHasSchema2RecoveryJournal ??
+            answerSetupHasSchema2RecoveryJournal;
+          hasSchema2RecoveryJournal = recognizeSchema2Journal(manifestPath);
+        }
+      } catch {
+        // Detection is read-only, but its raw error can carry a private path or
+        // journal detail. Stop on the same fixed ambiguous card as classification.
+        throw anthropicAnswerSetupInterruptedError(flags);
+      }
+    }
+    if (needsRecovery) {
+      if (hasSchema2RecoveryJournal) {
+        return connectAnthropic(manifestPath, flags, {
+          ...(options.anthropicOptions || {}),
+          interruptedRecovery: true,
+        });
+      }
       die(HALF_RUN(manifestPath));
     }
     const runManifestControl = options.withManifestControl ?? withManifestCloudflareControl;
-    const connectAnthropic = options.connectAnthropic ?? cmdConnectAnthropic;
     return runManifestControl(
       manifestPath,
       () => connectAnthropic(manifestPath, flags, options.anthropicOptions || {}),
@@ -19724,6 +19904,18 @@ async function assertLiveAnswerSetupWorker(manifestPath, manifest, options = {})
 
 /** Configure the reviewed owner-account answer pair without exposing the key. */
 export async function cmdConnectAnthropic(manifestPath, flags = {}, options = {}) {
+  const recoveryRequested = options.interruptedRecovery === true ||
+    flags.recover !== undefined || flags["confirm-recovery"] !== undefined;
+  if (recoveryRequested) {
+    const preview = await recoverAnthropicAnswerSetup({ manifestPath }, {
+      listSecretNames: options.listSecretNames,
+      journalFile: options.journalFile,
+      manifestFile: options.manifestFile,
+      stageFile: options.stageFile,
+    });
+    throw anthropicAnswerSetupInterruptedError(flags, preview);
+  }
+  const parsedFlags = parseAnthropicConnectFlags(flags);
   let m;
   try {
     ({ m } = (options.loadManifest ?? loadManifest)(manifestPath));
@@ -19786,7 +19978,9 @@ export async function cmdConnectAnthropic(manifestPath, flags = {}, options = {}
       platform,
       stdinIsTTY: options.stdinIsTTY ?? process.stdin.isTTY,
       loadManifest: (path) => (options.loadManifest ?? loadManifest)(path).m,
-      saveManifestAtomically: options.saveManifestAtomically ?? saveAnswerManifestAtomically,
+      ...(options.saveManifestAtomically
+        ? { saveManifestAtomically: options.saveManifestAtomically }
+        : {}),
       acquireLock: options.acquireLock ?? ((input, action) =>
         (options.withBrainLifecycleLock ?? withBrainLifecycleLock)(input, action)),
       verifyVersion,
@@ -19820,20 +20014,67 @@ export async function cmdConnectAnthropic(manifestPath, flags = {}, options = {}
       checkWorker,
       sleep: options.sleep,
       now: options.now,
+      deferDailyUntilAfterDeploy: options.deferDailyUntilAfterDeploy ?? !m.brain?.domain,
+      // The product loader proves deploy-time domain additions. An injected
+      // loader is not assumed to observe writes unless its caller also injects
+      // this readback seam explicitly.
+      readManifestAfterDeploy: options.readManifestAfterDeploy ??
+        (options.loadManifest === undefined ? (path) => loadManifest(path).m : undefined),
+      publicationOptions: options.publicationOptions,
+      removeRecoveryStagedFile: options.removeRecoveryStagedFile,
       journalExists: options.journalExists,
       writeJournal: options.writeJournal,
       removeJournal: options.removeJournal,
       log: (line) => output.push(line),
     });
-    if (flags.json === true) console.log(JSON.stringify(result));
-    else for (const line of output) say(line);
-    return result;
+    let configured = null;
+    try { configured = (options.loadManifest ?? loadManifest)(manifestPath).m; }
+    catch { /* Route readiness remains refused without exact post-setup readback. */ }
+    const modelPairAccepted = configured?.retrieval?.answer_model === "claude-opus-5-5" &&
+      configured?.retrieval?.gate_model === "claude-sonnet-5-5" &&
+      result?.answer_model === "claude-opus-5-5" && result?.gate_model === "claude-sonnet-5-5" &&
+      result?.worker_check?.answer?.model === "claude-opus-5-5" &&
+      result?.worker_check?.check?.model === "claude-sonnet-5-5";
+    const guideRefresh = modelPairAccepted
+      ? refreshPartBClaudeGuide(manifestPath, options, options.claudeWorkspaceOptions || {})
+      : partBClaudeGuideRefreshReceipt(null);
+    const guideAccepted = ["written", "verified"].includes(guideRefresh.outcome);
+    const completed = {
+      ...result,
+      guide_refresh: guideRefresh,
+      route_readiness: {
+        ready: false,
+        reason: guideAccepted ? "client_restart_required" :
+          modelPairAccepted ? "guide_refresh_refused" : "model_pair_unproven",
+        next_operation: "mcp-config.apply_after_full_exit",
+      },
+    };
+    if (flags.json === true) console.log(JSON.stringify(completed));
+    else {
+      for (const line of output) say(line);
+      if (guideAccepted) {
+        info("Close Claude completely, including Claude Code, the Claude desktop app, and any tray or background process.");
+        info("With Claude closed, run:");
+        info(renderCliCommands(`brain mcp-config ${JSON.stringify(manifestPath)} --apply`));
+        info("Then start Claude Code again.");
+      }
+    }
+    return completed;
   } catch (error) {
     if (error?.code === "brain_lifecycle_recovery_required") {
       error = new Error(UPDATE_FIRST(manifestPath), { cause: error });
       error.code = "UPDATE_FIRST";
     }
     if (flags.json === true) {
+      if (error?.code === "ANTHROPIC_KEY_REPLACEMENT_UNSUPPORTED") {
+        throw new JsonFatal({
+          schema_version: 1,
+          operation: "answer_setup.connect",
+          status: "error",
+          error_code: "anthropic_key_replacement_unsupported",
+          automatic_action: "none",
+        });
+      }
       const declaredCode = String(error?.supportCode || error?.code || "ANTHROPIC_CHECK_FAILED");
       throw new JsonFatal({
         schema_version: 1,
@@ -29737,7 +29978,11 @@ function writeAssistantWorkspaceGuide(manifestPath, assistant, options, writerOp
   // Windows can retain the writer's lock when an editor holds the original
   // guide open. Keep this check adjacent to the writer; a concurrent creator
   // still needs a create-only writer mode or lock recovery in 0.4.19.
-  if (writerOptions.platformName !== "win32" || !existsSync(path)) {
+  // Part B refreshes an existing managed guide after exact model readback. It
+  // still enters this common ownership guard, then relies on the writer's
+  // foreign, link, damage, staging, and exact-readback refusals on Windows.
+  if (run.allowExistingWindowsRefresh === true ||
+      writerOptions.platformName !== "win32" || !existsSync(path)) {
     return writeGuide(manifestPath, writerOptions);
   }
   if (!run.noticeShown) {

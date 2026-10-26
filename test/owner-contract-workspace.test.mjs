@@ -29,8 +29,8 @@ const ACCOUNT_HEADING = "## My accounts (fill in once, after the owner confirms)
 const SAVE_HEADING = "## Financial Brain: at the end of a working session";
 const hashes = {
   "answer-contract-v1.md": "440a931d73efce5e226e7e44da5d84b52ca8497754f7fd40526c8736348f2451",
-  "money-rules-v3.md": "5413cfbf5eb5b796ce3a2c2dd29994443ed334ff1cbe62b7b1d64e650cd10f33",
-  "money-rules-v3-windows.md": "b2eee70b4bd10a94075d8c1cfcb7a5b8767d50b1803fe3e361fb404fc27dcb6b",
+  "money-rules-v3.md": "9edd1b0b43a1d29955a3eb7477f46b9cdce52b7466ccdbe6ee77bebc4846f606",
+  "money-rules-v3-windows.md": "6d462e3a89bf03a6f63f143706aaabd5ee7695b9dc3797923ebcb5f89b57c85b",
 };
 // Repeated writer/race tests exercise real filesystem checks. Native reparse
 // detection has separate refusal/control and one bounded Windows smoke test;
@@ -481,7 +481,7 @@ function updateClosingBoundary({ platform = "win32", platformName, folder = "ord
   const bindings = {
     updateAttention: [guidance, guidance],
     options: { platform, platformName, ...(raw ? { reportUpdateFinish: message => reports.push(message) } : {}) },
-    pin: { target }, PRODUCT_VERSION: "0.4.19", mailTransition: null,
+    pin: { target }, PRODUCT_VERSION: "0.4.20", mailTransition: null,
     ownerSessionFolderLabel: () => "another folder",
     ownerBrainFolderWarning: () => locator,
     dirname: win32.dirname, quotePowerShellArgument, quotePosixArgument,
@@ -886,7 +886,7 @@ test("R2/R5 installed money rules use the Brain lead and preserve the parser men
   assert.equal(resolving("money-rules-v3.md"), resolving("money-rules-v3-windows.md"), "shared account guidance is byte-aligned");
   for (const platformName of ["darwin", "win32"]) {
     const rules = workspace.renderOwnerRulesSection({ platformName });
-    assert.match(rules, /Financial Brain 0\.4\.19/);
+    assert.match(rules, /Financial Brain 0\.4\.20/);
     assert.match(rules, /Never subtract.*already left out/);
     assert.match(rules, /Note:/);
     assert.match(rules, /What was my profit <period>\?/);
@@ -1473,7 +1473,7 @@ for (const arm of ["duplicate", "before-accounts", "misplaced-only", "fenced", "
 });
 
 for (const arm of ["none", "install", "after-return"]) test(`R4 original descriptor remains reachable: ${arm}`, {
-  skip: process.platform === "win32" ? "the 0.4.19 update path does not refresh an existing guide on Windows; see CHANGELOG known limitations" : false,
+  skip: process.platform === "win32" ? "the 0.4.20 ordinary update path does not refresh an existing guide on Windows; see CHANGELOG known limitations" : false,
 }, t => {
   const { root, manifest } = fixture(t), target = join(root, "AGENTS.md");
   const before = `${CODEX}\n# Older guide\n`, note = "\nRetain this concurrent owner annotation.\n";
@@ -2036,7 +2036,7 @@ test("WIN R5 every CLI writer reference is confined to the common guard", () => 
     .replace(/^import \{ writeClaudeWorkspaceGuide, writeCodexWorkspaceGuide, classifySessionFolder \}.*$/m, "")
     .replace(/\bwrite(?:Claude|Codex)WorkspaceGuide(?=\s*:)/g, "writerOption");
   assert.doesNotMatch(outside, /\bwrite(?:Claude|Codex)WorkspaceGuide\b/, "no direct or aliased writer remains outside the guard");
-  assert.equal((outside.match(/\bwriteAssistantWorkspaceGuide\(/g) || []).length, 4, "setup twice, tools, and the shared update refresher");
+  assert.equal((outside.match(/\bwriteAssistantWorkspaceGuide\(/g) || []).length, 5, "setup twice, tools, the shared update refresher, and connect anthropic");
 });
 
 for (const platform of ["win32", "darwin", "linux"]) {

@@ -28,8 +28,14 @@ import { CLOUDFLARE_OAUTH_WRANGLER_PACKAGE } from "./cloudflare-oauth-session.mj
 import { windowsFileChildEnvironment } from "./current-user-file.mjs";
 import { SKILL_CREDENTIAL_LINE } from "./answer-setup-copy.mjs";
 import { answerSetupOf } from "./answer-setup.mjs";
+import {
+  captureStagedProofWithRetry,
+  renameIdentityMatches,
+  renameWithRetrySync,
+} from "./rename-retry.mjs";
 
 export const CLAUDE_WORKSPACE_MARKER = "<!-- financial-brain-installer:claude-workspace:v1 -->";
+let claudeGuideGeneration = 0;
 
 function safeLocator(value, label, platformName = process.platform) {
   const raw = String(value || "");
@@ -424,8 +430,43 @@ function commitWorkspaceGuide(target, parent, snapshot, existing, content, owner
     fsyncSync(fd);
     const staged = fstatSync(fd);
     const closed = fd; fd = null; closeSync(closed);
-    if (!locked() || !unchangedWorkspaceFile(temporary, staged, content, ownership)) return notWritten();
-    renameSync(temporary, ready);
+    // The descriptor must be closed before Windows can make a trustworthy
+    // byte observation. The shared helper distinguishes a temporary sharing
+    // refusal from a definite same-inode mismatch and carries that same proof
+    // into publication. Revalidation deliberately performs no content read.
+    const stagedProof = captureStagedProofWithRetry(temporary, content, staged, {
+      platform: ownership?.platform ?? process.platform,
+    });
+    if (!stagedProof) {
+      // Refusal is terminal, but when the pathname metadata still matches the
+      // created inode, complete the existing exact-byte observation before
+      // returning. Its result cannot authorize publication.
+      unchangedWorkspaceFile(temporary, staged, content, ownership);
+      return notWritten();
+    }
+    let stagingRefused = false;
+    renameWithRetrySync(temporary, ready, {
+      platform: ownership?.platform ?? process.platform,
+      revalidate: () => {
+        if (!locked() || !workspaceParentUnchanged(parent) ||
+            !renameIdentityMatches(temporary, stagedProof) ||
+            !workspaceFileOwnedByUser(temporary, stagedProof, ownership)) {
+          throw new Error("the workspace staging boundary changed before publication");
+        }
+        try {
+          lstatSync(ready);
+          throw new Error("the workspace staging destination already exists");
+        } catch (error) {
+          if (error?.code !== "ENOENT") throw error;
+        }
+      },
+      staged: {
+        expected: stagedProof,
+        bytes: content,
+        refuse: () => { stagingRefused = true; },
+      },
+    });
+    if (stagingRefused) return notWritten();
     pendingPath = ready;
     if (!locked() || !unchangedWorkspaceFile(ready, staged, content, ownership)) return notWritten();
     // Finish every fallible content write before moving the active guide.
@@ -560,7 +601,12 @@ function writeWorkspaceGuide(manifestPath, options, assistant) {
 }
 
 export function writeClaudeWorkspaceGuide(manifestPath, options = {}) {
-  return writeWorkspaceGuide(manifestPath, options, "claude");
+  const outcome = writeWorkspaceGuide(manifestPath, options, "claude");
+  if (!["written", "verified"].includes(outcome.status)) return outcome;
+  // This process-local sequence is content-free. It proves that the installed
+  // caller obtained a fresh accepted writer decision in this operation; route
+  // readiness still rereads the manifest and relaunches the MCP process.
+  return { ...outcome, guideGeneration: ++claudeGuideGeneration };
 }
 
 export function writeCodexWorkspaceGuide(manifestPath, options = {}) {

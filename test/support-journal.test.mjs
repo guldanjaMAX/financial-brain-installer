@@ -21,6 +21,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   SUPPORT_COMMANDS,
+  SUPPORT_ERROR_CODES,
   SUPPORT_MAX_AGE_DAYS,
   SUPPORT_MAX_BYTES,
   SUPPORT_MAX_EVENTS,
@@ -148,6 +149,17 @@ try {
     ).error_code,
     "COMMAND_FAILED",
     "the CLI fallback failure classification is journalable",
+  );
+  assert.ok(
+    SUPPORT_ERROR_CODES.includes("CLOUDFLARE_SECRET_READBACK_FAILED"),
+    "the Cloudflare secret readback failure is a journalable support category",
+  );
+  assert.equal(
+    previewSupportEvent(
+      { command: "connect", source: "installer", errorCode: "CLOUDFLARE_SECRET_READBACK_FAILED" },
+      options(sandbox),
+    ).error_code,
+    "CLOUDFLARE_SECRET_READBACK_FAILED",
   );
   const fallbackRoot = freshRoot("command-failed");
   recordSupportEvent(

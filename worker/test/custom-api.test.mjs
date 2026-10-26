@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import test from "node:test";
 
@@ -11,6 +12,24 @@ import {
 
 const TOKEN = ["fixture", "bearer", "sentinel", "42"].join("-");
 const AT = new Date("2026-09-24T15:30:00.000Z");
+const MONTHLY_COVERAGE_NOTICE = "Store 01, 2026-08-01: no live animal sales recorded";
+const MONTHLY_TABLE_ROWS = [
+  ...Array.from({ length: 8 }, (_, index) => {
+    const store = `Store ${String(index + 1).padStart(2, "0")}`;
+    return [
+      `| ${store} | other | $${101 + index}.00 | 1 | 1 | 0 |`,
+      `| ${store} | services | $${100 + index}.00 | 1 | 1 | 0 |`,
+      `| ${store} total | all | $${201 + (2 * index)}.00 | 2 | 2 | 0 |`,
+    ];
+  }).flat(),
+  "| Grand total | all | $1,664.00 | 16 | 16 | 0 |",
+];
+
+function coverageFollowsCompleteTable(content, coverageNotice, finalTableRow) {
+  const coverageAt = content.indexOf(coverageNotice);
+  const finalTableRowAt = content.indexOf(finalTableRow);
+  return finalTableRowAt >= 0 && coverageAt > finalTableRowAt;
+}
 
 const configuration = (baseUrl) => ({
   enabled: true,
@@ -130,6 +149,59 @@ function memoryPersistence() {
   };
 }
 
+async function renderDefaultMonthlySalesEvidence() {
+  const template = JSON.parse(readFileSync(
+    new URL("../../templates/brain.manifest.json", import.meta.url),
+    "utf8",
+  )).corpora.custom_api;
+  const data = Array.from({ length: 8 }, (_, index) => {
+    const store = `Store ${String(index + 1).padStart(2, "0")}`;
+    return ["services", "other"].map((revenue_stream, streamIndex) => ({
+      store,
+      period: "2026-08-01",
+      revenue_stream,
+      net_sales: 100 + index + streamIndex,
+      transactions: 1,
+      units: 1,
+      puppies_sold: 0,
+    }));
+  }).flat();
+  const calls = [];
+  const fetchImpl = async (input, init) => {
+    const url = String(input);
+    calls.push({
+      url,
+      authorizationOkay: init?.headers?.Authorization === `Bearer ${TOKEN}`,
+    });
+    if (url !== "https://dashboard.invalid/api/sales") {
+      throw new Error("unexpected synthetic provider request");
+    }
+    return new Response(JSON.stringify({ data }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  const persistence = memoryPersistence();
+  const sales = template.endpoints.find((endpoint) => endpoint.name === "sales");
+  const result = await runCustomApiPull({
+    ...template,
+    enabled: true,
+    base_url: "https://dashboard.invalid/api/",
+    endpoints: [sales],
+  }, {
+    token: TOKEN,
+    fetchImpl,
+    now: () => AT,
+    sleep: async () => {},
+    persistence,
+  });
+  return {
+    calls,
+    content: persistence.documents.get("sales:monthly:2026-08-01")?.content || "",
+    result,
+  };
+}
+
 test("config is declarative, HTTPS-only, and names rather than contains its secret", () => {
   const parsed = validateCustomApiConfig(configuration("https://dashboard.invalid/api/"));
   assert.equal(parsed.token_secret, "CUSTOM_API_TOKEN_STORE_DASHBOARD");
@@ -230,6 +302,80 @@ test("the mock serves the real data envelopes and numeric, missing-stream, null-
     assert.equal(document.metadata.fetched_at, AT.toISOString());
     assert.match(document.metadata.response_hash, /^[a-f0-9]{64}$/);
   }
+});
+
+test("coverage-order guard refuses notices after every nonfinal monthly table row", async () => {
+  const { calls, content, result } = await renderDefaultMonthlySalesEvidence();
+  assert.equal(result.status, "completed");
+  assert.equal(calls.length, 1, "the matrix reached the configured sales endpoint exactly once");
+  assert.equal(calls[0].authorizationOkay, true, "the matrix used the synthetic bearer value");
+  assert.ok(content.length > 0, "the matrix reached the monthly renderer before mutating its output");
+
+  const renderedTableRows = content
+    .split("\n")
+    .filter((line) => MONTHLY_TABLE_ROWS.includes(line));
+  assert.deepEqual(renderedTableRows, MONTHLY_TABLE_ROWS, "the matrix uses every real rendered monthly row");
+  const finalTableRow = renderedTableRows.at(-1);
+  const coverageAt = content.indexOf(MONTHLY_COVERAGE_NOTICE);
+  const coverageBlockAt = content.lastIndexOf("\n\n", coverageAt) + 2;
+  assert.ok(coverageAt >= 0 && coverageBlockAt >= 2, "the real renderer produced a relocatable coverage block");
+  const coverageText = content.slice(coverageBlockAt);
+  const contentWithoutCoverage = content.slice(0, coverageBlockAt - 2);
+  let negativeDecisions = 0;
+  let greenDecisions = 0;
+  const cases = renderedTableRows.slice(0, -1).map((row) => {
+    const rowAt = contentWithoutCoverage.indexOf(row);
+    assert.ok(rowAt >= 0, `the real rendered output contains the mutation row ${row}`);
+    const rowEnd = rowAt + row.length;
+    const mutantContent = `${contentWithoutCoverage.slice(0, rowEnd)}\n\n${coverageText}${contentWithoutCoverage.slice(rowEnd)}`;
+    negativeDecisions++;
+    const mutantAccepted = coverageFollowsCompleteTable(mutantContent, MONTHLY_COVERAGE_NOTICE, finalTableRow);
+    greenDecisions++;
+    const greenAccepted = coverageFollowsCompleteTable(content, MONTHLY_COVERAGE_NOTICE, finalTableRow);
+    return {
+      row,
+      mutantAccepted,
+      greenAccepted,
+    };
+  });
+
+  assert.equal(cases.length, renderedTableRows.length - 1, "every nonfinal row has a refusal and green control");
+  assert.equal(negativeDecisions, 24, "all 24 relocated outputs reached the coverage-order decision");
+  assert.equal(greenDecisions, 24, "all 24 paired real-output controls reached the coverage-order decision");
+  assert.deepEqual(
+    cases.map(({ mutantAccepted }) => mutantAccepted),
+    cases.map(() => false),
+    "coverage before the grand-total row is refused for every sibling insertion position",
+  );
+  for (const { row, greenAccepted } of cases) {
+    assert.equal(greenAccepted, true, `green control after the grand-total row for ${row}`);
+  }
+});
+
+test("the default monthly sales evidence exposes a store total before coverage notes", async () => {
+  const { calls, content, result } = await renderDefaultMonthlySalesEvidence();
+  const firstStoreTotalRow = MONTHLY_TABLE_ROWS[2];
+  const finalTableRow = MONTHLY_TABLE_ROWS.at(-1);
+  const totalAt = content.indexOf(firstStoreTotalRow);
+  const coverageAt = content.indexOf(MONTHLY_COVERAGE_NOTICE);
+  assert.equal(result.status, "completed");
+  assert.equal(calls.length, 1, "the probe reached the configured sales endpoint");
+  assert.equal(calls[0].authorizationOkay, true, "the configured call used the synthetic bearer value");
+  assert.ok(content.length > 0, "the renderer reached the monthly-document decision point");
+  assert.ok(
+    totalAt >= 0 && totalAt < 350,
+    "the store total is inside both the 400-character hybrid evidence part and 900-character citation excerpt",
+  );
+  for (const row of MONTHLY_TABLE_ROWS) {
+    const rowAt = content.indexOf(row);
+    assert.ok(rowAt >= 0, `the complete table retains ${row}`);
+    assert.ok(coverageAt > rowAt, `green control: missing-stream coverage follows ${row}`);
+  }
+  assert.equal(
+    coverageFollowsCompleteTable(content, MONTHLY_COVERAGE_NOTICE, finalTableRow),
+    true,
+    "missing-stream coverage begins after the exact grand-total row",
+  );
 });
 
 test("unchanged rows skip, corrections revise, and a new store is added without deletion", async (t) => {

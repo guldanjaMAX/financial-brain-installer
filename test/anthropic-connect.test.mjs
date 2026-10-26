@@ -19,11 +19,13 @@ import {
 } from "../brain.mjs";
 
 import {
+  ANTHROPIC_KEY_REPLACEMENT_UNSUPPORTED,
   BUILT_IN_ANSWER_MODEL,
   RECOMMENDED_ANSWER_SETUP,
   RECOMMENDED_CLAUDE_DAILY_CAP_USD,
   REVIEWED_CLAUDE_ANSWER_MODELS,
   answerSetupOf,
+  answerSetupJournal,
   answerSetupJournalPath,
   answerSetupNeedsRecovery,
   assertReviewedAnswerModels,
@@ -282,6 +284,55 @@ test("connect writes the manifest before the secret and preserves the selected c
   assert.equal(saved.safety.daily_llm_spend_cap_usd, RECOMMENDED_CLAUDE_DAILY_CAP_USD);
   assert.deepEqual(saved.retrieval, RECOMMENDED_ANSWER_SETUP);
   assert.equal(result.rolled_back, false);
+});
+
+test("a first secret save waits until the third Cloudflare inventory read", async () => {
+  const harness = setupHarness(manifest());
+  let readbackAttempts = 0;
+  const waits = [];
+  harness.deps.listSecretNames = async () => {
+    if (!harness.calls.includes("put-secret")) return [];
+    readbackAttempts++;
+    return readbackAttempts >= 3 ? ["ANTHROPIC_API_KEY"] : [];
+  };
+  harness.deps.sleep = async (milliseconds) => waits.push(milliseconds);
+
+  const result = await runAnthropicAnswerSetup({
+    manifestPath: "/fixture/brain.manifest.json",
+    flags: { "from-clipboard": true },
+  }, harness.deps);
+
+  assert.equal(result.rolled_back, false);
+  assert.equal(readbackAttempts, 3, "the delayed name reached the third post-write decision");
+  assert.deepEqual(waits, [500, 1_000], "the successful read used only the first two bounded waits");
+  assert.ok(harness.calls.includes("answer-check"), "the accepted readback reached the Worker check");
+  assert.equal(harness.calls.includes("delete-secret"), false);
+});
+
+test("an exhausted secret readback fails closed with its own Cloudflare support code", async () => {
+  const harness = setupHarness(manifest());
+  let readbackAttempts = 0;
+  const waits = [];
+  harness.deps.listSecretNames = async () => {
+    if (harness.secret()) readbackAttempts++;
+    return [];
+  };
+  harness.deps.sleep = async (milliseconds) => waits.push(milliseconds);
+
+  const error = await runAnthropicAnswerSetup({
+    manifestPath: "/fixture/brain.manifest.json",
+    flags: { "from-clipboard": true },
+  }, harness.deps).then(() => null, (caught) => caught);
+
+  assert.equal(readbackAttempts, 6, "all six post-write inventory decisions ran");
+  assert.deepEqual(waits, [500, 1_000, 1_500, 2_500, 4_500]);
+  assert.equal(waits.reduce((sum, value) => sum + value, 0), 10_000);
+  assert.equal(error?.supportCode, "CLOUDFLARE_SECRET_READBACK_FAILED");
+  assert.equal(error?.rolledBack, true, "the failed name proof restored the prior setup");
+  assert.match(error?.message || "", /Cloudflare.*secret.*readback/i);
+  assert.doesNotMatch(`${error?.message || ""}\n${harness.lines.join("\n")}`, /Anthropic refused/i);
+  assert.ok(harness.calls.includes("delete-secret"), "the failure reached secret rollback");
+  assert.equal(harness.secret(), false);
 });
 
 test("daily definition reconciliation reinstalls only the recomputed non-source definition", async () => {
@@ -565,12 +616,14 @@ test("a replacement key rejected by the Worker does not restore the prior Claude
   const harness = setupHarness(before, { secretPresent: true, workerStatus: "key_rejected" });
   await assert.rejects(
     runAnthropicAnswerSetup({ manifestPath: "/fixture/brain.manifest.json", flags: { "from-clipboard": true } }, harness.deps),
-    (error) => error.supportCode === "ANTHROPIC_KEY_NOT_ACCEPTED" && error.rolledBack === true,
+    (error) => error.supportCode === "ANTHROPIC_KEY_REPLACEMENT_UNSUPPORTED" &&
+      error.message === ANTHROPIC_KEY_REPLACEMENT_UNSUPPORTED,
   );
-  assert.equal(answerSetupOf(harness.saved.at(-1)), "built-in");
-  assert.equal(harness.secret(), false);
-  assert.ok(harness.calls.includes("answer-check"), "the replacement reached the Worker check");
-  assert.ok(harness.calls.includes("delete-secret"));
+  assert.equal(harness.saved.length, 0);
+  assert.equal(harness.secret(), true);
+  assert.equal(harness.calls.includes("answer-check"), false);
+  assert.equal(harness.calls.includes("put-secret"), false);
+  assert.equal(harness.calls.includes("delete-secret"), false);
 });
 
 test("a paused Claude manifest with no old secret falls back to built-in after deploy failure", async () => {
@@ -578,12 +631,12 @@ test("a paused Claude manifest with no old secret falls back to built-in after d
   const harness = setupHarness(before, { failDeploy: true });
   await assert.rejects(
     runAnthropicAnswerSetup({ manifestPath: "/fixture/brain.manifest.json", flags: { "from-clipboard": true } }, harness.deps),
-    /synthetic deploy failure/,
+    (error) => error.message === ANTHROPIC_KEY_REPLACEMENT_UNSUPPORTED,
   );
-  assert.equal(answerSetupOf(harness.saved.at(-1)), "built-in");
-  assert.equal(Object.hasOwn(harness.saved.at(-1).retrieval, "answer_model"), false);
+  assert.equal(harness.saved.length, 0);
   assert.equal(harness.secret(), false);
-  assert.ok(harness.calls.includes("deploy-rollback"), "the rollback redeploy decision point was reached");
+  assert.equal(harness.calls.includes("deploy"), false);
+  assert.equal(harness.calls.includes("deploy-rollback"), false);
 });
 
 test("a preflight-proven replacement can restore the prior Claude pair when an old secret existed", async () => {
@@ -591,10 +644,11 @@ test("a preflight-proven replacement can restore the prior Claude pair when an o
   const harness = setupHarness(before, { secretPresent: true, failDeploy: true });
   await assert.rejects(
     runAnthropicAnswerSetup({ manifestPath: "/fixture/brain.manifest.json", flags: { "from-clipboard": true } }, harness.deps),
-    /synthetic deploy failure/,
+    (error) => error.message === ANTHROPIC_KEY_REPLACEMENT_UNSUPPORTED,
   );
-  assert.equal(answerSetupOf(harness.saved.at(-1)), "opus-sonnet");
+  assert.equal(harness.saved.length, 0);
   assert.equal(harness.secret(), true);
+  assert.equal(harness.calls.includes("deploy"), false);
   assert.equal(harness.calls.includes("delete-secret"), false);
 });
 
@@ -607,10 +661,17 @@ test("keep, dashboard, and clipboard failures preserve a working pair and a pre-
         manifestPath: "/fixture/brain.manifest.json",
         flags: { [mode]: true, ...(mode === "keep-key" ? { "daily-cap": "8" } : {}) },
       }, harness.deps),
-      (error) => error?.rolledBack === true,
+      (error) => mode === "keep-key"
+        ? error?.rolledBack === true
+        : error?.message === ANTHROPIC_KEY_REPLACEMENT_UNSUPPORTED,
     );
-    assert.ok(harness.calls.includes("answer-check"), `${mode}: the Worker decision point was reached`);
-    assert.equal(answerSetupOf(harness.saved.at(-1)), "opus-sonnet", `${mode}: the working pair survives`);
+    if (mode === "keep-key") {
+      assert.ok(harness.calls.includes("answer-check"), `${mode}: the Worker decision point was reached`);
+      assert.equal(answerSetupOf(harness.saved.at(-1)), "opus-sonnet", `${mode}: the working pair survives`);
+    } else {
+      assert.equal(harness.calls.includes("answer-check"), false, `${mode}: refusal stopped before the Worker check`);
+      assert.equal(harness.saved.length, 0, `${mode}: refusal stopped before a manifest write`);
+    }
     assert.equal(harness.secret(), true, `${mode}: the pre-existing secret survives`);
     assert.equal(harness.calls.includes("delete-secret"), false, `${mode}: no secret delete was attempted`);
   }
@@ -622,9 +683,11 @@ test("keep, dashboard, and clipboard failures preserve a working pair and a pre-
   await assert.rejects(runAnthropicAnswerSetup({
     manifestPath: "/fixture/brain.manifest.json",
     flags: { "from-clipboard": true },
-  }, rejected.deps), /did not accept this key/);
-  assert.ok(rejected.calls.includes("put-secret"), "the rejected-key control wrote this run's key");
-  assert.ok(rejected.calls.includes("delete-secret"), "confirmed rejection may delete the key this run wrote");
+  }, rejected.deps), (error) => error.message === ANTHROPIC_KEY_REPLACEMENT_UNSUPPORTED);
+  assert.equal(rejected.calls.includes("put-secret"), false,
+    "replacement refusal stopped before writing a new key");
+  assert.equal(rejected.calls.includes("delete-secret"), false,
+    "replacement refusal kept the existing key untouched");
 });
 
 test("a 404 while deleting a newly written rollback secret is treated as already absent", async () => {
@@ -869,13 +932,16 @@ test("dashboard, half-run, version, and Darwin input modes stop at their intende
 
 test("the installed Anthropic connect route refuses every journal state before credential control", async () => {
   const journalCases = [
-    ["valid regular file", (path) => writeFileSync(path, "{}\n", { mode: 0o600 })],
-    ["empty regular file", (path) => writeFileSync(path, "", { mode: 0o600 })],
-    ["malformed regular file", (path) => writeFileSync(path, "{", { mode: 0o600 })],
-    ["directory", (path) => mkdirSync(path, { mode: 0o700 })],
+    ["valid legacy journal", (path) => writeFileSync(path, `${JSON.stringify(answerSetupJournal(
+      manifest(),
+      { mode: "keep", secretExisted: true },
+    ))}\n`, { mode: 0o600 }), "legacy"],
+    ["empty regular file", (path) => writeFileSync(path, "", { mode: 0o600 }), "ambiguous"],
+    ["malformed regular file", (path) => writeFileSync(path, "{", { mode: 0o600 }), "ambiguous"],
+    ["directory", (path) => mkdirSync(path, { mode: 0o700 }), "ambiguous"],
   ];
 
-  for (const [label, createJournal] of journalCases) {
+  for (const [label, createJournal, expectedState] of journalCases) {
     const root = realpathSync.native(mkdtempSync(join(tmpdir(), "answer-setup-route-")));
     const manifestPath = join(root, "brain.manifest.json");
     const journalPath = answerSetupJournalPath(manifestPath);
@@ -902,7 +968,9 @@ test("the installed Anthropic connect route refuses every journal state before c
     try {
       await assert.rejects(
         cmdConnect("anthropic", options),
-        (error) => error.message === HALF_RUN(manifestPath),
+        (error) => expectedState === "legacy"
+          ? error.message === HALF_RUN(manifestPath)
+          : String(error?.message).startsWith("Recovery state: ambiguous\nAnswer setup was interrupted."),
         `${label} refuses before credential control`,
       );
       assert.equal(journalDecisions, 1, `${label} reached the presence decision`);
@@ -936,8 +1004,11 @@ test("the installed Anthropic connect route refuses every journal state before c
       throw new Error("fixture credential control reached");
     },
   };
-  await assert.rejects(cmdConnect("anthropic", undecidable), /journal inspection unavailable/,
-    "an undecidable journal inspection fails closed before credential control");
+  await assert.rejects(cmdConnect("anthropic", undecidable), (error) => {
+    assert.match(String(error?.message), /Recovery state: ambiguous/);
+    assert.doesNotMatch(String(error?.message), /journal inspection unavailable/);
+    return true;
+  }, "an undecidable journal inspection fails closed on the fixed card before credential control");
   assert.equal(journalDecisions, 1, "the undecidable presence decision was reached");
   assert.equal(credentialControls, 0, "an undecidable state cannot enter credential control");
 
