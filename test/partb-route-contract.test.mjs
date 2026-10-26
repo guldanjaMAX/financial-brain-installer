@@ -32,17 +32,34 @@ import {
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
 import {
   CLAUDE_CODE_FULL_EXIT_CARD,
+  PART_B_ROUTE_CONTROL,
   PART_B_ROUTE_READINESS_REASONS,
   normalizePartBRouteReadinessReason,
   proveClaudeCodeFullyExited,
   provePartBRouteReadiness,
   validatePartBRouteReceiptContent,
 } from "../operations/answer-route-proof.mjs";
+import worker from "../worker/src/index.js";
+import {
+  PUBLIC_INSTALL_SMOKE_CHUNK,
+  PUBLIC_INSTALL_SMOKE_DOC_UID,
+  PUBLIC_INSTALL_SMOKE_ID,
+  PUBLIC_INSTALL_SMOKE_METADATA,
+  PUBLIC_INSTALL_SMOKE_SOURCE,
+  PUBLIC_INSTALL_SMOKE_TITLE,
+} from "../worker/src/lib/install-smoke.js";
+import { applyMoneyVeto, isMoneyQuestion } from "../worker/src/lib/money-veto.js";
 import { createQueryTiming } from "../worker/src/lib/query-timing.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const PART_B_PROOF_MODULE = new URL("../operations/answer-route-proof.mjs", import.meta.url);
 const FIXTURE_ADMIN_KEY = "fixture-admin-key-not-a-credential";
+const LEGACY_PART_B_ROUTE_QUESTION =
+  "What does the Financial Brain first-install smoke proof establish?";
+const EXPECTED_PART_B_ROUTE_QUESTION =
+  "What does the first-install smoke proof establish?";
+const INSTALL_SMOKE_ANSWER =
+  "The Financial Brain first-install smoke proof establishes that the deployed system accepted, stored, and indexed one authenticated installation check [1].";
 
 // Independent contract inventory. Do not derive this from the production
 // allowlist: an omitted proof or validator outcome must make this test red.
@@ -100,6 +117,111 @@ const ACCEPTED_GUIDE_REFRESH = Object.freeze({
   answer_route: "brain_think_first",
   guide_generation: 1,
 });
+
+function installSmokeThinkEnvironment() {
+  const row = {
+    chunk_uid: `${PUBLIC_INSTALL_SMOKE_DOC_UID}#0`,
+    doc_uid: PUBLIC_INSTALL_SMOKE_DOC_UID,
+    text: PUBLIC_INSTALL_SMOKE_CHUNK,
+    source: PUBLIC_INSTALL_SMOKE_SOURCE,
+    source_kind: PUBLIC_INSTALL_SMOKE_SOURCE,
+    source_id: PUBLIC_INSTALL_SMOKE_ID,
+    uri: null,
+    title: PUBLIC_INSTALL_SMOKE_TITLE,
+    document_date: null,
+    date_source: null,
+    date_reliable: 0,
+    text_source: "native",
+    text_reliable: 1,
+    authority_meta: JSON.stringify(PUBLIC_INSTALL_SMOKE_METADATA),
+    authority_document_head: PUBLIC_INSTALL_SMOKE_CHUNK,
+    client: null,
+    category: null,
+    top_folder: null,
+    platform: null,
+  };
+  const calls = { embedding: 0, answer: 0, verifier: 0, d1: 0, vector: 0 };
+  const env = {
+    STORAGE: "d1",
+    ADMIN_KEY: FIXTURE_ADMIN_KEY,
+    DB: {
+      prepare(sql) {
+        calls.d1++;
+        return {
+          bind() { return this; },
+          all: async () => {
+            if (/unchunked-tax-document-candidates/u.test(sql) ||
+                /SELECT name FROM sources/u.test(sql)) return { results: [] };
+            return { results: [row] };
+          },
+          first: async () => {
+            if (/vector_projection_mutation_id AS mutation_id/u.test(sql)) {
+              return {
+                schema_version: 12,
+                mutation_id: null,
+                mutation_submitted_at: null,
+                projection_status: "verified",
+                bootstrap_epoch: 0,
+                bootstrap_cursor: null,
+                bootstrap_high_water: null,
+                expected_vectors: 1,
+                pending: 0,
+                submitted: 0,
+                oldest_queued_at: null,
+              };
+            }
+            if (/FROM vector_outbox/u.test(sql)) {
+              return { n: 0, oldest: null, upserts: 0, deletes: 0, submitted: 0 };
+            }
+            return /count\(\*\)/iu.test(sql)
+              ? { n: 1, stored_documents: 1, logical_documents: 1 }
+              : null;
+          },
+          run: async () => ({}),
+        };
+      },
+    },
+    VECTORIZE: {
+      query: async () => {
+        calls.vector++;
+        return { matches: [{ id: row.chunk_uid }] };
+      },
+      describe: async () => ({ vectorCount: 1, processedUpToMutation: null }),
+    },
+    AI: {
+      run: async (model, input) => {
+        if (String(model).includes("bge-")) {
+          calls.embedding++;
+          return { data: [[0.1, 0.2, 0.3]] };
+        }
+        const system = String(input?.messages?.[0]?.content || "");
+        if (/verify a proposed answer/u.test(system)) {
+          calls.verifier++;
+          return {
+            response: { supported: true, complete: true, evidence: [1], reason: "direct support" },
+            usage: {},
+          };
+        }
+        calls.answer++;
+        return { response: INSTALL_SMOKE_ANSWER, usage: {} };
+      },
+    },
+  };
+  return { env, calls };
+}
+
+async function askInstallSmoke(question) {
+  const state = installSmokeThinkEnvironment();
+  const response = await worker.fetch(new Request("https://fixture.invalid/api/rag/think", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Admin-Key": FIXTURE_ADMIN_KEY,
+    },
+    body: JSON.stringify({ q: question }),
+  }), state.env, { waitUntil() {}, passThroughOnException() {} });
+  return { ...state, response, body: await response.json() };
+}
 
 function syntheticManifest(answerSetup = "built-in") {
   const retrieval = answerSetup === "opus-sonnet"
@@ -782,6 +904,76 @@ test("Part B route reason display is a closed allowlist with a nondisclosing fal
   for (const value of [undefined, null, "", "provider text must not pass through"]) {
     assert.equal(normalizePartBRouteReadinessReason(value), "route_unproven");
   }
+});
+
+test("Part B control survives the real Worker evidence, premise, and money gates", async (t) => {
+  const directDoc = {
+    n: 1,
+    title: PUBLIC_INSTALL_SMOKE_TITLE,
+    source: PUBLIC_INSTALL_SMOKE_SOURCE,
+    snippet: PUBLIC_INSTALL_SMOKE_CHUNK,
+    ts: null,
+    date_reliable: false,
+    text_source: "native",
+    text_reliable: true,
+  };
+  const initialGate = { supported: true, complete: true, evidence: [1], reason: "direct support" };
+  const oldVeto = applyMoneyVeto({
+    question: LEGACY_PART_B_ROUTE_QUESTION,
+    answer: INSTALL_SMOKE_ANSWER,
+    evidenceGate: initialGate,
+    docs: [directDoc],
+  });
+  const newVeto = applyMoneyVeto({
+    question: EXPECTED_PART_B_ROUTE_QUESTION,
+    answer: INSTALL_SMOKE_ANSWER,
+    evidenceGate: initialGate,
+    docs: [directDoc],
+  });
+
+  assert.equal(isMoneyQuestion(LEGACY_PART_B_ROUTE_QUESTION), true);
+  assert.equal(oldVeto.answer, null);
+  assert.equal(oldVeto.gap?.rule, "unreliable_date");
+  assert.equal(isMoneyQuestion(EXPECTED_PART_B_ROUTE_QUESTION), false);
+  assert.equal(newVeto.answer, INSTALL_SMOKE_ANSWER);
+  assert.equal(newVeto.evidenceGate, initialGate, "the non-money control leaves the accepted gate unchanged");
+
+  const red = await askInstallSmoke(LEGACY_PART_B_ROUTE_QUESTION);
+  const green = await askInstallSmoke(PART_B_ROUTE_CONTROL.arguments.q);
+  for (const [label, result] of [["red", red], ["green", green]]) {
+    assert.equal(result.response.status, 200, `${label} reached the real think response`);
+    assert.equal(result.calls.embedding, 1, `${label} reached semantic retrieval`);
+    assert.equal(result.calls.answer, 1, `${label} reached answer generation`);
+    assert.equal(result.calls.verifier, 1, `${label} reached the evidence verifier`);
+    assert.ok(result.calls.d1 > 0 && result.calls.vector > 0,
+      `${label} used the D1 and Vectorize retrieval modules`);
+    assert.equal(result.body.results.length, 1, `${label} had exactly one evidence result`);
+    assert.equal(result.body.results[0].doc_uid, PUBLIC_INSTALL_SMOKE_DOC_UID);
+    assert.ok(result.body.timing.stages.evidence_gate.calls > 0,
+      `${label} exercised the evidence gate`);
+    assert.ok(result.body.timing.stages.premise_temporal.calls > 0,
+      `${label} exercised the premise and temporal gates`);
+    assert.equal(result.body.timing.stages.evidence_gate.errors, 0);
+    assert.equal(result.body.timing.stages.premise_temporal.errors, 0);
+  }
+  assert.equal(red.body.answer, null);
+  assert.equal(red.body.evidence_gate.supported, false);
+  assert.equal(red.body.timing.outcome, "refused");
+  assert.equal(red.body.gaps.find((gap) => gap.type === "money_veto")?.rule, "unreliable_date");
+
+  assert.equal(PART_B_ROUTE_CONTROL.arguments.q, EXPECTED_PART_B_ROUTE_QUESTION);
+  assert.equal(green.body.answer, INSTALL_SMOKE_ANSWER);
+  assert.equal(green.body.evidence_gate.supported, true, green.body.evidence_gate.reason);
+  assert.equal(green.body.timing.outcome, "ok");
+  assert.equal(green.body.citations.length, 1);
+  assert.equal(green.body.gaps.some((gap) =>
+    ["money_veto", "money_recall", "temporal_conflict"].includes(gap.type)), false);
+  t.diagnostic(
+    `red_evidence=${red.body.timing.stages.evidence_gate.calls} ` +
+    `red_premise=${red.body.timing.stages.premise_temporal.calls} ` +
+    `green_evidence=${green.body.timing.stages.evidence_gate.calls} ` +
+    `green_premise=${green.body.timing.stages.premise_temporal.calls}`,
+  );
 });
 
 test("Part B proof and receipt-validator outcomes match the independent reason inventory", async (t) => {

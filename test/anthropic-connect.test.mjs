@@ -286,6 +286,55 @@ test("connect writes the manifest before the secret and preserves the selected c
   assert.equal(result.rolled_back, false);
 });
 
+test("a first secret save waits until the third Cloudflare inventory read", async () => {
+  const harness = setupHarness(manifest());
+  let readbackAttempts = 0;
+  const waits = [];
+  harness.deps.listSecretNames = async () => {
+    if (!harness.calls.includes("put-secret")) return [];
+    readbackAttempts++;
+    return readbackAttempts >= 3 ? ["ANTHROPIC_API_KEY"] : [];
+  };
+  harness.deps.sleep = async (milliseconds) => waits.push(milliseconds);
+
+  const result = await runAnthropicAnswerSetup({
+    manifestPath: "/fixture/brain.manifest.json",
+    flags: { "from-clipboard": true },
+  }, harness.deps);
+
+  assert.equal(result.rolled_back, false);
+  assert.equal(readbackAttempts, 3, "the delayed name reached the third post-write decision");
+  assert.deepEqual(waits, [500, 1_000], "the successful read used only the first two bounded waits");
+  assert.ok(harness.calls.includes("answer-check"), "the accepted readback reached the Worker check");
+  assert.equal(harness.calls.includes("delete-secret"), false);
+});
+
+test("an exhausted secret readback fails closed with its own Cloudflare support code", async () => {
+  const harness = setupHarness(manifest());
+  let readbackAttempts = 0;
+  const waits = [];
+  harness.deps.listSecretNames = async () => {
+    if (harness.secret()) readbackAttempts++;
+    return [];
+  };
+  harness.deps.sleep = async (milliseconds) => waits.push(milliseconds);
+
+  const error = await runAnthropicAnswerSetup({
+    manifestPath: "/fixture/brain.manifest.json",
+    flags: { "from-clipboard": true },
+  }, harness.deps).then(() => null, (caught) => caught);
+
+  assert.equal(readbackAttempts, 6, "all six post-write inventory decisions ran");
+  assert.deepEqual(waits, [500, 1_000, 1_500, 2_500, 4_500]);
+  assert.equal(waits.reduce((sum, value) => sum + value, 0), 10_000);
+  assert.equal(error?.supportCode, "CLOUDFLARE_SECRET_READBACK_FAILED");
+  assert.equal(error?.rolledBack, true, "the failed name proof restored the prior setup");
+  assert.match(error?.message || "", /Cloudflare.*secret.*readback/i);
+  assert.doesNotMatch(`${error?.message || ""}\n${harness.lines.join("\n")}`, /Anthropic refused/i);
+  assert.ok(harness.calls.includes("delete-secret"), "the failure reached secret rollback");
+  assert.equal(harness.secret(), false);
+});
+
 test("daily definition reconciliation reinstalls only the recomputed non-source definition", async () => {
   const beforePlan = { source_plan_hash: "source-hash", ready: true, identity: { id: "fixture" } };
   const afterPlan = { ...beforePlan, definition_hash: "new-definition" };

@@ -7,7 +7,7 @@ import { mcpRegistrationDescriptor } from "../brain.mjs";
 export const PART_B_ROUTE_CONTROL = Object.freeze({
   name: "brain_think",
   arguments: Object.freeze({
-    q: "What does the Financial Brain first-install smoke proof establish?",
+    q: "What does the first-install smoke proof establish?",
   }),
 });
 export const CLAUDE_CODE_FULL_EXIT_CARD = Object.freeze({

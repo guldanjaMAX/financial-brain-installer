@@ -41,6 +41,7 @@ import {
   ROLLBACK_INCOMPLETE,
   ROLLED_BACK_BUILT_IN,
   ROLLED_BACK_PREVIOUS,
+  SECRET_READBACK_FAILED,
   UNREACHABLE,
   UPDATE_FIRST,
 } from "./answer-setup-copy.mjs";
@@ -136,6 +137,7 @@ export const PREFLIGHT_COPY = Object.freeze({
   model_unavailable: MODEL_UNAVAILABLE,
   busy: BUSY,
   unreachable: UNREACHABLE,
+  cloudflare_secret_readback_failed: SECRET_READBACK_FAILED,
   error: CHECK_FAILED,
 });
 
@@ -1301,6 +1303,28 @@ const asTime = (value) => {
 };
 
 const failureLine = (status) => status === "check_problem" ? CHECK_PROBLEM : PREFLIGHT_COPY[status] || CHECK_FAILED;
+const SECRET_READBACK_DELAYS_MS = Object.freeze([500, 1_000, 1_500, 2_500, 4_500]);
+
+async function waitForAnthropicSecretReadback(deps, checkBound) {
+  const sleep = deps.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+  for (let attempt = 0; attempt <= SECRET_READBACK_DELAYS_MS.length; attempt++) {
+    checkBound();
+    try {
+      const names = new Set(await deps.listSecretNames());
+      if (names.has(ANTHROPIC_SECRET_NAME)) return names;
+    } catch {
+      // A transient inventory failure proves no more than an absent name. The
+      // same bounded readback closes both cases without weakening the final stop.
+    }
+    if (attempt === SECRET_READBACK_DELAYS_MS.length) break;
+    await sleep(SECRET_READBACK_DELAYS_MS[attempt]);
+  }
+  const error = new Error(SECRET_READBACK_FAILED);
+  error.code = "CLOUDFLARE_SECRET_READBACK_FAILED";
+  error.supportCode = "CLOUDFLARE_SECRET_READBACK_FAILED";
+  error.answerSetupClass = "cloudflare_secret_readback_failed";
+  throw error;
+}
 
 function chooseMode(parsed, { platform, stdinIsTTY }) {
   if (parsed.modeFlag === "from-clipboard") return "clipboard";
@@ -1562,8 +1586,7 @@ export async function runAnthropicAnswerSetup({ manifestPath, flags = {} }, deps
             throw error;
           }
           keyWritten = true;
-          names = new Set(await deps.listSecretNames());
-          if (!names.has(ANTHROPIC_SECRET_NAME)) throw new Error("the Anthropic secret name was not present after write readback");
+          names = await waitForAnthropicSecretReadback(deps, checkBound);
           if (recoveryRuntime) recordSecretReadback(
             recoveryRuntime,
             manifestPath,
