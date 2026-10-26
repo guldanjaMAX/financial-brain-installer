@@ -1610,7 +1610,7 @@ test("keep-key remains allowed for an existing Claude answer setup", async () =>
     // directory holding the pending file with the same UUID) may be new or changed.
     const after = treeSnapshot(root);
     const uuid = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
-    const retained = new RegExp(`^CLAUDE\\.md\\.financial-brain-retained-(${uuid})(?:/CLAUDE\\.md\\.financial-brain-pending-\\1)?$`, "u");
+    const retained = new RegExp(`^CLAUDE\\.md\\.financial-brain-retained-(${uuid})(?:[\\\\/]CLAUDE\\.md\\.financial-brain-pending-\\1)?$`, "u");
     const routeOwned = (name) => name === "CLAUDE.md" || retained.test(name);
     const changedOrNew = Object.keys(after).filter((name) =>
       !Object.hasOwn(before, name) || JSON.stringify(after[name]) !== JSON.stringify(before[name]));
@@ -1963,7 +1963,21 @@ test("same-process rollback requires the last exact target proof before any reco
   }
 });
 
-async function successfulConnectScheduleArm({ savedDomain }) {
+const DAILY_SCHEDULER_FIXTURES = Object.freeze([
+  Object.freeze({
+    platform: "darwin",
+    principal: "uid:501",
+    nodePath: "/opt/fixture/bin/node",
+  }),
+  Object.freeze({
+    platform: "win32",
+    principal: "sid:S-1-5-21-1000",
+    nodePath: "C:\\Program Files\\nodejs\\node.exe",
+  }),
+]);
+
+async function successfulConnectScheduleArm({ savedDomain, schedulerFixture }) {
+  const { platform: schedulerPlatform, principal, nodePath } = schedulerFixture;
   const root = scratchRoot(savedDomain ? "schedule-control" : "schedule-domain-red");
   const manifestPath = join(root, "brain.manifest.json");
   const manifest = fixtureManifest(root, { domain: savedDomain });
@@ -1987,9 +2001,35 @@ async function successfulConnectScheduleArm({ savedDomain }) {
     scheduleRemovals: 0,
   };
   const scheduler = memoryDailyScheduler(schedulerCounters);
+  const nodeInspectionCalls = {
+    exists: [],
+    realpath: [],
+    stat: [],
+    access: [],
+  };
+  const schedulerDefinitionOptions = Object.freeze({
+    home: root,
+    nodePath,
+    nodePathExists: (candidate) => {
+      nodeInspectionCalls.exists.push(candidate);
+      return candidate === nodePath;
+    },
+    nodeRealpath: (candidate) => {
+      nodeInspectionCalls.realpath.push(candidate);
+      return candidate;
+    },
+    nodePathStat: (candidate) => {
+      nodeInspectionCalls.stat.push(candidate);
+      return { isFile: () => candidate === nodePath };
+    },
+    nodePathAccess: (candidate) => {
+      nodeInspectionCalls.access.push(candidate);
+      if (candidate !== nodePath) throw new Error("fixture Node access escaped its synthetic path");
+    },
+  });
   const dailyOptions = {
-    platform: "darwin",
-    principal: "uid:501",
+    platform: schedulerPlatform,
+    principal,
     localTimezone: "UTC",
     planLoad: async () => [{
       key: "fixture_source",
@@ -2000,17 +2040,13 @@ async function successfulConnectScheduleArm({ savedDomain }) {
     }],
     existingSchedulerOwners: [],
     schedulerAdapter: scheduler,
-    schedulerOptions: {
-      home: root,
-      nodePath: process.execPath,
-    },
+    schedulerOptions: schedulerDefinitionOptions,
   };
   const initialPlan = await buildConfiguredDailyPlan(manifest, manifestPath, dailyOptions);
   const initialRegistration = installDailyRefreshSchedule(initialPlan, {
-    platform: "darwin",
+    platform: schedulerPlatform,
     adapter: scheduler,
-    home: root,
-    nodePath: process.execPath,
+    ...schedulerDefinitionOptions,
   });
   assert.equal(initialRegistration.verified, true,
     "the fixture began with an exact registered daily definition");
@@ -2057,17 +2093,14 @@ async function successfulConnectScheduleArm({ savedDomain }) {
     const finalManifest = JSON.parse(readFileSync(manifestPath, "utf8"));
     const finalPlan = await buildConfiguredDailyPlan(finalManifest, manifestPath, dailyOptions);
     const scheduled = await captureOutcome(() => runDailyRefreshCli(manifestPath, {
-      platform: "darwin",
+      platform: schedulerPlatform,
       principal: dailyOptions.principal,
       localTimezone: dailyOptions.localTimezone,
       planLoad: dailyOptions.planLoad,
       existingSchedulerOwners: dailyOptions.existingSchedulerOwners,
       expectedDefinitionHash: registeredDefinition.definition_hash,
       schedulerAdapter: scheduler,
-      definitionOptions: {
-        home: root,
-        nodePath: process.execPath,
-      },
+      definitionOptions: schedulerDefinitionOptions,
       brainModule: {
         buildConfiguredDailyPlan: async (...args) => {
           scheduledPlanBuilds += 1;
@@ -2128,6 +2161,8 @@ async function successfulConnectScheduleArm({ savedDomain }) {
       receipts,
       sourceRuns,
       freshnessReads,
+      nodePath,
+      nodeInspectionCalls,
       registeredManifestHash: registeredDefinition.manifest_content_hash,
       finalManifestHash: finalPlan.manifest_content_hash,
       finalDomain: finalManifest.brain?.domain ?? null,
@@ -2154,46 +2189,72 @@ function assertSuccessfulScheduleDecisionPoints(arm, label) {
     `${label}: the later run built its plan through the real product planner`);
   assert.equal(arm.observations, 2,
     `${label}: the later real runner recorded start and terminal outcome`);
+  for (const decision of ["exists", "stat", "access"]) {
+    assert.ok(arm.nodeInspectionCalls[decision].length > 0,
+      `${label}: scheduled authorization reached the injected Node ${decision} decision`);
+    assert.equal(arm.nodeInspectionCalls[decision].every((candidate) => candidate === arm.nodePath), true,
+      `${label}: Node ${decision} inspection stayed on the platform's synthetic path`);
+  }
+  assert.ok(arm.nodeInspectionCalls.realpath.includes(arm.nodePath),
+    `${label}: registration and authorization used the injected Node realpath decision`);
 }
 
-test("a successful no-domain connect leaves the real daily definition bound to the final manifest", async () => {
-  const arm = await successfulConnectScheduleArm({ savedDomain: false });
-  assertSuccessfulScheduleDecisionPoints(arm, "no-domain red");
-  assert.equal(arm.domainWrites, 1, "the successful deploy added the verified domain once");
-  assert.ok(arm.finalDomain?.endsWith(".workers.dev"),
-    "the real domain writer saved the verified workers.dev hostname");
-  assert.equal(arm.registeredManifestHash, arm.finalManifestHash,
-    "the registered definition binds the final manifest after the verified domain save");
-  assert.equal(arm.scheduled.result?.status, "complete",
-    "the real daily source completed after authorization");
-  assert.equal(arm.sourceRuns, 1, "the later run reached the scheduled source decision once");
-  assert.equal(arm.freshnessReads, 2,
-    "the later run read source freshness before and after the scheduled source");
-  assert.equal(arm.lockAssertions, 3, "the later run retained the daily lifecycle lock throughout");
-  assert.equal(arm.lockReleases, 1, "the later run released the daily lifecycle lock");
-  assert.equal(arm.receipts, 2,
-    "the later run wrote one source receipt and one terminal daily receipt");
+test("successful connect keeps every supported daily scheduler contract runnable", async (t) => {
+  for (const schedulerFixture of DAILY_SCHEDULER_FIXTURES) {
+    const schedulerPlatform = schedulerFixture.platform;
+    await t.test(schedulerPlatform, async () => {
+      const changed = await successfulConnectScheduleArm({
+        savedDomain: false,
+        schedulerFixture,
+      });
+      const control = await successfulConnectScheduleArm({
+        savedDomain: true,
+        schedulerFixture,
+      });
 
-  assert.equal(arm.scheduled.error, null,
-    "successful connect must leave daily registration consistent with the final manifest");
-});
+      assertSuccessfulScheduleDecisionPoints(changed, `${schedulerPlatform} no-domain`);
+      assert.equal(changed.domainWrites, 1,
+        `${schedulerPlatform}: the successful deploy added the verified domain once`);
+      assert.ok(changed.finalDomain?.endsWith(".workers.dev"),
+        `${schedulerPlatform}: the real domain writer saved the verified workers.dev hostname`);
+      assert.equal(changed.registeredManifestHash, changed.finalManifestHash,
+        `${schedulerPlatform}: the registered definition binds the final manifest after the verified domain save`);
+      assert.equal(changed.scheduled.result?.status, "complete",
+        `${schedulerPlatform}: the real daily source completed after authorization`);
+      assert.equal(changed.sourceRuns, 1,
+        `${schedulerPlatform}: the later run reached the scheduled source decision once`);
+      assert.equal(changed.freshnessReads, 2,
+        `${schedulerPlatform}: the later run read source freshness before and after the scheduled source`);
+      assert.equal(changed.lockAssertions, 3,
+        `${schedulerPlatform}: the later run retained the daily lifecycle lock throughout`);
+      assert.equal(changed.lockReleases, 1,
+        `${schedulerPlatform}: the later run released the daily lifecycle lock`);
+      assert.equal(changed.receipts, 2,
+        `${schedulerPlatform}: the later run wrote one source receipt and one terminal daily receipt`);
+      assert.equal(changed.scheduled.error, null,
+        `${schedulerPlatform}: successful connect left daily registration consistent with the final manifest`);
 
-test("a saved-domain connect control leaves the real daily definition runnable", async () => {
-  const arm = await successfulConnectScheduleArm({ savedDomain: true });
-  assertSuccessfulScheduleDecisionPoints(arm, "saved-domain control");
-  assert.equal(arm.domainWrites, 0, "the control reached domain persistence without another write");
-  assert.equal(arm.registeredManifestHash, arm.finalManifestHash,
-    "the registered definition binds the final saved-domain manifest");
-  assert.equal(arm.scheduled.error, null, "the real scheduled authorization accepted the control");
-  assert.equal(arm.scheduled.result?.status, "complete",
-    "the real daily source completed after authorization");
-  assert.equal(arm.sourceRuns, 1, "the control reached the scheduled source decision once");
-  assert.equal(arm.freshnessReads, 2,
-    "the control read source freshness before and after the scheduled source");
-  assert.equal(arm.lockAssertions, 3, "the control retained the daily lifecycle lock throughout");
-  assert.equal(arm.lockReleases, 1, "the control released the daily lifecycle lock");
-  assert.equal(arm.receipts, 2,
-    "the control wrote one source receipt and one terminal daily receipt");
+      assertSuccessfulScheduleDecisionPoints(control, `${schedulerPlatform} saved-domain control`);
+      assert.equal(control.domainWrites, 0,
+        `${schedulerPlatform}: the control reached domain persistence without another write`);
+      assert.equal(control.registeredManifestHash, control.finalManifestHash,
+        `${schedulerPlatform}: the registered definition binds the final saved-domain manifest`);
+      assert.equal(control.scheduled.error, null,
+        `${schedulerPlatform}: the real scheduled authorization accepted the control`);
+      assert.equal(control.scheduled.result?.status, "complete",
+        `${schedulerPlatform}: the control daily source completed after authorization`);
+      assert.equal(control.sourceRuns, 1,
+        `${schedulerPlatform}: the control reached the scheduled source decision once`);
+      assert.equal(control.freshnessReads, 2,
+        `${schedulerPlatform}: the control read source freshness before and after the scheduled source`);
+      assert.equal(control.lockAssertions, 3,
+        `${schedulerPlatform}: the control retained the daily lifecycle lock throughout`);
+      assert.equal(control.lockReleases, 1,
+        `${schedulerPlatform}: the control released the daily lifecycle lock`);
+      assert.equal(control.receipts, 2,
+        `${schedulerPlatform}: the control wrote one source receipt and one terminal daily receipt`);
+    });
+  }
 });
 
 test("an unlocked connect control reaches the same real writer and completes", async () => {

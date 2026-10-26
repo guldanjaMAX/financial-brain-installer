@@ -306,7 +306,7 @@ export function readCurrentUserProcessList({
       "  if ($owner.ReturnValue -eq 0 -and (\"$($owner.Domain)\\$($owner.User)\" -ieq $current)) { $found=1 }",
       "}",
       "[Console]::Out.Write($found)",
-    ].join("\n");
+    ].join("; ");
     const result = run(command, [
       "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "-",
     ], {

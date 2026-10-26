@@ -126,6 +126,55 @@ test("the real current-user process query returns a frozen array of claude entri
   assert.equal(snapshot.every((entry) => entry === "claude"), true);
 });
 
+test("the Windows current-user query sends one complete PowerShell input line", () => {
+  const calls = [];
+  const snapshot = readCurrentUserProcessList({
+    platform: "win32",
+    environment: { SystemRoot: "C:\\Windows" },
+    run: (...args) => {
+      calls.push(args);
+      return { status: 0, stdout: "0" };
+    },
+  });
+
+  assert.deepEqual(snapshot, [], "the closed control returned no Claude process");
+  assert.equal(calls.length, 1, "the native query decision point was reached once");
+  const [command, args, options] = calls[0];
+  assert.equal(command, "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+  assert.deepEqual(args, [
+    "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "-",
+  ]);
+  assert.doesNotMatch(options.input, /[\r\n]/u,
+    "PowerShell stdin is one complete line so its final write is executed");
+  assert.match(options.input, /Get-CimInstance -ClassName Win32_Process/u);
+  assert.match(options.input, /Invoke-CimMethod -InputObject \$_ -MethodName GetOwner/u);
+  assert.equal(options.input.match(/\[Console\]::Out\.Write\(\$found\)/gu)?.length, 1,
+    "the script contains one final output write");
+});
+
+test("the Windows current-user query accepts only the closed one-byte result protocol", () => {
+  const calls = [];
+  const query = (stdout) => readCurrentUserProcessList({
+    platform: "win32",
+    environment: { SystemRoot: "C:\\Windows" },
+    run: (...args) => {
+      calls.push(args);
+      return { status: 0, stdout };
+    },
+  });
+
+  const open = query("1");
+  assert.deepEqual(open, ["claude"]);
+  assert.equal(Object.isFrozen(open), true);
+  const closed = query("0");
+  assert.deepEqual(closed, []);
+  assert.equal(Object.isFrozen(closed), true);
+  assert.throws(() => query(""), /current-user process query failed/u);
+  assert.throws(() => query("other"), /current-user process query failed/u);
+  assert.equal(calls.length, 4,
+    "both green controls and both refusals reached the native query decision point");
+});
+
 test("installed mcp-config defaults use an empty process snapshot and the real descriptor stdio route", async (t) => {
   const state = await fixture(t, "installed-defaults");
   const counters = { apply: 0, processSnapshots: 0 };
