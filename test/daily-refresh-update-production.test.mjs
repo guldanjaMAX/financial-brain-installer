@@ -5,6 +5,7 @@ import { createWindowsUpdateBridgeGuard as boundaryGuard } from "../operations/w
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
 import { cmdDrain, cmdHealth, cmdRollback, cmdUpdate } from "../brain.mjs";
@@ -62,6 +63,9 @@ function productionHarness(manifestPath, {
   failStage = () => null,
   failRestore = false,
   registeredDefinitionDrift = false,
+  postUpdateReconciliationError = null,
+  activeDailyTransaction = true,
+  corruptRecoveryReceiptBeforePostUpdateError = false,
 } = {}) {
   const events = [];
   const finish = [];
@@ -74,16 +78,19 @@ function productionHarness(manifestPath, {
     brainPath: String.raw`C:\Runtime\brain.mjs`,
     runnerPath: String.raw`C:\Runtime\daily-refresh-run.mjs`,
   };
-  let state = {
-    exists: true,
-    owned: true,
-    enabled: true,
-    definition: buildDailyRefreshDefinition(registeredDefinitionDrift
-      ? { ...plan, source_plan_hash: "sha256:registered-sources" }
-      : plan, registeredDefinitionDrift
-      ? { ...nativeOptions, nodePath: String.raw`C:\OldRuntime\node.exe` }
-      : nativeOptions),
-  };
+  let state = activeDailyTransaction
+    ? {
+        exists: true,
+        owned: true,
+        enabled: true,
+        definition: buildDailyRefreshDefinition(registeredDefinitionDrift
+          ? { ...plan, source_plan_hash: "sha256:registered-sources" }
+          : plan, registeredDefinitionDrift
+          ? { ...nativeOptions, nodePath: String.raw`C:\OldRuntime\node.exe` }
+          : nativeOptions),
+      }
+    : { exists: false, owned: false, enabled: false, definition: null };
+  let planCalls = 0;
   let d1Version = "0.4.7";
   const adapter = {
     read: () => state,
@@ -172,7 +179,19 @@ function productionHarness(manifestPath, {
       platform: "win32",
       bridgeOptions: bridgeNativeHarness().options,
       existingSchedulerOwners: [],
-      planDailyRefresh: async () => plan,
+      planDailyRefresh: async () => {
+        planCalls += 1;
+        if (planCalls > 1 && postUpdateReconciliationError) {
+          if (corruptRecoveryReceiptBeforePostUpdateError) {
+            writeFileSync(
+              dailyRefreshUpdateTransactionPath(plan.identity, { home }),
+              "{ malformed fixture recovery receipt\n",
+            );
+          }
+          throw postUpdateReconciliationError;
+        }
+        return plan;
+      },
       schedulerAdapter: adapter,
       schedulerOptions: { ...nativeOptions, home, machineLockRoot },
       syncSourceExpectations: false,
@@ -186,8 +205,28 @@ function productionHarness(manifestPath, {
     machineLockRoot,
     options,
     plan,
+    postUpdateReconciliationCalls: () => Math.max(0, planCalls - 1),
     state: () => state,
   };
+}
+
+const SAFE_PROVIDER_AUTHORIZATION_MESSAGE =
+  "Reconnect the provider authorization, then retry the update.";
+const SAFE_UNVERIFIED_PRODUCT_MESSAGE =
+  "The underlying product error was not recognized. Review the recovery receipt, then retry the update.";
+
+function providerAuthorizationError({ code = "provider_authorization_required" } = {}) {
+  const privatePath = join("/Users", "fixture-owner", "private", "provider-record.json");
+  const tokenLike = ["fixture", "token", "private", "segment"].join("_");
+  const error = new Error(
+    `provider response referenced ${privatePath}\nprovider detail carried ${tokenLike}`,
+  );
+  error.code = code;
+  error.safe_recovery_message = "Fixture-provided recovery text must not render.";
+  error.provider_payload = { detail: "private provider payload must not render" };
+  error.cause = new Error("nested private cause must not render");
+  error.stack = `ProductAuthorizationError: private stack must not render\n    at ${privatePath}:1:1`;
+  return { error, privatePath, tokenLike };
 }
 
 function response(body, status = 200) {
@@ -306,6 +345,136 @@ async function withFixture(run) {
     rmSync(directory, { recursive: true, force: true });
   }
 }
+
+function macLegacySchedulerHarness(manifestPath, { definitionMatches }) {
+  const harness = productionHarness(manifestPath);
+  const uid = typeof process.getuid === "function" ? process.getuid() : 501;
+  const nativeOptions = {
+    platform: "darwin",
+    nodePath: process.execPath,
+    brainPath: fileURLToPath(new URL("../brain.mjs", import.meta.url)),
+    runnerPath: fileURLToPath(new URL("../operations/daily-refresh-run.mjs", import.meta.url)),
+  };
+  harness.plan.platform = "darwin";
+  harness.plan.identity = { id: "v1-0123456789abcdef", principal: `uid:${uid}` };
+  harness.adapter.install(buildDailyRefreshDefinition(harness.plan, nativeOptions));
+  harness.events.length = 0;
+
+  const plistPath = join(dirname(manifestPath), definitionMatches ? "current-owned.plist" : "older-owned.plist");
+  const serialized = definitionMatches
+    ? "fixture current owned scheduler definition"
+    : "fixture older owned scheduler definition";
+  writeFileSync(plistPath, serialized, { mode: 0o600 });
+  const counters = {
+    captureDecisions: 0,
+    filesystemAvailabilityChecks: 0,
+    definitionCaptures: 0,
+    pauses: 0,
+    restores: 0,
+    installs: 0,
+  };
+  let loaded = true;
+  const snapshot = () => Object.freeze({
+    exists: true,
+    wasLoaded: loaded,
+    path: plistPath,
+    service: `gui/${uid}/com.brain-installer.fixture.drive-ingest`,
+    serialized,
+  });
+  const driveScheduler = {
+    statusDriveScheduler() {
+      counters.captureDecisions += 1;
+      assert.equal(readFileSync(plistPath, "utf8"), serialized);
+      counters.filesystemAvailabilityChecks += 1;
+      return {
+        installed: true,
+        loaded,
+        running: false,
+        definitionMatches,
+        interpreterPresent: true,
+        scheduleError: null,
+        plistPath,
+        service: snapshot().service,
+      };
+    },
+    captureInstalledSchedulerDefinition(path) {
+      counters.definitionCaptures += 1;
+      assert.equal(path, manifestPath);
+      assert.equal(readFileSync(plistPath, "utf8"), serialized);
+      return snapshot();
+    },
+    pauseDriveScheduler(_path, options = {}) {
+      counters.pauses += 1;
+      if (options.authorizedSnapshot) assert.equal(options.authorizedSnapshot.serialized, serialized);
+      const captured = snapshot();
+      loaded = false;
+      return captured;
+    },
+    restoreDriveScheduler(_path, prior) {
+      counters.restores += 1;
+      assert.equal(prior.serialized, serialized);
+      loaded = prior.wasLoaded;
+      return { verified: true, loaded };
+    },
+    installDriveScheduler() {
+      counters.installs += 1;
+      loaded = true;
+      return { installed: true, loaded: true };
+    },
+  };
+  harness.options.lifecycleLockOptions = { platform: "darwin", machineLockRoot: harness.machineLockRoot };
+  harness.options.dailyRefreshOptions = {
+    platform: "darwin",
+    principal: harness.plan.identity.principal,
+    localTimezone: "UTC",
+    existingSchedulerOwners: [],
+    planDailyRefresh: async () => harness.plan,
+    schedulerAdapter: harness.adapter,
+    schedulerOptions: { ...nativeOptions, home: dirname(manifestPath), machineLockRoot: harness.machineLockRoot },
+    driveScheduler,
+    legacySchedulerOptions: { uid },
+    syncSourceExpectations: false,
+  };
+  return { counters, harness, serialized };
+}
+
+test("update captures an older identity-owned scheduler definition before pausing it", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const { counters, harness } = macLegacySchedulerHarness(manifestPath, { definitionMatches: false });
+    let refusal = null;
+    try {
+      await cmdUpdate(manifestPath, harness.options);
+    } catch (error) {
+      refusal = error;
+    }
+    assert.ok(counters.captureDecisions > 0, "the real update path reached legacy capture");
+    assert.ok(counters.filesystemAvailabilityChecks > 0,
+      "the serialized older definition was available to the injected filesystem");
+    if (refusal) {
+      assert.match(refusal.message, /cannot be snapshotted safely before update/i);
+      assert.equal(counters.pauses, 0, "current behavior refused before pausing local work");
+      assert.equal(harness.events.filter((event) => event.startsWith("deploy:")).length, 0,
+        "current behavior refused before remote mutation");
+    }
+    assert.ifError(refusal);
+    assert.equal(counters.definitionCaptures, 1, "the installed definition supplied the update snapshot");
+    assert.equal(counters.pauses, 1, "the captured definition was paused once");
+    assert.equal(counters.installs, 1, "the verified update reconciled the captured scheduler once");
+  });
+});
+
+test("update still captures and continues for a current owned scheduler definition", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const { counters, harness } = macLegacySchedulerHarness(manifestPath, { definitionMatches: true });
+    await cmdUpdate(manifestPath, harness.options);
+    assert.ok(counters.captureDecisions > 0, "the green neighbor reached legacy capture");
+    assert.ok(counters.filesystemAvailabilityChecks > 0);
+    assert.equal(counters.pauses, 1);
+    assert.equal(counters.installs, 1);
+    assert.ok(harness.events.some((event) => event === "deploy:paused"),
+      "the current-definition control continued into the verified update");
+  });
+});
 
 test("production update proves active propagation before convergence and schedule restore", async () => {
   await withFixture(async ({ manifestPath }) => {
@@ -535,6 +704,132 @@ test("production native restore failure rejects with visible daily recovery and 
     }));
     assert.equal(JSON.parse(readFileSync(manifestPath, "utf8")).brain.version, PRODUCT_VERSION,
       "the schedule failure happened after the real upgrade stages committed");
+  });
+});
+
+test("post-update daily recovery persists before rendering one bounded product cause", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const fixture = providerAuthorizationError();
+    const harness = productionHarness(manifestPath, {
+      postUpdateReconciliationError: fixture.error,
+    });
+    let caught = null;
+    try {
+      await cmdUpdate(manifestPath, harness.options);
+    } catch (error) {
+      caught = error;
+    }
+
+    let recoveryCatchDecisionCount = 0;
+    if (/this update is incomplete: daily imports remain paused or unverified/i.test(caught?.message || "")) {
+      recoveryCatchDecisionCount += 1;
+    }
+    const receipt = readDailyRefreshUpdateTransaction(harness.plan.identity, {
+      home: dirname(manifestPath), manifestPath, machineLockRoot: harness.machineLockRoot,
+    });
+    let recoveryPersistenceCount = 0;
+    if (receipt?.phase === "recovery_required") recoveryPersistenceCount += 1;
+
+    assert.ok(recoveryCatchDecisionCount > 0, "the typed-error arm reached the recovery catch decision");
+    assert.ok(recoveryPersistenceCount > 0, "the recovery catch durably persisted its decision");
+    assert.equal(harness.postUpdateReconciliationCalls(), 1,
+      "the typed-error arm reached post-update daily reconciliation exactly once");
+    assert.equal(harness.finish.length, 0, "the incomplete update stopped before its success footer");
+    assert.equal(harness.state().enabled, false, "the incomplete update did not restore daily execution");
+    assert.match(caught.message, /Daily recovery receipt:/);
+    assert.match(caught.message, /Keep that receipt and the recovery fence/);
+    assert.match(caught.message, /Run brain update <manifest> again/);
+    assert.equal(caught.message.includes(fixture.error.code), true,
+      "the implemented recovery output retains the allowlisted typed product code");
+    assert.doesNotMatch(caught.message, new RegExp(fixture.privatePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "u"));
+    assert.doesNotMatch(caught.message, new RegExp(fixture.tokenLike, "u"));
+    assert.doesNotMatch(caught.message,
+      /Fixture-provided recovery text|private provider payload|nested private cause|private stack/u);
+    assert.equal((caught.message.match(/Underlying product error:/gu) || []).length, 1,
+      "the recovery output renders exactly one bounded underlying cause");
+    const receiptIndex = caught.message.indexOf("Daily recovery receipt:");
+    const productErrorIndex = caught.message.indexOf(
+      `Underlying product error: provider_authorization_required: ${SAFE_PROVIDER_AUTHORIZATION_MESSAGE}`,
+    );
+    const retryIndex = caught.message.indexOf("Keep that receipt and the recovery fence.");
+    assert.ok(receiptIndex >= 0 && receiptIndex < productErrorIndex && productErrorIndex < retryIndex,
+      "the single bounded cause appears beside the receipt only after durable persistence and before retry guidance");
+  });
+});
+
+test("post-update product errors rethrow unchanged without an active daily transaction", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    delete manifest.operations;
+    writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    const fixture = providerAuthorizationError();
+    const harness = productionHarness(manifestPath, {
+      postUpdateReconciliationError: fixture.error,
+      activeDailyTransaction: false,
+    });
+
+    await assert.rejects(() => cmdUpdate(manifestPath, harness.options), (error) => error === fixture.error);
+    assert.equal(harness.postUpdateReconciliationCalls(), 1,
+      "the green neighbor reached the same post-update reconciliation decision");
+    assert.equal(readDailyRefreshUpdateTransaction(harness.plan.identity, {
+      home: dirname(manifestPath), manifestPath, machineLockRoot: harness.machineLockRoot,
+    }), null, "the no-transaction path did not invent a recovery receipt");
+  });
+});
+
+test("post-update daily recovery maps every unknown product code to one generic bounded cause", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const fixture = providerAuthorizationError({ code: "fixture_unknown_product_code" });
+    fixture.error.safe_recovery_message = "Unknown typed text is not an allowlisted recovery message.";
+    const harness = productionHarness(manifestPath, {
+      postUpdateReconciliationError: fixture.error,
+    });
+
+    let caught = null;
+    try {
+      await cmdUpdate(manifestPath, harness.options);
+    } catch (error) {
+      caught = error;
+    }
+
+    assert.equal(harness.postUpdateReconciliationCalls(), 1,
+      "the unknown-code arm reached post-update daily reconciliation");
+    assert.equal(readDailyRefreshUpdateTransaction(harness.plan.identity, {
+      home: dirname(manifestPath), manifestPath, machineLockRoot: harness.machineLockRoot,
+    })?.phase, "recovery_required", "the unknown-code decision was durably persisted");
+    assert.equal((caught?.message.match(/Underlying product error:/gu) || []).length, 1);
+    assert.ok(caught.message.includes(
+      `Underlying product error: daily_recovery_unverified: ${SAFE_UNVERIFIED_PRODUCT_MESSAGE}`,
+    ));
+    assert.doesNotMatch(caught.message, /fixture_unknown_product_code|Unknown typed text/u,
+      "unknown code and message text never become recovery output");
+  });
+});
+
+test("post-update daily recovery emits no product cause when recovery persistence fails", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const fixture = providerAuthorizationError();
+    const harness = productionHarness(manifestPath, {
+      postUpdateReconciliationError: fixture.error,
+      corruptRecoveryReceiptBeforePostUpdateError: true,
+    });
+
+    let caught = null;
+    try {
+      await cmdUpdate(manifestPath, harness.options);
+    } catch (error) {
+      caught = error;
+    }
+
+    assert.equal(harness.postUpdateReconciliationCalls(), 1,
+      "the persistence-failure arm reached post-update daily reconciliation");
+    assert.match(caught?.message || "", /daily reconciliation failed.*recovery authorization.*could not be persisted/iu,
+      "the combined failure keeps both safe outcomes visible");
+    assert.doesNotMatch(caught.message, /Underlying product error:|provider_authorization_required/u,
+      "a cause line is impossible before durable recovery persistence");
+    assert.doesNotMatch(caught.message, new RegExp(fixture.privatePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "u"));
+    assert.doesNotMatch(caught.message, new RegExp(fixture.tokenLike, "u"));
+    assert.doesNotMatch(caught.message, /private provider payload|nested private cause|private stack/u);
   });
 });
 

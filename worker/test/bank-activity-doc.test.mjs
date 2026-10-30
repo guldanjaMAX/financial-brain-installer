@@ -103,7 +103,7 @@ test("the bank activity renderer filters honestly, keeps currencies separate, an
   assert.match(content, /1 included amount was rounded from finer bank precision/);
   assert.match(content, /1 removed line was left out/);
   assert.match(content, /1 superseded line was left out/);
-  assert.match(content, /Transfers between the owner's own accounts and card payments are included and are not netted out/);
+  assert.match(content, /Known moves between the owner's own accounts and card payments are separated below/);
   assert.match(content, /## EUR[\s\S]*Money in: EUR 5\.00[\s\S]*Money out: EUR 2\.75[\s\S]*Net: EUR 2\.25/);
   assert.match(content, /## USD/);
   assert.match(content, /3 more not listed\./);
@@ -145,6 +145,28 @@ test("an ordinary settled row remains a green rendering control", () => {
   assert.equal(result.stats.pending, 0);
   assert.equal(result.stats.removed, 0);
   assert.match(result.envelope.content, /Money in: USD 43\.21/);
+});
+
+test("A-R6 renderer separates known moves, keeps possible moves, and preserves settled count", () => {
+  const result = renderBankActivityDocument({
+    account,
+    month: "2026-09",
+    transactions: [
+      transaction({ id: 401, amount_minor: 30000, direction: "outflow", description: "TRANSFER FROM X0042 TO X1177", payee: null }),
+      transaction({ id: 402, amount_minor: 5000, direction: "outflow", description: "TRANSFER TO X9999", payee: null }),
+      transaction({ id: 403, amount_minor: 10000, direction: "inflow", description: "Ordinary receipt", payee: null }),
+    ],
+    transferStates: new Map([
+      [401, { state: "known-owned", reason: "unique directed owned endpoints" }],
+      [402, { state: "possible" }],
+    ]),
+  });
+  assert.equal(result.stats.settled, 3, "gross settled count includes every settled row");
+  assert.match(result.envelope.content, /Money in: USD 100\.00/);
+  assert.match(result.envelope.content, /Money out: USD 50\.00/);
+  assert.match(result.envelope.content, /Moved between your own accounts/);
+  assert.match(result.envelope.content, /USD 300\.00[\s\S]*out of this account[\s\S]*unique directed owned endpoints/);
+  assert.match(result.envelope.content, /possible move between your own accounts, kept in Money in and Money out/);
 });
 
 test("non-ASCII tie ordering is independent of the host locale comparator", () => {

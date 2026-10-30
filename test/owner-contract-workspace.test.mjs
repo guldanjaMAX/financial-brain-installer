@@ -29,8 +29,8 @@ const ACCOUNT_HEADING = "## My accounts (fill in once, after the owner confirms)
 const SAVE_HEADING = "## Financial Brain: at the end of a working session";
 const hashes = {
   "answer-contract-v1.md": "440a931d73efce5e226e7e44da5d84b52ca8497754f7fd40526c8736348f2451",
-  "money-rules-v3.md": "9edd1b0b43a1d29955a3eb7477f46b9cdce52b7466ccdbe6ee77bebc4846f606",
-  "money-rules-v3-windows.md": "6d462e3a89bf03a6f63f143706aaabd5ee7695b9dc3797923ebcb5f89b57c85b",
+  "money-rules-v3.md": "8b9b54e7cf863d8fdf0adb9de594f25337b011eaf0792b82cbbe70c166be2d3e",
+  "money-rules-v3-windows.md": "d095cf3dba877fa3403dfd799e0f2ebc853f9be15b344206899c27797f899bcf",
 };
 // Repeated writer/race tests exercise real filesystem checks. Native reparse
 // detection has separate refusal/control and one bounded Windows smoke test;
@@ -111,6 +111,8 @@ test("a: verbatim inputs, platform control, assistant substitution and one sessi
   for (const platformName of ["darwin", "linux", "win32"]) {
     const text = workspace.renderOwnerRulesSection({ platformName });
     const inner = moneyInner(platformName === "win32" ? "money-rules-v3-windows.md" : "money-rules-v3.md");
+    assert.match(inner, /owner(?:'s)? (?:configured )?time zone/i);
+    assert.doesNotMatch(inner, /server's clock, which is UTC|today's UTC date|server's `last month` follows UTC/);
     const expectedContract = template("answer-contract-v1.md").replace(
       /- If answer_error says today's spending limit was reached[^\n]+/,
       "- If answer_error says today's spending limit was reached, give the time answers start again in the owner's own time zone (answer_resumes_at, which is midnight UTC). The same limit also covers reading scanned pages. Do not suggest an Anthropic key command for a built-in Brain, and do not retry.",
@@ -770,8 +772,69 @@ test("Windows absolute locators retain their native spelling in the shared invoc
   const nodePath = "C:\\Program Files\\Node\\node.exe";
   const guide = workspace.renderClaudeWorkspaceGuide(manifest, { platformName: "win32", brainCliPath, nodePath });
   assert.ok(guide.includes(renderCopyableCommand(nodePath, [brainCliPath], { platformName: "win32" })));
+  assert.ok(guide.includes(renderCopyableCommand("brain", ["doctor", manifest], { platformName: "win32" })));
   assert.ok(guide.includes(manifest));
   assert.throws(() => workspace.renderClaudeWorkspaceGuide(manifest, { brainCliPath: "/fixture/unsafe\npath" }));
+});
+
+test("owner-guide bytes are invariant across every supported executable-path class", (t) => {
+  const maximum = workspace.MAX_OWNER_GUIDE_EXECUTABLE_PATH_CHARACTERS;
+  const paths = [
+    ["short", "/n"],
+    ["reviewed-long", `/${"r".repeat(60)}`],
+    ["space-bearing", "/fixture/runtime folder/node"],
+    ["maximum-supported", `/${"m".repeat(maximum - 1)}`],
+  ];
+  const outcomes = [];
+  let guideBuilds = 0;
+  let sizeDecisions = 0;
+  for (const platformName of ["darwin", "win32"]) {
+    const lengths = [];
+    for (const [label, nodePath] of paths) {
+      const { root, manifest } = fixture(t);
+      const localOptions = {
+        ...options,
+        platformName,
+        brainCliPath: resolve("/fixture/brain.mjs"),
+        nodePath,
+      };
+      guideBuilds++;
+      const result = workspace.writeClaudeWorkspaceGuide(manifest, localOptions);
+      sizeDecisions++;
+      assert.equal(result.status, "written", `${platformName} ${label} reaches publication`);
+      const content = readFileSync(result.path, "utf8");
+      lengths.push([content.length, Buffer.byteLength(content)]);
+      assert.ok(content.length < 40_000, `${platformName} ${label} remains below the product limit`);
+      const runtimeToken = platformName === "win32"
+        ? quotePowerShellArgument(nodePath)
+        : quotePosixArgument(nodePath);
+      assert.equal(count(content, runtimeToken), 1, `${platformName} ${label} retains one exact runtime contract`);
+      for (const command of ["tools", "doctor", "sources", "folder", "ask", "connect", "disconnect", "update", "ingest-file"]) {
+        assert.match(content, new RegExp(`[' ]${command}[' ]`), `${platformName} ${label} retains ${command}`);
+      }
+      outcomes.push("written");
+    }
+    assert.equal(new Set(lengths.map((value) => JSON.stringify(value))).size, 1,
+      `${platformName} guide characters and bytes cannot depend on executable-path length`);
+  }
+
+  const overMaximum = `/${"x".repeat(maximum)}`;
+  guideBuilds++;
+  assert.throws(
+    () => workspace.renderClaudeWorkspaceGuide("/fixture/brain.manifest.json", {
+      platformName: "darwin",
+      brainCliPath: "/fixture/brain.mjs",
+      nodePath: overMaximum,
+    }),
+    new RegExp(`supported ${maximum}-character executable-path limit`),
+  );
+  sizeDecisions++;
+  outcomes.push("refused");
+  assert.ok(guideBuilds > 0 && sizeDecisions > 0, "guide construction and every size decision were reached");
+  assert.ok(outcomes.includes("written") && outcomes.includes("refused"), "the matrix has a green control and a real negative");
+  const source = readFileSync(new URL("../operations/claude-workspace.mjs", import.meta.url), "utf8");
+  assert.match(source, /content\.length >= 40_000/, "the 40,000-character product decision remains exact");
+  t.diagnostic(`guide_builds=${guideBuilds} size_decisions=${sizeDecisions} outcomes=${outcomes.join(",")}`);
 });
 
 test("atomic writer retains the pending file when closing it fails", (t) => {
@@ -929,7 +992,9 @@ for (const platformName of ["darwin", "win32"]) test(`m6/m11 workspace fallback 
   assert.equal(workspace.writeClaudeWorkspaceGuide(manifest, { ...options, platformName }).status, "written");
   const text = readFileSync(join(folder, "CLAUDE.md"), "utf8");
   const fallback = text.split("## If brain_think gives no answer")[1].split("## Hard rules")[0];
-  const invocation = renderCopyableCommand(options.nodePath, [options.brainCliPath, "ask", manifest], { platformName });
+  const runtime = renderCopyableCommand(options.nodePath, [options.brainCliPath], { platformName });
+  const invocation = renderCopyableCommand("brain", ["ask", manifest], { platformName });
+  assert.ok(text.includes(runtime), "the exact executable contract remains visible");
   if (platformName === "win32") {
     assert.match(fallback, /skip the CLI fallback on Windows/);
     assert.equal(fallback.includes(invocation), false, "Windows must not advertise the unsupported fallback");
@@ -980,6 +1045,57 @@ test("v3 menu expansions all reach the ledger parser", () => {
       now: "2026-10-11T12:00:00Z",
     }).kind, "totals");
   }
+});
+
+test("current named-month guidance reaches current-to-date Think while finished named months stay fixed", async t => {
+  const guidance = [];
+  for (const file of ["money-rules-v3.md", "money-rules-v3-windows.md"]) {
+    const text = template(file);
+    assert.match(text, /owner names the current month.*use `this month`/i,
+      `${file}: current named-month translation decision reached`);
+    assert.match(text, /`in <Month YYYY>`.*complete calendar month/is,
+      `${file}: fixed named-month contract is present`);
+    assert.match(text, /may refuse until.*month.*fully covered/is,
+      `${file}: fixed current-month refusal is explicit`);
+    guidance.push(text.match(/owner names the current month[^\n]+/i)?.[0]);
+  }
+  assert.equal(new Set(guidance).size, 1, "both platform guides use the same current-month rule");
+
+  const now = "2026-10-11T12:00:00Z";
+  const f = await createProductFixture({ env: { BRAIN_TIMEZONE: "UTC" } });
+  t.after(() => f.close());
+  seedOwnedEntity(f, "owner", "Fixture owner");
+  f.raw(`INSERT INTO fin_accounts
+    (account_slug,entity_slug,account_kind,balance_role,mask,feed_mode,provenance,basis_state,recorded_at)
+    VALUES ('account-a','owner','checking','asset','1111','live','owner_stated','confirmed',?)`, now);
+  f.raw(`INSERT INTO fin_account_coverage
+    (account_slug,coverage_status,covered_from,covered_to,computed_at,provenance,basis_state,recorded_at)
+    VALUES ('account-a','complete','2026-09-01','2026-10-11',?,'owner_stated','confirmed',?)`, now, now);
+  for (const [id, day, amount] of [["september", "2026-09-15", 12001], ["october", "2026-10-05", 23001]]) {
+    f.raw(`INSERT INTO fin_transactions
+      (txn_uid,account_slug,posted_on,amount_minor,direction,description,provenance,basis_state,recorded_at)
+      VALUES (?,'account-a',?,?,'inflow','Fixture deposit','owner_stated','confirmed',?)`, id, day, amount, now);
+  }
+  const ask = question => withLedgerAnswer({
+    env: f.env, question, now, grantScope: { all: true }, scopePrincipalKind: "owner",
+  }, async gap => Response.json({ answer: null, citations: [], results: [], gaps: gap ? [gap] : [] }))
+    .then(response => response.json());
+
+  const current = await ask("How much money came in this month?");
+  assert.deepEqual([current.ledger?.from, current.ledger?.to], ["2026-10-01", "2026-10-11"],
+    "current-to-date translation reaches the real ledger path");
+  const finished = await ask("How much money came in September 2026?");
+  assert.deepEqual([finished.ledger?.from, finished.ledger?.to], ["2026-09-01", "2026-09-30"],
+    "finished named-month green sibling reaches its fixed real Think window");
+  const fixedIntent = classifyLedgerQuestion("How much money came in October 2026?", {
+    now, timeZone: "UTC",
+  });
+  assert.deepEqual([fixedIntent.from, fixedIntent.to], ["2026-10-01", "2026-10-31"],
+    "explicit current month reaches the complete-calendar decision");
+  const unfinishedFixed = await ask("How much money came in October 2026?");
+  assert.equal(unfinishedFixed.ledger, undefined, "fixed unfinished month supplies no partial figure");
+  assert.match(unfinishedFixed.gaps?.[0]?.detail || "", /covered through 2026-10-11/,
+    "fixed unfinished month reaches the real incomplete-coverage refusal");
 });
 
 test("Codex update requires a safe marker-owned sibling and current wiring proof", t => {
@@ -1616,9 +1732,13 @@ for (const suffix of ["ordinary space", "$UNSET_FIXTURE", "$(printf SUBSTITUTED)
     const opts = { brainCliPath: location === "runtime" ? join(root, "entry.mjs") : recorder, nodePath: location === "runtime" ? recorder : null, platformName: "darwin" };
     const result = workspace.writeCodexWorkspaceGuide(manifest, opts);
     assert.equal(result.status, "written");
-    const command = readFileSync(result.path, "utf8")
+    const guide = readFileSync(result.path, "utf8");
+    const command = guide
       .match(/## If brain_think gives no answer\n[\s\S]{0,700}?`([^`]+)`/)[1];
-    const child = spawnSync("/bin/sh", ["-c", command], { encoding: "utf8", env: shellEnv(root) });
+    const runtimeContract = opts.nodePath
+      ? guide.match(/Run this once in each new terminal[^\n]+: `([^`]+)`/)[1]
+      : "";
+    const child = spawnSync("/bin/sh", ["-c", `${runtimeContract}\n${command}`], { encoding: "utf8", env: shellEnv(root) });
     assert.equal(child.status, 0, "emitted invocation reaches the argument recorder");
     const argv = child.stdout.trimEnd().split("\n");
     assert.equal(argv[location === "runtime" ? 1 : 0], "ask", "command decision point reached");
@@ -1659,7 +1779,7 @@ for (const platform of ["darwin", "win32"]) test(`R5 literal restart and support
 });
 
 test("R5 unknown kind remains a connected account in both owner templates", async t => {
-  const f = await createProductFixture(); t.after(() => f.close());
+  const f = await createProductFixture({ env: { BRAIN_TIMEZONE: "UTC" } }); t.after(() => f.close());
   seedOwnedEntity(f, "owner", "Fixture owner");
   f.raw("INSERT INTO fin_accounts (account_slug,entity_slug,account_kind,balance_role,mask,feed_mode,provenance,basis_state,recorded_at) VALUES ('one','owner','other','asset','6842','live','owner_stated','confirmed','2028-04-15')");
   f.raw("INSERT INTO fin_balance_snapshots (account_slug,as_of_date,current_minor,provenance,basis_state,recorded_at) VALUES ('one','2028-04-14',48231,'owner_stated','confirmed','2028-04-15')");
@@ -1688,10 +1808,12 @@ test("R5 PowerShell locators use literal arguments for the runtime, script and m
   const manifest = "C:\\Users\\owner\\Reserve $fund's ; $(fixture)\\brain.manifest.json";
   const brainCliPath = "C:\\Brain $fund's ; $(fixture)\\entry.mjs", nodePath = "C:\\Runtime $fund's ; $(fixture)\\node.exe";
   const guide = workspace.renderClaudeWorkspaceGuide(manifest, { platformName: "win32", brainCliPath, nodePath });
-  const expected = renderCopyableCommand(nodePath, [brainCliPath, "ask", manifest], { platformName: "win32" });
-  assert.ok(guide.includes(expected), "actual guide renders the full installed invocation");
-  assert.ok(expected.startsWith("& '"));
-  assert.ok(expected.includes("fund''s"));
+  const runtime = renderCopyableCommand(nodePath, [brainCliPath], { platformName: "win32" });
+  const expected = renderCopyableCommand("brain", ["ask", manifest], { platformName: "win32" });
+  assert.ok(guide.includes(runtime), "actual guide retains the full executable contract");
+  assert.ok(guide.includes(expected), "actual guide renders the full installed command");
+  assert.ok(runtime.startsWith("& '") && expected.startsWith("& '"));
+  assert.ok(runtime.includes("fund''s") && expected.includes("fund''s"));
   const control = workspace.renderClaudeWorkspaceGuide("C:\\Brain\\brain.manifest.json", { platformName: "win32", brainCliPath: "C:\\Brain\\entry.mjs" });
   assert.ok(control.includes("& 'C:\\Brain\\entry.mjs'"));
 });

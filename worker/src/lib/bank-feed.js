@@ -353,6 +353,7 @@ export function bankFeedOwnerErrorMessage(data, status) {
     plaid_link_handoff_rejected: "That connection link is no longer usable. Your existing accounts are unchanged. Select Connect a bank to start again.",
     LINK_SESSION_STALE: "This saved bank connection session is no longer usable. Select Connect a bank to start the connection again.",
     BANK_WRITES_PAUSED: "Your Brain is finishing a verified update. Your bank connections and saved choices are safe. Please return to this step after the update finishes.",
+    BANK_PROVIDER_TRANSITION_FENCED: "Your Brain is finishing a reviewed bank-provider change. No bank connection or saved financial history was changed. Please return after deployment finishes.",
   };
   const base = (code && messages[code]) || (status === 503
     ? "This step is temporarily unavailable. Your earlier progress is safe. Please try again."

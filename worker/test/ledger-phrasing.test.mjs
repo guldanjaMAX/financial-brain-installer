@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { classifyLedgerQuestion } from "../src/lib/ledger-question.js";
+import { classifyLedgerQuestion, shiftLedgerDay } from "../src/lib/ledger-question.js";
 import { createProductFixture, seedOwnedEntity } from "./product-contract-fixture.mjs";
 import { linkAccounts } from "./fixtures/money-fix/fixture.mjs";
 
@@ -23,7 +23,7 @@ add("totals", SEP, [
 add("largest", SEP, ["What were my largest expenses in September 2026?", "What were my largest expenses last month?"]);
 add("deposits", RECENT, ["What were my recent deposits?", "Show my recent deposits over the last 14 days."]);
 add("deposits", SEP, ["Show my recent deposits in September 2026?"]);
-add("payment", ["2026-10-01", "2026-10-12"], ["Did a payment of $2,500 arrive in my account ending 8862 in October 2026?"], "8862", { amountMinor: 250000 });
+add("payment", ["2026-10-01", "2026-10-31"], ["Did a payment of $2,500 arrive in my account ending 8862 in October 2026?"], "8862", { amountMinor: 250000 });
 add("payment", SIXTY, ["Did the Paywire payment hit my bank account?"], null, { counterpartyWords: ["paywire"] });
 add("totals", SEP, ["How much money came in and went out in September 2026?"]);
 // Audit items 1, 3-7, 10, 14-16 have deterministic ledger operations.
@@ -32,7 +32,8 @@ add("payment", SIXTY, [
   "Has the payment from Fixture Payer via Paywire posted in account ending 4417?",
 ], "4417", { counterpartyWords: ["paywire", "fixture", "payer"] });
 add("balance", [], ["What is the current balance in each bank account?", "Show me all my bank balances.", "What are my checking balances?", "What is my current savings balance?"]);
-add("totals", SEP, ["How much income came in during September 2026, by account?", "Show me money in for September 2026 by account.", "How much did I spend in September 2026?", "What was my spending last month?", "What were my expenses in September 2026?", "How much money went out last month?", "How much money came in during September 2026?", "What did I spend in September 2026?", "Show me income in September 2026."]);
+add("totals", SEP, ["How much income came in during September 2026, by account?", "Show me money in for September 2026 by account.", "How much money came in during September 2026?", "Show me income in September 2026."]);
+add("expense_summary", SEP, ["What was my spending last month?", "How much money went out last month?", "What did I spend in September 2026?", "How much did I spend in September 2026?", "What were my expenses in September 2026?"]);
 add("category", SEP, ["What was my spending in September 2026 by category?", "Show my spending in September 2026, top categories.", "What were my top spending categories last month?", "Show me spending by category in September 2026."]);
 add("largest", SIXTY, ["What were my ten largest expenses in the last 60 days?", "Show me the 10 biggest expenses over the last 60 days.", "List my top 10 expenses in the last 60 days.", "What were my biggest expenses in the last 60 days?"]);
 add("largest", SEP, ["Show me my top expenses last month.", "List my largest charges in September 2026.", "What were my 3 biggest deposits in September 2026?"]);
@@ -41,9 +42,11 @@ add("deposits", RECENT, ["What deposits came in over the last 14 days?", "Show m
 add("category", ["2026-07-01", "2026-09-30"], ["How much did I spend on software/SaaS in Q3 2026?", "Show me software/SaaS spend in Q3 2026.", "What was my software spending in Q3 2026?"]);
 add("merchant", SEP, ["How much did I spend at Amazon in September 2026?", "Show me Amazon spend in September 2026.", "What was my Amazon spending last month?"]);
 add("transfers", SEP, ["How much did I transfer between my own accounts last month?", "Show me transfers between my own accounts last month.", "List my own-account transfers in September 2026."]);
-add("totals", MONTH, ["How much money came in this month?", "How much did I spend this month?"]);
+add("totals", MONTH, ["How much money came in this month?"]);
+add("expense_summary", MONTH, ["How much did I spend this month?"]);
 add("totals", ["2026-01-01", "2026-10-12"], ["How much money came in so far this year?", "Show me money in and out in 2026 so far."]);
-add("totals", SEP, ["How much money came into my checking account ending 8862 last month?", "What did I spend in account 8862 in September 2026?"], "8862");
+add("totals", SEP, ["How much money came into my checking account ending 8862 last month?"], "8862");
+add("expense_summary", SEP, ["What did I spend in account 8862 in September 2026?"], "8862");
 add("payment", SIXTY, ["Did the payment from Fixture Payer arrive?", "Has the payment from Fixture Payer cleared?", "Did the Fixture Payer payment post?", "Did the payment from Fixture Payer reach my bank account?"], null, { counterpartyWords: ["fixture", "payer"] });
 add("payment", ["2026-09-13", "2026-10-12"], ["Did a payment of $2,500 clear?", "Has the $2,500 payment posted?"], null, { amountMinor: 250000 });
 add("payment", SEP, ["Did the Paywire payment arrive in September 2026?", "Has the Paywire payment cleared last month?"], null, { counterpartyWords: ["paywire"] });
@@ -64,6 +67,122 @@ const documents = [
   "What is the balance in my Fixture Bank account?", "Did a payment of $2,500 arrive in my Fixture Bank account?",
   "How do I balance work and rest?",
 ];
+
+const EVERYDAY_ROWS = [
+  {
+    id: "D-R1",
+    question: "Did Payer Unit pay?",
+    control: "Did the payment from Payer Unit arrive?",
+    negative: "Did the second payer pay?",
+    expected: { kind: "payment", from: "2026-08-14", to: "2026-10-12", amountMinor: null, counterpartyWords: ["payer", "unit"] },
+  },
+  {
+    id: "D-R2",
+    question: "Has Payer Unit paid?",
+    control: "Has the payment from Payer Unit posted?",
+    negative: "Has payroll been paid?",
+    expected: { kind: "payment", from: "2026-08-14", to: "2026-10-12", amountMinor: null, counterpartyWords: ["payer", "unit"] },
+  },
+  {
+    id: "D-R3",
+    question: "Did Payer Unit pay in the past month?",
+    control: "Did the payment from Payer Unit arrive in the last 30 days?",
+    negative: "Did Payer Unit pay in the past 2 months?",
+    expected: { kind: "payment", from: "2026-09-13", to: "2026-10-12", amountMinor: null, counterpartyWords: ["payer", "unit"] },
+  },
+  {
+    id: "D-R4",
+    question: "Has Payer Unit paid in the last 30 days?",
+    control: "Has the payment from Payer Unit posted in the last 30 days?",
+    negative: "Has Payer Unit paid in the last 0 days?",
+    expected: { kind: "payment", from: "2026-09-13", to: "2026-10-12", amountMinor: null, counterpartyWords: ["payer", "unit"] },
+  },
+  {
+    id: "D-R5",
+    question: "Did Payer Unit pay in September?",
+    control: "Did the payment from Payer Unit arrive in September 2026?",
+    negative: "Did Payer Unit pay in September or October?",
+    expected: { kind: "payment", from: "2026-09-01", to: "2026-09-30", amountMinor: null, counterpartyWords: ["payer", "unit"] },
+  },
+  {
+    id: "D-R6",
+    question: "Was I paid by Payer Unit in September?",
+    control: "Did the payment from Payer Unit arrive in September 2026?",
+    negative: "Was the invoice paid in September?",
+    expected: { kind: "payment", from: "2026-09-01", to: "2026-09-30", amountMinor: null, counterpartyWords: ["payer", "unit"] },
+  },
+  {
+    id: "D-R7",
+    question: "Did I get paid $123.45 in the past month?",
+    control: "Did the payment of $123.45 arrive in the last 30 days?",
+    negative: "Did I get paid about $123.45 in the past month?",
+    expected: { kind: "payment", from: "2026-09-13", to: "2026-10-12", amountMinor: 12345, counterpartyWords: [] },
+  },
+  {
+    id: "D-R8",
+    question: "Were we paid $123.45 in the last 30 days?",
+    control: "Did the payment of $123.45 arrive in the last 30 days?",
+    negative: "Were we paid $123.45 or $234.56 in the last 30 days?",
+    expected: { kind: "payment", from: "2026-09-13", to: "2026-10-12", amountMinor: 12345, counterpartyWords: [] },
+  },
+  {
+    id: "D-R9",
+    question: "How much did I spend in the past month?",
+    control: "How much did I spend in the last 30 days?",
+    negative: "How much did I spend in the past 2 months?",
+    expected: { kind: "expense_summary", from: "2026-09-13", to: "2026-10-12", amountMinor: undefined, counterpartyWords: undefined },
+  },
+  {
+    id: "D-R10",
+    question: "How much money came in over the past month?",
+    control: "How much money came in over the last 30 days?",
+    negative: "How much money came in over the past year?",
+    expected: { kind: "totals", from: "2026-09-13", to: "2026-10-12", amountMinor: undefined, counterpartyWords: undefined },
+  },
+];
+
+const comparableIntent = intent => ({
+  kind: intent.kind,
+  from: intent.from,
+  to: intent.to,
+  amountMinor: intent.amountMinor,
+  counterpartyWords: intent.counterpartyWords,
+});
+
+for (const row of EVERYDAY_ROWS) test(`${row.id}: reviewed everyday form stays bounded`, () => {
+  const decisions = { classifier: 0, window: 0 };
+  const classify = question => {
+    decisions.classifier++;
+    const intent = classifyLedgerQuestion(question, { now: NOW });
+    if (intent.from && intent.to) decisions.window++;
+    return intent;
+  };
+  const control = classify(row.control);
+  const actual = classify(row.question);
+  const negative = classify(row.negative);
+  assert.deepEqual(comparableIntent(control), row.expected, `${row.id} canonical control`);
+  assert.equal(decisions.classifier, 3, `${row.id} classifier decision count`);
+  assert.equal(negative.kind, null, `${row.id} negative sibling stays on documents`);
+  assert.deepEqual(comparableIntent(actual), row.expected,
+    `${row.id} classifier=${decisions.classifier} window=${decisions.window}`);
+  assert.notEqual(actual.kind, negative.kind, `${row.id} routing outcomes must not be uniform`);
+});
+
+test("anchored bare months stay in the current owner year without widening arrival grammar", () => {
+  for (const question of ["Did Payer Unit pay in October?", "Was I paid by Payer Unit in October?"]) {
+    const current = classifyLedgerQuestion(question, { now: NOW });
+    assert.deepEqual([current.kind, current.from, current.to], ["payment", "2026-10-01", "2026-10-12"], question);
+  }
+  for (const question of [
+    "Did Payer Unit pay in November?",
+    "Was I paid by Payer Unit in November?",
+    "Did the payment from Payer Unit arrive in September?",
+    "Do we pay Payer Unit?",
+    "What were my largest expenses in the past month?",
+    "How much income came in during the past month?",
+  ]) assert.equal(classifyLedgerQuestion(question, { now: NOW }).kind, null, question);
+});
+
 for (const row of corpus) test(`phrasing: ${row.question}`, () => {
   const result = classifyLedgerQuestion(row.question, { now: NOW });
   assert.equal(result.kind, row.kind);
@@ -80,10 +199,152 @@ for (const question of documents) test(`document routing: ${question}`, () => {
   assert.deepEqual([result.from, result.to], [undefined, undefined]);
 });
 
+test("C-R1: owner evening drives current, recurring, and payment windows", () => {
+  const now = "2026-10-01T02:30:00Z";
+  const zone = "America/Phoenix";
+  const cases = [
+    ["How much money came in this month?", "2026-09-01", "2026-09-30"],
+    ["How much money came in September 2026?", "2026-09-01", "2026-09-30"],
+    ["What are my recurring charges?", "2026-06-03", "2026-09-30"],
+    ["Did the payment from Fixture Payer arrive?", "2026-08-02", "2026-09-30"],
+  ];
+  let windowDecisions = 0;
+  for (const [question, from, to] of cases) {
+    const intent = classifyLedgerQuestion(question, { now, timeZone: zone });
+    assert.ok(intent.kind, `${question}: grammar decision reached`);
+    assert.deepEqual([intent.from, intent.to], [from, to]);
+    assert.equal(intent.timeZone, zone);
+    windowDecisions++;
+  }
+  const utcCurrent = classifyLedgerQuestion("How much money came in this month?", { now, timeZone: "UTC" });
+  const utcRecurring = classifyLedgerQuestion("What are my recurring charges?", { now, timeZone: "UTC" });
+  const utcPayment = classifyLedgerQuestion("Did the payment from Fixture Payer arrive?", { now, timeZone: "UTC" });
+  const utcNamed = classifyLedgerQuestion("How much money came in October 2026?", { now, timeZone: "UTC" });
+  for (const intent of [utcCurrent, utcRecurring, utcPayment]) assert.equal(intent.to, "2026-10-01");
+  assert.equal(utcNamed.to, "2026-10-31", "an explicit month and year keeps its fixed calendar end");
+  assert.equal(windowDecisions, 4, "all four window decisions were reached");
+});
+
+test("C-R2: rolling days stay calendar-exact across spring and fall transitions", () => {
+  const cases = [
+    ["2026-03-08T04:30:00Z", true],
+    ["2026-03-08T06:59:00Z", false],
+    ["2026-03-08T07:01:00Z", false],
+    ["2026-11-01T03:30:00Z", true],
+    ["2026-11-01T05:59:00Z", false],
+    ["2026-11-01T06:01:00Z", false],
+  ];
+  let differingOwnerDays = 0, matchingOwnerDays = 0;
+  for (const [now, differs] of cases) {
+    const owner = classifyLedgerQuestion("How much money came in in the last 30 days?", {
+      now, timeZone: "America/New_York",
+    });
+    const utc = classifyLedgerQuestion("How much money came in in the last 30 days?", { now, timeZone: "UTC" });
+    const days = [];
+    for (let day = owner.from; day <= owner.to; day = shiftLedgerDay(day, 1)) days.push(day);
+    assert.equal(days.length, 30, `${now}: exactly thirty inclusive owner dates`);
+    assert.equal(new Set(days).size, 30, `${now}: no duplicate owner date`);
+    assert.equal(days.at(-1), owner.to, `${now}: no missing owner date`);
+    assert.equal(owner.timeZone, "America/New_York");
+    assert.equal(JSON.stringify([owner.from, owner.to]) !== JSON.stringify([utc.from, utc.to]), differs);
+    if (differs) differingOwnerDays++; else matchingOwnerDays++;
+  }
+  assert.equal(differingOwnerDays, 2, "evening boundary controls differ");
+  assert.equal(matchingOwnerDays, 4, "transition controls with the same calendar day stay equal");
+});
+
+test("C-R3: owner year boundary and explicit historical dates remain distinct", () => {
+  const now = "2035-01-01T02:30:00Z";
+  const zone = "America/Phoenix";
+  const lastMonth = classifyLedgerQuestion("What was my profit last month?", { now, timeZone: zone });
+  const yearToDate = classifyLedgerQuestion("How much money came in so far this year?", { now, timeZone: zone });
+  const payment = classifyLedgerQuestion("Did the payment from Fixture Payer arrive?", { now, timeZone: zone });
+  assert.deepEqual([lastMonth.from, lastMonth.to], ["2034-11-01", "2034-11-30"]);
+  assert.deepEqual([yearToDate.from, yearToDate.to], ["2034-01-01", "2034-12-31"]);
+  assert.deepEqual([payment.from, payment.to], ["2034-11-02", "2034-12-31"]);
+  for (const intent of [lastMonth, yearToDate, payment]) assert.equal(intent.timeZone, zone);
+
+  const historical = classifyLedgerQuestion("What was my profit in November 2034?", {
+    now, timeZone: "Invalid/Zone",
+  });
+  assert.deepEqual([historical.kind, historical.from, historical.to], ["totals", "2034-11-01", "2034-11-30"]);
+  assert.equal(historical.ownerTimeZoneUnavailable, undefined);
+  const explicitPayment = classifyLedgerQuestion("Did the payment of $120.01 arrive on 2034-11-15?", {
+    now, timeZone: "Invalid/Zone",
+  });
+  assert.deepEqual([explicitPayment.from, explicitPayment.to], ["2034-11-08", "2034-11-22"]);
+
+  const invalidDerived = classifyLedgerQuestion("What was my profit last month?", {
+    now, timeZone: "Invalid/Zone",
+  });
+  assert.equal(invalidDerived.kind, "totals", "derived grammar decision reached");
+  assert.equal(invalidDerived.ownerTimeZoneUnavailable, true);
+  assert.deepEqual([invalidDerived.from, invalidDerived.to], [undefined, undefined]);
+});
+
+test("item C explicit-window invariance table keeps fixed bounds without an owner zone", () => {
+  const explicitCases = [
+    ["owner-day boundary", "2026-10-01T02:30:00Z", "How much money came in October 2026?", "2026-10-01", "2026-10-31"],
+    ["month end", "2026-10-31T23:30:00Z", "How much money came in October 2026?", "2026-10-01", "2026-10-31"],
+    ["year end", "2034-12-31T23:30:00Z", "How much money came in December 2034?", "2034-12-01", "2034-12-31"],
+    ["leap day", "2024-02-29T12:00:00Z", "How much money came in February 2024?", "2024-02-01", "2024-02-29"],
+  ];
+  const zoneStates = [["valid owner-day-different", "America/Phoenix"], ["missing", null], ["invalid", "Invalid/Zone"]];
+  const armOutcomes = [];
+  let classificationDecisions = 0, boundDecisions = 0;
+  for (const [edge, now, question, from, to] of explicitCases) {
+    for (const [zoneState, timeZone] of zoneStates) {
+      const intent = classifyLedgerQuestion(question, { now, timeZone });
+      assert.equal(intent.kind, "totals", `${edge} ${zoneState}: classification decision reached`);
+      classificationDecisions++;
+      assert.equal(intent.ownerTimeZoneUnavailable, undefined, `${edge} ${zoneState}: explicit bounds do not need an owner day`);
+      assert.deepEqual([intent.from, intent.to], [from, to], `${edge} ${zoneState}: fixed date-only bounds`);
+      boundDecisions++;
+      armOutcomes.push("usable");
+    }
+  }
+
+  let historicalControls = 0;
+  for (const [zoneState, timeZone] of zoneStates.slice(1)) {
+    const historical = classifyLedgerQuestion("How much money came in September 2026?", {
+      now: "2026-10-01T02:30:00Z", timeZone,
+    });
+    assert.equal(historical.kind, "totals", `${zoneState}: historical classification reached`);
+    assert.deepEqual([historical.from, historical.to], ["2026-09-01", "2026-09-30"]);
+    assert.equal(historical.ownerTimeZoneUnavailable, undefined);
+    historicalControls++;
+  }
+
+  const derivedCases = [
+    ["current month", "How much money came in this month?"],
+    ["last month", "How much money came in last month?"],
+    ["rolling days", "How much money came in in the last 30 days?"],
+    ["year to date", "How much money came in so far this year?"],
+    ["explicit current year to date", "Show me money in and out in 2026 so far."],
+  ];
+  let refusalDecisions = 0;
+  for (const [zoneState, timeZone] of zoneStates.slice(1)) {
+    for (const [period, question] of derivedCases) {
+      const intent = classifyLedgerQuestion(question, { now: "2026-10-01T02:30:00Z", timeZone });
+      assert.equal(intent.kind, "totals", `${period} ${zoneState}: classification decision reached`);
+      assert.equal(intent.ownerTimeZoneUnavailable, true, `${period} ${zoneState}: refusal decision reached`);
+      assert.deepEqual([intent.from, intent.to], [undefined, undefined]);
+      refusalDecisions++;
+      armOutcomes.push("refused");
+    }
+  }
+  assert.equal(classificationDecisions, explicitCases.length * zoneStates.length);
+  assert.equal(boundDecisions, explicitCases.length * zoneStates.length);
+  assert.equal(historicalControls, 2);
+  assert.equal(refusalDecisions, derivedCases.length * 2);
+  assert.equal(new Set(armOutcomes).size, 2, "usable and refused arms must not collapse to a uniform outcome");
+});
+
 async function fixture(t, reverse = false) {
   t.mock.method(Date, "now", () => Date.parse(NOW));
   const f = await createProductFixture({ env: { ADMIN_KEY: randomBytes(24).toString("hex"),
-    SESSION_SIGNING_KEY: randomBytes(32).toString("hex"), AI: { async run() { return { response: "No document answer." }; } } } });
+    SESSION_SIGNING_KEY: randomBytes(32).toString("hex"), BRAIN_TIMEZONE: "UTC",
+    AI: { async run() { return { response: "No document answer." }; } } } });
   t.after(() => f.close());
   seedOwnedEntity(f, "owner", "Owner");
   f.raw(`INSERT INTO bank_feed_items (item_ref,access_ciphertext,access_iv,environment,connected_at,last_synced_at)
@@ -131,6 +392,7 @@ for (const reverse of [false, true]) test(`Think exact cents and empty-account c
   assert.deepEqual(largest.ledger?.rows.map(r => r.amount_minor), [12345, 6789]);
   const recent = await f.ask("What were my recent deposits?");
   assert.deepEqual(recent.ledger?.rows.map(r => r.amount_minor), [1234, 902, 250000]);
+  f.raw("UPDATE fin_account_coverage SET covered_to='2026-10-31' WHERE account_slug IN ('manual-b','live-b')");
   const amount = await f.ask("Did a payment of $2,500 arrive in my account ending 8862 in October 2026?");
   assert.equal(amount.ledger?.found, true); assert.deepEqual(amount.citations.map(c => c.amount_minor), [250000]);
   const named = await f.ask("Did the Paywire payment hit my bank account?");

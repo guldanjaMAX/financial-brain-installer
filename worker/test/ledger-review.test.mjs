@@ -7,6 +7,13 @@ let forbiddenFetches = 0;
 globalThis.fetch = async () => { forbiddenFetches++; throw new Error('Network disabled in review'); };
 test.after(() => assert.equal(forbiddenFetches, 0));
 
+const ledgerWordingUnsupportedGap = {
+  type: 'ledger_not_consulted',
+  reason: 'ledger_wording_unsupported',
+  code: 'ledger_wording_unsupported',
+  detail: 'The bank records were not checked for this wording. Try: "What are my account balances?", "How much money came in and went out in September 2026?", or "Did the payment of $123.45 arrive?"',
+};
+
 test('control: exact payer, absent payer, partial word and outflow exercise real transaction reads', async t => {
   const f = ledgerFixture(t);
   f.add('exact', 'Settlement', 'Fixture Payer');
@@ -31,7 +38,7 @@ for (const adjective of ['budgeted', 'budget', 'approved', 'planned', 'projected
   const body = await f.ask(question);
   assert.ok(f.calls.length > start || f.documentCalls > 0, 'a real routing decision was reached');
   assert.equal(body.ledger, undefined, `document qualifier became ${body.ledger?.kind}: ${body.answer}`);
-  assert.deepEqual(body, { route: 'documents', gaps: [] });
+  assert.deepEqual(body, { route: 'documents', gaps: [ledgerWordingUnsupportedGap] });
   assert.equal(f.calls.length, start, 'planning qualifiers cannot read the ledger');
   assert.equal(classify(question, { now: Date.parse(NOW) }).kind, null);
 });
@@ -50,7 +57,7 @@ for (const party of genericSenders) for (const [form, questionFor] of senderForm
   const start = f.calls.length, documents = f.documentCalls;
   const body = await f.ask(questionFor(party));
   assert.ok(f.calls.length > start || f.documentCalls > documents, 'real routing decision reached');
-  assert.deepEqual(body, { route: 'documents', gaps: [] }, 'generic sender must preserve document fallback');
+  assert.deepEqual(body, { route: 'documents', gaps: [ledgerWordingUnsupportedGap] }, 'generic sender must preserve document fallback');
   assert.equal(f.documentCalls, documents + 1);
   assert.equal(f.calls.length, start, 'generic sender cannot read unrelated deposits');
 });
@@ -137,7 +144,7 @@ for (const qualifier of ['first', 'second', 'third', 'another', 'bank']) test(`n
   assert.equal((await f.ask('Did a payment of $37.50 arrive?')).ledger?.found, true);
   const documents = f.documentCalls;
   const body = await f.ask(`Did the ${qualifier} payment of $37.50 arrive?`);
-  assert.deepEqual(body, { route: 'documents', gaps: [] });
+  assert.deepEqual(body, { route: 'documents', gaps: [ledgerWordingUnsupportedGap] });
   assert.equal(f.documentCalls, documents + 1, 'ambiguous sender reached document routing');
 });
 
@@ -147,7 +154,7 @@ test('closure: a lone past-participle qualifier such as "authorized" stays a doc
   for (const question of ['What is my authorized spending this month?', 'What is my allocated spending this month?']) {
     const documents = f.documentCalls;
     const body = await f.ask(question);
-    assert.deepEqual(body, { route: 'documents', gaps: [] }, question);
+    assert.deepEqual(body, { route: 'documents', gaps: [ledgerWordingUnsupportedGap] }, question);
     assert.equal(f.documentCalls, documents + 1, question);
   }
 });

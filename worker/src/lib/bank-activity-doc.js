@@ -9,6 +9,9 @@ import {
 } from "./store.js";
 import { gatedIngest } from "./zoom.js";
 import { withFirstPartySourceProvenance } from "./provenance-receipt.js";
+import { isDirectedOwnedTransfer, pairOwnTransfers } from "./ledger-analysis.js";
+import { shiftLedgerDay } from "./ledger-question.js";
+import { readEffectiveAccounts, readEffectiveTransactions } from "./ledger-reader.js";
 
 export const BANK_ACTIVITY_SOURCE = "bank_activity";
 export const BANK_ACTIVITY_KIND = "bank_activity";
@@ -113,11 +116,14 @@ function summarizeRows(rows, month, accountCurrency) {
   return { counts, included: included.sort(compareRows) };
 }
 
-function renderCurrencySection(currency, rows) {
+function renderCurrencySection(currency, rows, transferStates) {
+  const transferState = row => transferStates.get(row.id) || null;
+  const known = rows.filter(row => transferState(row)?.state === "known-owned");
+  const ordinary = rows.filter(row => transferState(row)?.state !== "known-owned");
   let moneyIn = 0n;
   let moneyOut = 0n;
   const payees = new Map();
-  for (const row of rows) {
+  for (const row of ordinary) {
     const amount = BigInt(Number(row.amount_minor || 0));
     if (row.direction === "inflow") moneyIn += amount;
     if (row.direction === "outflow") {
@@ -130,7 +136,11 @@ function renderCurrencySection(currency, rows) {
     if (a[1] !== b[1]) return a[1] > b[1] ? -1 : 1;
     return compareCodePoints(a[0], b[0]);
   }).slice(0, 5);
-  const latest = rows.slice(0, 25);
+  const latest = ordinary.slice(0, 25);
+  const description = row => `${safeText(row.payee || row.description, "Unlabelled activity")}${
+    transferState(row)?.state === "possible"
+      ? " (possible move between your own accounts, kept in Money in and Money out)"
+      : ""}`;
   const lines = [
     `## ${currency}`,
     `Settled transaction count: ${rows.length}. Money in: ${formatMinor(moneyIn, currency)}. ` +
@@ -142,10 +152,18 @@ function renderCurrencySection(currency, rows) {
     "| Date | Payee or description | Amount | Direction |",
     "| --- | --- | ---: | --- |",
     ...latest.map((row) =>
-      `| ${row.posted_on} | ${safeText(row.payee || row.description, "Unlabelled activity")} | ` +
+      `| ${row.posted_on} | ${description(row)} | ` +
       `${formatMinor(row.amount_minor, currency)} | ${row.direction === "inflow" ? "in" : "out"} |`),
   ];
-  if (rows.length > latest.length) lines.push(`${rows.length - latest.length} more not listed.`);
+  if (ordinary.length > latest.length) lines.push(`${ordinary.length - latest.length} more not listed.`);
+  if (known.length) lines.push(
+    "Moved between your own accounts:",
+    "| Date | Amount | Account direction | Why |",
+    "| --- | ---: | --- | --- |",
+    ...known.map(row => `| ${row.posted_on} | ${formatMinor(row.amount_minor, currency)} | ` +
+      `${row.direction === "inflow" ? "into this account" : "out of this account"} | ` +
+      `${safeText(transferState(row)?.reason, "unique directed owned endpoints")} |`),
+  );
   return lines.join("\n");
 }
 
@@ -153,7 +171,7 @@ function renderCurrencySection(currency, rows) {
  * Render only ledger-derived fields. The injected clock is accepted as a test
  * seam but deliberately unused, so retries cannot create a new document body.
  */
-export function renderBankActivityDocument({ account, month, transactions, now: _now = null }) {
+export function renderBankActivityDocument({ account, month, transactions, transferStates = new Map(), now: _now = null }) {
   if (!MONTH.test(String(month || ""))) throw new TypeError("bank activity month must be YYYY-MM");
   if (!PUBLIC_ACCOUNT_REF.test(String(account?.public_ref || ""))) {
     throw new TypeError("bank activity requires a public account reference");
@@ -175,10 +193,11 @@ export function renderBankActivityDocument({ account, month, transactions, now: 
       `${counts.rounded} included amount${counts.rounded === 1 ? " was" : "s were"} rounded from finer bank precision.`,
     `${counts.removed} removed line${counts.removed === 1 ? " was" : "s were"} left out, and ` +
       `${counts.superseded} superseded line${counts.superseded === 1 ? " was" : "s were"} left out.`,
-    "Transfers between the owner's own accounts and card payments are included and are not netted out.",
+    "Known moves between the owner's own accounts and card payments are separated below and left out of Money in and Money out. Possible moves stay included.",
     ...currencies.map((currency) => renderCurrencySection(
       currency,
       included.filter((row) => row.currency === currency),
+      transferStates,
     )),
   ].join("\n\n");
   const envelope = withFirstPartySourceProvenance({
@@ -222,7 +241,8 @@ function parseCursor(value) {
 }
 
 async function plaidLedgerMarker(env, tenantId) {
-  const rows = (await env.DB.prepare(
+  const [plaidResult, accountResult, linkResult] = await env.DB.batch([
+    env.DB.prepare(
     `SELECT i.item_ref,i.cursor,i.cursor_updated_at,i.last_synced_at,i.institution_label,
             a.id AS account_id,a.account_slug,a.entity_slug,a.label AS account_label,
             a.mask AS account_mask,a.currency AS account_currency,
@@ -247,8 +267,32 @@ async function plaidLedgerMarker(env, tenantId) {
         AND e.superseded_by_id IS NULL
       WHERE i.tenant_id=?1 AND i.removed_at IS NULL
       ORDER BY i.item_ref,a.id`,
-  ).bind(tenantId).all())?.results || [];
-  const bytes = new TextEncoder().encode(JSON.stringify(rows));
+    ).bind(tenantId),
+    env.DB.prepare(
+      `SELECT owned.id,owned.account_slug,owned.entity_slug,owned.mask,owned.account_kind,
+              owned.institution,owned.label,owned.external_ref,owned.source_feed,owned.currency,
+              owned.feed_mode,owned.balance_role,owned.basis_state
+         FROM fin_accounts owned
+         JOIN fin_entities entity ON entity.tenant_id=owned.tenant_id
+          AND entity.entity_slug=owned.entity_slug AND entity.superseded_by_id IS NULL
+          AND entity.relationship='owned' AND entity.basis_state='confirmed'
+        WHERE owned.tenant_id=?1 AND owned.superseded_by_id IS NULL
+        ORDER BY owned.entity_slug,owned.account_slug,owned.id`,
+    ).bind(tenantId),
+    env.DB.prepare(
+      `SELECT id,manual_account_slug,live_account_slug,identity_json,link_plan_hash,linked_at
+         FROM fin_account_links
+        WHERE tenant_id=?1 AND unlinked_at IS NULL
+        ORDER BY manual_account_slug,live_account_slug,id`,
+    ).bind(tenantId),
+  ]);
+  const rows = plaidResult?.results || [];
+  const inventory = accountResult?.results || [];
+  const links = linkResult?.results || [];
+  // The marker and transfer resolver must observe the same authority. Plaid
+  // rows alone miss manual accounts and committed account-link state, either
+  // of which can change endpoint uniqueness during a bounded traversal.
+  const bytes = new TextEncoder().encode(JSON.stringify({ plaid: rows, inventory, links }));
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
 }
@@ -311,6 +355,34 @@ async function monthTransactions(env, tenantId, candidate) {
       ORDER BY posted_on DESC,id`,
   ).bind(tenantId, candidate.account_slug, candidate.month).all();
   return result?.results || [];
+}
+
+async function transferAnalysisForMonth(env, tenantId, month) {
+  const inventory = await readEffectiveAccounts(env, { tenantId });
+  const accounts = inventory.filter(account => !account.ambiguous && !account.linkRequired &&
+    account.currency === "USD" && account.members.every(member => member.basis_state === "confirmed"));
+  const eligibleBySlug = new Map(accounts.map(account => [account.account_slug, account]));
+  // Eligibility controls which rows may pair. Endpoint uniqueness is a
+  // separate ownership question and must fail closed against the full
+  // inventory, including accounts whose rows are not eligible for this lead.
+  const resolverBySlug = new Map(inventory.map(account => [account.account_slug, account]));
+  const start = shiftLedgerDay(`${month}-01`, -6);
+  const end = shiftLedgerDay(monthEnd(month), 6);
+  // The reader revalidates the complete account snapshot. Read that full
+  // inventory, then admit only confirmed, unambiguous USD accounts to pairing.
+  const rows = inventory.length ? await readEffectiveTransactions(env, inventory, { from: start, to: end, tenantId }) : [];
+  const eligible = rows.filter(row => eligibleBySlug.has(row.effective_account_slug) && row.basis_state === "confirmed" &&
+    /^\d{4}-\d{2}-\d{2}$/.test(row.posted_on || "") && Number.isSafeInteger(row.amount_minor) &&
+    row.amount_minor > 0 && row.currency === "USD" && ["inflow", "outflow"].includes(row.direction));
+  const pairing = pairOwnTransfers(eligible, resolverBySlug);
+  const states = new Map(pairing.unmatched.map(row => [row.id, { state: "possible" }]));
+  for (const pair of pairing.pairs) {
+    const known = isDirectedOwnedTransfer(pair, resolverBySlug);
+    for (const row of [pair.out, pair.in]) states.set(row.id, known
+      ? { state: "known-owned", reason: pair.reason }
+      : { state: "possible" });
+  }
+  return { states };
 }
 
 async function bankActivityGeneration(env) {
@@ -410,6 +482,7 @@ export async function writeBankActivityDocuments(env, {
     refused: 0,
     failed: 0,
     deferred: 0,
+    transfer_decision_count: 0,
     complete_sweep: false,
   };
   if (env.VECTOR_DRAIN_MODE === "paused-for-upgrade") return { ...base, outcome: "paused" };
@@ -442,9 +515,17 @@ export async function writeBankActivityDocuments(env, {
   const counts = { ...base, ran: true, outcome: "ran" };
   let estimatedStatements = 0;
   let last = null;
+  const transferAnalyses = new Map();
+  const transferDecisionRows = new Set();
 
   for (const candidate of selected) {
     try {
+      if (!transferAnalyses.has(candidate.month)) {
+        transferAnalyses.set(candidate.month, transferAnalysisForMonth(env, tenantId, candidate.month));
+      }
+      const transferAnalysis = await transferAnalyses.get(candidate.month);
+      for (const rowId of transferAnalysis.states.keys()) transferDecisionRows.add(rowId);
+      counts.transfer_decision_count = transferDecisionRows.size;
       const publicRef = await plaidPublicAccountRef(tenantId, candidate.item_ref, candidate.provider_account_id);
       const transactions = await monthTransactions(env, tenantId, candidate);
       const { envelope } = renderBankActivityDocument({
@@ -459,6 +540,7 @@ export async function writeBankActivityDocuments(env, {
         },
         month: candidate.month,
         transactions,
+        transferStates: transferAnalysis.states,
       });
       const claimed = await claimBankActivityDocument(env, {
         sourceId: envelope.source_id,

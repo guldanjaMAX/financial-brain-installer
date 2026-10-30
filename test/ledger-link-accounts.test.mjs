@@ -63,11 +63,13 @@ test('R03 actual CLI: bounded refusal, preview, authentication, approval, replay
   const refusal = await ask(f);
   assert.equal(refusal.answer, null); assert.equal(refusal.gaps.length, 1);
   assert.equal(refusal.gaps[0].reason, 'ledger_account_link_required');
-  assert.match(refusal.gaps[0].detail, /Bank One.*4321.*checking/);
-  // The Worker and the owner app cannot know the installer's shell, so their
-  // guidance names the subcommand; only CLI output is rendered per platform.
-  assert.ok(refusal.gaps[0].detail.includes('ledger link-accounts <manifest> --manual manual-account --live live-account --preview'));
-  assert.ok(ownerError(new ApiError(409, { code: refusal.code })).message.includes('ledger link-accounts'));
+  assert.match(refusal.gaps[0].detail, /manual import and live feed.*owner.*confirmation/i);
+  assert.doesNotMatch(refusal.gaps[0].detail, /brain ledger|manual-account|live-account/,
+    'owner refusal contains neither an unrunnable shell command nor internal account ids');
+  const ownerRefusal = ownerError(new ApiError(409, { code: refusal.code })).message;
+  assert.match(ownerRefusal, /missing confirmation from the owner/iu);
+  assert.doesNotMatch(ownerRefusal, /ledger link-accounts|--manual|--live|<account>/iu,
+    'the owner error renderer must not expose an installer-only command or account placeholders');
   const think = () => worker.fetch(new Request('https://brain.invalid/api/rag/think', { method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Admin-Key': f.env.ADMIN_KEY },
     body: JSON.stringify({ q: 'How much money came in September 2026?' }) }), f.env, {}).then(r => r.json());

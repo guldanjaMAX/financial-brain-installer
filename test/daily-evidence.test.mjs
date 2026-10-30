@@ -944,6 +944,56 @@ test("permanent provider refusals remain visible through Worker receipts, source
   }, "bounded receipt-page merging retains the newest withholding aggregate");
 });
 
+test("microsoft durable withholding preserves calendar and credential causes with an exact sum", async t => {
+  const f = fixture(t);
+  const reason = providerWithheldReason({
+    calendar_event_incomplete: 1,
+    credential_detected: 1,
+  });
+  const base = {
+    source: "fixture", kind: "microsoft", status: "ready", run_id: "mixed-causes",
+    started_at: NOW, completed_at: NOW, walk_complete: true, provider_check_complete: true,
+    files_seen: 2, docs_added: 0, docs_updated: 0, docs_unchanged: 0, docs_refused: 2, docs_failed: 0,
+    refusal_reason: reason,
+  };
+  await f.postReceipt(base);
+  const read = async () => (await sourceInventory(f.env, { now: Date.parse(NOW) })).rows[0];
+  const positive = await read();
+  assert.equal(f.seen.receipts, 1, "the mixed-cause receipt reached durable validation");
+  assert.deepEqual(positive.receipt.latest_run.withheld_reasons, {
+    calendar_event_incomplete: 1,
+    credential_detected: 1,
+  });
+  assert.equal(positive.receipt.latest_run.docs_withheld, 2);
+  assert.equal(providerWithheldCheckAt("microsoft", positive.receipt.latest_run), NOW,
+    "the exact-sum mixed cause is the green control");
+
+  const rejected = [
+    { label: "sum mismatch", mutation: { docs_refused: 3 } },
+    {
+      label: "noncanonical key order",
+      mutation: { refusal_reason: 'provider_withheld_v1:{"credential_detected":1,"calendar_event_incomplete":1}' },
+    },
+    {
+      label: "unknown reason",
+      mutation: { refusal_reason: 'provider_withheld_v1:{"calendar_event_incomplete":1,"future_policy":1}' },
+    },
+    {
+      label: "zero count",
+      mutation: { refusal_reason: 'provider_withheld_v1:{"calendar_event_incomplete":0,"credential_detected":2}' },
+    },
+  ];
+  for (const [index, arm] of rejected.entries()) {
+    const before = f.seen.receipts;
+    await f.postReceipt({ ...base, run_id: `mixed-rejected-${index}`, ...arm.mutation });
+    assert.equal(f.seen.receipts, before + 1, `${arm.label}: receipt validation was reached`);
+    const row = await read();
+    assert.equal(providerWithheldCheckAt("microsoft", row.receipt.latest_run), null, arm.label);
+  }
+  assert.equal(providerWithheldCheckAt("slack", positive.receipt.latest_run), null,
+    "a calendar cause cannot be reassigned to a non-calendar provider kind");
+});
+
 for (const kind of ["microsoft", "slack", "notion", "dropbox", "hubspot", "quickbooks"]) {
   test(`${kind} stores only closed withholding evidence and rejects unproven checks`, async t => {
     const f = fixture(t);

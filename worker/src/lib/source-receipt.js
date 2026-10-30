@@ -67,29 +67,70 @@ export function providerNoChangeCheckAt(kind, run) {
 // aggregate. It carries no document identities or arbitrary provider strings.
 const PROVIDER_WITHHELD_PREFIX = "provider_withheld_v1:";
 const PROVIDER_KINDS = new Set(["microsoft", "slack", "notion", "dropbox", "hubspot", "quickbooks"]);
+export const PROVIDER_WITHHELD_REASON_CODES = Object.freeze([
+  "calendar_event_incomplete",
+  "credential_detected",
+]);
+const PROVIDER_WITHHELD_REASONS = new Set(PROVIDER_WITHHELD_REASON_CODES);
 
-export function providerWithheldReason(count) {
-  if (!Number.isSafeInteger(count) || count <= 0) return null;
-  return `${PROVIDER_WITHHELD_PREFIX}${JSON.stringify({ credential_detected: count })}`;
+export function normalizeProviderWithheldReasons(value) {
+  const candidate = Number.isSafeInteger(value)
+    ? { credential_detected: value }
+    : value;
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return null;
+  const keys = Object.keys(candidate).sort();
+  if (!keys.length || keys.some((key) => !PROVIDER_WITHHELD_REASONS.has(key))) return null;
+  const reasons = {};
+  let count = 0;
+  for (const key of keys) {
+    const valueCount = candidate[key];
+    if (!Number.isSafeInteger(valueCount) || valueCount <= 0 || !Number.isSafeInteger(count + valueCount)) return null;
+    reasons[key] = valueCount;
+    count += valueCount;
+  }
+  return { count, reasons };
+}
+
+export function mergeProviderWithheldReasons(values) {
+  if (!Array.isArray(values) || !values.length) return null;
+  const merged = {};
+  for (const value of values) {
+    const aggregate = normalizeProviderWithheldReasons(value);
+    if (!aggregate) return null;
+    for (const code of PROVIDER_WITHHELD_REASON_CODES) {
+      const next = (merged[code] || 0) + (aggregate.reasons[code] || 0);
+      if (!Number.isSafeInteger(next)) return null;
+      if (next > 0) merged[code] = next;
+    }
+  }
+  return normalizeProviderWithheldReasons(merged);
+}
+
+export function providerWithheldReason(value) {
+  const aggregate = normalizeProviderWithheldReasons(value);
+  return aggregate ? `${PROVIDER_WITHHELD_PREFIX}${JSON.stringify(aggregate.reasons)}` : null;
 }
 
 export function parseProviderWithheldReason(value, kind, refused) {
   if (!PROVIDER_KINDS.has(kind) || typeof value !== "string" || !value.startsWith(PROVIDER_WITHHELD_PREFIX)) return null;
   try {
     const reasons = JSON.parse(value.slice(PROVIDER_WITHHELD_PREFIX.length));
-    const count = reasons?.credential_detected;
-    if (providerWithheldReason(count) !== value || !Number.isSafeInteger(refused) || count > refused) return null;
-    return { count, reasons: { credential_detected: count } };
+    const aggregate = normalizeProviderWithheldReasons(reasons);
+    if (!aggregate || providerWithheldReason(aggregate.reasons) !== value ||
+        !Number.isSafeInteger(refused) || aggregate.count !== refused ||
+        (aggregate.reasons.calendar_event_incomplete && kind !== "microsoft")) return null;
+    return aggregate;
   } catch { return null; }
 }
 
 /** A completed check with policy omissions proves freshness, never full history. */
 export function providerWithheldCheckAt(kind, run) {
+  const aggregate = normalizeProviderWithheldReasons(run?.withheld_reasons);
   if (!PROVIDER_KINDS.has(kind) || run?.outcome !== "partial" || run.walk_complete !== true ||
       run.provider_check_complete !== true || run.metrics_version !== 1 || run.docs_failed !== 0 ||
       !Number.isSafeInteger(run.docs_withheld) || run.docs_withheld <= 0 || run.docs_withheld !== run.docs_refused ||
-      run.withheld_reasons?.credential_detected !== run.docs_withheld ||
-      Object.keys(run.withheld_reasons).length !== 1 || run.error) return null;
+      !aggregate || aggregate.count !== run.docs_withheld ||
+      (aggregate.reasons.calendar_event_incomplete && kind !== "microsoft") || run.error) return null;
   if (!["files_seen", "docs_added", "docs_updated", "docs_unchanged"]
       .every(field => Number.isSafeInteger(run[field]) && run[field] >= 0) || run.files_seen <= 0) return null;
   const started = typeof run.started_at === "string" ? Date.parse(run.started_at) : NaN;

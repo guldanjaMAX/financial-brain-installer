@@ -58,6 +58,7 @@ import {
 } from "./lib/quickbooks-oauth-callback.js";
 import { cleanupPublicAuthState, guardPublicRequest } from "./lib/public-request-guard.js";
 import { handleBankExportImport, BANK_IMPORT_PATH } from "./lib/fin-upload.js";
+import { writeBankActivityDocuments } from "./lib/bank-activity-doc.js";
 import { handleContentRefreshDates, CONTENT_REFRESH_PATH } from "./lib/content-freshness-maintenance.js";
 import { handleFinApi, FIN_PATH_PREFIX } from "./lib/fin-api.js";
 import {
@@ -3690,7 +3691,10 @@ export default {
           body: JSON.stringify(envelope),
         },
       ), { all: true }, { principalKind: "owner" });
-      return handleOwnerActions(env, request, path, { ingestEnvelope });
+      const afterBankImportCommit = ({ response, at }) => response?.changed === true
+        ? writeBankActivityDocuments(env, { metadataChanges: 1, at })
+        : null;
+      return handleOwnerActions(env, request, path, { ingestEnvelope, afterBankImportCommit });
     }
 
     // Plaid signs the exact raw body with a short-lived ES256 verification JWT.

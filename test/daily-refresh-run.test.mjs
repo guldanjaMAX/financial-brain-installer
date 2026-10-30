@@ -1,11 +1,19 @@
 import assert from "node:assert/strict";
-import { mkdtempSync as makeTempDirectory, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync as makeTempDirectory,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { buildDailyRefreshDefinition } from "../operations/daily-refresh-scheduler.mjs";
 import { runDailyRefresh, runDailyRefreshCli } from "../operations/daily-refresh-run.mjs";
+import { acquireBrainLifecycleLock } from "../operations/brain-lifecycle-lock.mjs";
 import { DriveRemovalReviewRequired } from "../operations/drive-removal-plan.mjs";
 
 const mkdtempSync = (...args) => realpathSync.native(makeTempDirectory(...args));
@@ -49,20 +57,425 @@ test("daily refresh runs ready owned legs sequentially and requires freshness to
   assert.ok(receipts.some((receipt) => receipt.source === "drive"), "per-source receipt was written");
 });
 
-test("busy lifecycle lock records a non-vacuous deferred outcome", async () => {
+test("macOS daily refresh waits for a live lifecycle holder, then acquires and runs", async () => {
   const receipts = [];
   let acquireCalls = 0;
+  let sourceCalls = 0;
+  let freshnessReads = 0;
+  let elapsed = 0;
   const busy = Object.assign(new Error("busy"), { code: "brain_lifecycle_busy" });
   const result = await runDailyRefresh({
     plan,
+    platform: "darwin",
+    acquireLock: () => {
+      acquireCalls += 1;
+      if (elapsed < 5_000) throw busy;
+      return { assertOwned() {}, release() {} };
+    },
+    sleep: async (milliseconds) => { elapsed += milliseconds; },
+    lockNow: () => elapsed,
+    runSource: async () => { sourceCalls += 1; return { status: "complete" }; },
+    readFreshness: async () => ({
+      drive: { last_successful_run_at: ++freshnessReads === 1
+        ? "2026-10-29T12:00:00.000Z"
+        : "2026-10-30T12:00:00.000Z" },
+    }),
+    writeReceipt: (receipt) => receipts.push(receipt),
+    now: () => new Date("2026-10-30T12:00:00.000Z"),
+  });
+  assert.equal(acquireCalls, 4, "the lock decision was retried at 0, 2, 4, and 6 seconds");
+  assert.equal(sourceCalls, 1, "the source ran only after the daily acquired the lock");
+  assert.equal(freshnessReads, 2, "both source evidence decisions were reached");
+  assert.equal(elapsed, 6_000);
+  assert.equal(result.status, "complete");
+  assert.equal(result.lock_wait_ms, 6_000);
+  assert.equal(receipts.at(-1).lock_wait_ms, 6_000);
+});
+
+test("macOS daily refresh makes the final lock decision when a holder releases inside the last interval", async () => {
+  const receipts = [];
+  let acquireCalls = 0;
+  let sourceCalls = 0;
+  let freshnessReads = 0;
+  let elapsed = 0;
+  let holderReleased = false;
+  const busy = Object.assign(new Error("busy"), { code: "brain_lifecycle_busy" });
+  const result = await runDailyRefresh({
+    plan,
+    platform: "darwin",
+    acquireLock: () => {
+      acquireCalls += 1;
+      if (!holderReleased) throw busy;
+      return { assertOwned() {}, release() {} };
+    },
+    sleep: async (milliseconds) => {
+      if (elapsed < 54_500 && elapsed + milliseconds >= 54_500) holderReleased = true;
+      elapsed += milliseconds;
+    },
+    lockNow: () => elapsed,
+    runSource: async () => { sourceCalls += 1; return { status: "complete" }; },
+    readFreshness: async () => ({
+      drive: { last_successful_run_at: ++freshnessReads === 1
+        ? "2026-10-29T12:00:00.000Z"
+        : "2026-10-30T12:00:00.000Z" },
+    }),
+    writeReceipt: (receipt) => receipts.push(receipt),
+    now: () => new Date("2026-10-30T12:00:00.000Z"),
+  });
+  assert.equal(acquireCalls, 29, "the final acquisition decision was reached at 55 seconds");
+  assert.equal(sourceCalls, 1, "the source ran after the holder released inside the final interval");
+  assert.equal(freshnessReads, 2, "both source evidence decisions were reached");
+  assert.equal(elapsed, 55_000);
+  assert.equal(result.status, "complete");
+  assert.equal(result.lock_wait_ms, 55_000);
+  assert.equal(receipts.at(-1).status, "complete", "the terminal receipt is not deferred");
+  assert.equal(receipts.at(-1).lock_wait_ms, 55_000);
+});
+
+test("macOS daily refresh defers after the fixed 55-second lifecycle wait", async () => {
+  const receipts = [];
+  let acquireCalls = 0;
+  let sourceCalls = 0;
+  let elapsed = 0;
+  const busy = Object.assign(new Error("busy"), { code: "brain_lifecycle_busy" });
+  const result = await runDailyRefresh({
+    plan,
+    platform: "darwin",
     acquireLock: () => { acquireCalls += 1; throw busy; },
-    runSource: async () => assert.fail("a deferred run must not reach a source"),
+    sleep: async (milliseconds) => { elapsed += milliseconds; },
+    lockNow: () => elapsed,
+    runSource: async () => { sourceCalls += 1; },
     readFreshness: async () => ({}),
     writeReceipt: (receipt) => receipts.push(receipt),
+    now: () => new Date("2026-10-30T12:00:00.000Z"),
   });
-  assert.equal(acquireCalls, 1, "lock decision point was reached");
+  assert.equal(acquireCalls, 29, "the initial decision and the final decision at 55 seconds were reached");
+  assert.equal(sourceCalls, 0, "the bounded refusal stopped before source execution");
+  assert.equal(elapsed, 55_000, "the final partial interval reaches the fixed total bound");
   assert.equal(result.status, "deferred");
+  assert.equal(result.lock_wait_ms, 55_000);
   assert.equal(receipts.at(-1).status, "deferred");
+  assert.equal(receipts.at(-1).lock_wait_ms, result.lock_wait_ms);
+});
+
+test("macOS daily refresh acquires a free lifecycle lock immediately", async () => {
+  let acquireCalls = 0;
+  let sourceCalls = 0;
+  let freshnessReads = 0;
+  let sleepCalls = 0;
+  const result = await runDailyRefresh({
+    plan,
+    platform: "darwin",
+    acquireLock: () => { acquireCalls += 1; return { assertOwned() {}, release() {} }; },
+    sleep: async () => { sleepCalls += 1; },
+    lockNow: () => 0,
+    runSource: async () => { sourceCalls += 1; return { status: "complete" }; },
+    readFreshness: async () => ({
+      drive: { last_successful_run_at: ++freshnessReads === 1
+        ? "2026-10-29T12:00:00.000Z"
+        : "2026-10-30T12:00:00.000Z" },
+    }),
+    now: () => new Date("2026-10-30T12:00:00.000Z"),
+  });
+  assert.equal(acquireCalls, 1, "the free-lock control reached exactly one acquisition decision");
+  assert.equal(sourceCalls, 1, "the free-lock control ran its source");
+  assert.equal(sleepCalls, 0);
+  assert.equal(result.status, "complete");
+  assert.equal(result.lock_wait_ms, 0);
+});
+
+test("Windows daily refresh keeps one immediate lifecycle-lock attempt", async () => {
+  let acquireCalls = 0;
+  let sleepCalls = 0;
+  const busy = Object.assign(new Error("busy"), { code: "brain_lifecycle_busy" });
+  const result = await runDailyRefresh({
+    plan,
+    platform: "win32",
+    acquireLock: () => { acquireCalls += 1; throw busy; },
+    sleep: async () => { sleepCalls += 1; },
+    lockNow: () => 0,
+    runSource: async () => assert.fail("Windows lock busy must stop before source execution"),
+    readFreshness: async () => ({}),
+  });
+  assert.equal(acquireCalls, 1, "the Windows negative sibling reached one lock decision");
+  assert.equal(sleepCalls, 0, "Windows did not enter the macOS wait path");
+  assert.equal(result.status, "deferred");
+  assert.equal(result.lock_wait_ms, 0);
+});
+
+test("Linux daily refresh keeps one immediate lifecycle-lock attempt", async () => {
+  let acquireCalls = 0;
+  let sleepCalls = 0;
+  const busy = Object.assign(new Error("busy"), { code: "brain_lifecycle_busy" });
+  const result = await runDailyRefresh({
+    plan,
+    platform: "linux",
+    acquireLock: () => { acquireCalls += 1; throw busy; },
+    sleep: async () => { sleepCalls += 1; },
+    lockNow: () => 0,
+    runSource: async () => assert.fail("Linux lock busy must stop before source execution"),
+    readFreshness: async () => ({}),
+  });
+  assert.equal(acquireCalls, 1, "the Linux sibling reached one lock decision");
+  assert.equal(sleepCalls, 0, "Linux did not enter the macOS wait path");
+  assert.equal(result.status, "deferred");
+  assert.equal(result.lock_wait_ms, 0);
+});
+
+test("daily refresh still reclaims a stale dead lifecycle owner under the existing rules", async () => {
+  const home = mkdtempSync(join(process.env.HOME, "daily-stale-owner-"));
+  const manifestPath = join(home, "brain.manifest.json");
+  const machineLockRoot = join(home, "lifecycle-locks");
+  const observedAt = new Date("2026-10-30T12:00:00.000Z");
+  writeFileSync(manifestPath, "{}\n");
+  const holder = acquireBrainLifecycleLock({
+    manifestPath,
+    operation: "fixture-holder",
+    home,
+    platform: "darwin",
+    machineLockRoot,
+    now: () => observedAt,
+  });
+  const ownerPath = join(holder.path, readdirSync(holder.path)[0]);
+  const staleAt = new Date(observedAt.getTime() - 60_001);
+  utimesSync(ownerPath, staleAt, staleAt);
+  let acquireCalls = 0;
+  let sourceCalls = 0;
+  let freshnessReads = 0;
+  try {
+    const result = await runDailyRefresh({
+      plan: { ...plan, manifest_path: manifestPath },
+      home,
+      platform: "darwin",
+      acquireLock: (options) => {
+        acquireCalls += 1;
+        return acquireBrainLifecycleLock({
+          ...options,
+          machineLockRoot,
+          staleMs: 60_000,
+          isOwnerAlive: () => false,
+          now: () => observedAt,
+        });
+      },
+      sleep: async () => assert.fail("stale-owner reclaim must complete inside the existing acquire call"),
+      lockNow: () => observedAt.getTime(),
+      runSource: async () => { sourceCalls += 1; return { status: "complete" }; },
+      readFreshness: async () => ({
+        drive: { last_successful_run_at: ++freshnessReads === 1
+          ? "2026-10-29T12:00:00.000Z"
+          : "2026-10-30T12:00:00.000Z" },
+      }),
+      now: () => observedAt,
+    });
+    assert.equal(acquireCalls, 1, "the daily reached the real lock acquisition decision once");
+    assert.equal(sourceCalls, 1, "reclaim allowed the daily source to run");
+    assert.equal(result.status, "complete");
+    assert.equal(result.lock_wait_ms, 0);
+  } finally {
+    holder.release();
+  }
+});
+
+test("daily owner copy keeps lock busy separate from a retryable network failure", async () => {
+  const home = mkdtempSync(join(process.env.HOME, "daily-owner-cause-"));
+  const manifestPath = join(home, "brain.manifest.json");
+  writeFileSync(manifestPath, "{}\n");
+  const ownerPlan = {
+    ...plan,
+    manifest_path: manifestPath,
+    sources: [{
+      key: "drive", source_names: ["drive"], class: "machine-pull",
+      owner: "daily-task", status: "ready", run_key: "google_drive",
+    }],
+  };
+  let lockElapsed = 0;
+  const common = {
+    brainModule: {},
+    buildPlan: async () => ownerPlan,
+    readFreshness: async () => ({}),
+    readUpdateTransaction: () => null,
+    writeReceipt: () => {},
+    home,
+    platform: "darwin",
+    now: () => new Date("2026-10-29T12:00:00.000Z"),
+    lockNow: () => lockElapsed,
+    sleep: async (milliseconds) => { lockElapsed += milliseconds; },
+  };
+
+  let lockDecisions = 0;
+  const lockLines = [];
+  const lockResult = await runDailyRefreshCli(manifestPath, {
+    ...common,
+    acquireLock: () => {
+      lockDecisions++;
+      throw Object.assign(new Error("fixture lock busy"), { code: "brain_lifecycle_busy" });
+    },
+    runSource: async () => assert.fail("lock busy must stop before source execution"),
+    log: (line) => lockLines.push(String(line)),
+  });
+
+  let networkDecisions = 0;
+  const networkLines = [];
+  const networkResult = await runDailyRefreshCli(manifestPath, {
+    ...common,
+    acquireLock: () => ({ assertOwned() {}, release() {} }),
+    runSource: async () => {
+      networkDecisions++;
+      throw Object.assign(new Error("fixture retryable network failure"), { code: "ECONNRESET" });
+    },
+    log: (line) => networkLines.push(String(line)),
+  });
+
+  const lockCopy = lockLines.join("\n");
+  const networkCopy = networkLines.join("\n");
+  assert.equal(lockDecisions, 29, "the real daily lifecycle classification reached the final bounded retry decision");
+  assert.equal(networkDecisions, 1, "the real daily network classification was reached");
+  assert.equal(lockResult.reason_code, "brain_lifecycle_busy");
+  assert.equal(lockResult.lock_wait_ms, 55_000);
+  assert.equal(networkResult.lock_wait_ms, 0);
+  assert.equal(networkResult.sources[0].issue_code, "NETWORK_UNREACHABLE");
+  assert.match(lockCopy, /another Brain operation is running.*retry after it finishes/iu);
+  assert.doesNotMatch(lockCopy, /internet connection dropped/iu);
+  assert.match(networkCopy, /network unavailable.*retry this source/iu);
+  assert.notEqual(lockCopy, networkCopy, "lock and network owner causes must not render uniformly");
+
+  const { dailyObservationStatus, readDailyObservation } = await import("../operations/daily-refresh-observation.mjs");
+  assert.equal(readDailyObservation(ownerPlan.identity, { home, platform: "darwin" }).record.result, "failed",
+    "the observation reader ignored the additive daily receipt field after the later source failure");
+  const status = dailyObservationStatus(ownerPlan, { enabled: false }, { known: true, exit_code: 0 }, true, {
+    home,
+    platform: "darwin",
+  });
+  assert.equal(status.last_result, "failed", "the status reader still parsed the observed daily outcome");
+});
+
+test("daily owner copy preserves each closed provider withholding cause", async () => {
+  const home = mkdtempSync(join(process.env.HOME, "daily-withheld-cause-"));
+  const manifestPath = join(home, "brain.manifest.json");
+  writeFileSync(manifestPath, "{}\n");
+  const before = "2026-10-28T12:00:00.000Z";
+  const observedAt = "2026-10-29T12:00:00.000Z";
+  const ownerPlan = {
+    ...plan,
+    manifest_path: manifestPath,
+    sources: [{
+      key: "microsoft", source_names: ["microsoft"], class: "machine-pull",
+      owner: "daily-task", status: "ready", run_key: "microsoft",
+    }],
+  };
+  const causeArms = [
+    {
+      label: "calendar-only",
+      reasons: { calendar_event_incomplete: 1 },
+      ownerPattern: /calendar_event_incomplete: 1 incomplete calendar item\(s\) queued for retry/iu,
+    },
+    {
+      label: "credential-only",
+      reasons: { credential_detected: 1 },
+      ownerPattern: /credential_detected: 1 item\(s\) held by the credential safety check for review/iu,
+    },
+    {
+      label: "mixed",
+      reasons: { calendar_event_incomplete: 1, credential_detected: 2 },
+      ownerPattern: /calendar_event_incomplete: 1 incomplete calendar item\(s\) queued for retry; credential_detected: 2 item\(s\) held by the credential safety check for review/iu,
+    },
+  ];
+  const ownerLines = [];
+
+  for (const arm of causeArms) {
+    const docsWithheld = Object.values(arm.reasons).reduce((sum, count) => sum + count, 0);
+    const latestRun = {
+      outcome: "partial",
+      walk_complete: true,
+      provider_check_complete: true,
+      metrics_version: 1,
+      started_at: observedAt,
+      finished_at: observedAt,
+      files_seen: docsWithheld,
+      docs_added: 0,
+      docs_updated: 0,
+      docs_unchanged: 0,
+      docs_refused: docsWithheld,
+      docs_failed: 0,
+      docs_withheld: docsWithheld,
+      withheld_reasons: arm.reasons,
+    };
+    let sourceDecisions = 0;
+    let inventoryDecisions = 0;
+    const receipts = [];
+    const lines = [];
+    const result = await runDailyRefreshCli(manifestPath, {
+      brainModule: {},
+      buildPlan: async () => ownerPlan,
+      acquireLock: () => ({ assertOwned() {}, release() {} }),
+      runSource: async () => { sourceDecisions++; return { status: "partial", partial: docsWithheld }; },
+      readFreshness: async () => {
+        inventoryDecisions++;
+        return { microsoft: {
+          kind: "microsoft",
+          last_check_at: inventoryDecisions === 1 ? before : observedAt,
+          last_successful_run_at: before,
+          latest_run: inventoryDecisions === 1 ? { finished_at: before } : latestRun,
+        } };
+      },
+      readUpdateTransaction: () => null,
+      writeReceipt: (receipt) => receipts.push(receipt),
+      log: (line) => lines.push(String(line)),
+      home,
+      platform: "darwin",
+      now: () => new Date(observedAt),
+    });
+    const sourceReceipt = receipts.find((receipt) => receipt.kind === "daily_refresh_source");
+    const ownerLine = lines.find((line) => line.startsWith("microsoft |"));
+    assert.equal(sourceDecisions, 1, `${arm.label}: the source decision was reached`);
+    assert.equal(inventoryDecisions, 2, `${arm.label}: both inventory decisions were reached`);
+    assert.equal(result.status, "partial", `${arm.label}: withholding remains partial`);
+    assert.equal(sourceReceipt?.docs_withheld, docsWithheld, `${arm.label}: exact count is durable`);
+    assert.deepEqual(sourceReceipt?.withheld_reasons, arm.reasons, `${arm.label}: exact closed map is durable`);
+    assert.match(ownerLine, arm.ownerPattern, `${arm.label}: the owner sees the cause and action`);
+    ownerLines.push(ownerLine);
+  }
+
+  let successDecisions = 0;
+  let successInventoryDecisions = 0;
+  const successLines = [];
+  const successResult = await runDailyRefreshCli(manifestPath, {
+    brainModule: {},
+    buildPlan: async () => ownerPlan,
+    acquireLock: () => ({ assertOwned() {}, release() {} }),
+    runSource: async () => { successDecisions++; return { status: "complete" }; },
+    readFreshness: async () => {
+      successInventoryDecisions++;
+      return { microsoft: {
+        kind: "microsoft",
+        last_successful_run_at: successInventoryDecisions === 1 ? before : observedAt,
+        latest_run: successInventoryDecisions === 1 ? { finished_at: before } : {
+          outcome: "completed",
+          metrics_version: 1,
+          files_seen: 1,
+          docs_added: 1,
+          docs_updated: 0,
+          docs_unchanged: 0,
+          docs_refused: 0,
+          docs_failed: 0,
+          docs_withheld: 0,
+        },
+      } };
+    },
+    readUpdateTransaction: () => null,
+    writeReceipt: () => {},
+    log: (line) => successLines.push(String(line)),
+    home,
+    platform: "darwin",
+    now: () => new Date(observedAt),
+  });
+  const successOwnerLine = successLines.find((line) => line.startsWith("microsoft |"));
+  assert.equal(successDecisions, 1, "success: the source decision was reached");
+  assert.equal(successInventoryDecisions, 2, "success: both inventory decisions were reached");
+  assert.equal(successResult.status, "complete", "success remains the completed green control");
+  assert.equal(successOwnerLine, `microsoft | complete | ${observedAt}`);
+  assert.equal(new Set(ownerLines).size, causeArms.length, "all withholding siblings render distinctly");
+  assert.ok(ownerLines.every((line) => line !== successOwnerLine), "no withholding arm renders like success");
 });
 
 test("claimed source success without advanced freshness fails honestly", async () => {
@@ -384,7 +797,7 @@ test("daily failure details redact canonical credential and bounded path views b
   assert.equal(sourceCalls, arms.length, "all adversarial and control source decisions were reached");
 });
 
-test("complete and partial source receipts remain byte-identical to the 60afb222 contract", async () => {
+test("complete and partial source receipts stay byte-identical while the daily receipt adds lock wait", async () => {
   const observedAt = "2026-10-21T18:00:00.000Z";
   const before = "2026-10-20T18:00:00.000Z";
   const after = "2026-10-21T18:00:00.000Z";
@@ -418,6 +831,7 @@ test("complete and partial source receipts remain byte-identical to the 60afb222
       status,
       started_at: observedAt,
       completed_at: observedAt,
+      lock_wait_ms: 0,
       schedule_attention: [],
       sources: [source],
     }];
@@ -732,6 +1146,47 @@ test("runtime exhaustion reaches the decision point and defers remaining sources
   assert.equal(result.status, "failed");
   assert.deepEqual(result.sources.map((source) => source.status), ["deferred", "deferred"]);
   assert.ok(result.sources.every((source) => /runtime budget/i.test(source.reason)));
+});
+
+test("macOS lifecycle waiting counts toward the existing daily runtime budget", async () => {
+  let elapsed = 0;
+  let freshnessReads = 0;
+  const sourceCalls = [];
+  const busy = Object.assign(new Error("busy"), { code: "brain_lifecycle_busy" });
+  const baseTime = Date.parse("2026-10-30T12:00:00.000Z");
+  const result = await runDailyRefresh({
+    plan: {
+      ...plan,
+      max_runtime_minutes: 1,
+      sources: [
+        plan.sources[0],
+        { ...plan.sources[0], key: "mail", source_names: ["mail"], run_key: "gmail" },
+      ],
+    },
+    platform: "darwin",
+    acquireLock: () => {
+      if (elapsed < 54_000) throw busy;
+      return { assertOwned() {}, release() {} };
+    },
+    sleep: async (milliseconds) => { elapsed += milliseconds; },
+    lockNow: () => elapsed,
+    now: () => new Date(baseTime + elapsed),
+    runSource: async (source) => {
+      sourceCalls.push(source.key);
+      elapsed += 7_000;
+      return { status: "complete" };
+    },
+    readFreshness: async () => ({
+      drive: { last_successful_run_at: ++freshnessReads === 1
+        ? "2026-10-29T12:00:00.000Z"
+        : "2026-10-30T12:00:00.000Z" },
+      mail: { last_successful_run_at: "2026-10-29T12:00:00.000Z" },
+    }),
+  });
+  assert.equal(result.lock_wait_ms, 54_000);
+  assert.deepEqual(sourceCalls, ["drive"], "only the source that fit inside the original deadline ran");
+  assert.deepEqual(result.sources.map((source) => source.status), ["complete", "deferred"]);
+  assert.match(result.sources[1].reason, /1-minute daily runtime budget was exhausted/iu);
 });
 
 test("daily CLI journals successful, refused, and failed runs with redacted source diagnostics", async () => {

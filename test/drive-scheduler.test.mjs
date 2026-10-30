@@ -21,6 +21,7 @@ import { spawnSync } from "node:child_process";
 import { previewSupportJournal, recordSupportEvent } from "../support-journal.mjs";
 import {
   buildDriveSchedulerPlan,
+  captureInstalledSchedulerDefinition,
   CLOUDFLARE_CREDENTIAL_ENV,
   cronToCalendarIntervals,
   DRIVE_LOG_HISTORY_FILES,
@@ -83,6 +84,18 @@ function opts(extra = {}) {
     localTimeZone: "America/Phoenix",
     ...extra,
   };
+}
+
+function launchctlDefinition(plan, programArguments = plan.programArguments, state = "waiting") {
+  return [
+    `path = ${plan.plistPath}`,
+    `state = ${state}`,
+    ...(state === "running" ? ["pid = 2468"] : []),
+    "arguments = {",
+    ...programArguments.map((argument) => `\t\t${argument}`),
+    "}",
+    "",
+  ].join("\n");
 }
 
 try {
@@ -756,12 +769,13 @@ try {
     const persistentHome = join(directory, "persistent-pause-home");
     writeManifest(baseManifest, persistentPath);
     let loaded = false;
+    let installedPlan = null;
     let disabled = false;
     const calls = [];
     const launchctl = (args) => {
       calls.push(args[0]);
       if (args[0] === "print") return loaded
-        ? { status: 0, stdout: "state = waiting\nruns = 1\nlast exit code = 0\n", stderr: "" }
+        ? { status: 0, stdout: launchctlDefinition(installedPlan), stderr: "" }
         : { status: 1, stdout: "", stderr: "not loaded" };
       if (args[0] === "disable") disabled = true;
       if (args[0] === "enable") disabled = false;
@@ -769,7 +783,7 @@ try {
       if (args[0] === "bootstrap") loaded = true;
       return { status: 0, stdout: "", stderr: "" };
     };
-    installDriveScheduler(persistentPath, opts({
+    installedPlan = installDriveScheduler(persistentPath, opts({
       home: persistentHome, nodePath: process.execPath, launchctl,
     }));
     calls.length = 0;
@@ -787,6 +801,172 @@ try {
     }));
     check("verified legacy restore re-enables and reloads the prior definition",
       restored.verified && !disabled && loaded, JSON.stringify(calls));
+  }
+  {
+    const capturePath = join(directory, "installed-capture", "brain.manifest.json");
+    const captureHome = join(directory, "installed-capture-home");
+    const uid = typeof process.getuid === "function" ? process.getuid() : 501;
+    writeManifest(baseManifest, capturePath);
+    const captureOptions = opts({ home: captureHome, uid, nodePath: process.execPath });
+    const plan = buildDriveSchedulerPlan(capturePath, captureOptions);
+    mkdirSync(dirname(plan.plistPath), { recursive: true });
+    const current = renderLaunchAgentPlist(plan);
+    const older = current.replace(
+      "  <key>LowPriorityIO</key>",
+      "  <!-- retained older installer formatting -->\n  <key>LowPriorityIO</key>",
+    );
+    const writeInstalled = (serialized = older, mode = 0o600) => {
+      writeFileSync(plan.plistPath, serialized, { mode });
+      chmodSync(plan.plistPath, mode);
+    };
+    const loaded = (programArguments = plan.programArguments, state = "waiting") => ({
+      status: 0,
+      stdout: launchctlDefinition(plan, programArguments, state),
+      stderr: "",
+    });
+    const unloaded = () => ({ status: 113, stdout: "", stderr: "not loaded" });
+
+    writeInstalled();
+    const driftStatus = statusDriveScheduler(capturePath, { ...captureOptions, launchctl: () => loaded() });
+    const captured = captureInstalledSchedulerDefinition(capturePath, { ...captureOptions, launchctl: () => loaded() });
+    check("installed-definition capture accepts owned older bytes without consulting the current renderer",
+      driftStatus.definitionMatches === false && captured.exists && captured.wasLoaded && captured.serialized === older,
+      JSON.stringify({ definitionMatches: driftStatus.definitionMatches, captured }));
+
+    let manifestError = null;
+    const wrongManifest = older.replace(`<string>${plan.path}</string>`, "<string>/tmp/foreign.manifest.json</string>");
+    writeInstalled(wrongManifest);
+    try { captureInstalledSchedulerDefinition(capturePath, { ...captureOptions, launchctl: () => loaded() }); }
+    catch (error) { manifestError = error; }
+    check("installed-definition capture rejects a wrong manifest argument despite the matching label",
+      /stable owner argument contract/.test(manifestError?.message), manifestError?.message);
+
+    let kindError = null;
+    const wrongKind = older.replace("drive-scheduler.mjs</string>", "folder-scheduler.mjs</string>");
+    writeInstalled(wrongKind);
+    try { captureInstalledSchedulerDefinition(capturePath, { ...captureOptions, launchctl: () => loaded() }); }
+    catch (error) { kindError = error; }
+    check("installed-definition capture rejects a wrong scheduler kind despite the matching service label",
+      /stable owner argument contract/.test(kindError?.message), kindError?.message);
+
+    let labelOnlyError = null;
+    writeInstalled(older.replace(/\s*<key>ProgramArguments<\/key>\s*<array>[\s\S]*?<\/array>/u, ""));
+    try { captureInstalledSchedulerDefinition(capturePath, { ...captureOptions, launchctl: () => loaded() }); }
+    catch (error) { labelOnlyError = error; }
+    check("a matching label without a bounded parsed argument contract is never ownership proof",
+      /unsafe property-list shape/.test(labelOnlyError?.message), labelOnlyError?.message);
+
+    let malformedError = null;
+    writeInstalled("not a property list\n");
+    try { captureInstalledSchedulerDefinition(capturePath, { ...captureOptions, launchctl: unloaded }); }
+    catch (error) { malformedError = error; }
+    check("installed-definition capture refuses a malformed property list",
+      /not a readable property list/.test(malformedError?.message), malformedError?.message);
+
+    writeInstalled();
+    let inspectionError = null;
+    try {
+      captureInstalledSchedulerDefinition(capturePath, {
+        ...captureOptions,
+        launchctl: () => ({ status: 77, stdout: "", stderr: "fixture inspection failed" }),
+      });
+    } catch (error) { inspectionError = error; }
+    check("a launch-service inspection error is not treated as an unloaded job",
+      /launch state could not be inspected/.test(inspectionError?.message), inspectionError?.message);
+
+    const mismatchedLoadedArguments = [...plan.programArguments];
+    mismatchedLoadedArguments[0] = "/opt/other/bin/node";
+    let loadedArgumentsError = null;
+    try {
+      captureInstalledSchedulerDefinition(capturePath, {
+        ...captureOptions,
+        launchctl: () => loaded(mismatchedLoadedArguments),
+      });
+    } catch (error) { loadedArgumentsError = error; }
+    check("loaded arguments must equal the parsed installed arguments exactly",
+      /does not match its installed definition/.test(loadedArgumentsError?.message), loadedArgumentsError?.message);
+
+    let runningError = null;
+    try { captureInstalledSchedulerDefinition(capturePath, { ...captureOptions, launchctl: () => loaded(plan.programArguments, "running") }); }
+    catch (error) { runningError = error; }
+    check("installed-definition capture refuses running work before returning a snapshot",
+      /running or its run state is unknown/.test(runningError?.message), runningError?.message);
+
+    writeInstalled(older, 0o644);
+    let modeError = null;
+    try { captureInstalledSchedulerDefinition(capturePath, { ...captureOptions, launchctl: unloaded }); }
+    catch (error) { modeError = error; }
+    check("installed-definition capture refuses a group- or other-readable file",
+      /safe owner-only mode/.test(modeError?.message), modeError?.message);
+
+    writeInstalled();
+    let ownerError = null;
+    try {
+      captureInstalledSchedulerDefinition(capturePath, {
+        ...captureOptions,
+        currentUid: uid + 1,
+        launchctl: unloaded,
+      });
+    } catch (error) { ownerError = error; }
+    check("installed-definition capture refuses a definition not owned by the current user",
+      /not owned by the current user/.test(ownerError?.message), ownerError?.message);
+
+    const linkedTarget = join(dirname(plan.plistPath), "linked-target.plist");
+    rmSync(plan.plistPath);
+    writeFileSync(linkedTarget, older, { mode: 0o600 });
+    linkSync(linkedTarget, plan.plistPath);
+    let linkError = null;
+    try { captureInstalledSchedulerDefinition(capturePath, { ...captureOptions, launchctl: unloaded }); }
+    catch (error) { linkError = error; }
+    check("installed-definition capture refuses a multiple-link file",
+      /multiple links/.test(linkError?.message), linkError?.message);
+
+    rmSync(plan.plistPath);
+    rmSync(linkedTarget);
+    symlinkSync(join(dirname(plan.plistPath), "missing-target.plist"), plan.plistPath);
+    let symlinkError = null;
+    try { captureInstalledSchedulerDefinition(capturePath, { ...captureOptions, launchctl: unloaded }); }
+    catch (error) { symlinkError = error; }
+    check("installed-definition capture refuses a symbolic link",
+      /not a regular file|symbolic link/.test(symlinkError?.message), symlinkError?.message);
+
+    rmSync(plan.plistPath);
+    let loadedWithoutDefinitionError = null;
+    try { captureInstalledSchedulerDefinition(capturePath, { ...captureOptions, launchctl: () => loaded() }); }
+    catch (error) { loadedWithoutDefinitionError = error; }
+    const absent = captureInstalledSchedulerDefinition(capturePath, { ...captureOptions, launchctl: unloaded });
+    check("a loaded job without a definition refuses while the unloaded absent control stays absent",
+      /has no readable installed definition/.test(loadedWithoutDefinitionError?.message) &&
+      absent.exists === false && absent.wasLoaded === false,
+      loadedWithoutDefinitionError?.message);
+
+    writeInstalled();
+    let legacyLoaded = true;
+    const calls = [];
+    const legacyLaunchctl = (args) => {
+      calls.push(args[0]);
+      if (args[0] === "print") return legacyLoaded ? loaded() : unloaded();
+      if (args[0] === "bootout") legacyLoaded = false;
+      if (args[0] === "bootstrap") legacyLoaded = true;
+      return { status: 0, stdout: "", stderr: "" };
+    };
+    const legacySnapshot = captureInstalledSchedulerDefinition(capturePath, {
+      ...captureOptions,
+      launchctl: legacyLaunchctl,
+    });
+    const pausedLegacy = pauseDriveScheduler(capturePath, {
+      ...captureOptions,
+      launchctl: legacyLaunchctl,
+      authorizedSnapshot: legacySnapshot,
+    });
+    const restoredLegacy = restoreDriveScheduler(capturePath, pausedLegacy, {
+      ...captureOptions,
+      launchctl: legacyLaunchctl,
+    });
+    check("pause and restore retain the captured older bytes instead of rendering a replacement",
+      pausedLegacy.serialized === older && readFileSync(plan.plistPath, "utf8") === older &&
+      restoredLegacy.verified && legacyLoaded && calls.includes("bootout") && calls.includes("bootstrap"),
+      JSON.stringify(calls));
   }
   {
     const rollbackPath = join(directory, "rollback", "brain.manifest.json");

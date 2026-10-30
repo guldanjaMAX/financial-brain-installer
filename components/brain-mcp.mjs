@@ -688,9 +688,10 @@ async function runTool(name, args = {}, queryTiming = null) {
         out.note = (d.notice || coverageIncompleteNotice(coverageUnavailable)) +
           " Relay the source coverage gaps and describe the result as provisional.";
       } else if (typeof d.answer === "string" && d.ledger && typeof d.ledger === "object" &&
-        typeof d.ledger.kind === "string" && d.evidence_gate?.supported === true && d.evidence_gate?.complete === true) {
-        // A covered zero or a bounded deposit miss has no matching row to cite.
-        // That is a ledger answer, not an empty document search.
+        typeof d.ledger.kind === "string" && d.evidence_gate?.supported === true) {
+        // A covered zero, bounded deposit miss, or incomplete vendor selector
+        // can have no matching row to cite. It is still a ledger answer, not an
+        // empty document search; preserve its stated completeness boundary.
         out.note = "Preserve the ledger answer's exact amounts, account masks, dates, and coverage bounds.";
       } else if (!out.citations.length && !out.results?.length) {
         out.note =
@@ -961,6 +962,26 @@ const ANSWER_ROUTE_INSTRUCTIONS = CLAUDE_ANSWER_SETUP
   ? "For every non-money question, use brain_think first. The Brain's Claude Opus model writes the answer from the records and Claude Sonnet checks it before it reaches you. If brain_think returns answer_error or a gap with type anthropic_key_missing, fall back to brain_search, read the returned excerpts, and write the answer yourself with each fact's source title and date. Search again with other wording, or sort \"newest\" for status, before saying a matching record was not found. Turn relative dates into from/to using `as_of` (\"this week\", \"Sunday\", \"Sept 30\", \"next\"). For fallback search, use names and distinctive words, not the whole question. When the question asks about present state, retain words such as `still`, `current`, or `latest` in the search query. Narrow by source when the question names a channel (calendar, Zoom call, email, text). If the first page does not hold the answer, refine: try another source, a tighter window, or the next offset. Read the strongest one or two excerpts closely before summarizing them. Excerpts are partial. If the answer may lie outside one, search again using its title or distinctive words, and say when you saw only an excerpt."
   : "To answer, search, read, then write. For every non-money question, use brain_search first, read the returned excerpts, and write the answer yourself with each fact's source title and date. Search again with other wording, or sort \"newest\" for status, before saying a matching record was not found. When the owner explicitly asks for the Brain's own answer, or a brain_financial_map flow calls for it, use brain_think instead. Turn relative dates into from/to using `as_of` (\"this week\", \"Sunday\", \"Sept 30\", \"next\"). Search with names and distinctive words, not the whole question. When the question asks about present state, retain words such as `still`, `current`, or `latest` in the search query. Narrow by source when the question names a channel (calendar, Zoom call, email, text). If the first page does not hold the answer, refine: try another source, a tighter window, or the next offset. Read the strongest one or two excerpts closely before summarizing them. Excerpts are partial. If the answer may lie outside one, search again using its title or distinctive words, and say when you saw only an excerpt.";
 
+const MONEY_TRANSLATION_INSTRUCTIONS = `Money translation menu: translate before calling brain_think.
+Translate the owner's wording into one supported question below, call brain_think with q only, and answer only from the returned deterministic ledger result.
+
+- Balances: \`What are my account balances?\` | \`What are my <checking|savings|card|loan|investment> account balances?\` | \`What is my balance for account ending NNNN?\`
+- In and out: \`How much money came in and went out <period>?\` | \`How much money came in and went out of my <checking|savings|card|loan> account <period>?\`
+- Measures: \`What was my profit <period>?\` | \`What was my net income <period>?\` (money in minus money out, not accounting profit or cash flow)
+- Lists: \`What were my <N> largest expenses <period>?\` (N optional, 1-100, default 10) | \`What were my <N> largest deposits <period>?\` | \`What were my deposits <period>?\` | \`What were my top spending categories <period>?\` | \`What was my spending by category <period>?\` | \`How much did I spend by merchant <period>?\` | \`How much income by merchant <period>?\`
+- Recurring: \`What are my recurring charges?\` | \`What recurring charges am I paying for and how much per month?\` (both look back about 120 days from today) | \`What are my recurring charges in Q<n> <YYYY>?\` (a finished quarter)
+- One name: \`How much did I spend at <merchant> <period>?\` | \`How much did I spend on <category> <period>?\` | \`How much income came from <payer> <period>?\`
+- Payments: \`Did the payment from <payer> arrive?\` | \`Did the payment of $<amount> arrive?\` (both take an optional <period>) | \`Did the payment from <payer> arrive on <Month D, YYYY>?\`
+- Own-account moves: \`How much did I transfer between my own accounts <period>?\`
+
+Use these canonical periods: \`last month\`, \`this month\`, \`in <Month YYYY>\`, \`in the last <N> days\`, \`so far this year\`, or \`in Q<1-4> <YYYY>\`. Interpret relative periods in the owner's configured time zone. When the owner names the current month and wants the figure to date, translate it to \`this month\`. \`in <Month YYYY>\` always means the complete calendar month and may refuse until that month is fully covered, so use it for a finished named month or when the owner explicitly requests the complete month. Always give a historical named month its year. Translate past 30 days to in the last 30 days, YTD to so far this year, last week to in the last 7 days, and last quarter to the finished \`in Q<n> <YYYY>\`.
+For one account, put \`for account ending NNNN\` after the period; payment questions use \`in account ending NNNN\`.
+Cash flow is unsupported: relay \`cash_flow_unsupported\` with no figure, calculation, or model fallback; offer the supported money-in/money-out or profit/net-income view without calling it cash flow.
+Never put a bank name, entity or company name, account nickname, or the word business in a ledger question. Resolve it to an already confirmed exact mask first, or ask the owner to clarify; never invent a selector or silently widen to all accounts.
+A ledger call is q-only: never pass a \`source\` filter to brain_think, because a source filter switches off the ledger route.
+If the ledger refuses or returns no figure, preserve the refusal and supply no figure. Never replace it with a figure from brain_search, documents, memory, estimation, or model arithmetic.
+End money translation menu.`;
+
 const INSTRUCTIONS = `This server is ${OWNER}'s private knowledge record: their documents, meetings, correspondence and decisions.
 
 Do NOT state a fact about a named person, client, deal, contract, commitment or figure in their world from your own knowledge. Your training data does not contain any of it, and a plausible reconstruction is indistinguishable from a real answer to the person reading it. ${ANSWER_ROUTE_INSTRUCTIONS}
@@ -976,6 +997,8 @@ When meaning_search.line is present, it was rendered locally from closed numeric
 In the answer, give each fact's date and source title. For every money figure, quote the sentence it comes from, name the payer and payee, and say what kind of event it was (invoice, payment, payout, refund). For "what is still open", say which document is newest on that exact topic. A newer document about something else does not change the answer.
 
 Before any status, "latest", or absence claim, run one brain_search for the subject with sort "newest", read newest_record, and say "as of <record date>" for the record you relied on. It covers only the returned relevance window, not all matching records; re-search with a recent date window before a latest claim.
+
+${MONEY_TRANSLATION_INSTRUCTIONS}
 
 For a money question the bank ledger answers (a balance, a payment received, money in and out, largest expenses, deposits, spend by merchant or category, transfers between the owner's own accounts, recurring charges, profit, net income, withdrawals, loan proceeds), use brain_think: it reads the ledger directly. Cash flow is unsupported: relay cash_flow_unsupported with no figure or model fallback. The profit and net-income view is money in minus money out, not accounting profit or cash flow. Keep its exact amounts, account masks, dates and coverage bounds.
 

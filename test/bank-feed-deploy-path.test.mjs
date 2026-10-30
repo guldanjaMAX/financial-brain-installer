@@ -192,6 +192,35 @@ try {
   assert.equal(valueOf(deployed, "BANK_FEED_COUNTRIES"), "US");
   assert.equal(valueOf(deployed, "BANK_FEED_RECONCILE_MINUTES"), "120");
 
+  const transitionCalls = [];
+  writeFileSync(manifestPath, JSON.stringify({
+    ...deployManifest,
+    corpora: { bank_feed: { enabled: true, provider: "simplefin", environment: "production" } },
+  }));
+  const simpleFinHarness = cloudflareHarness();
+  await withFixtureRuntime(simpleFinHarness.fetchImpl, () => cmdDeploy(manifestPath, {
+    nextSteps: false,
+    async readWorkerBankProvider({ phase }) {
+      transitionCalls.push(`runtime:${phase}`);
+      return phase === "before_upload" ? "plaid" : "simplefin";
+    },
+    async prepareBankProviderDeployment(input) {
+      transitionCalls.push(`prepare:${input.liveProvider}:${input.targetProvider}`);
+      return { transition_ref: "a".repeat(64), target_provider: "simplefin" };
+    },
+    async completeBankProviderDeployment(input) {
+      transitionCalls.push(`complete:${input.liveProvider}:${input.targetProvider}`);
+      return { deployed_provider: "simplefin" };
+    },
+  }));
+  assert.deepEqual(transitionCalls, [
+    "runtime:before_upload",
+    "prepare:plaid:simplefin",
+    "runtime:after_upload",
+    "complete:simplefin:simplefin",
+  ]);
+  assert.equal(simpleFinHarness.workerPuts, 1, "the fenced transition uploads exactly once");
+
   const invalidHarness = cloudflareHarness();
   writeFileSync(manifestPath, JSON.stringify({
     ...deployManifest,
