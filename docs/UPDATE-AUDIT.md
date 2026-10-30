@@ -161,11 +161,11 @@ login as a completed update. Never promise a duration without a measurement.
 
 ## Current candidate lineage
 
-The 0.4.20/schema48 audit tracks 41 stable incident rows. The earlier held
+The 0.4.21/schema48 audit tracks 41 stable incident rows. The earlier held
 0.4.7, 0.4.8 and 0.4.9 candidate records describe their own historical bytes;
 their evidence does not transfer to a changed package. Installation eligibility
 and publication status come from the current approved guide and reviewed
-receipt for the exact 0.4.20 artifact. The linked candidate evidence plan is a
+receipt for the exact 0.4.21 artifact. The linked candidate evidence plan is a
 planning record, not installation approval or proof of field acceptance.
 Four are `verified` on reviewed evidence: UPDATE-010, UPDATE-014, UPDATE-026,
 and UPDATE-032. Their evidence documents remain attached to the exact rows in
@@ -173,7 +173,7 @@ and UPDATE-032. Their evidence documents remain attached to the exact rows in
 set) and UPDATE-044 (bank freshness account breadth, under
 [ADR 008](decisions/008-rehome-update-025-breadth-into-update-044.md)) ship
 unproven and remain visible in the release note, but neither carries an
-exact-version 0.4.20 deferral. All 37 unresolved rows block release writes. The
+exact-version 0.4.21 deferral. All 37 unresolved rows block release writes. The
 prior 0.4.19 deferrals expired and were not renewed for this candidate.
 UPDATE-017 through
 UPDATE-022 and UPDATE-025 still need their required real-provider evidence
@@ -187,7 +187,7 @@ exports remain unbound, and the legacy whole-source provenance repair remains
 unaccepted. Every narrow receipt states `whole_source_complete: false` and does
 not authorize OCR, reingest, deletion, deployment, or customer execution.
 The exact-version narrowing originally recorded on 2026-09-26 is not renewed
-for 0.4.20. ADR 008 still defines UPDATE-044's acceptance scope, but missing
+for 0.4.21. ADR 008 still defines UPDATE-044's acceptance scope, but missing
 evidence does not authorize a deferral. The row remains held, and its owner
 limitation stays visible in the release note. Nothing else in this candidate
 weakens the gate. The
@@ -218,7 +218,7 @@ since v0.4.6, not a changed text. The eight v0.4.6 deferrals (UPDATE-012,
 UPDATE-017 through UPDATE-022, and UPDATE-025) named version 0.4.6 and have
 expired; none was renewed for 0.4.7 or 0.4.8. UPDATE-012 and UPDATE-044 received
 new exact-version records for 0.4.9 and 0.4.19. Those records have expired, and
-neither is renewed for 0.4.20. No
+neither is renewed for 0.4.21. No
 row changed status or
 evidence with either re-homing, and the release workflow still
 refuses to publish while any incident blocks. Earlier candidate

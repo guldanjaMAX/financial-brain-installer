@@ -842,7 +842,8 @@ test("permanent provider refusals remain visible through Worker receipts, source
     oauth: { providerAccessToken: async () => ({}), loadProviderSyncState: () => saved || {},
       saveProviderSyncState: (_provider, _source, state) => { saved = state; } },
     sync: async () => ({ documents: [{ source_type: "microsoft", source_id: "fixture_item",
-      title: "Synthetic private title", content: "-----BEGIN PRIVATE KEY-----", metadata: {}, uri: null }],
+      title: "Synthetic private title", content: ["-----BEGIN", "PRIVATE KEY-----"].join(" "),
+      metadata: {}, uri: null }],
       deletions: [], outcome: { kind: "completed" }, walk_complete: true, provider_check_complete: true,
       cursor_can_advance: true, proposed_cursor: { page: "next" }, warnings: [] }),
     requestIngestBatch: async ({ docs }) => {

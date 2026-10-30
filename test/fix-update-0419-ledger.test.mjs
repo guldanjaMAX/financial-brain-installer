@@ -25,7 +25,7 @@ function fixtureManifest(schemaVersion = 48) {
   const manifestPath = join(root, "brain.manifest.json");
   writeFileSync(manifestPath, JSON.stringify({
     client: { slug: "fixture" },
-    brain: { worker_name: "fixture-brain", version: "0.4.20" },
+    brain: { worker_name: "fixture-brain", version: "0.4.21" },
     infrastructure: {
       cloudflare: {
         account_id: "fixture-account",
@@ -36,7 +36,7 @@ function fixtureManifest(schemaVersion = 48) {
   }));
   const state = {
     client_slug: "fixture",
-    product_version: "0.4.20",
+    product_version: "0.4.21",
     schema_version: schemaVersion,
   };
   return { root, manifestPath, state };

@@ -4,6 +4,85 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.21 (2026-10-30)
+
+Candidate only. This version has not been released. The changes below still
+need the full host gate, CI and separately reviewed field acceptance for the
+exact sealed package. This version bump verifies no incident.
+
+- **More everyday money questions use the Brain's bank records.** You can ask
+  for balances by account or label, money in and money out, spending by vendor,
+  recent card activity, and the largest expenses. Check the cited accounts,
+  dates, currency, coverage and any gap before relying on a total.
+- **Transfers between your own USD accounts stay out of money-in and money-out
+  totals.** The Brain pairs supported transfer records before adding the totals.
+  Non-USD account pairs remain a known limit, so review the cited rows when
+  different currencies are involved.
+- **An incomplete bank answer says what is missing.** A partial ranking or
+  other incomplete record set carries a visible gap instead of presenting the
+  available rows as a complete answer.
+- **One incomplete calendar event no longer stops the daily refresh.** The
+  refresh queues that event for retry, continues with the remaining work, and
+  keeps calendar and credential causes distinct in the owner-visible result.
+- **A busy Mac gets a short daily-refresh retry.** The macOS runner waits for
+  the lifecycle lock for up to 55 seconds before recording that the daily run
+  could not start. Windows and Linux still make one attempt.
+- **Changing a bank provider starts with a preview.** The command inspects the
+  current state, refuses an active connection or existing ledger history, and
+  shows the remaining deploy and connection steps before any approved change.
+- **Recovery stops explain a known cause without exposing raw details.** The
+  daily update path saves its recovery state before showing one short cause
+  from a closed list, plus the existing receipt and retry guidance.
+- **Eligible older Mac schedules survive an update.** Update validates the
+  installed scheduler bytes, pauses the identity-owned schedule, and restores
+  it after the reviewed update path completes.
+
+### Technical changes
+
+- Ledger question parsing adds owner-local month windows, bounded account and
+  label selectors, balance, inflow, outflow, vendor, recent-card and largest-
+  expense routes, with structured incomplete-evidence gates.
+- Own-transfer pairing excludes supported internal USD pairs from bank
+  documents. Vendor answers distinguish exact rows from possible matches.
+- Durable daily receipts keep calendar-only, credential-only and mixed
+  withholding causes separate. Incomplete calendar events remain queued for an
+  exact retry while the completed event inventory can continue.
+- The macOS daily runner records its bounded lifecycle-lock wait in the
+  terminal receipt. Other platforms preserve their single-attempt contract.
+- The bank-provider transition command is preview-first, binds approval to the
+  inspected state, refuses unsafe state and writes the manifest atomically.
+- Daily-update recovery persists recovery state before rendering one bounded,
+  allowlisted cause. Unknown or unsafe material stays hidden.
+- Update can validate, capture, pause and restore an identity-owned older
+  macOS scheduler from its installed bytes without weakening normal status
+  checks.
+
+### Known issues
+
+- A failed bank-document replacement after a committed import or account
+  change can leave stale bank documents until the scheduled retry.
+- Own transfers between non-USD accounts can remain in money-in or money-out
+  figures.
+- Do not switch bank providers while a bank connection is in progress. A
+  request already crossing the transition can write after the transition
+  clears.
+- A very large ledger can return `query too large` instead of an answer.
+- This version has no account-link recovery command.
+- A Windows daily refresh still skips the day when its lifecycle lock is busy.
+- The local bank-provider manifest check does not enforce every schema string
+  format.
+- Physical Windows x64 and Mac owner acceptance is still required for the
+  exact sealed package. Synthetic tests and CI do not establish either
+  platform's owner acceptance.
+
+### This release does NOT cover
+
+- Windows x64 is the only supported Windows runtime in this release. Windows
+  ARM64 ships unproven.
+- Bank breadth ships unproven. Bank invitations stay closed.
+- Email attachments, Drive images and Drive simple sync remain outside this
+  release.
+
 ## 0.4.20 (2026-10-25)
 
 Candidate only. This version has not been released. The changes below still

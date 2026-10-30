@@ -65,7 +65,7 @@ function baseManifest(bankFeed = {}) {
   return {
     manifest_version: 1,
     client: { slug: "test-brain", display_name: "Test Brain" },
-    brain: { version: "0.4.20" },
+    brain: { version: "0.4.21" },
     infrastructure: {
       cloudflare: {
         account_id: "REQUIRED_client_account_id",

@@ -1,5 +1,5 @@
 <!-- BEGIN Financial Brain money-question rules (added by the Financial Brain morning kit; running the kit again replaces this section and keeps your "My accounts" lines) -->
-# Money questions: translate before you ask the Brain (Financial Brain 0.4.20)
+# Money questions: translate before you ask the Brain (Financial Brain 0.4.21)
 
 The Brain gives exact bank-ledger figures only when a question matches one of the phrasings below. Anything else is refused or answered from documents. Never pass the owner's words straight through: translate, ask, then answer only from what comes back.
 
@@ -13,7 +13,7 @@ The Brain gives exact bank-ledger figures only when a question matches one of th
 - These words switch the ledger off: tax, interest, average, budget, forecast, estimated, QuickBooks. Only the supported flip phrases below may use excluding, without or including; other qualifiers are unsupported.
 - <merchant>/<payer>: use only an unambiguous, unredacted bank label supported by the query grammar, at most 6 words. Do not reconstruct hidden digits or silently change a label. If a selector is ambiguous or redacted, quote the by-merchant list for that period and ask for clarification; never turn a refused or unmatched selector into zero.
 
-## Template menu (every one passes the 0.4.20 question parser)
+## Template menu (every one passes the 0.4.21 question parser)
 - Balances: `What are my account balances?` | `What are my <checking|savings|card|loan|investment> account balances?` | `What is my balance for account ending NNNN?`
 - In and out: `How much money came in and went out <period>?` | `How much money came in and went out of my <checking|savings|card|loan> account <period>?`
 - Measures: `What was my profit <period>?` | `What was my net income <period>?` (money in minus money out, not accounting profit or cash flow)

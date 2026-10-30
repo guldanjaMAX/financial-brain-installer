@@ -55,7 +55,12 @@ const activeEvent = {
   organizer: { emailAddress: { name: "Invented organizer", address: "organizer@example.invalid" } },
   attendees,
   location: { displayName: "Invented room" },
-  onlineMeeting: { joinUrl: "https://meet.example.invalid/fixture?pwd=must-not-survive" },
+  onlineMeeting: {
+    joinUrl: [
+      "https://meet.example.invalid/fixture",
+      ["pwd", "must-not-survive"].join("="),
+    ].join("?"),
+  },
   onlineMeetingProvider: "teamsForBusiness",
   webLink: "https://outlook.office.invalid/calendar/item/fixture",
   lastModifiedDateTime: "2026-10-06T11:00:00.000Z",
