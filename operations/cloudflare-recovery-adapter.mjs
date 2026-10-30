@@ -929,7 +929,8 @@ const AGGREGATE_FIELDS = Object.freeze([
      ...SCHEMA_42_TABLES, ...SCHEMA_43_TABLES, ...SCHEMA_44_TABLES,
      ...SCHEMA_45_TABLES, ...SCHEMA_47_TABLES, ...SCHEMA_48_TABLES,
      ...SCHEMA_49_TABLES, ...SCHEMA_50_TABLES, ...SCHEMA_52_TABLES,
-     ...SCHEMA_53_TABLES, ...SCHEMA_55_TABLES, ...SCHEMA_56_TABLES].includes(table)
+     ...SCHEMA_53_TABLES, ...SCHEMA_55_TABLES, ...SCHEMA_56_TABLES,
+     ...SCHEMA_57_TABLES].includes(table)
       ? "SELECT 0"
       : `SELECT COUNT(*) FROM ${quoteIdentifier(table)}`,
   ]),
