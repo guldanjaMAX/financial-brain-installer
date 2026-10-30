@@ -73,8 +73,65 @@ function writeManifest(manifest = baseManifest, path = manifestPath) {
   return path;
 }
 
+// The product reads installed LaunchAgent definitions with macOS /usr/bin/plutil. Linux CI has no
+// plutil, so there the test stands in for it through the product's own plistSpawn hook: a reader
+// for the XML subset the scheduler renders (dict, key, string, integer, true, false, array,
+// comments) that exits 0 with JSON like `plutil -convert json`, or non-zero on unreadable input.
+function readTestPlist(bytes) {
+  const text = Buffer.isBuffer(bytes) ? bytes.toString("utf8") : String(bytes);
+  const tokens = text.replace(/<!--[\s\S]*?-->/g, "").match(/<[^>]+>|[^<]+/g) || [];
+  const decode = (value) => value.replaceAll("&lt;", "<").replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"').replaceAll("&apos;", "'").replaceAll("&amp;", "&");
+  let index = 0;
+  const next = () => {
+    while (index < tokens.length && !tokens[index].trim()) index++;
+    return tokens[index++];
+  };
+  const readText = (close) => {
+    let value = "";
+    while (tokens[index] !== close) value += tokens[index++];
+    index++;
+    return decode(value);
+  };
+  const value = (open) => {
+    if (open === "<dict>") {
+      const dict = {};
+      for (let token = next(); token !== "</dict>"; token = next()) {
+        if (token !== "<key>") throw new Error("test plist: expected key");
+        const key = readText("</key>");
+        dict[key] = value(next());
+      }
+      return dict;
+    }
+    if (open === "<array>") {
+      const items = [];
+      for (let token = next(); token !== "</array>"; token = next()) items.push(value(token));
+      return items;
+    }
+    if (open === "<string>") return readText("</string>");
+    if (open === "<string/>") return "";
+    if (open === "<integer>") return Number(readText("</integer>"));
+    if (open === "<true/>") return true;
+    if (open === "<false/>") return false;
+    throw new Error(`test plist: unsupported element ${open}`);
+  };
+  for (let token = next(); token !== undefined; token = next()) {
+    if (token.startsWith("<plist")) return value(next());
+  }
+  throw new Error("test plist: no plist element");
+}
+
+function testPlutil(_command, _args, options) {
+  try {
+    return { status: 0, stdout: JSON.stringify(readTestPlist(options.input)), stderr: "" };
+  } catch (error) {
+    return { status: 1, stdout: "", stderr: error.message };
+  }
+}
+
 function opts(extra = {}) {
   return {
+    ...(process.platform === "darwin" ? {} : { plistSpawn: testPlutil }),
     platform: "darwin",
     home,
     uid: 501,
@@ -764,7 +821,9 @@ try {
     check("remove remains reachable after Drive or its cron is disabled",
       removed.removed && !existsSync(expectedPlist));
   }
-  {
+  if (process.platform === "win32") {
+    console.log("SKIP  installed LaunchAgent pause, restore and capture need POSIX owner-only files (macOS and Linux run them)");
+  } else {
     const persistentPath = join(directory, "persistent-pause", "brain.manifest.json");
     const persistentHome = join(directory, "persistent-pause-home");
     writeManifest(baseManifest, persistentPath);
@@ -802,7 +861,7 @@ try {
     check("verified legacy restore re-enables and reloads the prior definition",
       restored.verified && !disabled && loaded, JSON.stringify(calls));
   }
-  {
+  if (process.platform !== "win32") {
     const capturePath = join(directory, "installed-capture", "brain.manifest.json");
     const captureHome = join(directory, "installed-capture-home");
     const uid = typeof process.getuid === "function" ? process.getuid() : 501;
