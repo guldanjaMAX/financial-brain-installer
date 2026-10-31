@@ -215,9 +215,10 @@ function cleanConfiguredWithhold(payload, expectedModel) {
     payload.model === expectedModel && responseObject(payload.evidence_gate) &&
     payload.evidence_gate.supported === false &&
     !Object.hasOwn(payload.evidence_gate, "error") &&
+    !Object.hasOwn(payload.evidence_gate, "unreadable") &&
     !Object.hasOwn(payload, "answer_error") &&
     payload.status !== "search_unavailable" &&
-    !(payload.results.length === 0 && payload.degraded) &&
+    payload.results.length > 0 &&
     !isRetrievalFailureDegradation(payload.degraded);
 }
 
@@ -257,7 +258,7 @@ export function answerUnavailableDiagnostic(payload) {
     };
   }
 
-  if (evidenceGate?.error) {
+  if (evidenceGate?.error || (evidenceGate && Object.hasOwn(evidenceGate, "unreadable"))) {
     return {
       stage: "answer_verification",
       // Modern Workers emit a fixed public token here, but an acceptance
@@ -1090,6 +1091,7 @@ export class Acceptance {
     const answerQuestions = configuredAnswer ? savedQuestions.slice(0, 3) : savedQuestions.slice(0, 1);
     let thinkAttempt;
     let allWithheldCleanly = false;
+    let recoveredRetries = 0;
     for (const q of answerQuestions) {
       thinkAttempt = await this.retryTransientProbe(budget, async () => {
         const r = await this.post("/api/rag/think", { q, limit: 5 });
@@ -1097,6 +1099,7 @@ export class Acceptance {
         // the shared tier budget for every saved answer probe.
         return { failing: isRetrievalFailureDegradation(r.json?.degraded), value: r };
       });
+      if (thinkAttempt.recovered) recoveredRetries += thinkAttempt.retries;
       allWithheldCleanly = configuredAnswer && thinkAttempt.value.ok &&
         cleanConfiguredWithhold(thinkAttempt.value.json, expectedAnswerModel);
       if (!allWithheldCleanly) break;
@@ -1117,14 +1120,14 @@ export class Acceptance {
           (why ? `; the Worker reported ${why}` : "") +
           retryNote(thinkAttempt.retries, "degraded"),
       );
-    } else if (thinkAttempt.recovered) {
-      // Recorded only when it actually had to recover, so a healthy run's
-      // result list is byte-for-byte what it was before this change.
+    } else if (recoveredRetries > 0) {
+      // Recorded only when an answer probe actually had to recover, so a
+      // healthy run's result list is byte-for-byte what it was before.
       this.record(
         t,
         "think uses semantic retrieval",
         PASS,
-        `the answer path used semantic retrieval${retryNote(thinkAttempt.retries, "recovered")}`,
+        `the answer path used semantic retrieval${retryNote(recoveredRetries, "recovered")}`,
       );
     }
     if (!think.ok) {
