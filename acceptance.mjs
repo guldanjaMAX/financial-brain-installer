@@ -208,6 +208,19 @@ export function answerResponseContractDiagnostic(payload) {
   return null;
 }
 
+// A later probe may resolve an honest evidence refusal, but must never hide a
+// broken route. Require the complete receipt before spending another question.
+function cleanConfiguredWithhold(payload, expectedModel) {
+  return !answerResponseContractDiagnostic(payload) && payload.answer === null &&
+    payload.model === expectedModel && responseObject(payload.evidence_gate) &&
+    payload.evidence_gate.supported === false &&
+    !Object.hasOwn(payload.evidence_gate, "error") &&
+    !Object.hasOwn(payload, "answer_error") &&
+    payload.status !== "search_unavailable" &&
+    !(payload.results.length === 0 && payload.degraded) &&
+    !isRetrievalFailureDegradation(payload.degraded);
+}
+
 /**
  * Name the exact stage that left `/api/rag/think` without an answer.
  *
@@ -244,16 +257,6 @@ export function answerUnavailableDiagnostic(payload) {
     };
   }
 
-  const coverageGap = gaps.find((gap) =>
-    gap && typeof gap === "object" && ["coverage_stale", "coverage_unavailable"].includes(gap.type)
-  );
-  if (payload.status === "coverage_incomplete" || coverageGap) {
-    return {
-      stage: "source_coverage",
-      detail: "one or more declared sources are not yet proven complete",
-    };
-  }
-
   if (evidenceGate?.error) {
     return {
       stage: "answer_verification",
@@ -272,12 +275,22 @@ export function answerUnavailableDiagnostic(payload) {
   }
   if (evidenceGate && (evidenceGate.supported === false || evidenceGate.complete === false)) {
     return {
-      stage: "answer_verification",
+      stage: "answer_verification_refused",
       // The verifier reason is model-generated from the private question,
       // draft, and citations. It is diagnostic evidence, not public copy.
       detail: evidenceGate.supported === false
         ? "the generated draft was not accepted because its cited evidence did not support it"
         : "the generated draft was not accepted because it did not cover the complete question",
+    };
+  }
+
+  const coverageGap = gaps.find((gap) =>
+    gap && typeof gap === "object" && ["coverage_stale", "coverage_unavailable"].includes(gap.type)
+  );
+  if (payload.status === "coverage_incomplete" || coverageGap) {
+    return {
+      stage: "source_coverage",
+      detail: "one or more declared sources are not yet proven complete",
     };
   }
 
@@ -1072,12 +1085,22 @@ export class Acceptance {
     // break quietly, because it only fails when the LLM key, the spend cap or
     // the model name is wrong, none of which show up until someone asks a
     // question.
-    const thinkAttempt = await this.retryTransientProbe(budget, async () => {
-      const r = await this.post("/api/rag/think", { q: savedQuestions[0], limit: 5 });
-      // Same classification as the probes above: retry a failed retrieval path,
-      // never an expected state that a retry cannot change.
-      return { failing: isRetrievalFailureDegradation(r.json?.degraded), value: r };
-    });
+    const configuredAnswer = answerSetupOf(this.m) !== "built-in";
+    const expectedAnswerModel = resolvedAnswerModels(this.m).answer_model;
+    const answerQuestions = configuredAnswer ? savedQuestions.slice(0, 3) : savedQuestions.slice(0, 1);
+    let thinkAttempt;
+    let allWithheldCleanly = false;
+    for (const q of answerQuestions) {
+      thinkAttempt = await this.retryTransientProbe(budget, async () => {
+        const r = await this.post("/api/rag/think", { q, limit: 5 });
+        // Preserve the existing transient-retrieval retry classification and
+        // the shared tier budget for every saved answer probe.
+        return { failing: isRetrievalFailureDegradation(r.json?.degraded), value: r };
+      });
+      allWithheldCleanly = configuredAnswer && thinkAttempt.value.ok &&
+        cleanConfiguredWithhold(thinkAttempt.value.json, expectedAnswerModel);
+      if (!allWithheldCleanly) break;
+    }
     const think = thinkAttempt.value;
     if (isRetrievalFailureDegradation(think.json?.degraded)) {
       const why = workerDegradationDetail(think.json);
@@ -1112,18 +1135,21 @@ export class Acceptance {
       // Worker ran the reviewed answer path, and must never turn acceptance
       // green merely because `answer` is truthy.
       const diagnostic = answerUnavailableDiagnostic(think.json);
-      const configuredAnswer = answerSetupOf(this.m) !== "built-in";
-      const expectedAnswerModel = resolvedAnswerModels(this.m).answer_model;
       const answerPresent = typeof think.json?.answer === "string" && think.json.answer.trim().length > 0;
       if (configuredAnswer && diagnostic.stage !== "response_contract") {
-        this.record(
-          t,
-          "configured answer model returned an answer",
-          answerPresent ? PASS : FAIL,
-          answerPresent
-            ? `${expectedAnswerModel} returned answer text`
-            : `expected ${expectedAnswerModel}, but no answer text was returned`,
-        );
+        if (allWithheldCleanly) {
+          this.record(t, "configured answer model ran", WARN,
+            "answers were honestly withheld by the evidence check");
+        } else {
+          this.record(
+            t,
+            "configured answer model returned an answer",
+            answerPresent ? PASS : FAIL,
+            answerPresent
+              ? `${expectedAnswerModel} returned answer text`
+              : `expected ${expectedAnswerModel}, but no answer text was returned`,
+          );
+        }
         if (answerPresent) {
           const observedModel = typeof think.json?.model === "string" ? think.json.model : "none";
           this.record(

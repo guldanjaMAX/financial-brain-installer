@@ -4,6 +4,35 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.22 (2026-10-31)
+
+Candidate only. This version still needs the full host gate, CI and separately
+reviewed field acceptance for the exact package. This offline hotfix is not
+release or deployment evidence.
+
+- **0.4.22: acceptance accepts an honest verified withhold on Claude-configured Brains.** The configured answer check tries up to three saved probes. A
+  verified answer from the configured model passes. If every attempted answer
+  was withheld cleanly by that model's evidence check, acceptance reports a
+  warning so update can finish its remaining checks. Verifier errors, answer
+  errors, missing or different models, retrieval failures, HTTP failures and
+  invalid response contracts still fail. To check: the acceptance result names
+  the evidence refusal rather than calling it incomplete source coverage.
+- **Review the warning before relying on an answer.** A completed update with
+  this warning proves the configured route ran; it does not prove the sources
+  can support an answer. Inspect source coverage and the withheld evidence.
+  The built-in answer route and schema are unchanged.
+- **Earlier limits remain.** Review the 0.4.21 notes below for inherited owner
+  checks and unproven capabilities. This hotfix closes no release-audit row and
+  renews no exact-version deferral.
+
+### This release does NOT cover
+
+- Windows x64 is the only supported Windows runtime in this release. Windows
+  ARM64 ships unproven.
+- Bank breadth ships unproven. Bank invitations stay closed.
+- Email attachments, Drive images and Drive simple sync remain outside this
+  release.
+
 ## 0.4.21 (2026-10-30)
 
 Candidate only. This version has not been released. The changes below still
