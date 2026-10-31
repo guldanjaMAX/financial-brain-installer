@@ -790,11 +790,13 @@ const expected = [
   "migrations/d1/0054_daily_evidence.sql",
   "migrations/d1/0055_fin_account_links.sql",
   "migrations/d1/0056_content_date_refresh_receipts.sql",
+  "migrations/d1/0057_bank_provider_transition.sql",
   "operations/bank-access-wrapping-key.mjs",
   // Generic owner-present bank secret custody. Reviewed 2026-09-17: takes only
   // injected list, write, and hidden-prompt callbacks; refuses ambient values
   // and reports secret names, never values.
   "operations/bank-feed-owner-secrets.mjs",
+  "operations/bank-provider-command.mjs",
   "operations/custom-api-clipboard.mjs",
   "operations/bootstrap-status.mjs",
   // Generic local timing helper. It receives only injected clock/scheduler
@@ -839,6 +841,7 @@ const expected = [
   "worker/src/lib/bank-activity-doc.js",
   "worker/src/lib/bank-export.js",
   "worker/src/lib/bank-feed-profiles.js",
+  "worker/src/lib/bank-provider-transition.js",
   "worker/src/lib/ingestion-outcome.js",
   "worker/src/lib/install-smoke.js",
   "worker/src/lib/owner-bank-import.js",

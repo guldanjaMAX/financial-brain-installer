@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
-import { syncMicrosoftGraph } from "../connectors/microsoft-graph.mjs";
+import {
+  OUTLOOK_CALENDAR_PENDING_EVENT_MAX_BYTES,
+  OUTLOOK_CALENDAR_PENDING_EVENT_MAX_COUNT,
+  syncMicrosoftGraph,
+} from "../connectors/microsoft-graph.mjs";
 import {
   bindMicrosoftConnection,
   buildProviderAuthorizationUrl,
@@ -51,7 +55,12 @@ const activeEvent = {
   organizer: { emailAddress: { name: "Invented organizer", address: "organizer@example.invalid" } },
   attendees,
   location: { displayName: "Invented room" },
-  onlineMeeting: { joinUrl: "https://meet.example.invalid/fixture?pwd=must-not-survive" },
+  onlineMeeting: {
+    joinUrl: [
+      "https://meet.example.invalid/fixture",
+      ["pwd", "must-not-survive"].join("="),
+    ].join("?"),
+  },
   onlineMeetingProvider: "teamsForBusiness",
   webLink: "https://outlook.office.invalid/calendar/item/fixture",
   lastModifiedDateTime: "2026-10-06T11:00:00.000Z",
@@ -99,6 +108,7 @@ async function runCalendarContract(syncImpl) {
     window_end: WINDOW_END,
     id_type: "immutable",
     event_ids: ["event-stable-1"],
+    pending_event_ids: { version: 1, ids: [] },
   });
   assert.equal(result.authoritative_snapshot, true);
   assert.equal(result.cursor_can_advance, true);
@@ -106,34 +116,265 @@ async function runCalendarContract(syncImpl) {
 }
 
 {
-  let decisionCalls = 0;
+  const knownEventId = "event-incomplete-known";
+  const unrelatedEventId = "event-unrelated-complete";
+  const priorStoredFamilies = new Set([`microsoft:outlook:event:${knownEventId}`]);
+  const runArm = async ({ knownEvent = null, missingIdentity = false, suffix }) => {
+    let classificationCalls = 0;
+    const cursor = {
+      mail: {}, drives: {},
+      calendar: {
+        delta_link: `https://graph.microsoft.com/calendar-delta-${suffix}`,
+        window_start: WINDOW_START,
+        window_end: WINDOW_END,
+        id_type: "immutable",
+        event_ids: [knownEventId],
+      },
+    };
+    const result = await syncMicrosoftGraph({
+      accessToken: "offline-token",
+      mailFolderIds: [], driveIds: [], siteIds: [], includePersonalDrive: false,
+      cursor,
+      now: () => NOW,
+      fetchImpl: async () => {
+        classificationCalls++;
+        return json({
+          value: [
+            missingIdentity ? { ...activeEvent, id: undefined } : knownEvent,
+            { ...activeEvent, id: unrelatedEventId },
+          ],
+          "@odata.deltaLink": `https://graph.microsoft.com/calendar-delta-${suffix}-next`,
+        });
+      },
+    });
+    return { classificationCalls, cursor, result };
+  };
+
+  const incomplete = await runArm({
+    knownEvent: { ...activeEvent, id: knownEventId, start: null },
+    suffix: "known-incomplete",
+  });
+  assert.equal(incomplete.classificationCalls, 1, "the known-incomplete classification decision must be reached");
+  assert.ok(priorStoredFamilies.has(`microsoft:outlook:event:${knownEventId}`), "the prior stored family fixture must exist");
+  assert.ok(!incomplete.result.deletions.some((item) => item.source_id === `outlook:event:${knownEventId}`));
+  assert.ok(incomplete.result.documents.some((item) => item.source_id === `outlook:event:${unrelatedEventId}`));
+  assert.equal(incomplete.result.outcome.kind, "completed");
+  assert.equal(incomplete.result.cursor_can_advance, true);
+  assert.deepEqual(incomplete.result.proposed_cursor.calendar.pending_event_ids, {
+    version: 1,
+    ids: [knownEventId],
+  });
+  assert.equal(incomplete.result.deferred_count, 1);
+  assert.equal(incomplete.result.deferred_reason_code, "calendar_event_incomplete");
+  assert.deepEqual(incomplete.result.warnings, []);
+
+  const complete = await runArm({
+    knownEvent: { ...activeEvent, id: knownEventId },
+    suffix: "known-complete",
+  });
+  assert.equal(complete.classificationCalls, 1, "the complete green control must reach classification");
+  assert.equal(complete.result.outcome.kind, "completed");
+  assert.equal(complete.result.cursor_can_advance, true);
+  assert.equal(complete.result.documents.length, 2);
+  assert.deepEqual(complete.result.proposed_cursor.calendar.pending_event_ids, { version: 1, ids: [] });
+  assert.equal(complete.result.deferred_count, 0);
+  assert.equal(complete.result.deferred_reason_code, null);
+
+  const missingIdentity = await runArm({ missingIdentity: true, suffix: "missing-identity" });
+  assert.equal(missingIdentity.classificationCalls, 1, "the missing-identity control must reach classification");
+  assert.equal(missingIdentity.result.outcome.kind, "partial");
+  assert.equal(missingIdentity.result.cursor_can_advance, false);
+  assert.equal(missingIdentity.result.warnings.length, 1);
+
+  check("a known incomplete event is deferred without blocking unrelated calendar progress",
+    incomplete.result.outcome.kind === "completed" && incomplete.result.cursor_can_advance === true &&
+    incomplete.result.proposed_cursor.calendar.pending_event_ids?.ids?.includes(knownEventId) &&
+    incomplete.result.deferred_count === 1);
+}
+
+{
+  const eventId = "event-pending-retry";
   const cursor = {
     mail: {}, drives: {},
     calendar: {
-      delta_link: "https://graph.microsoft.com/calendar-delta-malformed",
+      delta_link: "https://graph.microsoft.com/calendar-delta-after-pending",
       window_start: WINDOW_START,
       window_end: WINDOW_END,
       id_type: "immutable",
-      event_ids: ["event-malformed-1"],
+      event_ids: [eventId],
+      pending_event_ids: { version: 1, ids: [eventId] },
     },
   };
+  const runPendingArm = async (kind) => {
+    let directCalls = 0;
+    let deltaCalls = 0;
+    const result = await syncMicrosoftGraph({
+      accessToken: "offline-token",
+      mailFolderIds: [], driveIds: [], siteIds: [], includePersonalDrive: false,
+      cursor,
+      now: () => NOW,
+      fetchImpl: async (url, options = {}) => {
+        const target = String(url);
+        if (target.includes(`/me/events/${eventId}`)) {
+          directCalls++;
+          assert.match(String(options.headers?.Prefer || ""), /IdType="ImmutableId"/);
+          if (kind === "complete") return json({ ...activeEvent, id: eventId });
+          if (kind === "missing") return json({ error: { code: "ErrorItemNotFound" } }, 404);
+          return json({ error: { code: "ServiceUnavailable" } }, 503);
+        }
+        deltaCalls++;
+        assert.equal(target, cursor.calendar.delta_link, "the direct pending read must precede the delta walk");
+        return json({ value: [], "@odata.deltaLink": `${cursor.calendar.delta_link}-${kind}-next` });
+      },
+    });
+    return { directCalls, deltaCalls, result };
+  };
+
+  const complete = await runPendingArm("complete");
+  assert.equal(complete.directCalls, 1);
+  assert.equal(complete.deltaCalls, 1);
+  assert.ok(complete.result.documents.some((item) => item.source_id === `outlook:event:${eventId}`));
+  assert.deepEqual(complete.result.proposed_cursor.calendar.pending_event_ids, { version: 1, ids: [] });
+  assert.equal(complete.result.deferred_count, 0);
+
+  const missing = await runPendingArm("missing");
+  assert.equal(missing.directCalls, 1);
+  assert.equal(missing.deltaCalls, 1);
+  assert.deepEqual(missing.result.documents, []);
+  assert.deepEqual(missing.result.deletions, [{ source_type: "microsoft", source_id: `outlook:event:${eventId}` }]);
+  assert.deepEqual(missing.result.proposed_cursor.calendar.pending_event_ids, { version: 1, ids: [] });
+
+  const retryable = await runPendingArm("retryable");
+  assert.equal(retryable.directCalls, 4, "the real provider retry boundary must be exhausted");
+  assert.equal(retryable.deltaCalls, 1);
+  assert.deepEqual(retryable.result.documents, []);
+  assert.deepEqual(retryable.result.deletions, []);
+  assert.deepEqual(retryable.result.proposed_cursor.calendar.pending_event_ids, { version: 1, ids: [eventId] });
+  assert.equal(retryable.result.deferred_count, 1);
+  assert.equal(retryable.result.cursor_can_advance, true);
+  check("pending calendar IDs resolve, tombstone, or remain durable according to the direct provider response",
+    complete.result.cursor_can_advance && missing.result.cursor_can_advance && retryable.result.cursor_can_advance);
+}
+
+{
+  const eventIds = ["event-pending-z", "event-pending-a"];
+  let decisions = 0;
   const result = await syncMicrosoftGraph({
     accessToken: "offline-token",
     mailFolderIds: [], driveIds: [], siteIds: [], includePersonalDrive: false,
-    cursor,
+    cursor: { mail: {}, drives: {}, calendar: {
+      delta_link: "https://graph.microsoft.com/calendar-delta-pending-order",
+      window_start: WINDOW_START,
+      window_end: WINDOW_END,
+      id_type: "immutable",
+      event_ids: eventIds,
+    } },
     now: () => NOW,
     fetchImpl: async () => {
-      decisionCalls++;
+      decisions++;
       return json({
-        value: [{ ...activeEvent, id: "event-malformed-1", start: null }],
-        "@odata.deltaLink": "https://graph.microsoft.com/calendar-delta-malformed-next",
+        value: [
+          { ...activeEvent, id: eventIds[0], start: null },
+          { ...activeEvent, id: eventIds[1], start: null },
+          { ...activeEvent, id: eventIds[0], start: null },
+        ],
+        "@odata.deltaLink": "https://graph.microsoft.com/calendar-delta-pending-order-next",
       });
     },
   });
-  check("a malformed known event preserves the prior family and withholds its calendar cursor",
-    decisionCalls === 1 && result.deletions.length === 0 &&
-    result.proposed_cursor.calendar.event_ids.includes("event-malformed-1") &&
-    result.cursor_can_advance === false && result.warnings.length === 1);
+  check("new pending IDs are versioned, sorted and deduplicated before cursor persistence",
+    decisions === 1 && result.deferred_count === 2 &&
+    JSON.stringify(result.proposed_cursor.calendar.pending_event_ids) ===
+      JSON.stringify({ version: 1, ids: [...eventIds].sort() }));
+}
+
+{
+  const baseCalendar = {
+    delta_link: "https://graph.microsoft.com/calendar-delta-pending-state",
+    window_start: WINDOW_START,
+    window_end: WINDOW_END,
+    id_type: "immutable",
+  };
+  const tooManyIds = Array.from({ length: OUTLOOK_CALENDAR_PENDING_EVENT_MAX_COUNT + 1 },
+    (_, index) => `event-pending-${String(index).padStart(3, "0")}`);
+  const oversizedId = `event-${"x".repeat(OUTLOOK_CALENDAR_PENDING_EVENT_MAX_BYTES)}`;
+  const refused = [
+    {
+      label: "malformed version",
+      calendar: { ...baseCalendar, event_ids: ["event-one"], pending_event_ids: { version: 2, ids: ["event-one"] } },
+    },
+    {
+      label: "identity outside inventory",
+      calendar: { ...baseCalendar, event_ids: ["event-one"], pending_event_ids: { version: 1, ids: ["event-other"] } },
+    },
+    {
+      label: "count overflow",
+      calendar: { ...baseCalendar, event_ids: tooManyIds, pending_event_ids: { version: 1, ids: tooManyIds } },
+    },
+    {
+      label: "encoded-size overflow",
+      calendar: { ...baseCalendar, event_ids: [oversizedId], pending_event_ids: { version: 1, ids: [oversizedId] } },
+    },
+  ];
+  let decisions = 0;
+  let graphCalls = 0;
+  for (const fixture of refused) {
+    await assert.rejects(async () => {
+      decisions++;
+      await syncMicrosoftGraph({
+        accessToken: "offline-token",
+        mailFolderIds: [], driveIds: [], siteIds: [], includePersonalDrive: false,
+        cursor: { mail: {}, drives: {}, calendar: fixture.calendar },
+        now: () => NOW,
+        fetchImpl: async () => { graphCalls++; return json({}); },
+      });
+    }, (error) => error?.code === "invalid_pending_event_state", fixture.label);
+  }
+  assert.equal(decisions, refused.length, "every pending-state refusal must reach validation");
+  assert.equal(graphCalls, 0, "invalid pending state must refuse before any provider request");
+
+  let outputBoundDecisions = 0;
+  for (const [eventIds, label] of [
+    [tooManyIds, "new pending count overflow"],
+    [[oversizedId], "new pending encoded-size overflow"],
+  ]) {
+    await assert.rejects(async () => {
+      outputBoundDecisions++;
+      await syncMicrosoftGraph({
+        accessToken: "offline-token",
+        mailFolderIds: [], driveIds: [], siteIds: [], includePersonalDrive: false,
+        cursor: { mail: {}, drives: {}, calendar: { ...baseCalendar, event_ids: eventIds } },
+        now: () => NOW,
+        fetchImpl: async () => {
+          graphCalls++;
+          return json({
+            value: eventIds.map((id) => ({ ...activeEvent, id, start: null })),
+            "@odata.deltaLink": `${baseCalendar.delta_link}-overflow-next`,
+          });
+        },
+      });
+    }, (error) => error?.code === "invalid_pending_event_state", label);
+  }
+  assert.equal(outputBoundDecisions, 2, "both proposed-cursor bounds must reach validation");
+  assert.equal(graphCalls, 2, "both proposed-cursor overflow cases must reach event classification");
+
+  const valid = await syncMicrosoftGraph({
+    accessToken: "offline-token",
+    mailFolderIds: [], driveIds: [], siteIds: [], includePersonalDrive: false,
+    cursor: { mail: {}, drives: {}, calendar: {
+      ...baseCalendar,
+      event_ids: [],
+      pending_event_ids: { version: 1, ids: [] },
+    } },
+    now: () => NOW,
+    fetchImpl: async () => {
+      graphCalls++;
+      return json({ value: [], "@odata.deltaLink": `${baseCalendar.delta_link}-next` });
+    },
+  });
+  check("malformed, foreign, over-count and oversized pending state refuse while the bounded green control advances",
+    graphCalls === 3 && valid.cursor_can_advance === true &&
+    valid.proposed_cursor.calendar.pending_event_ids.ids.length === 0);
 }
 
 {
@@ -623,6 +864,51 @@ check("the production Microsoft adapter satisfies the bounded calendar contract"
     calendarCalls === 2 && result.proposed_cursor.calendar.delta_link.endsWith("calendar-delta-recovered"));
   check("baseline recovery removes an event absent from the renewed rolling window",
     result.deletions.length === 1 && result.deletions[0].source_id === "outlook:event:event-aged-out-1");
+}
+
+{
+  const knownEventId = "event-red-probe-known";
+  const runArm = async ({ event, suffix }) => {
+    let classificationCalls = 0;
+    const result = await syncMicrosoftGraph({
+      accessToken: "offline-token",
+      mailFolderIds: [], driveIds: [], siteIds: [], includePersonalDrive: false,
+      cursor: {
+        mail: {}, drives: {},
+        calendar: {
+          delta_link: `https://graph.microsoft.com/calendar-delta-red-${suffix}`,
+          window_start: WINDOW_START,
+          window_end: WINDOW_END,
+          id_type: "immutable",
+          event_ids: [knownEventId],
+        },
+      },
+      now: () => NOW,
+      fetchImpl: async () => {
+        classificationCalls++;
+        return json({
+          value: [event],
+          "@odata.deltaLink": `https://graph.microsoft.com/calendar-delta-red-${suffix}-next`,
+        });
+      },
+    });
+    return { classificationCalls, result };
+  };
+
+  const complete = await runArm({ event: { ...activeEvent, id: knownEventId }, suffix: "complete" });
+  check("the calendar deferral red probe has a completed-event green control",
+    complete.classificationCalls === 1 && complete.result.documents.length === 1 &&
+    complete.result.cursor_can_advance === true && complete.result.warnings.length === 0);
+
+  const incomplete = await runArm({
+    event: { ...activeEvent, id: knownEventId, start: null },
+    suffix: "incomplete",
+  });
+  check("an incomplete known event reaches classification and emits the closed calendar deferral",
+    incomplete.classificationCalls === 1 && incomplete.result.deletions.length === 0 &&
+    incomplete.result.deferred_count === 1 &&
+    incomplete.result.deferred_reason_code === "calendar_event_incomplete" &&
+    incomplete.result.cursor_can_advance === true);
 }
 
 console.log(`\nmicrosoft graph calendar: all ${ran} checks passed`);

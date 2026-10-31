@@ -302,6 +302,83 @@ async function promotedFixture() {
   return { fixture, provider };
 }
 
+test("A-R6 scheduled writer separates bilateral legs and fails closed when cross-account analysis fails", async () => {
+  const { fixture } = await promotedFixture();
+  try {
+    const checking = fixture.first("SELECT account_slug FROM fin_accounts WHERE mask='0042' AND superseded_by_id IS NULL");
+    const card = fixture.first("SELECT account_slug FROM fin_accounts WHERE mask='1177' AND superseded_by_id IS NULL");
+    assert.ok(checking?.account_slug && card?.account_slug, "owned endpoint accounts were selected");
+    fixture.raw(
+      "UPDATE fin_transactions SET amount_minor=30000,direction='inflow',description='TRANSFER FROM X1177 TO X0042',payee=NULL WHERE account_slug=? AND posted_on='2026-09-18'",
+      checking.account_slug,
+    );
+    fixture.raw(
+      "UPDATE fin_transactions SET amount_minor=30000,direction='outflow',description='TRANSFER FROM X1177 TO X0042',payee=NULL WHERE account_slug=? AND posted_on='2026-09-18'",
+      card.account_slug,
+    );
+    const receipt = await writeBankActivityDocuments(fixture.env, {
+      metadataChanges: 1,
+      at: "2026-10-05T12:30:00.000Z",
+    });
+    assert.ok(receipt.transfer_decision_count > 0, "writer reached cross-account transfer analysis");
+    assert.equal(receipt.failed, 0);
+
+    const documentText = label => fixture.first(
+        `SELECT c.text FROM documents d JOIN chunks c ON c.doc_uid=d.doc_uid AND c.chunk_ix=0
+          WHERE d.source='bank_activity' AND d.source_id LIKE '%:2026-09'
+            AND d.title LIKE ? LIMIT 1`,
+        `%${label}%`,
+      ).text;
+    for (const label of ["Everyday checking", "Everyday card"]) {
+      const text = documentText(label);
+      assert.match(text, /Settled transaction count: 1/);
+      assert.match(text, /Money in: USD 0\.00[\s\S]*Money out: USD 0\.00/);
+      assert.match(text, /Moved between your own accounts/);
+      assert.match(text, /USD 300\.00/);
+    }
+
+    // Row eligibility remains limited to confirmed USD accounts, but endpoint
+    // uniqueness must be resolved against every owned account. A non-USD
+    // duplicate is ineligible for pairing and still keeps this mask ambiguous.
+    fixture.raw(
+      `INSERT INTO fin_accounts
+        (account_slug,entity_slug,institution,label,account_kind,balance_role,mask,currency,
+         feed_mode,provenance,basis_state,recorded_at)
+       VALUES ('duplicate-mask-eur',?,'Fixture Bank','Ineligible duplicate','other','neither',
+         '0042','EUR','none','owner_stated','confirmed','2026-10-05T12:30:30.000Z')`,
+      SECONDARY_ENTITY,
+    );
+    const ambiguous = await writeBankActivityDocuments(fixture.env, {
+      metadataChanges: 1,
+      at: "2026-10-05T12:30:31.000Z",
+    });
+    assert.ok(ambiguous.transfer_decision_count > 0, "duplicate-mask arm reached transfer analysis");
+    assert.equal(ambiguous.failed, 0);
+    const counted = [
+      ["Everyday checking", /Money in: USD 300\.00[\s\S]*Money out: USD 0\.00/],
+      ["Everyday card", /Money in: USD 0\.00[\s\S]*Money out: USD 300\.00/],
+    ];
+    for (const [label, totals] of counted) {
+      const text = documentText(label);
+      assert.match(text, totals, `${label} affected leg stayed in the lead figures`);
+      assert.match(text, /possible move between your own accounts, kept in Money in and Money out/);
+      assert.doesNotMatch(text, /Moved between your own accounts:/);
+    }
+
+    const storedBefore = fixture.first("SELECT COUNT(*) AS n FROM documents WHERE source='bank_activity'").n;
+    fixture.control.failOn = /SELECT a\.id,a\.account_slug,a\.entity_slug/;
+    const failed = await writeBankActivityDocuments(fixture.env, {
+      metadataChanges: 1,
+      at: "2026-10-05T12:31:00.000Z",
+    });
+    assert.ok(failed.failed > 0, "analysis failure reached the document failure receipt");
+    assert.equal(failed.ingest_calls, 0, "no document is certified without cross-account analysis");
+    assert.equal(fixture.first("SELECT COUNT(*) AS n FROM documents WHERE source='bank_activity'").n, storedBefore);
+  } finally {
+    fixture.close();
+  }
+});
+
 function addHistoricalMonths(fixture) {
   const accounts = fixture.rows(
     "SELECT account_slug,source_feed FROM fin_accounts WHERE feed_mode='live' ORDER BY account_slug",
@@ -619,6 +696,77 @@ test("mutable rendered metadata restarts a bounded sweep before completion", asy
   } finally {
     control.fixture.close();
     mutated.fixture.close();
+  }
+});
+
+test("the bounded sweep marker covers full owned-account and account-link state", async () => {
+  const { fixture } = await promotedFixture();
+  try {
+    addHistoricalMonths(fixture);
+    const initial = await writeBankActivityDocuments(fixture.env, {
+      committedPromotions: 1,
+      at: "2026-10-05T17:10:00.000Z",
+    });
+    assert.equal(initial.complete_sweep, false, "the marker control reached a bounded partial sweep");
+    const plaidOnly = JSON.parse(fixture.first(
+      "SELECT sync_cursor FROM sources WHERE name='bank_activity'",
+    ).sync_cursor).ledger_marker;
+    fixture.raw(
+      `INSERT INTO fin_accounts
+        (account_slug,entity_slug,institution,label,account_kind,balance_role,mask,currency,
+         feed_mode,provenance,basis_state,recorded_at,source_feed)
+       VALUES ('marker-manual',?,'Fixture Bank','Manual marker account','checking','asset','8899','EUR',
+         'manual','owner_stated','confirmed','2026-10-05T17:10:30.000Z','manual:marker')`,
+      PRIMARY_ENTITY,
+    );
+    const accountRestart = await writeBankActivityDocuments(fixture.env, {
+      metadataChanges: 1,
+      at: "2026-10-05T17:11:00.000Z",
+    });
+    assert.equal(accountRestart.complete_sweep, false);
+    const withManual = JSON.parse(fixture.first(
+      "SELECT sync_cursor FROM sources WHERE name='bank_activity'",
+    ).sync_cursor).ledger_marker;
+    assert.notEqual(withManual, plaidOnly, "a non-Plaid owned account restarts the traversal");
+
+    const live = fixture.first(
+      "SELECT account_slug FROM fin_accounts WHERE mask='0042' AND superseded_by_id IS NULL",
+    );
+    assert.ok(live?.account_slug, "the live link endpoint exists");
+    fixture.raw(
+      `INSERT INTO fin_account_links
+        (tenant_id,manual_account_slug,live_account_slug,identity_json,link_plan_hash,linked_at)
+       VALUES ('primary','marker-manual',?,'[]',?,'2026-10-05T17:11:30.000Z')`,
+      live.account_slug,
+      "b".repeat(64),
+    );
+    const linkRestart = await writeBankActivityDocuments(fixture.env, {
+      metadataChanges: 1,
+      at: "2026-10-05T17:12:00.000Z",
+    });
+    assert.equal(linkRestart.complete_sweep, false);
+    const linked = JSON.parse(fixture.first(
+      "SELECT sync_cursor FROM sources WHERE name='bank_activity'",
+    ).sync_cursor).ledger_marker;
+    assert.notEqual(linked, withManual, "a committed account link restarts the traversal");
+
+    fixture.raw(
+      `UPDATE fin_account_links SET unlinked_at='2026-10-05T17:12:30.000Z',unlink_plan_hash=?
+        WHERE manual_account_slug='marker-manual' AND live_account_slug=? AND unlinked_at IS NULL`,
+      "c".repeat(64),
+      live.account_slug,
+    );
+    const unlinkRestart = await writeBankActivityDocuments(fixture.env, {
+      metadataChanges: 1,
+      at: "2026-10-05T17:13:00.000Z",
+    });
+    assert.equal(unlinkRestart.complete_sweep, false);
+    const unlinked = JSON.parse(fixture.first(
+      "SELECT sync_cursor FROM sources WHERE name='bank_activity'",
+    ).sync_cursor).ledger_marker;
+    assert.notEqual(unlinked, linked, "a committed unlink restarts the traversal");
+  } finally {
+    fixture.close();
   }
 });
 

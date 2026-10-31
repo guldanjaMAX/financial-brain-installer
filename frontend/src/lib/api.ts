@@ -61,7 +61,7 @@ const OWNER_ACTION_CODE_MESSAGES: Readonly<Record<string, string>> = Object.free
   bank_export_unreadable: "The Brain could not read this bank export. Nothing was imported. Download a fresh supported export and try again.",
   bank_export_identity_review_required: "Older bank-export rows need identity recovery before another import. Ask your installer to run brain ledger rekey <manifest> --account <account> --preview. Review each page, then use --apply --approve <hash>. Retry the import only after recovery is complete.",
   bank_export_refused: "This bank export did not match the reviewed import format. Nothing was imported. Review the export type and column choices before trying again.",
-  ledger_account_link_required: "A manual import and live feed may describe the same account. Money totals need your confirmation. Run brain ledger link-accounts <manifest> --manual <account> --live <account> --preview. Review the accounts, then use --apply --approve <hash> only if they are the same account. Use --unlink --preview to review removing an outdated link. Account and transaction history stays intact.",
+  ledger_account_link_required: "A manual import and live feed may describe the same account. The Brain is missing confirmation from the owner that they are the same account. Ask the installer to review the two records with the owner. Until then, no total or zero is certified, and no account or transaction history is changed.",
 });
 
 function ownerActionMessage(body: Record<string, unknown>, fallback: string): string {

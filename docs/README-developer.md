@@ -8,7 +8,7 @@ store. Pinned Wrangler 4.131.1 cannot request Vectorize permission for that
 profile, so the read-only preflight routes that exact refusal to an explicit,
 account-scoped recovery API-token choice before any mutation.
 
-**Package identity: brain-installer 0.4.20, schema48.** Publication, supported
+**Package identity: brain-installer 0.4.21, schema48.** Publication, supported
 platforms and field acceptance are established by the reviewed evidence for
 the exact package bytes, not by this README or its version number. Before an
 install or update, match the package to the current approved guide and release
@@ -22,7 +22,7 @@ until reviewed evidence closes it; a deferred capability remains unproven.
 Earlier candidate identities and their planning records remain historical and
 must not be reused as proof for changed bytes.
 
-The 41-row release audit has 37 unresolved incidents, zero 0.4.20 deferrals, and four
+The 41-row release audit has 37 unresolved incidents, zero 0.4.21 deferrals, and four
 rows closed on reviewed evidence.
 
 Engineering changes follow [the code, test, documentation, and tracking
@@ -2223,14 +2223,17 @@ answer path through the Worker and real SQLite migrations, including twin
 precedence, exact cents, coverage boundaries, scope refusals and SQL mutations.
 Phase one supports USD balances, deposits within seven days of a supplied date
 (otherwise the last 30 days), named months, last month, last N days and year to
-date. Relative periods use the UTC calendar because the Worker has no owner
-timezone at this boundary. Reads are bounded to 200 source accounts and 5,000
+date. Relative periods use the configured owner IANA time zone. A missing or
+invalid owner zone refuses before ledger SQL even when a caller injects a test
+clock. An explicit `in <Month YYYY>` always means the complete calendar month
+and does not use an injected clock as a time-zone fallback. Reads are bounded to 200 source accounts and 5,000
 matching transaction rows; exceeding either bound falls back with a visible
 gap. Complete coverage is required for totals and negative deposit results.
 `node --test worker/test/ledger-phase2.test.mjs` extends that same path with
 largest N expenses/deposits (1 through 100), recent deposits, merchant/category
 spend or income, recurring charges, and own-account transfers. Named months
-and Q1 through Q4 may omit the year, meaning the current UTC year. Merchant
+and Q1 through Q4 may omit the year, meaning the current year in the owner's
+configured time zone. Merchant
 matches use the exact NFKC-normalized, case-insensitive payee when present.
 Only outflows without a payee use contiguous description tokens as a fallback.
 Inflows require an explicit payee or a directional/opening sender phrase, never
@@ -2242,8 +2245,9 @@ Quote the original by-merchant line rather than substituting or guessing. Catego
 ones say "bank's category (unconfirmed)". Unsorted is always a separate line.
 `node --test worker/test/ledger-phrasing.test.mjs` covers natural bank question
 forms, named payments without amounts (60-day default), recent deposits
-(14-day default), largest expenses without a count (ten), and current named
-months through today. It exercises the real Think route with two approved
+(14-day default), largest expenses without a count (ten), and bare current
+named-month references through the owner's today. Explicit `in <Month YYYY>`
+forms cover the complete calendar month. It exercises the real Think route with two approved
 twin pairs and an empty provider account, including missing-proof refusals.
 Named banks, entity-specific analysis, ordinal payments, average spend,
 anomalies and runway remain unsupported by this deterministic grammar.
@@ -2311,7 +2315,10 @@ required. Tax, projected, average, gross or business profit and other unconsumed
 qualifiers remain unsupported. Transfer and withdrawal clauses apply only to
 totals, largest, deposits, merchant, category and recurring questions. Repeated
 or contradictory clauses, other exclusions and flags on balance, payment or
-transfers questions refuse. Document-path money refusals remain unchanged.
+transfers questions refuse. Positively recognized unsupported money intent
+preserves the document response and adds one leading
+`ledger_wording_unsupported` gap. A policy or document question that merely
+contains a money word preserves the ordinary document response byte for byte.
 SQL stops at 5,001 matching rows; sorting happens only after proving the bound,
 so an oversized covered range does not need a full sort before refusing.
 

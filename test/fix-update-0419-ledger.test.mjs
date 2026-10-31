@@ -25,7 +25,7 @@ function fixtureManifest(schemaVersion = 48) {
   const manifestPath = join(root, "brain.manifest.json");
   writeFileSync(manifestPath, JSON.stringify({
     client: { slug: "fixture" },
-    brain: { worker_name: "fixture-brain", version: "0.4.20" },
+    brain: { worker_name: "fixture-brain", version: "0.4.21" },
     infrastructure: {
       cloudflare: {
         account_id: "fixture-account",
@@ -36,7 +36,7 @@ function fixtureManifest(schemaVersion = 48) {
   }));
   const state = {
     client_slug: "fixture",
-    product_version: "0.4.20",
+    product_version: "0.4.21",
     schema_version: schemaVersion,
   };
   return { root, manifestPath, state };
@@ -173,7 +173,7 @@ test("update validates the complete ledger before bookmark or paused deployment"
   assert.equal(remoteMutations, 0, "validation ran before bookmark and paused deployment");
 });
 
-test("schema 48 update prints its computed 0049-0056 pending set before remote work", async (t) => {
+test("schema 48 update prints its computed 0049-0057 pending set before remote work", async (t) => {
   const fixture = fixtureManifest();
   t.after(() => rmSync(fixture.root, { recursive: true, force: true }));
   const plans = [];
@@ -196,7 +196,7 @@ test("schema 48 update prints its computed 0049-0056 pending set before remote w
     /restore bookmark could not be captured/iu,
   );
   assert.equal(bookmarkReads, 1, "the green control continued to bookmark capture");
-  assert.deepEqual(plans, ["pending: 0049-0056 (8)"]);
+  assert.deepEqual(plans, ["pending: 0049-0057 (9)"]);
 });
 
 test("repair diagnosis uses the shared ledger validator and retains applied_at", async () => {
@@ -264,7 +264,7 @@ test("status and update report an old-CLI schema regression with the repair comm
   });
   assert.ok(output.length > 0, "status reached its reporting decision point");
   assert.equal(warnings.length, 1);
-  assert.match(warnings[0], /recorded schema 48[\s\S]*ledger maximum 56/iu);
+  assert.match(warnings[0], /recorded schema 48[\s\S]*ledger maximum 57/iu);
   assert.match(warnings[0], /brain update/iu);
 
   const updateWarnings = [];
@@ -282,7 +282,7 @@ test("status and update report an old-CLI schema regression with the repair comm
   }), /restore bookmark could not be captured/iu);
   assert.equal(bookmarkReads, 1, "update continued into its safe repair path");
   assert.equal(updateWarnings.length, 1, "update reached the schema regression decision point");
-  assert.match(updateWarnings[0], /recorded schema 48[\s\S]*ledger maximum 56/iu);
+  assert.match(updateWarnings[0], /recorded schema 48[\s\S]*ledger maximum 57/iu);
   assert.match(updateWarnings[0], /brain update/iu);
 });
 

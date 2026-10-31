@@ -47,7 +47,7 @@ export function fixture() {
   const first = (sql, ...args) => sqlite.prepare(sql).get(...args);
   raw(`INSERT INTO fin_entities (entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at)
     VALUES ('owner-company','Owner company','business','owned','owner_stated','confirmed',?)`, NOW);
-  return { env: { DB }, DB, sqlite, raw, rows, first, seen, queries, close: () => sqlite.close() };
+  return { env: { DB, BRAIN_TIMEZONE: 'UTC' }, DB, sqlite, raw, rows, first, seen, queries, close: () => sqlite.close() };
 }
 
 export function account(f, { slug = 'live-account', mask = '4321', mode = 'live', institution = 'Bank One', from = '2026-09-01', to = '2026-10-11', status = 'complete' } = {}) {

@@ -11,7 +11,7 @@ import { createProductFixture } from './product-contract-fixture.mjs';
 async function documentAnswer(t, { title = 'Card statement', content = 'Card ending 4242 charged USD 120.00.', metadata = {} } = {}) {
   let drafts = 0, verifiers = 0;
   const answer = 'Card ending 4242 charged USD 120.00 [1].';
-  const f = await createProductFixture({ env: { ADMIN_KEY: randomBytes(32).toString('hex'),
+  const f = await createProductFixture({ env: { BRAIN_TIMEZONE: 'UTC', ADMIN_KEY: randomBytes(32).toString('hex'),
     SESSION_SIGNING_KEY: randomBytes(32).toString('hex'), AI: { async run(model, input) {
       if (model.includes('bge-')) return { data: [[0.1, 0.2, 0.3]] };
       if (String(input.messages?.[0]?.content).includes('verify a proposed answer')) {
@@ -181,7 +181,8 @@ test('P02: adding out-of-window collisions cannot hide a relevant existing colli
   assert.equal(b.code, 'ledger_account_link_required', 'the original selected September collision still exists');
   assert.equal(documents, 0);
   assert.equal(b.gaps.length, 1);
-  assert.match(b.gaps[0].detail, /--manual manual-a --live live-a --preview/);
+  assert.match(b.gaps[0].detail, /missing the owner's confirmation/iu);
+  assert.doesNotMatch(b.gaps[0].detail, /ledger link-accounts|manual-a|live-a/iu);
 });
 
 test('P02 all collision edges are checked, including an earlier edge with unknown coverage', async t => {
@@ -199,7 +200,8 @@ test('P02 all collision edges are checked, including an earlier edge with unknow
   const before = f.seen.length, blocked = await ask(f, question, next);
   assert.ok(f.seen.slice(before).some(sql => sql.includes('FROM fin_accounts')));
   assert.equal(blocked.code, 'ledger_account_link_required'); assert.equal(documents, 1);
-  assert.match(blocked.gaps[0].detail, /--manual manual-a --live live-a --preview/);
+  assert.match(blocked.gaps[0].detail, /missing the owner's confirmation/iu);
+  assert.doesNotMatch(blocked.gaps[0].detail, /ledger link-accounts|manual-a|live-a/iu);
   const selected = await ask(f, 'How much money came in September 2026 for account ending 2468?', next);
   assert.equal(selected.ledger.accounts[0].credits_minor, 123450);
   assert.equal(documents, 1);
@@ -231,7 +233,7 @@ test('N03 coverage controls keep overlapping and unknown collisions closed, outs
 test('P02 real Think route: historical collisions cannot bypass the unresolved live collision', async t => {
   let drafts = 0, verifiers = 0;
   const answer = 'Income was USD 1234.50 in September 2026 [1].';
-  const f = await createProductFixture({ env: { ADMIN_KEY: randomBytes(32).toString('hex'),
+  const f = await createProductFixture({ env: { BRAIN_TIMEZONE: 'UTC', ADMIN_KEY: randomBytes(32).toString('hex'),
     SESSION_SIGNING_KEY: randomBytes(32).toString('hex'), AI: { async run(model, input) {
       if (model.includes('bge-')) return { data: [[0.1, 0.2, 0.3]] };
       if (String(input.messages?.[0]?.content).includes('verify a proposed answer')) {

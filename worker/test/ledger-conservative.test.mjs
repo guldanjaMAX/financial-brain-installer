@@ -181,7 +181,7 @@ test('inflow list caps at ten and keeps the account and date scope, not the amou
   f.raw(`INSERT INTO fin_accounts (account_slug,entity_slug,account_kind,balance_role,mask,feed_mode,provenance,source_feed,basis_state,recorded_at)
     VALUES ('other-account','owner','checking','asset','9876','live','feed','bank-feed:fixture-feed','confirmed',?)`, NOW);
   f.raw(`INSERT INTO fin_account_coverage (account_slug,coverage_status,covered_from,covered_to,computed_at,provenance,source_feed,basis_state,recorded_at)
-    VALUES ('other-account','complete','2024-01-01','2026-10-12',?,'feed','bank-feed:fixture-feed','confirmed',?)`, NOW, NOW);
+    VALUES ('other-account','complete','2024-01-01','2026-10-31',?,'feed','bank-feed:fixture-feed','confirmed',?)`, NOW, NOW);
   f.add('other-account-receipt', 'Outside selected account', 'Payer One');
   f.raw("UPDATE fin_transactions SET account_slug='other-account' WHERE txn_uid='other-account-receipt'");
   assert.equal((await reachedAnswer(f, payment)).ledger.found, true, 'other account positive control');

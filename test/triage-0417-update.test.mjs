@@ -20,6 +20,7 @@ function scheduleFixture(arm) {
   const bindings = {
     join, relative, sep, HERE: "/fixture", FormData, Blob,
     loadManifest: () => ({ m: manifest }), bankFeedWorkerVars: () => [],
+    readWorkerBankProvider: async () => { throw new Error("provider read must stay unreachable"); },
     assertReviewedAnswerModels: () => {},
     resolveAccount: async () => ({ id: "fixture-account" }),
     collectWorkerFiles: root => [join(root, "index.js")], readFileSync: () => "export default {};",
@@ -101,14 +102,15 @@ for (const arm of ["candidates", "no-candidates", "missing-results", "incomplete
       assert.match(text, /search could not be completed/i);
       assert.doesNotMatch(text, /Confidence[^\n]*%/i);
     } else if (arm === "candidates") {
-      assert.match(text, /checked 2 nearest candidates/);
       assert.match(text, /I found 2 records in this search, but none supported an answer/);
-      assert.match(text, /Confidence in this search result:/);
+      assert.doesNotMatch(text, /Confidence[^\n]*%/i);
       assert.match(text, /Fixture evidence limit/);
+      assert.match(text, /Next: ask about one record at a time/);
     } else if (arm === "no-candidates") {
-      assert.match(text, /no candidates/);
       assert.match(text, /I didn't find a matching record in this search/);
-      assert.match(text, /Confidence in this search result:/);
+      assert.doesNotMatch(text, /Confidence[^\n]*%/i);
+      assert.match(text, /Fixture evidence limit/);
+      assert.match(text, /Next: ask again with a name, date or exact phrase/);
     } else if (arm === "missing-results") {
       assert.match(text, /The records checked did not support an answer to this question/);
       assert.doesNotMatch(text, /I didn't find a matching record|I found 0/);

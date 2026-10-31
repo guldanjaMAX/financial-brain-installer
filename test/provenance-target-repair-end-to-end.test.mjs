@@ -616,8 +616,8 @@ test("lease-first target repair crosses native prepare, Worker schema 44/45, rep
     recoveredBrain.close();
   });
 
-  assert.equal(sourceBrain.migrationFiles.at(-1), "0056_content_date_refresh_receipts.sql");
-  assert.equal(recoveredBrain.migrationFiles.at(-1), "0056_content_date_refresh_receipts.sql");
+  assert.equal(sourceBrain.migrationFiles.at(-1), "0057_bank_provider_transition.sql");
+  assert.equal(recoveredBrain.migrationFiles.at(-1), "0057_bank_provider_transition.sql");
   // Both sides must actually apply the candidate schema before recovery runs.
   // A filename alone cannot prove that its column and index were created.
   for (const fixture of [sourceBrain, recoveredBrain]) {

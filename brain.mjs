@@ -58,6 +58,18 @@ import {
   SOURCE_FAILURE_EVIDENCE_VERSION,
 } from "./worker/src/lib/source-receipt.js";
 import { PLAID_PROFILE, manifestBankFeedProvider } from "./worker/src/lib/bank-feed-profiles.js";
+import {
+  BankProviderCommandError,
+  BANK_PROVIDER_COMPLETE_TRANSITION_SQL,
+  BANK_PROVIDER_ESTABLISH_TRANSITION_SQL,
+  BANK_PROVIDER_STATE_SQL,
+  completeBankProviderDeployment,
+  normalizeBankProviderState,
+  parseBankProviderArgv,
+  prepareBankProviderDeployment,
+  renderBankProviderReceipt,
+  runBankProviderCommand,
+} from "./operations/bank-provider-command.mjs";
 import { ingestEnvelopeValidationError } from "./worker/src/lib/ingest-envelope.js";
 import { normalizeSourceOriginalReceipt } from "./worker/src/lib/source-original-binding.js";
 import {
@@ -3088,6 +3100,18 @@ export function workerBindings(m, cfg, options = {}) {
   ];
 }
 
+async function readWorkerBankProvider({ accountId, scriptName }) {
+  const settings = await cf(`/accounts/${accountId}/workers/scripts/${scriptName}/settings`);
+  const bindings = settings?.bindings;
+  if (!Array.isArray(bindings)) throw new Error("the live Worker settings have no readable bindings");
+  const matches = bindings.filter((binding) => binding?.name === "BANK_FEED_PROVIDER");
+  if (matches.length !== 1 || matches[0]?.type !== "plain_text" ||
+      !["plaid", "simplefin", "custom"].includes(matches[0]?.text)) {
+    throw new Error("the live Worker bank-provider binding is missing or ambiguous");
+  }
+  return matches[0].text;
+}
+
 async function cmdDeployWithPrompts(manifestPath, options = {}) {
   const { m } = loadManifest(manifestPath);
   assertReviewedAnswerModels(m, { manifestPath });
@@ -3099,6 +3123,31 @@ async function cmdDeployWithPrompts(manifestPath, options = {}) {
   const scriptName = m.brain?.worker_name || `${m.client?.slug || "client"}-brain`;
 
   if (!cfg.d1_database_id) die("no d1_database_id in the manifest. Run `brain provision` first.");
+
+  const targetBankProvider = m.corpora?.bank_feed?.enabled === true
+    ? manifestBankFeedProvider(m.corpora.bank_feed)
+    : null;
+  let bankProviderTransition = null;
+  const readBankProvider = options.readWorkerBankProvider ?? readWorkerBankProvider;
+  if (targetBankProvider === "simplefin") {
+    try {
+      const liveProvider = await readBankProvider({
+        accountId: acct.id,
+        scriptName,
+        phase: "before_upload",
+      });
+      const prepareTransition = options.prepareBankProviderDeployment ?? prepareBankProviderDeployment;
+      bankProviderTransition = await prepareTransition({
+        targetProvider: targetBankProvider,
+        liveProvider,
+        inspectBankState: async () => normalizeBankProviderState(
+          await (options.d1Query ?? d1Query)(acct.id, cfg.d1_database_id, BANK_PROVIDER_STATE_SQL),
+        ),
+      });
+    } catch (error) {
+      die(String(error?.message || error));
+    }
+  }
 
   const srcRoot = join(HERE, "worker", "src");
   const files = collectWorkerFiles(srcRoot);
@@ -3295,6 +3344,34 @@ async function cmdDeployWithPrompts(manifestPath, options = {}) {
             "  CLOUDFLARE_API_TOKEN in the environment.)"
         );
       }
+    }
+  }
+  if (targetBankProvider === "simplefin") {
+    try {
+      const liveProvider = await readBankProvider({
+        accountId: acct.id,
+        scriptName,
+        phase: "after_upload",
+      });
+      const finishTransition = options.completeBankProviderDeployment ?? completeBankProviderDeployment;
+      await finishTransition({
+        targetProvider: targetBankProvider,
+        liveProvider,
+        transition: bankProviderTransition,
+        completeTransition: async (transitionRef) => {
+          const stamp = new Date().toISOString();
+          const result = await (options.d1Query ?? d1Query)(
+            acct.id,
+            cfg.d1_database_id,
+            BANK_PROVIDER_COMPLETE_TRANSITION_SQL,
+            [transitionRef, stamp],
+          );
+          const rows = result?.results;
+          return Array.isArray(rows) && rows.length === 1 ? rows[0] : null;
+        },
+      });
+    } catch (error) {
+      die(String(error?.message || error));
     }
   }
   // Same reasoning as provision: suppressed when setup drives the step.
@@ -4507,7 +4584,9 @@ export async function cmdAsk(manifestPath, options = {}) {
   // The response keeps the scorer's canonical answer; presentation scopes a
   // refusal to this search. An incomplete search has no refusal percentage.
   const refused = body.evidence_gate?.supported === false || typeof body.answer !== "string" || !body.answer.trim() || /^The documents do not answer/i.test(body.answer.trim());
-  const trust = cannotSupportAbsence ? null : confidenceLine(body.confidence, { refused });
+  // A refusal is not an answer-confidence result. Its scoped search facts and
+  // gaps remain visible below, without a high-confidence label beside "no".
+  const trust = cannotSupportAbsence || refused ? null : confidenceLine(body.confidence, { refused: false });
   if (trust) console.log(`  ${c.dim(trust)}\n`);
   // Say WHY when the answer was refused or cut short. The gate already
   // records it; hiding it left the owner with one sentence that meant five
@@ -4518,6 +4597,11 @@ export async function cmdAsk(manifestPath, options = {}) {
       provisional || refused)) {
     console.log(`  ${c.dim(gate.partial === true ? "Not covered" : "Why")}: ${gateReason}\n`);
   }
+  const ledgerGapCodes = [...new Set((Array.isArray(body.gaps) ? body.gaps : [])
+    .filter((gap) => /^ledger_/.test(String(gap?.type || "")) || gap?.source === "ledger" || gap?.source_kind === "ledger")
+    .map((gap) => gap?.code || gap?.reason)
+    .filter((code) => /^[a-z0-9_]{1,80}$/.test(String(code || ""))))];
+  for (const code of ledgerGapCodes) console.log(`  ${c.dim("Ledger gap")}: ${code}\n`);
   const nextAction = nextActionText(body);
   if (nextAction) console.log(`  ${c.dim(nextAction)}\n`);
   if (body.answer_error) {
@@ -9865,7 +9949,7 @@ function gitignoreTheKey(dir) {
   }
 }
 
-function parseFlags(argv) {
+export function parseFlags(argv) {
   const flags = {};
   for (let i = 0; i < argv.length; i++) {
     if (!argv[i].startsWith("--")) continue;
@@ -27448,24 +27532,50 @@ async function pauseExistingOwnedSchedulers(m, manifestPath, options = {}) {
 async function captureExistingOwnedSchedulers(m, manifestPath, options = {}) {
   if ((options.platform ?? process.platform) !== "darwin") return [];
   const schedulerOptions = { platform: options.platform ?? process.platform, ...(options.legacySchedulerOptions || {}) };
+  const schedulerCore = options.legacySchedulerCore ?? await import("./operations/drive-scheduler.mjs");
   const snapshots = [];
   const capture = (kind, sourceKey, module, status, provider = null) => {
-    if (!status?.installed) {
-      snapshots.push({ kind, sourceKey, ...(provider ? { provider } : {}), module,
-        snapshot: { exists: false, wasLoaded: false, path: status?.plistPath || null, service: status?.service || null } });
-      return;
+    const spec = status?.spec || (kind === "drive"
+      ? module.DRIVE_SCHEDULER_SPEC
+      : kind === "folder"
+        ? module.FOLDER_SCHEDULER_SPEC
+        : kind === "imessage"
+          ? module.IMESSAGE_SCHEDULER_SPEC
+          : module.createProviderSchedulerSpec?.(provider, schedulerOptions));
+    let snapshot;
+    if (typeof module.captureInstalledSchedulerDefinition === "function") {
+      snapshot = module.captureInstalledSchedulerDefinition(manifestPath, {
+        ...schedulerOptions,
+        ...(spec ? { spec } : {}),
+      });
+    } else if (spec) {
+      snapshot = schedulerCore.captureInstalledSchedulerDefinition(manifestPath, { ...schedulerOptions, spec });
+    } else {
+      // Retain the old injected-test seam for minimal scheduler doubles. Real
+      // product modules always supply their spec and use the installed parser.
+      if (!status?.installed) {
+        snapshot = { exists: false, wasLoaded: false, path: status?.plistPath || null, service: status?.service || null };
+      } else {
+        if (!status.definitionMatches || status.scheduleError || status.running) {
+          throw new Error(`the owned ${sourceKey} scheduler cannot be snapshotted safely before update`);
+        }
+        snapshot = {
+          exists: true,
+          wasLoaded: status.loaded === true,
+          path: status.plistPath,
+          service: status.service,
+          serialized: readFileSync(status.plistPath, "utf8"),
+        };
+      }
     }
-    if (!status.definitionMatches || status.scheduleError || status.running) {
-      throw new Error(`the owned ${sourceKey} scheduler cannot be snapshotted safely before update`);
+    if (!snapshot || typeof snapshot !== "object" || typeof snapshot.exists !== "boolean" ||
+        typeof snapshot.wasLoaded !== "boolean" ||
+        (snapshot.exists && (typeof snapshot.serialized !== "string" ||
+          typeof snapshot.path !== "string" || typeof snapshot.service !== "string"))) {
+      throw new Error(`the owned ${sourceKey} scheduler did not return a safe pre-update snapshot`);
     }
     snapshots.push({ kind, sourceKey, ...(provider ? { provider } : {}), module,
-      snapshot: {
-        exists: true,
-        wasLoaded: status.loaded === true,
-        path: status.plistPath,
-        service: status.service,
-        serialized: readFileSync(status.plistPath, "utf8"),
-      } });
+      snapshot });
   };
   if (m?.corpora?.google_drive?.enabled === true) {
     const module = options.driveScheduler ?? await import("./operations/drive-scheduler.mjs");
@@ -27496,12 +27606,12 @@ async function pauseCapturedOwnedSchedulers(manifestPath, snapshots, options = {
     for (const entry of snapshots) {
       if (!entry.snapshot?.exists) continue;
       const actual = entry.kind === "drive"
-        ? entry.module.pauseDriveScheduler(manifestPath, schedulerOptions)
+        ? entry.module.pauseDriveScheduler(manifestPath, { ...schedulerOptions, authorizedSnapshot: entry.snapshot })
         : entry.kind === "folder"
-          ? entry.module.pauseFolderScheduler(manifestPath, schedulerOptions)
+          ? entry.module.pauseFolderScheduler(manifestPath, { ...schedulerOptions, authorizedSnapshot: entry.snapshot })
           : entry.kind === "imessage"
-            ? entry.module.pauseImessageScheduler(manifestPath, schedulerOptions)
-            : entry.module.pauseProviderScheduler(entry.provider, manifestPath, schedulerOptions);
+            ? entry.module.pauseImessageScheduler(manifestPath, { ...schedulerOptions, authorizedSnapshot: entry.snapshot })
+            : entry.module.pauseProviderScheduler(entry.provider, manifestPath, { ...schedulerOptions, authorizedSnapshot: entry.snapshot });
       if (actual?.serialized !== entry.snapshot.serialized || actual?.wasLoaded !== entry.snapshot.wasLoaded) {
         throw new Error(`the owned ${entry.sourceKey} scheduler changed after its durable pre-update snapshot`);
       }
@@ -31192,6 +31302,39 @@ export async function cmdFirstSourceFile(argv = process.argv.slice(3), options =
 }
 
 /** Beginner update path: verify custody first, then run the fully gated upgrade. */
+const DAILY_RECOVERY_PRODUCT_ERROR_LIMITS = Object.freeze({ code: 64, message: 160 });
+const DAILY_RECOVERY_UNVERIFIED_PRODUCT_ERROR = Object.freeze({
+  code: "daily_recovery_unverified",
+  message: "The underlying product error was not recognized. Review the recovery receipt, then retry the update.",
+});
+const DAILY_RECOVERY_PRODUCT_ERROR_MESSAGES = Object.freeze({
+  provider_authorization_required: "Reconnect the provider authorization, then retry the update.",
+});
+
+function formatDailyRecoveryProductError(error) {
+  let code = null;
+  try {
+    if (error !== null && (typeof error === "object" || typeof error === "function") &&
+        typeof error.code === "string" &&
+        error.code.length > 0 && error.code.length <= DAILY_RECOVERY_PRODUCT_ERROR_LIMITS.code) {
+      code = error.code;
+    }
+  } catch {
+    return DAILY_RECOVERY_UNVERIFIED_PRODUCT_ERROR;
+  }
+  if (!code || !Object.hasOwn(DAILY_RECOVERY_PRODUCT_ERROR_MESSAGES, code)) {
+    return DAILY_RECOVERY_UNVERIFIED_PRODUCT_ERROR;
+  }
+  const message = DAILY_RECOVERY_PRODUCT_ERROR_MESSAGES[code];
+  if (message.length === 0 || message.length > DAILY_RECOVERY_PRODUCT_ERROR_LIMITS.message || /[\r\n\u2028\u2029]/u.test(message)) {
+    return DAILY_RECOVERY_UNVERIFIED_PRODUCT_ERROR;
+  }
+  return Object.freeze({ code, message });
+}
+
+class DailyRecoveryPersistenceError extends Error {}
+class DailyRecoveryReportedError extends Fatal {}
+
 async function cmdUpdateWithPrompts(manifestPath, options = {}) {
   let installed;
   try {
@@ -31574,21 +31717,26 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         if (dailyTransactionActive) {
           try {
             persistDailyTransaction("recovery_required");
-          } catch (recoveryError) {
-            throw new Error(
-              `${error.message}; the daily import recovery authorization also could not be persisted: ${recoveryError.message}`,
+          } catch {
+            throw new DailyRecoveryPersistenceError(
+              "The post-update daily reconciliation failed, and the daily import recovery authorization also could not be persisted.",
               { cause: error },
             );
           }
-          die("The Brain's remote update passed its checks, but this update is incomplete: daily imports remain paused or unverified.\n" +
+          const productError = formatDailyRecoveryProductError(error);
+          throw new DailyRecoveryReportedError(
+            "The Brain's remote update passed its checks, but this update is incomplete: daily imports remain paused or unverified.\n" +
             `Daily recovery receipt: ${dailyRefreshUpdateTransactionPath(dailyPlan.identity, dailyTransactionOptions)}\n` +
-            "Keep that receipt and the recovery fence. Run brain update <manifest> again to complete verified daily recovery.");
+            `Underlying product error: ${productError.code}: ${productError.message}\n` +
+            "Keep that receipt and the recovery fence. Run brain update <manifest> again to complete verified daily recovery."
+          );
         } else {
           throw error;
         }
       }
     }
     } catch (error) {
+      if (error instanceof DailyRecoveryPersistenceError) throw error;
       // Covers every failure after a captured local snapshot, including pause,
       // bookmark capture and persistence. Dispatch evidence is monotonic across
       // retries; an old ambiguous attempt cannot borrow this attempt's refusal.
@@ -31611,7 +31759,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
           if (dailyTransactionActive) persistDailyTransaction("recovery_required");
           throw new Error(`${error.message} The prior daily schedule could not be restored exactly; keep its recovery receipt. ${restoreError.message}`, { cause: error });
         }
-      } else if (dailyTransactionActive) {
+      } else if (dailyTransactionActive && !(error instanceof DailyRecoveryReportedError)) {
         persistDailyTransaction("recovery_required");
       }
       if (dailyTransactionActive && !String(error.message).includes("Daily recovery receipt:")) {
@@ -33181,6 +33329,86 @@ export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
 }
 
 /**
+ * Preview or apply the zero-history transition from Plaid/default to SimpleFIN.
+ * The command module owns validation, approval binding, the lifecycle fence,
+ * and the atomic manifest write. This adapter owns only the one aggregate D1
+ * observation and the CLI's existing Cloudflare credential boundary.
+ */
+export async function cmdBankProvider(argv = process.argv.slice(3), options = {}) {
+  const jsonRequested = Array.isArray(argv) && argv.includes("--json");
+  const applyRequested = Array.isArray(argv) && argv.includes("--apply");
+  try {
+    const { manifestPath, flags } = parseBankProviderArgv(argv);
+    const inspectBankState = options.inspectBankState ?? (async (manifest) => {
+      const cloudflare = manifest?.infrastructure?.cloudflare || {};
+      const databaseId = cloudflare.d1_database_id;
+      if (!databaseId) throw new Error("the manifest has no provisioned D1 database binding");
+      const accountId = String(cloudflare.account_id || "");
+      if (!/^[a-f0-9]{32}$/iu.test(accountId)) {
+        throw new Error("the manifest has no usable Cloudflare account binding");
+      }
+      const query = options.d1Query ?? d1Query;
+      const inspect = async () => normalizeBankProviderState(
+        await query(accountId, databaseId, BANK_PROVIDER_STATE_SQL),
+      );
+      return (options.withManifestControl ?? withManifestCloudflareControl)(
+        manifestPath,
+        inspect,
+        { command: "bank-provider" },
+      );
+    });
+    const establishTransition = options.establishTransition ??
+      options.commandOptions?.establishTransition ?? (async (manifest, transition) => {
+        const cloudflare = manifest?.infrastructure?.cloudflare || {};
+        const databaseId = cloudflare.d1_database_id;
+        const accountId = String(cloudflare.account_id || "");
+        if (!databaseId || !/^[a-f0-9]{32}$/iu.test(accountId)) {
+          throw new Error("the manifest has no usable D1 control binding");
+        }
+        const query = options.d1Query ?? d1Query;
+        const establish = async () => {
+          const result = await query(accountId, databaseId, BANK_PROVIDER_ESTABLISH_TRANSITION_SQL, [
+            transition.transition_ref,
+            transition.started_at,
+          ]);
+          const rows = result?.results;
+          return Array.isArray(rows) && rows.length === 1 ? rows[0] : null;
+        };
+        return (options.withManifestControl ?? withManifestCloudflareControl)(
+          manifestPath,
+          establish,
+          { command: "bank-provider" },
+        );
+      });
+    const receipt = await runBankProviderCommand({ manifestPath, flags }, {
+      ...(options.commandOptions || {}),
+      inspectBankState,
+      establishTransition,
+      displayManifestPath: commandPath(displayPath(manifestPath)),
+    });
+    const write = options.write ?? ((line) => console.log(line));
+    if (flags.json === true) write(JSON.stringify(receipt, null, 2));
+    else write(renderCliCommands(renderBankProviderReceipt(receipt)));
+    return receipt;
+  } catch (error) {
+    if (!(error instanceof BankProviderCommandError)) throw error;
+    if (jsonRequested) {
+      throw new JsonFatal(error.receipt || {
+        schema_version: 1,
+        kind: "bank_provider_change",
+        mode: applyRequested ? "apply" : "preview",
+        status: "refused",
+        error_code: error.code,
+        setup_token: "not_read_or_accepted",
+      });
+    }
+    die(error.receipt
+      ? `${renderBankProviderReceipt(error.receipt)}\n\n${error.message}`
+      : error.message);
+  }
+}
+
+/**
  * `brain import bank <manifest> --file <export>` — the operator's way in.
  *
  * WHY A COMMAND OF ITS OWN, AND NOT A FILE EXTENSION
@@ -33536,6 +33764,7 @@ const commands = {
   content: () => cmdContent(process.argv.slice(3)),
   "custom-api": cmdCustomApi,
   load: cmdLoad,
+  "bank-provider": () => cmdBankProvider(process.argv.slice(3)),
   connect: cmdConnect,
   disconnect: cmdDisconnect,
   status: (path) => withManifestCloudflareControl(path, () => cmdStatus(path)),
@@ -33602,6 +33831,7 @@ const WRANGLER_SESSION_EXEMPT_COMMANDS = new Set([
   "assistant-repair",
   "ocr-preflight",
   "custom-api",
+  "bank-provider",
   "folder",
   "schedule",
   "daily",
@@ -33693,6 +33923,9 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain migrate    <manifest>            apply pending schema migrations
     brain deploy     <manifest>            upload the worker with its bindings
     brain health     <manifest>            prove the install actually works
+    brain bank-provider <manifest> --set simplefin --enable [--json]
+                                           preview the zero-history provider switch; apply only with
+                                           --apply --approve <plan-id>
     brain quickbooks schedule on|off|status <manifest>
                                            QuickBooks refresh while this user is signed in
     brain daily      on|off|status <manifest>

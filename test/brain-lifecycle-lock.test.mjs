@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -10,6 +10,7 @@ import {
   clearBrainRecoveryFence,
   processStartIdentity,
   readBrainRecoveryFence,
+  readBrainRecoveryFenceReadOnly,
   withBrainLifecycleLock,
   writeBrainRecoveryFence,
 } from "../operations/brain-lifecycle-lock.mjs";
@@ -25,6 +26,24 @@ function fixture({ machineLockRoot: sharedMachineLockRoot } = {}) {
   }), { mode: 0o600 });
   return { home, manifestPath, machineLockRoot: sharedMachineLockRoot || join(root, "machine-locks") };
 }
+
+test("read-only recovery lookup neither creates nor permission-repairs the shared root", () => {
+  const missing = fixture();
+  assert.equal(readBrainRecoveryFenceReadOnly(missing), null);
+  assert.equal(existsSync(missing.machineLockRoot), false, "a missing root stays missing");
+  if (process.platform === "win32") return;
+
+  const existing = fixture();
+  mkdirSync(existing.machineLockRoot, { mode: 0o700 });
+  chmodSync(existing.machineLockRoot, 0o700);
+  let reached = 0;
+  assert.throws(() => readBrainRecoveryFenceReadOnly(existing), (error) => {
+    reached += 1;
+    return error instanceof BrainLifecycleLockError && error.code === "brain_lifecycle_unsafe";
+  });
+  assert.equal(reached, 1, "the existing-root permission decision was reached");
+  assert.equal(statSync(existing.machineLockRoot).mode & 0o7777, 0o700, "read-only lookup did not chmod");
+});
 
 test("a canonical Brain recovery fence blocks writers but permits the verified update recovery lane", () => {
   const { home, manifestPath, machineLockRoot } = fixture();

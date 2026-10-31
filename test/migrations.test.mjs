@@ -88,11 +88,12 @@ const ocrMigrationFiles = files.filter((name) => Number(name.slice(0, 4)) === 47
 check("the unshipped OCR schema is one consolidated migration 0047",
   ocrMigrationFiles.length === 1 && ocrMigrationFiles[0] === "0047_ocr_page_idempotency.sql",
   JSON.stringify(ocrMigrationFiles));
-// Schemas 0048 through 0056 add source, projection, revision, removal fencing,
-// financial and daily evidence, owner account-link approvals, and date-repair receipts.
+// Schemas 0048 through 0057 add source, projection, revision, removal fencing,
+// financial and daily evidence, owner account-link approvals, date-repair receipts,
+// and the durable bank-provider transition fence.
 // Pin the exact unshipped suffix so a stray migration cannot hide among them.
 const unshippedMigrationFiles = files.filter((name) => Number(name.slice(0, 4)) >= 47);
-check("the unshipped suffix is exactly OCR, custom API, SimpleFIN, bank-activity fencing, then SimpleFIN revisions, ingest removal fencing, financial evidence, daily evidence, owner account links and content-date repair receipts",
+check("the unshipped suffix is exactly OCR, custom API, SimpleFIN, bank-activity fencing, SimpleFIN revisions, ingest removal fencing, financial evidence, daily evidence, owner account links, content-date repair receipts, and the bank-provider transition fence",
   JSON.stringify(unshippedMigrationFiles) ===
     JSON.stringify([
       "0047_ocr_page_idempotency.sql",
@@ -105,6 +106,7 @@ check("the unshipped suffix is exactly OCR, custom API, SimpleFIN, bank-activity
       "0054_daily_evidence.sql",
       "0055_fin_account_links.sql",
       "0056_content_date_refresh_receipts.sql",
+      "0057_bank_provider_transition.sql",
     ]),
   JSON.stringify(unshippedMigrationFiles));
 

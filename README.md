@@ -13,7 +13,7 @@ whichever supported clients are present without placing a key in their config.
 
 ## Install it
 
-This package identifies itself as brain-installer 0.4.20. Its version alone does
+This package identifies itself as brain-installer 0.4.21. Its version alone does
 not establish whether it is approved for installation. Before installing or
 updating, use the current guided page at https://financialbrain.ai/install and
 match the exact approved package version, byte count and SHA-256. If the page
@@ -177,7 +177,7 @@ reviewed step at a time with `--run tools`, `cloudflare`, `smoke`, `google`, `zo
 `imap`, `passkey`, or `verify`. The owner still handles login, 2FA, OAuth consent,
 and the physical passkey gesture. For the supported Google, Zoom, and IMAP
 steps, tokens and app secrets go only into hidden terminal prompts or provider
-pages. The 0.4.20 candidate Windows path refuses those three credential ceremonies until
+pages. The 0.4.21 candidate Windows path refuses those three credential ceremonies until
 its secure secret-entry bridge is physically proven. Its first owner source is
 one explicitly approved local folder, previewed first and loaded manually.
 
@@ -896,11 +896,15 @@ non-accepted messages are those credential refusals finishes ready. It still
 does not claim a complete history sweep, and any storage failure, retry work,
 missing policy evidence, or other coverage gap keeps the run failed.
 Microsoft, Slack, Notion, Dropbox, HubSpot and QuickBooks also finish a completed
-provider check when their only omissions are documents withheld for credentials.
-The load stays partial and shows how many items were withheld by design. Sources
-and daily status retain that count, and daily refresh can verify the check.
+provider check when their only omissions have a closed withholding reason.
+Credential detections remain held for review. Microsoft can additionally defer
+an incomplete calendar event, keep it queued, and retry it on the next refresh.
+The load stays partial. Its reason counts must add up exactly to the withheld
+total. Sources and daily status retain those closed causes, and daily refresh
+shows credential holds separately from calendar items queued for retry.
 Withheld documents do not count as indexed or prove complete history. Unknown
-refusals and delivery failures still stop the run and preserve its cursor.
+reasons, count mismatches, delivery failures and other gaps still stop the run
+and preserve its cursor.
 
 Promotions, Social, and Forums are excluded by default. Updates stays included
 so statements, confirmations, and reminders are not silently missed.

@@ -30,6 +30,14 @@ const completeResult = () => ({
   cursor_can_advance: true,
   outcome: ingestionOutcome("completed"),
 });
+const deferredResult = () => ({
+  ...completeResult(),
+  deletions: [],
+  walk_complete: true,
+  provider_check_complete: true,
+  deferred_count: 1,
+  deferred_reason_code: "calendar_event_incomplete",
+});
 
 function harness(overrides = {}) {
   const receipts = [];
@@ -276,6 +284,136 @@ const lostSourceLease = () => new SourceIngestLockError(
     h.receipts.map((receipt) => receipt.status).join(",") === "indexing,ready" &&
     h.receipts[1].outcome_kind === "completed" && h.receipts[1].deletion_authority === "authoritative" &&
     h.receipts[1].files_seen === 1 && h.receipts[1].complete_sweep === false);
+}
+
+{
+  let saveSucceeded = false;
+  let terminalReceiptAfterSave = false;
+  const receipts = [];
+  const h = harness({
+    sync: async () => deferredResult(),
+    saveState: async (state) => {
+      assert.equal(state.cursor.page, "opaque-next");
+      saveSucceeded = true;
+    },
+    postReceipt: async (_base, _key, receipt) => {
+      if (receipt.status === "ready") terminalReceiptAfterSave = saveSucceeded;
+      receipts.push(receipt);
+      return receipt;
+    },
+  });
+  const result = await runProviderConnector(h.options);
+  check("deferred coverage becomes an operationally successful partial only after durable cursor save",
+    saveSucceeded && terminalReceiptAfterSave && result.cursor_advanced === true && result.refresh_succeeded === true &&
+    result.outcome.kind === "partial" && result.tally.deferred === 1 && result.tally.withheld === 1 &&
+    result.tally.refused === 1 && result.tally.refusal_reasons.calendar_event_incomplete === 1 &&
+    receipts.at(-1).status === "ready" && receipts.at(-1).provider_check_complete === true &&
+    receipts.at(-1).docs_refused === 1 && receipts.at(-1).files_seen === 2);
+}
+
+{
+  let saveAttempts = 0;
+  const h = harness({
+    sync: async () => deferredResult(),
+    saveState: async () => {
+      saveAttempts++;
+      throw new Error("fixture cursor save failed");
+    },
+  });
+  await assert.rejects(runProviderConnector(h.options), /fixture cursor save failed/);
+  check("a failed durable cursor save never accepts or reports deferred coverage",
+    saveAttempts === 1 && h.states.length === 0 &&
+    h.receipts.map((receipt) => receipt.status).join(",") === "indexing,error" &&
+    h.receipts.at(-1).docs_refused === 0 && h.receipts.at(-1).provider_check_complete === undefined);
+}
+
+{
+  let durableDecisions = 0;
+  const runArm = async ({ deferred, credential }) => {
+    const result = deferred ? deferredResult() : { ...completeResult(), deletions: [] };
+    const h = harness({
+      sync: async () => result,
+      sendBatch: async ({ docs }) => ({
+        body: {
+          results: docs.map((item) => credential
+            ? { source_id: item.source_id, status: "refused", labels: ["env_assignment"] }
+            : { source_id: item.source_id, status: "unchanged" }),
+        },
+      }),
+      postReceipt: async (_base, _key, receipt) => {
+        if (receipt.status === "ready") durableDecisions++;
+        h.receipts.push(receipt);
+        return receipt;
+      },
+    });
+    const connector = await runProviderConnector(h.options);
+    return { connector, receipt: h.receipts.at(-1) };
+  };
+
+  const credentialOnly = await runArm({ deferred: false, credential: true });
+  const calendarOnly = await runArm({ deferred: true, credential: false });
+  const mixed = await runArm({ deferred: true, credential: true });
+  check("calendar-only and mixed durable receipts preserve exact closed causes",
+    durableDecisions === 3 &&
+    credentialOnly.connector.tally.refusal_reasons.credential_detected === 1 &&
+    credentialOnly.receipt.refusal_reason === 'provider_withheld_v1:{"credential_detected":1}' &&
+    calendarOnly.connector.tally.refusal_reasons.calendar_event_incomplete === 1 &&
+    calendarOnly.receipt.docs_refused === 1 &&
+    calendarOnly.receipt.refusal_reason === 'provider_withheld_v1:{"calendar_event_incomplete":1}' &&
+    mixed.connector.tally.refusal_reasons.calendar_event_incomplete === 1 &&
+    mixed.connector.tally.refusal_reasons.credential_detected === 1 &&
+    mixed.receipt.docs_refused === 2 &&
+    mixed.receipt.refusal_reason ===
+      'provider_withheld_v1:{"calendar_event_incomplete":1,"credential_detected":1}');
+}
+
+{
+  const fixtures = [
+    ["partial outcome", { outcome: ingestionOutcome("partial", { reason: "fixture limitation" }) }],
+    ["incomplete walk", { walk_complete: false }],
+    ["missing cursor", { proposed_cursor: null }],
+    ["adapter cursor refusal", { cursor_can_advance: false }],
+    ["unverified provider check", { provider_check_complete: false }],
+    ["general warning", { warnings: ["fixture warning"] }],
+    ["count overflow", { deferred_count: 101 }],
+    ["unknown reason", { deferred_reason_code: "unknown_reason" }],
+    ["missing reason", { deferred_reason_code: null }],
+  ];
+  let decisions = 0;
+  let batchesSent = 0;
+  for (const [label, mutation] of fixtures) {
+    const h = harness({
+      sync: async () => {
+        decisions++;
+        return { ...deferredResult(), ...mutation };
+      },
+      sendBatch: async () => {
+        batchesSent++;
+        throw new Error("invalid deferred coverage reached delivery");
+      },
+    });
+    await assert.rejects(runProviderConnector(h.options),
+      (error) => error?.code === "invalid_provider_deferred_coverage", label);
+    assert.equal(h.states.length, 0, `${label} must not save a cursor`);
+  }
+  check("deferred coverage rejects every incomplete, unverified, unbounded, warned or open-reason arm before delivery",
+    decisions === fixtures.length && batchesSent === 0);
+}
+
+{
+  let deliveryCalls = 0;
+  const h = harness({
+    sync: async () => deferredResult(),
+    sendBatch: async ({ docs }) => {
+      deliveryCalls++;
+      return {
+        body: { results: docs.map((item) => ({ source_id: item.source_id, status: "failed" })) },
+      };
+    },
+  });
+  await assert.rejects(runProviderConnector(h.options), { code: "provider_delivery_incomplete" });
+  check("failed document delivery blocks deferred coverage and cursor save",
+    deliveryCalls === 1 && h.states.length === 0 && h.receipts.at(-1).status === "error");
 }
 
 {
