@@ -182,6 +182,7 @@ test("preview and approved apply use the real atomic writer, preserve unrelated 
     reconciliation_interval_minutes: 30,
   });
   const { directory, manifestPath } = fixture(t, original);
+  const modeBefore = statSync(manifestPath).mode & 0o777;
   const counters = { recovery: 0, inspections: 0, lifecycle: 0, ownership: 0, writes: 0 };
   const deps = dependencies(counters);
 
@@ -221,7 +222,9 @@ test("preview and approved apply use the real atomic writer, preserve unrelated 
     provider: "simplefin",
     environment: "production",
   });
-  assert.equal(statSync(manifestPath).mode & 0o777, 0o600);
+  assert.equal(statSync(manifestPath).mode & 0o777, modeBefore, "the writer preserved the manifest mode");
+  // Windows reports every writable file as 0o666, so the exact POSIX mode is checked only where it exists.
+  if (process.platform !== "win32") assert.equal(modeBefore, 0o600);
   const backups = readdirSync(directory).filter((name) => name.includes(".before-bank-provider-"));
   assert.equal(backups.length, 1);
   assert.deepEqual(JSON.parse(readFileSync(join(directory, backups[0]), "utf8")), original);

@@ -779,11 +779,13 @@ test("Windows absolute locators retain their native spelling in the shared invoc
 
 test("owner-guide bytes are invariant across every supported executable-path class", (t) => {
   const maximum = workspace.MAX_OWNER_GUIDE_EXECUTABLE_PATH_CHARACTERS;
+  // Host-shaped absolute paths: POSIX paths on macOS and Linux, drive-letter paths on a Windows runner.
+  const hostRoot = resolve("/");
   const paths = [
-    ["short", "/n"],
-    ["reviewed-long", `/${"r".repeat(60)}`],
-    ["space-bearing", "/fixture/runtime folder/node"],
-    ["maximum-supported", `/${"m".repeat(maximum - 1)}`],
+    ["short", resolve("/n")],
+    ["reviewed-long", resolve(`/${"r".repeat(60)}`)],
+    ["space-bearing", resolve("/fixture/runtime folder/node")],
+    ["maximum-supported", `${hostRoot}${"m".repeat(maximum - hostRoot.length)}`],
   ];
   const outcomes = [];
   let guideBuilds = 0;
@@ -818,7 +820,7 @@ test("owner-guide bytes are invariant across every supported executable-path cla
       `${platformName} guide characters and bytes cannot depend on executable-path length`);
   }
 
-  const overMaximum = `/${"x".repeat(maximum)}`;
+  const overMaximum = `${hostRoot}${"x".repeat(maximum + 1 - hostRoot.length)}`;
   guideBuilds++;
   assert.throws(
     () => workspace.renderClaudeWorkspaceGuide("/fixture/brain.manifest.json", {

@@ -232,7 +232,8 @@ test("daily refresh still reclaims a stale dead lifecycle owner under the existi
     manifestPath,
     operation: "fixture-holder",
     home,
-    platform: "darwin",
+    // The real lock checks the host's permission model; only the runner simulates macOS.
+    platform: process.platform,
     machineLockRoot,
     now: () => observedAt,
   });
@@ -251,6 +252,7 @@ test("daily refresh still reclaims a stale dead lifecycle owner under the existi
         acquireCalls += 1;
         return acquireBrainLifecycleLock({
           ...options,
+          platform: process.platform,
           machineLockRoot,
           staleMs: 60_000,
           isOwnerAlive: () => false,

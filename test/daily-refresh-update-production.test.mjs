@@ -438,7 +438,10 @@ function macLegacySchedulerHarness(manifestPath, { definitionMatches }) {
   return { counters, harness, serialized };
 }
 
-test("update captures an older identity-owned scheduler definition before pausing it", async () => {
+const SIMULATED_MAC_LOCK_SKIP = process.platform === "win32"
+  && "macOS LaunchAgent capture with a simulated darwin lifecycle lock needs POSIX permission bits";
+
+test("update captures an older identity-owned scheduler definition before pausing it", { skip: SIMULATED_MAC_LOCK_SKIP }, async () => {
   await withFixture(async ({ manifestPath }) => {
     const { counters, harness } = macLegacySchedulerHarness(manifestPath, { definitionMatches: false });
     let refusal = null;
@@ -463,7 +466,7 @@ test("update captures an older identity-owned scheduler definition before pausin
   });
 });
 
-test("update still captures and continues for a current owned scheduler definition", async () => {
+test("update still captures and continues for a current owned scheduler definition", { skip: SIMULATED_MAC_LOCK_SKIP }, async () => {
   await withFixture(async ({ manifestPath }) => {
     const { counters, harness } = macLegacySchedulerHarness(manifestPath, { definitionMatches: true });
     await cmdUpdate(manifestPath, harness.options);
