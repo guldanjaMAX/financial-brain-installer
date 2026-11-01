@@ -32,7 +32,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { printGuidance } from "./cli-guidance.mjs";
 
-import { recordSupportEvent } from "../support-journal.mjs";
+import { recordSupportEvent, SUPPORT_ERROR_CODES } from "../support-journal.mjs";
 import {
   cronToCalendarIntervals,
   expectedRefreshSecondsForCron,
@@ -80,12 +80,20 @@ const HISTORICAL_RAW_DRIVE_KEYS = new Set([
 
 class CuratedSchedulerError extends Error {}
 
-function fail(message) {
-  throw new CuratedSchedulerError(message);
+function fail(message, failure = null) {
+  const diagnostic = failure && SUPPORT_ERROR_CODES.includes(failure.code) &&
+    ["target", "readback", "audit"].includes(failure.phase) ? failure : null;
+  const error = new CuratedSchedulerError(diagnostic
+    ? `${message} [${diagnostic.phase}: ${diagnostic.code}]` : message);
+  if (diagnostic) error.supportCode = diagnostic.code;
+  throw error;
 }
 
-function publicFailure(error) {
-  return error instanceof CuratedSchedulerError ? error.message : "curated scheduler operation could not be completed safely";
+export function curatedSchedulerFailureMessage(error) {
+  if (error instanceof CuratedSchedulerError && SUPPORT_ERROR_CODES.includes(error.supportCode)) return error.message;
+  const message = error instanceof CuratedSchedulerError
+    ? error.message : "curated scheduler operation could not be completed safely";
+  return `${message} [SCHEDULE_RUN_FAILED]`;
 }
 
 function currentUid() {
@@ -708,11 +716,12 @@ export async function executeScheduledCuratedSync(planPath, options = {}) {
     expectedTargetFingerprints: plan.targetManifestFingerprints,
     home: plan.home,
   });
-  if (!report?.ok) fail("curated scheduled sync did not confirm every required target");
+  if (!report?.ok) fail("curated scheduled sync did not confirm every required target", report?.failure);
   const now = options.now instanceof Date ? options.now : new Date(options.now ?? Date.now());
   const receipt = successReceipt(plan, report, now);
   (options.writeFreshness ?? writePrivateFreshness)(plan.freshnessPath, receipt, options);
-  return { ...plan, status: "complete", code: 0, receipt };
+  return { ...plan, status: "complete", code: 0, receipt,
+    advisories: report.advisories?.includes("RAW_DRIVE_AUDIT_DEFERRED") ? ["RAW_DRIVE_AUDIT_DEFERRED"] : [] };
 }
 
 /** Acquire a nonblocking advisory lock without placing any credential in argv or env. */
@@ -823,7 +832,8 @@ export function recordCuratedSchedulerFailure(options = {}) {
     const event = recordSupportEvent({
       command: "schedule",
       source: "scheduler",
-      errorCode: "SCHEDULE_RUN_FAILED",
+      errorCode: options.error instanceof CuratedSchedulerError && SUPPORT_ERROR_CODES.includes(options.error.supportCode)
+        ? options.error.supportCode : "SCHEDULE_RUN_FAILED",
       productRelativeLocation: "operations/curated-sync-scheduler.mjs#main",
     }, options.journalOptions ?? {});
     return event.event_id;
@@ -899,10 +909,13 @@ async function main(argv = process.argv.slice(2)) {
     try {
       const result = await executeScheduledCuratedSync(planPath, { expectedConfigHash });
       console.log(`[${new Date().toISOString()}] curated sync ${result.status}`);
+      if (result.advisories.includes("RAW_DRIVE_AUDIT_DEFERRED")) {
+        console.log("RAW_DRIVE_AUDIT_DEFERRED: historical raw Drive presence was not checked; use the explicit audit mode.");
+      }
       return result.code;
     } catch (error) {
-      console.error(`Curated scheduler failed: ${publicFailure(error)}`);
-      const eventId = recordCuratedSchedulerFailure();
+      console.error(`Curated scheduler failed: ${curatedSchedulerFailureMessage(error)}`);
+      const eventId = recordCuratedSchedulerFailure({ error });
       printSupportReceipt(eventId);
       return eventId ? CHILD_FAILURE_JOURNALED_EXIT : CHILD_FAILURE_UNJOURNALED_EXIT;
     }
@@ -920,8 +933,8 @@ async function main(argv = process.argv.slice(2)) {
 const IS_MAIN = process.argv[1] && resolve(process.argv[1]) === resolve(DEFAULT_SCHEDULER_PATH);
 if (IS_MAIN) {
   main().then((code) => { process.exitCode = code; }).catch((error) => {
-    console.error(`Curated scheduler failed: ${publicFailure(error)}`);
-    printSupportReceipt(recordCuratedSchedulerFailure());
+    console.error(`Curated scheduler failed: ${curatedSchedulerFailureMessage(error)}`);
+    printSupportReceipt(recordCuratedSchedulerFailure({ error }));
     process.exitCode = 1;
   });
 }

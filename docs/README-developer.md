@@ -1793,7 +1793,9 @@ existing identities as updates. A previous dry-run or failed sync can have
 written that ledger, so these counts do not prove target coverage.
 `--dry-run` reads no credential and
 makes no request. `--audit` reads the Cloudflare Drive-family inventory but
-writes no document. `--sync` builds every transformed envelope once and sends
+writes no document. This explicit historical audit can still be expensive on a
+large corpus and exits unsuccessfully if its inventory is incomplete.
+`--sync` builds every transformed envelope once and sends
 the same title, content and metadata independently to any configured legacy endpoint. The
 Cloudflare copy adds the first-party native-text receipt and lineage expected
 of a current write, without changing the neutral `envelope_sha256`, and uses
@@ -1820,13 +1822,15 @@ redirect a credential. HTTPS origins are normalized,
 legacy and Cloudflare must use distinct origins and backends, and every
 authenticated fetch uses manual redirect handling. A redirect is a target
 failure, never an invitation to forward a key. Cloudflare POST receipts must
-echo the exact deterministic document identity, then the operation reads the
-curated source-family inventory back from the same origin and confirms every
-identity. Each confirmed Cloudflare write also requires authenticated
+echo the exact deterministic document identity. Each accepted Cloudflare write
+then requires authenticated
 `POST /api/admin/brain/curated-verify` readback. That read-only, full-admin route
 compares the current D1 content marker, title and normalized metadata with the
 submitted envelope, then binds its reply to the envelope hash. It uses a primary
-D1 session when sessions are available. Missing routes, mismatched revisions,
+D1 session when sessions are available. The operation calls it once per accepted
+document with a per-request timeout and never enumerates the curated inventory.
+Work is bounded by the declared collection rather than the whole Brain.
+Missing routes, mismatched revisions,
 redirects and unavailable verification fail closed; an older Worker must be
 updated through the separately approved upgrade workflow before this runtime
 can report a successful sync. This proof is current durable storage at readback,
@@ -1857,9 +1861,16 @@ sidecar, or the raw Drive state file, including through a real-path or hard-link
 collision.
 
 Raw Drive comparison is explicitly historical evidence, not live deletion
-proof. A historical checksum match means the local raw MD5 equals the checksum
-recorded in the resume state and a family with that historical identity is
-currently present. A driveVersion value that is merely a file size, or has no
+proof. Sync defers this separate inventory scan, reports
+`RAW_DRIVE_AUDIT_DEFERRED` in direct and scheduled output, and records mapped
+raw Drive evidence as `not_verified`. Its absence cannot fail an otherwise
+confirmed sync or prevent scheduled freshness from advancing. Run the explicit
+`--audit` mode for current historical-family observations; sync does not carry
+older audit matches forward as fresh evidence. Declared local resume-state
+validation and `require_state_match` remain preflight guards. A historical
+checksum match means the local raw MD5 equals the checksum recorded in the resume
+state and a family with that historical identity is currently present.
+A driveVersion value that is merely a file size, or has no
 checksum, is reported as historical unverified presence. A different MD5 is a
 historical mismatch. Every ledger sets `raw_drive_evidence.deletion_eligible`
 to `false`. Deletion remains forbidden until a server endpoint can bind the
@@ -1901,6 +1912,18 @@ receipt contains paths, source identities, document names, URLs, content, raw
 errors, or credentials. Freshness rejects malformed aggregates and timestamps
 more than five minutes ahead of the local clock, and any configuration change is
 always stale.
+
+Incomplete curated receipts carry a fixed phase (`target` or `readback`) and an
+existing support code into the scheduler log. The local support event stores
+that same code using its unchanged closed schema. `NETWORK_UNREACHABLE` means
+the request or response body could not be read, including a timeout;
+`REMOTE_NOT_FOUND` means HTTP 404, `RATE_LIMITED` means HTTP 429,
+`AUTH_EXPIRED` means HTTP 401, `REMOTE_PERMISSION_DENIED` means HTTP 403 or
+an origin change, and `REMOTE_UNAVAILABLE` covers server or other HTTP failure.
+`INPUT_REFUSED` identifies malformed or mismatched receipts and other client
+refusals. No response text or exception message is used to classify a failure.
+Unexpected exceptions retain the generic `SCHEDULE_RUN_FAILED` event. Every
+failed required receipt preserves the last successful freshness record.
 
 The scheduler wrapper and plist renderer do not silently replace a LaunchAgent.
 After reviewing the plan change, use these explicit local commands from the
