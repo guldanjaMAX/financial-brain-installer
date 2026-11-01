@@ -28,7 +28,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { printGuidance } from "./cli-guidance.mjs";
 
@@ -335,15 +335,21 @@ export function reinstallScheduledCuratedSync(planPath, options = {}) {
   ensurePrivateDirectory(join(plan.home, "Library"), true);
   ensurePrivateDirectory(dirname(plan.plistPath));
   let prior = null;
+  let installedArguments = null;
   if (existsSync(plan.plistPath)) {
     assertPrivateLockIdentity(lstatSync(plan.plistPath), "curated scheduler plist");
     prior = readFileSync(plan.plistPath, "utf8");
     // A matching label alone cannot authorize adopting an unrelated service.
-    // Bind the exact runtime, wrapper and plan, allowing only its previous hash.
-    const argumentsBlock = text => text.match(/<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/)?.[1]
-      ?.replace(/<string>[0-9a-f]{64}<\/string>/g, "<string>HASH</string>");
-    if (argumentsBlock(prior) !== argumentsBlock(desired) ||
-        !prior.includes(`<string>${plan.label}</string>`)) {
+    // Runtime directories change on update. Ownership follows this exact
+    // private plan, label and wrapper contract, never a runtime prefix alone.
+    const block = prior.match(/<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/)?.[1];
+    const decode = text => text.replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&quot;", '"').replaceAll("&apos;", "'").replaceAll("&amp;", "&");
+    installedArguments = [...(block ?? "").matchAll(/<string>([^<]*)<\/string>/gu)].map(match => decode(match[1]));
+    const label = prior.match(/<key>Label<\/key>\s*<string>([^<]*)<\/string>/)?.[1];
+    if (installedArguments.length !== 6 || !isAbsolute(installedArguments[0]) || basename(installedArguments[0]) !== basename(plan.nodePath) ||
+        !isAbsolute(installedArguments[1]) || basename(installedArguments[1]) !== basename(plan.schedulerPath) ||
+        installedArguments[2] !== "run" || installedArguments[3] !== plan.path || installedArguments[4] !== "--config-hash" ||
+        !/^[0-9a-f]{64}$/u.test(installedArguments[5]) || label !== plan.label) {
       fail("curated scheduler existing plist does not belong to this plan and runtime");
     }
   }
@@ -365,8 +371,7 @@ export function reinstallScheduledCuratedSync(planPath, options = {}) {
     if (wasLoaded) {
       const active = launchArguments(status.stdout);
       priorArguments = active;
-      if (JSON.stringify(active.slice(0, -1)) !== JSON.stringify(plan.programArguments.slice(0, -1)) ||
-          !/^[0-9a-f]{64}$/.test(active.at(-1) ?? "")) {
+      if (JSON.stringify(active) !== JSON.stringify(installedArguments)) {
         fail("curated scheduler loaded service does not belong to this plan and runtime");
       }
       if (/\bstate\s*=\s*running\b|\bpid\s*=\s*[1-9][0-9]*/.test(status.stdout)) {
@@ -407,8 +412,7 @@ export function reinstallScheduledCuratedSync(planPath, options = {}) {
       if (status.status === 0) {
         const active = launchArguments(status.stdout);
         // Never unload a different service encountered during recovery.
-        if (JSON.stringify(active.slice(0, -1)) !== JSON.stringify(plan.programArguments.slice(0, -1)) ||
-            !/^[0-9a-f]{64}$/.test(active.at(-1) ?? "")) fail("rollback identity changed");
+        if (![installedArguments, plan.programArguments].some(args => JSON.stringify(active) === JSON.stringify(args))) fail("rollback identity changed");
         priorStillLoaded = !bootoutAcknowledged && wasLoaded && JSON.stringify(active) === JSON.stringify(priorArguments);
         if (!priorStillLoaded) {
           if (/\bstate\s*=\s*running\b|\bpid\s*=\s*[1-9][0-9]*/.test(status.stdout)) fail("rollback service is running");

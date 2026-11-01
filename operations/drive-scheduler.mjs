@@ -1266,6 +1266,20 @@ export function installScheduler(manifestPath, options = {}) {
     }
     throw new Error(`writing the staged ${plan.spec.schedulerNoun} failed: ${error.message}`);
   }
+  // Update can move an unloaded definition without briefly starting its
+  // RunAtLoad ingest. Preserve that intent before exposing the new runtime.
+  if (options.enabled === false) {
+    const disabled = launchctl(["disable", plan.service]);
+    if (disabled?.status !== 0) {
+      failedReplacement(`keeping the ${plan.spec.schedulerNoun} paused`, disabled, plan, priorPlist, wasLoaded, launchctl);
+    }
+    const readback = launchctl(["print", plan.service]);
+    if (readback?.status !== 113 || readback.error ||
+        readFileSync(plan.plistPath, "utf8") !== renderLaunchAgentPlist(plan)) {
+      failedReplacement(`verifying the paused ${plan.spec.schedulerNoun}`, readback, plan, priorPlist, wasLoaded, launchctl);
+    }
+    return { ...plan, installed: true, loaded: false, replaced: priorPlist !== null };
+  }
   const enabled = launchctl(["enable", plan.service]);
   if (enabled?.status !== 0) {
     failedReplacement(`enabling the ${plan.spec.schedulerNoun}`, enabled, plan, priorPlist, wasLoaded, launchctl);
@@ -1406,7 +1420,7 @@ export function restoreScheduler(manifestPath, snapshot, options = {}) {
     throw new Error(`the owned ${status.spec.schedulerNoun} changed while update held it paused`);
   }
   const launchctl = options.launchctl || defaultLaunchctl;
-  const enabled = launchctl(["enable", status.service]);
+  const enabled = launchctl([snapshot.wasDisabled === true ? "disable" : "enable", status.service]);
   if (enabled?.status !== 0) throw launchctlError(`persistently restoring the ${status.spec.schedulerNoun}`, enabled);
   if (snapshot.wasLoaded && !status.loaded) {
     const restored = launchctl(["bootstrap", status.domain, status.plistPath]);

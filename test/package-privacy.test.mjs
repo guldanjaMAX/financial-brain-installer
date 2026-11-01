@@ -893,6 +893,7 @@ const expected = [
   "operations/current-user-file.mjs",
   "operations/drive-removal-plan.mjs",
   "operations/drive-scheduler.mjs",
+  "operations/update-scheduler-inventory.mjs",
   "operations/folder-retirement.mjs",
   "operations/folder-scheduler.mjs",
   "operations/imessage-scheduler.mjs",

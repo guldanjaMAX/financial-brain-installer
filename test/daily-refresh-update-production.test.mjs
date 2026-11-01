@@ -1092,6 +1092,7 @@ test("Windows pre-change refusal retries from durable restored bridge receipts",
     fail = false;
     await cmdUpdate(manifestPath, harness.options);
     assert.equal(native.rows.has(BRIDGE_NAME), false, "healthy retry is the restore control");
+    assert.match(harness.finish.at(-1), /Daily bridge 1: moved/, "the closing summary accounts for the retired native entry");
     assert.deepEqual(native.mutations().map(({ args }) => args.at(-1)), ["/DISABLE", "/ENABLE", "/DISABLE", BRIDGE_NAME]);
     assert.equal(bridgeArchive(manifestPath).bridge_snapshots[0].state, "retired");
   });

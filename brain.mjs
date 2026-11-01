@@ -100,6 +100,13 @@ import {
   readMigrationLedger,
 } from "./operations/migration-ledger.mjs";
 import { createWindowsUpdateBridgeGuard, WindowsDailyTaskRepairRequired } from "./operations/windows-update-bridge.mjs";
+import {
+  captureAdditionalUpdateSchedulers, pauseAdditionalUpdateScheduler, restoreAdditionalUpdateScheduler,
+  reconcileAdditionalUpdateScheduler, schedulerUpdateRow, renderUpdateSchedulerRows, requireUpdateSchedulers,
+  verifyUpdateSchedulerInventory,
+  updateSchedulerFix,
+  validateUpdateSchedulerSnapshot,
+} from "./operations/update-scheduler-inventory.mjs";
 import { planDailyRefresh } from "./operations/daily-refresh-plan.mjs";
 import {
   clearDailyRefreshUpdateTransaction,
@@ -27530,8 +27537,10 @@ async function pauseExistingOwnedSchedulers(m, manifestPath, options = {}) {
 }
 
 async function captureExistingOwnedSchedulers(m, manifestPath, options = {}) {
-  if ((options.platform ?? process.platform) !== "darwin") return [];
-  const schedulerOptions = { platform: options.platform ?? process.platform, ...(options.legacySchedulerOptions || {}) };
+  options = { nativeSchedulerInventory: IS_MAIN, ...options };
+  if ((options.platform ?? process.platform) !== "darwin") return captureAdditionalUpdateSchedulers(m, manifestPath, options);
+  const schedulerOptions = { platform: options.platform ?? process.platform,
+    ...(options.schedulerOptions?.home ? { home: options.schedulerOptions.home } : {}), ...(options.legacySchedulerOptions || {}) };
   const schedulerCore = options.legacySchedulerCore ?? await import("./operations/drive-scheduler.mjs");
   const snapshots = [];
   const capture = (kind, sourceKey, module, status, provider = null) => {
@@ -27596,6 +27605,7 @@ async function captureExistingOwnedSchedulers(m, manifestPath, options = {}) {
       capture("provider", provider, module, module.statusProviderScheduler(provider, manifestPath, schedulerOptions), provider);
     }
   }
+  snapshots.push(...await captureAdditionalUpdateSchedulers(m, manifestPath, options, snapshots));
   return snapshots;
 }
 
@@ -27605,7 +27615,9 @@ async function pauseCapturedOwnedSchedulers(manifestPath, snapshots, options = {
   try {
     for (const entry of snapshots) {
       if (!entry.snapshot?.exists) continue;
-      const actual = entry.kind === "drive"
+      const actual = entry.kind === "inventory"
+        ? await pauseAdditionalUpdateScheduler(loadManifest(manifestPath).m, manifestPath, entry, options)
+        : entry.kind === "drive"
         ? entry.module.pauseDriveScheduler(manifestPath, { ...schedulerOptions, authorizedSnapshot: entry.snapshot })
         : entry.kind === "folder"
           ? entry.module.pauseFolderScheduler(manifestPath, { ...schedulerOptions, authorizedSnapshot: entry.snapshot })
@@ -27619,32 +27631,42 @@ async function pauseCapturedOwnedSchedulers(manifestPath, snapshots, options = {
     }
     return snapshots;
   } catch (error) {
-    try { restoreExistingOwnedSchedulers(manifestPath, paused, options); } catch (restoreError) {
+    try { await restoreExistingOwnedSchedulers(manifestPath, paused, options); } catch (restoreError) {
       throw new Error(`${error.message}; restoring an already-paused owned scheduler also failed: ${restoreError.message}`, { cause: error });
     }
     throw error;
   }
 }
 
-function restoreExistingOwnedSchedulers(manifestPath, snapshots, options = {}) {
+async function restoreExistingOwnedSchedulers(manifestPath, snapshots, options = {}) {
   const schedulerOptions = { platform: options.platform ?? process.platform, ...(options.legacySchedulerOptions || {}) };
   for (const entry of [...snapshots].reverse()) {
     if (!entry.snapshot?.exists) continue;
-    if (entry.kind === "drive") entry.module.restoreDriveScheduler(manifestPath, entry.snapshot, schedulerOptions);
+    if (entry.kind === "inventory") await restoreAdditionalUpdateScheduler(loadManifest(manifestPath).m, manifestPath, entry, options);
+    else if (entry.kind === "drive") entry.module.restoreDriveScheduler(manifestPath, entry.snapshot, schedulerOptions);
     else if (entry.kind === "folder") entry.module.restoreFolderScheduler(manifestPath, entry.snapshot, schedulerOptions);
     else if (entry.kind === "imessage") entry.module.restoreImessageScheduler(manifestPath, entry.snapshot, schedulerOptions);
     else entry.module.restoreProviderScheduler(entry.provider, manifestPath, entry.snapshot, schedulerOptions);
   }
 }
 
-async function hydrateExistingOwnedSchedulerSnapshots(snapshots, options = {}) {
+async function hydrateExistingOwnedSchedulerSnapshots(snapshots, options = {}, manifestPath = null) {
   const hydrated = [];
   for (const entry of snapshots || []) {
     if (!entry || typeof entry !== "object" || !entry.snapshot ||
-        !new Set(["drive", "folder", "imessage", "provider"]).has(entry.kind)) {
+        !new Set(["drive", "folder", "imessage", "provider", "inventory"]).has(entry.kind)) {
       throw new Error("the durable legacy scheduler recovery snapshot is malformed");
     }
     let module;
+    if (entry.kind === "inventory") {
+      try { validateUpdateSchedulerSnapshot(loadManifest(manifestPath).m, manifestPath, entry, options); } catch {
+        requireUpdateSchedulers([schedulerUpdateRow(entry.snapshot?.jobKind || "daily", "COULD NOT MOVE",
+          "recovery ownership no longer matches this manifest; keep the receipt and inspect the job",
+          updateSchedulerFix(entry.snapshot?.jobKind || "daily", manifestPath, entry.snapshot?.planPath))]);
+      }
+      hydrated.push(entry);
+      continue;
+    }
     if (entry.kind === "drive") module = options.driveScheduler ?? await import("./operations/drive-scheduler.mjs");
     else if (entry.kind === "folder") module = options.folderScheduler ?? await import("./operations/folder-scheduler.mjs");
     else if (entry.kind === "imessage") module = options.imessageScheduler ?? await import("./operations/imessage-scheduler.mjs");
@@ -27665,10 +27687,28 @@ async function hydrateExistingOwnedSchedulerSnapshots(snapshots, options = {}) {
   return hydrated;
 }
 
-function reconcileExistingOwnedSchedulers(m, manifestPath, snapshots, options = {}) {
+async function reconcileExistingOwnedSchedulers(m, manifestPath, snapshots, options = {}) {
   const schedulerOptions = { platform: options.platform ?? process.platform, ...(options.legacySchedulerOptions || {}) };
+  const rows = [];
   for (const entry of snapshots) {
-    if (!entry.snapshot?.exists || m?.corpora?.[entry.sourceKey]?.enabled !== true) continue;
+    if (!entry.snapshot?.exists) continue;
+    if (entry.kind === "inventory") {
+      rows.push(await reconcileAdditionalUpdateScheduler(m, manifestPath, entry, options));
+      continue;
+    }
+    const spec = entry.module[entry.kind === "drive" ? "DRIVE_SCHEDULER_SPEC" : entry.kind === "folder"
+      ? "FOLDER_SCHEDULER_SPEC" : entry.kind === "imessage" ? "IMESSAGE_SCHEDULER_SPEC" : ""] ??
+      entry.module.createProviderSchedulerSpec?.(entry.provider, schedulerOptions);
+    if (spec) {
+      rows.push(await reconcileAdditionalUpdateScheduler(m, manifestPath, {
+        ...entry, snapshot: { ...entry.snapshot, jobKind: spec.kind },
+      }, options));
+      continue;
+    }
+    // Retain the established minimal injected scheduler seam. Product modules
+    // supply a spec and take the saved plus loaded exact-readback path above.
+    try {
+    if (m?.corpora?.[entry.sourceKey]?.enabled !== true) throw new Error("source is disabled");
     const result = entry.kind === "drive"
       ? entry.module.installDriveScheduler(manifestPath, schedulerOptions)
       : entry.kind === "folder"
@@ -27679,7 +27719,12 @@ function reconcileExistingOwnedSchedulers(m, manifestPath, snapshots, options = 
     if (result?.installed !== true || result?.loaded !== true) {
       throw new Error(`the updated ${entry.sourceKey} scheduler did not pass exact readback`);
     }
+    rows.push(schedulerUpdateRow(entry.kind, "moved"));
+    } catch {
+      rows.push(schedulerUpdateRow(entry.kind, "COULD NOT MOVE", "reviewed scheduler install failed", updateSchedulerFix("daily", manifestPath)));
+    }
   }
+  return rows;
 }
 
 export async function buildConfiguredDailyPlan(m, manifestPath, options = {}) {
@@ -31449,6 +31494,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
   let ownerAgentPreparationFailed = false;
   let ownerAgentRefreshResult = null;
   const updateAttention = [];
+  const schedulerResults = [];
   const upgradeResult = await runControl(async () => {
     revalidateUpdateManifest(pin, "update verification");
     await (options.cmdVerify ?? cmdVerify)(pin.target);
@@ -31546,6 +31592,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         ? await hydrateExistingOwnedSchedulerSnapshots(
             existingDailyTransaction.legacy_snapshots,
             options.dailyRefreshOptions || {},
+            pin.target,
           )
         : await captureExistingOwnedSchedulers(
             beforeUpdateManifest,
@@ -31640,12 +31687,16 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
       try {
         let permanentDailyVerified = false;
         const afterUpdateManifest = loadManifest(pin.target).m;
-        reconcileExistingOwnedSchedulers(
+        schedulerResults.push(...await reconcileExistingOwnedSchedulers(
           afterUpdateManifest,
           pin.target,
           legacySnapshots,
           options.dailyRefreshOptions || {},
-        );
+        ));
+        if (manageDailyDefinition && schedulerResults.some(row => row.state === "COULD NOT MOVE")) {
+          schedulerResults.push(schedulerUpdateRow("daily", "COULD NOT MOVE", "imports stay paused until the other scheduler repairs pass", updateSchedulerFix("daily", pin.target)));
+        }
+        requireUpdateSchedulers(schedulerResults);
         const updatedPlan = await buildConfiguredDailyPlan(afterUpdateManifest, pin.target, options.dailyRefreshOptions || {});
         if (manageDailyDefinition && !updatedPlan.ready) {
           throw new Error(
@@ -31672,6 +31723,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
           dailyReconciliation = { daily_definition: "verified", source_expectations: "verified" };
           if (dailyTransactionActive) persistDailyTransaction("recovery_required");
           permanentDailyVerified = true;
+          schedulerResults.push(schedulerUpdateRow("daily", dailySnapshot?.definition?.definition_hash === reconciled.definition?.definition_hash ? "already current" : "moved"));
           ok("Daily imports were recomputed from the updated manifest and restored after exact readback.");
         } else if (manageDailyDefinition) {
           if (dailySnapshot?.exists) {
@@ -31696,6 +31748,9 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
           dailyReconciliation = { daily_definition: "verified", source_expectations: "verified" };
           if (dailyTransactionActive) persistDailyTransaction("recovery_required");
           info("The updated manifest has no enabled daily machine-pull work, so its owned daily definition remains paused and was not removed.");
+          schedulerResults.push(schedulerUpdateRow("daily",
+            dailySnapshot?.definition?.definition_hash === dailyAuthorizedDefinition?.definition_hash ? "already current" : "moved",
+            "imports remain paused by configuration"));
         } else if (updatedPlan.enabled && updatedPlan.ready && runnable.length) {
           info(renderCliCommands(
             "This older manifest now has an eligible daily import plan. Run brain daily on <manifest> to approve and install its owned schedule."
@@ -31709,11 +31764,28 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
             updateAttention.push("The old daily task was paused; run brain daily on <manifest> to turn on permanent daily imports.");
           }
         }
+        for (const [index, entry] of bridgeSnapshots.entries()) {
+          const moved = entry.state === "retired";
+          const needsOwner = entry.prior_enabled && !moved;
+          schedulerResults.push({
+            ...schedulerUpdateRow("daily-bridge", moved ? "moved" : needsOwner ? "COULD NOT MOVE" : "already current",
+              moved ? "replaced by the verified permanent daily task" : "the bridge remains disabled",
+              needsOwner ? `${renderCliCommands("brain daily on", { platform: dailyPlatform })} ${(dailyPlatform === "win32" ? quotePowerShellArgument : quotePosixArgument)(pin.target)}` : null),
+            label: `Daily bridge ${index + 1}`,
+          });
+        }
         if (dailyTransactionActive) {
+          await verifyUpdateSchedulerInventory(afterUpdateManifest, pin.target, legacySnapshots, { nativeSchedulerInventory: IS_MAIN, ...(options.dailyRefreshOptions || {}) });
           clearDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions);
           dailyTransactionActive = false;
         }
+        if (!manageAnyLocalSchedule) await verifyUpdateSchedulerInventory(afterUpdateManifest, pin.target, legacySnapshots, { nativeSchedulerInventory: IS_MAIN, ...(options.dailyRefreshOptions || {}) });
       } catch (error) {
+        if (error.scheduler_results && error.scheduler_results !== schedulerResults) schedulerResults.push(...error.scheduler_results);
+        if (manageDailyDefinition && !schedulerResults.some(row => row.kind === "daily")) {
+          schedulerResults.push(schedulerUpdateRow("daily", "COULD NOT MOVE", "daily reconciliation did not pass exact readback", updateSchedulerFix("daily", pin.target)));
+        }
+        if (schedulerResults.length) error.scheduler_results = schedulerResults;
         if (dailyTransactionActive) {
           try {
             persistDailyTransaction("recovery_required");
@@ -31724,12 +31796,15 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
             );
           }
           const productError = formatDailyRecoveryProductError(error);
-          throw new DailyRecoveryReportedError(
+          const reported = new DailyRecoveryReportedError(
             "The Brain's remote update passed its checks, but this update is incomplete: daily imports remain paused or unverified.\n" +
             `Daily recovery receipt: ${dailyRefreshUpdateTransactionPath(dailyPlan.identity, dailyTransactionOptions)}\n` +
             `Underlying product error: ${productError.code}: ${productError.message}\n` +
-            "Keep that receipt and the recovery fence. Run brain update <manifest> again to complete verified daily recovery."
+            "Keep that receipt and the recovery fence. Run brain update <manifest> again to complete verified daily recovery." +
+            (schedulerResults.length ? `\n${renderUpdateSchedulerRows(schedulerResults)}` : "")
           );
+          reported.scheduler_results = schedulerResults;
+          throw reported;
         } else {
           throw error;
         }
@@ -31749,7 +31824,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
       }
       if (provenPreMutation && (dailySnapshot || legacySnapshots.some(entry => entry.snapshot?.exists))) {
         try {
-          restoreExistingOwnedSchedulers(pin.target, legacySnapshots, options.dailyRefreshOptions || {});
+          await restoreExistingOwnedSchedulers(pin.target, legacySnapshots, options.dailyRefreshOptions || {});
           if (dailySnapshot) restoreDailyRefreshSchedule(dailySnapshot, dailySchedulerOptions);
           if (dailyTransactionActive && !bridgeSnapshots.length) {
             clearDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions);
@@ -31916,6 +31991,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
   const brainFolderWarning = ownerBrainFolderWarning(pin.target, options);
   const closing = [
     `Done. Your Brain is now on version ${PRODUCT_VERSION} and passed its checks.`,
+    ...(schedulerResults.length ? [renderUpdateSchedulerRows(schedulerResults)] : []),
     ...(mailTransition ? [microsoftMailTransitionSummary(mailTransition)] : []),
     ...(attention.length ? [
       `${attention.length} ${attention.length === 1 ? "thing" : "things"} still ${attention.length === 1 ? "needs" : "need"} attention:`,
@@ -31931,6 +32007,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
     ] : []),
   ].join("\n");
   safelyReportUpdateResult(options.reportUpdateFinish ?? console.log, closing);
+  safelyReportUpdateResult(options.reportUpdateSchedulers ?? (() => {}), schedulerResults);
   return upgradeResult;
 }
 
@@ -31976,6 +32053,11 @@ export async function cmdUpdate(manifestPath, options = {}) {
       }
       throw error;
     }
+  } catch (error) {
+    if (error.scheduler_results) {
+      safelyReportUpdateResult(options.reportUpdateSchedulers ?? (() => {}), error.scheduler_results);
+    }
+    throw error;
   } finally {
     closePrompts();
   }

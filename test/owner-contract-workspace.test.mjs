@@ -482,6 +482,7 @@ function updateClosingBoundary({ platform = "win32", platformName, folder = "ord
   const reports = [], renderCalls = [];
   const bindings = {
     updateAttention: [guidance, guidance],
+    schedulerResults: [],
     options: { platform, platformName, ...(raw ? { reportUpdateFinish: message => reports.push(message) } : {}) },
     pin: { target }, PRODUCT_VERSION: "0.4.22", mailTransition: null,
     ownerSessionFolderLabel: () => "another folder",
