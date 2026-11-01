@@ -521,6 +521,16 @@ or a separately approved plan removes those exact members. Source deletions and
 replacement cleanup enter the same boundary. A nonempty plan always stops before
 removal and cursor advancement; accepted additions and updates remain durable.
 
+The shared load orchestrator may explicitly apply a saved Calendar or Gmail
+plan containing only source deletions, bounded by both 25 physical targets and
+1% of its authenticated stored source inventory. All aggregate reason counts
+must match, with no policy, skip, replacement or additional approval. It calls
+the existing exact-fingerprint executor and requires the removed count and
+successful readback before one source replay can advance the cursor. No other
+connector qualifies. A failed apply/readback retains the review and records
+`waiting_for_owner`; daily receipts and local status retain aggregate counts,
+reasons, the apply command and the readback outcome without target identities.
+
 QuickBooks Desktop also persists its exact pending tombstones and binds the
 review to the complete company checkpoint. Its refresh and separate apply both
 take the company-binding lease before the source lease. Apply rechecks both

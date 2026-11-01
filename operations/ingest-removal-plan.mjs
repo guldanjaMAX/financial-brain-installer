@@ -425,9 +425,14 @@ export function createIngestRemovalReview({
       `Review this plan, then run: brain ingest <manifest>${from ? ` --from ${from}` : ""} --source ${source} --apply-removals ${plan.fingerprint}` +
       (extraApproval ? ` --approve-removals ${extraApproval}` : ""),
       {
+        source,
+        kind: from || "upload",
         stored_documents_to_remove: observed.targets.length,
         source_removals: sourceTargets.length,
         replacement_family_reviews: families.length - sourceTargets.length,
+        source_stored_documents: sourcePlan?.stored ?? null,
+        reasons: sourcePlan ? { ...sourcePlan.counts } : null,
+        approval_fingerprint: extraApproval,
         ...(sourcePlan ? { source_cleanup_percentage: sourcePlan.ratio * 100 } : {}),
         fingerprint: plan.fingerprint,
       },
@@ -465,7 +470,7 @@ export function createIngestRemovalReview({
     delete state.ingest_pending_families;
     delete state.ingest_removal_plan;
     saveState();
-    return { removed, cursor_advanced: false };
+    return { removed, cursor_advanced: false, readback: "passed" };
   };
   return { remember, finish, apply };
 }

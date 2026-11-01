@@ -504,6 +504,18 @@ Follow the one printed `brain ingest <manifest> --source <source>
 additional `--approve-removals` argument in that command. Then rerun normal ingest
 to finish the source cursor. A dry run cannot authorize removal.
 
+`brain load`, including daily refresh, can finish a saved Calendar or Gmail
+review automatically when every target is a source deletion, there are no
+policy removals, intentional skips or replacement reviews, and the count is
+at most 25 and at most 1% of the stored source inventory. It uses the exact
+saved fingerprint and existing apply/readback checks, then reruns that source
+once to finish its cursor. Drive, uploads and all other sources remain held.
+Daily receipts record the source, count, percentage, fingerprint, reasons and
+readback result. Reviews outside those limits, or a failed apply/readback,
+report `waiting_for_owner` with reason `removal_review`, aggregate facts and
+the exact apply command in daily output and `daily status --json`. A failed
+apply is never replayed by this automation; a fresh source review is required.
+
 QuickBooks Desktop uses the same boundary for every stored tombstone, including
 small removals. Its printed command retains `--from quickbooks-desktop` and
 `--source quickbooks_desktop`. Apply checks the unchanged company binding and

@@ -635,17 +635,21 @@ test("removal review failures retain safe cause, attention, status, and daily-lo
   });
 
   assert.equal(sourceCalls, 1, "the removal-review decision point was reached");
-  assert.equal(result.status, "failed");
-  assert.equal(result.sources[0].status, "failed");
+  assert.equal(result.status, "waiting_for_owner");
+  assert.equal(result.sources[0].status, "waiting_for_owner");
   assert.equal(result.sources[0].issue_code, "SAFETY_REVIEW_REQUIRED");
-  assert.equal(result.sources[0].reason_code, "removal_review_required");
-  assert.equal(result.sources[0].reason,
-    `a removal review is waiting: 2 stored documents would be removed across 0 source removals and 9 replacement family reviews; ` +
-      `source cleanup is 0.0% of stored documents; plan fingerprint ${fingerprint}. Nothing was removed.`);
+  assert.equal(result.sources[0].reason_code, "removal_review");
+  const review = result.sources[0].removal_reviews[0];
+  assert.equal(review.stored_documents_to_remove, 2);
+  assert.equal(review.source_removals, 0);
+  assert.equal(review.replacement_family_reviews, 9);
+  assert.equal(review.source_cleanup_percentage, 0);
+  assert.equal(review.fingerprint, fingerprint);
+  assert.ok(result.sources[0].reason.includes(review.apply_command));
   assert.ok(result.sources[0].detail.length > 0 && result.sources[0].detail.length <= 200);
   assert.doesNotMatch(result.sources[0].detail, /[\r\n]/u);
   assert.deepEqual(result.schedule_attention, [
-    "archive: a removal review is waiting (2 stored parts, 0 source removals). Nothing was removed.",
+    "archive: waiting for owner approval of a removal review.",
   ]);
   assert.doesNotMatch(result.schedule_attention[0], /--apply-removals|then run|re-run/iu);
 
@@ -665,6 +669,7 @@ test("removal review failures retain safe cause, attention, status, and daily-lo
     "daily status reads the persisted removal-review attention");
   assert.deepEqual(schedule.source_issues, [{
     source: "archive", issue_code: "SAFETY_REVIEW_REQUIRED", detail: result.sources[0].detail,
+    status: "waiting_for_owner", reason_code: "removal_review", removal_reviews: [review],
   }]);
   assert.equal(JSON.parse(JSON.stringify(schedule)).source_issues[0].issue_code, "SAFETY_REVIEW_REQUIRED",
     "daily status JSON carries the source issue code");

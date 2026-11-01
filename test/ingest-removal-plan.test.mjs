@@ -104,10 +104,15 @@ test("the review command names an exact plan without disclosing target identitie
       `brain ingest <manifest> --source drive --apply-removals ${fingerprint}`,
     )));
     assert.deepEqual(stopped.removal_review, {
+      source: "drive",
+      kind: "upload",
       stored_documents_to_remove: 1,
       source_removals: 1,
       replacement_family_reviews: 0,
       source_cleanup_percentage: 5,
+      source_stored_documents: 20,
+      reasons: { source_deleted: 1, source_policy: 0, intentional_skip: 0 },
+      approval_fingerprint: null,
       fingerprint,
     }, "the real stopped ingest carries only aggregate review facts needed by unattended diagnostics");
     assert.doesNotMatch(stopped.message, /item0|\/fixture\/|fixture\.invalid/);

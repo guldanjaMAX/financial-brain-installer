@@ -38,6 +38,7 @@ import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { removalDigest, createIngestRemovalReview, applyApprovedProvenanceFamily } from "./operations/ingest-removal-plan.mjs";
+import { removalReviewFacts, removalOwnerSentence, runLoadRemovalLeg } from "./operations/load-removal-review.mjs";
 import { spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
 import { TextDecoder } from "node:util";
@@ -17073,6 +17074,8 @@ export async function cmdLoad(manifestPath, options = {}) {
     const legLines = [];
     const legResults = [];
     const legFailures = [];
+    entry.removal_reviews = [];
+    entry.auto_applied_removals = [];
     let review = false;
     // Isolation runs one level deeper than the source. A manifest can declare
     // several folders under one corpus, each its own named, separately
@@ -17085,15 +17088,26 @@ export async function cmdLoad(manifestPath, options = {}) {
       // reader can act on. The path is already in the plan printed above.
       const label = entry.legs.length > 1 ? leg.source : entry.label;
       try {
-        const described = describeLoadResult(await leg.run());
+        const loaded = await runLoadRemovalLeg({ run: leg.run, kind: entry.key, source: leg.source, dryRun,
+          assertOwned: options.assertOwned,
+          apply: applyFlags => (options.commands?.applyIngestRemovals ?? cmdApplyIngestRemovals)(m, manifestPath, applyFlags, options) });
+        entry.auto_applied_removals.push(...loaded.auto_applied_removals);
+        const described = describeLoadResult(loaded.result);
         legResults.push(described);
         if (entry.legs.length > 1) legLines.push(`${label}: ${described.text}`);
       } catch (error) {
         if (error instanceof DriveRemovalReviewRequired) review = true;
-        const reason = String(error?.message || error).replace(/\s+/g, " ").trim();
+        entry.auto_applied_removals.push(...(error.auto_applied_removals || []));
+        const facts = error instanceof DriveRemovalReviewRequired ? removalReviewFacts(error.removal_review, leg.source) : null;
+        if (facts) entry.removal_reviews.push(facts);
+        if (error.auto_apply_error) entry.auto_apply_error = error.auto_apply_error;
+        const reason = String(error.auto_apply_error
+          ? "Automatic removal stopped before verified completion. The source is waiting for owner review."
+          : error?.message || error).replace(/\s+/g, " ").trim();
         legFailures.push({ label, reason });
         if (entry.legs.length > 1) legLines.push(`${label}: NOT loaded — ${reason}`);
         log(`${review ? c.yellow("review") : c.red("fail")}  ${label}: ${reason.split("\n")[0]}`);
+        if (facts) log(removalOwnerSentence(facts));
       }
     }
 
@@ -17203,16 +17217,30 @@ export async function cmdLoad(manifestPath, options = {}) {
     skipped: skippedCount,
     unavailable: unavailableCount,
     failed: failedCount,
+    removal_reviews: entries.flatMap(entry => entry.removal_reviews || []),
+    auto_applied_removals: entries.flatMap(entry => entry.auto_applied_removals || []),
   };
   if (failedCount) {
+    if (summary.removal_reviews.length) {
+      const error = new DriveRemovalReviewRequired(summary.removal_reviews.map(removalOwnerSentence).join("\n"));
+      error.removal_reviews = summary.removal_reviews;
+      error.removal_review = summary.removal_reviews[0];
+      error.auto_applied_removals = summary.auto_applied_removals;
+      error.auto_apply_error = entries.find(entry => entry.auto_apply_error)?.auto_apply_error;
+      error.other_source_failures = entries.some(entry => entry.status === "failed" ||
+        (entry.legFailures?.length || 0) > (entry.removal_reviews?.length || 0));
+      throw error;
+    }
     // Non-zero, but only after the whole report has printed. The exit code is
     // for the script; the report above is for the person, and a partial load
     // with an honest list is still worth every line of it.
-    die(
+    const error = new Fatal(
       `${failedCount} of ${runnable.length} source(s) ${dryRun ? "could not even be previewed" : "did not load"}`
         + (done.length ? `; the other ${done.length} ${dryRun ? "previewed fine" : "did"}.` : ".") + "\n"
         + "      Fix the reported cause, then re-run just that one: brain load <manifest> --only <source>"
     );
+    error.auto_applied_removals = summary.auto_applied_removals;
+    throw error;
   }
   // Daily refresh independently verifies each durable success timestamp. Let
   // measured file omissions reach that check without claiming a full sweep.
@@ -17223,10 +17251,12 @@ export async function cmdLoad(manifestPath, options = {}) {
       unavailableCount ? `${unavailableCount} unavailable` : null,
       !dryRun && partialCount ? `${partialCount} partial` : null,
     ].filter(Boolean).join(" and ");
-    die(
+    const error = new Fatal(
       `${parts} source outcome(s) were not complete, so this load is not a successful sweep.\n` +
         "      The full report is above. Fix or reconnect the named source, then re-run only it with --only <source>."
     );
+    error.auto_applied_removals = summary.auto_applied_removals;
+    throw error;
   }
   return summary;
 }
@@ -34158,6 +34188,12 @@ if (IS_MAIN) {
       const label = reviewRequired ? c.yellow("review required") : c.red("fail");
       console.log(`${label}  ${renderCliCommands(e.message)}`);
       printSupportReceipt(supportEventId, (line) => console.log(line));
+      if (e instanceof DriveRemovalReviewRequired) {
+        // Exact approvals must survive piped output. Immediate exit can drop
+        // the queued review even though its saved plan already exists.
+        process.stdout.write("", () => process.exit(1));
+        return;
+      }
       process.exit(1);
     }
     crash(e);

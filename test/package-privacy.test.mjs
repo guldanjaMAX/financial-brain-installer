@@ -571,6 +571,7 @@ const expected = [
   // Saved exact-removal approval and runtime binding shared by ingest and
   // independently approved structural repair. No instance state ships.
   "operations/ingest-removal-plan.mjs",
+  "operations/load-removal-review.mjs",
   "operations/ingest-finalization-retry.mjs",
   "operations/provenance-source-assessment.mjs",
   // Held Windows x64 first-source lane. The pure orchestrator owns no I/O; its
