@@ -7,16 +7,18 @@ import { performance } from 'node:perf_hooks';
 import { BASE_CASES, CONTROLS, evidence, validateInputs } from '../../test/fixtures/fastloop-money/input.mjs';
 
 export const ROOT = realpathSync(fileURLToPath(new URL('../../', import.meta.url)));
+// The host quiet file sits beside the checkout; override with BRAIN_MAC_QUIET_FILE.
+export const QUIET_FILE = process.env.BRAIN_MAC_QUIET_FILE || resolve(ROOT, '..', 'MAC-QUIET');
 export const sha = value => createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex');
 export function waitForQuiet(env) {
   // Windows has no host quiet-file protocol or POSIX shell. On this host the
   // exact required loop runs immediately before every child Node invocation.
   if (process.platform !== 'win32') {
-    const quiet = spawnSync('/bin/sh', ['-c', 'while [ -e /Users/jamesguldan/brain-work/MAC-QUIET ]; do sleep 60; done'],
-      { env, timeout: 600000, encoding: 'utf8' });
+    const quiet = spawnSync('/bin/sh', ['-c', 'while [ -e "$BRAIN_MAC_QUIET_FILE" ]; do sleep 60; done'],
+      { env: { ...env, BRAIN_MAC_QUIET_FILE: QUIET_FILE }, timeout: 600000, encoding: 'utf8' });
     if (quiet.status !== 0) throw Error('MAC_QUIET_HELD');
   }
-  if (existsSync('/Users/jamesguldan/brain-work/MAC-QUIET')) throw Error('MAC_QUIET_HELD');
+  if (existsSync(QUIET_FILE)) throw Error('MAC_QUIET_HELD');
 }
 export function replay({ cases = [...BASE_CASES, ...CONTROLS], fault = null, sourceOverrides = {} } = {}) {
   validateInputs(cases);
