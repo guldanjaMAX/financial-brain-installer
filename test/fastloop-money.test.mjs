@@ -22,6 +22,19 @@ const changed = (id, mutation) => {
   assert.notEqual(JSON.stringify(target), before, 'mutant must change the real observation');
   return seal(copy);
 };
+async function scorerMutant(from, to) {
+  const scoreUrl = new URL('../eval/fast-loop/money-score.mjs', import.meta.url);
+  const moduleUrl = (code, base) => `data:text/javascript;base64,${Buffer.from(code
+    .replaceAll('import.meta.url', JSON.stringify(base.href))
+    .replace(/from '(.+?)'/g, (_, path) => `from '${path.startsWith('.') ? new URL(path, base).href : path}'`)).toString('base64')}`;
+  const source = readFileSync(scoreUrl, 'utf8');
+  assert.equal(source.split(from).length - 1, 1, 'one restoring scorer site');
+  const restoredUrl = moduleUrl(source.replace(from, to), scoreUrl);
+  const compareUrl = new URL('../eval/fast-loop/money-compare.mjs', import.meta.url);
+  const comparison = readFileSync(compareUrl, 'utf8').replace("from './money-score.mjs'", `from '${restoredUrl}'`);
+  return { scorer: (await import(restoredUrl)).scoreRun,
+    compare: (await import(moduleUrl(comparison, compareUrl))).compareRuns };
+}
 test.before(() => { run = seal(replay()); report = scoreRun(run, inputs); });
 
 test('bank accounts for twelve base cases and every declared child with independent bound keys', () => {
@@ -78,12 +91,138 @@ test('ranking uses ordinary eligibility before the limit on nonempty outgoing in
   assert.equal(observation('M06/typed').body.ledger.own_account_payments.loan_minor, 40000);
   assert.equal(score('M08/no-repayment').verdict, 'correct');
 });
+const requiredOutputContract = (candidate, id, scorer = scoreRun, compare = compareRuns) => {
+  assert.ok(observation(id).trace.rows_read.length > 0, 'real ranking read reached');
+  assert.equal(score(id).verdict, 'correct', 'intact green peer');
+  const after = scorer(candidate, inputs).scores.find(s => s.id === id);
+  assert.notEqual(after.verdict, 'correct');
+  assert.ok(after.required_facts_met < after.required_facts_total, 'required output was lost');
+  assert.equal(compare(run, candidate, inputs).regression_gate, false);
+};
+for (const [label, remove] of [
+  ['repayment object', o => { delete o.body.ledger.own_account_payments; }],
+  ['repayment display', o => { o.body.answer = o.body.answer.split('\n').filter(line =>
+    !line.startsWith('Payments to your own loan/card accounts:') && !line.startsWith('Note: payments')).join('\n'); }],
+  ['whole displayed answer', o => { o.body.answer = ''; }],
+  ['ordinary ranking row', o => { o.body.answer = o.body.answer.replace(/^\$60\.00 on .+\n/m, ''); }],
+  ['structured period', o => { delete o.body.ledger.from; delete o.body.ledger.to; }],
+]) test(`RM2 required ranking output cannot lose its ${label}`, () => {
+  requiredOutputContract(changed('M08', remove), 'M08');
+});
+test('RM2 required output loss also blocks comparison on an already-red ranking', () => {
+  const prior = changed('M08', o => { o.body.ledger.rows[0].amount_minor++; });
+  const candidate = structuredClone(prior);
+  candidate.observations.find(o => o.id === 'M08').body.answer = '';
+  assert.equal(scoreRun(prior, inputs).scores.find(s => s.id === 'M08').verdict, 'wrong figure');
+  const comparison = compareRuns(prior, seal(candidate), inputs);
+  assert.equal(comparison.regression_gate, false);
+  assert.ok(comparison.failures.includes('LOST_FACT:M08:displayed-ranking'));
+});
+test('RM2 restoring output-only traversal makes the removal contract fail again', async () => {
+  const candidate = changed('M08', o => { o.body.answer = ''; delete o.body.ledger.own_account_payments; });
+  requiredOutputContract(candidate, 'M08');
+  const { scorer, compare } = await scorerMutant("if (gold.contract === 'ranking') {\n    // Presence", "if (false) {\n    // Presence");
+  assert.equal(scorer(candidate, inputs).scores.find(s => s.id === 'M08').verdict, 'correct');
+  assert.equal(compare(run, candidate, inputs).regression_gate, true);
+  assert.throws(() => requiredOutputContract(candidate, 'M08', scorer, compare), { name: 'AssertionError' });
+});
+const countContract = (candidate, id, scorer = scoreRun, compare = compareRuns) => {
+  const trace = observation(id).trace;
+  assert.ok(trace.rows_read.length > 0 || trace.sql.some(s => s.kind === 'balances' && s.row_count > 0),
+    'nonempty transaction or balance read reached');
+  assert.equal(score(id).verdict, 'correct', 'intact green peer');
+  const after = scorer(candidate, inputs).scores.find(s => s.id === id);
+  assert.notEqual(after.verdict, 'correct');
+  assert.ok(after.safety_failures.length > 0, 'unsupported factual claim identified');
+  assert.equal(compare(run, candidate, inputs).regression_gate, false);
+};
+for (const [label, id, corrupt] of [
+  ['repayment display count', 'M08', o => { o.body.answer = o.body.answer.replace('across 1 payment.', 'across 999 payments.'); }],
+  ['structured repayment count', 'M08', o => { o.body.ledger.own_account_payments.count = 999; }],
+  ['both repayment counts', 'M08', o => { o.body.ledger.own_account_payments.count = 999;
+    o.body.answer = o.body.answer.replace('across 1 payment.', 'across 999 payments.'); }],
+  ['covered account display count', 'M06/typed', o => { o.body.answer = o.body.answer.replace('all 3 selected accounts', 'all 999 selected accounts'); }],
+  ['structured covered account count', 'M06/typed', o => { o.body.ledger.coverage.covered_account_count = 999; }],
+  ['structured candidate account count', 'M06/typed', o => { o.body.ledger.coverage.candidate_account_count = 999; }],
+  ['structured omitted account count', 'M06/typed', o => { o.body.ledger.coverage.omitted_account_count = 999; }],
+  ['evidence display count', 'M06/typed', o => { o.body.answer = o.body.answer.replace('Evidence: 5 of 7', 'Evidence: 999 of 7'); }],
+  ['structured cited count', 'M06/typed', o => { o.body.ledger.cited_row_count = 999; }],
+  ['structured omitted row count', 'M06/typed', o => { o.body.ledger.omitted_row_count = 999; }],
+  ['merchant display count', 'M06/typed', o => { o.body.answer = o.body.answer.replace('across 1 row', 'across 999 rows'); }],
+  ['structured merchant count', 'M06/typed', o => { o.body.ledger.groups[0].count = 999; }],
+  ['structured category count', 'M06/typed', o => { o.body.ledger.category_groups[0].count = 999; }],
+  ['structured group count', 'M06/typed', o => { o.body.ledger.group_count = 999; }],
+  ['structured transaction count', 'M05/gross', o => { o.body.ledger.accounts[0].transaction_count = 999; }],
+  ['structured transfer pair count', 'M08', o => { o.body.ledger.default_exclusions.own_transfer_pairs = 999; }],
+  ['coverage display date', 'M06/typed', o => { o.body.answer = o.body.answer.replace('accounts cover 2026-10-01', 'accounts cover 2026-09-01'); }],
+  ['structured coverage date', 'M06/typed', o => { o.body.ledger.accounts[0].covered_to = '2027-01-01'; }],
+  ['coverage display scope', 'M08', o => { o.body.answer = o.body.answer.replace('Accounts: account ****3131', 'Accounts: account ****9999'); }],
+  ['balance feed date', 'M01/supported', o => { o.body.answer = o.body.answer.replace('feed synced unavailable', 'feed synced 2026-10-31'); }],
+  ['zero-amount displayed account scope', 'M05/gross', o => { o.body.answer = o.body.answer.replace('account ****5353, 2026', 'account ****9999, 2026'); }],
+]) test(`RM3 independent membership rejects invented ${label}`, () => {
+  countContract(changed(id, corrupt), id);
+});
+test('RM3 restoring syntax-only validation makes count contracts fail again', async () => {
+  const { scorer, compare } = await scorerMutant('if (ledger) {\n    // Counts', 'if (false) {\n    // Counts');
+  for (const [id, corrupt] of [
+    ['M08', o => { o.body.ledger.own_account_payments.count = 999;
+      o.body.answer = o.body.answer.replace('across 1 payment.', 'across 999 payments.'); }],
+    ['M06/typed', o => { o.body.answer = o.body.answer.replace('all 3 selected accounts', 'all 999 selected accounts'); }],
+  ]) {
+    const candidate = changed(id, corrupt);
+    countContract(candidate, id);
+    assert.equal(scorer(candidate, inputs).scores.find(s => s.id === id).verdict, 'correct');
+    assert.equal(compare(run, candidate, inputs).regression_gate, true);
+    assert.throws(() => countContract(candidate, id, scorer, compare), { name: 'AssertionError' });
+  }
+});
+test('RM4 uncertain expense output remains partial with the original gold obligations unmet', () => {
+  for (const id of ['M06', 'M06/reset']) {
+    const o = observation(id), actual = score(id);
+    assert.ok(o.trace.rows_read.some(r => r.id === 7), 'uncertain payment read reached');
+    assert.equal(o.body.ledger.complete, false);
+    assert.equal(o.body.ledger.expense_total_minor, null);
+    assert.equal(o.body.ledger.retained_outflow_minor, 101000);
+    assert.equal(actual.verdict, 'partly');
+    for (const fact of ['expense-total', 'whole-repayment', 'expense-row-count', 'expense-evidence-membership'])
+      assert.equal(actual.checks.find(c => c.id === fact).ok, false, fact);
+    assert.equal(goldFor(id).total, '61000');
+    assert.equal(goldFor(id).repayment, '40000');
+    assert.ok(actual.required_facts_met < actual.required_facts_total);
+  }
+  assert.equal(score('M06/typed').verdict, 'correct');
+});
+test('RM4 restoring expense certification fails the independent oracle and comparison', () => {
+  const file = 'ledger-answer.js', source = readFileSync(new URL(`../worker/src/lib/${file}`, import.meta.url), 'utf8');
+  const from = 'if (!classificationComplete) {';
+  assert.equal(source.split(from).length - 1, 1, 'one restoring classification site');
+  const restored = source.replace(from, 'if (false) {');
+  const cases = [input('M06'), input('M06/reset')];
+  const control = seal(replay({ cases }));
+  const mutant = seal(replay({ cases, sourceOverrides: { [file]: restored } }));
+  assert.equal(mutant.source_files[join('worker', 'src', 'lib', file)], sha(restored));
+  assert.ok(mutant.observations.every(o => o.trace.rows_read.some(r => r.id === 7)));
+  assert.ok(scoreRun(control, cases).scores.every(s => s.verdict === 'partly'));
+  assert.ok(scoreRun(mutant, cases).scores.every(s => s.verdict === 'wrong figure'));
+  assert.equal(compareRuns(control, mutant, cases).regression_gate, false);
+});
+test('RM4 partial output cannot hide invented retained amounts or counts', () => {
+  for (const corrupt of [o => { o.body.ledger.retained_outflow_minor++; },
+    o => { o.body.answer = o.body.answer.replace('$1,010.00', '$1,010.01'); },
+    o => { o.body.ledger.cited_row_count = 999; }]) {
+    const candidate = changed('M06', corrupt);
+    assert.ok(observation('M06').trace.rows_read.length > 0);
+    const after = scoreRun(candidate, inputs).scores.find(s => s.id === 'M06');
+    assert.ok(after.safety_failures.length > 0);
+    assert.equal(compareRuns(run, candidate, inputs).regression_gate, false);
+  }
+});
 test('unknown classification and import reset stay held while typed memo and shorthand pass', () => {
   for (const id of ['M06', 'M06/reset']) {
     const o = observation(id);
     assert.ok(o.trace.rows_read.some(r => r.id === 7));
     assert.ok(o.trace.rows_read.some(r => r.id === 8));
-    assert.equal(score(id).verdict, 'wrong figure');
+    assert.equal(score(id).verdict, 'partly');
   }
   for (const id of ['M06/memo', 'M05/shorthand']) {
     const o = observation(id);
@@ -93,20 +232,21 @@ test('unknown classification and import reset stay held while typed memo and sho
     assert.equal(o.body.ledger.expense_total_minor, 61000);
     assert.equal(score(id).verdict, 'correct');
   }
-  assert.equal(observation('M06').body.ledger.expense_total_minor, 101000);
+  assert.equal(observation('M06').body.ledger.expense_total_minor, null);
+  assert.equal(observation('M06').body.ledger.retained_outflow_minor, 101000);
   const reset = observation('M06/reset').trace.import;
   assert.ok(reset.statements >= 2); assert.equal(reset.before.account_kind, 'loan');
   assert.equal(reset.after.account_kind, 'other'); assert.equal(reset.after.balance_role, 'neither');
   assert.equal(score('M06/typed').verdict, 'correct'); assert.equal(score('M05/gross').verdict, 'correct');
 });
-test('original probe passes three Batch 1 repairs and retains two storage prerequisite failures', () => {
+test('original probe passes the uncertain-headline repair and retains the provider storage failure', () => {
   const env = { PATH: '/usr/bin:/bin', HOME: resolve(ROOT, 'lane-evidence/home-fastloop'), BRAIN_NO_WRANGLER_LOGIN: '1' };
   for (const name of ['SystemRoot', 'WINDIR', 'ComSpec', 'PATHEXT']) if (process.platform === 'win32' && process.env[name]) env[name] = process.env[name];
   waitForQuiet(env);
   const child = spawnSync(process.execPath, ['--test', '--test-reporter=tap', 'test/fastloop-money-red.mjs'],
     { cwd: ROOT, env, encoding: 'utf8', timeout: 30000 });
-  assert.equal(child.status, 1); assert.match(child.stdout, /# pass 8\b/); assert.match(child.stdout, /# fail 2\b/);
-  assert.match(child.stdout, /not ok \d+ - RED unclassified debt/);
+  assert.equal(child.status, 1); assert.match(child.stdout, /# pass 9\b/); assert.match(child.stdout, /# fail 1\b/);
+  assert.match(child.stdout, /^ok \d+ - RED unclassified debt/m);
   assert.match(child.stdout, /not ok \d+ - RED provider replay/);
   assert.match(child.stdout, /# skipped 0\b/); assert.match(child.stdout, /# todo 0\b/);
 });

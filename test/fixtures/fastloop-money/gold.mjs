@@ -1,6 +1,6 @@
 // Separate fact custodian. Membership is authored here, never learned from product output.
 import { sumRows, total } from '../../../eval/fast-loop/money-oracle.mjs';
-export const GOLD_VERSION = 'money-batch1-gold-v2';
+export const GOLD_VERSION = 'money-batch1-gold-v3';
 const facts = {
   1: { cents: '6000' }, 2: { cents: '5000' }, 3: { cents: '4000' },
   4: { cents: '3000' }, 5: { cents: '2000' }, 6: { cents: '1000' },
@@ -19,7 +19,7 @@ const common = { required_for_gate: true, gold_version: GOLD_VERSION, currency: 
   rounding: 'exact integer cents', forbidden: ['principal split', 'forecast as fact', 'global absence', 'pending zero'] };
 const key = (contract, extra = {}) => ({ ...common, contract, answerability: 'full', ...extra });
 const expense = extra => key('expense', { included: ordinary, excluded: [7, 12, 13],
-  total: sumRows(facts, ordinary), repayment: '40000', groups: ordinary.map(id => ({ id, cents: facts[id].cents })), ...extra });
+  total: sumRows(facts, ordinary), repayment: '40000', repayment_ids: [7], groups: ordinary.map(id => ({ id, cents: facts[id].cents })), ...extra });
 const balances = key('balance', { balances: [
   { mask: '3131', cents: '502345', kind: 'checking', role: 'asset' },
   { mask: '5353', cents: '200001', kind: 'savings', role: 'asset' },
@@ -32,7 +32,7 @@ export const GOLD = {
   M05: expense({ require_posted_disclosure: true }),
   M06: expense({ classification_uncertain: true, answerability: 'clarify' }),
   M08: key('ranking', { ids: [8, 1, 2, 3, 4], cents: [8, 1, 2, 3, 4].map(id => facts[id].cents), excluded: [7, 12, 13],
-    repayment: '40000', gross_ids: [7, 8, 1, 2, 3], gross_cents: [7, 8, 1, 2, 3].map(id => facts[id].cents) }),
+    repayment: '40000', repayment_ids: [7], gross_ids: [7, 8, 1, 2, 3], gross_cents: [7, 8, 1, 2, 3].map(id => facts[id].cents) }),
   M09: key('transactions', { ids: [1, 2, 3, 4, 5, 6, 11, 9, 8, 7],
     cents: ['-6000', '-5000', '-4000', '-3000', '-2000', '-1000', '3333', '17777', '-40000', '-40000'],
     dates: ['2026-10-25', '2026-10-24', '2026-10-23', '2026-10-22', '2026-10-21', '2026-10-20',
@@ -40,7 +40,7 @@ export const GOLD = {
   M10: key('payment', { ids: [9], cents: ['17777'], from: '2026-10-05', to: '2026-10-19' }),
   M11: key('absence', { ids: [], scope: 'exact structured payee in September only' }),
   M12: { ...balances, contract: 'forecast', answerability: 'partial', require_withholding: true },
-  M16: key('repayment', { repayment: '40000', total: sumRows(facts, ordinary), included: ordinary }),
+  M16: key('repayment', { repayment: '40000', repayment_ids: [7], total: sumRows(facts, ordinary), included: ordinary }),
   M17: key('vendor', { total: '40000', ids: [8] }),
   M20: key('coverage', { answerability: 'partial', complete: false,
     accounts: ['3131', '5353', '4242'], from: '2026-09-01', to: '2026-09-30' }),
@@ -56,7 +56,7 @@ export const GOLD = {
   'M16/separate': expense(),
   'M17/outside-only': key('vendor', { total: '40000', ids: [8] }),
   'M20/incomplete': key('refuse-coverage', { answerability: 'refuse', require_withholding: true }),
-  'M20/covered-empty': expense({ included: [], excluded: [], total: '0', repayment: '0', groups: [] }),
+  'M20/covered-empty': expense({ included: [], excluded: [], total: '0', repayment: '0', repayment_ids: [], groups: [] }),
   'M06/memo': expense(),
   'M06/reset': expense({ classification_uncertain: true, answerability: 'clarify' }),
   'M05/shorthand': expense(),
@@ -69,7 +69,8 @@ export function goldFor(id) {
   const obligations = {
     expense: ['expense-total', 'whole-repayment', 'expense-row-count', 'expense-evidence-membership', 'visible-expense-period'],
     repayment: ['expense-total', 'whole-repayment', 'expense-row-count', 'expense-evidence-membership', 'visible-expense-period'],
-    ranking: ['eligible-ranking-before-limit', 'ranked-cents', 'period'],
+    ranking: ['eligible-ranking-before-limit', 'ranked-cents', 'period', 'displayed-ranking',
+      ...(result.repayment ? ['whole-repayment', 'displayed-whole-repayment'] : [])],
     transactions: ['transaction-order', 'transaction-dates', 'posted-list-complete', 'transaction-heading-count', 'period'],
     balance: (result.balances || []).flatMap(b => [`balance:${b.mask}`, `balance-date:${b.mask}`]),
     forecast: ['withhold-future', ...(result.balances || []).flatMap(b => [`balance:${b.mask}`, `balance-date:${b.mask}`])],

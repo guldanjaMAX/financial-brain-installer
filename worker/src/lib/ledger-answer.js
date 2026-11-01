@@ -247,6 +247,26 @@ function expenseSummary({ intent, accounts, requestedAccounts, omittedAccounts, 
       account_kind: account.account_kind,
     })),
   };
+  // Complete bank coverage does not prove which outgoing rows are expenses.
+  // Unknown inventory types can conceal a repayment destination or source;
+  // retain that money without certifying an expense figure from memo words.
+  const classificationComplete = [...bySlug.values()].every(account => account.account_kind !== "other");
+  if (!classificationComplete) {
+    return {
+      answer: `Recorded outgoing subtotal: ${money(totalMinor)}.\n` +
+        `Expense classification is uncertain; this subtotal may include payments between your own accounts.\n` +
+        `Period: ${intent.from} through ${intent.to}.\n` +
+        (complete
+          ? `Coverage: full, all ${accounts.length} selected accounts cover ${intent.from} through ${intent.to}.`
+          : `Coverage: partial, ${accounts.length} of ${requestedAccounts.length} selected accounts cover ${intent.from} through ${intent.to}; excluded ${omittedAccounts.map(masked).join(", ")}.`),
+      citations,
+      ledger: { kind: "expense_summary", from: intent.from, to: intent.to,
+        accounts: accountCoverage(accounts), coverage, complete: false, classification_complete: false,
+        total_minor: null, expense_total_minor: null, retained_outflow_minor: totalMinor,
+        row_count: ordinary.length, cited_row_count: citations.length, omitted_row_count: omittedRowCount,
+        own_account_payments: { total_minor: paymentTotal, count: paymentRows.length, card_minor: cardMinor, loan_minor: loanMinor } },
+    };
+  }
   const ledger = {
     kind: "expense_summary", from: intent.from, to: intent.to,
     accounts: accountCoverage(accounts), coverage, complete,

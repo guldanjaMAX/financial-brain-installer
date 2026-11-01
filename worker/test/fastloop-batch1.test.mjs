@@ -53,6 +53,48 @@ const postedContract = b => {
   assert.match(b.answer, /pending activity is not assessed here/i);
   assert.doesNotMatch(b.answer, /(?:no|zero) pending|pending.*\$|\bprincipal\b/i);
 };
+const ambiguousRepaymentContract = b => {
+  if (b.ledger.kind === 'expense_summary') {
+    assert.equal(b.ledger.own_account_payments.total_minor, 0);
+    assert.equal(b.ledger.expense_total_minor, 101000);
+  } else {
+    assert.equal(b.ledger.kind, 'largest');
+    assert.equal(b.ledger.own_account_payments, undefined);
+    assert.ok(b.ledger.lead_rows.some(r => r.ref === 'ledger:transaction:7'));
+    assert.doesNotMatch(b.answer, /Payments to your own loan\/card accounts:/);
+  }
+};
+for (const memo of ['payment to loan account 4242', 'payment to loan acct no. 4242',
+  'payment to card account 4242', 'payment to card acct no. 4242']) {
+  test(`RM1 duplicate masks stay ambiguous with a typed locator: ${memo}`, async t => {
+    const kind = memo.includes('card') ? 'card' : 'loan';
+    const change = s => { s.accounts[2].kind = kind; s.rows[6].description = memo; };
+    const f = seed(t, s => { change(s); s.accounts[1].mask = '4242'; });
+    for (const question of [summaryQuestion, rankQuestion]) ambiguousRepaymentContract(await f.ask(question));
+    const control = seed(t, change), summary = await control.ask(summaryQuestion);
+    assert.equal(summary.ledger.expense_total_minor, 61000);
+    assert.equal(summary.ledger.own_account_payments[`${kind}_minor`], 40000);
+    rankingContract(await control.ask(rankQuestion));
+  });
+}
+const uncertainExpenseContract = b => {
+  assert.equal(b.ledger.kind, 'expense_summary');
+  assert.equal(b.ledger.complete, false);
+  assert.equal(b.evidence_gate.complete, false);
+  assert.equal(b.evidence_gate.partial, true);
+  assert.equal(b.ledger.coverage.complete, true, 'coverage does not prove classification');
+  assert.equal(b.ledger.expense_total_minor, null, 'no certified expense figure');
+  assert.equal(b.ledger.total_minor, null);
+  assert.equal(b.ledger.retained_outflow_minor, 101000, 'uncertain row is retained');
+  assert.equal(b.ledger.own_account_payments.total_minor, 0, 'memo does not manufacture type');
+  assert.match(b.answer, /expense classification is uncertain/i);
+  assert.doesNotMatch(b.answer, /^You spent|expense subtotal:/im);
+};
+test('RM4 other-typed loan cannot certify an expense headline', async t => {
+  const f = seed(t, s => { s.accounts[2].kind = 'other'; s.accounts[2].role = 'neither'; });
+  uncertainExpenseContract(await f.ask(summaryQuestion));
+  expenseContract(await seed(t).ask(summaryQuestion));
+});
 
 for (const memo of ['payment to acct no. xxxx4242', 'payment to account number ****4242',
   'payment to loan acct #4242', 'payment to account no 4242', 'payment to acct ending in 4242']) {
@@ -75,7 +117,8 @@ for (const [label, change] of [
 ]) test(`F1 ${label} cannot prove owned repayment`, async t => {
   const f = seed(t, change), b = await f.ask(summaryQuestion);
   assert.equal(b.ledger.own_account_payments.total_minor, 0, 'ownership decision retains uncertain outgoing row');
-  assert.equal(b.ledger.expense_total_minor, 101000);
+  if (label.startsWith('unknown ')) uncertainExpenseContract(b);
+  else assert.equal(b.ledger.expense_total_minor, 101000);
   expenseContract(await seed(t).ask(summaryQuestion));
 });
 test('F2 eligibility precedes rank cutoff and preserves whole repayments separately', async t => {
@@ -125,6 +168,27 @@ async function mutant(file, from, to) {
   const answerSource = readFileSync(answerUrl, 'utf8').replace(`from "./${file}"`, `from "${target}"`);
   return (await import(moduleUrl(answerSource, answerUrl))).withLedgerAnswer;
 }
+test('RM1 restoring the type filter makes the duplicate-mask contract fail again', async t => {
+  const f = seed(t, s => { s.accounts[1].mask = '4242'; s.rows[6].description = 'payment to loan acct no. 4242'; });
+  const answer = await mutant('ledger-analysis.js',
+    'filter(account => (account.members || []).some(member =>',
+    'filter(account => (!statedKind || statedKind === account.account_kind) && (account.members || []).some(member =>');
+  for (const question of [summaryQuestion, rankQuestion]) {
+    ambiguousRepaymentContract(await f.ask(question));
+    const broken = await f.ask(question, answer);
+    assert.equal(broken.ledger.own_account_payments.total_minor, 40000);
+    assert.throws(() => ambiguousRepaymentContract(broken), { name: 'AssertionError' });
+  }
+});
+test('RM4 restoring coverage-only certification makes the uncertain-expense contract fail again', async t => {
+  const f = seed(t, s => { s.accounts[2].kind = 'other'; s.accounts[2].role = 'neither'; });
+  uncertainExpenseContract(await f.ask(summaryQuestion));
+  const answer = await mutant('ledger-answer.js', 'if (!classificationComplete) {', 'if (false) {');
+  const broken = await f.ask(summaryQuestion, answer);
+  assert.equal(broken.ledger.complete, true);
+  assert.equal(broken.ledger.expense_total_minor, 101000);
+  assert.throws(() => uncertainExpenseContract(broken), { name: 'AssertionError' });
+});
 test('F1 restoring locator grammar makes the same typed-memo contract fail', async t => {
   const f = seed(t, s => { s.rows[6].description = 'payment to acct no. xxxx4242'; });
   expenseContract(await f.ask(summaryQuestion));

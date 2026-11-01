@@ -96,11 +96,13 @@ function resolvesExactAccount(locator, other, accounts) {
   // whole locator anchored and reject a stated kind that conflicts with the
   // stored type, including when a provider inserts "acct no." before the mask.
   const statedKind = /^(card|checking|savings|loan|line of credit|investment|retirement)\b/.exec(text)?.[1]?.replaceAll(" ", "_");
-  const candidates = [...accounts.values()].filter(account => (!statedKind || statedKind === account.account_kind) && (account.members || []).some(member =>
+  // Resolve identity across the entire inventory before checking type. A type
+  // word cannot disambiguate two different accounts sharing the same mask.
+  const candidates = [...accounts.values()].filter(account => (account.members || []).some(member =>
     (normalizeLedgerText(member.label) && text === normalizeLedgerText(member.label)) ||
     (/^\d{1,4}$/.test(member.mask || "") &&
       new RegExp(`^(?:(?:account|acct|card|checking|savings|loan|line of credit|investment|retirement)(?: account| acct)? (?:number |no )?)?(?:ending (?:in )?)?(?:x)?${member.mask}$`).test(text))));
-  return candidates.length === 1 && candidates[0] === other;
+  return candidates.length === 1 && candidates[0] === other && (!statedKind || statedKind === other.account_kind);
 }
 
 export function transferEndpoints(description, { loanAdvance = false } = {}) {

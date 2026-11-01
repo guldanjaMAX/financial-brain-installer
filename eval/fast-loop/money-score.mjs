@@ -73,20 +73,32 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
     return finish();
   }
   check('real-fact-read', observation.trace.dependencies.some(d => ['transactions', 'balances'].includes(d)));
-  if (ledger.from && input.period.from) check('period', ledger.from === input.period.from && ledger.to === input.period.to, 'scope');
+  if (input.period.from) check('period', ledger.from === input.period.from && ledger.to === input.period.to, 'scope');
   if (gold.classification_uncertain) check('unknown-classification-is-not-complete', ledger.complete !== true, 'ownership');
 
   const ids = list => (list || []).map(rowId);
   const primaryIds = gold.contract === 'ranking' ? ids(ledger.lead_rows)
     : gold.contract === 'transactions' || gold.contract === 'payment' || gold.contract === 'vendor' ? ids(citations) : null;
   const expense = gold.contract === 'expense' || gold.contract === 'repayment';
+  const uncertainExpense = expense && gold.classification_uncertain && ledger.classification_complete === false &&
+    ledger.complete === false && ledger.expense_total_minor === null && ledger.total_minor === null;
+  const retainedIds = uncertainExpense ? [...new Set([...gold.included, ...gold.repayment_ids])] : gold.included || [];
+  const retainedTotal = total(retainedIds.map(id => rows.get(id).cents));
   if (expense) {
-    figure('expense-total', ledger.expense_total_minor, gold.total);
-    figure('whole-repayment', ledger.own_account_payments?.total_minor, gold.repayment);
-    check('expense-row-count', ledger.row_count === gold.included.length, 'wrong_figure');
+    if (uncertainExpense) {
+      // Withholding a classification never earns its required expense or
+      // repayment fact. The disclosed retained subtotal is checked separately.
+      check('expense-total', false);
+      check('whole-repayment', false);
+    } else {
+      figure('expense-total', ledger.expense_total_minor, gold.total);
+      figure('whole-repayment', ledger.own_account_payments?.total_minor, gold.repayment);
+    }
+    check('expense-row-count', !uncertainExpense && ledger.row_count === gold.included.length,
+      uncertainExpense ? 'missing_fact' : 'wrong_figure');
     const included = new Set(gold.included);
-    check('expense-evidence-membership', (!included.size || citations.length > 0) && citations.every(c => included.has(rowId(c))),
-      citations.length ? 'ownership' : 'missing_source');
+    check('expense-evidence-membership', !uncertainExpense && (!included.size || citations.length > 0) && citations.every(c => included.has(rowId(c))),
+      uncertainExpense ? 'missing_fact' : citations.length ? 'ownership' : 'missing_source');
     if (gold.require_posted_disclosure) check('posted-record-limitation', /\bposted\b/i.test(answer) && /\bpending\b/i.test(answer));
     check('whole-payment-no-invented-split', !/\bprincipal\b|interest (?:portion|amount|split)/i.test(answer), 'unsupported_claim');
     check('visible-expense-period', answer.includes(`Period: ${input.period.from} through ${input.period.to}.`), 'scope');
@@ -134,11 +146,108 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
     check('coverage-gap-disclosed', /partial|incomplete|unproven|not certified/i.test(answer));
   } else { result.execution_status = 'unbound_contract'; return result; }
 
+  if (gold.contract === 'ranking') {
+    // Presence is an obligation of the frozen key. Traversing only fields or
+    // figures that happen to survive in output cannot detect a missing answer.
+    const ordinaryDisplay = answer.split('\nWith everything counted:')[0];
+    const displayed = [...ordinaryDisplay.matchAll(/^(-?\$[\d,]+\.\d{2}) on (\d{4}-\d{2}-\d{2}) in account \*{4}(\d{4}): .+ \[(\d+)\]$/gm)]
+      .map(m => ({ id: rowId(citations.find(c => c.n === Number(m[4]))),
+        cents: displayFigures(m[1])[0].cents, date: m[2], mask: m[3] }));
+    const expected = gold.ids.map((id, i) => ({ id, cents: gold.cents[i], date: rows.get(id)?.date,
+      mask: snapshot.accounts.find(a => a.slug === rows.get(id)?.account)?.mask }));
+    check('displayed-ranking', same(displayed, expected));
+    if (gold.repayment) {
+      figure('whole-repayment', ledger.own_account_payments?.total_minor, gold.repayment);
+      const repaymentLines = answer.split('\n').filter(line => line.startsWith('Payments to your own loan/card accounts:'));
+      check('displayed-whole-repayment', repaymentLines.length === 1 &&
+        same(displayFigures(repaymentLines[0]).map(a => a.cents), [gold.repayment]));
+    }
+  }
+
   // Check every monetary structured field, including conditionals and notes.
   // Expected side is independently evaluated from the declared gold membership.
   const windowRows = [...rows.values()].filter(r => !r.pending && r.date >= (input.period.from || '0000') && r.date <= input.period.to);
   const accountSum = (mask, direction) => total(windowRows.filter(r =>
     r.account === snapshot.accounts.find(a => a.mask === mask)?.slug && r.direction === direction).map(r => r.cents));
+  if (ledger) {
+    // Counts and scope are facts too. Their expected side comes from frozen
+    // membership and input coverage, never another output count or its prose.
+    const selectedAccounts = snapshot.accounts.filter(a => gold.contract !== 'receipts' || a.mask in gold.receipts)
+      .sort((a, b) => a.slug.localeCompare(b.slug));
+    const coveredAccounts = selectedAccounts.filter(a => a.coverage === 'complete' &&
+      (!input.period.from || a.from <= input.period.from) && a.to >= input.period.to);
+    const covered = coveredAccounts.length, selected = selectedAccounts.length;
+    const included = retainedIds.map(id => rows.get(id));
+    const repaymentCount = uncertainExpense ? 0 : (gold.repayment_ids || []).length;
+    const groups = new Map();
+    for (const row of included) {
+      const label = row.payee.toLowerCase();
+      groups.set(label, (groups.get(label) || 0) + 1);
+    }
+    const cited = Math.min(included.length, 5), omitted = included.length - cited;
+    const factual = (id, actual, expected) => check(id, expected !== undefined && same(actual, expected), 'unsupported_claim');
+    const counters = (value, path = '') => {
+      for (const [name, item] of Object.entries(value || {})) {
+        const p = path ? `${path}.${name}` : name;
+        if (name === 'count' || /_(?:count|pairs)$/.test(name)) {
+          let expected;
+          if (p === 'own_account_payments.count') expected = repaymentCount;
+          else if (name === 'transaction_count') expected = windowRows.filter(r =>
+            r.account === snapshot.accounts.find(a => a.mask === value.account_mask)?.slug).length;
+          else if (path.startsWith('groups.') && name === 'count') expected = groups.get(value.merchant);
+          else if (path.startsWith('category_groups.') && name === 'count') expected = value.category === 'Unsorted' ? included.length : undefined;
+          else if (p === 'row_count') expected = expense ? included.length : (gold.ids || []).length;
+          else if (p === 'cited_row_count') expected = cited;
+          else if (p === 'omitted_row_count') expected = expense ? omitted : Math.max(0, (gold.ids || []).length - 5);
+          else if (p === 'group_count') expected = groups.size;
+          else if (p === 'omitted_group_count') expected = Math.max(0, groups.size - 10);
+          else if (p === 'category_group_count') expected = included.length ? 1 : 0;
+          else if (p === 'omitted_category_group_count') expected = 0;
+          else if (p === 'coverage.candidate_account_count') expected = selected;
+          else if (p === 'coverage.covered_account_count') expected = covered;
+          else if (p === 'coverage.omitted_account_count') expected = selected - covered;
+          else if (p === 'coverage.contributing_account_count') expected = new Set((gold.ids || []).map(id => rows.get(id)?.account)).size;
+          else if (['matched_transfer_count', 'candidate_transfer_count', 'excluded_own_movement_count'].includes(p) ||
+            /^default_exclusions\.(?:own_transfer_pairs|withdrawal_count|loan_proceeds_count)$/.test(p)) expected = 0;
+          factual(`count:${p}`, item, expected);
+        } else if (item && typeof item === 'object') counters(item, p);
+      }
+    };
+    counters(ledger);
+    if (ledger.accounts) {
+      factual('scope:account-membership', ledger.accounts.map(a => a.account_mask).sort(), selectedAccounts.map(a => a.mask).sort());
+      for (const account of ledger.accounts) {
+        const source = selectedAccounts.find(a => a.mask === account.account_mask);
+        if (Object.hasOwn(account, 'covered_to')) factual(`scope:covered-to:${account.account_mask}`, account.covered_to, source?.to);
+        if (Object.hasOwn(account, 'last_synced_at')) factual(`scope:synced:${account.account_mask}`, account.last_synced_at, null);
+      }
+    }
+    if (ledger.coverage && expense) {
+      factual('scope:coverage-complete', ledger.coverage.complete, covered === selected);
+      factual('scope:coverage-status', ledger.coverage.status, covered === selected ? 'full' : 'partial');
+    }
+    for (const line of answer.split('\n')) {
+      let m;
+      if ((m = /^Payments to your own loan\/card accounts: .+ across (\d+) payments?\.$/.exec(line)))
+        factual('display-count:repayments', Number(m[1]), repaymentCount);
+      else if ((m = /^(.+): -?\$[\d,]+\.\d{2} across (\d+) rows?/.exec(line)))
+        factual(`display-count:group:${m[1]}`, Number(m[2]), m[1] === 'Unsorted' ? included.length : groups.get(m[1]));
+      else if (line.startsWith('Evidence:')) factual('display-count:evidence', line,
+        `Evidence: ${cited} of ${included.length} expense rows cited${omitted ? `, and ${omitted} more rows` : ''}.`);
+      else if (line.startsWith('Coverage: full,')) factual('display-scope:coverage', line,
+        `Coverage: full, all ${covered} selected accounts cover ${input.period.from} through ${input.period.to}.`);
+      else if (line.startsWith('Period:')) factual('display-scope:period', line,
+        `Period: ${input.period.from} through ${input.period.to}.`);
+      else if (line.startsWith('Accounts:')) factual('display-scope:accounts', line,
+        `Accounts: ${selectedAccounts.map(a => `account ****${a.mask}`).join(', ')}; ${input.period.from} through ${input.period.to}; ` +
+        `${selectedAccounts.map(a => `account ****${a.mask}: covered through ${a.to}`).join('; ')}.`);
+      else if (line.startsWith('Coverage: requested')) factual('display-scope:vendor', line,
+        `Coverage: requested ${input.period.from} through ${input.period.to}; ` +
+        `${new Set((gold.ids || []).map(id => rows.get(id)?.account)).size} contributing, ${covered} fully covered, ` +
+        `${selected - covered} omitted account${selected - covered === 1 ? '' : 's'}; ` +
+        selectedAccounts.map(a => `account ****${a.mask} covered through ${a.to}`).join('; ') + '.');
+    }
+  }
   const fieldCheck = (value, path = '', parent = null) => {
     for (const [name, item] of Object.entries(value || {})) {
       const p = path ? `${path}.${name}` : name;
@@ -148,7 +257,8 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
         else if (name === 'current_minor') expected = gold.balances?.find(b => b.mask === value.account_mask)?.cents;
         else if (name === 'credits_minor' || name === 'debits_minor') expected = accountSum(value.account_mask, name === 'credits_minor' ? 'inflow' : 'outflow');
         else if (/^(?:default_exclusions\.|excluded_own_transfer_minor$|excluded_own_movement_minor$)/.test(p)) expected = '0';
-        else if (p.startsWith('own_account_payments.')) expected = name === 'card_minor' ? '0' : gold.repayment;
+        else if (p.startsWith('own_account_payments.')) expected = uncertainExpense || name === 'card_minor' ? '0' : gold.repayment;
+        else if (p === 'retained_outflow_minor' && uncertainExpense) expected = retainedTotal;
         else if (/^(?:expense_total_minor|total_minor)$/.test(p)) expected = gold.total;
         else if (p.startsWith('groups.') && expense) {
           const ids = gold.included.filter(id => rows.get(id)?.payee?.toLowerCase() === value.merchant);
@@ -171,8 +281,13 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
     const amounts = displayFigures(line);
     if (!amounts.length) continue;
     seenDisplay += amounts.length;
+    for (const match of line.matchAll(/account \*{4}(\d{4})/g)) {
+      const permitted = gold.contract === 'receipts' ? Object.keys(gold.receipts) : snapshot.accounts.map(a => a.mask);
+      check(`display-account-scope:${seenDisplay}:${match[1]}`, permitted.includes(match[1]), 'scope');
+    }
     const d = '-?\\$[\\d,]+\\.\\d{2}', day = '\\d{4}-\\d{2}-\\d{2}', ref = '\\[\\d+\\]';
     const allowedMoneyLine = [
+      `^Recorded outgoing subtotal: ${d}\\.$`,
       `^You spent ${d} (?:this month|last month|today|yesterday|this week|${day} through ${day})\\.$`,
       `^You spent ${d} at [A-Za-z ]+ (?:this month|in [A-Za-z]+ \\d{4})\\. ${ref}(?: ${ref})*\\.$`,
       `^[a-zA-Z ]+: ${d} across \\d+ rows?(?: ${ref})*\\.$`,
@@ -186,7 +301,8 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
     if (!allowedMoneyLine) check(`unreviewed-money-prose:${sha(line)}`, false, 'unsupported_claim');
     let expected = null;
     if (expense) {
-      if (/^(?:You spent|Covered-account expense subtotal|Unsorted:)/.test(line)) expected = [gold.total];
+      if (/^Recorded outgoing subtotal:/.test(line) && uncertainExpense) expected = [retainedTotal];
+      else if (/^(?:You spent|Covered-account expense subtotal|Unsorted:)/.test(line)) expected = [gold.total];
       else if (/^Payments to your own loan\/card accounts:/.test(line)) expected = [gold.repayment];
       else {
         const merchant = line.split(':')[0];
@@ -198,6 +314,7 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
       const balance = gold.balances.find(b => b.mask === mask);
       if (balance) expected = [balance.cents];
       check(`display-balance-date:${mask}`, line.includes(`as of ${gold.observed};`), 'scope');
+      check(`display-balance-sync:${mask}`, /; feed synced unavailable /.test(line), 'scope');
     } else if (gold.contract === 'ranking' && /^Payments to your own loan\/card accounts:/.test(line)) {
       expected = [gold.repayment];
     } else if (gold.contract === 'ranking' || gold.contract === 'transactions' || gold.contract === 'payment') {
@@ -221,6 +338,7 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
     if (['Figures use recorded posted rows. Pending activity is not assessed here.',
       'Note: payments to your own loan/card accounts are shown separately from expenses.',
       'With everything counted:'].includes(line)) continue;
+    if (uncertainExpense && line === 'Expense classification is uncertain; this subtotal may include payments between your own accounts.') continue;
     const known = /^(?:Your latest synced balances are below\.|Merchant groups:|Category groups:|Period: \d{4}-\d{2}-\d{2} through \d{4}-\d{2}-\d{2}\.|Evidence: \d+ of \d+ expense rows cited(?:, and \d+ more rows)?\.|Coverage: full, all \d+ selected accounts cover \d{4}-\d{2}-\d{2} through \d{4}-\d{2}-\d{2}\.|Newest \d+ transactions?:|Possible transfers are included in income and spend; no rows were removed as transfers\.|Accounts: account \*{4}\d{4}.*\.|Coverage: requested \d{4}-\d{2}-\d{2} through \d{4}-\d{2}-\d{2};.*\.|Partial: No transactions were found for .+ as exact vendor spend in the covered window, \d{4}-\d{2}-\d{2} through \d{4}-\d{2}-\d{2}\. .+)$/;
     if (!known.test(line)) check(`unreviewed-prose:${sha(line)}`, false, 'unsupported_claim');
   }
