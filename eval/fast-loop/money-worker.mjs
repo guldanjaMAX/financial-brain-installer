@@ -59,7 +59,7 @@ export async function executeReplay(request) {
         const inside = relative(base, path);
         if (!inside || inside.startsWith(`..${sep}`) || inside === '..' || !inside.endsWith('.js') ||
           realpathSync(path) !== path) return fail('CAPABILITY_DENIED', 'module');
-        const source = readFileSync(path, 'utf8');
+        const source = request.sourceOverrides?.[inside] ?? readFileSync(path, 'utf8');
         sourceDigests.set(relative(root, path), digest(source));
         const module = new SourceTextModule(source, { context, identifier: path,
           importModuleDynamically: () => fail('CAPABILITY_DENIED', 'dynamic-import') });

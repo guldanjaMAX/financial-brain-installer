@@ -92,10 +92,14 @@ function resolvesExactAccount(locator, other, accounts) {
   // letter, so remove only a bounded X run immediately before the final mask.
   // The account scan below still enforces uniqueness after normalization.
   const text = normalizeLedgerText(locator).replace(/\bx{1,4}(?=\d{1,4}$)/, "");
-  const candidates = [...accounts.values()].filter(account => (account.members || []).some(member =>
+  // A number marker is locator syntax, never account-type evidence. Keep the
+  // whole locator anchored and reject a stated kind that conflicts with the
+  // stored type, including when a provider inserts "acct no." before the mask.
+  const statedKind = /^(card|checking|savings|loan|line of credit|investment|retirement)\b/.exec(text)?.[1]?.replaceAll(" ", "_");
+  const candidates = [...accounts.values()].filter(account => (!statedKind || statedKind === account.account_kind) && (account.members || []).some(member =>
     (normalizeLedgerText(member.label) && text === normalizeLedgerText(member.label)) ||
     (/^\d{1,4}$/.test(member.mask || "") &&
-      new RegExp(`^(?:(?:account|acct|card|checking|savings|loan|line of credit|investment|retirement)(?: account| acct)? )?(?:ending (?:in )?)?(?:x)?${member.mask}$`).test(text))));
+      new RegExp(`^(?:(?:account|acct|card|checking|savings|loan|line of credit|investment|retirement)(?: account| acct)? (?:number |no )?)?(?:ending (?:in )?)?(?:x)?${member.mask}$`).test(text))));
   return candidates.length === 1 && candidates[0] === other;
 }
 

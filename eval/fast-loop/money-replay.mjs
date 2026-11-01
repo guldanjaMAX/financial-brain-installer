@@ -18,8 +18,13 @@ export function waitForQuiet(env) {
   }
   if (existsSync('/Users/jamesguldan/brain-work/MAC-QUIET')) throw Error('MAC_QUIET_HELD');
 }
-export function replay({ cases = [...BASE_CASES, ...CONTROLS], fault = null } = {}) {
+export function replay({ cases = [...BASE_CASES, ...CONTROLS], fault = null, sourceOverrides = {} } = {}) {
   validateInputs(cases);
+  // Only the three reviewed Batch 1 modules may be restored for a baseline or
+  // mutant. The VM import/capability boundary and actual source hashes remain.
+  for (const [name, source] of Object.entries(sourceOverrides)) if (
+    !['ledger-analysis.js', 'ledger-answer.js', 'ledger-question.js'].includes(name) ||
+    typeof source !== 'string' || !source.length) throw Error('INVALID_SOURCE_OVERRIDE');
   const inputs = cases.map(c => ({ ...c, snapshot: evidence(c.profile) }));
   // This is a trusted launcher, outside the product capability compartment.
   // No desktop environment, credentials, or model allowance enter the child.
@@ -31,7 +36,7 @@ export function replay({ cases = [...BASE_CASES, ...CONTROLS], fault = null } = 
   const child = spawnSync(process.execPath, ['--experimental-vm-modules', '--permission', `--allow-fs-read=${ROOT}`,
     '--import', fileURLToPath(new URL('../../test/fixtures/cli-side-effect-tripwire.mjs', import.meta.url)),
     fileURLToPath(new URL('./money-worker.mjs', import.meta.url))], {
-    cwd: ROOT, env, input: JSON.stringify({ root: ROOT, inputs, fault }),
+    cwd: ROOT, env, input: JSON.stringify({ root: ROOT, inputs, fault, sourceOverrides }),
     encoding: 'utf8', timeout: 60000, maxBuffer: 16 * 1024 * 1024,
   });
   if (child.status !== 0) throw Error(`REPLAY_CHILD_FAILED:${child.status}:${child.error?.code || child.stderr.slice(0, 300)}`);

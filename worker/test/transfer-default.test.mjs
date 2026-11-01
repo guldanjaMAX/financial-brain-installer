@@ -5,6 +5,7 @@ import { fixture, NOW, Q, accepted, refused, flipQuestion } from "./fixtures/tra
 import { classifyLedgerQuestion } from "../src/lib/ledger-question.js";
 
 const head = JSON.parse(readFileSync(new URL("./fixtures/transfer-default/head-baseline.json", import.meta.url), "utf8"));
+const postedDisclosure = "\nFigures use recorded posted rows. Pending activity is not assessed here.";
 test.before(() => {
   mock.method(Date, "now", () => Date.parse(NOW));
   mock.method(globalThis, "fetch", async () => { throw new Error("network forbidden"); });
@@ -19,7 +20,8 @@ function oldKeys(value) {
 function unchanged(body, scenario, question) {
   const golden = head[scenario][question];
   assert.ok(golden, "question captured before product changes");
-  assert.equal(body.answer, golden.answer, "answer text is byte-identical to HEAD");
+  assert.equal(body.answer, golden.answer + (body.ledger.kind === "balance" ? "" : postedDisclosure),
+    "reviewed answer bytes are preserved with the required posted-record disclosure");
   assert.deepEqual(oldKeys(body.ledger), golden.ledger, "existing JSON keys retain their values");
 }
 async function ask(f, question = Q.totals, kind = "totals", pairCount = 1) {
@@ -224,7 +226,7 @@ test("b: offered flip phrases round-trip through the classifier", async t => {
     const flipped = await ask(f, flipQuestion(question, phrases[0]), "totals", scenario === "category-withdrawal" ? 0 : 1);
     assert.equal(flipped.ledger.lead, expected);
     if (expected === "gross") {
-      assert.equal(flipped.answer, head[scenario][question].answer);
+      assert.equal(flipped.answer, head[scenario][question].answer + postedDisclosure);
       assert.deepEqual(oldKeys(flipped.ledger), head[scenario][question].ledger);
     } else assert.equal(account(flipped, "1111").debits_minor, 4710);
   }
@@ -435,7 +437,7 @@ test("h: combined profit sums only move kinds and uses real Think without a mode
   assert.equal(routed.ledger.net_minor, expected);
   assert.equal(f.modelCalls, 0);
   const gross = await ask(f, flipQuestion(Q.totals, "including transfers including withdrawals"), "totals", 4);
-  assert.equal(gross.answer, head.combined[Q.totals].answer);
+  assert.equal(gross.answer, head.combined[Q.totals].answer + postedDisclosure);
   assert.deepEqual(oldKeys(gross.ledger), head.combined[Q.totals].ledger);
 });
 
@@ -476,7 +478,7 @@ for (const kind of ["merchant", "category", "recurring", "largest", "deposits"])
   const phrases = offered(body);
   assert.equal(phrases.length, 1);
   const flipped = await ask(f, flipQuestion(Q[kind], phrases[0]), kind);
-  assert.equal(flipped.answer, head.own[Q[kind]].answer);
+  assert.equal(flipped.answer, head.own[Q[kind]].answer + postedDisclosure);
   assert.deepEqual(oldKeys(flipped.ledger), head.own[Q[kind]].ledger);
 });
 

@@ -93,6 +93,7 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
   } else if (gold.contract === 'ranking') {
     check('eligible-ranking-before-limit', same(primaryIds, gold.ids), 'wrong_figure');
     check('ranked-cents', same((ledger.lead_rows || []).map(r => String(r.amount_minor)), gold.cents), 'wrong_figure');
+    if (gold.gross_ids) check('original-gross-ranking', same(ids(ledger.rows), gold.gross_ids), 'wrong_figure');
   } else if (gold.contract === 'transactions') {
     check('transaction-order', same(primaryIds, gold.ids), 'wrong_figure');
     check('transaction-dates', same((ledger.rows || []).map(r => r.posted_on), gold.dates), 'wrong_figure');
@@ -153,7 +154,7 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
           const ids = gold.included.filter(id => rows.get(id)?.payee?.toLowerCase() === value.merchant);
           expected = total(ids.map(id => rows.get(id).cents));
         } else if (p.startsWith('category_groups.') && expense) expected = gold.total;
-        else if (name === 'total_minor' && gold.contract === 'ranking') expected = total(gold.cents);
+        else if (name === 'total_minor' && gold.contract === 'ranking') expected = total(gold.gross_cents || gold.cents);
         else if (['vendor', 'absence'].includes(gold.contract) &&
           /(?:total_minor|unsorted_minor)$/.test(name)) expected = gold.total;
         figure(`field:${p}`, item, expected ?? 'UNSUPPORTED');
@@ -164,7 +165,9 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
 
   const lines = answer.split('\n');
   let seenDisplay = 0;
+  let grossRanking = false;
   for (const line of lines) {
+    if (line === 'With everything counted:') grossRanking = true;
     const amounts = displayFigures(line);
     if (!amounts.length) continue;
     seenDisplay += amounts.length;
@@ -195,11 +198,13 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
       const balance = gold.balances.find(b => b.mask === mask);
       if (balance) expected = [balance.cents];
       check(`display-balance-date:${mask}`, line.includes(`as of ${gold.observed};`), 'scope');
+    } else if (gold.contract === 'ranking' && /^Payments to your own loan\/card accounts:/.test(line)) {
+      expected = [gold.repayment];
     } else if (gold.contract === 'ranking' || gold.contract === 'transactions' || gold.contract === 'payment') {
       const ref = /\[(\d+)\]/.exec(line)?.[1];
       const cite = citations.find(c => c.n === Number(ref)) || ledger.lead_rows?.find(c => c.n === Number(ref)) ||
         (gold.contract === 'transactions' && ref ? { ref: `ledger:transaction:${gold.ids[Number(ref) - 1]}` } : null);
-      const id = rowId(cite), allowed = gold.ids.includes(id), row = rows.get(id);
+      const id = rowId(cite), allowed = (grossRanking && gold.contract === 'ranking' ? gold.gross_ids || gold.ids : gold.ids).includes(id), row = rows.get(id);
       if (allowed && row) expected = [gold.contract === 'transactions' && row.direction === 'outflow' ? `-${row.cents}` : row.cents];
       check(`display-row-date:${seenDisplay}`, Boolean(row) && line.includes(row.date), 'scope');
     } else if (gold.contract === 'vendor') expected = [gold.total];
@@ -213,6 +218,9 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
   // This slice has a deterministic renderer, not a model-prose adjudicator.
   // Unrecognized factual prose is held for review, never silently approved.
   for (const line of lines.filter(line => line && !displayFigures(line).length)) {
+    if (['Figures use recorded posted rows. Pending activity is not assessed here.',
+      'Note: payments to your own loan/card accounts are shown separately from expenses.',
+      'With everything counted:'].includes(line)) continue;
     const known = /^(?:Your latest synced balances are below\.|Merchant groups:|Category groups:|Period: \d{4}-\d{2}-\d{2} through \d{4}-\d{2}-\d{2}\.|Evidence: \d+ of \d+ expense rows cited(?:, and \d+ more rows)?\.|Coverage: full, all \d+ selected accounts cover \d{4}-\d{2}-\d{2} through \d{4}-\d{2}-\d{2}\.|Newest \d+ transactions?:|Possible transfers are included in income and spend; no rows were removed as transfers\.|Accounts: account \*{4}\d{4}.*\.|Coverage: requested \d{4}-\d{2}-\d{2} through \d{4}-\d{2}-\d{2};.*\.|Partial: No transactions were found for .+ as exact vendor spend in the covered window, \d{4}-\d{2}-\d{2} through \d{4}-\d{2}-\d{2}\. .+)$/;
     if (!known.test(line)) check(`unreviewed-prose:${sha(line)}`, false, 'unsupported_claim');
   }

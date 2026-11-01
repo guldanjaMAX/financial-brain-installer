@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { BASE_CASES, CONTROLS, PERIODS, validateInputs } from './fixtures/fastloop-money/input.mjs';
 import { GOLD, goldFor } from './fixtures/fastloop-money/gold.mjs';
 import { replay, ROOT, sha, waitForQuiet } from '../eval/fast-loop/money-replay.mjs';
@@ -68,39 +68,82 @@ for (const id of CONTROLS.slice(0, 12).map(c => c.id)) {
     assert.ok(score(id).required_facts_met > 0);
   });
 }
-test('ranking defect is observed on seven non-pending outgoing inputs and a proved repayment', () => {
+test('ranking uses ordinary eligibility before the limit on nonempty outgoing inputs', () => {
   const o = observation('M08');
   assert.ok(o.trace.rows_read.filter(r => r.direction === 'outflow').length >= 8);
   assert.equal(o.trace.parsed_intents[0].kind, 'largest');
-  assert.deepEqual(o.body.ledger.lead_rows.map(r => Number(r.ref.split(':').at(-1))), [7, 8, 1, 2, 3]);
-  assert.equal(score('M08').verdict, 'wrong figure');
+  assert.deepEqual(o.body.ledger.lead_rows.map(r => Number(r.ref.split(':').at(-1))), [8, 1, 2, 3, 4]);
+  assert.equal(score('M08').verdict, 'correct');
+  assert.equal(o.body.ledger.own_account_payments.total_minor, 40000);
   assert.equal(observation('M06/typed').body.ledger.own_account_payments.loan_minor, 40000);
   assert.equal(score('M08/no-repayment').verdict, 'correct');
 });
-test('headline, unknown classification, import reset and memo failures have green peers', () => {
-  for (const id of ['M06', 'M06/reset', 'M06/memo', 'M05/shorthand']) {
+test('unknown classification and import reset stay held while typed memo and shorthand pass', () => {
+  for (const id of ['M06', 'M06/reset']) {
     const o = observation(id);
     assert.ok(o.trace.rows_read.some(r => r.id === 7));
     assert.ok(o.trace.rows_read.some(r => r.id === 8));
     assert.equal(score(id).verdict, 'wrong figure');
   }
-  assert.equal(observation('M05/shorthand').trace.parsed_intents[0].kind, 'totals');
-  assert.equal(observation('M05/shorthand').body.ledger.accounts.reduce((sum, a) => sum + a.debits_minor, 0), 101000);
+  for (const id of ['M06/memo', 'M05/shorthand']) {
+    const o = observation(id);
+    assert.ok(o.trace.rows_read.some(r => r.id === 7));
+    assert.equal(o.trace.parsed_intents[0].kind, 'expense_summary');
+    assert.equal(o.route, 'ledger:expense_summary');
+    assert.equal(o.body.ledger.expense_total_minor, 61000);
+    assert.equal(score(id).verdict, 'correct');
+  }
   assert.equal(observation('M06').body.ledger.expense_total_minor, 101000);
-  assert.equal(observation('M06/memo').body.ledger.expense_total_minor, 101000);
   const reset = observation('M06/reset').trace.import;
   assert.ok(reset.statements >= 2); assert.equal(reset.before.account_kind, 'loan');
   assert.equal(reset.after.account_kind, 'other'); assert.equal(reset.after.balance_role, 'neither');
   assert.equal(score('M06/typed').verdict, 'correct'); assert.equal(score('M05/gross').verdict, 'correct');
 });
-test('desired-behavior probe remains visibly red with five passing peers', () => {
+test('original probe passes three Batch 1 repairs and retains two storage prerequisite failures', () => {
   const env = { PATH: '/usr/bin:/bin', HOME: resolve(ROOT, 'lane-evidence/home-fastloop'), BRAIN_NO_WRANGLER_LOGIN: '1' };
   for (const name of ['SystemRoot', 'WINDIR', 'ComSpec', 'PATHEXT']) if (process.platform === 'win32' && process.env[name]) env[name] = process.env[name];
   waitForQuiet(env);
   const child = spawnSync(process.execPath, ['--test', '--test-reporter=tap', 'test/fastloop-money-red.mjs'],
     { cwd: ROOT, env, encoding: 'utf8', timeout: 30000 });
-  assert.equal(child.status, 1); assert.match(child.stdout, /# pass 5\b/); assert.match(child.stdout, /# fail 5\b/);
+  assert.equal(child.status, 1); assert.match(child.stdout, /# pass 8\b/); assert.match(child.stdout, /# fail 2\b/);
+  assert.match(child.stdout, /not ok \d+ - RED unclassified debt/);
+  assert.match(child.stdout, /not ok \d+ - RED provider replay/);
   assert.match(child.stdout, /# skipped 0\b/); assert.match(child.stdout, /# todo 0\b/);
+});
+test('equivalent explicit expense questions expose the parsed kind and actual selected route', () => {
+  for (const id of ['M05', 'M05/supported', 'M05/shorthand', 'M06/typed']) {
+    const o = observation(id);
+    assert.equal(o.trace.parsed_intents[0].kind, 'expense_summary');
+    assert.equal(o.route, 'ledger:expense_summary');
+    assert.ok(o.trace.rows_read.length > 0);
+    assert.equal(o.body.ledger.expense_total_minor, 61000);
+  }
+  assert.equal(observation('M05/gross').trace.parsed_intents[0].kind, 'totals');
+  assert.equal(observation('M05/gross').route, 'ledger:totals');
+  assert.equal(observation('M05/gross').body.ledger.accounts.reduce((sum, a) => sum + a.debits_minor, 0), 101000);
+});
+for (const [fix, id, file, from, to] of [
+  ['F1', 'M06/memo', 'ledger-analysis.js', '(?:number |no )?', ''],
+  ['F2', 'M08', 'ledger-answer.js', 'if (intent.kind === "largest" && intent.direction === "outflow") {', 'if (false) {'],
+  ['F3', 'M05/shorthand', 'ledger-question.js', '|spend)(?: and on what)?$/;', ')(?: and on what)?$/;'],
+  ['F4', 'M05', 'ledger-answer.js', 'if (answer.ledger.kind !== "balance") answer.answer +=', 'if (false) answer.answer +='],
+]) test(`${fix} restoring product mutant fails the independent fast-loop oracle and comparison`, () => {
+  const c = input(id), source = readFileSync(new URL(`../worker/src/lib/${file}`, import.meta.url), 'utf8');
+  assert.equal(source.split(from).length - 1, 1, 'exactly one restoring site');
+  const changedSource = source.replace(from, to);
+  assert.notEqual(changedSource, source);
+  const control = seal(replay({ cases: [c] }));
+  const mutant = seal(replay({ cases: [c], sourceOverrides: { [file]: changedSource } }));
+  assert.equal(mutant.source_files[join('worker', 'src', 'lib', file)], sha(changedSource), 'the restored module actually executed');
+  assert.ok(mutant.observations[0].trace.rows_read.length > 0);
+  assert.equal(mutant.observations[0].execution_status, 'complete');
+  assert.equal(scoreRun(control, [c]).scores[0].verdict, 'correct');
+  assert.notEqual(scoreRun(mutant, [c]).scores[0].verdict, 'correct');
+  assert.equal(compareRuns(control, mutant, [c]).regression_gate, false);
+});
+test('baseline override rejects modules outside the reviewed product set', () => {
+  assert.throws(() => replay({ cases: [input('M06/typed')], sourceOverrides: { '../outside.js': 'export {}' } }), /INVALID_SOURCE_OVERRIDE/);
+  assert.equal(score('M06/typed').verdict, 'correct');
 });
 test('one-cent displayed error fails while the structured total remains right', () => {
   assert.equal(score('M06/typed').verdict, 'correct');

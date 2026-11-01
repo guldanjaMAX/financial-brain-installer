@@ -207,7 +207,7 @@ function phaseTwoQuestion(q, intent, today) {
     from, to, derivedWindow: Boolean(period.derived) };
   const numberWords = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
   const count = "(\\d+|one|two|three|four|five|six|seven|eight|nine|ten)";
-  const expenseForm = /^(?:(?:what|how much)(?: money)? went out|what (?:are|were) my expenses|what (?:is|was) my spending|(?:how much|what) did (?:i|we) spend)(?: and on what)?$/;
+  const expenseForm = /^(?:(?:what|how much)(?: money)? went out|what (?:are|were) my expenses|what (?:is|was) my spending|(?:how much|what) did (?:i|we) spend|how much have (?:i|we) spent|spend)(?: and on what)?$/;
   if (expenseForm.test(residual)) {
     // Keep the periodless default deliberately narrow. It is an owner-zone
     // current-month request, not permission to guess a window for every spend

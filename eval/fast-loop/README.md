@@ -1,9 +1,10 @@
 # Synthetic money fast loop
 
-This is the Day 1 development harness. It evaluates 12 base cases and 17 child
+This development harness evaluates 12 base cases and 17 child
 controls against the real `withLedgerAnswer`, classifier, SQLite reader and
-composers, using every shipped D1 migration. It changes no product behavior.
-The current product intentionally remains red on reproduced defects.
+composers, using every shipped D1 migration. Batch 1 repairs typed repayment
+locators, ordinary-expense ranking, explicit spending synonyms and posted scope.
+Unknown account types and provider classification resets remain held for A/I1.
 
 From the repository root, first create `lane-evidence/home-fastloop` and
 `lane-evidence/tmp`. Before each Node or npm command, run the required host
@@ -22,8 +23,9 @@ The direct equivalent of the npm entry is `node eval/fast-loop/money-cli.mjs`.
 A run exits 1 for wrong monetary answers or invalid executions. A comparison
 exits 1 for a regression, and 0 when no new regression exists. An unchanged
 baseline passes that regression check but has no improvement and cannot be
-promoted. The opt-in red probe has five failing desired-behavior assertions
-and five passing peers at the pinned product. The registered green suite also
+promoted. The original opt-in probe has eight passing assertions and two
+storage-prerequisite failures after Batch 1 (five pass and five fail at the
+Day 1 pin). The registered green suite also
 runs that probe and verifies its counted outcome; nothing is skipped or marked
 todo. The test graph registers the green suite in both required command lists.
 `test/test-chain-complete.test.mjs` proves registration, including untracked tests.
@@ -83,6 +85,16 @@ renderer and safety checks do not increase that denominator or reward refusal.
 Unsupported wording records `documents_unexecuted`. The empty fallback marker
 never counts as a document answer or as a tested forecast refusal. Results are
 ledger-attempt verdicts, not complete HTTP or model-backed answer verdicts.
+For an exact baseline replay, `replay({sourceOverrides})` accepts source text for
+only the three reviewed Batch 1 product modules. Restore those modules from the
+pinned Git commit; their executed bytes are hashed in the receipt. Both arms
+use the current identical harness and scorer. No expected total or membership
+changed: key v2 adds the separate repayment and original gross ranking for M08.
+The scorer checks the ordinary lead, the separately labeled gross view, and the
+whole repayment. `worker/test/fastloop-batch1.test.mjs` restores each defect
+individually and reruns its positive contract; independent oracle/comparison
+mutants additionally prove each repair can fail the same fast-loop gate.
+
 No full-route, model tape, document, private corpus, 80-case, live improvement
 or release claim is made. These files and the synthetic key are outside the
 package publication allowlist.

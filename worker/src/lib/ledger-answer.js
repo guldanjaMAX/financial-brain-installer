@@ -106,6 +106,17 @@ const moveKind = kind => ["checking", "savings", "card"].includes(kind);
 const withdrawalKind = kind => ["investment", "retirement"].includes(kind);
 
 function leadExclusions(rows, pairs, selected, bySlug, intent) {
+  if (intent.kind === "largest" && intent.direction === "outflow") {
+    const { ownTransfers, payments } = ordinaryExpenseSelection(rows, pairs, bySlug);
+    // Explicit transfer inclusion remains a requested alternate view. The
+    // ordinary ranking and summary share the same proved expense membership.
+    const removedTransfers = intent.ownTransfers === "include" ? [] : [...ownTransfers.values()];
+    return { excluded: new Set([...removedTransfers.map(row => row.id), ...payments.keys()]),
+      keptPairs: new Map(), knownOwnTransferRows: new Set(intent.ownTransfers === "include" ? ownTransfers.keys() : []),
+      scopedKnownTransferRows: new Set(), expensePayments: payments,
+      summary: { own_transfer_pairs: removedTransfers.length, own_transfer_minor: sumMinor(removedTransfers),
+        withdrawal_count: 0, withdrawal_minor: 0, loan_proceeds_count: 0, loan_proceeds_minor: 0 } };
+  }
   const excluded = new Set(), ownPairs = [], withdrawals = new Map(), loanProceeds = new Map(), keptPairs = new Map();
   const knownOwnTransferRows = new Set(), scopedKnownTransferRows = new Set();
   const inAnswer = new Set(rows.map(row => row.id));
@@ -162,10 +173,14 @@ function leadExclusions(rows, pairs, selected, bySlug, intent) {
     loan_proceeds_count: loanProceeds.size, loan_proceeds_minor: sumMinor([...loanProceeds.values()]) } };
 }
 
-function expenseSummary({ intent, accounts, requestedAccounts, omittedAccounts, rows, pairs, pairing, bySlug }) {
+function ordinaryExpenseSelection(rows, pairs, bySlug) {
   const outflows = rows.filter(row => row.direction === "outflow");
+  const inAnswer = new Set(outflows.map(row => row.id));
   const ownTransfers = new Map(), payments = new Map();
   for (const pair of pairs) {
+    // Padding and a counterpart in another selected period cannot exclude a
+    // row that does not contribute to this answer's outgoing expense pool.
+    if (!inAnswer.has(pair.out.id)) continue;
     const movement = classifyOwnedMovement(pair, bySlug);
     if (movement?.kind === "own_transfer") ownTransfers.set(pair.out.id, pair.out);
     if (movement?.kind === "owned_liability_payment") {
@@ -178,6 +193,11 @@ function expenseSummary({ intent, accounts, requestedAccounts, omittedAccounts, 
     if (liabilityKind) payments.set(row.id, { row, liabilityKind });
   }
   const ordinary = outflows.filter(row => !ownTransfers.has(row.id) && !payments.has(row.id));
+  return { ordinary, ownTransfers, payments };
+}
+
+function expenseSummary({ intent, accounts, requestedAccounts, omittedAccounts, rows, pairs, pairing, bySlug }) {
+  const { ordinary, ownTransfers, payments } = ordinaryExpenseSelection(rows, pairs, bySlug);
   const compareText = (a, b) => a < b ? -1 : a > b ? 1 : 0;
   const rowOrder = (a, b) => b.amount_minor - a.amount_minor ||
     b.posted_on.localeCompare(a.posted_on) || compareText(String(a.id), String(b.id));
@@ -473,7 +493,7 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
         (intent.kind === "merchant" ? matchesMerchant : matchesCategory)(row, intent.match) ||
         (intent.kind === "category" && !categoryFor(row)));
   } else if (intent.kind === "recurring") figureRows = detectRecurring(rows, intent.to).flatMap(group => group.rows);
-  const { excluded: leadExcluded, keptPairs, knownOwnTransferRows, scopedKnownTransferRows, summary } = leadExclusions(figureRows, intent.kind === "transfers" ? [] : pairs, selected, bySlug,
+  const { excluded: leadExcluded, keptPairs, knownOwnTransferRows, scopedKnownTransferRows, summary, expensePayments = new Map() } = leadExclusions(figureRows, intent.kind === "transfers" ? [] : pairs, selected, bySlug,
     intent.kind === "transfers" ? { withdrawals: "include" } : namedOutflowMerchant ? { ...intent, ownTransfers: "exclude" } : intent);
   // Compact vendor spend excludes only bilaterally proved own movements and
   // payments to an exactly identified owned liability. A possible transfer is
@@ -519,6 +539,12 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
   const ledger = { kind: intent.kind, from: intent.from, to: intent.to, accounts: accountCoverage(accounts),
     includes_own_transfers: true, matched_transfer_count: 0, candidate_transfer_count: pairs.length,
     lead: leadExcluded.size ? "default_exclusions" : "gross", default_exclusions: summary, flip: [] };
+  if (expensePayments.size) {
+    const payments = [...expensePayments.values()];
+    ledger.own_account_payments = { total_minor: sumMinor(payments, item => item.row.amount_minor), count: payments.length,
+      card_minor: sumMinor(payments.filter(item => item.liabilityKind === "card"), item => item.row.amount_minor),
+      loan_minor: sumMinor(payments.filter(item => item.liabilityKind === "loan"), item => item.row.amount_minor) };
+  }
   if (knownOwnTransferRows.size) ledger.known_own_transfer_in_lead = true;
   const conditionalAccounts = accounts.map(account => {
     const ownRows = withoutCandidates(rows.filter(row => row.effective_account_slug === account.account_slug));
@@ -753,6 +779,7 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     if (noteSummary.own_transfer_pairs) { notes.push(`${money(noteSummary.own_transfer_minor)} between your own connected accounts left out of the first figures; say "including transfers" to count those moves`); ledger.flip.push("including transfers"); }
     if (noteSummary.withdrawal_count) { notes.push(`${money(noteSummary.withdrawal_minor)} in retirement or investment withdrawals left out of the first figures; say "including withdrawals" to count them`); ledger.flip.push("including withdrawals"); }
     if (noteSummary.loan_proceeds_count) { notes.push(`${money(noteSummary.loan_proceeds_minor)} in loan or line-of-credit proceeds left out of the first figures; say "including loan proceeds" to count them`); ledger.flip.push("including loan proceeds"); }
+    if (expensePayments.size) notes.push("payments to your own loan/card accounts are shown separately from expenses");
     if (unchangedLimitedList && leadExcluded.size) notes.push("exclusions apply to the wider candidate pool; the displayed rows are unchanged");
     if (!unchangedLimitedList && [...keptPairs.values()].some(reason => reason.startsWith("other account"))) {
       notes.push('moves with an account outside this question are kept; say "excluding transfers" to leave them out'); ledger.flip.push("excluding transfers");
@@ -794,6 +821,7 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
       ? `Partial answer from available ledger records. This ranking may be incomplete because SimpleFIN coverage is not yet certified complete.\n${answer}`
       : `Partial answer from available ledger records. No matching expenses were found in those records, but incomplete SimpleFIN coverage does not prove zero or a complete list.\n${answer}`;
   }
+  if (expensePayments.size) answer += `\nPayments to your own loan/card accounts: ${money(ledger.own_account_payments.total_minor)} across ${expensePayments.size} ${expensePayments.size === 1 ? "payment" : "payments"}.`;
   return { answer, citations, ledger };
 }
 
@@ -851,6 +879,9 @@ export async function withLedgerAnswer(options, next) {
         const answer = await ledgerAnswer(env, intent, accounts, inventory);
         reason = answer.reason;
         if (!reason) {
+          // The reader admits posted records only. It cannot observe pending
+          // activity or certify its absence, even on a posted-only snapshot.
+          if (answer.ledger.kind !== "balance") answer.answer += "\nFigures use recorded posted rows. Pending activity is not assessed here.";
           if (intent.from && intent.to && configuredTimeZone) answer.ledger.time_zone = intent.timeZone;
           const partialCoverage = answer.ledger.partial_reason === "ledger_partial_coverage";
           const incomplete = Boolean(answer.ledger.attribution_incomplete || answer.ledger.complete === false ||

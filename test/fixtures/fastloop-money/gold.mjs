@@ -1,6 +1,6 @@
 // Separate fact custodian. Membership is authored here, never learned from product output.
 import { sumRows, total } from '../../../eval/fast-loop/money-oracle.mjs';
-export const GOLD_VERSION = 'money-day1-gold-v1';
+export const GOLD_VERSION = 'money-batch1-gold-v2';
 const facts = {
   1: { cents: '6000' }, 2: { cents: '5000' }, 3: { cents: '4000' },
   4: { cents: '3000' }, 5: { cents: '2000' }, 6: { cents: '1000' },
@@ -31,7 +31,8 @@ export const GOLD = {
   M04: key('receipts', { receipts, combined: total(Object.values(receipts)), require_combined: true }),
   M05: expense({ require_posted_disclosure: true }),
   M06: expense({ classification_uncertain: true, answerability: 'clarify' }),
-  M08: key('ranking', { ids: [8, 1, 2, 3, 4], cents: [8, 1, 2, 3, 4].map(id => facts[id].cents), excluded: [7, 12, 13] }),
+  M08: key('ranking', { ids: [8, 1, 2, 3, 4], cents: [8, 1, 2, 3, 4].map(id => facts[id].cents), excluded: [7, 12, 13],
+    repayment: '40000', gross_ids: [7, 8, 1, 2, 3], gross_cents: [7, 8, 1, 2, 3].map(id => facts[id].cents) }),
   M09: key('transactions', { ids: [1, 2, 3, 4, 5, 6, 11, 9, 8, 7],
     cents: ['-6000', '-5000', '-4000', '-3000', '-2000', '-1000', '3333', '17777', '-40000', '-40000'],
     dates: ['2026-10-25', '2026-10-24', '2026-10-23', '2026-10-22', '2026-10-21', '2026-10-20',

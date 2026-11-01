@@ -1,4 +1,4 @@
-// Opt-in desired-behavior probes. These stay red until the later product repair.
+// Original desired-behavior probes. The two storage prerequisites remain red.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fixture } from '../worker/test/ledger-review-fixture.mjs';
