@@ -602,6 +602,7 @@ null `top_folder` alone is never proof of membership or permission to remove.
 | SMS and Google Voice exports | Built as sessionized file imports; real export samples remain acceptance gates |
 | iPhone backup | Built against a synthetic unencrypted backup; an Apple-written backup remains a field gate |
 | Zoom | Built as a transcript webhook; a paid real-account meeting remains a field gate |
+| Granola | Supervised meeting JSON export normalizer and internal batch importer with account-bound identity and typed metadata. Notes-only coverage is explicit and summary-only input refuses. No owner CLI, live acquisition, scheduler, or cross-provider dedupe; host and real-export gates remain open |
 | Bank exports and hosted feed | Built into the shared financial ledger; real-statement and real-feed reconciliation remain field gates |
 | OCR for scanned PDFs | Built, optional, and provenance-marked; aggregate local preflight is read-only and synthetic-tested, while private real scans remain a field gate |
 | Slack and Notion | Built behind field gates with scripted provider-I/O proof; no real workspace has completed acceptance |

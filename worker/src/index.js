@@ -2544,7 +2544,7 @@ const SOURCE_RECEIPT_STATUSES = new Set(["indexing", "ready", "error"]);
 const SOURCE_RUN_LANES = new Set(["incremental", "sweep", "manual"]);
 const SOURCE_REVIEW_ISSUE_CODE = "SAFETY_REVIEW_REQUIRED";
 const SOURCE_KINDS = new Set([
-  "drive", "gmail", "imap", "calendar", "imessage", "whatsapp", "zoom",
+  "drive", "gmail", "imap", "calendar", "imessage", "whatsapp", "zoom", "granola",
   "quickbooks", "slack", "notion", "microsoft", "dropbox", "hubspot", "plaid",
   // A one-time history load out of an iPhone backup. Deliberately its own
   // kind rather than "imessage": it is a point-in-time snapshot with no

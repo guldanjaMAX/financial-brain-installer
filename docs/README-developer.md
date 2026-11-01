@@ -1771,6 +1771,62 @@ configured handover; it does not claim that Outlook has already imported.
 No new prompt, storage migration, alias rewrite, or per-message matching is
 introduced. This remains scripted-provider proof pending the tenant field gate.
 
+### Supervised Granola meeting exports
+
+`connectors/granola-export.mjs` provides `planGranolaExport` and
+`importGranolaExport` for the `granola.meeting.v1` file contract. This is an
+internal integration seam with synthetic offline proof. There is no Granola
+owner CLI, live API/MCP acquisition, automatic folder detection, daily refresh,
+or cross-provider meeting dedupe. General JSON folder ingestion keeps its
+existing behavior and does not interpret these files as meeting records.
+
+The disabled `corpora.granola` template declares `source`, `transport:
+"file-export"`, `format`, exact `owner_email`, and an absolute owner-only
+`export_path`. An authorized caller passes explicit direct JSON file paths and
+an injected `request(path, body)` adapter returning a Response. That caller
+owns the existing lifecycle/source lease and full-admin credential boundary;
+the importer does not acquire credentials or provide a default network path.
+It first validates the entire selected set, registers the declared source with
+kind `granola`, then posts ordinary envelopes to the shared ingest batch route.
+Exact registration and every per-document receipt are required for completion.
+Accepted storage does not prove Vectorize projection or semantic retrieval.
+
+The declared export root must be a regular directory, with owner-only mode on
+POSIX. A linked ancestor is permitted, including system temp-directory aliases;
+the root itself and selected file or directory links below it are refused.
+Selections must be direct JSON children of the declared path and resolve to
+that same child inside its canonical root. Reads use the verified canonical
+path and check descriptor identity, so a retargeted ancestor cannot redirect
+the read outside that root.
+
+Each file contains `id`, `title`, an offset-aware `meeting_at`, `attendees`
+(display/email strings), exact `owner_email`, optional `notes` and `summary`,
+`transcript` (null or ordered `{speaker, source, start, text}` segments), and
+offset-aware `exported_at`. Speaker may be null; source is `microphone` or
+`system`; start is nonnegative seconds or null. Unknown fields, missing IDs,
+missing/impossible dates, wrong accounts, and decreasing known segment times
+refuse visibly. Export time never supplies the meeting date. Attendees remain
+unverified export labels and never establish observed participation.
+
+Exact account and meeting ID form a collision-safe identity independent of
+title and export time. Identical copies in one selection collapse; conflicting
+copies refuse so an arbitrary file order cannot choose a revision. Across runs,
+the same identity uses ordinary created/updated/unchanged storage behavior.
+The declared source is a storage namespace: renaming it does not move history
+or prove equivalence to another source. Metadata retains meeting time, segment
+speaker/channel/time, transcript coverage, export time, and source lineage.
+Private notes without a transcript are visibly notes-only; a later transcript
+revises that same meeting. Summary text is excluded from native evidence, and
+a summary without transcript or private notes is refused.
+
+Limits are 100 selected files, 512 KiB per file, 8 MiB total input, 400,000
+rendered text bytes, and 800,000 envelope bytes. Oversized records refuse
+without truncation. Common quality and credential checks run before requests;
+the Worker repeats its standard checks. No local cursor or removal plan is
+created. Missing files or exports grant no authority to erase stored history.
+Concurrent refresh, downgrade protection across transcript revisions, durable
+retry state, scheduling, and owner entry points remain later integration work.
+
 ### Curated collections during and after migration
 
 `operations/curated-dual-sync.mjs` is the internal rollback-compatible path for

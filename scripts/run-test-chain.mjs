@@ -13,6 +13,9 @@ export const RUNNER_TEST_COMMAND = "node test/test-chain-runner.test.mjs";
 // weaken the projection itself.
 export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   RUNNER_TEST_COMMAND,
+  "node --test test/granola-records.test.mjs",
+  "node --test test/granola-export.test.mjs",
+  "node --test test/granola-source-contract.test.mjs",
   "node --test worker/test/ledger-answer.test.mjs",
   "node --test worker/test/ledger-conservative.test.mjs",
   "node --test worker/test/ledger-phase2.test.mjs",
@@ -459,6 +462,9 @@ export const TEST_COMMANDS = Object.freeze([
   "node --test test/curated-cloudflare-only.test.mjs",
   "node test/curated-dual-sync.test.mjs",
   "node test/curated-sync-scheduler.test.mjs",
+  "node --test test/granola-records.test.mjs",
+  "node --test test/granola-export.test.mjs",
+  "node --test test/granola-source-contract.test.mjs",
   "node --test test/package-bundle-verifier.test.mjs",
   "node --test test/runtime-identity-receipt.test.mjs",
   "node test/package-privacy.test.mjs",

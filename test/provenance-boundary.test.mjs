@@ -19,6 +19,7 @@ import { normalizeProviderResult } from "../connectors/provider-runtime.mjs";
 import { storeFor } from "../worker/src/lib/store.js";
 import { buildZoomEnvelope, gatedIngest } from "../worker/src/lib/zoom.js";
 import { createProductFixture } from "../worker/test/product-contract-fixture.mjs";
+import { normalizeGranolaRecord } from "../connectors/granola-records.mjs";
 
 const doc = (extra = {}) => ({
   source_type: "drive",
@@ -26,6 +27,27 @@ const doc = (extra = {}) => ({
   content: "ordinary fixture text",
   ...extra,
 });
+
+// Exported speech and private notes remain source records. Generated summary
+// text cannot enter the native evidence body or supply a missing transcript.
+{
+  const meeting = {
+    id: "meeting-001", title: "Synthetic source session", meeting_at: "2026-10-30T10:00:00-07:00",
+    owner_email: "owner@example.invalid", attendees: [], notes: "Private source notes.",
+    summary: "Derived summary must stay out of the native evidence body.",
+    transcript: [{ speaker: null, source: "system", start: null, text: "Verify the delivery schedule before publishing it." }],
+    exported_at: "2026-10-31T12:00:00Z",
+  };
+  const options = { source: "meeting-export", ownerEmail: meeting.owner_email };
+  const envelope = normalizeGranolaRecord(meeting, options);
+  assert.equal(ingestEnvelopeValidationError(envelope), null);
+  assert.equal(envelope.metadata.evidence_lineage.kind, "source_record");
+  assert.deepEqual(envelope.metadata.provenance_receipt.root_ids, [`meeting-export:${envelope.source_id}`]);
+  assert.ok(envelope.content.includes(meeting.transcript[0].text));
+  assert.ok(!envelope.content.includes(meeting.summary));
+  assert.throws(() => normalizeGranolaRecord({ ...meeting, transcript: null, notes: "" }, options), error =>
+    error.code === "GRANOLA_SOURCE_TEXT_REQUIRED" && error.stage === "content");
+}
 
 // Shared ingress remains backward compatible, but omission is represented as
 // unavailable instead of being silently promoted to native/reliable.

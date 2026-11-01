@@ -147,6 +147,19 @@
       ],
       "enabled": false
     },
+    "granola": {
+      "_comment": [
+        "Supervised meeting JSON exports only; internal import seam, no owner CLI or scheduler yet.",
+        "Set the exact reviewed owner email and absolute owner-only export directory before use.",
+        "Missing transcripts remain notes-only. Summary-only exports are refused. History is retained."
+      ],
+      "enabled": false,
+      "source": "granola",
+      "transport": "file-export",
+      "format": "granola.meeting.v1",
+      "owner_email": "",
+      "export_path": ""
+    },
     "zoom": {
       "_comment": [
         "Zoom cloud-recording transcripts. Requires a PAID (Licensed) Zoom seat:",

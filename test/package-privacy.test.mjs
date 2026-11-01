@@ -722,6 +722,9 @@ const expected = [
   "CHANGELOG.md",
   "brain.mjs",
   "connectors/catalog.mjs",
+  // Supervised meeting export modules carry no account default or acquisition capability.
+  "connectors/granola-records.mjs",
+  "connectors/granola-export.mjs",
   "connectors/dropbox.mjs",
   "connectors/hubspot.mjs",
   "connectors/microsoft-graph.mjs",
