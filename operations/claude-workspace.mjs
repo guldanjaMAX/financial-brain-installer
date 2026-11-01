@@ -19,7 +19,11 @@ import {
   writeFileSync,
   unlinkSync,
 } from "node:fs";
-import { renderCopyableCommand } from "./command-display.mjs";
+import {
+  quotePosixArgument,
+  quotePowerShellArgument,
+  renderCopyableCommand,
+} from "./command-display.mjs";
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
@@ -28,8 +32,16 @@ import { CLOUDFLARE_OAUTH_WRANGLER_PACKAGE } from "./cloudflare-oauth-session.mj
 import { windowsFileChildEnvironment } from "./current-user-file.mjs";
 import { SKILL_CREDENTIAL_LINE } from "./answer-setup-copy.mjs";
 import { answerSetupOf } from "./answer-setup.mjs";
+import {
+  captureStagedProofWithRetry,
+  renameIdentityMatches,
+  renameWithRetrySync,
+} from "./rename-retry.mjs";
 
 export const CLAUDE_WORKSPACE_MARKER = "<!-- financial-brain-installer:claude-workspace:v1 -->";
+export const MAX_OWNER_GUIDE_EXECUTABLE_PATH_CHARACTERS = 384;
+const OWNER_GUIDE_RUNTIME_CONTRACT_CHARACTERS = 2_048;
+let claudeGuideGeneration = 0;
 
 function safeLocator(value, label, platformName = process.platform) {
   const raw = String(value || "");
@@ -41,18 +53,39 @@ function safeLocator(value, label, platformName = process.platform) {
   return text;
 }
 
+function ownerGuideRuntimeContract(nodePath, brainScript, platformName) {
+  if (nodePath.length > MAX_OWNER_GUIDE_EXECUTABLE_PATH_CHARACTERS) {
+    throw new Error(
+      `Node path exceeds the owner workspace guide's supported ${MAX_OWNER_GUIDE_EXECUTABLE_PATH_CHARACTERS}-character executable-path limit`,
+    );
+  }
+  const runtime = platformName === "win32"
+    ? `function brain { & ${quotePowerShellArgument(nodePath)} ${quotePowerShellArgument(brainScript)} @args }`
+    : `brain() { ${quotePosixArgument(nodePath)} ${quotePosixArgument(brainScript)} "$@"; }`;
+  if (runtime.length > OWNER_GUIDE_RUNTIME_CONTRACT_CHARACTERS) {
+    throw new Error("Node path needs too much escaping for the owner workspace guide runtime contract");
+  }
+  const padding = " ".repeat(OWNER_GUIDE_RUNTIME_CONTRACT_CHARACTERS - runtime.length);
+  return `\`${runtime}\`<!-- financial-brain-runtime-path-padding:${padding}-->`;
+}
+
 function guideLocators(manifestPath, { brainCliPath = process.argv[1], nodePath = null, platformName = process.platform } = {}) {
   const manifest = safeLocator(manifestPath, "manifest path", platformName);
   const brainScript = safeLocator(brainCliPath, "Brain CLI path", platformName);
-  const command = nodePath ? safeLocator(nodePath, "Node path", platformName) : brainScript;
-  const prefix = nodePath ? [brainScript] : [];
-  const brain = renderCopyableCommand(command, prefix, { platformName });
-  const commandFor = args => renderCopyableCommand(command, [...prefix, ...args], { platformName });
-  return { manifest, brain, commandFor };
+  if (!nodePath) {
+    const brain = renderCopyableCommand(brainScript, [], { platformName });
+    const commandFor = args => renderCopyableCommand(brainScript, args, { platformName });
+    return { manifest, brain, commandFor, runtimeContract: null };
+  }
+  const runtime = safeLocator(nodePath, "Node path", platformName);
+  const runtimeContract = ownerGuideRuntimeContract(runtime, brainScript, platformName);
+  const brain = renderCopyableCommand("brain", [], { platformName });
+  const commandFor = args => renderCopyableCommand("brain", args, { platformName });
+  return { manifest, brain, commandFor, runtimeContract };
 }
 
 export function renderClaudeWorkspaceGuide(manifestPath, options = {}) {
-  const { manifest, brain, commandFor } = guideLocators(manifestPath, options);
+  const { manifest, brain, commandFor, runtimeContract } = guideLocators(manifestPath, options);
   return `${CLAUDE_WORKSPACE_MARKER}
 # Financial Brain owner workspace
 
@@ -91,6 +124,7 @@ registered Financial Brain MCP server before reaching for Cloudflare directly.
 
 ## Installed commands
 
+${runtimeContract ? `- Run this once in each new terminal to define the exact reviewed Node and Brain CLI invocation for this session only; it writes no file: ${runtimeContract}\n` : ""}
 - Guided install and connector skill: \`/financial-brain-technician\`
 - Confirm it is available in Claude Code: \`/skills\`
 - Brain CLI invocation: \`${brain}\`
@@ -297,12 +331,13 @@ export function mergeOwnerRules(existingText, render) {
 }
 
 function renderCodexWorkspaceGuide(manifestPath, options) {
-  const { manifest, brain } = guideLocators(manifestPath, options);
+  const { manifest, brain, runtimeContract } = guideLocators(manifestPath, options);
   return `${CODEX_WORKSPACE_MARKER}
 # Financial Brain owner workspace (Codex)
 
 This folder belongs to the Brain owner. Keep Codex's normal approval prompts on.
 
+${runtimeContract ? `- Run this once in each new terminal to define the exact reviewed Node and Brain CLI invocation for this session only; it writes no file: ${runtimeContract}\n` : ""}
 - Brain CLI invocation: \`${brain}\`
 - Manifest: \`${manifest}\`
 - Guided install and connector skill: \`$financial-brain-technician\`
@@ -424,8 +459,43 @@ function commitWorkspaceGuide(target, parent, snapshot, existing, content, owner
     fsyncSync(fd);
     const staged = fstatSync(fd);
     const closed = fd; fd = null; closeSync(closed);
-    if (!locked() || !unchangedWorkspaceFile(temporary, staged, content, ownership)) return notWritten();
-    renameSync(temporary, ready);
+    // The descriptor must be closed before Windows can make a trustworthy
+    // byte observation. The shared helper distinguishes a temporary sharing
+    // refusal from a definite same-inode mismatch and carries that same proof
+    // into publication. Revalidation deliberately performs no content read.
+    const stagedProof = captureStagedProofWithRetry(temporary, content, staged, {
+      platform: ownership?.platform ?? process.platform,
+    });
+    if (!stagedProof) {
+      // Refusal is terminal, but when the pathname metadata still matches the
+      // created inode, complete the existing exact-byte observation before
+      // returning. Its result cannot authorize publication.
+      unchangedWorkspaceFile(temporary, staged, content, ownership);
+      return notWritten();
+    }
+    let stagingRefused = false;
+    renameWithRetrySync(temporary, ready, {
+      platform: ownership?.platform ?? process.platform,
+      revalidate: () => {
+        if (!locked() || !workspaceParentUnchanged(parent) ||
+            !renameIdentityMatches(temporary, stagedProof) ||
+            !workspaceFileOwnedByUser(temporary, stagedProof, ownership)) {
+          throw new Error("the workspace staging boundary changed before publication");
+        }
+        try {
+          lstatSync(ready);
+          throw new Error("the workspace staging destination already exists");
+        } catch (error) {
+          if (error?.code !== "ENOENT") throw error;
+        }
+      },
+      staged: {
+        expected: stagedProof,
+        bytes: content,
+        refuse: () => { stagingRefused = true; },
+      },
+    });
+    if (stagingRefused) return notWritten();
     pendingPath = ready;
     if (!locked() || !unchangedWorkspaceFile(ready, staged, content, ownership)) return notWritten();
     // Finish every fallible content write before moving the active guide.
@@ -560,7 +630,12 @@ function writeWorkspaceGuide(manifestPath, options, assistant) {
 }
 
 export function writeClaudeWorkspaceGuide(manifestPath, options = {}) {
-  return writeWorkspaceGuide(manifestPath, options, "claude");
+  const outcome = writeWorkspaceGuide(manifestPath, options, "claude");
+  if (!["written", "verified"].includes(outcome.status)) return outcome;
+  // This process-local sequence is content-free. It proves that the installed
+  // caller obtained a fresh accepted writer decision in this operation; route
+  // readiness still rereads the manifest and relaunches the MCP process.
+  return { ...outcome, guideGeneration: ++claudeGuideGeneration };
 }
 
 export function writeCodexWorkspaceGuide(manifestPath, options = {}) {

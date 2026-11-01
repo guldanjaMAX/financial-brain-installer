@@ -369,7 +369,7 @@ test(`verified update prints one mail handover line without an extra approval on
           platform,
           uid: 501,
           home: fixtureHome,
-          launchctl: () => { schedulerReads++; return { status: 1, stdout: "", stderr: "" }; },
+          launchctl: () => { schedulerReads++; return { status: 113, stdout: "", stderr: "not loaded" }; },
         },
         schedulerAdapter: { read: () => ({ exists: false }) },
         schedulerOptions: { home: fixtureHome, machineLockRoot: join(fixtureHome, "locks") },

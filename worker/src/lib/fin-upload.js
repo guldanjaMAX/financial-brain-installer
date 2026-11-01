@@ -42,6 +42,7 @@ import { importBankExport, balanceRoleFor, DEFAULT_TENANT } from "./fin-import.j
 import { rekeyBankExportTransactions } from "./fin-ledger-maintenance.js";
 import { maintainAccountLink } from "./fin-account-links.js";
 import { ledgerInstalled } from "./fin-d1.js";
+import { writeBankActivityDocuments } from "./bank-activity-doc.js";
 
 /** Operator-only. Mounted behind the admin-key gate in `index.js`. */
 export const BANK_IMPORT_PATH = "/api/admin/fin/import-bank-export";
@@ -302,6 +303,15 @@ export async function handleBankExportImport(env, request) {
     entityLabel: body?.entity_label ? String(body.entity_label).slice(0, 200) : null,
     origin: { provenance: "extracted", sourceDocUid: checked.envelope.sourceDocUid },
   });
+  if (receipt.imported) {
+    try {
+      await writeBankActivityDocuments(env, { metadataChanges: 1 });
+    } catch {
+      // The shared import transaction already made the replacement debt
+      // durable and the old projection non-ready. A bounded later writer pass
+      // can resume it without turning a committed ledger import into a retry.
+    }
+  }
   return jsonResponse({
     ...receipt,
     source_label: checked.envelope.sourceLabel || null,

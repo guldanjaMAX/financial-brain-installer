@@ -196,8 +196,7 @@ function recoveryFencePath(options) {
   return join(root, `brain-update-recovery-${identity}.json`);
 }
 
-export function readBrainRecoveryFence({ manifestPath, platform = process.platform, machineLockRoot } = {}) {
-  const path = recoveryFencePath({ manifestPath, platform, machineLockRoot });
+function readRecoveryFenceAtPath(path) {
   if (!existsSync(path)) return null;
   const state = lstatSync(path);
   if (!state.isFile() || state.isSymbolicLink() || state.nlink !== 1 || state.size > 2048) {
@@ -213,6 +212,37 @@ export function readBrainRecoveryFence({ manifestPath, platform = process.platfo
     throw failure("brain_lifecycle_unsafe", "the Brain update recovery fence is malformed");
   }
   return Object.freeze({ ...value, path });
+}
+
+export function readBrainRecoveryFence({ manifestPath, platform = process.platform, machineLockRoot } = {}) {
+  const path = recoveryFencePath({ manifestPath, platform, machineLockRoot });
+  return readRecoveryFenceAtPath(path);
+}
+
+/**
+ * Preview-only recovery lookup. A missing machine root means no fence; an
+ * existing root is validated but never created or permission-repaired.
+ */
+export function readBrainRecoveryFenceReadOnly({
+  manifestPath,
+  platform = process.platform,
+  machineLockRoot,
+} = {}) {
+  const identity = brainIdentityFromManifest(manifestPath);
+  const lexicalRoot = resolve(machineLockRoot || defaultMachineLockRoot(platform));
+  if (!existsSync(lexicalRoot)) return null;
+  const state = lstatSync(lexicalRoot);
+  if (!state.isDirectory() || state.isSymbolicLink()) {
+    throw failure("brain_lifecycle_unsafe", "the machine Brain lock root must be one real directory");
+  }
+  if (platform !== "win32" && ((state.mode & 0o002) === 0 || (state.mode & 0o1000) === 0)) {
+    throw failure(
+      "brain_lifecycle_unsafe",
+      "the machine Brain lock root does not have the required shared permissions",
+    );
+  }
+  const root = realpathSync(lexicalRoot);
+  return readRecoveryFenceAtPath(join(root, `brain-update-recovery-${identity}.json`));
 }
 
 export function writeBrainRecoveryFence({

@@ -81,7 +81,7 @@ test("dual control preserves exact ledger bytes and both targets", async t => {
   const f = fixture(t, true);
   const report = await sync.runCuratedDualSync(f.plan, f.options);
   assert.equal(report.ok, true);
-  assert.equal(f.calls.length, 10);
+  assert.equal(f.calls.length, 9);
   assert.equal(f.calls.filter(call => call.path.endsWith("/curated-verify")).length, 3);
   assert.deepEqual(report.actions, { legacy: { created: 0, updated: 0, unchanged: 3 }, cloudflare: { created: 0, updated: 0, unchanged: 3 } });
   assert.deepEqual(Object.keys(report.targetCoverage), ["cloudflare_confirmed", "legacy_confirmed"]);
@@ -97,7 +97,7 @@ test("Cloudflare-only sync confirms writes and emits no legacy aggregates", asyn
   const report = await sync.runCuratedDualSync(f.plan, { ...f.options,
     expectedTargetFingerprints: { cloudflare: contracts.cloudflare.manifestFingerprint } });
   assert.equal(report.ok, true);
-  assert.equal(f.calls.length, 7);
+  assert.equal(f.calls.length, 6);
   assert.equal(f.calls.filter(call => call.path.endsWith("/curated-verify")).length, 3);
   assert.ok(f.calls.every(c => c.host === "cloudflare.fixture.invalid"));
   assert.deepEqual(report.actions, { cloudflare: { created: 0, updated: 0, unchanged: 3 } });
@@ -113,7 +113,7 @@ test("Windows target resolution obtains current-user identity before file valida
     await t.test(dual ? "dual target" : "Cloudflare only", async t => {
       const f = fixture(t, dual);
       const username = "fixture-owner";
-      const expectedRequests = dual ? 10 : 7;
+      const expectedRequests = dual ? 9 : 6;
       const options = { ...f.options, platform: "win32", home: f.common.home };
       const control = await sync.runCuratedDualSync(f.plan, { ...options, username,
         userInfo: () => { throw new Error("explicit identity must not need a lookup"); },
@@ -146,7 +146,7 @@ test("Windows identity lookup failures refuse before credential reads or request
   const options = { ...f.options, platform: "win32", home: f.common.home };
   const control = await sync.runCuratedDualSync(f.plan, { ...options, username: "fixture-owner" });
   assert.equal(control.ok, true);
-  assert.equal(f.calls.length, 7);
+  assert.equal(f.calls.length, 6);
   f.calls.length = 0;
   for (const fault of ["missing", "blank", "throw"]) {
     let identities = 0;
@@ -178,7 +178,7 @@ test("Windows identity lookup failures refuse before credential reads or request
 test("partial and malformed targets refuse after a valid nonempty control", async t => {
   const f = fixture(t, true);
   assert.equal((await sync.runCuratedDualSync(f.plan, f.options)).ok, true);
-  assert.equal(f.calls.length, 10);
+  assert.equal(f.calls.length, 9);
   let attempts = 0;
   for (const name of ["legacy_target", "cloudflare_target"]) {
     for (const invalid of [null, false, {}, [], { manifest: "target.json" }, { backend: f.plan[name].backend }, { ...f.plan[name], backend: "wrong" }]) {
@@ -236,7 +236,7 @@ test("single-target freshness records and validates exactly the planned coverage
     });
   } finally { closeSync(fd); }
   assert.equal(runs, 1);
-  assert.equal(f.calls.length, 7);
+  assert.equal(f.calls.length, 6);
   assert.deepEqual(result.receipt.target_coverage, { cloudflare: 3 });
   assert.deepEqual(scheduler.statusScheduledCuratedSync(f.path, f.common).freshness.targetCoverage, { cloudflare: 3 });
   const lastSuccess = readFileSync(plan.freshnessPath);
@@ -256,7 +256,7 @@ test("single-target freshness records and validates exactly the planned coverage
     }), /did not confirm every required target/);
   } finally { closeSync(failedFd); }
   assert.equal(failedRuns, 1);
-  assert.equal(f.calls.length, 10, "failed sync reached all three writes after the green control");
+  assert.equal(f.calls.length, 9, "failed sync reached all three writes after the green control");
   assert.deepEqual(readFileSync(plan.freshnessPath), lastSuccess);
   for (const coverage of [{ cloudflare: 2 }, { cloudflare: 3, legacy: 3 }, {}]) {
     writeFileSync(plan.freshnessPath, JSON.stringify({ ...result.receipt, target_coverage: coverage }));
@@ -277,7 +277,7 @@ test("preview prints local counts without credentials or ledger mutation", async
     writeLedger: () => { writes++; },
   });
   assert.deepEqual(report.preview, { documents: 3, roles: f.plan.expected_roles, adds: 0, updates: 1, unchanged: 2, removed: 0 });
-  assert.equal(f.calls.length, 10);
+  assert.equal(f.calls.length, 9);
   assert.equal(resolves, 0);
   assert.equal(writes, 0);
   assert.deepEqual(readFileSync(ledgerPath), prior);
@@ -362,6 +362,7 @@ test("historical Drive evidence and incomplete Cloudflare receipts remain fail c
   f.plan.raw_drive = { state_file: "drive-state.json", path_prefix: "Fixture", match: "path", require_state_match: true };
   f.save();
   let readbacks = 0;
+  let revisionReads = 0;
   let incomplete = false;
   const fetch = async (url, options) => {
     const result = await f.options.fetch(url, options);
@@ -370,22 +371,34 @@ test("historical Drive evidence and incomplete Cloudflare receipts remain fail c
       readbacks++;
       const value = JSON.parse(await result.text());
       if (body.source === "drive") value.families = docs.map((_, i) => `drive:fixture-${i}`);
-      else if (incomplete) value.families.pop();
       return { ...result, text: async () => JSON.stringify(value) };
+    }
+    if (new URL(url).pathname.endsWith("/curated-verify")) {
+      revisionReads++;
+      if (incomplete && body.source_id.endsWith("fixture-gamma")) return {
+        ...result, text: async () => JSON.stringify({ confirmed: false, doc_uid: `curated:${body.source_id}`, envelope_sha256: null }),
+      };
     }
     return result;
   };
-  const control = await sync.runCuratedDualSync(f.plan, { ...f.options, fetch });
+  const control = await sync.runCuratedDualSync(f.plan, { ...f.options, mode: "audit", fetch });
   assert.equal(control.ok, true);
-  assert.equal(readbacks, 2);
+  assert.equal(readbacks, 1);
   assert.equal(control.rawDriveHistoricalChecksumMatches.total, 1);
   assert.equal(control.rawDriveHistoricalChecksumMismatches.total, 1);
   assert.equal(control.rawDriveHistoricalPresenceUnverified.total, 1);
   assert.equal(control.ledger.raw_drive_evidence.deletion_eligible, false);
+  const synced = await sync.runCuratedDualSync(f.plan, { ...f.options, fetch });
+  assert.equal(synced.ok, true);
+  assert.equal(synced.targetCoverage.cloudflare_confirmed.total, 3);
+  assert.equal(revisionReads, 3);
+  assert.deepEqual(synced.advisories, ["RAW_DRIVE_AUDIT_DEFERRED"]);
+  assert.ok(synced.ledger.documents.every(document => document.raw_drive === "not_verified"));
   incomplete = true;
   const failed = await sync.runCuratedDualSync(f.plan, { ...f.options, fetch });
   assert.equal(failed.ok, false);
-  assert.equal(readbacks, 4);
+  assert.equal(readbacks, 1, "sync never enumerates historical families");
+  assert.equal(revisionReads, 6, "both syncs reached every revision check");
   assert.equal(failed.targetCoverage.cloudflare_confirmed.total, 2);
 });
 
@@ -595,10 +608,10 @@ test("F4 older remote revision cannot advance scheduled freshness", async t => {
     const path = new URL(url).pathname;
     const body = JSON.parse(options.body);
     if (path.endsWith("/ingest")) stored.set(`curated:${body.source_id}`, structuredClone(body));
-    if (path.endsWith("/source-families")) {
+    if (path.endsWith("/curated-verify")) {
       readbacks++;
       // A writer on another machine can defeat any local lock. Its successful
-      // older POST lands between this run's write and confirmation.
+      // older POST lands between this run's write and exact confirmation.
       if (race) for (const [uid, value] of original) stored.set(uid, structuredClone(value));
     }
     if (path.endsWith("/curated-verify")) {
@@ -624,7 +637,7 @@ test("F4 older remote revision cannot advance scheduled freshness", async t => {
   race = true;
   let failure;
   try { await run(); } catch (error) { failure = error; }
-  assert.equal(readbacks, 2, "both runs reached final family readback");
+  assert.equal(readbacks, 6, "both runs reached every exact revision readback");
   assert.equal(stored.size, 3, "identities alone still match");
   assert.ok(failure, "an older stored revision must refuse completion");
   assert.match(failure.message, /did not confirm every required target/);

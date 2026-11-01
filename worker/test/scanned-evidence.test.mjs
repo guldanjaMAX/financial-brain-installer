@@ -597,9 +597,9 @@ test("a partial OCR read of the exact filing keeps the merged unreadable refusal
   assert.equal(body.gaps.some((gap) => gap.type === "tax_evidence_unreadable"), true);
   assert.match(body.notice || "", /could not be read reliably/);
   assertNoScannedTrace(text);
-  assert.equal(digest(text), "9316f98d27cc3aec36bb2bd440d32656ec90b1194fd2aac032f169ac87ad1932", "partial tax /think response bytes");
+  assert.equal(digest(text), "af9badb3318cb85cf3f4584ca8b17c62f4af514c10b43f4479b8cf703ce103f2", "partial tax /think response bytes");
   assert.deepEqual(promptDigests(prompts), {
-    answer: "4925b7c2872d8bd917cc3043b5a54f7df08a65fa58342660818f4fb30a4b50d9",
+    answer: "443de547029fe4e8e9d3c0244df8ce5e107a6276a7a80f2e240db9f90f51010d",
     verifier: "02f741f0c66d5103766e4678d2b7848b25219bdac71a2251f11718242c8e4b44",
   }, "both model prompts are byte-identical to main");
 });
@@ -611,9 +611,9 @@ test("an unknown text source for the exact filing keeps the merged unreadable re
   assert.equal(body.evidence_gate?.reason, TAX_UNREADABLE_REASON);
   assert.equal(body.gaps.some((gap) => gap.type === "tax_evidence_unreadable"), true);
   assertNoScannedTrace(text);
-  assert.equal(digest(text), "9007e9cb76c27111fb46219fe4b41fe5d4d7a9fdd138c9f6a78163aa9b12a5d0", "unknown tax /think response bytes");
+  assert.equal(digest(text), "7c596e7079b6625501e959b593477bfd4803d1801942f9147b9b47ff915dade4", "unknown tax /think response bytes");
   assert.deepEqual(promptDigests(prompts), {
-    answer: "6ce3566fbf62d8585b70b022843466b737adbdc2a5e3f9893b248aa7781a294c",
+    answer: "000db50fedf0b7e8b8a50ac48e9867e7773040d5e12f4ed38f4d61ab13692d5e",
     verifier: "07b1f8359fed51608a8f52b7216df19348bee3563e293dac92c8ff3cd69c0262",
   }, "both model prompts are byte-identical to main");
 });
@@ -623,9 +623,9 @@ test("the native filing answers the tax question exactly as main did", async () 
   const { text, body } = await think({ rows: [taxReturnRow("native")], answer: A_TAX, prompts }, Q_TAX);
   assert.equal(body.answer, A_TAX);
   assertNoScannedTrace(text);
-  assert.equal(digest(text), "3e89cc9b966e910a787d09dce2781d3cbfa19073707dd208d7512512e2991d3e", "native tax /think response bytes");
+  assert.equal(digest(text), "2acebe1cdf86fc2971af40171a7ca57a9fe1eaa2e0c03f93aad3e37918d695a3", "native tax /think response bytes");
   assert.deepEqual(promptDigests(prompts), {
-    answer: "5d2c4bdb43c139f5a3ec06b29b2be0438b26ebdf191198b873d4f0718b22d172",
+    answer: "8c4fb5cdb8017bb62172fac170621e7a8ab933e6b0b0a004c4775767e026738a",
     verifier: "8dfc28095856ab29287b7fc867bd96ec49e1ac6f0df6a9ccca49975d90428a2c",
   }, "both model prompts are byte-identical to main");
 });
@@ -856,9 +856,9 @@ const PINNED = Object.freeze({
     },
   },
   markedTax: {
-    response: "de3306691a648add31d3d06535045d90c7ade35072e96c7e8503d25b5de4ce14",
+    response: "b911ff143547aa918a8f0c12dcc3a8a9c50992e217bb456c746ca2ca5b5203b6",
     prompts: {
-      answer: "c4cfb0e1573e9477960e7f65d9708500913c5317c4cdd7dee8fe212d32f4bcba",
+      answer: "07a299a001668602cc9e09d0fe69e1286cb08e19a26d6a0b89708664f0d287a0",
       verifier: "a191e680b3641aac01a71f68239e6765da2fea69c8a21ef4d85a0b4ccbab91f3",
     },
   },
@@ -866,9 +866,9 @@ const PINNED = Object.freeze({
   markedGeneral: "6db28f02fca77a46b961336eb5a583abf329a95d9ed4ce6ac871595fe4b949e8",
   markedGeneralMcpAsk: "7bcf60627fa7808d5b8ca6467ec42fdc3ad6356f000e953c33bca6c3b327ed5f",
   markedGeneralCli: "5c6d078b783ed5993ae2296e778309ea39940991d5bfd7a83194bae867e45a42",
-  scannedTaxModelRefusal: "194443c7bcd688031cf6e88c356dd43c0d46737ac11e37474c382ca980435b97",
-  markedTaxGateRefusal: "c72a42bcbc461efcb3923b5442beb0ef14d48ce0f2d46432c852e9a3042654fd",
-  scannedTaxGateRefusal: "7b6c75a8a33c7f2d40b6c80aaa79b55b1a03aaf71a6f3dbd666dc47bd183c572",
+  scannedTaxModelRefusal: "f7777be50778356ee3adf98bc97e75f5fd15ce07bcf87d7cc6040da8bf159355",
+  markedTaxGateRefusal: "fd1f179a3d101de3a1c33a0c8c2f8cd86c51f251eca94ae81e413d9eae14ecf3",
+  scannedTaxGateRefusal: "f683fbf935fa52b3761d827cfa10b417f122556923b31a1204b2f4545f515434",
 });
 
 /** The fields that carry a refusal's disclosure, in response order. */
@@ -1052,7 +1052,8 @@ test("a scanned filing whose cited chunk carries an unreadable mark keeps the me
   assert.equal(body.answer, null);
   assert.equal(body.status, "coverage_incomplete");
   assert.equal(body.evidence_gate?.reason, TAX_UNREADABLE_REASON);
-  assert.equal(body.gaps[0]?.type, "tax_evidence_unreadable");
+  assert.equal(body.gaps[0]?.reason, "ledger_wording_unsupported");
+  assert.equal(body.gaps[1]?.type, "tax_evidence_unreadable");
   assert.equal(body.notice, TAX_UNREADABLE_NOTICE);
   assertNoScannedTrace(text);
   assert.equal(digest(text), PINNED.markedTax.response, "marked tax /think response bytes");
@@ -1073,7 +1074,8 @@ test("a clean scan of the filing that the model finds nothing in still gets the 
   assert.equal(body.answer, null, `not a plain refusal: ${JSON.stringify({ answer: body.answer, notice: body.notice })}`);
   assert.equal(body.status, "coverage_incomplete");
   assert.equal(body.notice, TAX_UNREADABLE_NOTICE);
-  assert.equal(body.gaps[0]?.type, "tax_evidence_unreadable");
+  assert.equal(body.gaps[0]?.reason, "ledger_wording_unsupported");
+  assert.equal(body.gaps[1]?.type, "tax_evidence_unreadable");
   assert.equal(scannedGapOf(body), undefined, "a refusal rests on nothing");
   assert.equal(body.confidence, undefined, "an unproven absence carries no refusal confidence");
   assert.equal(digest(disclosureOf(body)), PINNED.scannedTaxModelRefusal, "the disclosure is main's, field for field");
@@ -1090,7 +1092,8 @@ test("a clean scan of the filing whose draft the evidence gate refuses gets the 
   assert.equal(body.answer, null);
   assert.equal(body.status, "coverage_incomplete", `not the generic evidence-check notice: ${body.notice}`);
   assert.equal(body.notice, TAX_UNREADABLE_NOTICE);
-  assert.equal(body.gaps[0]?.type, "tax_evidence_unreadable");
+  assert.equal(body.gaps[0]?.reason, "ledger_wording_unsupported");
+  assert.equal(body.gaps[1]?.type, "tax_evidence_unreadable");
   assert.equal(scannedGapOf(body), undefined);
   assert.equal(digest(disclosureOf(body)), PINNED.scannedTaxGateRefusal, "the disclosure is main's, field for field");
 });

@@ -17,6 +17,7 @@ export const BUSY = "Anthropic is busy right now, or this account reached its pe
 export const UNREACHABLE = "This computer could not reach Anthropic. Check the internet connection, click Copy again in the key window, and rerun the same command. Nothing was changed.";
 export const CHECK_FAILED = "Anthropic refused the test message for a reason this installer does not recognize. Nothing was changed. Support code: ANTHROPIC_CHECK_FAILED.";
 export const CHECK_PROBLEM = "The answer model check could not be read completely. Your current answer setup was kept. In a few minutes, run the same check again. Support code: ANTHROPIC_CHECK_FAILED.";
+export const SECRET_READBACK_FAILED = "Cloudflare did not show the saved Anthropic secret after repeated readback checks. The change was rolled back. In a few minutes, rerun the same command. Support code: CLOUDFLARE_SECRET_READBACK_FAILED.";
 export const CLIPBOARD_CLEAR_WARNING = "Claude answers are connected, but this command could not clear the clipboard. Clear it now before closing the key window; a clipboard history app may still keep a copy.";
 export const ROLLED_BACK_BUILT_IN = "Your Brain could not answer with Claude using this key, so it was put back on the built-in model. Fix the item below, then rerun the same command.";
 export const ROLLED_BACK_PREVIOUS = "The change could not be finished, so your Brain was put back exactly as it was. Fix the item below, then rerun the same command.";

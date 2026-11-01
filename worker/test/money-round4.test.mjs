@@ -20,6 +20,12 @@ test.before(() => {
 test.after(() => { assert.equal(network, 0); assert.equal(subprocesses, 0); mock.restoreAll(); syncBuiltinESMExports(); });
 
 const question = 'How much money came in and went out in September 2026?';
+const ledgerWordingUnsupportedGap = {
+  type: 'ledger_not_consulted',
+  reason: 'ledger_wording_unsupported',
+  code: 'ledger_wording_unsupported',
+  detail: 'The bank records were not checked for this wording. Try: "What are my account balances?", "How much money came in and went out in September 2026?", or "Did the payment of $123.45 arrive?"',
+};
 const ask = (f, q = question, next = async gap => new Response(JSON.stringify({ answer: null, gaps: [gap] }))) =>
   withLedgerAnswer({ env: f.env, question: q, grantScope: { all: true }, scopePrincipalKind: 'owner', now: NOW }, next).then(r => r.json());
 const total = (b, k) => b.ledger.accounts.reduce((n, a) => n + a[k], 0);
@@ -41,7 +47,7 @@ function collision(f, extra = {}) {
 async function documentAnswer(t, { title = 'Card statement', content = 'Card ending 4242 charged USD 120.00.', metadata = {}, sourceKind = 'gmail', dateReliable = true } = {}) {
   let drafts = 0, verifiers = 0;
   const answer = 'Card ending 4242 charged USD 120.00 [1].';
-  const f = await createProductFixture({ env: { ADMIN_KEY: randomBytes(32).toString('hex'),
+  const f = await createProductFixture({ env: { BRAIN_TIMEZONE: 'UTC', ADMIN_KEY: randomBytes(32).toString('hex'),
     SESSION_SIGNING_KEY: randomBytes(32).toString('hex'), AI: { async run(model, input) {
       if (model.includes('bge-')) return { data: [[0.1, 0.2, 0.3]] };
       if (String(input.messages?.[0]?.content).includes('verify a proposed answer')) {
@@ -133,7 +139,7 @@ test('N03 variant: a document-only historical question outside feed coverage sti
 test('N03 real route: an expense policy remains answerable with an unrelated historical collision', async t => {
   let drafts = 0, verifiers = 0;
   const answer = 'Receipts are required for reimbursement [1].';
-  const f = await createProductFixture({ env: { ADMIN_KEY: randomBytes(32).toString('hex'),
+  const f = await createProductFixture({ env: { BRAIN_TIMEZONE: 'UTC', ADMIN_KEY: randomBytes(32).toString('hex'),
     SESSION_SIGNING_KEY: randomBytes(32).toString('hex'), AI: { async run(model, input) {
       if (model.includes('bge-')) return { data: [[0.1, 0.2, 0.3]] };
       if (String(input.messages?.[0]?.content).includes('verify a proposed answer')) {
@@ -301,17 +307,28 @@ test('N03 a supported question outside the collision window uses document fallba
   assert.equal(b.gaps[0].reason, 'period_outside_coverage'); assert.equal(b.code, undefined);
 });
 
-test('N03 unsupported and non-ledger questions preserve exact response identity, bytes and headers', async t => {
+test('N03 non-ledger questions preserve exact response identity while unsupported money adds its gap', async t => {
   const f = fixture(); t.after(f.close); collision(f);
   assert.equal((await ask(f)).code, 'ledger_account_link_required', 'positive collision decision reached');
-  for (const question of ['What are the office expense reimbursement rules?', 'How do I balance work and rest?', 'What invoice was paid in January 2020?']) {
+  for (const [question, expectedGap] of [
+    ['What are the office expense reimbursement rules?', null],
+    ['How do I balance work and rest?', null],
+    ['What invoice was paid in January 2020?', ledgerWordingUnsupportedGap],
+  ]) {
     const raw = '{"answer":"Human record", "gaps":[]}';
     const expected = new Response(raw, { headers: { 'X-Document-Result': 'preserved' } });
     let calls = 0; const before = f.seen.length;
     const actual = await withLedgerAnswer({ env: f.env, question, now: NOW, grantScope: { all: true }, scopePrincipalKind: 'owner' }, async gap => {
-      calls++; assert.equal(gap, null); return expected;
+      calls++; assert.deepEqual(gap, expectedGap); return expected;
     });
-    assert.equal(calls, 1); assert.equal(actual, expected); assert.equal(await actual.text(), raw);
+    assert.equal(calls, 1);
+    if (expectedGap) {
+      assert.notEqual(actual, expected);
+      assert.equal(await actual.text(), JSON.stringify({ answer: 'Human record', gaps: [expectedGap] }));
+    } else {
+      assert.equal(actual, expected);
+      assert.equal(await actual.text(), raw);
+    }
     assert.equal(actual.headers.get('X-Document-Result'), 'preserved'); assert.equal(f.seen.length, before);
   }
 });

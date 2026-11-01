@@ -11,7 +11,9 @@ import { linkAccounts } from "./fixtures/money-fix/fixture.mjs";
 
 const NOW = "2026-10-11T12:00:00.000Z";
 const stamp = "2026-10-11T10:00:00.000Z";
-test.before(() => mock.method(Date, "now", () => Date.parse(NOW)));
+const unsupportedLedgerWordingDetail = 'The bank records were not checked for this wording. Try: "What are my account balances?", "How much money came in and went out in September 2026?", or "Did the payment of $123.45 arrive?"';
+let clockNow = NOW;
+test.before(() => mock.method(Date, "now", () => Date.parse(clockNow)));
 test.after(() => mock.restoreAll());
 const fallback = async () => new Response(JSON.stringify({ answer: null, citations: [], gaps: [] }));
 const direct = (f, question, extra = {}) => withLedgerAnswer({ env: f.env, question,
@@ -22,6 +24,7 @@ async function fixtureFor(t) {
     ADMIN_KEY: randomBytes(24).toString("hex"),
     SESSION_SIGNING_KEY: randomBytes(32).toString("hex"),
     RAG_PROXY_KEY: randomBytes(24).toString("hex"),
+    BRAIN_TIMEZONE: "UTC",
     AI: { async run(model) {
       if (String(model).includes("bge-")) return { data: [[0.1, 0.2, 0.3]] };
       return { response: "The documents do not answer the question." };
@@ -89,6 +92,247 @@ test("Think totals exclude the manual twin inside live coverage", async (t) => {
   assert.equal(f.sqlite.prepare("SELECT total_changes() AS n").get().n, before);
 });
 
+test("C-R4: real Think propagates owner time zone and refuses only derived invalid windows", async (t) => {
+  clockNow = "2026-10-01T02:30:00Z";
+  t.after(() => { clockNow = NOW; });
+  const f = await fixtureFor(t);
+  const transactionDecisions = () => f.seen.sql.filter(sql => /fin_transactions/.test(sql)).length;
+  const bindsSince = index => f.seen.binds.slice(index).flat();
+
+  f.env.BRAIN_TIMEZONE = "America/Phoenix";
+  const sqlBeforeOwner = f.seen.sql.length;
+  const owner = await (await f.ask("How much money came in this month?")).json();
+  assert.equal(owner.ledger?.kind, "totals", "real Think ledger decision reached");
+  assert.deepEqual([owner.ledger.from, owner.ledger.to], ["2026-09-01", "2026-09-30"]);
+  assert.equal(owner.ledger.time_zone, "America/Phoenix");
+  assert.ok(bindsSince(sqlBeforeOwner).includes("2026-08-26"), "owner window plus transfer padding reached SQL from bound");
+  assert.ok(bindsSince(sqlBeforeOwner).includes("2026-10-06"), "owner window plus transfer padding reached SQL to bound");
+  const afterOwnerTransactions = transactionDecisions();
+  assert.ok(afterOwnerTransactions > 0, "transaction SQL decision counter advanced");
+
+  f.env.BRAIN_TIMEZONE = "Invalid/Zone";
+  const invalid = await (await f.ask("How much money came in this month?")).json();
+  assert.equal(invalid.gaps?.[0]?.reason, "owner_timezone_unavailable", "nonempty time-zone gap decision reached");
+  assert.equal(transactionDecisions(), afterOwnerTransactions, "invalid derived window runs no transaction SQL");
+  assert.equal(invalid.ledger, undefined, "invalid derived window emits no ledger figure");
+  assert.equal(invalid.citations?.some(citation => citation.source_kind === "ledger") || false, false);
+
+  delete f.env.BRAIN_TIMEZONE;
+  const missing = await (await f.ask("How much money came in this month?")).json();
+  assert.equal(missing.gaps?.[0]?.reason, "owner_timezone_unavailable", "missing binding reaches the same gap");
+  assert.equal(transactionDecisions(), afterOwnerTransactions, "missing derived window runs no transaction SQL");
+  assert.equal(missing.ledger, undefined);
+
+  f.env.BRAIN_TIMEZONE = "Invalid/Zone";
+  const historical = await (await f.ask("How much money came in and went out in September 2026?")).json();
+  assert.equal(historical.ledger?.kind, "totals", "explicit month and year remains usable");
+  assert.deepEqual([historical.ledger.from, historical.ledger.to], ["2026-09-01", "2026-09-30"]);
+  const explicitPayment = await (await f.ask("Did the payment of $120.01 arrive on 2026-09-15?")).json();
+  assert.equal(explicitPayment.ledger?.found, true, "explicit ISO payment date remains usable");
+  const balance = await (await f.ask("What is my current balance?")).json();
+  assert.equal(balance.ledger?.kind, "balance", "window-free balance remains usable");
+
+  f.env.BRAIN_TIMEZONE = "UTC";
+  const utc = await (await f.ask("How much money came in this month?")).json();
+  assert.deepEqual([utc.ledger.from, utc.ledger.to], ["2026-10-01", "2026-10-01"]);
+  assert.equal(utc.ledger.time_zone, "UTC", "UTC control reaches the next calendar day");
+});
+
+test("item C real Think keeps explicit current bounds and refuses derived windows before SQL", async (t) => {
+  clockNow = "2026-10-01T02:30:00Z";
+  t.after(() => { clockNow = NOW; });
+  const f = await fixtureFor(t);
+  f.raw("UPDATE fin_account_coverage SET covered_to='2026-10-31'");
+  f.add("october-deposit", "live-account", "2026-10-15", 13001);
+  const transactionDecisions = () => f.seen.sql.filter(sql => /fin_transactions/.test(sql)).length;
+  const zoneStates = [["valid owner-day-different", "America/Phoenix"], ["missing", null], ["invalid", "Invalid/Zone"]];
+  const figureControls = [];
+  let explicitSqlDecisions = 0, historicalControls = 0, refusalDecisions = 0;
+
+  for (const [zoneState, timeZone] of zoneStates) {
+    if (timeZone === null) delete f.env.BRAIN_TIMEZONE;
+    else f.env.BRAIN_TIMEZONE = timeZone;
+    const sqlBefore = transactionDecisions();
+    const explicit = await (await f.ask("How much money came in October 2026?")).json();
+    assert.equal(explicit.ledger?.kind, "totals", `${zoneState}: explicit classification reached the ledger`);
+    assert.deepEqual([explicit.ledger.from, explicit.ledger.to], ["2026-10-01", "2026-10-31"]);
+    assert.ok(transactionDecisions() > sqlBefore, `${zoneState}: explicit window reached transaction SQL`);
+    explicitSqlDecisions++;
+    figureControls.push(JSON.stringify({ from: explicit.ledger.from, to: explicit.ledger.to,
+      accounts: explicit.ledger.accounts.map(account => [
+        account.account_mask, account.credits_minor, account.debits_minor,
+      ]) }));
+
+    if (zoneState !== "valid owner-day-different") {
+      const historicalSqlBefore = transactionDecisions();
+      const historical = await (await f.ask("How much money came in September 2026?")).json();
+      assert.equal(historical.ledger?.kind, "totals", `${zoneState}: historical control reached the ledger`);
+      assert.deepEqual([historical.ledger.from, historical.ledger.to], ["2026-09-01", "2026-09-30"]);
+      assert.ok(transactionDecisions() > historicalSqlBefore, `${zoneState}: historical control reached transaction SQL`);
+      historicalControls++;
+    }
+  }
+  assert.equal(new Set(figureControls).size, 1, "all explicit figure controls are byte-identical");
+
+  const derivedCases = [
+    ["current month", "How much money came in this month?"],
+    ["last month", "How much money came in last month?"],
+    ["rolling days", "How much money came in in the last 30 days?"],
+    ["year to date", "How much money came in so far this year?"],
+    ["explicit current year to date", "Show me money in and out in 2026 so far."],
+  ];
+  const armOutcomes = ["usable"];
+  for (const [zoneState, timeZone] of zoneStates.slice(1)) {
+    if (timeZone === null) delete f.env.BRAIN_TIMEZONE;
+    else f.env.BRAIN_TIMEZONE = timeZone;
+    for (const [period, question] of derivedCases) {
+      const sqlBefore = transactionDecisions();
+      const refused = await (await f.ask(question)).json();
+      assert.equal(refused.gaps?.[0]?.reason, "owner_timezone_unavailable", `${period} ${zoneState}: refusal decision reached`);
+      assert.equal(transactionDecisions(), sqlBefore, `${period} ${zoneState}: refusal occurs before transaction SQL`);
+      assert.equal(refused.ledger, undefined, `${period} ${zoneState}: no ledger figure`);
+      refusalDecisions++;
+      armOutcomes.push("refused");
+    }
+  }
+  assert.equal(explicitSqlDecisions, 3);
+  assert.equal(historicalControls, 2);
+  assert.equal(refusalDecisions, derivedCases.length * 2);
+  assert.equal(new Set(armOutcomes).size, 2, "real-path arms must not collapse to a uniform outcome");
+});
+
+test("item C injected clocks never supply a missing owner time zone", async () => {
+  const question = "How much money came in this month?";
+  let refusalDecisions = 0;
+  for (const [zoneState, timeZone] of [["missing", null], ["invalid", "Invalid/Zone"]]) {
+    let sqlCalls = 0, fallbackCalls = 0;
+    const env = { DB: { prepare() { sqlCalls++; throw new Error("ledger inventory control reached"); } } };
+    if (timeZone !== null) env.BRAIN_TIMEZONE = timeZone;
+    const body = await withLedgerAnswer({
+      env, question, grantScope: { all: true }, scopePrincipalKind: "owner", now: NOW,
+    }, async gap => {
+      fallbackCalls++;
+      return Response.json({ answer: null, citations: [], results: [], gaps: gap ? [gap] : [] });
+    }).then(response => response.json());
+    assert.equal(fallbackCalls, 1, `${zoneState}: document fallback decision reached once`);
+    assert.equal(body.gaps?.[0]?.reason, "owner_timezone_unavailable", `${zoneState}: derived window refused`);
+    assert.equal(sqlCalls, 0, `${zoneState}: refusal happens before ledger inventory SQL`);
+    refusalDecisions++;
+  }
+
+  let historicalSqlCalls = 0;
+  const historical = await withLedgerAnswer({
+    env: { BRAIN_TIMEZONE: "UTC", DB: { prepare() { historicalSqlCalls++; throw new Error("historical inventory control reached"); } } },
+    question: "How much money came in September 2026?", grantScope: { all: true },
+    scopePrincipalKind: "owner", now: NOW,
+  }, async gap => Response.json({ answer: null, citations: [], results: [], gaps: gap ? [gap] : [] }))
+    .then(response => response.json());
+  assert.ok(historicalSqlCalls > 0, "explicit historical control reached ledger inventory SQL");
+  assert.equal(historical.gaps?.[0]?.reason, "ledger_unavailable");
+  assert.equal(refusalDecisions, 2, "both missing-zone decision arms executed");
+});
+
+test("B-R1 broad unsupported money wording preserves a document result and adds one plain gap", async () => {
+  let callbackCalls = 0, sqlCalls = 0;
+  const callbackGaps = [];
+  const response = await withLedgerAnswer({
+    env: { BRAIN_TIMEZONE: "UTC", DB: { prepare() { sqlCalls++; throw new Error("ledger SQL must not run"); } } },
+    question: "What did the bank do for me recently?", grantScope: { all: true },
+    scopePrincipalKind: "owner", now: NOW,
+  }, async gap => {
+    callbackCalls++;
+    callbackGaps.push(gap);
+    return Response.json({ answer: "Document control", results: [{ id: "document-control" }], gaps: [] });
+  });
+  const body = await response.json();
+  assert.equal(callbackCalls, 1, "document callback decision reached once");
+  assert.equal(callbackGaps.length, 1);
+  assert.ok(callbackGaps[0], "document callback received the bank gap");
+  assert.equal(callbackGaps[0].type, "ledger_not_consulted");
+  assert.equal(callbackGaps[0].reason, "ledger_wording_unsupported");
+  assert.equal(callbackGaps[0].code, "ledger_wording_unsupported");
+  assert.equal(callbackGaps[0].detail, unsupportedLedgerWordingDetail);
+  assert.equal(sqlCalls, 0, "unsupported wording did not read ledger inventory");
+  assert.deepEqual(body.results, [{ id: "document-control" }]);
+  assert.equal(body.gaps.filter(gap => gap.reason === "ledger_wording_unsupported").length, 1);
+  assert.equal(body.gaps[0].detail, unsupportedLedgerWordingDetail);
+});
+
+test("B-R2 broad unsupported money wording leads a zero-result document gap exactly once", async () => {
+  let callbackCalls = 0, sqlCalls = 0;
+  const callbackGaps = [];
+  const ordinaryGap = { type: "no_results", reason: "no_results", detail: "Document control" };
+  const response = await withLedgerAnswer({
+    env: { BRAIN_TIMEZONE: "UTC", DB: { prepare() { sqlCalls++; throw new Error("ledger SQL must not run"); } } },
+    question: "What did the bank do for me recently?", grantScope: { all: true },
+    scopePrincipalKind: "owner", now: NOW,
+  }, async gap => {
+    callbackCalls++;
+    callbackGaps.push(gap);
+    return Response.json({ answer: null, results: [], gaps: [ordinaryGap] });
+  });
+  const body = await response.json();
+  assert.equal(callbackCalls, 1, "zero-result document decision reached once");
+  assert.equal(callbackGaps.length, 1);
+  assert.ok(callbackGaps[0], "zero-result document callback received the bank gap");
+  assert.equal(callbackGaps[0].reason, "ledger_wording_unsupported");
+  assert.equal(sqlCalls, 0, "unsupported wording did not read ledger inventory");
+  assert.deepEqual(body.results, []);
+  assert.equal(body.gaps[0].reason, "ledger_wording_unsupported");
+  assert.equal(body.gaps[0].detail, unsupportedLedgerWordingDetail);
+  assert.deepEqual(body.gaps[1], ordinaryGap);
+  assert.equal(body.gaps.filter(gap => gap.reason === "ledger_wording_unsupported").length, 1);
+});
+
+test("developer contracts describe the integrated unsupported-wording and fixed-month behavior", () => {
+  const contracts = [
+    ["architecture", readFileSync(new URL("../../docs/ARCHITECTURE.md", import.meta.url), "utf8")],
+    ["developer README", readFileSync(new URL("../../docs/README-developer.md", import.meta.url), "utf8")],
+  ];
+  let checked = 0;
+  for (const [name, text] of contracts) {
+    assert.match(text, /ledger_wording_unsupported/, `${name}: unsupported wording gap is documented`);
+    assert.match(text, /explicit .*Month YYYY.*complete calendar month/is,
+      `${name}: explicit month and year is documented as a complete calendar month`);
+    assert.doesNotMatch(text, /document(?:-path| path).*refusal(?:s| rules) (?:remain|retains?) unchanged/i,
+      `${name}: retired unchanged-document-path claim is absent`);
+    checked++;
+  }
+  assert.equal(checked, contracts.length, "both developer-contract decisions were reached");
+});
+
+test("item B controls distinguish supported inventory from byte-identical non-money documents", async () => {
+  let supportedSqlCalls = 0, supportedCallbackCalls = 0;
+  await withLedgerAnswer({
+    env: { BRAIN_TIMEZONE: "UTC", DB: { prepare() { supportedSqlCalls++; throw new Error("inventory control reached"); } } },
+    question: "What are my account balances?", grantScope: { all: true },
+    scopePrincipalKind: "owner", now: NOW,
+  }, async gap => {
+    supportedCallbackCalls++;
+    assert.equal(gap?.reason, "ledger_unavailable");
+    return Response.json({ answer: null, results: [], gaps: [] });
+  });
+  assert.equal(supportedCallbackCalls, 1, "supported control completed its document fallback");
+  assert.ok(supportedSqlCalls > 0, "supported balance reached account inventory");
+
+  let nonMoneyCallbackCalls = 0, nonMoneySqlCalls = 0;
+  const expected = new Response('{"answer":"control", "results":[], "gaps":[]}', {
+    status: 203, headers: { "X-Document-Control": "preserved" },
+  });
+  const actual = await withLedgerAnswer({
+    env: { BRAIN_TIMEZONE: "UTC", DB: { prepare() { nonMoneySqlCalls++; throw new Error("ledger SQL must not run"); } } },
+    question: "How do I balance work and rest?", grantScope: { all: true },
+    scopePrincipalKind: "owner", now: NOW,
+  }, async gap => {
+    nonMoneyCallbackCalls++;
+    assert.equal(gap, null, "non-money document callback received no ledger gap");
+    return expected;
+  });
+  assert.equal(nonMoneyCallbackCalls, 1, "non-money document decision reached once");
+  assert.equal(nonMoneySqlCalls, 0);
+  assert.equal(actual, expected, "non-money response object and bytes stay untouched");
+});
+
 test("Think payment matches exact cents and returns bounded absence", async (t) => {
   const f = await fixtureFor(t);
   const found = await (await f.ask("Did the payment of $120.01 arrive on September 15, 2026?")).json();
@@ -99,6 +343,50 @@ test("Think payment matches exact cents and returns bounded absence", async (t) 
   assert.match(absent.answer, /2026-09-08.*2026-09-22/);
   assert.match(absent.answer, /covers through.*2026-10-11/);
   assert.ok(f.seen.sql.filter(sql => /fin_transactions/.test(sql)).length >= 2);
+});
+
+test("Think routes all ten reviewed everyday forms like their canonical controls", async (t) => {
+  const f = await fixtureFor(t);
+  const rows = [
+    ["D-R1", "Did Payer Unit pay?", "Did the payment from Payer Unit arrive?", "Did the second payer pay?"],
+    ["D-R2", "Has Payer Unit paid?", "Has the payment from Payer Unit posted?", "Has payroll been paid?"],
+    ["D-R3", "Did Payer Unit pay in the past month?", "Did the payment from Payer Unit arrive in the last 30 days?", "Did Payer Unit pay in the past 2 months?"],
+    ["D-R4", "Has Payer Unit paid in the last 30 days?", "Has the payment from Payer Unit posted in the last 30 days?", "Has Payer Unit paid in the last 0 days?"],
+    ["D-R5", "Did Payer Unit pay in September?", "Did the payment from Payer Unit arrive in September 2026?", "Did Payer Unit pay in September or October?"],
+    ["D-R6", "Was I paid by Payer Unit in September?", "Did the payment from Payer Unit arrive in September 2026?", "Was the invoice paid in September?"],
+    ["D-R7", "Did I get paid $120.01 in the past month?", "Did the payment of $120.01 arrive in the last 30 days?", "Did I get paid about $120.01 in the past month?"],
+    ["D-R8", "Were we paid $120.01 in the last 30 days?", "Did the payment of $120.01 arrive in the last 30 days?", "Were we paid $120.01 or $120.02 in the last 30 days?"],
+    ["D-R9", "How much did I spend in the past month?", "How much did I spend in the last 30 days?", "How much did I spend in the past 2 months?"],
+    ["D-R10", "How much money came in over the past month?", "How much money came in over the last 30 days?", "How much money came in over the past year?"],
+  ];
+  const outcome = body => ({ answer: body.answer, ledger: body.ledger, citations: body.citations,
+    gaps: body.gaps, evidence_gate: body.evidence_gate });
+  let sqlRows = 0, matchingRows = 0, documentRows = 0;
+  for (const [id, question, control, negative] of rows) {
+    const actualStart = f.seen.sql.length;
+    const actual = await (await f.ask(question)).json();
+    const actualSql = f.seen.sql.slice(actualStart);
+    assert.ok(actualSql.some(sql => /FROM fin_accounts/.test(sql)), `${id} account SQL reached`);
+    assert.ok(actualSql.some(sql => /JOIN fin_transactions/.test(sql)), `${id} transaction SQL reached`);
+    sqlRows++;
+
+    const controlStart = f.seen.sql.length;
+    const canonical = await (await f.ask(control)).json();
+    const controlSql = f.seen.sql.slice(controlStart);
+    assert.ok(controlSql.some(sql => /FROM fin_accounts/.test(sql)), `${id} canonical account SQL reached`);
+    assert.ok(controlSql.some(sql => /JOIN fin_transactions/.test(sql)), `${id} canonical transaction SQL reached`);
+    assert.deepEqual(outcome(actual), outcome(canonical), `${id} response matches canonical control`);
+    matchingRows++;
+
+    const documentStart = f.seen.sql.length;
+    const document = await (await f.ask(negative)).json();
+    const documentSql = f.seen.sql.slice(documentStart);
+    assert.ok(documentSql.length > 0, `${id} negative document callback reached`);
+    assert.equal(documentSql.some(sql => /FROM fin_accounts/.test(sql)), false, `${id} negative skipped account SQL`);
+    assert.equal(document.ledger, undefined, `${id} negative has no ledger figure`);
+    documentRows++;
+  }
+  assert.deepEqual({ sqlRows, matchingRows, documentRows }, { sqlRows: 10, matchingRows: 10, documentRows: 10 });
 });
 
 test("reader preserves manual rows outside both live-window edges and records each supplier", async (t) => {
@@ -131,6 +419,10 @@ test("all period shapes use an injected UTC calendar and covered zero periods st
     if (credits === null) {
       assert.equal(body.gaps[0].type, "ledger_out_of_coverage");
       assert.equal(body.gaps[0].accounts[0].covered_to, "2026-10-11");
+    } else if (/went out/.test(q)) {
+      assert.equal(body.ledger.kind, "expense_summary");
+      assert.equal(body.ledger.total_minor, credits);
+      assert.equal(body.ledger.includes_own_transfers, false);
     } else {
       assert.equal(body.ledger.accounts[0].credits_minor, credits);
       assert.equal(body.ledger.includes_own_transfers, true);

@@ -79,7 +79,7 @@ test('R03: same-bank last-four collision is not a verified twin relationship', a
 async function documentAnswer(t, { title = 'Card statement', content = 'Card ending 4242 charged USD 120.00.', metadata = {} } = {}) {
   let drafts = 0, verifiers = 0;
   const answer = 'Card ending 4242 charged USD 120.00 [1].';
-  const f = await createProductFixture({ env: { ADMIN_KEY: randomBytes(32).toString('hex'),
+  const f = await createProductFixture({ env: { BRAIN_TIMEZONE: 'UTC', ADMIN_KEY: randomBytes(32).toString('hex'),
     SESSION_SIGNING_KEY: randomBytes(32).toString('hex'), AI: { async run(model, input) {
       if (model.includes('bge-')) return { data: [[0.1, 0.2, 0.3]] };
       if (String(input.messages?.[0]?.content).includes('verify a proposed answer')) {
@@ -176,11 +176,25 @@ test('R02 description fallback only when an explicit payee is absent', async t =
   const f = fixture(); t.after(f.close); account(f);
   add(f, { uid: 'fallback', amount: 1200, direction: 'outflow', description: 'Cloud Tools subscription' });
   const question = 'How much did I spend at Cloud Tools in September 2026?';
-  assert.equal((await ask(f, question)).ledger.total_minor, 1200);
+  const possible = await ask(f, question);
+  assert.equal(possible.ledger.match_basis, 'possible');
+  assert.equal(possible.evidence_gate.complete, false);
+  assert.equal(possible.citations.length, 0);
+  assert.doesNotMatch(possible.answer, /\$\d[\d,]*\.\d{2}/);
+  assert.equal(Object.hasOwn(possible.ledger, 'total_minor'), false);
+  assert.equal(Object.hasOwn(possible.ledger, 'possible_subtotal_minor'), false);
   f.raw("UPDATE fin_transactions SET payee='Outside Consultant'");
   const before = f.seen.length;
-  assert.equal((await ask(f, question)).ledger.total_minor, 0);
+  const absent = await ask(f, question);
+  assert.equal(absent.ledger.match_basis, 'none');
+  assert.equal(absent.ledger.total_minor, null);
+  assert.doesNotMatch(absent.answer, /\$0\.00/);
   assert.ok(f.seen.slice(before).some(sql => sql.includes('JOIN fin_transactions')));
+  f.raw("UPDATE fin_transactions SET payee='Cloud Tools'");
+  const exact = await ask(f, question);
+  assert.equal(exact.ledger.match_basis, 'exact');
+  assert.equal(exact.ledger.total_minor, 1200);
+  assert.equal(exact.evidence_gate.complete, true);
 });
 
 test('R01 a mask shared by two owned accounts cannot identify the counterparty', async t => {
@@ -197,11 +211,15 @@ test('R01 a mask shared by two owned accounts cannot identify the counterparty',
   assert.equal(total(result, 'debits_minor'), 50000); assert.equal(total(result, 'credits_minor'), 50000);
 });
 
-test('R02 an explicit longer payee is a different merchant identity', async t => {
+test('R02 an explicit longer payee stays outside the exact subtotal and visible as possible', async t => {
   const f = fixture(); t.after(f.close); account(f);
   add(f, { uid: 'wanted', amount: 1200, direction: 'outflow', description: 'Cloud Tools', payee: 'Cloud Tools' });
   add(f, { uid: 'other', amount: 80000, direction: 'outflow', description: 'Cloud Tools', payee: 'Cloud Tools Consulting' });
   const before = f.seen.length;
-  assert.equal((await ask(f, 'How much did I spend at Cloud Tools in September 2026?')).ledger.total_minor, 1200);
+  const result = await ask(f, 'How much did I spend at Cloud Tools in September 2026?');
+  assert.equal(result.ledger.total_minor, null);
+  assert.equal(result.ledger.exact_subtotal_minor, 1200);
+  assert.equal(result.ledger.possible_subtotal_minor, 80000);
+  assert.equal(result.evidence_gate.complete, false);
   assert.ok(f.seen.slice(before).some(sql => sql.includes('JOIN fin_transactions')));
 });

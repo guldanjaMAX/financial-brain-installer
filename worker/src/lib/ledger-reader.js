@@ -126,7 +126,24 @@ export function accountLinkPairsInWindow(account, intent) {
   });
 }
 
-async function snapshotRows(env, accounts, sql, binds, { tenantId, mask, accountKind }) {
+function selectedSnapshotAccounts(accounts, { mask, accountKind, effectiveAccountSlugs = null }) {
+  let allowed = null;
+  if (effectiveAccountSlugs !== null) {
+    if (!Array.isArray(effectiveAccountSlugs) || !effectiveAccountSlugs.length ||
+        effectiveAccountSlugs.some(slug => typeof slug !== "string" || !slug.length) ||
+        new Set(effectiveAccountSlugs).size !== effectiveAccountSlugs.length) {
+      throw new Error("ledger account allow-list invalid");
+    }
+    allowed = new Set(effectiveAccountSlugs);
+  }
+  const selected = accounts.filter(account => (!allowed || allowed.has(account.account_slug)) &&
+    (!mask || account.mask === mask) && (!accountKind || account.account_kind === accountKind));
+  if (allowed && selected.length !== allowed.size) throw new Error("ledger account allow-list changed");
+  return selected;
+}
+
+async function snapshotRows(env, accounts, sql, binds, { tenantId, mask, accountKind,
+  effectiveAccountSlugs = null }) {
   // D1 batches run transactionally. Re-read the account mapping beside the
   // rows in that same snapshot, so a sync/assignment after account selection
   // cannot combine old coverage exclusions with new transactions or balances.
@@ -135,8 +152,13 @@ async function snapshotRows(env, accounts, sql, binds, { tenantId, mask, account
     env.DB.prepare(sql).bind(...binds),
   ]);
   if (!Array.isArray(inventory?.results) || !Array.isArray(facts?.results)) throw new Error("ledger snapshot unavailable");
-  const current = groupAccounts(inventory.results).filter(a => (!mask || a.mask === mask) && (!accountKind || a.account_kind === accountKind));
-  if (JSON.stringify(current) !== JSON.stringify(accounts)) throw new Error("ledger mapping changed");
+  const currentInventory = groupAccounts(inventory.results);
+  const current = selectedSnapshotAccounts(currentInventory, { mask, accountKind, effectiveAccountSlugs });
+  // An explicit effective-account list is derived from the whole authorized
+  // inventory. Validate that inventory in this same snapshot, while the facts
+  // query and its row bound remain limited to the exact selected mappings.
+  const expected = effectiveAccountSlugs === null ? current : currentInventory;
+  if (JSON.stringify(expected) !== JSON.stringify(accounts)) throw new Error("ledger mapping changed");
   return facts.results;
 }
 
@@ -187,9 +209,11 @@ export function effectivePeriodCovered(account, from, to) {
 }
 
 export async function readEffectiveTransactions(env, accounts, { from, to, amountMinor = null,
-  tenantId = env.BANK_FEED_TENANT || DEFAULT_TENANT, mask = null, accountKind = null } = {}) {
-  if (accounts.some(unknownTwinCoverage)) throw new Error("ledger twin coverage unknown");
-  const mapping = accounts.flatMap(account => account.members.map(member => ({
+  tenantId = env.BANK_FEED_TENANT || DEFAULT_TENANT, mask = null, accountKind = null,
+  effectiveAccountSlugs = null } = {}) {
+  const selected = selectedSnapshotAccounts(accounts, { mask, accountKind, effectiveAccountSlugs });
+  if (selected.some(unknownTwinCoverage)) throw new Error("ledger twin coverage unknown");
+  const mapping = selected.flatMap(account => account.members.map(member => ({
     slug: member.account_slug, effective: account.account_slug,
     // A twin's live rows are authoritative only inside its proven interval;
     // the complete manual source supplies the outside interval alone.
@@ -225,7 +249,9 @@ export async function readEffectiveTransactions(env, accounts, { from, to, amoun
     ${select} AND t.posted_on BETWEEN ?3 AND ?4
     UNION ALL ${select} AND t.posted_on IS NULL
     ) LIMIT ?6`,
-  [JSON.stringify(mapping), tenantId, from, to, amountMinor, MAX_ROWS + 1], { tenantId, mask, accountKind });
+  [JSON.stringify(mapping), tenantId, from, to, amountMinor, MAX_ROWS + 1], {
+    tenantId, mask, accountKind, effectiveAccountSlugs,
+  });
   if (result.length > MAX_ROWS) throw new Error("ledger row limit");
   // Sorting in SQL before LIMIT scans the entire covered range. Sort only
   // after the bound is proven, so a large ledger stops at the overflow row.
@@ -234,8 +260,10 @@ export async function readEffectiveTransactions(env, accounts, { from, to, amoun
 
 export async function readEffectiveBalances(env, accounts, {
   tenantId = env.BANK_FEED_TENANT || DEFAULT_TENANT, mask = null, accountKind = null,
+  effectiveAccountSlugs = null,
 } = {}) {
-  const mapping = accounts.flatMap(account => account.members.map(member => ({
+  const selected = selectedSnapshotAccounts(accounts, { mask, accountKind, effectiveAccountSlugs });
+  const mapping = selected.flatMap(account => account.members.map(member => ({
     slug: member.account_slug, effective: account.account_slug, live: member.feed_mode === "live" ? 1 : 0,
     last_synced_at: member.feed_mode === "live" ? member.last_synced_at : null,
   })));
@@ -247,5 +275,7 @@ export async function readEffectiveBalances(env, accounts, {
       ROW_NUMBER() OVER (PARTITION BY json_extract(m.value,'$.effective')
         ORDER BY b.as_of_date DESC,b.recorded_at DESC,json_extract(m.value,'$.live') DESC,b.id DESC) AS rank
     FROM json_each(?) m JOIN fin_balance_snapshots b ON b.account_slug=json_extract(m.value,'$.slug')
-    WHERE b.tenant_id=?) SELECT * FROM observations WHERE rank=1`, [JSON.stringify(mapping), tenantId], { tenantId, mask, accountKind });
+    WHERE b.tenant_id=?) SELECT * FROM observations WHERE rank=1`, [JSON.stringify(mapping), tenantId], {
+      tenantId, mask, accountKind, effectiveAccountSlugs,
+    });
 }

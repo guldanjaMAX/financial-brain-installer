@@ -209,7 +209,7 @@ for (const [label, body, expectedStage, detailPattern] of [
   [
     "an evidence refusal",
     { results: [validCandidate()], model: "@cf/example", evidence_gate: { supported: false, complete: false, evidence: [], reason: "private-payload-canary\nfrom the draft" } },
-    "answer_verification",
+    "answer_verification_refused",
     /not accepted because its cited evidence did not support it/i,
   ],
   [

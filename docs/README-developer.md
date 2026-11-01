@@ -8,7 +8,7 @@ store. Pinned Wrangler 4.131.1 cannot request Vectorize permission for that
 profile, so the read-only preflight routes that exact refusal to an explicit,
 account-scoped recovery API-token choice before any mutation.
 
-**Package identity: brain-installer 0.4.19, schema48.** Publication, supported
+**Package identity: brain-installer 0.4.22, schema48.** Publication, supported
 platforms and field acceptance are established by the reviewed evidence for
 the exact package bytes, not by this README or its version number. Before an
 install or update, match the package to the current approved guide and release
@@ -22,7 +22,7 @@ until reviewed evidence closes it; a deferred capability remains unproven.
 Earlier candidate identities and their planning records remain historical and
 must not be reused as proof for changed bytes.
 
-The 41-row release audit has 37 unresolved incidents, two 0.4.19 deferrals, and four
+The 41-row release audit has 37 unresolved incidents, zero 0.4.22 deferrals, and four
 rows closed on reviewed evidence.
 
 Engineering changes follow [the code, test, documentation, and tracking
@@ -1793,7 +1793,9 @@ existing identities as updates. A previous dry-run or failed sync can have
 written that ledger, so these counts do not prove target coverage.
 `--dry-run` reads no credential and
 makes no request. `--audit` reads the Cloudflare Drive-family inventory but
-writes no document. `--sync` builds every transformed envelope once and sends
+writes no document. This explicit historical audit can still be expensive on a
+large corpus and exits unsuccessfully if its inventory is incomplete.
+`--sync` builds every transformed envelope once and sends
 the same title, content and metadata independently to any configured legacy endpoint. The
 Cloudflare copy adds the first-party native-text receipt and lineage expected
 of a current write, without changing the neutral `envelope_sha256`, and uses
@@ -1820,13 +1822,15 @@ redirect a credential. HTTPS origins are normalized,
 legacy and Cloudflare must use distinct origins and backends, and every
 authenticated fetch uses manual redirect handling. A redirect is a target
 failure, never an invitation to forward a key. Cloudflare POST receipts must
-echo the exact deterministic document identity, then the operation reads the
-curated source-family inventory back from the same origin and confirms every
-identity. Each confirmed Cloudflare write also requires authenticated
+echo the exact deterministic document identity. Each accepted Cloudflare write
+then requires authenticated
 `POST /api/admin/brain/curated-verify` readback. That read-only, full-admin route
 compares the current D1 content marker, title and normalized metadata with the
 submitted envelope, then binds its reply to the envelope hash. It uses a primary
-D1 session when sessions are available. Missing routes, mismatched revisions,
+D1 session when sessions are available. The operation calls it once per accepted
+document with a per-request timeout and never enumerates the curated inventory.
+Work is bounded by the declared collection rather than the whole Brain.
+Missing routes, mismatched revisions,
 redirects and unavailable verification fail closed; an older Worker must be
 updated through the separately approved upgrade workflow before this runtime
 can report a successful sync. This proof is current durable storage at readback,
@@ -1857,9 +1861,16 @@ sidecar, or the raw Drive state file, including through a real-path or hard-link
 collision.
 
 Raw Drive comparison is explicitly historical evidence, not live deletion
-proof. A historical checksum match means the local raw MD5 equals the checksum
-recorded in the resume state and a family with that historical identity is
-currently present. A driveVersion value that is merely a file size, or has no
+proof. Sync defers this separate inventory scan, reports
+`RAW_DRIVE_AUDIT_DEFERRED` in direct and scheduled output, and records mapped
+raw Drive evidence as `not_verified`. Its absence cannot fail an otherwise
+confirmed sync or prevent scheduled freshness from advancing. Run the explicit
+`--audit` mode for current historical-family observations; sync does not carry
+older audit matches forward as fresh evidence. Declared local resume-state
+validation and `require_state_match` remain preflight guards. A historical
+checksum match means the local raw MD5 equals the checksum recorded in the resume
+state and a family with that historical identity is currently present.
+A driveVersion value that is merely a file size, or has no
 checksum, is reported as historical unverified presence. A different MD5 is a
 historical mismatch. Every ledger sets `raw_drive_evidence.deletion_eligible`
 to `false`. Deletion remains forbidden until a server endpoint can bind the
@@ -1901,6 +1912,18 @@ receipt contains paths, source identities, document names, URLs, content, raw
 errors, or credentials. Freshness rejects malformed aggregates and timestamps
 more than five minutes ahead of the local clock, and any configuration change is
 always stale.
+
+Incomplete curated receipts carry a fixed phase (`target` or `readback`) and an
+existing support code into the scheduler log. The local support event stores
+that same code using its unchanged closed schema. `NETWORK_UNREACHABLE` means
+the request or response body could not be read, including a timeout;
+`REMOTE_NOT_FOUND` means HTTP 404, `RATE_LIMITED` means HTTP 429,
+`AUTH_EXPIRED` means HTTP 401, `REMOTE_PERMISSION_DENIED` means HTTP 403 or
+an origin change, and `REMOTE_UNAVAILABLE` covers server or other HTTP failure.
+`INPUT_REFUSED` identifies malformed or mismatched receipts and other client
+refusals. No response text or exception message is used to classify a failure.
+Unexpected exceptions retain the generic `SCHEDULE_RUN_FAILED` event. Every
+failed required receipt preserves the last successful freshness record.
 
 The scheduler wrapper and plist renderer do not silently replace a LaunchAgent.
 After reviewing the plan change, use these explicit local commands from the
@@ -2195,19 +2218,21 @@ inode stay there, including after success, so an editor with an open original
 file descriptor cannot lose a later edit. These local recovery directories are
 never automatically deleted. Interrupted writes likewise require explicit
 recovery; never automatically clear their lock.
-In 0.4.19, Windows setup, tools handoff and update leave existing assistant
-guides untouched without entering the writer. One notice is printed per run,
-even when both assistants are connected. Setup and tools still create missing
-guides; update retains its existing-only policy, including verified Codex
-creation beside a safely managed Claude guide. Keeping a guide is not ownership
-verification, so tools handoff requires manual review instead of automatically
-launching Claude with an existing Windows guide. macOS/Linux behavior is unchanged.
-This avoids the Windows open-file refusal of the final directory rename for
-guides present at the check. A concurrent creator between that check and the
-writer's snapshot can still leave a retained lock, with no data loss. That race
-is accepted for 0.4.19; the existence check stays immediately beside the writer
-call. Refreshed Windows answer rules are deferred to 0.4.20, whose design needs
-a create-only writer mode or separately reviewed lock recovery.
+In 0.4.20, ordinary Windows setup, tools handoff and update leave existing
+assistant guides untouched without entering the writer. One notice is printed
+per run, even when both assistants are connected. Setup and tools still create
+missing guides; update retains its existing-only policy, including verified
+Codex creation beside a safely managed Claude guide. Keeping a guide is not
+ownership verification, so tools handoff requires manual review instead of
+automatically launching Claude with an existing Windows guide. macOS/Linux
+behavior is unchanged. The first `brain connect anthropic` is the narrow
+exception: after exact model readback, Part B refreshes an existing managed
+guide through the same ownership and damage guards, with bounded retry for a
+Windows replacement refusal. Key replacement remains deferred.
+The ordinary-path existence check avoids the Windows open-file refusal of the
+final directory rename for guides present at the check. A concurrent creator
+between that check and the writer's snapshot can still leave a retained lock,
+with no data loss. The check stays immediately beside the writer call.
 Native Windows filesystem behavior remains a separate host/CI gate.
 Repeated writer tests inject only the native attribute probe, keeping filesystem
 identity, content, link and race checks real. A separate bounded Windows test
@@ -2221,14 +2246,17 @@ answer path through the Worker and real SQLite migrations, including twin
 precedence, exact cents, coverage boundaries, scope refusals and SQL mutations.
 Phase one supports USD balances, deposits within seven days of a supplied date
 (otherwise the last 30 days), named months, last month, last N days and year to
-date. Relative periods use the UTC calendar because the Worker has no owner
-timezone at this boundary. Reads are bounded to 200 source accounts and 5,000
+date. Relative periods use the configured owner IANA time zone. A missing or
+invalid owner zone refuses before ledger SQL even when a caller injects a test
+clock. An explicit `in <Month YYYY>` always means the complete calendar month
+and does not use an injected clock as a time-zone fallback. Reads are bounded to 200 source accounts and 5,000
 matching transaction rows; exceeding either bound falls back with a visible
 gap. Complete coverage is required for totals and negative deposit results.
 `node --test worker/test/ledger-phase2.test.mjs` extends that same path with
 largest N expenses/deposits (1 through 100), recent deposits, merchant/category
 spend or income, recurring charges, and own-account transfers. Named months
-and Q1 through Q4 may omit the year, meaning the current UTC year. Merchant
+and Q1 through Q4 may omit the year, meaning the current year in the owner's
+configured time zone. Merchant
 matches use the exact NFKC-normalized, case-insensitive payee when present.
 Only outflows without a payee use contiguous description tokens as a fallback.
 Inflows require an explicit payee or a directional/opening sender phrase, never
@@ -2240,8 +2268,9 @@ Quote the original by-merchant line rather than substituting or guessing. Catego
 ones say "bank's category (unconfirmed)". Unsorted is always a separate line.
 `node --test worker/test/ledger-phrasing.test.mjs` covers natural bank question
 forms, named payments without amounts (60-day default), recent deposits
-(14-day default), largest expenses without a count (ten), and current named
-months through today. It exercises the real Think route with two approved
+(14-day default), largest expenses without a count (ten), and bare current
+named-month references through the owner's today. Explicit `in <Month YYYY>`
+forms cover the complete calendar month. It exercises the real Think route with two approved
 twin pairs and an empty provider account, including missing-proof refusals.
 Named banks, entity-specific analysis, ordinal payments, average spend,
 anomalies and runway remain unsupported by this deterministic grammar.
@@ -2309,7 +2338,10 @@ required. Tax, projected, average, gross or business profit and other unconsumed
 qualifiers remain unsupported. Transfer and withdrawal clauses apply only to
 totals, largest, deposits, merchant, category and recurring questions. Repeated
 or contradictory clauses, other exclusions and flags on balance, payment or
-transfers questions refuse. Document-path money refusals remain unchanged.
+transfers questions refuse. Positively recognized unsupported money intent
+preserves the document response and adds one leading
+`ledger_wording_unsupported` gap. A policy or document question that merely
+contains a money word preserves the ordinary document response byte for byte.
 SQL stops at 5,001 matching rows; sorting happens only after proving the bound,
 so an oversized covered range does not need a full sort before refusing.
 

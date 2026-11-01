@@ -47,7 +47,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -64,6 +64,10 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_BRAIN_PATH = resolve(HERE, "..", "brain.mjs");
 const DEFAULT_SCHEDULER_PATH = fileURLToPath(import.meta.url);
 const MAX_CALENDAR_INTERVALS = 512;
+const MAX_INSTALLED_PLIST_BYTES = 256 * 1024;
+const MAX_INSTALLED_PLIST_JSON_BYTES = 1024 * 1024;
+const MAX_INSTALLED_PROGRAM_ARGUMENTS = 16;
+const MAX_INSTALLED_ARGUMENT_BYTES = 16 * 1024;
 const LOCKF_PATH = "/usr/bin/lockf";
 const LOCK_BUSY_EXIT = 75; // EX_TEMPFAIL from sysexits(3)
 
@@ -949,6 +953,224 @@ function defaultLaunchctl(args) {
   });
 }
 
+function safeInstalledDefinitionStat(st, path, uid) {
+  if (st.isSymbolicLink() || !st.isFile()) {
+    throw new Error(`the installed scheduler definition is not a regular file: ${path}`);
+  }
+  if (st.nlink !== 1) {
+    throw new Error(`the installed scheduler definition has multiple links: ${path}`);
+  }
+  if (!Number.isInteger(uid) || st.uid !== uid) {
+    throw new Error(`the installed scheduler definition is not owned by the current user: ${path}`);
+  }
+  const mode = st.mode & 0o7777;
+  if ((mode & 0o7000) !== 0 || (mode & 0o177) !== 0 || (mode & 0o400) === 0) {
+    throw new Error(`the installed scheduler definition does not have a safe owner-only mode: ${path}`);
+  }
+  if (!Number.isSafeInteger(st.size) || st.size < 1 || st.size > MAX_INSTALLED_PLIST_BYTES) {
+    throw new Error(`the installed scheduler definition has an unsafe size: ${path}`);
+  }
+}
+
+function sameFileIdentity(left, right) {
+  return left.dev === right.dev && left.ino === right.ino && left.size === right.size;
+}
+
+function readInstalledDefinitionBytes(path, options = {}) {
+  const uid = options.currentUid ?? currentUserId();
+  const before = lstatSync(path);
+  safeInstalledDefinitionStat(before, path, uid);
+  let fd;
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY | noFollowFlag());
+    const opened = fstatSync(fd);
+    safeInstalledDefinitionStat(opened, path, uid);
+    if (!sameFileIdentity(before, opened)) {
+      throw new Error(`the installed scheduler definition changed while it was opened: ${path}`);
+    }
+    const bytes = readFileSync(fd);
+    const afterRead = fstatSync(fd);
+    const afterPath = lstatSync(path);
+    safeInstalledDefinitionStat(afterRead, path, uid);
+    safeInstalledDefinitionStat(afterPath, path, uid);
+    if (!sameFileIdentity(opened, afterRead) || !sameFileIdentity(afterRead, afterPath) || bytes.length !== afterRead.size) {
+      throw new Error(`the installed scheduler definition changed while it was read: ${path}`);
+    }
+    return bytes;
+  } catch (error) {
+    if (error?.code === "ELOOP") {
+      throw new Error(`the installed scheduler definition is a symbolic link: ${path}`);
+    }
+    throw error;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function parseInstalledPlist(bytes, options = {}) {
+  if (typeof options.parseInstalledPlist === "function") return options.parseInstalledPlist(bytes);
+  const result = (options.plistSpawn || spawnSync)(
+    "/usr/bin/plutil",
+    ["-convert", "json", "-o", "-", "--", "-"],
+    {
+      input: bytes,
+      encoding: "utf8",
+      env: { LC_ALL: "C" },
+      timeout: 15_000,
+      maxBuffer: MAX_INSTALLED_PLIST_JSON_BYTES,
+    },
+  );
+  if (!result || result.status !== 0 || result.error || result.signal) {
+    throw new Error("the installed scheduler definition is not a readable property list");
+  }
+  let parsed;
+  try { parsed = JSON.parse(String(result.stdout || "")); } catch {}
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+    throw new Error("the installed scheduler definition is not a property-list dictionary");
+  }
+  return parsed;
+}
+
+function boundedInstalledArguments(plist) {
+  if (Object.keys(plist).length < 2 || Object.keys(plist).length > 32 ||
+      typeof plist.Label !== "string" || !Array.isArray(plist.ProgramArguments) ||
+      plist.ProgramArguments.length < 1 || plist.ProgramArguments.length > MAX_INSTALLED_PROGRAM_ARGUMENTS) {
+    throw new Error("the installed scheduler definition has an unsafe property-list shape");
+  }
+  let total = 0;
+  for (const argument of plist.ProgramArguments) {
+    if (typeof argument !== "string") {
+      throw new Error("the installed scheduler definition has a non-string program argument");
+    }
+    const size = Buffer.byteLength(argument, "utf8");
+    if (size < 1 || size > MAX_INSTALLED_ARGUMENT_BYTES) {
+      throw new Error("the installed scheduler definition has an unsafe program argument");
+    }
+    total += size;
+  }
+  if (total > 64 * 1024) throw new Error("the installed scheduler definition has oversized program arguments");
+  return plist.ProgramArguments;
+}
+
+function validateInstalledArgumentContract(reference, plist) {
+  const args = boundedInstalledArguments(plist);
+  const schedulerArguments = reference.spec.schedulerArgumentsOf
+    ? reference.spec.schedulerArgumentsOf(reference)
+    : [];
+  const runIndex = 2 + schedulerArguments.length;
+  if (plist.Label !== reference.label || plist.WorkingDirectory !== dirname(reference.path) ||
+      args.length !== 8 + schedulerArguments.length ||
+      !isAbsolute(args[0]) || basename(args[0]) !== "node" ||
+      !isAbsolute(args[1]) || basename(args[1]) !== basename(reference.spec.defaultSchedulerPath()) ||
+      schedulerArguments.some((argument, index) => args[2 + index] !== argument) ||
+      args[runIndex] !== "run" || args[runIndex + 1] !== reference.path ||
+      args[runIndex + 2] !== "--brain" || !isAbsolute(args[runIndex + 3]) ||
+      basename(args[runIndex + 3]) !== basename(reference.brainPath) ||
+      args[runIndex + 4] !== "--config-hash" || !/^[a-f0-9]{64}$/u.test(args[runIndex + 5])) {
+    throw new Error("the installed scheduler definition does not match the stable owner argument contract");
+  }
+  return args;
+}
+
+function parseLoadedArguments(output) {
+  const text = String(output || "");
+  if (Buffer.byteLength(text, "utf8") > MAX_INSTALLED_PLIST_JSON_BYTES) {
+    throw new Error("the loaded scheduler definition is too large to inspect safely");
+  }
+  const lines = text.split(/\r?\n/u);
+  const starts = lines.reduce((matches, line, index) =>
+    /^\s*arguments\s*=\s*\{\s*$/u.test(line) ? [...matches, index] : matches, []);
+  if (starts.length !== 1) throw new Error("the loaded scheduler arguments could not be inspected exactly");
+  const values = [];
+  let closed = false;
+  for (let index = starts[0] + 1; index < lines.length; index++) {
+    const line = lines[index];
+    if (/^\s*\}\s*$/u.test(line)) { closed = true; break; }
+    const raw = line.trim();
+    if (!raw) continue;
+    if (values.length >= MAX_INSTALLED_PROGRAM_ARGUMENTS) {
+      throw new Error("the loaded scheduler has too many program arguments");
+    }
+    let value = raw;
+    if (raw.startsWith('"') || raw.endsWith('"')) {
+      try { value = JSON.parse(raw); } catch {
+        throw new Error("the loaded scheduler arguments could not be decoded exactly");
+      }
+    }
+    if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > MAX_INSTALLED_ARGUMENT_BYTES) {
+      throw new Error("the loaded scheduler has an unsafe program argument");
+    }
+    values.push(value);
+  }
+  if (!closed || !values.length) throw new Error("the loaded scheduler arguments could not be inspected exactly");
+  return values;
+}
+
+function loadedDefinitionPath(output) {
+  const matches = [...String(output || "").matchAll(/^\s*path\s*=\s*(.+?)\s*$/gmu)];
+  if (matches.length !== 1) throw new Error("the loaded scheduler definition path could not be inspected exactly");
+  return matches[0][1];
+}
+
+/**
+ * Capture the exact installed owner definition without asking the current
+ * renderer whether those older bytes are still current. This is read-only;
+ * update supplies the returned snapshot explicitly to pause and restore.
+ */
+export function captureInstalledSchedulerDefinition(manifestPath, options = {}) {
+  const reference = buildSchedulerReference(manifestPath, options);
+  const launchctl = options.launchctl || defaultLaunchctl;
+  let result;
+  try { result = launchctl(["print", reference.service]); } catch {
+    throw new Error(`the installed ${reference.spec.schedulerNoun} launch state could not be inspected`);
+  }
+  if (!result || result.error || result.signal || !Number.isInteger(result.status)) {
+    throw new Error(`the installed ${reference.spec.schedulerNoun} launch state could not be inspected`);
+  }
+  const loaded = result.status === 0;
+  const notLoaded = !loaded && (result.status === 113 ||
+    /could not find service|not found|not loaded/iu.test(String(result.stderr || "")));
+  if (!loaded && !notLoaded) {
+    throw new Error(`the installed ${reference.spec.schedulerNoun} launch state could not be inspected`);
+  }
+  const runtime = loaded ? parseLaunchctlStatus(result.stdout) : null;
+  if (loaded && (!runtime?.state || runtime.running || runtime.pid !== null)) {
+    throw new Error(`the installed ${reference.spec.schedulerNoun} is running or its run state is unknown`);
+  }
+
+  const present = lstatIfPresent(reference.plistPath);
+  if (!present) {
+    if (loaded) throw new Error(`the loaded ${reference.spec.schedulerNoun} has no readable installed definition`);
+    return Object.freeze({
+      exists: false,
+      wasLoaded: false,
+      path: reference.plistPath,
+      service: reference.service,
+    });
+  }
+
+  const bytes = readInstalledDefinitionBytes(reference.plistPath, options);
+  const serialized = bytes.toString("utf8");
+  if (!Buffer.from(serialized, "utf8").equals(bytes)) {
+    throw new Error(`the installed ${reference.spec.schedulerNoun} definition is not valid UTF-8`);
+  }
+  const plist = parseInstalledPlist(bytes, options);
+  const installedArguments = validateInstalledArgumentContract(reference, plist);
+  if (loaded) {
+    if (loadedDefinitionPath(result.stdout) !== reference.plistPath ||
+        JSON.stringify(parseLoadedArguments(result.stdout)) !== JSON.stringify(installedArguments)) {
+      throw new Error(`the loaded ${reference.spec.schedulerNoun} does not match its installed definition`);
+    }
+  }
+  return Object.freeze({
+    exists: true,
+    wasLoaded: loaded,
+    path: reference.plistPath,
+    service: reference.service,
+    serialized,
+  });
+}
+
 function launchctlError(action, result) {
   const detail = String(result?.stderr || result?.stdout || "unknown launchctl failure").trim();
   return new Error(`${action} failed: ${detail}`);
@@ -1128,7 +1350,17 @@ export function pauseScheduler(manifestPath, options = {}) {
   if (!status.installed) {
     return Object.freeze({ exists: false, wasLoaded: false, path: status.plistPath, service: status.service });
   }
-  if (!status.definitionMatches || status.scheduleError) {
+  let authorizedSnapshot = null;
+  if (options.authorizedSnapshot?.exists === true) {
+    authorizedSnapshot = captureInstalledSchedulerDefinition(manifestPath, options);
+    if (authorizedSnapshot.path !== options.authorizedSnapshot.path ||
+        authorizedSnapshot.service !== options.authorizedSnapshot.service ||
+        authorizedSnapshot.wasLoaded !== options.authorizedSnapshot.wasLoaded ||
+        authorizedSnapshot.serialized !== options.authorizedSnapshot.serialized) {
+      throw new Error(`the owned ${status.spec.schedulerNoun} changed after its pre-update capture`);
+    }
+  }
+  if ((!status.definitionMatches && !authorizedSnapshot) || status.scheduleError) {
     throw new Error(`the owned ${status.spec.schedulerNoun} definition does not match this manifest; update cannot pause it safely`);
   }
   if (status.running) {
@@ -1146,7 +1378,13 @@ export function pauseScheduler(manifestPath, options = {}) {
     }
   }
   const readback = statusScheduler(manifestPath, options);
-  if (!readback.installed || readback.loaded || !readback.definitionMatches ||
+  const pausedCapture = authorizedSnapshot
+    ? captureInstalledSchedulerDefinition(manifestPath, options)
+    : null;
+  if (!readback.installed || readback.loaded ||
+      (pausedCapture && (pausedCapture.wasLoaded || pausedCapture.path !== authorizedSnapshot.path ||
+        pausedCapture.service !== authorizedSnapshot.service || pausedCapture.serialized !== serialized)) ||
+      (!authorizedSnapshot && !readback.definitionMatches) ||
       readFileSync(readback.plistPath, "utf8") !== serialized) {
     throw new Error(`the ${status.spec.schedulerNoun} pause did not pass exact readback`);
   }
@@ -1162,7 +1400,9 @@ export function pauseScheduler(manifestPath, options = {}) {
 export function restoreScheduler(manifestPath, snapshot, options = {}) {
   if (!snapshot?.exists) return Object.freeze({ restored: false, verified: true });
   const status = statusScheduler(manifestPath, options);
-  if (!status.installed || readFileSync(status.plistPath, "utf8") !== snapshot.serialized) {
+  const captured = captureInstalledSchedulerDefinition(manifestPath, options);
+  if (!status.installed || captured.wasLoaded || captured.path !== snapshot.path || captured.service !== snapshot.service ||
+      captured.serialized !== snapshot.serialized || readFileSync(status.plistPath, "utf8") !== snapshot.serialized) {
     throw new Error(`the owned ${status.spec.schedulerNoun} changed while update held it paused`);
   }
   const launchctl = options.launchctl || defaultLaunchctl;
@@ -1173,7 +1413,10 @@ export function restoreScheduler(manifestPath, snapshot, options = {}) {
     if (restored?.status !== 0) throw launchctlError(`restoring the ${status.spec.schedulerNoun}`, restored);
   }
   const readback = statusScheduler(manifestPath, options);
-  if (!readback.installed || readback.loaded !== snapshot.wasLoaded || !readback.definitionMatches ||
+  const restoredCapture = captureInstalledSchedulerDefinition(manifestPath, options);
+  if (!readback.installed || restoredCapture.wasLoaded !== snapshot.wasLoaded ||
+      restoredCapture.path !== snapshot.path || restoredCapture.service !== snapshot.service ||
+      restoredCapture.serialized !== snapshot.serialized ||
       readFileSync(readback.plistPath, "utf8") !== snapshot.serialized) {
     throw new Error(`the ${status.spec.schedulerNoun} restore did not pass exact readback`);
   }

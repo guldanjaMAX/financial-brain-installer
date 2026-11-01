@@ -648,6 +648,7 @@ const expected = [
   // Shared byte contract for a normalized install-state prefix plus one direct
   // D1 data export. It owns no credential, provider, or command transport.
   "operations/recovery-content-fingerprint.mjs",
+  "operations/rename-retry.mjs",
   // Reviewed v0.4.8 campaign contracts. Seven are dependency-free or pure
   // hash/shape validators. The teardown D1 proof accepts only an injected,
   // already approved Wrangler boundary, fixes every permitted read/export
@@ -789,11 +790,13 @@ const expected = [
   "migrations/d1/0054_daily_evidence.sql",
   "migrations/d1/0055_fin_account_links.sql",
   "migrations/d1/0056_content_date_refresh_receipts.sql",
+  "migrations/d1/0057_bank_provider_transition.sql",
   "operations/bank-access-wrapping-key.mjs",
   // Generic owner-present bank secret custody. Reviewed 2026-09-17: takes only
   // injected list, write, and hidden-prompt callbacks; refuses ambient values
   // and reports secret names, never values.
   "operations/bank-feed-owner-secrets.mjs",
+  "operations/bank-provider-command.mjs",
   "operations/custom-api-clipboard.mjs",
   "operations/bootstrap-status.mjs",
   // Generic local timing helper. It receives only injected clock/scheduler
@@ -838,6 +841,7 @@ const expected = [
   "worker/src/lib/bank-activity-doc.js",
   "worker/src/lib/bank-export.js",
   "worker/src/lib/bank-feed-profiles.js",
+  "worker/src/lib/bank-provider-transition.js",
   "worker/src/lib/ingestion-outcome.js",
   "worker/src/lib/install-smoke.js",
   "worker/src/lib/owner-bank-import.js",
@@ -899,6 +903,7 @@ const expected = [
   // filesystem, retry, or mutation implementation and receives one fixed
   // aggregate SELECT through injected read-only callbacks.
   "operations/aggregate-field-observer.mjs",
+  "operations/answer-route-proof.mjs",
   "operations/cloudflare-recovery-adapter.mjs",
   "operations/locked-wrangler-runtime.mjs",
   "operations/package-bundle-verifier.mjs",

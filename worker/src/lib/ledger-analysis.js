@@ -17,9 +17,16 @@ export const merchantFor = row => row.direction === "inflow" ? senderFor(row) : 
 const containsTokens = (haystack, needle) => Boolean(needle) && ` ${haystack} `.includes(` ${needle} `);
 // An explicit payee controls attribution. A memo about another merchant cannot
 // turn a payment to this payee into that merchant's income or spend.
-export const matchesMerchant = (row, query) => row.payee || row.direction === "inflow"
-  ? merchantFor(row) === normalizeMerchantText(query)
-  : containsTokens(normalizeMerchantText(row.description), normalizeMerchantText(query));
+export function merchantMatchBasis(row, query) {
+  const merchant = merchantFor(row), wanted = normalizeMerchantText(query);
+  if (!merchant || !wanted) return "none";
+  // A structured merchant/payee can prove exact identity after normalization.
+  // Existing inflow sender parsing remains only an attributed, incomplete
+  // subtotal in ledger-answer. Outflow description text is never exact.
+  if ((row.payee || row.direction === "inflow") && merchant === wanted) return "exact";
+  return containsTokens(merchant, wanted) ? "possible" : "none";
+}
+export const matchesMerchant = (row, query) => merchantMatchBasis(row, query) === "exact";
 export function matchesSender(row, wanted) {
   if (!wanted.length) return true;
   const sender = normalizeLedgerText(senderFor(row));
@@ -81,12 +88,53 @@ function namesOwnedAccount(row, account, accounts) {
 }
 
 function resolvesExactAccount(locator, other, accounts) {
-  const text = normalizeLedgerText(locator);
+  // NFKC/token normalization removes star and bullet mask decorations. X is a
+  // letter, so remove only a bounded X run immediately before the final mask.
+  // The account scan below still enforces uniqueness after normalization.
+  const text = normalizeLedgerText(locator).replace(/\bx{1,4}(?=\d{1,4}$)/, "");
   const candidates = [...accounts.values()].filter(account => (account.members || []).some(member =>
     (normalizeLedgerText(member.label) && text === normalizeLedgerText(member.label)) ||
     (/^\d{1,4}$/.test(member.mask || "") &&
-      new RegExp(`^(?:(?:account|acct|card|checking|savings|loan|line of credit|investment|retirement) )?(?:ending (?:in )?)?${member.mask}$`).test(text))));
+      new RegExp(`^(?:(?:account|acct|card|checking|savings|loan|line of credit|investment|retirement)(?: account| acct)? )?(?:ending (?:in )?)?(?:x)?${member.mask}$`).test(text))));
   return candidates.length === 1 && candidates[0] === other;
+}
+
+export function transferEndpoints(description, { loanAdvance = false } = {}) {
+  const text = normalizeLedgerText(description);
+  const channel = "(?:(?:online|automatic|mobile|internet) )?";
+  const transfer = `${channel}transfer`;
+  const bilateral = text.match(new RegExp(`^${transfer} from (.+?) to (.+)$`));
+  if (bilateral) return { form: "bilateral", source: bilateral[1], destination: bilateral[2] };
+  const verb = loanAdvance
+    ? `(?:${transfer}|(?:loan |credit )?(?:advance|disbursement|proceeds))`
+    : `(?:${transfer}|${channel}payment)`;
+  const unary = text.match(new RegExp(`^(${verb}) (to|from) (.+)$`));
+  return unary ? { form: "unary", verb: unary[1], direction: unary[2], locator: unary[3] } : null;
+}
+
+// Some feeds copy a channel label into payee rather than naming a counterparty.
+// Keep the allowance bounded to the same payment and transfer channels accepted
+// by the directed-description grammar. Every other nonempty payee must resolve
+// the connected account or it is positive evidence of an external party.
+const genericOwnedMovementPayee = payee =>
+  /^(?:(?:automatic|internet|mobile|online) )?(?:payment|transfer)$/.test(normalizeLedgerText(payee));
+const payeeSupportsOwnedCounterparty = (payee, account, accounts) => {
+  const text = normalizeLedgerText(payee);
+  return !text || genericOwnedMovementPayee(text) || resolvesExactAccount(text, account, accounts);
+};
+
+export function ownedLiabilityPaymentKind(row, accounts) {
+  if (row.direction !== "outflow" || row.amount_minor <= 0) return null;
+  const source = accounts.get(row.effective_account_slug);
+  if (!["checking", "savings"].includes(source?.account_kind)) return null;
+  const endpoint = transferEndpoints(row.description);
+  if (endpoint?.form !== "unary" || endpoint.direction !== "to") return null;
+  const liabilities = [...accounts.values()].filter(account =>
+    ["card", "loan", "line_of_credit"].includes(account.account_kind) &&
+    resolvesExactAccount(endpoint.locator, account, accounts) && !conflictsWithAccountKind(row, account));
+  if (liabilities.length !== 1) return null;
+  if (!payeeSupportsOwnedCounterparty(row.payee, liabilities[0], accounts)) return null;
+  return liabilities[0].account_kind === "card" ? "card" : "loan";
 }
 
 // Advisory equal-amount matches are not enough to remove money. Both legs
@@ -101,26 +149,29 @@ export function isDirectedOwnedTransfer(pair, accounts, { loanAdvance = false } 
   const unconflicted = (row, other) => {
     const text = normalizeLedgerText(`${row.description || ""} ${row.payee || ""} ${row.category || ""}`);
     if (/\b(?:customer|client|invoice|refund|refunded|reversal|reversed|reimbursement|chargeback|income|revenue|sale|sales)\b/.test(text)) return false;
-    if (normalizeLedgerText(row.payee) && !resolvesExactAccount(row.payee, other, accounts)) return false;
+    if (!payeeSupportsOwnedCounterparty(row.payee, other, accounts)) return false;
     return !conflictsWithAccountKind(row, other);
   };
   if (!unconflicted(pair.out, inAccount) || !unconflicted(pair.in, outAccount)) return false;
-  const directed = (row, other, direction) => {
-    // Only the complete immediate locator identifies the counterparty. A memo
-    // mentioning an account, multiple alternatives or an unknown prefix cannot.
-    const verb = loanAdvance
-      ? "(?:(?:(?:online|automatic|mobile|internet) )?transfer|(?:loan |credit )?(?:advance|disbursement|proceeds))"
-      : "(?:(?:(?:online|automatic|mobile|internet) )?transfer|payment)";
-    const clause = normalizeLedgerText(row.description).match(new RegExp(`^${verb} ${direction} (.+)$`));
-    return Boolean(clause && resolvesExactAccount(clause[1], other, accounts));
-  };
-  if (!directed(pair.out, inAccount, "to")) return false;
-  if (directed(pair.in, outAccount, "from")) return true;
+  const directed = (endpoints, direction, other) => endpoints?.form === "unary" &&
+    endpoints.direction === direction && resolvesExactAccount(endpoints.locator, other, accounts);
+  const bilateral = endpoints => endpoints?.form === "bilateral" &&
+    resolvesExactAccount(endpoints.source, outAccount, accounts) &&
+    resolvesExactAccount(endpoints.destination, inAccount, accounts);
+  const outgoing = transferEndpoints(pair.out.description, { loanAdvance });
+  const incoming = transferEndpoints(pair.in.description, { loanAdvance });
+  // Validate each memo against its posting account and unique owned
+  // counterparty. A complete bilateral memo and a compatible unary memo carry
+  // the same directed evidence even when a provider formats the legs differently.
+  const outgoingDirected = bilateral(outgoing) || directed(outgoing, "to", inAccount);
+  const incomingDirected = bilateral(incoming) || directed(incoming, "from", outAccount);
+  if (!outgoingDirected) return false;
+  if (incomingDirected) return true;
   // A connected card's acknowledgement is a supported payment control. It
   // still needs the uniquely directed outgoing leg and no conflicting payee.
   return !loanAdvance && inAccount.account_kind === "card" &&
     ["checking", "savings"].includes(outAccount.account_kind) &&
-    /^payment to /.test(normalizeLedgerText(pair.out.description)) &&
+    outgoing?.verb?.endsWith("payment") &&
     normalizeLedgerText(pair.in.description) === "payment thank you";
 }
 
@@ -128,6 +179,19 @@ export function isLoanAdvance(pair, accounts) {
   return ["loan", "line_of_credit"].includes(accounts.get(pair.out.effective_account_slug)?.account_kind) &&
     ["checking", "savings", "card"].includes(accounts.get(pair.in.effective_account_slug)?.account_kind) &&
     isDirectedOwnedTransfer(pair, accounts, { loanAdvance: true });
+}
+
+export function classifyOwnedMovement(pair, accounts) {
+  if (!isDirectedOwnedTransfer(pair, accounts)) return null;
+  const outKind = accounts.get(pair.out.effective_account_slug)?.account_kind;
+  const inKind = accounts.get(pair.in.effective_account_slug)?.account_kind;
+  if (["checking", "savings"].includes(outKind) && ["card", "loan", "line_of_credit"].includes(inKind)) {
+    return { kind: "owned_liability_payment", liabilityKind: inKind === "card" ? "card" : "loan" };
+  }
+  if (["checking", "savings", "card"].includes(outKind) && ["checking", "savings", "card"].includes(inKind)) {
+    return { kind: "own_transfer" };
+  }
+  return null;
 }
 export function pairOwnTransfers(rows, accounts = new Map()) {
   const candidates = rows.filter(row => row.amount_minor > 0);

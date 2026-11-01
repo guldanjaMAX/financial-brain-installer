@@ -100,7 +100,10 @@
               "description": "Must be scoped to the client, e.g. acme-brain. A bare \"brain\" is refused at provision: it may already exist in the account and belong to something else."
             },
             "d1_database_id": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "vectorize_index": {
               "type": "string",
@@ -256,7 +259,10 @@
               "default": false
             },
             "host": {
-              "type": "string",
+              "type": [
+                "string",
+                "null"
+              ],
               "description": "IMAP hostname, for example imap.mail.yahoo.com. May also be supplied as --host at connect."
             },
             "port": {
@@ -265,7 +271,10 @@
               "description": "Implicit TLS. 993 unless the provider says otherwise. STARTTLS on 143 is not supported, because a failed upgrade is a silent downgrade."
             },
             "username": {
-              "type": "string",
+              "type": [
+                "string",
+                "null"
+              ],
               "description": "The mailbox address. The password is never stored here."
             }
           }

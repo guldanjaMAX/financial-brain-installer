@@ -622,6 +622,7 @@ await test("zero-row largest keeps the real ledger answer beside an empty-docume
   t.mock.method(Date, "now", () => Date.parse(now));
   const f = await createProductFixture({ env: {
     ADMIN_KEY: randomBytes(24).toString("hex"), SESSION_SIGNING_KEY: randomBytes(32).toString("hex"),
+    BRAIN_TIMEZONE: "UTC",
     AI: { async run() { throw new Error("money must use the ledger"); } },
   } });
   t.after(() => f.close());
