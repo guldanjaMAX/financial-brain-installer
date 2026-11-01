@@ -26,6 +26,7 @@
     "privacy:history:remote": "node scripts/scan-git-history-privacy.mjs --remote origin --ref HEAD --require-clean",
     "privacy:history:strict": "node scripts/scan-git-history-privacy.mjs --remote origin --ref HEAD --require-clean",
     "test": "node scripts/run-test-chain.mjs",
+    "fastloop:money": "node eval/fast-loop/money-cli.mjs",
     "test:eval": "node --test eval/brain-client.test.mjs eval/corpus-contract.test.mjs eval/golden-20.test.mjs eval/profile.test.mjs eval/run.test.mjs eval/scorer.test.mjs",
     "audit:updates": "node scripts/audit-updates.mjs --release",
     "audit:regressions": "node scripts/audit-updates.mjs --regressions",
