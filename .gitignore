@@ -88,3 +88,6 @@ machine-prep/installers/windows/handoff-windows.url
 /artifact-in/
 /home-dpapi/
 /lane-evidence/
+
+# Disposable scheduler rebind verification and copied inputs.
+/.lane-r3/

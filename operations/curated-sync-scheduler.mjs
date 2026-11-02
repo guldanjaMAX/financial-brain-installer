@@ -293,8 +293,8 @@ export function buildCuratedSchedulerPlan(planPath, options = {}) {
   return Object.freeze(plan);
 }
 
-export function renderCuratedLaunchAgentPlist(plan) {
-  return renderLaunchAgentPlist(plan);
+export function renderCuratedLaunchAgentPlist(plan, options = {}) {
+  return renderLaunchAgentPlist(plan, options);
 }
 
 function launchArguments(output) {
@@ -331,7 +331,7 @@ export function reinstallScheduledCuratedSync(planPath, options = {}) {
     encoding: "utf8", env: launchctlChildEnvironment(options.env ?? process.env),
     timeout: 15_000, shell: false,
   }));
-  const desired = renderCuratedLaunchAgentPlist(plan);
+  const desired = renderCuratedLaunchAgentPlist(plan, options);
   ensurePrivateDirectory(join(plan.home, "Library"), true);
   ensurePrivateDirectory(dirname(plan.plistPath));
   let prior = null;
@@ -394,6 +394,12 @@ export function reinstallScheduledCuratedSync(planPath, options = {}) {
     if (readFileSync(plan.plistPath, "utf8") !== desired) fail("curated scheduler plist readback failed");
     // A plan or manifest changed while preparing the service is never adopted.
     assertExpectedConfiguration(buildCuratedSchedulerPlan(planPath, options), plan.configHash);
+    if (options.enabled === false) {
+      requireSuccess(["disable", plan.service]);
+      const readback = launchctl(["print", plan.service]);
+      if (readback?.error || readback?.status !== 113) fail("curated disabled registration readback failed");
+      return { ...plan, installed: true, loaded: false, replaced: prior !== null };
+    }
     requireSuccess(["enable", plan.service]);
     requireSuccess(["bootstrap", plan.domain, plan.plistPath]);
     const readback = requireSuccess(["print", plan.service]);

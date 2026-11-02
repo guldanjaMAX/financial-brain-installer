@@ -106,6 +106,7 @@ import {
   verifyUpdateSchedulerInventory,
   updateSchedulerFix,
   validateUpdateSchedulerSnapshot,
+  reserveUpdateSchedulerWriters, releaseUpdateSchedulerReservations,
 } from "./operations/update-scheduler-inventory.mjs";
 import { planDailyRefresh } from "./operations/daily-refresh-plan.mjs";
 import {
@@ -27615,6 +27616,9 @@ async function pauseCapturedOwnedSchedulers(manifestPath, snapshots, options = {
   try {
     for (const entry of snapshots) {
       if (!entry.snapshot?.exists) continue;
+      // A native timeout can follow a successful disable. Recovery must include
+      // the attempted entry even when its pause never acknowledges success.
+      paused.push(entry);
       const actual = entry.kind === "inventory"
         ? await pauseAdditionalUpdateScheduler(loadManifest(manifestPath).m, manifestPath, entry, options)
         : entry.kind === "drive"
@@ -27627,7 +27631,6 @@ async function pauseCapturedOwnedSchedulers(manifestPath, snapshots, options = {
       if (actual?.serialized !== entry.snapshot.serialized || actual?.wasLoaded !== entry.snapshot.wasLoaded) {
         throw new Error(`the owned ${entry.sourceKey} scheduler changed after its durable pre-update snapshot`);
       }
-      paused.push(entry);
     }
     return snapshots;
   } catch (error) {
@@ -27640,14 +27643,20 @@ async function pauseCapturedOwnedSchedulers(manifestPath, snapshots, options = {
 
 async function restoreExistingOwnedSchedulers(manifestPath, snapshots, options = {}) {
   const schedulerOptions = { platform: options.platform ?? process.platform, ...(options.legacySchedulerOptions || {}) };
+  const failures = [];
   for (const entry of [...snapshots].reverse()) {
     if (!entry.snapshot?.exists) continue;
-    if (entry.kind === "inventory") await restoreAdditionalUpdateScheduler(loadManifest(manifestPath).m, manifestPath, entry, options);
-    else if (entry.kind === "drive") entry.module.restoreDriveScheduler(manifestPath, entry.snapshot, schedulerOptions);
-    else if (entry.kind === "folder") entry.module.restoreFolderScheduler(manifestPath, entry.snapshot, schedulerOptions);
-    else if (entry.kind === "imessage") entry.module.restoreImessageScheduler(manifestPath, entry.snapshot, schedulerOptions);
-    else entry.module.restoreProviderScheduler(entry.provider, manifestPath, entry.snapshot, schedulerOptions);
+    try {
+      if (entry.kind === "inventory") await restoreAdditionalUpdateScheduler(loadManifest(manifestPath).m, manifestPath, entry, options);
+      else if (entry.kind === "drive") entry.module.restoreDriveScheduler(manifestPath, entry.snapshot, schedulerOptions);
+      else if (entry.kind === "folder") entry.module.restoreFolderScheduler(manifestPath, entry.snapshot, schedulerOptions);
+      else if (entry.kind === "imessage") entry.module.restoreImessageScheduler(manifestPath, entry.snapshot, schedulerOptions);
+      else entry.module.restoreProviderScheduler(entry.provider, manifestPath, entry.snapshot, schedulerOptions);
+    } catch {
+      failures.push(`${entry.snapshot.jobKind || entry.kind}: prior state remains unverified`);
+    }
   }
+  if (failures.length) throw new Error(`Scheduler restoration incomplete: ${failures.join("; ")}`);
 }
 
 async function hydrateExistingOwnedSchedulerSnapshots(snapshots, options = {}, manifestPath = null) {
@@ -31599,6 +31608,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
             pin.target,
             options.dailyRefreshOptions || {},
           );
+      reserveUpdateSchedulerWriters(legacySnapshots, { ...(options.dailyRefreshOptions || {}), manifestPath: pin.target });
       persistDailyTransaction = (phase, remoteMutationMayHaveStarted) => writeDailyRefreshUpdateTransaction({
         plan: dailyPlan,
         snapshot: dailySnapshot,
@@ -31624,7 +31634,12 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         info("Daily imports are paused for the verified update window.");
       }
       try {
-        if (!resumingDailyRecovery) {
+        if (resumingDailyRecovery && !remoteMutationMayHaveStarted) {
+          // An interrupted local pause may have left the exact original job
+          // loaded. Restore that pre-dispatch state before taking a new pause.
+          await restoreExistingOwnedSchedulers(pin.target, legacySnapshots, options.dailyRefreshOptions || {});
+        }
+        if (!resumingDailyRecovery || !remoteMutationMayHaveStarted) {
           legacySnapshots = await pauseCapturedOwnedSchedulers(
             pin.target,
             legacySnapshots,
@@ -31635,13 +31650,9 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
           persistDailyTransaction("paused");
         }
       } catch (error) {
-        if (!resumingDailyRecovery) {
-          if (dailySnapshot) restoreDailyRefreshSchedule(dailySnapshot, dailySchedulerOptions);
-          if (dailyTransactionActive && !bridgeSnapshots.length) {
-            clearDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions);
-            dailyTransactionActive = false;
-          }
-        } else if (dailyTransactionActive) {
+        // The outer recovery path restores every attempted job before it may
+        // clear the receipt. A partial pause is still a mutation to recover.
+        if (dailyTransactionActive) {
           persistDailyTransaction("recovery_required");
         }
         throw error;
@@ -31862,6 +31873,8 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         }
       }
       throw error;
+    } finally {
+      releaseUpdateSchedulerReservations(legacySnapshots);
     }
     if (installed.source !== "remembered") {
       try {

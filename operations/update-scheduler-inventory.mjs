@@ -10,7 +10,8 @@ import { IMESSAGE_SCHEDULER_SPEC } from "./imessage-scheduler.mjs";
 import { WHATSAPP_DRAIN_SCHEDULER_SPEC } from "./whatsapp-drain-scheduler.mjs";
 import { SCHEDULED_PROVIDER_IDS, createProviderSchedulerSpec } from "./provider-scheduler.mjs";
 import * as curated from "./curated-sync-scheduler.mjs";
-import { inspectCuratedTargetContracts } from "./curated-dual-sync.mjs";
+import { curatedSourceLeaseOptions, inspectCuratedTargetContracts } from "./curated-dual-sync.mjs";
+import { acquireSourceIngestLock } from "./source-ingest-lock.mjs";
 import * as quickbooks from "./quickbooks-schedule.mjs";
 import * as daemon from "./whatsapp-daemon.mjs";
 import { quotePosixArgument, quotePowerShellArgument } from "./command-display.mjs";
@@ -25,6 +26,43 @@ const launch = options => options.launchctl ?? (args => spawnSync("/bin/launchct
   encoding: "utf8", env: core.launchctlChildEnvironment(), timeout: 15_000, maxBuffer: 1024 * 1024,
 }));
 const desiredLoaded = snapshot => typeof snapshot.wasDisabled === "boolean" ? !snapshot.wasDisabled : snapshot.wasLoaded;
+// Handles stay outside the durable snapshots. A retry reacquires them before
+// mutation; a live update retains them until acceptance or recovery handoff.
+const reservations = new WeakMap();
+
+export function releaseUpdateSchedulerReservations(entries) {
+  for (const entry of entries) {
+    reservations.get(entry.snapshot)?.release();
+    reservations.delete(entry.snapshot);
+  }
+}
+
+export function reserveUpdateSchedulerWriters(entries, options = {}) {
+  const native = nativeOptions(options);
+  try {
+    for (const entry of entries) {
+      const snapshot = entry.snapshot;
+      if (!snapshot?.exists) continue;
+      const held = reservations.get(snapshot);
+      if (held) { held.assertOwned(); continue; }
+      const kind = snapshot.jobKind ?? ({ drive: "drive-ingest", folder: "folder-ingest", imessage: "imessage-capture" })[entry.kind] ??
+        (entry.kind === "provider" ? `${entry.provider}-ingest` : null);
+      const spec = genericJobs(native).find(([, item]) => item.kind === kind)?.[1];
+      if (snapshot.jobKind !== "curated-sync" && !spec) continue;
+      const plan = spec ? core.schedulerIdentity(options.manifestPath, { ...native, spec })
+        : curated.buildCuratedSchedulerPlan(snapshot.planPath, native);
+      if (core.schedulerLockHeld({ ...plan, spec: spec || { schedulerNoun: "curated scheduler" } }, native)) {
+        throw new Error("scheduler writer is busy");
+      }
+      if (!spec) reservations.set(snapshot, acquireSourceIngestLock(curatedSourceLeaseOptions(plan.curatedPlan, {
+        planDirectory: plan.planDirectory, home: native.home,
+      })));
+    }
+  } catch {
+    releaseUpdateSchedulerReservations(entries);
+    throw new Error("scheduler writer is busy or its reservation could not be proved");
+  }
+}
 
 function disabledLabels(options) {
   const result = launch(options)(["print-disabled", `gui/${options.uid ?? process.getuid?.()}`]);
@@ -143,12 +181,15 @@ function inspectNative(snapshot, options, { allowRunning = false } = {}) {
         JSON.stringify(loadedArguments(result.stdout)) !== JSON.stringify(installed.plist.ProgramArguments)) throw new Error("loaded definition differs from saved definition");
     if (!allowRunning && /\bstate\s*=\s*running\b|\bpid\s*=\s*[1-9][0-9]*/u.test(result.stdout)) throw new Error("job is running; wait for it to finish");
   }
-  return { ...installed, wasLoaded: result.status === 0 };
+  return { ...installed, wasLoaded: result.status === 0,
+    loadedPolicyKnown: result.status === 0 && [...String(result.stdout).matchAll(/^\s*properties\s*=/gmu)].length === 1,
+    loadedRunAtLoad: result.status === 0 && /\brunatload\b/iu.test(String(result.stdout)) };
 }
 
 export function verifyUpdateSchedulerDefinition(plan, expected, options = {}, enabled = true) {
   const readback = inspectNative({ path: plan.plistPath, service: plan.service }, options, { allowRunning: true });
   if (readback.serialized !== expected || readback.wasLoaded !== enabled ||
+      (enabled && (!readback.loadedPolicyKnown || readback.loadedRunAtLoad) && /<key>RunAtLoad<\/key>\s*<false\s*\/>/u.test(expected)) ||
       JSON.stringify(readback.plist.ProgramArguments) !== JSON.stringify(plan.programArguments)) throw new Error("saved and loaded definitions did not read back exactly");
   if (!existsSync(plan.nodePath) || !existsSync(plan.schedulerPath) || (plan.brainPath && !existsSync(plan.brainPath))) throw new Error("new runtime is missing");
   if (disabledLabels(options).has(plan.label) === enabled) throw new Error("native enablement did not read back exactly");
@@ -174,6 +215,13 @@ function ownedQuickBooksState(state, plan, manifestPath) {
     win32.isAbsolute(contract.command) && win32.basename(contract.command).toLowerCase() === "node.exe" &&
     win32.isAbsolute(runner || "") && win32.basename(runner).toLowerCase() === "quickbooks-schedule.mjs" &&
     contract.arguments === `${quoteWindowsTaskArgument(runner)} ${tail}` && Boolean(definition.serialized);
+}
+
+function sameQuickBooksContract(state, expected, plan, manifestPath) {
+  return ownedQuickBooksState(state, plan, manifestPath) && ownedQuickBooksState(expected, plan, manifestPath) &&
+    /^sha256:[a-f0-9]{64}$/u.test(String(state.definition.native_definition_hash)) &&
+    state.definition.native_definition_hash === expected.definition.native_definition_hash &&
+    state.definition.definition_hash === expected.definition.definition_hash;
 }
 
 export function validateUpdateSchedulerSnapshot(m, manifestPath, entry, options = {}) {
@@ -321,6 +369,9 @@ export async function captureAdditionalUpdateSchedulers(m, manifestPath, options
   if (loadedLabels.has(daemonReference.label) && !files.includes(basename(daemonReference.plistPath))) refuse("whatsapp-daemon", "loaded capture has no readable saved definition");
   if (refusals.length) requireUpdateSchedulers([...refusals, ...entries.map(entry => schedulerUpdateRow(entry.snapshot.jobKind,
     "COULD NOT MOVE", "update did not start because another job needs repair", fixFor(entry.snapshot.jobKind, manifestPath, entry.snapshot.planPath)))]);
+  try { reserveUpdateSchedulerWriters(entries, { ...options, manifestPath }); } catch {
+    failed("daily", manifestPath, "scheduler writer is busy or its reservation could not be proved");
+  }
   return entries;
 }
 
@@ -333,7 +384,7 @@ export async function pauseAdditionalUpdateScheduler(m, manifestPath, entry, opt
     if (JSON.stringify(current) !== JSON.stringify(snapshot.state)) throw new Error("QuickBooks task changed after capture");
     q.adapter.setEnabled(q.plan.identity, false, { expected: current });
     const paused = q.adapter.read(q.plan.identity);
-    if (!paused?.owned || paused.enabled || paused.definition?.serialized !== snapshot.serialized) throw new Error("QuickBooks pause readback failed");
+    if (paused.enabled !== false || !sameQuickBooksContract(paused, snapshot.state, q.plan, manifestPath)) throw new Error("QuickBooks pause readback failed");
     return snapshot;
   }
   const native = nativeOptions(options);
@@ -359,12 +410,13 @@ export async function restoreAdditionalUpdateScheduler(m, manifestPath, entry, o
   const native = nativeOptions(options);
   const spec = genericJobs(native).find(([, item]) => item.kind === snapshot.jobKind)?.[1];
   if (spec) return core.restoreScheduler(manifestPath, snapshot, { ...native, spec });
-  const current = inspectNative(snapshot, native);
-  if (current.serialized !== snapshot.serialized || current.wasLoaded) throw new Error("curated job changed while paused");
-  if (launch(native)(["enable", snapshot.service])?.status !== 0) throw new Error("curated restore failed");
-  if (snapshot.wasLoaded && launch(native)(["bootstrap", `gui/${native.uid ?? process.getuid?.()}`, snapshot.path])?.status !== 0) throw new Error("curated restore failed");
+  const current = inspectNative(snapshot, native, { allowRunning: true });
+  if (current.serialized !== snapshot.serialized || (current.wasLoaded && !snapshot.wasLoaded)) throw new Error("curated job changed while paused");
+  if (launch(native)([snapshot.wasDisabled === true ? "disable" : "enable", snapshot.service])?.status !== 0) throw new Error("curated restore failed");
+  if (snapshot.wasLoaded && !current.wasLoaded && launch(native)(["bootstrap", `gui/${native.uid ?? process.getuid?.()}`, snapshot.path])?.status !== 0) throw new Error("curated restore failed");
   const restored = inspectNative(snapshot, native, { allowRunning: true });
-  if (restored.wasLoaded !== snapshot.wasLoaded || restored.serialized !== snapshot.serialized) throw new Error("curated restore readback failed");
+  if (restored.wasLoaded !== snapshot.wasLoaded || restored.serialized !== snapshot.serialized ||
+      disabledLabels(native).has(snapshot.service.split("/").at(-1)) !== (snapshot.wasDisabled === true)) throw new Error("curated restore readback failed");
 }
 
 export async function reconcileAdditionalUpdateScheduler(m, manifestPath, entry, options = {}) {
@@ -376,16 +428,12 @@ export async function reconcileAdditionalUpdateScheduler(m, manifestPath, entry,
       const q = qbContext(m, manifestPath, options);
       const state = q.adapter.read(q.plan.identity);
       const desired = q.module.buildQuickBooksScheduleDefinition(q.plan, q.schedulerOptions);
-      if (!ownedQuickBooksState(state, q.plan, manifestPath) || ![snapshot.serialized, desired.serialized].includes(state.definition.serialized)) throw new Error("task changed while paused");
-      if (!snapshot.wasLoaded) {
-        if (state.enabled || state.definition.serialized !== desired.serialized) throw new Error("disabled task needs an attended reinstall");
-        return schedulerUpdateRow(kind, "already current");
-      }
-      const installed = q.module.registerQuickBooksSchedule(q.plan, q.schedulerOptions);
-      if (!snapshot.wasLoaded) q.adapter.setEnabled(q.plan.identity, false);
+      if (!sameQuickBooksContract(state, snapshot.state, q.plan, manifestPath) &&
+          !sameQuickBooksContract(state, { exists: true, owned: true, definition: desired }, q.plan, manifestPath)) throw new Error("task changed while paused");
+      const installed = q.module.registerQuickBooksSchedule(q.plan, { ...q.schedulerOptions, enabled: snapshot.wasLoaded });
       const checked = q.module.statusQuickBooksSchedule(q.plan, q.schedulerOptions);
-      if (!installed.verified || checked.enabled !== snapshot.wasLoaded || (snapshot.wasLoaded && !checked.verified)) throw new Error("task exact readback failed");
-      return schedulerUpdateRow(kind, installed.definition.serialized === snapshot.serialized ? "already current" : "moved");
+      if (!installed.verified || !checked.definitionValid || checked.enabled !== snapshot.wasLoaded) throw new Error("task exact readback failed");
+      return schedulerUpdateRow(kind, installed.definition.definition_hash === snapshot.state.definition.definition_hash ? "already current" : "moved");
     }
     const native = nativeOptions(options);
     if (kind === "whatsapp-daemon") {
@@ -402,17 +450,17 @@ export async function reconcileAdditionalUpdateScheduler(m, manifestPath, entry,
     }
     const spec = genericJobs(native).find(([, item]) => item.kind === kind)?.[1];
     const plan = spec ? core.buildSchedulerPlan(manifestPath, { ...native, spec }) : curated.buildCuratedSchedulerPlan(snapshot.planPath, native);
-    const desired = spec ? core.renderLaunchAgentPlist(plan) : curated.renderCuratedLaunchAgentPlist(plan);
+    const render = spec ? core.renderLaunchAgentPlist : curated.renderCuratedLaunchAgentPlist;
+    const desired = render(plan, { registrationOnly: true });
     const current = inspectNative(snapshot, native, { allowRunning: true });
     if (current.serialized !== snapshot.serialized && current.serialized !== desired) throw new Error("definition changed while update held it paused");
     if (current.wasLoaded && current.serialized !== desired) throw new Error("old definition unexpectedly resumed");
     if (!current.wasLoaded) {
-      if (spec) core.installScheduler(manifestPath, { ...native, spec, enabled: desiredLoaded(snapshot) });
-      else if (desiredLoaded(snapshot)) curated.reinstallScheduledCuratedSync(snapshot.planPath, native);
-      else if (current.serialized !== desired) throw new Error("disabled curated definition needs an attended reinstall");
+      if (spec) core.installScheduler(manifestPath, { ...native, spec, enabled: desiredLoaded(snapshot), registrationOnly: true });
+      else curated.reinstallScheduledCuratedSync(snapshot.planPath, { ...native, enabled: desiredLoaded(snapshot), registrationOnly: true });
     }
     verifyUpdateSchedulerDefinition(plan, desired, native, desiredLoaded(snapshot));
-    return schedulerUpdateRow(kind, snapshot.serialized === desired ? "already current" : "moved");
+    return schedulerUpdateRow(kind, [desired, render(plan)].includes(snapshot.serialized) ? "already current" : "moved");
   } catch {
     return schedulerUpdateRow(kind, "COULD NOT MOVE", "reviewed install or exact runtime readback failed; imports remain paused or unverified", fixFor(kind, manifestPath, snapshot.planPath));
   }
@@ -420,38 +468,43 @@ export async function reconcileAdditionalUpdateScheduler(m, manifestPath, entry,
 
 /** A second inventory is part of local acceptance, before releasing recovery. */
 export async function verifyUpdateSchedulerInventory(m, manifestPath, entries, options = {}) {
+  reserveUpdateSchedulerWriters(entries, { ...options, manifestPath });
   const added = await captureAdditionalUpdateSchedulers(m, manifestPath, { ...options, preserveSnapshotIntent: true }, entries);
-  const known = new Set(entries.filter(entry => entry.snapshot?.exists).map(entry => entry.snapshot.service));
-  const rows = added.filter(entry => !known.has(entry.snapshot.service)).map(entry => schedulerUpdateRow(
-    entry.snapshot.jobKind, "COULD NOT MOVE", "job appeared after the pre-update snapshot; retry the update",
-    fixFor(entry.snapshot.jobKind, manifestPath, entry.snapshot.planPath),
-  ));
-  for (const entry of entries) {
-    if (!entry.snapshot?.exists) continue;
-    const native = nativeOptions(options);
-    const kind = entry.snapshot.jobKind ?? entry.module?.[entry.kind === "drive" ? "DRIVE_SCHEDULER_SPEC" : entry.kind === "folder"
-      ? "FOLDER_SCHEDULER_SPEC" : entry.kind === "imessage" ? "IMESSAGE_SCHEDULER_SPEC" : ""]?.kind ??
-      entry.module?.createProviderSchedulerSpec?.(entry.provider, native)?.kind;
-    if (!kind) continue;
-    try {
-      if (kind === "quickbooks-task") {
-        const q = qbContext(m, manifestPath, options);
-        const checked = q.module.statusQuickBooksSchedule(q.plan, q.schedulerOptions);
-        if (checked.enabled !== entry.snapshot.wasLoaded || (entry.snapshot.wasLoaded && !checked.verified)) throw new Error("task drift");
-      } else if (kind === "whatsapp-daemon") {
-        const plan = daemon.buildWhatsappDaemonPlan(manifestPath, { ...native, ...(options.whatsappDaemonOptions || {}) });
-        const checked = inspectNative(entry.snapshot, native, { allowRunning: true });
-        if (checked.serialized !== daemon.renderDaemonPlist(plan) || checked.wasLoaded !== desiredLoaded(entry.snapshot) ||
-            disabledLabels(native).has(plan.label) === desiredLoaded(entry.snapshot) || !existsSync(plan.binaryPath)) throw new Error("capture drift");
-      } else {
-        const spec = genericJobs(native).find(([, item]) => item.kind === kind)?.[1];
-        const plan = spec ? core.buildSchedulerPlan(manifestPath, { ...native, spec }) : curated.buildCuratedSchedulerPlan(entry.snapshot.planPath, native);
-        verifyUpdateSchedulerDefinition(plan, spec ? core.renderLaunchAgentPlist(plan) : curated.renderCuratedLaunchAgentPlist(plan), native, desiredLoaded(entry.snapshot));
+  try {
+    const known = new Set(entries.filter(entry => entry.snapshot?.exists).map(entry => entry.snapshot.service));
+    const rows = added.filter(entry => !known.has(entry.snapshot.service)).map(entry => schedulerUpdateRow(
+      entry.snapshot.jobKind, "COULD NOT MOVE", "job appeared after the pre-update snapshot; retry the update",
+      fixFor(entry.snapshot.jobKind, manifestPath, entry.snapshot.planPath),
+    ));
+    for (const entry of entries) {
+      if (!entry.snapshot?.exists) continue;
+      const native = nativeOptions(options);
+      const kind = entry.snapshot.jobKind ?? entry.module?.[entry.kind === "drive" ? "DRIVE_SCHEDULER_SPEC" : entry.kind === "folder"
+        ? "FOLDER_SCHEDULER_SPEC" : entry.kind === "imessage" ? "IMESSAGE_SCHEDULER_SPEC" : ""]?.kind ??
+        entry.module?.createProviderSchedulerSpec?.(entry.provider, native)?.kind;
+      if (!kind) continue;
+      try {
+        if (kind === "quickbooks-task") {
+          const q = qbContext(m, manifestPath, options);
+          const checked = q.module.statusQuickBooksSchedule(q.plan, q.schedulerOptions);
+          if (!checked.definitionValid || checked.enabled !== entry.snapshot.wasLoaded) throw new Error("task drift");
+        } else if (kind === "whatsapp-daemon") {
+          const plan = daemon.buildWhatsappDaemonPlan(manifestPath, { ...native, ...(options.whatsappDaemonOptions || {}) });
+          const checked = inspectNative(entry.snapshot, native, { allowRunning: true });
+          if (checked.serialized !== daemon.renderDaemonPlist(plan) || checked.wasLoaded !== desiredLoaded(entry.snapshot) ||
+              disabledLabels(native).has(plan.label) === desiredLoaded(entry.snapshot) || !existsSync(plan.binaryPath)) throw new Error("capture drift");
+        } else {
+          const spec = genericJobs(native).find(([, item]) => item.kind === kind)?.[1];
+          const plan = spec ? core.buildSchedulerPlan(manifestPath, { ...native, spec }) : curated.buildCuratedSchedulerPlan(entry.snapshot.planPath, native);
+          verifyUpdateSchedulerDefinition(plan, spec ? core.renderLaunchAgentPlist(plan, { registrationOnly: true }) : curated.renderCuratedLaunchAgentPlist(plan, { registrationOnly: true }), native, desiredLoaded(entry.snapshot));
+        }
+      } catch {
+        rows.push(schedulerUpdateRow(kind, "COULD NOT MOVE", "final local acceptance found an unverified definition or runtime", fixFor(kind, manifestPath, entry.snapshot.planPath)));
       }
-    } catch {
-      rows.push(schedulerUpdateRow(kind, "COULD NOT MOVE", "final local acceptance found an unverified definition or runtime", fixFor(kind, manifestPath, entry.snapshot.planPath)));
     }
+    requireUpdateSchedulers(rows);
+    return rows;
+  } finally {
+    releaseUpdateSchedulerReservations(added);
   }
-  requireUpdateSchedulers(rows);
-  return rows;
 }

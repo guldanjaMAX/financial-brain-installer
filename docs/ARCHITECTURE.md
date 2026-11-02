@@ -641,6 +641,14 @@ share an exclusive lifecycle lease keyed by canonical Brain resource identity
 in a machine-shared lock root. Manifest aliases and operating-system users
 therefore reach the same writer boundary. Lock order is lifecycle lease first,
 then the source lease, then any shared provider credential-record lease. A
+curated sync follows that same order for every target and checks the recovery
+fence before credential resolution. Update retains each curated ledger lease
+through local acceptance or recovery handoff and checks native advisory locks
+before permitting scheduler mutation. Scheduler rebind registration suppresses
+load-time ingest while preserving calendar triggers and disabled intent.
+Native enablement is verified separately from immutable Windows task contracts.
+Partial pause recovery includes every attempted job, even after a lost native
+acknowledgement, and keeps the recovery receipt if any restoration is unproved. A
 scheduled collision records a deferred outcome; interactive mutations fail
 closed. Update durably records the verified prior schedule before persistently
 disabling it, and reconciles from the updated manifest only after version

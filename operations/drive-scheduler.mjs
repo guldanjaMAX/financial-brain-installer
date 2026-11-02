@@ -859,7 +859,7 @@ function renderCalendarEntry(entry) {
   return body ? `    <dict>\n${body}\n    </dict>` : "    <dict/>";
 }
 
-export function renderLaunchAgentPlist(plan) {
+export function renderLaunchAgentPlist(plan, { registrationOnly = false } = {}) {
   const args = plan.programArguments.map((arg) => `      <string>${xml(arg)}</string>`).join("\n");
   const intervals = plan.intervals.map(renderCalendarEntry).join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -879,7 +879,8 @@ ${args}
 ${intervals}
   </array>
   <!--
-    RunAtLoad is TRUE so a missed schedule is caught up.
+    Ordinary installation catches up at load. Update registration suppresses
+    that trigger until a later calendar firing, after local acceptance.
 
     launchd coalesces a calendar firing missed while the Mac is asleep, but a
     firing missed while the Mac is powered off or the owner is logged out is
@@ -897,7 +898,7 @@ ${intervals}
     to save a little work is the exact failure this whole change exists to fix.
   -->
   <key>RunAtLoad</key>
-  <true/>
+  <${registrationOnly ? "false" : "true"}/>
   <key>ProcessType</key>
   <string>Background</string>
   <key>LowPriorityIO</key>
@@ -1222,7 +1223,7 @@ export function installScheduler(manifestPath, options = {}) {
   // Stage and chmod the complete definition before touching a working service.
   // A disk-full or permissions failure therefore cannot unload the old job.
   const stagePlist = options.stagePlist || stageAtomicWrite;
-  const staged = stagePlist(plan.plistPath, renderLaunchAgentPlist(plan));
+  const staged = stagePlist(plan.plistPath, renderLaunchAgentPlist(plan, options));
   let priorStatus;
   try {
     priorStatus = launchctl(["print", plan.service]);
@@ -1275,7 +1276,7 @@ export function installScheduler(manifestPath, options = {}) {
     }
     const readback = launchctl(["print", plan.service]);
     if (readback?.status !== 113 || readback.error ||
-        readFileSync(plan.plistPath, "utf8") !== renderLaunchAgentPlist(plan)) {
+        readFileSync(plan.plistPath, "utf8") !== renderLaunchAgentPlist(plan, options)) {
       failedReplacement(`verifying the paused ${plan.spec.schedulerNoun}`, readback, plan, priorPlist, wasLoaded, launchctl);
     }
     return { ...plan, installed: true, loaded: false, replaced: priorPlist !== null };
@@ -1322,7 +1323,10 @@ export function statusScheduler(manifestPath, options = {}) {
   const installed = existsSync(plan.plistPath);
   let definitionMatches = false;
   if (installed && !scheduleError) {
-    try { definitionMatches = readFileSync(plan.plistPath, "utf-8") === renderLaunchAgentPlist(plan); } catch {}
+    try {
+      const saved = readFileSync(plan.plistPath, "utf-8");
+      definitionMatches = [renderLaunchAgentPlist(plan), renderLaunchAgentPlist(plan, { registrationOnly: true })].includes(saved);
+    } catch {}
   }
   // A LaunchAgent whose interpreter has been upgraded away is loaded, matches
   // the manifest, and cannot run. Nothing else in this report would say so.
@@ -1415,7 +1419,7 @@ export function restoreScheduler(manifestPath, snapshot, options = {}) {
   if (!snapshot?.exists) return Object.freeze({ restored: false, verified: true });
   const status = statusScheduler(manifestPath, options);
   const captured = captureInstalledSchedulerDefinition(manifestPath, options);
-  if (!status.installed || captured.wasLoaded || captured.path !== snapshot.path || captured.service !== snapshot.service ||
+  if (!status.installed || (captured.wasLoaded && !snapshot.wasLoaded) || captured.path !== snapshot.path || captured.service !== snapshot.service ||
       captured.serialized !== snapshot.serialized || readFileSync(status.plistPath, "utf8") !== snapshot.serialized) {
     throw new Error(`the owned ${status.spec.schedulerNoun} changed while update held it paused`);
   }

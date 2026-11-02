@@ -14,6 +14,7 @@
  */
 
 import { acquireSourceIngestLock } from "./source-ingest-lock.mjs";
+import { acquireBrainLifecycleLock } from "./brain-lifecycle-lock.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import {
   constants as fsConstants,
@@ -836,6 +837,7 @@ function validateResolvedTarget(name, target, resolved) {
 }
 
 async function resolveRequiredTargets(prepared, options, mode, inspectedTargets = null) {
+  options.assertLeaseOwned?.();
   if (mode === "dry-run") return Object.freeze({});
   const resolver = options.resolveTarget ?? defaultResolveTarget;
   const names = mode === "sync" ? targetNames(prepared.plan) : ["cloudflare"];
@@ -901,6 +903,7 @@ async function postOneTarget(name, prepared, resolved, options = {}) {
   const request = options.fetch ?? globalThis.fetch;
   for (const document of prepared.documents) {
     const envelope = name === "legacy" ? document.legacyEnvelope : document.cloudflareEnvelope;
+    options.assertLeaseOwned?.();
     if (Buffer.byteLength(envelope.content, "utf8") > MAX_DOCUMENT_BYTES) {
       statuses.set(document.logicalFingerprint, "oversized");
       continue;
@@ -1250,6 +1253,11 @@ export function writeCuratedCoverageLedger(path, ledger, options = {}) {
  *   audit:   read-only Cloudflare historical-family evidence, no ingest writes;
  *   sync:    independent legacy and Cloudflare writes plus historical evidence.
  */
+export function curatedSourceLeaseOptions(plan, options = {}) {
+  const ledgerPath = resolveFromPlan(options.planDirectory ?? process.cwd(), plan.ledgerFile);
+  return { sourceName: "curated", statePath: pathIdentity(ledgerPath).real, home: options.home };
+}
+
 export async function runCuratedDualSync(planInput, options = {}) {
   if (!["preview", "dry-run", "audit", "sync"].includes(options.mode)) {
     fail("curated sync mode must be preview, dry-run, audit, or sync");
@@ -1257,20 +1265,33 @@ export async function runCuratedDualSync(planInput, options = {}) {
   if (options.mode === "preview") return runCuratedSyncHeld(planInput, options);
   const plan = planInput?.schemaVersion === CURATED_SYNC_PLAN_VERSION
     ? planInput : validateCuratedSyncPlan(planInput);
-  const ledgerPath = resolveFromPlan(options.planDirectory ?? process.cwd(), plan.ledgerFile);
   // Every ledger-writing entry point uses one canonical local lease. The
   // scheduler's launchd lock alone cannot serialize supervised direct runs.
   let lease;
+  const lifecycle = [];
   try {
-    lease = acquireSourceIngestLock({
-      sourceName: "curated", statePath: pathIdentity(ledgerPath).real, home: options.home,
-    });
+    // Use the same lifecycle and recovery boundary as update before resolving
+    // credentials. Sort and deduplicate targets so two-target runs cannot
+    // reverse the lifecycle -> source lock order.
+    const contracts = inspectCuratedTargetContracts(plan, options);
+    const manifests = [...new Set(Object.values(contracts).map(target => realpathSync(target.manifestPath)))].sort();
+    for (const manifestPath of manifests) lifecycle.push(acquireBrainLifecycleLock({
+      ...options.lifecycleLockOptions, manifestPath, operation: "curated-sync",
+    }));
+    lease = acquireSourceIngestLock(curatedSourceLeaseOptions(plan, options));
   } catch {
+    for (const held of lifecycle.reverse()) held.release();
     fail("curated sync already running or local lock could not be acquired safely");
   }
   try {
-    return await runCuratedSyncHeld(plan, { ...options, assertLeaseOwned: lease.assertOwned });
-  } finally { lease.release(); }
+    return await runCuratedSyncHeld(plan, { ...options, assertLeaseOwned: () => {
+      for (const held of lifecycle) held.assertOwned();
+      lease.assertOwned();
+    } });
+  } finally {
+    lease.release();
+    for (const held of lifecycle.reverse()) held.release();
+  }
 }
 
 async function runCuratedSyncHeld(planInput, options = {}) {

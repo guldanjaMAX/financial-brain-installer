@@ -34,6 +34,15 @@ const corpus = join(sandbox, "corpus");
 const stateFile = join(sandbox, ".brain-ingest-drive.json");
 const ledgerFile = join(sandbox, ".brain-curated-sync-ledger.json");
 
+// Lifecycle exclusion needs target identities even with an injected resolver.
+writeFileSync(join(sandbox, "legacy.manifest.json"), JSON.stringify({
+    brain: { domain: "legacy-contract.invalid" },
+  }), { mode: 0o600 });
+writeFileSync(join(sandbox, "cloudflare.manifest.json"), JSON.stringify({
+    brain: { domain: "cloudflare-contract.invalid" },
+    infrastructure: { cloudflare: { storage: "d1" } },
+  }), { mode: 0o600 });
+
 const docs = Object.freeze([
   {
     relative_path: "alpha.md",
@@ -359,13 +368,6 @@ try {
 
   // Target identity can be resolved and validated without reading an admin
   // credential. This exercises the production manifest parser and D1 contract.
-  writeFileSync(join(sandbox, "legacy.manifest.json"), JSON.stringify({
-    brain: { domain: "legacy-contract.invalid" },
-  }), { mode: 0o600 });
-  writeFileSync(join(sandbox, "cloudflare.manifest.json"), JSON.stringify({
-    brain: { domain: "cloudflare-contract.invalid" },
-    infrastructure: { cloudflare: { storage: "d1" } },
-  }), { mode: 0o600 });
   const contracts = inspectCuratedTargetContracts(plan(), { planDirectory: sandbox });
   assert.equal(contracts.legacy.origin, "https://legacy-contract.invalid");
   assert.equal(contracts.cloudflare.origin, "https://cloudflare-contract.invalid");

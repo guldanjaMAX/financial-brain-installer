@@ -14,7 +14,7 @@ import { buildCuratedSchedulerPlan, renderCuratedLaunchAgentPlist } from "../ope
 import * as quickbooks from "../operations/quickbooks-schedule.mjs";
 import { buildWhatsappDaemonPlan, renderDaemonPlist } from "../operations/whatsapp-daemon.mjs";
 import { dailyRefreshIdentity } from "../operations/daily-refresh-plan.mjs";
-import { buildDailyRefreshDefinition } from "../operations/daily-refresh-scheduler.mjs";
+import { buildDailyRefreshDefinition, readDailyRefreshUpdateTransaction } from "../operations/daily-refresh-scheduler.mjs";
 import { captureAdditionalUpdateSchedulers, pauseAdditionalUpdateScheduler, reconcileAdditionalUpdateScheduler } from "../operations/update-scheduler-inventory.mjs";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
@@ -49,6 +49,7 @@ function parsePlist(bytes) {
   const args = text.match(/<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/)?.[1] ?? "";
   return { Label: field("Label"), WorkingDirectory: field("WorkingDirectory"),
     EnvironmentVariables: { BRAIN_MANIFEST_PATH: field("BRAIN_MANIFEST_PATH"), WA_DATA_DIR: field("WA_DATA_DIR") },
+    RunAtLoad: /<key>RunAtLoad<\/key>\s*<true\s*\/>/u.test(text),
     ProgramArguments: [...args.matchAll(/<string>([^<]*)<\/string>/g)].map(match => decode(match[1])) };
 }
 
@@ -70,9 +71,10 @@ function fixture({ aliasHome = false } = {}) {
   writeFileSync(manifestPath, JSON.stringify(m), { mode: 0o600 });
   const loaded = new Map();
   const disabled = new Set();
-  const calls = [], finish = [], reports = [];
+  const calls = [], finish = [], reports = [], starts = [];
   const native = { platform: "darwin", uid, home, nodePath: process.execPath,
-    brainPath: join(ROOT, "brain.mjs"), parseInstalledPlist: parsePlist };
+    brainPath: join(ROOT, "brain.mjs"), parseInstalledPlist: parsePlist,
+    lockProbeSpawn: () => ({ status: 0 }) };
   const launchctl = args => {
     calls.push(args);
     if (args[0] === "list") return { status: 0, stdout: `PID Status Label\n${[...loaded.keys()].map(service => `- 0 ${service.split("/").at(-1)}`).join("\n")}\n` };
@@ -82,12 +84,13 @@ function fixture({ aliasHome = false } = {}) {
     if (args[0] === "print") {
       const item = loaded.get(args[1]);
       if (!item) return { status: 113, stderr: "not found" };
-      return { status: 0, stdout: `path = ${item.path}\nstate = waiting\narguments = {\n${item.args.join("\n")}\n}\n` };
+      return { status: 0, stdout: `path = ${item.path}\nstate = waiting\nproperties = ${item.runAtLoad ? "runatload" : "none"}\narguments = {\n${item.args.join("\n")}\n}\n` };
     }
     if (args[0] === "bootout") loaded.delete(args[1]);
     if (args[0] === "bootstrap") {
       const definition = parsePlist(readFileSync(args[2]));
-      loaded.set(`${args[1]}/${definition.Label}`, { path: args[2], args: definition.ProgramArguments });
+      if (definition.RunAtLoad) starts.push(definition.ProgramArguments[2]);
+      loaded.set(`${args[1]}/${definition.Label}`, { path: args[2], args: definition.ProgramArguments, runAtLoad: definition.RunAtLoad });
     }
     return { status: 0, stdout: "" };
   };
@@ -115,7 +118,7 @@ function fixture({ aliasHome = false } = {}) {
     writeFileSync(plan.plistPath, text, { mode: 0o600 });
     loaded.set(plan.service, { path: plan.plistPath, args: plan.programArguments });
   }
-  return { home, requestedHome, manifestPath, m, native, options, calls, finish, reports, loaded, disabled, installFile,
+  return { home, requestedHome, manifestPath, m, native, options, calls, finish, reports, loaded, disabled, installFile, starts, dailyPlan: plan,
     upgrades: () => upgrades, close: () => rmSync(directory, { recursive: true, force: true }) };
 }
 
@@ -503,4 +506,59 @@ macTest("an installed daily job with imports off reports a moved runtime", async
     assert.notEqual(state.definition.definition_hash, old.definition_hash);
     assert.equal(f.reports.flat().find(row => row.kind === "daily")?.state, "moved");
   } finally { f.close(); }
+});
+
+macTest("update rebind and a current retry do not trigger load-time data work", async () => {
+  const f = fixture();
+  try {
+    const { plan } = curated(f, true);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await cmdUpdate(f.manifestPath, f.options);
+      assert.equal(f.upgrades(), attempt + 1);
+      assert.equal(f.loaded.has(plan.service), true);
+      assert.equal(f.starts.length, 0);
+    }
+    assert.equal(f.calls.filter(call => call[0] === "bootstrap").length, 2, "both update registrations reached native loading");
+  } finally { f.close(); }
+});
+
+macTest("partial pause restores the original job or retains a receipt for a clean retry", async () => {
+  for (const failRestore of [false, true]) {
+    const f = fixture();
+    try {
+      const { plan } = curated(f, false);
+      const nativeLaunch = f.native.launchctl;
+      let stopFailed = false, restoringBlocked = failRestore, enableAttempts = 0;
+      f.native.launchctl = args => {
+        if (args[0] === "bootout" && !stopFailed) {
+          stopFailed = true;
+          return { status: 5, stderr: "synthetic pause refusal" };
+        }
+        if (args[0] === "enable") {
+          enableAttempts++;
+          if (restoringBlocked) return { status: 5, stderr: "synthetic restore refusal" };
+        }
+        return nativeLaunch(args);
+      };
+      await assert.rejects(cmdUpdate(f.manifestPath, f.options));
+      assert.equal(stopFailed, true, "pause reached the native mutation");
+      assert.ok(enableAttempts > 0, "recovery attempted the partially changed entry");
+      assert.equal(f.upgrades(), 0);
+      assert.equal(f.loaded.has(plan.service), true);
+      assert.equal(f.disabled.has(plan.service), failRestore);
+      const receiptOptions = { home: f.home, manifestPath: f.manifestPath, platform: "darwin", machineLockRoot: join(f.home, "machine-locks") };
+      const receipt = readDailyRefreshUpdateTransaction(f.dailyPlan.identity, receiptOptions);
+      if (failRestore) {
+        assert.equal(receipt.phase, "recovery_required");
+        assert.equal(receipt.remote_mutation_may_have_started, false);
+        assert.equal(receipt.legacy_snapshots.length, 1);
+        restoringBlocked = false;
+        await cmdUpdate(f.manifestPath, f.options);
+        assert.equal(f.upgrades(), 1);
+        assert.equal(f.disabled.has(plan.service), false);
+        assert.equal(readDailyRefreshUpdateTransaction(f.dailyPlan.identity, receiptOptions), null);
+        assert.equal(f.finish.length, 1);
+      } else assert.equal(receipt, null, "exact restoration permits clearing the receipt");
+    } finally { f.close(); }
+  }
 });
