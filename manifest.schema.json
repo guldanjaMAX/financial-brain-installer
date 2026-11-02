@@ -300,7 +300,7 @@
             "transport": { "type": "string", "const": "file-export" },
             "format": { "type": "string", "const": "granola.meeting.v1" },
             "owner_email": { "type": "string", "maxLength": 320, "description": "Exact reviewed account email, never inferred or case-folded." },
-            "export_path": { "type": "string", "description": "Absolute owner-only directory of explicitly selected direct meeting JSON files." }
+            "export_path": { "type": "string", "description": "Native absolute owner-only directory of explicitly selected direct meeting JSON files. Windows paths require an explicit drive or UNC share; foreign-platform syntax is refused." }
           },
           "allOf": [{
             "if": { "required": ["enabled"], "properties": { "enabled": { "const": true } } },

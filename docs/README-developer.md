@@ -1782,7 +1782,9 @@ existing behavior and does not interpret these files as meeting records.
 
 The disabled `corpora.granola` template declares `source`, `transport:
 "file-export"`, `format`, exact `owner_email`, and an absolute owner-only
-`export_path`. An authorized caller passes explicit direct JSON file paths and
+`export_path` in the current platform's native syntax. Windows roots must name
+an explicit drive or UNC share; a foreign-platform path is refused before file
+access or delivery. An authorized caller passes explicit direct JSON file paths and
 an injected `request(path, body)` adapter returning a Response. That caller
 owns the existing lifecycle/source lease and full-admin credential boundary;
 the importer does not acquire credentials or provide a default network path.
@@ -1795,9 +1797,15 @@ The declared export root must be a regular directory, with owner-only mode on
 POSIX. A linked ancestor is permitted, including system temp-directory aliases;
 the root itself and selected file or directory links below it are refused.
 Selections must be direct JSON children of the declared path and resolve to
-that same child inside its canonical root. Reads use the verified canonical
-path and check descriptor identity, so a retargeted ancestor cannot redirect
-the read outside that root.
+that same child inside its canonical root. Canonicalization must preserve the
+device/inode and permissions of the original root. POSIX retains a no-follow
+directory descriptor; both root spellings are checked against the original
+identity around member reads. An isolated Node reader starts inside the
+canonical directory and verifies its kernel-held working directory against
+that original identity before opening any member. All member syscalls remain
+relative to that pinned directory, even if its path is replaced. The caller's
+working directory stays unchanged. File descriptors and output pipes remain
+bounded, and the reader receives no inherited desktop environment or credentials.
 
 Each file contains `id`, `title`, an offset-aware `meeting_at`, `attendees`
 (display/email strings), exact `owner_email`, optional `notes` and `summary`,

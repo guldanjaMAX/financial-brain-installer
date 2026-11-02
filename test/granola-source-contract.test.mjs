@@ -25,9 +25,9 @@ test("manifest schema, disabled template and catalog describe supervised export 
   }
 });
 
-test("the package privacy inventory explicitly reviews both meeting import modules", () => {
+test("the package privacy inventory explicitly reviews every meeting import module", () => {
   const inventory = read("test/package-privacy.test.mjs");
-  for (const path of ["connectors/granola-records.mjs", "connectors/granola-export.mjs"]) {
+  for (const path of ["connectors/granola-records.mjs", "connectors/granola-export.mjs", "connectors/granola-export-reader.mjs"]) {
     assert.ok(inventory.includes(JSON.stringify(path)), `missing reviewed package entry: ${path}`);
   }
 });
