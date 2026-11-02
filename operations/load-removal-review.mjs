@@ -1,6 +1,7 @@
 /** Aggregate review facts shared by load, daily receipts and local status. */
 import { DriveRemovalReviewRequired } from "./drive-removal-plan.mjs";
 import { renderCliCommands } from "./cli-guidance.mjs";
+import { checkedRemovalCauseCounts } from "./removal-causes.mjs";
 
 const count = (value) => Number.isSafeInteger(value) && value >= 0 ? value : null;
 const fingerprint = (value) => typeof value === "string" && /^[a-f0-9]{64}$/u.test(value) ? value : null;
@@ -22,6 +23,7 @@ export function removalReviewFacts(review, source) {
     reasons: review.reasons && ["source_deleted", "source_policy", "intentional_skip"].every(key => count(review.reasons[key]) !== null)
       ? Object.fromEntries(["source_deleted", "source_policy", "intentional_skip"].map(key => [key, review.reasons[key]])) : null,
     fingerprint: review.fingerprint,
+    removal_causes: checkedRemovalCauseCounts(review.removal_causes, review.stored_documents_to_remove),
     approval_fingerprint: fingerprint(review.approval_fingerprint),
   };
   if (!facts.source || [facts.stored_documents_to_remove, facts.source_removals, facts.replacement_family_reviews].includes(null)) return null;
@@ -40,16 +42,23 @@ export function canAutoApplyRemoval(review, kind, source) {
     total * 100 <= review.source_stored_documents &&
     review.source_removals === total && review.replacement_family_reviews === 0 &&
     review.reasons?.source_deleted === total && review.reasons.source_policy === 0 &&
-    review.reasons.intentional_skip === 0 && review.approval_fingerprint === null;
+    review.reasons.intentional_skip === 0 && review.approval_fingerprint === null &&
+    checkedRemovalCauseCounts(review.removal_causes, total)?.explicit_deletion === total;
 }
 
 export function removalOwnerSentence(review) {
   const label = review?.kind === "calendar" ? "Calendar" : review?.kind === "gmail" ? "Gmail" : "This source";
   if (!review) return `${label} is waiting for your OK to review removals. Run ingestion again to obtain the exact apply command.`;
-  const deletedOnly = review.reasons?.source_deleted === review.source_removals &&
-    review.reasons.source_policy === 0 && review.reasons.intentional_skip === 0 && review.replacement_family_reviews === 0;
+  const causes = checkedRemovalCauseCounts(review.removal_causes, review.stored_documents_to_remove);
+  const total = review.stored_documents_to_remove;
+  const explanation = causes?.explicit_deletion === total ? " confirmed deleted by the provider."
+    : causes?.window_exit === total ? " no longer in the synced window."
+    : causes?.scope_or_filter_change === total ? " outside the current sync filters."
+    : causes?.blank_or_quality === total ? " with no usable searchable content."
+    : causes?.permission_or_visibility === total ? " no longer visible to the Brain."
+    : " after a removal review.";
   return `${label} is waiting for your OK to remove ${review.stored_documents_to_remove} item(s)` +
-    (deletedOnly ? " you deleted." : " after a removal review.") + ` Run: ${review.apply_command}`;
+    explanation + ` Run: ${review.apply_command}`;
 }
 
 /** One initial source run, one exact apply, one source replay. No retry loop. */

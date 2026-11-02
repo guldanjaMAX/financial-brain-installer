@@ -1160,10 +1160,16 @@ for diagnosis. A non-zero Drive review exit is reserved for a matured, labelled,
 current-run-corroborated candidate that requires owner approval before the
 cursor may advance; ordinary walk failures remain non-zero as well.
 
-A Gmail full pass is an authoritative snapshot. It compares every message
+A Gmail full pass enumerates the configured query. It compares every message
 allowed by the default query with the live D1 family inventory, so messages
 missed after history expiry, deletion, or relabeling are reconciled without
-trusting the local resume file. Planned removals are read back from D1 before the
+trusting the local resume file. Absence from that query carries an unknown cause,
+never explicit deletion evidence. Such removals stay held for exact owner review.
+Only item-specific provider tombstones or a confirmed exact-item not-found read
+can carry `explicit_deletion`. Saved source and physical plans fingerprint every
+cause, and automatic apply independently checks them along with the existing
+25-target and 1% limits. Other causes and legacy plans stay held; the separate
+owner-approved apply remains available. Planned removals are read back from D1 before the
 history cursor or credential-scanner fingerprint can commit. Scanner v5 forces
 local folders, Drive, Gmail, and IMAP through a complete recheck of previously
 accepted documents and does not mark that migration complete until the snapshot

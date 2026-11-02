@@ -13,6 +13,7 @@ import { ingestionOutcome } from "../ingest/outcome.mjs";
 import { providerWithheldReason, sourceReceiptIssueCode } from "../worker/src/lib/source-receipt.js";
 import { restampFirstPartySourceProvenance } from "../worker/src/lib/provenance-receipt.js";
 import { credentialRefusalReason } from "../worker/src/lib/secret-scan.js";
+import { removalCause } from "../operations/removal-causes.mjs";
 
 const SAFE_SOURCE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const RESULT_STATUSES = new Set(["created", "updated", "unchanged", "refused", "failed"]);
@@ -90,10 +91,22 @@ export function normalizeProviderResult(source, result) {
       code: "provider_identity_conflict",
     });
   }
+  // Folder observations have no shared ordering that makes one cause final.
+  // Merge before snapshot deduplication can discard conflicting evidence.
+  // Missing or disagreeing causes stay unknown; an inferred snapshot absence
+  // below cannot replace the merged item-specific evidence.
+  const removals = new Map();
+  for (const deletion of deletions) {
+    const id = String(deletion.source_id || "");
+    const cause = removalCause(deletion.removal_cause);
+    const prior = removals.get(id);
+    if (!prior) removals.set(id, { ...deletion, removal_cause: cause });
+    else if (prior.removal_cause !== cause) prior.removal_cause = "unknown";
+  }
   return {
     ...result,
     documents,
-    deletions,
+    deletions: [...removals.values()],
     deferred_count: deferred.count,
     deferred_reason_code: deferred.reason,
   };
@@ -375,6 +388,8 @@ export async function runProviderConnector({
       }
       await reviewRemovals({
         uids: normalized.deletions.map((item) => `${sourceName}:${item.source_id}`),
+        targetCauses: Object.fromEntries(normalized.deletions.map(item =>
+          [`${sourceName}:${item.source_id}`, item.removal_cause])),
         storedFamilies: storedFamiliesBefore,
         requiredApproval: requiredRemovalApproval,
         notice: removalReviewNotice,

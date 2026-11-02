@@ -522,7 +522,7 @@ replacement cleanup enter the same boundary. A nonempty plan always stops before
 removal and cursor advancement; accepted additions and updates remain durable.
 
 The shared load orchestrator may explicitly apply a saved Calendar or Gmail
-plan containing only source deletions, bounded by both 25 physical targets and
+plan containing only explicit provider deletions, bounded by both 25 physical targets and
 1% of its authenticated stored source inventory. All aggregate reason counts
 must match, with no policy, skip, replacement or additional approval. It calls
 the existing exact-fingerprint executor and requires the removed count and
@@ -530,6 +530,16 @@ successful readback before one source replay can advance the cursor. No other
 connector qualifies. A failed apply/readback retains the review and records
 `waiting_for_owner`; daily receipts and local status retain aggregate counts,
 reasons, the apply command and the readback outcome without target identities.
+
+Each adapter supplies a per-item removal cause from a closed set:
+`explicit_deletion`, `window_exit`, `scope_or_filter_change`, `blank_or_quality`,
+`permission_or_visibility`, or `unknown`. Both source and exact-plan fingerprints
+cover these causes. Authenticated previews bind each physical family member to
+its cause; automatic apply rechecks the saved causes at every mutation boundary.
+Missing or legacy evidence stays held. Gmail filtered-list absence is unknown,
+including after history expiry. Microsoft window exits and blank events retain
+their distinct causes and remain outside automatic apply. Owner review text
+describes the cause without claiming who deleted an item.
 
 QuickBooks Desktop also persists its exact pending tombstones and binds the
 review to the complete company checkpoint. Its refresh and separate apply both

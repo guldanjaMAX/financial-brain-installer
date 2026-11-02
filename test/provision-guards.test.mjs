@@ -1077,7 +1077,7 @@ check("a fully accepted batch may advance its source cursor", sourceCursorCanAdv
     removalBoundary.indexOf("const apply = async"));
   const boundaryGuard = removalBoundary.search(/\n\s*if \(plan\.sourcePlan\) assertDriveRemovalPlanSafe\(plan\.sourcePlan,/);
   const boundaryFirstApply = removalBoundary.indexOf('action: "apply"');
-  const boundaryPreview = boundaryFinish.indexOf("const observed = await preview(families);");
+  const boundaryPreview = boundaryFinish.indexOf("const observed = await preview(families, null, sourcePlan?.targetCauses);");
   const boundaryExclusionRefusal = boundaryFinish.indexOf("if (sourceObserved.excluded_documents) fail(");
   const boundaryEmptyReturn = boundaryFinish.indexOf("if (!observed.targets.length)");
   check("the removal boundary refuses excluded source targets before empty-preview completion and guards exact apply with readback",

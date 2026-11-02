@@ -17,6 +17,8 @@ const CALENDAR_PREFER = 'IdType="ImmutableId", outlook.body-content-type="text",
 const IMMUTABLE_CALENDAR_ID_TYPE = "immutable";
 const PENDING_EVENT_IDS_VERSION = 1;
 const CALENDAR_EVENT_DEFERRED_REASON = "calendar_event_incomplete";
+const tombstoneCause = item => item?.deleted || item?.["@removed"]?.reason === "deleted"
+  ? "explicit_deletion" : item?.["@removed"]?.reason === "changed" ? "scope_or_filter_change" : "unknown";
 const SAFE_GRAPH_TIME_ZONE = /^[A-Za-z0-9_+./: -]{1,100}$/;
 export const OUTLOOK_CALENDAR_PAST_DAYS = 30;
 export const OUTLOOK_CALENDAR_FUTURE_DAYS = 90;
@@ -294,7 +296,8 @@ async function fetchPendingCalendarChange(eventId, { accessToken, fetchImpl }) {
     };
   } catch (error) {
     if (error instanceof ProviderSyncError && error.status === 404) {
-      return { kind: "delete", item: { id: eventId, "@removed": { reason: "not_found" } } };
+      return { kind: "delete", removal_cause: "explicit_deletion",
+        item: { id: eventId, "@removed": { reason: "not_found" } } };
     }
     if (error instanceof ProviderSyncError && error.outcome?.kind === "retryable") return null;
     throw error;
@@ -370,7 +373,7 @@ function outlookCalendarInstruction(event) {
     config,
   });
   if (instruction.kind === "delete") {
-    return { kind: "delete", event_id: eventId, source_id: sourceId };
+    return { kind: "delete", event_id: eventId, source_id: sourceId, removal_cause: instruction.removal_cause };
   }
   if (instruction.kind !== "upsert") return { ...instruction, event_id: eventId, source_id: sourceId };
   const envelope = instruction.envelope;
@@ -460,7 +463,9 @@ async function syncOutlookCalendar({ accessToken, fetchImpl, cursor, now }) {
       pending.delete(eventId);
       inventory.delete(eventId);
       documents.delete(eventId);
-      deletions.set(eventId, { source_type: "microsoft", source_id: sourceId });
+      deletions.set(eventId, { source_type: "microsoft", source_id: sourceId,
+        removal_cause: change.kind === "delete" ? change.removal_cause || tombstoneCause(change.item)
+          : instruction.removal_cause });
     } else if (instruction.kind === "upsert") {
       pending.delete(eventId);
       inventory.add(eventId);
@@ -474,7 +479,7 @@ async function syncOutlookCalendar({ accessToken, fetchImpl, cursor, now }) {
       pending.delete(eventId);
       inventory.delete(eventId);
       documents.delete(eventId);
-      deletions.set(eventId, { source_type: "microsoft", source_id: sourceId });
+      deletions.set(eventId, { source_type: "microsoft", source_id: sourceId, removal_cause: "blank_or_quality" });
     } else if (instruction.reason === "event has no start time" &&
         (inventory.has(eventId) || priorEventIds.has(eventId))) {
       // Missing start/time evidence is malformed provider data, not proof that
@@ -496,10 +501,13 @@ async function syncOutlookCalendar({ accessToken, fetchImpl, cursor, now }) {
           // genuinely aged-out event from the malformed row. Keep unmatched
           // prior families visible for retry, while honoring exact tombstones.
           inventory.add(eventId);
-        } else {
+        } else if (!deletions.has(eventId)) {
           deletions.set(eventId, {
             source_type: "microsoft",
             source_id: `outlook:event:${eventId}`,
+            // A new window can omit a still-existing item. Cursor recovery with
+            // the same window is even less specific; neither proves deletion.
+            removal_cause: !sameWindow ? "window_exit" : "unknown",
           });
         }
       }
@@ -611,6 +619,7 @@ export async function syncMicrosoftGraph({
     } else {
       deletions.push(...page.deletions.filter((message) => message?.id).map((message) => ({
         source_type: "microsoft", source_id: `outlook:message:${message.id}`,
+        removal_cause: tombstoneCause(message),
       })));
     }
     proposed.mail[folderId] = page.deltaLink;
@@ -667,6 +676,7 @@ export async function syncMicrosoftGraph({
     }
     deletions.push(...page.deletions.filter((item) => item?.id).map((item) => ({
       source_type: "microsoft", source_id: `drive:item:${driveId}:${item.id}`,
+      removal_cause: tombstoneCause(item),
     })));
     proposed.drives[driveId] = page.deltaLink;
   }

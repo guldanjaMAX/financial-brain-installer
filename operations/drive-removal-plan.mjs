@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { removalCause } from "./removal-causes.mjs";
 import {
   DRIVE_STORED_FAMILY_UID_MAX_BYTES,
   isCanonicalStoredFamilyUid,
@@ -81,6 +82,9 @@ export function buildDriveRemovalPlan(input = {}, options = {}) {
     CATEGORY_INPUTS.map(([category]) => [category, targets[category].length])
   );
   const total = assigned.size;
+  // A list omission or a legacy category supplies no item-deletion evidence.
+  const targetCauses = Object.fromEntries([...assigned].sort().map(uid =>
+    [uid, removalCause(input.targetCauses?.[uid])]));
   const ratio = stored ? total / stored : total ? 1 : 0;
   const maxCount = options.maxCount ?? DRIVE_REMOVAL_MAX_COUNT;
   const maxRatio = options.maxRatio ?? DRIVE_REMOVAL_MAX_RATIO;
@@ -99,11 +103,12 @@ export function buildDriveRemovalPlan(input = {}, options = {}) {
   // target or changing the plan invalidates an earlier approval even when the
   // aggregate total happens to stay the same.
   const fingerprint = createHash("sha256").update(JSON.stringify({
-    version: fingerprintBinding === null ? 2 : 3,
+    version: fingerprintBinding === null ? 4 : 5,
     context: fingerprintContext,
     limits: { maxCount, maxRatio, ratioFloorCount },
     stored,
     targets: CATEGORY_INPUTS.map(([category]) => [category, targets[category]]),
+    targetCauses,
     ...(fingerprintBinding === null ? {} : { binding: fingerprintBinding }),
   })).digest("hex");
 
@@ -113,6 +118,7 @@ export function buildDriveRemovalPlan(input = {}, options = {}) {
     ratio,
     counts,
     targets,
+    targetCauses,
     fingerprint,
     inventoryStored,
     tooLarge: total > maxCount || (total > ratioFloorCount && ratio > maxRatio),
@@ -123,7 +129,7 @@ export function buildDriveRemovalPlan(input = {}, options = {}) {
 export function formatDriveRemovalPlan(plan) {
   const percent = (Number(plan.ratio || 0) * 100).toFixed(1);
   return `${plan.total} of ${plan.stored} stored documents (${percent}%).\n` +
-    `      Aggregate reasons: source policy ${plan.counts.source_policy}; source deletion ${plan.counts.source_deleted}; intentional skip ${plan.counts.intentional_skip}.`;
+    `      Aggregate reasons: source policy ${plan.counts.source_policy}; source removal ${plan.counts.source_deleted}; intentional skip ${plan.counts.intentional_skip}.`;
 }
 
 /** Refuse a surprising plan without disclosing any source identifier. */

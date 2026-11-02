@@ -241,7 +241,8 @@ async function runCalendarContract(syncImpl) {
   assert.equal(missing.directCalls, 1);
   assert.equal(missing.deltaCalls, 1);
   assert.deepEqual(missing.result.documents, []);
-  assert.deepEqual(missing.result.deletions, [{ source_type: "microsoft", source_id: `outlook:event:${eventId}` }]);
+  assert.deepEqual(missing.result.deletions, [{ source_type: "microsoft", source_id: `outlook:event:${eventId}`,
+    removal_cause: "explicit_deletion" }]);
   assert.deepEqual(missing.result.proposed_cursor.calendar.pending_event_ids, { version: 1, ids: [] });
 
   const retryable = await runPendingArm("retryable");

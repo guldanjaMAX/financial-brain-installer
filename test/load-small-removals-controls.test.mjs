@@ -7,7 +7,7 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 for (const [control, pattern, failures] of [
   ["good", "1 of 1269|stays held|receipt, owner|Drive .*approval line", 0],
   ["never-apply", "1 of 1269", 2],
-  ["always-apply", "stays held", 9],
+  ["always-apply", "stays held", 11],
   ["omit-receipt", "receipt, owner", 1],
   ["ignore-failure", "receipt, owner", 2],
   ["immediate-exit", "Drive CLI held review", 1],

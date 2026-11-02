@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 import { DriveRemovalReviewRequired, assertDriveRemovalPlanSafe, formatDriveRemovalPlan } from "./drive-removal-plan.mjs";
 import { renderCliCommands } from "./cli-guidance.mjs";
 import { SOURCE_FAMILY_INVENTORY_RETRY_DELAYS_MS } from "./source-family-inventory-retry.mjs";
+import { removalCause, removalCauseCounts } from "./removal-causes.mjs";
+import { canAutoApplyRemoval } from "./load-removal-review.mjs";
 
 const canonical = (value) => Array.isArray(value) ? value.map(canonical)
   : value && typeof value === "object"
@@ -20,6 +22,21 @@ const fail = (text, removalReview = null) => {
   throw error;
 };
 const validFingerprint = (value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+
+const reviewFacts = plan => ({
+  source: plan.source,
+  kind: plan.kind,
+  stored_documents_to_remove: plan.targets.length,
+  source_removals: plan.sourceTargets.length,
+  replacement_family_reviews: plan.families.length - plan.sourceTargets.length,
+  source_stored_documents: plan.sourcePlan?.stored ?? null,
+  reasons: plan.sourcePlan ? { ...plan.sourcePlan.counts } : null,
+  removal_causes: removalCauseCounts(plan.targets, plan.targetCauses),
+  approval_fingerprint: plan.providerApproval || (plan.sourcePlan?.tooLarge || plan.requireSourceApproval
+    ? plan.sourcePlan.fingerprint : null),
+  ...(plan.sourcePlan ? { source_cleanup_percentage: plan.sourcePlan.ratio * 100 } : {}),
+  fingerprint: plan.fingerprint,
+});
 
 /** Bind code bytes, lockfile and installed dependencies, not a version label. */
 export function ingestRemovalRuntime(root = fileURLToPath(new URL("../", import.meta.url))) {
@@ -343,13 +360,20 @@ export function createIngestRemovalReview({
     }
   };
 
-  const preview = async (families, expectedMarker = null) => {
+  const preview = async (families, expectedMarker = null, familyCauses = {}) => {
     let marker = expectedMarker;
     const targets = new Set();
+    const targetCauses = {};
+    // Each authenticated preview batch has one cause. This binds physical parts
+    // to their family's evidence without guessing membership from ID prefixes.
+    families = [...families].sort((a, b) => removalCause(familyCauses[a.base_doc_uid])
+      .localeCompare(removalCause(familyCauses[b.base_doc_uid])));
     let excluded = 0;
     let batchSize = 50;
     for (let index = 0; index < families.length || index === 0;) {
-      const group = families.slice(index, index + batchSize);
+      const cause = removalCause(familyCauses[families[index]?.base_doc_uid]);
+      const group = families.slice(index, index + batchSize)
+        .filter(family => removalCause(familyCauses[family.base_doc_uid]) === cause);
       let response;
       try { response = await send({ action: "preview", families: group, marker }); }
       catch (error) {
@@ -362,12 +386,15 @@ export function createIngestRemovalReview({
       if (marker && removalDigest(marker) !== removalDigest(part.marker)) fail("Stored inventory or runtime changed; run ingestion again.");
       marker = part.marker;
       excluded += part.excluded_documents ?? 0;
-      for (const uid of part.targets) targets.add(uid);
+      for (const uid of part.targets) {
+        targetCauses[uid] = targets.has(uid) && targetCauses[uid] !== cause ? "unknown" : cause;
+        targets.add(uid);
+      }
       index += group.length;
       if (families.length > 50) onProgress(`Removal review: checked ${index.toLocaleString("en-US")} of ${families.length.toLocaleString("en-US")} families.`);
       if (!families.length) break;
     }
-    return { marker, targets: [...targets].sort(), excluded_documents: excluded };
+    return { marker, targets: [...targets].sort(), targetCauses, excluded_documents: excluded };
   };
 
   const finish = async ({ sourcePlan = null, requireSourceApproval = false, familyKind = "structural", providerApproval = null, expiresAt = null, notice = "" } = {}) => {
@@ -383,7 +410,7 @@ export function createIngestRemovalReview({
       saveState();
       return;
     }
-    const observed = await preview(families);
+    const observed = await preview(families, null, sourcePlan?.targetCauses);
     // An excluded source target is still stored. Recheck only source removals
     // so unrelated replacement-family exclusions cannot block cursor progress.
     if (observed.excluded_documents && sourceTargets.length) {
@@ -425,21 +452,12 @@ export function createIngestRemovalReview({
       `Review this plan, then run: brain ingest <manifest>${from ? ` --from ${from}` : ""} --source ${source} --apply-removals ${plan.fingerprint}` +
       (extraApproval ? ` --approve-removals ${extraApproval}` : ""),
       {
-        source,
-        kind: from || "upload",
-        stored_documents_to_remove: observed.targets.length,
-        source_removals: sourceTargets.length,
-        replacement_family_reviews: families.length - sourceTargets.length,
-        source_stored_documents: sourcePlan?.stored ?? null,
-        reasons: sourcePlan ? { ...sourcePlan.counts } : null,
-        approval_fingerprint: extraApproval,
-        ...(sourcePlan ? { source_cleanup_percentage: sourcePlan.ratio * 100 } : {}),
-        fingerprint: plan.fingerprint,
+        ...reviewFacts(plan), kind: from || "upload",
       },
     );
   };
 
-  const apply = async (fingerprint, sourceApproval) => {
+  const apply = async (fingerprint, sourceApproval, { automatic = false } = {}) => {
     const plan = state.ingest_removal_plan;
     if (!validFingerprint(fingerprint) || !plan || plan.fingerprint !== fingerprint) {
       fail("No matching saved removal plan. Run ingestion again and review its exact fingerprint.");
@@ -453,6 +471,11 @@ export function createIngestRemovalReview({
       if (removalDigest(payload) !== fingerprint || plan.state !== snapshotState(state) ||
           plan.policy !== binding() || plan.runtime !== runtime()) {
         fail("Removal plan changed: state, policy or runtime no longer matches. Run ingestion again; no further removal was applied.");
+      }
+      // Automatic callers cannot substitute aggregate review text for the
+      // fingerprinted evidence on every exact physical target. Legacy plans hold.
+      if (automatic && !canAutoApplyRemoval(reviewFacts(plan), kind, source)) {
+        fail("Automatic removal needs explicit deletion evidence for every target. Review the saved plan.");
       }
     };
     verifyLocal();

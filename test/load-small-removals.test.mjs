@@ -21,7 +21,7 @@ import { cliTestEnvironment } from "./helpers/cli-test-environment.mjs";
 // Use the real load registry, saved review, apply executor and D1 readback.
 // Only provider reads and credential custody are synthetic and injected.
 function fixture({ kind = "calendar", stored = 1269, deleted = 1, policy = 0, skip = 0,
-  replacement = false, failure = null, dryRun = false, requireSourceApproval = false } = {}) {
+  replacement = false, failure = null, dryRun = false, requireSourceApproval = false, cause = "explicit_deletion" } = {}) {
   const home = realpathSync.native(mkdtempSync(join(tmpdir(), "small-removals-")));
   const manifestPath = join(home, "brain.manifest.json");
   const source = kind === "google_drive" ? "drive" : kind;
@@ -68,6 +68,7 @@ function fixture({ kind = "calendar", stored = 1269, deleted = 1, policy = 0, sk
         keep_doc_uids: [], stateKey: "replacement", hash: "v1" }]);
     }
     await review.finish({ requireSourceApproval, sourcePlan: buildDriveRemovalPlan({ storedFamilies: store.uids(),
+      targetCauses: Object.fromEntries(ids(0, deleted).map(uid => [uid, cause])),
       vanishedCandidates: ids(0, deleted), policyCandidates: ids(deleted, policy),
       intentionalCandidates: ids(deleted + policy, skip) }) });
     return { sent: { created: 0, updated: 0, unchanged: 1 }, removed: 0 };
@@ -229,7 +230,7 @@ test("the real Calendar pipeline keeps its old cursor through apply and advances
         syncAll: async ({ state }) => {
           pulls++;
           assert.equal(state.primary.sync_token, "fixture-prior", "apply cannot advance a source cursor");
-          return { ok: true, documents: [], deletions: [{ source_id: "item0" }],
+          return { ok: true, documents: [], deletions: [{ source_id: "item0", removal_cause: "explicit_deletion" }],
             state: { primary: { sync_token: "fixture-next" } },
             calendars: [{ ok: true, mode: "incremental", authoritative_snapshot: true }],
             summary: { events_seen: 1, calendars_ok: 1, calendars_failed: 0, skipped: 0 } };
@@ -276,6 +277,8 @@ for (const kind of ["calendar", "gmail"]) {
 const heldCases = [
   ["26 deletions", { stored: 5000, deleted: 26 }],
   ["1.1 percent", { stored: 1000, deleted: 11 }],
+  ["missing cause", { cause: null }],
+  ["window exit", { cause: "window_exit" }],
   ["policy removal", { deleted: 0, policy: 1 }],
   ["intentional skip", { deleted: 0, skip: 1 }],
   ["mixed reasons", { policy: 1 }],

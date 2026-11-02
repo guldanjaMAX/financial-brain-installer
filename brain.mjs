@@ -13111,7 +13111,8 @@ export async function cmdApplyIngestRemovals(m, manifestPath, flags, options = {
     if (!adminKey) die("Removal apply needs this Brain's durable admin key.");
     const review = ingestRemovalReview(m, manifestPath, sourceName, state,
       () => { assertOwned?.(); lib.saveState(statePath, state); }, base, adminKey, options, assertOwned);
-    const result = await review.apply(flags["apply-removals"], flags["approve-removals"]);
+    const result = await review.apply(flags["apply-removals"], flags["approve-removals"],
+      { automatic: options.automaticRemoval === true });
     ok(`${result.removed} planned document(s) removed from source ${sourceName}; exact readback passed. Run ingestion again to complete the source refresh.`);
     return result;
   });
@@ -15107,7 +15108,8 @@ async function cmdIngestCalendarRun(
       { ...options, removalSourceKind: "calendar" }, assertLockOwned);
     try {
       const storedFamilies = await listFamilies({ base, adminKey, source: sourceName, assertOwned: assertLockOwned });
-      await review.finish({ sourcePlan: buildDriveRemovalPlan({ storedFamilies, vanishedCandidates: uids }) });
+      await review.finish({ sourcePlan: buildDriveRemovalPlan({ storedFamilies, vanishedCandidates: uids,
+        targetCauses: Object.fromEntries(result.deletions.map(d => [`${sourceName}:${d.source_id}`, d.removal_cause])) }) });
     } catch (error) {
       removalError = error;
       removalPending = uids.length;
@@ -17090,7 +17092,8 @@ export async function cmdLoad(manifestPath, options = {}) {
       try {
         const loaded = await runLoadRemovalLeg({ run: leg.run, kind: entry.key, source: leg.source, dryRun,
           assertOwned: options.assertOwned,
-          apply: applyFlags => (options.commands?.applyIngestRemovals ?? cmdApplyIngestRemovals)(m, manifestPath, applyFlags, options) });
+          apply: applyFlags => (options.commands?.applyIngestRemovals ?? cmdApplyIngestRemovals)(m, manifestPath, applyFlags,
+            { ...options, automaticRemoval: true }) });
         entry.auto_applied_removals.push(...loaded.auto_applied_removals);
         const described = describeLoadResult(loaded.result);
         legResults.push(described);
@@ -18691,6 +18694,7 @@ const cmdIngestRemoteRun = async (
     const gmailPolicyUids = [];
     const gmailDeletedUids = [];
     const gmailIntentionalUids = [];
+    const gmailRemovalCauses = {};
 
     const capturePrewalkHistory = async () => {
       try {
@@ -18722,6 +18726,7 @@ const cmdIngestRemoteRun = async (
           `${retryIds.length} durable retry message(s)`,
         );
         gmailDeletedUids.push(...h.deletedIds.map((id) => `${sourceName}:${id}`));
+        for (const id of h.deletedIds) gmailRemovalCauses[`${sourceName}:${id}`] = h.removal_causes?.[id];
         nextHistory = h.historyId || nextHistory;
         gmailHistoryMarkerMissing = nextHistory ? 0 : 1;
         ids = [...new Set([...retryIds, ...h.ids])].slice(0, limit);
@@ -18872,6 +18877,7 @@ const cmdIngestRemoteRun = async (
         throw preparationError;
       }
       if (r.skip) {
+        gmailRemovalCauses[key] = r.removal_cause;
         const previouslyAccepted = storedBeforeSweep
           ? storedBeforeSweep.has(key)
           : Object.prototype.hasOwnProperty.call(state.done || {}, key);
@@ -18917,6 +18923,7 @@ const cmdIngestRemoteRun = async (
         state.skipped[key] = refusal.reason;
         localRefused++;
         gmailIntentionalUids.push(key);
+        gmailRemovalCauses[key] = "blank_or_quality";
         clearGmailRetry(state, key, sourceName);
         return { skip };
       }
@@ -19048,6 +19055,7 @@ const cmdIngestRemoteRun = async (
           currentTypedRemovalUids.size === 1;
         const gmailRemovalPlan = buildDriveRemovalPlan({
           storedFamilies: storedGmailUids,
+          targetCauses: gmailRemovalCauses,
           activeFamilies: gmailActiveUids,
           policyCandidates: gmailPolicyUids,
           vanishedCandidates: [...gmailDeletedUids, ...vanishedSnapshotUids],
@@ -32475,7 +32483,7 @@ async function cmdIngestProviderRun(
     const stored = flags.reset ? {} : await loadState();
     const cursor = stored?.configuration_fingerprint === fingerprint ? stored.cursor ?? null : null;
     const result = await adapter({ cursor, access: await resolveAccess() });
-    info(`${result.documents.length} document(s) would be sent; ${result.deletions.length} exact tombstone(s) would be applied.`);
+    info(`${result.documents.length} document(s) would be sent; ${result.deletions.length} source removal(s) would need review.`);
     for (const warning of result.warnings || []) warn(warning);
     if (result.mail_transition) info(`${result.mail_transition.excluded_messages} mail message(s) precede the cutover; ${result.mail_transition.retained_tombstones} mail removal notice(s) retained without deletion.`);
     ok("dry run, no brain document, deletion, source receipt, or provider cursor was changed");
@@ -32510,7 +32518,7 @@ async function cmdIngestProviderRun(
       adminKey,
       assertOwned: assertLockOwned,
       reset: Boolean(flags.reset),
-      reviewRemovals: async ({ uids, storedFamilies, requiredApproval, notice }) => {
+      reviewRemovals: async ({ uids, targetCauses, storedFamilies, requiredApproval, notice }) => {
         const lib = await (options.ingestLib ?? ingestLib)();
         const path = canonicalSourceIngestStatePath({ manifestPath, sourceName });
         const reviewState = lib.loadState(path);
@@ -32520,7 +32528,7 @@ async function cmdIngestProviderRun(
           () => { assertLockOwned?.(); lib.saveState(path, reviewState); },
           base, adminKey, options, assertLockOwned);
         await review.finish({
-          sourcePlan: buildDriveRemovalPlan({ storedFamilies, vanishedCandidates: uids }),
+          sourcePlan: buildDriveRemovalPlan({ storedFamilies, vanishedCandidates: uids, targetCauses }),
           providerApproval: requiredApproval,
           notice,
         });
