@@ -1,12 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
 import { replay, ROOT, sha } from '../../eval/fast-loop/money-replay.mjs';
 import { cases, snapshotFor } from './fixtures/inflow-transfer-cases.mjs';
 import { contract } from './fixtures/inflow-transfer-key.mjs';
 import { reviewedFinalOffer, reviewedPlainCopy, reviewedTitleFields } from './fixtures/plain-copy-expectations.mjs';
 import { pairOwnTransfers } from '../src/lib/ledger-analysis.js';
+
+// The pinned money-in implementation (commit 129c78f5) is kept beside this test, so the restoring
+// check does not depend on that commit being present in the checkout's history.
+const pinned = file => readFileSync(new URL(`./fixtures/historical-129c78f5/${file}.txt`, import.meta.url), 'utf8');
 
 let run;
 test.before(() => { run = replay({ cases, snapshotFor }); });
@@ -31,9 +34,7 @@ test('restoring no matched subtraction fails the same clean-pair contract', () =
 
 test('the actual pinned money-in implementation fails the clean-pair contract', () => {
   contract(run.observations[0]);
-  const source = execFileSync('git', ['show', '129c78f554bb55a296e66380ae9e54382996ce67:worker/src/lib/ledger-answer.js'],
-    { cwd: ROOT, encoding: 'utf8', env: { PATH: process.env.PATH, HOME: process.env.HOME,
-      BRAIN_NO_WRANGLER_LOGIN: '1' } });
+  const source = pinned('ledger-answer.js');
   const restored = replay({ cases: [cases[0]], snapshotFor, sourceOverrides: { 'ledger-answer.js': source } });
   const o = restored.observations[0];
   assert.equal(restored.source_files['worker/src/lib/ledger-answer.js'], sha(source), 'pinned bytes actually executed');
@@ -63,9 +64,7 @@ test('generic-payee admission preserves expense and mixed-outflow facts with rev
   const c = cases.find(c => c.id === 'INFLOW/generic-payees');
   contract(run.observations.find(o => o.id === c.id));
   const sourceOverrides = Object.fromEntries(['ledger-answer.js', 'ledger-analysis.js'].map(file => [file,
-    execFileSync('git', ['show', `129c78f554bb55a296e66380ae9e54382996ce67:worker/src/lib/${file}`],
-      { cwd: ROOT, encoding: 'utf8', env: { PATH: process.env.PATH, HOME: process.env.HOME,
-        BRAIN_NO_WRANGLER_LOGIN: '1' } })]));
+    pinned(file)]));
   for (const question of ['How much money came in and went out in September 2026?',
     'What were my expenses in September 2026?']) {
     const inputs = [{ ...c, question }];
