@@ -36,8 +36,10 @@ registerHooks({
     if (control === "omit-receipt") source = source.replace('auto_applied_removals: [attempt]', 'auto_applied_removals: []');
     if (control === "omit-approval") source = source.replace(
       '(facts.approval_fingerprint ? ` --approve-removals ${facts.approval_fingerprint}` : "")', '""');
-    if (control === "ignore-failure") source = source.replace('error.auto_apply_error = failure;\n      throw error;',
+    if (control === "ignore-failure") source = source.replace(/error\.auto_apply_error = failure;\r?\n      throw error;/u,
       'error.auto_apply_error = failure;\n      return { result: { sent: { unchanged: 1 } }, auto_applied_removals: [attempt] };');
+    if (["never-apply", "always-apply", "omit-receipt", "omit-approval", "ignore-failure"].includes(control) &&
+        source === String(result.source)) throw new Error("the removal control did not reach its mutation site");
     return { ...result, source };
   },
 });

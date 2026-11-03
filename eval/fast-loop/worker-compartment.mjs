@@ -44,7 +44,7 @@ export async function workerCompartment({ root, clock, fail, hooks, trace = true
     const id = path + (original ? ':original' : '');
     if (cache.has(id)) return cache.get(id);
     let source = sourceOverrides[local.split(sep).join('/').replace(/^lib\//, '')] ?? readFileSync(path, 'utf8');
-    sourceFiles[relative(root, path)] = sha256(source);
+    sourceFiles[relative(root, path).split(sep).join('/')] = sha256(source);
     const replacement = !original && replacements[local.split(sep).join('/')];
     if (replacement) {
       const [name, implementation] = replacement;

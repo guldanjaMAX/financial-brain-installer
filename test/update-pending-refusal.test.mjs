@@ -600,6 +600,16 @@ test("production recovery retry keeps imports paused through refusal and reconci
     const dailyRefreshOptions = {
       platform: "darwin",
       principal: plan().identity.principal,
+      // This fixture models launchd on every test host, including hosts without getuid.
+      legacySchedulerOptions: {
+        uid: 501,
+        home,
+        launchctl: (args) => {
+          if (args[0] === "list") return { status: 0, stdout: "PID Status Label\n" };
+          if (args[0] === "print-disabled") return { status: 0, stdout: "disabled services = {\n}\n" };
+          assert.fail("unexpected native scheduler action");
+        },
+      },
       localTimezone: "UTC",
       existingSchedulerOwners: [],
       planDailyRefresh: async () => plan(),

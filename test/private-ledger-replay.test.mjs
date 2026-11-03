@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, statSync, readdirSync, symlinkSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
 import { ROOT, waitForQuiet } from '../eval/fast-loop/money-replay.mjs';
 import { MONEY_JARGON } from '../worker/test/fixtures/plain-copy-expectations.mjs';
 import { exportQueries, validateEnvelope } from '../eval/fast-loop/private-ledger-contract.mjs';
@@ -144,7 +145,7 @@ test('in-memory worker executes three real paths without a disk output exception
   meta.now_utc = new Date(meta.now_utc).toISOString();
   waitForQuiet(env);
   const child = spawnSync(process.execPath, ['--experimental-vm-modules', '--permission', '--no-warnings', `--allow-fs-read=${ROOT}`,
-    '--import', resolve(ROOT, 'test/fixtures/cli-side-effect-tripwire.mjs'), resolve(ROOT, 'eval/fast-loop/private-ledger-worker.mjs')], {
+    '--import', pathToFileURL(resolve(ROOT, 'test/fixtures/cli-side-effect-tripwire.mjs')).href, resolve(ROOT, 'eval/fast-loop/private-ledger-worker.mjs')], {
     cwd: ROOT, env, stdio: ['pipe', 'ignore', 'pipe', 'pipe'], encoding: 'utf8', timeout: 60000,
     input: JSON.stringify({ root: ROOT, trusted_root: ROOT, tables: f.tables, meta, questions: JSON.parse(readFileSync(f.questions, 'utf8')), input_digest: 'synthetic' }),
   });

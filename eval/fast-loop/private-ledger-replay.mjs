@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, realpathSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { resolve, dirname, relative, isAbsolute, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { ROOT, waitForQuiet } from './money-replay.mjs';
 import { TABLES, sha256, fail, d1Rows, validateEnvelope, exportQueries } from './private-ledger-contract.mjs';
 export { TABLES } from './private-ledger-contract.mjs';
@@ -58,7 +58,7 @@ export function runPrivateArm(root, request) {
   for (const key of ['SystemRoot', 'WINDIR', 'ComSpec', 'PATHEXT']) if (process.platform === 'win32' && process.env[key]) env[key] = process.env[key];
   waitForQuiet(env);
   const child = spawnSync(process.execPath, ['--experimental-vm-modules', '--permission', '--no-warnings',
-    `--allow-fs-read=${ROOT}`, `--allow-fs-read=${root}`, '--import', tripwire, worker], {
+    `--allow-fs-read=${ROOT}`, `--allow-fs-read=${root}`, '--import', pathToFileURL(tripwire).href, worker], {
     cwd: ROOT, env, input: JSON.stringify({ ...request, root, trusted_root: ROOT }),
     stdio: ['pipe', 'ignore', 'pipe', 'pipe'], encoding: 'utf8', timeout: 120000, maxBuffer: 128 * 1024 * 1024,
   });

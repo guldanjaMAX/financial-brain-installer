@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { BASE_CASES, CONTROLS, PERIODS, evidence, validateInputs } from './fixtures/fastloop-money/input.mjs';
 import { GOLD, goldFor } from './fixtures/fastloop-money/gold.mjs';
 import { replay, ROOT, sha, waitForQuiet } from '../eval/fast-loop/money-replay.mjs';
@@ -253,7 +253,7 @@ test('RM4 restoring expense certification fails the independent oracle and compa
   const cases = partialCases;
   const control = seal(replay({ cases }));
   const mutant = seal(replay({ cases, sourceOverrides: { [file]: restored } }));
-  assert.equal(mutant.source_files[join('worker', 'src', 'lib', file)], sha(restored));
+  assert.equal(mutant.source_files[`worker/src/lib/${file}`], sha(restored));
   assert.ok(mutant.observations.every(o => o.trace.rows_read.some(r => r.id === 7)));
   assert.ok(scoreRun(control, cases).scores.every(s => s.verdict === 'partly'));
   assert.ok(scoreRun(mutant, cases).scores.every(s => s.verdict === 'wrong figure'));
@@ -328,7 +328,7 @@ for (const [fix, id, file, from, to] of [
   assert.notEqual(changedSource, source);
   const control = seal(replay({ cases: [c] }));
   const mutant = seal(replay({ cases: [c], sourceOverrides: { [file]: changedSource } }));
-  assert.equal(mutant.source_files[join('worker', 'src', 'lib', file)], sha(changedSource), 'the restored module actually executed');
+  assert.equal(mutant.source_files[`worker/src/lib/${file}`], sha(changedSource), 'the restored module actually executed');
   assert.ok(mutant.observations[0].trace.rows_read.length > 0);
   assert.equal(mutant.observations[0].execution_status, 'complete');
   assert.equal(scoreRun(control, [c]).scores[0].verdict, 'correct');

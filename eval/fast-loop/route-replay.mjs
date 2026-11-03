@@ -19,7 +19,7 @@ export function replayRoute({ cases = BASE_CASES, capture = false, fixtures,
   waitForQuiet(env);
   const started = performance.now();
   const child = spawnSync(process.execPath, ['--experimental-vm-modules', '--permission', `--allow-fs-read=${ROOT}`,
-    '--import', fileURLToPath(new URL('../../test/fixtures/cli-side-effect-tripwire.mjs', import.meta.url)),
+    '--import', new URL('../../test/fixtures/cli-side-effect-tripwire.mjs', import.meta.url).href,
     fileURLToPath(new URL('./route-worker.mjs', import.meta.url))], { cwd: ROOT, env,
     input: JSON.stringify({ root: ROOT, inputs, capture, fixtures, authority, fixtureId, trace, fault, arms, sourceOverrides }),
     encoding: 'utf8', timeout: 60000, maxBuffer: 32 * 1024 * 1024 });

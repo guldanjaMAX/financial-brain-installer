@@ -45,11 +45,14 @@ export function replay({ cases = [...BASE_CASES, ...CONTROLS], fault = null,
   for (const name of ['SystemRoot', 'WINDIR', 'ComSpec', 'PATHEXT']) if (process.platform === 'win32' && process.env[name]) env[name] = process.env[name];
   waitForQuiet(env);
   const start = performance.now();
+  // ESM preloads need file URLs on Windows; the script argument stays a native path.
   const child = spawnSync(process.execPath, ['--experimental-vm-modules', '--permission', `--allow-fs-read=${ROOT}`,
-    '--import', fileURLToPath(new URL('../../test/fixtures/cli-side-effect-tripwire.mjs', import.meta.url)),
+    '--import', new URL('../../test/fixtures/cli-side-effect-tripwire.mjs', import.meta.url).href,
     fileURLToPath(new URL('./money-worker.mjs', import.meta.url))], {
     cwd: ROOT, env, input: JSON.stringify({ root: ROOT, inputs, fault, sourceOverrides }),
-    encoding: 'utf8', timeout: 60000, maxBuffer: 16 * 1024 * 1024,
+    // Slow CI hosts can exceed one minute even for a small restored-source arm.
+    // Keep the same bounded budget as the private replay child.
+    encoding: 'utf8', timeout: 120000, maxBuffer: 16 * 1024 * 1024,
   });
   if (child.status !== 0) throw Error(`REPLAY_CHILD_FAILED:${child.status}:${child.error?.code || child.stderr.slice(0, 300)}`);
   const result = JSON.parse(child.stdout);

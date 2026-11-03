@@ -68,7 +68,7 @@ export async function executeReplay(request) {
         if (!inside || inside.startsWith(`..${sep}`) || inside === '..' || !inside.endsWith('.js') ||
           realpathSync(path) !== path) return fail('CAPABILITY_DENIED', 'module');
         const source = request.sourceOverrides?.[inside] ?? readFileSync(path, 'utf8');
-        sourceDigests.set(relative(root, path), digest(source));
+        sourceDigests.set(relative(root, path).split(sep).join('/'), digest(source));
         const module = new SourceTextModule(source, { context, identifier: path,
           importModuleDynamically: () => fail('CAPABILITY_DENIED', 'dynamic-import') });
         // Observe the actual exported classifier called inside withLedgerAnswer.

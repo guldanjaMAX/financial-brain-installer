@@ -93,8 +93,9 @@ export async function executePrivateReplay(request) {
         const inside = relative(base, path);
         if (!inside || inside === '..' || inside.startsWith(`..${sep}`) || !inside.endsWith('.js') || realpathSync(path) !== path) return deny('module');
         const source = readFileSync(path, 'utf8');
-        if (sourceFiles.has(relative(root, path)) && sourceFiles.get(relative(root, path)) !== sha256(source)) return deny('source-changed');
-        sourceFiles.set(relative(root, path), sha256(source));
+        const sourceKey = relative(root, path).split(sep).join('/');
+        if (sourceFiles.has(sourceKey) && sourceFiles.get(sourceKey) !== sha256(source)) return deny('source-changed');
+        sourceFiles.set(sourceKey, sha256(source));
         const module = new SourceTextModule(source, { context, identifier: path, importModuleDynamically: () => deny('dynamic-import') });
         cache.set(path, module);
         await module.link(linker);

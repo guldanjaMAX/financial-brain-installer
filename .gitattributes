@@ -69,3 +69,12 @@ test/fixtures/machine-prep/*.cmd -text -whitespace
 # autocrlf must not change their hashes or the whole-line Markdown boundaries.
 templates/owner-contract/*.md text eol=lf
 skills/financial-brain-technician/SKILL.md text eol=lf
+
+# Replay controls restore exact source text and verify historical byte hashes.
+# Preserve those bytes under Windows autocrlf, including multiline mutation sites.
+eval/fast-loop/*.mjs text eol=lf
+worker/src/lib/ledger-*.js text eol=lf
+test/fixtures/fastloop-day3/historical-shared-v1.json text eol=lf
+test/fixtures/fastloop-day3/candidate-inventory-v1.json text eol=lf
+test/fixtures/fastloop-day3/candidate-router-v1.json text eol=lf
+test/fixtures/fastloop-day3/candidate-soft-copy-v1.json text eol=lf

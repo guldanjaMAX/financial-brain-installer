@@ -140,7 +140,7 @@ test("interruption after deploy leaves the manifest byte-identical and retry com
   assert.equal(run.uploads.length, 2, "the interrupted arm reached active deploy");
   assert.ok(run.calls.includes("POST /api/rag/think"), "acceptance reached the failure injection");
   assert.match(run.error?.message || "", /update stopped during full acceptance test: fixture interruption after deploy/);
-  assert.ok(run.error.message.includes(renderCliCommands(RETRY_LINE)), "the owner sees the model-specific retry instruction");
+  assert.ok(renderCliCommands(run.error.message).includes(renderCliCommands(RETRY_LINE)), "the owner sees the model-specific retry instruction");
   assert.deepEqual(readFileSync(f.manifestPath), before);
   assert.deepEqual(run.secretWrites, []);
   assert.equal((await update(f)).error, null, "green retry control");
@@ -212,7 +212,7 @@ test("model retry notice is absent before deployment and on an interrupted revie
   assert.equal(run.uploads.length, 2, "the reviewed-model control reached active deployment");
   assert.ok(run.calls.includes("POST /api/rag/think"));
   assert.match(run.error?.message || "", /fixture interruption after deploy/);
-  assert.equal(run.error.message.includes(renderCliCommands(RETRY_LINE)), false);
+  assert.equal(renderCliCommands(run.error.message).includes(renderCliCommands(RETRY_LINE)), false);
 });
 
 test("failed local model commit explains the remote switch and a retry finishes", async (t) => {
@@ -225,7 +225,7 @@ test("failed local model commit explains the remote switch and a retry finishes"
   assert.equal(run.uploads.length, 2);
   assert.ok(run.calls.includes("POST /api/rag/think"));
   assert.match(run.error?.message || "", /fixture local commit stop/);
-  assert.equal(run.error.message.split(renderCliCommands(RETRY_LINE)).length, 2, "the retry sentence appears once");
+  assert.equal(renderCliCommands(run.error.message).split(renderCliCommands(RETRY_LINE)).length, 2, "the retry sentence appears once");
   assert.deepEqual(readFileSync(f.manifestPath), before);
   assert.equal((await update(f)).error, null, "green retry completes the deferred local commit");
 });
