@@ -156,7 +156,12 @@ export function buildWhatsappDaemonPlan(manifestPath, options = {}) {
     binaryPath: binary.path,
     binarySource: binary.source,
     programArguments: [binary.path],
-    environment: daemonEnvironment(options.daemonEnv || { HOME: reference.home, PATH: "/usr/bin:/bin:/usr/sbin:/sbin" }, reference.dataDir),
+    environment: {
+      ...daemonEnvironment(options.daemonEnv || { HOME: reference.home, PATH: "/usr/bin:/bin:/usr/sbin:/sbin" }, reference.dataDir),
+      // A future update must prove which manifest owns this resident process.
+      // The older data-directory-only definition cannot supply that proof.
+      BRAIN_MANIFEST_PATH: reference.path,
+    },
   };
 }
 

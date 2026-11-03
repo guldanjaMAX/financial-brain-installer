@@ -3,7 +3,9 @@ import { test } from "node:test";
 import { createProductFixture } from "./product-contract-fixture.mjs";
 import { demoteScaffolding } from "../src/index.js";
 import { evidenceLineageFor } from "../src/lib/evidence-lineage.js";
-import { applyMoneyVeto } from "../src/lib/money-veto.js";
+import { applyMoneyVeto, isMoneyAnswer, isMoneyQuestion } from "../src/lib/money-veto.js";
+import { classifyLedgerQuestion } from "../src/lib/ledger-question.js";
+import { applyTemporalVeto } from "../src/lib/temporal-guard.js";
 import { tierOf } from "../src/lib/evidence-authority.js";
 import { assembleOcr } from "../../ingest/ocr.mjs";
 
@@ -68,6 +70,125 @@ test("money: a dated primary record passes unchanged", async (t) => {
   assert.equal(body.evidence_gate.complete, true);
 });
 
+for (const topic of ["a statement", "statements", "desire statements"]) {
+  test(`money topic: generic ${topic} stays outside the money contract`, () => {
+    const question = `What did the founder say about ${topic} on our last call?`;
+    assert.equal(isMoneyQuestion("What did the bank statement say?"), true, "financial control reaches the classifier");
+    assert.equal(isMoneyQuestion(question), false);
+    assert.equal(isMoneyAnswer(question, `The founder discussed ${topic} [1].`), false);
+  });
+}
+
+test("money topic: native call transcript answers a desire-statements question", async (t) => {
+  const answer = "The founder suggested writing three desire statements before the next call [1].";
+  const body = await run(t, {
+    question: "What did the founder say about desire statements on our last call?",
+    answer, content: "The founder suggested writing three desire statements before the next call.",
+    title: "Founder call transcript", kind: "zoom",
+  });
+  assert.equal(body.results[0].authority.tier, "T4", "the native transcript reaches its real authority decision");
+  assert.equal(body.results[0].text_source, "native");
+  assert.equal(body.answer, answer, body.evidence_gate.reason);
+  assert.equal(body.evidence_gate.supported, true);
+  assert.equal(body.gaps.some(gap => gap.type === "money_veto"), false);
+});
+
+test("money topic: desire-statements questions retain ordinary retrieval windows", async (t) => {
+  const body = await run(t, {
+    question: "What did the founder say about desire statements in the last 2 days?",
+    answer: "The founder suggested writing desire statements [1].",
+    content: "The founder suggested writing desire statements.",
+    title: "Founder call transcript", kind: "zoom",
+  });
+  assert.equal(body.time_window?.from, "2026-10-09T00:00:00.000Z");
+  assert.equal(body.evidence_gate.supported, true);
+  const money = await run(t, { question: "What did I pay in the last 2 days?" });
+  assert.equal(money.answer, ANSWER);
+  assert.equal(money.time_window, undefined, "real money keeps its verifier-only window contract");
+});
+
+// The short spend question now belongs to the deterministic ledger route.
+// Keep this peer on document retrieval so it exercises the exact-span veto.
+test("money topic: recorded spending stays on the document-veto path", () => {
+  const options = { now: NOW, timeZone: "UTC" };
+  assert.equal(classifyLedgerQuestion("What did I spend?", options).kind, "expense_summary",
+    "the supported spend control reaches the ledger classifier");
+  const question = "What spending amount was recorded?";
+  assert.equal(isMoneyQuestion(question), true, "the replacement reaches the money classifier");
+  assert.equal(classifyLedgerQuestion(question, options).kind, null);
+});
+
+for (const question of [
+  "What is my balance?", "What spending amount was recorded?", "What payment was recorded?",
+  "What does the invoice say?", "What does the bank statement say?",
+  "What amount was recorded?", "What was the price?", "What did I pay?",
+]) {
+  test(`money topic: unsupported financial question stays guarded: ${question}`, async (t) => {
+    const control = await run(t, { question });
+    assert.equal(control.answer, ANSWER, control.evidence_gate.reason);
+    const body = await run(t, { question, answer: ANSWER.replace("120.00", "121.00") });
+    assert.equal(body.answer, null);
+    assert.equal(body.gaps.find(gap => gap.type === "money_veto")?.rule, "span_mismatch");
+  });
+}
+
+test("money topic: an explicit financial answer stays guarded when the question is generic", () => {
+  const input = {
+    now: NOW, question: "What did the statement say?", answer: ANSWER,
+    evidenceGate: { supported: true, complete: true, evidence: [1] },
+    docs: [{ n: 1, ts: "2026-10-10", date_reliable: true, snippet: CONTENT }],
+  };
+  assert.equal(applyMoneyVeto(input).answer, ANSWER, "supported money answer is the green control");
+  input.answer = ANSWER.replace("120.00", "121.00");
+  const refused = applyMoneyVeto(input);
+  assert.equal(refused.answer, null);
+  assert.equal(refused.gap.rule, "span_mismatch", "explicit money reaches the exact-span decision");
+});
+
+test("money topic: mixed question checks the money sentence without demanding bank authority for call prose", () => {
+  const nonMoney = "The founder said desire statements express intent [1].";
+  const money = "The bank statement records a charge of USD 120.00 [2].";
+  const input = {
+    now: NOW,
+    question: "What did the founder say about desire statements, and what did the bank statement record?",
+    answer: `${nonMoney} ${money}`,
+    evidenceGate: { supported: true, complete: true, evidence: [1, 2] },
+    docs: [
+      { n: 1, ts: "2026-10-10", date_reliable: true, authority: { tier: "T4" },
+        snippet: "The founder said desire statements express intent." },
+      { n: 2, ts: "2026-10-10", date_reliable: true, authority: { tier: "T1" },
+        snippet: "The bank statement records a charge of USD 120.00." },
+    ],
+  };
+  assert.equal(isMoneyQuestion(input.question), true, "mixed question enters the real money decision");
+  assert.deepEqual(applyMoneyVeto(input), { answer: input.answer, evidenceGate: input.evidenceGate });
+  input.answer = `${nonMoney} ${money.replace("120.00", "121.00")}`;
+  const refused = applyMoneyVeto(input);
+  assert.equal(refused.answer, null);
+  assert.equal(refused.gap.rule, "span_mismatch", "only the changed financial sentence causes refusal");
+  input.answer = `${nonMoney} The documents do not confirm the charge.`;
+  const partial = applyMoneyVeto(input);
+  assert.equal(partial.answer, input.answer);
+  assert.equal(partial.evidenceGate.complete, false);
+  assert.equal(partial.gap.rule, "incomplete_claim");
+});
+
+test("money topic: desire-statements wording no longer bypasses the temporal guard", () => {
+  const input = {
+    question: "When is my next call with the founder about desire statements?",
+    answer: "Your next call with the founder is October 12, 2026 [1].",
+    evidenceGate: { supported: true, complete: true, evidence: [1] },
+    docs: [{ n: 1, title: "Founder call", snippet: "Call with the founder on October 12, 2026.",
+      ts: "2026-10-12", occurred_at: "2026-10-12", date_source: "calendar:all_day_start",
+      date_reliable: true, text_reliable: true }],
+    now: NOW, timeZone: "UTC",
+  };
+  assert.equal(applyTemporalVeto(input).answer, input.answer, "future call is the green control");
+  const refused = applyTemporalVeto({ ...input, now: Date.parse("2026-10-13T12:00:00Z") });
+  assert.equal(refused.answer, null);
+  assert.equal(refused.gap.type, "temporal_conflict", "approved cited event reached the date decision");
+});
+
 for (const kind of ["gmail", "imessage", "upload", "calendar", "gdrive"]) {
   test(`money: dated unknown-lineage ${kind} supports its cited figure`, async (t) => {
     const body = await run(t, { lineage: null, kind });
@@ -112,10 +233,10 @@ for (const [label, mutation, reason] of [
   ["wrong month list", { answer: "Card ending 4242 statement months: January, April [1]." }, /span/i],
   ["wrong question account", { question: "Which statement months are recorded for card ending 4343?", answer: "January, February, March [1]." }, /span/i],
   ["document absence", { answer: "There are no duplicate charges [1].", content: "There are no duplicate charges for card ending 4242 over the last 60 days." }, /ledger|whole window/i],
-  ["all statements", { question: "Do I have every 2025 statement?", answer: "All 2025 statements are present [1].", content: "All 2025 statements are present." }, /ledger|whole window/i],
+  ["all statements", { question: "Do I have every 2025 bank statement?", answer: "All 2025 statements are present [1].", content: "All 2025 statements are present." }, /ledger|whole window/i],
   ["nothing due", { answer: "Nothing is due [1].", content: "Nothing is due for card ending 4242." }, /ledger|whole window/i],
   ["short absence", { question: "Any duplicate or unusual charges in the last 60 days?", answer: "No [1].", content: "No duplicate charges." }, /ledger|whole window/i],
-  ["short completeness", { question: "Do I have every 2025 statement?", answer: "Yes [1].", content: "All 2025 statements are present." }, /ledger|whole window/i],
+  ["short completeness", { question: "Do I have every 2025 bank statement?", answer: "Yes [1].", content: "All 2025 statements are present." }, /ledger|whole window/i],
   ["title-only figure", { title: "Card ending 4242 USD 120.00", content: "Card ending 4242 statement has no amount printed." }, /span/i],
   ["wrong currency", { answer: ANSWER.replace("USD", "CAD") }, /span/i],
   ["wrong magnitude", { answer: ANSWER.replace("120.00", "120.00 million") }, /span/i],
@@ -232,7 +353,7 @@ for (const [label, claim, span] of [
     assert.equal(body.evidence_gate.supported, false);
     const diagnostic = body.gaps.filter(gap => gap.type === "money_veto");
     assert.deepEqual(diagnostic, [{ type: "money_veto", rule: "span_mismatch", count: 1,
-      detail: "The money evidence check refused a claim." }]);
+      detail: "I can help review the source, but this money claim is unconfirmed. The amount, account, or month does not match the cited words.\nWant to check the original record?" }]);
   });
 }
 
@@ -344,7 +465,7 @@ test("calibration qualification reports only a fixed rule and count", async t =>
   assert.equal(body.evidence_gate.supported, true);
   assert.equal(body.evidence_gate.complete, false);
   assert.deepEqual(body.gaps.filter(gap => gap.type === "money_veto"), [{ type: "money_veto",
-    rule: "incomplete_claim", count: 1, detail: "The money evidence check qualified an incomplete answer." }]);
+    rule: "incomplete_claim", count: 1, detail: "I can help review the source, but some money details are still unconfirmed. Some payment details are still unknown in the records checked.\nWant to check the original record?" }]);
 });
 
 test("a money veto and a later scanned-tax gap both survive the real think route", async t => {

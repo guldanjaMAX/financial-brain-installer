@@ -301,7 +301,7 @@ test('E control: repeated empty completions remain null with a reviewed error', 
   assert.deepEqual(r.body.citations, []);
   assert.equal(r.drafts, 2, 'both generation decisions were reached');
   assert.equal(r.verifiers, 0, 'empty drafts never enter a verifier');
-  assert.equal(r.body.answer_error, 'Answer generation is unavailable right now. Try again in a moment.');
+  assert.equal(r.body.answer_error, 'I can help you try again, but answers are unavailable right now. Want to try again in a moment?');
 });
 
 const paymentQuestion = 'Payer North paid, right?';
@@ -449,7 +449,7 @@ test('B02 boundary: an excerpt cannot supply another account or payer month', ()
     ['Which months for Payer North?',
       'Payer North statement months: October. Payer South statement months: September.'],
   ]) {
-    const input = { ...recallInput(text), question: q };
+    const input = { ...recallInput(text), question: `bank statement: ${q}` };
     assert.equal(input.evidenceGate.supported, true, 'approved exact excerpt reaches month binding');
     assert.deepEqual(moneyRecordQualification(input).evidence, [1]);
     const result = applyMoneyVeto(input);

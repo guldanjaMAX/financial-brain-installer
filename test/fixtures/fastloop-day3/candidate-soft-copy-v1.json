@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "version": "soft-refusal-copy-v1",
+  "case": "Q11",
+  "model_index": 0,
+  "before_sha256": "20b5cdad6ebc3af0392b44ddd774cad92f6c6474c565df399ecdc3c4ef62c82e",
+  "after_sha256": "4ea9472746ac2cd03a6bffeb06b131c32110cc7705da9fc61eca5be1d0500b7e",
+  "from": "I can't answer that bank question as phrased. I can show balances, posted transactions, and spending for a specific period.\nTry: \"What are my account balances?\"",
+  "to": "I want to make sure I get this right. I can show you balances, recent transactions, or what you spent in a set period. Which would help most?"
+}

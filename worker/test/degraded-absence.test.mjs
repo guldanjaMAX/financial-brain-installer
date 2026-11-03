@@ -1188,7 +1188,7 @@ const EMPTY_DEGRADED_THINK = {
     confidence: { percent: 80, band: "high", basis: ["retrieval found no candidates at all"] },
   };
   check("REGRESSION GUARD at /app: a healthy empty result keeps its search scope",
-    render.answerText(healthyEmpty) === "I didn't find a matching record in this search.",
+    render.answerText(healthyEmpty) === "I can try a more specific search, but I didn't find a matching record in this search. Want to add a detail?",
     render.answerText(healthyEmpty));
   check("REGRESSION GUARD at /app: labels its confidence in this search result",
     /^Confidence in this search result: 80%/.test(render.confidenceText(healthyEmpty)),

@@ -41,7 +41,9 @@ import { jsonResponse } from "./core.js";
 import { importBankExport, balanceRoleFor, DEFAULT_TENANT } from "./fin-import.js";
 import { rekeyBankExportTransactions } from "./fin-ledger-maintenance.js";
 import { maintainAccountLink } from "./fin-account-links.js";
+import { maintainAccountKind } from './fin-account-kinds.js';
 import { ledgerInstalled } from "./fin-d1.js";
+import { writeBankActivityDocuments } from "./bank-activity-doc.js";
 
 /** Operator-only. Mounted behind the admin-key gate in `index.js`. */
 export const BANK_IMPORT_PATH = "/api/admin/fin/import-bank-export";
@@ -230,6 +232,20 @@ export async function handleBankExportImport(env, request) {
   }
 
   // Reuse the import route's exact admin-key and upgrade-pause boundaries.
+  if (body?.action === 'account-kind') {
+    if (typeof body.dry_run !== 'boolean' || typeof body.revoke !== 'boolean') {
+      return jsonResponse({ reason: 'Preview the account review before applying.' }, 400);
+    }
+    try {
+      return jsonResponse(await maintainAccountKind(env, { selector: body.account, kind: body.kind,
+        role: body.role, revoke: body.revoke, dryRun: body.dry_run, approve: body.approve }));
+    } catch (error) {
+      const known = ['Account review approval is stale; preview again.',
+        'Account review is blocked. Select one exact owned account; revoke any stale review first.'];
+      return jsonResponse({ code: 'ledger_account_kind_review_required', reason: known.includes(error.message)
+        ? error.message : 'Account review could not be verified. Preview again before applying.' }, 409);
+    }
+  }
   if (body?.action === 'link-accounts') {
     if (!SLUG.test(body.manual_account_slug || '') || !SLUG.test(body.live_account_slug || '') ||
         typeof body.dry_run !== 'boolean' || typeof body.unlink !== 'boolean' ||
@@ -302,6 +318,15 @@ export async function handleBankExportImport(env, request) {
     entityLabel: body?.entity_label ? String(body.entity_label).slice(0, 200) : null,
     origin: { provenance: "extracted", sourceDocUid: checked.envelope.sourceDocUid },
   });
+  if (receipt.imported) {
+    try {
+      await writeBankActivityDocuments(env, { metadataChanges: 1 });
+    } catch {
+      // The shared import transaction already made the replacement debt
+      // durable and the old projection non-ready. A bounded later writer pass
+      // can resume it without turning a committed ledger import into a retry.
+    }
+  }
   return jsonResponse({
     ...receipt,
     source_label: checked.envelope.sourceLabel || null,

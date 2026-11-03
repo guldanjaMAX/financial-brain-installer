@@ -70,7 +70,7 @@ export async function measureProduction(f) {
     // Citations can include uncertain rows. Presence needs the exact receipt
     // and a matching positive amount; certified absence of this payer is wrong.
     const cited = b.citations.some(ref => ref.amount_minor === c.cents);
-    const paymentAmounts = [...b.answer.matchAll(/^Found a deposit of \$([\d,]+\.\d{2}) posted /gm)]
+    const paymentAmounts = [...b.answer.matchAll(/^Found a deposit of \$([\d,]+\.\d{2}) dated /gm)]
       .map(m => Math.round(Number(m[1].replaceAll(',', '')) * 100));
     const amount = b.ledger.attributed_subtotal_minor ?? b.ledger.total_minor;
     if (matched && cited && (c.kind === 'payment' ? paymentAmounts.length === 1 && paymentAmounts[0] === c.cents : amount === c.cents)) stats.answered++;

@@ -7,6 +7,7 @@
  */
 
 import { DEFAULT_TENANT } from "./fin-d1.js";
+import { accountKindReviewSql, accountKindReview } from './fin-account-kinds.js';
 import { storedProvenanceAssessment } from "./provenance-receipt.js";
 import { sourceCoverageFromEvidence } from "./source-coverage.js";
 import {
@@ -1238,6 +1239,7 @@ const REFERENCE_INTEGRITY_SQL = `
 const ACCOUNT_SQL = `
   SELECT a.id AS internal_id, a.account_slug, a.entity_slug, a.institution,
          a.account_kind, a.balance_role, a.mask, a.currency, a.feed_mode,
+         ${accountKindReviewSql('a')} AS account_kind_review_json,
          a.expected_cadence, a.status, a.opened_on, a.closed_on, a.provenance,
          a.source_doc_uid, a.source_locator, a.source_feed,
          EXISTS (SELECT 1 FROM fin_entities ae
@@ -2719,6 +2721,7 @@ async function periodRecord(row, references) {
 
 async function accountRecord(row, references) {
   row = await prepareFinancialRow(row, references);
+  const review = accountKindReview(row);
   const category = categoryFor(row.account_kind);
   const institution = safeInstitution(row.institution);
   const ending = row.mask ? `ending ${String(row.mask).slice(-4).padStart(4, "X")}` : "ending unknown";
@@ -2780,6 +2783,13 @@ async function accountRecord(row, references) {
     institution,
     category,
     stored_account_kind: row.account_kind,
+    reviewed_account_kind: review?.kind ?? null,
+    reviewed_balance_role: review?.role ?? null,
+    effective_account_kind: review?.state === 'current' ? review.kind : row.account_kind,
+    effective_balance_role: review?.state === 'current' ? review.role : row.balance_role,
+    account_kind_review: review ? { state: review.state, reviewer: review.reviewer, source: review.source,
+      reviewed_at: review.reviewed_at, revoked_at: review.revoked_at,
+      bound_identity_ref: await references.ref('acct', review.identity_json) } : null,
     entity_ref: await references.ref("entity", row.entity_slug),
     entity_reference_state: row.entity_reference_present
       ? "current_entity_resolved"

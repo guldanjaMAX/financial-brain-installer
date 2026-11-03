@@ -906,7 +906,8 @@ export function buildEnvelope(event, { calendar, config } = {}) {
   const source_id = sourceIdFor(cal.key, eventId);
 
   if (event.status === "cancelled") {
-    return { kind: "delete", source_id, event_id: eventId, reason: "event is cancelled or deleted" };
+    return { kind: "delete", source_id, event_id: eventId, reason: "event is cancelled or deleted",
+      removal_cause: "explicit_deletion" };
   }
 
   const start = readEventTime(event.start);
@@ -1194,7 +1195,8 @@ export async function syncCalendar({
   for (const event of listing.events) {
     const out = buildEnvelope(event, { calendar, config: cfg });
     if (out.kind === "upsert") result.documents.push(out.envelope);
-    else if (out.kind === "delete") result.deletions.push({ source_id: out.source_id, event_id: out.event_id, reason: out.reason });
+    else if (out.kind === "delete") result.deletions.push({ source_id: out.source_id, event_id: out.event_id,
+      reason: out.reason, removal_cause: out.removal_cause });
     else result.skipped.push({ source_id: out.source_id || null, event_id: out.event_id, reason: out.reason });
   }
 

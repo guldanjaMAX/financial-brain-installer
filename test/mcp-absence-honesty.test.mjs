@@ -29,7 +29,7 @@ const ABSENCE = 'No match in this search. Search again with different wording, o
 const NO_HITS = 'No hits in this search. This is not proof that no such record exists. Search again with different wording, or sort "newest" for status, before saying "I didn\'t find a matching record in these searches". Name both searches and the next place you would check.';
 const REMOTE_NO_HITS = 'No hits in this search. This is not proof that no such record exists. Say "I didn\'t find a matching record in this search" and name the next search you would run.';
 const SCOPED_GAP = "No match in this search. This is not proof that no such record exists.";
-const REFUSAL = "I didn't find a matching record in this search.";
+const REFUSAL = "I can try a more specific search, but I didn't find a matching record in this search. Want to add a detail?";
 const NEXT_NO_MATCH = "Next: ask again with a name, date or exact phrase the record would contain.";
 const PRESERVE = "Preserve the ledger answer's exact amounts, account masks, dates, and coverage bounds.";
 const LATEST = 'Before any status, "latest", or absence claim, run one brain_search for the subject with sort "newest", read newest_record, and say "as of <record date>" for the record you relied on.';
@@ -622,6 +622,7 @@ await test("zero-row largest keeps the real ledger answer beside an empty-docume
   t.mock.method(Date, "now", () => Date.parse(now));
   const f = await createProductFixture({ env: {
     ADMIN_KEY: randomBytes(24).toString("hex"), SESSION_SIGNING_KEY: randomBytes(32).toString("hex"),
+    BRAIN_TIMEZONE: "UTC",
     AI: { async run() { throw new Error("money must use the ledger"); } },
   } });
   t.after(() => f.close());
@@ -880,7 +881,9 @@ await test("R4 remote refusal preserves ledger and source coverage limits", asyn
     const out = await remoteCall({ answer: "The documents do not answer the question.", results: [reliable], citations: [], gaps: [{ type, detail }] }, "ask");
     assert.ok(out.includes(detail));
     assert.match(out, /I found 1 record/);
-    if (type === "ledger_out_of_coverage") assert.match(out, /last finished month/);
+    if (type === "ledger_out_of_coverage") assert.ok(out.split("\n").includes(
+      "Want help connecting or refreshing the bank records for those dates?",
+    ));
     const empty = await remoteCall({ answer: null, results: [], citations: [], gaps: [{ type, detail }] }, "ask");
     assert.ok(empty.includes(detail), "empty synthesis still carries the real reason");
   }
@@ -895,7 +898,10 @@ for (const status of ["coverage_incomplete", "search_unavailable"]) for (const t
   const out = await remoteCall(payload, "ask");
   assert.ok(out.includes(notice), "the unavailable document branch was reached");
   assert.ok(out.includes(detail));
-  assert.match(out, /last finished month/);
+  const nextStep = type === "ledger_out_of_coverage"
+    ? "Want help connecting or refreshing the bank records for those dates?"
+    : "Want help with the bank connection step above?";
+  assert.ok(out.split("\n").includes(nextStep), "the exact next step matches the authorized ledger gap");
   assert.doesNotMatch(out, /Fixture reliable|Candidate citation|Sources:|I found 1 record/);
   const control = await remoteCall({ ...payload, status: undefined, notice: undefined, results: [], citations: [] }, "ask");
   assert.ok(control.includes(detail));

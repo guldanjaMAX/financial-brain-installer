@@ -2,19 +2,40 @@
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { dailyRefreshIdentity, dailyRefreshPrincipal } from "./daily-refresh-plan.mjs";
 import { appendDailySourceFailure, observeDailyRun } from "./daily-refresh-observation.mjs";
 import { acquireBrainLifecycleLock } from "./brain-lifecycle-lock.mjs";
 import { DriveRemovalReviewRequired } from "./drive-removal-plan.mjs";
+import { removalReviewFacts, removalOwnerSentence } from "./load-removal-review.mjs";
 import { SUPPORT_ERROR_CODES } from "../support-journal.mjs";
-import { providerNoChangeCheckAt, providerWithheldCheckAt } from "../worker/src/lib/source-receipt.js";
+import {
+  mergeProviderWithheldReasons,
+  normalizeProviderWithheldReasons,
+  providerNoChangeCheckAt,
+  providerWithheldCheckAt,
+} from "../worker/src/lib/source-receipt.js";
 import { redactAll, sanitizeSensitiveLinks, scan } from "../worker/src/lib/secret-scan.js";
 import {
   buildDailyRefreshDefinition,
   readDailyRefreshUpdateTransaction,
   statusDailyRefreshSchedule,
 } from "./daily-refresh-scheduler.mjs";
+
+const DAILY_LOCK_RETRY_INTERVAL_MS = 2_000;
+const DAILY_LOCK_WAIT_LIMIT_MS = 55_000;
+
+function lockClockMilliseconds(lockNow) {
+  const value = lockNow();
+  const milliseconds = value instanceof Date ? value.getTime() : value;
+  if (!Number.isFinite(milliseconds)) throw new TypeError("the daily lifecycle-lock clock is invalid");
+  return milliseconds;
+}
+
+function elapsedLockWaitMilliseconds(startedAt, scheduledWaitMs, lockNow) {
+  return Math.max(scheduledWaitMs, Math.ceil(lockClockMilliseconds(lockNow) - startedAt), 0);
+}
 
 function timestamp(now) {
   const value = now();
@@ -125,26 +146,13 @@ function safeDiagnosticText(value, maxLength = 200) {
 }
 
 function safeRemovalReview(error, source) {
-  const review = error?.removal_review;
-  const count = (key) => Number.isSafeInteger(review?.[key]) && review[key] >= 0 ? review[key] : null;
-  const stored = count("stored_documents_to_remove");
-  const sourceRemovals = count("source_removals");
-  const replacementReviews = count("replacement_family_reviews");
-  const percentage = Number.isFinite(review?.source_cleanup_percentage) &&
-    review.source_cleanup_percentage >= 0 && review.source_cleanup_percentage <= 100
-    ? review.source_cleanup_percentage : null;
-  const fingerprint = /^[a-f0-9]{64}$/u.test(String(review?.fingerprint || "")) ? review.fingerprint : null;
-  if ([stored, sourceRemovals, replacementReviews, percentage].some((value) => value === null) || !fingerprint) {
-    return {
-      reason: "a removal review is waiting. Nothing was removed.",
-      attention: `${source}: a removal review is waiting. Nothing was removed.`,
-    };
-  }
+  const reviews = (error.removal_reviews || [error.removal_review])
+    .map(review => removalReviewFacts(review, source)).filter(Boolean);
+  const failure = error.auto_apply_error ? ` Automatic removal stopped: ${safeDiagnosticText(error.auto_apply_error.message)}.` : "";
   return {
-    reason: `a removal review is waiting: ${stored} stored documents would be removed across ` +
-      `${sourceRemovals} source removals and ${replacementReviews} replacement family reviews; ` +
-      `source cleanup is ${percentage.toFixed(1)}% of stored documents; plan fingerprint ${fingerprint}. Nothing was removed.`,
-    attention: `${source}: a removal review is waiting (${stored} stored parts, ${sourceRemovals} source removals). Nothing was removed.`,
+    reason: (reviews.length ? reviews.map(removalOwnerSentence).join(" ") : removalOwnerSentence(null)) + failure,
+    attention: `${source}: waiting for owner approval of a removal review.`,
+    reviews,
   };
 }
 
@@ -167,6 +175,38 @@ function compareFreshness(before, after) {
   });
 }
 
+function dailyWithheldAggregate(latestRuns, withheldBySource) {
+  const reasonMaps = [];
+  let declaredCount = 0;
+  for (let index = 0; index < latestRuns.length; index++) {
+    const run = latestRuns[index];
+    const count = run?.docs_withheld;
+    if (count === undefined || count === null) continue;
+    if (!Number.isSafeInteger(count) || count < 0 || !Number.isSafeInteger(declaredCount + count)) return null;
+    declaredCount += count;
+    if (count === 0) {
+      if (run?.withheld_reasons !== undefined && run?.withheld_reasons !== null) return null;
+      continue;
+    }
+    if (!withheldBySource[index]) return null;
+    reasonMaps.push(run.withheld_reasons);
+  }
+  if (declaredCount === 0) return { count: 0, reasons: null };
+  const aggregate = mergeProviderWithheldReasons(reasonMaps);
+  return aggregate?.count === declaredCount ? aggregate : null;
+}
+
+function providerWithheldOwnerCopy(source) {
+  const aggregate = normalizeProviderWithheldReasons(source?.withheld_reasons);
+  if (!aggregate || aggregate.count !== source?.docs_withheld) return null;
+  const causes = [];
+  const calendar = aggregate.reasons.calendar_event_incomplete;
+  const credentials = aggregate.reasons.credential_detected;
+  if (calendar) causes.push(`calendar_event_incomplete: ${calendar} incomplete calendar item(s) queued for retry`);
+  if (credentials) causes.push(`credential_detected: ${credentials} item(s) held by the credential safety check for review`);
+  return `${aggregate.count} item(s) withheld by design: ${causes.join("; ")}`;
+}
+
 export async function runDailyRefresh({
   plan,
   acquireLock = (options) => acquireBrainLifecycleLock(options),
@@ -174,6 +214,8 @@ export async function runDailyRefresh({
   readFreshness,
   writeReceipt = () => {},
   now = () => new Date(),
+  lockNow = () => performance.now(),
+  sleep = (milliseconds) => new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds)),
   home = homedir(),
   platform = process.platform,
   recoveryRequired = () => false,
@@ -184,15 +226,44 @@ export async function runDailyRefresh({
   if (typeof runSource !== "function" || typeof readFreshness !== "function" || typeof writeReceipt !== "function") {
     throw new TypeError("daily refresh needs source, freshness, and receipt dependencies");
   }
+  if (typeof lockNow !== "function" || typeof sleep !== "function") {
+    throw new TypeError("daily refresh needs lifecycle-lock clock and sleep dependencies");
+  }
   const startedAt = timestamp(now);
   const runtimeMinutes = Number.isInteger(plan.max_runtime_minutes) && plan.max_runtime_minutes > 0
     ? plan.max_runtime_minutes
     : 45;
   const deadlineAt = Date.parse(startedAt) + runtimeMinutes * 60_000;
   let lock;
-  try {
-    lock = acquireLock({ manifestPath: plan.manifest_path, operation: "daily-refresh", home, platform });
-  } catch (error) {
+  let lockError = null;
+  let lockWaitMs = 0;
+  let scheduledWaitMs = 0;
+  const lockWaitStartedAt = lockClockMilliseconds(lockNow);
+  for (;;) {
+    try {
+      lock = acquireLock({ manifestPath: plan.manifest_path, operation: "daily-refresh", home, platform });
+      break;
+    } catch (error) {
+      if (platform !== "darwin" || error?.code !== "brain_lifecycle_busy") {
+        lockError = error;
+        break;
+      }
+      // The existing acquire path rechecks owner liveness and stale reclaim on
+      // every attempt. This runner only adds a macOS pre-source wait boundary.
+      lockWaitMs = elapsedLockWaitMilliseconds(lockWaitStartedAt, scheduledWaitMs, lockNow);
+      const remainingMs = DAILY_LOCK_WAIT_LIMIT_MS - lockWaitMs;
+      if (remainingMs <= 0) {
+        lockError = error;
+        break;
+      }
+      const sleepMs = Math.min(DAILY_LOCK_RETRY_INTERVAL_MS, remainingMs);
+      await sleep(sleepMs);
+      scheduledWaitMs += sleepMs;
+      lockWaitMs = elapsedLockWaitMilliseconds(lockWaitStartedAt, scheduledWaitMs, lockNow);
+    }
+  }
+  if (lockError) {
+    const error = lockError;
     if (!new Set(["brain_lifecycle_busy", "brain_lifecycle_recovery_required"]).has(error?.code)) throw error;
     const receipt = Object.freeze({
       schema_version: 1,
@@ -201,6 +272,7 @@ export async function runDailyRefresh({
       status: "deferred",
       started_at: startedAt,
       completed_at: timestamp(now),
+      lock_wait_ms: lockWaitMs,
       reason_code: error?.code === "brain_lifecycle_recovery_required" ? "update_recovery_required" : "brain_lifecycle_busy",
       reason: error?.code === "brain_lifecycle_recovery_required"
         ? "a prior update still requires verified schedule recovery"
@@ -224,6 +296,7 @@ export async function runDailyRefresh({
         status: "deferred",
         started_at: startedAt,
         completed_at: timestamp(now),
+        lock_wait_ms: lockWaitMs,
         reason_code: "update_recovery_required",
         reason: "a prior update still requires verified schedule recovery",
         schedule_attention: Object.freeze([...attentionEntries]),
@@ -339,7 +412,9 @@ export async function runDailyRefresh({
           return check && Date.parse(row.latest_run.started_at) >= Date.parse(sourceStartedAt) &&
             Date.parse(check) <= Date.parse(checkedAt) && (!prior || Date.parse(check) > Date.parse(prior)) ? check : null;
         });
-        const docsWithheld = latestRuns.reduce((sum, run) => sum + (run?.docs_withheld || 0), 0);
+        const withheldAggregate = dailyWithheldAggregate(latestRuns, withheldBySource);
+        const withholdingEvidenceInvalid = withheldAggregate === null;
+        const docsWithheld = withholdingEvidenceInvalid ? null : withheldAggregate.count;
         const docsRefused = latestRuns.every((run) => Number.isSafeInteger(run?.docs_refused))
           ? latestRuns.reduce((sum, run) => sum + run.docs_refused, 0) : null;
         const failedRun = latestRuns.some((run) => ["failed", "refused"].includes(run?.outcome) || run?.docs_failed > 0);
@@ -350,11 +425,11 @@ export async function runDailyRefresh({
             ![run?.docs_added, run?.docs_updated, run?.docs_unchanged]
               .some((count) => Number.isSafeInteger(count) && count > 0))));
         const loaderRefused = ["failed", "refused"].includes(runResult?.status);
-        const unverifiedRun = unverifiedBySource.some(Boolean);
+        const unverifiedRun = withholdingEvidenceInvalid || unverifiedBySource.some(Boolean);
         const freshnessAdvanced = !freshnessUnknown && !loaderRefused && executionComplete && freshness.advanced && !failedRun && !unverifiedRun;
         // Either missing observation leaves this invocation's evidence unknown,
         // even if the other read contains a completed provider check.
-        const checkVerified = !freshnessUnknown && executionComplete && !failedRun && latestRuns.every((_run, index) => {
+        const checkVerified = !freshnessUnknown && !withholdingEvidenceInvalid && executionComplete && !failedRun && latestRuns.every((_run, index) => {
           if (noChangeBySource[index] || withheldBySource[index]) return true;
           const name = Object.keys(afterBySource)[index];
           return compareFreshness({ [name]: beforeBySource[name] }, { [name]: afterBySource[name] }).advanced &&
@@ -365,7 +440,8 @@ export async function runDailyRefresh({
             runResult?.partial > 0 || docsExcluded > 0)) outcome = "partial";
         if (!checkVerified) {
           outcome = "failed";
-          reason = unverifiedRun ? "the latest source receipt verified no accepted or unchanged documents"
+          reason = withholdingEvidenceInvalid ? "the latest source receipt has invalid or mismatched withholding evidence"
+            : unverifiedRun ? "the latest source receipt verified no accepted or unchanged documents"
             : failedRun ? "the latest source receipt reports a failed or refused run"
             : freshness.missing.length
             ? "the source claimed success, but one or more freshness receipts were missing or invalid"
@@ -404,10 +480,12 @@ export async function runDailyRefresh({
             noChangeBySource[index] ? afterInventory[name].latest_run.finished_at : withheldBySource[index] || afterBySource[name]).sort().at(-1) : null,
           docs_refused: docsRefused,
           docs_withheld: docsWithheld,
+          ...(withheldAggregate?.reasons ? { withheld_reasons: Object.freeze(withheldAggregate.reasons) } : {}),
           docs_excluded: docsExcluded,
           missing_freshness_sources: freshness.missing,
           unadvanced_freshness_sources: freshness.notAdvanced,
           reason,
+          ...(runResult?.auto_applied_removals?.length ? { auto_applied_removals: runResult.auto_applied_removals } : {}),
         });
         sourceResults.push(receipt);
         await writeReceipt(receipt);
@@ -415,7 +493,7 @@ export async function runDailyRefresh({
         const sourceName = source.source_names?.[0] || source.key;
         const safeSource = safeDiagnosticText(sourceName, 128);
         const issueCode = dailyIssueCode(error);
-        const detail = safeDiagnosticText(error?.message || error);
+        const detail = safeDiagnosticText(error.auto_apply_error?.message || error?.message || error);
         const removalReview = issueCode === "SAFETY_REVIEW_REQUIRED"
           ? safeRemovalReview(error, safeSource) : null;
         if (removalReview) attentionEntries.push(removalReview.attention);
@@ -424,14 +502,16 @@ export async function runDailyRefresh({
           kind: "daily_refresh_source",
           identity: plan.identity.id,
           source: sourceName,
-          status: "failed",
+          status: removalReview && !error.other_source_failures ? "waiting_for_owner" : "failed",
           started_at: sourceStartedAt,
           completed_at: timestamp(now),
           freshness_advanced: false,
           issue_code: issueCode,
           detail,
-          reason_code: removalReview ? "removal_review_required" : "source_execution_failed",
+          reason_code: removalReview ? "removal_review" : "source_execution_failed",
           reason: removalReview?.reason || "the source refresh failed; retry this source or inspect its private local diagnostics",
+          ...(removalReview ? { removal_reviews: removalReview.reviews } : {}),
+          ...(error.auto_applied_removals?.length ? { auto_applied_removals: error.auto_applied_removals } : {}),
         });
         sourceResults.push(receipt);
         await writeReceipt(receipt);
@@ -440,18 +520,22 @@ export async function runDailyRefresh({
           source: safeSource,
           issue_code: issueCode,
           detail,
-          ...(removalReview ? { attention: removalReview.attention } : {}),
+          ...(removalReview ? { attention: removalReview.attention, removal_reviews: removalReview.reviews } : {}),
         });
       }
     }
+    const status = sourceResults.length === 0 || sourceResults.some((entry) => !["complete", "partial", "held", "waiting_for_owner"].includes(entry.status)) ? "failed"
+      : sourceResults.some(entry => entry.status === "waiting_for_owner") ? "waiting_for_owner"
+      : sourceResults.some((entry) => ["partial", "held"].includes(entry.status)) ? "partial" : "complete";
     const result = Object.freeze({
       schema_version: 1,
       kind: "daily_refresh",
       identity: plan.identity.id,
-      status: sourceResults.length === 0 || sourceResults.some((entry) => !["complete", "partial", "held"].includes(entry.status)) ? "failed"
-        : sourceResults.some((entry) => ["partial", "held"].includes(entry.status)) ? "partial" : "complete",
+      status,
+      ...(status === "waiting_for_owner" ? { reason_code: "removal_review" } : {}),
       started_at: startedAt,
       completed_at: timestamp(now),
+      lock_wait_ms: lockWaitMs,
       schedule_attention: Object.freeze([...attentionEntries]),
       sources: Object.freeze(sourceResults),
     });
@@ -559,14 +643,17 @@ async function executeDailyRefreshCli(path, m, options, observationStarted) {
     const result = await runDailyRefresh({
       plan,
       acquireLock: options.acquireLock,
-      runSource: options.runSource ?? ((source) => brain.cmdLoad(path, {
+      runSource: options.runSource ?? ((source, lease) => brain.cmdLoad(path, {
         flags: { only: source.run_key },
         lifecycleLockHeld: true,
         allowPartialRefresh: true,
+        assertOwned: lease.assertOwned,
       })),
       readFreshness,
       writeReceipt: receiptWriter,
       now: options.now,
+      lockNow: options.lockNow,
+      sleep: options.sleep,
       home: options.home,
       platform: options.platform,
       scheduleAttention,
@@ -582,15 +669,26 @@ async function executeDailyRefreshCli(path, m, options, observationStarted) {
       const log = options.log || console.log;
       for (const attention of result.schedule_attention) log(attention);
       const heldCount = result.sources.filter((source) => source.status === "held").length;
+      const runCause = result.reason_code === "brain_lifecycle_busy"
+        ? "brain_lifecycle_busy: another Brain operation is running; retry after it finishes."
+        : result.reason_code === "update_recovery_required"
+          ? "update_recovery_required: a prior update needs recovery; complete or retry the update before daily imports."
+          : null;
       log(`daily refresh ${result.status}: ${result.sources.length - heldCount} source(s) attempted` +
-        (heldCount ? `; ${heldCount} held` : ""));
+        (heldCount ? `; ${heldCount} held` : "") +
+        (runCause ? ` | ${runCause}` : ""));
       for (const source of result.sources) {
+        const withheldCopy = providerWithheldOwnerCopy(source);
+        const sourceCause = source.issue_code === "NETWORK_UNREACHABLE"
+          ? "NETWORK_UNREACHABLE: network unavailable; check the connection, then retry this source."
+          : null;
         log(`${source.source} | ${source.status} | ${source.last_successful_run_at_after || "never"}` +
           (source.no_change ? ` | checked ${source.last_check_at_after}; no changes` : "") +
-          (source.docs_withheld > 0 ? ` | ${source.docs_withheld} item(s) withheld by design`
+          (withheldCopy ? ` | ${withheldCopy}`
             : source.status === "partial" ? ` | ${source.docs_refused ?? "unknown"} refused` : "") +
-          (source.status === "held" ? ` | ${source.reason}` : "") +
-          (source.docs_excluded > 0 ? ` | ${source.docs_excluded} excluded by rule` : ""));
+          (["held", "waiting_for_owner"].includes(source.status) ? ` | ${source.reason}` : "") +
+          (source.docs_excluded > 0 ? ` | ${source.docs_excluded} excluded by rule` : "") +
+          (sourceCause ? ` | ${sourceCause}` : ""));
       }
     }
     return result;

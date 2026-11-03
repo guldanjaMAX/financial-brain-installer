@@ -546,7 +546,7 @@ other homework.
    update, tell the owner to quit Claude Code (and Codex, if they use it), open
    it again, type `/exit`, then `claude --continue`, and ask: "check my Brain."
 
-For an existing Brain, set up Claude answers only when the owner asks for it, for example 'set up Claude answers'. Never offer it on your own after an update. An update never changes the answer model.
+For an existing Brain, set up Claude answers only when the owner asks for it, for example 'set up Claude answers'. Never offer it on your own after an update. An update preserves the configured models except for the exact legacy name claude-sonnet-5: it announces the switch to Opus answers, Sonnet checks and uses the same stored key.
 
 ## Offer Claude Code concierge browser help
 

@@ -424,18 +424,27 @@ does not credit a complete history sweep with refused documents. Failed parts,
 durable retry backlog, missing history or label proof, and other non-policy
 skips remain receipt gaps.
 The shared provider runner (Microsoft, Slack, Notion, Dropbox, HubSpot and
-QuickBooks) also treats a complete set of known credential-scanner labels as a
-permanent refusal for that content. Its exact batch acknowledgement remains
-mandatory. Unknown labels, custody refusals, missing identities, failed members
-and transport errors keep the cursor. A completed walk containing only accepted
-or credential-withheld items can save its cursor and close ready with a partial
-coverage outcome. The versioned `provider_withheld_v1:` aggregate in the existing
-`sync_runs.refusal_reason` column records only the `credential_detected` reason
-and count. Source inventory projects that validated aggregate as `docs_withheld`
-and `withheld_reasons`, and retains the most recent withholding aggregate as
-`last_withheld` across bounded receipt pages; daily verification requires the completed walk and saved
-provider boundary. A withheld-only check advances no accepted-document timestamp
-or complete-history claim. Other connectors retain their refusal behavior.
+QuickBooks) treats a complete set of known credential-scanner labels as a
+permanent refusal for that content. Microsoft can also defer a known calendar
+event whose required fields are incomplete. That event stays queued for retry
+instead of becoming accepted content or a deletion. Exact batch acknowledgement
+remains mandatory. Unknown labels or reasons, custody refusals, missing
+identities, failed members and transport errors keep the cursor. A completed
+walk containing only accepted items and these closed omissions can save its
+cursor and close ready with a partial coverage outcome.
+
+The versioned `provider_withheld_v1:` aggregate in the existing
+`sync_runs.refusal_reason` column has a closed reason map:
+`credential_detected` for every shared provider and
+`calendar_event_incomplete` only for Microsoft. Every count is positive and the
+canonical reason-map sum must equal `docs_refused`. Source inventory projects
+that validated aggregate as `docs_withheld` and `withheld_reasons`, and retains
+the most recent aggregate as `last_withheld` across bounded receipt pages. Daily
+verification requires the completed walk and saved provider boundary, carries
+the exact map into its source receipt, and renders credential review separately
+from calendar retry. A withheld-only check advances no accepted-document
+timestamp or complete-history claim. Other connectors retain their refusal
+behavior.
 
 Mutating local-folder, Drive, Gmail, and Calendar runs share one cross-platform
 owner lease keyed to the canonical adjacent source-state path. The lease is
@@ -511,6 +520,26 @@ until the authenticated removal preview proves that they have no obsolete member
 or a separately approved plan removes those exact members. Source deletions and
 replacement cleanup enter the same boundary. A nonempty plan always stops before
 removal and cursor advancement; accepted additions and updates remain durable.
+
+The shared load orchestrator may explicitly apply a saved Calendar or Gmail
+plan containing only explicit provider deletions, bounded by both 25 physical targets and
+1% of its authenticated stored source inventory. All aggregate reason counts
+must match, with no policy, skip, replacement or additional approval. It calls
+the existing exact-fingerprint executor and requires the removed count and
+successful readback before one source replay can advance the cursor. No other
+connector qualifies. A failed apply/readback retains the review and records
+`waiting_for_owner`; daily receipts and local status retain aggregate counts,
+reasons, the apply command and the readback outcome without target identities.
+
+Each adapter supplies a per-item removal cause from a closed set:
+`explicit_deletion`, `window_exit`, `scope_or_filter_change`, `blank_or_quality`,
+`permission_or_visibility`, or `unknown`. Both source and exact-plan fingerprints
+cover these causes. Authenticated previews bind each physical family member to
+its cause; automatic apply rechecks the saved causes at every mutation boundary.
+Missing or legacy evidence stays held. Gmail filtered-list absence is unknown,
+including after history expiry. Microsoft window exits and blank events retain
+their distinct causes and remain outside automatic apply. Owner review text
+describes the cause without claiming who deleted an item.
 
 QuickBooks Desktop also persists its exact pending tombstones and binds the
 review to the complete company checkpoint. Its refresh and separate apply both
@@ -593,6 +622,7 @@ null `top_folder` alone is never proof of membership or permission to remove.
 | SMS and Google Voice exports | Built as sessionized file imports; real export samples remain acceptance gates |
 | iPhone backup | Built against a synthetic unencrypted backup; an Apple-written backup remains a field gate |
 | Zoom | Built as a transcript webhook; a paid real-account meeting remains a field gate |
+| Granola | Supervised meeting JSON export normalizer and internal batch importer with account-bound identity and typed metadata. Notes-only coverage is explicit and summary-only input refuses. No owner CLI, live acquisition, scheduler, or cross-provider dedupe; host and real-export gates remain open |
 | Bank exports and hosted feed | Built into the shared financial ledger; real-statement and real-feed reconciliation remain field gates |
 | OCR for scanned PDFs | Built, optional, and provenance-marked; aggregate local preflight is read-only and synthetic-tested, while private real scans remain a field gate |
 | Slack and Notion | Built behind field gates with scripted provider-I/O proof; no real workspace has completed acceptance |
@@ -632,6 +662,14 @@ share an exclusive lifecycle lease keyed by canonical Brain resource identity
 in a machine-shared lock root. Manifest aliases and operating-system users
 therefore reach the same writer boundary. Lock order is lifecycle lease first,
 then the source lease, then any shared provider credential-record lease. A
+curated sync follows that same order for every target and checks the recovery
+fence before credential resolution. Update retains each curated ledger lease
+through local acceptance or recovery handoff and checks native advisory locks
+before permitting scheduler mutation. Scheduler rebind registration suppresses
+load-time ingest while preserving calendar triggers and disabled intent.
+Native enablement is verified separately from immutable Windows task contracts.
+Partial pause recovery includes every attempted job, even after a lost native
+acknowledgement, and keeps the recovery receipt if any restoration is unproved. A
 scheduled collision records a deferred outcome; interactive mutations fail
 closed. Update durably records the verified prior schedule before persistently
 disabling it, and reconciles from the updated manifest only after version
@@ -782,9 +820,10 @@ totals, recent deposits, recurring charges and own-account transfers;
 `ledger-reader.js` groups manual/live twins only after an explicit owner-approved
 link. Matching institution, entity, mask and account kind identify candidates,
 not proof. For supported ledger questions, unlinked collisions whose selected
-accounts and coverage overlap the requested window refuse with one bounded gap and the exact
-`brain ledger link-accounts` preview command. Every unresolved pair is retained
-for the window decision; the gap displays one relevant pair. Migration 0055 stores approval
+accounts and coverage overlap the requested window refuse with one bounded gap. The owner-facing
+gap says that confirmation is missing and asks the installer to review the records; it exposes
+neither internal account identifiers nor a shell command. Every unresolved pair is retained
+for the window decision. Migration 0055 stores approval
 history without triggers. The authenticated import admin route previews, hashes,
 atomically guards and verifies link/unlink actions. Saved account identities
 must still match at read time; changed identities require new review.
@@ -845,7 +884,11 @@ other account kinds are listed with a reason and no eligible account means
 required. The three flip clause families are bounded and reject duplicates,
 contradictions and other qualifiers. They apply to totals, largest, deposits,
 merchant, category and recurring, never balances, payments or the transfers
-view. The document path retains its existing money refusal rules.
+view. Positively recognized money intent outside the deterministic grammar
+preserves the document response and adds one leading
+`ledger_wording_unsupported` gap. A money word inside a policy or document
+question is not enough; those questions preserve the ordinary document response
+byte for byte.
 Recurrence uses at least three charges, bounded weekly/monthly intervals and
 integer amount tolerance; results are explicitly detected rather than confirmed. Category proposals and Unsorted remain visible. Ambiguous groups,
 incomplete coverage and unreadable rows cannot establish a total or absence.
@@ -860,14 +903,29 @@ stay with documents instead of becoming merchant filters. Only posted inflows
 match. Without a
 supplied period, a named payment without an amount searches 60 days; exact
 amounts retain the 30-day default. Recent deposits use 14 days, and largest
-expenses without a count list ten. The current named month ends today; period
-responses retain their actual UTC window. Unrecognized bank names, entities and
-unsupported analysis still use documents rather than widening account scope.
+expenses without a count list ten. A bare reference to the current named month
+ends on the owner's today. An explicit `in <Month YYYY>` always means that
+complete calendar month and may refuse until the month is fully covered.
+Relative period responses retain their actual owner-time-zone window.
+Unrecognized bank names, entities and unsupported analysis still use documents
+rather than widening account scope.
 
 Merchant selectors preserve literal `and` and `&` as different labels. Redacted,
 shortened or unknown labels refuse; an unmatched conjunction substitution
 returns `merchant_selector_ambiguous`. Quote the original list line instead of
 guessing hidden text or reporting zero.
+
+Named vendor spend also admits structured payees beginning with the asked
+vendor at a whole-word boundary after NFKC, case and punctuation normalization.
+A single-word selector of five characters or fewer keeps exact-only behavior
+and lists prefix candidates as ambiguous. The bounded card-descriptor aliases
+are `GOOG *<product>` for Google and `AMZN *<product>` for Amazon; they require
+a structured payee and the literal star separator. Bank text remains possible
+evidence and never enters the structured figure. Family answers expose integer
+cents, each stored payee spelling, row counts and citations, an included-payees
+line, and `also includes:` whenever an exact payee gains family members.
+Exact-only answers retain their existing shape and citation limit. Refund
+inflows and proved own-account movements keep the existing spend rules.
 
 Partial imports cannot enlarge a certified complete interval. They retain all
 transactions but downgrade an expanded window to partial. Legacy complete rows
@@ -905,7 +963,9 @@ Ledger citations expose masked accounts, amounts, dates and feed sync time.
 The boundary follows the financial-map owner guard: exact-document access,
 non-owner principals, narrowed grants and request filters fall back without a
 ledger read. Remote MCP Ask currently enters with unrestricted owner scope.
-Unsupported money and non-ledger questions bypass ledger reads and preserve the
+Unsupported positively recognized money intent bypasses ledger reads, preserves
+the document response, and adds one leading `ledger_wording_unsupported` gap.
+Policy and document questions that merely contain a money word preserve the
 ordinary document response unchanged. Supported ledger questions outside known
 collision coverage can fall back with ordinary coverage guidance. Document-age
 gaps explicitly describe retrieved documents rather than the bank feed.

@@ -94,7 +94,7 @@ test("update refuses an unreviewed answer model before any paused-stage or crede
     },
   }).then(() => null, (caught) => caught);
   assert.equal(error?.supportCode, "ANSWER_MODEL_NOT_REVIEWED");
-  assert.match(error?.message || "", /brain disconnect anthropic/);
+  assert.equal(error?.message, "This model name isn't supported for updates yet. Nothing was changed. Contact your partner.");
   assert.equal(calls.length, 0, "the unreviewed-model decision happened before credential or pause work");
 });
 

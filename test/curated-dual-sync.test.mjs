@@ -34,6 +34,15 @@ const corpus = join(sandbox, "corpus");
 const stateFile = join(sandbox, ".brain-ingest-drive.json");
 const ledgerFile = join(sandbox, ".brain-curated-sync-ledger.json");
 
+// Lifecycle exclusion needs target identities even with an injected resolver.
+writeFileSync(join(sandbox, "legacy.manifest.json"), JSON.stringify({
+    brain: { domain: "legacy-contract.invalid" },
+  }), { mode: 0o600 });
+writeFileSync(join(sandbox, "cloudflare.manifest.json"), JSON.stringify({
+    brain: { domain: "cloudflare-contract.invalid" },
+    infrastructure: { cloudflare: { storage: "d1" } },
+  }), { mode: 0o600 });
+
 const docs = Object.freeze([
   {
     relative_path: "alpha.md",
@@ -104,7 +113,7 @@ function plan(overrides = {}) {
   };
 }
 
-// Existing fixtures model writes and family inventory; revision verification
+// Existing fixtures model writes and explicit historical inventory; revision verification
 // is a separate authenticated read. Its adversarial storage cases live in
 // curated-cloudflare-only.test.mjs and do not alter these write counters.
 function runCuratedDualSync(input, options) {
@@ -114,7 +123,8 @@ function runCuratedDualSync(input, options) {
       const envelope = JSON.parse(args.body);
       const document = prepareCuratedCorpus(input, options).documents
         .find(item => item.cloudflareEnvelope.source_id === envelope.source_id);
-      return response(200, { confirmed: true, doc_uid: `curated:${envelope.source_id}`, envelope_sha256: document.envelopeHash });
+      const confirmed = options.verifyRevision?.(document) ?? true;
+      return response(200, { confirmed, doc_uid: `curated:${envelope.source_id}`, envelope_sha256: confirmed ? document.envelopeHash : null });
     }
     return options.fetch(url, args);
   } });
@@ -359,13 +369,6 @@ try {
 
   // Target identity can be resolved and validated without reading an admin
   // credential. This exercises the production manifest parser and D1 contract.
-  writeFileSync(join(sandbox, "legacy.manifest.json"), JSON.stringify({
-    brain: { domain: "legacy-contract.invalid" },
-  }), { mode: 0o600 });
-  writeFileSync(join(sandbox, "cloudflare.manifest.json"), JSON.stringify({
-    brain: { domain: "cloudflare-contract.invalid" },
-    infrastructure: { cloudflare: { storage: "d1" } },
-  }), { mode: 0o600 });
   const contracts = inspectCuratedTargetContracts(plan(), { planDirectory: sandbox });
   assert.equal(contracts.legacy.origin, "https://legacy-contract.invalid");
   assert.equal(contracts.cloudflare.origin, "https://cloudflare-contract.invalid");
@@ -649,10 +652,15 @@ try {
   assert.equal(partialLedger.target_coverage.cloudflare_confirmed.total, 3);
 
   // A syntactically valid Cloudflare POST receipt is still downgraded unless
-  // the exact curated source family can be read back from that same origin.
+  // the exact curated revision can be read back from that same origin.
+  let revisionReads = 0;
   const missingReadback = await runCuratedDualSync(plan(), {
     mode: "sync",
     planDirectory: sandbox,
+    verifyRevision: (document) => {
+      revisionReads++;
+      return document.cloudflareEnvelope.source_id !== "brain:custom:fixture-gamma-id";
+    },
     resolveTarget: async (_target, _directory, _options, name) => ({
       baseUrl: `https://${name}.invalid`,
       backend: name === "legacy" ? "legacy_notes_supabase" : "cloudflare_d1",
@@ -675,6 +683,7 @@ try {
     },
     writeLedger: () => {},
   });
+  assert.equal(revisionReads, 3, "every accepted write reached revision readback");
   assert.equal(missingReadback.targetCoverage.cloudflare_confirmed.total, 2);
   assert.equal(missingReadback.ok, false);
 

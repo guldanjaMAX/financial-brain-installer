@@ -2769,6 +2769,23 @@ const zeroChunkExpectedReturn = {
 
 /* ---- manual source registration stays behind the Worker write barrier ---- */
 {
+  const sourceRows = [];
+  const { env, seen } = mkEnv([], { sourceRows });
+  const register = kind => worker.fetch(new Request("https://brain.invalid/api/admin/brain/source-register", {
+    method: "POST", headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({ source: "meeting-export", kind }),
+  }), env, {});
+  const accepted = await register("granola");
+  const acceptedBody = await accepted.json();
+  const conflict = await register("upload");
+  const conflictBody = await conflict.json();
+  check("Granola registration supports a declared namespace and refuses a kind change after registry inspection",
+    accepted.status === 200 && acceptedBody.kind === "granola" && acceptedBody.registered === true &&
+    conflict.status === 409 && conflictBody.code === "source_kind_conflict" &&
+    seen.sql.filter(sql => /FROM sources s WHERE s.name/.test(sql)).length === 2 &&
+    sourceRows.length === 1 && sourceRows[0].kind === "granola");
+}
+{
   const { env, seen } = mkEnv([]);
   const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-register", {
     method: "POST",

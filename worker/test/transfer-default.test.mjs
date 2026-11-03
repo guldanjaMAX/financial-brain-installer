@@ -1,16 +1,26 @@
+import { PAYER_PARTIAL_LINE } from './fixtures/plain-copy-expectations.mjs';
 import test, { mock } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fixture, NOW, Q, accepted, refused, flipQuestion } from "./fixtures/transfer-default/fixture.mjs";
+import { reviewedFinalOffer, reviewedDateCopy, reviewedTitleFields, reviewedPlainCopy, POSTED_PLAIN, TRANSFERS_PLAIN, CATEGORY_PLAIN } from "./fixtures/plain-copy-expectations.mjs";
 import { classifyLedgerQuestion } from "../src/lib/ledger-question.js";
 
 const head = JSON.parse(readFileSync(new URL("./fixtures/transfer-default/head-baseline.json", import.meta.url), "utf8"));
+for (const scenario of Object.values(head)) for (const body of Object.values(scenario)) {
+  if (typeof body.answer !== "string") continue;
+  body.answer = reviewedPlainCopy(body.answer);
+  body.ledger = reviewedTitleFields(body.ledger);
+  if (body.ledger?.groups?.some(group => group.category_basis_state === "proposed")) body.answer = body.answer.replace("\nUnsorted:", `\n${CATEGORY_PLAIN}\nUnsorted:`);
+  if (body.ledger?.kind === "transfers") body.answer = body.answer.replace("\nAccounts:", `\n${TRANSFERS_PLAIN}\nAccounts:`);
+}
+const postedDisclosure = `\n${POSTED_PLAIN}`;
 test.before(() => {
   mock.method(Date, "now", () => Date.parse(NOW));
   mock.method(globalThis, "fetch", async () => { throw new Error("network forbidden"); });
 });
 test.after(() => mock.restoreAll());
-const newKeys = new Set(["lead_rows", "lead", "default_exclusions", "lead_accounts", "lead_total_minor", "lead_monthly_total_minor", "flip", "measure", "net_minor", "net_label", "excluded_from_lead", "kept_reason"]);
+const newKeys = new Set(["lead_rows", "lead", "default_exclusions", "lead_accounts", "lead_total_minor", "lead_monthly_total_minor", "flip", "measure", "net_minor", "net_label", "excluded_from_lead", "kept_reason", "time_zone", "known_own_transfer_in_lead"]);
 function oldKeys(value) {
   if (Array.isArray(value)) return value.map(oldKeys);
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).filter(([key]) => !newKeys.has(key)).map(([key, item]) => [key, oldKeys(item)]));
@@ -19,7 +29,8 @@ function oldKeys(value) {
 function unchanged(body, scenario, question) {
   const golden = head[scenario][question];
   assert.ok(golden, "question captured before product changes");
-  assert.equal(body.answer, golden.answer, "answer text is byte-identical to HEAD");
+  assert.equal(body.answer, reviewedFinalOffer(golden.answer + (body.ledger.kind === "balance" ? "" : postedDisclosure), body.ledger.kind === "balance" ? "Want help refreshing the bank connection for a newer balance?" : undefined),
+    "reviewed answer bytes are preserved with the required posted-record disclosure");
   assert.deepEqual(oldKeys(body.ledger), golden.ledger, "existing JSON keys retain their values");
 }
 async function ask(f, question = Q.totals, kind = "totals", pairCount = 1) {
@@ -53,12 +64,126 @@ function blocks(body, scenario, question) {
   const lines = first.split("\n"), note = lines.at(-1);
   assert.match(note, /^Note: /);
   assert.equal(lines.filter(line => line.startsWith("Note: ")).length, 1);
-  const gross = head[scenario][question].answer.split("\nAccounts:")[0];
+  const invitation = 'Want me to show your account balances?';
+  const expected = reviewedFinalOffer(head[scenario][question].answer.split("\nAccounts:")[0]);
+  const gross = expected.slice(0, -invitation.length - 1);
+  assert.ok(body.answer.endsWith(invitation));
+  assert.deepEqual(body.answer.match(/Want[^?\n]*\?/g), [invitation]);
   assert.ok(rest.startsWith(gross + "\nAccounts:"), "gross sentences and citations are unchanged");
   assert.doesNotMatch(body.answer, /no rows were removed as transfers|If these are transfers between your own accounts/);
   return { lead: lines.slice(0, -1).join("\n"), note };
 }
 const offered = body => [...body.answer.matchAll(/say "([a-z ]+)"/g)].map(m => m[1]);
+
+const bilateralDescriptions = [
+  ["A-R1", "TRANSFER FROM X1111 TO X2222"],
+  ["A-R2", "ONLINE TRANSFER FROM XXXX1111 TO XXXX2222"],
+  ["A-R3", "AUTOMATIC TRANSFER FROM ****1111 TO ****2222"],
+  ["A-R4", "MOBILE TRANSFER FROM ••••1111 TO ••••2222"],
+  ["A-R5", "INTERNET TRANSFER FROM checking ending in 1111 TO savings ending 2222"],
+];
+
+for (const [id, description] of bilateralDescriptions) test(`${id} bilateral endpoints remove both legs and preserve gross`, async t => {
+  const f = await fixture(t);
+  f.raw("UPDATE fin_transactions SET description=? WHERE txn_uid IN ('move-out','move-in')", description);
+  const body = await ask(f);
+  assert.equal(body.ledger.candidate_transfer_count, 1, "bilateral pair reached transfer analysis");
+  assert.equal(body.ledger.transfers[0].excluded_from_lead, true);
+  assert.equal(body.ledger.default_exclusions.own_transfer_minor, 23617);
+  assert.deepEqual(
+    [account(body, "1111").credits_minor, account(body, "1111").debits_minor,
+      account(body, "2222").credits_minor, account(body, "2222").debits_minor],
+    [73129, 4710, 0, 0],
+  );
+  assert.deepEqual(
+    [account(body, "1111", false).debits_minor, account(body, "2222", false).credits_minor],
+    [28327, 23617],
+    "gross figures retain both transfer legs",
+  );
+  assert.match(body.answer, /Moves between your own connected accounts/);
+  assert.equal(body.ledger.known_own_transfer_in_lead, undefined);
+  assert.equal(body.evidence_gate.complete, true);
+});
+
+test("A-R7 a known bilateral leg kept outside account scope makes evidence incomplete", async t => {
+  const f = await fixture(t);
+  f.raw("UPDATE fin_transactions SET description='TRANSFER FROM X1111 TO X2222' WHERE txn_uid IN ('move-out','move-in')");
+  const body = await ask(f, Q.checking);
+  assert.equal(body.ledger.candidate_transfer_count, 1, "scoped pair reached transfer analysis");
+  assert.equal(body.ledger.transfers[0].excluded_from_lead, false);
+  assert.equal(account(body, "1111").debits_minor, 28327);
+  assert.equal(body.ledger.known_own_transfer_in_lead, true);
+  assert.equal(body.evidence_gate.complete, false);
+  assert.match(body.answer, /known move between your own accounts/i);
+  assert.match(body.answer, /other account is outside this question/i);
+});
+
+for (const [name, outgoing, incoming] of [
+  ["bilateral plus unary", "TRANSFER FROM X1111 TO X2222", "TRANSFER FROM account 1111"],
+  ["unary plus bilateral", "TRANSFER TO account 2222", "TRANSFER FROM X1111 TO X2222"],
+]) test(`A-R8 mixed-form ${name} removes both compatible legs`, async t => {
+  const f = await fixture(t);
+  f.raw("UPDATE fin_transactions SET description=? WHERE txn_uid='move-out'", outgoing);
+  f.raw("UPDATE fin_transactions SET description=? WHERE txn_uid='move-in'", incoming);
+  const body = await ask(f);
+  assert.equal(body.ledger.candidate_transfer_count, 1, "mixed-form pair decision reached");
+  assert.equal(body.ledger.transfers[0].excluded_from_lead, true);
+  assert.equal(body.ledger.default_exclusions.own_transfer_minor, 23617, "pair amount removed once");
+  assert.deepEqual(
+    [account(body, "1111").credits_minor, account(body, "1111").debits_minor,
+      account(body, "2222").credits_minor, account(body, "2222").debits_minor],
+    [73129, 4710, 0, 0],
+    "lead figures exclude the compatible mixed-form movement",
+  );
+  assert.equal(body.ledger.known_own_transfer_in_lead, undefined);
+  assert.equal(body.evidence_gate.complete, true);
+});
+
+test("A-R8 negative bilateral table reaches paired or unmatched analysis and keeps lead figures", async t => {
+  const arms = [
+    ["duplicated mask", f => f.account("account-c", "2222", "savings")],
+    ["outside endpoint", f => f.raw("UPDATE fin_transactions SET description='TRANSFER FROM X1111 TO X9999' WHERE txn_uid IN ('move-out','move-in')")],
+    ["conflicting payee", f => f.raw("UPDATE fin_transactions SET payee='Outside counterparty' WHERE txn_uid='move-out'")],
+    ["reversed endpoint", f => f.raw("UPDATE fin_transactions SET description='TRANSFER FROM X2222 TO X1111' WHERE txn_uid IN ('move-out','move-in')")],
+    ["four-day gap", f => f.raw("UPDATE fin_transactions SET posted_on='2026-09-19' WHERE txn_uid='move-in'")],
+    ["unequal amount", f => f.raw("UPDATE fin_transactions SET amount_minor=23618 WHERE txn_uid='move-in'")],
+  ];
+  const decisions = new Set();
+  for (const [name, mutate] of arms) {
+    await t.test(name, async t => {
+      const f = await fixture(t);
+      f.raw("UPDATE fin_transactions SET description='TRANSFER FROM X1111 TO X2222' WHERE txn_uid IN ('move-out','move-in')");
+      mutate(f);
+      const body = await ask(f, Q.totals, "totals", ["four-day gap", "unequal amount"].includes(name) ? 0 : 1);
+      const reached = body.ledger.candidate_transfer_count + body.ledger.unmatched_transfers.length;
+      assert.ok(reached > 0, `${name} reached candidate or unmatched transfer analysis`);
+      const decision = body.ledger.candidate_transfer_count ? "paired-kept" : "unmatched-kept";
+      decisions.add(decision);
+      assert.equal(body.ledger.default_exclusions.own_transfer_minor, 0);
+      assert.equal(account(body, "1111").debits_minor, 28327, `${name} keeps the outgoing leg`);
+      assert.equal(body.ledger.known_own_transfer_in_lead, undefined);
+      assert.ok(body.ledger.transfers.every(pair => !pair.excluded_from_lead));
+      assert.match(body.answer, /possible|insufficient|conflicting|unmatched/i);
+    });
+  }
+  assert.ok(decisions.size > 1, "negative arms exercise nonuniform paired and unmatched decisions");
+});
+
+test("A green controls retain unary, card acknowledgement, and explicit gross behavior", async t => {
+  const unary = await fixture(t);
+  const unaryBody = await ask(unary);
+  assert.equal(unaryBody.ledger.transfers[0].excluded_from_lead, true);
+
+  const card = await fixture(t, "card");
+  const cardBody = await ask(card);
+  assert.equal(cardBody.ledger.transfers[0].excluded_from_lead, true);
+
+  const gross = await ask(unary, flipQuestion(Q.totals, "including transfers"));
+  assert.equal(gross.ledger.lead, "gross");
+  assert.deepEqual(gross.ledger.lead_accounts, gross.ledger.accounts);
+  assert.equal(gross.ledger.known_own_transfer_in_lead, true);
+  assert.equal(gross.evidence_gate.complete, false);
+});
 
 // Byte controls are separate tests so the failing-first run proves them green.
 for (const kind of ["balance", "payment", "totals", "largest", "deposits", "merchant", "category", "recurring", "transfers"]) {
@@ -68,7 +193,11 @@ for (const kind of ["balance", "payment", "totals", "largest", "deposits", "merc
     assert.equal(body.ledger?.kind, kind);
     assert.ok(f.seen.sql.slice(before).some(sql => kind === "balance" ? /fin_balance_snapshots/.test(sql) : /JOIN fin_transactions/.test(sql)));
     assert.equal(body.ledger.transfers?.length ?? 0, 0);
-    unchanged(body, "plain", Q[kind]);
+    if (kind === "balance") {
+      assert.equal(body.answer, reviewedFinalOffer("Your latest synced balances are below.\nHere are your recorded balances, with the date for each account; these do not show live or available cash.\nWant help refreshing the bank connection for a newer balance?\nCash accounts (recorded balances):\nyour account ending 1111: $837.19 as of October 11; last update unavailable [1].", "Want help refreshing the bank connection for a newer balance?"));
+      assert.deepEqual(body.ledger.accounts, [{ account_mask: "1111", balance_group: "cash", current_minor: 83719,
+        as_of: "2026-10-11", last_synced_at: null }]);
+    } else unchanged(body, "plain", Q[kind]);
   });
 }
 for (const scenario of ["unrelated", "card-unconnected", "dividend", "description-ira", "description-401k", "boundary-far", "boundary-uncovered"]) {
@@ -85,7 +214,7 @@ test("HEAD control: transfers view keeps both candidate legs and text", async t 
 test("a: own move leads with conditional cents, one note, then exact gross", async t => {
   const f = await fixture(t), body = await ask(f);
   const { lead, note } = blocks(body, "own", Q.totals);
-  assert.equal(lead, "account ****1111, 2026-09-01 through 2026-09-30: money in $731.29; money out $47.10.\naccount ****2222, 2026-09-01 through 2026-09-30: money in $0.00; money out $0.00.");
+  assert.equal(lead, "your account ending 1111, September: money in $731.29; money out $47.10.\nyour account ending 2222, September: money in $0.00; money out $0.00.");
   assert.equal(note.split("$236.17").length - 1, 1);
   assert.match(note, /between your own connected accounts/);
   assert.match(note, /say "including transfers"/);
@@ -110,7 +239,7 @@ test("b: offered flip phrases round-trip through the classifier", async t => {
     const flipped = await ask(f, flipQuestion(question, phrases[0]), "totals", scenario === "category-withdrawal" ? 0 : 1);
     assert.equal(flipped.ledger.lead, expected);
     if (expected === "gross") {
-      assert.equal(flipped.answer, head[scenario][question].answer);
+      assert.equal(flipped.answer, reviewedFinalOffer(head[scenario][question].answer + postedDisclosure));
       assert.deepEqual(oldKeys(flipped.ledger), head[scenario][question].ledger);
     } else assert.equal(account(flipped, "1111").debits_minor, 4710);
   }
@@ -130,11 +259,13 @@ test("c: one description enables an advisory pair, reciprocal evidence enables e
 
 for (const [question, mask, credit, debit] of [[Q.totals, "1111", 73129, 4710], [Q.october, "2222", 0, 0]]) {
   test(`d: only the in-period leg changes the lead for ${mask}`, async t => {
-    const f = await fixture(t, "boundary"), body = await ask(f, question);
+    const f = await fixture(t, "boundary");
+    if (question === Q.october) f.raw("UPDATE fin_account_coverage SET covered_to='2026-10-31'");
+    const body = await ask(f, question);
     assert.equal(body.ledger.transfers[0].excluded_from_lead, true);
     assert.deepEqual([account(body, mask).credits_minor, account(body, mask).debits_minor], [credit, debit]);
     assert.equal(account(body, mask, false)[mask === "1111" ? "debits_minor" : "credits_minor"], mask === "1111" ? 32363 : 27653);
-    assert.equal(body.ledger.to, mask === "1111" ? "2026-09-30" : "2026-10-11");
+    assert.equal(body.ledger.to, mask === "1111" ? "2026-09-30" : "2026-10-31");
     assert.equal(body.ledger.lead_accounts.reduce((n, a) => n + a.transaction_count, 0), mask === "1111" ? 3 : 0);
   });
 }
@@ -207,7 +338,7 @@ test("g: proposed and confirmed category withdrawals leave income with a flip no
   assert.equal(incomplete.ledger.default_exclusions.withdrawal_minor, 41383);
   assert.match(incomplete.answer, /withdrawals left out/);
   assert.ok(incomplete.ledger.flip.includes("including withdrawals"));
-  assert.match(incomplete.answer.split("\nNote:")[0], /can't confirm/i);
+  assert.match(incomplete.answer.split("\nNote:")[0], PAYER_PARTIAL_LINE);
   f.raw("UPDATE fin_transactions SET payee='Fixture client' WHERE txn_uid='deposit'");
   const income = await ask(f, Q.income, "merchant", 0);
   assert.equal(income.ledger.lead_total_minor, null);
@@ -250,7 +381,7 @@ for (const [kind, summaryKey, phrase] of [
   assert.equal(body.ledger.default_exclusions[summaryKey], 23617);
   assert.ok(body.ledger.flip.includes(phrase));
   assert.ok(body.answer.includes(`say "${phrase}"`));
-  assert.match(body.answer.split("\nNote:")[0], /can't confirm/i);
+  assert.match(body.answer.split("\nNote:")[0], PAYER_PARTIAL_LINE);
   const restored = await ask(f, flipQuestion(question, phrase), "merchant");
   assert.equal(restored.ledger.lead_total_minor, null);
   assert.equal(restored.ledger.lead_attributed_subtotal_minor, 23617);
@@ -311,7 +442,7 @@ test("h: combined profit sums only move kinds and uses real Think without a mode
   assert.equal(body.ledger.net_minor, expected);
   assert.equal(body.ledger.net_label, "money in minus money out, not accounting profit or cash flow");
   assert.ok(body.answer.startsWith(`Money in minus money out, not accounting profit or cash flow: ${fmt(expected)}`));
-  assert.match(body.answer, /account \*\*\*\*4444.*loan.*left out of money in minus money out/);
+  assert.match(body.answer, /your account ending 4444.*loan.*left out of money in minus money out/);
   assert.match(body.answer, /loan payment, kept in money out/);
   const routeBefore = f.seen.sql.length, routed = await f.ask(Q.profit, true);
   assert.equal(routed.ledger.kind, "totals");
@@ -319,7 +450,7 @@ test("h: combined profit sums only move kinds and uses real Think without a mode
   assert.equal(routed.ledger.net_minor, expected);
   assert.equal(f.modelCalls, 0);
   const gross = await ask(f, flipQuestion(Q.totals, "including transfers including withdrawals"), "totals", 4);
-  assert.equal(gross.answer, head.combined[Q.totals].answer);
+  assert.equal(gross.answer, reviewedFinalOffer(head.combined[Q.totals].answer + postedDisclosure));
   assert.deepEqual(oldKeys(gross.ledger), head.combined[Q.totals].ledger);
 });
 
@@ -360,7 +491,7 @@ for (const kind of ["merchant", "category", "recurring", "largest", "deposits"])
   const phrases = offered(body);
   assert.equal(phrases.length, 1);
   const flipped = await ask(f, flipQuestion(Q[kind], phrases[0]), kind);
-  assert.equal(flipped.answer, head.own[Q[kind]].answer);
+  assert.equal(flipped.answer, reviewedFinalOffer(head.own[Q[kind]].answer + postedDisclosure));
   assert.deepEqual(oldKeys(flipped.ledger), head.own[Q[kind]].ledger);
 });
 

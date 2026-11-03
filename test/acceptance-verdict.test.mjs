@@ -209,12 +209,12 @@ for (const [label, body, expectedStage, detailPattern] of [
   [
     "an evidence refusal",
     { results: [validCandidate()], model: "@cf/example", evidence_gate: { supported: false, complete: false, evidence: [], reason: "private-payload-canary\nfrom the draft" } },
-    "answer_verification",
+    "answer_verification_refused",
     /not accepted because its cited evidence did not support it/i,
   ],
   [
     "a sanitized model error",
-    { results: [validCandidate()], answer_error: "Answer generation is unavailable right now. Try again in a moment." },
+    { results: [validCandidate()], answer_error: "I can help you try again, but answers are unavailable right now. Want to try again in a moment?" },
     "answer_model",
     /unavailable right now/i,
   ],
@@ -247,7 +247,7 @@ for (const [label, body, expectedStage, detailPattern] of [
 {
   const diagnostic = answerUnavailableDiagnostic(validNullAnswer({
     results: [validCandidate()],
-    answer_error: "The evidence check could not verify support, so no answer was shown. Try again in a moment.",
+    answer_error: "I can try the evidence check again, but no answer is confirmed yet, so none was shown. Want to try again in a moment?",
     evidence_gate: { supported: false, complete: false, error: "verification unavailable" },
   }));
   check("the Worker's verification-failure shape names answer verification, not the answer model",
@@ -274,7 +274,7 @@ for (const [label, body, expectedStage, detailPattern] of [
     answer_error: "provider failed with private-payload-canary",
   }));
   check("an older Worker's raw model error is replaced with reviewed public copy",
-    /Answer generation is unavailable right now/i.test(diagnostic.detail) &&
+    diagnostic.detail === "I can help you try again, but answers are unavailable right now. Want to try again in a moment?" &&
       !/private-payload-canary/i.test(diagnostic.detail), JSON.stringify(diagnostic));
 }
 

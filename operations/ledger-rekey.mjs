@@ -19,7 +19,7 @@ export function parseLedgerRekeyArgs(argv) {
   return { manifestPath, accountSlug: flags['--account'], dryRun: !!flags['--preview'], approve: flags['--approve'] };
 }
 
-async function requestMaintenance(body, { manifest, credential, fetchImpl = fetch }) {
+export async function requestMaintenance(body, { manifest, credential, fetchImpl = fetch }) {
   const saved = manifest?.brain?.domain;
   if (typeof saved !== 'string' || !saved) throw new Error('A saved HTTPS Brain address is required for ledger recovery.');
   const base = new URL(saved.includes('://') ? saved : `https://${saved}`);

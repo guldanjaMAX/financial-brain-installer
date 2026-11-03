@@ -1,0 +1,855 @@
+{
+ "purpose": "Second owner-question set (written blind by a separate lane, synthetic placeholders filled by MAIN). Use for development only.",
+ "questions": [
+  {
+   "id": "B1-01",
+   "category": "balances",
+   "question": "How much money we have now in bank please"
+  },
+  {
+   "id": "B1-02",
+   "category": "balances",
+   "question": "check both accounts tell me what is there today"
+  },
+  {
+   "id": "B1-03",
+   "category": "balances",
+   "question": "Cash left?"
+  },
+  {
+   "id": "B1-04",
+   "category": "balances",
+   "question": "I have been packing orders since breakfast and just sat down with my first cup of tea, can you tell me our current account balances?"
+  },
+  {
+   "id": "B1-05",
+   "category": "balances",
+   "question": "If you have a moment, could you show the balance of each account?"
+  },
+  {
+   "id": "B1-06",
+   "category": "balances",
+   "question": "Bookkeeper asks how much sitting in the two accounts can you check"
+  },
+  {
+   "id": "B1-07",
+   "category": "balances",
+   "question": "Available balance please"
+  },
+  {
+   "id": "B1-08",
+   "category": "balances",
+   "question": "I see one amount in the savings account and another in checking, what is the total we have?"
+  },
+  {
+   "id": "B1-09",
+   "category": "balances",
+   "question": "Please show money in bank now with date of that information"
+  },
+  {
+   "id": "B1-10",
+   "category": "balances",
+   "question": "what have we got in checking right now"
+  },
+  {
+   "id": "B1-11",
+   "category": "balances",
+   "question": "Before I head home, I need to know how much is in our business accounts."
+  },
+  {
+   "id": "B1-12",
+   "category": "balances",
+   "question": "Both account balances?"
+  },
+  {
+   "id": "B1-13",
+   "category": "balances",
+   "question": "Can tell me balance separate for each bank not only all together"
+  },
+  {
+   "id": "B1-14",
+   "category": "balances",
+   "question": "Sorry for the interruption, what is our latest recorded cash balance?"
+  },
+  {
+   "id": "B1-15",
+   "category": "balances",
+   "question": "I am on the bus and cannot open the bank app what are the balances today"
+  },
+  {
+   "id": "B2-01",
+   "category": "money_in",
+   "question": "How much money came in this month please"
+  },
+  {
+   "id": "B2-02",
+   "category": "money_in",
+   "question": "total incoming this week across the two accounts"
+  },
+  {
+   "id": "B2-03",
+   "category": "money_in",
+   "question": "Money received today?"
+  },
+  {
+   "id": "B2-04",
+   "category": "money_in",
+   "question": "I finally finished the morning deliveries and have a minute before the next customer arrives, can you tell me how much money came in yesterday?"
+  },
+  {
+   "id": "B2-05",
+   "category": "money_in",
+   "question": "Would you please show our incoming payments for last month?"
+  },
+  {
+   "id": "B2-06",
+   "category": "money_in",
+   "question": "Bookkeeper needs amount received from customers this week"
+  },
+  {
+   "id": "B2-07",
+   "category": "money_in",
+   "question": "Any deposits since Friday?"
+  },
+  {
+   "id": "B2-08",
+   "category": "money_in",
+   "question": "Can you tell money entering checking and savings separately this month"
+  },
+  {
+   "id": "B2-09",
+   "category": "money_in",
+   "question": "what came in over the last seven days"
+  },
+  {
+   "id": "B2-10",
+   "category": "money_in",
+   "question": "Income this quarter?"
+  },
+  {
+   "id": "B2-11",
+   "category": "money_in",
+   "question": "I was away for three days and missed the updates, which payments came in while I was gone?"
+  },
+  {
+   "id": "B2-12",
+   "category": "money_in",
+   "question": "Please could you add up the customer payments received this month?"
+  },
+  {
+   "id": "B2-13",
+   "category": "money_in",
+   "question": "We move money between our two accounts sometimes so how much new money actually came in this month"
+  },
+  {
+   "id": "B2-14",
+   "category": "money_in",
+   "question": "From first of month until today how much we received"
+  },
+  {
+   "id": "B2-15",
+   "category": "money_in",
+   "question": "incoming money last month total and where from"
+  },
+  {
+   "id": "B3-01",
+   "category": "spend_this_month",
+   "question": "This month how much we spend and for which things"
+  },
+  {
+   "id": "B3-02",
+   "category": "spend_this_month",
+   "question": "spending since the first break it down for me"
+  },
+  {
+   "id": "B3-03",
+   "category": "spend_this_month",
+   "question": "Month spend by type?"
+  },
+  {
+   "id": "B3-04",
+   "category": "spend_this_month",
+   "question": "I have just cleaned up the shop and the day went so quickly, can you show what we have spent this month and where it went?"
+  },
+  {
+   "id": "B3-05",
+   "category": "spend_this_month",
+   "question": "When convenient, could you total this month's spending and group it by category?"
+  },
+  {
+   "id": "B3-06",
+   "category": "spend_this_month",
+   "question": "Bookkeeper wants this month spend from both accounts with the main things we bought"
+  },
+  {
+   "id": "B3-07",
+   "category": "spend_this_month",
+   "question": "Where did money go this month?"
+  },
+  {
+   "id": "B3-08",
+   "category": "spend_this_month",
+   "question": "Please show costs this month food supplies travel everything by group"
+  },
+  {
+   "id": "B3-09",
+   "category": "spend_this_month",
+   "question": "how much out so far this month and on what"
+  },
+  {
+   "id": "B3-10",
+   "category": "spend_this_month",
+   "question": "Current month spending split?"
+  },
+  {
+   "id": "B3-11",
+   "category": "spend_this_month",
+   "question": "I thought we were spending less after the busy weekend, what does this month's total and breakdown actually look like?"
+  },
+  {
+   "id": "B3-12",
+   "category": "spend_this_month",
+   "question": "Could I trouble you for a list of our expense categories and amounts for this month?"
+  },
+  {
+   "id": "B3-13",
+   "category": "spend_this_month",
+   "question": "We use two accounts for bills can you count this month spending together and show categories"
+  },
+  {
+   "id": "B3-14",
+   "category": "spend_this_month",
+   "question": "Tell me money used this month with biggest spending groups please"
+  },
+  {
+   "id": "B3-15",
+   "category": "spend_this_month",
+   "question": "this month expenses total then what took the most"
+  },
+  {
+   "id": "B4-01",
+   "category": "vendor_spend",
+   "question": "How much we paid to Northside Supply this month please"
+  },
+  {
+   "id": "B4-02",
+   "category": "vendor_spend",
+   "question": "add up everything spent at Desert Print Co last week"
+  },
+  {
+   "id": "B4-03",
+   "category": "vendor_spend",
+   "question": "Cloud Tools Inc spend total?"
+  },
+  {
+   "id": "B4-04",
+   "category": "vendor_spend",
+   "question": "I am waiting for a delivery and looking through my notes, how much have we spent at Mesa Coffee since the start of this year?"
+  },
+  {
+   "id": "B4-05",
+   "category": "vendor_spend",
+   "question": "Would you mind checking our total spend with Northside Supply last month?"
+  },
+  {
+   "id": "B4-06",
+   "category": "vendor_spend",
+   "question": "Bookkeeper thinks both accounts paid Desert Print Co can you total those payments this month"
+  },
+  {
+   "id": "B4-07",
+   "category": "vendor_spend",
+   "question": "Any spend at Cloud Tools Inc today?"
+  },
+  {
+   "id": "B4-08",
+   "category": "vendor_spend",
+   "question": "Please tell costs for Mesa Coffee during last three months"
+  },
+  {
+   "id": "B4-09",
+   "category": "vendor_spend",
+   "question": "what did we spend with Northside Supply yesterday"
+  },
+  {
+   "id": "B4-10",
+   "category": "vendor_spend",
+   "question": "Desert Print Co this quarter?"
+  },
+  {
+   "id": "B4-11",
+   "category": "vendor_spend",
+   "question": "I went past the store on my way home and it reminded me to ask how much we paid Cloud Tools Inc over the last thirty days."
+  },
+  {
+   "id": "B4-12",
+   "category": "vendor_spend",
+   "question": "If possible, please show the payments to Mesa Coffee and their total for this year."
+  },
+  {
+   "id": "B4-13",
+   "category": "vendor_spend",
+   "question": "For Northside Supply how much from checking and how much from savings last month"
+  },
+  {
+   "id": "B4-14",
+   "category": "vendor_spend",
+   "question": "I need amount we spent at Desert Print Co not all suppliers please"
+  },
+  {
+   "id": "B4-15",
+   "category": "vendor_spend",
+   "question": "check Cloud Tools Inc spending since Monday"
+  },
+  {
+   "id": "B5-01",
+   "category": "biggest_expenses",
+   "question": "Which expenses are biggest this month please"
+  },
+  {
+   "id": "B5-02",
+   "category": "biggest_expenses",
+   "question": "show the five largest payments out last month"
+  },
+  {
+   "id": "B5-03",
+   "category": "biggest_expenses",
+   "question": "Largest bill paid?"
+  },
+  {
+   "id": "B5-04",
+   "category": "biggest_expenses",
+   "question": "I have been fixing shelves all afternoon and am too tired to go through the list, what were our three biggest expenses this week?"
+  },
+  {
+   "id": "B5-05",
+   "category": "biggest_expenses",
+   "question": "Could you please rank our largest expenses for this quarter?"
+  },
+  {
+   "id": "B5-06",
+   "category": "biggest_expenses",
+   "question": "Bookkeeper wants top ten expenses across both accounts this year"
+  },
+  {
+   "id": "B5-07",
+   "category": "biggest_expenses",
+   "question": "Biggest outgoing yesterday?"
+  },
+  {
+   "id": "B5-08",
+   "category": "biggest_expenses",
+   "question": "Please show highest cost first for last month expenses"
+  },
+  {
+   "id": "B5-09",
+   "category": "biggest_expenses",
+   "question": "what are the largest charges over the last seven days"
+  },
+  {
+   "id": "B5-10",
+   "category": "biggest_expenses",
+   "question": "Top three costs today?"
+  },
+  {
+   "id": "B5-11",
+   "category": "biggest_expenses",
+   "question": "I am between customer calls and only have a minute, which single expense was the biggest this month?"
+  },
+  {
+   "id": "B5-12",
+   "category": "biggest_expenses",
+   "question": "Would you be so kind as to list the five largest expenses with their dates and amounts?"
+  },
+  {
+   "id": "B5-13",
+   "category": "biggest_expenses",
+   "question": "From two accounts together what is biggest payment out this week"
+  },
+  {
+   "id": "B5-14",
+   "category": "biggest_expenses",
+   "question": "Which payments took most money last quarter can show in order"
+  },
+  {
+   "id": "B5-15",
+   "category": "biggest_expenses",
+   "question": "largest expense in each account this month"
+  },
+  {
+   "id": "B6-01",
+   "category": "recent_transactions",
+   "question": "Can show last few transactions please"
+  },
+  {
+   "id": "B6-02",
+   "category": "recent_transactions",
+   "question": "read me the latest ten entries from both accounts"
+  },
+  {
+   "id": "B6-03",
+   "category": "recent_transactions",
+   "question": "Newest transactions?"
+  },
+  {
+   "id": "B6-04",
+   "category": "recent_transactions",
+   "question": "I just got back from the post office after waiting in a very long queue and missed the alerts, what are the most recent transactions on checking?"
+  },
+  {
+   "id": "B6-05",
+   "category": "recent_transactions",
+   "question": "Please could you show the last five transactions with dates and amounts?"
+  },
+  {
+   "id": "B6-06",
+   "category": "recent_transactions",
+   "question": "Bookkeeper asked what changed since yesterday show recent transactions"
+  },
+  {
+   "id": "B6-07",
+   "category": "recent_transactions",
+   "question": "Latest account activity?"
+  },
+  {
+   "id": "B6-08",
+   "category": "recent_transactions",
+   "question": "I need recent money in and money out together in date order"
+  },
+  {
+   "id": "B6-09",
+   "category": "recent_transactions",
+   "question": "what happened in the accounts over the last two days"
+  },
+  {
+   "id": "B6-10",
+   "category": "recent_transactions",
+   "question": "Last three entries?"
+  },
+  {
+   "id": "B6-11",
+   "category": "recent_transactions",
+   "question": "I am putting the keys away and checking one last thing, have there been any transactions today?"
+  },
+  {
+   "id": "B6-12",
+   "category": "recent_transactions",
+   "question": "If it is no trouble, show the newest transactions in each of our two accounts."
+  },
+  {
+   "id": "B6-13",
+   "category": "recent_transactions",
+   "question": "Please latest transactions first not biggest amount first"
+  },
+  {
+   "id": "B6-14",
+   "category": "recent_transactions",
+   "question": "what are the last payments and deposits recorded"
+  },
+  {
+   "id": "B6-15",
+   "category": "recent_transactions",
+   "question": "I cannot remember last time I checked can you show the ten newest transactions"
+  },
+  {
+   "id": "B7-01",
+   "category": "payment_arrived",
+   "question": "Payment of $412.50 due October 14, 2026 did it come please"
+  },
+  {
+   "id": "B7-02",
+   "category": "payment_arrived",
+   "question": "check if $1,250.00 arrived on September 30, 2026"
+  },
+  {
+   "id": "B7-03",
+   "category": "payment_arrived",
+   "question": "$89.99 received October 2, 2026?"
+  },
+  {
+   "id": "B7-04",
+   "category": "payment_arrived",
+   "question": "I have been out buying supplies and could not check my phone, did the payment for $2,000 expected on October 14, 2026 arrive?"
+  },
+  {
+   "id": "B7-05",
+   "category": "payment_arrived",
+   "question": "Could you please confirm whether we received $412.50 on September 30, 2026?"
+  },
+  {
+   "id": "B7-06",
+   "category": "payment_arrived",
+   "question": "Bookkeeper looking for $1,250.00 from October 2, 2026 can you check both accounts"
+  },
+  {
+   "id": "B7-07",
+   "category": "payment_arrived",
+   "question": "$89.99 due October 14, 2026 landed?"
+  },
+  {
+   "id": "B7-08",
+   "category": "payment_arrived",
+   "question": "We wait money $2,000 for September 30, 2026 is it received already"
+  },
+  {
+   "id": "B7-09",
+   "category": "payment_arrived",
+   "question": "was there an incoming payment for $412.50 around October 2, 2026"
+  },
+  {
+   "id": "B7-10",
+   "category": "payment_arrived",
+   "question": "October 14, 2026 receipt for $1,250.00?"
+  },
+  {
+   "id": "B7-11",
+   "category": "payment_arrived",
+   "question": "I am about to close the shop and remembered the payment of $89.99 that was meant to arrive on September 30, 2026, is it in?"
+  },
+  {
+   "id": "B7-12",
+   "category": "payment_arrived",
+   "question": "When you get a chance, please look for the $2,000 payment expected on October 2, 2026 and tell me its status."
+  },
+  {
+   "id": "B7-13",
+   "category": "payment_arrived",
+   "question": "Maybe it went into other account did $412.50 arrive by October 14, 2026"
+  },
+  {
+   "id": "B7-14",
+   "category": "payment_arrived",
+   "question": "Please find received payment $1,250.00 dated September 30, 2026 if it exists"
+  },
+  {
+   "id": "B7-15",
+   "category": "payment_arrived",
+   "question": "the customer says $89.99 was paid on October 2, 2026 can you see it arriving"
+  },
+  {
+   "id": "B8-01",
+   "category": "undated_expenses",
+   "question": "Which expenses have no date please"
+  },
+  {
+   "id": "B8-02",
+   "category": "undated_expenses",
+   "question": "show spending entries where the date is missing"
+  },
+  {
+   "id": "B8-03",
+   "category": "undated_expenses",
+   "question": "Undated expenses?"
+  },
+  {
+   "id": "B8-04",
+   "category": "undated_expenses",
+   "question": "I was sorting the paperwork after lunch and noticed some blank spaces, which expense records are missing their dates?"
+  },
+  {
+   "id": "B8-05",
+   "category": "undated_expenses",
+   "question": "Could you please list the expenses with no recorded date and their amounts?"
+  },
+  {
+   "id": "B8-06",
+   "category": "undated_expenses",
+   "question": "Bookkeeper needs all undated costs from both accounts"
+  },
+  {
+   "id": "B8-07",
+   "category": "undated_expenses",
+   "question": "No date bills total?"
+  },
+  {
+   "id": "B8-08",
+   "category": "undated_expenses",
+   "question": "How much expenses we cannot put in month because date missing"
+  },
+  {
+   "id": "B8-09",
+   "category": "undated_expenses",
+   "question": "any outgoing entries without a date"
+  },
+  {
+   "id": "B8-10",
+   "category": "undated_expenses",
+   "question": "Count undated charges?"
+  },
+  {
+   "id": "B8-11",
+   "category": "undated_expenses",
+   "question": "I have a pile of receipts to tidy before I leave to pick up supplies for tomorrow, can you show the expense entries that still have no date?"
+  },
+  {
+   "id": "B8-12",
+   "category": "undated_expenses",
+   "question": "Would you mind checking for expenses whose date field is blank?"
+  },
+  {
+   "id": "B8-13",
+   "category": "undated_expenses",
+   "question": "For two accounts please separate costs with date absent"
+  },
+  {
+   "id": "B8-14",
+   "category": "undated_expenses",
+   "question": "Please list spending with unknown date do not put it in this month"
+  },
+  {
+   "id": "B8-15",
+   "category": "undated_expenses",
+   "question": "what is the total value of expenses that have no recorded date"
+  },
+  {
+   "id": "B9-01",
+   "category": "recurring",
+   "question": "Which charges come again every month please"
+  },
+  {
+   "id": "B9-02",
+   "category": "recurring",
+   "question": "find repeat payments in the two accounts"
+  },
+  {
+   "id": "B9-03",
+   "category": "recurring",
+   "question": "Regular bills?"
+  },
+  {
+   "id": "B9-04",
+   "category": "recurring",
+   "question": "I am making tomorrow's opening checklist and remembered the subscriptions, which charges seem to keep coming back?"
+  },
+  {
+   "id": "B9-05",
+   "category": "recurring",
+   "question": "Please could you show our recurring charges and how often they appear?"
+  },
+  {
+   "id": "B9-06",
+   "category": "recurring",
+   "question": "Bookkeeper asks which payments look like weekly or monthly costs"
+  },
+  {
+   "id": "B9-07",
+   "category": "recurring",
+   "question": "Any yearly renewals?"
+  },
+  {
+   "id": "B9-08",
+   "category": "recurring",
+   "question": "We pay same supplier many times is there regular pattern in charges"
+  },
+  {
+   "id": "B9-09",
+   "category": "recurring",
+   "question": "what subscriptions are we paying for from checking"
+  },
+  {
+   "id": "B9-10",
+   "category": "recurring",
+   "question": "Repeating costs and amounts?"
+  },
+  {
+   "id": "B9-11",
+   "category": "recurring",
+   "question": "I was clearing old apps from my phone while waiting for the kettle to boil and wondered which subscription charges still show up in our accounts."
+  },
+  {
+   "id": "B9-12",
+   "category": "recurring",
+   "question": "If you have time, could you list likely recurring payments with their most recent charge dates?"
+  },
+  {
+   "id": "B9-13",
+   "category": "recurring",
+   "question": "Both accounts have bills please show regular ones separately for each account"
+  },
+  {
+   "id": "B9-14",
+   "category": "recurring",
+   "question": "Which expenses repeat but amount changes each month"
+  },
+  {
+   "id": "B9-15",
+   "category": "recurring",
+   "question": "look for charges every week and tell me which ones seem recurring"
+  },
+  {
+   "id": "B10-01",
+   "category": "forecast_or_unanswerable",
+   "question": "How much money will we have next month please"
+  },
+  {
+   "id": "B10-02",
+   "category": "forecast_or_unanswerable",
+   "question": "will the account run out before the next rent payment"
+  },
+  {
+   "id": "B10-03",
+   "category": "forecast_or_unanswerable",
+   "question": "Cash next Friday?"
+  },
+  {
+   "id": "B10-04",
+   "category": "forecast_or_unanswerable",
+   "question": "I have been thinking about taking a few days off and wondering whether we will definitely have enough money to pay every bill next month."
+  },
+  {
+   "id": "B10-05",
+   "category": "forecast_or_unanswerable",
+   "question": "Could you please estimate our cash balance in thirty days and explain what you would need to know?"
+  },
+  {
+   "id": "B10-06",
+   "category": "forecast_or_unanswerable",
+   "question": "Bookkeeper wants next quarter profit exactly can you tell from these accounts"
+  },
+  {
+   "id": "B10-07",
+   "category": "forecast_or_unanswerable",
+   "question": "Future exchange rate?"
+  },
+  {
+   "id": "B10-08",
+   "category": "forecast_or_unanswerable",
+   "question": "Can tell why customer has not paid when only bank entries available"
+  },
+  {
+   "id": "B10-09",
+   "category": "forecast_or_unanswerable",
+   "question": "what will our total spending be next year"
+  },
+  {
+   "id": "B10-10",
+   "category": "forecast_or_unanswerable",
+   "question": "Loan approval guaranteed?"
+  },
+  {
+   "id": "B10-11",
+   "category": "forecast_or_unanswerable",
+   "question": "I was talking about opening another store over lunch, will it make a profit in its first month?"
+  },
+  {
+   "id": "B10-12",
+   "category": "forecast_or_unanswerable",
+   "question": "Would you please tell me the exact tax we will owe next year from the transaction list alone?"
+  },
+  {
+   "id": "B10-13",
+   "category": "forecast_or_unanswerable",
+   "question": "We have two accounts will combining their balances tell you if we can afford a new employee"
+  },
+  {
+   "id": "B10-14",
+   "category": "forecast_or_unanswerable",
+   "question": "Next month sales amount can you know before orders come"
+  },
+  {
+   "id": "B10-15",
+   "category": "forecast_or_unanswerable",
+   "question": "tell me whether a charge that has not reached either account will post tomorrow"
+  },
+  {
+   "id": "BX-01",
+   "category": "decoy",
+   "question": "What price should I quote a new client for a two hour consultation?"
+  },
+  {
+   "id": "BX-02",
+   "category": "decoy",
+   "question": "please help write an agenda for a meeting about next year budget"
+  },
+  {
+   "id": "BX-03",
+   "category": "decoy",
+   "question": "Course tuition meaning?"
+  },
+  {
+   "id": "BX-04",
+   "category": "decoy",
+   "question": "I have spent the morning arranging chairs for a workshop, how should I describe the ticket price on the invitation?"
+  },
+  {
+   "id": "BX-05",
+   "category": "decoy",
+   "question": "Would you kindly explain the difference between a fixed price and an hourly rate?"
+  },
+  {
+   "id": "BX-06",
+   "category": "decoy",
+   "question": "Bookkeeper giving a talk about budgeting can you suggest a title"
+  },
+  {
+   "id": "BX-07",
+   "category": "decoy",
+   "question": "How to say payment due politely?"
+  },
+  {
+   "id": "BX-08",
+   "category": "decoy",
+   "question": "I make brochure for new client where should price go on page"
+  },
+  {
+   "id": "BX-09",
+   "category": "decoy",
+   "question": "write a reminder for our budget meeting tomorrow"
+  },
+  {
+   "id": "BX-10",
+   "category": "decoy",
+   "question": "Free course or paid course?"
+  },
+  {
+   "id": "BX-11",
+   "category": "decoy",
+   "question": "I am on my lunch break comparing two courses, what questions should I ask about tuition before enrolling?"
+  },
+  {
+   "id": "BX-12",
+   "category": "decoy",
+   "question": "Could you please reword this sentence for a proposal: the price includes two revisions?"
+  },
+  {
+   "id": "BX-13",
+   "category": "decoy",
+   "question": "For training slides how do two accounts help someone learn budgeting"
+  },
+  {
+   "id": "BX-14",
+   "category": "decoy",
+   "question": "Client asking discount what polite reply can I write without promising one"
+  },
+  {
+   "id": "BX-15",
+   "category": "decoy",
+   "question": "explain cost per lesson using a made up example"
+  },
+  {
+   "id": "BX-16",
+   "category": "decoy",
+   "question": "Budget meeting icebreaker?"
+  },
+  {
+   "id": "BX-17",
+   "category": "decoy",
+   "question": "We are planning a course and need names for the basic and premium pricing tiers, can you suggest some?"
+  },
+  {
+   "id": "BX-18",
+   "category": "decoy",
+   "question": "Please help me practice telling a client the price over the phone."
+  },
+  {
+   "id": "BX-19",
+   "category": "decoy",
+   "question": "what does deposit mean in a course booking policy"
+  },
+  {
+   "id": "BX-20",
+   "category": "decoy",
+   "question": "I have the bookkeeper coming to teach a class, what should the handout say about keeping receipts?"
+  }
+ ]
+}

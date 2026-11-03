@@ -65,6 +65,18 @@ in ADR 003; they are not claimed as current connector behavior.
 
 ---
 
+## Granola supervised export boundary
+
+Granola meeting JSON normalization and an internal registered-source batch
+importer are built with synthetic offline proof. A reviewed file carries an
+exact meeting ID and owner email, offset-aware meeting date, unverified attendee
+labels, optional private notes, and ordered transcript segments. Missing
+transcripts remain labeled notes-only; summaries alone refuse. The disabled
+manifest block declares the export contract and owner-only directory.
+There is no owner CLI, live API/MCP connection, daily scheduling, or
+cross-provider dedupe yet. Ordinary JSON folder ingest does not provide this
+meeting contract. Host gates and an approved real-export acceptance remain open.
+
 ## Built
 
 ### Google Drive

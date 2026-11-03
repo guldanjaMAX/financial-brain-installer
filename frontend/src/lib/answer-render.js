@@ -33,14 +33,14 @@ const GENERIC_COVERAGE_NOTICE = coverageIncompleteNotice(false);
 
 /** Reviewed messages a Worker may return instead of raw provider errors. */
 export const ANSWER_ERROR_MESSAGES = Object.freeze({
-  notConfigured: "Answer generation is not configured yet. Ask your installer to finish setup.",
-  keyMissing: "Answers are paused: this Brain is set to answer with Claude, but its Anthropic key is missing. Search still works.",
-  providerAccount: "Answers are paused: your Anthropic account needs attention (its key or its credit balance). Search still works.",
-  dailyLimit: "Answers have reached today's spending limit. They start again at midnight UTC, or sooner if the limit is raised. Search still works.",
-  dailyLimitLegacy: "Answer generation has reached its daily limit. Try again after the limit resets.",
-  spendCheckPaused: "Answers are paused for a few minutes while your Brain rechecks its spending record. Try again shortly. Search still works.",
-  verificationUnavailable: "The evidence check could not verify support, so no answer was shown. Try again in a moment.",
-  unavailable: "Answer generation is unavailable right now. Try again in a moment.",
+  notConfigured: "Search is available, but answers still need to be set up. Want help finishing setup with your installer?",
+  keyMissing: "Search still works, but answers are paused because the answer service needs to be reconnected. Want help reconnecting it?",
+  providerAccount: "Search still works, but answers are paused because the answer service needs its access or credit balance checked. Want help checking it?",
+  dailyLimit: "Search still works, but answers have reached today's spending limit and restart at midnight UTC, or sooner if the limit is raised. Want to search your records in the meantime?",
+  dailyLimitLegacy: "Search is available, but answers have reached the daily limit. Want to search while the limit resets?",
+  spendCheckPaused: "Search still works, but answers are paused for a few minutes while the spending record is checked. Want to try again shortly?",
+  verificationUnavailable: "I can try the evidence check again, but no answer is confirmed yet, so none was shown. Want to try again in a moment?",
+  unavailable: "I can help you try again, but answers are unavailable right now. Want to try again in a moment?",
 });
 
 const REVIEWED_ANSWER_ERRORS = new Set(Object.values(ANSWER_ERROR_MESSAGES));
@@ -64,8 +64,34 @@ export function unavailableSearch(r) {
   return absenceUnproven(r);
 }
 
+// Typed bank decisions already carry their owner explanation. Keep internal
+// decision reasons in JSON without repeating them as owner prose.
+export function moneyExplanation(r) {
+  return (Array.isArray(r?.gaps) ? r.gaps : []).filter(gap =>
+    /^ledger_/.test(String(gap?.type || "")) || ["money_veto", "money_recall"].includes(gap?.type))
+    .map(gap => typeof gap.detail === "string" && gap.detail ? gap.detail
+      : "I can help check the bank connection, but the bank records needed for this answer are unavailable.\nWant help connecting or refreshing the bank account?").join("\n");
+}
+export function answerReasonText(r) {
+  if (r?.ledger || moneyExplanation(r)) return null;
+  return typeof r?.evidence_gate?.reason === "string"
+    ? r.evidence_gate.reason.replace(/\s+/g, " ").trim().slice(0, 240) || null : null;
+}
+
+// Invitations are presentation choices, separate from factual qualifications.
+// Keep account labels, numeric citations and coverage facts byte-for-byte.
+export function separateOffers(text = "") {
+  const offers = [];
+  const facts = text.replace(/(?:^|(?<=[.!?])\s+)(Want[^?\n]*\?|Which would help most\?|If you tell me[^.\n]*\.)/g,
+    (_, offer) => { offers.push(offer); return ""; }).trim();
+  return { facts, offers };
+}
+
 export function answerText(r) {
-  if (r.status === COVERAGE_INCOMPLETE) return r.notice || GENERIC_COVERAGE_NOTICE;
+  if (r.status === COVERAGE_INCOMPLETE) {
+    const notice = r.notice || GENERIC_COVERAGE_NOTICE;
+    return moneyExplanation(r) ? notice.replaceAll("Source coverage", "The connected records") : notice;
+  }
   if (unavailableSearch(r)) return r.notice || GENERIC_UNAVAILABLE_NOTICE;
   if (r.answer_error && !r.answer) {
     const message = safeAnswerErrorText(r.answer_error);
@@ -74,14 +100,28 @@ export function answerText(r) {
       ? `${message} Answers start again ${new Date(reset).toLocaleString()}.`
       : message;
   }
-  if (r.answer && !/^The documents do not answer/i.test(r.answer)) return r.answer;
+  if (r.answer && !/^The documents do not answer/i.test(r.answer)) {
+    const explanation = moneyExplanation(r);
+    if (r.ledger || r.clarification) {
+      const composed = separateOffers(r.answer);
+      const extra = separateOffers(explanation).facts.split("\n")
+        .filter(line => line && !composed.facts.includes(line)).join("\n");
+      // A composed ledger answer already chose its invitation. Missing gap
+      // facts belong before it; gap invitations must never be restored here.
+      return extra ? [composed.facts, extra, ...composed.offers].filter(Boolean).join("\n") : r.answer;
+    }
+    const extra = explanation.split("\n").filter(line => line && !r.answer.includes(line)).join("\n");
+    return extra ? `${r.answer}\n\n${extra}` : r.answer;
+  }
+  const explanation = moneyExplanation(r);
+  if (explanation) return explanation;
   // A refusal is about the records checked, even when retrieval was healthy.
   // Missing result metadata must not become a fabricated zero count.
-  if (!Array.isArray(r.results)) return "The records checked did not support an answer to this question.";
+  if (!Array.isArray(r.results)) return "I can help narrow the search, but the records checked did not support an answer. Want to try a more specific detail?";
   const count = r.results.length;
   return count
-    ? `I found ${count} ${count === 1 ? "record" : "records"} in this search, but none supported an answer to this question.`
-    : "I didn't find a matching record in this search.";
+    ? `I found ${count} ${count === 1 ? "record" : "records"} in this search, but none supported an answer to this question. Want to try a more specific detail?`
+    : "I can try a more specific search, but I didn't find a matching record in this search. Want to add a detail?";
 }
 
 export const SCANNED_EVIDENCE_GAP_TYPE = "scanned_evidence";
@@ -105,15 +145,17 @@ export function scannedEvidenceNotice(r) {
 
 export function confidenceText(r) {
   if (r.status === ANSWER_WITHHELD) {
-    return "Answer withheld by an evidence check. No confidence percentage is shown.";
+    return "The evidence check left this answer unconfirmed, so no confidence percentage is shown.";
   }
   if (r.status === COVERAGE_INCOMPLETE) {
-    return "Source coverage is incomplete. This result is provisional.";
+    return moneyExplanation(r)
+      ? "Some connected records may be missing or still loading. This answer is incomplete."
+      : "Source coverage is incomplete. This result is provisional.";
   }
   // No rubric for a search that never ran: "how sure are we that nothing is
   // recorded" has no answer when nothing was read. A percentage here would put
   // a number on an absence nobody measured.
-  if (unavailableSearch(r)) return "Search incomplete. This is not a statement about what your brain holds.";
+  if (unavailableSearch(r)) return "The search is incomplete, so what your records hold is still unconfirmed.";
   const conf = r.confidence;
   if (!conf) return "";
   return (r.answer && !/^The documents do not answer/i.test(r.answer || "") ? "Confidence" : "Confidence in this search result") +

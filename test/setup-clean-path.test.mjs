@@ -162,6 +162,8 @@ try {
   assert.deepEqual(events, ["verify", "provision", "migrate", "deploy", "secrets", "drain", "health", "wire", "claude-guide"]);
   assert.equal(ocrConsentPrompts, 1, "fresh setup asks for OCR consent exactly once");
   const saved = JSON.parse(readFileSync(target, "utf8"));
+  assert.equal(Object.hasOwn(saved.client, "primary_contact"), false,
+    "fresh setup omits an unknown optional contact");
   assert.equal(saved.infrastructure.cloudflare.account_id, oneAccount.id);
   assert.equal(saved.brain.domain, "clean-brain.owner-subdomain.workers.dev");
   assert.equal(readInstalledManifest(installedManifestOptions), realpathSync.native(target));

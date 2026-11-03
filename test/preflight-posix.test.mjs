@@ -24,16 +24,17 @@ function runPreflight({
   manifests = 0,
   rememberedManifest = false,
   unsafeRememberedManifest = false,
+  hiddenHomeAncestor = false,
   wranglerSession = null,
   elevated = false,
   freeKib = 3 * 1024 * 1024,
 } = {}) {
   const fixture = mkdtempSync(join(tmpdir(), "brain-preflight-"));
   try {
-    const home = join(fixture, "home");
+    const home = join(fixture, ...(hiddenHomeAncestor ? [".fixture-parent"] : []), "home");
     const bin = join(fixture, "bin");
     const unexpectedNpmUse = join(fixture, "unexpected-npm-use");
-    mkdirSync(home);
+    mkdirSync(home, { recursive: true });
     mkdirSync(bin);
     executable(join(bin, "uname"), "printf '%s\\n' 'Darwin'");
     executable(join(bin, "id"), `printf '%s\\n' '${elevated ? 0 : 501}'`);
@@ -250,6 +251,15 @@ test("POSIX preflight gives the private installed-manifest pointer priority over
   assert.equal(unsafe.status, 1);
   assert.match(unsafe.stdout, /STOP\s+the saved installed Brain location is unsafe, unreadable, or missing/i);
   assert.doesNotMatch(unsafe.stdout, /ok\s+one manifest:/i);
+});
+
+test("POSIX manifest discovery survives a hidden ancestor of the owner home", { skip: process.platform === "win32" }, () => {
+  const ambiguous = runPreflight({ manifests: 2, hiddenHomeAncestor: true });
+  assert.equal(ambiguous.status, 1);
+  assert.match(ambiguous.stdout, /STOP\s+2 manifests found/i);
+  const selected = runPreflight({ manifests: 2, rememberedManifest: true, hiddenHomeAncestor: true });
+  assert.equal(selected.status, 0, selected.stderr || selected.stdout);
+  assert.match(selected.stdout, /using the saved installed manifest/i);
 });
 
 test("POSIX preflight follows Wrangler session precedence without directory masking", { skip: process.platform === "win32" }, () => {

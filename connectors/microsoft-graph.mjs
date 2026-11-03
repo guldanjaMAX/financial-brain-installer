@@ -15,9 +15,15 @@ const GRAPH = "https://graph.microsoft.com/v1.0";
 const MAIL_PREFER = 'IdType="ImmutableId", outlook.body-content-type="text"';
 const CALENDAR_PREFER = 'IdType="ImmutableId", outlook.body-content-type="text", outlook.timezone="UTC"';
 const IMMUTABLE_CALENDAR_ID_TYPE = "immutable";
+const PENDING_EVENT_IDS_VERSION = 1;
+const CALENDAR_EVENT_DEFERRED_REASON = "calendar_event_incomplete";
+const tombstoneCause = item => item?.deleted || item?.["@removed"]?.reason === "deleted"
+  ? "explicit_deletion" : item?.["@removed"]?.reason === "changed" ? "scope_or_filter_change" : "unknown";
 const SAFE_GRAPH_TIME_ZONE = /^[A-Za-z0-9_+./: -]{1,100}$/;
 export const OUTLOOK_CALENDAR_PAST_DAYS = 30;
 export const OUTLOOK_CALENDAR_FUTURE_DAYS = 90;
+export const OUTLOOK_CALENDAR_PENDING_EVENT_MAX_COUNT = 100;
+export const OUTLOOK_CALENDAR_PENDING_EVENT_MAX_BYTES = 16 * 1024;
 
 // Keep calendar and mail-only runs independent of the optional document
 // extractor bundle. A drive item loads that bundle immediately before use.
@@ -181,18 +187,66 @@ function calendarWindow(now) {
 
 function normalizedCalendarCursor(value) {
   if (typeof value === "string" && value) {
-    return { delta_link: value, window_start: null, window_end: null, id_type: null, event_ids: [] };
+    return {
+      delta_link: value, window_start: null, window_end: null, id_type: null,
+      event_ids: [], pending_event_ids: [],
+    };
   }
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const eventIds = Array.isArray(value.event_ids)
+    ? [...new Set(value.event_ids.map(String).filter(Boolean))].sort()
+    : [];
   return {
     delta_link: typeof value.delta_link === "string" && value.delta_link ? value.delta_link : null,
     window_start: typeof value.window_start === "string" ? value.window_start : null,
     window_end: typeof value.window_end === "string" ? value.window_end : null,
     id_type: value.id_type === IMMUTABLE_CALENDAR_ID_TYPE ? IMMUTABLE_CALENDAR_ID_TYPE : null,
-    event_ids: Array.isArray(value.event_ids)
-      ? [...new Set(value.event_ids.map(String).filter(Boolean))].sort()
-      : [],
+    event_ids: eventIds,
+    pending_event_ids: normalizePendingEventIds(value, eventIds),
   };
+}
+
+function pendingEventStateError() {
+  return new ProviderSyncError("microsoft", "the Outlook pending-event cursor state is invalid", {
+    kind: "retryable", code: "invalid_pending_event_state",
+  });
+}
+
+function encodedPendingEventStateBytes(value) {
+  try {
+    return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+  } catch {
+    throw pendingEventStateError();
+  }
+}
+
+function normalizePendingEventIds(calendarCursor, eventIds) {
+  if (!Object.hasOwn(calendarCursor, "pending_event_ids")) return [];
+  const state = calendarCursor.pending_event_ids;
+  if (!state || typeof state !== "object" || Array.isArray(state) || state.version !== PENDING_EVENT_IDS_VERSION ||
+      !Array.isArray(state.ids) || Object.keys(state).sort().join(",") !== "ids,version" ||
+      state.ids.some((id) => typeof id !== "string" || id.length === 0) ||
+      state.ids.length > OUTLOOK_CALENDAR_PENDING_EVENT_MAX_COUNT ||
+      encodedPendingEventStateBytes(state) > OUTLOOK_CALENDAR_PENDING_EVENT_MAX_BYTES) {
+    throw pendingEventStateError();
+  }
+  const normalized = [...new Set(state.ids)].sort();
+  const eventInventory = new Set(eventIds);
+  if (normalized.length !== state.ids.length || normalized.some((id, index) => id !== state.ids[index]) ||
+      normalized.some((id) => !eventInventory.has(id))) {
+    throw pendingEventStateError();
+  }
+  return normalized;
+}
+
+function pendingEventCursorState(eventIds) {
+  const ids = [...new Set(eventIds)].sort();
+  const state = { version: PENDING_EVENT_IDS_VERSION, ids };
+  if (ids.length > OUTLOOK_CALENDAR_PENDING_EVENT_MAX_COUNT ||
+      encodedPendingEventStateBytes(state) > OUTLOOK_CALENDAR_PENDING_EVENT_MAX_BYTES) {
+    throw pendingEventStateError();
+  }
+  return state;
 }
 
 function calendarPrefer(timeZone = "UTC") {
@@ -221,6 +275,33 @@ async function eventWithCivilAllDayTime(event, { accessToken, fetchImpl }) {
     });
   }
   return data;
+}
+
+async function fetchPendingCalendarChange(eventId, { accessToken, fetchImpl }) {
+  const url = `${GRAPH}/me/events/${encodeURIComponent(eventId)}`;
+  try {
+    const { data } = await providerJson("microsoft", url, {
+      accessToken,
+      fetchImpl,
+      headers: { Prefer: CALENDAR_PREFER },
+    });
+    if (String(data?.id || "") !== eventId) {
+      throw new ProviderSyncError("microsoft", "the Outlook pending event identity changed during retry", {
+        kind: "retryable", code: "event_identity_changed",
+      });
+    }
+    return {
+      kind: "upsert",
+      item: await eventWithCivilAllDayTime(data, { accessToken, fetchImpl }),
+    };
+  } catch (error) {
+    if (error instanceof ProviderSyncError && error.status === 404) {
+      return { kind: "delete", removal_cause: "explicit_deletion",
+        item: { id: eventId, "@removed": { reason: "not_found" } } };
+    }
+    if (error instanceof ProviderSyncError && error.outcome?.kind === "retryable") return null;
+    throw error;
+  }
 }
 
 function graphCalendarPerson(value) {
@@ -292,7 +373,7 @@ function outlookCalendarInstruction(event) {
     config,
   });
   if (instruction.kind === "delete") {
-    return { kind: "delete", event_id: eventId, source_id: sourceId };
+    return { kind: "delete", event_id: eventId, source_id: sourceId, removal_cause: instruction.removal_cause };
   }
   if (instruction.kind !== "upsert") return { ...instruction, event_id: eventId, source_id: sourceId };
   const envelope = instruction.envelope;
@@ -319,6 +400,13 @@ function outlookCalendarInstruction(event) {
 async function syncOutlookCalendar({ accessToken, fetchImpl, cursor, now }) {
   const window = calendarWindow(now);
   const prior = normalizedCalendarCursor(cursor);
+  const priorEventIds = new Set(prior?.event_ids || []);
+  const pendingEventIds = new Set(prior?.pending_event_ids || []);
+  const pendingChanges = [];
+  for (const eventId of pendingEventIds) {
+    const change = await fetchPendingCalendarChange(eventId, { accessToken, fetchImpl });
+    if (change) pendingChanges.push(change);
+  }
   const sameWindow = prior?.window_start === window.start && prior?.window_end === window.end;
   let baseline = !prior?.delta_link || !sameWindow || prior?.id_type !== IMMUTABLE_CALENDAR_ID_TYPE;
   const initialUrl = () => {
@@ -346,13 +434,14 @@ async function syncOutlookCalendar({ accessToken, fetchImpl, cursor, now }) {
     });
   }
 
-  const priorEventIds = new Set(prior?.event_ids || []);
   const inventory = new Set(baseline ? [] : priorEventIds);
+  const pending = new Set(pendingEventIds);
+  for (const eventId of pending) inventory.add(eventId);
   const documents = new Map();
   const deletions = new Map();
   const warnings = [];
   let baselineIdentityIncomplete = false;
-  for (const change of page.changes) {
+  for (const change of [...pendingChanges, ...page.changes]) {
     const eventId = change.item?.id ? String(change.item.id) : null;
     if (!eventId) {
       baselineIdentityIncomplete = true;
@@ -371,10 +460,14 @@ async function syncOutlookCalendar({ accessToken, fetchImpl, cursor, now }) {
     if (instruction.kind === "delete") {
       if (change.kind === "delete" && !scopedDeletion) continue;
       if (change.kind !== "delete" && !priorEventIds.has(eventId) && !inventory.has(eventId)) continue;
+      pending.delete(eventId);
       inventory.delete(eventId);
       documents.delete(eventId);
-      deletions.set(eventId, { source_type: "microsoft", source_id: sourceId });
+      deletions.set(eventId, { source_type: "microsoft", source_id: sourceId,
+        removal_cause: change.kind === "delete" ? change.removal_cause || tombstoneCause(change.item)
+          : instruction.removal_cause });
     } else if (instruction.kind === "upsert") {
+      pending.delete(eventId);
       inventory.add(eventId);
       deletions.delete(eventId);
       documents.set(eventId, instruction.envelope);
@@ -383,14 +476,20 @@ async function syncOutlookCalendar({ accessToken, fetchImpl, cursor, now }) {
       // A changed event whose searchable fields were all blanked must not
       // leave its prior document behind. Calendar-scoped removal review below
       // prevents unrelated mail or drive families from diluting this decision.
+      pending.delete(eventId);
       inventory.delete(eventId);
       documents.delete(eventId);
-      deletions.set(eventId, { source_type: "microsoft", source_id: sourceId });
-    } else {
+      deletions.set(eventId, { source_type: "microsoft", source_id: sourceId, removal_cause: "blank_or_quality" });
+    } else if (instruction.reason === "event has no start time" &&
+        (inventory.has(eventId) || priorEventIds.has(eventId))) {
       // Missing start/time evidence is malformed provider data, not proof that
-      // the owner intentionally blanked the event. Keep a known prior family
-      // and withhold the cursor so a later complete response can repair it.
-      if (priorEventIds.has(eventId)) inventory.add(eventId);
+      // the owner intentionally blanked the event. Keep the known prior family
+      // while the versioned pending set gives the next run an exact retry.
+      inventory.add(eventId);
+      pending.add(eventId);
+      documents.delete(eventId);
+      deletions.delete(eventId);
+    } else {
       warnings.push("An Outlook calendar event was incomplete, so its prior document was retained and its cursor was withheld for retry.");
     }
   }
@@ -402,10 +501,13 @@ async function syncOutlookCalendar({ accessToken, fetchImpl, cursor, now }) {
           // genuinely aged-out event from the malformed row. Keep unmatched
           // prior families visible for retry, while honoring exact tombstones.
           inventory.add(eventId);
-        } else {
+        } else if (!deletions.has(eventId)) {
           deletions.set(eventId, {
             source_type: "microsoft",
             source_id: `outlook:event:${eventId}`,
+            // A new window can omit a still-existing item. Cursor recovery with
+            // the same window is even less specific; neither proves deletion.
+            removal_cause: !sameWindow ? "window_exit" : "unknown",
           });
         }
       }
@@ -415,6 +517,9 @@ async function syncOutlookCalendar({ accessToken, fetchImpl, cursor, now }) {
     documents: [...documents.values()],
     deletions: [...deletions.values()],
     eventIds: [...inventory].sort(),
+    pendingEventState: pendingEventCursorState(pending),
+    deferred_count: pending.size,
+    deferred_reason_code: pending.size ? CALENDAR_EVENT_DEFERRED_REASON : null,
     deltaLink: page.deltaLink,
     provider_check_complete: !cursorRecovered,
     baseline,
@@ -449,6 +554,8 @@ export async function syncMicrosoftGraph({
   const warnings = [];
   const auth = { accessToken, fetchImpl };
   const prior = cursor && typeof cursor === "object" ? cursor : {};
+  let deferredCount = 0;
+  let deferredReasonCode = null;
   // A bounded mail walk cannot authorize absence-based deletion of an older
   // stored family, including after a reset or a configuration fingerprint change.
   let authoritativeSnapshot = mailStart === null;
@@ -462,6 +569,8 @@ export async function syncMicrosoftGraph({
     documents.push(...calendar.documents);
     deletions.push(...calendar.deletions);
     warnings.push(...calendar.warnings);
+    deferredCount = calendar.deferred_count;
+    deferredReasonCode = calendar.deferred_reason_code;
     snapshotSourceIds.push(...calendar.eventIds.map((eventId) => `outlook:event:${eventId}`));
     proposed.calendar = {
       delta_link: calendar.deltaLink,
@@ -469,6 +578,7 @@ export async function syncMicrosoftGraph({
       window_end: calendar.window.end,
       id_type: IMMUTABLE_CALENDAR_ID_TYPE,
       event_ids: calendar.eventIds,
+      pending_event_ids: calendar.pendingEventState,
     };
     if (!calendar.baseline) authoritativeSnapshot = false;
   }
@@ -509,6 +619,7 @@ export async function syncMicrosoftGraph({
     } else {
       deletions.push(...page.deletions.filter((message) => message?.id).map((message) => ({
         source_type: "microsoft", source_id: `outlook:message:${message.id}`,
+        removal_cause: tombstoneCause(message),
       })));
     }
     proposed.mail[folderId] = page.deltaLink;
@@ -565,6 +676,7 @@ export async function syncMicrosoftGraph({
     }
     deletions.push(...page.deletions.filter((item) => item?.id).map((item) => ({
       source_type: "microsoft", source_id: `drive:item:${driveId}:${item.id}`,
+      removal_cause: tombstoneCause(item),
     })));
     proposed.drives[driveId] = page.deltaLink;
   }
@@ -583,6 +695,8 @@ export async function syncMicrosoftGraph({
     // A recovered 410 may save its new baseline, but the failed window is not
     // evidence of a quiet check. The runner also requires durable cursor save.
     provider_check_complete: cursorSafe && providerCheckComplete && warnings.length === 0,
+    deferred_count: deferredCount,
+    deferred_reason_code: deferredReasonCode,
     ...(mailTransition ? { mail_transition: mailTransition } : {}),
     authoritative_snapshot: authoritativeSnapshot,
     snapshot_source_ids: snapshotSourceIds,

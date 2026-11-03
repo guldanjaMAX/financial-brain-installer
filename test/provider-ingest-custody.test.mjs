@@ -1,17 +1,42 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cmdIngestProvider } from "../brain.mjs";
 import * as oauth from "../connectors/provider-oauth.mjs";
 import { acquireSourceIngestLock, sourceIngestLockPath, withSourceIngestLock } from "../operations/source-ingest-lock.mjs";
 import { ingestionOutcome } from "../ingest/outcome.mjs";
+import { planGranolaExport } from "../connectors/granola-export.mjs";
+
+test("supervised meeting imports use the caller's exact planned source lease before any request", async t => {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "granola-custody-")));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const exportPath = join(home, "exports"); mkdirSync(exportPath, { mode: 0o700 });
+  const file = join(exportPath, "meeting.json");
+  writeFileSync(file, readFileSync(new URL("./fixtures/granola/full.json", import.meta.url)));
+  const plan = await planGranolaExport({ files: [file], config: {
+    enabled: true, source: "meeting-export", owner_email: "owner@example.invalid",
+    transport: "file-export", format: "granola.meeting.v1", export_path: exportPath,
+  } });
+  assert.equal(plan.documents.length, 1);
+  const options = { home, manifestPath: join(home, "brain.manifest.json"), sourceName: plan.source };
+  writeFileSync(options.manifestPath, "{}");
+  let reached = 0;
+  const held = acquireSourceIngestLock(options);
+  try {
+    await assert.rejects(withSourceIngestLock(options, async () => { reached++; }), /ingest is already running/);
+    assert.equal(reached, 0);
+    assert.equal(held.assertOwned(), true, "the conflicting lock was actually held at the decision point");
+  } finally { held.release(); }
+  await withSourceIngestLock(options, async ({ assertOwned }) => { assertOwned(); reached++; });
+  assert.equal(reached, 1, "green control reaches the planned source after release");
+});
 
 // Two manifest directories still write one per-user provider credential record.
 // Use the actual credential/cursor file, real CLI path and real filesystem locks.
 for (const differentSource of [false, true]) test(`provider record excludes a second manifest${differentSource ? " and source" : ""} before reads`, async t => {
-  const home = mkdtempSync(join(tmpdir(), "brain-provider-custody-"));
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "brain-provider-custody-")));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const paths = ["one", "two"].map(name => {
     const directory = join(home, name); mkdirSync(directory);
@@ -53,7 +78,7 @@ for (const differentSource of [false, true]) test(`provider record excludes a se
 
 for (const phase of ["before_refresh", "after_walk", "after_delivery"]) {
   test(`lost shared-record ownership ${phase} blocks stale work while the source lease stays owned`, async t => {
-    const home = mkdtempSync(join(tmpdir(), "brain-provider-record-loss-"));
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "brain-provider-record-loss-")));
     let successor = null;
     t.after(() => { successor?.release(); rmSync(home, { recursive: true, force: true }); });
     const manifestPath = join(home, "brain.manifest.json"); writeFileSync(manifestPath, "{}");

@@ -1,3 +1,5 @@
+import { accountKindReviewSql, applyAccountKindReview, effectiveAccountKindSql } from "./fin-account-kinds.js";
+
 /**
  * fin-d1 — the read path over the structured financial ledger (migration 0015).
  *
@@ -194,6 +196,7 @@ export async function ledgerAccounts(env, { tenantId = DEFAULT_TENANT, entitySlu
     env,
     `SELECT a.account_slug, a.entity_slug, a.institution, a.label, a.account_kind,
             a.balance_role, a.mask, a.currency, a.feed_mode, a.expected_cadence,
+            ${accountKindReviewSql('a')} AS account_kind_review_json,
             a.status, a.opened_on, a.closed_on,
             a.provenance, a.source_doc_uid, a.source_locator, a.source_feed,
             a.confidence_bp, a.basis_state, a.unparsed_reason,
@@ -210,13 +213,21 @@ export async function ledgerAccounts(env, { tenantId = DEFAULT_TENANT, entitySlu
   );
   return {
     unavailable,
-    accounts: results.map((row) => ({
+    accounts: results.map(applyAccountKindReview).map((row) => ({
       account_slug: row.account_slug,
       entity_slug: row.entity_slug,
       institution: row.institution || null,
       label: row.label || [row.institution, row.account_kind].filter(Boolean).join(" ") || row.account_slug,
       account_kind: row.account_kind,
       balance_role: row.balance_role,
+      ...(row.account_kind_review ? {
+        provider_account_kind: row.provider_account_kind,
+        provider_balance_role: row.provider_balance_role,
+        account_kind_review: { kind: row.account_kind_review.kind, role: row.account_kind_review.role,
+          state: row.account_kind_review.state, reviewer: row.account_kind_review.reviewer,
+          source: row.account_kind_review.source, reviewed_at: row.account_kind_review.reviewed_at,
+          revoked_at: row.account_kind_review.revoked_at },
+      } : {}),
       mask: row.mask || null,
       currency: row.currency,
       feed_mode: row.feed_mode,
@@ -426,6 +437,10 @@ export async function ledgerCashPosition(
   const considered = accounts.filter(
     (a) => a.balance_role === "asset" && DEPOSIT_KINDS.includes(a.account_kind),
   );
+  // Older reviews or later provider observations can contradict the balance's
+  // meaning. Preserve those facts, but never certify an amount owed as cash.
+  const conflicts = considered.filter(a => a.account_kind_review?.state === "current" &&
+    a.provider_balance_role === "liability");
   const excluded = accounts
     .filter((a) => !considered.includes(a))
     .map((a) => ({
@@ -438,6 +453,7 @@ export async function ledgerCashPosition(
   const figures = new Map();
   let balanceUnavailable = false;
   for (const account of considered) {
+    if (conflicts.includes(account)) continue;
     const read = await confirmedBalanceFor(env, tenantId, account.account_slug);
     balanceUnavailable = balanceUnavailable || read.unavailable;
     figures.set(account.account_slug, read.figure);
@@ -451,6 +467,11 @@ export async function ledgerCashPosition(
   const covered = [];
   const missing = [];
   for (const account of considered) {
+    if (conflicts.includes(account)) {
+      missing.push({ account_slug: account.account_slug, reason: "account_kind_balance_conflict",
+        coverage_status: account.coverage_status, covered_to: account.covered_to, last_confirmed_as_of: null });
+      continue;
+    }
     const figure = figures.get(account.account_slug);
     if (!figure) {
       missing.push({
@@ -497,14 +518,14 @@ export async function ledgerCashPosition(
   const currencies = new Set(covered.map((c) => c.currency));
   const mixed = currencies.size > 1;
   return {
-    unavailable: balanceUnavailable,
+    unavailable: balanceUnavailable || conflicts.length > 0,
     // The one day every summed figure is true of. Null when nothing is summed.
     as_of: covered.length ? positionAsOf : null,
     // Null rather than a number whenever a number would mean something false.
-    total_minor: mixed || covered.length === 0
+    total_minor: mixed || covered.length === 0 || conflicts.length > 0
       ? null
       : covered.reduce((sum, c) => sum + c.amount_minor, 0),
-    currency: mixed || covered.length === 0 ? null : [...currencies][0],
+    currency: mixed || covered.length === 0 || conflicts.length > 0 ? null : [...currencies][0],
     mixed_currency: mixed,
     covered,
     missing,
@@ -841,10 +862,10 @@ export async function ledgerObligations(
   // This read is independent of the snapshot's requested sections and limits.
   // An unknown feed account may hide a debt even when the register is empty.
   const classification = await safeAll(env,
-    `SELECT COUNT(*) AS unclassified FROM fin_accounts
-      WHERE tenant_id=? AND ${LIVE} AND (provenance='feed' OR feed_mode='live')
-        AND (account_kind IS NULL OR account_kind='' OR account_kind='other')
-        ${entitySlug ? "AND entity_slug=?" : ""}`,
+    `SELECT COUNT(*) AS unclassified FROM fin_accounts a
+      WHERE a.tenant_id=? AND a.${LIVE} AND (a.provenance='feed' OR a.feed_mode='live')
+        AND ${effectiveAccountKindSql('a')} IN ('','other')
+        ${entitySlug ? "AND a.entity_slug=?" : ""}`,
     entitySlug ? [tenantId, entitySlug] : [tenantId]);
   return {
     unavailable: unavailable || classification.unavailable,

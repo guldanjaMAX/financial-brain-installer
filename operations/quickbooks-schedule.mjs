@@ -125,6 +125,7 @@ export function buildQuickBooksScheduleDefinition(plan, options = {}) {
   const args = host ? [...host.args, base.node_path, ...argv] : argv;
   const marker = `${MARKER}:${plan.identity.id}:${definitionHash}`;
   const serialized = base.serialized
+    .replace(/(<Settings>[\s\S]*?<Enabled>)(true|false)(<\/Enabled>)/u, `$1${options.enabled !== false}$3`)
     .replace(/<Description>[\s\S]*?<\/Description>/u, `<Description>${marker}</Description>`)
     .replace('<CalendarTrigger>', `<CalendarTrigger><Repetition><Interval>PT2H</Interval><Duration>PT${plan.window.duration_minutes}M</Duration><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>`)
     .replace('<WakeToRun>true</WakeToRun>', '<WakeToRun>false</WakeToRun>')
@@ -140,17 +141,23 @@ const exact = (state, definition, enabled = true) => state?.exists === true && s
 const adapterFor = options => options.adapter || createQuickBooksScheduleAdapter(options);
 export function statusQuickBooksSchedule(plan, options = {}) {
   const state = adapterFor(options).read(plan.identity); owned(state);
-  if (!state?.exists) return { installed: false, enabled: false, verified: false, state };
+  if (!state?.exists) return { installed: false, enabled: false, verified: false, definitionValid: false, state };
   const definition = buildQuickBooksScheduleDefinition(plan, options);
   const usable = options.runtimeUsable || (d => { try { accessSync(d.node_path, constants.X_OK); return statSync(d.node_path).isFile() && statSync(d.runner_path).isFile(); } catch { return false; } });
-  return { installed: true, enabled: state.enabled === true, verified: plan.enabled && plan.ready && exact(state, definition) && usable(definition) === true, state, definition };
+  const definitionValid = plan.ready && state.definition?.native_contract_valid === true &&
+    exact(state, definition, state.enabled === true) && usable(definition) === true;
+  return { installed: true, enabled: state.enabled === true, definitionValid,
+    verified: plan.enabled && state.enabled === true && definitionValid, state, definition };
 }
 export function restoreQuickBooksSchedule(plan, snapshot, options = {}) {
   const adapter = adapterFor(options); const current = adapter.read(plan.identity); owned(current);
   if (snapshot?.exists) {
     owned(snapshot);
-    adapter.install(snapshot.definition, { replaceOwned: current?.exists === true, expected: current });
-    if (!snapshot.enabled) adapter.setEnabled(plan.identity, false);
+    // Disabled intent is encoded before installation, never repaired after a
+    // transient enabled task has become eligible to run.
+    const serialized = snapshot.definition.serialized.replace(/(<Settings>[\s\S]*?<Enabled>)(true|false)(<\/Enabled>)/u, `$1${snapshot.enabled === true}$3`);
+    const definition = { ...snapshot.definition, ...observe(plan.identity, serialized) };
+    adapter.install(definition, { replaceOwned: current?.exists === true, expected: current });
     if (!exact(adapter.read(plan.identity), snapshot.definition, snapshot.enabled === true)) throw new Error('QuickBooks rollback did not pass exact readback');
   } else if (current?.exists) {
     adapter.remove(plan.identity, { expected: current });
@@ -158,15 +165,16 @@ export function restoreQuickBooksSchedule(plan, snapshot, options = {}) {
   }
 }
 export function registerQuickBooksSchedule(plan, options = {}) {
-  if (!plan.ready || !plan.enabled || !plan.sources.length) throw failure('SCHEDULE_INSTALL_FAILED', 'An enabled QuickBooks plan with brain.domain in this machine timezone is required.');
+  const enabled = options.enabled !== false;
+  if (!plan.ready || (enabled && !plan.enabled) || !plan.sources.length) throw failure('SCHEDULE_INSTALL_FAILED', 'An enabled QuickBooks plan with brain.domain in this machine timezone is required.');
   const definition = buildQuickBooksScheduleDefinition(plan, options);
   const adapter = adapterFor(options); const before = adapter.read(plan.identity); owned(before);
-  if (exact(before, definition)) return { installed: true, verified: true, enabled: true, changed: false, definition };
+  if (exact(before, definition, enabled)) return { installed: true, verified: true, enabled, changed: false, definition };
   try {
     adapter.install(definition, { replaceOwned: before?.exists === true, expected: before });
     const readback = adapter.read(plan.identity);
-    if (!exact(readback, definition)) throw failure('SCHEDULE_INSTALL_FAILED', 'QuickBooks task exact readback failed.');
-    return { installed: true, verified: true, enabled: true, changed: true, definition };
+    if (!exact(readback, definition, enabled)) throw failure('SCHEDULE_INSTALL_FAILED', 'QuickBooks task exact readback failed.');
+    return { installed: true, verified: true, enabled, changed: true, definition };
   } catch (error) {
     restoreQuickBooksSchedule(plan, before, { ...options, adapter });
     throw error;

@@ -30,6 +30,36 @@ const SNAPSHOT = `SELECT (${ACCOUNTS}) AS accounts,(${LINKS}) AS links`;
 const digest = async value => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',
   new TextEncoder().encode(value)))).map(n => n.toString(16).padStart(2, '0')).join('');
 
+/**
+ * Couple every effective-account inventory mutation to its derived document
+ * debt. The generation fences a writer that already read the old inventory;
+ * the source row makes the incomplete replacement visible and retryable.
+ */
+export function bankActivityInvalidationPlan({ at }) {
+  return [
+    [
+      `UPDATE bank_activity_refresh_state
+          SET generation=generation+1,requested_at=?
+        WHERE id=(SELECT CASE
+          WHEN EXISTS (SELECT 1 FROM bank_activity_refresh_state WHERE id=1) THEN 1
+          ELSE json_extract('bank activity refresh state unavailable','$') END)`,
+      [at],
+    ],
+    [
+      `UPDATE sources
+          SET status='indexing',last_complete_sweep_at=NULL,sync_cursor=NULL,
+              stale_reason='bank activity refresh pending'
+        WHERE name='bank_activity' AND kind='bank_activity'`,
+      [],
+    ],
+  ];
+}
+
+export function bankActivityInvalidationStatements(env, options) {
+  return bankActivityInvalidationPlan(options)
+    .map(([sql, binds]) => env.DB.prepare(sql).bind(...binds));
+}
+
 export async function maintainAccountLink(env, { tenantId = env.BANK_FEED_TENANT || 'primary',
   manualSlug, liveSlug, unlink = false, dryRun = true, approve = null, now = new Date(Date.now()).toISOString() } = {}) {
   if (![tenantId, manualSlug, liveSlug].every(s => typeof s === 'string' && SLUG.test(s)) ||
@@ -71,7 +101,8 @@ export async function maintainAccountLink(env, { tenantId = env.BANK_FEED_TENANT
           WHERE tenant_id=?1 AND manual_account_slug=?2 AND live_account_slug=?3 AND unlinked_at IS NULL`).bind(...binds, now, planHash)
       : env.DB.prepare(`INSERT INTO fin_account_links
           (tenant_id,manual_account_slug,live_account_slug,identity_json,link_plan_hash,linked_at)
-          VALUES (?1,?2,?3,?4,?5,?6)`).bind(...binds, identity, planHash, now));
+          VALUES (?1,?2,?3,?4,?5,?6)`).bind(...binds, identity, planHash, now),
+      ...bankActivityInvalidationStatements(env, { at: now }));
   }
   const expectedHash = unlink ? (desired ? last?.unlink_plan_hash : planHash) : (desired ? active.link_plan_hash : planHash);
   const proof = unlink

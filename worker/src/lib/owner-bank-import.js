@@ -15,6 +15,7 @@ import { prepareBankExportImport, bankExportIdentityNeedsReview, bankExportOverl
 import { ledgerInstalled } from "./fin-d1.js";
 import { validateBankEnvelope } from "./fin-upload.js";
 import { ownerActivityStatement } from "./owner-activity.js";
+import { bankActivityInvalidationStatements } from "./fin-account-links.js";
 
 export const OWNER_BANK_IMPORT_PATH_PREFIX = "/api/owner/bank-imports/";
 export const OWNER_BANK_IMPORT_CAPABILITIES_PATH = `${OWNER_BANK_IMPORT_PATH_PREFIX}capabilities`;
@@ -547,6 +548,7 @@ async function commit(env, body, options) {
        VALUES (?,?,?,?)`,
     ).bind(DEFAULT_TENANT, previewId, requestId, at),
     ...(changed ? planStatements(env, plan) : []),
+    ...(changed ? bankActivityInvalidationStatements(env, { at }) : []),
     ...(changed ? [ownerActivityStatement(env, {
       eventId,
       eventType: "bank_import_completed",
@@ -583,7 +585,7 @@ async function commit(env, body, options) {
     return unavailable("owner_bank_import_commit_unavailable");
   }
   if (typeof options.afterCommit === "function") {
-    try { await options.afterCommit({ requestId, previewId, response }); }
+    try { await options.afterCommit({ requestId, previewId, response, at }); }
     catch { return unavailable("owner_bank_import_finalize_unavailable"); }
   }
   return respond(response, status);

@@ -88,3 +88,13 @@ machine-prep/installers/windows/handoff-windows.url
 /artifact-in/
 /home-dpapi/
 /lane-evidence/
+# Ignore the evidence path itself, including a local symlink.
+/lane-evidence
+
+# Disposable scheduler rebind verification and copied inputs.
+/.lane-r3/
+/.lane-rc4/
+# Local offline intent-router lane evidence.
+.lane-r8/
+# Local merge verification and copied inputs.
+/.lane-m24r/

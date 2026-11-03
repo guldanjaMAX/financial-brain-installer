@@ -1,0 +1,10 @@
+{
+  "id": "meeting-002",
+  "title": "Synthetic private notes",
+  "meeting_at": "2026-10-30T11:00:00-07:00",
+  "attendees": [],
+  "owner_email": "owner@example.invalid",
+  "notes": "The owner recorded a reminder to review capacity before committing to a delivery date.",
+  "transcript": null,
+  "exported_at": "2026-10-31T12:00:00Z"
+}

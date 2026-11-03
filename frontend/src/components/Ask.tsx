@@ -4,7 +4,7 @@ import { ApiError, api, ownerError, type Answer, type Citation, type GrantPrinci
 // as an absence is a product rule, not a rendering detail, so both surfaces
 // derive it from one module instead of each writing their own.
 import {
-  SCANNED_CITATION_MARK, answerText, citationIsScanned, confidenceText, scannedEvidenceNotice,
+  SCANNED_CITATION_MARK, answerReasonText, answerText, citationIsScanned, confidenceText, scannedEvidenceNotice,
   nextActionText, unavailableSearch,
 } from "../lib/answer-render.js";
 import { Attention, TruthNote } from "./ui";
@@ -109,7 +109,7 @@ export function CitationSources({ citations }: { citations: Citation[] }) {
 
 /** Turn the Worker's evidence decision into one short sentence beside the answer. */
 export function evidenceGateNote(answer: Answer): string | null {
-  const rawReason = answer.evidence_gate?.reason;
+  const rawReason = answerReasonText(answer);
   if (typeof rawReason !== "string") return null;
   const reason = rawReason.replace(/\s+/g, " ").trim().slice(0, 240);
   if (!reason) return null;

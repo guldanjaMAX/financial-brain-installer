@@ -4,6 +4,12 @@ const row = (value) => Object.freeze({ real_boundary: "not_run", acceptance: "pe
 
 export const CONNECTOR_EXPANSION_CATALOG = Object.freeze([
   row({
+    id: "granola", label: "Granola meeting file export", build: "supervised_file_export",
+    automated_proof: "synthetic_export_and_in_process_worker", rehearsal_available: false, installed_connection: false,
+    current_boundary: "A reviewed meeting JSON export can be normalized and imported through the registered-source batch boundary. Missing transcripts remain labeled notes-only; summaries alone are refused. There is no live acquisition, owner CLI, daily schedule, or cross-provider dedupe.",
+    next_acceptance: "Complete owner entry-point review and host gates, then separately approve one supervised export import, unchanged replay, metadata correction, retrieval, and delayed-transcript retry.",
+  }),
+  row({
     id: "custom-api", label: "Custom business API", build: "declarative_worker_source",
     automated_proof: "local_mock_and_sqlite", rehearsal_available: false, installed_connection: true,
     current_boundary: "A manifest-declared read-only JSON API can run inside the owner's Worker on its existing cron. HTTPS host boundaries, paging, byte and row limits, retries, correction history, freshness, and hidden Worker-secret custody are wired. No provider or customer endpoint has crossed this build.",

@@ -91,23 +91,23 @@ const MAP_IDS = Object.freeze({
 const COPY = Object.freeze({
   not_established: Object.freeze({
     unsupported:
-      "Your financial map isn't set up yet, so your Brain can't say which entities are open or closed.",
+      "I can help build your financial map, but it is not set up yet, so which businesses are open or closed is still unconfirmed.",
     supported:
-      "This comes from your documents, not from a financial map you confirmed — your map isn't set up yet.",
+      "Here is what your documents support; your financial map is not set up yet, so this has not been confirmed through that map.",
     one_step:
-      "Open Financial Map in your private owner app and answer its short questions, one at a time — which businesses you own or have owned, and whether each one is still open — then save the map it builds. From then on your Financial Map shows every entity with its status.",
+      "Want to open Financial Map in your private owner app, answer its short questions about which businesses you own or owned and whether each is still open, then save the map?",
     // Appended to the not-established one step only, and only when a list
     // really follows. A stale map's one step has no questions in it.
     candidates_follow:
-      " The questions start from what your Brain has already seen, listed below as possible mentions.",
+      " The questions can start from the possible mentions listed below.",
   }),
   stale: Object.freeze({
     unsupported:
-      "Your financial map is out of date: an entity or account was added or changed after you set it up, so your Brain won't answer this from the old map.",
+      "I can help review your financial map, but a business or account changed after it was saved, so the old map does not confirm current status.",
     supported:
-      "This comes from your documents, not from a financial map you confirmed — your map is out of date.",
+      "Here is what your documents support; your financial map is out of date, so this has not been confirmed through a current map.",
     one_step:
-      "Open Financial Map in your private owner app, review what changed, and save the updated map. Then your Financial Map shows every entity with its current status.",
+      "Want to open Financial Map in your private owner app, review what changed, and save the updated map?",
   }),
 });
 const ownerKey = (fixture) => ({ "X-Admin-Key": fixture.env.ADMIN_KEY });
@@ -330,7 +330,7 @@ test("a not-established map turns a bare refusal into the reason, the candidates
   const guidance = body.map_guidance;
   assert.ok(guidance, "an entity-status question on an unset map must not end as a bare refusal");
   assert.equal(guidance.map_status, "not_established");
-  assert.match(guidance.message, /financial map isn't set up yet/i);
+  assert.match(guidance.message, /^I can help build your financial map, but it is not set up yet, so which businesses are open or closed is still unconfirmed\.$/m);
   assert.equal(guidance.message, COPY.not_established.unsupported);
   assert.equal(guidance.one_step, COPY.not_established.one_step + COPY.not_established.candidates_follow,
     "candidates are listed below, so the sentence that points at them is appended");
@@ -340,7 +340,7 @@ test("a not-established map turns a bare refusal into the reason, the candidates
   const seen = guidance.what_the_brain_sees;
   assert.equal(seen.unconfirmed, true);
   assert.equal(seen.candidate_notice, CANDIDATE_NOTICE);
-  assert.match(seen.candidate_notice, /not confirmed facts/i);
+  assert.match(seen.candidate_notice, /^Here are possible mentions I found, still unconfirmed; they become a list of your businesses only after you confirm each one\.$/);
   assert.deepEqual(
     seen.entities,
     [
@@ -716,19 +716,19 @@ test("the remote MCP renders the guidance above the refusal and leaves the incom
 
   const rendered = await call(refused);
   assert.equal(askCalls, 1, "the remote ask refusal decision point was not reached");
-  assert.match(rendered, /financial map isn't set up yet/i);
+  assert.match(rendered, /^I can help build your financial map, but it is not set up yet, so which businesses are open or closed is still unconfirmed\.$/m);
   assert.ok(rendered.includes(COPY.not_established.one_step), "the one step renders verbatim");
   assert.match(rendered, /possible mentions/i);
   assert.match(rendered, /possible_mention/);
   assert.ok(rendered.includes(ENTITY_LABEL) && rendered.includes(ACCOUNT_LABEL));
   const refusalBlock = [
-    "I didn't find a matching record in this search.",
+    "I can try a more specific search, but I didn't find a matching record in this search. Want to add a detail?",
     "Why: answer model found no direct support",
     "Next: ask again with a name, date or exact phrase the record would contain.",
   ].join("\n");
   assert.ok(rendered.includes(refusalBlock), "the healthy refusal keeps its reviewed Why and Next lines");
   assert.ok(
-    rendered.indexOf("financial map isn't set up") < rendered.indexOf(refusalBlock),
+    rendered.indexOf(COPY.not_established.unsupported) < rendered.indexOf(refusalBlock),
     "the guidance goes above the search-scoped refusal",
   );
 
@@ -814,7 +814,7 @@ test("the guidance renders as sentences that keep every candidate a candidate", 
     current_inventory: { entities: [], accounts: [] },
   });
   const emptyText = financialMapGuidanceLines(empty).join("\n");
-  assert.match(emptyText, /no confirmed entities or accounts on file/i);
+  assert.match(emptyText, /^I can help build the list, but there are no confirmed businesses or accounts on file and no possible mentions to propose yet\.$/m);
 
   // A map that IS current is not this module's business.
   assert.equal(financialMapGuidance({ map_status: "current", current_inventory: { entities: [], accounts: [] } }), null);

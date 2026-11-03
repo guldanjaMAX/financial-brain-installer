@@ -14,6 +14,7 @@
  */
 
 import { acquireSourceIngestLock } from "./source-ingest-lock.mjs";
+import { acquireBrainLifecycleLock } from "./brain-lifecycle-lock.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import {
   constants as fsConstants,
@@ -836,6 +837,7 @@ function validateResolvedTarget(name, target, resolved) {
 }
 
 async function resolveRequiredTargets(prepared, options, mode, inspectedTargets = null) {
+  options.assertLeaseOwned?.();
   if (mode === "dry-run") return Object.freeze({});
   const resolver = options.resolveTarget ?? defaultResolveTarget;
   const names = mode === "sync" ? targetNames(prepared.plan) : ["cloudflare"];
@@ -878,11 +880,7 @@ function setAll(statuses, value) {
 }
 
 async function parseJsonResponse(response) {
-  try {
-    return JSON.parse(await response.text());
-  } catch {
-    return null;
-  }
+  return JSON.parse(await response.text());
 }
 
 function responseStayedOnOrigin(response, origin) {
@@ -890,19 +888,36 @@ function responseStayedOnOrigin(response, origin) {
   try { return new URL(response.url).origin === origin; } catch { return false; }
 }
 
+// Reuse the support journal's closed classifications. Never classify from a
+// response body or exception message, which may contain source content.
+function targetHttpFailureCode(status) {
+  if (status === 401) return "AUTH_EXPIRED";
+  if (status === 403) return "REMOTE_PERMISSION_DENIED";
+  if (status === 404) return "REMOTE_NOT_FOUND";
+  if (status === 429) return "RATE_LIMITED";
+  return Number.isInteger(status) && status >= 400 && status < 500
+    ? "INPUT_REFUSED" : "REMOTE_UNAVAILABLE";
+}
+
 async function postOneTarget(name, prepared, resolved, options = {}) {
   const statuses = blankTargetStatuses(prepared);
   const actions = { created: 0, updated: 0, unchanged: 0 };
+  let failure = null;
+  const refused = (document, status, code) => {
+    statuses.set(document.logicalFingerprint, status);
+    failure ??= { phase: "target", code };
+  };
   if (!resolved) {
     setAll(statuses, "credential_unavailable");
-    return { statuses, actions };
+    return { statuses, actions, failure: { phase: "target", code: "AUTH_REQUIRED" } };
   }
 
   const request = options.fetch ?? globalThis.fetch;
   for (const document of prepared.documents) {
     const envelope = name === "legacy" ? document.legacyEnvelope : document.cloudflareEnvelope;
+    options.assertLeaseOwned?.();
     if (Buffer.byteLength(envelope.content, "utf8") > MAX_DOCUMENT_BYTES) {
-      statuses.set(document.logicalFingerprint, "oversized");
+      refused(document, "oversized", "INPUT_REFUSED");
       continue;
     }
     let response;
@@ -918,18 +933,23 @@ async function postOneTarget(name, prepared, resolved, options = {}) {
         signal: options.abortSignal?.() ?? AbortSignal.timeout(options.targetTimeoutMs ?? TARGET_TIMEOUT_MS),
       });
     } catch {
-      statuses.set(document.logicalFingerprint, "network_error");
+      refused(document, "network_error", "NETWORK_UNREACHABLE");
+      continue;
+    }
+    if (!responseStayedOnOrigin(response, resolved.origin)) {
+      refused(document, "http_error", "REMOTE_PERMISSION_DENIED");
+      continue;
+    }
+    if (!response.ok) {
+      refused(document, "http_error", targetHttpFailureCode(response.status));
       continue;
     }
     let body;
     try {
       body = await parseJsonResponse(response);
-    } catch {
-      statuses.set(document.logicalFingerprint, "network_error");
-      continue;
-    }
-    if (!response.ok || !responseStayedOnOrigin(response, resolved.origin)) {
-      statuses.set(document.logicalFingerprint, "http_error");
+    } catch (error) {
+      refused(document, error instanceof SyntaxError ? "invalid_receipt" : "network_error",
+        error instanceof SyntaxError ? "INPUT_REFUSED" : "NETWORK_UNREACHABLE");
       continue;
     }
     const action = String(body?.action ?? "");
@@ -937,13 +957,13 @@ async function postOneTarget(name, prepared, resolved, options = {}) {
       ? Boolean(body?.brain_doc_id)
       : body?.doc_uid === `curated:${document.cloudflareEnvelope.source_id}`;
     if (!identityValid || !RECEIPT_ACTIONS.has(action)) {
-      statuses.set(document.logicalFingerprint, "invalid_receipt");
+      refused(document, "invalid_receipt", "INPUT_REFUSED");
       continue;
     }
     statuses.set(document.logicalFingerprint, "confirmed");
     actions[action]++;
   }
-  return { statuses, actions };
+  return { statuses, actions, failure };
 }
 
 async function postOneTargetSafely(name, prepared, options) {
@@ -955,7 +975,8 @@ async function postOneTargetSafely(name, prepared, options) {
     // other write and prevents raw response details from reaching the ledger.
     const statuses = blankTargetStatuses(prepared);
     setAll(statuses, "network_error");
-    return { statuses, actions: { created: 0, updated: 0, unchanged: 0 } };
+    return { statuses, actions: { created: 0, updated: 0, unchanged: 0 },
+      failure: { phase: "target", code: "NETWORK_UNREACHABLE" } };
   }
 }
 
@@ -1006,7 +1027,8 @@ async function listCloudflareFamilies(source, resolved, options = {}) {
 }
 
 async function verifyCloudflareRevision(document, resolved, options) {
-  if (!resolved) return false;
+  const refused = (code) => ({ ok: false, failure: { phase: "readback", code } });
+  if (!resolved) return refused("AUTH_REQUIRED");
   try {
     const response = await (options.fetch ?? globalThis.fetch)(`${resolved.baseUrl}/api/admin/brain/curated-verify`, {
       method: "POST",
@@ -1015,11 +1037,17 @@ async function verifyCloudflareRevision(document, resolved, options) {
       redirect: "manual",
       signal: options.abortSignal?.() ?? AbortSignal.timeout(options.targetTimeoutMs ?? TARGET_TIMEOUT_MS),
     });
+    if (!responseStayedOnOrigin(response, resolved.origin)) return refused("REMOTE_PERMISSION_DENIED");
+    // Read the HTTP classification before the body: an error page need not be
+    // JSON and must not hide a missing route, authorization refusal or outage.
+    if (!response.ok) return refused(targetHttpFailureCode(response.status));
     const body = await parseJsonResponse(response);
-    return response.ok && responseStayedOnOrigin(response, resolved.origin) &&
-      body?.confirmed === true && body?.doc_uid === `curated:${document.cloudflareEnvelope.source_id}` &&
-      body?.envelope_sha256 === document.envelopeHash;
-  } catch { return false; }
+    if (body?.confirmed !== true || body?.doc_uid !== `curated:${document.cloudflareEnvelope.source_id}` ||
+        body?.envelope_sha256 !== document.envelopeHash) return refused("INPUT_REFUSED");
+    return { ok: true, failure: null };
+  } catch (error) {
+    return refused(error instanceof SyntaxError ? "INPUT_REFUSED" : "NETWORK_UNREACHABLE");
+  }
 }
 
 function rawDriveStatuses(prepared, mapped, live) {
@@ -1248,8 +1276,13 @@ export function writeCuratedCoverageLedger(path, ledger, options = {}) {
  *   preview: counts compared with the local ledger, no credentials or writes;
  *   dry-run: exact local inventory and hashes only, no credential or network;
  *   audit:   read-only Cloudflare historical-family evidence, no ingest writes;
- *   sync:    independent legacy and Cloudflare writes plus historical evidence.
+ *   sync:    independent writes and exact revisions; historical audit deferred.
  */
+export function curatedSourceLeaseOptions(plan, options = {}) {
+  const ledgerPath = resolveFromPlan(options.planDirectory ?? process.cwd(), plan.ledgerFile);
+  return { sourceName: "curated", statePath: pathIdentity(ledgerPath).real, home: options.home };
+}
+
 export async function runCuratedDualSync(planInput, options = {}) {
   if (!["preview", "dry-run", "audit", "sync"].includes(options.mode)) {
     fail("curated sync mode must be preview, dry-run, audit, or sync");
@@ -1257,20 +1290,33 @@ export async function runCuratedDualSync(planInput, options = {}) {
   if (options.mode === "preview") return runCuratedSyncHeld(planInput, options);
   const plan = planInput?.schemaVersion === CURATED_SYNC_PLAN_VERSION
     ? planInput : validateCuratedSyncPlan(planInput);
-  const ledgerPath = resolveFromPlan(options.planDirectory ?? process.cwd(), plan.ledgerFile);
   // Every ledger-writing entry point uses one canonical local lease. The
   // scheduler's launchd lock alone cannot serialize supervised direct runs.
   let lease;
+  const lifecycle = [];
   try {
-    lease = acquireSourceIngestLock({
-      sourceName: "curated", statePath: pathIdentity(ledgerPath).real, home: options.home,
-    });
+    // Use the same lifecycle and recovery boundary as update before resolving
+    // credentials. Sort and deduplicate targets so two-target runs cannot
+    // reverse the lifecycle -> source lock order.
+    const contracts = inspectCuratedTargetContracts(plan, options);
+    const manifests = [...new Set(Object.values(contracts).map(target => realpathSync(target.manifestPath)))].sort();
+    for (const manifestPath of manifests) lifecycle.push(acquireBrainLifecycleLock({
+      ...options.lifecycleLockOptions, manifestPath, operation: "curated-sync",
+    }));
+    lease = acquireSourceIngestLock(curatedSourceLeaseOptions(plan, options));
   } catch {
+    for (const held of lifecycle.reverse()) held.release();
     fail("curated sync already running or local lock could not be acquired safely");
   }
   try {
-    return await runCuratedSyncHeld(plan, { ...options, assertLeaseOwned: lease.assertOwned });
-  } finally { lease.release(); }
+    return await runCuratedSyncHeld(plan, { ...options, assertLeaseOwned: () => {
+      for (const held of lifecycle) held.assertOwned();
+      lease.assertOwned();
+    } });
+  } finally {
+    lease.release();
+    for (const held of lifecycle.reverse()) held.release();
+  }
 }
 
 async function runCuratedSyncHeld(planInput, options = {}) {
@@ -1340,7 +1386,10 @@ async function runCuratedSyncHeld(planInput, options = {}) {
   const resolvedTargets = await resolveRequiredTargets(prepared, options, mode, inspectedTargets);
   const targetOptions = { ...options, resolvedTargets };
   let live = { ok: false, families: new Set() };
-  if (mode !== "dry-run" && prepared.plan.rawDrive) {
+  // Historical family presence cannot bind a stored revision or permit
+  // deletion. Keep the corpus-wide inventory in the explicit audit command;
+  // its cost and availability must not gate this small collection's writes.
+  if (mode === "audit" && prepared.plan.rawDrive) {
     live = await listCloudflareFamilies("drive", resolvedTargets.cloudflare, options);
   }
   const rawDrive = rawDriveStatuses(prepared, mapped, live);
@@ -1358,13 +1407,15 @@ async function runCuratedSyncHeld(planInput, options = {}) {
     // Identity presence cannot prove the current revision: another writer may
     // have replaced it after the POST. Confirm content, title and metadata too.
     if ([...cloudflareResult.statuses.values()].some((value) => value === "confirmed")) {
-      const readback = await listCloudflareFamilies("curated", resolvedTargets.cloudflare, options);
       for (const document of prepared.documents) {
         if (cloudflareResult.statuses.get(document.logicalFingerprint) !== "confirmed") continue;
-        const expected = `curated:${document.cloudflareEnvelope.source_id}`;
-        if (!readback.ok || !readback.families.has(expected) ||
-            !await verifyCloudflareRevision(document, resolvedTargets.cloudflare, options)) {
+        // The existing full-admin route uses one exact primary D1 lookup and
+        // binds identity, revision and envelope hash. Inventory adds no proof
+        // and can time out before any of these indexed lookups is reached.
+        const readback = await verifyCloudflareRevision(document, resolvedTargets.cloudflare, options);
+        if (!readback.ok) {
           cloudflareResult.statuses.set(document.logicalFingerprint, "invalid_receipt");
+          cloudflareResult.failure ??= readback.failure;
         }
       }
     }
@@ -1380,13 +1431,16 @@ async function runCuratedSyncHeld(planInput, options = {}) {
   writer(ledgerPath, ledger, { ...options, protectedPaths });
 
   const allConfirmed = (statuses) => [...statuses.values()].every((value) => value === "confirmed");
-  const auditComplete = !prepared.plan.rawDrive || live.ok || mode === "dry-run";
+  const auditComplete = mode !== "audit" || !prepared.plan.rawDrive || live.ok;
   const ok = mode === "sync"
-    ? (!prepared.plan.legacyTarget || allConfirmed(legacyResult.statuses)) && allConfirmed(cloudflareResult.statuses) && auditComplete
+    ? (!prepared.plan.legacyTarget || allConfirmed(legacyResult.statuses)) && allConfirmed(cloudflareResult.statuses)
     : auditComplete;
   return {
     ok,
     mode,
+    failure: legacyResult.failure ?? cloudflareResult.failure ??
+      (auditComplete ? null : { phase: "audit", code: "REMOTE_UNAVAILABLE" }),
+    advisories: mode === "sync" && prepared.plan.rawDrive ? ["RAW_DRIVE_AUDIT_DEFERRED"] : [],
     count: prepared.documents.length,
     roles: { ...prepared.plan.expectedRoles },
     corpusFingerprint: ledger.corpus_fingerprint,
@@ -1464,6 +1518,10 @@ async function main(argv = process.argv.slice(2)) {
       `deletion proof: unavailable; ` +
       `coverage ledger ${report.ok ? "updated" : "updated with incomplete receipts"}`,
     );
+    for (const advisory of report.advisories) {
+      console.log(`${advisory}: historical raw Drive presence was not checked; use the explicit audit mode.`);
+    }
+    if (report.failure) console.error(`curated sync failed [${report.failure.phase}: ${report.failure.code}]`);
     return report.ok ? 0 : 1;
   } catch (error) {
     console.error(`curated sync stopped: ${String(error?.message || "unknown failure")}`);

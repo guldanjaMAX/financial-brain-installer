@@ -1,6 +1,7 @@
 import { DEFAULT_TENANT } from "./fin-d1.js";
 import { ledgerDay, shiftLedgerDay } from "./ledger-question.js";
 import { accountLinkIdentity } from "./fin-account-links.js";
+import { accountKindReviewSql, applyAccountKindReview } from "./fin-account-kinds.js";
 
 const MAX_ACCOUNTS = 200;
 const MAX_ROWS = 5000;
@@ -16,7 +17,7 @@ async function rows(env, sql, binds) {
 
 // Labels identify transfer counterparts; provider references only validate the
 // owner's saved link. Neither reference nor credential is exposed in citations.
-const ACCOUNTS_SQL = `SELECT a.id,a.account_slug,a.entity_slug,a.mask,a.account_kind,a.institution,a.label,a.external_ref,a.source_feed,
+const ACCOUNTS_SQL = `SELECT a.id,a.account_slug,a.entity_slug,e.kind AS entity_kind,a.mask,a.account_kind,a.institution,a.label,a.external_ref,a.source_feed,
       a.currency,a.feed_mode,a.balance_role,a.basis_state,c.coverage_status,c.covered_from,c.covered_to,
       c.basis_state AS coverage_basis,i.last_synced_at,
       CASE WHEN c.coverage_status='complete' AND c.basis_note LIKE 'Read from a bank export covering %'
@@ -37,7 +38,8 @@ const ACCOUNTS_SQL = `SELECT a.id,a.account_slug,a.entity_slug,a.mask,a.account_
           AND (z.current_minor IS NULL OR z.current_minor<>0 OR COALESCE(z.available_minor,0)<>0
             OR z.basis_state<>'confirmed' OR z.currency<>'USD'))
         THEN date(substr(b.queued_at,1,10),printf('-%d days',b.requested_days-1)) END AS empty_provider_from,
-      l.manual_account_slug AS link_manual,l.live_account_slug AS link_live,l.identity_json AS link_identity
+      l.manual_account_slug AS link_manual,l.live_account_slug AS link_live,l.identity_json AS link_identity,
+      ${accountKindReviewSql('a')} AS account_kind_review_json
     FROM fin_accounts a
     JOIN fin_entities e ON e.tenant_id=a.tenant_id AND e.entity_slug=a.entity_slug
       AND e.superseded_by_id IS NULL AND e.relationship='owned' AND e.basis_state='confirmed'
@@ -92,6 +94,10 @@ function groupAccounts(accounts) {
       }
     }
   }
+  // Both approved links and unresolved collisions use provider observations.
+  // A classification review cannot settle an independent identity question or
+  // admit two copies of an expense by changing just one candidate's kind.
+  accounts = accounts.map(applyAccountKindReview);
   for (const account of accounts) {
     const key = approved.get(account.account_slug) || account.account_slug;
     if (!groups.has(key)) groups.set(key, []);
@@ -126,7 +132,24 @@ export function accountLinkPairsInWindow(account, intent) {
   });
 }
 
-async function snapshotRows(env, accounts, sql, binds, { tenantId, mask, accountKind }) {
+function selectedSnapshotAccounts(accounts, { mask, accountKind, effectiveAccountSlugs = null }) {
+  let allowed = null;
+  if (effectiveAccountSlugs !== null) {
+    if (!Array.isArray(effectiveAccountSlugs) || !effectiveAccountSlugs.length ||
+        effectiveAccountSlugs.some(slug => typeof slug !== "string" || !slug.length) ||
+        new Set(effectiveAccountSlugs).size !== effectiveAccountSlugs.length) {
+      throw new Error("ledger account allow-list invalid");
+    }
+    allowed = new Set(effectiveAccountSlugs);
+  }
+  const selected = accounts.filter(account => (!allowed || allowed.has(account.account_slug)) &&
+    (!mask || account.mask === mask) && (!accountKind || account.account_kind === accountKind));
+  if (allowed && selected.length !== allowed.size) throw new Error("ledger account allow-list changed");
+  return selected;
+}
+
+async function snapshotRows(env, accounts, sql, binds, { tenantId, mask, accountKind,
+  effectiveAccountSlugs = null }) {
   // D1 batches run transactionally. Re-read the account mapping beside the
   // rows in that same snapshot, so a sync/assignment after account selection
   // cannot combine old coverage exclusions with new transactions or balances.
@@ -135,8 +158,13 @@ async function snapshotRows(env, accounts, sql, binds, { tenantId, mask, account
     env.DB.prepare(sql).bind(...binds),
   ]);
   if (!Array.isArray(inventory?.results) || !Array.isArray(facts?.results)) throw new Error("ledger snapshot unavailable");
-  const current = groupAccounts(inventory.results).filter(a => (!mask || a.mask === mask) && (!accountKind || a.account_kind === accountKind));
-  if (JSON.stringify(current) !== JSON.stringify(accounts)) throw new Error("ledger mapping changed");
+  const currentInventory = groupAccounts(inventory.results);
+  const current = selectedSnapshotAccounts(currentInventory, { mask, accountKind, effectiveAccountSlugs });
+  // An explicit effective-account list is derived from the whole authorized
+  // inventory. Validate that inventory in this same snapshot, while the facts
+  // query and its row bound remain limited to the exact selected mappings.
+  const expected = effectiveAccountSlugs === null ? current : currentInventory;
+  if (JSON.stringify(expected) !== JSON.stringify(accounts)) throw new Error("ledger mapping changed");
   return facts.results;
 }
 
@@ -187,9 +215,11 @@ export function effectivePeriodCovered(account, from, to) {
 }
 
 export async function readEffectiveTransactions(env, accounts, { from, to, amountMinor = null,
-  tenantId = env.BANK_FEED_TENANT || DEFAULT_TENANT, mask = null, accountKind = null } = {}) {
-  if (accounts.some(unknownTwinCoverage)) throw new Error("ledger twin coverage unknown");
-  const mapping = accounts.flatMap(account => account.members.map(member => ({
+  tenantId = env.BANK_FEED_TENANT || DEFAULT_TENANT, mask = null, accountKind = null,
+  effectiveAccountSlugs = null, pendingOnly = false } = {}) {
+  const selected = selectedSnapshotAccounts(accounts, { mask, accountKind, effectiveAccountSlugs });
+  if (selected.some(unknownTwinCoverage)) throw new Error("ledger twin coverage unknown");
+  const mapping = selected.flatMap(account => account.members.map(member => ({
     slug: member.account_slug, effective: account.account_slug,
     // A twin's live rows are authoritative only inside its proven interval;
     // the complete manual source supplies the outside interval alone.
@@ -211,7 +241,7 @@ export async function readEffectiveTransactions(env, accounts, { from, to, amoun
           AND (other.external_id IS NULL)<>(t.external_id IS NULL)
       ) ELSE 0 END AS export_overlap_review
     FROM json_each(?1) m CROSS JOIN fin_transactions t INDEXED BY idx_fin_transactions_account ON t.account_slug=json_extract(m.value,'$.slug')
-    WHERE t.tenant_id=?2 AND t.superseded_by_id IS NULL AND t.removed_at IS NULL AND t.pending=0
+    WHERE t.tenant_id=?2 AND t.superseded_by_id IS NULL AND t.removed_at IS NULL AND t.pending=${pendingOnly ? 1 : 0}
       AND (json_extract(m.value,'$.exclude_from') IS NULL OR t.posted_on IS NULL OR
         NOT (t.posted_on BETWEEN json_extract(m.value,'$.exclude_from') AND json_extract(m.value,'$.exclude_to')))
       AND (json_extract(m.value,'$.include_from') IS NULL OR t.posted_on IS NULL OR
@@ -225,7 +255,9 @@ export async function readEffectiveTransactions(env, accounts, { from, to, amoun
     ${select} AND t.posted_on BETWEEN ?3 AND ?4
     UNION ALL ${select} AND t.posted_on IS NULL
     ) LIMIT ?6`,
-  [JSON.stringify(mapping), tenantId, from, to, amountMinor, MAX_ROWS + 1], { tenantId, mask, accountKind });
+  [JSON.stringify(mapping), tenantId, from, to, amountMinor, MAX_ROWS + 1], {
+    tenantId, mask, accountKind, effectiveAccountSlugs,
+  });
   if (result.length > MAX_ROWS) throw new Error("ledger row limit");
   // Sorting in SQL before LIMIT scans the entire covered range. Sort only
   // after the bound is proven, so a large ledger stops at the overflow row.
@@ -234,18 +266,28 @@ export async function readEffectiveTransactions(env, accounts, { from, to, amoun
 
 export async function readEffectiveBalances(env, accounts, {
   tenantId = env.BANK_FEED_TENANT || DEFAULT_TENANT, mask = null, accountKind = null,
+  effectiveAccountSlugs = null, observationTo = null, includeAvailable = false,
 } = {}) {
-  const mapping = accounts.flatMap(account => account.members.map(member => ({
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(observationTo || "") ||
+      !Number.isFinite(Date.parse(observationTo)) || ledgerDay(observationTo) !== observationTo)
+    throw new Error("ledger observation cutoff unavailable");
+  const selected = selectedSnapshotAccounts(accounts, { mask, accountKind, effectiveAccountSlugs });
+  const mapping = selected.flatMap(account => account.members.map(member => ({
     slug: member.account_slug, effective: account.account_slug, live: member.feed_mode === "live" ? 1 : 0,
     last_synced_at: member.feed_mode === "live" ? member.last_synced_at : null,
   })));
-  // Pick newest observation across twins, with live precedence only on ties.
+  // Exclude invalid and future observations before ranking, so an eligible
+  // prior snapshot can still answer. The cutoff comes from the owner calendar.
   return snapshotRows(env, accounts, `WITH observations AS (
-    SELECT b.id,b.account_slug AS source_account_slug,b.as_of_date,b.current_minor,b.currency,b.basis_state,
+    SELECT b.id,b.account_slug AS source_account_slug,b.as_of_date,b.current_minor,${includeAvailable ? 'b.available_minor,' : ''}b.currency,b.basis_state,
       json_extract(m.value,'$.effective') AS effective_account_slug,
       json_extract(m.value,'$.last_synced_at') AS last_synced_at,
       ROW_NUMBER() OVER (PARTITION BY json_extract(m.value,'$.effective')
         ORDER BY b.as_of_date DESC,b.recorded_at DESC,json_extract(m.value,'$.live') DESC,b.id DESC) AS rank
     FROM json_each(?) m JOIN fin_balance_snapshots b ON b.account_slug=json_extract(m.value,'$.slug')
-    WHERE b.tenant_id=?) SELECT * FROM observations WHERE rank=1`, [JSON.stringify(mapping), tenantId], { tenantId, mask, accountKind });
+    WHERE b.tenant_id=? AND b.as_of_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+      AND date(b.as_of_date,'+0 days')=b.as_of_date AND b.as_of_date<=?)
+    SELECT * FROM observations WHERE rank=1`, [JSON.stringify(mapping), tenantId, observationTo], {
+      tenantId, mask, accountKind, effectiveAccountSlugs,
+    });
 }

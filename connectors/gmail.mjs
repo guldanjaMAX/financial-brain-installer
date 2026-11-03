@@ -332,6 +332,8 @@ export async function listHistory(getAccessToken, startHistoryId, opts = {}) {
   return {
     ids: [...actions].filter(([, action]) => action === "fetch").map(([id]) => id),
     deletedIds: [...actions].filter(([, action]) => action === "delete").map(([id]) => id),
+    removal_causes: Object.fromEntries([...actions].filter(([, action]) => action === "delete")
+      .map(([id]) => [id, "explicit_deletion"])),
     expired: false,
     historyId: terminalHistoryId,
   };
@@ -376,6 +378,7 @@ export async function messagePolicy(getAccessToken, id, opts = {}) {
       allowed: false,
       skip: { path: id, id, reason: `could not be fetched: ${e.message.slice(0, 120)}` },
       source_deleted: true,
+      removal_cause: "explicit_deletion",
       retain_existing: false,
       cursor_blocking: false,
     };
@@ -388,6 +391,7 @@ export async function messagePolicy(getAccessToken, id, opts = {}) {
     allowed: false,
     skip: { path: id, id, reason: decision.reason },
     policy_skip: decision.policy,
+    removal_cause: decision.policy ? "scope_or_filter_change" : "unknown",
     retain_existing: !decision.policy,
     cursor_blocking: decision.cursor_blocking,
   };
@@ -411,6 +415,7 @@ export async function toEnvelope(
     return {
       skip: { path: id, id, reason: `could not be fetched: ${e.message.slice(0, 120)}` },
       source_deleted: true,
+      removal_cause: "explicit_deletion",
       retain_existing: false,
       cursor_blocking: false,
     };
@@ -427,6 +432,7 @@ export async function toEnvelope(
     return {
       skip: { path: id, id, reason: labelDecision.reason },
       policy_skip: labelDecision.policy,
+      removal_cause: labelDecision.policy ? "scope_or_filter_change" : "unknown",
       // An absent classification is an incomplete read, not deletion proof.
       // Keep a prior accepted revision while the run stays visibly non-green.
       retain_existing: !labelDecision.policy,

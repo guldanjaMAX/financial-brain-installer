@@ -37,6 +37,8 @@
  * connector-owned tables and never enter the ledger.
  */
 
+import { bankActivityInvalidationPlan } from "./fin-account-links.js";
+
 /**
  * What counts as money you HOLD.
  *
@@ -319,7 +321,14 @@ export async function importBankExport(env, envelope, options = {}) {
   }
   if (options.origin?.provenance !== "feed" &&
       await bankExportOverlapNeedsReview(env, envelope, options.tenantId)) return overlapRefusal();
-  await runAll(env, plan.statements);
+  // Every extracted-import caller shares this authority. Keep projection debt
+  // in the first batch that can change account or transaction inventory so a
+  // failed fence cannot leave a ready document describing the old inventory.
+  // Feed imports retain their provider-owned promotion and writer boundary.
+  const statements = options.origin?.provenance === "feed"
+    ? plan.statements
+    : [...bankActivityInvalidationPlan({ at: nowIso(options.now) }), ...plan.statements];
+  await runAll(env, statements);
   return plan.receipt;
 }
 
@@ -352,6 +361,8 @@ function accountStatement(tenantId, entitySlug, account, source, envelope, stamp
        label = COALESCE(excluded.label, fin_accounts.label),
        account_kind = excluded.account_kind,
        balance_role = excluded.balance_role,
+       -- A replacement provider reference must not inherit an older review.
+       external_ref = COALESCE(excluded.external_ref, fin_accounts.external_ref),
        mask = COALESCE(excluded.mask, fin_accounts.mask),
        currency = excluded.currency,
        source_doc_uid = excluded.source_doc_uid,

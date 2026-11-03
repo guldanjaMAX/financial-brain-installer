@@ -213,6 +213,7 @@ const RECORD_KEYS = Object.freeze({
   accounts: [
     "account_ref", "masked_identity", "institution", "category",
     "stored_account_kind", "entity_ref", "entity_reference_state",
+    "reviewed_account_kind", "reviewed_balance_role", "effective_account_kind", "effective_balance_role", "account_kind_review",
     "balance_role", "currency", "feed_mode", "expected_cadence", "status",
     "opened_on", "closed_on", "coverage", "mapping_confirmation",
     "source_lineage", "account_entity_mapping_basis", "verification",
@@ -1135,6 +1136,30 @@ function assertRecord(section, value, path) {
       "retirement", "merchant", "point_of_sale", "escrow", "other",
     ]), `${path}.stored_account_kind`);
     assertEnum(value.balance_role, new Set(["asset", "liability", "neither"]), `${path}.balance_role`);
+    const kinds = new Set(['checking','savings','card','loan','line_of_credit','other']);
+    const allKinds = new Set([...kinds,'investment','retirement','merchant','point_of_sale','escrow']);
+    assertEnum(value.reviewed_account_kind, kinds, `${path}.reviewed_account_kind`, { nullable: true });
+    assertEnum(value.reviewed_balance_role, new Set(['asset','liability']), `${path}.reviewed_balance_role`, { nullable: true });
+    assertEnum(value.effective_account_kind, allKinds, `${path}.effective_account_kind`);
+    assertEnum(value.effective_balance_role, new Set(['asset','liability','neither']), `${path}.effective_balance_role`);
+    if (value.account_kind_review !== null) {
+      const review = value.account_kind_review;
+      assertKeys(review, ['state','reviewer','source','reviewed_at','revoked_at','bound_identity_ref'], `${path}.account_kind_review`);
+      assertEnum(review.state, new Set(['current','stale','revoked']), `${path}.account_kind_review.state`);
+      assertEnum(review.reviewer, new Set(['owner']), `${path}.account_kind_review.reviewer`);
+      assertEnum(review.source, new Set(['owner_account_kind']), `${path}.account_kind_review.source`);
+      assertStoredTimestampOrNull(review.reviewed_at, `${path}.account_kind_review.reviewed_at`);
+      assertStoredTimestampOrNull(review.revoked_at, `${path}.account_kind_review.revoked_at`);
+      assertReference(review.bound_identity_ref, `${path}.account_kind_review.bound_identity_ref`);
+      if (value.reviewed_account_kind === null || value.reviewed_balance_role === null || review.reviewed_at === null ||
+          review.bound_identity_ref === null ||
+          (review.state === 'revoked') !== (review.revoked_at !== null)) fail(path, 'incomplete account review provenance');
+      if ((['checking','savings'].includes(value.reviewed_account_kind) && value.reviewed_balance_role !== 'asset') ||
+          (['card','loan','line_of_credit'].includes(value.reviewed_account_kind) && value.reviewed_balance_role !== 'liability')) fail(path, 'incompatible reviewed account role');
+    } else if (value.reviewed_account_kind !== null || value.reviewed_balance_role !== null) fail(path, 'missing account review provenance');
+    const currentReview = value.account_kind_review?.state === 'current';
+    if (value.effective_account_kind !== (currentReview ? value.reviewed_account_kind : value.stored_account_kind) ||
+        value.effective_balance_role !== (currentReview ? value.reviewed_balance_role : value.balance_role)) fail(path, 'effective account values disagree with review state');
     if (typeof value.currency !== "string" || !/^[A-Z]{3}$/.test(value.currency)) {
       fail(`${path}.currency`, "expected a three-letter currency code");
     }

@@ -104,10 +104,17 @@ test("the review command names an exact plan without disclosing target identitie
       `brain ingest <manifest> --source drive --apply-removals ${fingerprint}`,
     )));
     assert.deepEqual(stopped.removal_review, {
+      source: "drive",
+      kind: "upload",
       stored_documents_to_remove: 1,
       source_removals: 1,
       replacement_family_reviews: 0,
       source_cleanup_percentage: 5,
+      source_stored_documents: 20,
+      reasons: { source_deleted: 1, source_policy: 0, intentional_skip: 0 },
+      removal_causes: { explicit_deletion: 0, window_exit: 0, scope_or_filter_change: 0,
+        blank_or_quality: 0, permission_or_visibility: 0, unknown: 1 },
+      approval_fingerprint: null,
       fingerprint,
     }, "the real stopped ingest carries only aggregate review facts needed by unattended diagnostics");
     assert.doesNotMatch(stopped.message, /item0|\/fixture\/|fixture\.invalid/);
@@ -157,7 +164,7 @@ test("approval prints the source ratio and aggregate reasons before any removal"
     const sourcePlan = buildDriveRemovalPlan({ storedFamilies: f.store.uids(), intentionalCandidates: f.store.uids() });
     await assert.rejects(f.review.finish({ sourcePlan }), error => {
       assert.match(error.message, /would remove 101 of 101 stored documents \(100\.0%\)/);
-      assert.match(error.message, /Aggregate reasons: source policy 0; source deletion 0; intentional skip 101/);
+      assert.match(error.message, /Aggregate reasons: source policy 0; source removal 0; intentional skip 101/);
       return error.code === "SAFETY_REVIEW_REQUIRED";
     });
     assert.equal(f.state.ingest_removal_plan.targets.length, 101);
@@ -331,6 +338,7 @@ test("runtime binding works in a packed installation without a lockfile and cove
   try {
     for (const folder of ["operations", "connectors", "ingest", "worker/src/lib"]) mkdirSync(join(root, folder), { recursive: true });
     for (const path of ["operations/ingest-removal-plan.mjs", "operations/drive-removal-plan.mjs",
+      "operations/removal-causes.mjs", "operations/load-removal-review.mjs",
       "operations/cli-guidance.mjs", "operations/source-family-inventory-retry.mjs", "operations/command-display.mjs", "worker/src/lib/stored-family-identity.js"]) {
       const bytes = readFileSync(new URL(`../${path}`, import.meta.url));
       writeFileSync(join(root, path), bytes);

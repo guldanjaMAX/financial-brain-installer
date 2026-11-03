@@ -17,6 +17,7 @@ import {
   tenantReference,
 } from "./bank-feed.js";
 import { balanceRoleFor } from "./fin-import.js";
+import { assertBankProviderTransitionAllows } from "./bank-provider-transition.js";
 import { MINOR_ROUNDED_QUALIFIER, minorRoundedFields } from "./fin-d1.js";
 import {
   PLAID_DECIMAL_MAX_LENGTH,
@@ -503,6 +504,7 @@ export async function completePlaidLink(env, {
   const config = bankFeedConfig(env);
   const { tenantId } = tenantReference(env);
   const stamp = nowIso(now);
+  await assertBankProviderTransitionAllows(env, PROVIDER);
   const row = await linkRow(env, tenantId, sessionRef);
   if (!row) throw new Error("that Plaid Link session is not on this brain");
   refuseRejectedHandoff(row);
@@ -1269,6 +1271,7 @@ function assignmentBlockedResult(itemRef, readiness, receipt = {}) {
 }
 
 async function promotePlaidWindow(env, details, receipt = {}) {
+  await assertBankProviderTransitionAllows(env, PROVIDER);
   const staged = (await env.DB.prepare(
     `SELECT s.provider_account_id AS providerAccountId,s.currency,s.iso_currency_code,
             s.current_balance_decimal,s.available_balance_decimal,s.current_balance_minor,
