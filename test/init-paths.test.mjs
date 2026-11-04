@@ -40,16 +40,22 @@ const a = JSON.parse(readFileSync(join(dir, "a.json"), "utf8"));
 assert.equal(a.client.slug, "rowanvale");
 assert.equal(a.client.display_name, "Rowan Vale");
 assert.equal(a.brain.worker_name, "rowanvale-brain");
+assert.equal(Object.hasOwn(a.client, "primary_contact"), false,
+  "interactive init omits an unknown optional contact");
 
 // Partly flagged: the mixed path, which is what an operator actually types.
 const partial = run([join(dir, "b.json"), "--name", "Harbour Stone"], `harbourstone\n${ACCOUNT}\n`);
 assert.equal(partial.status, 0, `partly-flagged init failed: ${partial.stderr}`);
 assert.equal(JSON.parse(readFileSync(join(dir, "b.json"), "utf8")).client.slug, "harbourstone");
+assert.equal(Object.hasOwn(JSON.parse(readFileSync(join(dir, "b.json"), "utf8")).client, "primary_contact"), false,
+  "partly flagged init omits an unknown optional contact");
 
 // Fully flagged: must not read stdin at all.
 const flagged = run([join(dir, "c.json"), "--name", "Example Company", "--slug", "examplecompany", "--account", ACCOUNT]);
 assert.equal(flagged.status, 0, `flagged init failed: ${flagged.stderr}`);
 assert.equal(JSON.parse(readFileSync(join(dir, "c.json"), "utf8")).client.slug, "examplecompany");
+assert.equal(Object.hasOwn(JSON.parse(readFileSync(join(dir, "c.json"), "utf8")).client, "primary_contact"), false,
+  "fully flagged init omits an unknown optional contact");
 
 // A typo must be refused rather than silently ignored, and write nothing.
 const typo = run([join(dir, "d.json"), "--nmae", "x"]);

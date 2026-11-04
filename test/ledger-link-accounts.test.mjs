@@ -63,11 +63,26 @@ test('R03 actual CLI: bounded refusal, preview, authentication, approval, replay
   const refusal = await ask(f);
   assert.equal(refusal.answer, null); assert.equal(refusal.gaps.length, 1);
   assert.equal(refusal.gaps[0].reason, 'ledger_account_link_required');
-  assert.match(refusal.gaps[0].detail, /Bank One.*4321.*checking/);
-  // The Worker and the owner app cannot know the installer's shell, so their
-  // guidance names the subcommand; only CLI output is rendered per platform.
-  assert.ok(refusal.gaps[0].detail.includes('ledger link-accounts <manifest> --manual manual-account --live live-account --preview'));
-  assert.ok(ownerError(new ApiError(409, { code: refusal.code })).message.includes('ledger link-accounts'));
+  const assertReviewDetail = detail => assert.deepEqual(detail.split('\n'), [
+    "I can help review these records, but an import and a bank connection may describe the same account, so they stay separate: your account ending 4321.",
+    'Want help reviewing them together?',
+  ]);
+  assertReviewDetail(refusal.gaps[0].detail);
+  for (const mutant of [
+    refusal.gaps[0].detail.split('\n')[0],
+    refusal.gaps[0].detail.replace('reviewing them together', 'combining them automatically'),
+    refusal.gaps[0].detail.replace('4321', '4322'),
+  ]) {
+    assert.notEqual(mutant, refusal.gaps[0].detail, 'the account-review refusal was reached');
+    assert.throws(() => assertReviewDetail(mutant), { code: 'ERR_ASSERTION' },
+      'missing owner review or a wrong account must fail the same complete-line assertion');
+  }
+  assert.doesNotMatch(refusal.gaps[0].detail, /brain ledger|manual-account|live-account/,
+    'owner refusal contains neither an unrunnable shell command nor internal account ids');
+  const ownerRefusal = ownerError(new ApiError(409, { code: refusal.code })).message;
+  assert.match(ownerRefusal, /missing confirmation from the owner/iu);
+  assert.doesNotMatch(ownerRefusal, /ledger link-accounts|--manual|--live|<account>/iu,
+    'the owner error renderer must not expose an installer-only command or account placeholders');
   const think = () => worker.fetch(new Request('https://brain.invalid/api/rag/think', { method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Admin-Key': f.env.ADMIN_KEY },
     body: JSON.stringify({ q: 'How much money came in September 2026?' }) }), f.env, {}).then(r => r.json());

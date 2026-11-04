@@ -27,7 +27,7 @@ import { confidenceLine } from "./confidence.js";
 // never be reported as an absence. retrieval-status.js names an MCP server as
 // a consumer that has to defend itself, and this is the remote one.
 import {
-  SCANNED_CITATION_MARK, answerText, citationIsScanned, confidenceText,
+  SCANNED_CITATION_MARK, answerReasonText, answerText, moneyExplanation, citationIsScanned, confidenceText,
   nextActionText, safeAnswerErrorText, scannedEvidenceNotice, unavailableSearch,
 } from "./answer-render.js";
 import { COVERAGE_INCOMPLETE } from "./retrieval-status.js";
@@ -237,9 +237,7 @@ async function runAsk(deps, args) {
   const withGuidance = (rest) => text([...(guidance.length ? [...guidance, ""] : []), ...rest].join("\n"));
   const refusalExplanation = () => {
     const lines = [];
-    const reason = typeof thought.evidence_gate?.reason === "string"
-      ? thought.evidence_gate.reason.replace(/\s+/g, " ").trim().slice(0, 240)
-      : "";
+    const reason = answerReasonText(thought);
     if (reason) lines.push(`Why: ${reason}`);
     const next = nextActionText(thought);
     if (next) lines.push(next);
@@ -268,8 +266,8 @@ async function runAsk(deps, args) {
       .filter(gap => ["ledger_out_of_coverage", "ledger_not_consulted"].includes(gap.type));
     return withGuidance([answerText(thought), ...ledgerGaps.filter(gap => gap.detail).map(gap => gap.detail),
       ...(ledgerGaps.length ? [ledgerGaps.some(gap => gap.type === "ledger_out_of_coverage")
-        ? "Try the last finished month if the feed covers it, or a past month ending on or before the covered-through date."
-        : "Resolve the ledger gap above, then try the last finished month if the feed covers it, or a past covered month."] : []),
+        ? "Want help connecting or refreshing the bank records for those dates?"
+        : "Want help with the bank connection step above?"] : []),
       ...refusalExplanation(),
       "", confidenceText(thought)]);
   }
@@ -279,17 +277,23 @@ async function runAsk(deps, args) {
   const gaps = Array.isArray(thought.gaps) ? thought.gaps : [];
   if (refused) {
     if (results.length) {
-      lines.push(`I found ${results.length} ${results.length === 1 ? "record" : "records"} but none answered this directly.`);
+      lines.push(`I found ${results.length} ${results.length === 1 ? "record" : "records"} but none answered this directly. Want to try a more specific detail?`);
       for (const row of results.slice(0, 3)) {
         const date = Number.isFinite(Date.parse(row.ts || "")) ? String(row.ts).slice(0, 10) : "date unavailable";
         lines.push(`- ${row.title || "Untitled record"} (${date}${row.ts && row.date_reliable !== true ? "; date unverified" : ""})`);
       }
     } else if (!gaps.some(gap => ["ledger_out_of_coverage", "ledger_not_consulted"].includes(gap.type))) {
-      lines.push("I didn't find a matching record in this search.");
+      lines.push("I can try a more specific search, but I didn't find a matching record in this search. Want to add a detail?");
     }
-    for (const gap of gaps) if (gap.type !== "no_results" && gap.detail) lines.push(gap.detail);
-    if (gaps.some(gap => gap.type === "ledger_out_of_coverage")) lines.push("Try the last finished month if the feed covers it, or a past month ending on or before the covered-through date.");
-  } else lines.push(answerText(thought));
+    const explanation = moneyExplanation(thought);
+    if (explanation) lines.push(explanation);
+    for (const gap of gaps) if (gap.type !== "no_results" && gap.detail && !explanation.includes(gap.detail)) lines.push(gap.detail);
+    if (gaps.some(gap => gap.type === "ledger_out_of_coverage")) lines.push("Want help connecting or refreshing the bank records for those dates?");
+  } else {
+    lines.push(answerText(thought));
+    const explanation = moneyExplanation(thought);
+    if (explanation && !answerText(thought).includes(explanation)) lines.push(explanation);
+  }
   if (refused) lines.push(...refusalExplanation());
   const scanned = scannedEvidenceNotice(thought);
   if (scanned) lines.push("", scanned);
@@ -486,7 +490,7 @@ async function runRemember(deps, args, profile) {
     // Return the refusals as guidance rather than a bare error: the model can
     // usually satisfy them on a second try, and the contract exists to make
     // the record better rather than to make writing hard.
-    return toolError(`this cannot be recorded yet:\n- ${checked.errors.join("\n- ")}`);
+    return toolError(`I can help review this record, but it has not been saved because some details need checking. Want to review them?\n- ${checked.errors.join("\n- ")}`);
   }
   const confirmed = [];
   for (const record of checked.records) {
@@ -719,19 +723,19 @@ async function handleMcpImpl(env, request, url, deps) {
       // prompt-injected `confirm:true` cannot be interpreted as owner approval.
       if (name === "forget") {
         return rpcResult(id, toolError(
-          "forget cannot delete. Use delete_preview with a break-glass connection; the owner must execute its receipt with a fresh passkey.",
+          "I can help prepare a deletion preview, but this connection has no permission to delete. Want to use delete_preview with a break-glass connection, then have the owner approve its receipt with a fresh passkey?",
         ));
       }
       if (name === "remember") {
         if (!profileHas(profile.name, "curated:write")) {
           return rpcResult(id, toolError(
-            "this profile cannot write curated records. Reconnect as structured-contributor."));
+            "I can help you read records with this connection, but it has no permission to save curated records. Want to reconnect as structured-contributor?"));
         }
         return rpcResult(id, await runRemember(deps, args, profile.name));
       }
       if (name === "diagnose") {
         if (!profileHas(profile.name, "diagnostics:read")) {
-          return rpcResult(id, toolError("this profile cannot read whole-brain diagnostics."));
+          return rpcResult(id, toolError("I can help with the records this connection permits, but it has no permission to read whole-brain diagnostics. Want to use an owner connection?"));
         }
         return rpcResult(id, text(JSON.stringify(await deps.diagnose())));
       }

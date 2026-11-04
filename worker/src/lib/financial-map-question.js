@@ -139,35 +139,35 @@ const GUIDED_STATES = new Set(["not_established", "stale"]);
 const MESSAGES = Object.freeze({
   not_established: Object.freeze({
     unsupported:
-      "Your financial map isn't set up yet, so your Brain can't say which entities are open or closed.",
+      "I can help build your financial map, but it is not set up yet, so which businesses are open or closed is still unconfirmed.",
     supported:
-      "This comes from your documents, not from a financial map you confirmed — your map isn't set up yet.",
+      "Here is what your documents support; your financial map is not set up yet, so this has not been confirmed through that map.",
     one_step:
-      "Open Financial Map in your private owner app and answer its short questions, one at a time — which businesses you own or have owned, and whether each one is still open — then save the map it builds. From then on your Financial Map shows every entity with its status.",
+      "Want to open Financial Map in your private owner app, answer its short questions about which businesses you own or owned and whether each is still open, then save the map?",
     // Appended ONLY when at least one candidate is listed below it, so the
     // sentence never points at a list that is not there. Set under the
     // not-established wording deliberately: it says the QUESTIONS start from
     // what the Brain has seen, and only the not-established one_step has
     // questions in it. A stale map's one step is "review what changed".
     candidates_follow:
-      " The questions start from what your Brain has already seen, listed below as possible mentions.",
+      " The questions can start from the possible mentions listed below.",
   }),
   // A stale map was activated once and its inventory has changed since. Reading
   // the old snapshot as current fact is the exact error the map's own
   // currentness check exists to prevent, so a stale map gets guidance too.
   stale: Object.freeze({
     unsupported:
-      "Your financial map is out of date: an entity or account was added or changed after you set it up, so your Brain won't answer this from the old map.",
+      "I can help review your financial map, but a business or account changed after it was saved, so the old map does not confirm current status.",
     supported:
-      "This comes from your documents, not from a financial map you confirmed — your map is out of date.",
+      "Here is what your documents support; your financial map is out of date, so this has not been confirmed through a current map.",
     one_step:
-      "Open Financial Map in your private owner app, review what changed, and save the updated map. Then your Financial Map shows every entity with its current status.",
+      "Want to open Financial Map in your private owner app, review what changed, and save the updated map?",
   }),
 });
 
 /* The words that keep a candidate a candidate wherever this is rendered. */
 export const CANDIDATE_NOTICE =
-  "These are possible mentions your Brain has seen — not confirmed facts, and not a list of your entities until you confirm each one.";
+  "Here are possible mentions I found, still unconfirmed; they become a list of your businesses only after you confirm each one.";
 
 /* Enough to show the owner what the brain sees without turning a refusal into
    a wall of names. The map's own read is the complete list. */
@@ -268,7 +268,7 @@ export function financialMapGuidanceLines(guidance) {
     const omitted = Number(seen.entities_not_listed || 0) + Number(seen.accounts_not_listed || 0);
     if (omitted > 0) lines.push(`${omitted} more possible mentions are not listed here.`);
   } else {
-    lines.push("", "Your Brain has no confirmed entities or accounts on file, and none to propose yet.");
+    lines.push("", "I can help build the list, but there are no confirmed businesses or accounts on file and no possible mentions to propose yet.");
   }
   return lines;
 }

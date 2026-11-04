@@ -23,7 +23,7 @@ export function fixture(t) {
   };
   const prepared = (sql, params = []) => ({ sql, params, bind: (...p) => prepared(sql, p),
     all: async () => execute(sql, params, 'all'), first: async () => execute(sql, params, 'first'), run: async () => execute(sql, params, 'run') });
-  const env = { STORAGE: 'd1', DB: { prepare: prepared, async batch(statements) {
+  const env = { STORAGE: 'd1', BRAIN_TIMEZONE: 'UTC', DB: { prepare: prepared, async batch(statements) {
     db.exec('BEGIN');
     try { const out = statements.map(s => execute(s.sql, s.params)); db.exec('COMMIT'); return out; }
     catch (e) { db.exec('ROLLBACK'); throw e; }
@@ -55,7 +55,8 @@ export function ledgerFixture(t, { legacy = false } = {}) {
   f.raw(`INSERT INTO fin_accounts (account_slug,entity_slug,account_kind,balance_role,mask,feed_mode,provenance,source_feed,basis_state,recorded_at)
     VALUES ('fixture-account','owner','checking','asset','1234','live','feed','bank-feed:fixture-feed','confirmed',?)`, NOW);
   f.raw(`INSERT INTO fin_account_coverage (account_slug,coverage_status,covered_from,covered_to,computed_at,provenance,source_feed,basis_state,recorded_at)
-    VALUES ('fixture-account','complete',?,'2026-10-12',?,'feed','bank-feed:fixture-feed','confirmed',?)`, legacy ? null : '2024-01-01', NOW, NOW);
+    VALUES ('fixture-account','complete',?,?,?,'feed','bank-feed:fixture-feed','confirmed',?)`,
+    legacy ? null : '2024-01-01', legacy ? '2026-10-12' : '2026-10-31', NOW, NOW);
   f.raw(`INSERT INTO fin_balance_snapshots (account_slug,as_of_date,current_minor,provenance,source_feed,basis_state,recorded_at)
     VALUES ('fixture-account','2026-10-12',0,'feed','bank-feed:fixture-feed','confirmed',?)`, NOW);
   f.add = (uid, description, payee, { date = '2026-10-05', cents = 2500, direction = 'inflow' } = {}) => f.raw(`INSERT INTO fin_transactions

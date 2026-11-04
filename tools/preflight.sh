@@ -142,7 +142,10 @@ else
     MN=1
     ok "using the saved installed manifest: $MF"
   elif [ "$POINTER_STATUS" -eq 2 ]; then
-    MF=$(find "$HOME" -maxdepth 4 -name brain.manifest.json -not -path "*/node_modules/*" -not -path "*/templates/*" -not -path "*/.*/*" 2>/dev/null)
+    # Apply hidden-directory exclusions below the owner home, so a hidden
+    # ancestor of that home cannot conceal every otherwise visible manifest.
+    MF=$(cd "$HOME" && find . -maxdepth 4 -name brain.manifest.json -not -path "*/node_modules/*" -not -path "*/templates/*" -not -path "*/.*/*" 2>/dev/null |
+      while IFS= read -r candidate; do printf '%s/%s\n' "$HOME" "${candidate#./}"; done)
     MN=$(printf "%s" "$MF" | grep -c .)
   elif [ "$POINTER_STATUS" -eq 3 ]; then
     stop "the saved installed Brain location is unsafe, unreadable, or missing; repair that private pointer before choosing a manifest"

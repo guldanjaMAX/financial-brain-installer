@@ -355,6 +355,7 @@ test(`verified update prints one mail handover line without an extra approval on
     const finish = [];
     let approvals = 0;
     let schedulerReads = 0;
+    const schedulerCalls = [];
     let credentialProbes = 0;
     const fixtureHome = join(manifestPath, "..", "scheduler-home");
     const result = await cmdUpdate(manifestPath, {
@@ -369,7 +370,15 @@ test(`verified update prints one mail handover line without an extra approval on
           platform,
           uid: 501,
           home: fixtureHome,
-          launchctl: () => { schedulerReads++; return { status: 1, stdout: "", stderr: "" }; },
+          launchctl: args => {
+            schedulerReads++;
+            schedulerCalls.push(args[0]);
+            // An absent service still has a readable empty job inventory.
+            if (args[0] === "list") return { status: 0, stdout: "PID Status Label\n" };
+            if (args[0] === "print-disabled") return { status: 0, stdout: "disabled services = {\n}\n" };
+            assert.equal(args[0], "print", "this fixture must not mutate a native scheduler");
+            return { status: 113, stdout: "", stderr: "not loaded" };
+          },
         },
         schedulerAdapter: { read: () => ({ exists: false }) },
         schedulerOptions: { home: fixtureHome, machineLockRoot: join(fixtureHome, "locks") },
@@ -384,7 +393,11 @@ test(`verified update prints one mail handover line without an extra approval on
     assert.equal(finish[0].split("\n").filter((line) => line.startsWith("Outlook mail")).length, 1);
     assert.match(finish[0], /2026-10-01T07:00:00.000Z.*earlier exported mail stays available with its existing citations/);
     assert.equal(approvals, 0);
-    if (platform === "darwin") assert.ok(schedulerReads > 0, "scheduler inspection used only the injected host adapter");
+    if (platform === "darwin") {
+      assert.ok(schedulerReads > 0, "scheduler inspection used only the injected host adapter");
+      assert.ok(schedulerCalls.includes("list"), "the control reached job inventory");
+      assert.ok(schedulerCalls.includes("print-disabled"), "the control inspected saved intent");
+    }
     else assert.equal(schedulerReads, 0, "this platform has no legacy LaunchAgent owner");
     if (platform !== "linux") assert.ok(credentialProbes > 0, "provider inspection used only the injected credential status");
   });
@@ -587,6 +600,16 @@ test("production recovery retry keeps imports paused through refusal and reconci
     const dailyRefreshOptions = {
       platform: "darwin",
       principal: plan().identity.principal,
+      // This fixture models launchd on every test host, including hosts without getuid.
+      legacySchedulerOptions: {
+        uid: 501,
+        home,
+        launchctl: (args) => {
+          if (args[0] === "list") return { status: 0, stdout: "PID Status Label\n" };
+          if (args[0] === "print-disabled") return { status: 0, stdout: "disabled services = {\n}\n" };
+          assert.fail("unexpected native scheduler action");
+        },
+      },
       localTimezone: "UTC",
       existingSchedulerOwners: [],
       planDailyRefresh: async () => plan(),

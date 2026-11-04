@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -253,7 +253,7 @@ for (const command of dispatched) {
  * worker/ runs in Cloudflare, where its strings reach a terminal only through
  * the CLI printers pinned below.
  */
-const SKIP_DIRECTORIES = new Set(["node_modules", ".git", "frontend", "evidence", "test", "worker"]);
+const SKIP_DIRECTORIES = new Set(["node_modules", ".git", "frontend", "evidence", "test", "worker", "lane-evidence"]);
 // The second form is an injectable fallback, `(options.write ?? console.log)(...)`:
 // its argument is a live emission too, and it hid an unrendered usage line.
 const EMITTERS = /\bconsole\.(?:log|error|warn|info)\s*\(|\bconsole\.(?:log|error|warn|info)\s*\)\s*\(|\bprocess\.(?:stdout|stderr)\.write\s*\(/g;
@@ -367,9 +367,13 @@ const productDirectory = fileURLToPath(productRoot);
 const moduleFiles = [];
 (function walk(directory) {
   for (const entry of readdirSync(directory)) {
-    if (SKIP_DIRECTORIES.has(entry)) continue;
+    // Ignored lane outputs contain copied modules and deliberate link cycles.
+    // They are temporary fixtures rather than product emission sites.
+    if (SKIP_DIRECTORIES.has(entry) || entry.startsWith(".lane-")) continue;
     const full = join(directory, entry);
-    if (statSync(full).isDirectory()) walk(full);
+    const info = lstatSync(full);
+    if (info.isSymbolicLink()) continue;
+    if (info.isDirectory()) walk(full);
     else if (/\.m?js$/.test(full)) moduleFiles.push(full);
   }
 })(productDirectory);

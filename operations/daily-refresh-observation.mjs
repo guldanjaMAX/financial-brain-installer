@@ -3,11 +3,20 @@ import { closeSync, constants, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdi
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { restrictWindowsDirectoryToCurrentUser, restrictWindowsFileToCurrentUser } from "./current-user-file.mjs";
+import { removalReviewFacts, removalOwnerSentence } from "./load-removal-review.mjs";
 
 export const DAILY_LOG_MAX_BYTES = 64 * 1024;
-const RESULTS = new Set(["running", "complete", "partial", "failed", "deferred"]);
+const RESULTS = new Set(["running", "complete", "partial", "failed", "deferred", "waiting_for_owner"]);
 export const DAILY_RUN_ERROR = "Daily refresh failed before completion. Inspect the schedule and source authorization.";
-const ERRORS = new Set([DAILY_RUN_ERROR, "One or more daily sources failed or did not prove freshness.", "Daily refresh was deferred by another operation or recovery."]);
+const ERRORS = new Set([DAILY_RUN_ERROR, "One or more daily sources failed or did not prove freshness.", "Daily refresh was deferred by another operation or recovery.", "A source is waiting for owner approval of removals."]);
+
+function reviewFields(record) {
+  if (record.removal_reviews === undefined) return {};
+  if (!Array.isArray(record.removal_reviews) || record.removal_reviews.length > 32) throw new Error("invalid daily removal reviews");
+  const reviews = record.removal_reviews.map(review => removalReviewFacts(review, record.source));
+  if (reviews.some(review => !review)) throw new Error("invalid daily removal review");
+  return { status: "waiting_for_owner", reason_code: "removal_review", removal_reviews: reviews };
+}
 
 export function dailyLogPaths(identity, { home = homedir() } = {}) {
   if (!/^v1-[a-z0-9]+$/u.test(String(identity?.id || ""))) throw new Error("the daily log identity is invalid");
@@ -124,6 +133,7 @@ export function appendDailySourceFailure(identity, record, options = {}) {
     issue_code: record.issue_code,
     detail: record.detail,
     ...(record.attention ? { attention: record.attention } : {}),
+    ...reviewFields(record),
   })}\n`);
   return appendDailyRecord(identity, bytes, settings);
 }
@@ -209,6 +219,7 @@ export function readDailyObservation(identity, options = {}) {
             issue_code: record.issue_code,
             detail: record.detail,
             ...(record.attention ? { attention: record.attention } : {}),
+            ...reviewFields(record),
           });
           continue;
         }
@@ -240,7 +251,8 @@ export async function observeDailyRun(identity, run, options = {}) {
     const status = RESULTS.has(result?.status) && result.status !== "running" ? result.status : "failed";
     write(identity, { started_at, completed_at: now().toISOString(), result: status,
       // Verified partial coverage is an outcome, not a process failure.
-      error: status === "complete" || status === "partial" ? null : status === "deferred"
+      error: status === "complete" || status === "partial" ? null : status === "waiting_for_owner"
+        ? "A source is waiting for owner approval of removals." : status === "deferred"
         ? "Daily refresh was deferred by another operation or recovery."
         : "One or more daily sources failed or did not prove freshness." }, options);
     return result;
@@ -281,12 +293,14 @@ export function dailyObservationStatus(plan, schedule, runtime, runnerUsable, op
     if (date <= now) date.setDate(date.getDate() + 1);
     next = date.toISOString();
   }
-  const sourceIssues = (observed.source_failures || []).map(({ source, issue_code, detail }) => ({
+  const sourceIssues = (observed.source_failures || []).map(({ source, issue_code, detail, ...record }) => ({
     source, issue_code, detail,
+    ...reviewFields({ ...record, source }),
   }));
   const scheduleAttention = [...new Set((observed.source_failures || [])
     .map((record) => record.attention).filter(Boolean))];
   return { log_path: observed.log_path, last_run_at: newerNativeRun ? nativeTime : row?.started_at || nativeTime,
+    ...(result === "waiting_for_owner" ? { status: result, reason_code: "removal_review" } : {}),
     last_result: result, next_run_at: schedule.enabled ? next : null,
     next_run: !schedule.enabled ? "not scheduled" : next || (schedule.plan_matches_registered_definition
       ? `${plan.cron} ${plan.timezone} (planned)` : "unknown (schedule needs repair)"),
@@ -303,6 +317,7 @@ export function renderDailyObservation(schedule, log) {
   for (const attention of schedule.schedule_attention || []) log(`Daily attention: ${attention}`);
   for (const issue of schedule.source_issues || []) {
     log(`Daily source issue: ${issue.source} | ${issue.issue_code} | ${issue.detail}`);
+    for (const review of issue.removal_reviews || []) log(removalOwnerSentence(review));
   }
   if (schedule.log_path) log(`Daily log: ${schedule.log_path}`);
 }

@@ -224,12 +224,31 @@ test("deploy leaves an existing wrapping key untouched", async () => {
 test("deploy creates and verifies the same independent key for SimpleFIN", async () => {
   const harness = cloudflareHarness();
   const path = writeManifest("deploy-simplefin-absent.json", manifest({ provider: "simplefin" }));
+  const providerChecks = [];
   await isolatedRuntime(harness.fetchImpl, () => cmdDeploy(path, {
     nextSteps: false,
     generateBankWrappingKey: () => SENTINEL,
+    readWorkerBankProvider: async ({ phase }) => {
+      providerChecks.push(`runtime:${phase}`);
+      return "simplefin";
+    },
+    prepareBankProviderDeployment: async ({ liveProvider, targetProvider }) => {
+      providerChecks.push(`prepare:${liveProvider}:${targetProvider}`);
+      return { target_provider: "simplefin", transition_ref: null };
+    },
+    completeBankProviderDeployment: async ({ liveProvider, targetProvider }) => {
+      providerChecks.push(`complete:${liveProvider}:${targetProvider}`);
+      return { deployed_provider: "simplefin" };
+    },
   }));
 
   assert.equal(harness.workerUploads, 1, "the SimpleFIN deploy decision point must be reached");
+  assert.deepEqual(providerChecks, [
+    "runtime:before_upload",
+    "prepare:simplefin:simplefin",
+    "runtime:after_upload",
+    "complete:simplefin:simplefin",
+  ], "the provider transition boundary must be reached on both sides of the upload");
   assert.equal(harness.secretLists, 2, "the missing key and its readback must both be observed");
   assert.equal(harness.secretPuts, 1);
   assert.deepEqual(harness.calls.slice(0, 4), [

@@ -359,6 +359,7 @@ async function quietly(run) {
  */
 async function update(brain, release, { force = false, duringAcceptance = null } = {}) {
   const kit = brain.kit(release);
+  const schedulerReads = [];
   const upgradeOptions = duringAcceptance
     ? {
       ...kit.upgradeOptions,
@@ -389,12 +390,20 @@ async function update(brain, release, { force = false, duringAcceptance = null }
       schedulerAdapter: { read: () => null },
       schedulerOptions: { home: brain.sandbox },
       legacySchedulerOptions: { home: brain.sandbox, uid: 501, launchctl: args => {
+        schedulerReads.push(args[0]);
+        // The empty synthetic home has no loaded jobs or disabled intent.
+        if (args[0] === "list") return { status: 0, stdout: "PID Status Label\n" };
+        if (args[0] === "print-disabled") return { status: 0, stdout: "disabled services = {\n}\n" };
         assert.equal(args[0], "print", "this fixture must not mutate a native scheduler");
         return { status: 113, stdout: "", stderr: "fixture not loaded" };
       } },
     },
   }));
-  if (!run.error) kit.bookmarkWriter.assertCalled();
+  if (!run.error) {
+    kit.bookmarkWriter.assertCalled();
+    assert.ok(schedulerReads.includes("list"), "the completed control reached job inventory");
+    assert.ok(schedulerReads.includes("print-disabled"), "the completed control inspected saved intent");
+  }
   return run;
 }
 

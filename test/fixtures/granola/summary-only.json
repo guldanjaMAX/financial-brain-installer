@@ -1,0 +1,10 @@
+{
+  "id": "meeting-003",
+  "title": "Synthetic derived overview",
+  "meeting_at": "2026-10-30T13:00:00-07:00",
+  "attendees": [],
+  "owner_email": "owner@example.invalid",
+  "summary": "Only a generated summary is available for this meeting.",
+  "transcript": null,
+  "exported_at": "2026-10-31T12:00:00Z"
+}

@@ -57,7 +57,7 @@ export const refused = [
 // All values are invented. A pair's evidence comes from literal account
 // references, never a merchant label or a real institution name.
 export async function fixture(t, scenario = "own") {
-  const f = await createProductFixture({ env: { AI: { async run() {
+  const f = await createProductFixture({ env: { BRAIN_TIMEZONE: "UTC", AI: { async run() {
     f.modelCalls++; throw new Error("fixture model must not draft money");
   } } } });
   if (t) t.after(() => f.close());
@@ -93,6 +93,7 @@ function base(f) {
   f.account("account-a", "1111");
   f.add("deposit", "2026-09-03", 73129, "inflow", "Fixture client deposit");
   f.add("expense-a", "2026-09-05", 2807, "outflow", "Fixture Store", "SOFTWARE", "confirmed");
+  f.raw("UPDATE fin_transactions SET payee='Fixture Store' WHERE txn_uid='expense-a'");
   f.add("expense-b", "2026-09-07", 1903, "outflow", "Fixture Supplies");
 }
 function own(f) {

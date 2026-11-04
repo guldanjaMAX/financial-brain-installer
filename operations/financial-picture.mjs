@@ -357,6 +357,14 @@ export function renderFinancialPicture(receipt) {
         `${section.truncated ? " (more available; use the section cursor)" : ""}` +
         `${section.state === "partial" ? " [schema limitations named in JSON]" : ""}`,
       );
+      if (name === 'accounts') for (const account of section.records || []) {
+        const review = account.account_kind_review;
+        lines.push(`  ${account.masked_identity}: provider ${account.stored_account_kind}/${account.balance_role}; ` +
+          (review ? `reviewed ${account.reviewed_account_kind}/${account.reviewed_balance_role} ` +
+            `(${review.state}, ${review.reviewer}, ${review.reviewed_at}, ${review.source}` +
+            `${review.revoked_at ? `, revoked ${review.revoked_at}` : ''}); effective ${account.effective_account_kind}/${account.effective_balance_role}.`
+            : 'owner review absent.'));
+      }
     }
   }
   lines.push("", "No corpus, configuration, access, or index changes were made.");

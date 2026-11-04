@@ -1285,11 +1285,13 @@ test("scheduled execution reuses the installed ownership plan before checking it
   const definition = buildDailyRefreshDefinition(runnablePlan, DARWIN_DEFINITION_OPTIONS);
   const schedulerAdapter = memoryAdapter({ exists: true, owned: true, enabled: true, definition });
   const result = await runDailyRefreshCli(manifestPath, {
+    home: directory,
     brainModule: {},
     buildPlan: async () => { planCalls += 1; return runnablePlan; },
     expectedDefinitionHash: definition.definition_hash,
     platform: "darwin",
     definitionOptions: {
+      home: directory,
       ...DARWIN_DEFINITION_OPTIONS,
       nodePathExists: () => true,
       nodeRealpath: (path) => path,

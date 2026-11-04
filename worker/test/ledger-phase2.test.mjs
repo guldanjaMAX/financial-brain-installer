@@ -6,6 +6,8 @@ import { createProductFixture, seedOwnedEntity } from "./product-contract-fixtur
 import { withLedgerAnswer } from "../src/lib/ledger-answer.js";
 import { classifyLedgerQuestion } from "../src/lib/ledger-question.js";
 
+import { reviewedDateCopy } from "./fixtures/plain-copy-expectations.mjs";
+
 import { linkAccounts } from "./fixtures/money-fix/fixture.mjs";
 
 const NOW = "2026-10-11T12:00:00Z";
@@ -15,6 +17,7 @@ test.after(() => mock.restoreAll());
 async function fixture(t) {
   const f = await createProductFixture({ env: {
     ADMIN_KEY: randomBytes(24).toString("hex"), SESSION_SIGNING_KEY: randomBytes(32).toString("hex"),
+    BRAIN_TIMEZONE: "UTC",
     AI: { async run() { throw new Error("money must use the ledger"); } },
   } });
   t.after(() => f.close());
@@ -26,9 +29,15 @@ async function fixture(t) {
       VALUES (?,'complete','2026-06-01','2026-10-11',?,'owner_stated','confirmed',?)`, slug, stamp, stamp);
   };
   f.account("account-a", "1111"); f.account("account-b", "2222", "savings");
-  f.add = (id, date, amount, direction = "outflow", description = "Fixture merchant", category = null, basis = null, account = "account-a") => {
-    f.raw(`INSERT INTO fin_transactions (txn_uid,account_slug,posted_on,amount_minor,direction,description,category,category_basis_state,provenance,basis_state,recorded_at)
-      VALUES (?,?,?,?,?,?,?,?,'owner_stated','confirmed',?)`, id, account, date, amount, direction, description, category, basis, stamp);
+  const structuredPayees = new Map([
+    ["merchant", "Fixture Store"], ["exact", "Fixture Store"],
+    ["other", "Fixture Storehouse"], ["unsorted:Fixture Store", "Fixture Store"],
+  ]);
+  f.add = (id, date, amount, direction = "outflow", description = "Fixture merchant", category = null, basis = null,
+    account = "account-a", payee = null) => {
+    payee ??= structuredPayees.get(`${id}:${description}`) || structuredPayees.get(id) || null;
+    f.raw(`INSERT INTO fin_transactions (txn_uid,account_slug,posted_on,amount_minor,direction,description,payee,category,category_basis_state,provenance,basis_state,recorded_at)
+      VALUES (?,?,?,?,?,?,?,?,?,'owner_stated','confirmed',?)`, id, account, date, amount, direction, description, payee, category, basis, stamp);
   };
   f.ask = (question, extra = {}) => withLedgerAnswer({ env: f.env, question, now: NOW,
     grantScope: { all: true }, scopePrincipalKind: "owner", ...extra },
@@ -67,8 +76,8 @@ for (const [question, kind, seed] of [
     assert.equal(absent.ledger?.found, false);
     assert.ok(transactionReads(f) > before, "absence inspected transactions");
     assert.match(absent.answer, /1111.*2222/);
-    assert.ok(absent.answer.includes(absent.ledger.from) && absent.answer.includes(absent.ledger.to));
-    assert.match(absent.answer, /covered through 2026-10-11/);
+    assert.ok(absent.answer.includes(reviewedDateCopy(`${absent.ledger.from} through ${absent.ledger.to}`)));
+    assert.match(absent.answer, /covered through October 11/);
     seed(f);
     f.raw("UPDATE fin_account_coverage SET covered_from='2026-10-05'");
     const readCount = f.seen.sql.length;
@@ -108,7 +117,8 @@ test("merchant tokens are contiguous and category proposals and Unsorted stay ex
   f.add("unsorted", "2026-09-17", 99, "outflow", "Fixture Store");
   const merchant = await f.ask("How much did I spend at fixture store in September 2026?");
   assert.equal(merchant.ledger.total_minor, 10100);
-  assert.match(merchant.answer, /Unsorted.*\$0\.99/);
+  assert.doesNotMatch(merchant.answer, /Unsorted|possible (?:transfer|move)/i);
+  assert.equal(merchant.answer.match(/\$\d[\d,]*\.\d{2}/g)?.length, 1, "named vendor output has one currency figure");
   const category = await f.ask("How much did I spend on software/SaaS in Q3?");
   assert.equal(category.ledger.total_minor, 10501);
   assert.equal(category.ledger.unsorted_minor, 99);
@@ -202,7 +212,8 @@ test("selected account still pairs with owned counterparts across month boundari
   f.add("boundary-in", "2026-10-02", 5555, "inflow", "TRANSFER FROM account 1111", null, null, "account-b");
   const out = await f.ask("How much money went out in September 2026 for account 1111?");
   assert.equal(out.ledger.accounts.length, 1);
-  assert.equal(out.ledger.accounts[0].debits_minor, 5555);
+  assert.equal(out.ledger.total_minor, 0);
+  assert.equal(out.ledger.excluded_own_transfer_minor, 5555);
   assert.equal(out.ledger.candidate_transfer_count, 1);
   const income = await f.ask("How much income by category in October 2026?", { now: "2026-11-01T00:00:00Z" });
   assert.equal(income.gaps[0]?.reason, "period_outside_coverage");
@@ -295,13 +306,27 @@ test("mutation control kills a removed recurring cadence guard through SQLite", 
 
 test("merchant punctuation and category words do not become implicit account selectors", async t => {
   const f = await fixture(t);
-  f.add("punctuation", "2026-09-15", 1357, "outflow", "Fixture.Store card payment", "SOFTWARE", "confirmed");
+  f.add("punctuation", "2026-09-15", 1357, "outflow", "Fixture.Store payment", "SOFTWARE", "confirmed", "account-a", "Fixture.Store");
+  f.add("account-word", "2026-09-16", 2468, "outflow", "Fixture Store card payment", "SOFTWARE", "confirmed", "account-a", "Fixture Store card");
   const punctuation = await f.ask("How much did I spend at Fixture.Store in September 2026?");
-  assert.equal(punctuation.ledger.total_minor, 1357);
+  // A structured whole-word suffix is now disclosed family spend. The word
+  // "card" inside that payee must still never narrow the account inventory.
+  assert.equal(punctuation.ledger.total_minor, 3825);
+  assert.equal(punctuation.ledger.match_basis, "family");
+  assert.equal(punctuation.ledger.exact_match_count, 1);
+  assert.equal(punctuation.ledger.family_match_count, 1);
+  assert.equal(punctuation.evidence_gate.complete, true);
+  assert.match(punctuation.answer, /^also includes: Fixture Store card\.$/m);
+  assert.equal(punctuation.ledger.accounts.length, 2);
   const accountWord = await f.ask("How much did I spend at Fixture Store card in September 2026?");
-  assert.equal(accountWord.ledger?.total_minor, 1357);
+  assert.equal(accountWord.ledger?.total_minor, 2468);
   const selected = await f.ask("How much did I spend at Fixture.Store in September 2026 for checking account 1111?");
-  assert.equal(selected.ledger.total_minor, 1357);
+  assert.equal(selected.ledger.total_minor, 3825);
+  assert.deepEqual(selected.ledger.groups.map(g => [g.merchant, g.total_minor, g.count]), [
+    ["Fixture Store card", 2468, 1], ["Fixture.Store", 1357, 1],
+  ]);
+  assert.equal(selected.evidence_gate.complete, true);
+  assert.match(selected.answer, /^also includes: Fixture Store card\.$/m);
   assert.equal(selected.ledger.accounts.length, 1);
 });
 
@@ -351,15 +376,17 @@ test("transfer uniqueness inspects competitors beyond a window-edge counterpart"
   f.add("out", "2026-09-01", 12345, "outflow", "TRANSFER TO account 2222");
   f.add("in", "2026-08-29", 12345, "inflow", "TRANSFER FROM account 1111", null, null, "account-b");
   const control = await f.ask("How much money went out in September 2026 for account 1111?");
-  assert.equal(control.ledger.accounts[0].debits_minor, 12345);
+  assert.equal(control.ledger.total_minor, 0);
+  assert.equal(control.ledger.excluded_own_transfer_minor, 12345);
   assert.equal(control.ledger.candidate_transfer_count, 1);
   f.add("competitor", "2026-08-26", 12345, "outflow", "TRANSFER TO account 2222", null, null, "account-c");
   const before = transactionReads(f);
   const ambiguous = await f.ask("How much money went out in September 2026 for account 1111?");
   assert.ok(transactionReads(f) > before);
-  assert.equal(ambiguous.ledger.accounts[0].debits_minor, 12345);
+  assert.equal(ambiguous.ledger.total_minor, 12345);
+  assert.equal(ambiguous.ledger.excluded_own_transfer_minor, 0);
+  assert.equal(ambiguous.ledger.row_count, 1);
   assert.equal(ambiguous.ledger.candidate_transfer_count, 0);
-  assert.equal(ambiguous.ledger.unmatched_transfers.length, 1);
 });
 
 test("row LIMIT stops a large covered range before a global sort scans it all", async t => {

@@ -28,11 +28,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { printGuidance } from "./cli-guidance.mjs";
 
-import { recordSupportEvent } from "../support-journal.mjs";
+import { recordSupportEvent, SUPPORT_ERROR_CODES } from "../support-journal.mjs";
 import {
   cronToCalendarIntervals,
   expectedRefreshSecondsForCron,
@@ -80,12 +80,20 @@ const HISTORICAL_RAW_DRIVE_KEYS = new Set([
 
 class CuratedSchedulerError extends Error {}
 
-function fail(message) {
-  throw new CuratedSchedulerError(message);
+function fail(message, failure = null) {
+  const diagnostic = failure && SUPPORT_ERROR_CODES.includes(failure.code) &&
+    ["target", "readback", "audit"].includes(failure.phase) ? failure : null;
+  const error = new CuratedSchedulerError(diagnostic
+    ? `${message} [${diagnostic.phase}: ${diagnostic.code}]` : message);
+  if (diagnostic) error.supportCode = diagnostic.code;
+  throw error;
 }
 
-function publicFailure(error) {
-  return error instanceof CuratedSchedulerError ? error.message : "curated scheduler operation could not be completed safely";
+export function curatedSchedulerFailureMessage(error) {
+  if (error instanceof CuratedSchedulerError && SUPPORT_ERROR_CODES.includes(error.supportCode)) return error.message;
+  const message = error instanceof CuratedSchedulerError
+    ? error.message : "curated scheduler operation could not be completed safely";
+  return `${message} [SCHEDULE_RUN_FAILED]`;
 }
 
 function currentUid() {
@@ -293,8 +301,8 @@ export function buildCuratedSchedulerPlan(planPath, options = {}) {
   return Object.freeze(plan);
 }
 
-export function renderCuratedLaunchAgentPlist(plan) {
-  return renderLaunchAgentPlist(plan);
+export function renderCuratedLaunchAgentPlist(plan, options = {}) {
+  return renderLaunchAgentPlist(plan, options);
 }
 
 function launchArguments(output) {
@@ -331,19 +339,25 @@ export function reinstallScheduledCuratedSync(planPath, options = {}) {
     encoding: "utf8", env: launchctlChildEnvironment(options.env ?? process.env),
     timeout: 15_000, shell: false,
   }));
-  const desired = renderCuratedLaunchAgentPlist(plan);
+  const desired = renderCuratedLaunchAgentPlist(plan, options);
   ensurePrivateDirectory(join(plan.home, "Library"), true);
   ensurePrivateDirectory(dirname(plan.plistPath));
   let prior = null;
+  let installedArguments = null;
   if (existsSync(plan.plistPath)) {
     assertPrivateLockIdentity(lstatSync(plan.plistPath), "curated scheduler plist");
     prior = readFileSync(plan.plistPath, "utf8");
     // A matching label alone cannot authorize adopting an unrelated service.
-    // Bind the exact runtime, wrapper and plan, allowing only its previous hash.
-    const argumentsBlock = text => text.match(/<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/)?.[1]
-      ?.replace(/<string>[0-9a-f]{64}<\/string>/g, "<string>HASH</string>");
-    if (argumentsBlock(prior) !== argumentsBlock(desired) ||
-        !prior.includes(`<string>${plan.label}</string>`)) {
+    // Runtime directories change on update. Ownership follows this exact
+    // private plan, label and wrapper contract, never a runtime prefix alone.
+    const block = prior.match(/<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/)?.[1];
+    const decode = text => text.replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&quot;", '"').replaceAll("&apos;", "'").replaceAll("&amp;", "&");
+    installedArguments = [...(block ?? "").matchAll(/<string>([^<]*)<\/string>/gu)].map(match => decode(match[1]));
+    const label = prior.match(/<key>Label<\/key>\s*<string>([^<]*)<\/string>/)?.[1];
+    if (installedArguments.length !== 6 || !isAbsolute(installedArguments[0]) || basename(installedArguments[0]) !== basename(plan.nodePath) ||
+        !isAbsolute(installedArguments[1]) || basename(installedArguments[1]) !== basename(plan.schedulerPath) ||
+        installedArguments[2] !== "run" || installedArguments[3] !== plan.path || installedArguments[4] !== "--config-hash" ||
+        !/^[0-9a-f]{64}$/u.test(installedArguments[5]) || label !== plan.label) {
       fail("curated scheduler existing plist does not belong to this plan and runtime");
     }
   }
@@ -365,8 +379,7 @@ export function reinstallScheduledCuratedSync(planPath, options = {}) {
     if (wasLoaded) {
       const active = launchArguments(status.stdout);
       priorArguments = active;
-      if (JSON.stringify(active.slice(0, -1)) !== JSON.stringify(plan.programArguments.slice(0, -1)) ||
-          !/^[0-9a-f]{64}$/.test(active.at(-1) ?? "")) {
+      if (JSON.stringify(active) !== JSON.stringify(installedArguments)) {
         fail("curated scheduler loaded service does not belong to this plan and runtime");
       }
       if (/\bstate\s*=\s*running\b|\bpid\s*=\s*[1-9][0-9]*/.test(status.stdout)) {
@@ -389,6 +402,12 @@ export function reinstallScheduledCuratedSync(planPath, options = {}) {
     if (readFileSync(plan.plistPath, "utf8") !== desired) fail("curated scheduler plist readback failed");
     // A plan or manifest changed while preparing the service is never adopted.
     assertExpectedConfiguration(buildCuratedSchedulerPlan(planPath, options), plan.configHash);
+    if (options.enabled === false) {
+      requireSuccess(["disable", plan.service]);
+      const readback = launchctl(["print", plan.service]);
+      if (readback?.error || readback?.status !== 113) fail("curated disabled registration readback failed");
+      return { ...plan, installed: true, loaded: false, replaced: prior !== null };
+    }
     requireSuccess(["enable", plan.service]);
     requireSuccess(["bootstrap", plan.domain, plan.plistPath]);
     const readback = requireSuccess(["print", plan.service]);
@@ -407,8 +426,7 @@ export function reinstallScheduledCuratedSync(planPath, options = {}) {
       if (status.status === 0) {
         const active = launchArguments(status.stdout);
         // Never unload a different service encountered during recovery.
-        if (JSON.stringify(active.slice(0, -1)) !== JSON.stringify(plan.programArguments.slice(0, -1)) ||
-            !/^[0-9a-f]{64}$/.test(active.at(-1) ?? "")) fail("rollback identity changed");
+        if (![installedArguments, plan.programArguments].some(args => JSON.stringify(active) === JSON.stringify(args))) fail("rollback identity changed");
         priorStillLoaded = !bootoutAcknowledged && wasLoaded && JSON.stringify(active) === JSON.stringify(priorArguments);
         if (!priorStillLoaded) {
           if (/\bstate\s*=\s*running\b|\bpid\s*=\s*[1-9][0-9]*/.test(status.stdout)) fail("rollback service is running");
@@ -708,11 +726,12 @@ export async function executeScheduledCuratedSync(planPath, options = {}) {
     expectedTargetFingerprints: plan.targetManifestFingerprints,
     home: plan.home,
   });
-  if (!report?.ok) fail("curated scheduled sync did not confirm every required target");
+  if (!report?.ok) fail("curated scheduled sync did not confirm every required target", report?.failure);
   const now = options.now instanceof Date ? options.now : new Date(options.now ?? Date.now());
   const receipt = successReceipt(plan, report, now);
   (options.writeFreshness ?? writePrivateFreshness)(plan.freshnessPath, receipt, options);
-  return { ...plan, status: "complete", code: 0, receipt };
+  return { ...plan, status: "complete", code: 0, receipt,
+    advisories: report.advisories?.includes("RAW_DRIVE_AUDIT_DEFERRED") ? ["RAW_DRIVE_AUDIT_DEFERRED"] : [] };
 }
 
 /** Acquire a nonblocking advisory lock without placing any credential in argv or env. */
@@ -823,7 +842,8 @@ export function recordCuratedSchedulerFailure(options = {}) {
     const event = recordSupportEvent({
       command: "schedule",
       source: "scheduler",
-      errorCode: "SCHEDULE_RUN_FAILED",
+      errorCode: options.error instanceof CuratedSchedulerError && SUPPORT_ERROR_CODES.includes(options.error.supportCode)
+        ? options.error.supportCode : "SCHEDULE_RUN_FAILED",
       productRelativeLocation: "operations/curated-sync-scheduler.mjs#main",
     }, options.journalOptions ?? {});
     return event.event_id;
@@ -899,10 +919,13 @@ async function main(argv = process.argv.slice(2)) {
     try {
       const result = await executeScheduledCuratedSync(planPath, { expectedConfigHash });
       console.log(`[${new Date().toISOString()}] curated sync ${result.status}`);
+      if (result.advisories.includes("RAW_DRIVE_AUDIT_DEFERRED")) {
+        console.log("RAW_DRIVE_AUDIT_DEFERRED: historical raw Drive presence was not checked; use the explicit audit mode.");
+      }
       return result.code;
     } catch (error) {
-      console.error(`Curated scheduler failed: ${publicFailure(error)}`);
-      const eventId = recordCuratedSchedulerFailure();
+      console.error(`Curated scheduler failed: ${curatedSchedulerFailureMessage(error)}`);
+      const eventId = recordCuratedSchedulerFailure({ error });
       printSupportReceipt(eventId);
       return eventId ? CHILD_FAILURE_JOURNALED_EXIT : CHILD_FAILURE_UNJOURNALED_EXIT;
     }
@@ -920,8 +943,8 @@ async function main(argv = process.argv.slice(2)) {
 const IS_MAIN = process.argv[1] && resolve(process.argv[1]) === resolve(DEFAULT_SCHEDULER_PATH);
 if (IS_MAIN) {
   main().then((code) => { process.exitCode = code; }).catch((error) => {
-    console.error(`Curated scheduler failed: ${publicFailure(error)}`);
-    printSupportReceipt(recordCuratedSchedulerFailure());
+    console.error(`Curated scheduler failed: ${curatedSchedulerFailureMessage(error)}`);
+    printSupportReceipt(recordCuratedSchedulerFailure({ error }));
     process.exitCode = 1;
   });
 }

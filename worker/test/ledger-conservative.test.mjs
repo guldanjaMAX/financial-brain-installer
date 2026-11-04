@@ -1,3 +1,4 @@
+import { PAYER_PARTIAL_LINE } from './fixtures/plain-copy-expectations.mjs';
 // Adapted from both hotfix review rounds. Each refusal reaches the real reader
 // and is paired with a positive receipt, bank-total or empty-window control.
 import test from 'node:test';
@@ -9,13 +10,13 @@ import { classifyLedgerQuestion } from '../src/lib/ledger-question.js';
 const payment = 'Did the payment from Payer One arrive in October 2026?';
 const income = 'How much income came from Payer One in October 2026?';
 const grouped = 'How much income came by merchant in October 2026?';
-const labelNote = 'Labels come from your bank and may not identify who paid.';
+const labelNote = "Bank payee names may not identify who paid, so the sender of every deposit is still unconfirmed.";
 function uncertain(body, count = 1) {
   assert.equal(body.ledger.found, null);
   assert.equal(body.ledger.total_minor, null);
   assert.equal(body.ledger.complete, false);
   assert.equal(body.evidence_gate.complete, false);
-  assert.match(body.answer, /can't confirm/i);
+  assert.match(body.answer, PAYER_PARTIAL_LINE);
   assert.doesNotMatch(body.answer, /No matching deposit|\$0\.00|No matching transactions/);
   assert.equal(body.ledger.inflow_count, count);
   assert.equal(body.ledger.inflows.length, Math.min(10, count));
@@ -58,6 +59,8 @@ for (const [id, description, payee] of [
   assert.equal(groups.ledger.complete, false);
   assert.equal(groups.evidence_gate.complete, false);
   assert.ok(groups.answer.includes(labelNote));
+  assert.ok(groups.answer.endsWith('Want me to show your account balances?'));
+  assert.equal((groups.answer.match(/Want[^?]*\?/g) || []).length, 1);
 });
 
 for (const identifier of ['AB12CD34EF56', '482.617.039.258.001', '482617039258001', 'Q7X9P2', 'AB12/CD34/EF56']) {
@@ -181,7 +184,7 @@ test('inflow list caps at ten and keeps the account and date scope, not the amou
   f.raw(`INSERT INTO fin_accounts (account_slug,entity_slug,account_kind,balance_role,mask,feed_mode,provenance,source_feed,basis_state,recorded_at)
     VALUES ('other-account','owner','checking','asset','9876','live','feed','bank-feed:fixture-feed','confirmed',?)`, NOW);
   f.raw(`INSERT INTO fin_account_coverage (account_slug,coverage_status,covered_from,covered_to,computed_at,provenance,source_feed,basis_state,recorded_at)
-    VALUES ('other-account','complete','2024-01-01','2026-10-12',?,'feed','bank-feed:fixture-feed','confirmed',?)`, NOW, NOW);
+    VALUES ('other-account','complete','2024-01-01','2026-10-31',?,'feed','bank-feed:fixture-feed','confirmed',?)`, NOW, NOW);
   f.add('other-account-receipt', 'Outside selected account', 'Payer One');
   f.raw("UPDATE fin_transactions SET account_slug='other-account' WHERE txn_uid='other-account-receipt'");
   assert.equal((await reachedAnswer(f, payment)).ledger.found, true, 'other account positive control');

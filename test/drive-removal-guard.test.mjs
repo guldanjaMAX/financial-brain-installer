@@ -602,7 +602,10 @@ assert.equal(approvalPlan.tooLarge, true);
 const refusal = errorMessage(approvalPlan);
 assert.ok(refusal, "an unusually large plan must be refused without approval");
 assert.ok(reportsCount(refusal, "source[_\\s-]*policy", 1), refusal);
-assert.ok(reportsCount(refusal, "source[_\\s-]*(?:deleted|deletion)", 1), refusal);
+// The legacy source_deleted category carries no item-specific deletion evidence.
+assert.equal(approvalPlan.targetCauses[rawUids.source_deleted], "unknown");
+assert.ok(reportsCount(refusal, "source[_\\s-]*removal", 1), refusal);
+assert.doesNotMatch(refusal, /\bdelet(?:ed|ion)\b/i);
 assert.ok(reportsCount(refusal, "intentional[_\\s-]*skip", 1), refusal);
 assert.ok(
   (reportsCount(refusal, "total", 3) && reportsCount(refusal, "stored", 20)) ||

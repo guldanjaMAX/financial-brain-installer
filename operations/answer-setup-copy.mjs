@@ -17,6 +17,7 @@ export const BUSY = "Anthropic is busy right now, or this account reached its pe
 export const UNREACHABLE = "This computer could not reach Anthropic. Check the internet connection, click Copy again in the key window, and rerun the same command. Nothing was changed.";
 export const CHECK_FAILED = "Anthropic refused the test message for a reason this installer does not recognize. Nothing was changed. Support code: ANTHROPIC_CHECK_FAILED.";
 export const CHECK_PROBLEM = "The answer model check could not be read completely. Your current answer setup was kept. In a few minutes, run the same check again. Support code: ANTHROPIC_CHECK_FAILED.";
+export const SECRET_READBACK_FAILED = "Cloudflare did not show the saved Anthropic secret after repeated readback checks. The change was rolled back. In a few minutes, rerun the same command. Support code: CLOUDFLARE_SECRET_READBACK_FAILED.";
 export const CLIPBOARD_CLEAR_WARNING = "Claude answers are connected, but this command could not clear the clipboard. Clear it now before closing the key window; a clipboard history app may still keep a copy.";
 export const ROLLED_BACK_BUILT_IN = "Your Brain could not answer with Claude using this key, so it was put back on the built-in model. Fix the item below, then rerun the same command.";
 export const ROLLED_BACK_PREVIOUS = "The change could not be finished, so your Brain was put back exactly as it was. Fix the item below, then rerun the same command.";
@@ -37,8 +38,16 @@ export const DASHBOARD_STEPS = "In Cloudflare, open your Brain's Worker, then Se
 export const DAILY_RECONCILE_FAILED = (manifest) =>
   `Daily imports need one more step after this change. Run: brain daily on ${manifest}`;
 export const INSECURE_PROMPT = "This window cannot ask for the key privately. Copy the key, then run: brain connect anthropic <manifest> --from-clipboard";
-export const MODEL_NOT_REVIEWED = ({ field, id, manifest }) =>
-  `retrieval.${field} is set to ${id}, which this installer has not reviewed. Nothing was changed. First run brain disconnect anthropic ${manifest} to return to the built-in model. Then, if the owner wants the recommended setup, run brain connect anthropic ${manifest} --from-clipboard.`;
+export const MODEL_NOT_REVIEWED = () =>
+  "This model name isn't supported for updates yet. Nothing was changed. Contact your partner.";
+export const LEGACY_MODEL_SWITCH_LINE = "Your Brain uses an older Claude model name (claude-sonnet-5). This update switches it to the current pair: Opus answers, Sonnet checks. Same key, same data.";
+
+export function legacyModelSwitchMessage({ changes }) {
+  if (changes.answer_model && changes.gate_model) return LEGACY_MODEL_SWITCH_LINE;
+  const field = changes.answer_model ? "answer_model" : "gate_model";
+  const role = field === "answer_model" ? "answers" : "checks";
+  return `Your Brain uses an older Claude model name (${changes[field].from}). This update switches ${role} to ${changes[field].to}. Same key, same data.`;
+}
 export const ENV_IGNORED = (manifest) =>
   `ANTHROPIC_API_KEY in this terminal was ignored. To connect Claude answers, run: brain connect anthropic ${manifest} --from-clipboard`;
 export const HEALTH_KEY_MISSING = "Answers are paused: this Brain is set to answer with Claude, but its Anthropic key is missing.";
@@ -62,7 +71,7 @@ export const SETUP_CUSTOM = (answerModel, gateModel) =>
 export const RECOVERY_KEY_LINE = (manifest) =>
   `This Brain answers with Claude. Reconnect its Anthropic key with: brain connect anthropic ${manifest} --from-clipboard`;
 
-export const GAP_DETAIL = "Answers are paused until the Anthropic key is reconnected.";
+export const GAP_DETAIL = "Search still works, but answers are paused until the answer service is reconnected. Want help reconnecting it?";
 
 export const TECHNICIAN_ANTHROPIC_COPY = Object.freeze({
   title: "Choose who writes your answers",
@@ -91,7 +100,7 @@ Privacy: for each question, your Brain sends Anthropic your question, your name,
 The other choice is the built-in Cloudflare model: no second account and almost no cost, but in the same test 16 of its 43 answers were wrong.
 
 If you say yes, your part is: sign in to Anthropic, add a card if it asks, click Create and Copy when I say, and approve one command. I do the rest. Shall I set it up?`;
-export const SKILL_ON_REQUEST = "For an existing Brain, set up Claude answers only when the owner asks for it, for example 'set up Claude answers'. Never offer it on your own after an update. An update never changes the answer model.";
+export const SKILL_ON_REQUEST = "For an existing Brain, set up Claude answers only when the owner asks for it, for example 'set up Claude answers'. Never offer it on your own after an update. An update preserves the configured models except for the exact legacy name claude-sonnet-5: it announces the switch to Opus answers, Sonnet checks and uses the same stored key.";
 export const SKILL_CREDENTIAL_LINE = "Anthropic API keys: entered only through brain connect anthropic (clipboard or the masked Cloudflare field). Never in chat, an environment variable, a command argument or a file.";
 
 export const CONTRACT_SECTION = `## If answers are paused

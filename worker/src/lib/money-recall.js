@@ -61,13 +61,14 @@ export function moneyRecordQualification({ question, answer, docs = [], now = Da
 export function applyMoneyRecallVeto({ question, answer, evidenceGate, docs = [], candidates = docs, now = Date.now(), owner, filters }) {
   const unchanged = { answer, evidenceGate };
   if (!answer || evidenceGate?.supported !== true || !isMoneyQuestion(question)) return unchanged;
-  const refuse = reason => ({ answer: null, evidenceGate: { ...evidenceGate,
+  const refuse = (reason, detail) => ({ answer: null, evidenceGate: { ...evidenceGate,
     supported: false, complete: false, evidence: [], reason },
-    gap: { type: 'money_recall', detail: reason } });
+    gap: { type: 'money_recall', detail } });
   const approved = docs.filter(doc => evidenceGate.evidence?.includes(doc.n));
   const qualified = moneyRecordQualification({ question, answer, docs: approved, now });
   if (/\bthe record states\b/.test(answer) && !qualified.evidence.length) {
-    return refuse('The dated money quote does not match its entire cited span, date or requested subject.');
+    return refuse('The dated money quote does not match its entire cited span, date or requested subject.',
+      `I can help review the original record, but this money quote differs in its text, date, or subject, so the quoted detail is unconfirmed.\nWant to check the original record?`);
   }
   if (hasExplicitCurrentIntent(question) && !qualified.evidence.length) {
     const current = currentEvidenceCandidates(question, candidates.filter(eligible), { owner, filters });
@@ -76,7 +77,8 @@ export function applyMoneyRecallVeto({ question, answer, evidenceGate, docs = []
     if (newest !== undefined && cited.some(doc => {
       const time = reliableDocumentTime(doc);
       return time !== null && time < newest;
-    })) return refuse('The current answer cites older money evidence; report exact dated history or cite the newer supporting record.');
+    })) return refuse('The current answer cites older money evidence; report exact dated history or cite the newer supporting record.',
+      `I found a newer matching record, but this answer uses an older one, so the current amount is unconfirmed.\nWant to review the newest record?`);
   }
   return unchanged;
 }

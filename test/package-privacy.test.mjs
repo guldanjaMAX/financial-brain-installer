@@ -432,6 +432,7 @@ const expected = [
   "connectors/zoom.mjs",
   "connectors/whatsapp.mjs",
   "docs/ARCHITECTURE.md",
+  "docs/account-kind-reviews.md",
   "docs/COMPETITIVE-BENCHMARK.md",
   "docs/CONNECTOR-BACKLOG.md",
   "docs/ENGINEERING-STANDARDS.md",
@@ -571,6 +572,8 @@ const expected = [
   // Saved exact-removal approval and runtime binding shared by ingest and
   // independently approved structural repair. No instance state ships.
   "operations/ingest-removal-plan.mjs",
+  "operations/load-removal-review.mjs",
+  "operations/removal-causes.mjs",
   "operations/ingest-finalization-retry.mjs",
   "operations/provenance-source-assessment.mjs",
   // Held Windows x64 first-source lane. The pure orchestrator owns no I/O; its
@@ -648,6 +651,7 @@ const expected = [
   // Shared byte contract for a normalized install-state prefix plus one direct
   // D1 data export. It owns no credential, provider, or command transport.
   "operations/recovery-content-fingerprint.mjs",
+  "operations/rename-retry.mjs",
   // Reviewed v0.4.8 campaign contracts. Seven are dependency-free or pure
   // hash/shape validators. The teardown D1 proof accepts only an injected,
   // already approved Wrangler boundary, fixes every permitted read/export
@@ -673,6 +677,7 @@ const expected = [
   // redirects, and sends only bounded exact filters to the Brain data plane.
   "operations/financial-picture.mjs",
   "operations/ledger-rekey.mjs",
+  "operations/ledger-account-kind.mjs",
   "operations/content-refresh-dates.mjs",
   "operations/cloudflare-token-store.mjs",
   // Generic brain check modules. Reviewed 2026-09-05: categories and fixtures
@@ -721,6 +726,10 @@ const expected = [
   "CHANGELOG.md",
   "brain.mjs",
   "connectors/catalog.mjs",
+  // Supervised meeting export modules carry no account default or acquisition capability.
+  "connectors/granola-records.mjs",
+  "connectors/granola-export.mjs",
+  "connectors/granola-export-reader.mjs",
   "connectors/dropbox.mjs",
   "connectors/hubspot.mjs",
   "connectors/microsoft-graph.mjs",
@@ -789,11 +798,14 @@ const expected = [
   "migrations/d1/0054_daily_evidence.sql",
   "migrations/d1/0055_fin_account_links.sql",
   "migrations/d1/0056_content_date_refresh_receipts.sql",
+  "migrations/d1/0057_bank_provider_transition.sql",
+  "migrations/d1/0058_fin_account_kind_reviews.sql",
   "operations/bank-access-wrapping-key.mjs",
   // Generic owner-present bank secret custody. Reviewed 2026-09-17: takes only
   // injected list, write, and hidden-prompt callbacks; refuses ambient values
   // and reports secret names, never values.
   "operations/bank-feed-owner-secrets.mjs",
+  "operations/bank-provider-command.mjs",
   "operations/custom-api-clipboard.mjs",
   "operations/bootstrap-status.mjs",
   // Generic local timing helper. It receives only injected clock/scheduler
@@ -838,6 +850,7 @@ const expected = [
   "worker/src/lib/bank-activity-doc.js",
   "worker/src/lib/bank-export.js",
   "worker/src/lib/bank-feed-profiles.js",
+  "worker/src/lib/bank-provider-transition.js",
   "worker/src/lib/ingestion-outcome.js",
   "worker/src/lib/install-smoke.js",
   "worker/src/lib/owner-bank-import.js",
@@ -889,6 +902,7 @@ const expected = [
   "operations/current-user-file.mjs",
   "operations/drive-removal-plan.mjs",
   "operations/drive-scheduler.mjs",
+  "operations/update-scheduler-inventory.mjs",
   "operations/folder-retirement.mjs",
   "operations/folder-scheduler.mjs",
   "operations/imessage-scheduler.mjs",
@@ -899,6 +913,7 @@ const expected = [
   // filesystem, retry, or mutation implementation and receives one fixed
   // aggregate SELECT through injected read-only callbacks.
   "operations/aggregate-field-observer.mjs",
+  "operations/answer-route-proof.mjs",
   "operations/cloudflare-recovery-adapter.mjs",
   "operations/locked-wrangler-runtime.mjs",
   "operations/package-bundle-verifier.mjs",
@@ -951,10 +966,17 @@ const expected = [
   // inference, mutation, or instance defaults.
   "worker/src/lib/financial-picture.js",
   "worker/src/lib/fin-account-links.js",
+  "worker/src/lib/fin-account-kinds.js",
   "worker/src/lib/fin-d1.js",
   "worker/src/lib/ledger-question.js",
   "worker/src/lib/ledger-reader.js",
   "worker/src/lib/ledger-answer.js",
+  "worker/src/lib/ledger-monthly.js",
+  "worker/src/lib/ledger-intent.js",
+  "worker/src/lib/ledger-intent-contract.js",
+  "worker/src/lib/ledger-clarification.js",
+  "worker/src/lib/ledger-wording.js",
+  "worker/src/lib/money-format.js",
   "worker/src/lib/ledger-analysis.js",
   "worker/src/lib/fin-import.js",
   "worker/src/lib/fin-ledger-maintenance.js",

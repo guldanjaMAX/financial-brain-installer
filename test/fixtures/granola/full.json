@@ -1,0 +1,15 @@
+{
+  "id": "meeting-001",
+  "title": "Synthetic planning session",
+  "meeting_at": "2026-10-30T09:30:00-07:00",
+  "attendees": ["Owner", "Reviewer <reviewer@example.invalid>"],
+  "owner_email": "owner@example.invalid",
+  "notes": "Review the proposed delivery date before publishing the schedule.",
+  "summary": "A generated overview that must never replace the source transcript.",
+  "transcript": [
+    {"speaker": "Owner", "source": "microphone", "start": 0, "text": "The proposed delivery date is next Friday."},
+    {"speaker": "Reviewer", "source": "system", "start": 3.5, "text": "Please verify the capacity before confirming that date."},
+    {"speaker": null, "source": "system", "start": null, "text": "The schedule remains provisional pending that review."}
+  ],
+  "exported_at": "2026-10-31T12:00:00Z"
+}

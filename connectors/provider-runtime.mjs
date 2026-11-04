@@ -13,9 +13,12 @@ import { ingestionOutcome } from "../ingest/outcome.mjs";
 import { providerWithheldReason, sourceReceiptIssueCode } from "../worker/src/lib/source-receipt.js";
 import { restampFirstPartySourceProvenance } from "../worker/src/lib/provenance-receipt.js";
 import { credentialRefusalReason } from "../worker/src/lib/secret-scan.js";
+import { removalCause } from "../operations/removal-causes.mjs";
 
 const SAFE_SOURCE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const RESULT_STATUSES = new Set(["created", "updated", "unchanged", "refused", "failed"]);
+const MAX_PROVIDER_DEFERRED_COUNT = 100;
+const PROVIDER_DEFERRED_REASON_CODES = new Set(["calendar_event_incomplete"]);
 const clean = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 
 export class ProviderDeliveryError extends Error {
@@ -35,6 +38,20 @@ export const providerSnapshotRemovalFingerprint = (source, uids) => createHash("
 const providerRemovalReviewRequired = (removalCount, storedCount) =>
   removalCount > 100 || (storedCount > 0 && removalCount / storedCount > 0.10);
 
+function normalizeDeferredCoverage(result) {
+  const count = result?.deferred_count;
+  const reason = result?.deferred_reason_code;
+  if (count === undefined && reason === undefined) return { count: 0, reason: null };
+  if (!Number.isSafeInteger(count) || count < 0 || count > MAX_PROVIDER_DEFERRED_COUNT ||
+      (count === 0 && reason !== null) ||
+      (count > 0 && !PROVIDER_DEFERRED_REASON_CODES.has(reason))) {
+    throw new ProviderDeliveryError("the provider returned invalid deferred-coverage evidence", {
+      code: "invalid_provider_deferred_coverage",
+    });
+  }
+  return { count, reason };
+}
+
 export function normalizeProviderResult(source, result) {
   const sourceName = clean(source).toLowerCase();
   if (!SAFE_SOURCE.test(sourceName)) throw new TypeError("provider delivery needs a safe source name");
@@ -52,6 +69,7 @@ export function normalizeProviderResult(source, result) {
     });
   });
   const deletions = result.deletions.map((deletion) => ({ ...deletion, source_type: sourceName }));
+  const deferred = normalizeDeferredCoverage(result);
   const documentIds = documents.map((document) => String(document?.source_id || ""));
   const deletionIds = deletions.map((deletion) => String(deletion?.source_id || ""));
   if (documentIds.some((id) => !id.trim()) || new Set(documentIds).size !== documentIds.length) {
@@ -73,10 +91,24 @@ export function normalizeProviderResult(source, result) {
       code: "provider_identity_conflict",
     });
   }
+  // Folder observations have no shared ordering that makes one cause final.
+  // Merge before snapshot deduplication can discard conflicting evidence.
+  // Missing or disagreeing causes stay unknown; an inferred snapshot absence
+  // below cannot replace the merged item-specific evidence.
+  const removals = new Map();
+  for (const deletion of deletions) {
+    const id = String(deletion.source_id || "");
+    const cause = removalCause(deletion.removal_cause);
+    const prior = removals.get(id);
+    if (!prior) removals.set(id, { ...deletion, removal_cause: cause });
+    else if (prior.removal_cause !== cause) prior.removal_cause = "unknown";
+  }
   return {
     ...result,
     documents,
-    deletions,
+    deletions: [...removals.values()],
+    deferred_count: deferred.count,
+    deferred_reason_code: deferred.reason,
   };
 }
 
@@ -247,6 +279,17 @@ export async function runProviderConnector({
       connection: access.connection,
       cursor,
     }));
+    const adapterWalkComplete = normalized.walk_complete === true ||
+      (normalized.walk_complete === undefined && normalized.outcome.kind === "completed");
+    if (normalized.deferred_count > 0 &&
+        (normalized.outcome.kind !== "completed" || !adapterWalkComplete ||
+         normalized.cursor_can_advance !== true || normalized.proposed_cursor == null ||
+         normalized.provider_check_complete !== true || !Array.isArray(normalized.warnings) ||
+         normalized.warnings.length !== 0)) {
+      throw new ProviderDeliveryError("deferred coverage requires a complete provider check and a proposed cursor", {
+        code: "invalid_provider_deferred_coverage",
+      });
+    }
     // A provider page walk may take minutes. Recheck before any result from the
     // old owner can reach D1, a deletion request, or the local cursor store.
     assertOwned?.();
@@ -318,33 +361,35 @@ export async function runProviderConnector({
         : `Provider cleanup would remove ${planned.length} from ${storedFamiliesBefore.size} stored families.`;
       normalized = { ...normalized, deletions: planned };
     }
-    const tally = await deliverProviderDocuments(normalized.documents, {
+    const deliveryTally = await deliverProviderDocuments(normalized.documents, {
       sendBatch, base, adminKey, assertOwned,
     });
     terminalEvidence = {
       files_seen: normalized.documents.length + normalized.deletions.length,
-      docs_added: tally.created, docs_updated: tally.updated, docs_unchanged: tally.unchanged,
-      docs_refused: tally.refused, docs_failed: tally.failed,
-      refusal_reason: providerWithheldReason(tally.withheld),
+      docs_added: deliveryTally.created, docs_updated: deliveryTally.updated, docs_unchanged: deliveryTally.unchanged,
+      docs_refused: deliveryTally.refused, docs_failed: deliveryTally.failed,
+      refusal_reason: providerWithheldReason(deliveryTally.refusal_reasons),
       walk_complete: normalized.walk_complete === true ||
         (normalized.walk_complete === undefined && normalized.outcome.kind === "completed"),
       complete_sweep: false, outcome_kind: normalized.outcome.kind,
       deletion_authority: normalized.deletion_authority,
     };
     assertOwned?.();
-    if (tally.failed || tally.refused !== tally.withheld) {
+    if (deliveryTally.failed || deliveryTally.refused !== deliveryTally.withheld) {
       throw new ProviderDeliveryError("Provider document delivery is incomplete; the cursor was kept.", {
-        code: "provider_delivery_incomplete", tally,
+        code: "provider_delivery_incomplete", tally: deliveryTally,
       });
     }
     if (normalized.deletions.length) {
       if (typeof reviewRemovals !== "function") {
         throw new ProviderDeliveryError("Source removals need a saved exact plan and a separate apply command.", {
-          code: "provider_removal_review_required", tally,
+          code: "provider_removal_review_required", tally: deliveryTally,
         });
       }
       await reviewRemovals({
         uids: normalized.deletions.map((item) => `${sourceName}:${item.source_id}`),
+        targetCauses: Object.fromEntries(normalized.deletions.map(item =>
+          [`${sourceName}:${item.source_id}`, item.removal_cause])),
         storedFamilies: storedFamiliesBefore,
         requiredApproval: requiredRemovalApproval,
         notice: removalReviewNotice,
@@ -356,7 +401,7 @@ export async function runProviderConnector({
     // All nonempty removals leave through the separate exact-plan command.
     const removal = { applied: 0, pending: 0 };
     const deletionReadbackVerified = normalized.deletions.length === 0;
-    const deliveryComplete = tally.failed === 0 && tally.refused === tally.withheld;
+    const deliveryComplete = deliveryTally.failed === 0 && deliveryTally.refused === deliveryTally.withheld;
     const sourceComplete = normalized.outcome.kind === "completed";
     const sourceWalkComplete = normalized.walk_complete === true ||
       (normalized.walk_complete === undefined && sourceComplete);
@@ -364,10 +409,10 @@ export async function runProviderConnector({
     // truth. An inconsistent adapter must not turn an explicit partial result
     // into a skipped provider window or a healthy source receipt.
     const cursorAdvanced = deliveryComplete && sourceComplete && sourceWalkComplete &&
-      normalized.cursor_can_advance && normalized.proposed_cursor !== null;
+      normalized.cursor_can_advance && normalized.proposed_cursor != null;
     const providerCheckComplete = sourceWalkComplete && cursorAdvanced &&
       (normalized.provider_check_complete === true ||
-        (tally.withheld > 0 && normalized.provider_check_complete !== false));
+        (deliveryTally.withheld > 0 && normalized.provider_check_complete !== false));
     const completedAt = now().toISOString();
     if (cursorAdvanced) {
       assertOwned?.();
@@ -377,14 +422,25 @@ export async function runProviderConnector({
         completed_at: completedAt,
       });
     }
+    const tally = normalized.deferred_count > 0 ? {
+      ...deliveryTally,
+      deferred: normalized.deferred_count,
+      refused: deliveryTally.refused + normalized.deferred_count,
+      withheld: deliveryTally.withheld + normalized.deferred_count,
+      refusal_reasons: {
+        ...deliveryTally.refusal_reasons,
+        [normalized.deferred_reason_code]: normalized.deferred_count,
+      },
+    } : deliveryTally;
+    const filesSeen = normalized.documents.length + normalized.deletions.length + (tally.deferred || 0);
     const detail = resultDetail(normalized, tally, removal, cursorAdvanced);
     terminalEvidence = {
-      files_seen: normalized.documents.length + normalized.deletions.length,
+      files_seen: filesSeen,
       docs_added: tally.created,
       docs_updated: tally.updated,
       docs_unchanged: tally.unchanged,
       docs_refused: tally.refused,
-      refusal_reason: providerWithheldReason(tally.withheld),
+      refusal_reason: providerWithheldReason(tally.refusal_reasons),
       docs_failed: tally.failed,
       walk_complete: sourceWalkComplete,
       complete_sweep: false,
@@ -398,10 +454,10 @@ export async function runProviderConnector({
     await postReceipt(base, adminKey, {
       source: sourceName, kind, status: sourceWalkComplete ? "ready" : "error", run_id: runId, lane,
       started_at: startedAt, completed_at: completedAt,
-      files_seen: normalized.documents.length + normalized.deletions.length,
+      files_seen: filesSeen,
       docs_added: tally.created, docs_updated: tally.updated, docs_unchanged: tally.unchanged,
       docs_refused: tally.refused, docs_failed: tally.failed,
-      refusal_reason: providerWithheldReason(tally.withheld),
+      refusal_reason: providerWithheldReason(tally.refusal_reasons),
       walk_complete: sourceWalkComplete,
       // Publish boundary proof only after the selected cursor has been saved.
       // Incomplete walks and an explicit adapter refusal of proof stay unverified.

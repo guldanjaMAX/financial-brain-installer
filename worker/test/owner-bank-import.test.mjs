@@ -50,22 +50,29 @@ function freshDb() {
 }
 
 function d1Environment(db) {
-  const control = { failPattern: null };
+  const control = { failPattern: null, failCount: 0 };
+  const failIfRequested = (sql) => {
+    if (!control.failPattern) return;
+    control.failPattern.lastIndex = 0;
+    if (!control.failPattern.test(sql)) return;
+    control.failCount += 1;
+    throw new Error("synthetic D1 unavailable");
+  };
   const statement = (sql, params = []) => {
     const shaped = {
       __sql: sql,
       __params: params,
       bind: (...next) => statement(sql, next),
       all: async () => {
-        if (control.failPattern?.test(sql)) throw new Error("synthetic D1 unavailable");
+        failIfRequested(sql);
         return { results: db.prepare(sql).all(...params) };
       },
       first: async () => {
-        if (control.failPattern?.test(sql)) throw new Error("synthetic D1 unavailable");
+        failIfRequested(sql);
         return db.prepare(sql).get(...params) ?? null;
       },
       run: async () => {
-        if (control.failPattern?.test(sql)) throw new Error("synthetic D1 unavailable");
+        failIfRequested(sql);
         const result = db.prepare(sql).run(...params);
         return { meta: { changes: Number(result.changes || 0) } };
       },
@@ -85,7 +92,7 @@ function d1Environment(db) {
         db.exec("BEGIN IMMEDIATE");
         try {
           for (const item of statements) {
-            if (control.failPattern?.test(item.__sql)) throw new Error("synthetic D1 unavailable");
+            failIfRequested(item.__sql);
             const prepared = db.prepare(item.__sql);
             if (prepared.columns().length > 0) {
               results.push({ results: prepared.all(...item.__params), meta: { changes: 0 } });
@@ -159,6 +166,41 @@ function bodyFor(name, overrides = {}) {
 
 async function parsed(response) {
   return { response, body: await response.json() };
+}
+
+function primeBankActivityReady(f, generation = null) {
+  const current = f.db.prepare(
+    "SELECT generation FROM bank_activity_refresh_state WHERE id=1",
+  ).get();
+  const next = generation ?? Number(current.generation);
+  f.db.prepare(
+    `UPDATE bank_activity_refresh_state
+        SET generation=?,requested_at=?,completed_generation=?,completed_at=?
+      WHERE id=1`,
+  ).run(next, "2026-07-31T23:58:00.000Z", next, "2026-07-31T23:59:00.000Z");
+  f.db.prepare(
+    `INSERT INTO sources
+       (name,kind,status,created_at,last_complete_sweep_at,sync_cursor,stale_reason)
+     VALUES ('bank_activity','bank_activity','ready','2026-01-01T00:00:00.000Z',?,?,NULL)
+     ON CONFLICT(name) DO UPDATE SET
+       kind='bank_activity',status='ready',last_complete_sweep_at=excluded.last_complete_sweep_at,
+       sync_cursor=excluded.sync_cursor,stale_reason=NULL`,
+  ).run(
+    "2026-07-31T23:59:00.000Z",
+    JSON.stringify({ version: 1, rank: 2, month: "2026-06", account_id: 1,
+      failures: 0, ledger_marker: "a".repeat(64) }),
+  );
+  return next;
+}
+
+function bankActivityState(f) {
+  return f.db.prepare(
+    `SELECT r.generation,r.completed_generation,r.completed_at,
+            s.status,s.last_complete_sweep_at,s.sync_cursor,s.stale_reason
+       FROM bank_activity_refresh_state r
+       JOIN sources s ON s.name='bank_activity' AND s.kind='bank_activity'
+      WHERE r.id=1`,
+  ).get();
 }
 
 test("owner bank-import capabilities are owner-only and honest about bounds", async () => {
@@ -348,6 +390,185 @@ test("a failed atomic batch leaves no commit, ledger rows, receipt, or activity 
   assert.equal(f.db.prepare("SELECT count(*) AS n FROM owner_bank_import_commits").get().n, 1);
   assert.equal(f.db.prepare("SELECT count(*) AS n FROM owner_action_requests").get().n, 1);
   assert.equal(f.db.prepare("SELECT count(*) AS n FROM owner_activity_events").get().n, 1);
+});
+
+test("changed owner imports invalidate bank activity atomically and the live route attempts refresh", async () => {
+  const f = await fixture();
+  primeBankActivityReady(f, 7);
+  const upload = bodyFor("checking-july.ofx");
+  const preview = await parsed(await f.post(OWNER_BANK_IMPORT_PREVIEW_PATH, upload));
+  assert.equal(preview.response.status, 200);
+  const commitBody = {
+    ...upload,
+    preview_id: preview.body.preview_id,
+    request_id: "bank_commit_projection_fence",
+    confirmed: true,
+  };
+
+  f.control.failPattern = /UPDATE bank_activity_refresh_state/;
+  const refused = await parsed(await f.post(OWNER_BANK_IMPORT_COMMIT_PATH, commitBody));
+  assert.ok(f.control.failCount > 0, "changed import reached the projection invalidation statement");
+  assert.equal(refused.response.status, 503);
+  assert.equal(refused.body.code, "owner_bank_import_commit_unavailable");
+  assert.equal(f.db.prepare("SELECT count(*) AS n FROM fin_transactions").get().n, 0);
+  assert.equal(f.db.prepare("SELECT count(*) AS n FROM owner_bank_import_commits").get().n, 0);
+  assert.deepEqual({ ...bankActivityState(f) }, {
+    generation: 7,
+    completed_generation: 7,
+    completed_at: "2026-07-31T23:59:00.000Z",
+    status: "ready",
+    last_complete_sweep_at: "2026-07-31T23:59:00.000Z",
+    sync_cursor: JSON.stringify({ version: 1, rank: 2, month: "2026-06", account_id: 1,
+      failures: 0, ledger_marker: "a".repeat(64) }),
+    stale_reason: null,
+  });
+
+  f.control.failPattern = null;
+  f.control.failCount = 0;
+  const committed = await parsed(await f.post(OWNER_BANK_IMPORT_COMMIT_PATH, commitBody));
+  assert.equal(committed.response.status, 201, JSON.stringify(committed.body));
+  assert.equal(committed.body.changed, true);
+  assert.equal(f.db.prepare("SELECT count(*) AS n FROM fin_transactions").get().n, 5);
+  assert.deepEqual({ ...bankActivityState(f) }, {
+    generation: 8,
+    completed_generation: 7,
+    completed_at: "2026-07-31T23:59:00.000Z",
+    status: "indexing",
+    last_complete_sweep_at: null,
+    sync_cursor: null,
+    stale_reason: "bank activity refresh pending",
+  });
+
+  const replay = await parsed(await f.post(OWNER_BANK_IMPORT_COMMIT_PATH, commitBody));
+  assert.equal(replay.response.status, 200);
+  assert.equal(replay.body.replayed, true);
+  assert.equal(bankActivityState(f).generation, 8, "an exact receipt replay adds no refresh debt");
+
+  primeBankActivityReady(f);
+  f.env.BANK_FEED_PROVIDER = "plaid";
+  const secondUpload = bodyFor("card-july.qfx");
+  const secondPreview = await parsed(await f.post(OWNER_BANK_IMPORT_PREVIEW_PATH, secondUpload));
+  assert.equal(secondPreview.response.status, 200);
+  f.control.failPattern = /SELECT generation,completed_generation FROM bank_activity_refresh_state/;
+  f.control.failCount = 0;
+  const finalize = await parsed(await f.post(OWNER_BANK_IMPORT_COMMIT_PATH, {
+    ...secondUpload,
+    preview_id: secondPreview.body.preview_id,
+    request_id: "bank_commit_refresh_attempt",
+    confirmed: true,
+  }));
+  assert.ok(f.control.failCount > 0, "the live owner dispatcher reached the replacement writer");
+  assert.equal(finalize.response.status, 503);
+  assert.equal(finalize.body.code, "owner_bank_import_finalize_unavailable");
+  assert.equal(f.db.prepare(
+    "SELECT count(*) AS n FROM owner_bank_import_commits WHERE request_id='bank_commit_refresh_attempt'",
+  ).get().n, 1, "the ledger commit remains durable when its replacement writer fails");
+  const pending = bankActivityState(f);
+  assert.equal(pending.generation, 9);
+  assert.equal(pending.completed_generation, 8);
+  assert.equal(pending.status, "indexing", "the older activity projection cannot remain ready");
+  assert.equal(pending.last_complete_sweep_at, null);
+  assert.equal(pending.sync_cursor, null);
+});
+
+test("committed account link and unlink invalidate in their own D1 batches", async () => {
+  const f = await fixture();
+  primeBankActivityReady(f, 3);
+  f.db.exec(`
+    INSERT INTO fin_accounts
+      (tenant_id,account_slug,entity_slug,institution,label,account_kind,balance_role,mask,currency,
+       feed_mode,provenance,basis_state,recorded_at,source_feed)
+    VALUES
+      ('primary','manual-fixture','acme','Fixture Bank','Manual checking','checking','asset','4242','USD',
+       'manual','owner_stated','confirmed','2026-07-31T23:59:30.000Z','manual:fixture'),
+      ('primary','live-fixture','acme','Fixture Bank','Live checking','checking','asset','4242','USD',
+       'live','feed','confirmed','2026-07-31T23:59:30.000Z','bank-feed:fixture');
+  `);
+  const operatorPost = (body) => f.post(
+    "/api/admin/fin/import-bank-export",
+    body,
+    { "X-Admin-Key": f.env.ADMIN_KEY },
+  );
+  const linkBody = {
+    action: "link-accounts",
+    manual_account_slug: "manual-fixture",
+    live_account_slug: "live-fixture",
+    unlink: false,
+  };
+  const linkPreview = await parsed(await operatorPost({ ...linkBody, dry_run: true }));
+  assert.equal(linkPreview.response.status, 200);
+  assert.equal(bankActivityState(f).generation, 3, "preview is the no-write control");
+
+  f.control.failPattern = /UPDATE bank_activity_refresh_state/;
+  const refusedLink = await parsed(await operatorPost({
+    ...linkBody,
+    dry_run: false,
+    approve: linkPreview.body.plan_hash,
+  }));
+  assert.ok(f.control.failCount > 0, "link reached the projection invalidation statement");
+  assert.equal(refusedLink.response.status, 409);
+  assert.equal(f.db.prepare(
+    "SELECT count(*) AS n FROM fin_account_links WHERE unlinked_at IS NULL",
+  ).get().n, 0, "a link cannot commit without its invalidation");
+  assert.equal(bankActivityState(f).status, "ready");
+
+  f.control.failPattern = null;
+  f.control.failCount = 0;
+  const linked = await parsed(await operatorPost({
+    ...linkBody,
+    dry_run: false,
+    approve: linkPreview.body.plan_hash,
+  }));
+  assert.equal(linked.response.status, 200, JSON.stringify(linked.body));
+  assert.equal(linked.body.mutation_count, 1);
+  assert.equal(f.db.prepare(
+    "SELECT count(*) AS n FROM fin_account_links WHERE unlinked_at IS NULL",
+  ).get().n, 1);
+  assert.equal(bankActivityState(f).generation, 4);
+  assert.equal(bankActivityState(f).status, "indexing");
+  assert.equal(bankActivityState(f).sync_cursor, null);
+
+  const replay = await parsed(await operatorPost({
+    ...linkBody,
+    dry_run: false,
+    approve: linkPreview.body.plan_hash,
+  }));
+  assert.equal(replay.response.status, 200);
+  assert.equal(replay.body.mutation_count, 0);
+  assert.equal(bankActivityState(f).generation, 4, "an exact link replay adds no refresh debt");
+
+  primeBankActivityReady(f);
+  const unlinkBody = { ...linkBody, unlink: true };
+  const unlinkPreview = await parsed(await operatorPost({ ...unlinkBody, dry_run: true }));
+  assert.equal(unlinkPreview.response.status, 200);
+  f.control.failPattern = /UPDATE bank_activity_refresh_state/;
+  f.control.failCount = 0;
+  const refusedUnlink = await parsed(await operatorPost({
+    ...unlinkBody,
+    dry_run: false,
+    approve: unlinkPreview.body.plan_hash,
+  }));
+  assert.ok(f.control.failCount > 0, "unlink reached the projection invalidation statement");
+  assert.equal(refusedUnlink.response.status, 409);
+  assert.equal(f.db.prepare(
+    "SELECT count(*) AS n FROM fin_account_links WHERE unlinked_at IS NULL",
+  ).get().n, 1, "an unlink cannot commit without its invalidation");
+  assert.equal(bankActivityState(f).status, "ready");
+
+  f.control.failPattern = null;
+  const unlinked = await parsed(await operatorPost({
+    ...unlinkBody,
+    dry_run: false,
+    approve: unlinkPreview.body.plan_hash,
+  }));
+  assert.equal(unlinked.response.status, 200, JSON.stringify(unlinked.body));
+  assert.equal(unlinked.body.mutation_count, 1);
+  assert.equal(f.db.prepare(
+    "SELECT count(*) AS n FROM fin_account_links WHERE unlinked_at IS NULL",
+  ).get().n, 0);
+  assert.equal(bankActivityState(f).generation, 5);
+  assert.equal(bankActivityState(f).status, "indexing");
+  assert.equal(bankActivityState(f).sync_cursor, null);
 });
 
 test("commit binds exact preview bytes, mapping, confirmation, and expiry before mutation", async () => {

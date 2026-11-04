@@ -4,6 +4,399 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.25 (2026-11-02)
+
+Candidate only. These package bytes still need MAIN's full host gate, CI and
+separately reviewed field acceptance. This entry grants no installation or
+update approval.
+
+- **A missing answer starts with what the Brain can give.** When records or
+  details are missing, the Brain explains the gap and offers one next step.
+  Check the stated limits: a partial or unconfirmed figure is still qualified,
+  and an unsupported forecast does not become a made-up answer.
+- **Ask more money questions in your own words.** More account shorthand,
+  pending card questions, shared date ranges and requests for the rows behind
+  a figure can reach the supported bank readers. A question about what a money
+  term means stays a document question. Check the interpretation, dates,
+  account coverage and cited rows before relying on a figure.
+- **Ask for the useful part while keeping unanswered details visible.**
+  Supported recurring-charge, payment and spending questions can return their
+  recorded facts without claiming to explain duplicates, price changes,
+  reversals or missing detail. Explicit expense-minus-refund questions show
+  their reading; an ordinary payee total says when refunds were not netted.
+- **An empty contact field no longer blocks the bank-provider step.** New setup
+  leaves an unknown optional contact out, and an existing empty optional
+  contact is accepted. A nonempty malformed contact still needs correction.
+- **An approved pilot can reach the bank-provider state check on D1.** Its
+  ledger queries now fit D1's query limits. Existing transition guards and
+  connection warnings still apply; bank invitations remain closed.
+- **Your chosen answer or check model stays chosen during a legacy-model
+  update.** Only a field using the retired model, or inheriting it, switches.
+  If an update stops after the Brain may have received the new models, the
+  message explains that possibility and asks you to run update again to finish.
+- **Earlier owner checks still apply.** Review the 0.4.24 notes below for
+  vendor families, comparisons and the legacy-model update path. This metadata
+  bump closes no release-audit row or exact-version deferral.
+
+### Technical changes
+
+- Money router rounds 13 through 16 broaden grounded account, date, payment,
+  pending-activity and detail handling. Shared clause checks keep independent
+  periods, amounts, account selectors, payees and outer tasks separate.
+  Definition questions return to documents before extraction; owner pending
+  card and account questions retain their bank path.
+- Reader corrections preserve transaction direction before limits, exact-cent
+  payment candidates, transfer-pair counts, recurrence dates, per-account
+  rankings and category-first remainder membership. Unknown selectors do not
+  produce a zero or invented remainder. Synthetic extractor examples and
+  refusal diagnostics do not establish fresh-model or live-corpus correctness.
+- Softer wording is shared across bank answers, document and temporal limits,
+  the app, CLI and MCP. Both frontend rebuilds since the previous candidate
+  are included. Frozen scorer inputs and evidence hashes retain exact copy
+  translations and negative controls.
+- Setup omits an unknown contact. Bank-provider validation treats exactly an
+  empty optional formatted string as absent while retaining required-field,
+  type, length and nonempty-format checks.
+- Bank-provider state and transition SQL use per-table scalar sums and
+  NOT EXISTS guards in place of a twelve-term compound SELECT. Refusals add a
+  fixed cause code without exposing SQL, provider errors or data.
+- The legacy-model switch saves a field-specific patch and preserves reviewed
+  peer choices. Interrupted acceptance or local commit keeps the saved
+  manifest intact and reports the possible remote switch. Extracted deploy
+  and missing-results tests now supply the current binding and refusal copy.
+
+### This release does NOT cover
+
+- Windows x64 is the only supported Windows runtime in this release. Windows
+  ARM64 ships unproven.
+- Bank breadth ships unproven. Bank invitations stay closed.
+- Email attachments, Drive images and Drive simple sync remain outside this
+  release.
+
+## 0.4.24 (2026-11-02)
+
+Candidate only. These package bytes still need MAIN's full host gate, CI and
+separately reviewed field acceptance. This entry grants no installation or
+update approval.
+
+- **Ask more money questions in your own words.** More everyday phrasing,
+  shorthand, account nicknames and date wording can reach the Brain's bank
+  records. The answer shows how it read the question. Check that reading,
+  the cited rows, dates and covered accounts before relying on a figure.
+- **Ask about a useful part even when the whole question cannot be answered.**
+  Supported parts can return bank facts while the answer repeats the part it
+  could not answer. A loose or unknown account nickname can show a clearly
+  labeled broader reading instead of stopping the question. Check which
+  accounts the answer actually includes.
+- **Compare periods, separate monthly spending and ask about money received.**
+  Supported questions include two-period comparisons, per-month spending,
+  largest payments at a vendor, payer wording, account-type balances and
+  pending versus available balances. Event wording uses the earliest covered
+  date when the event date is unknown; it does not invent when the event began.
+- **A vendor question includes the vendor's recognized payee family.** The
+  answer names the included payees and shows their amounts separately. Unclear
+  short names keep exact matching, and possible matches found only in bank
+  descriptions stay outside the total. Check the included payees.
+- **A refusal explains what, why and what to ask next.** Money answers use
+  plainer account words and readable dates. Missing records, unsupported
+  questions and incomplete account coverage keep their own explanations.
+- **A Brain using the older `claude-sonnet-5` model can update in place.** Update
+  announces the switch to Opus answers and Sonnet checks, reuses the same stored
+  key and keeps the daily spending limit. It saves the new model names only
+  when update finishes successfully. To check: review the announced switch and
+  the final answer setup after the supervised update.
+- **Earlier owner checks still apply.** Review the 0.4.23 notes below for
+  account-kind reviews, saved schedules, source imports and coverage limits.
+  This metadata bump closes no release-audit row or exact-version deferral.
+
+### Technical changes
+
+- Money router rounds 1 through 12 validate a closed model intent against the
+  actual question before using the existing ledger readers. A single JSON
+  object may have one code fence; the model call has a four-second timeout.
+  Vendor, account, amount and date evidence remain grounded in the question,
+  and local code computes the requested periods in the owner's time zone.
+- Routing expands supported money cues, period grammar, account hints,
+  comparisons, monthly breakdowns, vendor rankings and description filters.
+  Interpretation labels, unanswered tails and bounded reason codes preserve
+  the limits of partial answers. Unsupported requests and document-question
+  decoys retain their separate paths.
+- Vendor-family matching uses whole-word payee prefixes and a bounded alias
+  table, with exact matching for ambiguous short words and a visible payee
+  breakdown. Transfer handling counts matched own-account transfers once.
+- A shared money-copy formatter renders plain refusals and readable dates.
+  Refusal, scanned-evidence, balance, account-link and MCP absence regressions
+  now assert the intended wording with discriminating negative controls.
+- The exact legacy `claude-sonnet-5` ID switches to `claude-opus-5-5` answers and
+  `claude-sonnet-5-5` checks without disconnecting. Malformed values and other
+  unreviewed IDs still stop. Interrupted updates leave saved model fields intact.
+- Daily CLI regression suites use isolated homes with a canary protecting the
+  ambient home log. The legacy-model switch suite now runs in the ordered test
+  chain. Recorded model tapes and synthetic tests establish bounded regression
+  behavior, not general or live-corpus answer correctness.
+
+### This release does NOT cover
+
+- Windows x64 is the only supported Windows runtime in this release. Windows
+  ARM64 ships unproven.
+- Bank breadth ships unproven. Bank invitations stay closed.
+- Email attachments, Drive images and Drive simple sync remain outside this
+  release.
+
+## 0.4.23 (2026-11-02)
+
+Candidate only. The integrated source passed its earlier host gate, but these
+new package bytes still need MAIN's full host gate, CI and separately reviewed
+field acceptance. This entry grants no installation or update approval.
+
+- **Review a loan or card account once so repayments stay separate from spending.**
+  When a bank feed calls an account "other", the owner can review its kind.
+  Confirmed loans and cards help the Brain recognize payments between owned
+  accounts. Missing or conflicting evidence still leaves an uncertainty warning.
+  To check: review the account kind, then compare the cited repayment rows with
+  ordinary expenses before relying on the total.
+- **An early-month spending question also answers the previous complete month.**
+  During the first three days, or when this month has no posted expense rows,
+  an undated question shows a short month-to-date line and the previous month.
+  This month's missing coverage stays visible without blocking a covered prior
+  month. Explicit dates keep their requested period.
+- **Money in separates matched transfers between your own accounts.** Answers
+  show recorded inflow, proven transfer pairs and inflow from outside the covered
+  accounts. Ambiguous matches remain unmatched. Check account coverage, currency
+  and the cited rows before treating that figure as all your income.
+- **Updates reconnect saved schedules to the installed release.** Curated
+  sync, Drive and messaging schedules are checked alongside the other saved
+  jobs. Reconnecting does not start a data-writing job, and disabled schedules
+  stay disabled. An unfinished reconnection keeps the update incomplete with
+  recovery guidance. Check each enabled schedule after the supervised update.
+- **Meeting notes can be imported from a Granola file export.** The declared
+  export folder supplies notes, summaries and transcripts with per-item receipts,
+  revision tracking and duplicate/conflict checks. This is a file import, with
+  separate owner approval and source setup. Check its receipts and citations.
+- **Ordinary document questions no longer trigger the money warning just for
+  using a generic word such as "statements".** Real money claims retain their
+  evidence checks. A nonfinancial transcript question should answer from its
+  cited records when those records support it.
+- **Small, explicit source deletions can finish without holding the whole
+  refresh.** Eligible Gmail and Calendar removals must be at most 25 items and
+  at most 1% of the source, with exact saved approval and readback. Drive and
+  uncertain or larger removals stay held for the owner. A missing item alone
+  does not prove deletion.
+- **Curated sync checks the documents it just posted.** A large source inventory
+  no longer has to be paged to confirm those writes. Failed checks retain a
+  bounded diagnostic code and a retryable receipt.
+- **Money answers make their limits clearer.** Owned repayments remain separate
+  from ordinary expenses; supported balance, month, payment and recurring-charge
+  questions use the reviewed ledger rules. Answers disclose posted records and
+  refuse unsupported forecasts or unresolved account choices. Earlier release
+  limitations still apply.
+
+### Technical changes
+
+- Migration 0058 stores owner account-kind reviews without replacing provider
+  observations. Conflicting deposit evidence and unresolved liabilities retain
+  the expense-certification guard.
+- Expense ranking uses one eligibility rule before top-N selection. Transfer
+  uniqueness is decided across all candidates before filtering; each row can be
+  used once. Balance reads exclude future and malformed observations before
+  ranking and bind the owner-local day.
+- Update inventories, captures and rebinds owned schedulers with exact definition
+  and runtime readback, preserved enablement and recoverable partial failures.
+- The Granola export adapter refuses linked roots or members, uses the common
+  ingest batch path and retains item-level revision and custody receipts.
+- Source-removal plans carry closed causes in their fingerprints. Only explicit
+  per-item deletion evidence can enter the bounded automatic apply path.
+- Curated readback verifies exact posted identities. The money veto tests actual
+  money topics, with supported expense questions retained as green controls.
+- Synthetic money and HTTP-route replay harnesses add independent gold, frozen
+  clocks, exact dependency tapes and witnessed negative controls. Private replay
+  uses a separate exported ledger copy and a D1-compatible count query. These
+  are development tools, not proof of a live corpus or general answer correctness.
+
+### This release does NOT cover
+
+- Windows x64 is the only supported Windows runtime in this release. Windows
+  ARM64 ships unproven.
+- Bank breadth ships unproven. Bank invitations stay closed.
+- Email attachments, Drive images and Drive simple sync remain outside this
+  release.
+
+## 0.4.22 (2026-10-31)
+
+Candidate only. This version still needs the full host gate, CI and separately
+reviewed field acceptance for the exact package. This offline hotfix is not
+release or deployment evidence.
+
+- **0.4.22: acceptance accepts an honest verified withhold on Claude-configured Brains.** The configured answer check tries up to three saved probes. A
+  verified answer from the configured model passes. If every attempted answer
+  was withheld cleanly by that model's evidence check, acceptance reports a
+  warning so update can finish its remaining checks. Verifier errors, answer
+  errors, missing or different models, retrieval failures, HTTP failures and
+  invalid response contracts still fail. To check: the acceptance result names
+  the evidence refusal rather than calling it incomplete source coverage.
+- **Review the warning before relying on an answer.** A completed update with
+  this warning proves the configured route ran; it does not prove the sources
+  can support an answer. Inspect source coverage and the withheld evidence.
+  The built-in answer route and schema are unchanged.
+- **Earlier limits remain.** Review the 0.4.21 notes below for inherited owner
+  checks and unproven capabilities. This hotfix closes no release-audit row and
+  renews no exact-version deferral.
+
+### This release does NOT cover
+
+- Windows x64 is the only supported Windows runtime in this release. Windows
+  ARM64 ships unproven.
+- Bank breadth ships unproven. Bank invitations stay closed.
+- Email attachments, Drive images and Drive simple sync remain outside this
+  release.
+
+## 0.4.21 (2026-10-30)
+
+Candidate only. This version has not been released. The changes below still
+need the full host gate, CI and separately reviewed field acceptance for the
+exact sealed package. This version bump verifies no incident.
+
+- **More everyday money questions use the Brain's bank records.** You can ask
+  for balances by account or label, money in and money out, spending by vendor,
+  recent card activity, and the largest expenses. Check the cited accounts,
+  dates, currency, coverage and any gap before relying on a total.
+- **Transfers between your own USD accounts stay out of money-in and money-out
+  totals.** The Brain pairs supported transfer records before adding the totals.
+  Non-USD account pairs remain a known limit, so review the cited rows when
+  different currencies are involved.
+- **An incomplete bank answer says what is missing.** A partial ranking or
+  other incomplete record set carries a visible gap instead of presenting the
+  available rows as a complete answer.
+- **One incomplete calendar event no longer stops the daily refresh.** The
+  refresh queues that event for retry, continues with the remaining work, and
+  keeps calendar and credential causes distinct in the owner-visible result.
+- **A busy Mac gets a short daily-refresh retry.** The macOS runner waits for
+  the lifecycle lock for up to 55 seconds before recording that the daily run
+  could not start. Windows and Linux still make one attempt.
+- **Changing a bank provider starts with a preview.** The command inspects the
+  current state, refuses an active connection or existing ledger history, and
+  shows the remaining deploy and connection steps before any approved change.
+- **Recovery stops explain a known cause without exposing raw details.** The
+  daily update path saves its recovery state before showing one short cause
+  from a closed list, plus the existing receipt and retry guidance.
+- **Eligible older Mac schedules survive an update.** Update validates the
+  installed scheduler bytes, pauses the identity-owned schedule, and restores
+  it after the reviewed update path completes.
+
+### Technical changes
+
+- Ledger question parsing adds owner-local month windows, bounded account and
+  label selectors, balance, inflow, outflow, vendor, recent-card and largest-
+  expense routes, with structured incomplete-evidence gates.
+- Own-transfer pairing excludes supported internal USD pairs from bank
+  documents. Vendor answers distinguish exact rows from possible matches.
+- Durable daily receipts keep calendar-only, credential-only and mixed
+  withholding causes separate. Incomplete calendar events remain queued for an
+  exact retry while the completed event inventory can continue.
+- The macOS daily runner records its bounded lifecycle-lock wait in the
+  terminal receipt. Other platforms preserve their single-attempt contract.
+- The bank-provider transition command is preview-first, binds approval to the
+  inspected state, refuses unsafe state and writes the manifest atomically.
+- Daily-update recovery persists recovery state before rendering one bounded,
+  allowlisted cause. Unknown or unsafe material stays hidden.
+- Update can validate, capture, pause and restore an identity-owned older
+  macOS scheduler from its installed bytes without weakening normal status
+  checks.
+
+### Known issues
+
+- A failed bank-document replacement after a committed import or account
+  change can leave stale bank documents until the scheduled retry.
+- Own transfers between non-USD accounts can remain in money-in or money-out
+  figures.
+- Do not switch bank providers while a bank connection is in progress. A
+  request already crossing the transition can write after the transition
+  clears.
+- A very large ledger can return `query too large` instead of an answer.
+- This version has no account-link recovery command.
+- A Windows daily refresh still skips the day when its lifecycle lock is busy.
+- The local bank-provider manifest check does not enforce every schema string
+  format.
+- Physical Windows x64 and Mac owner acceptance is still required for the
+  exact sealed package. Synthetic tests and CI do not establish either
+  platform's owner acceptance.
+
+### This release does NOT cover
+
+- Windows x64 is the only supported Windows runtime in this release. Windows
+  ARM64 ships unproven.
+- Bank breadth ships unproven. Bank invitations stay closed.
+- Email attachments, Drive images and Drive simple sync remain outside this
+  release.
+
+## 0.4.20 (2026-10-25)
+
+Candidate only. This version has not been released. The changes below still
+need the full host gate, CI and separately reviewed field acceptance for the
+exact sealed package. This version bump verifies no incident.
+
+- **Store-feed answers can now see the per-store sales row.** The sales table
+  for each store is placed before the coverage notes, so the row stays inside
+  the answer input instead of being pushed out by the notes. Check the cited
+  store, dates and coverage before relying on a total.
+- **Claude Code uses the Brain's checked answers after the first Claude
+  connection.** After `brain connect anthropic` finishes, close Claude
+  completely, run `brain mcp-config <manifest> --apply`, then start Claude Code
+  again. It reads the refreshed workspace guide and asks the Brain for its
+  answer instead of following the older search-only route.
+- **The connection command says whether Claude answers are on.** On a Brain
+  that uses Claude answers, `brain mcp-config <manifest> --apply` prints
+  `Claude answer route ready` only after it has checked the route end to end.
+  If it cannot prove that, it stops with the reason. Close Claude completely
+  and run the same command again. A Brain on the built-in models sees no
+  change.
+- **Answer setup stops safely when a local replacement cannot finish.** On
+  Windows, the setup retries a temporary file-replacement refusal. If setup was
+  interrupted and a later command finds its journal, nothing more runs
+  automatically. The fixed card says the Brain keeps working as before and to
+  contact your Financial Brain partner. It does not print paths, file names,
+  secret state or provider details.
+- **This version supports the first Claude connection only.** It can move a
+  Brain from built-in models to the reviewed Claude answer pair. If a Claude
+  answer model is already configured, bringing in a new key stops before setup
+  work. Key replacement waits for a later version.
+
+### Technical changes
+
+- The store-feed formatter emits the per-store table before coverage notes and
+  keeps its existing coverage and refusal boundaries.
+- Part B proves the final manifest models, refreshes the managed workspace
+  guide, and verifies the installed defaults from a fresh-session fixture.
+- `mcp-config --apply` on a Claude answer manifest prints a fixed ready line
+  only after the route receipt is accepted, and otherwise exits nonzero with a
+  reason from a closed list. A rejected or partial assistant wiring result is
+  reported as `route_unproven`. Built-in manifests keep their output and exit
+  status.
+- Manifest publication and same-process rollback use a bounded Windows
+  `EPERM`/`EBUSY` replacement retry. A later process classifies a current
+  interrupted journal read-only and returns the fixed no-action card.
+- First-connect guards refuse a new key before manifest control when either
+  current answer model already selects Claude. The existing `--keep-key` path
+  remains available without authorizing key replacement.
+
+### Known issues
+
+- Physical Windows x64 and Mac owner acceptance is still required for the
+  exact sealed package. Synthetic tests and CI do not establish either
+  platform's owner acceptance.
+- An interrupted answer setup needs partner review. This release does not
+  provide automatic recovery from a later command.
+- Removal of rows the Worker cannot verify still needs the technician.
+
+### This release does NOT cover
+
+- Windows x64 is the only supported Windows runtime in this release. Windows
+  ARM64 ships unproven.
+- Bank breadth ships unproven. Bank invitations stay closed.
+- Replacing an existing Claude key is not supported in this release.
+- Email attachments, Drive images and Drive simple sync remain outside this
+  release.
+
 ## 0.4.19 (2026-10-24)
 
 Candidate only. This version has not been released. The changes below still

@@ -128,7 +128,8 @@ test('populated schema 48 survives the candidate migration and approved money ma
     admin_key_file: keyPath, infrastructure: { cloudflare: { storage: 'd1', d1_database_id: 'synthetic-database' } } };
   writeFileSync(manifestPath, JSON.stringify(manifest));
   let modelCalls = 0;
-  const env = { DB: f.DB, STORAGE_BACKEND: 'd1', ADMIN_KEY: readFileSync(keyPath, 'utf8'),
+  // The frozen clock does not supply the owner's calendar for balance reads.
+  const env = { DB: f.DB, STORAGE_BACKEND: 'd1', BRAIN_TIMEZONE: 'UTC', ADMIN_KEY: readFileSync(keyPath, 'utf8'),
     VECTORIZE: { query: async () => ({ matches: [] }) },
     AI: { run: async model => { modelCalls++; if (model.includes('bge-')) return { data: [[0.1, 0.2]] };
       return { response: 'No supporting documents.' }; } } };

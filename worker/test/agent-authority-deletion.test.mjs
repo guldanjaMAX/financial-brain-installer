@@ -1,3 +1,4 @@
+import { MCP_DELETE_PLAIN, MCP_WRITE_PLAIN } from './fixtures/plain-copy-expectations.mjs';
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -829,7 +830,7 @@ test("one MCP call, confirm flags, and prompt text cannot reach deletion", async
     params: { name: "forget", arguments: { ids: ["drive:one"], confirm: true } },
   }), url, deps)).json();
   assert.equal(direct.result.isError, true);
-  assert.match(direct.result.content[0].text, /cannot delete/);
+  assert.equal(direct.result.content[0].text, MCP_DELETE_PLAIN);
   assert.equal(previewCalls, 0);
 
   const injected = await (await handleMcp({}, rpc({

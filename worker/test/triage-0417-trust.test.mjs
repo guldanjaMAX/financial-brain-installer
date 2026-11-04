@@ -1,3 +1,4 @@
+import { MCP_DELETE_PLAIN, MCP_WRITE_PLAIN } from './fixtures/plain-copy-expectations.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
@@ -7,6 +8,7 @@ import { handleMcp } from '../src/lib/mcp-endpoint.js';
 import { refusalConfidence, confidenceLine } from '../src/lib/confidence.js';
 import * as retrieval from '../src/lib/retrieval-status.js';
 import { profileHas } from '../src/lib/agent-authority.js';
+import { partBRouteReceiptFromTiming } from '../../components/brain-mcp-timing.mjs';
 import { ownerSystemStatus } from '../src/lib/system-status.js';
 import { nextActionText as workerNextActionText } from '../src/lib/answer-render.js';
 import {
@@ -172,7 +174,7 @@ test('T06 R5 control: remote search declares its relevance-only contract', async
 
 test('T07 control: provider answer errors are safely rendered by the app', () => {
   const rendered = answerText({ answer: null, answer_error: 'Synthetic private title; count=731' });
-  assert.equal(rendered, 'Answer generation is unavailable right now. Try again in a moment.');
+  assert.equal(rendered, 'I can help you try again, but answers are unavailable right now. Want to try again in a moment?');
 });
 test('T07 defect: remote caught errors must not disclose private text or aggregate counts', async () => {
   let reached = 0;
@@ -284,7 +286,7 @@ test('T08 control: remote profiles cannot execute deletion', async () => {
     previewDeletion: async () => { deletions++; return {}; },
   });
   assert.equal(reply.isError, true);
-  assert.match(textOf(reply), /forget cannot delete/, 'explicit forget decision reached');
+  assert.equal(textOf(reply), MCP_DELETE_PLAIN, 'explicit forget decision reached');
   assert.equal(deletions, 0);
 });
 
@@ -301,6 +303,7 @@ function localFixture(transport, toolOverride) {
   let reached = 0;
   const functions = runInNewContext(`${http}\n${tools}\n${toolOverride ? 'runTool = injectedTool;' : ''}\n${handle}\n({ call, runTool, handle })`, {
     ...retrieval, safeAnswerErrorText, scannedEvidenceNotice, ANSWER_ERROR_MESSAGES,
+    partBRouteReceiptFromTiming,
     nextActionText: workerNextActionText,
     answerResumeAt: value => typeof value === 'string' ? value : undefined,
     PROFILE: 'librarian', profileHas, BASE: 'https://fixture.invalid', TIMEOUT_MS: 120000, UA: 'fixture',
@@ -416,7 +419,7 @@ for (const profile of ['librarian', 'structured-contributor', 'technician', 'bre
       grant: { profile }, previewDeletion: async () => { deletions++; return {}; },
     });
     assert.equal(reply.isError, true);
-    assert.match(textOf(reply), /forget cannot delete/);
+    assert.equal(textOf(reply), MCP_DELETE_PLAIN);
     assert.equal(deletions, 0);
   });
 }

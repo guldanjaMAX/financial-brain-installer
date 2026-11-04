@@ -1,3 +1,4 @@
+import { MCP_DELETE_PLAIN, MCP_WRITE_PLAIN } from './fixtures/plain-copy-expectations.mjs';
 /**
  * Remote connector end-to-end: discovery -> dynamic registration -> passkey-
  * session-gated approval -> PKCE token exchange -> MCP initialize/tools ->
@@ -584,7 +585,7 @@ test("structured-contributor can correct the brain and the contract still applie
 
   // The old one-call deletion surface is inert for every profile.
   const confirmed = await call("forget", { ids: ["drive:doc-1"], confirm: true });
-  assert.match(confirmed, /cannot delete/);
+  assert.equal(confirmed, MCP_DELETE_PLAIN);
 });
 
 test("a read-only grant is neither shown nor allowed the write tools", async () => {
@@ -609,7 +610,7 @@ test("a read-only grant is neither shown nor allowed the write tools", async () 
         params: { name, arguments: { title: "t", body: "b".repeat(50), confidence: "unverified", ids: ["x"] } } }),
       url, deps)).json();
     assert.equal(attempt.result.isError, true, `${name} must be refused without write scope`);
-    assert.match(attempt.result.content[0].text, /cannot write|cannot delete/);
+    assert.equal(attempt.result.content[0].text, name === "remember" ? MCP_WRITE_PLAIN : MCP_DELETE_PLAIN);
   }
   assert.equal(wrote, false, "a read-only grant must never reach the write path at all");
 });

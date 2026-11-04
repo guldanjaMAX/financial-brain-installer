@@ -46,7 +46,7 @@ export function fixture(t) {
     } catch (e) { sqlite.exec('ROLLBACK'); throw e; }
   } };
   const raw = (sql, ...args) => sqlite.prepare(sql).run(...args);
-  const f = { sqlite, raw, seen, env: { DB },
+  const f = { sqlite, raw, seen, env: { DB, BRAIN_TIMEZONE: 'UTC' },
     entity(slug, kind = 'business') {
       raw(`INSERT INTO fin_entities (entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at)
         VALUES (?,?,?,'owned','owner_stated','confirmed',?)`, slug, slug, kind, NOW);

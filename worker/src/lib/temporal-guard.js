@@ -188,26 +188,26 @@ export function applyTemporalVeto({ question, answer, evidenceGate, docs = [], c
         if (HISTORICAL.test(clause) && !/\b(?:next|upcoming|coming up)\b/i.test(clause)) continue;
         if (!literalMatches.length && UNCERTAIN.test(clause)) continue;
         if (!literalMatches.length && !EVENT.test(clause) && !FUTURE.test(clause)) continue;
-        if (!today) return veto("The owner's timezone is missing or invalid; an upcoming event date cannot be checked against today.");
+        if (!today) return veto("I can check the event dates once your timezone is set, but an upcoming date is unconfirmed until then. Want help setting it?");
         const anchors = entityAnchors(question, sentence, cited, owner)
           .filter(anchor => cited.some(doc => containsPhrase(`${doc.title} ${doc.snippet}`, anchor)));
-        if (!anchors.length) return veto("The upcoming event subject is ambiguous; the retrieved dates cannot establish which occurrence is next.");
+        if (!anchors.length) return veto("I can help check the event, but its subject is unclear, so the next occurrence is unconfirmed. Want to narrow down which event?");
         const citedEvents = cited.flatMap(doc => eventOccurrences(doc, context, anchors));
         const referenceDays = citedEvents.map(event => event.day);
         const picked = literalMatches.map(match => literalDay(match[0], { ...context, referenceDays }));
-        if (!picked.length || picked.some(day => !day)) return veto("No unambiguous dated upcoming occurrence is established; recurring wording or an ambiguous date cannot prove the next event.");
-        if (picked.some(day => day < today)) return veto("The answer presents a past appointment or event as upcoming. An upcoming occurrence has not been established by that date.");
-        if (picked.some(day => !referenceDays.includes(day))) return veto("The cited evidence does not establish that dated upcoming occurrence; an old series or a document date cannot supply the next event.");
+        if (!picked.length || picked.some(day => !day)) return veto("I can review the event records, but recurring wording or an ambiguous date does not confirm a dated upcoming occurrence. Want to check the exact date?");
+        if (picked.some(day => day < today)) return veto("I can check later dates, but this answer treats a past appointment or event as upcoming. Want to look for a later dated event?");
+        if (picked.some(day => !referenceDays.includes(day))) return veto("I can show the cited records, but an old series or a document date does not confirm that dated upcoming occurrence. Want to check for an explicit event date?");
         const minute = clockMinute(clause);
         const instances = citedEvents.filter(event => event.day === picked[0] && (minute === null || event.minute === minute));
-        if (!instances.length || instances.some(event => !upcoming(event, context))) return veto("The cited appointment or event start has passed, or its time is not established as upcoming.");
+        if (!instances.length || instances.some(event => !upcoming(event, context))) return veto("I found the cited appointment or event, but its start has passed or its time is not confirmed as upcoming. Want to check the event time?");
         const selected = instances.length === 1 ? instances[0] : { day: picked[0], minute, instant: null };
         const earlier = candidates.filter(doc => anchors.some(anchor => containsPhrase(`${doc.title} ${doc.snippet}`, anchor)))
           .flatMap(doc => eventOccurrences(doc, context, anchors)).filter(event => upcoming(event, context) && before(event, selected) &&
             !anchors.some(anchor => mentioned.has(anchor) && !before(event, mentioned.get(anchor).first)));
-        if (earlier.length) return veto("An earlier upcoming event for the same named subject appears in the retrieved records; review the dates in order before calling this the next event.");
-        if (picked.some((day, index) => index > 0 && day < picked[index - 1])) return veto("Upcoming events are not listed in date order; the soonest occurrence must come first.");
-        if (anchors.some(anchor => mentioned.has(anchor) && before(selected, mentioned.get(anchor).last))) return veto("Upcoming events are not listed in date order; the soonest occurrence must come first.");
+        if (earlier.length) return veto("I found an earlier upcoming event for the same subject, so this one is not confirmed as next. Want to review the dates in order?");
+        if (picked.some((day, index) => index > 0 && day < picked[index - 1])) return veto("I found upcoming events, but they are not listed in date order with the soonest first. Want to review them from earliest to latest?");
+        if (anchors.some(anchor => mentioned.has(anchor) && before(selected, mentioned.get(anchor).last))) return veto("I found upcoming events, but they are not listed in date order with the soonest first. Want to review them from earliest to latest?");
         for (const anchor of anchors) mentioned.set(anchor, { first: mentioned.get(anchor)?.first || selected,
           last: { ...selected, day: picked.at(-1) } });
       }
@@ -237,13 +237,13 @@ export function applyTemporalVeto({ question, answer, evidenceGate, docs = [], c
           return !cited.some(doc => eligible(doc) && reliableDocumentTime(doc) > latestStop &&
             reliableDocumentTime(doc) <= now && restartedSubject(doc.snippet, subject));
         });
-        if (stopped) return veto("A newer record says the cited item stopped, was discontinued or ended; older evidence may be superseded and cannot establish current use.");
+        if (stopped) return veto("I found a newer record saying this item stopped, was discontinued or ended, so older evidence does not confirm current use. Want to review the newer record?");
         // Preserve the existing owner-confirmed operative-value contract when
         // every newer mention repeats its exact value. Agreement is not a
         // supersession, and this does not bypass a newer stopped-item check.
         const operative = old.authority?.owner_confirmed && old.authority?.operative_section?.value;
         if (operative && newer.every(doc => containsPhrase(doc.snippet, operative))) continue;
-        if (!newer.some(doc => cited.some(item => item.n === doc.n))) return veto("A newer record about the same subject may supersede the older cited status; current status requires review of that newer evidence.");
+        if (!newer.some(doc => cited.some(item => item.n === doc.n))) return veto("I found a newer record about the same subject that may supersede the older cited status. Current status is unconfirmed until that record is reviewed. Want to look at it?");
       }
     }
   }

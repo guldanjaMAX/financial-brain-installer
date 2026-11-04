@@ -1,0 +1,965 @@
+{
+  "purpose": "Authored offline development questions for future provider recordings; no live accuracy claim.",
+  "questions": [
+    {
+      "id": "balances-1",
+      "category": "balances",
+      "question": "Show the recorded cash balances we hold.",
+      "expected": {
+        "kind": "balance"
+      }
+    },
+    {
+      "id": "balances-2",
+      "category": "balances",
+      "question": "Can you fetch a fresh view of our bank balances?",
+      "expected": {
+        "kind": "balance"
+      }
+    },
+    {
+      "id": "balances-3",
+      "category": "balances",
+      "question": "What amount is sitting across all our accounts?",
+      "expected": {
+        "kind": "balance"
+      }
+    },
+    {
+      "id": "balances-4",
+      "category": "balances",
+      "question": "Please give the latest recorded balances for us.",
+      "expected": {
+        "kind": "balance"
+      }
+    },
+    {
+      "id": "balances-5",
+      "category": "balances",
+      "question": "How much cash is currently shown at the bank?",
+      "expected": {
+        "kind": "balance"
+      }
+    },
+    {
+      "id": "balances-6",
+      "category": "balances",
+      "question": "Bring me the current balances of our business accounts.",
+      "expected": {
+        "kind": "balance"
+      }
+    },
+    {
+      "id": "balances-7",
+      "category": "balances",
+      "question": "I need to know the balance recorded for each bank account.",
+      "expected": {
+        "kind": "balance"
+      }
+    },
+    {
+      "id": "balances-8",
+      "category": "balances",
+      "question": "Could we view the account balance observations?",
+      "expected": {
+        "kind": "balance"
+      }
+    },
+    {
+      "id": "balances-9",
+      "category": "balances",
+      "question": "What are the amounts our accounts currently hold?",
+      "expected": {
+        "kind": "balance"
+      }
+    },
+    {
+      "id": "balances-10",
+      "category": "balances",
+      "question": "Please check the bank balance snapshot as of now.",
+      "expected": {
+        "kind": "balance"
+      }
+    },
+    {
+      "id": "balances-11",
+      "category": "balances",
+      "question": "How much is held in our business bank accounts?",
+      "expected": {
+        "kind": "balance"
+      }
+    },
+    {
+      "id": "balances-12",
+      "category": "balances",
+      "question": "Give us the present recorded cash position.",
+      "expected": {
+        "kind": "balance"
+      }
+    },
+    {
+      "id": "money-in-1",
+      "category": "money-in",
+      "question": "Add together the money that arrived this week.",
+      "expected": {
+        "kind": "totals"
+      }
+    },
+    {
+      "id": "money-in-2",
+      "category": "money-in",
+      "question": "How much did the bank receive in the previous calendar month?",
+      "expected": {
+        "kind": "totals"
+      }
+    },
+    {
+      "id": "money-in-3",
+      "category": "money-in",
+      "question": "Total our incoming deposits for this month so far.",
+      "expected": {
+        "kind": "totals"
+      }
+    },
+    {
+      "id": "money-in-4",
+      "category": "money-in",
+      "question": "What is the sum of our posted incoming money last week?",
+      "expected": {
+        "kind": "totals"
+      }
+    },
+    {
+      "id": "money-in-5",
+      "category": "money-in",
+      "question": "Can you combine the bank inflows over the past eight days?",
+      "expected": {
+        "kind": "totals"
+      }
+    },
+    {
+      "id": "money-in-6",
+      "category": "money-in",
+      "question": "How much has come into all accounts month-to-date?",
+      "expected": {
+        "kind": "totals"
+      }
+    },
+    {
+      "id": "money-in-7",
+      "category": "money-in",
+      "question": "Show the total amount received during Q2 2026.",
+      "expected": {
+        "kind": "totals"
+      }
+    },
+    {
+      "id": "money-in-8",
+      "category": "money-in",
+      "question": "Sum the incoming funds since 2026-09-01.",
+      "expected": {
+        "kind": "totals"
+      }
+    },
+    {
+      "id": "money-in-9",
+      "category": "money-in",
+      "question": "What did we receive through our accounts in 2025?",
+      "expected": {
+        "kind": "totals"
+      }
+    },
+    {
+      "id": "money-in-10",
+      "category": "money-in",
+      "question": "Give the combined money coming in during the prior week.",
+      "expected": {
+        "kind": "totals"
+      }
+    },
+    {
+      "id": "money-in-11",
+      "category": "money-in",
+      "question": "Please calculate the bank money-in total for this calendar month.",
+      "expected": {
+        "kind": "totals"
+      }
+    },
+    {
+      "id": "money-in-12",
+      "category": "money-in",
+      "question": "How much arrived between 2026-09-01 and 2026-09-30?",
+      "expected": {
+        "kind": "totals"
+      }
+    },
+    {
+      "id": "spend-this-month-1",
+      "category": "spend-this-month",
+      "question": "Add together our ordinary expenses month-to-date.",
+      "expected": {
+        "kind": "expense_summary"
+      }
+    },
+    {
+      "id": "spend-this-month-2",
+      "category": "spend-this-month",
+      "question": "What is the running total of our spending this calendar month?",
+      "expected": {
+        "kind": "expense_summary"
+      }
+    },
+    {
+      "id": "spend-this-month-3",
+      "category": "spend-this-month",
+      "question": "Please total the purchases made this month.",
+      "expected": {
+        "kind": "expense_summary"
+      }
+    },
+    {
+      "id": "spend-this-month-4",
+      "category": "spend-this-month",
+      "question": "Can you give a current-month expense breakdown?",
+      "expected": {
+        "kind": "expense_summary"
+      }
+    },
+    {
+      "id": "spend-this-month-5",
+      "category": "spend-this-month",
+      "question": "How much have our outgoing expenses cost this month?",
+      "expected": {
+        "kind": "expense_summary"
+      }
+    },
+    {
+      "id": "spend-this-month-6",
+      "category": "spend-this-month",
+      "question": "Review the ordinary charges recorded so far this month.",
+      "expected": {
+        "kind": "expense_summary"
+      }
+    },
+    {
+      "id": "spend-this-month-7",
+      "category": "spend-this-month",
+      "question": "What has our spending amounted to in the current month?",
+      "expected": {
+        "kind": "expense_summary"
+      }
+    },
+    {
+      "id": "spend-this-month-8",
+      "category": "spend-this-month",
+      "question": "Give the sum of the expenses since this month began.",
+      "expected": {
+        "kind": "expense_summary"
+      }
+    },
+    {
+      "id": "spend-this-month-9",
+      "category": "spend-this-month",
+      "question": "Show where the money went during this calendar month.",
+      "expected": {
+        "kind": "expense_summary"
+      }
+    },
+    {
+      "id": "spend-this-month-10",
+      "category": "spend-this-month",
+      "question": "How much was spent during this month up to now?",
+      "expected": {
+        "kind": "expense_summary"
+      }
+    },
+    {
+      "id": "spend-this-month-11",
+      "category": "spend-this-month",
+      "question": "I need the ordinary expense summary for month-to-date.",
+      "expected": {
+        "kind": "expense_summary"
+      }
+    },
+    {
+      "id": "spend-this-month-12",
+      "category": "spend-this-month",
+      "question": "Can we see what our current-month purchases total?",
+      "expected": {
+        "kind": "expense_summary"
+      }
+    },
+    {
+      "id": "vendor-spend-1",
+      "category": "vendor-spend",
+      "question": "Total our purchases from Supply Unit this month.",
+      "expected": {
+        "kind": "merchant"
+      }
+    },
+    {
+      "id": "vendor-spend-2",
+      "category": "vendor-spend",
+      "question": "What did we spend with Service Unit during the previous week?",
+      "expected": {
+        "kind": "merchant"
+      }
+    },
+    {
+      "id": "vendor-spend-3",
+      "category": "vendor-spend",
+      "question": "Give the total paid to Supply Unit in Q1 2026.",
+      "expected": {
+        "kind": "merchant"
+      }
+    },
+    {
+      "id": "vendor-spend-4",
+      "category": "vendor-spend",
+      "question": "How much went to Service Unit over the last ten days?",
+      "expected": {
+        "kind": "merchant"
+      }
+    },
+    {
+      "id": "vendor-spend-5",
+      "category": "vendor-spend",
+      "question": "Please combine the Supply Unit charges from last month.",
+      "expected": {
+        "kind": "merchant"
+      }
+    },
+    {
+      "id": "vendor-spend-6",
+      "category": "vendor-spend",
+      "question": "What is the sum spent at Service Unit since 2026-08-01?",
+      "expected": {
+        "kind": "merchant"
+      }
+    },
+    {
+      "id": "vendor-spend-7",
+      "category": "vendor-spend",
+      "question": "Can you add up Supply Unit purchases in 2025?",
+      "expected": {
+        "kind": "merchant"
+      }
+    },
+    {
+      "id": "vendor-spend-8",
+      "category": "vendor-spend",
+      "question": "Review the charges from Service Unit this week.",
+      "expected": {
+        "kind": "merchant"
+      }
+    },
+    {
+      "id": "vendor-spend-9",
+      "category": "vendor-spend",
+      "question": "How much did Supply Unit cost us in the current calendar month?",
+      "expected": {
+        "kind": "merchant"
+      }
+    },
+    {
+      "id": "vendor-spend-10",
+      "category": "vendor-spend",
+      "question": "Show the total we paid Service Unit during Q3 2026.",
+      "expected": {
+        "kind": "merchant"
+      }
+    },
+    {
+      "id": "vendor-spend-11",
+      "category": "vendor-spend",
+      "question": "What did purchases at Supply Unit add up to last week?",
+      "expected": {
+        "kind": "merchant"
+      }
+    },
+    {
+      "id": "vendor-spend-12",
+      "category": "vendor-spend",
+      "question": "Please sum our spending with Service Unit month-to-date.",
+      "expected": {
+        "kind": "merchant"
+      }
+    },
+    {
+      "id": "biggest-expenses-1",
+      "category": "biggest-expenses",
+      "question": "Rank our top three purchases from last week.",
+      "expected": {
+        "kind": "largest"
+      }
+    },
+    {
+      "id": "biggest-expenses-2",
+      "category": "biggest-expenses",
+      "question": "Which seven charges were the biggest this month?",
+      "expected": {
+        "kind": "largest"
+      }
+    },
+    {
+      "id": "biggest-expenses-3",
+      "category": "biggest-expenses",
+      "question": "Show the ten highest expenses posted in Q2 2026.",
+      "expected": {
+        "kind": "largest"
+      }
+    },
+    {
+      "id": "biggest-expenses-4",
+      "category": "biggest-expenses",
+      "question": "Can we see the largest six purchases from the prior month?",
+      "expected": {
+        "kind": "largest"
+      }
+    },
+    {
+      "id": "biggest-expenses-5",
+      "category": "biggest-expenses",
+      "question": "Please list our four most expensive charges this week.",
+      "expected": {
+        "kind": "largest"
+      }
+    },
+    {
+      "id": "biggest-expenses-6",
+      "category": "biggest-expenses",
+      "question": "What were the top eight expenses over the past ten days?",
+      "expected": {
+        "kind": "largest"
+      }
+    },
+    {
+      "id": "biggest-expenses-7",
+      "category": "biggest-expenses",
+      "question": "Give the five highest purchases recorded since 2026-09-01.",
+      "expected": {
+        "kind": "largest"
+      }
+    },
+    {
+      "id": "biggest-expenses-8",
+      "category": "biggest-expenses",
+      "question": "Which three expenses cost the most in 2025?",
+      "expected": {
+        "kind": "largest"
+      }
+    },
+    {
+      "id": "biggest-expenses-9",
+      "category": "biggest-expenses",
+      "question": "Pull up our twelve largest charges during Q3 2026.",
+      "expected": {
+        "kind": "largest"
+      }
+    },
+    {
+      "id": "biggest-expenses-10",
+      "category": "biggest-expenses",
+      "question": "I need the top nine expense transactions this calendar month.",
+      "expected": {
+        "kind": "largest"
+      }
+    },
+    {
+      "id": "biggest-expenses-11",
+      "category": "biggest-expenses",
+      "question": "Show the twenty biggest purchases from last month.",
+      "expected": {
+        "kind": "largest"
+      }
+    },
+    {
+      "id": "biggest-expenses-12",
+      "category": "biggest-expenses",
+      "question": "Rank the highest five outgoing expenses for month-to-date.",
+      "expected": {
+        "kind": "largest"
+      }
+    },
+    {
+      "id": "recent-transactions-1",
+      "category": "recent-transactions",
+      "question": "Show the newest three posted transactions.",
+      "expected": {
+        "kind": "transactions"
+      }
+    },
+    {
+      "id": "recent-transactions-2",
+      "category": "recent-transactions",
+      "question": "Can you retrieve our latest seven bank entries?",
+      "expected": {
+        "kind": "transactions"
+      }
+    },
+    {
+      "id": "recent-transactions-3",
+      "category": "recent-transactions",
+      "question": "Give me the last twelve account transactions.",
+      "expected": {
+        "kind": "transactions"
+      }
+    },
+    {
+      "id": "recent-transactions-4",
+      "category": "recent-transactions",
+      "question": "List our four most recent bank transactions.",
+      "expected": {
+        "kind": "transactions"
+      }
+    },
+    {
+      "id": "recent-transactions-5",
+      "category": "recent-transactions",
+      "question": "I would like the newest eight transactions across our accounts.",
+      "expected": {
+        "kind": "transactions"
+      }
+    },
+    {
+      "id": "recent-transactions-6",
+      "category": "recent-transactions",
+      "question": "Please display the latest twenty posted bank transactions.",
+      "expected": {
+        "kind": "transactions"
+      }
+    },
+    {
+      "id": "recent-transactions-7",
+      "category": "recent-transactions",
+      "question": "Which ten bank entries posted most recently?",
+      "expected": {
+        "kind": "transactions"
+      }
+    },
+    {
+      "id": "recent-transactions-8",
+      "category": "recent-transactions",
+      "question": "Bring us the last six transactions from the accounts.",
+      "expected": {
+        "kind": "transactions"
+      }
+    },
+    {
+      "id": "recent-transactions-9",
+      "category": "recent-transactions",
+      "question": "Can we look at our newest five bank movements?",
+      "expected": {
+        "kind": "transactions"
+      }
+    },
+    {
+      "id": "recent-transactions-10",
+      "category": "recent-transactions",
+      "question": "I need a list of the nine latest transactions.",
+      "expected": {
+        "kind": "transactions"
+      }
+    },
+    {
+      "id": "recent-transactions-11",
+      "category": "recent-transactions",
+      "question": "What are our last fifteen recorded bank transactions?",
+      "expected": {
+        "kind": "transactions"
+      }
+    },
+    {
+      "id": "recent-transactions-12",
+      "category": "recent-transactions",
+      "question": "Pull up the most recent transaction history.",
+      "expected": {
+        "kind": "transactions"
+      }
+    },
+    {
+      "id": "payment-arrived-1",
+      "category": "payment-arrived",
+      "question": "Was the $234.56 deposit from Sender Unit received last week?",
+      "expected": {
+        "kind": "payment"
+      }
+    },
+    {
+      "id": "payment-arrived-2",
+      "category": "payment-arrived",
+      "question": "Check whether Sender Unit sent us $345.67 this month.",
+      "expected": {
+        "kind": "payment"
+      }
+    },
+    {
+      "id": "payment-arrived-3",
+      "category": "payment-arrived",
+      "question": "Could you find a $456.78 payment from Sender Unit last month?",
+      "expected": {
+        "kind": "payment"
+      }
+    },
+    {
+      "id": "payment-arrived-4",
+      "category": "payment-arrived",
+      "question": "Did $567.89 from Sender Unit reach our bank this week?",
+      "expected": {
+        "kind": "payment"
+      }
+    },
+    {
+      "id": "payment-arrived-5",
+      "category": "payment-arrived",
+      "question": "Look for the Sender Unit payment of $678.90 during Q3 2026.",
+      "expected": {
+        "kind": "payment"
+      }
+    },
+    {
+      "id": "payment-arrived-6",
+      "category": "payment-arrived",
+      "question": "Has a deposit of $789.01 from Sender Unit been recorded?",
+      "expected": {
+        "kind": "payment"
+      }
+    },
+    {
+      "id": "payment-arrived-7",
+      "category": "payment-arrived",
+      "question": "Please check for $890.12 from Sender Unit since 2026-09-01.",
+      "expected": {
+        "kind": "payment"
+      }
+    },
+    {
+      "id": "payment-arrived-8",
+      "category": "payment-arrived",
+      "question": "Was $901.23 received from Sender Unit on September 18, 2026?",
+      "expected": {
+        "kind": "payment"
+      }
+    },
+    {
+      "id": "payment-arrived-9",
+      "category": "payment-arrived",
+      "question": "Find whether the $112.34 Sender Unit payment arrived.",
+      "expected": {
+        "kind": "payment"
+      }
+    },
+    {
+      "id": "payment-arrived-10",
+      "category": "payment-arrived",
+      "question": "Can we confirm a $223.45 bank payment from Sender Unit last week?",
+      "expected": {
+        "kind": "payment"
+      }
+    },
+    {
+      "id": "payment-arrived-11",
+      "category": "payment-arrived",
+      "question": "Is a $334.56 deposit from Sender Unit visible this month?",
+      "expected": {
+        "kind": "payment"
+      }
+    },
+    {
+      "id": "payment-arrived-12",
+      "category": "payment-arrived",
+      "question": "Please look for the $445.67 payment on 2026-09-22.",
+      "expected": {
+        "kind": "payment"
+      }
+    },
+    {
+      "id": "undated-expenses-1",
+      "category": "undated-expenses",
+      "question": "Add up our ordinary spending.",
+      "expected": {
+        "kind": "expense_summary"
+      }
+    },
+    {
+      "id": "undated-expenses-2",
+      "category": "undated-expenses",
+      "question": "Can you show the expense breakdown for us?",
+      "expected": {
+        "kind": "expense_summary"
+      }
+    },
+    {
+      "id": "undated-expenses-3",
+      "category": "undated-expenses",
+      "question": "I need a summary of the charges we pay.",
+      "expected": {
+        "kind": "expense_summary"
+      }
+    },
+    {
+      "id": "undated-expenses-4",
+      "category": "undated-expenses",
+      "question": "Give me the total of our ordinary purchases.",
+      "expected": {
+        "kind": "expense_summary"
+      }
+    },
+    {
+      "id": "undated-expenses-5",
+      "category": "undated-expenses",
+      "question": "Where does our expense money end up?",
+      "expected": {
+        "kind": "expense_summary"
+      }
+    },
+    {
+      "id": "undated-expenses-6",
+      "category": "undated-expenses",
+      "question": "Please review how much we spend.",
+      "expected": {
+        "kind": "expense_summary"
+      }
+    },
+    {
+      "id": "undated-expenses-7",
+      "category": "undated-expenses",
+      "question": "Show us a rundown of outgoing purchases.",
+      "expected": {
+        "kind": "expense_summary"
+      }
+    },
+    {
+      "id": "undated-expenses-8",
+      "category": "undated-expenses",
+      "question": "What have our ordinary expenses cost?",
+      "expected": {
+        "kind": "expense_summary"
+      }
+    },
+    {
+      "id": "undated-expenses-9",
+      "category": "undated-expenses",
+      "question": "Tell me the total spending amount.",
+      "expected": {
+        "kind": "expense_summary"
+      }
+    },
+    {
+      "id": "undated-expenses-10",
+      "category": "undated-expenses",
+      "question": "Could we look at our spending summary?",
+      "expected": {
+        "kind": "expense_summary"
+      }
+    },
+    {
+      "id": "undated-expenses-11",
+      "category": "undated-expenses",
+      "question": "How much goes out as ordinary expenses?",
+      "expected": {
+        "kind": "expense_summary"
+      }
+    },
+    {
+      "id": "undated-expenses-12",
+      "category": "undated-expenses",
+      "question": "Bring up the expense totals for us.",
+      "expected": {
+        "kind": "expense_summary"
+      }
+    },
+    {
+      "id": "recurring-1",
+      "category": "recurring",
+      "question": "Which outgoing charges look repeated?",
+      "expected": {
+        "kind": "recurring"
+      }
+    },
+    {
+      "id": "recurring-2",
+      "category": "recurring",
+      "question": "Show the expenses that repeat on a schedule.",
+      "expected": {
+        "kind": "recurring"
+      }
+    },
+    {
+      "id": "recurring-3",
+      "category": "recurring",
+      "question": "Can we see detected recurring payments?",
+      "expected": {
+        "kind": "recurring"
+      }
+    },
+    {
+      "id": "recurring-4",
+      "category": "recurring",
+      "question": "What subscriptions appear in the posted bank charges?",
+      "expected": {
+        "kind": "recurring"
+      }
+    },
+    {
+      "id": "recurring-5",
+      "category": "recurring",
+      "question": "Find the purchases we keep paying every month.",
+      "expected": {
+        "kind": "recurring"
+      }
+    },
+    {
+      "id": "recurring-6",
+      "category": "recurring",
+      "question": "Give us the repeating charge patterns from the bank.",
+      "expected": {
+        "kind": "recurring"
+      }
+    },
+    {
+      "id": "recurring-7",
+      "category": "recurring",
+      "question": "Which expenses seem to come back regularly?",
+      "expected": {
+        "kind": "recurring"
+      }
+    },
+    {
+      "id": "recurring-8",
+      "category": "recurring",
+      "question": "Please review the charges that recur.",
+      "expected": {
+        "kind": "recurring"
+      }
+    },
+    {
+      "id": "recurring-9",
+      "category": "recurring",
+      "question": "Are any posted purchases recurring?",
+      "expected": {
+        "kind": "recurring"
+      }
+    },
+    {
+      "id": "recurring-10",
+      "category": "recurring",
+      "question": "What ongoing subscriptions are visible in our transactions?",
+      "expected": {
+        "kind": "recurring"
+      }
+    },
+    {
+      "id": "recurring-11",
+      "category": "recurring",
+      "question": "Tell us which bank payments look repetitive.",
+      "expected": {
+        "kind": "recurring"
+      }
+    },
+    {
+      "id": "recurring-12",
+      "category": "recurring",
+      "question": "Could you list the detected subscription-like charges?",
+      "expected": {
+        "kind": "recurring"
+      }
+    },
+    {
+      "id": "forecast-or-unanswerable-1",
+      "category": "forecast-or-unanswerable",
+      "question": "How much cash will remain in the bank next week?",
+      "expected": {
+        "kind": "forecast"
+      }
+    },
+    {
+      "id": "forecast-or-unanswerable-2",
+      "category": "forecast-or-unanswerable",
+      "question": "Predict the account balances for next month.",
+      "expected": {
+        "kind": "forecast"
+      }
+    },
+    {
+      "id": "forecast-or-unanswerable-3",
+      "category": "forecast-or-unanswerable",
+      "question": "Where might our cash balance stand tomorrow?",
+      "expected": {
+        "kind": "forecast"
+      }
+    },
+    {
+      "id": "forecast-or-unanswerable-4",
+      "category": "forecast-or-unanswerable",
+      "question": "Can you project how much bank money we will have?",
+      "expected": {
+        "kind": "forecast"
+      }
+    },
+    {
+      "id": "forecast-or-unanswerable-5",
+      "category": "forecast-or-unanswerable",
+      "question": "Show what our business cash balance will be next quarter.",
+      "expected": {
+        "kind": "forecast"
+      }
+    },
+    {
+      "id": "forecast-or-unanswerable-6",
+      "category": "forecast-or-unanswerable",
+      "question": "How much will we spend next month?",
+      "expected": {
+        "kind": null
+      }
+    },
+    {
+      "id": "forecast-or-unanswerable-7",
+      "category": "forecast-or-unanswerable",
+      "question": "What bank should we open an account with?",
+      "expected": {
+        "kind": null
+      }
+    },
+    {
+      "id": "forecast-or-unanswerable-8",
+      "category": "forecast-or-unanswerable",
+      "question": "Translate the phrase bank balances into another language.",
+      "expected": {
+        "kind": null
+      }
+    },
+    {
+      "id": "forecast-or-unanswerable-9",
+      "category": "forecast-or-unanswerable",
+      "question": "Rewrite our expense policy in simpler language.",
+      "expected": {
+        "kind": null
+      }
+    },
+    {
+      "id": "forecast-or-unanswerable-10",
+      "category": "forecast-or-unanswerable",
+      "question": "Explain what a recurring charge means.",
+      "expected": {
+        "kind": null
+      }
+    },
+    {
+      "id": "forecast-or-unanswerable-11",
+      "category": "forecast-or-unanswerable",
+      "question": "Compare our spending with the budget we approved.",
+      "expected": {
+        "kind": null
+      }
+    },
+    {
+      "id": "forecast-or-unanswerable-12",
+      "category": "forecast-or-unanswerable",
+      "question": "What would our cash be after a hypothetical purchase?",
+      "expected": {
+        "kind": null
+      }
+    }
+  ]
+}

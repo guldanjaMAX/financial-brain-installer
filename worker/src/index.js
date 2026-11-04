@@ -58,6 +58,7 @@ import {
 } from "./lib/quickbooks-oauth-callback.js";
 import { cleanupPublicAuthState, guardPublicRequest } from "./lib/public-request-guard.js";
 import { handleBankExportImport, BANK_IMPORT_PATH } from "./lib/fin-upload.js";
+import { writeBankActivityDocuments } from "./lib/bank-activity-doc.js";
 import { handleContentRefreshDates, CONTENT_REFRESH_PATH } from "./lib/content-freshness-maintenance.js";
 import { handleFinApi, FIN_PATH_PREFIX } from "./lib/fin-api.js";
 import {
@@ -2543,7 +2544,7 @@ const SOURCE_RECEIPT_STATUSES = new Set(["indexing", "ready", "error"]);
 const SOURCE_RUN_LANES = new Set(["incremental", "sweep", "manual"]);
 const SOURCE_REVIEW_ISSUE_CODE = "SAFETY_REVIEW_REQUIRED";
 const SOURCE_KINDS = new Set([
-  "drive", "gmail", "imap", "calendar", "imessage", "whatsapp", "zoom",
+  "drive", "gmail", "imap", "calendar", "imessage", "whatsapp", "zoom", "granola",
   "quickbooks", "slack", "notion", "microsoft", "dropbox", "hubspot", "plaid",
   // A one-time history load out of an iPhone backup. Deliberately its own
   // kind rather than "imessage": it is a point-in-time snapshot with no
@@ -3690,7 +3691,10 @@ export default {
           body: JSON.stringify(envelope),
         },
       ), { all: true }, { principalKind: "owner" });
-      return handleOwnerActions(env, request, path, { ingestEnvelope });
+      const afterBankImportCommit = ({ response, at }) => response?.changed === true
+        ? writeBankActivityDocuments(env, { metadataChanges: 1, at })
+        : null;
+      return handleOwnerActions(env, request, path, { ingestEnvelope, afterBankImportCommit });
     }
 
     // Plaid signs the exact raw body with a short-lived ES256 verification JWT.

@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { normalizeGranolaRecord } from "../connectors/granola-records.mjs";
 import {
   declaredUploadSourceFor,
   localReceiptCoverage,
@@ -124,3 +125,23 @@ assert.equal(declaredUploadSourceFor({}, "C:\\anything"), null, "no corpus decla
 assert.equal(declaredUploadSourceFor(manifest, ""), null, "an empty path resolves nothing");
 
 console.log("PASS  a folder's declared source is what --path files it under");
+
+// Meeting identity and metadata come from the export contract, never a filename
+// or generic JSON front matter. The source still follows the exact declaration.
+{
+  const record = {
+    id: "meeting-001", title: "Synthetic session", meeting_at: "2026-10-30T10:00:00-07:00",
+    owner_email: "owner@example.invalid", attendees: ["Invitee"],
+    transcript: [{ speaker: "Owner", source: "microphone", start: 0, text: "Review the delivery capacity before confirming the schedule." }],
+    exported_at: "2026-10-31T12:00:00Z",
+  };
+  const meeting = normalizeGranolaRecord(record, { source: "meeting-export", ownerEmail: record.owner_email });
+  assert.equal(meeting.source_type, "meeting-export");
+  assert.equal(meeting.occurred_at, record.meeting_at);
+  assert.equal(meeting.metadata.granola.meeting_id, record.id);
+  assert.equal(meeting.metadata.granola.attendance, "unverified");
+  assert.notEqual(normalizeGranolaRecord({ ...record, id: "meeting-002" }, {
+    source: "meeting-export", ownerEmail: record.owner_email,
+  }).source_id, meeting.source_id, "matching titles cannot collapse separate meetings");
+}
+console.log("PASS  declared Granola export source preserves typed meeting metadata and ID boundaries");

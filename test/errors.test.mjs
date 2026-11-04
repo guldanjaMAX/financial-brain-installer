@@ -192,9 +192,13 @@ function cli(args, env = {}, options = {}) {
 }
 
 {
-  const { debugRetryHint } = await import("../brain.mjs");
+  const { debugRetryHint, supportErrorCode } = await import("../brain.mjs");
   check("the Windows debug hint uses PowerShell syntax",
     debugRetryHint("win32") === "$env:BRAIN_DEBUG=1; <the same command>", debugRetryHint("win32"));
+  const readbackFailure = new Error("content-free fixture");
+  readbackFailure.supportCode = "CLOUDFLARE_SECRET_READBACK_FAILED";
+  check("the Cloudflare secret readback support code survives the CLI classifier",
+    supportErrorCode(readbackFailure, { command: "connect" }) === "CLOUDFLARE_SECRET_READBACK_FAILED");
 }
 
 {

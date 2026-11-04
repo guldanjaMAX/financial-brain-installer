@@ -152,6 +152,29 @@ function mkZoomFetch({
   return { fetchImpl, calls };
 }
 
+const routeCalls = [];
+async function routeFetch(request, env, ctx) {
+  const originalFetch = globalThis.fetch;
+  const zoom = mkZoomFetch();
+  const pending = [];
+  globalThis.fetch = zoom.fetchImpl;
+  try {
+    const response = await worker.fetch(request, env, {
+      waitUntil(work) {
+        pending.push(work);
+        ctx?.waitUntil?.(work);
+      },
+    });
+    // A durable acknowledgement starts work even when the caller discards it.
+    // Keep that work on the scripted transport until it has settled.
+    await Promise.all(pending);
+    routeCalls.push(...zoom.calls);
+    return response;
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
 /** Records the envelopes handed to the ingest path. */
 function mkIngest() {
   const envelopes = [];
@@ -313,9 +336,9 @@ check("an empty or missing VTT parses to an empty string",
   const env = mkEnv({ secret: null });
   const pending = [];
   const ctx = { waitUntil: (p) => pending.push(p) };
-  const response = await worker.fetch(signedRequest(transcriptEvent()), env, ctx);
+  const response = await routeFetch(signedRequest(transcriptEvent()), env, ctx);
   check("with no webhook secret set, a signed event is refused 503", response.status === 503, String(response.status));
-  const challenge = await worker.fetch(
+  const challenge = await routeFetch(
     signedRequest({ event: "endpoint.url_validation", payload: { plainToken: "abc" } }),
     env, ctx,
   );
@@ -330,7 +353,7 @@ check("an empty or missing VTT parses to an empty string",
 {
   const env = mkEnv();
   const plainToken = "qgg8vlvZRS6UYooatFL8Aw";
-  const response = await worker.fetch(
+  const response = await routeFetch(
     // Zoom signs nothing on the challenge, so this deliberately carries no
     // valid signature: answering it must not depend on one.
     new Request("https://brain.example/api/webhooks/zoom", {
@@ -351,25 +374,30 @@ check("an empty or missing VTT parses to an empty string",
 
 {
   const env = mkEnv();
-  const notFound = await worker.fetch(
+  const notFound = await routeFetch(
     new Request("https://brain.example/api/webhooks/zoom"), env, { waitUntil() {} },
   );
   check("GET on the webhook route is not a route", notFound.status === 404, String(notFound.status));
 
-  const noKey = await worker.fetch(
+  const noKey = await routeFetch(
     signedRequest(transcriptEvent()), env, { waitUntil() {} },
   );
   check("the webhook needs no admin key: Zoom cannot send one", noKey.status !== 401, String(noKey.status));
 
-  const badSig = await worker.fetch(
+  check("the accepted route reaches the scripted provider token exchange",
+    routeCalls.some(call => call.url.startsWith("https://zoom.us/oauth/token")));
+  const callsBeforeBadSignature = routeCalls.length;
+  const badSig = await routeFetch(
     signedRequest(transcriptEvent(), { secret: "wrong-secret" }), env, { waitUntil() {} },
   );
   const badBody = await badSig.json();
   check("a wrongly signed event is refused 401", badSig.status === 401, String(badSig.status));
+  check("the signature refusal starts no provider request after the accepted control",
+    callsBeforeBadSignature > 0 && routeCalls.length === callsBeforeBadSignature);
   check("the refusal names no failing check an attacker could iterate against",
     JSON.stringify(badBody) === JSON.stringify({ error: "unauthorized" }), JSON.stringify(badBody));
 
-  const stale = await worker.fetch(
+  const stale = await routeFetch(
     signedRequest(transcriptEvent(), { timestamp: Date.now() - 6 * 60 * 1000 }), env, { waitUntil() {} },
   );
   check("a correctly signed but stale body is refused 401", stale.status === 401, String(stale.status));
@@ -379,18 +407,18 @@ check("an empty or missing VTT parses to an empty string",
   const pretty = JSON.stringify(transcriptEvent(), null, 2);
   const ts = Date.now();
   const compactSignature = `v0=${sign(SECRET, `v0:${ts}:${JSON.stringify(JSON.parse(pretty))}`)}`;
-  const reserialized = await worker.fetch(
+  const reserialized = await routeFetch(
     signedRequest(null, { raw: pretty, timestamp: ts, signature: compactSignature }), env, { waitUntil() {} },
   );
   check("a signature over re-serialized JSON does not verify (raw bytes are signed)",
     reserialized.status === 401, String(reserialized.status));
 
-  const rawOk = await worker.fetch(
+  const rawOk = await routeFetch(
     signedRequest(null, { raw: pretty, timestamp: ts }), env, { waitUntil() {} },
   );
   check("the same pretty-printed body signed as sent does verify", rawOk.status === 200, String(rawOk.status));
 
-  const badJson = await worker.fetch(
+  const badJson = await routeFetch(
     new Request("https://brain.example/api/webhooks/zoom", { method: "POST", body: "not json" }),
     env, { waitUntil() {} },
   );
@@ -403,7 +431,7 @@ check("an empty or missing VTT parses to an empty string",
   const env = mkEnv();
   const pending = [];
   const ctx = { waitUntil: (p) => pending.push(p) };
-  const completed = await worker.fetch(
+  const completed = await routeFetch(
     signedRequest({ event: "recording.completed", payload: { object: { uuid: UUID } } }), env, ctx,
   );
   const body = await completed.json();
@@ -411,7 +439,7 @@ check("an empty or missing VTT parses to an empty string",
     completed.status === 200 && body.durable === true && pending.length === 1,
     JSON.stringify(body));
 
-  const noUuid = await worker.fetch(
+  const noUuid = await routeFetch(
     signedRequest({ event: ZOOM_TRANSCRIPT_EVENT, payload: { object: { topic: "no uuid here" } } }), env, ctx,
   );
   const noUuidBody = await noUuid.json();
@@ -423,7 +451,7 @@ check("an empty or missing VTT parses to an empty string",
 {
   const env = mkEnv({ extra: { VECTOR_DRAIN_MODE: "paused-for-upgrade" } });
   const pending = [];
-  const paused = await worker.fetch(
+  const paused = await routeFetch(
     signedRequest(transcriptEvent()), env, { waitUntil: (p) => pending.push(p) },
   );
   const body = await paused.json();

@@ -157,8 +157,9 @@ try {
       plan.dataDir);
 
     /* ---- the credential claim, asserted rather than asserted-in-prose ---- */
-    check("the plist carries WA_DATA_DIR and OS basics only",
-      Object.keys(plan.environment).sort().join(",") === "HOME,PATH,WA_DATA_DIR",
+    check("the plist carries its manifest locator, WA_DATA_DIR and OS basics only",
+      Object.keys(plan.environment).sort().join(",") === "BRAIN_MANIFEST_PATH,HOME,PATH,WA_DATA_DIR" &&
+      plan.environment.BRAIN_MANIFEST_PATH === manifestPath,
       JSON.stringify(plan.environment));
     check("no credential material of any kind reaches the resident process",
       !plist.includes("keychain://") && !plist.includes("CLOUDFLARE") &&

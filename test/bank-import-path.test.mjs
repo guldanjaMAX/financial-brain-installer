@@ -61,6 +61,8 @@ function freshDb() {
   for (const file of migrationFiles) {
     for (const statement of splitStatements(readFileSync(join(MIGRATIONS, file), "utf-8"))) db.exec(statement);
   }
+  db.exec(`INSERT INTO install_state (id,client_slug,product_version,installed_at)
+    VALUES (1,'fixture','0.0.0-test','2026-01-01T00:00:00.000Z')`);
   return db;
 }
 
@@ -69,21 +71,44 @@ function freshDb() {
  * takes the batch path in production and a harness without one would prove the
  * path nobody runs.
  */
-function d1(db) {
+function d1(db, control = { failPattern: null, failCount: 0 }) {
+  const failIfRequested = (sql) => {
+    if (!control.failPattern) return;
+    control.failPattern.lastIndex = 0;
+    if (!control.failPattern.test(sql)) return;
+    control.failCount++;
+    throw new Error("injected operator import statement failure");
+  };
   return {
     prepare(sql) {
       const shape = (params = []) => ({
         bind: (...next) => shape(next),
-        all: async () => ({ results: db.prepare(sql).all(...params) }),
-        first: async () => db.prepare(sql).get(...params) ?? null,
-        run: async () => ({ meta: { changes: Number(db.prepare(sql).run(...params).changes || 0) } }),
+        all: async () => {
+          failIfRequested(sql);
+          return { results: db.prepare(sql).all(...params) };
+        },
+        first: async () => {
+          failIfRequested(sql);
+          return db.prepare(sql).get(...params) ?? null;
+        },
+        run: async () => {
+          failIfRequested(sql);
+          return { meta: { changes: Number(db.prepare(sql).run(...params).changes || 0) } };
+        },
       });
       return shape();
     },
     async batch(statements) {
-      const out = [];
-      for (const statement of statements) out.push(await statement.run());
-      return out;
+      db.exec("BEGIN");
+      try {
+        const out = [];
+        for (const statement of statements) out.push(await statement.run());
+        db.exec("COMMIT");
+        return out;
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
     },
   };
 }
@@ -97,7 +122,8 @@ writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
 /** One live brain: a real router over a real database, plus a call counter. */
 function brain() {
   const db = freshDb();
-  const env = { STORAGE: "d1", ADMIN_KEY, BRAIN_VERSION: "fixture-version", DB: d1(db) };
+  const control = { failPattern: null, failCount: 0 };
+  const env = { STORAGE: "d1", ADMIN_KEY, BRAIN_VERSION: "fixture-version", DB: d1(db, control) };
   const calls = [];
   const fetchImpl = async (url, init = {}) => {
     calls.push({ url: String(url), method: init.method || "GET" });
@@ -110,7 +136,35 @@ function brain() {
     resolveAccount: async () => ({ id: "fixture-account" }),
   };
   const count = (table) => db.prepare(`SELECT count(*) c FROM ${table}`).get().c;
-  return { db, env, calls, options, count };
+  return { db, env, calls, options, count, control };
+}
+
+function primeBankActivityReady(b, generation = 6) {
+  const completedAt = "2026-07-31T23:59:00.000Z";
+  b.db.prepare(
+    `UPDATE bank_activity_refresh_state
+        SET generation=?,requested_at=?,completed_generation=?,completed_at=?
+      WHERE id=1`,
+  ).run(generation, "2026-07-31T23:58:00.000Z", generation, completedAt);
+  b.db.prepare(
+    `INSERT INTO sources
+       (name,kind,status,created_at,last_complete_sweep_at,sync_cursor,stale_reason)
+     VALUES ('bank_activity','bank_activity','ready','2026-01-01T00:00:00.000Z',?,?,NULL)
+     ON CONFLICT(name) DO UPDATE SET
+       kind='bank_activity',status='ready',last_complete_sweep_at=excluded.last_complete_sweep_at,
+       sync_cursor=excluded.sync_cursor,stale_reason=NULL`,
+  ).run(completedAt, JSON.stringify({ version: 1, rank: 2, month: "2026-06", account_id: 1,
+    failures: 0, ledger_marker: "a".repeat(64) }));
+}
+
+function bankActivityState(b) {
+  return b.db.prepare(
+    `SELECT r.generation,r.completed_generation,s.status,
+            s.last_complete_sweep_at,s.sync_cursor,s.stale_reason
+       FROM bank_activity_refresh_state r
+       JOIN sources s ON s.name='bank_activity' AND s.kind='bank_activity'
+      WHERE r.id=1`,
+  ).get();
 }
 
 /** Run a command with its console output captured, so the receipt can be asserted. */
@@ -129,6 +183,47 @@ async function captured(run) {
 }
 
 const runImport = (b, flags) => captured(() => cmdImportBank(manifest, manifestPath, flags, b.options));
+
+/* The shared extracted-import boundary fences every operator/CLI mutation. */
+{
+  const b = brain();
+  primeBankActivityReady(b);
+  b.control.failPattern = /UPDATE bank_activity_refresh_state/;
+  const refused = await runImport(b, { file: fixture("checking-july.ofx"), entity: "primary" });
+  check("AN OPERATOR IMPORT REACHES PROJECTION INVALIDATION BEFORE LEDGER MUTATION",
+    b.control.failCount > 0, String(b.control.failCount));
+  check("a failed invalidation cannot leave changed inventory behind a ready old projection",
+    refused.error !== null && b.count("fin_accounts") === 0 && b.count("fin_transactions") === 0 &&
+      bankActivityState(b).status === "ready" && bankActivityState(b).generation === 6,
+    refused.error?.message || JSON.stringify(bankActivityState(b)));
+
+  b.control.failPattern = /SELECT generation,completed_generation FROM bank_activity_refresh_state/;
+  b.control.failCount = 0;
+  b.env.BANK_FEED_PROVIDER = "plaid";
+  const committed = await runImport(b, { file: fixture("checking-july.ofx"), entity: "primary" });
+  check("the same operator import succeeds when its invalidation can commit",
+    committed.error === null && committed.value?.imported === true && b.count("fin_transactions") === 5,
+    committed.error?.message || JSON.stringify(committed.value));
+  check("the operator route attempts the replacement writer after the durable invalidation",
+    b.control.failCount > 0, String(b.control.failCount));
+  const pending = bankActivityState(b);
+  check("a writer failure leaves durable refresh debt instead of a ready stale projection",
+    pending.generation === 7 && pending.completed_generation === 6 && pending.status === "indexing" &&
+      pending.last_complete_sweep_at === null && pending.sync_cursor === null &&
+      pending.stale_reason === "bank activity refresh pending",
+    JSON.stringify(pending));
+
+  b.control.failPattern = null;
+  b.control.failCount = 0;
+  delete b.env.BANK_FEED_PROVIDER;
+  const beforeReplay = b.count("fin_transactions");
+  const replay = await runImport(b, { file: fixture("checking-july.ofx"), entity: "primary" });
+  check("an exact operator replay stays idempotent while its possible mutation batch remains fenced",
+    replay.error === null && replay.value?.imported === true && beforeReplay === 5 &&
+      b.count("fin_transactions") === 5 && bankActivityState(b).generation === 8 &&
+      bankActivityState(b).status === "indexing",
+    replay.error?.message || JSON.stringify(bankActivityState(b)));
+}
 
 /* ============ 1. END TO END: a real file becomes real ledger rows ============ */
 {

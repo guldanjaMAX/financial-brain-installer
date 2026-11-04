@@ -1,6 +1,6 @@
 {
   "name": "brain-installer",
-  "version": "0.4.19",
+  "version": "0.4.25",
   "private": true,
   "description": "Provision and manage a client-owned retrieval brain inside their own Cloudflare account",
   "type": "module",
@@ -26,6 +26,7 @@
     "privacy:history:remote": "node scripts/scan-git-history-privacy.mjs --remote origin --ref HEAD --require-clean",
     "privacy:history:strict": "node scripts/scan-git-history-privacy.mjs --remote origin --ref HEAD --require-clean",
     "test": "node scripts/run-test-chain.mjs",
+    "fastloop:money": "node eval/fast-loop/money-cli.mjs",
     "test:eval": "node --test eval/brain-client.test.mjs eval/corpus-contract.test.mjs eval/golden-20.test.mjs eval/profile.test.mjs eval/run.test.mjs eval/scorer.test.mjs",
     "audit:updates": "node scripts/audit-updates.mjs --release",
     "audit:regressions": "node scripts/audit-updates.mjs --regressions",
@@ -45,6 +46,7 @@
     "components/",
     "connectors/",
     "docs/ARCHITECTURE.md",
+    "docs/account-kind-reviews.md",
     "docs/COMPETITIVE-BENCHMARK.md",
     "docs/CONNECTOR-BACKLOG.md",
     "docs/ENGINEERING-STANDARDS.md",

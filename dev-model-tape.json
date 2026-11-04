@@ -1,0 +1,1446 @@
+{
+ "purpose": "Real model replies (claude-haiku-4-5-20251001) recorded by MAIN 2026-11-01 for the lane-authored development questions only. Request = the round-1 extractor request (system prompt + question). No held-out text.",
+ "recorded_at": "2026-11-02T00:20:00.908Z",
+ "tape": [
+  {
+   "id": "balances-1",
+   "question": "Show the recorded cash balances we hold.",
+   "expected": {
+    "kind": "balance"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1215,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"balance\",\n      \"direction\": null,\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "balances-2",
+   "question": "Can you fetch a fresh view of our bank balances?",
+   "expected": {
+    "kind": "balance"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1130,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"balance\",\n      \"direction\": null,\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "balances-3",
+   "question": "What amount is sitting across all our accounts?",
+   "expected": {
+    "kind": "balance"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1155,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"balance\",\n      \"direction\": null,\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "balances-4",
+   "question": "Please give the latest recorded balances for us.",
+   "expected": {
+    "kind": "balance"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1144,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"balance\",\n      \"direction\": null,\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": "balance"
+  },
+  {
+   "id": "balances-5",
+   "question": "How much cash is currently shown at the bank?",
+   "expected": {
+    "kind": "balance"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1129,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"balance\",\n      \"direction\": null,\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "balances-6",
+   "question": "Bring me the current balances of our business accounts.",
+   "expected": {
+    "kind": "balance"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1123,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"balance\",\n      \"direction\": null,\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": "balance"
+  },
+  {
+   "id": "balances-7",
+   "question": "I need to know the balance recorded for each bank account.",
+   "expected": {
+    "kind": "balance"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1179,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"balance\",\n      \"direction\": null,\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "balances-8",
+   "question": "Could we view the account balance observations?",
+   "expected": {
+    "kind": "balance"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1158,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"balance\",\n      \"direction\": null,\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "balances-9",
+   "question": "What are the amounts our accounts currently hold?",
+   "expected": {
+    "kind": "balance"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1134,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"balance\",\n      \"direction\": null,\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "balances-10",
+   "question": "Please check the bank balance snapshot as of now.",
+   "expected": {
+    "kind": "balance"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1106,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"balance\",\n      \"direction\": null,\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "balances-11",
+   "question": "How much is held in our business bank accounts?",
+   "expected": {
+    "kind": "balance"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1107,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"balance\",\n      \"direction\": null,\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "balances-12",
+   "question": "Give us the present recorded cash position.",
+   "expected": {
+    "kind": "balance"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1145,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"balance\",\n      \"direction\": null,\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "money-in-1",
+   "question": "Add together the money that arrived this week.",
+   "expected": {
+    "kind": "totals"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1176,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"totals\",\n      \"direction\": \"inflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_week\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "money-in-2",
+   "question": "How much did the bank receive in the previous calendar month?",
+   "expected": {
+    "kind": "totals"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1208,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"totals\",\n      \"direction\": \"inflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"last_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": "totals"
+  },
+  {
+   "id": "money-in-3",
+   "question": "Total our incoming deposits for this month so far.",
+   "expected": {
+    "kind": "totals"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1134,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"deposits\",\n      \"direction\": \"inflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "money-in-4",
+   "question": "What is the sum of our posted incoming money last week?",
+   "expected": {
+    "kind": "totals"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1174,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"totals\",\n      \"direction\": \"inflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"last_week\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": "totals"
+  },
+  {
+   "id": "money-in-5",
+   "question": "Can you combine the bank inflows over the past eight days?",
+   "expected": {
+    "kind": "totals"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1281,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"totals\",\n      \"direction\": \"inflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"last_n_days\",\n        \"n\": 8\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "money-in-6",
+   "question": "How much has come into all accounts month-to-date?",
+   "expected": {
+    "kind": "totals"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1171,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"totals\",\n      \"direction\": \"inflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "money-in-7",
+   "question": "Show the total amount received during Q2 2026.",
+   "expected": {
+    "kind": "totals"
+   },
+   "called": false,
+   "model": null,
+   "latency_ms": null,
+   "reply_text": null,
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "money-in-8",
+   "question": "Sum the incoming funds since 2026-09-01.",
+   "expected": {
+    "kind": "totals"
+   },
+   "called": false,
+   "model": null,
+   "latency_ms": null,
+   "reply_text": null,
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "money-in-9",
+   "question": "What did we receive through our accounts in 2025?",
+   "expected": {
+    "kind": "totals"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1216,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"deposits\",\n      \"direction\": \"inflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"year\",\n        \"year\": 2025\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "money-in-10",
+   "question": "Give the combined money coming in during the prior week.",
+   "expected": {
+    "kind": "totals"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1224,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"totals\",\n      \"direction\": \"inflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"last_week\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "money-in-11",
+   "question": "Please calculate the bank money-in total for this calendar month.",
+   "expected": {
+    "kind": "totals"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1175,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"totals\",\n      \"direction\": \"inflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "money-in-12",
+   "question": "How much arrived between 2026-09-01 and 2026-09-30?",
+   "expected": {
+    "kind": "totals"
+   },
+   "called": false,
+   "model": null,
+   "latency_ms": null,
+   "reply_text": null,
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "spend-this-month-1",
+   "question": "Add together our ordinary expenses month-to-date.",
+   "expected": {
+    "kind": "expense_summary"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1187,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"expense_summary\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "spend-this-month-2",
+   "question": "What is the running total of our spending this calendar month?",
+   "expected": {
+    "kind": "expense_summary"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1158,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"totals\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "spend-this-month-3",
+   "question": "Please total the purchases made this month.",
+   "expected": {
+    "kind": "expense_summary"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1186,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"totals\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "spend-this-month-4",
+   "question": "Can you give a current-month expense breakdown?",
+   "expected": {
+    "kind": "expense_summary"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1168,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"expense_summary\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "spend-this-month-5",
+   "question": "How much have our outgoing expenses cost this month?",
+   "expected": {
+    "kind": "expense_summary"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1184,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"expense_summary\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": "expense_summary"
+  },
+  {
+   "id": "spend-this-month-6",
+   "question": "Review the ordinary charges recorded so far this month.",
+   "expected": {
+    "kind": "expense_summary"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1201,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"expense_summary\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": "expense_summary"
+  },
+  {
+   "id": "spend-this-month-7",
+   "question": "What has our spending amounted to in the current month?",
+   "expected": {
+    "kind": "expense_summary"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1165,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"totals\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "spend-this-month-8",
+   "question": "Give the sum of the expenses since this month began.",
+   "expected": {
+    "kind": "expense_summary"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1167,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"totals\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "spend-this-month-9",
+   "question": "Show where the money went during this calendar month.",
+   "expected": {
+    "kind": "expense_summary"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1152,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"expense_summary\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "spend-this-month-10",
+   "question": "How much was spent during this month up to now?",
+   "expected": {
+    "kind": "expense_summary"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1186,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"totals\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "spend-this-month-11",
+   "question": "I need the ordinary expense summary for month-to-date.",
+   "expected": {
+    "kind": "expense_summary"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1141,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"expense_summary\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": "expense_summary"
+  },
+  {
+   "id": "spend-this-month-12",
+   "question": "Can we see what our current-month purchases total?",
+   "expected": {
+    "kind": "expense_summary"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1176,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"totals\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "vendor-spend-1",
+   "question": "Total our purchases from Supply Unit this month.",
+   "expected": {
+    "kind": "merchant"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1160,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"merchant\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": \"Supply Unit\",\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": "merchant"
+  },
+  {
+   "id": "vendor-spend-2",
+   "question": "What did we spend with Service Unit during the previous week?",
+   "expected": {
+    "kind": "merchant"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1129,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"merchant\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": \"Service Unit\",\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"last_week\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": "merchant"
+  },
+  {
+   "id": "vendor-spend-3",
+   "question": "Give the total paid to Supply Unit in Q1 2026.",
+   "expected": {
+    "kind": "merchant"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1299,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"totals\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": \"Supply Unit\",\n      \"amount_text\": null,\n      \"date_text\": \"Q1 2026\",\n      \"period\": {\n        \"type\": \"quarter\",\n        \"q\": 1,\n        \"year\": 2026\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "vendor-spend-4",
+   "question": "How much went to Service Unit over the last ten days?",
+   "expected": {
+    "kind": "merchant"
+   },
+   "called": false,
+   "model": null,
+   "latency_ms": null,
+   "reply_text": null,
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "vendor-spend-5",
+   "question": "Please combine the Supply Unit charges from last month.",
+   "expected": {
+    "kind": "merchant"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1127,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"merchant\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": \"Supply Unit\",\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"last_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "vendor-spend-6",
+   "question": "What is the sum spent at Service Unit since 2026-08-01?",
+   "expected": {
+    "kind": "merchant"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1323,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"merchant\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": \"Service Unit\",\n      \"amount_text\": null,\n      \"date_text\": \"2026-08-01\",\n      \"period\": {\n        \"type\": \"since\",\n        \"date\": \"2026-08-01\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "vendor-spend-7",
+   "question": "Can you add up Supply Unit purchases in 2025?",
+   "expected": {
+    "kind": "merchant"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1281,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"totals\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": \"Supply Unit\",\n      \"amount_text\": null,\n      \"date_text\": \"2025\",\n      \"period\": {\n        \"type\": \"year\",\n        \"year\": 2025\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "vendor-spend-8",
+   "question": "Review the charges from Service Unit this week.",
+   "expected": {
+    "kind": "merchant"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1131,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"merchant\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": \"Service Unit\",\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_week\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": "merchant"
+  },
+  {
+   "id": "vendor-spend-9",
+   "question": "How much did Supply Unit cost us in the current calendar month?",
+   "expected": {
+    "kind": "merchant"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1136,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"merchant\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": \"Supply Unit\",\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "vendor-spend-10",
+   "question": "Show the total we paid Service Unit during Q3 2026.",
+   "expected": {
+    "kind": "merchant"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1270,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"totals\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": \"Service Unit\",\n      \"amount_text\": null,\n      \"date_text\": \"Q3 2026\",\n      \"period\": {\n        \"type\": \"quarter\",\n        \"q\": 3,\n        \"year\": 2026\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "vendor-spend-11",
+   "question": "What did purchases at Supply Unit add up to last week?",
+   "expected": {
+    "kind": "merchant"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1121,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"merchant\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": \"Supply Unit\",\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"last_week\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "vendor-spend-12",
+   "question": "Please sum our spending with Service Unit month-to-date.",
+   "expected": {
+    "kind": "merchant"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1156,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"totals\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": \"Service Unit\",\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "biggest-expenses-1",
+   "question": "Rank our top three purchases from last week.",
+   "expected": {
+    "kind": "largest"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1204,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"largest\",\n      \"direction\": \"outflow\",\n      \"count\": 3,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"last_week\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": "largest"
+  },
+  {
+   "id": "biggest-expenses-2",
+   "question": "Which seven charges were the biggest this month?",
+   "expected": {
+    "kind": "largest"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1179,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"largest\",\n      \"direction\": \"outflow\",\n      \"count\": 7,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": "largest"
+  },
+  {
+   "id": "biggest-expenses-3",
+   "question": "Show the ten highest expenses posted in Q2 2026.",
+   "expected": {
+    "kind": "largest"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1280,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"largest\",\n      \"direction\": \"outflow\",\n      \"count\": 10,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"quarter\",\n        \"q\": 2,\n        \"year\": 2026\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": "largest"
+  },
+  {
+   "id": "biggest-expenses-4",
+   "question": "Can we see the largest six purchases from the prior month?",
+   "expected": {
+    "kind": "largest"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1220,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"largest\",\n      \"direction\": \"outflow\",\n      \"count\": 6,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"last_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": "largest"
+  },
+  {
+   "id": "biggest-expenses-5",
+   "question": "Please list our four most expensive charges this week.",
+   "expected": {
+    "kind": "largest"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1213,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"largest\",\n      \"direction\": \"outflow\",\n      \"count\": 4,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_week\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": "largest"
+  },
+  {
+   "id": "biggest-expenses-6",
+   "question": "What were the top eight expenses over the past ten days?",
+   "expected": {
+    "kind": "largest"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1259,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"largest\",\n      \"direction\": \"outflow\",\n      \"count\": 8,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"last_n_days\",\n        \"n\": 10\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": "largest"
+  },
+  {
+   "id": "biggest-expenses-7",
+   "question": "Give the five highest purchases recorded since 2026-09-01.",
+   "expected": {
+    "kind": "largest"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1314,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"largest\",\n      \"direction\": \"outflow\",\n      \"count\": 5,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": \"2026-09-01\",\n      \"period\": {\n        \"type\": \"since\",\n        \"date\": \"2026-09-01\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "biggest-expenses-8",
+   "question": "Which three expenses cost the most in 2025?",
+   "expected": {
+    "kind": "largest"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1245,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"largest\",\n      \"direction\": \"outflow\",\n      \"count\": 3,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"year\",\n        \"year\": 2025\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "biggest-expenses-9",
+   "question": "Pull up our twelve largest charges during Q3 2026.",
+   "expected": {
+    "kind": "largest"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1302,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"largest\",\n      \"direction\": \"outflow\",\n      \"count\": 12,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"quarter\",\n        \"q\": 3,\n        \"year\": 2026\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "biggest-expenses-10",
+   "question": "I need the top nine expense transactions this calendar month.",
+   "expected": {
+    "kind": "largest"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1185,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"largest\",\n      \"direction\": \"outflow\",\n      \"count\": 9,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": "largest"
+  },
+  {
+   "id": "biggest-expenses-11",
+   "question": "Show the twenty biggest purchases from last month.",
+   "expected": {
+    "kind": "largest"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1171,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"largest\",\n      \"direction\": \"outflow\",\n      \"count\": 20,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"last_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "biggest-expenses-12",
+   "question": "Rank the highest five outgoing expenses for month-to-date.",
+   "expected": {
+    "kind": "largest"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1176,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"largest\",\n      \"direction\": \"outflow\",\n      \"count\": 5,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": "largest"
+  },
+  {
+   "id": "recent-transactions-1",
+   "question": "Show the newest three posted transactions.",
+   "expected": {
+    "kind": "transactions"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1152,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"transactions\",\n      \"direction\": null,\n      \"count\": 3,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": "transactions"
+  },
+  {
+   "id": "recent-transactions-2",
+   "question": "Can you retrieve our latest seven bank entries?",
+   "expected": {
+    "kind": "transactions"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1149,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"transactions\",\n      \"direction\": null,\n      \"count\": 7,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "recent-transactions-3",
+   "question": "Give me the last twelve account transactions.",
+   "expected": {
+    "kind": "transactions"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1173,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"transactions\",\n      \"direction\": null,\n      \"count\": 12,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "recent-transactions-4",
+   "question": "List our four most recent bank transactions.",
+   "expected": {
+    "kind": "transactions"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1119,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"transactions\",\n      \"direction\": null,\n      \"count\": 4,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": "transactions"
+  },
+  {
+   "id": "recent-transactions-5",
+   "question": "I would like the newest eight transactions across our accounts.",
+   "expected": {
+    "kind": "transactions"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1137,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"transactions\",\n      \"direction\": null,\n      \"count\": 8,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": "transactions"
+  },
+  {
+   "id": "recent-transactions-6",
+   "question": "Please display the latest twenty posted bank transactions.",
+   "expected": {
+    "kind": "transactions"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1132,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"transactions\",\n      \"direction\": null,\n      \"count\": 20,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "recent-transactions-7",
+   "question": "Which ten bank entries posted most recently?",
+   "expected": {
+    "kind": "transactions"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1254,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"transactions\",\n      \"direction\": null,\n      \"count\": 10,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": "transactions"
+  },
+  {
+   "id": "recent-transactions-8",
+   "question": "Bring us the last six transactions from the accounts.",
+   "expected": {
+    "kind": "transactions"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1144,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"transactions\",\n      \"direction\": null,\n      \"count\": 6,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": "transactions"
+  },
+  {
+   "id": "recent-transactions-9",
+   "question": "Can we look at our newest five bank movements?",
+   "expected": {
+    "kind": "transactions"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1118,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"transactions\",\n      \"direction\": null,\n      \"count\": 5,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "recent-transactions-10",
+   "question": "I need a list of the nine latest transactions.",
+   "expected": {
+    "kind": "transactions"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1168,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"transactions\",\n      \"direction\": null,\n      \"count\": 9,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": "transactions"
+  },
+  {
+   "id": "recent-transactions-11",
+   "question": "What are our last fifteen recorded bank transactions?",
+   "expected": {
+    "kind": "transactions"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1144,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"transactions\",\n      \"direction\": null,\n      \"count\": 15,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "recent-transactions-12",
+   "question": "Pull up the most recent transaction history.",
+   "expected": {
+    "kind": "transactions"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1124,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"transactions\",\n      \"direction\": null,\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "payment-arrived-1",
+   "question": "Was the $234.56 deposit from Sender Unit received last week?",
+   "expected": {
+    "kind": "payment"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1224,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"payment\",\n      \"direction\": \"inflow\",\n      \"count\": null,\n      \"vendor_text\": \"Sender Unit\",\n      \"amount_text\": \"$234.56\",\n      \"date_text\": \"last week\",\n      \"period\": {\n        \"type\": \"last_week\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "payment-arrived-2",
+   "question": "Check whether Sender Unit sent us $345.67 this month.",
+   "expected": {
+    "kind": "payment"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1175,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"payment\",\n      \"direction\": \"inflow\",\n      \"count\": null,\n      \"vendor_text\": \"Sender Unit\",\n      \"amount_text\": \"$345.67\",\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": "payment"
+  },
+  {
+   "id": "payment-arrived-3",
+   "question": "Could you find a $456.78 payment from Sender Unit last month?",
+   "expected": {
+    "kind": "payment"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1204,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"payment\",\n      \"direction\": \"inflow\",\n      \"count\": null,\n      \"vendor_text\": \"Sender Unit\",\n      \"amount_text\": \"$456.78\",\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"last_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": "payment"
+  },
+  {
+   "id": "payment-arrived-4",
+   "question": "Did $567.89 from Sender Unit reach our bank this week?",
+   "expected": {
+    "kind": "payment"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1176,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"payment\",\n      \"direction\": \"inflow\",\n      \"count\": null,\n      \"vendor_text\": \"Sender Unit\",\n      \"amount_text\": \"$567.89\",\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_week\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "payment-arrived-5",
+   "question": "Look for the Sender Unit payment of $678.90 during Q3 2026.",
+   "expected": {
+    "kind": "payment"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1367,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"payment\",\n      \"direction\": \"inflow\",\n      \"count\": null,\n      \"vendor_text\": \"Sender Unit\",\n      \"amount_text\": \"$678.90\",\n      \"date_text\": \"Q3 2026\",\n      \"period\": {\n        \"type\": \"quarter\",\n        \"q\": 3,\n        \"year\": 2026\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "payment-arrived-6",
+   "question": "Has a deposit of $789.01 from Sender Unit been recorded?",
+   "expected": {
+    "kind": "payment"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1185,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"payment\",\n      \"direction\": \"inflow\",\n      \"count\": null,\n      \"vendor_text\": \"Sender Unit\",\n      \"amount_text\": \"$789.01\",\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "payment-arrived-7",
+   "question": "Please check for $890.12 from Sender Unit since 2026-09-01.",
+   "expected": {
+    "kind": "payment"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1311,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"payment\",\n      \"direction\": \"inflow\",\n      \"count\": null,\n      \"vendor_text\": \"Sender Unit\",\n      \"amount_text\": \"$890.12\",\n      \"date_text\": \"2026-09-01\",\n      \"period\": {\n        \"type\": \"since\",\n        \"date\": \"2026-09-01\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "payment-arrived-8",
+   "question": "Was $901.23 received from Sender Unit on September 18, 2026?",
+   "expected": {
+    "kind": "payment"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1270,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"payment\",\n      \"direction\": \"inflow\",\n      \"count\": null,\n      \"vendor_text\": \"Sender Unit\",\n      \"amount_text\": \"$901.23\",\n      \"date_text\": \"September 18, 2026\",\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": "payment"
+  },
+  {
+   "id": "payment-arrived-9",
+   "question": "Find whether the $112.34 Sender Unit payment arrived.",
+   "expected": {
+    "kind": "payment"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1192,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"payment\",\n      \"direction\": \"inflow\",\n      \"count\": null,\n      \"vendor_text\": \"Sender Unit\",\n      \"amount_text\": \"$112.34\",\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "payment-arrived-10",
+   "question": "Can we confirm a $223.45 bank payment from Sender Unit last week?",
+   "expected": {
+    "kind": "payment"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1267,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"payment\",\n      \"direction\": \"inflow\",\n      \"count\": null,\n      \"vendor_text\": \"Sender Unit\",\n      \"amount_text\": \"$223.45\",\n      \"date_text\": \"last week\",\n      \"period\": {\n        \"type\": \"last_week\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "payment-arrived-11",
+   "question": "Is a $334.56 deposit from Sender Unit visible this month?",
+   "expected": {
+    "kind": "payment"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1191,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"payment\",\n      \"direction\": \"inflow\",\n      \"count\": null,\n      \"vendor_text\": \"Sender Unit\",\n      \"amount_text\": \"$334.56\",\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "payment-arrived-12",
+   "question": "Please look for the $445.67 payment on 2026-09-22.",
+   "expected": {
+    "kind": "payment"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1275,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"payment\",\n      \"direction\": null,\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": \"$445.67\",\n      \"date_text\": \"2026-09-22\",\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": "payment"
+  },
+  {
+   "id": "undated-expenses-1",
+   "question": "Add up our ordinary spending.",
+   "expected": {
+    "kind": "expense_summary"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1162,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"expense_summary\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "undated-expenses-2",
+   "question": "Can you show the expense breakdown for us?",
+   "expected": {
+    "kind": "expense_summary"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1176,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"expense_summary\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "undated-expenses-3",
+   "question": "I need a summary of the charges we pay.",
+   "expected": {
+    "kind": "expense_summary"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1202,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"expense_summary\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "undated-expenses-4",
+   "question": "Give me the total of our ordinary purchases.",
+   "expected": {
+    "kind": "expense_summary"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1217,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"expense_summary\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "undated-expenses-5",
+   "question": "Where does our expense money end up?",
+   "expected": {
+    "kind": "expense_summary"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1882,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"not_money\",\n      \"direction\": null,\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```\n\nThis question asks for advice or explanation about expense accounting processes (\"where does money end up\"), not a bank-ledger data request. It cannot be answered by querying posted transactions, balances, or expense summaries.",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "undated-expenses-6",
+   "question": "Please review how much we spend.",
+   "expected": {
+    "kind": "expense_summary"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1171,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"expense_summary\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "undated-expenses-7",
+   "question": "Show us a rundown of outgoing purchases.",
+   "expected": {
+    "kind": "expense_summary"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1196,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"expense_summary\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "undated-expenses-8",
+   "question": "What have our ordinary expenses cost?",
+   "expected": {
+    "kind": "expense_summary"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1172,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"expense_summary\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "undated-expenses-9",
+   "question": "Tell me the total spending amount.",
+   "expected": {
+    "kind": "expense_summary"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1193,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"totals\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "undated-expenses-10",
+   "question": "Could we look at our spending summary?",
+   "expected": {
+    "kind": "expense_summary"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1186,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"expense_summary\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "undated-expenses-11",
+   "question": "How much goes out as ordinary expenses?",
+   "expected": {
+    "kind": "expense_summary"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1174,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"expense_summary\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "undated-expenses-12",
+   "question": "Bring up the expense totals for us.",
+   "expected": {
+    "kind": "expense_summary"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1151,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"totals\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"this_month\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "recurring-1",
+   "question": "Which outgoing charges look repeated?",
+   "expected": {
+    "kind": "recurring"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1126,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"recurring\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "recurring-2",
+   "question": "Show the expenses that repeat on a schedule.",
+   "expected": {
+    "kind": "recurring"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1168,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"recurring\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "recurring-3",
+   "question": "Can we see detected recurring payments?",
+   "expected": {
+    "kind": "recurring"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1213,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"recurring\",\n      \"direction\": null,\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "recurring-4",
+   "question": "What subscriptions appear in the posted bank charges?",
+   "expected": {
+    "kind": "recurring"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1175,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"recurring\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "recurring-5",
+   "question": "Find the purchases we keep paying every month.",
+   "expected": {
+    "kind": "recurring"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1223,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"recurring\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"last_n_days\",\n        \"n\": 120\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "recurring-6",
+   "question": "Give us the repeating charge patterns from the bank.",
+   "expected": {
+    "kind": "recurring"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1192,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"recurring\",\n      \"direction\": null,\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "recurring-7",
+   "question": "Which expenses seem to come back regularly?",
+   "expected": {
+    "kind": "recurring"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1158,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"recurring\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "recurring-8",
+   "question": "Please review the charges that recur.",
+   "expected": {
+    "kind": "recurring"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1166,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"recurring\",\n      \"direction\": null,\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": "recurring"
+  },
+  {
+   "id": "recurring-9",
+   "question": "Are any posted purchases recurring?",
+   "expected": {
+    "kind": "recurring"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1189,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"recurring\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "recurring-10",
+   "question": "What ongoing subscriptions are visible in our transactions?",
+   "expected": {
+    "kind": "recurring"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1234,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"recurring\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"last_n_days\",\n        \"n\": 120\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "recurring-11",
+   "question": "Tell us which bank payments look repetitive.",
+   "expected": {
+    "kind": "recurring"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1141,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"recurring\",\n      \"direction\": \"outflow\",\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "recurring-12",
+   "question": "Could you list the detected subscription-like charges?",
+   "expected": {
+    "kind": "recurring"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1175,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"recurring\",\n      \"direction\": null,\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "forecast-or-unanswerable-1",
+   "question": "How much cash will remain in the bank next week?",
+   "expected": {
+    "kind": "forecast"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1187,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"forecast\",\n      \"direction\": null,\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "forecast-or-unanswerable-2",
+   "question": "Predict the account balances for next month.",
+   "expected": {
+    "kind": "forecast"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1159,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"forecast\",\n      \"direction\": null,\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": "balance"
+  },
+  {
+   "id": "forecast-or-unanswerable-3",
+   "question": "Where might our cash balance stand tomorrow?",
+   "expected": {
+    "kind": "forecast"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1193,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"forecast\",\n      \"direction\": null,\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": \"tomorrow\",\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "forecast-or-unanswerable-4",
+   "question": "Can you project how much bank money we will have?",
+   "expected": {
+    "kind": "forecast"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1230,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"forecast\",\n      \"direction\": null,\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "forecast-or-unanswerable-5",
+   "question": "Show what our business cash balance will be next quarter.",
+   "expected": {
+    "kind": "forecast"
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1234,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"forecast\",\n      \"direction\": null,\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "forecast-or-unanswerable-6",
+   "question": "How much will we spend next month?",
+   "expected": {
+    "kind": null
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1137,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"forecast\",\n      \"direction\": null,\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "forecast-or-unanswerable-7",
+   "question": "What bank should we open an account with?",
+   "expected": {
+    "kind": null
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1216,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"not_money\",\n      \"direction\": null,\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "forecast-or-unanswerable-8",
+   "question": "Translate the phrase bank balances into another language.",
+   "expected": {
+    "kind": null
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1575,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"not_money\",\n      \"direction\": null,\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```\n\nThis is a translation/language request, not a bank-ledger query. It does not seek posted financial data or account information.",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "forecast-or-unanswerable-9",
+   "question": "Rewrite our expense policy in simpler language.",
+   "expected": {
+    "kind": null
+   },
+   "called": false,
+   "model": null,
+   "latency_ms": null,
+   "reply_text": null,
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "forecast-or-unanswerable-10",
+   "question": "Explain what a recurring charge means.",
+   "expected": {
+    "kind": null
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1190,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"not_money\",\n      \"direction\": null,\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```",
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "forecast-or-unanswerable-11",
+   "question": "Compare our spending with the budget we approved.",
+   "expected": {
+    "kind": null
+   },
+   "called": false,
+   "model": null,
+   "latency_ms": null,
+   "reply_text": null,
+   "round1_accepted_kind": null
+  },
+  {
+   "id": "forecast-or-unanswerable-12",
+   "question": "What would our cash be after a hypothetical purchase?",
+   "expected": {
+    "kind": null
+   },
+   "called": true,
+   "model": "claude-haiku-4-5-20251001",
+   "latency_ms": 1614,
+   "reply_text": "```json\n{\n  \"intents\": [\n    {\n      \"kind\": \"not_money\",\n      \"direction\": null,\n      \"count\": null,\n      \"vendor_text\": null,\n      \"amount_text\": null,\n      \"date_text\": null,\n      \"period\": {\n        \"type\": \"none\"\n      }\n    }\n  ]\n}\n```\n\nThis is a hypothetical scenario request, which cannot be answered from posted bank-ledger data. It requires speculation about a transaction that has not occurred.",
+   "round1_accepted_kind": null
+  }
+ ]
+}

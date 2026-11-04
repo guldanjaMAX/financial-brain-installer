@@ -5,10 +5,14 @@
  * answers have a separate deterministic route and do not enter this contract.
  */
 import { answerSentences } from "./answer-sentences.js";
+import { plainMoneyCheck } from "./ledger-wording.js";
 import { isAgentDerivedArtifact } from "./evidence-lineage.js";
 import { parseCanonicalEvidenceDate, queryTimeWindow, reliableDocumentTime } from "./query-intent.js";
 
-const MONEY_TOPIC = /\b(?:money|financial|bank|cards?|accounts?|statements?|charges?|charged|payments?|pay(?:s|ing)?|paid|unpaid|invoices?|bills?|owe[ds]?|owing|due|outstanding|settled|refund(?:s|ed|ing)?|bounc(?:e[ds]?|ing)|return(?:s|ed|ing)?|wir(?:e[ds]?|ing)|debits?|credits?|transactions?|spend|spent|expenses?|income|revenue|fees?|costs?|prices?|tax|salary|wages?|receipts?)\b/i;
+// A generic statement, including a desire statement from a call, is not a
+// money topic. Financial statements still match their bank/account/card or
+// other money context; the same boundary applies to questions and claims.
+const MONEY_TOPIC = /\b(?:money|financial|bank|cards?|accounts?|charges?|charged|payments?|pay(?:s|ing)?|paid|unpaid|invoices?|bills?|owe[ds]?|owing|due|outstanding|settled|refund(?:s|ed|ing)?|bounc(?:e[ds]?|ing)|return(?:s|ed|ing)?|wir(?:e[ds]?|ing)|debits?|credits?|transactions?|spend|spent|expenses?|income|revenue|fees?|costs?|prices?|tax|salary|wages?|receipts?)\b/i;
 const MONEY_QUESTION = /\b(?:how much|amounts?|payers?|payees?|deposits?|withdrawals?|transfers?|loans?|rent|worth|budgets?|profits?)\b/i;
 const CURRENCY = /[$€£¥]|\b(?:USD|EUR|GBP|CAD|AUD|JPY|dollars?|euros?|pounds?|cents?)\b/i;
 const UNCONFIRMED = /\b(?:documents?|sources?|evidence|records?)\s+(?:do(?:es)? not|don['’]t|doesn['’]t|cannot|can['’]t)\s+(?:confirm|establish|cover|show|provide|answer|verify|prove)\b|\b(?:cannot|can['’]t|could not|unable to)\s+(?:be\s+)?(?:confirm|verify|establish|determine)\b|\b(?:not (?:confirmed|covered|established|verified|known)|unconfirmed|unknown|insufficient evidence)\b/i;
@@ -296,9 +300,12 @@ export function isMoneyQuestion(question) {
 export function applyMoneyVeto({ question, answer, evidenceGate, docs = [], now = Date.now() } = {}) {
   const unchanged = { answer, evidenceGate };
   if (!answer || evidenceGate?.supported !== true) return unchanged;
-  if (!isMoneyQuestion(question)) return unchanged;
+  // A broad question can still produce currency or an account identifier.
+  // Keep those exact-span checks without treating general financial wording
+  // in application copy as a monetary assertion.
+  if (!isMoneyQuestion(question) && !CURRENCY.test(answer) && !accountIds(answer).length) return unchanged;
   const diagnostic = (rule, refused = true) => ({ type: "money_veto", rule, count: 1,
-    detail: refused ? "The money evidence check refused a claim." : "The money evidence check qualified an incomplete answer." });
+    detail: plainMoneyCheck(rule) });
   const veto = (rule, reason) => ({ gap: diagnostic(rule), answer: null, evidenceGate: {
     ...evidenceGate, supported: false, complete: false, evidence: [], reason,
   } });

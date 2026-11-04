@@ -74,7 +74,7 @@ for (const [label, response] of Object.entries({
   if (label === "answered") assert.equal(worker.answerText(response), response.answer);
   if (label === "candidate") assert.match(worker.answerText(response), /I found 1 record in this search/);
   if (label === "multiple") assert.match(worker.answerText(response), /I found 2 records in this search/);
-  if (label === "missing") assert.equal(worker.answerText(response), "The records checked did not support an answer to this question.");
+  if (label === "missing") assert.equal(worker.answerText(response), "I can help narrow the search, but the records checked did not support an answer. Want to try a more specific detail?");
   if (label === "withheld") {
     assert.equal(worker.answerText(response), response.notice);
     assert.doesNotMatch(worker.confidenceText(response), /\d+%/);

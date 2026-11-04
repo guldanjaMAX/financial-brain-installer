@@ -8,7 +8,7 @@ store. Pinned Wrangler 4.131.1 cannot request Vectorize permission for that
 profile, so the read-only preflight routes that exact refusal to an explicit,
 account-scoped recovery API-token choice before any mutation.
 
-**Package identity: brain-installer 0.4.19, schema48.** Publication, supported
+**Package identity: brain-installer 0.4.25, schema58.** Publication, supported
 platforms and field acceptance are established by the reviewed evidence for
 the exact package bytes, not by this README or its version number. Before an
 install or update, match the package to the current approved guide and release
@@ -22,7 +22,7 @@ until reviewed evidence closes it; a deferred capability remains unproven.
 Earlier candidate identities and their planning records remain historical and
 must not be reused as proof for changed bytes.
 
-The 41-row release audit has 37 unresolved incidents, two 0.4.19 deferrals, and four
+The 41-row release audit has 37 unresolved incidents, zero 0.4.25 deferrals, and four
 rows closed on reviewed evidence.
 
 Engineering changes follow [the code, test, documentation, and tracking
@@ -503,6 +503,18 @@ Follow the one printed `brain ingest <manifest> --source <source>
 --apply-removals <fingerprint>` command to apply the saved exact plan. Keep any
 additional `--approve-removals` argument in that command. Then rerun normal ingest
 to finish the source cursor. A dry run cannot authorize removal.
+
+`brain load`, including daily refresh, can finish a saved Calendar or Gmail
+review automatically when every target is a source deletion, there are no
+policy removals, intentional skips or replacement reviews, and the count is
+at most 25 and at most 1% of the stored source inventory. It uses the exact
+saved fingerprint and existing apply/readback checks, then reruns that source
+once to finish its cursor. Drive, uploads and all other sources remain held.
+Daily receipts record the source, count, percentage, fingerprint, reasons and
+readback result. Reviews outside those limits, or a failed apply/readback,
+report `waiting_for_owner` with reason `removal_review`, aggregate facts and
+the exact apply command in daily output and `daily status --json`. A failed
+apply is never replayed by this automation; a fresh source review is required.
 
 QuickBooks Desktop uses the same boundary for every stored tombstone, including
 small removals. Its printed command retains `--from quickbooks-desktop` and
@@ -1148,10 +1160,16 @@ for diagnosis. A non-zero Drive review exit is reserved for a matured, labelled,
 current-run-corroborated candidate that requires owner approval before the
 cursor may advance; ordinary walk failures remain non-zero as well.
 
-A Gmail full pass is an authoritative snapshot. It compares every message
+A Gmail full pass enumerates the configured query. It compares every message
 allowed by the default query with the live D1 family inventory, so messages
 missed after history expiry, deletion, or relabeling are reconciled without
-trusting the local resume file. Planned removals are read back from D1 before the
+trusting the local resume file. Absence from that query carries an unknown cause,
+never explicit deletion evidence. Such removals stay held for exact owner review.
+Only item-specific provider tombstones or a confirmed exact-item not-found read
+can carry `explicit_deletion`. Saved source and physical plans fingerprint every
+cause, and automatic apply independently checks them along with the existing
+25-target and 1% limits. Other causes and legacy plans stay held; the separate
+owner-approved apply remains available. Planned removals are read back from D1 before the
 history cursor or credential-scanner fingerprint can commit. Scanner v5 forces
 local folders, Drive, Gmail, and IMAP through a complete recheck of previously
 accepted documents and does not mark that migration complete until the snapshot
@@ -1771,6 +1789,70 @@ configured handover; it does not claim that Outlook has already imported.
 No new prompt, storage migration, alias rewrite, or per-message matching is
 introduced. This remains scripted-provider proof pending the tenant field gate.
 
+### Supervised Granola meeting exports
+
+`connectors/granola-export.mjs` provides `planGranolaExport` and
+`importGranolaExport` for the `granola.meeting.v1` file contract. This is an
+internal integration seam with synthetic offline proof. There is no Granola
+owner CLI, live API/MCP acquisition, automatic folder detection, daily refresh,
+or cross-provider meeting dedupe. General JSON folder ingestion keeps its
+existing behavior and does not interpret these files as meeting records.
+
+The disabled `corpora.granola` template declares `source`, `transport:
+"file-export"`, `format`, exact `owner_email`, and an absolute owner-only
+`export_path` in the current platform's native syntax. Windows roots must name
+an explicit drive or UNC share; a foreign-platform path is refused before file
+access or delivery. An authorized caller passes explicit direct JSON file paths and
+an injected `request(path, body)` adapter returning a Response. That caller
+owns the existing lifecycle/source lease and full-admin credential boundary;
+the importer does not acquire credentials or provide a default network path.
+It first validates the entire selected set, registers the declared source with
+kind `granola`, then posts ordinary envelopes to the shared ingest batch route.
+Exact registration and every per-document receipt are required for completion.
+Accepted storage does not prove Vectorize projection or semantic retrieval.
+
+The declared export root must be a regular directory, with owner-only mode on
+POSIX. A linked ancestor is permitted, including system temp-directory aliases;
+the root itself and selected file or directory links below it are refused.
+Selections must be direct JSON children of the declared path and resolve to
+that same child inside its canonical root. Canonicalization must preserve the
+device/inode and permissions of the original root. POSIX retains a no-follow
+directory descriptor; both root spellings are checked against the original
+identity around member reads. An isolated Node reader starts inside the
+canonical directory and verifies its kernel-held working directory against
+that original identity before opening any member. All member syscalls remain
+relative to that pinned directory, even if its path is replaced. The caller's
+working directory stays unchanged. File descriptors and output pipes remain
+bounded, and the reader receives no inherited desktop environment or credentials.
+
+Each file contains `id`, `title`, an offset-aware `meeting_at`, `attendees`
+(display/email strings), exact `owner_email`, optional `notes` and `summary`,
+`transcript` (null or ordered `{speaker, source, start, text}` segments), and
+offset-aware `exported_at`. Speaker may be null; source is `microphone` or
+`system`; start is nonnegative seconds or null. Unknown fields, missing IDs,
+missing/impossible dates, wrong accounts, and decreasing known segment times
+refuse visibly. Export time never supplies the meeting date. Attendees remain
+unverified export labels and never establish observed participation.
+
+Exact account and meeting ID form a collision-safe identity independent of
+title and export time. Identical copies in one selection collapse; conflicting
+copies refuse so an arbitrary file order cannot choose a revision. Across runs,
+the same identity uses ordinary created/updated/unchanged storage behavior.
+The declared source is a storage namespace: renaming it does not move history
+or prove equivalence to another source. Metadata retains meeting time, segment
+speaker/channel/time, transcript coverage, export time, and source lineage.
+Private notes without a transcript are visibly notes-only; a later transcript
+revises that same meeting. Summary text is excluded from native evidence, and
+a summary without transcript or private notes is refused.
+
+Limits are 100 selected files, 512 KiB per file, 8 MiB total input, 400,000
+rendered text bytes, and 800,000 envelope bytes. Oversized records refuse
+without truncation. Common quality and credential checks run before requests;
+the Worker repeats its standard checks. No local cursor or removal plan is
+created. Missing files or exports grant no authority to erase stored history.
+Concurrent refresh, downgrade protection across transcript revisions, durable
+retry state, scheduling, and owner entry points remain later integration work.
+
 ### Curated collections during and after migration
 
 `operations/curated-dual-sync.mjs` is the internal rollback-compatible path for
@@ -1793,7 +1875,9 @@ existing identities as updates. A previous dry-run or failed sync can have
 written that ledger, so these counts do not prove target coverage.
 `--dry-run` reads no credential and
 makes no request. `--audit` reads the Cloudflare Drive-family inventory but
-writes no document. `--sync` builds every transformed envelope once and sends
+writes no document. This explicit historical audit can still be expensive on a
+large corpus and exits unsuccessfully if its inventory is incomplete.
+`--sync` builds every transformed envelope once and sends
 the same title, content and metadata independently to any configured legacy endpoint. The
 Cloudflare copy adds the first-party native-text receipt and lineage expected
 of a current write, without changing the neutral `envelope_sha256`, and uses
@@ -1820,13 +1904,15 @@ redirect a credential. HTTPS origins are normalized,
 legacy and Cloudflare must use distinct origins and backends, and every
 authenticated fetch uses manual redirect handling. A redirect is a target
 failure, never an invitation to forward a key. Cloudflare POST receipts must
-echo the exact deterministic document identity, then the operation reads the
-curated source-family inventory back from the same origin and confirms every
-identity. Each confirmed Cloudflare write also requires authenticated
+echo the exact deterministic document identity. Each accepted Cloudflare write
+then requires authenticated
 `POST /api/admin/brain/curated-verify` readback. That read-only, full-admin route
 compares the current D1 content marker, title and normalized metadata with the
 submitted envelope, then binds its reply to the envelope hash. It uses a primary
-D1 session when sessions are available. Missing routes, mismatched revisions,
+D1 session when sessions are available. The operation calls it once per accepted
+document with a per-request timeout and never enumerates the curated inventory.
+Work is bounded by the declared collection rather than the whole Brain.
+Missing routes, mismatched revisions,
 redirects and unavailable verification fail closed; an older Worker must be
 updated through the separately approved upgrade workflow before this runtime
 can report a successful sync. This proof is current durable storage at readback,
@@ -1857,9 +1943,16 @@ sidecar, or the raw Drive state file, including through a real-path or hard-link
 collision.
 
 Raw Drive comparison is explicitly historical evidence, not live deletion
-proof. A historical checksum match means the local raw MD5 equals the checksum
-recorded in the resume state and a family with that historical identity is
-currently present. A driveVersion value that is merely a file size, or has no
+proof. Sync defers this separate inventory scan, reports
+`RAW_DRIVE_AUDIT_DEFERRED` in direct and scheduled output, and records mapped
+raw Drive evidence as `not_verified`. Its absence cannot fail an otherwise
+confirmed sync or prevent scheduled freshness from advancing. Run the explicit
+`--audit` mode for current historical-family observations; sync does not carry
+older audit matches forward as fresh evidence. Declared local resume-state
+validation and `require_state_match` remain preflight guards. A historical
+checksum match means the local raw MD5 equals the checksum recorded in the resume
+state and a family with that historical identity is currently present.
+A driveVersion value that is merely a file size, or has no
 checksum, is reported as historical unverified presence. A different MD5 is a
 historical mismatch. Every ledger sets `raw_drive_evidence.deletion_eligible`
 to `false`. Deletion remains forbidden until a server endpoint can bind the
@@ -1901,6 +1994,18 @@ receipt contains paths, source identities, document names, URLs, content, raw
 errors, or credentials. Freshness rejects malformed aggregates and timestamps
 more than five minutes ahead of the local clock, and any configuration change is
 always stale.
+
+Incomplete curated receipts carry a fixed phase (`target` or `readback`) and an
+existing support code into the scheduler log. The local support event stores
+that same code using its unchanged closed schema. `NETWORK_UNREACHABLE` means
+the request or response body could not be read, including a timeout;
+`REMOTE_NOT_FOUND` means HTTP 404, `RATE_LIMITED` means HTTP 429,
+`AUTH_EXPIRED` means HTTP 401, `REMOTE_PERMISSION_DENIED` means HTTP 403 or
+an origin change, and `REMOTE_UNAVAILABLE` covers server or other HTTP failure.
+`INPUT_REFUSED` identifies malformed or mismatched receipts and other client
+refusals. No response text or exception message is used to classify a failure.
+Unexpected exceptions retain the generic `SCHEDULE_RUN_FAILED` event. Every
+failed required receipt preserves the last successful freshness record.
 
 The scheduler wrapper and plist renderer do not silently replace a LaunchAgent.
 After reviewing the plan change, use these explicit local commands from the
@@ -2195,19 +2300,21 @@ inode stay there, including after success, so an editor with an open original
 file descriptor cannot lose a later edit. These local recovery directories are
 never automatically deleted. Interrupted writes likewise require explicit
 recovery; never automatically clear their lock.
-In 0.4.19, Windows setup, tools handoff and update leave existing assistant
-guides untouched without entering the writer. One notice is printed per run,
-even when both assistants are connected. Setup and tools still create missing
-guides; update retains its existing-only policy, including verified Codex
-creation beside a safely managed Claude guide. Keeping a guide is not ownership
-verification, so tools handoff requires manual review instead of automatically
-launching Claude with an existing Windows guide. macOS/Linux behavior is unchanged.
-This avoids the Windows open-file refusal of the final directory rename for
-guides present at the check. A concurrent creator between that check and the
-writer's snapshot can still leave a retained lock, with no data loss. That race
-is accepted for 0.4.19; the existence check stays immediately beside the writer
-call. Refreshed Windows answer rules are deferred to 0.4.20, whose design needs
-a create-only writer mode or separately reviewed lock recovery.
+In 0.4.20, ordinary Windows setup, tools handoff and update leave existing
+assistant guides untouched without entering the writer. One notice is printed
+per run, even when both assistants are connected. Setup and tools still create
+missing guides; update retains its existing-only policy, including verified
+Codex creation beside a safely managed Claude guide. Keeping a guide is not
+ownership verification, so tools handoff requires manual review instead of
+automatically launching Claude with an existing Windows guide. macOS/Linux
+behavior is unchanged. The first `brain connect anthropic` is the narrow
+exception: after exact model readback, Part B refreshes an existing managed
+guide through the same ownership and damage guards, with bounded retry for a
+Windows replacement refusal. Key replacement remains deferred.
+The ordinary-path existence check avoids the Windows open-file refusal of the
+final directory rename for guides present at the check. A concurrent creator
+between that check and the writer's snapshot can still leave a retained lock,
+with no data loss. The check stays immediately beside the writer call.
 Native Windows filesystem behavior remains a separate host/CI gate.
 Repeated writer tests inject only the native attribute probe, keeping filesystem
 identity, content, link and race checks real. A separate bounded Windows test
@@ -2221,16 +2328,28 @@ answer path through the Worker and real SQLite migrations, including twin
 precedence, exact cents, coverage boundaries, scope refusals and SQL mutations.
 Phase one supports USD balances, deposits within seven days of a supplied date
 (otherwise the last 30 days), named months, last month, last N days and year to
-date. Relative periods use the UTC calendar because the Worker has no owner
-timezone at this boundary. Reads are bounded to 200 source accounts and 5,000
+date. Relative periods use the configured owner IANA time zone. A missing or
+invalid owner zone refuses before ledger SQL even when a caller injects a test
+clock. An explicit `in <Month YYYY>` always means the complete calendar month
+and does not use an injected clock as a time-zone fallback. Reads are bounded to 200 source accounts and 5,000
 matching transaction rows; exceeding either bound falls back with a visible
 gap. Complete coverage is required for totals and negative deposit results.
 `node --test worker/test/ledger-phase2.test.mjs` extends that same path with
 largest N expenses/deposits (1 through 100), recent deposits, merchant/category
 spend or income, recurring charges, and own-account transfers. Named months
-and Q1 through Q4 may omit the year, meaning the current UTC year. Merchant
+and Q1 through Q4 may omit the year, meaning the current year in the owner's
+configured time zone. Merchant
 matches use the exact NFKC-normalized, case-insensitive payee when present.
-Only outflows without a payee use contiguous description tokens as a fallback.
+Named outflow spend also admits whole-word structured-payee prefixes and the
+bounded descriptor aliases documented in the architecture. Single-word vendor
+selectors of five characters or fewer retain exact-only behavior and disclose
+ambiguous prefix candidates. Family totals include a cited per-payee breakdown,
+stored payee spellings and an explicit `also includes:` line when expanding an
+exact payee. Description-only outflows remain possible matches, never additions
+to the structured figure. `worker/test/ledger-vendor-selector.test.mjs` covers
+these boundaries and an exact-only restoring mutant. The development-only
+`node eval/fast-loop/vendor-family-bench.mjs` compares the pinned `cc679bb0`
+sources over the original, Batch 2, early-month and new synthetic family slices.
 Inflows require an explicit payee or a directional/opening sender phrase, never
 an invoice subject. Both amount-qualified and amountless payment checks use
 that attribution. Payer clauses are removed before account-kind selection.
@@ -2240,8 +2359,9 @@ Quote the original by-merchant line rather than substituting or guessing. Catego
 ones say "bank's category (unconfirmed)". Unsorted is always a separate line.
 `node --test worker/test/ledger-phrasing.test.mjs` covers natural bank question
 forms, named payments without amounts (60-day default), recent deposits
-(14-day default), largest expenses without a count (ten), and current named
-months through today. It exercises the real Think route with two approved
+(14-day default), largest expenses without a count (ten), and bare current
+named-month references through the owner's today. Explicit `in <Month YYYY>`
+forms cover the complete calendar month. It exercises the real Think route with two approved
 twin pairs and an empty provider account, including missing-proof refusals.
 Named banks, entity-specific analysis, ordinal payments, average spend,
 anomalies and runway remain unsupported by this deterministic grammar.
@@ -2309,7 +2429,10 @@ required. Tax, projected, average, gross or business profit and other unconsumed
 qualifiers remain unsupported. Transfer and withdrawal clauses apply only to
 totals, largest, deposits, merchant, category and recurring questions. Repeated
 or contradictory clauses, other exclusions and flags on balance, payment or
-transfers questions refuse. Document-path money refusals remain unchanged.
+transfers questions refuse. Positively recognized unsupported money intent
+preserves the document response and adds one leading
+`ledger_wording_unsupported` gap. A policy or document question that merely
+contains a money word preserves the ordinary document response byte for byte.
 SQL stops at 5,001 matching rows; sorting happens only after proving the bound,
 so an oversized covered range does not need a full sort before refusing.
 
