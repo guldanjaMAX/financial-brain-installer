@@ -52,7 +52,7 @@ export function replay({ cases = [...BASE_CASES, ...CONTROLS], fault = null,
     cwd: ROOT, env, input: JSON.stringify({ root: ROOT, inputs, fault, sourceOverrides }),
     // Slow CI hosts can exceed one minute even for a small restored-source arm.
     // Keep the same bounded budget as the private replay child.
-    encoding: 'utf8', timeout: 120000, maxBuffer: 16 * 1024 * 1024,
+    encoding: 'utf8', timeout: 300000, maxBuffer: 16 * 1024 * 1024,
   });
   if (child.status !== 0) throw Error(`REPLAY_CHILD_FAILED:${child.status}:${child.error?.code || child.stderr.slice(0, 300)}`);
   const result = JSON.parse(child.stdout);

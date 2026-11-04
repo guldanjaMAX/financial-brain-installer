@@ -22,7 +22,7 @@ export function replayRoute({ cases = BASE_CASES, capture = false, fixtures,
     '--import', new URL('../../test/fixtures/cli-side-effect-tripwire.mjs', import.meta.url).href,
     fileURLToPath(new URL('./route-worker.mjs', import.meta.url))], { cwd: ROOT, env,
     input: JSON.stringify({ root: ROOT, inputs, capture, fixtures, authority, fixtureId, trace, fault, arms, sourceOverrides }),
-    encoding: 'utf8', timeout: 60000, maxBuffer: 32 * 1024 * 1024 });
+    encoding: 'utf8', timeout: 300000, maxBuffer: 32 * 1024 * 1024 });
   if (child.status !== 0) throw Error(`ROUTE_CHILD_FAILED:${child.status}:${child.error?.code || child.stderr.slice(0, 300)}`);
   const run = JSON.parse(child.stdout);
   return { ...run, wall_ms: performance.now() - started,

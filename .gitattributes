@@ -74,6 +74,12 @@ skills/financial-brain-technician/SKILL.md text eol=lf
 # Preserve those bytes under Windows autocrlf, including multiline mutation sites.
 eval/fast-loop/*.mjs text eol=lf
 worker/src/lib/ledger-*.js text eol=lf
+worker/src/lib/core.js text eol=lf
+worker/src/lib/grants.js text eol=lf
+worker/src/lib/fin-d1.js text eol=lf
+worker/src/lib/fin-account-links.js text eol=lf
+worker/src/lib/fin-account-kinds.js text eol=lf
+worker/src/lib/query-timing.js text eol=lf
 test/fixtures/fastloop-day3/historical-shared-v1.json text eol=lf
 test/fixtures/fastloop-day3/candidate-inventory-v1.json text eol=lf
 test/fixtures/fastloop-day3/candidate-router-v1.json text eol=lf
