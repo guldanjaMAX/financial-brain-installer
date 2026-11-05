@@ -4,6 +4,105 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.27 (unreleased)
+
+- Stored-source inventory and removal reviews use indexed family membership
+  after a resumable background preparation pass. Large Drive and mail refreshes
+  can then read each inventory page without scanning every stored document.
+  Preparation retains the existing inventory results while it is incomplete.
+  After a reviewed update, verify that preparation completes and the next
+  refresh finishes its inventory and any required removal review.
+
+## 0.4.26 (2026-11-03)
+
+Candidate only. These package bytes still need MAIN's full host gate, CI and
+separately reviewed field acceptance. This entry grants no installation or
+update approval.
+
+- **Completed daily checks show items set aside without looking overdue.**
+  When a source finishes reading and only sets aside items for a known safety
+  or calendar retry reason, status shows when it ran, the count and the grouped
+  reasons. Check that the next daily run updates its read date. Those items
+  remain out of search, and their history coverage stays incomplete. A failed
+  or unfinished update still reports a problem and keeps any measured items
+  set aside visible during recovery.
+- Updates can find Claude Code in its standard Mac folder when PATH omits it. Check that the connection is ready after updating.
+- Updates move earlier installer connections to the current tools, including versioned and owner-session install folders. Check that both installed assistants use the current connection after updating.
+- Updates that keep or switch to Claude now check for the Worker's Anthropic key before pausing imports or deploying; a missing key stops the update with a dashboard repair step.
+- **Stop one Brain feed without losing its documents.** Run
+  `brain folder <manifest> remove --source <name>` to remove one feed from your
+  settings. Documents already in your Brain stay and nothing on disk is
+  deleted. Other feeds and upload settings stay as they were. If daily refresh
+  is on, run `brain daily on <manifest>` afterward to rebuild its approved job.
+  Check the remaining feeds with `brain folder <manifest> status`.
+- **Private update offers are prepared for reviewed use.** An offer is tied to
+  one Brain, its installed version and a newer package, with an expiry date.
+  The check shows the reason and deadline without installing anything. Real
+  use remains held until the signing public key and exact package are reviewed.
+- **Every answer ends with one clear offer, after its facts and sources.**
+  Money, document, refusal and error answers choose a single closing offer.
+  In the app it appears after the sources and trust notes. The stated evidence
+  limits and citations are kept.
+- **A category total is never claimed when uncategorized spending could
+  belong to it.** If the period has transactions without a confirmed category,
+  the answer shows the confirmed subtotal and the uncategorized amount
+  separately, states the period, and does not report a total or a $0.00.
+  "Largest expense in a category" lists confirmed candidates instead of
+  saying nothing was found. Asking about the uncategorized bucket itself still
+  gives its total.
+- **Spending "after refunds" is never shown as a before-refunds figure.**
+  When the records do not show which deposits were refunds, the answer says
+  so, labels the amounts as before subtracting refunds, and leaves them out of
+  month-to-month comparisons. Ordinary spending questions are unchanged.
+- **Ask more money questions in your own words.** Supported questions can use
+  short dates, weekdays and named months or quarters. The answer states the period
+  it used and explains yearless or nearby-date readings where needed. Check
+  that period, the covered accounts and cited rows before relying on a figure.
+- **An interrupted update describes a possible model switch more precisely.**
+  The recovery sentence appears only after a Worker upload was dispatched.
+  Earlier failures no longer suggest that the Brain may have changed models.
+- **Folder changes and daily refresh take turns safely.** A running lifecycle
+  operation blocks competing folder changes. Daily refresh rechecks its
+  approved settings after getting the lock and prints the recovery command
+  when those settings have changed.
+- **Earlier owner checks still apply.** Review the 0.4.25 notes below for money
+  readers, evidence limits and legacy-model updates. This metadata bump closes
+  no release-audit row or exact-version deferral.
+
+### Technical changes
+
+- Folder removal uses the existing source lease, manifest backup, atomic write,
+  exact readback and rollback. Add, remove, create-feeds and off also share the
+  lifecycle lock. Removing the final feed preserves upload settings.
+- Daily refresh validates the approved plan again under its lifecycle lease,
+  before credential access or ingest. Its entry point retains the explicit
+  command for rebuilding the approved job.
+- Private offers use Ed25519 signatures, exact account/D1 identity, starting
+  and destination versions, bounded dates, package byte counts and SHA-256.
+  Installation refetches the offer and verifies the saved offer and archive.
+  The ordinary updater rechecks the binding before recovery and after its
+  asynchronous preflight. Source includes a signing helper, and the three
+  runtime modules have package privacy review. The verification public key
+  remains unset in this candidate.
+- Both answer renderers choose the final document offer before composing the
+  answer. The embedded frontend was rebuilt for that correction. Evidence gaps
+  and the interpretation check keep their own single closing offer.
+- Money router round 19 starts from round 16 and adds literal date admission
+  plus corrected closed-schema examples. Existing calendar choices, snapshot
+  guards, contradiction decisions and refusal guidance stay in force. Literal
+  account or vendor wording cannot supply an unrelated activity date. Recorded
+  model tapes and synthetic cases do not prove fresh-model answer correctness.
+- Model-switch recovery tracks whether a Worker upload was dispatched. The
+  merged update regression also removes a duplicate test-only helper.
+
+### This release does NOT cover
+
+- Windows x64 is the only supported Windows runtime in this release. Windows
+  ARM64 ships unproven.
+- Bank breadth ships unproven. Bank invitations stay closed.
+- Email attachments, Drive images and Drive simple sync remain outside this
+  release.
+
 ## 0.4.25 (2026-11-02)
 
 Candidate only. These package bytes still need MAIN's full host gate, CI and
@@ -51,9 +150,12 @@ update approval.
   produce a zero or invented remainder. Synthetic extractor examples and
   refusal diagnostics do not establish fresh-model or live-corpus correctness.
 - Softer wording is shared across bank answers, document and temporal limits,
-  the app, CLI and MCP. Both frontend rebuilds since the previous candidate
+  the app, CLI and MCP. All frontend rebuilds since the previous candidate
   are included. Frozen scorer inputs and evidence hashes retain exact copy
   translations and negative controls.
+- Review corrections keep withheld totals from becoming zero or a remainder.
+  Limitation sentences do not claim that a read returned results when it did
+  not, and supported money answers select one final offer.
 - Setup omits an unknown contact. Bank-provider validation treats exactly an
   empty optional formatted string as absent while retaining required-field,
   type, length and nonempty-format checks.
@@ -64,6 +166,8 @@ update approval.
   peer choices. Interrupted acceptance or local commit keeps the saved
   manifest intact and reports the possible remote switch. Extracted deploy
   and missing-results tests now supply the current binding and refusal copy.
+  An empty saved check-model field inherits the retired answer model for this
+  switch, so it receives the reviewed check model too.
 
 ### This release does NOT cover
 

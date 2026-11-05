@@ -1,5 +1,9 @@
 /** Named public-endpoint profiles for providers that implement the bank-feed contract. */
 
+// Shared by ingestion and read admission, including before the first upgraded
+// maintenance run. Older receipts never prove full-day, posted-only history.
+export const SIMPLEFIN_POSTED_HISTORY_REVISION = "posted-history-2:";
+
 export const PLAID_PROFILE = Object.freeze({
   provider: "plaid",
   apiBases: Object.freeze({

@@ -10,9 +10,11 @@ import { acquireBrainLifecycleLock } from "./brain-lifecycle-lock.mjs";
 import { DriveRemovalReviewRequired } from "./drive-removal-plan.mjs";
 import { removalReviewFacts, removalOwnerSentence } from "./load-removal-review.mjs";
 import { SUPPORT_ERROR_CODES } from "../support-journal.mjs";
+import { renderCliCommands } from "./cli-guidance.mjs";
+import { quotePosixArgument, quotePowerShellArgument } from "./command-display.mjs";
 import {
   mergeProviderWithheldReasons,
-  normalizeProviderWithheldReasons,
+  providerSetAsideOwnerCopy,
   providerNoChangeCheckAt,
   providerWithheldCheckAt,
 } from "../worker/src/lib/source-receipt.js";
@@ -196,19 +198,9 @@ function dailyWithheldAggregate(latestRuns, withheldBySource) {
   return aggregate?.count === declaredCount ? aggregate : null;
 }
 
-function providerWithheldOwnerCopy(source) {
-  const aggregate = normalizeProviderWithheldReasons(source?.withheld_reasons);
-  if (!aggregate || aggregate.count !== source?.docs_withheld) return null;
-  const causes = [];
-  const calendar = aggregate.reasons.calendar_event_incomplete;
-  const credentials = aggregate.reasons.credential_detected;
-  if (calendar) causes.push(`calendar_event_incomplete: ${calendar} incomplete calendar item(s) queued for retry`);
-  if (credentials) causes.push(`credential_detected: ${credentials} item(s) held by the credential safety check for review`);
-  return `${aggregate.count} item(s) withheld by design: ${causes.join("; ")}`;
-}
-
 export async function runDailyRefresh({
   plan,
+  validatePlan = (currentPlan) => currentPlan,
   acquireLock = (options) => acquireBrainLifecycleLock(options),
   runSource,
   readFreshness,
@@ -285,9 +277,14 @@ export async function runDailyRefresh({
   }
 
   const sourceResults = [];
-  const attentionEntries = [...scheduleAttention];
+  let attentionEntries = [...scheduleAttention];
   try {
     lock.assertOwned();
+    // A folder action may finish while acquisition waits. Only a snapshot
+    // approved under this lease may supply the source legs and receipts.
+    plan = await validatePlan(plan);
+    lock.assertOwned();
+    attentionEntries = [...scheduleAttention];
     if (await recoveryRequired()) {
       const receipt = Object.freeze({
         schema_version: 1,
@@ -569,6 +566,11 @@ function dailyReceiptWriter(plan, { home = homedir() } = {}) {
   };
 }
 
+function dailyRefreshRecoveryCommand(manifestPath, platform = process.platform) {
+  const quotePath = platform === "win32" ? quotePowerShellArgument : quotePosixArgument;
+  return renderCliCommands(`brain daily on ${quotePath(resolve(manifestPath))}`, { platform });
+}
+
 export async function runDailyRefreshCli(manifestPath, options = {}) {
   const path = resolve(String(manifestPath || ""));
   let m;
@@ -588,7 +590,7 @@ async function executeDailyRefreshCli(path, m, options, observationStarted) {
   const brain = options.brainModule ?? await import("../brain.mjs");
   const buildPlan = options.buildPlan ?? brain.buildConfiguredDailyPlan;
   if (typeof buildPlan !== "function") throw new TypeError("the shared daily plan builder is unavailable");
-  const plan = await buildPlan(m, path, {
+  const planOptions = {
     platform: options.platform ?? process.platform,
     ...(options.principal ? { principal: options.principal } : {}),
     ...(options.localTimezone ? { localTimezone: options.localTimezone } : {}),
@@ -597,25 +599,30 @@ async function executeDailyRefreshCli(path, m, options, observationStarted) {
       ? { existingSchedulerOwners: options.existingSchedulerOwners }
       : {}),
     ...(options.planOptions || {}),
-  });
+  };
+  let plan = await buildPlan(m, path, planOptions);
   const execute = async () => {
-    if (!plan.ready) throw new Error(plan.configuration_error || "the daily refresh plan is not ready");
     const receiptWriter = options.writeReceipt ?? dailyReceiptWriter(plan, options);
     const readUpdateTransaction = options.readUpdateTransaction ?? readDailyRefreshUpdateTransaction;
     const expectedDefinitionHash = options.expectedDefinitionHash || null;
     const scheduleAttention = [];
-    if (expectedDefinitionHash) {
+    const validateDefinition = async (currentPlan) => {
+      if (!expectedDefinitionHash) return;
+      const obsoleteDefinition = () => Object.assign(new Error(
+        "the manifest or source plan changed after daily refresh registration; next run: " +
+          dailyRefreshRecoveryCommand(path, options.platform ?? process.platform),
+      ), { code: "daily_schedule_definition_obsolete" });
       const definitionOptions = {
         platform: options.platform ?? process.platform,
         ...(options.definitionOptions || {}),
       };
       const inspectSchedule = options.inspectSchedule ?? statusDailyRefreshSchedule;
-      const schedule = await inspectSchedule(plan, {
+      const schedule = await inspectSchedule(currentPlan, {
         ...definitionOptions,
         ...(options.schedulerAdapter ? { adapter: options.schedulerAdapter } : {}),
       });
       if (!schedule?.installed || schedule.enabled === false || schedule.state?.definition?.definition_hash !== expectedDefinitionHash) {
-        throw new Error("the manifest or source plan changed after daily refresh registration; run brain daily on <manifest> to reconcile it");
+        throw obsoleteDefinition();
       }
       if (schedule.registered_node_usable === false) {
         const missing = schedule.registered_node_present === false;
@@ -626,22 +633,38 @@ async function executeDailyRefreshCli(path, m, options, observationStarted) {
         throw error;
       }
       if (schedule.plan_matches_registered_definition !== true) {
-        throw new Error("the manifest or source plan changed after daily refresh registration; run brain daily on <manifest> to reconcile it");
+        throw obsoleteDefinition();
       }
-      const definition = buildDailyRefreshDefinition(plan, definitionOptions);
+      const definition = buildDailyRefreshDefinition(currentPlan, definitionOptions);
       if (definition.definition_hash !== expectedDefinitionHash) {
         if (schedule.node_path_changed !== true) {
-          throw new Error("the manifest or source plan changed after daily refresh registration; run brain daily on <manifest> to reconcile it");
+          throw obsoleteDefinition();
         }
-        scheduleAttention.push("daily schedule needs refresh (Node changed)");
+        if (!scheduleAttention.includes("daily schedule needs refresh (Node changed)")) {
+          scheduleAttention.push("daily schedule needs refresh (Node changed)");
+        }
       }
-    }
+    };
+    await validateDefinition(plan);
+    if (!plan.ready) throw new Error(plan.configuration_error || "the daily refresh plan is not ready");
     const readFreshness = options.readFreshness ?? (async () => freshnessMap(await (brain.readSourceFreshness ?? brain.cmdSources)(path, {
       flags: { json: true },
       silent: true,
     })));
     const result = await runDailyRefresh({
       plan,
+      validatePlan: async () => {
+        if (!expectedDefinitionHash) return plan;
+        let currentManifest;
+        try { currentManifest = JSON.parse(readFileSync(path, "utf8")); } catch (error) {
+          throw new Error(`the daily refresh manifest could not be read: ${error.message}`);
+        }
+        const currentPlan = await buildPlan(currentManifest, path, planOptions);
+        await validateDefinition(currentPlan);
+        if (!currentPlan.ready) throw new Error(currentPlan.configuration_error || "the daily refresh plan is not ready");
+        plan = currentPlan;
+        return plan;
+      },
       acquireLock: options.acquireLock,
       runSource: options.runSource ?? ((source, lease) => brain.cmdLoad(path, {
         flags: { only: source.run_key },
@@ -678,14 +701,15 @@ async function executeDailyRefreshCli(path, m, options, observationStarted) {
         (heldCount ? `; ${heldCount} held` : "") +
         (runCause ? ` | ${runCause}` : ""));
       for (const source of result.sources) {
-        const withheldCopy = providerWithheldOwnerCopy(source);
+        const withheldCopy = providerSetAsideOwnerCopy(source);
         const sourceCause = source.issue_code === "NETWORK_UNREACHABLE"
           ? "NETWORK_UNREACHABLE: network unavailable; check the connection, then retry this source."
           : null;
         log(`${source.source} | ${source.status} | ${source.last_successful_run_at_after || "never"}` +
+          (source.check_verified ? ` | ran ${source.last_check_at_after}${withheldCopy ? `; ${withheldCopy}` : ""}` : "") +
+          (!source.check_verified && withheldCopy ? ` | ${withheldCopy}` : "") +
           (source.no_change ? ` | checked ${source.last_check_at_after}; no changes` : "") +
-          (withheldCopy ? ` | ${withheldCopy}`
-            : source.status === "partial" ? ` | ${source.docs_refused ?? "unknown"} refused` : "") +
+          (!withheldCopy && source.status === "partial" ? ` | ${source.docs_refused ?? "unknown"} refused` : "") +
           (["held", "waiting_for_owner"].includes(source.status) ? ` | ${source.reason}` : "") +
           (source.docs_excluded > 0 ? ` | ${source.docs_excluded} excluded by rule` : "") +
           (sourceCause ? ` | ${sourceCause}` : ""));
@@ -709,9 +733,13 @@ if (IS_MAIN) {
   main().then((result) => {
     if (result.status === "failed") process.exitCode = 1;
   }).catch((error) => {
-    console.error(new Set(["daily_schedule_node_missing", "daily_schedule_node_unusable"]).has(error?.code)
-      ? `Daily refresh did not run: the registered Node binary is ${error.code === "daily_schedule_node_missing" ? "missing" : "not executable"}. Turn daily imports on again from the normal Brain terminal to repair the schedule.`
-      : "Daily refresh failed: daily_refresh_failed. Inspect the private local diagnostics, then retry.");
+    // Only this typed failure may expose a concrete command. Rebuild it from
+    // the entry arguments; arbitrary exception text stays private.
+    console.error(error?.code === "daily_schedule_definition_obsolete"
+      ? `Daily refresh did not run: its approved definition is out of date. Next run: ${dailyRefreshRecoveryCommand(process.argv[3])}`
+      : new Set(["daily_schedule_node_missing", "daily_schedule_node_unusable"]).has(error?.code)
+        ? `Daily refresh did not run: the registered Node binary is ${error.code === "daily_schedule_node_missing" ? "missing" : "not executable"}. Turn daily imports on again from the normal Brain terminal to repair the schedule.`
+        : "Daily refresh failed: daily_refresh_failed. Inspect the private local diagnostics, then retry.");
     process.exitCode = 1;
   });
 }

@@ -1,3 +1,4 @@
+import { isolateUpdateSchedulers } from "./fixtures/isolated-update-schedulers.mjs";
 /**
  * A Brain installed before `auth_profile` existed must still be updatable.
  *
@@ -41,9 +42,10 @@ import { fileURLToPath } from "node:url";
 import {
   adoptCloudflareAuthProfile,
   cloudflareOAuthInstallIdentity,
-  cmdUpdate,
+  cmdUpdate as cmdUpdateWithNativeSchedulers,
   readHiddenCloudflareToken,
 } from "../brain.mjs";
+const cmdUpdate = isolateUpdateSchedulers(cmdUpdateWithNativeSchedulers);
 import { cloudflareOAuthProfileName } from "../operations/cloudflare-oauth-session.mjs";
 import { findWranglerConfig, readWranglerOAuthToken } from "../operations/wrangler-oauth.mjs";
 import { loadStoredCloudflareToken } from "../operations/cloudflare-token-store.mjs";

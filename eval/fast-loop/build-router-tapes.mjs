@@ -29,9 +29,12 @@ function tapeChanges(before, after, path = []) {
   if (before === after) return [];
   // The installed schema already includes account-kind reviews. Older tapes
   // predate it; no model request, figure, bind or other response may change.
-  assert.ok((path.at(-1) === 'schema_version' && before === 57 && after === 58) ||
+  assert.ok((path.at(-1) === 'schema_version' && before === 57 && [58, 59].includes(after)) ||
     (typeof before === 'string' && sha(before) === '511315a8f707696def73f2bcdf1759704fa16b1f636dabc5c983a4fdc562f3a6' &&
-      sha(after) === '085a3cb746a3831a3f0a640f08a0ffbd57297d917c3e1dfe483d8d581d74efa6'),
+      // Current admission additionally checks SimpleFIN proof versions. Every
+      // bind, response, model tape and historical arm remains exact below.
+      ['085a3cb746a3831a3f0a640f08a0ffbd57297d917c3e1dfe483d8d581d74efa6',
+        '0560a90893bdbca03eb46f39580b9d0e6fd87070fe7c3560a58d12de0a571b2e'].includes(sha(after))),
   `unreviewed tape change at ${path.join('/')}`);
   return [{ path, before_sha256: sha(before), value: after }];
 }

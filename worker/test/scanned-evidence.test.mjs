@@ -716,6 +716,16 @@ async function mcpCall(tool, args, deps) {
   return (await response.json()).result;
 }
 
+// Preserve the frozen pre-offer hashes for every original byte. Only the
+// new final invitation and the CLI's outer blank lines are projected here.
+function beforeFinalInvitation(text, cli = false) {
+  const suffix = "\nWant to check the original record?";
+  assert.ok(text.endsWith(suffix), 'one reviewed document invitation is final');
+  assert.equal(text.split(suffix).length - 1, 1, 'invitation appears once');
+  const facts = text.slice(0, -suffix.length);
+  return cli ? `\n${facts}\n` : facts;
+}
+
 async function askCli(body) {
   const sandbox = mkdtempSync(join(tmpdir(), "brain-scanned-ask-"));
   const printed = [];
@@ -801,13 +811,13 @@ test("the remote MCP search tool keeps the scanned flag on the result", async ()
   assert.equal(searched.results[0].text_source, "ocr");
 });
 
-test("the remote MCP ask text for a native answer is unchanged", async () => {
+test("the remote MCP native answer keeps its original facts and final invitation", async () => {
   const { body } = await nativeGeneral();
   const result = await mcpCall("ask", { question: Q_GENERAL }, { think: async () => body });
   const text = result.content[0].text;
   assert.equal(text.includes("(scanned)"), false);
   assert.equal(text.includes(ANSWER_NOTICE), false);
-  assert.equal(digest(text), "88f99e290e6884da217236e524a477d7adce9cfd97887d5a9848bab88cc1d5f3", "native MCP ask text");
+  assert.equal(digest(beforeFinalInvitation(text)), "88f99e290e6884da217236e524a477d7adce9cfd97887d5a9848bab88cc1d5f3", "native MCP ask text");
 });
 
 test("brain ask prints the notice and marks the scanned citation", async () => {
@@ -817,12 +827,12 @@ test("brain ask prints the notice and marks the scanned citation", async () => {
   assert.match(printed, /\[1\] Harbor Storage service contract \(scanned\) \(drive; 2026-08-03; OCR text, verify key details; reference drive:storage-contract-ocr\)/);
 });
 
-test("brain ask output for a native answer is unchanged", async () => {
+test("brain ask native output keeps its original facts and final invitation", async () => {
   const { body } = await nativeGeneral();
   const printed = await askCli(body);
   assert.equal(printed.includes("(scanned)"), false);
   assert.equal(printed.includes(ANSWER_NOTICE), false);
-  assert.equal(digest(printed), "ba8c0c71a9c6645a05758395cb878ed7490c513d9fe41745b1cb1f743690e4ac", "native brain ask output");
+  assert.equal(digest(beforeFinalInvitation(printed, true)), "ba8c0c71a9c6645a05758395cb878ed7490c513d9fe41745b1cb1f743690e4ac", "native brain ask output");
 });
 
 test("the local MCP server carries the flag and the gap, and tells the assistant to relay it", async () => {
@@ -1214,13 +1224,13 @@ test("an answer citing a scan that is not proof keeps main's OCR label on every 
   assert.equal(mcp.includes("(scanned)"), false);
   assert.equal(mcp.includes(ANSWER_NOTICE), false);
   assert.match(mcp, /OCR text, verify key details/);
-  assert.equal(digest(mcp), PINNED.markedGeneralMcpAsk, "the remote MCP ask text is byte for byte main's");
+  assert.equal(digest(beforeFinalInvitation(mcp)), PINNED.markedGeneralMcpAsk, "original remote MCP facts match the frozen bytes");
 
   const printed = await askCli(body);
   assert.equal(printed.includes("(scanned)"), false);
   assert.equal(printed.includes(ANSWER_NOTICE), false);
   assert.match(printed, /OCR text, verify key details/);
-  assert.equal(digest(printed), PINNED.markedGeneralCli, "brain ask output is byte for byte main's");
+  assert.equal(digest(beforeFinalInvitation(printed, true)), PINNED.markedGeneralCli, "original CLI facts match the frozen bytes");
 
   const html = reportFor(body);
   assert.equal(html.includes("(scanned)"), false);

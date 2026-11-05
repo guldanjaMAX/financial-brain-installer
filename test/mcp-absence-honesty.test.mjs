@@ -789,11 +789,11 @@ await test("remote incomplete coverage retains newest metadata and unavailable s
 await test("remote refused ask scopes its line and confidence beside an unchanged cited control", async () => {
   const confidence = { percent: 80, band: "high", basis: ["fixture evidence"] };
   const refused = await remoteCall({ answer: "The documents do not answer the question.", confidence, results: [], citations: [], gaps: [] }, "ask");
-  assert.equal(refused, `${REFUSAL}\n${NEXT_NO_MATCH}\n\nConfidence in this search result: 80% (high). fixture evidence.`);
+  assert.equal(refused, `${REFUSAL.split(" Want")[0]}\n\nConfidence in this search result: 80% (high). fixture evidence.\n${NEXT_NO_MATCH}`);
   assert.doesNotMatch(refused, /Confidence nothing is recorded|The documents do not answer/);
   const cited = await remoteCall({ answer: "Fixture answer [1].", confidence,
     citations: [{ n: 1, title: "Fixture record", source: "fixture", lineage: { status: "known" } }], results: [], gaps: [] }, "ask");
-  assert.equal(cited, "Fixture answer [1].\n\nConfidence: 80% (high). fixture evidence.\n\nSources:\n[1] Fixture record · fixture");
+  assert.equal(cited, "Fixture answer [1].\n\nConfidence: 80% (high). fixture evidence.\n\nSources:\n[1] Fixture record · fixture\nWant to check the original record?");
   const unavailable = await remoteCall({ status: "search_unavailable", answer: "The documents do not answer the question.", confidence, results: [], citations: [], gaps: [] }, "ask");
   assert.match(unavailable, /could not be completed/i);
   assert.doesNotMatch(unavailable, /\d+%|Confidence nothing is recorded|I didn't find a matching record/);
@@ -806,7 +806,8 @@ await test("remote refusal renders Why before the exact reviewed Next action", a
     evidence_gate: { supported: false, reason: "synthetic support was insufficient" },
     next_action: next,
   }, "ask");
-  assert.match(out, /Why: synthetic support was insufficient\nNext: ask about one record at a time/);
+  assert.ok(out.includes("Why: synthetic support was insufficient"));
+  assert.equal(out.split("\n").at(-1), next, "reviewed action follows every factual qualification");
   assert.equal(out.split(next).length - 1, 1, "the reviewed action is rendered once");
 });
 
@@ -887,7 +888,7 @@ await test("R4 remote refusal preserves ledger and source coverage limits", asyn
     const empty = await remoteCall({ answer: null, results: [], citations: [], gaps: [{ type, detail }] }, "ask");
     assert.ok(empty.includes(detail), "empty synthesis still carries the real reason");
   }
-  assert.equal(await remoteCall({ answer: "Fixture supported answer.", results: [], citations: [], gaps: [] }, "ask"), "Fixture supported answer.");
+  assert.equal(await remoteCall({ answer: "Fixture supported answer.", results: [], citations: [], gaps: [] }, "ask"), "Fixture supported answer.\nWant to check the original record?");
 });
 
 for (const status of ["coverage_incomplete", "search_unavailable"]) for (const type of ["ledger_out_of_coverage", "ledger_not_consulted"]) await test(`F5 ${status} retains authorized ${type} without candidate records`, async () => {
@@ -898,10 +899,11 @@ for (const status of ["coverage_incomplete", "search_unavailable"]) for (const t
   const out = await remoteCall(payload, "ask");
   assert.ok(out.includes(notice), "the unavailable document branch was reached");
   assert.ok(out.includes(detail));
-  const nextStep = type === "ledger_out_of_coverage"
-    ? "Want help connecting or refreshing the bank records for those dates?"
-    : "Want help with the bank connection step above?";
-  assert.ok(out.split("\n").includes(nextStep), "the exact next step matches the authorized ledger gap");
+  const nextStep = status === "coverage_incomplete"
+    ? 'Next: say "check my Brain" to see which source is still loading, then ask again.'
+    : 'Next: ask again in a minute; if it fails twice, say "check my Brain".';
+  assert.equal(out.split("\n").at(-1), nextStep, "reviewed refusal action is final");
+  assert.equal((out.match(/\bWant[^?]*\?/g) || []).length, 0, "no extra bank invitation beside Next");
   assert.doesNotMatch(out, /Fixture reliable|Candidate citation|Sources:|I found 1 record/);
   const control = await remoteCall({ ...payload, status: undefined, notice: undefined, results: [], citations: [] }, "ask");
   assert.ok(control.includes(detail));

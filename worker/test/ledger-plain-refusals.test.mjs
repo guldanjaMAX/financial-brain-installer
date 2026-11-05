@@ -78,8 +78,8 @@ test('owner renderer uses the plain bank refusal and keeps search failure notice
   assert.equal(response.gaps.length, 1, 'real refusal supplied');
   assert.equal(answerText(response), detail);
   assert.equal(answerText({ ...response, status: 'coverage_incomplete', notice: 'Search is still incomplete.' }), 'Search is still incomplete.');
-  assert.equal(answerText({ answer: 'Ordinary answer.', gaps: [] }), 'Ordinary answer.');
-  assert.equal(answerText({ ...response, answer: 'A dated document answer.', gaps: [{ ...response.gaps[0], detail: "This answer comes from your documents; I did not match it to your bank data." }] }), "A dated document answer.\n\nThis answer comes from your documents; I did not match it to your bank data.");
+  assert.equal(answerText({ answer: 'Ordinary answer.', gaps: [] }), 'Ordinary answer.\nWant to check the original record?');
+  assert.equal(answerText({ ...response, answer: 'A dated document answer.', gaps: [{ ...response.gaps[0], detail: "This answer comes from your documents; I did not match it to your bank data." }] }), "A dated document answer.\n\nThis answer comes from your documents; I did not match it to your bank data.\nWant to check the original record?");
 });
 
 import { applyMoneyVeto } from '../src/lib/money-veto.js';
@@ -131,7 +131,7 @@ test('older bank replies with codes only still explain the missing records', asy
   assert.ok(body.gaps.length);
   for (const { answerText } of renderers) {
     ownerMessages.push(answerText(body));
-    assert.equal(answerText(body), "I can help check the bank connection, but the bank records needed for this answer are unavailable.\nWant help connecting or refreshing the bank account?");
+    assert.equal(answerText(body), "I can help check the bank connection, but the bank records needed for this answer are unavailable.");
   }
 });
 
@@ -164,7 +164,9 @@ test('CLI and MCP preserve the bank explanation without printing decision codes'
   assert.equal(reads, 2, 'both real renderers reached their injected read');
   for (const text of [printed.join('\n'), rpc.result.content.map(c => c.text).join('\n')]) {
     ownerMessages.push(text);
-    assert.ok(text.includes(detail));
+    assert.ok(text.includes(detail.split('\n')[0]), 'every factual bank qualification retained');
+    assert.equal(text.trim().split('\n').at(-1), 'Next: ask again with a name, date or exact phrase the record would contain.');
+    assert.equal((text.match(/\bWant[^?]*\?/g) || []).length, 0, 'reviewed Next is the only invitation');
     assert.doesNotMatch(text, /no_accounts|Ledger gap|\bcoverage\b/i);
   }
 });

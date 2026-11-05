@@ -482,7 +482,8 @@ test("package source compound-operator joins have a bounded execution probe", as
   const receipt = await forgetFamilies(env, { families: Array.from({ length: 25 }, (_, index) => ({
     base_doc_uid: `fixture:item-${index}`, family_kind: "hybrid",
   })) });
-  assert.equal(queries.length, 1, "the full group reached the compound SQL builder");
-  assert.equal(compoundTerms(queries[0]), 2, "both structural and declared arms were built");
+  assert.equal(queries.length, 2, "one readiness read precedes the full compound group");
+  assert.match(queries[0], /^SELECT cursor, complete FROM document_family_index_state/);
+  assert.equal(compoundTerms(queries[1]), 2, "both structural and declared arms were built");
   assert.equal(receipt.dry_run, true);
 });

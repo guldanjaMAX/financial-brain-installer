@@ -17,3 +17,4 @@ code it governs.
 - [007: Re-home UPDATE-006's Windows ARM64 clause into UPDATE-012](007-rehome-update-006-arm64-clause.md)
 - [008: Re-home UPDATE-025's account breadth into UPDATE-044 and pre-register its 0.4.9 exception](008-rehome-update-025-breadth-into-update-044.md)
 - [009: Bind the public install doorway to the release state](009-bind-install-doorway-to-release-state.md)
+- [010: Separate install doorway state from update availability](010-separate-install-and-update-doorway-state.md)

@@ -717,12 +717,13 @@ test("the remote MCP renders the guidance above the refusal and leaves the incom
   const rendered = await call(refused);
   assert.equal(askCalls, 1, "the remote ask refusal decision point was not reached");
   assert.match(rendered, /^I can help build your financial map, but it is not set up yet, so which businesses are open or closed is still unconfirmed\.$/m);
-  assert.ok(rendered.includes(COPY.not_established.one_step), "the one step renders verbatim");
+  assert.ok(rendered.endsWith("Next: ask again with a name, date or exact phrase the record would contain."), "reviewed refusal action is final");
+  assert.equal(rendered.includes(COPY.not_established.one_step), false, "no extra map invitation beside the reviewed refusal action");
   assert.match(rendered, /possible mentions/i);
   assert.match(rendered, /possible_mention/);
   assert.ok(rendered.includes(ENTITY_LABEL) && rendered.includes(ACCOUNT_LABEL));
   const refusalBlock = [
-    "I can try a more specific search, but I didn't find a matching record in this search. Want to add a detail?",
+    "I can try a more specific search, but I didn't find a matching record in this search.",
     "Why: answer model found no direct support",
     "Next: ask again with a name, date or exact phrase the record would contain.",
   ].join("\n");
@@ -750,14 +751,14 @@ test("the remote MCP renders the guidance above the refusal and leaves the incom
   assert.equal(askCalls, 2, "the incomplete-search decision point was not reached");
   const noticeBlock = [
     answerText(incomplete),
-    'Next: ask again in a minute; if it fails twice, say "check my Brain".',
     "",
     confidenceText(incomplete),
+    'Next: ask again in a minute; if it fails twice, say "check my Brain".',
   ].join("\n");
 
   // The notice is byte-identical, and the reviewed Next line follows it.
   assert.ok(withGuidance.endsWith(noticeBlock), "the incomplete-search notice must not be reworded");
-  assert.equal(withGuidance, `${financialMapGuidanceLines(guidance).join("\n")}\n\n${noticeBlock}`);
+  assert.equal(withGuidance, `${financialMapGuidanceLines({ ...guidance, one_step: guidance.one_step.replace(COPY.not_established.one_step, "").trim() }).join("\n")}\n\n${noticeBlock}`);
   assert.ok(
     withGuidance.indexOf(COPY.not_established.unsupported) < withGuidance.indexOf(answerText(incomplete)),
     "the guidance goes above the notice, never instead of it",

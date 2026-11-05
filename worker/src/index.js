@@ -1,3 +1,4 @@
+import { backfillSourceFamilyIndex } from "./lib/source-family-index.js";
 import { synthesisIntent, SYNTHESIS_INSTRUCTION, verifySynthesis } from './lib/synthesis-answer.js';
 import { qualifyDatedStatus, datedStatusPrompt, datedStatusInstruction, datedStatusConflicts } from './lib/dated-status-answer.js';
 import { readIngestRemovalRequest, previewIngestRemovals, applyIngestRemovals, ingestRemovalFailure } from "./lib/ingest-removal-plan.js";
@@ -42,6 +43,9 @@ import {
 } from "./lib/core.js";
 import { resolvePrincipal, principalMay, scopeIsUnrestricted } from "./lib/grants.js";
 import { withLedgerAnswer } from "./lib/ledger-answer.js";
+import {
+  filterThinkCandidates, SENSITIVE_DOCUMENTS_NOTICE, SENSITIVE_DOCUMENTS_WITHHELD,
+} from "./lib/think-candidate-policy.js";
 import { handleBankFeed, bankFeedEnabled } from "./lib/bank-feed.js";
 import { handlePlaidWebhook, runPlaidMaintenance } from "./lib/plaid-bank-feed.js";
 import { runSimpleFinMaintenance } from "./lib/simplefin-bank-feed.js";
@@ -1112,7 +1116,16 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
     retrievalReceipt, meaningSearch,
     matches, evidenceAuthority, degraded, degradedReason, retrievalScope, access: accessSummary, ignoredFilters,
   } = await unifiedRetrieve(env, url, { limit, access, scope: grantScope, scopePrincipalKind, timing });
-  const windowed = applyQuestionRetrievalWindow(Array.isArray(matches) ? matches : [], timeWindow);
+  // Filter before deriving prompts, citations, gaps, or exported candidates.
+  // Ledger admission misses some money phrasings, so no ledgerGap is required.
+  const candidatePolicy = filterThinkCandidates(Array.isArray(matches) ? matches : [], {
+    question: q, taxQuestion, owner: env.BRAIN_OWNER, now: Date.now(), timeZone: env.BRAIN_TIMEZONE,
+    // This route checks exact tax scope and readability after synthesis. A
+    // solicited near neighbor must reach that guard, not become an absence or
+    // an unsolicited-record refusal before the evidence decision can run.
+    deferTaxScope: taxQuestion.applicable && taxQuestion.resolved,
+  });
+  const windowed = applyQuestionRetrievalWindow(candidatePolicy.rows, timeWindow);
   const results = windowed.rows;
   const meaningSearchStatus = meaningSearch
     ? { ...meaningSearch, line: meaningSearchLine(meaningSearch) }
@@ -1159,6 +1172,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
         ? sourceCoverageGaps
         : disclosure.gaps;
     if (documentTaxGap) gaps = [documentTaxGap, ...gaps];
+    if (candidatePolicy.withheld) gaps = [SENSITIVE_DOCUMENTS_WITHHELD, ...gaps.filter(gap => gap.type !== "no_results")];
     if (timeWindow) gaps.push(questionRetrievalWindowGap(timeWindow, 0, windowed.dropped));
     const coverageIncomplete = disclosure.incomplete || (!disclosure.unavailable &&
       (sourceCoverageGaps.length > 0 || Boolean(documentTaxGap)));
@@ -1170,7 +1184,8 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
       degraded_reason: degradedReason || undefined,
       retrieval_scope: retrievalScope,
       access: accessSummary,
-      status: disclosure.unavailable || disclosure.incomplete
+      withheld_documents: candidatePolicy.withheld,
+      status: candidatePolicy.withheld ? ANSWER_WITHHELD : disclosure.unavailable || disclosure.incomplete
         ? disclosure.status
         : coverageIncomplete
           ? COVERAGE_INCOMPLETE
@@ -1178,7 +1193,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
       // The sentence a human sees in place of an answer. Present only when the
       // search failed, so /app and the CLI cannot render the refusal wording by
       // reaching for a field that is always there.
-      notice: disclosure.unavailable || disclosure.incomplete
+      notice: candidatePolicy.withheld ? SENSITIVE_DOCUMENTS_NOTICE : disclosure.unavailable || disclosure.incomplete
         ? disclosure.notice
         : coverageIncomplete
           ? taxDocumentCoverage.unreadable
@@ -1188,8 +1203,11 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
               : coverageIncompleteNotice(coverage.unavailable)
           : undefined,
       answer: null,
+      evidence_gate: candidatePolicy.withheld ? {
+        supported: false, complete: false, evidence: [], reason: "sensitive_documents_withheld",
+      } : undefined,
       next_action: refusalNextAction({
-        status: disclosure.unavailable || disclosure.incomplete
+        status: candidatePolicy.withheld ? ANSWER_WITHHELD : disclosure.unavailable || disclosure.incomplete
           ? disclosure.status
           : coverageIncomplete ? COVERAGE_INCOMPLETE : undefined,
       }),
@@ -1202,7 +1220,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
       // recorded". When the search did not complete that question has no
       // answer, and putting a percentage on it would dress the failure up as a
       // finding. The notice and the gap carry the truth instead.
-      confidence: disclosure.unavailable || coverageIncomplete
+      confidence: candidatePolicy.withheld || disclosure.unavailable || coverageIncomplete
         ? undefined
         : refusalConfidence({ gaps, degraded, resultCount: 0 }),
       evidence_authority: evidenceAuthority || undefined,
@@ -1216,6 +1234,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
   }
 
   const gaps = measureQueryStage(timing, "gaps", () => computeGaps(results));
+  if (candidatePolicy.withheld) gaps.unshift(SENSITIVE_DOCUMENTS_WITHHELD);
   if (timeWindow) gaps.push(questionRetrievalWindowGap(timeWindow, results.length, windowed.dropped));
   if (ledgerGap) {
     for (const gap of gaps) if (gap.type === "stale") {
@@ -1928,6 +1947,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
   // it), so the confidence rubric travels as its own field.
   const categoricalRefusal = !answerError &&
     (!answer || answer === unsupportedAnswer || !approvedDocs.length);
+  const sensitiveCandidatesBlockAbsence = categoricalRefusal && Boolean(candidatePolicy.withheld);
   const refusalSearchDisclosure = categoricalRefusal && degraded
     ? emptyRetrievalDisclosure(degraded, degradedReason, {
         candidatesFound: results.length > 0,
@@ -1965,7 +1985,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
               ["status_conflict", "status_conflict_check_unavailable"].includes(gap?.type))
             ? "conflicting_records"
             : "unsupported";
-  const confidence = answerError || refusalSearchDisclosure || incompleteCoverageBlocksAbsence || answerValidationBlocksAbsence
+  const confidence = sensitiveCandidatesBlockAbsence || answerError || refusalSearchDisclosure || incompleteCoverageBlocksAbsence || answerValidationBlocksAbsence
     ? undefined
     : answer === unsupportedAnswer || !approvedDocs.length
       ? refusalConfidence({
@@ -1981,7 +2001,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
           partial: evidenceGate?.partial === true ? (evidenceGate.reason || "one part not covered") : null,
         });
   const refusalStatus = categoricalRefusal
-    ? answerWithheld && !incompleteCoverageBlocksAbsence
+    ? sensitiveCandidatesBlockAbsence || (answerWithheld && !incompleteCoverageBlocksAbsence)
       ? ANSWER_WITHHELD
       : refusalSearchDisclosure?.status || (incompleteCoverageBlocksAbsence
         ? COVERAGE_INCOMPLETE
@@ -2000,13 +2020,14 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
   return jsonResponse({
     mode: "think",
     entity_scope: entityScope,
+    withheld_documents: candidatePolicy.withheld,
     ...(timeWindow ? { time_window: timeWindow.public } : {}),
     degraded: degraded || undefined,
     degraded_reason: degradedReason || undefined,
     retrieval_scope: retrievalScope,
     access: accessSummary,
     status: refusalStatus,
-    notice: answerWithheld && !incompleteCoverageBlocksAbsence
+    notice: sensitiveCandidatesBlockAbsence ? SENSITIVE_DOCUMENTS_NOTICE : answerWithheld && !incompleteCoverageBlocksAbsence
       ? answerWithheldNotice(answerWithheldGate)
       : refusalSearchDisclosure?.notice || (taxDocumentCoverageBlocksAbsence &&
           (unreadableRequestedTaxEvidence || scannedTaxEvidenceNotRelied)
@@ -2018,7 +2039,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
           : answerValidationBlocksAbsence
             ? ANSWER_VALIDATION_UNAVAILABLE_NOTICE
             : undefined),
-    answer: refusalSearchDisclosure || incompleteCoverageBlocksAbsence || answerValidationBlocksAbsence ? null : answer,
+    answer: sensitiveCandidatesBlockAbsence || refusalSearchDisclosure || incompleteCoverageBlocksAbsence || answerValidationBlocksAbsence ? null : answer,
     answer_error: answerError || undefined,
     answer_resumes_at: answerError === ANSWER_ERROR_MESSAGES.dailyLimit
       ? nextUtcMidnight()
@@ -2816,7 +2837,9 @@ async function handleSourceReceipt(env, request) {
          last_complete_sweep_at=CASE WHEN ?5 = 1 THEN excluded.last_ingest_at ELSE sources.last_complete_sweep_at END
        WHERE sources.kind=excluded.kind`
     ).bind(source, kind, completedAt, documents, completeSweep ? 1 : 0,
-      verifiedWork || quietCheck ? 1 : 0, verifiedWork || quietCheck || withheldCheck ? null : "NO_VERIFIED_WORK"));
+      // A completed policy-only check read the source even when it accepted no
+      // documents. Keep accepted-work and complete-history dates separate.
+      verifiedWork || quietCheck || withheldCheck ? 1 : 0, verifiedWork || quietCheck || withheldCheck ? null : "NO_VERIFIED_WORK"));
   } else {
     // A failed attempt does not become the last successful ingest. Advancing
     // last_ingest_at here would make a broken daily sync look current for the
@@ -4377,7 +4400,7 @@ export default {
         // mid-batch every time. allSettled, not all: the TTL cleanups must
         // still run when the vector provider is failing, and a cleanup error
         // must not stop the durable vector queue.
-        const [drainResult, cleanupResult, quickbooksCleanupResult] = await Promise.allSettled([
+        const [drainResult, cleanupResult, quickbooksCleanupResult, familyIndexResult] = await Promise.allSettled([
           drainOutbox(env, {
             embed: (text) => embedText(env, text),
             embedBatch: (texts) => embedTexts(env, texts),
@@ -4389,6 +4412,7 @@ export default {
           }),
           cleanupPublicAuthState(env),
           cleanupQuickBooksOAuthIntents(env),
+          backfillSourceFamilyIndex(env),
         ]);
         if (drainResult.status === "fulfilled") {
           const r = drainResult.value;
@@ -4406,6 +4430,13 @@ export default {
         }
         if (cleanupResult.status === "rejected") {
           console.warn("public auth state: scheduled TTL cleanup failed");
+        }
+        if (familyIndexResult.status === "rejected") {
+          console.warn("source-family index: scheduled backfill failed");
+        } else if (familyIndexResult.value.unavailable) {
+          console.warn("source-family index: schema unavailable");
+        } else if (familyIndexResult.value.advanced || familyIndexResult.value.finished) {
+          console.log(`source-family index: processed ${familyIndexResult.value.advanced}, complete=${familyIndexResult.value.complete}`);
         }
         if (quickbooksCleanupResult.status === "rejected") {
           console.warn("quickbooks oauth intents: scheduled TTL cleanup failed");

@@ -83,8 +83,17 @@ const genericJobs = options => [
 const sameFile = (a, b) => { try { return realpathSync(a) === realpathSync(b); } catch { return false; } };
 const command = (script, action, path) => [quotePosixArgument(process.execPath), quotePosixArgument(join(ROOT, "operations", script)), action, quotePosixArgument(path)].join(" ");
 
-function fixFor(kind, manifestPath, planPath) {
-  if (kind === "curated-sync") return command("curated-sync-scheduler.mjs", "reinstall", planPath);
+const displayablePath = path => typeof path === "string" && path.length > 0 && !/[\u0000-\u001f\u007f]/u.test(path);
+
+function fixFor(kind, manifestPath, planPath, jobPath) {
+  if (kind === "curated-sync") {
+    if (displayablePath(planPath) && isAbsolute(planPath)) return command("curated-sync-scheduler.mjs", "reinstall", planPath);
+    // Discovery can refuse before a plan locator is known. Never fabricate a
+    // runnable reinstall argument from an unreadable or unbound definition.
+    const job = displayablePath(jobPath) ? quotePosixArgument(jobPath) : "the local curated-sync job file";
+    return `Inspect ${job}; recover its reviewed private plan, then use curated-sync-scheduler.mjs reinstall with that plan before retrying the update.`;
+  }
+  if (!displayablePath(manifestPath)) return "Inspect the local scheduler definition and recover its reviewed manifest before retrying the update.";
   if (kind === "whatsapp-daemon") return command("whatsapp-daemon.mjs", "install", manifestPath);
   if (kind === "quickbooks-task") return `${renderCliCommands("brain update", { platform: "win32" })} ${quotePowerShellArgument(manifestPath)}`;
   if (kind === "daily") return `${renderCliCommands("brain update")} ${(process.platform === "win32" ? quotePowerShellArgument : quotePosixArgument)(manifestPath)}`;
@@ -256,7 +265,7 @@ export async function captureAdditionalUpdateSchedulers(m, manifestPath, options
   const platform = options.platform ?? process.platform;
   const entries = [];
   const refusals = [];
-  const refuse = (kind, reason, planPath) => refusals.push(schedulerUpdateRow(kind, "COULD NOT MOVE", reason, fixFor(kind, manifestPath, planPath)));
+  const refuse = (kind, reason, planPath, jobPath) => refusals.push(schedulerUpdateRow(kind, "COULD NOT MOVE", reason, fixFor(kind, manifestPath, planPath, jobPath)));
   if (platform === "win32") {
     // Permanent daily and historical bridge tasks are inventoried by their
     // existing transaction. This is the remaining product Scheduled Task kind.
@@ -291,7 +300,8 @@ export async function captureAdditionalUpdateSchedulers(m, manifestPath, options
       if (options.preserveSnapshotIntent) continue;
       if (!entry.snapshot?.exists) continue;
       const label = entry.snapshot.service?.split("/").at(-1);
-      if (entry.snapshot.wasLoaded && disabled.has(label)) refuse(label, "job is disabled but still loaded; inspect it before retrying");
+      if (entry.snapshot.wasLoaded && disabled.has(label)) refuse(entry.snapshot.jobKind ?? label,
+        "job is disabled but still loaded; inspect it before retrying", entry.snapshot.planPath, entry.snapshot.path);
       entry.snapshot = { ...entry.snapshot, wasDisabled: disabled.has(label) };
     }
   }
@@ -318,32 +328,33 @@ export async function captureAdditionalUpdateSchedulers(m, manifestPath, options
     const path = join(directory, file);
     if (alreadyCaptured.has(path)) continue;
     let observed;
-    try { observed = readPlist(path, native); } catch { refuse("curated-sync", "candidate definition could not be read safely; inspect the local job"); continue; }
+    try { observed = readPlist(path, native); } catch { refuse("curated-sync", "candidate definition could not be read safely; inspect the local job", undefined, path); continue; }
     const args = observed.plist.ProgramArguments;
     // Inspect the private plan's target locators before claiming this job.
     // A foreign plan is ignored even when its label resembles this Brain.
-    if (args.length !== 6 || args[2] !== "run" || !isAbsolute(args[3])) { refuse("curated-sync", "candidate plan binding could not be proved; inspect the local job"); continue; }
+    if (args.length !== 6 || args[2] !== "run" || !isAbsolute(args[3])) { refuse("curated-sync", "candidate plan binding could not be proved; inspect the local job", undefined, path); continue; }
     let plan;
     let contracts;
     try {
       plan = curated.buildCuratedSchedulerPlan(args[3], native);
       contracts = inspectCuratedTargetContracts(plan.curatedPlan, { planDirectory: plan.planDirectory });
-    } catch { refuse("curated-sync", "candidate plan ownership could not be proved", args[3]); continue; }
+    } catch { refuse("curated-sync", "candidate plan ownership could not be proved", args[3], path); continue; }
     if (!Object.values(contracts).some(target => sameFile(target.manifestPath, manifestPath))) continue;
-    if (Object.keys(contracts).length !== 1) { refuse("curated-sync", "multiple target Brains require a coordinated repair", args[3]); continue; }
+    if (Object.keys(contracts).length !== 1) { refuse("curated-sync", "multiple target Brains require a coordinated repair", args[3], path); continue; }
     if (observed.plist.Label !== plan.label || path !== plan.plistPath || !isAbsolute(args[0]) || basename(args[0]) !== "node" ||
         !isAbsolute(args[1]) || basename(args[1]) !== "curated-sync-scheduler.mjs" || args[4] !== "--config-hash" || !/^[a-f0-9]{64}$/u.test(args[5])) {
-      refuse("curated-sync", "stable plan and argument ownership could not be proved", args[3]); continue;
+      refuse("curated-sync", "stable plan and argument ownership could not be proved", args[3], path); continue;
     }
     const snapshot = { exists: true, path, service: plan.service, jobKind: "curated-sync", planPath: args[3] };
-    try { Object.assign(snapshot, inspectNative(snapshot, native)); } catch { refuse("curated-sync", "native ownership or idle state could not be proved", args[3]); continue; }
+    try { Object.assign(snapshot, inspectNative(snapshot, native)); } catch { refuse("curated-sync", "native ownership or idle state could not be proved", args[3], path); continue; }
     delete snapshot.plist;
     snapshot.wasDisabled = disabled.has(plan.label);
-    if (snapshot.wasLoaded && snapshot.wasDisabled) { refuse("curated-sync", "job is disabled but still loaded; inspect it before retrying", args[3]); continue; }
+    if (snapshot.wasLoaded && snapshot.wasDisabled) { refuse("curated-sync", "job is disabled but still loaded; inspect it before retrying", args[3], path); continue; }
     entries.push({ kind: "inventory", sourceKey: "curated", snapshot });
   }
   for (const label of loadedLabels) {
-    if (label.endsWith(".curated-sync") && !files.includes(`${label}.plist`)) refuse("curated-sync", "loaded job has no readable plan definition; inspect it before retrying");
+    if (label.endsWith(".curated-sync") && !files.includes(`${label}.plist`)) refuse("curated-sync",
+      "loaded job has no readable plan definition; inspect it before retrying", undefined, join(directory, `${label}.plist`));
   }
   const daemonReference = daemon.whatsappDaemonReference(manifestPath, { ...native, ...(options.whatsappDaemonOptions || {}) });
   if (files.includes(basename(daemonReference.plistPath)) && !alreadyCaptured.has(daemonReference.plistPath)) {
@@ -368,7 +379,7 @@ export async function captureAdditionalUpdateSchedulers(m, manifestPath, options
   }
   if (loadedLabels.has(daemonReference.label) && !files.includes(basename(daemonReference.plistPath))) refuse("whatsapp-daemon", "loaded capture has no readable saved definition");
   if (refusals.length) requireUpdateSchedulers([...refusals, ...entries.map(entry => schedulerUpdateRow(entry.snapshot.jobKind,
-    "COULD NOT MOVE", "update did not start because another job needs repair", fixFor(entry.snapshot.jobKind, manifestPath, entry.snapshot.planPath)))]);
+    "COULD NOT MOVE", "update did not start because another job needs repair", fixFor(entry.snapshot.jobKind, manifestPath, entry.snapshot.planPath, entry.snapshot.path)))]);
   try { reserveUpdateSchedulerWriters(entries, { ...options, manifestPath }); } catch {
     failed("daily", manifestPath, "scheduler writer is busy or its reservation could not be proved");
   }
@@ -462,7 +473,7 @@ export async function reconcileAdditionalUpdateScheduler(m, manifestPath, entry,
     verifyUpdateSchedulerDefinition(plan, desired, native, desiredLoaded(snapshot));
     return schedulerUpdateRow(kind, [desired, render(plan)].includes(snapshot.serialized) ? "already current" : "moved");
   } catch {
-    return schedulerUpdateRow(kind, "COULD NOT MOVE", "reviewed install or exact runtime readback failed; imports remain paused or unverified", fixFor(kind, manifestPath, snapshot.planPath));
+    return schedulerUpdateRow(kind, "COULD NOT MOVE", "reviewed install or exact runtime readback failed; imports remain paused or unverified", fixFor(kind, manifestPath, snapshot.planPath, snapshot.path));
   }
 }
 
@@ -474,7 +485,7 @@ export async function verifyUpdateSchedulerInventory(m, manifestPath, entries, o
     const known = new Set(entries.filter(entry => entry.snapshot?.exists).map(entry => entry.snapshot.service));
     const rows = added.filter(entry => !known.has(entry.snapshot.service)).map(entry => schedulerUpdateRow(
       entry.snapshot.jobKind, "COULD NOT MOVE", "job appeared after the pre-update snapshot; retry the update",
-      fixFor(entry.snapshot.jobKind, manifestPath, entry.snapshot.planPath),
+      fixFor(entry.snapshot.jobKind, manifestPath, entry.snapshot.planPath, entry.snapshot.path),
     ));
     for (const entry of entries) {
       if (!entry.snapshot?.exists) continue;
@@ -499,7 +510,7 @@ export async function verifyUpdateSchedulerInventory(m, manifestPath, entries, o
           verifyUpdateSchedulerDefinition(plan, spec ? core.renderLaunchAgentPlist(plan, { registrationOnly: true }) : curated.renderCuratedLaunchAgentPlist(plan, { registrationOnly: true }), native, desiredLoaded(entry.snapshot));
         }
       } catch {
-        rows.push(schedulerUpdateRow(kind, "COULD NOT MOVE", "final local acceptance found an unverified definition or runtime", fixFor(kind, manifestPath, entry.snapshot.planPath)));
+        rows.push(schedulerUpdateRow(kind, "COULD NOT MOVE", "final local acceptance found an unverified definition or runtime", fixFor(kind, manifestPath, entry.snapshot.planPath, entry.snapshot.path)));
       }
     }
     requireUpdateSchedulers(rows);

@@ -71,11 +71,23 @@ async function ledgerBodies(t) {
       })).json();
       assert.equal(body.ledger?.kind, kind, `${kind}: real ledger intent`);
       assert.equal(body.evidence_gate?.supported, true, `${kind}: supported ledger answer`);
-      assert.equal(body.evidence_gate?.complete, !(kind === "merchant" && empty),
-        `${kind}: only an exact structured selector is complete`);
+      // These recurring and transfer rows have no category. A confirmed match
+      // cannot establish the full topic amount while their membership is unknown.
+      const topicUnconfirmed = kind === "category" && !empty;
+      assert.equal(body.evidence_gate?.complete, !(kind === "merchant" && empty || topicUnconfirmed),
+        `${kind}: completeness requires both selector and category membership`);
       assert.ok(f.seen.sql.filter(sql => readPattern.test(sql)).length > before, `${kind}: ledger read count increased`);
       if (kind === "totals") assert.equal(body.ledger.accounts.reduce((n, a) => n + a.transaction_count, 0) > 0, !empty);
-      else if (kind !== "balance") assert.equal(body.ledger.found, !empty, `${kind}: populated/zero decision`);
+      else if (kind !== "balance") assert.equal(body.ledger.found, topicUnconfirmed ? null : !empty, `${kind}: populated/zero decision`);
+      if (topicUnconfirmed) {
+        assert.equal(body.ledger.category_total_unconfirmed, true);
+        assert.equal(body.ledger.total_minor, null);
+        assert.equal(body.ledger.lead_total_minor, null);
+        assert.equal(body.ledger.if_own_transfers.total_minor, null);
+        assert.equal(body.ledger.complete, false);
+        assert.equal(body.ledger.confirmed_category_subtotal_minor, 23001);
+        assert.ok(body.ledger.unsorted_minor > 0, 'nonempty unknown membership reached the category decision');
+      }
       assert.equal(body.citations.length > 0, !empty, `${kind}: populated/zero citations`);
       bodies.push({ key: `${kind}-${empty ? "zero" : "nonzero"}`, question, body });
     }
@@ -155,7 +167,12 @@ globalThis.fetch = async (url, init) => {
       assert.equal(fetchCalls, 0);
       assert.ok(!reply.result.isError);
       const text = reply.result.content[0].text;
-      assert.ok(text.includes(body.answer), "remote ask contains the real Worker answer verbatim");
+      const invitations = body.answer.match(/(?:Want[^?\n]*\?|Which would help most\?|If you tell me[^.\n]*\.)/g) || [];
+      assert.equal(invitations.length, 1, "real ledger composition selected one invitation");
+      const facts = body.answer.replace(invitations[0], "").trim();
+      assert.ok(text.includes(facts), "remote ask contains every real Worker fact verbatim");
+      assert.equal(text.trim().split("\n").at(-1), invitations[0], "same ledger invitation follows the sources");
+      assert.equal(text.split(invitations[0]).length - 1, 1, "the invitation appears once");
       assert.doesNotMatch(text, GLOBAL_ABSENCE);
     });
   }

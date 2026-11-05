@@ -29,7 +29,7 @@ describe("answer messages", () => {
   it("replaces an older Worker's raw provider error with reviewed copy", () => {
     const raw = "provider request failed with private trace fixture-123";
     const rendered = answerText({ answer: null, answer_error: raw });
-    expect(rendered).toBe(ANSWER_ERROR_MESSAGES.unavailable);
+    expect(rendered).toBe(ANSWER_ERROR_MESSAGES.unavailable.replace(" Want", "\nWant"));
     expect(rendered).not.toContain(raw);
   });
 
@@ -37,7 +37,7 @@ describe("answer messages", () => {
     expect(answerText({
       answer: null,
       answer_error: ANSWER_ERROR_MESSAGES.notConfigured,
-    })).toBe(ANSWER_ERROR_MESSAGES.notConfigured);
+    })).toBe(ANSWER_ERROR_MESSAGES.notConfigured.replace(" Want", "\nWant"));
   });
 
   it("states the unavailable-search conclusion in the right direction", () => {
@@ -272,7 +272,7 @@ describe("search-scoped refusal confidence", () => {
   });
   it("distinguishes supported answers, empty searches and incomplete searches", () => {
     const supported: Answer = { answer: "The records support 42 [1].", confidence };
-    expect(answerText(supported)).toBe(supported.answer);
+    expect(answerText(supported)).toBe(`${supported.answer}\nWant to check the original record?`);
     expect(renderToStaticMarkup(<Trust answer={supported} />)).not.toContain("confidence in this search result");
     const empty: Answer = { answer: "The documents do not answer the question.", results: [], confidence };
     expect(answerText(empty)).toContain("matching record in this search");

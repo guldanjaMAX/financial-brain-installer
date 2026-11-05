@@ -1,0 +1,16 @@
+{
+  "commit": "df90142dd0031da4f6f301af2e57f6451ca45fc3",
+  "responses": {
+    "phrase_0": "5de623a7eee5ed05b9cfb2441f98310b1cc301ca36c70e835e8a480c53c37ed4",
+    "phrase_1": "5de623a7eee5ed05b9cfb2441f98310b1cc301ca36c70e835e8a480c53c37ed4",
+    "phrase_2": "5de623a7eee5ed05b9cfb2441f98310b1cc301ca36c70e835e8a480c53c37ed4",
+    "phrase_3": "5de623a7eee5ed05b9cfb2441f98310b1cc301ca36c70e835e8a480c53c37ed4",
+    "net_change": "898302e03ba5ed806ae51bf248ddecc0bba453258702255cb9f9bb74b84a5e85",
+    "all_net_change": "92a9d4e580723ca78bd684a4d0af48d7d18a096ac18f4c67fdffd2be0eab0545",
+    "all_net_refunds": "92a9d4e580723ca78bd684a4d0af48d7d18a096ac18f4c67fdffd2be0eab0545",
+    "gross_plain": "a0f1d0bd7da29a106df9d013bb581eda918ebb85cf58fe5e5d75251bbea3def2",
+    "gross_explicit": "a0f1d0bd7da29a106df9d013bb581eda918ebb85cf58fe5e5d75251bbea3def2",
+    "refund_only": "4daaefa08c3c17e85f5c862326479624acd88ea20ebc489e26e5f2df4cc477a0",
+    "refund_list": "4daaefa08c3c17e85f5c862326479624acd88ea20ebc489e26e5f2df4cc477a0"
+  }
+}

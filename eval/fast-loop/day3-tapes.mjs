@@ -33,7 +33,10 @@ export function candidateTapes(base, { router = true } = {}) {
     if (sha256(result[change.id]) !== change.before_sha256) throw Error('CANDIDATE_TAPE_CASE_MISMATCH');
     result[change.id] = clone(change.tape);
   }
-  return softCopyTapes(router ? routerTapes(result) : result);
+  // The router authoring command compares the current soft-copy candidate.
+  // Apply that dependency first so the exact base digest and model bytes agree.
+  const current = softCopyTapes(result);
+  return router ? routerTapes(current) : current;
 }
 
 function routerTapes(base) {
@@ -61,7 +64,7 @@ function routerTapes(base) {
   return result;
 }
 
-const ROUTER_PATCH_SHA256 = '2a41a6a0b2962543b435e87c17737fe6432fb8ee5504a1e27960445d4b85d118';
+const ROUTER_PATCH_SHA256 = '1ecfda6209f4231b212221b6321ca58c4c28c18259db219fd4f47c3ea4738d35';
 
 // Change only the reviewed refusal inside one exact model request. Frozen SQL,
 // outputs and historical arms remain byte-for-byte inputs to the same matcher.

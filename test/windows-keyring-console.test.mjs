@@ -1,3 +1,4 @@
+import { isolateUpdateSchedulers } from "./fixtures/isolated-update-schedulers.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -9,9 +10,10 @@ import { fileURLToPath } from "node:url";
 import { formatMessagesSync } from "esbuild";
 import {
   askForTesting, closePromptsForTesting, cloudflareOAuthFailureMessage,
-  cmdUpdate, openPromptsForTesting, promptsOpenForTesting, renderCliCommands,
+  cmdUpdate as cmdUpdateWithNativeSchedulers, openPromptsForTesting, promptsOpenForTesting, renderCliCommands,
   supportErrorCode, withCloudflareControlCredential,
 } from "../brain.mjs";
+const cmdUpdate = isolateUpdateSchedulers(cmdUpdateWithNativeSchedulers);
 import {
   enableCloudflareOAuthKeyring, captureCloudflareOAuthToken, cloudflareOAuthProfileName,
   isWindowsKeyringEnableTest, withCloudflareOAuthSession, CloudflareOAuthSessionError,

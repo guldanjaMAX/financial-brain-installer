@@ -1278,6 +1278,8 @@ test("scheduled execution reuses the installed ownership plan before checking it
   const manifestPath = join(directory, "brain.manifest.json");
   writeFileSync(manifestPath, JSON.stringify({ client: { slug: "fixture" }, corpora: {} }));
   let planCalls = 0;
+  let lockedPlanCalls = 0;
+  let leaseHeld = false;
   let sourceCalls = 0;
   let reads = 0;
   const runnablePlan = { ...basePlan, sources: [{ key: "calendar", run_key: "calendar",
@@ -1287,7 +1289,7 @@ test("scheduled execution reuses the installed ownership plan before checking it
   const result = await runDailyRefreshCli(manifestPath, {
     home: directory,
     brainModule: {},
-    buildPlan: async () => { planCalls += 1; return runnablePlan; },
+    buildPlan: async () => { planCalls += 1; if (leaseHeld) lockedPlanCalls++; return runnablePlan; },
     expectedDefinitionHash: definition.definition_hash,
     platform: "darwin",
     definitionOptions: {
@@ -1299,13 +1301,18 @@ test("scheduled execution reuses the installed ownership plan before checking it
       nodePathAccess: () => {},
     },
     schedulerAdapter,
-    acquireLock: () => ({ assertOwned: () => true, release: () => {} }),
+    acquireLock: () => {
+      leaseHeld = true;
+      return { assertOwned: () => assert.equal(leaseHeld, true), release: () => { leaseHeld = false; } };
+    },
     runSource: async () => { sourceCalls++; },
     readFreshness: async () => ({ calendar: { last_successful_run_at: ++reads === 1 ? "2026-10-08T12:00:00.000Z" : "2026-10-10T12:00:00.000Z" } }),
     writeReceipt: () => {},
     silent: true,
   });
-  assert.equal(planCalls, 1, "execution reached the same shared planning decision used by installation");
+  assert.equal(planCalls, 2, "execution repeats the shared planning decision after lifecycle acquisition");
+  assert.equal(lockedPlanCalls, 1, "the authoritative plan was built while holding the lease");
+  assert.equal(leaseHeld, false, "the completed run released its lease");
   assert.equal(sourceCalls, 1, "the hash-bound plan also reached real source work");
   assert.equal(result.status, "complete");
 });

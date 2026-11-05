@@ -376,17 +376,17 @@ test("daily owner copy preserves each closed provider withholding cause", async 
     {
       label: "calendar-only",
       reasons: { calendar_event_incomplete: 1 },
-      ownerPattern: /calendar_event_incomplete: 1 incomplete calendar item\(s\) queued for retry/iu,
+      ownerPattern: /1 item set aside \(1 incomplete calendar item queued for retry\)/iu,
     },
     {
       label: "credential-only",
       reasons: { credential_detected: 1 },
-      ownerPattern: /credential_detected: 1 item\(s\) held by the credential safety check for review/iu,
+      ownerPattern: /1 item set aside \(1 item held by the credential safety check for review\)/iu,
     },
     {
       label: "mixed",
       reasons: { calendar_event_incomplete: 1, credential_detected: 2 },
-      ownerPattern: /calendar_event_incomplete: 1 incomplete calendar item\(s\) queued for retry; credential_detected: 2 item\(s\) held by the credential safety check for review/iu,
+      ownerPattern: /3 items set aside \(1 incomplete calendar item queued for retry; 2 items held by the credential safety check for review\)/iu,
     },
   ];
   const ownerLines = [];
@@ -442,6 +442,7 @@ test("daily owner copy preserves each closed provider withholding cause", async 
     assert.equal(sourceReceipt?.docs_withheld, docsWithheld, `${arm.label}: exact count is durable`);
     assert.deepEqual(sourceReceipt?.withheld_reasons, arm.reasons, `${arm.label}: exact closed map is durable`);
     assert.match(ownerLine, arm.ownerPattern, `${arm.label}: the owner sees the cause and action`);
+    assert.match(ownerLine, new RegExp(`ran ${observedAt}; `), `${arm.label}: the completed check time is visible`);
     ownerLines.push(ownerLine);
   }
 
@@ -482,7 +483,7 @@ test("daily owner copy preserves each closed provider withholding cause", async 
   assert.equal(successDecisions, 1, "success: the source decision was reached");
   assert.equal(successInventoryDecisions, 2, "success: both inventory decisions were reached");
   assert.equal(successResult.status, "complete", "success remains the completed green control");
-  assert.equal(successOwnerLine, `microsoft | complete | ${observedAt}`);
+  assert.equal(successOwnerLine, `microsoft | complete | ${observedAt} | ran ${observedAt}`);
   assert.equal(new Set(ownerLines).size, causeArms.length, "all withholding siblings render distinctly");
   assert.ok(ownerLines.every((line) => line !== successOwnerLine), "no withholding arm renders like success");
 });

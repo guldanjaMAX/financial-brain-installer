@@ -193,6 +193,33 @@ function feedDecision(callback, path, source, outcome, reason = null) {
   callback?.(Object.freeze({ path: String(path), source: String(source), outcome, reason }));
 }
 
+/** Remove one declared feed without inspecting its files or changing upload policy. */
+export function prepareFeedRemoval(manifest, source, options = {}) {
+  const refuse = (message) => {
+    feedDecision(options.onDecision, "", source, "refused", message);
+    throw new Error(`${message}. Nothing changed.`);
+  };
+  let folders;
+  try {
+    folders = uploadFolderEntries(manifest);
+  } catch (error) {
+    return refuse(String(error?.message || error));
+  }
+  const matches = folders.flatMap((entry, index) => entry.feed && entry.source === source ? [index] : []);
+  if (!matches.length) return refuse(`No feed has source ${source}`);
+  if (matches.length !== 1) {
+    return refuse(`More than one feed has source ${source} (entries ${matches.map((index) => index + 1).join(", ")})`);
+  }
+  const index = matches[0];
+  const intended = JSON.parse(JSON.stringify(manifest));
+  // Upload also carries manual roots and exclusion policy. Even the final
+  // feed removal changes only the selected array entry, never that policy.
+  intended.corpora.upload.folders = effectiveUploadFolderValues(manifest.corpora.upload)
+    .filter((_, entryIndex) => entryIndex !== index);
+  feedDecision(options.onDecision, folders[index].path, source, "accepted");
+  return Object.freeze({ changed: true, path: folders[index].path, source, manifest: intended });
+}
+
 /**
  * Validate one owner-selected landing folder without reading any file below it.
  * The returned path is the canonical directory identity persisted in the

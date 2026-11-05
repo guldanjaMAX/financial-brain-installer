@@ -98,3 +98,9 @@ machine-prep/installers/windows/handoff-windows.url
 .lane-r8/
 # Local merge verification and copied inputs.
 /.lane-m24r/
+# Private offline offer development and synthetic signing material.
+/.lane-plax/
+/.lane-plax2/
+
+# Offline family-index lane fixtures and measurements.
+/.lane-d1inv/

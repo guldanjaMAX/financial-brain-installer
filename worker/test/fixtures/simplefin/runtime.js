@@ -9,6 +9,12 @@ function database() {
   const prepare = (sql, params = []) => ({ sql, params,
     bind: (...values) => prepare(sql, values),
     async first() {
+      if (/UPDATE simplefin_connections SET\s+requests_today=/.test(sql)) {
+        connection.request_day = params[0];
+        connection.requests_today = (connection.requests_today || 0) + 1;
+        return { request_day: connection.request_day, requests_today: connection.requests_today };
+      }
+      if (/SELECT window_start,window_end FROM simplefin_sync_windows/.test(sql)) return null;
       if (/SELECT COUNT\(\*\) n FROM simplefin_stage_transactions/.test(sql)) return { n: staged };
       if (/SELECT backfill_next FROM simplefin_connections/.test(sql)) return connection;
       throw new Error("native database unexpected read");

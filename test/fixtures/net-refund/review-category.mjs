@@ -1,0 +1,23 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { evaluate, reached, safeBasis, surfaces, save, purchase, refund, reply, parts } from './review-harness.mjs';
+const rows = [purchase, refund, { ...purchase, id: 'prior_purchase', cents: 9000, date: '2026-09-05' }].map(r => ({ ...r, category: 'Materials' }));
+const observations = [];
+for (const comparison of [false, true]) test(`confirmed category refund basis: ${comparison ? 'comparison' : 'single'}`, async t => {
+  const intents = [reply({ kind: 'category', vendor_text: 'Materials' })];
+  if (comparison) intents.push(reply({ kind: 'category', vendor_text: 'Materials', period: { type: 'last_month' } }));
+  const grossQuestion = comparison ? 'Could you compare Materials spending this month versus last month?' : 'Could you retrieve Materials spending this month?';
+  const gross = await evaluate({ rows, intents, question: grossQuestion }); reached(gross);
+  const base = await evaluate({ rows, intents, question: grossQuestion }, true); assert.equal(gross.bytes, base.bytes);
+  assert.ok(parts(gross.body).every(p => !p.selector_unresolved && p.category_selector === 'Materials'));
+  if (comparison) assert.deepEqual(gross.body.ledger.comparison, { figures_minor: [12000, 9000], difference_minor: 3000 });
+  else assert.equal(gross.body.ledger.expense_total_minor, 12000);
+  const question = grossQuestion.replace('?', ' after refunds?');
+  const actual = await evaluate({ rows, intents, question }); reached(actual);
+  assert.equal(actual.trace.model, 1);
+  assert.equal(actual.trace.transactions, comparison ? 2 : 1);
+  assert.ok(parts(actual.body).every(p => !p.selector_unresolved && p.category_selector === 'Materials'));
+  const views = await surfaces(t, actual, question), safe = safeBasis(actual) && !actual.body.ledger.comparison;
+  observations.push({ id: comparison ? 'comparison' : 'single', question, safe, trace: actual.trace, plan: actual.plan, body: actual.body, surfaces: views }); save('category-observations', observations);
+  assert.equal(safe, true, 'a confirmed category cannot discard the requested refund basis');
+});

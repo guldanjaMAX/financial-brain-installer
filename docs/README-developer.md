@@ -8,7 +8,7 @@ store. Pinned Wrangler 4.131.1 cannot request Vectorize permission for that
 profile, so the read-only preflight routes that exact refusal to an explicit,
 account-scoped recovery API-token choice before any mutation.
 
-**Package identity: brain-installer 0.4.25, schema58.** Publication, supported
+**Package identity: brain-installer 0.4.26, schema59.** Publication, supported
 platforms and field acceptance are established by the reviewed evidence for
 the exact package bytes, not by this README or its version number. Before an
 install or update, match the package to the current approved guide and release
@@ -22,7 +22,7 @@ until reviewed evidence closes it; a deferred capability remains unproven.
 Earlier candidate identities and their planning records remain historical and
 must not be reused as proof for changed bytes.
 
-The 41-row release audit has 37 unresolved incidents, zero 0.4.25 deferrals, and four
+The 41-row release audit has 37 unresolved incidents, zero 0.4.26 deferrals, and four
 rows closed on reviewed evidence.
 
 Engineering changes follow [the code, test, documentation, and tracking
@@ -130,8 +130,20 @@ This adapter completes exact runtime, package, manifest, D1, version, and bare
 `brain.domain` validation before the credential or network boundary. It then
 ignores ambient `ADMIN_KEY`, resolves only the durable admin-key store selected
 by the pinned manifest, and makes one authenticated HTTP 200 GET to the saved
-Brain's existing `/api/admin/brain/documents` contract. It does not enter the
-Wrangler or Cloudflare control plane. The bounded response reader discards
+Brain's existing `/api/admin/brain/documents` contract. When the resulting
+answer or check model uses Claude, a typed missing-key state blocks immediately.
+Otherwise, preview reads the exact Worker's secret-name list only with an
+already acquired in-memory credential. It never invokes Wrangler, a credential
+store, package acquisition or token renewal. Pinned Wrangler can refresh and
+persist even an apparently read-only token request, so a durable named profile
+alone returns an unverified prerequisite regardless of its expiry. A matching,
+already authorized profile snapshot or approved automation-token snapshot can
+perform the read; the preview holder has no renewal callback. Repair a saved
+profile separately with `brain verify <manifest>` in an interactive terminal.
+Normal update retains its consent-aware authentication and key check. An
+unreadable inventory blocks the preview. Secret
+values are never requested. Built-in answer and check models need no extra read.
+The bounded response reader discards
 document rows and binds only the same-response version, D1 backend, active
 drain mode, vector counts, queue aggregates, readiness reason, and verdict into
 the plan fingerprint. `brain_domain_identity: pinned_manifest_assertion` is an
@@ -151,8 +163,8 @@ Generation and drain mode remain unproven, so mixed generations are not
 excluded. The receipt is useful test evidence only and cannot satisfy the
 existing-Brain update gate. The adapter does not stitch in public `/health` or
 another response. This fallback performs one durable credential read and one
-authenticated network request, with zero Brain writes, Cloudflare control
-requests, deployments, or installs. Modern same-response behavior is
+authenticated network request, plus the Claude key prerequisite above when
+required, with zero Brain writes, deployments, or installs. Modern same-response behavior is
 unchanged.
 
 The ordinary authenticated documents response is intentionally informational
@@ -187,11 +199,25 @@ shortfall. A smaller or delete-only queue is fingerprinted as
 projection with zero pending work, a zero-queue provider-visibility gap, an
 excess projection, a paused or mixed generation, or malformed fields. Both
 successful and post-boundary failure receipts report the credential and network
-reads actually attempted, while Brain, control-plane, deployment, manifest,
-workspace, install, browser, support, and skill effects remain zero. These local
+reads actually attempted, including the extra saved-access lookup and
+Cloudflare secret-name request when required. The proof boundary records that
+access separately from the pinned Brain-domain assertion. Brain writes,
+deployment, manifest, workspace, install, browser, support, and skill effects
+remain zero. These local
 rules and fixture tests are not package, CI, field, or live-Brain proof.
 
-The supported beginner update is `brain update [manifest]`. It verifies the
+The supported beginner update is `brain update [manifest]`. It establishes
+control-plane access through the existing consent-aware adoption or sign-in
+repair flow. Authentication may save refreshed credentials. Before manifest
+adoption is persisted, daily-import changes or deployment, an update that keeps
+or switches to Claude verifies that the exact Worker's `ANTHROPIC_API_KEY`
+secret name exists. Only the derived profile and the exact non-interactive
+consent receipt may be added by adoption; all other manifest fields stay bound
+to the earlier key proof. Missing or unreadable names stop the update. The missing-key remedy is
+the Worker's masked Secret field in Cloudflare, then another update attempt;
+this also works when the saved legacy model blocks `brain connect anthropic`.
+Only a passed key check permits the model-switch promise about keeping the key.
+The update then verifies the
 account, requires a pre-change D1 bookmark, saves and exactly reads back a
 private local receipt, then deploys and verifies a paused
 compatibility Worker, then requires one authenticated documents response to
@@ -1585,6 +1611,17 @@ remain independent checks. Update readiness must stop on actual run failures,
 stale or missing freshness, or vector debt; a current partial receipt alone is
 a coverage warning, not a failed refresh.
 
+A completed shared-provider check with an exact closed set-aside reason map
+advances `sources.last_ingest_at` even without accepted documents. This is the
+last-read timestamp used by health and stale-age checks; it does not advance
+`receipt.last_successful_run_at` or complete history. Source, daily and health
+copy says `ran <time>; N items set aside`, followed by grouped calendar retry
+and credential-review causes. A completed run with no set-aside items says
+`ran <time>`. Errors and unfinished checks retain their failed classification.
+Their measured set-aside counts and validated grouped causes remain visible in
+daily status. When grouped copy is unavailable, a positive measured count still
+renders without borrowing completed-check evidence or advancing freshness.
+
 Zoom's registered source inventory includes `receipt.zoom`: a closed state,
 last completed rolling-window check, pagination-pending flag, and aggregate
 delivery counts by state. It exposes no recording IDs, page tokens, provider
@@ -2107,6 +2144,31 @@ refuse cloud-managed roots, links or reparse points, retired roots, parent or
 child overlap, missing add paths, and more than six feeds. The exact manifest
 bytes are backed up, replaced through a same-directory atomic rename, and read
 back before success is reported. An identical add is a no-op.
+
+Every mutating folder action (`add`, `remove`, `create-feeds`, and `off`)
+takes the shared Brain lifecycle lease before reading its manifest snapshot.
+The order is lifecycle, then source; readback and source release complete
+before the lifecycle lease is released. A busy holder refuses immediately
+with a plain instruction to wait and retry, matching interactive ingest and
+load. The byte comparison still protects against edits outside these commands.
+Direct feed-reader helpers revalidate the saved declaration under the source
+lease before walking, so an old plan cannot read a stopped feed.
+
+`brain folder <manifest> remove --source <name>` removes exactly one entry
+marked `feed: true` with that exact source. Missing or duplicate feed sources
+refuse before any write, and duplicate errors identify the source and entry
+positions. A live source reader refuses removal. The source lease remains held
+through the same backed-up atomic write and rollback used by add. Removal never
+reads or deletes feed files, ingest state, or stored documents. Other entries,
+the watched-folder lane, and all other upload settings stay unchanged, including
+`enabled` when the last feed is removed. An enabled upload block with no roots
+remains visibly unavailable in load planning until another root is added.
+If daily refresh is on, run `brain daily on <manifest>` after removal to rebuild
+the approved definition. An obsolete daily runner prints that command with the
+actual manifest path and refuses before any source runs. The standalone
+scheduled entry recognizes `daily_schedule_definition_obsolete` and rebuilds
+that shell-quoted, platform-rendered command from its manifest argument.
+Arbitrary exception text remains private and observations remain bounded.
 
 Feed ingest reuses the ordinary upload loader and source locks, but it does not
 reuse the watched-folder mirror's removal phase. Missing prior files are kept

@@ -530,6 +530,7 @@ test("feed exclusion and placeholder controls detect a disabled safety rule", as
   writeFileSync(join(excluded, "decoy.txt"), "Synthetic decoy content with enough words to load.\n");
 
   const run = async (manifest, home) => {
+    writeFileSync(f.manifestPath, manifestBytes(manifest));
     const prepared = [];
     const result = await cmdIngestLocal(manifest, f.manifestPath, {
       path: feed,

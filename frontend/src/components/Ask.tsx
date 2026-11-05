@@ -5,7 +5,7 @@ import { ApiError, api, ownerError, type Answer, type Citation, type GrantPrinci
 // derive it from one module instead of each writing their own.
 import {
   SCANNED_CITATION_MARK, answerReasonText, answerText, citationIsScanned, confidenceText, scannedEvidenceNotice,
-  nextActionText, unavailableSearch,
+  nextActionText, separateOffers, unavailableSearch,
 } from "../lib/answer-render.js";
 import { Attention, TruthNote } from "./ui";
 import { FinanceScopeBar, useFinanceScope } from "./FinanceScope";
@@ -169,6 +169,25 @@ export function Trust({ answer }: { answer: Answer }) {
   );
 }
 
+function AnswerContent({ answer }: { answer: Answer }) {
+  // Parse only answer prose. Source titles and metadata remain factual text,
+  // even when a title contains wording that resembles an invitation.
+  const composed = separateOffers(answerText(answer));
+  const selectedOffer = nextActionText(answer) || composed.offers.at(-1);
+  return (
+    <>
+      <p className="whitespace-pre-wrap leading-relaxed">{composed.facts}</p>
+      <ScannedEvidenceNote answer={answer} />
+      <EvidenceGateReason answer={answer} />
+      <Trust answer={answer} />
+      {!!answer.citations?.length && <CitationSources citations={answer.citations} />}
+      {selectedOffer && (
+        <p className="mt-3 text-[14px] text-ink-soft">{selectedOffer}</p>
+      )}
+    </>
+  );
+}
+
 // The action is separate from the question draft. Only the structured fields
 // select a workflow; the existing Ask button always sends an ordinary question.
 export function taxEvidenceAction(entity: string | null, year: string) {
@@ -299,14 +318,7 @@ export function Ask({ owner = false }: { owner?: boolean }) {
               </Attention>
             </div>
           )}
-          <p className="whitespace-pre-wrap leading-relaxed">{answerText(answer)}</p>
-          <ScannedEvidenceNote answer={answer} />
-          <EvidenceGateReason answer={answer} />
-          <Trust answer={answer} />
-          {nextActionText(answer) && (
-            <p className="mt-3 text-[14px] text-ink-soft">{nextActionText(answer)}</p>
-          )}
-          {!!answer.citations?.length && <CitationSources citations={answer.citations} />}
+          <AnswerContent answer={answer} />
         </article>
       )}
       </div>
@@ -409,14 +421,7 @@ export function ScopedAsk({ principal, onAccessEnded }: {
             <p className="text-[12px] uppercase tracking-wider text-ink-soft font-semibold mb-3">
               Exact shared documents only
             </p>
-            <p className="whitespace-pre-wrap leading-relaxed">{answerText(answer)}</p>
-            <ScannedEvidenceNote answer={answer} />
-            <EvidenceGateReason answer={answer} />
-            <Trust answer={answer} />
-            {nextActionText(answer) && (
-              <p className="mt-3 text-[14px] text-ink-soft">{nextActionText(answer)}</p>
-            )}
-            {!!answer.citations?.length && <CitationSources citations={answer.citations} />}
+            <AnswerContent answer={answer} />
           </article>
         )}
       </div>

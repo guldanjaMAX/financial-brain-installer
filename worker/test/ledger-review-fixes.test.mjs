@@ -8,9 +8,129 @@ import { withLedgerAnswer } from '../src/lib/ledger-answer.js';
 import { answerText } from '../src/lib/answer-render.js';
 import { answerText as appAnswerText } from '../../frontend/src/lib/answer-render.js';
 import { plainRouterLimitation } from '../src/lib/ledger-wording.js';
+import { createProductFixture } from './product-contract-fixture.mjs';
 
 test.beforeEach(t => {
   t.mock.method(globalThis, 'fetch', () => assert.fail('network forbidden'));
+});
+
+async function documentOfferPair(t) {
+  t.mock.method(Date, 'now', () => Date.parse('2026-10-11T12:00:00Z'));
+  let drafts = 0, verifiers = 0, retrievals = 0;
+  let claim = 'Card ending 4242 charged USD 120.00 [1].';
+  const f = await createProductFixture({ env: { AI: { async run(model, input) {
+    if (model.includes('bge-')) return { data: [[0.1, 0.2, 0.3]] };
+    if (String(input.messages?.[0]?.content).includes('verify a proposed answer')) {
+      verifiers++;
+      return { response: { supported: true, complete: true, evidence: [1], reason: 'fixture approval' } };
+    }
+    drafts++;
+    return { response: claim };
+  } } } });
+  t.after(() => f.close());
+  f.raw("INSERT INTO sources(name,kind,status,created_at) VALUES ('records','bank','ready','2026-10-10')");
+  const ingest = await f.post('/api/admin/brain/ingest/batch', { docs: [{
+    source_type: 'records', source_id: 'record-one', title: 'Card statement',
+    content: 'Card ending 4242 charged USD 120.00 on 2026-10-10.',
+    occurred_at: '2026-10-10', date_reliable: true, date_source: 'fixture:record_date',
+    text_source: 'native', text_reliable: true,
+    metadata: { evidence_lineage: { version: 1, kind: 'source_record' } },
+  }] }, { 'X-Admin-Key': f.env.ADMIN_KEY });
+  assert.equal(ingest.status, 200);
+  assert.equal((await ingest.json()).results[0].status, 'created');
+  f.env.VECTORIZE.query = async () => {
+    retrievals++;
+    return { matches: f.rows('SELECT chunk_uid AS id FROM chunks') };
+  };
+  const ask = async () => {
+    const response = await f.post('/api/rag/think', {
+      q: 'What did card ending 4242 charge in the last 60 days?',
+    }, { 'X-Admin-Key': f.env.ADMIN_KEY });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.ok(body.results.length > 0, 'retrieval reached the stored synthetic record');
+    assert.ok(body.gaps.some(gap => gap.type === 'ledger_not_consulted'), 'bank limitation decision reached');
+    assert.equal(body.ledger, undefined, 'the document renderer branch is exercised');
+    assert.equal(body.clarification, undefined);
+    assert.equal(body.evidence_gate.supported, true);
+    assert.equal(body.citations.length, 1, 'the supported figure retains its citation');
+    assert.ok(body.answer.includes(claim));
+    return body;
+  };
+  const green = await ask();
+  assert.equal(green.answer, claim);
+  assert.equal(green.evidence_gate.complete, true);
+  assert.equal(green.gaps.some(gap => gap.type === 'money_veto'), false);
+  claim += ' Other payments are unconfirmed.';
+  const partial = await ask();
+  assert.equal(drafts, 2, 'both arms reached the real draft path');
+  assert.equal(verifiers, 2, 'both arms reached the real verification path');
+  assert.equal(retrievals, 2, 'both arms reached semantic retrieval');
+  assert.equal(partial.evidence_gate.complete, false);
+  assert.ok(partial.gaps.some(gap => gap.type === 'money_veto' && gap.rule === 'incomplete_claim'),
+    'the independent money limitation decision reached');
+  return { green, partial };
+}
+
+function documentOfferContract(body, render, expected) {
+  const text = render(body);
+  assert.match(text, /Card ending 4242 charged USD 120\.00 \[1\]\./);
+  assert.ok(text.includes('This answer comes from your documents; I did not match it to your bank data.'));
+  assert.ok(text.includes('I want to make sure I get this right. I can show you balances, recent transactions, or what you spent in a set period.'));
+  if (!body.evidence_gate.complete) {
+    assert.ok(text.includes('Other payments are unconfirmed.'));
+    assert.ok(text.includes('some money details are still unconfirmed'));
+    assert.ok(text.includes('Some payment details are still unknown in the records checked.'));
+  }
+  assert.deepEqual(offers(text), [expected], 'one final document offer');
+  assert.ok(text.endsWith(expected), 'the invitation follows every fact and qualification');
+  return text;
+}
+
+test('R3-01 partial document answers retain one final repair offer on both surfaces', async t => {
+  const { green, partial } = await documentOfferPair(t);
+  for (const [surface, render] of [['worker', answerText], ['app', appAnswerText]]) {
+    await t.test(surface, () => {
+      documentOfferContract(green, render, 'Which would help most?');
+      documentOfferContract(partial, render, 'Want to check the original record?');
+      documentOfferContract({ ...partial, answer: `Which would help most?\n${partial.answer}` },
+        render, 'Want to check the original record?');
+      documentOfferContract({ ...partial,
+        answer: `${partial.answer}\nWhich would help most?\nWant to check the original record?` },
+      render, 'Want to check the original record?');
+    });
+  }
+});
+
+test('R3-01 restoring document gap appending fails the same contract and keeps its green control', async t => {
+  const { green, partial } = await documentOfferPair(t);
+  const sources = [new URL('../src/lib/answer-render.js', import.meta.url),
+    new URL('../../frontend/src/lib/answer-render.js', import.meta.url)];
+  for (const [index, url] of sources.entries()) {
+    const render = [answerText, appAnswerText][index];
+    const source = readFileSync(url, 'utf8');
+    const site = 'const composed = separateOffers(r.answer);';
+    assert.equal(source.split(site).length - 1, 1, 'one restoring document decision point');
+    const restored = source.replace(site, [
+      'if (!r.ledger && !r.clarification) {',
+      '  const extra = explanation.split("\\n").filter(line => line && !r.answer.includes(line)).join("\\n");',
+      '  return extra ? `${r.answer}\\n\\n${extra}` : r.answer;',
+      '}',
+      site,
+    ].join('\n')).replace(/from (["'])(\.\/.+?)\1/g,
+      (_, quote, path) => `from ${quote}${new URL(path, url).href}${quote}`);
+    assert.notEqual(restored, source, 'the restoring branch was inserted');
+    const mutant = (await import(`data:text/javascript;base64,${Buffer.from(restored).toString('base64')}`)).answerText;
+    for (const control of [render, mutant]) documentOfferContract(green, control, 'Which would help most?');
+    documentOfferContract(partial, render, 'Want to check the original record?');
+    assert.deepEqual(offers(mutant(partial)), ['Which would help most?', 'Want to check the original record?'],
+      'the restored branch reached the duplicate-offer decision');
+    assert.throws(() => documentOfferContract(partial, mutant, 'Want to check the original record?'), error => {
+      assert.ok(error instanceof assert.AssertionError);
+      assert.equal(error.message.split('\n')[0], 'one final document offer');
+      return true;
+    });
+  }
 });
 
 function fixture(t) {
@@ -68,6 +188,9 @@ test('RANGE-01 unknown expense classification withholds remainder arithmetic', a
 
 test('RANGE-01 a category with a withheld total cannot display a zero expense figure', async t => {
   const f = fixture(t);
+  // Keep this account-type probe independent of unknown category membership.
+  f.raw("UPDATE fin_transactions SET category='Other',category_basis_state='confirmed' WHERE txn_uid='other'");
+  assert.equal(f.first("SELECT count(*) n FROM fin_transactions WHERE direction='outflow' AND posted_on LIKE '2026-10-%' AND category IS NULL").n, 0);
   const question = 'Could you retrieve expenses for materials this month?';
   const intents = [recordedIntent('merchant', { direction: 'outflow', vendor_text: 'materials' })];
   const green = await ask(f, question, intents);
@@ -182,6 +305,9 @@ test('RANGE-01 a legitimate partition retains its partial coverage disclosure', 
 
 test('RANGE-01 safe integer subtotals still require confirmed account roles before deriving figures', async t => {
   const f = fixture(t);
+  // The category control needs complete membership before account-role checks.
+  f.raw("UPDATE fin_transactions SET category='Other',category_basis_state='confirmed' WHERE txn_uid='other'");
+  assert.equal(f.first("SELECT count(*) n FROM fin_transactions WHERE direction='outflow' AND posted_on LIKE '2026-10-%' AND category IS NULL").n, 0);
   f.add('refund', 'REFUND settlement', 'Outside Unit', { cents: 500 });
   const cases = [
     [remainderQuestion, remainderIntents(), 'remainder', /all other recorded ordinary spending:/],
@@ -368,7 +494,7 @@ for (const [question, intent, fact, obsolete] of [
     'Store refunds are not split out in this view.', 'Here is the recorded spending;'],
   ['Could you retrieve Store Unit spending after refunds this month?',
     recordedIntent('merchant', { direction: 'outflow', vendor_text: 'Store Unit' }),
-    'Refunds have not been subtracted because these records do not establish which deposits are refunds for that store.',
+    "I cannot confirm spending after refunds because these records do not show which deposits are refunds from this business. The amounts below are before subtracting refunds.",
     'Here is the recorded spending before refunds;'],
   ['Could you retrieve expenses this month by payee?', recordedIntent('expense_summary'),
     'A payee breakdown is not available in this view.', 'Here is the category summary;'],

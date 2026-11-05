@@ -5,6 +5,7 @@ import { realpathSync, existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { BASE_CASES, CONTROLS, evidence, validateInputs } from '../../test/fixtures/fastloop-money/input.mjs';
+import { runReplayChild } from './child-run.mjs';
 
 export const ROOT = realpathSync(fileURLToPath(new URL('../../', import.meta.url)));
 // The host quiet file sits beside the checkout; override with BRAIN_MAC_QUIET_FILE.
@@ -34,7 +35,7 @@ export function validateSourceOverrides(sourceOverrides) {
 }
 export function replay({ cases = [...BASE_CASES, ...CONTROLS], fault = null,
   sourceOverrides = {}, validateCases = validateInputs,
-  snapshotFor = c => c.snapshot || evidence(c.profile, c.account_reviews) } = {}) {
+  snapshotFor = c => c.snapshot || evidence(c.profile, c.account_reviews) } = {}, { spawn, writeStderr } = {}) {
   validateCases(cases);
   validateSourceOverrides(sourceOverrides);
   const inputs = cases.map(c => ({ ...c, snapshot: snapshotFor(c) }));
@@ -43,20 +44,17 @@ export function replay({ cases = [...BASE_CASES, ...CONTROLS], fault = null,
   const env = { PATH: '/usr/bin:/bin', HOME: resolve(ROOT, 'lane-evidence/home-fastloop'),
     BRAIN_NO_WRANGLER_LOGIN: '1', TZ: 'UTC' };
   for (const name of ['SystemRoot', 'WINDIR', 'ComSpec', 'PATHEXT']) if (process.platform === 'win32' && process.env[name]) env[name] = process.env[name];
-  waitForQuiet(env);
   const start = performance.now();
   // ESM preloads need file URLs on Windows; the script argument stays a native path.
-  const child = spawnSync(process.execPath, ['--experimental-vm-modules', '--permission', `--allow-fs-read=${ROOT}`,
+  const child = runReplayChild({ label: 'REPLAY', spawn, writeStderr, beforeAttempt: () => waitForQuiet(env),
+    args: ['--experimental-vm-modules', '--permission', `--allow-fs-read=${ROOT}`,
     '--import', new URL('../../test/fixtures/cli-side-effect-tripwire.mjs', import.meta.url).href,
-    fileURLToPath(new URL('./money-worker.mjs', import.meta.url))], {
+    fileURLToPath(new URL('./money-worker.mjs', import.meta.url))], options: {
     cwd: ROOT, env, input: JSON.stringify({ root: ROOT, inputs, fault, sourceOverrides }),
-    // Slow CI hosts can exceed one minute even for a small restored-source arm.
-    // Keep the same bounded budget as the private replay child.
-    encoding: 'utf8', timeout: 300000, maxBuffer: 16 * 1024 * 1024,
-  });
-  if (child.status !== 0) throw Error(`REPLAY_CHILD_FAILED:${child.status}:${child.error?.code || child.stderr.slice(0, 300)}`);
+    encoding: 'utf8', maxBuffer: 16 * 1024 * 1024,
+  } });
   const result = JSON.parse(child.stdout);
-  result.harness_digest = sha(['./money-replay.mjs', './money-worker.mjs',
+  result.harness_digest = sha(['./money-replay.mjs', './money-worker.mjs', './child-run.mjs', './child-stall.mjs',
     '../../worker/src/lib/fin-account-kinds.js', '../../worker/src/lib/fin-account-links.js',
     '../../test/fixtures/cli-side-effect-tripwire.mjs', '../../test/fixtures/fastloop-money/input.mjs']
     .map(path => readFileSync(new URL(path, import.meta.url), 'utf8')));

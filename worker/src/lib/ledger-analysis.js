@@ -67,13 +67,14 @@ export function matchesSender(row, wanted) {
   }
   return sender === wanted.join(" ") || sender.startsWith(`${wanted.join(" ")} `);
 }
+export const isUncategorizedBucket = query => ["unsorted", "uncategorized", "uncategorised"].includes(normalizeLedgerText(query));
 export function categoryFor(row) {
   const category = normalizeLedgerText(row.category);
-  return !category || !row.category_basis_state || ["unsorted", "uncategorized", "uncategorised", "unknown"].includes(category) ? null : category;
+  return !category || !row.category_basis_state || isUncategorizedBucket(category) || category === "unknown" ? null : category;
 }
 export function matchesCategory(row, query) {
   const category = categoryFor(row), wanted = normalizeLedgerText(query);
-  if (["unsorted", "uncategorized", "uncategorised"].includes(wanted)) return !category;
+  if (isUncategorizedBucket(wanted)) return !category;
   if (!category) return false;
   return ["software", "saas", "software saas"].includes(wanted)
     ? /\b(?:software|saas)\b/.test(category) : containsTokens(category, wanted);

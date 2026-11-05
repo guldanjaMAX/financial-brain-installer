@@ -86,8 +86,8 @@ export function ledgerClauseDecision(question, intents, { sharedWindow = false }
   if (intents.length === 2 && comparison.length === 2 && comparison.every(Boolean) && intents[0].kind === intents[1].kind) {
     return { outcome: 'ready', clauses: comparison, comparison: true };
   }
-  text = text.replace(/\b(?:between|from) (?:\d{4}-\d{2}-\d{2}|[a-z]+ \d{1,2}(?:st|nd|rd|th)?(?:,? \d{4})?) (?:and|to|through) (?:\d{4}-\d{2}-\d{2}|[a-z]+ \d{1,2}(?:st|nd|rd|th)?(?:,? \d{4})?)\b/gi, protect)
-    .replace(/\bon or after (?:\d{4}-\d{2}-\d{2}|[a-z]+ \d{1,2}(?:st|nd|rd|th)?(?:,? \d{4})?)\b/gi, protect)
+  text = text.replace(/\b(?:between|from) (?:\d{4}-\d{2}-\d{2}|\d{1,2}\/\d{1,2}(?:\/\d{4})?|[a-z]+ \d{1,2}(?:st|nd|rd|th)?(?:,? \d{4})?) (?:and|to|through) (?:\d{4}-\d{2}-\d{2}|\d{1,2}\/\d{1,2}(?:\/\d{4})?|[a-z]+ \d{1,2}(?:st|nd|rd|th)?(?:,? \d{4})?)\b/gi, protect)
+    .replace(/\bon or after (?:\d{4}-\d{2}-\d{2}|\d{1,2}\/\d{1,2}(?:\/\d{4})?|[a-z]+ \d{1,2}(?:st|nd|rd|th)?(?:,? \d{4})?)\b/gi, protect)
     .replace(/\b(?:came in and went out|money in and out|credits and debits|incoming and outgoing)\b/gi, protect);
   if (intents.every(intent => intent.kind === 'transfers')) text = text.replace(/\bbetween (?:my|our|the) personal and business (?:accounts|accts)\b/gi, protect);
   const clauses = text.split(/\s*;\s*|\b(?:and|also|plus|then|or)\b/i)

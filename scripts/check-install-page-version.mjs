@@ -61,7 +61,7 @@ function supervisedPlatform(platform, { exactString = false } = {}) {
 }
 
 /**
- * Validate the executable candidate contract before its artifact URL can be
+ * Validate the executable supervised contract before its artifact URL can be
  * followed. Both the release-health checker and the install matrix use this
  * one parser, so a duplicate field or a weakened owner/target/status boundary
  * cannot be accepted by one surface and rejected by the other.
@@ -106,6 +106,21 @@ export function validateSupervisedInstallContract(installGuide, { platform } = {
 export function validateHeldInstallContract(installGuide) {
   requireValue(installGuide === HELD_INSTALL_CONTRACT, 'invalid held install contract');
   return Object.freeze({ state: 'held' });
+}
+function validateInstallDoorwayContract(installGuide, { platform, releaseState }) {
+  // Updates can be stable while new installs remain closed. Only the exact
+  // reviewed hold text closes installs; arbitrary text must still fail the
+  // supervised parser shared by release health and the install matrix.
+  if (releaseState === 'held' || installGuide === HELD_INSTALL_CONTRACT) {
+    requireValue(releaseState !== 'candidate',
+      'candidate update manifest cannot pair with a held install doorway');
+    validateHeldInstallContract(installGuide);
+    return Object.freeze({ install: 'held' });
+  }
+  return Object.freeze({
+    install: 'supervised',
+    ...validateSupervisedInstallContract(installGuide, { platform }),
+  });
 }
 export function validatePublicManifest(value) {
   requireValue(value?.schema_version === 2, 'unsupported update manifest schema');
@@ -154,13 +169,12 @@ export function validateDoorways({ manifest, updateGuide, installGuide }) {
   'update guide and manifest disagree');
   const permitted = manifest.release_state === 'stable' ? 'guided-update-after-release-and-owner-checks' : 'read-only-diagnosis';
   requireValue(update.PERMITTED_MODE === permitted, 'update guide permits the wrong operation');
-  // Held must keep the doorway closed with the exact reviewed document.
-  // Candidate and stable retain the artifact-bearing supervised contract.
-  const install = manifest.release_state === 'held'
-    ? (validateHeldInstallContract(installGuide), null)
-    : validateSupervisedInstallContract(installGuide, { platform: RELEASE_HEALTH_PLATFORM });
+  const install = validateInstallDoorwayContract(installGuide, {
+    platform: RELEASE_HEALTH_PLATFORM, releaseState: manifest.release_state,
+  });
   return {
     state: manifest.release_state,
+    install: install.install,
     publicRelease: manifest.release,
     supervisedCandidate: install?.candidateVersion ?? null,
   };
@@ -210,13 +224,17 @@ export async function readSupervisedInstallContract({ platform = 'windows', read
   requireValue(guideBytes.length < 200_000, 'invalid agent guide');
   const guide = guideBytes.toString('utf8');
   const contract = validateSupervisedInstallContract(guide, { platform });
+  const artifact = await readSupervisedInstallArtifact(contract, read);
+  // Return the same local URL passed to read(), so callers can independently
+  // compare the fetched platform resource with their expected public guide.
+  return Object.freeze({ ...contract, guideUrl, guide, artifact });
+}
+async function readSupervisedInstallArtifact(contract, read) {
   const artifact = Buffer.from(await read(contract.artifactUrl, contract.artifactBytes));
   requireValue(artifact.length === contract.artifactBytes &&
     createHash('sha256').update(artifact).digest('hex') === contract.artifactSha256,
   'downloaded supervised artifact differs from the published receipt');
-  // Return the same local URL passed to read(), so callers can independently
-  // compare the fetched platform resource with their expected public guide.
-  return Object.freeze({ ...contract, guideUrl, guide, artifact });
+  return artifact;
 }
 export async function readInstallDoorwayContract({ platform = 'windows', read = publicBytes } = {}) {
   const manifestBytes = Buffer.from(await read(ENDPOINTS.manifest, 200_000));
@@ -224,22 +242,18 @@ export async function readInstallDoorwayContract({ platform = 'windows', read = 
   const manifest = JSON.parse(manifestBytes.toString('utf8'));
   validatePublicManifest(manifest);
 
-  if (manifest.release_state !== 'held') {
-    return Object.freeze({
-      state: manifest.release_state,
-      ...await readSupervisedInstallContract({ platform, read }),
-    });
-  }
-
   const { guideUrl } = supervisedPlatform(platform, { exactString: true });
   const guideBytes = Buffer.from(await read(guideUrl, 200_000));
   requireValue(guideBytes.length < 200_000, 'invalid agent guide');
   const guide = guideBytes.toString('utf8');
-  validateHeldInstallContract(guide);
+  const contract = validateInstallDoorwayContract(guide, { platform, releaseState: manifest.release_state });
   return Object.freeze({
     state: manifest.release_state,
+    ...contract,
     guideUrl,
     guide,
+    ...(contract.install === 'supervised'
+      ? { artifact: await readSupervisedInstallArtifact(contract, read) } : {}),
   });
 }
 export async function checkInstallPage({ read = publicBytes, requireStable = false } = {}) {

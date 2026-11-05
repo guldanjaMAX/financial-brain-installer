@@ -459,3 +459,32 @@ A bank category is tried first, then an exact payee. An unknown selector gets
 no invented zero or remainder. Two independently named selectors retain the
 comparison contract. A single-amount lookup offering either owned account
 searches all owned accounts and shows the account of each matching row.
+
+## Round 19: schema facts and calendar literal admission
+
+The round-16 extraction and refusal guidance, closed schema and ten examples
+remain unchanged. Additional field-shape facts state required fields, nullable
+values, exact enums and period keys, and integer years. The earlier examples
+already satisfy the schema; this round does not claim to correct their objects.
+
+Calendar admission accepts month/day slash dates, abbreviated month dates,
+ordinals and weekdays for activity readings. It only supplies a valid window
+when the original local parser found none. Existing named-month, quarter and
+relative-period choices retain precedence. Payment date fields may also carry
+a literal named month or quarter, or a weekday in a since-window. Short-date
+readings disclose the month/day assumption and omitted-year/month convention.
+New day spellings must remain literal question text; they gain no exemption
+from grounding. Existing relative aliases retain their compatibility behavior.
+
+The round-17 independent calendar-conflict detector, undefined-holiday rules,
+future-balance guard and undated-expense changes are excluded. Snapshot guards,
+existing contradictory-period behavior and expense defaults remain the
+round-16 contracts. No new calendar restriction can create a contradiction.
+Compound day/month/year inheritance from round 18 is outside this change.
+
+Offline tests cover schema examples and malformed replies, exact dates and
+SQLite row membership, preserved accepted questions, and restoring mutations
+with reached decisions and green peers. The synthetic fast-loop comparison
+requires zero new wrong figures or unsupported claims. Recorded or injected
+replies cannot measure how a fresh model responds to the revised schema facts;
+that comparison remains an owner-reviewed integration gate.

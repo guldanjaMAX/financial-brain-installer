@@ -1,3 +1,4 @@
+import { isolateUpdateSchedulers } from "./fixtures/isolated-update-schedulers.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -12,7 +13,7 @@ import {
   cmdConnect,
   cmdDoctor,
   cmdDisconnect,
-  cmdUpdate,
+  cmdUpdate as cmdUpdateWithNativeSchedulers,
   commandPath,
   parseWranglerMetadataIndexList,
   readHiddenCloudflareToken,
@@ -22,6 +23,7 @@ import {
   withCloudflareControlCredential,
   withWranglerSessionIfNeeded,
 } from "../brain.mjs";
+const cmdUpdate = isolateUpdateSchedulers(cmdUpdateWithNativeSchedulers);
 
 import {
   CLOUDFLARE_OAUTH_CALLBACK_HOST,

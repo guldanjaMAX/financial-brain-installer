@@ -49,6 +49,7 @@ const config :Workerd.Config = (services = [
     (name = "worker/src/lib/sessions.js", esModule = embed "../../../src/lib/sessions.js"),
     (name = "worker/src/lib/simplefin-bank-feed.js", esModule = embed "../../../src/lib/simplefin-bank-feed.js"),
     (name = "worker/src/lib/source-coverage.js", esModule = embed "../../../src/lib/source-coverage.js"),
+    (name = "worker/src/lib/source-family-index.js", esModule = embed "../../../src/lib/source-family-index.js"),
     (name = "worker/src/lib/source-inventory-merge.js", esModule = embed "../../../src/lib/source-inventory-merge.js"),
     (name = "worker/src/lib/source-inventory-scan.js", esModule = embed "../../../src/lib/source-inventory-scan.js"),
     (name = "worker/src/lib/source-original-binding.js", esModule = embed "../../../src/lib/source-original-binding.js"),

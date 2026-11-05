@@ -1,4 +1,6 @@
+import { isolateUpdateSchedulers, isolatedUpdateSchedulerOptions } from "./fixtures/isolated-update-schedulers.mjs";
 import { createUpgradeBookmarkWriter } from "./fixtures/upgrade-bookmark-writer.mjs";
+import { installLifecycleLockTripwire } from "./fixtures/lifecycle-lock-tripwire.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -16,12 +18,13 @@ import { fileURLToPath } from "node:url";
 import {
   classifyCliCredentialBoundary,
   buildConfiguredDailyPlan,
-  cmdUpdate,
+  cmdUpdate as cmdUpdateWithNativeSchedulers,
   dispatchUpdateCli,
   readUpdateBacklog,
   supportErrorCode,
   updateCommandTarget,
 } from "../brain.mjs";
+const cmdUpdate = isolateUpdateSchedulers(cmdUpdateWithNativeSchedulers);
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
 import { quotePosixArgument, quotePowerShellArgument } from "../operations/command-display.mjs";
 import {
@@ -137,6 +140,7 @@ function inventoryResponse(inventory, options = {}) {
 
 function updateHarness(manifestPath, readUpdateBacklog, events) {
   return {
+    dailyRefreshOptions: isolatedUpdateSchedulerOptions(dirname(manifestPath)),
     discoverInstalledManifest: () => ({ path: manifestPath, source: "remembered" }),
     readUpdateBacklog: async (...args) => {
       events.push("authenticated documents backlog read");
@@ -794,12 +798,16 @@ test("force with pending work proceeds after one risk warning", async () => {
     const priorLog = console.log;
     console.log = (...values) => output.push(values.map(String).join(" "));
     let result;
+    const guard = installLifecycleLockTripwire(dirname(manifestPath));
     try {
       result = await dispatchUpdateCli([manifestPath, "--force"], {
-        updateOptions: updateHarness(manifestPath, async () => ({ pending: 3 }), events),
+        updateOptions: { ...updateHarness(manifestPath, async () => ({ pending: 3 }), events),
+          lifecycleLockOptions: { machineLockRoot: join(dirname(manifestPath), "lifecycle-locks") } },
       });
     } finally {
       console.log = priorLog;
+      guard.restore();
+      assert.equal(guard.blocked, 0, "the direct dispatcher kept real locking inside its fixture");
     }
 
     assert.deepEqual(result, { updated: true });

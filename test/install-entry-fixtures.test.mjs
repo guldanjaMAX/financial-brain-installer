@@ -115,14 +115,22 @@ for (const platform of ['windows', 'macos']) {
   });
 }
 
-test('IC-04 current: stable updates with a separately held install still refuse, so compatibility remains deferred', async () => {
+test('IC-04 current: stable updates accept the exact separately held install', async () => {
   const input = { manifest: stable, updateGuide: bytes('stable-update-guide.md').toString(),
     installGuide: bytes('legacy-windows-v2.md').toString() };
   assert.equal(validateDoorways(input).supervisedCandidate, '0.4.10', 'green release and guide control');
-  assert.throws(() => validateDoorways({ ...input, installGuide: bytes('held-install.txt').toString() }), /AGENT_INSTALL_CONTRACT_VERSION/);
-  const arm = reader('windows', stable, bytes('held-install.txt'));
-  await assert.rejects(readInstallDoorwayContract(arm), /AGENT_INSTALL_CONTRACT_VERSION/);
-  assert.equal(arm.calls.length, 2, 'both release and held guide fetched before refusal');
+  assert.deepEqual(validateDoorways({ ...input, installGuide: bytes('held-install.txt').toString() }), {
+    state: 'stable', install: 'held', publicRelease: stable.release, supervisedCandidate: null,
+  });
+  for (const platform of ['windows', 'macos']) {
+    const arm = reader(platform, stable, bytes('held-install.txt'));
+    const result = await readInstallDoorwayContract(arm);
+    assert.equal(result.state, 'stable');
+    assert.equal(result.install, 'held');
+    assert.equal(Object.hasOwn(result, 'artifact'), false);
+    assert.deepEqual(arm.calls.map(({ url }) => url), [ENDPOINTS.manifest, expectedSupervisedGuideUrl(platform)],
+      'both release and held guide fetched; no artifact');
+  }
 });
 
 test('shared fixture approvals bind exact HTML bytes and canonical unsigned manifest, with nine separate receipts', () => {

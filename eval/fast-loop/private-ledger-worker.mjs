@@ -6,8 +6,11 @@ import { readFileSync, readdirSync, realpathSync, writeSync } from 'node:fs';
 import { resolve, relative, dirname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { TABLES, sha256, figures, fail } from './private-ledger-contract.mjs';
+import { armReplayStall } from './child-stall.mjs';
 
 const SQL_CONTRACTS = new Map([
+  // Exact bounded inventory with the SimpleFIN posted-history admission guard.
+  ['0560a90893bdbca03eb46f39580b9d0e6fd87070fe7c3560a58d12de0a571b2e', 'inventory'],
   // Reviewed inventory adds confirmed entity kind to the existing bounded
   // owner-review read. Tenant, joins, limits and admission stay exact.
   ['085a3cb746a3831a3f0a640f08a0ffbd57297d917c3e1dfe483d8d581d74efa6', 'inventory'],
@@ -188,6 +191,7 @@ export async function executePrivateReplay(request) {
   } finally { db.close(); }
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  armReplayStall();
   try { writeSync(3, JSON.stringify(await executePrivateReplay(JSON.parse(readFileSync(0, 'utf8'))))); }
   catch { process.stderr.write('PRIVATE_REPLAY_WORKER_FAILED\n'); process.exitCode = 2; }
 }

@@ -1,3 +1,4 @@
+import { isolateUpdateSchedulers } from "./fixtures/isolated-update-schedulers.mjs";
 /**
  * A Worker paused on the SAME version the manifest records is a resumable
  * paused generation, not a foreign one.
@@ -30,11 +31,12 @@ import {
   cmdHealth as realCmdHealth,
   cmdMigrate,
   cmdRollback,
-  cmdUpdate,
+  cmdUpdate as cmdUpdateWithNativeSchedulers,
   commitManifestVersion,
   readUpdateBacklog,
   splitStatements,
 } from "../brain.mjs";
+const cmdUpdate = isolateUpdateSchedulers(cmdUpdateWithNativeSchedulers);
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
 import worker from "../worker/src/index.js";
 

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import test from 'node:test';
@@ -415,6 +415,178 @@ function reader(manifest, overrides = {}) {
   const calls = [];
   return { calls, read: async (url) => { calls.push(url); assert.ok(Object.hasOwn(values, url), 'unexpected request'); return values[url]; } };
 }
+
+const stableHeldDoorways = () => ({ manifest: stable(), updateGuide: guide('stable'), installGuide: heldInstallGuide });
+
+test('stable held doorway keeps the update artifact and runtime identity checks', async () => {
+  assert.deepEqual(validateDoorways(stableHeldDoorways()), {
+    state: 'stable', install: 'held', publicRelease: '9.8.7', supervisedCandidate: null,
+  });
+  const io = reader(stable(), { [WINDOWS_INSTALL_GUIDE_URL]: Buffer.from(heldInstallGuide) });
+  assert.deepEqual(await checkInstallPage({ ...io, requireStable: true }), {
+    state: 'stable', install: 'held', publicRelease: '9.8.7', supervisedCandidate: null,
+    promotionAllowed: true, artifactVerified: true,
+  });
+  assert.deepEqual(io.calls, [ENDPOINTS.manifest, ENDPOINTS.updateGuide, WINDOWS_INSTALL_GUIDE_URL,
+    ENDPOINTS.latest, stable().installer.url, stable().runtime_identity.url]);
+});
+
+test('stable held reader returns no install artifact on either platform', async () => {
+  for (const platform of ['windows', 'macos']) {
+    const guideUrl = expectedSupervisedGuideUrl(platform);
+    const io = reader(stable(), { [guideUrl]: Buffer.from(heldInstallGuide) });
+    const result = await readInstallDoorwayContract({ ...io, platform });
+    assert.deepEqual(result, { state: 'stable', install: 'held', guideUrl, guide: heldInstallGuide });
+    assert.deepEqual(io.calls, [ENDPOINTS.manifest, guideUrl], 'manifest and exact held guide decision reached');
+    assert.equal(Object.hasOwn(result, 'artifact'), false);
+  }
+});
+
+// Keep the actual parser and runner. Only public transport and command execution
+// are synthetic, so a closed install decision cannot pass through a stub parser.
+function runDoorwayFixture(root, label, manifest, installText, platform = 'windows') {
+  const fixtureRoot = join(root, label);
+  mkdirSync(fixtureRoot);
+  const callsPath = join(fixtureRoot, 'calls.json');
+  const executionMarker = join(fixtureRoot, 'execution.txt');
+  const workdir = join(fixtureRoot, 'install-workdir');
+  const bootstrap = join(fixtureRoot, 'bootstrap.mjs');
+  const values = {
+    [ENDPOINTS.manifest]: JSON.stringify(manifest),
+    [expectedSupervisedGuideUrl(platform)]: installText,
+    [validateSupervisedInstallContract(installGuide, { platform: 'windows' }).artifactUrl]: bytes.toString(),
+  };
+  writeFileSync(bootstrap, `
+    import { writeFileSync } from 'node:fs';
+    import childProcess from 'node:child_process';
+    import { syncBuiltinESMExports } from 'node:module';
+    const calls = [];
+    const values = ${JSON.stringify(values)};
+    globalThis.fetch = async (url) => {
+      calls.push(url);
+      writeFileSync(${JSON.stringify(callsPath)}, JSON.stringify(calls));
+      if (!Object.hasOwn(values, url)) throw new Error('unexpected synthetic public request');
+      return new Response(values[url]);
+    };
+    childProcess.execFileSync = childProcess.spawn = () => {
+      writeFileSync(${JSON.stringify(executionMarker)}, 'reached');
+      throw new Error('synthetic execution boundary');
+    };
+    syncBuiltinESMExports();
+  `);
+  const result = spawnSync(process.execPath, ['--import', pathToFileURL(bootstrap).href,
+    fileURLToPath(new URL('../scripts/install-from-public-contract.mjs', import.meta.url)),
+    workdir, '--guide', platform], {
+    encoding: 'utf8', timeout: 30_000,
+    env: { HOME: process.env.HOME, TMPDIR: process.env.TMPDIR, PATH: process.env.PATH,
+      SystemRoot: process.env.SystemRoot, BRAIN_NO_WRANGLER_LOGIN: '1' },
+  });
+  assert.ifError(result.error);
+  return { result, workdir, executionMarker, calls: JSON.parse(readFileSync(callsPath, 'utf8')) };
+}
+
+test('stable held runner exits successfully before any install work through the real parser', () => {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'brain-stable-held-runner-')));
+  try {
+    const control = runDoorwayFixture(root, 'open', stable(), installGuide);
+    assert.equal(control.result.status, 1);
+    assert.equal(existsSync(control.executionMarker), true, 'green open control reaches command boundary');
+    assert.equal(control.calls.length, 3, 'green open control downloads validated synthetic artifact');
+    for (const platform of ['windows', 'macos']) {
+      const closed = runDoorwayFixture(root, platform, stable(), heldInstallGuide, platform);
+      assert.equal(closed.result.status, 0, closed.result.stderr);
+      assert.match(closed.result.stdout, /install doorway is closed; no artifact was selected or executed/);
+      assert.deepEqual(closed.calls, [ENDPOINTS.manifest, expectedSupervisedGuideUrl(platform)]);
+      assert.equal(existsSync(closed.workdir), false);
+      assert.equal(existsSync(closed.executionMarker), false);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('stable held runner refuses candidate holds and altered documents before install work', () => {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'brain-held-runner-refusal-')));
+  try {
+    const control = runDoorwayFixture(root, 'candidate-open', held('candidate'), installGuide);
+    assert.equal(existsSync(control.executionMarker), true, 'green candidate control reaches execution');
+    const arms = [
+      ['candidate-held', held('candidate'), heldInstallGuide, /candidate update manifest cannot pair with a held install doorway/, 2],
+      ['stable-altered', stable(), heldInstallGuide.trimEnd(), /AGENT_INSTALL_CONTRACT_VERSION/, 2],
+      ['stable-overclaim', { ...stable(), proof: { ...stable().proof, archive_release_gate: 'pending' } },
+        heldInstallGuide, /stable manifest lacks release proof/, 1],
+    ];
+    for (const [label, manifest, text, error, reads] of arms) {
+      const arm = runDoorwayFixture(root, label, manifest, text);
+      assert.equal(arm.result.status, 1);
+      assert.match(arm.result.stderr, error);
+      assert.equal(arm.calls.length, reads, 'manifest or guide decision reached');
+      assert.equal(existsSync(arm.workdir), false);
+      assert.equal(existsSync(arm.executionMarker), false);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('stable held exactness rejects arbitrary install text and candidate plus held on both surfaces', async () => {
+  assert.equal(validateDoorways(stableHeldDoorways()).install, 'held', 'green exact held control');
+  const mutations = ['', heldInstallGuide.trimEnd(), `${heldInstallGuide}\n`, '<html>closed</html>',
+    installGuide.replace('OWNER_PRESENT: required', 'OWNER_PRESENT: optional'),
+    installGuide.replace('TARGET: physical Windows 10 or newer', 'TARGET: any computer'),
+    installGuide.replace('STATUS: supervised field-test candidate', 'STATUS: open')];
+  for (const bad of mutations) {
+    assert.notEqual(bad, heldInstallGuide);
+    assert.throws(() => validateDoorways({ ...stableHeldDoorways(), installGuide: bad }), /supervised install contract/);
+    const io = reader(stable(), { [WINDOWS_INSTALL_GUIDE_URL]: Buffer.from(bad) });
+    await assert.rejects(readInstallDoorwayContract(io), /supervised install contract/);
+    assert.deepEqual(io.calls, [ENDPOINTS.manifest, WINDOWS_INSTALL_GUIDE_URL]);
+  }
+  assert.equal(validateDoorways({ manifest: held('candidate'), updateGuide: guide('candidate'), installGuide }).supervisedCandidate,
+    '9.8.6', 'green candidate control');
+  assert.throws(() => validateDoorways({ manifest: held('candidate'), updateGuide: guide('candidate'), installGuide: heldInstallGuide }),
+    /candidate update manifest cannot pair with a held install doorway/);
+  const candidate = reader(held('candidate'), { [WINDOWS_INSTALL_GUIDE_URL]: Buffer.from(heldInstallGuide) });
+  await assert.rejects(readInstallDoorwayContract(candidate), /candidate update manifest cannot pair with a held install doorway/);
+  assert.deepEqual(candidate.calls, [ENDPOINTS.manifest, WINDOWS_INSTALL_GUIDE_URL]);
+});
+
+test('stable held never bypasses update guide or manifest proof validation', async () => {
+  assert.equal((await checkInstallPage(reader(stable(), { [WINDOWS_INSTALL_GUIDE_URL]: Buffer.from(heldInstallGuide) }))).artifactVerified, true);
+  for (const updateGuide of [guide('held'), guide('candidate'), guide('stable').replace('guided-update-after-release-and-owner-checks', 'read-only-diagnosis')]) {
+    assert.throws(() => validateDoorways({ ...stableHeldDoorways(), updateGuide }), /disagree|wrong operation/);
+  }
+  const mutations = [{ schema_version: 1 }, { available: false }, { published_at: '2026-02-30' },
+    { proof: { ...stable().proof, live_client_acceptance: 'passed' } },
+    { proof: { ...stable().proof, automated_release_suite: 'pending' } },
+    { proof: { ...stable().proof, archive_release_gate: 'not_passed' } },
+    { installer: { ...stable().installer, bytes: 0 } },
+    { installer: { ...stable().installer, sha256: 'bad' } },
+    { runtime_identity: null }, { runtime_identity: { ...stable().runtime_identity, source_sha: 'bad' } }];
+  for (const mutation of mutations) {
+    const manifest = { ...stable(), ...mutation };
+    assert.notDeepEqual(manifest, stable());
+    let decisions = 0;
+    assert.throws(() => { decisions++; validateDoorways({ ...stableHeldDoorways(), manifest }); });
+    assert.equal(decisions, 1);
+    const io = reader(manifest, { [WINDOWS_INSTALL_GUIDE_URL]: Buffer.from(heldInstallGuide) });
+    await assert.rejects(readInstallDoorwayContract(io));
+    assert.deepEqual(io.calls, [ENDPOINTS.manifest], 'invalid manifest refuses before install selection');
+  }
+});
+
+test('stable held refuses tampered release metadata, archive bytes and runtime identity', async () => {
+  const heldOverrides = { [WINDOWS_INSTALL_GUIDE_URL]: Buffer.from(heldInstallGuide) };
+  assert.equal((await checkInstallPage(reader(stable(), heldOverrides))).artifactVerified, true);
+  const arms = [
+    [{ [ENDPOINTS.latest]: Buffer.from(JSON.stringify({ ...release(), immutable: false })) }, /immutable stable release/, ENDPOINTS.latest],
+    [{ [stable().installer.url]: Buffer.alloc(bytes.length) }, /archive differs/, stable().installer.url],
+    [{ [stable().installer.url]: Buffer.concat([bytes, Buffer.from('x')]) }, /archive differs/, stable().installer.url],
+    [{ [stable().runtime_identity.url]: Buffer.alloc(runtimeBytes.length) }, /RUNTIME_IDENTITY_/, stable().runtime_identity.url],
+  ];
+  for (const [overrides, error, reachedUrl] of arms) {
+    const io = reader(stable(), { ...heldOverrides, ...overrides });
+    await assert.rejects(checkInstallPage(io), error);
+    assert.ok(io.calls.includes(reachedUrl), 'verification decision reached after the held guide');
+  }
+});
+
 test('the independent supervised-guide oracle pins both public guide URLs', () => {
   const cases = [
     ['windows', 'https://financialbrain.ai/install/agent.md', 'https://financialbrain.ai/install/agent-macos.md'],
@@ -455,12 +627,13 @@ test('release health fetches the Windows install guide selected by the shared pl
     'https://financialbrain.ai/install/agent.md',
   ]);
 });
-test('release health accepts the exact held doorway and still requires the stable versioned contract', async () => {
+test('release health accepts exact held and supervised install doorways', async () => {
   const heldIo = reader(held(), {
     [WINDOWS_INSTALL_GUIDE_URL]: Buffer.from(heldInstallGuide),
   });
   assert.deepEqual(await checkInstallPage(heldIo), {
     state: 'held',
+    install: 'held',
     publicRelease: null,
     supervisedCandidate: null,
     promotionAllowed: false,
@@ -491,9 +664,9 @@ test('the old unconditional supervised-parser mutant fails the held-doorway fixt
   // multi-line LF target below would match nothing there. Normalize first, as
   // the other source-anchored suites do; the mutant is written back with LF.
   const source = readFileSync(sourcePath, 'utf8').replace(/\r\n/g, '\n');
-  const fixedBranch = `const install = manifest.release_state === 'held'
-    ? (validateHeldInstallContract(installGuide), null)
-    : validateSupervisedInstallContract(installGuide, { platform: RELEASE_HEALTH_PLATFORM });`;
+  const fixedBranch = `const install = validateInstallDoorwayContract(installGuide, {
+    platform: RELEASE_HEALTH_PLATFORM, releaseState: manifest.release_state,
+  });`;
   const oldBranch = `const install = validateSupervisedInstallContract(
     installGuide,
     { platform: RELEASE_HEALTH_PLATFORM },
@@ -504,7 +677,7 @@ test('the old unconditional supervised-parser mutant fails the held-doorway fixt
     "from './runtime-identity-receipt.mjs';",
     `from '${new URL('../scripts/runtime-identity-receipt.mjs', import.meta.url).href}';`,
   );
-  const fixtureRoot = mkdtempSync(join(tmpdir(), 'brain-held-contract-mutant-'));
+  const fixtureRoot = realpathSync.native(mkdtempSync(join(tmpdir(), 'brain-held-contract-mutant-')));
   const mutantPath = join(fixtureRoot, 'mutant.mjs');
   writeFileSync(mutantPath, mutant);
   try {
@@ -521,7 +694,7 @@ test('the old unconditional supervised-parser mutant fails the held-doorway fixt
 });
 for (const state of ['held', 'candidate']) test(`${state} is healthy but never a promotion or artifact proof`, async () => {
   const io = reader(held(state));
-  assert.deepEqual(await checkInstallPage(io), { state, publicRelease: null,
+  assert.deepEqual(await checkInstallPage(io), { state, install: state === 'held' ? 'held' : 'supervised', publicRelease: null,
     supervisedCandidate: state === 'candidate' ? '9.8.6' : null,
     promotionAllowed: false, artifactVerified: false });
   assert.equal(io.calls.length, 3, 'held checker must not fetch latest or install a candidate');
@@ -535,7 +708,7 @@ test('nonstable metadata cannot expose a release, installer, completion claim, o
   }
 });
 test('stable requires exact immutable receipt, independent bytes, and matching guide', async () => {
-  assert.deepEqual(await checkInstallPage(reader(stable())), { state: 'stable', publicRelease: '9.8.7', supervisedCandidate: '9.8.6', promotionAllowed: true, artifactVerified: true });
+  assert.deepEqual(await checkInstallPage(reader(stable())), { state: 'stable', install: 'supervised', publicRelease: '9.8.7', supervisedCandidate: '9.8.6', promotionAllowed: true, artifactVerified: true });
   await assert.rejects(checkInstallPage(reader(stable(), { [stable().installer.url]: Buffer.from('wrong archive') })), /archive differs/);
   await assert.rejects(checkInstallPage(reader(stable(), {
     [stable().runtime_identity.url]: Buffer.from('wrong runtime receipt'),
@@ -585,10 +758,15 @@ test('public runtime receipt cannot disagree with its independently bound packag
     size: mismatchedBytes.length,
     digest: `sha256:${mismatchedSha}`,
   });
-  await assert.rejects(checkInstallPage(reader(manifest, {
-    [manifest.runtime_identity.url]: mismatchedBytes,
-    [ENDPOINTS.latest]: Buffer.from(JSON.stringify(metadata)),
-  })), /RUNTIME_IDENTITY_EXPECTATION_MISMATCH/);
+  for (const installText of [installGuide, heldInstallGuide]) {
+    const io = reader(manifest, {
+      [WINDOWS_INSTALL_GUIDE_URL]: Buffer.from(installText),
+      [manifest.runtime_identity.url]: mismatchedBytes,
+      [ENDPOINTS.latest]: Buffer.from(JSON.stringify(metadata)),
+    });
+    await assert.rejects(checkInstallPage(io), /RUNTIME_IDENTITY_EXPECTATION_MISMATCH/);
+    assert.ok(io.calls.includes(manifest.runtime_identity.url), 'independent package binding decision reached');
+  }
 });
 test('latest mutable, different-version, incomplete, and mismatched assets all refuse', () => {
   for (const mutation of [{ immutable: false }, { draft: true }, { prerelease: true }, { tag_name: 'v9.8.6' }, { assets: [] }, { assets: [release().assets[0], release().assets[0]] }]) {
@@ -713,7 +891,7 @@ test('the public install runner uses the independent platform oracle before extr
 });
 
 test('a runner guide mismatch stops before filesystem or command execution', () => {
-  const fixtureRoot = mkdtempSync(join(tmpdir(), 'brain-runner-guide-mismatch-'));
+  const fixtureRoot = realpathSync.native(mkdtempSync(join(tmpdir(), 'brain-runner-guide-mismatch-')));
   const bootstrapPath = join(fixtureRoot, 'bootstrap.mjs');
   const hooksPath = join(fixtureRoot, 'hooks.mjs');
   const workdir = join(fixtureRoot, 'runner-workdir');
@@ -794,7 +972,7 @@ test('a runner guide mismatch stops before filesystem or command execution', () 
   }
 });
 test('the real public runner treats held and stable doorway decisions differently', () => {
-  const fixtureRoot = mkdtempSync(join(tmpdir(), 'brain-runner-doorway-state-'));
+  const fixtureRoot = realpathSync.native(mkdtempSync(join(tmpdir(), 'brain-runner-doorway-state-')));
   const runnerUrl = new URL('../scripts/install-from-public-contract.mjs', import.meta.url).href;
   const runnerPath = fileURLToPath(runnerUrl);
   const emptySha256 = createHash('sha256').update(Buffer.alloc(0)).digest('hex');
@@ -808,7 +986,7 @@ test('the real public runner treats held and stable doorway decisions differentl
     const executionMarker = join(stateRoot, 'exec-was-called.txt');
     const contractSource = state === 'held'
       ? `export async function readInstallDoorwayContract() {
-          return { state: 'held', guideUrl: 'https://financialbrain.ai/install/agent.md' };
+          return { state: 'held', install: 'held', guideUrl: 'https://financialbrain.ai/install/agent.md' };
         }`
       : `export async function readInstallDoorwayContract() {
           return {
@@ -906,7 +1084,7 @@ function runSyntheticKit({
   rootMode = 'directory', archiveMode = 'file', receiptMode = 'file',
   workdirMode = 'directory', documentsMode = 'none', failSecondMacRead = false,
 }) {
-  const fixtureRoot = mkdtempSync(join(tmpdir(), 'brain-kit-containment-'));
+  const fixtureRoot = realpathSync.native(mkdtempSync(join(tmpdir(), 'brain-kit-containment-')));
   const workdir = join(fixtureRoot, 'runner-workdir');
   const executionMarker = join(fixtureRoot, 'install-command-ran.txt');
   const runnerUrl = new URL('../scripts/install-from-public-contract.mjs', import.meta.url).href;
@@ -1065,7 +1243,7 @@ function runSyntheticKit({
     assert.equal(existsSync(join(workdir, 'prefix')), false, 'no install prefix may be created');
     return result;
   } finally {
-    assert.ok(resolve(fixtureRoot).startsWith(`${resolve(tmpdir())}${sep}`));
+    assert.ok(resolve(fixtureRoot).startsWith(`${realpathSync.native(tmpdir())}${sep}`));
     rmSync(fixtureRoot, { recursive: true, force: true });
   }
 }

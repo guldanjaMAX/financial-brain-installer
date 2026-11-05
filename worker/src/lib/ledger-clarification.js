@@ -1,6 +1,6 @@
 // These are choices to clarify the request, never extra reader plans. Facts
 // and numeric references belong only to the one fully validated reading.
-import { plainRouterLimitation } from './ledger-wording.js';
+import { originalRecordSuggestion, plainRouterLimitation } from './ledger-wording.js';
 import { separateOffers } from './answer-render.js';
 const choices = {
   balance: ['current recorded balances', 'recent transactions', 'both'],
@@ -21,11 +21,20 @@ function recordMissing(ledger) {
     ledger.kind === 'multi' && ledger.parts.some(recordMissing);
 }
 
-export function finalLedgerOffer(body, clarificationQuestion) {
+export function finalLedgerOffer(body, clarificationQuestion, refundBusiness = body.ledger?.kind === 'merchant') {
   const composed = separateOffers(body.answer);
   const repair = (body.gaps || []).flatMap(gap => separateOffers(gap.detail).offers)[0] || composed.offers[0];
-  const question = recordMissing(body.ledger) && repair ? repair
-    : clarificationQuestion || composed.offers[0] || repair;
+  const topicUnconfirmed = ledger => ledger?.category_total_unconfirmed || ledger?.category_ranking_unconfirmed ||
+    ledger?.kind === 'multi' && ledger.parts.some(topicUnconfirmed);
+  const parts = body.ledger?.parts || (body.ledger ? [body.ledger] : []);
+  const refundParts = parts.filter(part => part?.net_refunds_unavailable);
+  const refundQuestion = refundParts.length ? refundBusiness
+    ? 'Want to review the deposits for possible refunds from this business?'
+    : 'Want to review the deposits for possible refunds?' : null;
+  // A refund limitation names its own review step; otherwise an unconfirmed category points to the original record.
+  const question = refundQuestion || (topicUnconfirmed(body.ledger) ? originalRecordSuggestion
+    : recordMissing(body.ledger) && repair ? repair
+    : clarificationQuestion || composed.offers[0] || repair);
   return { ...body, answer: [composed.facts, question].filter(Boolean).join('\n') };
 }
 
@@ -45,7 +54,8 @@ export function ledgerClarificationAnswer(body, decision) {
     (body.gaps || []).map(gap => gap.detail).filter(Boolean).join('\n') || plainRouterLimitation('reading_unavailable');
   const composed = finalLedgerOffer({ ...body,
     answer: `Here's my best reading of your question: ${reading}\n${[detail, decision.unansweredPart].filter(Boolean).join('\n')}` },
-  'Want to choose the dates or account that would help most?');
+  'Want to choose the dates or account that would help most?',
+  intent.kind === 'merchant' && decision.intents.every(part => part.kind === 'merchant' && part.match === intent.match));
   const question = separateOffers(composed.answer).offers[0];
   // Preserve the reviewed composer, including every coverage qualification and
   // citation. Completeness here concerns the unresolved question, independent

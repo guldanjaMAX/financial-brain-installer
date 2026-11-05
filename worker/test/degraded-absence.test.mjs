@@ -1168,12 +1168,12 @@ const EMPTY_DEGRADED_THINK = {
   const rawProviderFailure = "Workers AI request failed with private upstream trace fixture-123";
   check("/app: an older Worker's raw model error is replaced with reviewed copy",
     render.answerText({ answer: null, answer_error: rawProviderFailure }) ===
-      render.ANSWER_ERROR_MESSAGES.unavailable &&
+      render.ANSWER_ERROR_MESSAGES.unavailable.replace(" Want", "\nWant") &&
       !render.answerText({ answer: null, answer_error: rawProviderFailure }).includes(rawProviderFailure),
     render.answerText({ answer: null, answer_error: rawProviderFailure }));
   check("/app: a reviewed model error keeps its specific recovery message",
     render.answerText({ answer: null, answer_error: render.ANSWER_ERROR_MESSAGES.dailyLimit }) ===
-      render.ANSWER_ERROR_MESSAGES.dailyLimit,
+      render.ANSWER_ERROR_MESSAGES.dailyLimit.replace(" Want", "\nWant"),
     render.answerText({ answer: null, answer_error: render.ANSWER_ERROR_MESSAGES.dailyLimit }));
 
   // Version skew again: a page cached from a newer worker, talking to an older
@@ -1188,7 +1188,7 @@ const EMPTY_DEGRADED_THINK = {
     confidence: { percent: 80, band: "high", basis: ["retrieval found no candidates at all"] },
   };
   check("REGRESSION GUARD at /app: a healthy empty result keeps its search scope",
-    render.answerText(healthyEmpty) === "I can try a more specific search, but I didn't find a matching record in this search. Want to add a detail?",
+    render.answerText(healthyEmpty) === "I can try a more specific search, but I didn't find a matching record in this search.",
     render.answerText(healthyEmpty));
   check("REGRESSION GUARD at /app: labels its confidence in this search result",
     /^Confidence in this search result: 80%/.test(render.confidenceText(healthyEmpty)),
@@ -1198,8 +1198,8 @@ const EMPTY_DEGRADED_THINK = {
     answer: "The retainer was deferred [1].", citations: [{ n: 1 }], results: [{ title: "x" }],
     confidence: { percent: 75, band: "moderate", basis: ["evidence gate approved 1 citation"] },
   };
-  check("REGRESSION GUARD at /app: a real answer is untouched",
-    render.answerText(answered) === answered.answer &&
+  check("REGRESSION GUARD at /app: a real answer keeps its facts and one invitation",
+    render.answerText(answered) === `${answered.answer}\nWant to check the original record?` &&
       /^Confidence: 75%/.test(render.confidenceText(answered)),
     render.confidenceText(answered));
 }
