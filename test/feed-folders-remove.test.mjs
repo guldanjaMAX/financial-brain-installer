@@ -299,7 +299,12 @@ for (const mode of ["registration", "plan", "definition", "empty"]) {
     const refused = await capture(() => runDailyRefreshCli(f.manifestPath, runOptions));
     assert.equal(inspections, 1, "the stale arm reaches the registered definition decision");
     assert.equal(runs, 0);
-    assert.ok(refused.error?.message.includes(renderCliCommands(`brain daily on ${quotePosixArgument(f.manifestPath)}`)));
+    // The executable prefix depends on how the CLI is installed on the host
+    // ("brain" on PATH or the full node command), so assert the concrete
+    // command with the platform-quoted manifest path.
+    const quoted = (process.platform === "win32" ? quotePowerShellArgument : quotePosixArgument)(f.manifestPath);
+    assert.match(refused.error?.message || "", /next run: \S/);
+    assert.ok(refused.error.message.includes(`daily on ${quoted}`), refused.error.message);
     if (mode === "empty") {
       assert.equal(after.ready, false, "the final removal leaves enabled upload visibly unavailable");
       f.manifest.corpora.upload.folders = [{

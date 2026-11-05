@@ -204,7 +204,7 @@ test("model retry notice is absent before deployment and on an interrupted revie
   assert.equal(verificationCalls, 1, "the pre-deployment failure decision was reached");
   assert.match(stopped.error?.message || "", /fixture verification stop/);
   assert.deepEqual(stopped.uploads, []);
-  assert.equal(stopped.error.message.includes(renderCliCommands(RETRY_LINE)), false);
+  assert.equal(renderCliCommands(stopped.error.message).includes(renderCliCommands(RETRY_LINE)), false);
   const reviewed = fixture(t);
   reviewed.manifest.retrieval = { ...reviewed.manifest.retrieval, ...PAIR };
   writeFileSync(reviewed.manifestPath, JSON.stringify(reviewed.manifest));
@@ -235,7 +235,7 @@ for (const failedLookup of [1, 2]) {
     const green = await update(f);
     assert.equal(green.error, null, "green retry completes the update");
     assert.equal(green.uploads.length, 2, "green retry reaches both real uploads");
-    assert.equal(run.error.message.includes(renderCliCommands(RETRY_LINE)), failedLookup > 1);
+    assert.equal(renderCliCommands(run.error.message).includes(renderCliCommands(RETRY_LINE)), failedLookup > 1);
   });
 }
 
@@ -253,7 +253,7 @@ test("lost upload reply keeps the model retry notice and retry finishes", async 
   assert.equal(lost, 1, "the real upload was applied before its reply was lost");
   assert.equal(run.uploads.length, 1);
   assert.match(run.error?.message || "", /fixture upload reply lost/);
-  assert.ok(run.error.message.includes(renderCliCommands(RETRY_LINE)));
+  assert.ok(renderCliCommands(run.error.message).includes(renderCliCommands(RETRY_LINE)));
   assert.deepEqual(readFileSync(f.manifestPath), before);
   const green = await update(f);
   assert.equal(green.error, null, "green retry completes the update");
@@ -270,7 +270,7 @@ test("unverified local model readback keeps the model retry notice", async (t) =
   assert.equal(run.uploads.length, 2);
   assert.ok(run.calls.includes("POST /api/rag/think"));
   assert.match(run.error?.message || "", /the local manifest changed beyond its verified update fields/);
-  assert.ok(run.error.message.includes(renderCliCommands(RETRY_LINE)));
+  assert.ok(renderCliCommands(run.error.message).includes(renderCliCommands(RETRY_LINE)));
   assert.deepEqual(readFileSync(f.manifestPath), before);
   assert.equal((await update(f)).error, null, "green retry persists and verifies the desired fields");
 });
@@ -306,7 +306,7 @@ test("a failure after the verified local model commit needs no model retry notic
   assert.equal(run.uploads.length, 2);
   assert.ok(run.calls.includes("POST /api/rag/think"));
   assert.match(run.error?.message || "", /the verified update could not be recorded in upgrade history/);
-  assert.equal(run.error.message.includes(renderCliCommands(RETRY_LINE)), false);
+  assert.equal(renderCliCommands(run.error.message).includes(renderCliCommands(RETRY_LINE)), false);
   const saved = JSON.parse(readFileSync(f.manifestPath, "utf8"));
   assert.deepEqual(saved.retrieval, { ...f.manifest.retrieval, ...PAIR });
   assert.equal(saved.brain.version, f.targetVersion);
