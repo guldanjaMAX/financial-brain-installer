@@ -27,7 +27,7 @@ import { confidenceLine } from "./confidence.js";
 // never be reported as an absence. retrieval-status.js names an MCP server as
 // a consumer that has to defend itself, and this is the remote one.
 import {
-  SCANNED_CITATION_MARK, answerReasonText, answerText, moneyExplanation, citationIsScanned, confidenceText,
+  SCANNED_CITATION_MARK, answerReasonText, answerText, finalAnswerText, moneyExplanation, separateOffers, citationIsScanned, confidenceText,
   nextActionText, safeAnswerErrorText, scannedEvidenceNotice, unavailableSearch,
 } from "./answer-render.js";
 import { COVERAGE_INCOMPLETE } from "./retrieval-status.js";
@@ -226,21 +226,24 @@ async function runAsk(deps, args) {
   if (!question) return toolError("a question is required");
   const thought = await deps.think({ q: question, limit: 12 });
   if (thought.answer === null && thought.answer_error) {
-    return toolError(`${safeAnswerErrorText(thought.answer_error)} (Support code: MCP_ANSWER_ERROR)`);
+    const message = separateOffers(safeAnswerErrorText(thought.answer_error));
+    return toolError(finalAnswerText(`${message.facts} (Support code: MCP_ANSWER_ERROR)`, message.offers.at(-1)));
   }
   // A question about which of the owner's entities or accounts are open, on a
   // brain whose financial map is not set up, ends in a refusal that is honest
   // and useless. The guidance goes ABOVE the search-scoped refusal, explaining
   // why the brain cannot answer it yet, what it has
   // seen without confirming, and the one step that fixes it.
-  const guidance = financialMapGuidanceLines(thought.map_guidance);
-  const withGuidance = (rest) => text([...(guidance.length ? [...guidance, ""] : []), ...rest].join("\n"));
+  const mapStep = separateOffers(thought.map_guidance?.one_step || "");
+  const guidance = financialMapGuidanceLines(thought.map_guidance
+    ? { ...thought.map_guidance, one_step: mapStep.facts } : null);
+  const selectedOffer = nextActionText(thought) || mapStep.offers.at(-1) || separateOffers(answerText(thought)).offers.at(-1);
+  const withGuidance = (rest) => text(finalAnswerText(
+    [...(guidance.length ? [...guidance, ""] : []), ...rest].join("\n"), selectedOffer));
   const refusalExplanation = () => {
     const lines = [];
     const reason = answerReasonText(thought);
     if (reason) lines.push(`Why: ${reason}`);
-    const next = nextActionText(thought);
-    if (next) lines.push(next);
     return lines;
   };
 
@@ -264,10 +267,7 @@ async function runAsk(deps, args) {
     // suppressed while retrieval is incomplete or unavailable.
     const ledgerGaps = (Array.isArray(thought.gaps) ? thought.gaps : [])
       .filter(gap => ["ledger_out_of_coverage", "ledger_not_consulted"].includes(gap.type));
-    return withGuidance([answerText(thought), ...ledgerGaps.filter(gap => gap.detail).map(gap => gap.detail),
-      ...(ledgerGaps.length ? [ledgerGaps.some(gap => gap.type === "ledger_out_of_coverage")
-        ? "Want help connecting or refreshing the bank records for those dates?"
-        : "Want help with the bank connection step above?"] : []),
+    return withGuidance([answerText(thought), ...ledgerGaps.filter(gap => gap.detail).map(gap => separateOffers(gap.detail).facts),
       ...refusalExplanation(),
       "", confidenceText(thought)]);
   }
@@ -277,22 +277,19 @@ async function runAsk(deps, args) {
   const gaps = Array.isArray(thought.gaps) ? thought.gaps : [];
   if (refused) {
     if (results.length) {
-      lines.push(`I found ${results.length} ${results.length === 1 ? "record" : "records"} but none answered this directly. Want to try a more specific detail?`);
+      lines.push(`I found ${results.length} ${results.length === 1 ? "record" : "records"} but none answered this directly.`);
       for (const row of results.slice(0, 3)) {
         const date = Number.isFinite(Date.parse(row.ts || "")) ? String(row.ts).slice(0, 10) : "date unavailable";
         lines.push(`- ${row.title || "Untitled record"} (${date}${row.ts && row.date_reliable !== true ? "; date unverified" : ""})`);
       }
     } else if (!gaps.some(gap => ["ledger_out_of_coverage", "ledger_not_consulted"].includes(gap.type))) {
-      lines.push("I can try a more specific search, but I didn't find a matching record in this search. Want to add a detail?");
+      lines.push("I can try a more specific search, but I didn't find a matching record in this search.");
     }
     const explanation = moneyExplanation(thought);
-    if (explanation) lines.push(explanation);
-    for (const gap of gaps) if (gap.type !== "no_results" && gap.detail && !explanation.includes(gap.detail)) lines.push(gap.detail);
-    if (gaps.some(gap => gap.type === "ledger_out_of_coverage")) lines.push("Want help connecting or refreshing the bank records for those dates?");
+    if (explanation) lines.push(separateOffers(explanation).facts);
+    for (const gap of gaps) if (gap.type !== "no_results" && gap.detail && !explanation.includes(gap.detail)) lines.push(separateOffers(gap.detail).facts);
   } else {
-    lines.push(answerText(thought));
-    const explanation = moneyExplanation(thought);
-    if (explanation && !answerText(thought).includes(explanation)) lines.push(explanation);
+    lines.push(separateOffers(answerText(thought)).facts);
   }
   if (refused) lines.push(...refusalExplanation());
   const scanned = scannedEvidenceNotice(thought);
@@ -309,7 +306,7 @@ async function runAsk(deps, args) {
       lines.push(`[${citation.n}] ${citation.title}${mark}${provenance.length ? ` · ${provenance.join(" · ")}` : ""}`);
     }
   }
-  return text(lines.join("\n"));
+  return text(finalAnswerText(lines.join("\n"), selectedOffer));
 }
 
 // Search and fetch share result ids; tied dates keep the original Worker order.

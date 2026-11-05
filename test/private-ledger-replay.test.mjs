@@ -9,6 +9,7 @@ import { pathToFileURL } from 'node:url';
 import { ROOT, waitForQuiet } from '../eval/fast-loop/money-replay.mjs';
 import { MONEY_JARGON } from '../worker/test/fixtures/plain-copy-expectations.mjs';
 import { exportQueries, validateEnvelope } from '../eval/fast-loop/private-ledger-contract.mjs';
+import { runReplayChild } from '../eval/fast-loop/child-run.mjs';
 
 const entry = resolve(ROOT, 'eval/fast-loop/private-ledger-replay.mjs');
 const scratch = resolve(process.env.PRIVATE_REPLAY_TEST_SCRATCH || resolve(ROOT, 'lane-evidence/private-replay'));
@@ -20,7 +21,23 @@ for (const key of ['SystemRoot', 'WINDIR', 'ComSpec', 'PATHEXT']) if (process.pl
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 function cli(args) {
   waitForQuiet(env);
-  return spawnSync(process.execPath, [entry, ...args], { cwd: ROOT, env, encoding: 'utf8', timeout: 60000, maxBuffer: 1024 * 1024 });
+  // A comparison may run two arms, each with two bounded 120 s attempts.
+  const child = spawnSync(process.execPath, [entry, ...args], { cwd: ROOT, env, encoding: 'utf8', timeout: 490000, maxBuffer: 1024 * 1024 });
+  if (child.status === 0) {
+    // Expected recovery diagnostics belong in the CI log. Keep every other
+    // byte subject to the existing empty-stderr assertion in successful().
+    const diagnostics = [], unexpected = [];
+    for (const line of child.stderr.split('\n')) {
+      if (/^REPLAY_CHILD_TIMEOUT PRIVATE_REPLAY attempt=1 ms=\d+ stderr=[^\r\n]{0,400}$/.test(line)) diagnostics.push(line);
+      else unexpected.push(line);
+    }
+    if (diagnostics.length) {
+      assert.ok(diagnostics.length <= (args.includes('--baseline') ? 2 : 1), 'one recovered timeout per executed arm');
+      for (const line of diagnostics) process.stderr.write(line + '\n');
+      child.stderr = unexpected.join('\n');
+    }
+  }
+  return child;
 }
 test('private replay entry point exists and rejects missing arguments without content', () => {
   assert.ok(existsSync(entry), 'offline replay entry point must exist');
@@ -117,8 +134,10 @@ test('argument parsing rejects unknown, duplicate and unpaired comparison option
 });
 test('export plan covers exact bounded money reads without credential columns', () => {
   const queries = exportQueries('primary');
-  assert.equal(Object.keys(queries).length, 11);
+  assert.equal(Object.keys(queries).length, 13);
   assert.ok(Object.hasOwn(queries, 'fin_account_kind_reviews.sql'));
+  assert.match(queries['simplefin_account_assignments.sql'], /^SELECT tenant_id,item_ref,account_ref FROM/);
+  assert.match(queries['simplefin_sync_windows.sql'], /^SELECT tenant_id,item_ref,state,revision,staging_revision,errlist_json FROM/);
   for (const sql of Object.values(queries)) {
     assert.match(sql, /LIMIT 10001/);
     assert.doesNotMatch(sql, /access_ciphertext|access_iv|cursor|chunks|vectors|INSERT|UPDATE|DELETE/i);
@@ -143,12 +162,12 @@ test('in-memory worker executes three real paths without a disk output exception
   const f = await fixture();
   const meta = JSON.parse(readFileSync(join(f.dir, 'export.json'), 'utf8'));
   meta.now_utc = new Date(meta.now_utc).toISOString();
-  waitForQuiet(env);
-  const child = spawnSync(process.execPath, ['--experimental-vm-modules', '--permission', '--no-warnings', `--allow-fs-read=${ROOT}`,
-    '--import', pathToFileURL(resolve(ROOT, 'test/fixtures/cli-side-effect-tripwire.mjs')).href, resolve(ROOT, 'eval/fast-loop/private-ledger-worker.mjs')], {
-    cwd: ROOT, env, stdio: ['pipe', 'ignore', 'pipe', 'pipe'], encoding: 'utf8', timeout: 60000,
+  const child = runReplayChild({ label: 'PRIVATE_REPLAY', beforeAttempt: () => waitForQuiet(env),
+    args: ['--experimental-vm-modules', '--permission', '--no-warnings', `--allow-fs-read=${ROOT}`,
+    '--import', pathToFileURL(resolve(ROOT, 'test/fixtures/cli-side-effect-tripwire.mjs')).href, resolve(ROOT, 'eval/fast-loop/private-ledger-worker.mjs')], options: {
+    cwd: ROOT, env, stdio: ['pipe', 'ignore', 'pipe', 'pipe'], encoding: 'utf8',
     input: JSON.stringify({ root: ROOT, trusted_root: ROOT, tables: f.tables, meta, questions: JSON.parse(readFileSync(f.questions, 'utf8')), input_digest: 'synthetic' }),
-  });
+  } });
   assert.equal(child.status, 0, child.stderr);
   const run = JSON.parse(child.output[3]);
   assert.equal(run.invalid, 0);
@@ -320,6 +339,28 @@ test('in-memory provider projections change the real empty-history coverage deci
   assert.equal(refused.trace.sql[0].rows[0].empty_provider_from, null);
   assert.equal(refused.trace.source_row_counts.plaid_sync_windows, 1);
 });
+test('private replay requires versioned SimpleFIN evidence with real refusal and green peers', async () => {
+  const f = await fixture(), r = request(f);
+  Object.assign(r.tables.fin_accounts[0], { feed_mode: 'live', source_feed: 'bank-feed:synthetic-item', external_ref: 'synthetic-account' });
+  Object.assign(r.tables.fin_account_coverage[0], { provenance: 'feed', source_feed: 'bank-feed:synthetic-item' });
+  r.tables.simplefin_account_assignments = [{ tenant_id: 'primary', item_ref: 'synthetic-item', account_ref: 'synthetic-account' }];
+  const { SIMPLEFIN_POSTED_HISTORY_REVISION } = await import('../worker/src/lib/bank-feed-profiles.js');
+  const proof = { tenant_id: 'primary', item_ref: 'synthetic-item', state: 'promoted',
+    revision: `${SIMPLEFIN_POSTED_HISTORY_REVISION}fixture`, staging_revision: `${SIMPLEFIN_POSTED_HISTORY_REVISION}fixture`, errlist_json: '[]' };
+  for (const fault of [{ revision: 'legacy', staging_revision: 'legacy' }, { state: 'staged' }, { staging_revision: 'racing' }, { errlist_json: '["gap"]' }]) {
+    r.tables.simplefin_sync_windows = [proof];
+    const green = f.api.runPrivateArm(ROOT, r).observations[0];
+    assert.equal(green.execution_status, 'complete');
+    assert.ok(green.body.ledger?.expense_total_minor > 0, 'versioned source reaches the real expense decision');
+    r.tables.simplefin_sync_windows = [{ ...proof, ...fault }];
+    const refused = f.api.runPrivateArm(ROOT, r).observations[0];
+    assert.equal(refused.execution_status, 'complete');
+    assert.equal(refused.body.answer, null);
+    assert.equal(refused.trace.sql[0].row_count, 1, 'invalid evidence reaches the same nonempty inventory');
+    assert.equal(refused.trace.sql[0].rows[0].coverage_review_required, 1);
+  }
+});
+
 test('baseline and candidate use identical inputs and expose per-question structured figure changes', async () => {
   const f = await fixture();
   const candidateRoot = await candidate(f, source => source.replace('if (answer.ledger.kind !== "balance") answer.answer +=', 'if (answer.ledger.expense_total_minor != null) answer.ledger.expense_total_minor += 1;\n          if (answer.ledger.kind !== "balance") answer.answer +='));
@@ -353,11 +394,11 @@ for (const [label, snippet, expected] of [
     assert.ok(o.trace.sql.some(call => call.kind === 'inventory' && call.row_count > 0), 'actual ledger path also ran');
   }
 });
-test('offline export plan names exactly ten reviewed tables and no credential projection', async () => {
+test('offline export plan names exactly twelve reviewed tables and no credential projection', async () => {
   const f = await fixture(), out = join(outputRoot(), 'plan');
   const child = cli(['--export-plan', out, '--tenant', 'primary']);
   assert.equal(child.status, 0, child.stderr);
-  assert.equal(readdirSync(out).filter(name => name.endsWith('.sql')).length, 11);
+  assert.equal(readdirSync(out).filter(name => name.endsWith('.sql')).length, 13);
   for (const table of f.api.TABLES) {
     const sql = readFileSync(join(out, `${table.name}.sql`), 'utf8');
     assert.match(sql, new RegExp(`FROM ${table.name} WHERE tenant_id='primary'`));

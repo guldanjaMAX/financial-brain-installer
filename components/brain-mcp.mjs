@@ -617,6 +617,7 @@ async function runTool(name, args = {}, queryTiming = null) {
           : gap),
         citations: d.citations ?? [],
         ledger: d.ledger ?? undefined,
+        withheld_documents: d.withheld_documents ?? undefined,
         // Trust metadata rides beside the answer. The worker computes a
         // deterministic confidence rubric with a plain-words basis list, and
         // the evidence gate records WHY an answer was refused or cut short.
@@ -664,7 +665,11 @@ async function runTool(name, args = {}, queryTiming = null) {
           snippet: String(r.snippet ?? "").slice(0, 700),
         }));
       if (includeAllCandidates || candidates.length) out.results = candidates;
-      if (withheld) {
+      if (d.withheld_documents?.count > 0) {
+        out.note = `${d.withheld_documents.count} retrieved document candidate(s) were withheld by the sensitive-record check. ` +
+          "Only permitted evidence appears in results and citations. Do not treat withheld material as absent or infer its contents." +
+          (withheld ? ` ${d.notice || "The answer was withheld by an evidence check."}` : "");
+      } else if (withheld) {
         const n = out.results?.length || 0;
         out.note = `${d.notice || "The answer was withheld by an evidence check."} ` +
           `The brain FOUND ${n} document${n === 1 ? "" : "s"} but could not write a supported answer from them. ` +

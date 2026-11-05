@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -25,6 +25,7 @@ import {
   CloudflareRecoveryAdapterError,
   RECOVERY_ADAPTER_RESIDUE_POLICY_INVENTORY,
   RECOVERY_DURABLE_TABLES,
+  V048_RECOVERY_DURABLE_TABLES,
   RECOVERY_EXPORT_TABLES,
   RECOVERY_FIELD_GATE_STOP_STAGES,
   RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_CODE,
@@ -143,6 +144,112 @@ import {
 import {
   createDisposableCampaignAuthorityFixture,
 } from "./helpers/disposable-campaign-authority.mjs";
+
+// Run the same real historical-artifact cases from the full adapter suite or
+// independently, without its package-install and locked-runtime prerequisites.
+async function verifyRecoveryMigrationPrefixes(directory, { currentFingerprint } = {}) {
+  const files = readdirSync(join(process.cwd(), "migrations", "d1"))
+    .filter((name) => /^\d+_.*\.sql$/.test(name)).sort();
+  assert.equal(files.length, 59, "the current migration contract is explicitly pinned");
+  assert.equal(files.at(-1), "0059_document_family_index.sql");
+  const migrations = files.map((file, index) => {
+    assert.equal(Number(file.split("_")[0]), index + 1, "migration files are contiguous");
+    const sql = readFileSync(join(process.cwd(), "migrations", "d1", file), "utf8");
+    return { version: index + 1, name: file.replace(/\.sql$/, ""),
+      checksum: createHash("sha256").update(sql).digest("hex").slice(0, 16), sql };
+  });
+  const derivedTables = ["document_family_index", "document_family_index_state"];
+  const evidence = new Map();
+  const artifactSql = (version) => {
+    const prefix = migrations.slice(0, version);
+    const receipts = prefix.map(({ version, name, checksum }) =>
+      `INSERT INTO schema_migrations (version,name,applied_at,checksum) VALUES (` +
+      `${version},'${name}','2026-08-25T12:00:00.000Z','${checksum}');`).join("\n");
+    // Preserve the schema-10 install-state control as well as the empty schema
+    // 12/33 controls. Every intervening prefix takes the same verifier path.
+    const install = version === 10
+      ? "INSERT INTO install_state " +
+        "(id,client_slug,product_version,schema_version,gate_version,installed_at,ring,outbox_generation) " +
+        "VALUES (1,'fixture-brain','0.1.12',10,4,'2026-08-25T12:00:00.000Z','stable',9);"
+      : "";
+    return `${prefix.map(row => row.sql).join("\n\n")}\n${receipts}\n${install}\n`;
+  };
+  async function verify(version, omittedTable = null, populated = false) {
+    const artifact = join(directory, `.brain-recovery-prefix-${version}-${omittedTable || "complete"}.sql`);
+    const corpus = populated
+      ? "INSERT INTO install_state " +
+        "(id,client_slug,product_version,schema_version,gate_version,installed_at,ring," +
+        "source_original_retrieval_generation) VALUES " +
+        `(1,'fixture','0.0.0',${version},0,'2026-08-25T12:00:00.000Z','stable',0);\n` +
+        "INSERT INTO documents (doc_uid,source,source_id,ingested_at,content_hash) " +
+        "VALUES ('fixture:record','fixture','record',1700000000000,'fixture-hash');\n" +
+        "INSERT INTO chunks (chunk_uid,doc_uid,chunk_ix,text,source) " +
+        "VALUES ('fixture:record:0','fixture:record',0,'Synthetic recovery evidence','fixture');\n"
+      : "";
+    writeFileSync(artifact, artifactSql(version) + corpus + (omittedTable ? `DROP TABLE ${omittedTable};\n` : ""),
+      { mode: 0o600 });
+    chmodSync(artifact, 0o600);
+    let output = "";
+    const options = { spawnProcess(command, args, options) {
+      assert.equal(command, "/usr/bin/sqlite3");
+      const child = spawn(command, args, options);
+      child.stdout.on("data", bytes => { output += bytes.toString("utf8"); });
+      return child;
+    } };
+    let result;
+    if (omittedTable) {
+      await assert.rejects(verifyRecoverySqlArtifact(artifact, options),
+        error => error.code === "RECOVERY_TABLE_INVENTORY_INVALID");
+    } else {
+      result = await verifyRecoverySqlArtifact(artifact, options);
+      assert.equal(result.integrity, "ok");
+      assert.equal(result.document_count, populated ? 1 : 0);
+      assert.equal(result.chunk_count, populated ? 1 : 0);
+      assert.equal(result.fts_count, populated ? 1 : 0);
+    }
+    const groups = output.trim().split(/\r?\n/).map(line => JSON.parse(line));
+    // Prove rejection reached exact inventory after valid receipts, rather
+    // than passing on an earlier SQL, migration, or aggregate refusal.
+    assert.deepEqual(groups.find(group => group.group === "migrations").rows,
+      migrations.slice(0, version).map(({ version, name, checksum }) => ({ version, name, checksum })));
+    const tables = groups.find(group => group.group === "tables").rows.map(row => row.name);
+    assert.ok(tables.length > 0, "the real inventory comparison received tables");
+    return { result, tables };
+  }
+  // Schema 10, 12 and 33 retain their original verifier behavior; testing every
+  // prefix also covers both sides of each later table-introduction boundary.
+  for (let version = 10; version <= 59; version++) {
+    const checked = await verify(version);
+    evidence.set(version, checked);
+    for (const table of derivedTables) {
+      assert.equal(checked.tables.includes(table), version >= 59);
+      assert.equal(recoveryExportTables(migrations.slice(0, version)).includes(table), false);
+      assert.equal(RECOVERY_EXPORT_TABLES.includes(table), false);
+    }
+  }
+  assert.notEqual(evidence.get(33).result.schema_fingerprint, evidence.get(59).result.schema_fingerprint);
+  if (currentFingerprint) assert.equal(evidence.get(59).result.schema_fingerprint, currentFingerprint);
+  assert.deepEqual([...V048_RECOVERY_DURABLE_TABLES].sort(), evidence.get(48).tables,
+    "the frozen inventory exactly matches a real schema-48 artifact");
+  await verify(58, null, true);
+  for (const table of derivedTables) {
+    assert.equal(V048_RECOVERY_DURABLE_TABLES.includes(table), false);
+    const control = await verify(59, null, true);
+    assert.equal(control.tables.includes(table), true);
+    const refused = await verify(59, table, true);
+    assert.deepEqual(refused.tables, control.tables.filter(name => name !== table),
+      "the refused table is the only inventory difference from its green control");
+  }
+  console.log("PASS  50 historical SQL prefixes, 2 paired missing-table refusals, frozen inventory and export exclusions");
+}
+
+if (process.env.BRAIN_RECOVERY_SQL_ARTIFACT_TEST_ONLY === "1") {
+  assert.equal(existsSync("/usr/bin/sqlite3"), true, "the real SQLite verifier is required");
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-recovery-sql-prefixes-")));
+  try { await verifyRecoveryMigrationPrefixes(directory); }
+  finally { rmSync(directory, { recursive: true, force: true }); }
+  process.exit(0);
+}
 
 let skippedLinkChecks = 0;
 
@@ -272,7 +379,7 @@ const wrapperPath = join(sandbox, "wrangler-owner-wrapper");
 const goldenPath = join(sandbox, "brain.golden.json");
 const fieldPreparationDirectory = join(sandbox, "private-v048-field-preparation");
 const fieldReceiptPath = join(fieldPreparationDirectory, "field-prepare-receipt.json");
-const fieldPackagePath = join(fieldPreparationDirectory, "brain-installer-0.4.25.tgz");
+const fieldPackagePath = join(fieldPreparationDirectory, "brain-installer-0.4.26.tgz");
 const fieldSourcePreflightReceiptPath = join(
   fieldPreparationDirectory,
   DISPOSABLE_RECOVERY_SOURCE_PREFLIGHT_RECEIPT_NAME,
@@ -382,7 +489,7 @@ const syntheticFieldSourceManifest = {
   ...structuredClone(sourceManifest),
   client: { slug: "v048-field-proof", display_name: "Synthetic Field Gate v0.4.8" },
   brain: {
-    version: "0.4.25",
+    version: "0.4.26",
     worker_name: syntheticFieldSourceResource,
     domain: `${syntheticFieldSourceResource}.fixture.workers.dev`,
   },
@@ -457,7 +564,7 @@ function npmPackageFixture(destination) {
   assert.equal(packed.status, 0, "focused recovery test must build its exact local npm package");
   const metadata = JSON.parse(packed.stdout);
   assert.equal(metadata.length, 1);
-  assert.equal(metadata[0].filename, "brain-installer-0.4.25.tgz");
+  assert.equal(metadata[0].filename, "brain-installer-0.4.26.tgz");
   assert.equal(metadata[0].entryCount, metadata[0].files.length);
   return Object.freeze({
     bytes: readFileSync(join(destination, metadata[0].filename)),
@@ -614,13 +721,13 @@ function fullFieldPreparationReceipt(candidateSha, packageBytes, packageFileCoun
       head_sha: candidateSha,
       tree_sha: "b".repeat(40),
       package_name: "brain-installer",
-      package_version: "0.4.25",
+      package_version: "0.4.26",
       package_alignment: {
         aligned: true,
         package_lock_name: "brain-installer",
-        package_lock_version: "0.4.25",
+        package_lock_version: "0.4.26",
         package_lock_root_name: "brain-installer",
-        package_lock_root_version: "0.4.25",
+        package_lock_root_version: "0.4.26",
       },
       package_json_sha256: hash(readFileSync(join(process.cwd(), "package.json"))),
       package_lock_sha256: hash(readFileSync(join(process.cwd(), "package-lock.json"))),
@@ -631,7 +738,7 @@ function fullFieldPreparationReceipt(candidateSha, packageBytes, packageFileCoun
       end_clean: true,
     },
     package: {
-      filename: "brain-installer-0.4.25.tgz",
+      filename: "brain-installer-0.4.26.tgz",
       bytes: packageBytes.length,
       sha256: hash(packageBytes),
       identity_scheme: UPDATE_RUNTIME_IDENTITY_SCHEME,
@@ -1314,7 +1421,7 @@ function fullDisposableSeedReceipt(binding, {
       independently_verified_empty: true,
     },
     d1: {
-      worker_version: "0.4.25",
+      worker_version: "0.4.26",
       documents: DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
       chunks,
       fts: chunks,
@@ -5088,7 +5195,7 @@ try {
   );
   const mismatchedRuntimePackagePath = join(
     mismatchedRuntimeDirectory,
-    "brain-installer-0.4.25.tgz",
+    "brain-installer-0.4.26.tgz",
   );
   mkdirSync(mismatchedRuntimeDirectory, { mode: 0o700 });
   if (process.platform !== "win32") chmodSync(mismatchedRuntimeDirectory, 0o700);
@@ -5132,7 +5239,7 @@ try {
   );
   const omittedRuntimePackagePath = join(
     omittedRuntimeDirectory,
-    "brain-installer-0.4.25.tgz",
+    "brain-installer-0.4.26.tgz",
   );
   mkdirSync(omittedRuntimeDirectory, { mode: 0o700 });
   if (process.platform !== "win32") chmodSync(omittedRuntimeDirectory, 0o700);
@@ -5203,7 +5310,7 @@ try {
   // field-preparation receipt. A copied approval cannot authorize a later run.
   const replayReceiptDirectory = join(sandbox, "private-v048-field-preparation-replay");
   const replayReceiptPath = join(replayReceiptDirectory, "field-prepare-receipt.json");
-  const replayPackagePath = join(replayReceiptDirectory, "brain-installer-0.4.25.tgz");
+  const replayPackagePath = join(replayReceiptDirectory, "brain-installer-0.4.26.tgz");
   const replaySourcePreflightReceiptPath = join(
     replayReceiptDirectory,
     DISPOSABLE_RECOVERY_SOURCE_PREFLIGHT_RECEIPT_NAME,
@@ -7740,67 +7847,7 @@ try {
     const commentless = await verifyRecoverySqlArtifact(commentlessArtifact);
     assert.equal(commentless.schema_fingerprint, local.schema_fingerprint);
 
-    // Recovery intentionally accepts an exact applied-migration prefix. The
-    // normalized aggregate must not reference lease columns before 0011.
-    const prefixMigrationNames = readdirSync(join(process.cwd(), "migrations", "d1"))
-      .filter((name) => /^\d+_.*\.sql$/.test(name))
-      .sort()
-      .slice(0, 10);
-    const prefixSchema = prefixMigrationNames
-      .map((name) => readFileSync(join(process.cwd(), "migrations", "d1", name), "utf8"))
-      .join("\n\n");
-    const prefixReceipts = appliedMigrations.slice(0, 10).map((row) =>
-      `INSERT INTO schema_migrations (version,name,applied_at,checksum) VALUES (` +
-      `${row.version},'${row.name}','2026-08-25T12:00:00.000Z','${row.checksum}');`).join("\n");
-    const prefixInstall =
-      "INSERT INTO install_state " +
-      "(id,client_slug,product_version,schema_version,gate_version,installed_at,ring,outbox_generation) " +
-      "VALUES (1,'fixture-brain','0.1.12',10,4,'2026-08-25T12:00:00.000Z','stable',9);";
-    const prefixArtifact = join(sandbox, ".brain-recovery-prefix-verifier.sql");
-    writeFileSync(prefixArtifact, `${prefixSchema}\n${prefixReceipts}\n${prefixInstall}\n`, { mode: 0o600 });
-    chmodSync(prefixArtifact, 0o600);
-    const prefix = await verifyRecoverySqlArtifact(prefixArtifact);
-    assert.equal(prefix.integrity, "ok");
-    assert.equal(prefix.document_count, 0);
-
-    // Schema 12 is the immediate historical prefix. Its exact artifact remains
-    // inspectable offline even though live recovery requires schema 13.
-    const schema12MigrationNames = readdirSync(join(process.cwd(), "migrations", "d1"))
-      .filter((name) => /^\d+_.*\.sql$/.test(name))
-      .sort()
-      .slice(0, 12);
-    const schema12Schema = schema12MigrationNames
-      .map((name) => readFileSync(join(process.cwd(), "migrations", "d1", name), "utf8"))
-      .join("\n\n");
-    const schema12Receipts = appliedMigrations.slice(0, 12).map((row) =>
-      `INSERT INTO schema_migrations (version,name,applied_at,checksum) VALUES (` +
-      `${row.version},'${row.name}','2026-08-25T12:00:00.000Z','${row.checksum}');`).join("\n");
-    const schema12Artifact = join(sandbox, ".brain-recovery-schema12-prefix-verifier.sql");
-    writeFileSync(schema12Artifact, `${schema12Schema}\n${schema12Receipts}\n`, { mode: 0o600 });
-    chmodSync(schema12Artifact, 0o600);
-    const schema12 = await verifyRecoverySqlArtifact(schema12Artifact);
-    assert.equal(schema12.integrity, "ok");
-    assert.equal(schema12.document_count, 0);
-
-    // Schema 33 is the immediate recovery prefix before the derived source
-    // inventory. It must remain verifiable without querying schema-34 tables.
-    const schema33MigrationNames = readdirSync(join(process.cwd(), "migrations", "d1"))
-      .filter((name) => /^\d+_.*\.sql$/.test(name))
-      .sort()
-      .slice(0, 33);
-    const schema33Schema = schema33MigrationNames
-      .map((name) => readFileSync(join(process.cwd(), "migrations", "d1", name), "utf8"))
-      .join("\n\n");
-    const schema33Receipts = appliedMigrations.slice(0, 33).map((row) =>
-      `INSERT INTO schema_migrations (version,name,applied_at,checksum) VALUES (` +
-      `${row.version},'${row.name}','2026-08-25T12:00:00.000Z','${row.checksum}');`).join("\n");
-    const schema33Artifact = join(sandbox, ".brain-recovery-schema33-prefix-verifier.sql");
-    writeFileSync(schema33Artifact, `${schema33Schema}\n${schema33Receipts}\n`, { mode: 0o600 });
-    chmodSync(schema33Artifact, 0o600);
-    const schema33 = await verifyRecoverySqlArtifact(schema33Artifact);
-    assert.equal(schema33.integrity, "ok");
-    assert.equal(schema33.document_count, 0);
-    assert.notEqual(schema33.schema_fingerprint, local.schema_fingerprint);
+    await verifyRecoveryMigrationPrefixes(sandbox, { currentFingerprint: local.schema_fingerprint });
   }
 
   console.log("PASS  Cloudflare recovery adapter is disposable-only, credential-safe, redirect-safe, and " +

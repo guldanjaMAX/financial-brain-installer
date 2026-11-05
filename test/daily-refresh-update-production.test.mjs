@@ -166,6 +166,14 @@ function productionHarness(manifestPath, {
     readUpdateBacklog: async () => ({ pending: 0 }),
     adoptCloudflareAuthProfile: async () => {},
     withCloudflareControl: async (action) => action(),
+    answerKeyOptions: {
+      cf: async (path, init) => {
+        events.push("answer-key:names");
+        assert.equal(path, `/accounts/${"1".repeat(32)}/workers/scripts/fixture-brain/secrets`);
+        assert.equal(init?.method ?? "GET", "GET");
+        return [{ name: "ANTHROPIC_API_KEY", type: "secret_text" }];
+      },
+    },
     cmdVerify: async () => { events.push("verification"); },
     upgradeOptions,
     reconcileExistingOwnerAgents: null,
@@ -509,8 +517,34 @@ test("an update preserves the selected answer and gate models byte for byte", as
     await cmdUpdate(manifestPath, harness.options);
     const after = JSON.parse(readFileSync(manifestPath, "utf8"));
     assert.deepEqual(after.retrieval, before.retrieval);
+    assert.equal(harness.events.filter((event) => event === "answer-key:names").length, 1,
+      "the real update proved the selected Worker's key name before proceeding");
+    assert.ok(harness.events.indexOf("answer-key:names") < harness.events.indexOf("deploy:paused"));
     assert.ok(harness.events.includes("deploy:active"),
       "the preservation assertion follows the real update deployment decision point");
+  });
+});
+
+test("an unreadable answer-key inventory stops update before scheduler changes or deployment", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const before = JSON.parse(readFileSync(manifestPath, "utf8"));
+    before.retrieval = { answer_model: "claude-opus-5-5", gate_model: "claude-sonnet-5-5" };
+    writeFileSync(manifestPath, `${JSON.stringify(before, null, 2)}\n`);
+    const harness = productionHarness(manifestPath);
+    harness.options.answerKeyOptions.cf = async () => {
+      harness.events.push("answer-key:names");
+      throw new Error("fixture secret-name inventory unreadable");
+    };
+    await assert.rejects(cmdUpdate(manifestPath, harness.options), (error) => {
+      assert.equal(error.message.split("\n")[0],
+        "This update needs the Worker's Anthropic key, but its presence could not be checked. No Brain update was started.");
+      return true;
+    });
+    assert.deepEqual(harness.events, ["answer-key:names"],
+      "the key decision was reached before any scheduler change or deployment");
+    assert.deepEqual(JSON.parse(readFileSync(manifestPath, "utf8")), before);
+    assert.equal(harness.state().enabled, true);
+    assert.equal(harness.finish.length, 0);
   });
 });
 

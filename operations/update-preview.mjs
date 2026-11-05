@@ -3,7 +3,7 @@
  *
  * This module deliberately has no manifest discovery, credential, network,
  * browser, support-journal, package-install, workspace, or skill dependency.
- * The CLI adapter owns the one authenticated read-only request and gives this
+ * The CLI adapter owns authenticated read-only requests and gives this
  * module only its in-memory response. Raw rows are never copied into a receipt.
  */
 import { createHash } from "node:crypto";
@@ -61,6 +61,8 @@ export const UPDATE_PREVIEW_FAILURE_CODES = Object.freeze([
   "UPDATE_PREVIEW_DOWNGRADE_REFUSED",
   "UPDATE_PREVIEW_BRAIN_DOMAIN_INVALID",
   "UPDATE_PREVIEW_ADMIN_KEY_UNAVAILABLE",
+  "UPDATE_PREVIEW_ANTHROPIC_KEY_MISSING",
+  "UPDATE_PREVIEW_ANTHROPIC_KEY_UNVERIFIED",
   "UPDATE_PREVIEW_READINESS_UNAVAILABLE",
   "UPDATE_PREVIEW_READINESS_RECEIPT_INVALID",
   "UPDATE_PREVIEW_LEGACY_GENERATION_UNBOUND",
@@ -1787,12 +1789,21 @@ export function legacyV046UpdatePreviewObservationFingerprint(observation) {
 function receiptEffects(observed = {}, { requireLiveRead = false } = {}) {
   const credentialReads = observed?.credential_reads;
   const networkRequests = observed?.network_requests;
+  const controlCredentialReads = observed?.cloudflare_credential_reads ?? 0;
+  const controlRequests = observed?.cloudflare_control_requests ?? 0;
   if (![credentialReads, networkRequests].every((value) =>
     Number.isSafeInteger(value) && value >= 0 && value <= 1) ||
+      ![controlCredentialReads, controlRequests].every(value => value === 0 || value === 1) ||
+      controlRequests > controlCredentialReads ||
       (requireLiveRead && (credentialReads !== 1 || networkRequests !== 1))) {
     refuse("UPDATE_PREVIEW_PLAN_INVALID");
   }
-  return { ...ZERO_EFFECTS, credential_reads: credentialReads, network_requests: networkRequests };
+  return {
+    ...ZERO_EFFECTS,
+    credential_reads: credentialReads + controlCredentialReads,
+    network_requests: networkRequests + controlRequests,
+    cloudflare_control_requests: controlRequests,
+  };
 }
 
 /**

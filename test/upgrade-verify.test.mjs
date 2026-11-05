@@ -1,3 +1,4 @@
+import { isolateUpdateSchedulers } from "./fixtures/isolated-update-schedulers.mjs";
 // From the second field report, 2026-08-19.
 //
 // `brain upgrade` probed /health, got a 200 from the worker it was REPLACING,
@@ -48,7 +49,7 @@ import {
   cmdHealth,
   cmdRollback,
   cmdRollbackInteractive,
-  cmdUpdate,
+  cmdUpdate as cmdUpdateWithNativeSchedulers,
   cmdUpgrade as cmdUpgradeWithRealQuiescence,
   commitManifestVersion,
   pinUpdateManifest,
@@ -64,6 +65,7 @@ import {
   VECTOR_DRAIN_CUTOVER_QUIESCENCE_MS,
   waitForVectorDrainCutover,
 } from "../brain.mjs";
+const cmdUpdate = isolateUpdateSchedulers(cmdUpdateWithNativeSchedulers);
 import { DRAIN_LEASE_TTL_MS } from "../worker/src/lib/store-d1.js";
 import { Acceptance, credentialGateRefusalVerdict } from "../acceptance.mjs";
 import {
@@ -3454,12 +3456,14 @@ globalThis.fetch = async (input, init = {}) => {
           LOCALAPPDATA: fakeLocalAppData,
           NO_COLOR: "1",
           BRAIN_NO_WRANGLER_LOGIN: "1",
+          BRAIN_LIFECYCLE_LOCK_ROOT: join(sandbox, "lifecycle-locks"),
+          BRAIN_TEST_LIFECYCLE_ROOT: sandbox,
           ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
           ...(process.env.WINDIR ? { WINDIR: process.env.WINDIR } : {}),
         };
         const fakeWorkerEnvironment = (log, pending = 0) => ({
           ...isolatedEnvironment,
-          NODE_OPTIONS: `--import=${pathToFileURL(fakeWorker).href}`,
+          NODE_OPTIONS: `--import=${pathToFileURL(join(root, "test/fixtures/lifecycle-lock-tripwire.mjs")).href} --import=${pathToFileURL(fakeWorker).href}`,
           FAKE_WORKER_LOG: log,
           FAKE_WORKER_PENDING: String(pending),
         });

@@ -130,12 +130,12 @@ function fakeBatchReceipt(documents, status = "created") {
 }
 
 function emptyInventory() {
-  return { version: "0.4.25", backend: "d1", vector_drain_mode: "active", rows: [] };
+  return { version: "0.4.26", backend: "d1", vector_drain_mode: "active", rows: [] };
 }
 
 function completeInventory(fixture = disposableRecoveryFixture()) {
   return {
-    version: "0.4.25",
+    version: "0.4.26",
     backend: "d1",
     vector_drain_mode: "active",
     vector_backlog: {
@@ -168,7 +168,7 @@ function completeInventory(fixture = disposableRecoveryFixture()) {
 
 function prefixInventory(documents, fixture = disposableRecoveryFixture()) {
   return {
-    version: "0.4.25",
+    version: "0.4.26",
     backend: "d1",
     vector_drain_mode: "active",
     rows: [{

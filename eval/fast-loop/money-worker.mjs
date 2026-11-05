@@ -6,12 +6,16 @@ import { resolve, relative, dirname, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { maintainAccountKind } from '../../worker/src/lib/fin-account-kinds.js';
+import { armReplayStall } from './child-stall.mjs';
 
 const digest = value => createHash('sha256').update(value).digest('hex');
 const copy = value => JSON.parse(JSON.stringify(value));
 // Exact reviewed templates over a complete tiny relational envelope. A SQL
 // edit needs an explicit adapter review, rather than a successful empty read.
 export const SQL_CONTRACTS = new Map([
+  // Same bounded inventory and bindings; the added SimpleFIN receipt check
+  // refuses legacy or incomplete proof before a covered answer is admitted.
+  ['0560a90893bdbca03eb46f39580b9d0e6fd87070fe7c3560a58d12de0a571b2e', 'inventory'],
   // The merged inventory retains owner-reviewed account kinds and adds the
   // confirmed entity kind. No tenant, limit, join or admission guard changes.
   ['085a3cb746a3831a3f0a640f08a0ffbd57297d917c3e1dfe483d8d581d74efa6', 'inventory'],
@@ -269,6 +273,7 @@ function monetaryFields(value, path = '') {
 }
 
 if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(new URL(import.meta.url))) {
+  armReplayStall();
   try {
     const request = JSON.parse(readFileSync(0, 'utf8'));
     process.stdout.write(JSON.stringify(await executeReplay(request)));

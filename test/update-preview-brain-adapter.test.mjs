@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -1227,7 +1227,7 @@ test("the update-preview wrapper never calls the Wrangler-session boundary", asy
   assert.equal(wrapperCalls, 0);
 });
 
-test("CLI help describes the authenticated aggregate read without claiming local-only access", () => {
+test("CLI help describes the aggregate read and Claude secret-name prerequisite", () => {
   const result = spawnSync(process.execPath, [resolve("brain.mjs"), "help"], {
     cwd: resolve("."),
     encoding: "utf8",
@@ -1238,12 +1238,13 @@ test("CLI help describes the authenticated aggregate read without claiming local
     renderCliCommands("brain update     [manifest] --preview"),
   ));
   assert.match(previewHelp, /one authenticated aggregate\s+Brain read/u);
-  assert.match(previewHelp, /no control-plane request, write, deploy/u);
+  assert.match(previewHelp, /Claude setups also read Worker secret names/u);
+  assert.doesNotMatch(previewHelp, /no control-plane request/u);
   assert.doesNotMatch(previewHelp.slice(0, 400), /local preflight|no credential,\s+network/u);
 });
 
 test("malformed preview CLI returns one fixed JSON refusal with no support journal", () => {
-  const privateHome = mkdtempSync(join(tmpdir(), "brain-update-preview-cli-"));
+  const privateHome = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-update-preview-cli-")));
   try {
     const result = spawnSync(process.execPath, [
       resolve("brain.mjs"), "update", "--preview", "--json",
@@ -1254,6 +1255,7 @@ test("malformed preview CLI returns one fixed JSON refusal with no support journ
         PATH: process.env.PATH || "",
         HOME: privateHome,
         USERPROFILE: privateHome,
+        BRAIN_NO_WRANGLER_LOGIN: "1",
       },
       timeout: 30_000,
     });

@@ -2,6 +2,7 @@ import { DEFAULT_TENANT } from "./fin-d1.js";
 import { ledgerDay, shiftLedgerDay } from "./ledger-question.js";
 import { accountLinkIdentity } from "./fin-account-links.js";
 import { accountKindReviewSql, applyAccountKindReview } from "./fin-account-kinds.js";
+import { SIMPLEFIN_POSTED_HISTORY_REVISION } from "./bank-feed-profiles.js";
 
 const MAX_ACCOUNTS = 200;
 const MAX_ROWS = 5000;
@@ -20,7 +21,14 @@ async function rows(env, sql, binds) {
 const ACCOUNTS_SQL = `SELECT a.id,a.account_slug,a.entity_slug,e.kind AS entity_kind,a.mask,a.account_kind,a.institution,a.label,a.external_ref,a.source_feed,
       a.currency,a.feed_mode,a.balance_role,a.basis_state,c.coverage_status,c.covered_from,c.covered_to,
       c.basis_state AS coverage_basis,i.last_synced_at,
-      CASE WHEN c.coverage_status='complete' AND c.basis_note LIKE 'Read from a bank export covering %'
+      CASE WHEN (c.coverage_status='complete' AND c.basis_note LIKE 'Read from a bank export covering %')
+        OR EXISTS (SELECT 1 FROM simplefin_account_assignments x
+          WHERE x.tenant_id=a.tenant_id AND x.account_ref=a.external_ref
+            AND a.source_feed=('bank-feed:'||x.item_ref) AND (
+              NOT EXISTS (SELECT 1 FROM simplefin_sync_windows w WHERE w.tenant_id=x.tenant_id AND w.item_ref=x.item_ref)
+              OR EXISTS (SELECT 1 FROM simplefin_sync_windows w WHERE w.tenant_id=x.tenant_id AND w.item_ref=x.item_ref
+                AND (w.state<>'promoted' OR w.revision<>w.staging_revision OR w.errlist_json<>'[]'
+                  OR substr(w.revision,1,${SIMPLEFIN_POSTED_HISTORY_REVISION.length})<>'${SIMPLEFIN_POSTED_HISTORY_REVISION}'))))
         THEN 1 ELSE 0 END AS coverage_review_required,
       CASE WHEN a.feed_mode='live' AND c.coverage_status='complete' AND c.covered_from IS NULL
         AND c.basis_state='confirmed' AND c.provenance='feed' AND c.source_feed=a.source_feed

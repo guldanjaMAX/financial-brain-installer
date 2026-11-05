@@ -253,13 +253,13 @@ Never combine those into a broader claim than the evidence supports.
 
 ## Cut an immutable release
 
-The current 0.4.25/schema58 field candidate remains held. The earlier 0.4.7,
+The current 0.4.26/schema58 field candidate remains held. The earlier 0.4.7,
 0.4.8, and 0.4.9 candidates were never tagged, published, or offered as customer
 updates; their identities are retired so their evidence cannot be mistaken for
 evidence from these changed bytes. At this freeze the current candidate's
 41-row audit has 37 unresolved incidents and four rows closed on reviewed
 evidence. Two of the unresolved rows, UPDATE-012 and UPDATE-044, carry
-owner-facing limitations in the release note but no exact-version 0.4.25
+owner-facing limitations in the release note but no exact-version 0.4.26
 deferral. All 37 unresolved rows remain held. The prior 0.4.19 deferrals have
 expired and were not renewed. Since the held 0.4.8 candidate,
 three acceptance texts changed and one row was added, because two clauses
@@ -269,7 +269,7 @@ Windows ARM64 clause into UPDATE-012, and
 [ADR 008](./decisions/008-rehome-update-025-breadth-into-update-044.md) moves
 UPDATE-025's two-institution, two-business and business-banking-login breadth
 into the new UPDATE-044. ADR 008 defines that narrowing, and the current
-candidate plan records that no exact-version 0.4.25 deferral was renewed.
+candidate plan records that no exact-version 0.4.26 deferral was renewed.
 Against the last shipped release, v0.4.6, five
 acceptance texts changed and two rows were added: those three texts and
 UPDATE-044, plus UPDATE-043 and the UPDATE-036 and UPDATE-037 texts rewritten
@@ -278,7 +278,7 @@ all of them. A tag requests the release workflow; it never
 bypasses CI, unresolved incidents, owner acceptance, or the repository's
 immutable-release setting. Do not create or publish releases by hand to work
 around a failed workflow. The
-[0.4.25 candidate evidence plan](./release-evidence/v0.4.25-candidate-release-evidence-plan.md)
+[0.4.26 candidate evidence plan](./release-evidence/v0.4.26-candidate-release-evidence-plan.md)
 is planning only until a reviewed change binds it to the final candidate SHA.
 
 1. Keep package.json, both root lockfile versions, the manifest template, newest
@@ -329,10 +329,15 @@ is planning only until a reviewed change binds it to the final candidate SHA.
    promotion is allowed.
 
 Public doorway monitoring uses the schema-2 /update/manifest.json and matching
-/update/agent.md. The manifest also binds the unlisted platform install routes.
-A held release must return the exact closed-door document and select no
-artifact. A candidate or stable release must return the version-2 supervised
-field-kit contract. That kit may intentionally be older than the public release. Changing
+/update/agent.md. The install document independently controls the unlisted
+platform install routes.
+A held release requires the exact closed-door document and selects no install
+artifact. Stable updates may pair with that same held install document; the
+release checker still verifies the stable archive and runtime identity, while
+the install matrix exits successfully without selecting or executing an install
+artifact. A candidate release requires the version-2 supervised field-kit
+contract. Stable updates may also pair with that supervised contract, whose kit
+may intentionally be older than the public release. Changing
 either doorway contract requires coordinated review, not substitution of
 releases/latest. Do not rewrite or resync a sealed field kit casually.
 

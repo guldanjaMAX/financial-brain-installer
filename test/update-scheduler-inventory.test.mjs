@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { basename, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -14,8 +14,11 @@ import { buildCuratedSchedulerPlan, renderCuratedLaunchAgentPlist } from "../ope
 import * as quickbooks from "../operations/quickbooks-schedule.mjs";
 import { buildWhatsappDaemonPlan, renderDaemonPlist } from "../operations/whatsapp-daemon.mjs";
 import { dailyRefreshIdentity } from "../operations/daily-refresh-plan.mjs";
-import { buildDailyRefreshDefinition, readDailyRefreshUpdateTransaction } from "../operations/daily-refresh-scheduler.mjs";
-import { captureAdditionalUpdateSchedulers, pauseAdditionalUpdateScheduler, reconcileAdditionalUpdateScheduler } from "../operations/update-scheduler-inventory.mjs";
+import { quotePosixArgument } from "../operations/command-display.mjs";
+import { SCHEDULED_PROVIDER_IDS } from "../operations/provider-scheduler.mjs";
+import { buildDailyRefreshDefinition, readDailyRefreshUpdateTransaction, writeDailyRefreshUpdateTransaction } from "../operations/daily-refresh-scheduler.mjs";
+import { captureAdditionalUpdateSchedulers, pauseAdditionalUpdateScheduler, reconcileAdditionalUpdateScheduler,
+  updateSchedulerFix, schedulerUpdateRow, renderUpdateSchedulerRows, releaseUpdateSchedulerReservations } from "../operations/update-scheduler-inventory.mjs";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const uid = process.getuid?.() ?? 501;
@@ -54,7 +57,7 @@ function parsePlist(bytes) {
 }
 
 function fixture({ aliasHome = false } = {}) {
-  const directory = mkdtempSync(join(tmpdir(), "scheduler-case-"));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), "scheduler-case-")));
   const requestedHome = aliasHome ? join(directory, "alias") : directory;
   if (aliasHome) symlinkSync(".", requestedHome, "dir");
   // Update resolves the manifest to its physical path before capture. Keep
@@ -227,6 +230,89 @@ function curated(f, stale) {
   f.installFile(plan, renderCuratedLaunchAgentPlist(plan));
   return { planPath, plan };
 }
+
+for (const defect of ["unreadable", "empty", "unbound arguments", "unsafe plan path", "missing saved definition"])
+macTest(`curated ${defect} renders a refusal before update mutation`, async () => {
+  const f = fixture();
+  try {
+    const { plan, planPath } = curated(f, false);
+    const manifestBytes = readFileSync(f.manifestPath, "utf8");
+    const original = readFileSync(plan.plistPath, "utf8");
+    if (defect === "missing saved definition") rmSync(plan.plistPath);
+    else writeFileSync(plan.plistPath, defect === "unreadable" ? "{}" : defect === "empty" ? ""
+      : defect === "unsafe plan path" ? original.replace(planPath, `${planPath}\t`)
+      : original.replace("<string>run</string>", "<string>unknown</string>"));
+    const bytes = defect === "missing saved definition" ? null : readFileSync(plan.plistPath, "utf8");
+    let failure;
+    try { await cmdUpdate(f.manifestPath, f.options); } catch (error) { failure = error; }
+    assert.ok(f.calls.some(call => call[0] === "list"), "native inventory decision was reached");
+    assert.equal(failure?.code, "UPDATE_SCHEDULERS_INCOMPLETE", failure?.stack);
+    const row = failure.scheduler_results.find(item => item.kind === "curated-sync");
+    assert.equal(row?.state, "COULD NOT MOVE", "candidate reached the curated refusal decision");
+    assert.ok(row.fix.includes(quotePosixArgument(plan.plistPath)), "unknown plan recovery identifies the quoted job file");
+    assert.match(row.fix, /reviewed private plan.*reinstall/u);
+    assert.doesNotMatch(row.fix, /undefined|reinstall\s+(?:''|""|<)/u);
+    assert.equal(f.upgrades(), 0);
+    assert.equal(readFileSync(f.manifestPath, "utf8"), manifestBytes, "refusal cannot rewrite the manifest");
+    assert.ok(f.calls.every(call => ["list", "print-disabled", "print"].includes(call[0])), "refusal cannot mutate native state");
+    if (bytes === null) assert.equal(existsSync(plan.plistPath), false, "refusal cannot recreate a missing job file");
+    else assert.equal(readFileSync(plan.plistPath, "utf8"), bytes);
+    // The same discovered candidate becomes a healthy control after repair.
+    f.installFile(plan, original);
+    f.reports.length = 0;
+    await cmdUpdate(f.manifestPath, f.options);
+    assert.equal(f.upgrades(), 1);
+    assert.equal(f.reports.flat().find(item => item.kind === "curated-sync")?.state, "already current");
+  } finally { f.close(); }
+});
+
+test("every scheduler kind renders recovery with missing or unsafe locators", () => {
+  const manifestPath = join(tmpdir(), "owner's folder", "brain.manifest.json");
+  const jobPath = join(tmpdir(), "owner's folder", "com.brain-installer.fixture.curated-sync.plist");
+  const kinds = ["curated-sync", "daily", "quickbooks-task", "whatsapp-daemon", "drive-ingest",
+    "folder-ingest", "imessage-capture", "whatsapp-drain", ...SCHEDULED_PROVIDER_IDS.map(provider => `${provider}-ingest`)];
+  for (const kind of kinds) {
+    for (const path of [undefined, null, "", "/fixture/unsafe\tplan", manifestPath]) {
+      const fix = updateSchedulerFix(kind, path, undefined, jobPath);
+      const rendered = renderUpdateSchedulerRows([schedulerUpdateRow(kind, "COULD NOT MOVE", "fixture proof failed", fix)]);
+      assert.match(rendered, /COULD NOT MOVE.*\nFix: .+/u);
+      assert.doesNotMatch(fix, /undefined|null|[\u0000-\u001f\u007f]/u);
+      if (kind === "curated-sync") assert.ok(fix.includes(quotePosixArgument(jobPath)));
+    }
+  }
+  const known = updateSchedulerFix("curated-sync", manifestPath, manifestPath, jobPath);
+  assert.ok(known.endsWith(`reinstall ${quotePosixArgument(manifestPath)}`), "known-plan control retains the exact quoted command");
+});
+
+macTest("a recovered curated snapshot with no plan locator still identifies its job", async () => {
+  const f = fixture();
+  let entries = [];
+  try {
+    const { plan } = curated(f, false);
+    entries = await captureAdditionalUpdateSchedulers(f.m, f.manifestPath, f.options.dailyRefreshOptions);
+    assert.equal(entries.length, 1, "the ownership decision produced a real recovery candidate");
+    releaseUpdateSchedulerReservations(entries);
+    const snapshot = { identity: f.dailyPlan.identity, exists: false, enabled: false, definition: null };
+    const transactionOptions = { home: f.home, manifestPath: f.manifestPath,
+      machineLockRoot: join(f.home, "machine-locks"), now: () => new Date("2026-10-06T18:00:00.000Z") };
+    const save = legacySnapshots => writeDailyRefreshUpdateTransaction({ plan: f.dailyPlan, snapshot,
+      phase: "preparing", legacySnapshots, remoteMutationMayHaveStarted: false }, transactionOptions);
+    save(entries.map(entry => ({ ...entry, snapshot: { ...entry.snapshot, planPath: undefined } })));
+    const before = f.calls.length;
+    await assert.rejects(cmdUpdate(f.manifestPath, f.options), error => {
+      assert.equal(error.code, "UPDATE_SCHEDULERS_INCOMPLETE");
+      const row = error.scheduler_results.find(item => item.kind === "curated-sync");
+      assert.match(row?.reason ?? "", /recovery ownership no longer matches/u, "the saved snapshot reached hydration validation");
+      assert.ok(row.fix.includes(quotePosixArgument(plan.plistPath)), "recovery must identify the available job path");
+      return true;
+    });
+    assert.equal(f.upgrades(), 0);
+    assert.ok(f.calls.slice(before).every(call => ["list", "print-disabled", "print"].includes(call[0])));
+    save(entries);
+    await cmdUpdate(f.manifestPath, f.options);
+    assert.equal(f.upgrades(), 1, "the exact saved plan is the healthy recovery control");
+  } finally { releaseUpdateSchedulerReservations(entries); f.close(); }
+});
 
 macTest("older curated runtime moves through reviewed reinstall; current control passes", async () => {
   for (const stale of [true, false]) {

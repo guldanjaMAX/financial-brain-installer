@@ -13,6 +13,8 @@ export const TABLES = Object.freeze([
   { name: 'bank_feed_items', columns: ['tenant_id', 'item_ref', 'last_synced_at', 'status', 'removed_at'] },
   { name: 'bank_feed_backfill', columns: ['tenant_id', 'item_ref', 'state', 'provider_history_state', 'unread_lines', 'requested_days', 'queued_at', 'finished_at'] },
   { name: 'plaid_sync_windows', columns: ['tenant_id', 'item_ref'] },
+  { name: 'simplefin_account_assignments', columns: ['tenant_id', 'item_ref', 'account_ref'] },
+  { name: 'simplefin_sync_windows', columns: ['tenant_id', 'item_ref', 'state', 'revision', 'staging_revision', 'errlist_json'] },
 ].map(Object.freeze));
 export const MAX_TABLE_ROWS = 10000;
 export const sha256 = value => createHash('sha256').update(typeof value === 'string' || Buffer.isBuffer(value) ? value : JSON.stringify(value)).digest('hex');

@@ -3,11 +3,12 @@ import { scopeIsUnrestricted } from "./grants.js";
 import { classifyLedgerQuestion, ledgerDay, ownerLedgerDay, shiftLedgerDay } from "./ledger-question.js";
 import { extractLedgerIntentDecision, ledgerIntentInterpretation, normalizeLedgerIntentWords } from "./ledger-intent.js";
 import { finalLedgerOffer, ledgerClarificationAnswer } from "./ledger-clarification.js";
+import { refundBasisForOperand } from "./ledger-refund-basis.js";
 import { monthlyLedgerAnswer } from "./ledger-monthly.js";
 import { accountLinkRequiredInWindow, effectivePeriodCovered, readEffectiveAccounts, readEffectiveBalances, readEffectiveTransactions } from "./ledger-reader.js";
-import { accountKindReviewRequired, categoryFor, classifyOwnedMovement, detectRecurring, isDirectedOwnedTransfer, isLoanAdvance, isTransferCandidate, matchesCategory, matchesMerchant, matchesSender, merchantFor, merchantMatchBasis, normalizeLedgerText, normalizeMerchantText, ownedLiabilityPaymentKind, pairOwnTransfers, selectVendorFamily, sumMinor } from "./ledger-analysis.js";
+import { accountKindReviewRequired, categoryFor, classifyOwnedMovement, detectRecurring, isDirectedOwnedTransfer, isLoanAdvance, isTransferCandidate, isUncategorizedBucket, matchesCategory, matchesMerchant, matchesSender, merchantFor, merchantMatchBasis, normalizeLedgerText, normalizeMerchantText, ownedLiabilityPaymentKind, pairOwnTransfers, selectVendorFamily, sumMinor } from "./ledger-analysis.js";
 
-import { accountEndings, balanceSuggestion, documentMoneyNotice, pendingNotice, plainBankGap, plainRouterLimitation } from "./ledger-wording.js";
+import { accountEndings, balanceSuggestion, documentMoneyNotice, originalRecordSuggestion, pendingNotice, plainBankGap, plainRouterLimitation } from "./ledger-wording.js";
 
 const masked = moneyAccount;
 const money = cents => `${cents < 0 ? "-" : ""}$${Math.floor(Math.abs(cents) / 100).toLocaleString("en-US")}.${String(Math.abs(cents) % 100).padStart(2, "0")}`;
@@ -101,24 +102,28 @@ function leadExclusions(rows, pairs, selected, bySlug, intent) {
     // Explicit transfer inclusion remains a requested alternate view. The
     // ordinary ranking and summary share the same proved expense membership.
     const removedTransfers = intent.ownTransfers === "include" ? [] : [...ownTransfers.values()];
-    return { excluded: new Set([...removedTransfers.map(row => row.id), ...payments.keys()]),
+    const excluded = new Map(removedTransfers.map(row => [row.id, "a matched own-account transfer"]));
+    for (const [id, payment] of payments) excluded.set(id, `a payment to your own ${payment.liabilityKind} account`);
+    return { excluded,
       keptPairs: new Map(), knownOwnTransferRows: new Set(intent.ownTransfers === "include" ? ownTransfers.keys() : []),
       scopedKnownTransferRows: new Set(), expensePayments: payments,
       summary: { own_transfer_pairs: removedTransfers.length, own_transfer_minor: sumMinor(removedTransfers),
         withdrawal_count: 0, withdrawal_minor: 0, loan_proceeds_count: 0, loan_proceeds_minor: 0 } };
   }
-  const excluded = new Set(), ownPairs = [], withdrawals = new Map(), loanProceeds = new Map(), keptPairs = new Map();
+  const excluded = new Map(), ownPairs = [], withdrawals = new Map(), loanProceeds = new Map(), keptPairs = new Map();
   const knownOwnTransferRows = new Set(), scopedKnownTransferRows = new Set();
   const inAnswer = new Set(rows.map(row => row.id));
   const kind = row => bySlug.get(row.effective_account_slug).account_kind;
-  const omit = row => { if (inAnswer.has(row.id)) excluded.add(row.id); };
+  // Keep the decision with the row. Rendering must never guess an exclusion
+  // reason from transfer-like wording or from membership alone.
+  const omit = (row, reason) => { if (inAnswer.has(row.id)) excluded.set(row.id, reason); };
   // A category code is evidence; description words and institution names are
   // never withdrawal evidence. Proposed feed categories count by this rule.
   if (intent.withdrawals !== "include") for (const row of rows) {
     if (row.direction === "inflow" && moveKind(kind(row)) &&
         /^TRANSFER_IN_INVESTMENT_AND_RETIREMENT_FUNDS$/i.test(row.category || "") &&
         ["proposed", "confirmed"].includes(row.category_basis_state)) {
-      omit(row); withdrawals.set(row.id, row);
+      omit(row, "a retirement or investment withdrawal"); withdrawals.set(row.id, row);
     }
   }
   for (const pair of pairs) {
@@ -133,7 +138,7 @@ function leadExclusions(rows, pairs, selected, bySlug, intent) {
     }
     if (moveKind(outKind) && moveKind(inKind)) {
       if (intent.ownTransfers !== "include" && (bothInScope || intent.ownTransfers === "exclude")) {
-        omit(pair.out); omit(pair.in); ownPairs.push(pair);
+        omit(pair.out, "a matched own-account transfer"); omit(pair.in, "a matched own-account transfer"); ownPairs.push(pair);
       } else if (!bothInScope && intent.ownTransfers !== "include") {
         keptPairs.set(pair, "other account is outside this question, kept in money in and money out");
         for (const row of [pair.out, pair.in]) if (inAnswer.has(row.id)) {
@@ -144,11 +149,11 @@ function leadExclusions(rows, pairs, selected, bySlug, intent) {
       }
     } else if (withdrawalKind(outKind) && moveKind(inKind) && selected.has(pair.in.effective_account_slug)) {
       if (intent.withdrawals !== "include") {
-        omit(pair.out); omit(pair.in); withdrawals.set(pair.in.id, pair.in);
+        omit(pair.out, "a retirement or investment withdrawal"); omit(pair.in, "a retirement or investment withdrawal"); withdrawals.set(pair.in.id, pair.in);
       }
     } else if (isLoanAdvance(pair, bySlug) && selected.has(pair.in.effective_account_slug)) {
       if (intent.loanProceeds !== "include") {
-        omit(pair.out); omit(pair.in); loanProceeds.set(pair.in.id, pair.in);
+        omit(pair.out, "loan or line-of-credit proceeds"); omit(pair.in, "loan or line-of-credit proceeds"); loanProceeds.set(pair.in.id, pair.in);
       }
     } else {
       keptPairs.set(pair, moveKind(outKind) && ["loan", "line_of_credit"].includes(inKind)
@@ -588,10 +593,21 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     const categoryMatch = rows.some(row => row.direction === 'outflow' && categoryFor(row) === wanted);
     const categoryWord = /^(?:supplies|software|materials|repairs|everyday running costs)$/.test(wanted);
     if (intent.kind === 'category' || (!exactPayee && (categoryMatch || categoryWord))) {
-      intent.categorySelector = intent.match;
-      intent.categorySelectorResolved = categoryMatch;
+      // This defined bucket has known membership even without bank categories.
+      // Keep it on the category reader, where its rows can be measured directly.
+      if (isUncategorizedBucket(intent.match)) intent.kind = 'category';
+      else {
+        intent.categorySelector = intent.match;
+        intent.categorySelectorResolved = categoryMatch;
+      }
     }
   }
+  // Decide on the full scoped period before category selection can discard
+  // unknown membership. Model readings share the deterministic category guard
+  // and its citations; an exact payee still keeps the merchant path.
+  const categoryTotalUnconfirmed = Boolean(intent.categorySelector && !isUncategorizedBucket(intent.categorySelector) &&
+    rows.some(row => row.direction === intent.direction && !categoryFor(row)));
+  if (categoryTotalUnconfirmed) intent.kind = 'category';
   if (intent.interpretation && intent.direction === 'inflow' && intent.match && /^(?:refunds?|reimbursements?)$/i.test(intent.match)) {
     const keyword = intent.match.toLowerCase().replace(/s$/, '');
     const matched = inflows.filter(row => (String(row.description || '').toLowerCase().match(/[\p{L}\p{N}]+/gu) || [])
@@ -630,7 +646,7 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     ? selected.has(pair.out.effective_account_slug) && inWindow(pair.out)
     : [pair.out, pair.in].some(row => selected.has(row.effective_account_slug) && inWindow(row)));
   const unmatched = pairing.unmatched.filter(row => selected.has(row.effective_account_slug) && inWindow(row));
-  if (intent.categorySelector) {
+  if (intent.categorySelector && !categoryTotalUnconfirmed) {
     const categoryRows = intent.categorySelectorResolved ? rows.filter(row => categoryFor(row) === normalizeMerchantText(intent.categorySelector)) : rows;
     const summary = expenseSummary({ intent: { ...intent, categoryLimit: Number.MAX_SAFE_INTEGER }, accounts, requestedAccounts, omittedAccounts,
       rows: categoryRows, pairs, pairing, bySlug });
@@ -783,8 +799,8 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     const outKind = bySlug.get(pair.out.effective_account_slug)?.account_kind;
     const inKind = bySlug.get(pair.in.effective_account_slug)?.account_kind;
     if (!(moveKind(outKind) && (moveKind(inKind) || ["loan", "line_of_credit"].includes(inKind)))) continue;
-    if (figureRows.some(row => row.id === pair.out.id)) leadExcluded.add(pair.out.id);
-    if (figureRows.some(row => row.id === pair.in.id)) leadExcluded.add(pair.in.id);
+    if (figureRows.some(row => row.id === pair.out.id)) leadExcluded.set(pair.out.id, "a matched own-account transfer");
+    if (figureRows.some(row => row.id === pair.in.id)) leadExcluded.set(pair.in.id, "a matched own-account transfer");
   }
   let noteSummary = summary, noteExcluded = leadExcluded, unchangedLimitedList = false;
   const withoutLead = list => list.filter(row => !leadExcluded.has(row.id));
@@ -864,12 +880,42 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
         leadDetail += `\n${masked(account)}: ${account.account_kind} account, left out of money in minus money out; only checking, savings and card accounts contribute.`;
     }
   } else if (["largest", "deposits"].includes(intent.kind)) {
+    const categoryRanking = intent.kind === "largest" && intent.matchType === "category";
+    const selectorMatches = categoryRanking ? matchesCategory : matchesMerchant;
+    if (categoryRanking) {
+      ledger.selector_type = "category";
+      ledger.category_selector = intent.match;
+      ledger.complete = !partialSimpleFinRanking;
+      // Check the full scoped, directional pool before filtering or limiting it.
+      // An unknown category could hide the largest expense, even beside a match.
+      const unknown = activity.filter(row => row.direction === intent.direction &&
+        (!categoryFor(row) || row.category_basis_state !== "confirmed"));
+      if (!isUncategorizedBucket(intent.match) && unknown.length) {
+        const candidates = withoutLead(activity).filter(row => row.direction === intent.direction &&
+          row.category_basis_state === "confirmed" && matchesCategory(row, intent.match))
+          .sort((a, b) => b.amount_minor - a.amount_minor || a.id - b.id);
+        const shown = candidates.slice(0, intent.limit);
+        ledger.found = null; ledger.complete = false;
+        ledger.total_minor = null; ledger.lead_total_minor = null; ledger.expense_total_minor = null;
+        ledger.category_ranking_unconfirmed = true;
+        ledger.rows = []; ledger.lead_rows = [];
+        ledger.confirmed_candidates = shown.map(publicRow);
+        ledger.confirmed_candidate_count = candidates.length;
+        ledger.unsorted_minor = sumMinor(unknown);
+        ledger.if_own_transfers = { total_minor: null, complete: false };
+        answer = `I found transactions without a confirmed category, so the ranking for ${safeDescription(intent.match)} is unconfirmed.`;
+        if (shown.length) answer += `\nConfirmed category candidates (incomplete ranking), showing ${shown.length} of ${candidates.length}:\n${shown.map(rowLine).join("\n")}`;
+        answer += `\nTransactions without a confirmed category: ${money(ledger.unsorted_minor)} ${refs(unknown)}.`;
+        answer += `\n${bounded}\n${originalRecordSuggestion}`;
+        return { answer, citations, ledger };
+      }
+    }
     const found = activity.filter(row => row.direction === intent.direction && descriptionMatches(row) &&
-      (!intent.match || matchesMerchant(row, intent.match))).sort((a, b) =>
+      (!intent.match || selectorMatches(row, intent.match))).sort((a, b) =>
       (intent.kind === "largest" ? b.amount_minor - a.amount_minor : b.posted_on.localeCompare(a.posted_on)) || a.id - b.id);
     const listed = intent.limit ? found.slice(0, intent.limit) : found;
     if (intent.descriptionKeyword) ledger.description_keyword = intent.descriptionKeyword;
-    if (intent.match) ledger.vendor_selector = intent.match;
+    if (intent.match && !categoryRanking) ledger.vendor_selector = intent.match;
     ledger.found = listed.length > 0; ledger.rows = listed.map(publicRow);
     ledger.if_own_transfers.total_minor = sumMinor(withoutCandidates(listed));
     conditionalDetail = `total of the listed ${intent.direction === "inflow" ? "deposits" : "expenses"}: ${money(ledger.if_own_transfers.total_minor)}`;
@@ -952,13 +998,41 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
       return { answer, citations, ledger };
     }
     const unsorted = (intent.kind === "category" ? directionRows : matched).filter(row => !categoryFor(row));
+    const explicitBucket = intent.kind === "category" && isUncategorizedBucket(intent.match);
+    const topicLabel = explicitBucket ? "the uncategorized bucket" : safeDescription(intent.match);
+    if (explicitBucket) { ledger.category_bucket = "uncategorized"; ledger.complete = true; }
+    // Unclassified rows cannot prove that an arbitrary requested topic had
+    // a complete topic amount, even beside confirmed category rows. Keep both
+    // evidence groups, but withhold every total until membership is known.
+    if (intent.kind === "category" && intent.match && !explicitBucket && unsorted.length) {
+      ledger.total_minor = null; ledger.lead_total_minor = null; ledger.found = null;
+      ledger.expense_total_minor = null;
+      ledger.unsorted_minor = sumMinor(unsorted); ledger.complete = false;
+      ledger.category_total_unconfirmed = true;
+      if (intent.categorySelector) {
+        ledger.category_selector = intent.categorySelector;
+        ledger.selector_unresolved = !intent.categorySelectorResolved;
+      }
+      ledger.if_own_transfers.total_minor = null;
+      ledger.if_own_transfers.complete = false;
+      answer = `I found transactions without a confirmed category, so the total for ${safeDescription(intent.match)} is unconfirmed.`;
+      for (const row of matched) cite(row);
+      const confirmed = matched.filter(row => row.category_basis_state === "confirmed");
+      if (confirmed.length) {
+        ledger.confirmed_category_subtotal_minor = sumMinor(confirmed);
+        answer += `\nConfirmed in ${safeDescription(intent.match)} (subtotal): ${money(ledger.confirmed_category_subtotal_minor)} ${refs(confirmed)}.`;
+      }
+      answer += `\nTransactions without a confirmed category: ${money(ledger.unsorted_minor)} ${refs(unsorted)}.`;
+      answer += `\n${bounded}\n${originalRecordSuggestion}`;
+      return { answer, citations, ledger };
+    }
     ledger.total_minor = sumMinor(matched); ledger.unsorted_minor = sumMinor(unsorted); ledger.found = matched.length > 0;
     if (namedOutflowMerchant) { ledger.match_basis = "exact"; ledger.complete = omittedAccounts.length === 0; }
     ledger.lead_total_minor = sumMinor(withoutLead(matched));
-    leadDetail = `Total money ${intent.direction === "inflow" ? "in" : "out"}${intent.match ? ` for ${safeDescription(intent.match)}` : ` by ${intent.kind}`}: ${money(ledger.lead_total_minor)}; Unsorted: ${money(sumMinor(withoutLead(unsorted)))}.`;
+    leadDetail = `Total money ${intent.direction === "inflow" ? "in" : "out"}${intent.match ? ` for ${topicLabel}` : ` by ${intent.kind}`}: ${money(ledger.lead_total_minor)}; Unsorted: ${money(sumMinor(withoutLead(unsorted)))}.`;
     ledger.if_own_transfers.total_minor = sumMinor(withoutCandidates(matched));
     ledger.if_own_transfers.unsorted_minor = sumMinor(withoutCandidates(unsorted));
-    conditionalDetail = `total ${intent.direction === "inflow" ? "income" : "spend"}${intent.match ? ` for ${safeDescription(intent.match)}` : ` by ${intent.kind}`}: ${money(ledger.if_own_transfers.total_minor)}; Unsorted: ${money(ledger.if_own_transfers.unsorted_minor)}`;
+    conditionalDetail = `total ${intent.direction === "inflow" ? "income" : "spend"}${intent.match ? ` for ${topicLabel}` : ` by ${intent.kind}`}: ${money(ledger.if_own_transfers.total_minor)}; Unsorted: ${money(ledger.if_own_transfers.unsorted_minor)}`;
     const groups = new Map();
     const familyBreakdown = namedOutflowMerchant && withoutLead(namedOutflowMerchant.family).length > 0;
     for (const row of matched) {
@@ -1057,7 +1131,7 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
       category_basis_state: g.state, total_minor: sumMinor(g.rows), citations: g.rows.map(row => cite(row).n),
       possible_transfer_citations: g.rows.filter(row => pairing.candidateRows.has(row.id)).map(row => cite(row).n),
       if_own_transfers_total_minor: sumMinor(withoutCandidates(g.rows)) }));
-    answer = `Total ${intent.direction === "inflow" ? "income" : "spend"}${intent.match ? ` for ${safeDescription(intent.match)}` : ` by ${intent.kind}`}: ${money(ledger.total_minor)}.`;
+    answer = `Total ${intent.direction === "inflow" ? "income" : "spend"}${intent.match ? ` for ${topicLabel}` : ` by ${intent.kind}`}: ${money(ledger.total_minor)}.`;
     if (!matched.length) answer += " No matching transactions found.";
     for (const g of orderedGroups) answer += `\n${safeDescription(g.label)}${g.state === "proposed" ? " (bank's category (unconfirmed))" : ""}: ${money(sumMinor(g.rows))} ${refs(g.rows)}${g.rows.some(row => pairing.candidateRows.has(row.id)) ? " (includes possible moves between your own accounts)" : ""}.`;
     if (orderedGroups.some(group => group.state === "proposed")) answer += `\nHere are the spending categories from your bank; those marked unconfirmed have not been reviewed.\n${balanceSuggestion}`;
@@ -1145,7 +1219,10 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
   ledger.transfers = pairs.map(pair => ({ candidate: true, excluded_from_totals: false, reason: pair.reason,
     amount_minor: pair.out.amount_minor, outgoing: publicRow(pair.out), incoming: publicRow(pair.in),
     excluded_from_lead: [pair.out, pair.in].some(row => leadExcluded.has(row.id)), kept_reason: keptPairs.get(pair) || null }));
-  ledger.unmatched_transfers = unmatched.map(publicRow);
+  // Exactly identified liability payments have their own explanation below;
+  // they must not reappear as uncertain, unmatched transfers.
+  const unmatchedTransfers = unmatched.filter(row => !expensePayments.has(row.id));
+  ledger.unmatched_transfers = unmatchedTransfers.map(publicRow);
   const restored = intent.ownTransfers === "include" && intent.withdrawals === "include" && !leadExcluded.size;
   if (intent.measure || (!restored && (leadExcluded.size || keptPairs.size))) {
     const notes = [];
@@ -1160,11 +1237,12 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     if (!notes.length) notes.push(keptPairs.size ? "paired activity stays where listed below" : "only checking, savings and card accounts contribute to money in minus money out");
     // Gross sentences retain their wording and citation order for existing clients.
     answer = `${leadDetail || answer}\nNote: ${notes.join("; ")}.\nWith everything counted:\n${answer}\n${bounded}`;
-    const omittedPairs = pairs.filter(pair => [pair.out, pair.in].some(row => noteExcluded.has(row.id)));
+    const omittedPairs = pairs.filter(pair => !expensePayments.has(pair.out.id) &&
+      [pair.out, pair.in].some(row => noteExcluded.has(row.id)));
     if (omittedPairs.length) {
       answer += "\nMoves between your own connected accounts, left out of the first figures:";
       const leadRowLine = row => rowLine(row).replace(candidateMark(row), leadExcluded.has(row.id)
-        ? " (left out of the first figures)" : " (outside this answer's accounts or period)");
+        ? ` (left out of the first figures as ${leadExcluded.get(row.id)})` : " (outside this answer's accounts or period)");
       for (const pair of omittedPairs) answer += `\n${leadRowLine(pair.out)}; received ${leadRowLine(pair.in)}. Why: ${pair.reason}.`;
     }
     if (keptPairs.size) answer += "\nKept pairs:";
@@ -1177,9 +1255,11 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
       answer += `\nIf these are transfers between your own accounts, with those candidates excluded: ${conditionalDetail}.`;
     }
   }
-  for (const row of unmatched) answer += `\nPossible transfer, unmatched (${leadExcluded.has(row.id)
-    ? noteExcluded.has(row.id) ? "left out of the first figures as a retirement or investment withdrawal; kept in the gross figures"
-      : "retirement or investment withdrawal excluded from the wider candidate pool; outside the displayed rows"
+  const exclusionLabel = row => noteExcluded.has(row.id)
+    ? `left out of the first figures as ${leadExcluded.get(row.id)}; kept in the gross figures`
+    : `${leadExcluded.get(row.id)} excluded from the wider candidate pool; outside the displayed rows`;
+  for (const row of unmatchedTransfers) answer += `\nPossible transfer, unmatched (${leadExcluded.has(row.id)
+    ? exclusionLabel(row)
     : "retained in income/spend totals"}): ${rowLine(row)}.`;
   if (incompleteNamed) {
     const detail = inflowDetail(cite);
@@ -1199,7 +1279,11 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     answer += share ? `\nShare of total: ${money(share.listed_minor)} of ${money(share.total_minor)} in ordinary spending, ${share.percent}%, for the same accounts and ${intent.presentation.period(intent.from, intent.to)}.`
       : '\nI can show the listed expenses, but their share is unconfirmed without a complete positive spending total and confirmed expense types. Want to review the total first?';
   }
-  if (expensePayments.size) answer += `\nPayments to your own loan/card accounts: ${money(ledger.own_account_payments.total_minor)} across ${expensePayments.size} ${expensePayments.size === 1 ? "payment" : "payments"}.`;
+  if (expensePayments.size) {
+    // The payment summary owns this explanation. A dated excluded-row appendix
+    // repeats the same liability payment and is not an ordinary expense row.
+    answer += `\nPayments to your own loan/card accounts: ${money(ledger.own_account_payments.total_minor)} across ${expensePayments.size} ${expensePayments.size === 1 ? "payment" : "payments"}.`;
+  }
   return { answer, citations, ledger };
 }
 
@@ -1212,6 +1296,14 @@ export async function withLedgerAnswer(options, next) {
   const timeZone = env.BRAIN_TIMEZONE ?? null;
   const evaluated = { ...options, now };
   const parsed = classifyLedgerQuestion(question, { now, timeZone });
+  if (parsed.kind) {
+    const basis = refundBasisForOperand({ question, clause: question,
+      intents: [{ vendor_text: parsed.match, account_hint: parsed.accountSelector }],
+      operand: { kind: parsed.kind, direction: parsed.direction, vendor: parsed.match || null,
+        monthlyBreakdown: parsed.monthlyBreakdown, count: 1 } });
+    if (basis.descriptionOnly) parsed.netRefunds = true;
+    if (basis.requested && !basis.descriptionOnly) parsed.refundsNotNetted = true;
+  }
   // Grammar successes retain their route and zero-call latency.
   const eligible = !access && Boolean(grantScope) && scopeIsUnrestricted(grantScope) &&
     scopePrincipalKind === "owner" && !entityScope?.applied && Object.keys(filters).length === 0 && ledgerEligible;
@@ -1285,13 +1377,14 @@ export async function withLedgerAnswer(options, next) {
   // certify a period difference, and broad inflow/outflow has two measures.
   let comparison;
   if (decision.comparison) {
-    const usable = part => part && part.complete !== false && part.coverage?.complete !== false && !part.classification_uncertain && !part.selector_unresolved;
-    const figure = part => !usable(part) ? null
+    const usable = part => part && part.complete !== false && part.coverage?.complete !== false && !part.classification_uncertain && !part.selector_unresolved && !part.net_refunds_unavailable;
+    const figure = (part, intent) => !usable(part) ? null
+      : intent.netRefunds || intent.refundsNotNetted ? part.net_expense_minor ?? null
       : part?.kind === 'expense_summary' ? part.expense_total_minor
         : part?.kind === 'totals' && part.income_established === false ? part.combined_inflow_minor
           : part?.kind === 'balance' && new Set(part.accounts.map(account => account.balance_group)).size === 1 ? sumMinor(part.accounts, account => account.current_minor)
           : ['merchant', 'category'].includes(part?.kind) ? part.lead_total_minor ?? part.total_minor : null;
-    const figures = combined.map(part => figure(part.ledger));
+    const figures = combined.map((part, index) => figure(part.ledger, extracted[index]));
     if (figures.every(Number.isSafeInteger)) {
       const difference = figures[0] - figures[1];
       if (Number.isSafeInteger(difference)) comparison = { figures_minor: figures, difference_minor: difference };
@@ -1489,7 +1582,15 @@ async function withParsedLedgerAnswer(options, next, intent) {
             answer.answer += `\n${plainRouterLimitation('extra_part')}`;
           }
           if (intent.refundsSeparateUnavailable) answer.answer += '\nStore refunds are not split out in this view. Want to review the deposits separately?';
-          if (intent.refundsNotNetted) answer.answer += '\nRefunds have not been subtracted because these records do not establish which deposits are refunds for that store. Want to review the deposits separately?';
+          if (intent.refundsNotNetted) {
+            // Covered gross rows do not prove refund attribution. Preserve
+            // gross completeness separately from the unavailable net field.
+            Object.assign(answer.ledger, { net_refunds_unavailable: true, amount_basis: 'gross_before_refunds' });
+            answer.answer = (intent.kind === 'merchant'
+              ? "I cannot confirm spending after refunds because these records do not show which deposits are refunds from this business. "
+              : "I cannot confirm spending after refunds because these records do not show which deposits refunded these expenses. ") +
+              "The amounts below are before subtracting refunds.\n" + answer.answer;
+          }
           if (intent.exactPaymentOnly) answer.answer += '\nThis lookup checks exact amounts only; payouts changed by fees are not inferred. Want to review the deposit amounts?';
           if (intent.payeeBreakdownUnavailable) answer.answer += '\nA payee breakdown is not available in this view. Want to review individual transactions?';
           // The reader admits posted records only. It cannot observe pending
@@ -1498,14 +1599,15 @@ async function withParsedLedgerAnswer(options, next, intent) {
           if (answer.ledger.kind !== "balance") answer.answer += `\n${pendingNotice}`;
           if (intent.from && intent.to && configuredTimeZone) answer.ledger.time_zone = intent.timeZone;
           const partialCoverage = answer.ledger.partial_reason === "ledger_partial_coverage";
-          const incomplete = Boolean(answer.ledger.attribution_incomplete || answer.ledger.complete === false ||
+          const incomplete = Boolean(answer.ledger.net_refunds_unavailable || answer.ledger.attribution_incomplete || answer.ledger.complete === false ||
             answer.ledger.known_own_transfer_in_lead || answer.ledger.previous_month?.complete === false);
           return new Response(JSON.stringify(finalLedgerOffer({ mode: "think", answer: intent.interpretation
             ? `${intent.interpretation}\n${answer.answer}` : answer.answer,
           citations: answer.citations, results: [],
           gaps: [...(answer.gaps || []), ...(partialCoverage ? [gapFor("ledger_partial_coverage", accounts, intent)] : [])], ledger: answer.ledger,
           evidence_gate: { supported: true, complete: !incomplete, partial: incomplete,
-            reason: answer.ledger.forecast_supported === false ? "forecast unavailable; current recorded balance observations only"
+            reason: answer.ledger.net_refunds_unavailable ? "net of refunds unavailable; gross recorded amounts only"
+              : answer.ledger.forecast_supported === false ? "forecast unavailable; current recorded balance observations only"
               : answer.ledger.ambiguous ? "multiple near-date deposits match; no unique payment is confirmed"
               : partialCoverage ? "available ledger rows are cited, but ledger coverage is not certified complete"
               : answer.ledger.attribution_incomplete ? "payer attribution incomplete in covered ledger rows"

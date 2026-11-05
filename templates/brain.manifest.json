@@ -20,7 +20,7 @@
     "timezone": "America/Phoenix"
   },
   "brain": {
-    "version": "0.4.25",
+    "version": "0.4.26",
     "domain": "brain.acme.com",
     "worker_name": "acme-brain"
   },
@@ -342,7 +342,10 @@
         "create both empty home landing folders with brain folder <manifest>",
         "create-feeds. The command validates the folder and writes feed: true.",
         "Files that disappear from a feed never remove Brain content. Folder",
-        "names or globs in exclude are skipped and counted."
+        "names or globs in exclude are skipped and counted.",
+        "Stop one feed with brain folder <manifest> remove --source <name>.",
+        "Stored documents and local files stay. If daily refresh is on, run",
+        "brain daily on <manifest> to rebuild its approved job."
       ],
       "enabled": false,
       "folders": [],

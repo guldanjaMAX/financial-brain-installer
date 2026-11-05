@@ -2,7 +2,8 @@
 /**
  * Follow the PUBLIC install state the way a client's agent is told to, and fail
  * on the first thing that does not match. A held doorway is a successful
- * no-install result; candidate or stable continues to an artifact.
+ * no-install result, including when updates are stable. An open supervised
+ * doorway continues to an artifact.
  *
  * The point is that this reads https://financialbrain.ai/install/agent.md, not
  * the repo. Testing the repo's own idea of the install proves the repo agrees
@@ -63,12 +64,11 @@ const readKitFile = (path, encoding, message) => {
   try { return readFileSync(path, encoding); } catch { die(message); }
 };
 
-// Use the same state-bound parser as the live install/update doorway checker.
-// Held validates the exact closed-door document. Candidate or stable validates
-// owner presence, exact platform target/status, unique fields, the full commit,
-// and a digest-derived bounded artifact URL before downloading it.
+// The shared parser validates the update manifest independently of the install
+// doorway. An open doorway requires owner presence, exact platform target/status,
+// unique fields, the full commit, and a digest-derived bounded artifact URL.
 const publicContract = await readInstallDoorwayContract({ platform: guideArg });
-if (publicContract.state === "held") {
+if (publicContract.install === "held") {
   ok(`held contract read from ${publicContract.guideUrl}`);
   console.log("      install doorway is closed; no artifact was selected or executed");
   process.exit(0);

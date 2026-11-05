@@ -616,11 +616,13 @@ test("lease-first target repair crosses native prepare, Worker schema 44/45, rep
     recoveredBrain.close();
   });
 
-  assert.equal(sourceBrain.migrationFiles.at(-1), "0058_fin_account_kind_reviews.sql");
-  assert.equal(recoveredBrain.migrationFiles.at(-1), "0058_fin_account_kind_reviews.sql");
   // Both sides must actually apply the candidate schema before recovery runs.
   // A filename alone cannot prove that its column and index were created.
   for (const fixture of [sourceBrain, recoveredBrain]) {
+    assert.equal(fixture.migrationFiles.at(-1), "0059_document_family_index.sql");
+    assert.equal(fixture.migrationFiles.length, 59);
+    assert.ok(fixture.migrationFiles.every((file, index) => Number(file.split("_")[0]) === index + 1),
+      "both recovery fixtures must contain the complete independently pinned migration prefix");
     assert.deepEqual(
       fixture.rows("PRAGMA table_info(sync_runs)")
         .filter(row => row.name === "provider_check_complete")

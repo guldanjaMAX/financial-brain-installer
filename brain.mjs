@@ -37,11 +37,16 @@ import { basename, delimiter, isAbsolute, join, dirname, relative, resolve, sep,
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { discoverClaudeMcpCommand } from "./operations/claude-mcp-discovery.mjs";
+import { recognizedPriorInstallerRuntime } from "./operations/mcp-prior-runtime.mjs";
+import { hasPrivateUpdateFlags, parsePrivateUpdateArgv, runPrivateUpdate } from "./operations/private-update-command.mjs";
+import { PRIVATE_UPDATE_BINDING_ENV, PrivateOfferError,
+  assertPrivateUpdateBinding, privateOfferTarget } from "./operations/private-update-offer.mjs";
 import { removalDigest, createIngestRemovalReview, applyApprovedProvenanceFamily } from "./operations/ingest-removal-plan.mjs";
 import { removalReviewFacts, removalOwnerSentence, runLoadRemovalLeg } from "./operations/load-removal-review.mjs";
 import { spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
-import { TextDecoder } from "node:util";
+import { TextDecoder, isDeepStrictEqual } from "node:util";
 import { assertIngestionOutcome, ingestionOutcome } from "./ingest/outcome.mjs";
 import { microsoftMailTransition, microsoftMailTransitionSummary, normalizeMailStartAt } from "./connectors/microsoft-mail-transition.mjs";
 import {
@@ -54,7 +59,9 @@ import {
   canonicalGoogleProviderReason,
   GMAIL_FAILURE_OPERATION_CLASSES,
   normalizeSourceFailureEvidence,
+  mergeProviderWithheldReasons,
   providerNoChangeCheckAt,
+  providerSetAsideOwnerCopy,
   providerWithheldCheckAt,
   SOURCE_FAILURE_EVIDENCE_VERSION,
 } from "./worker/src/lib/source-receipt.js";
@@ -93,6 +100,7 @@ import {
   withBrainLifecycleLockWait,
 } from "./operations/brain-lifecycle-lock.mjs";
 import { renderDailyObservation } from "./operations/daily-refresh-observation.mjs";
+import { checkUpdateAnswerKey, readUpdateAnswerKeySecretNames } from "./operations/update-key-preflight.mjs";
 import { createMigrationStatementIntentStore } from "./operations/migration-statement-intent.mjs";
 import {
   MigrationLedgerReadError,
@@ -323,6 +331,7 @@ import {
   feedPathsOverlap,
   inspectFeedFolder,
   prepareFeedAddition,
+  prepareFeedRemoval,
   uploadFolderEntriesOf,
 } from "./operations/feed-folders.mjs";
 import { writeClaudeWorkspaceGuide, writeCodexWorkspaceGuide, classifySessionFolder } from "./operations/claude-workspace.mjs";
@@ -419,7 +428,7 @@ import {
 } from "./operations/technician-setup.mjs";
 import { fetchBrainWithAdminKey, guardBrainAdminFetch, secureBrainRequestUrl } from "./components/brain-http.mjs";
 import { confidenceLine } from "./worker/src/lib/confidence.js";
-import { answerReasonText, answerText as renderAnswerText, moneyExplanation, nextActionText } from "./worker/src/lib/answer-render.js";
+import { answerReasonText, answerText as renderAnswerText, finalAnswerText, moneyExplanation, nextActionText, separateOffers } from "./worker/src/lib/answer-render.js";
 import {
   absenceUnproven, COVERAGE_INCOMPLETE, coverageIncompleteNotice,
   meaningSearchLine, unavailableNotice,
@@ -1549,6 +1558,7 @@ export async function withCloudflareControlCredential(action, options = {}) {
       const holder = {
         buffer: session.token,
         source: "wrangler-oauth",
+        profile: session.profile,
         machineReadable: false,
         announced: true,
         // The exact account and preflight receipt let deploy bind the
@@ -3208,6 +3218,9 @@ async function cmdDeployWithPrompts(manifestPath, options = {}) {
   }
 
   info(`uploading ${files.length} module(s) as "${scriptName}"`);
+  // Preparation cannot change the deployed models. Dispatch can, even when
+  // the upload's reply is lost, so notify the update before sending the PUT.
+  options.onWorkerUploadDispatch?.();
   await cf(`/accounts/${acct.id}/workers/scripts/${scriptName}`, {
     method: "PUT",
     body: form,
@@ -4596,16 +4609,19 @@ export async function cmdAsk(manifestPath, options = {}) {
           ? coverageIncompleteNotice(false)
           : unavailableNotice(body.degraded))
     : renderAnswerText({ ...body, answer: typeof body.answer === "string" ? body.answer.trim() : null });
-  console.log(`\n${answer}\n`);
+  const composed = separateOffers(answer);
+  const lines = [];
+  const print = (...parts) => lines.push(parts.join(" "));
+  print(`\n${composed.facts}\n`);
   const scanned = scannedEvidenceNotice(body);
-  if (scanned) console.log(`  ${scanned}\n`);
+  if (scanned) print(`  ${scanned}\n`);
   // The response keeps the scorer's canonical answer; presentation scopes a
   // refusal to this search. An incomplete search has no refusal percentage.
   const refused = body.evidence_gate?.supported === false || typeof body.answer !== "string" || !body.answer.trim() || /^The documents do not answer/i.test(body.answer.trim());
   // A refusal is not an answer-confidence result. Its scoped search facts and
   // gaps remain visible below, without a high-confidence label beside "no".
   const trust = cannotSupportAbsence || refused ? null : confidenceLine(body.confidence, { refused: false });
-  if (trust) console.log(`  ${c.dim(trust)}\n`);
+  if (trust) print(`  ${c.dim(trust)}\n`);
   // Say WHY when the answer was refused or cut short. The gate already
   // records it; hiding it left the owner with one sentence that meant five
   // different things.
@@ -4613,12 +4629,13 @@ export async function cmdAsk(manifestPath, options = {}) {
   const gateReason = answerReasonText(body);
   if (gateReason && (gate.supported === false || gate.partial === true ||
       provisional || refused)) {
-    console.log(`  ${c.dim(gate.partial === true ? "Not covered" : "Why")}: ${gateReason}\n`);
+    print(`  ${c.dim(gate.partial === true ? "Not covered" : "Why")}: ${gateReason}\n`);
   }
-  const bankExplanation = moneyExplanation(body);
-  if (bankExplanation && !answer.includes(bankExplanation)) console.log(`  ${bankExplanation}\n`);
-  const nextAction = nextActionText(body);
-  if (nextAction) console.log(`  ${c.dim(nextAction)}\n`);
+  // answerText already composed document and bank facts. An unavailable
+  // search bypasses it, so retain those bank bounds without another offer.
+  const bankFacts = separateOffers(moneyExplanation(body)).facts;
+  if (cannotSupportAbsence && bankFacts && !answer.includes(bankFacts)) print(`  ${bankFacts}\n`);
+  const nextAction = nextActionText(body) || composed.offers.at(-1);
   if (body.answer_error) {
     let resumes = "";
     if (typeof body.answer_resumes_at === "string" && Number.isFinite(Date.parse(body.answer_resumes_at))) {
@@ -4634,7 +4651,7 @@ export async function cmdAsk(manifestPath, options = {}) {
         resumes = ` Answers start again at ${body.answer_resumes_at}.`;
       }
     }
-    warn(`answer generation reported: ${String(body.answer_error).slice(0, 160)}${resumes}`);
+    warn(`answer generation reported: ${separateOffers(String(body.answer_error)).facts.slice(0, 160)}${resumes}`);
   }
   const searchLine = body.meaning_search && typeof body.meaning_search === "object"
     ? meaningSearchLine({
@@ -4642,11 +4659,11 @@ export async function cmdAsk(manifestPath, options = {}) {
         total: body.meaning_search.total,
       })
     : null;
-  if (searchLine) console.log(`  ${c.dim(searchLine)}\n`);
+  if (searchLine) print(`  ${c.dim(searchLine)}\n`);
   else if (body.degraded) warn(`search is degraded: ${String(body.degraded).slice(0, 80)}`);
   const citations = Array.isArray(body.citations) ? body.citations : [];
   if (citations.length) {
-    console.log(`  ${c.bold("Sources")}`);
+    print(`  ${c.bold("Sources")}`);
     for (const citation of citations) {
       const number = Number.isInteger(citation?.n) ? `[${citation.n}]` : "[ ]";
       const title = String(citation?.title || "Untitled").replace(/\s+/g, " ").slice(0, 140);
@@ -4667,10 +4684,11 @@ export async function cmdAsk(manifestPath, options = {}) {
         provenance.push(`reference ${source}:${String(citation.ref).replace(/\s+/g, " ").slice(0, 160)}`);
       }
       const mark = citationIsScanned(citation) ? ` ${SCANNED_CITATION_MARK}` : "";
-      console.log(`  ${number} ${title}${mark} (${provenance.join("; ")})`);
+      print(`  ${number} ${title}${mark} (${provenance.join("; ")})`);
     }
-    console.log("");
+    print("");
   }
+  console.log(finalAnswerText(lines.join("\n"), nextAction));
   return body;
 }
 
@@ -7162,11 +7180,14 @@ export async function cmdUpgrade(manifestPath, options = {}) {
     let activeWriterModeVerified = false;
     let switchedModelsMayBeDeployed = false;
     let switchedModelsCommitted = false;
-    const deployWithModels = (deployOptions) => {
-      // A lost upload reply can still leave the switched models serving.
-      switchedModelsMayBeDeployed = modelOptions.legacyModelSwitch === true;
-      return deploy(executionPin.target, deployOptions);
-    };
+    const deployWithModels = (deployOptions) => deploy(executionPin.target, {
+      ...deployOptions,
+      onWorkerUploadDispatch: () => {
+        // Keep an earlier upload's uncertainty through later preparation and
+        // acceptance failures until the saved model fields pass readback.
+        if (modelOptions.legacyModelSwitch === true) switchedModelsMayBeDeployed = true;
+      },
+    });
     const runStage = async (name, action) => {
       stage = name;
       const context = await assertStageContext(name);
@@ -10977,8 +10998,12 @@ export async function cmdSources(manifestPath, options = {}) {
         if (noChangeAt) {
           console.log(`    checked ${row.receipt.last_check_at}; no changes; last ingest ${row.receipt.last_successful_run_at || "never"}`);
         }
+        const setAsideCopy = providerSetAsideOwnerCopy(row.receipt?.latest_run);
+        if (!sourceFailed && row.receipt?.status === "ready" && row.receipt.last_check_at) {
+          console.log(`    ran ${row.receipt.last_check_at}${setAsideCopy ? `; ${setAsideCopy}` : ""}`);
+        }
         if (row.receipt?.latest_run?.docs_withheld > 0) {
-          console.log(`    ${row.receipt.latest_run.docs_withheld} item(s) withheld by design; history remains incomplete`);
+          console.log(`    ${setAsideCopy || "set-aside reasons unavailable"}; history remains incomplete`);
         } else if (row.receipt?.last_withheld) {
           console.log(`    last withholding: ${row.receipt.last_withheld.count} item(s) withheld by design on ${row.receipt.last_withheld.at}`);
         }
@@ -13432,14 +13457,26 @@ export async function cmdIngestLocal(m, manifestPath, flags, options = {}) {
     dryRun: context.dry,
     lockDryRun: true,
     options,
-  }, (assertLockOwned) => cmdIngestLocalRun(
-    m,
-    manifestPath,
-    flags,
-    context,
-    options,
-    assertLockOwned,
-  ));
+  }, (assertLockOwned) => {
+    // Direct helper callers may have planned before taking a source lease.
+    // Revalidate feed ownership under that lease before importing the walker;
+    // a removed feed must never fall back to ordinary mirror behavior.
+    let currentManifest = m;
+    let currentContext = context;
+    if (context.feedMode) {
+      assertLockOwned();
+      currentManifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+      currentContext = localIngestContext(currentManifest, manifestPath, flags, {
+        ...options,
+        onFeedIngestDecision: undefined,
+      });
+      if (currentManifest?.corpora?.upload?.enabled !== true ||
+          !currentContext.feedMode || currentContext.sourceName !== context.sourceName) {
+        dieInputRefused("The feed settings changed before this read could start. Run the command again. Nothing was read, sent, or removed.");
+      }
+    }
+    return cmdIngestLocalRun(currentManifest, manifestPath, flags, currentContext, options, assertLockOwned);
+  });
 }
 
 async function cmdIngestLocalRun(m, manifestPath, flags, context, options, assertLockOwned) {
@@ -23237,88 +23274,6 @@ function registrationHasOnlyInstallerFields(entry) {
   return Object.keys(entry).every((key) => direct.has(key));
 }
 
-// The published v0.4.0-v0.4.5 packages all carried this exact MCP runtime.
-// Package metadata and a familiar install path are not ownership proof on
-// their own because either can coexist with owner-modified executable bytes.
-const PRIOR_INSTALLER_MCP_RUNTIME_SHA256 = Object.freeze({
-  "0.4.0": "7de0808beebd990df4affb5e146baf6c5f484ff379471dbe1392affed742e47a",
-  "0.4.1": "7de0808beebd990df4affb5e146baf6c5f484ff379471dbe1392affed742e47a",
-  "0.4.2": "7de0808beebd990df4affb5e146baf6c5f484ff379471dbe1392affed742e47a",
-  "0.4.3": "7de0808beebd990df4affb5e146baf6c5f484ff379471dbe1392affed742e47a",
-  "0.4.4": "7de0808beebd990df4affb5e146baf6c5f484ff379471dbe1392affed742e47a",
-  "0.4.5": "7de0808beebd990df4affb5e146baf6c5f484ff379471dbe1392affed742e47a",
-});
-const PRIOR_INSTALLER_MCP_VERSIONS = new Set(Object.keys(PRIOR_INSTALLER_MCP_RUNTIME_SHA256));
-
-function priorInstallerPackageRoot(runtimePath) {
-  if (typeof runtimePath !== "string" || !isAbsolute(runtimePath) ||
-      basename(runtimePath) !== "brain-mcp.mjs" || basename(dirname(runtimePath)) !== "components") {
-    return null;
-  }
-  const packageRoot = dirname(dirname(resolve(runtimePath)));
-  const nodeModules = dirname(packageRoot);
-  if (basename(packageRoot) !== "brain-installer" || basename(nodeModules) !== "node_modules") {
-    return null;
-  }
-  const container = dirname(nodeModules);
-  const prefix = basename(container).toLowerCase() === "lib" ? dirname(container) : container;
-  if (![".financial-brain", "financialbrain"].includes(basename(prefix).toLowerCase())) {
-    return null;
-  }
-  return packageRoot;
-}
-
-function recognizedPriorInstallerRuntime(runtimePath) {
-  const packageRoot = priorInstallerPackageRoot(runtimePath);
-  if (!packageRoot) return false;
-  try {
-    const packageRootStat = lstatSync(packageRoot);
-    const runtimeStat = lstatSync(runtimePath);
-    const canonicalRuntime = resolve(realpathSync(runtimePath));
-    if (!packageRootStat.isDirectory() || packageRootStat.isSymbolicLink() ||
-        !runtimeStat.isFile() || runtimeStat.isSymbolicLink() || runtimeStat.nlink !== 1 ||
-        runtimeStat.size > 16 * 1024 * 1024 ||
-        (typeof process.getuid === "function" &&
-          (packageRootStat.uid !== process.getuid() || runtimeStat.uid !== process.getuid())) ||
-        !priorInstallerPackageRoot(canonicalRuntime)) {
-      return false;
-    }
-    const runtimeFd = openSync(runtimePath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0));
-    let runtimeBytes;
-    try {
-      const openedRuntime = fstatSync(runtimeFd);
-      if (!sameOpenedFile(runtimeStat, openedRuntime)) return false;
-      runtimeBytes = readFileSync(runtimeFd);
-      if (runtimeBytes.length !== openedRuntime.size) return false;
-    } finally {
-      closeSync(runtimeFd);
-    }
-    const packagePath = join(packageRoot, "package.json");
-    const before = lstatSync(packagePath);
-    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.size > 64 * 1024 ||
-        (typeof process.getuid === "function" && before.uid !== process.getuid())) {
-      return false;
-    }
-    const fd = openSync(packagePath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0));
-    try {
-      const opened = fstatSync(fd);
-      if (!sameOpenedFile(before, opened)) return false;
-      const bytes = readFileSync(fd);
-      if (bytes.length !== opened.size) return false;
-      const pkg = JSON.parse(bytes.toString("utf8"));
-      if (pkg?.name !== "brain-installer" || !PRIOR_INSTALLER_MCP_VERSIONS.has(pkg.version)) {
-        return false;
-      }
-      return createHash("sha256").update(runtimeBytes).digest("hex") ===
-        PRIOR_INSTALLER_MCP_RUNTIME_SHA256[pkg.version];
-    } finally {
-      closeSync(fd);
-    }
-  } catch {
-    return false;
-  }
-}
-
 function recognizedInstallerNodeCommand(command, desiredCommand, priorRuntime) {
   if (command === "node") return true;
   const samePath = (left, right) => {
@@ -23410,7 +23365,13 @@ export function mcpRegistrationIsInstallerOwned(entry, desired) {
   const priorRuntimeIdentity = !transitionName && sameManifest &&
     (sameStringMap(actual?.env, desired.env) || oldLocatorOwned);
   const priorRuntime = actual?.args?.length === 1 && !currentRuntime && priorRuntimeIdentity &&
-    recognizedPriorInstallerRuntime(actual.args[0]);
+    recognizedPriorInstallerRuntime(actual.args[0], {
+      runningVersion: PRODUCT_VERSION,
+      // Structural ownership authorizes only replacement with this exact
+      // owner locator. Historical hash-checked entries keep their old shape.
+      allowStructural: desired.env.BRAIN_AGENT_PROFILE === LOCAL_OWNER_AGENT_PROFILE &&
+        sameStringMap(actual.env, desired.env),
+    });
   const installerNode = recognizedInstallerNodeCommand(
     actual?.command,
     desired.command,
@@ -24439,6 +24400,7 @@ function reconcileClaudeRegistration(desired, options) {
 
 function reconcileClaudeRegistrationFrom(before, desired, options) {
   const runner = options.runCommand;
+  const command = options.claudeCommand;
   if (!before.entry && options.existingOnly) return { status: "skipped" };
   if (before.entry && mcpRegistrationIsExact(before.entry, desired)) return { status: "verified" };
   if (before.entry && !mcpRegistrationIsInstallerOwned(before.entry, desired)) {
@@ -24455,14 +24417,14 @@ function reconcileClaudeRegistrationFrom(before, desired, options) {
   try {
     if (before.entry) {
       neutralizeClaudeLegacyKey(desired, before);
-      runAgentCli(runner, options.environment, "claude", [
+      runAgentCli(runner, options.environment, command, [
         "mcp", "remove", "--scope", "user", desired.name,
       ]);
       const removed = readClaudeRegistration(desired, options);
       if (removed.entry) return failedAgentReconciliation("remove-failed", rollbackSnapshot);
     }
 
-    runAgentCli(runner, options.environment, "claude", claudeAddArgs(desired));
+    runAgentCli(runner, options.environment, command, claudeAddArgs(desired));
     let after = readClaudeRegistration(desired, options);
     if (mcpRegistrationIsExact(after.entry, desired)) {
       return { status: before.entry ? "updated" : "added" };
@@ -24471,13 +24433,13 @@ function reconcileClaudeRegistrationFrom(before, desired, options) {
     // A second secret-free CLI path recovers from a version-specific add parser
     // failure. Never reconstruct a removed legacy entry containing a literal key.
     if (after.entry && mcpRegistrationIsInstallerOwned(after.entry, desired)) {
-      runAgentCli(runner, options.environment, "claude", [
+      runAgentCli(runner, options.environment, command, [
         "mcp", "remove", "--scope", "user", desired.name,
       ]);
       after = readClaudeRegistration(desired, options);
     }
     if (!after.entry) {
-      runAgentCli(runner, options.environment, "claude", claudeAddArgs(desired, { json: true }));
+      runAgentCli(runner, options.environment, command, claudeAddArgs(desired, { json: true }));
       after = readClaudeRegistration(desired, options);
       if (mcpRegistrationIsExact(after.entry, desired)) {
         return { status: before.entry ? "updated" : "added" };
@@ -24487,7 +24449,7 @@ function reconcileClaudeRegistrationFrom(before, desired, options) {
     // If a partial installer-owned entry was created, remove only that entry.
     // An unrelated concurrent replacement is preserved untouched.
     if (after.entry && mcpRegistrationIsInstallerOwned(after.entry, desired)) {
-      runAgentCli(runner, options.environment, "claude", [
+      runAgentCli(runner, options.environment, command, [
         "mcp", "remove", "--scope", "user", desired.name,
       ]);
     }
@@ -24741,8 +24703,12 @@ export async function wireAgents(m, manifestPath, options = {}) {
   const skipped = [];
   const preserved = [];
   const name = m?.client?.slug || "brain";
-  const claudeInstalled = claudeSelected &&
-    runAgentCli(runner, environment, "claude", ["--version"]).ok;
+  const claudeCommand = claudeSelected ? discoverClaudeMcpCommand({
+    environment,
+    platform: options.platform ?? process.platform,
+    probe: (command) => runAgentCli(runner, environment, command, ["--version"]),
+  }) : null;
+  const claudeInstalled = Boolean(claudeCommand);
   const codexPresent = codexSelected && codexClientIsPresent(environment, options);
   const codexInstalled = codexPresent && runAgentCli(runner, environment, "codex", ["--version"]).ok;
 
@@ -24879,6 +24845,7 @@ export async function wireAgents(m, manifestPath, options = {}) {
   }
   const reconcileOptions = {
     environment,
+    claudeCommand,
     existingOnly,
     rotationOnly,
     ownerAssistantMigrationOnly,
@@ -27154,14 +27121,20 @@ function cloneManifest(value) {
 
 /** Manage append-only landing feeds and the older one-folder watched lane. */
 export async function cmdFolder(manifestPath, argv = process.argv.slice(4), options = {}) {
-  const usage = "usage: brain folder <manifest> add --path <absolute> --source <name>|create-feeds|off|status";
+  const usage = "usage: brain folder <manifest> add --path <absolute> --source <name>|remove --source <name>|create-feeds|off|status";
   if (!manifestPath || !Array.isArray(argv) || !argv.length ||
-      !["add", "create-feeds", "off", "status"].includes(argv[0])) {
+      !["add", "remove", "create-feeds", "off", "status"].includes(argv[0])) {
     die(renderCliCommands(usage));
   }
   const action = argv[0];
   if (["create-feeds", "off", "status"].includes(action) && argv.length !== 1) die(renderCliCommands(usage));
   let addFlags = null;
+  let removeFlags = null;
+  if (action === "remove") {
+    removeFlags = parseFlags(argv.slice(1));
+    assertKnownFlags(removeFlags, ["source"], "brain folder remove");
+    if (argv.length !== 3 || typeof removeFlags.source !== "string") die(renderCliCommands(usage));
+  }
   if (action === "add") {
     addFlags = parseFlags(argv.slice(1));
     assertKnownFlags(addFlags, ["path", "source"], "brain folder add");
@@ -27169,6 +27142,30 @@ export async function cmdFolder(manifestPath, argv = process.argv.slice(4), opti
       die(renderCliCommands(usage));
     }
   }
+  if (action === "status") return runFolderAction(manifestPath, action, addFlags, removeFlags, options);
+  const lockTask = options.withBrainLifecycleLock ?? withBrainLifecycleLock;
+  let entered = false;
+  try {
+    return await lockTask({
+      manifestPath,
+      operation: "folder",
+      ...(options.lifecycleLockOptions || {}),
+    }, (lease) => {
+      entered = true;
+      return runFolderAction(manifestPath, action, addFlags, removeFlags, options, lease);
+    });
+  } catch (error) {
+    if (!entered && error?.code === "brain_lifecycle_busy") {
+      dieInputRefused("A Brain job is running now. Wait for it to end, then run this again. Nothing changed.");
+    }
+    throw error;
+  }
+}
+
+async function runFolderAction(manifestPath, action, addFlags, removeFlags, options, lifecycleLease = null) {
+  // Order is lifecycle, then source. Hold the outer lease through readback
+  // and source release, so an old load plan cannot outlive a successful edit.
+  lifecycleLease?.assertOwned();
   const platform = options.platform ?? process.platform;
   let initialManifestBytes;
   let m;
@@ -27256,20 +27253,52 @@ export async function cmdFolder(manifestPath, argv = process.argv.slice(4), opti
       ...extra,
     },
   );
-  const writeFeedManifest = (intended, now) => (options.writeManifestAtomically ?? writeManifestAtomically)(
-    manifestPath,
-    intended,
-    {
-      platform,
-      filesystemPlatform: options.filesystemPlatform ?? process.platform,
-      now: () => now,
-      backupTag: "folder-feed",
-      includeMilliseconds: true,
-      operationLabel: "folder feed update",
-      ...(options.manifestWriteOptions || {}),
-      expectedOriginalBytes: initialManifestBytes,
-    },
-  );
+  const writeFeedManifest = (intended, now) => {
+    lifecycleLease.assertOwned();
+    const result = (options.writeManifestAtomically ?? writeManifestAtomically)(
+      manifestPath,
+      intended,
+      {
+        platform,
+        filesystemPlatform: options.filesystemPlatform ?? process.platform,
+        now: () => now,
+        backupTag: "folder-feed",
+        includeMilliseconds: true,
+        operationLabel: "folder feed update",
+        ...(options.manifestWriteOptions || {}),
+        expectedOriginalBytes: initialManifestBytes,
+      },
+    );
+    lifecycleLease.assertOwned();
+    return result;
+  };
+
+  if (action === "remove") {
+    const prepared = prepareFeedRemoval(m, assertSourceName(removeFlags.source), {
+      onDecision: options.onFeedDecision,
+    });
+    let lease;
+    try {
+      lease = (options.acquireSourceIngestLock ?? acquireSourceIngestLock)({
+        manifestPath,
+        sourceName: prepared.source,
+        ...(options.sourceIngestLockOptions || {}),
+      });
+    } catch (error) {
+      if (error instanceof SourceIngestLockError && error.code === "source_ingest_already_running") folderReaderBusy();
+      throw error;
+    }
+    try {
+      lease.assertOwned();
+      const now = options.now ? options.now() : new Date();
+      const writeResult = writeFeedManifest(prepared.manifest, now);
+      ok(`Removed feed ${prepared.source}. Documents already in your Brain stay. Nothing on disk was deleted.`);
+      info(renderCliCommands(`If daily refresh is on, rebuild its approved job with: brain daily on ${commandPath(manifestPath)}`));
+      return Object.freeze({ action, changed: true, source: prepared.source, backupPath: writeResult.backupPath });
+    } finally {
+      lease.release();
+    }
+  }
 
   if (action === "add") {
     const prepared = prepareFeed(m, addFlags.path, addFlags.source);
@@ -27426,6 +27455,7 @@ export async function cmdFolder(manifestPath, argv = process.argv.slice(4), opti
 
   let writeResult;
   try {
+    lifecycleLease.assertOwned();
     writeResult = (options.writeManifestAtomically ?? writeManifestAtomically)(
       manifestPath,
       intended,
@@ -27437,6 +27467,7 @@ export async function cmdFolder(manifestPath, argv = process.argv.slice(4), opti
         expectedOriginalBytes: initialManifestBytes,
       },
     );
+    lifecycleLease.assertOwned();
   } catch (error) {
     if (platform !== "darwin") throw error;
     const schedulerRemoved = Boolean(schedulerResult?.removed || schedulerResult?.loaded);
@@ -27732,7 +27763,7 @@ async function hydrateExistingOwnedSchedulerSnapshots(snapshots, options = {}, m
       try { validateUpdateSchedulerSnapshot(loadManifest(manifestPath).m, manifestPath, entry, options); } catch {
         requireUpdateSchedulers([schedulerUpdateRow(entry.snapshot?.jobKind || "daily", "COULD NOT MOVE",
           "recovery ownership no longer matches this manifest; keep the receipt and inspect the job",
-          updateSchedulerFix(entry.snapshot?.jobKind || "daily", manifestPath, entry.snapshot?.planPath))]);
+          updateSchedulerFix(entry.snapshot?.jobKind || "daily", manifestPath, entry.snapshot?.planPath, entry.snapshot?.path))]);
       }
       hydrated.push(entry);
       continue;
@@ -27917,6 +27948,11 @@ export function dailyFreshnessRows(plan, inventory, schedule = null) {
     const zoom = receiptRows.length === 1 ? receiptRows[0]?.receipt?.zoom : null;
     const measuredCount = (field) => latestRuns.every((run) => Number.isSafeInteger(run?.[field]))
       ? latestRuns.reduce((sum, run) => sum + run[field], 0) : null;
+    // Measured coverage survives failed or unfinished runs. Only the separate
+    // check timestamps can authorize freshness or a successful run claim.
+    const withheldAggregate = mergeProviderWithheldReasons(latestRuns
+      .filter((run) => providerSetAsideOwnerCopy(run))
+      .map(run => run.withheld_reasons));
     const folderReason = receiptRows.length > 0 && receiptRows.every(row =>
       row?.kind === "upload" && row?.freshness?.state === "manual" && row?.freshness?.reason)
       ? receiptRows.map(row => row.freshness.reason).join("; ") : null;
@@ -27952,6 +27988,7 @@ export function dailyFreshnessRows(plan, inventory, schedule = null) {
       last_run_outcome: lastRunOutcome,
       docs_refused: measuredCount("docs_refused"),
       docs_withheld: measuredCount("docs_withheld"),
+      ...(withheldAggregate ? { withheld_reasons: withheldAggregate.reasons } : {}),
       last_withheld_count: receiptRows.reduce((sum, row) => sum + (row?.receipt?.last_withheld?.count || 0), 0),
       last_withheld_at: receiptRows.map(row => row?.receipt?.last_withheld?.at).filter(Boolean).sort().at(-1) || null,
       docs_failed: measuredCount("docs_failed"),
@@ -27970,11 +28007,17 @@ export function dailyFreshnessRows(plan, inventory, schedule = null) {
 
 function renderDailyFreshnessRows(rows, log = console.log) {
   for (const row of rows) {
+    const setAsideCopy = providerSetAsideOwnerCopy(row) ||
+      (Number.isSafeInteger(row.docs_withheld) && row.docs_withheld > 0
+        ? `${row.docs_withheld} item(s) withheld by design` : null);
+    const showRun = ["ok", "checked", "stale"].includes(row.current_state) && row.last_check_at;
     log(`${row.source} | ${row.current_state} | ${row.last_successful_run_at || "never"} | ${row.next_run} | ${row.owner}` +
+      (showRun
+        ? ` | ran ${row.last_check_at}${setAsideCopy ? `; ${setAsideCopy}` : ""}` : "") +
+      (!showRun && setAsideCopy ? ` | ${setAsideCopy}` : "") +
       (row.last_run_outcome === "no_change" ? ` | checked ${row.last_check_at}; no changes` : "") +
       (row.zoom ? ` | Zoom ${row.zoom.state}; last check ${row.zoom.last_check_at || "never"}; history unproven` : "") +
-      (row.docs_withheld > 0 ? ` | ${row.docs_withheld} item(s) withheld by design`
-        : row.last_withheld_count > 0 ? ` | last withholding: ${row.last_withheld_count} item(s) on ${row.last_withheld_at}` : "") +
+      (!row.docs_withheld && row.last_withheld_count > 0 ? ` | last withholding: ${row.last_withheld_count} item(s) on ${row.last_withheld_at}` : "") +
       (!row.docs_withheld && ["partial", "refused", "empty"].includes(row.last_run_outcome)
         ? ` | ${row.last_run_outcome}; ${row.docs_refused ?? "unknown"} refused` : "") +
       (row.current_state === "held" || (row.current_state === "skipped" && row.reason === "not connected on this machine")
@@ -28513,6 +28556,7 @@ export function classifyCliCredentialBoundary(command, argv = []) {
       : "ingest-file-preview";
   }
   if (name !== "update") return name;
+  if (hasPrivateUpdateFlags(argv)) return "update-private-offer";
   if (!Array.isArray(argv) || argv.some((value) => typeof value !== "string")) {
     return "update-preview";
   }
@@ -28702,6 +28746,10 @@ export async function adoptCloudflareAuthProfile(manifestPath, options = {}) {
     warn("the Cloudflare sign-in did not confirm this install's exact account, so nothing was recorded.");
     return null;
   }
+
+  // Authentication may repair credential storage. Update must prove the key
+  // before this distinct manifest-persistence boundary, and failures propagate.
+  if (options.beforePersist) await options.beforePersist(session);
 
   // Re-read immediately before writing so this cannot overwrite a manifest
   // that changed during the ceremony, and cannot invent a second profile for
@@ -30524,6 +30572,54 @@ export function pinUpdateRuntimePackage(root = HERE) {
   return pin;
 }
 
+/** Preview has no credential acquisition capability, including implicit refresh. */
+export async function withUpdateKeyPreviewCloudflare(action, {
+  manifest, forceToken = false,
+} = {}) {
+  const accountId = manifest.infrastructure?.cloudflare?.account_id;
+  const profile = manifest.infrastructure?.cloudflare?.auth_profile;
+  const holder = cloudflareTokenSession.getStore();
+  const exactProfile = holder?.source === "wrangler-oauth" &&
+    holder.profile === profile && holder.account?.id === accountId;
+  // Pinned Wrangler's token command can refresh, persist and install through
+  // npx. Never call it from preview, even for an apparently unexpired profile.
+  const available = profile && !forceToken
+    ? (exactProfile ? holder.buffer : null)
+    : (process.env.CLOUDFLARE_API_TOKEN || holder?.buffer);
+  if (!available) {
+    const error = new Error("Preview cannot acquire or repair Cloudflare credentials. Authorize this Brain's sign-in separately.");
+    error.code = "UPDATE_PREVIEW_CLOUDFLARE_ACCESS_UNAVAILABLE";
+    throw error;
+  }
+  const buffer = Buffer.from(available);
+  try {
+    // A separate holder cannot inherit a parent's automatic renewal callback.
+    return await cloudflareTokenSession.run({ buffer, source: "update-preview" }, action);
+  } finally {
+    buffer.fill(0);
+  }
+}
+
+function updateKeyPreviewReceipt(core, key, effects) {
+  if (!key || key.status === "not_required") return core;
+  return {
+    ...core,
+    answer_key_preflight: { status: key.status, source: key.source },
+    ...(key.blocking_prerequisite ? {
+      blocking_prerequisite: key.blocking_prerequisite,
+      next_step: renderCliCommands(key.next_step),
+    } : {}),
+    ...(effects.cloudflare_credential_reads ? {
+      proof_boundary: {
+        ...core.proof_boundary,
+        credential_custody: "durable_admin_key_and_saved_cloudflare_access_read",
+        cloudflare_account_ownership: effects.cloudflare_control_requests
+          ? "worker_secret_inventory_requested" : "not_accessed",
+      },
+    } : {}),
+  };
+}
+
 /**
  * Read-only exact-package update preview. Runtime bytes are verified before
  * manifest discovery; both runtime and manifest are rechecked before the one
@@ -30652,6 +30748,26 @@ export async function cmdUpdatePreview(argv = process.argv.slice(3), options = {
       }
     }
 
+    let answerKey = null;
+    if (!responseErrorCode) {
+      answerKey = await checkUpdateAnswerKey(
+        updateAnswerManifest(manifestPin.manifest, { legacyModelSwitch: true }), {
+          workerState: inventory,
+          readSecretNames: async () => {
+            return (options.withKeyPreflightCloudflare ?? withUpdateKeyPreviewCloudflare)(async () => {
+              observedEffects.cloudflare_credential_reads = 1;
+              revalidateRuntimePackage(runtimePackagePin, "update preview key request");
+              revalidateManifest(manifestPin, "update preview key request");
+              observedEffects.cloudflare_control_requests = 1;
+              return readUpdateAnswerKeySecretNames(manifestPin.manifest, {
+                cf, ...(options.answerKeyOptions || {}),
+              });
+            }, { manifestPath: manifestPin.target, manifest: manifestPin.manifest });
+          },
+        },
+      );
+    }
+
     // The authenticated read is evidence only if the exact candidate runtime
     // and installed manifest are still the identities checked before it. This
     // postflight also runs after an HTTP or bounded-body refusal, so crossing
@@ -30663,6 +30779,13 @@ export async function cmdUpdatePreview(argv = process.argv.slice(3), options = {
     revalidateRuntimePackage(runtimePackagePin, "update runtime live receipt");
     revalidateManifest(manifestPin, "update preview live receipt");
     if (responseErrorCode) throw new preview.UpdatePreviewError(responseErrorCode);
+    if (answerKey && !["present", "not_required"].includes(answerKey.status)) {
+      const code = answerKey.status === "missing"
+        ? "UPDATE_PREVIEW_ANTHROPIC_KEY_MISSING" : "UPDATE_PREVIEW_ANTHROPIC_KEY_UNVERIFIED";
+      throw new JsonFatal(updateKeyPreviewReceipt(
+        preview.createUpdatePreviewFailureReceipt(code, observedEffects), answerKey, observedEffects,
+      ));
+    }
     const legacyPre047Shape = preview.isLegacyPre047Version(local.recordedVersion) &&
       !Object.hasOwn(inventory, "version") &&
       !Object.hasOwn(inventory, "vector_drain_mode");
@@ -30695,9 +30818,9 @@ export async function cmdUpdatePreview(argv = process.argv.slice(3), options = {
         runtimeProof: finalRuntime,
         deployedObservation,
       });
-      const receipt = preview.createLegacyV046UpdatePreviewReceipt(
-        observation,
-        observedEffects,
+      const receipt = updateKeyPreviewReceipt(
+        preview.createLegacyV046UpdatePreviewReceipt(observation, observedEffects),
+        answerKey, observedEffects,
       );
       throw new JsonFatal(receipt);
     }
@@ -30718,8 +30841,9 @@ export async function cmdUpdatePreview(argv = process.argv.slice(3), options = {
       ? preview.createUpdatePreviewProjectionFailureReceipt(plan, observedEffects)
       : preview.createUpdatePreviewSuccessReceipt(plan, observedEffects);
     const modelSwitch = legacyModelSwitchFor(manifestPin.manifest);
+    const checkedReceipt = updateKeyPreviewReceipt(coreReceipt, answerKey, observedEffects);
     const receipt = modelSwitch
-      ? { ...coreReceipt, planned_changes: [legacyModelSwitchMessage(modelSwitch)] } : coreReceipt;
+      ? { ...checkedReceipt, planned_changes: [legacyModelSwitchMessage(modelSwitch)] } : checkedReceipt;
     if (projectionFailed) throw new JsonFatal(receipt);
     (options.write ?? console.log)(JSON.stringify(receipt, null, 2));
     return receipt;
@@ -30736,9 +30860,27 @@ export function dispatchUpdateCli(argv = process.argv.slice(3), options = {}) {
     (options.write ?? console.log)(renderCliCommands(
       "Usage: brain update [manifest]\n\n" +
       "Updates the installed Brain, resumes safely if interrupted, and verifies it before finishing.\n" +
-      "Run it with no options. The manifest may be omitted when this computer remembers the Brain."
+      "Run it with no options. The manifest may be omitted when this computer remembers the Brain.\n\n" +
+      "brain update [manifest] --private-offer [--private-offer-file <new-offer.json>]\n" +
+      "  Check the official private offer, show its reason and expiry, and stop.\n" +
+      "brain update [manifest] --private-package <package.tgz> --private-offer-file <offer.json>\n" +
+      "  Recheck the official offer and exact package, then run the normal update."
     ));
     return { help: true };
+  }
+  if (hasPrivateUpdateFlags(argv)) {
+    return Promise.resolve().then(() => runPrivateUpdate(parsePrivateUpdateArgv(argv), {
+      discoverInstalledManifest,
+      pinManifest: pinUpdateManifest,
+      revalidateManifest: revalidateUpdateManifest,
+      ...(options.privateOfferOptions || {}),
+    })).catch((error) => {
+      if (!(error instanceof PrivateOfferError)) throw error;
+      const refusal = new Fatal(error.message);
+      refusal.code = error.code;
+      refusal.supportCode = "UPGRADE_FAILED";
+      throw refusal;
+    });
   }
   const allowedFlags = new Set([
     "--adopt-cloudflare-profile", "--force", "--preview", "--json", "--expect-runtime-sha256",
@@ -31473,13 +31615,28 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         "Run brain update <full path to brain.manifest.json> once; future updates will work from any folder."
     );
   }
+  // The parent verified this binding before package installation. Check under
+  // the lifecycle lock, before recovery, backlog credentials, or auth adoption.
+  let privatePin = null;
+  if (process.env[PRIVATE_UPDATE_BINDING_ENV] !== undefined) {
+    try {
+      privatePin = pinUpdateManifest(installed.path);
+      assertPrivateUpdateBinding(privatePin, JSON.parse(process.env[PRIVATE_UPDATE_BINDING_ENV]));
+      installed = { ...installed, path: privatePin.target };
+    } catch {
+      const refusal = new Fatal(new PrivateOfferError("PRIVATE_OFFER_BINDING").message);
+      refusal.code = "PRIVATE_OFFER_BINDING";
+      refusal.supportCode = "UPGRADE_FAILED";
+      throw refusal;
+    }
+  }
   if ((options.answerSetupNeedsRecovery ?? answerSetupNeedsRecovery)(installed.path)) {
     die(HALF_RUN(installed.path));
   }
-  const installedManifest = loadManifest(installed.path).m;
+  const keyPreflightPin = pinUpdateManifest(installed.path);
+  const installedManifest = keyPreflightPin.manifest;
   const modelSwitch = legacyModelSwitchFor(installedManifest);
   assertReviewedAnswerModels(updateAnswerManifest(installedManifest, { legacyModelSwitch: true }), { manifestPath: installed.path });
-  if (modelSwitch) say(legacyModelSwitchMessage(modelSwitch));
   const forceQueuedUpdate = options.forceQueuedUpdate === true;
   const mailTransition = microsoftMailTransition(installedManifest);
   let backlog = null;
@@ -31533,6 +31690,34 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
   }
   const interactive = options.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
   const automationToken = !interactive && Boolean(process.env.CLOUDFLARE_API_TOKEN);
+  const resultingAnswerManifest = updateAnswerManifest(installedManifest, { legacyModelSwitch: true });
+  const runControl = options.withCloudflareControl ?? withCloudflareControlCredential;
+  let keyProven = answerSetupOf(resultingAnswerManifest) === "built-in";
+  const proveKey = async (authProfile = installedManifest.infrastructure?.cloudflare?.auth_profile) => {
+    if (keyProven) return;
+    // Use real update authentication, with its consent and typed recovery.
+    // Only authentication is allowed before this gate, never schedule changes.
+    const answerKey = await runControl(async () => {
+      revalidateUpdateManifest(keyPreflightPin, "update answer key preflight");
+      return checkUpdateAnswerKey(resultingAnswerManifest, {
+        preserveCredentialFailure: true,
+        readSecretNames: () => readUpdateAnswerKeySecretNames(installedManifest, {
+          cf, ...(options.answerKeyOptions || {}),
+        }),
+      });
+    }, {
+      ...options,
+      manifestPath: keyPreflightPin.target,
+      accountId: installedManifest.infrastructure?.cloudflare?.account_id,
+      authProfile,
+      forceToken: options.forceToken === true || automationToken,
+      allowBrowserReauth: interactive, allowTokenRecovery: interactive,
+      interactive, askFn: options.askFn ?? ask,
+    });
+    revalidateUpdateManifest(keyPreflightPin, "update answer key preflight");
+    if (answerKey.status !== "present") die(`${answerKey.blocking_prerequisite}\n${answerKey.next_step}`);
+    keyProven = true;
+  };
   // An install written before the named-profile field has no saved custody, so
   // the credential wrapper below would take the token lane and, on a machine
   // with no wrangler session, no keychain copy and no real TTY, die
@@ -31541,7 +31726,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
   // BEFORE the pin, never after: pinUpdateManifest fingerprints the raw bytes
   // and every stage inside the wrapper revalidates them, so a manifest write
   // after this line would abort the very update it repairs.
-  await (options.adoptCloudflareAuthProfile ?? adoptCloudflareAuthProfile)(installed.path, {
+  const adoptedProfile = await (options.adoptCloudflareAuthProfile ?? adoptCloudflareAuthProfile)(installed.path, {
     interactive,
     // Passed through as given, not coerced: leaving it undefined is what lets
     // adoption still read BRAIN_ADOPT_CLOUDFLARE_PROFILE for itself.
@@ -31550,10 +31735,46 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
     forceToken: options.forceToken === true || automationToken,
     oauthOptions: options.oauthOptions,
     ...(options.authProfileAdoption || {}),
+    beforePersist: session => proveKey(session.profile),
   });
+  await proveKey();
+  if (modelSwitch) say(legacyModelSwitchMessage(modelSwitch));
   const pin = pinUpdateManifest(installed.path);
+  if (answerSetupOf(resultingAnswerManifest) !== "built-in") {
+    const before = structuredClone(installedManifest), after = structuredClone(pin.manifest);
+    const previous = before.infrastructure.cloudflare, adopted = after.infrastructure?.cloudflare;
+    // Only an actual adoption may add the derived profile and exact consent
+    // receipt. Existing metadata and every other field must remain identical.
+    if (!previous.auth_profile && adoptedProfile === cloudflareOAuthProfileName(cloudflareOAuthInstallIdentity(installed.path)) &&
+        adopted?.auth_profile === adoptedProfile &&
+        (interactive || adopted.auth_profile_consent === "non-interactive")) {
+      if (Object.hasOwn(previous, "auth_profile")) adopted.auth_profile = previous.auth_profile;
+      else delete adopted.auth_profile;
+      if (!interactive && adopted.auth_profile_consent === "non-interactive") {
+        if (Object.hasOwn(previous, "auth_profile_consent")) adopted.auth_profile_consent = previous.auth_profile_consent;
+        else delete adopted.auth_profile_consent;
+      }
+    }
+    if (pin.target !== keyPreflightPin.target || !isDeepStrictEqual(before, after)) {
+      die("The Brain settings changed after the Anthropic key check. Nothing was deployed. Rerun brain update.");
+    }
+  }
+  // Adoption may change profile fields, but the offer's target and starting
+  // version must survive both asynchronous preflight steps.
+  if (privatePin) {
+    try {
+      if (privateOfferTarget(pin.manifest) !== privateOfferTarget(privatePin.manifest) ||
+          pin.manifest.brain?.version !== privatePin.manifest.brain?.version) {
+        throw new PrivateOfferError("PRIVATE_OFFER_BINDING");
+      }
+    } catch {
+      const refusal = new Fatal(new PrivateOfferError("PRIVATE_OFFER_BINDING").message);
+      refusal.code = "PRIVATE_OFFER_BINDING";
+      refusal.supportCode = "UPGRADE_FAILED";
+      throw refusal;
+    }
+  }
   const binding = manifestCloudflareControlBinding(pin.target);
-  const runControl = options.withCloudflareControl ?? withCloudflareControlCredential;
   const reconcileOwnerAgents = Object.hasOwn(options, "reconcileExistingOwnerAgents")
     ? options.reconcileExistingOwnerAgents
     : (IS_MAIN ? wireAgents : null);
@@ -33982,6 +34203,7 @@ const versionRequested = VERSION_ARGUMENTS.has(cmd);
 // Keep this one set beside the actual dispatcher wrapper so tests exercise the
 // same decision the installed CLI uses.
 const WRANGLER_SESSION_EXEMPT_COMMANDS = new Set([
+  "update-private-offer",
   "content",
   "ledger",
   "quickbooks-desktop-data",
@@ -34025,7 +34247,10 @@ export function manifestHasSavedBrainDomain(manifestPath, { readFile = readFileS
 export function runCliCommandWithCredentialBoundary(command, run, options = {}) {
   if (typeof run !== "function") throw new TypeError("a CLI command function is required");
   const name = String(command || "");
-  if (WRANGLER_SESSION_EXEMPT_COMMANDS.has(name) ||
+  // A private-package child must validate its carried binding under the update
+  // lock before this outer credential lookup. Its normal control wrapper remains.
+  if ((name === "update" && process.env[PRIVATE_UPDATE_BINDING_ENV] !== undefined) ||
+      WRANGLER_SESSION_EXEMPT_COMMANDS.has(name) ||
       (WRANGLER_SESSION_EXEMPT_WITH_SAVED_DOMAIN.has(name) &&
         (options.manifestHasSavedDomain ?? manifestHasSavedBrainDomain)(options.manifestPath))) {
     return Promise.resolve().then(run);
@@ -34188,6 +34413,7 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
                                            connected OAuth provider (macOS)
     brain folder     <manifest> add --path <absolute> --source <name>
                                            add one validated append-only landing feed
+    brain folder     <manifest> remove --source <name>  stop one feed; keep documents and local files
     brain folder     <manifest> create-feeds  create two empty Brain Feeds landing folders
     brain folder     <manifest> off        turn off the watched folder without removing anything
     brain folder     <manifest> status     show watched-folder state and counts-only feed status
@@ -34205,8 +34431,8 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
   Technician only
     brain update     [manifest] --preview --expect-runtime-sha256 <sha256> --json
                                            local identity gates, then one authenticated aggregate
-                                           Brain read; no control-plane request, write, deploy,
-                                           install, browser, or update authorization
+                                           Brain read. Claude setups also read Worker secret names.
+                                           No write, deploy, install, browser, or update authorization
     brain update     [manifest] --adopt-cloudflare-profile  approve the one-time Cloudflare
                                            browser sign-in from a session with no terminal
                                            (an agent). Same as BRAIN_ADOPT_CLOUDFLARE_PROFILE=1
@@ -34224,6 +34450,7 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain schedule   <manifest> --folder   inspect (or --install/--remove) the watched folder lane
     brain schedule   <manifest> --provider <id>  inspect (or --install/--remove) that provider lane
     brain folder     <manifest> add --path <absolute> --source <name>  add one landing feed
+    brain folder     <manifest> remove --source <name>  stop one feed; keep documents and local files
     brain folder     <manifest> create-feeds  create the two standard empty landing feeds
     brain folder     <manifest> off|status turn off or inspect folders and feed status
     brain disconnect imessage <manifest>   stop live capture, flush open sessions, remove the agent

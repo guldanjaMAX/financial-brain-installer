@@ -119,11 +119,24 @@ test("merchant tokens are contiguous and category proposals and Unsorted stay ex
   assert.equal(merchant.ledger.total_minor, 10100);
   assert.doesNotMatch(merchant.answer, /Unsorted|possible (?:transfer|move)/i);
   assert.equal(merchant.answer.match(/\$\d[\d,]*\.\d{2}/g)?.length, 1, "named vendor output has one currency figure");
+  const beforeCategory = transactionReads(f);
   const category = await f.ask("How much did I spend on software/SaaS in Q3?");
-  assert.equal(category.ledger.total_minor, 10501);
+  assert.ok(transactionReads(f) > beforeCategory, "unknown category membership reached the real reader");
+  assert.equal(category.ledger.total_minor, null);
+  assert.equal(category.ledger.category_total_unconfirmed, true);
+  assert.equal(category.ledger.confirmed_category_subtotal_minor, 500);
   assert.equal(category.ledger.unsorted_minor, 99);
-  assert.match(category.answer, /bank's category \(unconfirmed\)/);
-  assert.match(category.answer, /Unsorted.*\$0\.99/);
+  assert.match(category.answer, /Transactions without a confirmed category: \$0\.99/);
+  const bucket = await f.ask("How much did I spend on Unsorted in Q3?");
+  assert.equal(bucket.ledger.total_minor, 99);
+  assert.match(bucket.answer, /Unsorted.*\$0\.99/);
+  const classified = await fixture(t);
+  classified.add("exact", "2026-09-15", 10001, "outflow", "Fixture service", "SOFTWARE", "proposed");
+  classified.add("other", "2026-09-16", 500, "outflow", "Fixture service", "SOFTWARE", "confirmed");
+  const control = await classified.ask("How much did I spend on software/SaaS in Q3?");
+  assert.ok(transactionReads(classified) > 0, "classified proposal control reached the reader");
+  assert.equal(control.ledger.total_minor, 10501);
+  assert.match(control.answer, /bank's category \(unconfirmed\)/);
   const breakdown = await f.ask("How much did I spend by category in September 2026?");
   assert.equal(breakdown.ledger.total_minor, 10600);
   assert.equal(breakdown.ledger.groups.filter(g => g.category === "software").length, 2);
@@ -334,10 +347,18 @@ test("Unsorted can be requested without silently excluding uncategorized rows", 
   const f = await fixture(t);
   f.add("unsorted", "2026-09-15", 1717);
   f.add("confirmed", "2026-09-16", 1357, "outflow", "Fixture store", "SOFTWARE", "confirmed");
-  assert.equal((await f.ask("How much did I spend on software in Q3?")).ledger.total_minor, 1357);
+  const beforeCategory = transactionReads(f);
+  const category = await f.ask("How much did I spend on software in Q3?");
+  assert.ok(transactionReads(f) > beforeCategory, "unknown topic membership reached the reader");
+  assert.equal(category.ledger.total_minor, null);
+  assert.equal(category.ledger.category_total_unconfirmed, true);
+  assert.equal(category.ledger.confirmed_category_subtotal_minor, 1357);
   const unsorted = await f.ask("How much did I spend on Unsorted in Q3?");
   assert.equal(unsorted.ledger.total_minor, 1717);
   assert.equal(unsorted.ledger.found, true);
+  f.raw("UPDATE fin_transactions SET category='travel',category_basis_state='confirmed' WHERE txn_uid='unsorted'");
+  assert.equal((await f.ask("How much did I spend on software in Q3?")).ledger.total_minor, 1357,
+    "a classified unrelated row restores the complete category control");
 });
 
 test("Think uses the existing single call site and phase two keeps the owner scope guard", async t => {

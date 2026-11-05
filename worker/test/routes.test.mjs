@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { backfillSourceFamilyIndex } from "../src/lib/source-family-index.js";
 import worker from "../src/index.js";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -3103,6 +3105,18 @@ const labelProjectionParityRows = [
       },
     },
   };
+  // Run the existing SQL/label fixtures through the completed index as well.
+  database.exec(readFileSync(new URL("../../migrations/d1/0059_document_family_index.sql", import.meta.url), "utf8"));
+  env.DB.batch = async (statements) => {
+    database.exec("BEGIN");
+    try {
+      const results = [];
+      for (const statement of statements) results.push(await statement.all());
+      database.exec("COMMIT");
+      return results;
+    } catch (error) { database.exec("ROLLBACK"); throw error; }
+  };
+  check("existing inventory fixtures complete the indexed backfill", (await backfillSourceFamilyIndex(env)).complete);
   const preRewritePage = (source, cursor = "", limit = 1) => {
     const results = database.prepare(
       `SELECT family_doc_uid
@@ -3370,15 +3384,18 @@ const labelProjectionParityRows = [
       splitLabel.family_details?.[0]?.name === "Owner annual report.pdf",
     JSON.stringify(splitLabel));
 
-  const sql = seen.sql.find((value) => /SELECT family_doc_uid/.test(value)) || "";
+  const inventoryQueryIndex = seen.sql.findIndex((value) => /SELECT family_doc_uid/.test(value));
+  const sql = seen.sql[inventoryQueryIndex] || "";
+  check("D1 checks the family index receipt before choosing the legacy query",
+    inventoryQueryIndex > 0 && /SELECT cursor, complete FROM document_family_index_state/.test(seen.sql[inventoryQueryIndex - 1]));
   check("D1 collapses structural and declared families before the page limit",
     /GROUP BY family_doc_uid/.test(sql) && /part_of/.test(sql) && /family_of/.test(sql) && /deleted_at IS NULL/.test(sql), sql);
   check("D1 filters by the derived family namespace rather than the physical row source",
     /substr\(family_doc_uid, 1, length\(\?1\) \+ 1\) = \?1 \|\| ':'/.test(sql) &&
       !/WHERE source = \?1/.test(sql), sql);
   check("D1 applies the lexical cursor before ordering and fetching one lookahead row",
-    /family_doc_uid > \?2/.test(sql) && /ORDER BY family_doc_uid ASC/.test(sql) && seen.binds[0]?.[2] === 3,
-    `${sql} ${JSON.stringify(seen.binds[0])}`);
+    /family_doc_uid > \?2/.test(sql) && /ORDER BY family_doc_uid ASC/.test(sql) && seen.binds[inventoryQueryIndex]?.[2] === 3,
+    `${sql} ${JSON.stringify(seen.binds[inventoryQueryIndex])}`);
 
   const globalResponse = await call(env, "/api/admin/brain/source-families?limit=1000");
   const global = await globalResponse.json();
@@ -5145,10 +5162,12 @@ async function postConfirmedSourceForget(env, source = "meeting") {
     everyMutationPaused, JSON.stringify(pauseDetails));
 
   let readOnlyD1Calls = 0;
+  const readOnlySql = [];
   const readOnlyEnv = {
     ...env,
     DB: {
-      prepare() {
+      prepare(sql) {
+        readOnlySql.push(sql);
         const statement = {
           bind: () => statement,
           all: async () => { readOnlyD1Calls++; return { results: [] }; },
@@ -5161,7 +5180,10 @@ async function postConfirmedSourceForget(env, source = "meeting") {
     source: "drive",
   });
   check("paused mode keeps authenticated read-only source-family inventory available",
-    sourceFamilies.status === 200 && readOnlyD1Calls === 1,
+    sourceFamilies.status === 200 && readOnlyD1Calls === 2 &&
+      readOnlySql.length === 2 && readOnlySql.every(sql => /^SELECT\b/.test(sql.trim())) &&
+      readOnlySql.some(sql => /FROM document_family_index_state/.test(sql)) &&
+      readOnlySql.some(sql => /FROM documents/.test(sql)),
     `${sourceFamilies.status}/${readOnlyD1Calls}`);
 
   let scheduledPromise = null;

@@ -69,6 +69,8 @@ async function ingestDecision(m, manifestPath, path, source, options = {}) {
   };
   let error = null;
   try {
+    // Direct feed readers revalidate the saved declaration under their lease.
+    writeFileSync(manifestPath, `${JSON.stringify(m)}\n`);
     await cmdIngestLocal(m, manifestPath, {
       path,
       source,

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import { installLifecycleLockTripwire } from "./fixtures/lifecycle-lock-tripwire.mjs";
 import { buildConfiguredDailyPlan, cmdIngestCalendar, cmdIngestProvider, cmdLoad, cmdSources, cmdDaily, dailyFreshnessRows, splitStatements } from "../brain.mjs";
 import { runDailyRefresh, runDailyRefreshCli } from "../operations/daily-refresh-run.mjs";
 import worker from "../worker/src/index.js";
@@ -24,6 +25,8 @@ function fixture(t, { throughMigration = Infinity } = {}) {
   t.mock.timers.enable({ apis: ["Date"], now: Date.parse(NOW) });
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "daily-evidence-")));
   t.after(() => rmSync(root, { recursive: true, force: true }));
+  const guard = installLifecycleLockTripwire(root);
+  t.after(() => { guard.restore(); assert.equal(guard.blocked, 0, "lifecycle writes stayed in the fixture"); });
   const keyPath = join(root, ".brain-admin-key");
   writeFileSync(keyPath, "synthetic-owner-proof", { mode: 0o600 });
   const db = new DatabaseSync(":memory:");
@@ -113,7 +116,8 @@ async function dailyCase(t, { mutate = x => x, inventoryMutation = x => x, runMu
     cmdLoad: async (path, options) => {
       f.seen.runs++;
       if (skip) return { status: "skipped" };
-      return runMutation(await cmdLoad(path, { ...options, commands, probes, log() {} }));
+      return runMutation(await cmdLoad(path, { ...options, commands, probes, log() {},
+        lifecycleLockOptions: { machineLockRoot: join(f.root, "lifecycle-locks") } }));
     },
   };
   // Keep synthetic fixture values and connector chatter out of test output.
@@ -869,6 +873,7 @@ test("permanent provider refusals remain visible through Worker receipts, source
     readFreshness: async () => Object.fromEntries((await sourceInventory(f.env, { now: Date.parse(NOW) })).rows
       .map(row => [row.name, { kind: row.kind, ...row.receipt }])),
     runSource: async () => cmdLoad(manifestPath, { only: "microsoft", allowPartialRefresh: true,
+      lifecycleLockOptions: { machineLockRoot: join(f.root, "lifecycle-locks") },
       commands, probes: { microsoft: async () => ({ connected: true }) }, log: line => logs.push(String(line)) }),
   });
   assert.equal(sends, 1, "the daily run reached real provider delivery");
@@ -907,9 +912,8 @@ test("permanent provider refusals remain visible through Worker receipts, source
       });
       assert.equal(scheduleReads, 1, "status uses the injected native scheduler");
       assert.equal(result.sources.length, 1);
-      assert.match(lines.join("\n"), /1 item\(s\)/);
-      if (result.sources[0].docs_withheld) assert.match(lines.join("\n"), /withheld by design/);
-      else assert.match(lines.join("\n"), /last withholding/);
+      if (result.sources[0].docs_withheld) assert.match(lines.join("\n"), /ran 2026-10-10T12:00:00.000Z; 1 item set aside \(1 item held by the credential safety check for review\)/);
+      else assert.match(lines.join("\n"), /last withholding: 1 item\(s\) on 2026-10-10T12:00:00.000Z/);
     }
   };
   await readDailyStatus(inventory);
@@ -1005,6 +1009,8 @@ for (const kind of ["microsoft", "slack", "notion", "dropbox", "hubspot", "quick
     await f.postReceipt(base);
     const read = async () => (await sourceInventory(f.env, { now: Date.parse(NOW) })).rows[0];
     assert.equal(providerWithheldCheckAt(kind, (await read()).receipt.latest_run), NOW, "positive control reaches real storage");
+    assert.equal((await read()).receipt.last_ingest_receipt_at, NOW, "every supported provider advances its completed read");
+    assert.equal((await read()).receipt.last_successful_run_at, null, "a completed read does not invent accepted work");
     for (const mutation of [
       { refusal_reason: 'provider_withheld_v1:{"future_policy":1}' },
       { refusal_reason: 'provider_withheld_v1:{"credential_detected":1,"content":"synthetic"}' },

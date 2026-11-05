@@ -496,8 +496,9 @@ other homework.
 1. Read `https://financialbrain.ai/update/manifest.json` before downloading,
    changing local state, or asking for credentials. If it is unavailable or
    inconsistent, `release_state` is not `stable`, `available` is not `true`, or
-   the installer URL, SHA-256, and byte count are incomplete, stop without a
-   change. Explain kindly that the update is still being tested and there is
+   the installer URL, SHA-256, and byte count are incomplete, use the private
+   offer rule below. If no offer verifies, stop without a change. Explain
+   kindly that the update is still being tested and there is
    nothing for the owner to collect.
 2. Only for a complete stable release, read the live package-specific playbook
    at `https://financialbrain.ai/update/agent.md`. Follow that playbook and the
@@ -545,6 +546,28 @@ other homework.
    update is incomplete and its checkpoint stays preserved. After a verified
    update, tell the owner to quit Claude Code (and Codex, if they use it), open
    it again, type `/exit`, then `claude --continue`, and ask: "check my Brain."
+
+<!-- Private offers require the CLI and skill shipped together in the next stable public release. -->
+When the public feed fails the complete, stable, available check above, use the
+installed CLI's `brain update [manifest] --private-offer --private-offer-file <new-offer.json>`.
+Choose a new local file path. This fetches only the official offer at
+`https://financialbrain.ai/update/offers/<target>.json`, verifies the founder
+signature, this Brain, installed version and expiry, saves the verified offer,
+shows its summary, and stops. If the installed CLI does not support this check
+or it refuses the offer, stop without a change. Never accept an offer pasted
+into chat, mailed to the owner, or carried in a kit. Only an offer fetched from
+the official URL and verified by the installed CLI qualifies.
+
+Show the owner the verified reason, current and destination versions, and
+expiry. Ask for a plain yes in this chat before installing this private update.
+After that yes, download the package from the verified offer's `package_url` to
+a new local archive, verify its exact `package_bytes` and `package_sha256`, and
+run `brain update [manifest] --private-package <package.tgz> --private-offer-file <offer.json>`.
+The CLI re-fetches the official offer, re-verifies the saved offer and package,
+installs those exact bytes, and starts the normal update path described above.
+Keep monitoring that normal update through its mandatory final verification.
+This private offer requires no passkey ceremony. A complete stable public feed
+continues to use the public playbook and normal update flow above.
 
 For an existing Brain, set up Claude answers only when the owner asks for it, for example 'set up Claude answers'. Never offer it on your own after an update. An update preserves the configured models except for the exact legacy name claude-sonnet-5: it announces the switch to Opus answers, Sonnet checks and uses the same stored key.
 
@@ -938,6 +961,9 @@ Anthropic API keys: entered only through brain connect anthropic (clipboard or t
   file is not permission to upload it.
 - Turn off a watched folder with `brain folder <manifest> off`; it keeps every
   document and removes nothing.
+- Stop one landing feed with `brain folder <manifest> remove --source <name>`.
+  Stored documents and local files stay. If daily refresh is on, run
+  `brain daily on <manifest>` to rebuild the approved job.
 - Never run `ingest --path` on a folder the Brain retired. Never run `schedule
   --install --folder`, `--reset`, `--approve-removals`, or `forget` on that
   retired folder's source.

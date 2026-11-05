@@ -8,7 +8,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import * as sync from "../operations/curated-dual-sync.mjs";
 import * as scheduler from "../operations/curated-sync-scheduler.mjs";
 import { validateAdminKeyFileDestination } from "../operations/admin-key-file.mjs";
@@ -524,7 +524,7 @@ test("F2 real reinstall CLI bounds filesystem and child-process errors", { skip:
     const command = fault === "lock"
       ? [fileURLToPath(new URL("../operations/curated-dual-sync.mjs", import.meta.url)), "--plan", f.path, "--dry-run"]
       : [fileURLToPath(new URL("../operations/curated-sync-scheduler.mjs", import.meta.url)), "reinstall", f.path];
-    const cli = spawnSync(process.execPath, ["--import", hookPath, ...command], {
+    const cli = spawnSync(process.execPath, ["--import", pathToFileURL(hookPath).href, ...command], {
       encoding: "utf8", env: { HOME: home, TMPDIR: tmpdir(), PATH: "/usr/bin:/bin",
         BRAIN_NO_WRANGLER_LOGIN: "1", COUNTERS: countersPath, FAULT: fault },
     });

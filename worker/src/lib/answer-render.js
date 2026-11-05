@@ -22,7 +22,7 @@
 
 import {
   absenceUnproven, ANSWER_WITHHELD, COVERAGE_INCOMPLETE, coverageIncompleteNotice,
-  REFUSAL_NEXT_ACTIONS, refusalNextAction, unavailableNotice,
+  REFUSAL_NEXT_ACTIONS, refusalNextAction, SEARCH_UNAVAILABLE, unavailableNotice,
 } from "./retrieval-status.js";
 
 // The fallback when the worker sent no notice of its own — an older worker, or
@@ -104,12 +104,29 @@ export function answerReasonText(r) {
 // Keep account labels, numeric citations and coverage facts byte-for-byte.
 export function separateOffers(text = "") {
   const offers = [];
-  const facts = text.replace(/(?:^|(?<=[.!?])\s+)(Want[^?\n]*\?|Which would help most\?|If you tell me[^.\n]*\.)/g,
+  const facts = text.replace(/(?:^[ \t]*|(?<=[.!?])\s+)(Want[^?\n]*\?|Which would help most\?|If you tell me[^.\n]*\.)/gm,
     (_, offer) => { offers.push(offer); return ""; }).trim();
   return { facts, offers };
 }
 
+// Full CLI and MCP responses add sources and trust notes after answerText.
+// Finalize once after those facts, retaining only the chosen invitation.
+export function finalAnswerText(facts, selectedOffer) {
+  return [facts.trim(), selectedOffer].filter(Boolean).join("\n");
+}
+
 export function answerText(r) {
+  const text = answerBodyText(r);
+  // The surface renders the reviewed Next action separately. It is already
+  // the repair invitation, so another question here would duplicate it.
+  if (nextActionText(r)) return separateOffers(text).facts;
+  // Supported answers were composed with their qualifications below.
+  if (r.answer && !/^The documents do not answer/i.test(r.answer)) return text;
+  const composed = separateOffers(text);
+  return finalAnswerText(composed.facts, composed.offers.at(-1));
+}
+
+function answerBodyText(r) {
   if (r.status === COVERAGE_INCOMPLETE) {
     const notice = r.notice || GENERIC_COVERAGE_NOTICE;
     return moneyExplanation(r) ? notice.replaceAll("Source coverage", "The connected records") : notice;
@@ -118,19 +135,25 @@ export function answerText(r) {
   if (r.answer_error && !r.answer) return safeAnswerErrorText(r.answer_error);
   if (r.answer && !/^The documents do not answer/i.test(r.answer)) {
     const explanation = moneyExplanation(r);
-    if (r.ledger || r.clarification) {
-      const composed = separateOffers(r.answer);
-      const extra = separateOffers(explanation).facts.split("\n")
-        .filter(line => line && !composed.facts.includes(line)).join("\n");
-      // A composed ledger answer already chose its invitation. Missing gap
-      // facts belong before it; gap invitations must never be restored here.
-      return extra ? [composed.facts, extra, ...composed.offers].filter(Boolean).join("\n") : r.answer;
-    }
-    const extra = explanation.split("\n").filter(line => line && !r.answer.includes(line)).join("\n");
-    return extra ? `${r.answer}\n\n${extra}` : r.answer;
+    const composed = separateOffers(r.answer);
+    const gap = separateOffers(explanation);
+    const extra = gap.facts.split("\n")
+      .filter(line => line && !composed.facts.includes(line)).join("\n");
+    // Ledger composition already selected its offer. Document gaps can carry
+    // a later repair choice; keep every factual qualification before it.
+    const offer = r.ledger || r.clarification ? composed.offers[0]
+      : gap.offers.at(-1) || composed.offers.at(-1) || "Want to check the original record?";
+    const facts = [composed.facts, extra].filter(Boolean).join(r.ledger || r.clarification ? "\n" : "\n\n");
+    return [facts, offer].filter(Boolean).join("\n");
   }
   const explanation = moneyExplanation(r);
-  if (explanation) return explanation;
+  if (explanation) {
+    const gap = separateOffers(explanation);
+    const fallback = r.gaps.some(g => g?.type === "ledger_out_of_coverage")
+      ? "Want help connecting or refreshing the bank records for those dates?"
+      : "Want help connecting or refreshing the bank account?";
+    return finalAnswerText(gap.facts, gap.offers.at(-1) || fallback);
+  }
   // A refusal is about the records checked, even when retrieval was healthy.
   // Missing result metadata must not become a fabricated zero count.
   if (!Array.isArray(r.results)) return "I can help narrow the search, but the records checked did not support an answer. Want to try a more specific detail?";
@@ -204,6 +227,8 @@ export function nextActionText(r) {
     return refusalNextAction({ status: ANSWER_WITHHELD, withheldGate: "unsupported" });
   }
   if (r.status) return refusalNextAction({ status: r.status });
+  // Older Workers can omit status and result metadata while search is down.
+  if (unavailableSearch(r)) return refusalNextAction({ status: SEARCH_UNAVAILABLE });
   if (r.evidence_gate?.supported === false && Array.isArray(r.results) && r.results.length) {
     return refusalNextAction({ status: ANSWER_WITHHELD, withheldGate: "unsupported" });
   }

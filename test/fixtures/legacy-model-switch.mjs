@@ -44,6 +44,8 @@ export function previewOptions(f, write) {
     validateManifest: () => ({ recordedVersion: "0.4.17", credential_reference: "adjacent_protected_file" }),
     revalidateRuntimePackage: () => {},
     resolveAdminKey: () => ["fixture", "admin"].join("-"),
+    withKeyPreflightCloudflare: async action => action(),
+    answerKeyOptions: { cf: async () => [{ name: "ANTHROPIC_API_KEY", type: "secret_text" }] },
     request: async () => Response.json(readyInventory("0.4.17")),
     write,
   };

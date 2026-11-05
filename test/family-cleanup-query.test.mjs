@@ -1,3 +1,4 @@
+import { backfillSourceFamilyIndex } from "../worker/src/lib/source-family-index.js";
 /**
  * Regression probe for split-document cleanup on a large corpus.
  *
@@ -67,7 +68,7 @@ const prepare = (sql) => {
   const shape = (params = []) => ({
     bind: (...next) => shape(next),
     all: async () => {
-      if (/NULL AS family_of|json_extract\(meta,'\$\.family_of'\) AS family_of/i.test(sql)) {
+      if (/NULL AS family_of|json_extract\(meta,'\$\.family_of'\) AS family_of|declared_family_uid AS family_of/i.test(sql)) {
         reads.push({ sql, params });
       }
       return { results: db.prepare(sql).all(...params) };
@@ -117,6 +118,21 @@ assert.match(
   `structural family lookup must use the document identity index:\n${detail}`,
 );
 
+// Prepare outside the dry-run adapter, whose mutation refusal remains active.
+const preparationEnv = { DB: { prepare, batch: async statements => {
+  db.exec("BEGIN");
+  try {
+    const results = statements.map(s => ({ success: true, results: db.prepare(s._sql).all(...s._params) }));
+    db.exec("COMMIT"); return results;
+  } catch (error) { db.exec("ROLLBACK"); throw error; }
+} } };
+let prepared = 0;
+for (;;) {
+  const receipt = await backfillSourceFamilyIndex(preparationEnv);
+  prepared += receipt.advanced;
+  if (receipt.complete) break;
+}
+assert.ok(prepared > 0, "the existing fixture exercised preparation");
 const declaredReceipt = await forgetFamilies(env, {
   families: [{
     base_doc_uid: declaredBase,
@@ -133,3 +149,7 @@ assert.deepEqual(
 );
 
 console.log("family cleanup query: structural families are indexed and declared families keep their scope");
+
+const declaredPlan = db.prepare(`EXPLAIN QUERY PLAN ${reads[1].sql}`).all(...reads[1].params).map(r => r.detail).join("\n");
+assert.doesNotMatch(declaredPlan, /SCAN documents|SCAN document_family_index/i);
+assert.match(declaredPlan, /SEARCH.*idx_document_family_declared/i);

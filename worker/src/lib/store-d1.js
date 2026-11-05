@@ -1,3 +1,4 @@
+import { sourceFamilyIndexReady } from "./source-family-index.js";
 import { collapseTitleFamilies, domainExpansion, queryNames, containsName, metadataNameVariant } from './retrieval-expansion.js';
 import { measureQueryStage, startQueryStage } from "./query-timing.js";
 /**
@@ -52,7 +53,7 @@ import {
   PUBLIC_INSTALL_SMOKE_TITLE,
   publicInstallSmokeContentHash,
 } from "./install-smoke.js";
-import { parseProviderWithheldReason, parseStoredSourceFailureEvidence, providerNoChangeCheckAt, providerWithheldCheckAt, sourceReceiptOwnerMessage } from "./source-receipt.js";
+import { parseProviderWithheldReason, parseStoredSourceFailureEvidence, providerNoChangeCheckAt, providerWithheldCheckAt, providerSetAsideOwnerCopy, sourceReceiptOwnerMessage } from "./source-receipt.js";
 import { sourceCoverageFromEvidence } from "./source-coverage.js";
 import { zoomSourceStatus } from "./zoom-deliveries.js";
 import { scopeIsUnrestricted } from "./grants.js";
@@ -4304,6 +4305,14 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
       }
       else if (!unregistered && !Number.isFinite(last)) state = "never_synced";
       else if (!unregistered && (now - last) / 1000 > expected * 1.5) state = "stale";
+      const latestRun = latestRuns.get(s.name) || null;
+      const withheld = parseProviderWithheldReason(latestRun?.refusal_reason, s.kind, latestRun?.docs_refused);
+      if (!unregistered && !retirement.retired && !operational.state && s.status === "ready" &&
+          latestRun && Number(latestRun.walk_complete) === 1 && !latestRun.error && latestRun.docs_failed === 0 &&
+          Number.isFinite(last) && timestampMs(latestRun.finished_at) === last) {
+        const setAsideCopy = withheld && providerSetAsideOwnerCopy({ docs_withheld: withheld.count, withheld_reasons: withheld.reasons });
+        reason = `ran ${new Date(last).toISOString()}${setAsideCopy ? `; ${setAsideCopy}` : ""}`;
+      }
       const report = {
         name: s.name, kind: s.kind, state,
         // Null is a real, owner-only unassigned state for registered sources.
@@ -4327,7 +4336,6 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
         reason,
         automatable,
       };
-      const latestRun = latestRuns.get(s.name) || null;
       return {
         ...report,
         last_failure: latestRun?.error
@@ -5125,7 +5133,7 @@ export async function sourceInventorySlice(env, {
     if (registered && !retirement.retired && row.status === "ready" && withheldCheckAt) {
       const age = now - Date.parse(withheldCheckAt);
       state = age >= 0 && age <= (expectedSeconds || 86400) * 1000 * 1.5 ? "ok" : "stale";
-      reason = `${withheld.count} item(s) withheld by design`;
+      reason = `ran ${withheldCheckAt}; ${providerSetAsideOwnerCopy(latestRun)}`;
     }
     const lastFailure = latestRun?.outcome === "failed"
       ? parseStoredSourceFailureEvidence(row.run_failure_evidence, {
@@ -8025,7 +8033,20 @@ export async function listSourceFamilies(env, {
   const uidFilter = Array.isArray(uids) && uids.length
     ? ` AND family_doc_uid IN (${uids.map((_, index) => `?${index + 4}`).join(", ")})`
     : "";
-  const statement = source
+  const indexed = await sourceFamilyIndexReady(env);
+  const statement = indexed
+    ? env.DB.prepare(
+      `SELECT family_doc_uid${labelProjection}
+         FROM document_family_index
+         ${includeLabels ? "JOIN documents USING (doc_uid)" : ""}
+        WHERE live=1
+          ${source ? "AND family_doc_uid >= MAX(?1 || ':', ?2) AND family_doc_uid < ?1 || ';' AND family_doc_uid > ?2" : "AND family_doc_uid > ?1"}
+          ${source ? uidFilter : ""}
+        ${grouping}
+        ORDER BY family_doc_uid ASC
+        LIMIT ${source ? "?3" : "?2"}`
+    ).bind(...(source ? [source, cursor, limit + 1, ...(uids || [])] : [cursor, limit + 1]))
+    : source
     ? env.DB.prepare(
       `SELECT family_doc_uid${labelProjection}
          FROM (
@@ -8203,6 +8224,8 @@ export async function forgetFamilies(env, { families = [], dryRun = true } = {})
     }
     return family.expectedOriginalId;
   };
+  const indexed = normalized.some(family => family.kind !== "structural") &&
+    await sourceFamilyIndexReady(env);
   for (let i = 0; i < normalized.length; i += 25) {
     const group = normalized.slice(i, i + 25);
     const structuralClauses = [];
@@ -8220,10 +8243,9 @@ export async function forgetFamilies(env, { families = [], dryRun = true } = {})
       }
       if (family.kind !== "structural") {
         const n = binds.push(family.base);
-        // Declared message-export families cannot be derived from doc_uid. They
-        // remain a separate, rare lookup so a remote Gmail batch never turns
-        // into a whole-corpus JSON scan. json_valid protects legacy bad metadata.
-        declaredClauses.push(
+        // Until the durable walk completes, retain the exact legacy scope.
+        // Afterwards the declared column handles cross-source exports by seek.
+        declaredClauses.push(indexed ? `declared_family_uid = ?${n}` :
           `(json_valid(meta) AND json_type(meta,'$.family_of') = 'text'` +
           ` AND json_extract(meta,'$.family_of') = ?${n})`
         );
@@ -8246,9 +8268,15 @@ export async function forgetFamilies(env, { families = [], dryRun = true } = {})
     }
     if (declaredClauses.length) {
       selects.push(
+        // The legacy JSON scan emitted declared candidates in document rowid
+        // order. Sort only the indexed candidate set to preserve receipt bytes.
+        (indexed ? `SELECT * FROM (` : "") +
         `SELECT doc_uid, source, meta, source_original_binding_hash,` +
-        ` json_extract(meta,'$.family_of') AS family_of, NULL AS original_id` +
-        ` FROM documents WHERE ${declaredClauses.join(" OR ")}`
+        (indexed ? ` declared_family_uid AS family_of, NULL AS original_id` +
+          ` FROM document_family_index JOIN documents USING (doc_uid)` :
+          ` json_extract(meta,'$.family_of') AS family_of, NULL AS original_id FROM documents`) +
+        ` WHERE ${declaredClauses.join(" OR ")}` +
+        (indexed ? ` ORDER BY documents.rowid)` : "")
       );
     }
     const { results } = await env.DB.prepare(

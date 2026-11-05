@@ -1,6 +1,6 @@
 {
   "name": "brain-installer",
-  "version": "0.4.25",
+  "version": "0.4.26",
   "private": true,
   "description": "Provision and manage a client-owned retrieval brain inside their own Cloudflare account",
   "type": "module",
@@ -68,6 +68,7 @@
     "docs/decisions/007-rehome-update-006-arm64-clause.md",
     "docs/decisions/008-rehome-update-025-breadth-into-update-044.md",
     "docs/decisions/009-bind-install-doorway-to-release-state.md",
+    "docs/decisions/010-separate-install-and-update-doorway-state.md",
     "docs/decisions/README.md",
     "doctor.mjs",
     "eval/brain-client.mjs",

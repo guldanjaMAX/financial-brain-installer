@@ -2185,8 +2185,8 @@ function assertSuccessfulScheduleDecisionPoints(arm, label) {
     `${label}: initial registration and the real answer-edit replacement both installed`);
   assert.ok(arm.schedulerCounters.scheduleReads >= 4,
     `${label}: registration, replacement, and scheduled authorization read back state`);
-  assert.equal(arm.scheduledPlanBuilds, 1,
-    `${label}: the later run built its plan through the real product planner`);
+  assert.equal(arm.scheduledPlanBuilds, 2,
+    `${label}: the later run rebuilt its plan under the lifecycle lease through the real product planner`);
   assert.equal(arm.observations, 2,
     `${label}: the later real runner recorded start and terminal outcome`);
   for (const decision of ["exists", "stat", "access"]) {
@@ -2225,7 +2225,7 @@ test("successful connect keeps every supported daily scheduler contract runnable
         `${schedulerPlatform}: the later run reached the scheduled source decision once`);
       assert.equal(changed.freshnessReads, 2,
         `${schedulerPlatform}: the later run read source freshness before and after the scheduled source`);
-      assert.equal(changed.lockAssertions, 3,
+      assert.equal(changed.lockAssertions, 4,
         `${schedulerPlatform}: the later run retained the daily lifecycle lock throughout`);
       assert.equal(changed.lockReleases, 1,
         `${schedulerPlatform}: the later run released the daily lifecycle lock`);
@@ -2247,7 +2247,7 @@ test("successful connect keeps every supported daily scheduler contract runnable
         `${schedulerPlatform}: the control reached the scheduled source decision once`);
       assert.equal(control.freshnessReads, 2,
         `${schedulerPlatform}: the control read source freshness before and after the scheduled source`);
-      assert.equal(control.lockAssertions, 3,
+      assert.equal(control.lockAssertions, 4,
         `${schedulerPlatform}: the control retained the daily lifecycle lock throughout`);
       assert.equal(control.lockReleases, 1,
         `${schedulerPlatform}: the control released the daily lifecycle lock`);

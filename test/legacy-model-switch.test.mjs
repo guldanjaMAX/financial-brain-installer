@@ -17,12 +17,12 @@ function fixture(t) {
   return f;
 }
 
-async function update(f, overrides = {}) {
+async function update(f, overrides = {}, transport = (fetch) => fetch) {
   const run = updateAdapters(f, overrides);
   const priorFetch = globalThis.fetch, priorLog = console.log;
   const priorToken = process.env.CLOUDFLARE_API_TOKEN;
   process.env.CLOUDFLARE_API_TOKEN = ["fixture", "control"].join("-");
-  globalThis.fetch = run.fetchImpl;
+  globalThis.fetch = transport(run.fetchImpl);
   console.log = (...values) => run.lines.push(values.map(String).join(" "));
   try {
     await cmdUpdate(f.manifestPath, {
@@ -213,6 +213,66 @@ test("model retry notice is absent before deployment and on an interrupted revie
   assert.ok(run.calls.includes("POST /api/rag/think"));
   assert.match(run.error?.message || "", /fixture interruption after deploy/);
   assert.equal(renderCliCommands(run.error.message).includes(renderCliCommands(RETRY_LINE)), false);
+});
+
+for (const failedLookup of [1, 2]) {
+  test(`deploy preparation failure at upload ${failedLookup} reports only earlier uploads`, async (t) => {
+    const f = fixture(t), before = readFileSync(f.manifestPath);
+    let accounts = 0;
+    const run = await update(f, {}, (fetch) => async (url, init) => {
+      if (new URL(url).pathname === "/client/v4/accounts" && ++accounts === failedLookup) {
+        throw new Error("fixture deploy account preparation stop");
+      }
+      return fetch(url, init);
+    });
+    assert.equal(accounts, failedLookup, "real deploy preparation reached the injected failure");
+    assert.match(run.error?.message || "", /fixture deploy account preparation stop/);
+    assert.equal(run.uploads.length, failedLookup - 1, "only earlier Worker uploads were dispatched");
+    if (failedLookup === 2) {
+      assert.equal(run.uploads[0].bindings.find(({ name }) => name === "ANSWER_MODEL").text, PAIR.answer_model);
+    }
+    assert.deepEqual(readFileSync(f.manifestPath), before);
+    const green = await update(f);
+    assert.equal(green.error, null, "green retry completes the update");
+    assert.equal(green.uploads.length, 2, "green retry reaches both real uploads");
+    assert.equal(run.error.message.includes(renderCliCommands(RETRY_LINE)), failedLookup > 1);
+  });
+}
+
+test("lost upload reply keeps the model retry notice and retry finishes", async (t) => {
+  const f = fixture(t), before = readFileSync(f.manifestPath);
+  let lost = 0;
+  const run = await update(f, {}, (fetch) => async (url, init) => {
+    const response = await fetch(url, init);
+    if (init?.method === "PUT" && new URL(url).pathname.endsWith("/workers/scripts/fixture-brain")) {
+      lost++;
+      throw new Error("fixture upload reply lost");
+    }
+    return response;
+  });
+  assert.equal(lost, 1, "the real upload was applied before its reply was lost");
+  assert.equal(run.uploads.length, 1);
+  assert.match(run.error?.message || "", /fixture upload reply lost/);
+  assert.ok(run.error.message.includes(renderCliCommands(RETRY_LINE)));
+  assert.deepEqual(readFileSync(f.manifestPath), before);
+  const green = await update(f);
+  assert.equal(green.error, null, "green retry completes the update");
+  assert.equal(green.uploads.length, 2);
+});
+
+test("unverified local model readback keeps the model retry notice", async (t) => {
+  const f = fixture(t), before = readFileSync(f.manifestPath);
+  let commits = 0;
+  const run = await update(f, { options: { upgradeOptions: {
+    commitManifestVersion: () => { commits++; },
+  } } });
+  assert.equal(commits, 1, "the commit adapter returned without persisting the desired fields");
+  assert.equal(run.uploads.length, 2);
+  assert.ok(run.calls.includes("POST /api/rag/think"));
+  assert.match(run.error?.message || "", /the local manifest changed beyond its verified update fields/);
+  assert.ok(run.error.message.includes(renderCliCommands(RETRY_LINE)));
+  assert.deepEqual(readFileSync(f.manifestPath), before);
+  assert.equal((await update(f)).error, null, "green retry persists and verifies the desired fields");
 });
 
 test("failed local model commit explains the remote switch and a retry finishes", async (t) => {

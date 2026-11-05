@@ -10,6 +10,7 @@ import { RECORDED_REPLIES } from './fixtures/ledger-intent-recorded.mjs';
 import { ledgerFixture, NOW } from './ledger-review-fixture.mjs';
 import worker from '../src/index.js';
 import { MONEY_JARGON as jargon, reviewedDateCopy } from './fixtures/plain-copy-expectations.mjs';
+import { moneyPresentation } from '../src/lib/money-format.js';
 const displayPeriod = (from, to) => reviewedDateCopy(`${from} through ${to}`);
 
 test.beforeEach(t => {
@@ -366,7 +367,7 @@ test('R6 repair relative annotations use local windows through the real extracto
   for (const [label, from, to] of [
     ['now', '2026-10-01', '2026-10-12'],
     ['this month', '2026-10-01', '2026-10-12'],
-    ['the 1st', '2026-10-01', '2026-10-12'],
+    ['the 1st', '2026-10-01', '2026-10-01'],
     ['today', '2026-10-12', '2026-10-12'],
     ['yesterday', '2026-10-11', '2026-10-11'],
   ]) {
@@ -475,7 +476,7 @@ test('R6 repair parser tracks escaped quotes and nested braces without inspectin
 test('R6 repair restoring each rule fails its positive contract with green peers', async () => {
   const api = await import('../src/lib/ledger-intent.js');
   const cases = [
-    ['relative annotation', [['const annotationPeriod = relativeDatePeriod(value.date_text);', 'const annotationPeriod = null;'], ['return localLedgerWindow(temporal, today);', 'return null;']], [], m => {
+    ['relative annotation', [['const annotationPeriod = relativeDatePeriod(value.date_text);', 'const annotationPeriod = null;'], ['const existing = localLedgerWindow(temporal, today);', 'const existing = null;']], [], m => {
       const q = 'Could you retrieve expenses this month?';
       const plan = m.validateLedgerIntents({ intents: [recordedIntent('expense_summary', { date_text: 'this month' })] }, q, context);
       assert.deepEqual([plan?.[0].from, plan?.[0].to], ['2026-10-01', '2026-10-12']);
@@ -1102,7 +1103,7 @@ async function answerMutant(file, from, to) {
 }
 
 const restoringR7 = [
-  [1, 'ledger-intent.js', 'return localLedgerWindow(temporal, today);', 'return null;',
+  [1, 'ledger-intent.js', 'const existing = localLedgerWindow(temporal, today);', 'const existing = null;',
     'Could you retrieve expenses last year?', recordedIntent('expense_summary', { period: { type: 'year', year: 2024 } }),
     b => { assert.equal(b.ledger.from, '2025-01-01'); assert.match(b.answer.split('\n')[0], /January 2025 through December 2025/); }],
   [2, 'ledger-answer.js', 'const from = intent.interpretation && intent.from ? intent.from', 'const from = false ? intent.from',
@@ -1752,7 +1753,12 @@ for (const [kind, extra, line] of interpretationCases) test(`R4 clarification te
   assert.equal(r.body.intent_outcome, 'clarify');
   assert.equal(r.body.answer.split('\n')[0], labeled(line));
   assert.deepEqual(r.body.clarification.alternatives, clarificationChoices[kind]);
-  assert.ok(r.body.answer.endsWith(['transfers', 'recurring'].includes(kind) ? 'Want me to show your account balances?' : readingQuestion));
+  if (kind === 'category') {
+    assert.equal(r.body.ledger.category_total_unconfirmed, true);
+    assert.ok(r.body.ledger.unsorted_minor > 0, 'unclassified category evidence reached the composer');
+  }
+  assert.ok(r.body.answer.endsWith(kind === 'category' ? 'Want to check the original record?'
+    : ['transfers', 'recurring'].includes(kind) ? 'Want me to show your account balances?' : readingQuestion));
   assert.equal(r.body.answer, green.body.answer, 'same labeled composer output');
   assert.deepEqual(r.body.citations, green.body.citations, 'same reviewed numeric evidence');
   assert.deepEqual(r.body.ledger, green.body.ledger, 'same figures and coverage');
@@ -2990,7 +2996,7 @@ for (const [index, contract] of r10Contracts.entries()) test(`R10 class ${index 
 });
 const r10RestoringSites = [
   ['ledger-intent.js', 'const selectorComparison = raw.intents.length === 2', 'const selectorComparison = false'],
-  ['ledger-answer.js', 'if (intent.categorySelector) {', 'if (false) {'],
+  ['ledger-answer.js', 'if (intent.categorySelector && !categoryTotalUnconfirmed) {', 'if (false) {'],
   ['ledger-answer.js', 'if (intent.showExcludedTransfers || (intent.interpretation && ledger.excluded_own_transfer_minor > 0)) answer +=', 'if (false) answer +='],
   ['ledger-intent.js', 'if (eventDate) intent.earliestCoveredDate = true;', ''],
   ['ledger-answer.js', 'if (intent.pendingRequested) {', 'if (false) {'],
@@ -3394,7 +3400,7 @@ test('R12 class 1 loan exclusions require reciprocal owned-loan evidence, with a
 
 const r12RestoringSites = [
   ['ledger-intent.js', "const scopes = question.replace(taxPurpose, 'account');", "const scopes = question;"],
-  ['ledger-intent.js', "if (kind === 'largest' && vendor !== null) intent.match = vendor;", "if (kind === 'largest' && vendor !== null) return fallbackDecision('capability');"],
+  ['ledger-intent.js', "if (kind === 'largest' && vendor !== null) {\n      intent.match = vendor;\n      intent.matchType = rankingMatchType(clause, vendor);\n    }", "if (kind === 'largest' && vendor !== null) return fallbackDecision('capability');"],
   ['ledger-intent.js', "if (kind === 'deposits' && vendor !== null) intent.descriptionKeyword = vendor;", "if (kind === 'deposits' && vendor !== null) return fallbackDecision('capability');"],
   // Class 4 was already supported in the pinned code. This preventive mutant
   // demonstrates that the regression contract detects the reported refusal.
@@ -3561,7 +3567,7 @@ test('R12 description-list aliases keep the earlier refund singular/plural seman
 
 test('R12 reader selector mutants fail exact-row probes and keep unfiltered controls green', async t => {
   for (const [from,to,contract] of [
-    ['(!intent.match || matchesMerchant(row, intent.match))','true',r12Largest],
+    ['(!intent.match || selectorMatches(row, intent.match))','true',r12Largest],
     ['if (!intent.descriptionKeyword) return true;','return true;',r12Payer],
   ]) {
     const mutant = await r8AnswerMutant('ledger-answer.js',from,to);
@@ -4089,7 +4095,7 @@ const r16Details = [
   ['largest', 'Who received the most, and list the payment dates?', { direction: 'inflow', count: 1 }, null],
   ['deposits', 'Could you retrieve the newest payment we got, and which account did that payment land in?', { count: 1 }, 'which account did that payment land in'],
 ];
-const refundUnconfirmed = 'Refunds have not been subtracted because these records do not establish which deposits are refunds for that store.';
+const refundUnconfirmed = "I cannot confirm spending after refunds because these records do not show which deposits are refunds from this business. The amounts below are before subtracting refunds.";
 for (const [index, [kind, q, extra, tail]] of r16Details.entries()) test(`R16 class 1 detail ${index + 1} reaches a ready reader with a green control`, async t => {
   const api = await import('../src/lib/ledger-intent.js');
   const raw = { unanswered_part: tail, intents: [recordedIntent(kind, extra)] };
@@ -4317,7 +4323,7 @@ const r16Mutations = [
   ['transfer direction', 'ledger-intent.js', "if (value.kind === 'transfers' && value.direction === 'both') value.direction = null;", '', (f, answer) => r16CapabilityContract(f, answer, 'transfer-both')],
   ['balance measure', 'ledger-intent.js', 'pending|cleared|posted)(?: balances?', 'pending)(?: balances?', (f, answer) => r16CapabilityContract(f, answer, 'balance-posted')],
   ['refund determiner', 'ledger-intent.js', 'including (?:(?:any|the|all|their) )?refunds separately\\b/i.test', 'including refunds separately\\b/i.test', (f, answer) => r16CapabilityContract(f, answer, 'separate-refunds')],
-  ['payee refund honesty', 'ledger-intent.js', 'if (payeeRefunds) intent.refundsNotNetted = true;', '', (f, answer) => r16CapabilityContract(f, answer, 'refund-net-outflow')],
+  ['payee refund honesty', 'ledger-intent.js', 'if (refundAmount && !netRefunds) intent.refundsNotNetted = true;', '', (f, answer) => r16CapabilityContract(f, answer, 'refund-net-outflow')],
   ['freshness verbs', 'ledger-intent.js', r16Source.split('\n').find(line => line.includes("return 'freshness';") && line.includes('when did you last')), '', (f, answer) => r16CapabilityContract(f, answer, 'freshness')],
   ['payee overview', 'ledger-intent.js', "['category', 'merchant'].includes(value.kind) && vendor === null && [null, 'outflow'].includes(value.direction)", "value.kind === 'category' && vendor === null && [null, 'outflow'].includes(value.direction)", (f, answer) => r16CapabilityContract(f, answer, 'payee-overview')],
   ['same-payee rows', 'ledger-intent.js', 'raw.intents.splice(1);', '', async (f, answer) => {
@@ -4427,4 +4433,340 @@ test('merged R16 exact payments keep reviewed copy for every direction and empty
       }
     }
   }
+});
+function r19Schema(value, schema = LEDGER_INTENT_SCHEMA) {
+  if (schema.oneOf) return schema.oneOf.filter(branch => r19Schema(value, branch)).length === 1;
+  if (Object.hasOwn(schema, 'const') && value !== schema.const) return false;
+  if (schema.enum && !schema.enum.includes(value)) return false;
+  const type = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+  if (schema.type && ![schema.type].flat().some(t => t === type || t === 'integer' && Number.isInteger(value))) return false;
+  if (type === 'object') {
+    if (schema.required?.some(key => !Object.hasOwn(value, key))) return false;
+    if (schema.additionalProperties === false && Object.keys(value).some(key => !Object.hasOwn(schema.properties, key))) return false;
+    if (Object.entries(value).some(([key, item]) => schema.properties?.[key] && !r19Schema(item, schema.properties[key]))) return false;
+  }
+  if (type === 'array' && (value.length < (schema.minItems ?? 0) || value.length > (schema.maxItems ?? Infinity) || value.some(item => !r19Schema(item, schema.items)))) return false;
+  if (type === 'string' && value.length > (schema.maxLength ?? Infinity)) return false;
+  return type !== 'number' || value >= (schema.minimum ?? -Infinity) && value <= (schema.maximum ?? Infinity);
+}
+
+// R19 is an offline admission contract, with independently authored wording.
+const r19Context = { now: '2026-11-20T12:00:00Z', timeZone: 'UTC' };
+const r19Raw = (kind, extra = {}) => ({ ambiguous: false, unanswered_part: null,
+  intents: [{ account_hint: null, ...recordedIntent(kind, extra) }] });
+const r19Accepted = [
+  ...['Please retrieve the balances we hold.', 'Pull the current cash balances for us.',
+    'Show balances after the expected payment arrived.', 'Could we see the money in our bank accounts?',
+    'Fetch current balances for the Monday account.', 'Retrieve balances after the payment we expected cleared.',
+    'Show current balances after the Monday deposit arrived.', 'Give us our available bank balances.']
+    .map(q => [q, r19Raw('balance')]),
+  ...['Please total money in during March.', 'Add up incoming money from last quarter.',
+    'Retrieve money received since Monday.', 'Show money in for the third quarter.',
+    'How much money came in last week in March?', 'Total deposits received during September.',
+    'Retrieve our money in since September.', 'Show incoming money this month during Q3.']
+    .map(q => [q, r19Raw('totals', { direction: 'inflow' })]),
+  ...['Please retrieve our expenses during October.', 'Add up spending since Friday.',
+    'Show spending last week in March.', 'Total expenses this month during Q3.',
+    'What spending is recorded for this quarter?', 'Show the expenses on Monday.',
+    'Retrieve spending on the 15th.', 'Could we see our spending this month?']
+    .map(q => [q, r19Raw('expense_summary', { direction: 'outflow' })]),
+  ...['Retrieve spend at Store Unit during March.', 'Show charges at Store Unit since Monday.',
+    'Total Store Unit spending for Q3.', 'Fetch expenses at Store Unit last week in March.',
+    'How much did we pay Store Unit this month?', 'Retrieve Store Unit spend last quarter.',
+    'List Store Unit expenses on Friday.', 'Show spending at Store Unit since September.']
+    .map(q => [q, r19Raw('merchant', { direction: 'outflow', vendor_text: 'Store Unit' })]),
+  ...['Find the $42.17 payment received this month.', 'Was the $42.17 payment in on Monday?',
+    'Retrieve the $42.17 deposit on November 2.', 'Show the $42.17 payment during Q3.',
+    'Find the $42.17 deposit received since Friday.', 'Show payments of $42.17 in March.',
+    'Retrieve the $42.17 payment from last quarter.', 'Check for the $42.17 payment on the 15th.']
+    .map(q => [q, r19Raw('payment', { direction: 'inflow', amount_text: '$42.17',
+      date_text: /on Monday/.test(q) ? 'Monday' : /November 2/.test(q) ? 'November 2' : /15th/.test(q) ? 'the 15th' : null })]),
+];
+const r19Short = [
+  ['11/1', '2026-11-01'], ['11/01/2026', '2026-11-01'], ['the 15th', '2026-11-15'],
+  ['Oct 30th', '2026-10-30'], ['Nov 2', '2026-11-02'], ['10/31', '2026-10-31'],
+  ['Oct. 9, 2026', '2026-10-09'], ['2/29/2024', '2024-02-29'],
+];
+const r19DateAssumption = 'I read dates as month/day, using 2026 for a missing year and November 2026 for a day without a month.';
+const r19Named = [
+  ['Please add expenses in March.', '2026-03-01', '2026-03-31'],
+  ["Fetch September's expenses.", '2026-09-01', '2026-09-30'],
+  ['Retrieve our expenses during Q3.', '2026-07-01', '2026-09-30'],
+  ['What expenses were posted in the third quarter?', '2026-07-01', '2026-09-30'],
+  ['Please retrieve spending from last quarter.', '2026-07-01', '2026-09-30'],
+  ['Fetch expenses recorded on Monday.', '2026-11-16', '2026-11-16'],
+  ['Retrieve expenses on last Friday.', '2026-11-13', '2026-11-13'],
+  ['Add the expenses since September.', '2026-09-01', '2026-11-20'],
+];
+async function r19Extract(api, question, raw, inspect = () => {}) {
+  let calls = 0;
+  const d = await api.extractLedgerIntentDecision({ env: { ANTHROPIC_API_KEY: randomBytes(24).toString('hex') },
+    question, ...r19Context, callLLM: async (_env, request) => {
+      calls++; inspect(request); return wire(structuredClone(raw));
+    } });
+  assert.equal(calls, 1, 'injected provider and compile decision reached');
+  return d;
+}
+async function r19PromptContract(api) {
+  for (const [q, raw] of r19Accepted.filter((_, i) => i % 5 === 0)) {
+    const d = await r19Extract(api, q, raw, request => {
+      const examples = request.system.split('\n').filter(line => line.startsWith('JSON: '));
+      assert.equal(examples.length, 10, 'all examples reached');
+      for (const line of examples) assert.equal(r19Schema(JSON.parse(line.slice(6))), true);
+      assert.match(request.system, /Every intent has exactly kind, direction, count, vendor_text, account_hint, amount_text, date_text and period/);
+      assert.match(request.system, /All nullable fields must be explicit null when absent/);
+      assert.match(request.system, /The integer year is mandatory for quarter and year/);
+      assert.doesNotMatch(request.system, /Refusals use the same complete object|Use not_money for a refusal core/);
+    });
+    assert.equal(d.outcome, 'ready'); assert.ok(d.intents.length > 0);
+  }
+}
+test('R19 schema facts and all ten closed examples preserve refusal guidance', async () => {
+  await r19PromptContract(await import('../src/lib/ledger-intent.js'));
+});
+test('R19 invalid wire shapes reach extraction and retain green schema controls', async () => {
+  const api = await import('../src/lib/ledger-intent.js');
+  const corrupt = [r => ({ ...r, refusal: true }), r => ({ ...r, intents: [] }),
+    r => ({ ...r, ambiguous: null }), r => ({ ...r, intents: [{ ...r.intents[0], kind: 'expense' }] }),
+    r => ({ ...r, intents: [{ ...r.intents[0], direction: 'outgoing' }] }),
+    r => ({ ...r, intents: [{ ...r.intents[0], period: null }] }),
+    r => ({ ...r, intents: [{ ...r.intents[0], period: { type: 'quarter', q: 3 } }] }),
+    r => ({ ...r, intents: [{ ...r.intents[0], period: { type: 'year', year: '2026' } }] })];
+  for (const change of corrupt) {
+    const q = 'Please retrieve our expenses this month.', good = r19Raw('expense_summary');
+    const bad = change(structuredClone(good));
+    assert.equal(r19Schema(good), true); assert.equal(r19Schema(bad), false);
+    assert.equal((await r19Extract(api, q, good)).outcome, 'ready');
+    assert.equal((await r19Extract(api, q, bad)).outcome, 'fallback');
+  }
+});
+async function r19ShortContract(api) {
+  for (const [literal, day] of r19Short) {
+    for (const [q, raw] of [
+      [`Find the $42.17 payment that arrived on ${literal}.`, r19Raw('payment', { amount_text: '$42.17', date_text: literal })],
+      [`Please total our incoming money on ${literal}.`, r19Raw('totals', { direction: 'inflow' })],
+    ]) {
+      const d = await r19Extract(api, q, raw);
+      assert.equal(d.outcome, 'ready', q + ': ' + d.reason);
+      assert.deepEqual([d.intents[0].from, d.intents[0].to], [day, day]);
+      assert.equal(d.intents[0].dateAssumption, r19DateAssumption);
+      assert.equal(d.intents[0].interpretation.split(r19DateAssumption).length - 1, 1);
+    }
+  }
+}
+test('R19 short dates admit literal days with a stated locale and exact controls', async () => {
+  await r19ShortContract(await import('../src/lib/ledger-intent.js'));
+});
+async function r19NamedContract(api) {
+  for (const [q, from, to] of r19Named) {
+    const d = await r19Extract(api, q, r19Raw('expense_summary'));
+    assert.equal(d.outcome, 'ready', q + ': ' + d.reason);
+    assert.deepEqual([d.intents[0].from, d.intents[0].to], [from, to]);
+  }
+  for (const [literal, from, to] of [['March', '2026-03-01', '2026-03-31'],
+    ['Q3', '2026-07-01', '2026-09-30'], ['last quarter', '2026-07-01', '2026-09-30'],
+    ['since Friday', '2026-11-20', '2026-11-20']]) {
+    const q = `Retrieve the $42.17 payment ${literal === 'since Friday' ? literal : 'during ' + literal}.`;
+    const d = await r19Extract(api, q, r19Raw('payment', { amount_text: '$42.17', date_text: literal.replace('since ', '') }));
+    assert.equal(d.outcome, 'ready', q + ': ' + d.reason);
+    assert.deepEqual([d.intents[0].from, d.intents[0].to], [from, to]);
+  }
+}
+test('R19 named months quarters and weekdays ground without a conflict detector', async () => {
+  await r19NamedContract(await import('../src/lib/ledger-intent.js'));
+});
+async function r19PreservationContract(api) {
+  assert.equal(r19Accepted.length, 40);
+  for (const [q, raw] of r19Accepted) {
+    const d = await r19Extract(api, q, raw);
+    assert.equal(d.outcome, 'ready', q + ': ' + d.reason);
+    assert.ok(d.intents.length > 0);
+    assert.notEqual(d.reason, 'period_contradiction');
+    assert.notEqual(d.reason, 'model_refused');
+  }
+}
+test('R19 forty round-16 accepted paraphrases keep executable readings', async () => {
+  await r19PreservationContract(await import('../src/lib/ledger-intent.js'));
+});
+test('R19 malformed and invented new dates keep the reached grounding boundary', async () => {
+  const api = await import('../src/lib/ledger-intent.js');
+  for (const literal of ['2/30', '13/1', '31/10/2026', '2/29/2026', 'Nov 31', '11/01/26', '10/0', '11/21']) {
+    const raw = r19Raw('payment', { amount_text: '$42.17', date_text: literal });
+    const q = `Find the $42.17 payment received on ${literal}.`;
+    assert.equal((await r19Extract(api, q, raw)).outcome, 'fallback', literal);
+    const green = await r19Extract(api, 'Find the $42.17 payment received on 11/1.',
+      r19Raw('payment', { amount_text: '$42.17', date_text: '11/1' }));
+    assert.equal(green.outcome, 'ready'); assert.ok(green.intents.length > 0);
+  }
+  for (const literal of ['11/1', 'Oct 30th', 'Nov 2', 'last Friday']) {
+    const d = await r19Extract(api, 'Find the $42.17 payment received.', r19Raw('payment', { amount_text: '$42.17', date_text: literal }));
+    assert.equal(d.outcome, 'fallback'); assert.equal(d.reason, 'date_literal_mismatch');
+  }
+});
+test('R19 short ranges and weekday since windows keep both bounds', async () => {
+  const api = await import('../src/lib/ledger-intent.js');
+  for (const [q, from, to] of [
+    ['Please add expenses between 10/30 and 11/2.', '2026-10-30', '2026-11-02'],
+    ['Fetch incoming money since Nov 2.', '2026-11-02', '2026-11-20'],
+    ['Retrieve expenses on or after Oct 30th.', '2026-10-30', '2026-11-20'],
+    ['Show incoming money since last Friday.', '2026-11-13', '2026-11-20'],
+  ]) {
+    const d = await r19Extract(api, q, r19Raw('totals', { direction: 'inflow' }));
+    assert.equal(d.outcome, 'ready', q + ': ' + d.reason);
+    assert.deepEqual([d.intents[0].from, d.intents[0].to], [from, to]);
+  }
+});
+test('R19 admitted days select exact SQLite figures and exclude adjacent days', async t => {
+  const f = configured(t);
+  f.raw("UPDATE fin_account_coverage SET covered_to='2026-11-30'");
+  for (const [id, date, cents, direction] of [
+    ['day-in', '2026-11-01', 4217, 'inflow'], ['adjacent-in', '2026-11-02', 4217, 'inflow'],
+    ['day-out', '2026-11-01', 1900, 'outflow'], ['adjacent-out', '2026-11-02', 2900, 'outflow'],
+  ]) f.add(id, direction === 'outflow' ? 'Store Unit' : 'Payer Unit', direction === 'outflow' ? 'Store Unit' : 'Payer Unit', { date, cents, direction });
+  for (const [q, raw, check] of [
+    ['Retrieve incoming money on 11/1.', r19Raw('totals', { direction: 'inflow' }), body => assert.equal(body.ledger.accounts.reduce((sum, row) => sum + row.credits_minor, 0), 4217)],
+    ['Retrieve expenses on 11/1.', r19Raw('expense_summary'), body => assert.equal(body.ledger.total_minor, 1900)],
+    ['Retrieve Store Unit spend on 11/1.', r19Raw('merchant', { direction: 'outflow', vendor_text: 'Store Unit' }), body => assert.equal(body.ledger.total_minor, 1900)],
+    ['Find the $42.17 payment on 11/1.', r19Raw('payment', { amount_text: '$42.17', date_text: '11/1' }), body => assert.equal(body.ledger.found, true)],
+  ]) {
+    const r = await ask(f, q, raw, r19Context);
+    assert.equal(r.calls, 1); assert.equal(r.fallback, 0); assert.ok(r.sql.length > 0);
+    assert.deepEqual([r.body.ledger.from, r.body.ledger.to], ['2026-11-01', '2026-11-01']);
+    check(r.body); assert.ok(r.body.citations.length > 0);
+    assert.ok(r.body.citations.every(row => row.posted_on === '2026-11-01'));
+  }
+  const green = await ask(f, 'Retrieve expenses this month.', r19Raw('expense_summary'), r19Context);
+  assert.equal(green.calls, 1); assert.ok(green.sql.length > 0); assert.equal(green.body.ledger.total_minor, 4800);
+});
+
+test('merged R19 short date keeps the formatter and discloses its assumption once', async t => {
+  const api = await import('../src/lib/ledger-intent.js');
+  const raw = r19Raw('expense_summary');
+  const d = await r19Extract(api, 'Retrieve expenses on 11/1.', raw);
+  assert.equal(d.outcome, 'ready'); assert.equal(d.intents.length, 1);
+  const intent = d.intents[0], formatter = moneyPresentation(r19Context);
+  let periodCalls = 0;
+  intent.presentation = { ...formatter, period: (...args) => {
+    periodCalls++; return formatter.period(...args);
+  } };
+  const interpretation = api.ledgerIntentInterpretation(intent);
+  assert.equal(periodCalls, 1, 'the retained formatter renders the literal day');
+  assert.match(interpretation, /for November 1\./);
+  assert.equal(intent.dateAssumption, r19DateAssumption);
+  assert.equal(interpretation.split(r19DateAssumption).length - 1, 1);
+
+  const f = configured(t);
+  f.raw("UPDATE fin_account_coverage SET covered_to='2026-11-30'");
+  f.add('literal-expense', 'Store Unit', 'Store Unit', { date: '2026-11-01', cents: 1900, direction: 'outflow' });
+  f.add('adjacent-expense', 'Store Unit', 'Store Unit', { date: '2026-11-02', cents: 2900, direction: 'outflow' });
+  for (const [q, total, disclosures] of [
+    ['Retrieve expenses on 11/1.', 1900, 1], ['Retrieve expenses this month.', 4800, 0],
+  ]) {
+    const r = await ask(f, q, raw, r19Context);
+    assert.equal(r.calls, 1); assert.equal(r.fallback, 0);
+    assert.ok(r.sql.length > 0, 'both readings reach the real bank reader');
+    assert.equal(r.body.ledger.total_minor, total);
+    assert.ok(r.body.citations.length > 0);
+    if (disclosures) {
+      assert.deepEqual([r.body.ledger.from, r.body.ledger.to], ['2026-11-01', '2026-11-01']);
+      assert.match(r.body.answer.split('\n')[0], /for November 1\./);
+      assert.ok(r.body.citations.every(row => row.posted_on === '2026-11-01'));
+    }
+    assert.equal(r.body.answer.split(r19DateAssumption).length - 1, disclosures);
+    assert.equal((r.body.answer.match(/\?/g) || []).length, 1, 'one offer in the complete answer');
+    assert.doesNotMatch(r.body.answer, /\[object Object\]|Here are|2026-11/);
+  }
+});
+
+// Each restored decision has a working peer in both arms and must alter the
+// same positive contract. Mutants execute through the actual extractor.
+function r19RestoredPeriodConflict(question, window, today) {
+  if (!window.from || !window.to) return false;
+  const text = question.toLowerCase();
+  const current = new Date(`${today}T00:00:00Z`), year = current.getUTCFullYear(), month = current.getUTCMonth();
+  const monday = shiftLedgerDay(today, -((current.getUTCDay() + 6) % 7));
+  for (const match of text.matchAll(/\b(this|current|last|previous|prior) (?:calendar )?(month|week|quarter|year)\b/g)) {
+    const prior = ['last', 'previous', 'prior'].includes(match[1]);
+    let from, to;
+    if (match[2] === 'week') { from = shiftLedgerDay(monday, prior ? -7 : 0); to = prior ? shiftLedgerDay(monday, -1) : today; }
+    else if (match[2] === 'month') { from = ledgerDay(Date.UTC(year, month - Number(prior), 1)); to = prior ? ledgerDay(Date.UTC(year, month, 0)) : today; }
+    else if (match[2] === 'quarter') { const start = Math.floor(month / 3) * 3 - (prior ? 3 : 0); from = ledgerDay(Date.UTC(year, start, 1)); to = prior ? ledgerDay(Date.UTC(year, start + 3, 0)) : today; }
+    else { from = `${year - Number(prior)}-01-01`; to = prior ? `${year - 1}-12-31` : today; }
+    // "Since last month" names a start, not a completed-month end.
+    if (/\bsince\s*$/.test(text.slice(0, match.index))) to = today;
+    if (window.to < from || window.from > to) return true;
+  }
+  return false;
+}
+function r19RestoredFutureBalance(question) {
+  return /\b(?:will|future|forecast|predict(?:ed)?|projected|projection|expect(?:ed)?|going to|tomorrow|next (?:week|month|quarter|year))\b|\b(?:have|got|has|is|be) enough\b|\b(?:cash|money) (?:last|left|remain)\b|\b(?:after paying|once (?:the )?bills|at month end)\b/i.test(question);
+}
+const r19Mutations = [
+  ['literal-only presentation', [['const datePresentation = localWindow?.literalAdmission || localWindow?.paymentDay || explicitDate', 'const datePresentation = true']], [], r19PresentationContract],
+  ['schema facts', [['${REQUEST_RULES}\\n${SCHEMA_RULES}\\n${EXAMPLES}', '${REQUEST_RULES}\\n${EXAMPLES}']], [], r19PromptContract],
+  ['short literal windows', [['return supplementalLedgerWindow(literalQuestion, today);', 'return null;']], [], r19ShortContract],
+  ['short payment days', [['return groundedDay(text, today) || shortLedgerDay(text, today) || namedLedgerDay(text, today);', 'return groundedDay(text, today);']], [], r19ShortContract],
+  ['named payment periods', [['!parsedWindow?.paymentDay && !literalPeriod ? null', '!parsedWindow?.paymentDay ? null']], [], r19NamedContract],
+  ['weekday admission', [['return supplementalLedgerWindow(literalQuestion, today);', 'return null;']], [], r19NamedContract],
+  ['slash range protection', [], [['|\\d{1,2}\\/\\d{1,2}(?:\\/\\d{4})?', '']], async api => {
+    const q = 'Please total money in between 10/30 and 11/2.';
+    const d = await r19Extract(api, q, r19Raw('totals', { direction: 'inflow' }));
+    assert.equal(d.outcome, 'ready'); assert.deepEqual([d.intents[0].from, d.intents[0].to], ['2026-10-30', '2026-11-02']);
+  }],
+  ['round-17 contradiction gate', [
+    ['function compileLedgerIntents(', `${r19RestoredPeriodConflict.toString()}\nfunction compileLedgerIntents(`],
+    ["if (!localWindow && periodContradiction(clause, intent, today)) {",
+      "if (r19RestoredPeriodConflict(clause, intent, today)) return { outcome: 'clarify', intents: [], reason: 'period_uncertain' };\n    if (!localWindow && periodContradiction(clause, intent, today)) {"],
+  ], [], r19PreservationContract],
+  ['round-17 future-balance gate', [
+    ['function compileLedgerIntents(', `${r19RestoredFutureBalance.toString()}\nfunction compileLedgerIntents(`],
+    ["const core = answerableCore(question, raw.unanswered_part, raw.intents);",
+      "if (raw.intents.some(value => value.kind === 'balance') && r19RestoredFutureBalance(question) && !raw.intents.some(value => value.kind === 'forecast')) return fallbackDecision('capability');\n  const core = answerableCore(question, raw.unanswered_part, raw.intents);"],
+  ], [], r19PreservationContract],
+];
+for (const [label, edits, helperEdits, contract] of r19Mutations) test(`R19 restoring mutant ${label} fails its contract and keeps a green peer`, async () => {
+  const api = await import('../src/lib/ledger-intent.js');
+  const mutant = await intentMutant(edits, helperEdits);
+  for (const arm of [api, mutant]) {
+    const d = await r19Extract(arm, 'Please retrieve expenses this month.', r19Raw('expense_summary'));
+    assert.equal(d.outcome, 'ready'); assert.ok(d.intents.length > 0);
+  }
+  await contract(api);
+  await assert.rejects(() => contract(mutant), assert.AssertionError, 'the restored decision must fail the same contract');
+});
+
+test('R19 undated expense selectors keep the round-16 default and dated controls', async () => {
+  const api = await import('../src/lib/ledger-intent.js');
+  for (const [q, kind, selector] of [
+    ['What did we spend on supplies?', 'category', 'supplies'],
+    ['Retrieve our software spending.', 'category', 'software'],
+    ['Add up expenses for materials.', 'category', 'materials'],
+    ['What have repairs cost us?', 'category', 'repairs'],
+    ['Show spending at Store Unit.', 'merchant', 'Store Unit'],
+    ['What did we pay for office equipment?', 'category', 'office equipment'],
+    ['Retrieve our shipping expenses.', 'category', 'shipping'],
+    ['Total payments to Store Unit.', 'merchant', 'Store Unit'],
+  ]) {
+    const d = await r19Extract(api, q, r19Raw(kind, { vendor_text: selector, direction: 'outflow' }));
+    assert.equal(d.outcome, 'ready'); assert.ok(d.intents.length > 0);
+    assert.deepEqual([d.intents[0].from, d.intents[0].to], ['2026-11-01', '2026-11-20']);
+    assert.equal(d.intents[0].dateAssumption, undefined, 'no new default date assumption');
+    const dated = await r19Extract(api, `${q.replace(/[?.!]$/, '')} last month.`, r19Raw(kind, { vendor_text: selector, direction: 'outflow' }));
+    assert.equal(dated.outcome, 'ready'); assert.ok(dated.intents.length > 0);
+    assert.deepEqual([dated.intents[0].from, dated.intents[0].to], ['2026-10-01', '2026-10-31']);
+  }
+});
+
+async function r19PresentationContract(api) {
+  const existing = await r19Extract(api, 'Please retrieve expenses on 10/15 last year.', r19Raw('expense_summary'));
+  assert.equal(existing.outcome, 'ready'); assert.ok(existing.intents.length > 0);
+  assert.deepEqual([existing.intents[0].from, existing.intents[0].to], ['2025-01-01', '2025-12-31']);
+  assert.equal(existing.intents[0].dateAssumption, undefined, 'preserved year reading cannot claim a current-year day');
+  const admitted = await r19Extract(api, 'Please retrieve expenses on 10/15.', r19Raw('expense_summary'));
+  assert.equal(admitted.outcome, 'ready'); assert.ok(admitted.intents.length > 0);
+  assert.deepEqual([admitted.intents[0].from, admitted.intents[0].to], ['2026-10-15', '2026-10-15']);
+  assert.match(admitted.intents[0].dateAssumption, /month\/day/);
+}
+test('R19 date assumptions describe only an admitted literal window', async () => {
+  await r19PresentationContract(await import('../src/lib/ledger-intent.js'));
 });

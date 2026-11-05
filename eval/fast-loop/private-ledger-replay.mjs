@@ -1,9 +1,9 @@
-import { spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, realpathSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { resolve, dirname, relative, isAbsolute, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { ROOT, waitForQuiet } from './money-replay.mjs';
 import { TABLES, sha256, fail, d1Rows, validateEnvelope, exportQueries } from './private-ledger-contract.mjs';
+import { runReplayChild } from './child-run.mjs';
 export { TABLES } from './private-ledger-contract.mjs';
 
 const worker = fileURLToPath(new URL('./private-ledger-worker.mjs', import.meta.url));
@@ -50,24 +50,24 @@ function sourceRoot(path) {
   for (const part of ['worker/src/lib/ledger-answer.js', 'migrations/d1']) if (!existsSync(resolve(root, part))) fail('SOURCE_INVALID');
   return root;
 }
-export function runPrivateArm(root, request) {
+export function runPrivateArm(root, request, { spawn, writeStderr } = {}) {
   // The launcher is trusted and gets no desktop environment or credentials.
   // The child has read permission only; VM imports are further restricted to
   // relative product modules. IPC is a private pipe separate from stdout.
   const env = { PATH: '/usr/bin:/bin', HOME: resolve(ROOT, 'lane-evidence/home-private-replay'), BRAIN_NO_WRANGLER_LOGIN: '1', TZ: 'UTC' };
   for (const key of ['SystemRoot', 'WINDIR', 'ComSpec', 'PATHEXT']) if (process.platform === 'win32' && process.env[key]) env[key] = process.env[key];
-  waitForQuiet(env);
-  const child = spawnSync(process.execPath, ['--experimental-vm-modules', '--permission', '--no-warnings',
-    `--allow-fs-read=${ROOT}`, `--allow-fs-read=${root}`, '--import', pathToFileURL(tripwire).href, worker], {
+  const child = runReplayChild({ label: 'PRIVATE_REPLAY', spawn, writeStderr, beforeAttempt: () => waitForQuiet(env),
+    failureMessage: child => `PRIVATE_REPLAY_${child.status === 86 ? 'TRANSPORT_BLOCKED' : 'WORKER_FAILED'}`,
+    args: ['--experimental-vm-modules', '--permission', '--no-warnings',
+    `--allow-fs-read=${ROOT}`, `--allow-fs-read=${root}`, '--import', pathToFileURL(tripwire).href, worker], options: {
     cwd: ROOT, env, input: JSON.stringify({ ...request, root, trusted_root: ROOT }),
-    stdio: ['pipe', 'ignore', 'pipe', 'pipe'], encoding: 'utf8', timeout: 120000, maxBuffer: 128 * 1024 * 1024,
-  });
-  if (child.status !== 0) fail(child.status === 86 ? 'TRANSPORT_BLOCKED' : 'WORKER_FAILED');
+    stdio: ['pipe', 'ignore', 'pipe', 'pipe'], encoding: 'utf8', maxBuffer: 128 * 1024 * 1024,
+  } });
   let result;
   try { result = JSON.parse(child.output[3]); }
   catch { fail('WORKER_FAILED'); }
   if (result.input_digest !== request.input_digest || result.observations?.length !== request.questions.length) fail('WORKER_FAILED');
-  result.harness_digest = sha256(['private-ledger-replay.mjs', 'private-ledger-worker.mjs', 'private-ledger-contract.mjs', 'money-replay.mjs']
+  result.harness_digest = sha256(['private-ledger-replay.mjs', 'private-ledger-worker.mjs', 'private-ledger-contract.mjs', 'money-replay.mjs', 'child-run.mjs', 'child-stall.mjs']
     .map(name => readFileSync(new URL(name, import.meta.url))));
   result.transport_digest = sha256(readFileSync(tripwire));
   result.worktree_path = root;
@@ -148,7 +148,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     for (const name of result.files) process.stdout.write(resolve(result.output, name) + '\n');
     process.exitCode = result.invalid ? 1 : 0;
   } catch (error) {
-    const code = /^PRIVATE_REPLAY_[A-Z_]+$/.test(error.message) ? error.message : 'PRIVATE_REPLAY_INPUT_OR_IO_FAILED';
+    const code = /^PRIVATE_REPLAY_[A-Z_]+(?= |$)/.exec(error.message)?.[0] || 'PRIVATE_REPLAY_INPUT_OR_IO_FAILED';
     process.stderr.write(code + '\n'); process.exitCode = 2;
   }
 }

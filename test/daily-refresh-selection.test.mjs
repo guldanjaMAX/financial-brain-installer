@@ -114,7 +114,7 @@ for (const hostPlatform of ["darwin", "linux", "win32"]) {
     present = false;
     const checksBefore = checked.length;
     await assert.rejects(h.command("run", ["--definition-hash", hash]), { code: "daily_schedule_node_missing" });
-    assert.equal(h.calls.plans.length, 3, "the missing-runtime arm rebuilt the source plan");
+    assert.equal(h.calls.plans.length, 4, "the missing-runtime arm rebuilt the source plan after the successful run checked twice");
     assert.ok(checked.length > checksBefore, "the missing-runtime arm reached the same presence guard");
     assert.equal(h.calls.locks, 1, "a missing Node cannot reach a second source-execution lease");
     assert.deepEqual(h.calls.runs, ["gmail", "calendar"], "the missing-runtime arm added no source calls");
@@ -124,7 +124,7 @@ for (const hostPlatform of ["darwin", "linux", "win32"]) {
     h.save();
     const driftChecksBefore = checked.length;
     await assert.rejects(h.command("run", ["--definition-hash", hash]), /manifest or source plan changed/);
-    assert.equal(h.calls.plans.length, 4, "the drift arm rebuilt the changed source plan");
+    assert.equal(h.calls.plans.length, 5, "the drift arm rebuilt the changed source plan");
     assert.ok(checked.length > driftChecksBefore, "drift reached the registered runtime check");
     assert.equal(h.calls.locks, 1);
     assert.deepEqual(h.calls.runs, ["gmail", "calendar"], "drift added no source calls");
@@ -179,7 +179,7 @@ test("legacy all-source control still runs all three ready sources", async () =>
   const h = harness({ sources: null });
   const installed = await h.command("on");
   const result = await h.command("run", ["--definition-hash", installed.schedule.definition.definition_hash]);
-  assert.equal(h.calls.plans.length, 2);
+  assert.equal(h.calls.plans.length, 3);
   assert.deepEqual(h.calls.runs, ["gmail", "calendar", "google_drive"]);
   assert.equal(result.status, "complete");
 });
@@ -199,9 +199,9 @@ for (const driveReady of [true, false]) {
     const installed = await h.command("on");
     h.setDriveReady(!driveReady);
     const result = await h.command("run", ["--definition-hash", installed.schedule.definition.definition_hash]);
-    assert.equal(h.calls.plans.length, 2);
+    assert.equal(h.calls.plans.length, 3);
     const driveStates = h.calls.plans.map((entries) => entries.find((entry) => entry.key === "google_drive").status);
-    assert.deepEqual(driveStates, driveReady ? ["ready", "unavailable"] : ["unavailable", "ready"],
+    assert.deepEqual(driveStates, driveReady ? ["ready", "unavailable", "unavailable"] : ["unavailable", "ready", "ready"],
       "the shared planner observed a real connection-readiness transition");
     assert.equal(result.status, "partial");
     assert.deepEqual(h.calls.runs, ["gmail", "calendar"]);

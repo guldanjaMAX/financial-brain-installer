@@ -108,6 +108,7 @@ check("the unshipped suffix is exactly OCR, custom API, SimpleFIN, bank-activity
       "0056_content_date_refresh_receipts.sql",
       "0057_bank_provider_transition.sql",
       "0058_fin_account_kind_reviews.sql",
+      "0059_document_family_index.sql",
     ]),
   JSON.stringify(unshippedMigrationFiles));
 

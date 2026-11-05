@@ -174,7 +174,7 @@ test('T06 R5 control: remote search declares its relevance-only contract', async
 
 test('T07 control: provider answer errors are safely rendered by the app', () => {
   const rendered = answerText({ answer: null, answer_error: 'Synthetic private title; count=731' });
-  assert.equal(rendered, 'I can help you try again, but answers are unavailable right now. Want to try again in a moment?');
+  assert.equal(rendered, 'I can help you try again, but answers are unavailable right now.\nWant to try again in a moment?');
 });
 test('T07 defect: remote caught errors must not disclose private text or aggregate counts', async () => {
   let reached = 0;
@@ -377,7 +377,10 @@ for (const [name, failure] of [['private', canary], ...Object.entries(ANSWER_ERR
     } });
     assert.equal(reached, 1);
     assert.equal(reply.isError, true);
-    assert.ok(textOf(reply).includes(safeAnswerErrorText(failure)));
+    const [facts, offer] = safeAnswerErrorText(failure).split(/ (?=Want)/);
+    assert.ok(textOf(reply).includes(facts), 'reviewed factual error copy retained');
+    assert.equal(textOf(reply).split('\n').at(-1), offer, 'reviewed invitation is final');
+    assert.equal(textOf(reply).split(offer).length - 1, 1, 'one reviewed invitation');
     assert.doesNotMatch(textOf(reply), /Synthetic private title|count=731|private marker/);
     assert.match(textOf(reply), /support code: MCP_/i);
   });

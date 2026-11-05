@@ -2,6 +2,7 @@ import { moneyAccount, moneyAccounts } from './money-format.js';
 // Presentation only. Refusal codes, admission, amounts and citations stay with
 // the caller; a wording helper must never promote a partial result to a total.
 export const balanceSuggestion = 'Want me to show your account balances?';
+export const originalRecordSuggestion = 'Want to check the original record?';
 export const pendingNotice = `This reading covers completed transactions only; pending activity is not included.\n${balanceSuggestion}`;
 export const documentMoneyNotice = "This answer comes from your documents; I did not match it to your bank data.";
 export function plainMoneyCheck(rule) {
@@ -17,7 +18,7 @@ export function plainMoneyCheck(rule) {
     incomplete_claim: "Some payment details are still unknown in the records checked.",
     claim_date_unknown: "The record does not say when the payment arrived, was completed, or became due.",
   };
-  return `I can help review the source, but ${['incomplete_claim', 'claim_date_unknown'].includes(rule) ? 'some money details are still unconfirmed' : 'this money claim is unconfirmed'}. ${reasons[rule]}\nWant to check the original record?`;
+  return `I can help review the source, but ${['incomplete_claim', 'claim_date_unknown'].includes(rule) ? 'some money details are still unconfirmed' : 'this money claim is unconfirmed'}. ${reasons[rule]}\n${originalRecordSuggestion}`;
 }
 export const accountEndings = moneyAccounts;
 

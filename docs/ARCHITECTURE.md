@@ -133,6 +133,18 @@ an existing script. Health after deploy must observe the expected package
 version, not merely any HTTP 200, because the previous Worker can remain visible
 briefly during propagation.
 
+An update first establishes control-plane access through approved adoption or
+sign-in repair. Authentication can refresh stored credentials, but manifest
+adoption persistence, daily-import changes and deployment wait for proof of the
+exact Worker's `ANTHROPIC_API_KEY` secret name when the resulting answer or
+check setup uses Claude. Missing or unreadable names stop before those changes.
+Preview can use a typed missing-key state to stop without a control-plane read;
+older Workers need the names list. Preview uses only already acquired in-memory
+access with renewal disabled. A durable profile alone is unverified because
+pinned Wrangler's token command can refresh and persist credentials. Preview
+never calls that command or a credential store. Neither path reads the key value. The remedy uses the masked Worker Secret
+field in the dashboard, so a legacy model guard cannot block key repair.
+
 Provisioning adopts only resources whose identity and stored install state prove
 they belong to this client. Migrations are checksum-protected, append-only, and
 restart-safe after every independently committed statement. A D1 upgrade
@@ -442,9 +454,15 @@ that validated aggregate as `docs_withheld` and `withheld_reasons`, and retains
 the most recent aggregate as `last_withheld` across bounded receipt pages. Daily
 verification requires the completed walk and saved provider boundary, carries
 the exact map into its source receipt, and renders credential review separately
-from calendar retry. A withheld-only check advances no accepted-document
-timestamp or complete-history claim. Other connectors retain their refusal
+from calendar retry. A withheld-only check advances the source's last-read
+timestamp, just like a verified quiet check, so health and source status agree
+on operational freshness. It advances no accepted-document timestamp or
+complete-history claim. Other connectors retain their refusal
 behavior.
+Daily status displays validated withholding aggregates independently of that
+completed-check predicate. Failed and unfinished receipts retain their measured
+count and closed causes; a missing valid cause map falls back to the measured
+count alone. Neither display path authorizes freshness or a completed-run claim.
 
 Mutating local-folder, Drive, Gmail, and Calendar runs share one cross-platform
 owner lease keyed to the canonical adjacent source-state path. The lease is
@@ -802,14 +820,45 @@ mutation and reports historical completion only. The recovery table inventory
 includes these receipts, but exports omit them so a restored database cannot
 reuse an old local approval.
 
+### Indexed source-family inventory
+
+Migration 0059 adds real family identity columns in `document_family_index`,
+a derived table with live-family and declared-membership indexes. It creates
+indexes on the empty projection, so schema application does not evaluate JSON
+across the existing corpus. This path uses ordinary tables, indexes and
+triggers already used by the D1 backend; it requires no generated-column support.
+
+Triggers maintain membership on document insert, identity/metadata changes,
+soft deletion, restoration and physical deletion, including older writers.
+The active scheduled Worker advances at most 500 existing document identities
+per transaction. Its primary-key cursor and completion receipt commit with the
+projection writes. A failed batch advances nothing, overlapping workers cannot
+move the cursor backward, and another scheduled pass resumes retained work.
+Preparation never writes document/chunk rows or removal-approval generations.
+It pauses with the whole scheduled cycle during an upgrade. Logs report only
+processed counts, completion and fixed failure messages.
+
+Until the completion receipt is present, inventory and declared-family lookup
+retain their legacy queries. Afterwards inventory seeks the live-family index
+from the source prefix and lexical cursor, grouping only subsequent members.
+Labels still aggregate exact current document metadata for the selected page.
+Declared forget candidates seek the declared-membership index; structural
+candidates retain the document primary-key range and all provenance checks.
+Work is proportional to page members, including label aggregation; a family
+with many physical documents necessarily costs more than a one-row family.
+Neither preparation nor the fast path changes the CLI's D1-only retry rule.
+Recovery inventories include both derived tables but omit them from exports;
+target triggers and a fresh local walk rebuild them from restored documents.
+
 ## Retrieval and answer flow
 
 The installer always binds the manifest's `retrieval.answer_model` as
 `ANSWER_MODEL`. It binds optional `retrieval.gate_model` as `GATE_MODEL`; when
 that value is absent, synthesis and evidence checks use `ANSWER_MODEL` exactly.
 Provider custody is decided independently for each configured model. A missing
-Anthropic key keeps the existing built-in-model fallback visible through a
-computed `/think` gap and the authenticated documents receipt used by
+Anthropic key refuses configured Claude answer and check calls without a Workers AI fallback.
+`/think` returns an `anthropic_key_missing` gap while search stays available;
+the authenticated documents receipt reports `anthropic_key_missing: true` for
 `brain health`.
 
 Think first offers unrestricted owner money questions to a read-only ledger

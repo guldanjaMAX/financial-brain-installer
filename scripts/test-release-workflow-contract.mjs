@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -54,8 +54,8 @@ assert.match(installMatrix, /node scripts\/install-from-public-contract\.mjs/);
 assert.doesNotMatch(installMatrix, /brain (?:setup|provision|drain|ask)/,
   "the package-only public-contract gate must not claim or start live provisioning");
 assert.match(installRunner, /readInstallDoorwayContract\(\{ platform: guideArg \}\)/,
-  "the install runner must bind the release state to the strict live doorway validator before download");
-const heldDoorwayIndex = installRunner.indexOf('if (publicContract.state === "held")');
+  "the install runner must use the shared strict live doorway validator before download");
+const heldDoorwayIndex = installRunner.indexOf('if (publicContract.install === "held")');
 const installWorkdirIndex = installRunner.indexOf('mkdirSync(workdir, { recursive: true });');
 assert.ok(heldDoorwayIndex > 0 && installWorkdirIndex > heldDoorwayIndex,
   "a held doorway must stop before the install runner creates its work directory");
@@ -514,7 +514,7 @@ for (const [name, text] of workflowFiles) {
   }
 }
 
-const sandbox = mkdtempSync(join(tmpdir(), "brain-release-contract-"));
+const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-release-contract-")));
 try {
   const versioned = join(sandbox, "brain-installer-9.8.7.tgz");
   const canonical = join(sandbox, "brain-installer.tgz");

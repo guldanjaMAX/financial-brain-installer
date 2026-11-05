@@ -106,6 +106,18 @@ export function mergeProviderWithheldReasons(values) {
   return normalizeProviderWithheldReasons(merged);
 }
 
+/** Render only closed aggregate causes, never provider text or document data. */
+export function providerSetAsideOwnerCopy(run) {
+  const aggregate = normalizeProviderWithheldReasons(run?.withheld_reasons);
+  if (!aggregate || aggregate.count !== run?.docs_withheld) return null;
+  const causes = [];
+  const calendar = aggregate.reasons.calendar_event_incomplete;
+  const credentials = aggregate.reasons.credential_detected;
+  if (calendar) causes.push(`${calendar} incomplete calendar ${calendar === 1 ? "item" : "items"} queued for retry`);
+  if (credentials) causes.push(`${credentials} ${credentials === 1 ? "item" : "items"} held by the credential safety check for review`);
+  return `${aggregate.count} ${aggregate.count === 1 ? "item" : "items"} set aside (${causes.join("; ")})`;
+}
+
 export function providerWithheldReason(value) {
   const aggregate = normalizeProviderWithheldReasons(value);
   return aggregate ? `${PROVIDER_WITHHELD_PREFIX}${JSON.stringify(aggregate.reasons)}` : null;

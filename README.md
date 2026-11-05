@@ -13,7 +13,7 @@ whichever supported clients are present without placing a key in their config.
 
 ## Install it
 
-This package identifies itself as brain-installer 0.4.25. Its version alone does
+This package identifies itself as brain-installer 0.4.26. Its version alone does
 not establish whether it is approved for installation. Before installing or
 updating, use the current guided page at https://financialbrain.ai/install and
 match the exact approved package version, byte count and SHA-256. If the page
@@ -177,7 +177,7 @@ reviewed step at a time with `--run tools`, `cloudflare`, `smoke`, `google`, `zo
 `imap`, `passkey`, or `verify`. The owner still handles login, 2FA, OAuth consent,
 and the physical passkey gesture. For the supported Google, Zoom, and IMAP
 steps, tokens and app secrets go only into hidden terminal prompts or provider
-pages. The 0.4.25 candidate Windows path refuses those three credential ceremonies until
+pages. The 0.4.26 candidate Windows path refuses those three credential ceremonies until
 its secure secret-entry bridge is physically proven. Its first owner source is
 one explicitly approved local folder, previewed first and loaded manually.
 
@@ -902,6 +902,12 @@ an incomplete calendar event, keep it queued, and retry it on the next refresh.
 The load stays partial. Its reason counts must add up exactly to the withheld
 total. Sources and daily status retain those closed causes, and daily refresh
 shows credential holds separately from calendar items queued for retry.
+Source, daily and health status show when the check ran and how many items were
+set aside, grouped by reason. A completed check advances the source's last-read
+freshness even if every item was set aside. Accepted-document and complete-history
+dates remain separate; a failed or unfinished check still needs attention.
+Daily status keeps measured set-aside counts visible during failure recovery,
+without presenting the failed run as a completed check.
 Withheld documents do not count as indexed or prove complete history. Unknown
 reasons, count mismatches, delivery failures and other gaps still stop the run
 and preserve its cursor.
@@ -1168,7 +1174,11 @@ claiming the original enumeration as the removal count.
   overlaps, and missing add paths before changing settings. A placeholder,
   excluded folder, or file moved away never removes content already loaded into
   the Brain. Check counts and newest-file times without exposing file names with
-  `brain folder <manifest> status`.
+  `brain folder <manifest> status`. To stop one feed, run
+  `brain folder <manifest> remove --source <name>`. Documents already in your
+  Brain stay and nothing on disk is deleted. Other feeds, the watched folder,
+  and upload settings stay as they were, even when the last feed is removed.
+  If daily refresh is on, run `brain daily on <manifest>` to rebuild its job.
 - **The admin key is operator-only; people use passkeys.** An owner passkey has
   the owner's full workspace. A scoped person sees only exact documents granted
   to that session, and an unknown or unavailable grant fails closed. These

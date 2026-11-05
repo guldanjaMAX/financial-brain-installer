@@ -452,6 +452,7 @@ const expected = [
   "docs/decisions/007-rehome-update-006-arm64-clause.md",
   "docs/decisions/008-rehome-update-025-breadth-into-update-044.md",
   "docs/decisions/009-bind-install-doorway-to-release-state.md",
+  "docs/decisions/010-separate-install-and-update-doorway-state.md",
   "docs/decisions/README.md",
   "doctor.mjs",
   "eval/brain-client.mjs",
@@ -539,6 +540,7 @@ const expected = [
   "operations/admin-key-persistence.mjs",
   "operations/answer-setup-copy.mjs",
   "operations/answer-setup.mjs",
+  "operations/update-key-preflight.mjs",
   "operations/brain-lifecycle-lock.mjs",
   "operations/daily-refresh-observation.mjs",
   // Content-free durable dispatch intent is required by the migration runner.
@@ -648,6 +650,14 @@ const expected = [
   // pending path before any live action, leaves the final path absent until
   // no-replace publication, and refuses ambiguous replacement or recovery state.
   "operations/private-aggregate-receipt.mjs",
+  "operations/private-update-command.mjs",
+  "operations/private-update-offer.mjs",
+  "operations/private-update-package.mjs",
+  // Claude Code connection discovery and the structural trust gate for
+  // connections an earlier installer wrote (0.4.6 up to the running version).
+  // They read .claude.json and installer package metadata only; no credential.
+  "operations/claude-mcp-discovery.mjs",
+  "operations/mcp-prior-runtime.mjs",
   // Shared byte contract for a normalized install-state prefix plus one direct
   // D1 data export. It owns no credential, provider, or command transport.
   "operations/recovery-content-fingerprint.mjs",
@@ -800,6 +810,7 @@ const expected = [
   "migrations/d1/0056_content_date_refresh_receipts.sql",
   "migrations/d1/0057_bank_provider_transition.sql",
   "migrations/d1/0058_fin_account_kind_reviews.sql",
+  "migrations/d1/0059_document_family_index.sql",
   "operations/bank-access-wrapping-key.mjs",
   // Generic owner-present bank secret custody. Reviewed 2026-09-17: takes only
   // injected list, write, and hidden-prompt callbacks; refuses ambient values
@@ -977,7 +988,9 @@ const expected = [
   "worker/src/lib/ledger-clarification.js",
   "worker/src/lib/ledger-wording.js",
   "worker/src/lib/money-format.js",
+  "worker/src/lib/ledger-intent-calendar.js",
   "worker/src/lib/ledger-analysis.js",
+  "worker/src/lib/ledger-refund-basis.js",
   "worker/src/lib/fin-import.js",
   "worker/src/lib/fin-ledger-maintenance.js",
   "worker/src/lib/fin-upload.js",
@@ -986,6 +999,7 @@ const expected = [
   "worker/src/lib/memory-supersession.js",
   "worker/src/lib/oauth.js",
   "worker/src/lib/owner-note-contract.js",
+  "worker/src/lib/think-candidate-policy.js",
   "worker/src/lib/curated-verify.js",
   "worker/src/lib/owner-notes.js",
   "worker/src/lib/remember-contract.js",
@@ -1015,6 +1029,7 @@ const expected = [
   // owner data, or network access.
   "worker/src/lib/stored-family-identity.js",
   "worker/src/lib/store-d1.js",
+  "worker/src/lib/source-family-index.js",
   "worker/src/lib/store.js",
   // Hot source-sized inventory plus an owner-admin exact report. The report
   // pages private family identities inside the Worker and emits aggregates.

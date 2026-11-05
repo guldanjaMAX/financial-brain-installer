@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join, relative, sep } from "node:path";
+import { legacyModelSwitchFor } from "../operations/answer-setup.mjs";
 
 // Execute the complete pinned production function with boundary replacements.
 // This function currently closes over control-plane dependencies, so extracting
@@ -11,19 +12,29 @@ const start = source.indexOf("async function cmdDeployWithPrompts(");
 const end = source.indexOf("\n/**\n * A control-plane prompt owns stdin", start);
 assert.ok(start > 0 && end > start);
 const deploySource = source.slice(start, end);
+const modelStart = source.indexOf("function updateAnswerManifest(");
+const modelEnd = source.indexOf("\nfunction answerSetupLine(", modelStart);
+assert.ok(modelStart > 0 && modelEnd > modelStart);
+const updateAnswerManifest = new Function("legacyModelSwitchFor",
+  `${source.slice(modelStart, modelEnd)}\nreturn updateAnswerManifest;`)(legacyModelSwitchFor);
 function scheduleFixture(arm) {
   let schedules = arm === "present" ? ["* * * * *", "7 6 * * *"] : ["7 6 * * *"];
   const events = [], messages = [];
-  let reads = 0, writes = 0;
+  let reads = 0, writes = 0, modelPreparations = 0;
   const manifest = { client: { slug: "fixture" }, brain: { domain: "brain.invalid", worker_name: "fixture-brain" },
     infrastructure: { cloudflare: { d1_database_id: "fixture-db", vectorize_index: "fixture-index" } } };
   const bindings = {
     join, relative, sep, HERE: "/fixture", FormData, Blob,
     loadManifest: () => ({ m: manifest }), bankFeedWorkerVars: () => [],
+    updateAnswerManifest: (value, options) => {
+      modelPreparations++;
+      assert.notEqual(options.legacyModelSwitch, true, "ordinary deploy does not request a switch");
+      const prepared = updateAnswerManifest(value, options);
+      assert.equal(prepared, value, "the production helper preserves ordinary deploy identity");
+      return prepared;
+    },
     readWorkerBankProvider: async () => { throw new Error("provider read must stay unreachable"); },
     assertReviewedAnswerModels: () => {},
-    // Deploy passes no legacyModelSwitch option, so the real helper returns the manifest unchanged.
-    updateAnswerManifest: manifest => manifest,
     resolveAccount: async () => ({ id: "fixture-account" }),
     collectWorkerFiles: root => [join(root, "index.js")], readFileSync: () => "export default {};",
     workerBindings: () => [], die: message => { throw new Error(message); },
@@ -44,7 +55,7 @@ function scheduleFixture(arm) {
   };
   const deploy = new Function(...Object.keys(bindings), `${deploySource}\nreturn cmdDeployWithPrompts;`)(...Object.values(bindings));
   return { run: () => deploy("fixture-manifest", { persistDomain: false, nextSteps: false }),
-    state: () => ({ reads, writes, schedules, messages, events }) };
+    state: () => ({ reads, writes, schedules, messages, events, modelPreparations }) };
 }
 for (const arm of ["present", "added", "lost-write", "unreadable", "missing-inventory", "readback-unreadable"]) {
   test(`S2 cron exact readback and preservation: ${arm}`, async () => {
@@ -52,6 +63,7 @@ for (const arm of ["present", "added", "lost-write", "unreadable", "missing-inve
     let failure;
     try { await f.run(); } catch (error) { failure = error; }
     const state = f.state();
+    assert.equal(state.modelPreparations, 1, "the exact production model helper ran");
     assert.ok(state.events.some(([method, path]) => method === "PUT" && path.endsWith("/fixture-brain")), "real deployment decision reached");
     assert.ok(state.reads >= 1, "schedule inventory decision reached");
     if (["present", "added"].includes(arm)) {
@@ -114,7 +126,10 @@ for (const arm of ["candidates", "no-candidates", "missing-results", "incomplete
       assert.match(text, /Fixture evidence limit/);
       assert.match(text, /Next: ask again with a name, date or exact phrase/);
     } else if (arm === "missing-results") {
-      assert.match(text, /I can help narrow the search, but the records checked did not support an answer\. Want to try a more specific detail\?/);
+      assert.match(text, /I can help narrow the search, but the records checked did not support an answer\./);
+      // The one offer comes last, after the reason line.
+      assert.match(text, /Fixture evidence limit\nWant to try a more specific detail\?$/);
+      assert.equal(text.match(/Want to try/g)?.length, 1);
       assert.doesNotMatch(text, /I didn't find a matching record|I found 0/);
     }
     else assert.match(text, /fixture supports this answer/);

@@ -1,6 +1,6 @@
 # ADR 009: Bind the public install doorway to the release state
 
-- Status: Accepted
+- Status: Superseded by ADR 010
 - Date: 2026-10-01
 - Owners: Product and engineering
 - Confidence: High

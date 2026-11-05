@@ -8,6 +8,7 @@ import { prepareBankExportImport } from '../../worker/src/lib/fin-import.js';
 import { workerCompartment } from './worker-compartment.mjs';
 import { clone, typed, sha256, exactTape, d1Tape, modelRequest } from './exact-tape.mjs';
 import { ARMS, runRetrievalArm } from './retrieval-arms.mjs';
+import { armReplayStall } from './child-stall.mjs';
 
 const executionStatus = fatal => !fatal.length ? 'complete'
   : fatal[0] === 'MODEL_TAPE_MISS' ? 'model_tape_miss'
@@ -263,6 +264,7 @@ function normalizeMap(text) {
 }
 
 if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(new URL(import.meta.url))) {
+  armReplayStall();
   try { process.stdout.write(JSON.stringify(await executeRoutes(JSON.parse(readFileSync(0, 'utf8'))))); }
   catch { process.stderr.write('ROUTE_HOST_FAILURE\n'); process.exitCode = 2; }
 }
