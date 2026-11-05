@@ -15,7 +15,16 @@ import { captureAdditionalUpdateSchedulers } from "../operations/update-schedule
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 test("simulated Darwin inventory stays isolated without process.getuid on any OS", async t => {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "scheduler-no-uid-")));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  let homeMock;
+  let inventoryMock;
+  // One cleanup, in order: restore the fs mocks first, then remove the tree. On Node 22,
+  // recursive rmSync walks the tree with fs.readdirSync and would hit the inventory mock.
+  t.after(() => {
+    homeMock?.mock.restore();
+    inventoryMock?.mock.restore();
+    syncBuiltinESMExports();
+    rmSync(root, { recursive: true, force: true });
+  });
   const getuid = Object.getOwnPropertyDescriptor(process, "getuid");
   delete process.getuid;
   t.after(() => {
@@ -28,18 +37,13 @@ test("simulated Darwin inventory stays isolated without process.getuid on any OS
   mkdirSync(poisoned, { recursive: true });
   writeFileSync(join(poisoned, "com.brain-installer.sentinel.curated-sync.plist"), "{}");
   const readDirectory = fs.readdirSync;
-  const homeMock = t.mock.method(os, "homedir", () => fallback);
-  const inventoryMock = t.mock.method(fs, "readdirSync", (path, ...args) => {
+  homeMock = t.mock.method(os, "homedir", () => fallback);
+  inventoryMock = t.mock.method(fs, "readdirSync", (path, ...args) => {
     assert.notEqual(resolve(String(path)), poisoned, "the poisoned fallback inventory must never be read");
     if (resolve(String(path)) === join(root, "Library", "LaunchAgents")) inventories++;
     return readDirectory(path, ...args);
   });
   syncBuiltinESMExports();
-  t.after(() => {
-    homeMock.mock.restore();
-    inventoryMock.mock.restore();
-    syncBuiltinESMExports();
-  });
   const options = isolatedUpdateSchedulerOptions(root, { platform: "darwin" });
   const launchctl = options.legacySchedulerOptions.launchctl;
   options.legacySchedulerOptions.launchctl = args => { listings++; return launchctl(args); };
