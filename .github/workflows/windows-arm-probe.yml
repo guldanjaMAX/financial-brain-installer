@@ -1,0 +1,175 @@
+# Evidence-only probe for UPDATE-006 and UPDATE-012. This is intentionally not
+# part of the required release matrix and cannot clear either physical-device
+# acceptance gate. It uses no repository secrets and contacts no product
+# endpoint.
+name: windows-arm64-probe
+
+on:
+  workflow_dispatch:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-arm64:
+    name: Windows 11 ARM64 / Node 24 probe
+    if: ${{ github.event_name != 'pull_request' || github.head_ref == 'claude/windows-arm-probe' }}
+    runs-on: windows-11-arm
+    continue-on-error: true
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: prove the native runtime identity
+        shell: powershell
+        env:
+          RUNNER_ARCH: ${{ runner.arch }}
+        run: |
+          $osArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+          Write-Host "OS_ARCHITECTURE=$osArchitecture"
+          if ($osArchitecture -ne 'Arm64') { throw "native Windows architecture is $osArchitecture, expected Arm64" }
+          node -e '
+            const actual = {
+              runner_arch: process.env.RUNNER_ARCH,
+              platform: process.platform,
+              arch: process.arch,
+              node: process.versions.node,
+            };
+            console.log("RUNTIME " + JSON.stringify(actual));
+            const problems = [];
+            if (actual.runner_arch !== "ARM64") problems.push(`runner arch ${actual.runner_arch}`);
+            if (process.platform !== "win32") problems.push(`platform ${process.platform}`);
+            if (process.arch !== "arm64") problems.push(`Node arch ${process.arch}`);
+            if (process.versions.node.split(".")[0] !== "24") problems.push(`Node ${process.versions.node}`);
+            if (problems.length) throw new Error(`not native Windows ARM64 Node 24: ${problems.join("; ")}`);
+          '
+          Write-Host "PROCESSOR_ARCHITECTURE=$env:PROCESSOR_ARCHITECTURE"
+
+      # A fresh runner is the point. A prior Brain or CLI would make the local
+      # install smoke ambiguous.
+      - name: prove this machine has no brain
+        if: ${{ !cancelled() }}
+        shell: powershell
+        run: |
+          if (Test-Path (Join-Path $HOME '.brain')) { throw 'runner is not fresh' }
+          if (Get-Command brain -ErrorAction SilentlyContinue) { throw 'a brain CLI is already on PATH' }
+          Write-Host 'no brain, no CLI: this is a first install'
+
+      # Match the required matrix's install policy. Optional native packages
+      # are the leading ARM64 risk, so ignored lifecycle scripts must not hide
+      # whether npm selected usable binaries for this platform.
+      - name: install exact locked dependencies
+        if: ${{ !cancelled() }}
+        run: npm ci --ignore-scripts
+
+      - name: exercise native optional dependencies
+        if: ${{ !cancelled() }}
+        shell: powershell
+        run: |
+          $failures = 0
+          $checks = @(
+            @{ Name = 'esbuild'; Run = { & .\node_modules\.bin\esbuild.cmd --version } },
+            @{ Name = 'sharp'; Run = { node -e "require('sharp')({create:{width:1,height:1,channels:4,background:'#00000000'}}).png().toBuffer().then(() => console.log('sharp ok'))" } },
+            @{ Name = 'workerd'; Run = { & .\node_modules\.bin\workerd.cmd --version } },
+            @{ Name = 'wrangler'; Run = { & .\node_modules\.bin\wrangler.cmd --version } }
+          )
+          foreach ($check in $checks) {
+            try {
+              & $check.Run
+              if ($LASTEXITCODE -ne 0) { throw "exit $LASTEXITCODE" }
+              Write-Host "PASS $($check.Name)"
+            } catch {
+              $failures += 1
+              Write-Host "::error::$($check.Name) is unavailable on native Windows ARM64"
+            }
+          }
+          if ($failures -ne 0) { throw "$failures native dependency probe(s) failed" }
+
+      - name: reject private package inputs
+        if: ${{ !cancelled() }}
+        run: node test/package-privacy.test.mjs --scan-only
+
+      # This is the endpoint-free equivalent of the install matrix's client
+      # smoke: pack the checkout, install through real npm.cmd into a user-owned
+      # prefix, invoke brain.cmd, and require meaningful CLI output.
+      - name: packed PowerShell user-prefix install and CLI smoke
+        if: ${{ !cancelled() }}
+        shell: powershell
+        run: |
+          $packageDir = Join-Path $env:RUNNER_TEMP 'arm64-package'
+          $prefix = Join-Path $env:RUNNER_TEMP 'financial-brain-cli'
+          New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
+          npm.cmd pack --ignore-scripts --pack-destination $packageDir
+          if ($LASTEXITCODE -ne 0) { throw "npm pack failed: $LASTEXITCODE" }
+          $tarballs = @(Get-ChildItem -Path $packageDir -Filter '*.tgz')
+          if ($tarballs.Count -ne 1) { throw "expected one package, found $($tarballs.Count)" }
+          npm.cmd install --global --prefix $prefix --ignore-scripts --no-audit --no-fund $tarballs[0].FullName
+          if ($LASTEXITCODE -ne 0) { throw "package install failed: $LASTEXITCODE" }
+          $brain = Join-Path $prefix 'brain.cmd'
+          if (-not (Test-Path $brain -PathType Leaf)) { throw 'the installed brain.cmd entrypoint is missing' }
+          $usage = & $brain 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "installed command failed: $LASTEXITCODE" }
+          Write-Host $usage
+          if ($usage -notmatch 'brain setup|setup\s+\[manifest\]') { throw 'installed CLI printed no usage' }
+          $doctor = & $brain doctor 2>&1 | Out-String
+          $doctorCode = $LASTEXITCODE
+          Write-Host $doctor
+          if ($doctor -notmatch 'Node') { throw 'installed doctor produced no report' }
+          if ($doctor -match 'cannot find module') { throw 'installed doctor crashed on imports' }
+          Write-Host "doctor exited $doctorCode, expected without credentials"
+
+      - name: PowerShell and MSIX preflight path
+        if: ${{ !cancelled() }}
+        shell: powershell
+        run: |
+          $path = Resolve-Path .\tools\preflight.ps1
+          $errors = $null
+          $tokens = $null
+          [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -ne 0) { throw 'preflight.ps1 did not parse' }
+          $out = powershell.exe -NoProfile -ExecutionPolicy Bypass -File $path 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $out
+          if ($out -notmatch 'Financial Brain preflight') { throw 'preflight did not run' }
+          if ($out -notmatch 'this process has no Windows package identity') { throw 'native package identity was not checked' }
+          if ($out -notmatch 'STOP.*running as Administrator') { throw 'hosted runner did not reach the expected elevation refusal' }
+          if ($code -ne 1) { throw "expected the Administrator STOP to exit 1, got $code" }
+
+      - name: Windows DPAPI release probe
+        if: ${{ !cancelled() }}
+        run: node scripts/windows-dpapi-release-gate.mjs
+
+      - name: Windows-focused contract tests
+        if: ${{ !cancelled() }}
+        shell: powershell
+        run: |
+          $tests = @(
+            'test/cli-guidance-rendering.test.mjs',
+            'test/cli-path-persist.test.mjs',
+            'test/technician-setup.test.mjs',
+            'test/install-contract-runtime.test.mjs',
+            'test/windows-native-architecture.test.mjs',
+            'test/windows-dpapi-release-gate.test.mjs',
+            'test/windows-preflight-contract.test.mjs',
+            'test/onboarding-sandbox.test.mjs'
+          )
+          $failures = 0
+          foreach ($test in $tests) {
+            Write-Host "RUN $test"
+            node $test
+            if ($LASTEXITCODE -ne 0) {
+              $failures += 1
+              Write-Host "::error::$test failed with exit $LASTEXITCODE"
+            }
+          }
+          if ($failures -ne 0) { throw "$failures Windows-focused test file(s) failed" }
