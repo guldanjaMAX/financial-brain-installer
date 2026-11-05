@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
 import { generateKeyPairSync, sign, createHash } from "node:crypto";
 import { readFileSync, writeFileSync, mkdtempSync, statSync, chmodSync, symlinkSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -141,14 +142,14 @@ test("signer file/stdin round trip and private output boundaries", async t => {
     manifest, now, publicKey: publicPem,
   }).to_version, "0.4.23");
   const cli = new URL("../tools/sign-private-offer.mjs", import.meta.url);
-  const child = spawnSync(process.execPath, [cli.pathname, ...args.slice(0, -1), join(root, "child-offer.json"), "--key-stdin"], {
+  const child = spawnSync(process.execPath, [fileURLToPath(cli), ...args.slice(0, -1), join(root, "child-offer.json"), "--key-stdin"], {
     input: privatePem, encoding: "utf8", env: {
       PATH: process.env.PATH, HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE,
       TMPDIR: process.env.TMPDIR, BRAIN_NO_WRANGLER_LOGIN: "1",
     },
   });
   assert.equal(child.status, 0, child.stderr);
-  const failed = spawnSync(process.execPath, [cli.pathname, ...args, "--key-stdin"], {
+  const failed = spawnSync(process.execPath, [fileURLToPath(cli), ...args, "--key-stdin"], {
     input: privatePem, encoding: "utf8", env: { HOME: root, USERPROFILE: root, TMPDIR: root, BRAIN_NO_WRANGLER_LOGIN: "1" },
   });
   assert.notEqual(failed.status, 0, "occupied offer output refuses");

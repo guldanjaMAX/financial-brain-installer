@@ -220,7 +220,10 @@ if (process.platform !== "win32") {
   } }]);
 }
 for (const [label, options] of negatives) {
-  test(`prior runtime refuses ${label} at the collision decision`, () => exercise(options, refused));
+  const windowsUnrepresentable = process.platform === "win32" && /[\r\n]/.test(options.prefix ?? "");
+  test(`prior runtime refuses ${label} at the collision decision`, {
+    skip: windowsUnrepresentable ? "Windows cannot create a folder name containing a line break, so this prior runtime cannot exist there" : false,
+  }, () => exercise(options, refused));
 }
 
 test("Codex migrates the same structural prior runtime", () => exercise({ target: "codex" }, (run) => accepted(run, "Codex")));
