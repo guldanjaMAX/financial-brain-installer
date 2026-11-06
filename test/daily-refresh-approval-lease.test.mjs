@@ -81,7 +81,9 @@ async function run(race, mutateBeforeStart = false) {
           ? ["add", "--path", join(root, "third"), "--source", "third"]
           : ["remove", "--source", "first"], folderOptions));
       }
-      const lock = acquireBrainLifecycleLock({ ...options, machineLockRoot });
+      // The schedule fixture renders macOS commands, but the lock lives on this
+      // machine's real filesystem, so it uses the real platform's privacy check.
+      const lock = acquireBrainLifecycleLock({ ...options, platform: process.platform, machineLockRoot });
       leaseHeld = true;
       return {
         assertOwned: lock.assertOwned,
