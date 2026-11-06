@@ -1,0 +1,52 @@
+# Scratch probe for the 0.4.26 release: proves the Windows test fixes on real
+# Windows runners in minutes. Runs only on this scratch branch; never merged.
+name: windows-0426-test-probe
+
+on:
+  push:
+    branches:
+      - "claude/0426-win-lease-probe"
+
+concurrency:
+  group: windows-0426-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Windows probe / node ${{ matrix.node }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+      - name: install
+        run: npm ci --ignore-scripts
+      - name: the 0.4.26 Windows-portability test files
+        shell: bash
+        env:
+          BRAIN_NO_WRANGLER_LOGIN: '1'
+          BRAIN_TEST_CHAIN: '1'
+        run: |
+          set -u
+          fails=0
+          for f in test/daily-refresh-approval-lease.test.mjs test/feed-folders-remove.test.mjs test/legacy-model-switch.test.mjs test/mcp-prior-runtime.test.mjs test/private-update-offer.test.mjs; do
+            echo "::group::$f"
+            node --test --test-reporter=tap "$f"; rc=$?
+            echo "::endgroup::"
+            echo "RESULT $f exit=$rc"
+            [ $rc -eq 0 ] || fails=$((fails+1))
+          done
+          echo "FAILED FILES: $fails"
+          [ $fails -eq 0 ]
