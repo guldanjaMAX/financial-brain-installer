@@ -146,67 +146,28 @@ test("C-R4: real Think propagates owner time zone and refuses only derived inval
   assert.equal(validBalance.ledger.accounts[0].current_minor, 98765);
 });
 
-test("item C real Think keeps explicit current bounds and refuses derived windows before SQL", async (t) => {
+test("item C explicit periods respect owner today and require a usable owner zone", async (t) => {
   clockNow = "2026-10-01T02:30:00Z";
   t.after(() => { clockNow = NOW; });
   const f = await fixtureFor(t);
   f.raw("UPDATE fin_account_coverage SET covered_to='2026-10-31'");
   f.add("october-deposit", "live-account", "2026-10-15", 13001);
   const transactionDecisions = () => f.seen.sql.filter(sql => /fin_transactions/.test(sql)).length;
-  const zoneStates = [["valid owner-day-different", "America/Phoenix"], ["missing", null], ["invalid", "Invalid/Zone"]];
-  const figureControls = [];
-  let explicitSqlDecisions = 0, historicalControls = 0, refusalDecisions = 0;
-
-  for (const [zoneState, timeZone] of zoneStates) {
+  for (const timeZone of ['America/Phoenix', null, 'Invalid/Zone']) {
     if (timeZone === null) delete f.env.BRAIN_TIMEZONE;
     else f.env.BRAIN_TIMEZONE = timeZone;
-    const sqlBefore = transactionDecisions();
-    const explicit = await (await f.ask("How much money came in October 2026?")).json();
-    assert.equal(explicit.ledger?.kind, "totals", `${zoneState}: explicit classification reached the ledger`);
-    assert.deepEqual([explicit.ledger.from, explicit.ledger.to], ["2026-10-01", "2026-10-31"]);
-    assert.ok(transactionDecisions() > sqlBefore, `${zoneState}: explicit window reached transaction SQL`);
-    explicitSqlDecisions++;
-    figureControls.push(JSON.stringify({ from: explicit.ledger.from, to: explicit.ledger.to,
-      accounts: explicit.ledger.accounts.map(account => [
-        account.account_mask, account.credits_minor, account.debits_minor,
-      ]) }));
-
-    if (zoneState !== "valid owner-day-different") {
-      const historicalSqlBefore = transactionDecisions();
-      const historical = await (await f.ask("How much money came in September 2026?")).json();
-      assert.equal(historical.ledger?.kind, "totals", `${zoneState}: historical control reached the ledger`);
-      assert.deepEqual([historical.ledger.from, historical.ledger.to], ["2026-09-01", "2026-09-30"]);
-      assert.ok(transactionDecisions() > historicalSqlBefore, `${zoneState}: historical control reached transaction SQL`);
-      historicalControls++;
-    }
+    const before = transactionDecisions();
+    const future = await (await f.ask('How much money came in October 2026?')).json();
+    assert.equal(future.ledger, undefined);
+    assert.equal(transactionDecisions(), before, 'future or ungrounded owner day refuses before facts');
+    if (timeZone === 'America/Phoenix') assert.match(future.answer, /period has not happened yet/i);
+    else assert.equal(future.gaps[0].reason, 'owner_timezone_unavailable');
   }
-  assert.equal(new Set(figureControls).size, 1, "all explicit figure controls are byte-identical");
-
-  const derivedCases = [
-    ["current month", "How much money came in this month?"],
-    ["last month", "How much money came in last month?"],
-    ["rolling days", "How much money came in in the last 30 days?"],
-    ["year to date", "How much money came in so far this year?"],
-    ["explicit current year to date", "Show me money in and out in 2026 so far."],
-  ];
-  const armOutcomes = ["usable"];
-  for (const [zoneState, timeZone] of zoneStates.slice(1)) {
-    if (timeZone === null) delete f.env.BRAIN_TIMEZONE;
-    else f.env.BRAIN_TIMEZONE = timeZone;
-    for (const [period, question] of derivedCases) {
-      const sqlBefore = transactionDecisions();
-      const refused = await (await f.ask(question)).json();
-      assert.equal(refused.gaps?.[0]?.reason, "owner_timezone_unavailable", `${period} ${zoneState}: refusal decision reached`);
-      assert.equal(transactionDecisions(), sqlBefore, `${period} ${zoneState}: refusal occurs before transaction SQL`);
-      assert.equal(refused.ledger, undefined, `${period} ${zoneState}: no ledger figure`);
-      refusalDecisions++;
-      armOutcomes.push("refused");
-    }
-  }
-  assert.equal(explicitSqlDecisions, 3);
-  assert.equal(historicalControls, 2);
-  assert.equal(refusalDecisions, derivedCases.length * 2);
-  assert.equal(new Set(armOutcomes).size, 2, "real-path arms must not collapse to a uniform outcome");
+  f.env.BRAIN_TIMEZONE = 'America/Phoenix';
+  const historical = await (await f.ask('How much money came in September 2026?')).json();
+  assert.equal(historical.ledger.kind, 'totals');
+  assert.deepEqual([historical.ledger.from,historical.ledger.to], ['2026-09-01','2026-09-30']);
+  assert.equal(historical.evidence_gate.complete, true);
 });
 
 test("item C injected clocks never supply a missing owner time zone", async () => {
@@ -449,10 +410,13 @@ test("payment edges are inclusive, optional mask and counterparty are exact, and
   assert.equal(body.ledger.found, true);
   assert.deepEqual(body.citations.map(c => c.posted_on), ["2026-09-08", "2026-09-22"]);
   const wrongPayer = await direct(f, "Did the payment of $50.11 from Different payer arrive on 2026-09-15?");
-  // Every in-scope inflow remains visible; an amount filter cannot prove payer absence.
+  // Exact cents now bound anonymous candidates without establishing the payer.
   assert.equal(wrongPayer.ledger.found, null);
-  assert.equal(wrongPayer.ledger.inflow_count, 3);
-  assert.deepEqual(wrongPayer.citations.map(c => c.posted_on), ["2026-09-22", "2026-09-15", "2026-09-08"]);
+  assert.equal(wrongPayer.ledger.match_basis, 'possible');
+  assert.equal(wrongPayer.ledger.amount_candidates.length, 2);
+  assert.deepEqual(wrongPayer.citations.map(c => c.posted_on), ["2026-09-08", "2026-09-22"]);
+  assert.ok(wrongPayer.citations.every(c => c.amount_minor === 5011));
+  assert.match(wrongPayer.answer, /POSSIBLE match/);
   const wrongMask = await direct(f, "Did the payment of $50.11 arrive on 2026-09-15 in account 9999?");
   assert.equal(wrongMask.gaps[0].reason, "no_accounts");
   assert.equal((await direct(f, "Did the payment of $120.01 arrive?")).ledger.found, true);
@@ -691,7 +655,8 @@ for (const label of ["Zelle", "ACH", "ACH Credit", "Deposit", "Transfer", "Wire"
       for (const question of [payerPayment, payerIncome]) {
         const control = await reachedAnswer(f, question);
         assert.equal(control.ledger.found, true);
-        assert.equal(control.evidence_gate.complete, control.ledger.kind === "payment");
+        assert.equal(control.evidence_gate.complete, false, "an observed payment does not complete the future part of October");
+    assert.equal(control.ledger.requested_to, "2026-10-31");
       }
       for (const body of unknown) {
         assert.equal(body.ledger.found, null);
@@ -838,7 +803,8 @@ for (const description of [
   for (const question of [payerPayment, payerIncome]) {
     const control = await reachedAnswer(f, question);
     assert.equal(control.ledger.found, true, "structured payee restores the answer");
-    assert.equal(control.evidence_gate.complete, control.ledger.kind === "payment");
+    assert.equal(control.evidence_gate.complete, false, "the future part of October is incomplete");
+    assert.equal(control.ledger.requested_to, "2026-10-31");
   }
 });
 

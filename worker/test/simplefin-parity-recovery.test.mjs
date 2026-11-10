@@ -8,8 +8,10 @@ import { createHash } from "node:crypto";
 import { createProductFixture, seedOwnedEntity } from "./product-contract-fixture.mjs";
 import * as product from "../src/lib/simplefin-bank-feed.js";
 import { withLedgerAnswer } from "../src/lib/ledger-answer.js";
+import { simpleFinCoverageSummaryStatement } from "../src/lib/simplefin-ledger.js";
+import { reviewSimpleFinReplacement } from "../src/lib/simplefin-reconciliation.js";
 import * as reader from "../src/lib/ledger-reader.js";
-import { scoreAnswer, moneyBook, oracleFor } from "./fixtures/simplefin-parity.mjs";
+import { scoreAnswer, moneyBook, oracleFor, reviewParityCoverage } from "./fixtures/simplefin-parity.mjs";
 
 const sourceUrl = new URL("../src/lib/simplefin-bank-feed.js", import.meta.url);
 const day = (date, offset = 0) => new Date(Date.parse(`${date}T00:00:00Z`) + offset * 86400000).toISOString().slice(0, 10);
@@ -29,7 +31,7 @@ async function moduleCopy(t, source, label, origin = sourceUrl) {
   const originalSha = createHash("sha256").update(source).digest("hex");
   const directory = realpathSync.native(mkdtempSync(join(tmpdir(), "simplefin-recovery-")));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
-  source = source.replace(/from "(\.{1,2}\/[^\"]+)"/g, (_, dependency) => `from ${JSON.stringify(new URL(dependency, origin).href)}`);
+  source = source.replace(/from (["'])(\.{1,2}\/[^"']+)\1/g, (_, quote, dependency) => `from ${JSON.stringify(new URL(dependency, origin).href)}`);
   const path = join(directory, `${label}.mjs`);
   writeFileSync(path, source);
   copies.push({ label, input_sha256: originalSha, copied_sha256: createHash("sha256").update(source).digest("hex") });
@@ -49,6 +51,9 @@ async function fixture(t, { sf = product, start = "2026-11-01", end = "2026-11-0
   // Initial schedule only. Recovery tests never edit a persisted cursor.
   f.raw("UPDATE simplefin_connections SET backfill_start=?,backfill_next=?,backfill_end=?,next_pull_at=?",
     start, start, end, now(end));
+  // Retained-connection schedule: these tests start at an exact history boundary.
+  // Fresh first-day scheduling is covered separately by the business suite.
+  f.raw("UPDATE bank_feed_items SET last_synced_at=?", now(end));
   const calls = [];
   const pull = async (date, { fail = false, partial = false, omit = false, unread = false, using = sf,
     maxRequestsPerItem = 1, responseRows = rows, beforeResponse = async () => {} } = {}) => {
@@ -73,7 +78,8 @@ async function fixture(t, { sf = product, start = "2026-11-01", end = "2026-11-0
       request_id: `assign-${row.account_ref}`, account_ref: row.account_ref, entity_slug: "store",
     }, { now: now(end) });
   };
-  return { f, calls, pull, assign, item: claimed.body.item_ref };
+  const review = (from = start, to = end, stamp = now(end)) => reviewParityCoverage(f,from,to,stamp);
+  return { f, calls, pull, assign, review, item: claimed.body.item_ref };
 }
 
 async function payment(f, date, amount = "123.45") {
@@ -94,6 +100,7 @@ async function boundaryReplay(t, sf = product, boundary = "2025-02-02") {
   const end = day(boundary, 8);
   const r = await fixture(t, { sf, start: day(boundary, -89), end, rows: expected });
   await r.pull(end); await r.assign(); await r.pull(day(end, 1));
+  await r.review();
   assert.equal(r.calls.length, 2, "both adjacent provider requests reached");
   const active = r.f.rows("SELECT external_id FROM fin_transactions WHERE removed_at IS NULL ORDER BY external_id").map(row => row.external_id);
   assert.ok(active.includes("before"), "23:59:58 green control was fetched");
@@ -112,7 +119,7 @@ async function recoveryReplay(t, sf = product, fault = "fail") {
     { id: "october", posted: epoch("2026-10-16T12:00:00Z"), amount: "123.45" },
     { id: "current", posted: epoch("2026-11-04T12:00:00Z"), amount: "1.00" },
   ] });
-  await r.pull("2026-11-04"); await r.assign();
+  await r.pull("2026-11-04"); await r.assign(); await r.review();
   assert.equal(r.f.first("SELECT coverage_status FROM fin_account_coverage").coverage_status, "complete", "uninterrupted initial control");
   await r.pull("2026-11-05", { [fault]: true });
   assert.equal(r.calls.length, 2, "failed decision reached provider transport");
@@ -124,7 +131,8 @@ async function recoveryReplay(t, sf = product, fault = "fail") {
   assert.equal(r.calls.length, 4, "later successful daily requests reached transport");
   assert.equal(r.calls[2].from, r.calls[1].from, "oldest failed interval is durably retried");
   assert.equal(r.calls[2].to, r.calls[1].to, "retry preserves the failed interval endpoint");
-  assert.equal(r.f.first("SELECT coverage_status FROM fin_account_coverage").coverage_status, "complete", "proved history recovers without cursor edits");
+  await r.review();
+  assert.equal(r.f.first("SELECT coverage_status FROM fin_account_coverage").coverage_status, "complete", "proved history and fresh bank comparison recover without cursor edits");
   assert.equal((await payment(r.f, "2026-10-16")).ledger?.found, true);
   return r;
 }
@@ -142,6 +150,7 @@ async function delayedRecovery(t, sf = product, { days = 3, fault = "fail", lega
     if (r.f.first("SELECT backfill_next>backfill_end AS done FROM simplefin_connections").done) break;
     r.f.raw("UPDATE simplefin_connections SET next_pull_at=?", now("2026-11-04"));
   }
+  await r.review();
   assert.equal((await payment(r.f, "2026-10-16")).ledger?.found, true, "historical green payment is independently proved");
   if (legacy) r.f.raw("UPDATE simplefin_sync_windows SET revision='legacy',staging_revision='legacy'");
   const before = r.calls.length;
@@ -152,6 +161,7 @@ async function delayedRecovery(t, sf = product, { days = 3, fault = "fail", lega
   assert.ok(recoveryCalls.some(c => !c.fail && !c.partial && !c.unread && c.from <= epoch("2026-11-06T12:00:00Z") && c.to > epoch("2026-11-06T12:00:00Z")), "outstanding history includes the elapsed unrequested day");
   assert.equal(r.f.first("SELECT count(*) AS n FROM fin_transactions WHERE external_id='missed-day' AND removed_at IS NULL").n, 1,
     "delayed event is eventually imported exactly once");
+  await r.review();
   assert.equal((await payment(r.f, "2026-10-16")).ledger?.found, true, "October payment recovers after the delayed catch-up");
   assert.ok(r.f.rows("SELECT requests_today FROM simplefin_connections").every(c => c.requests_today <= 24));
   return r;
@@ -171,14 +181,14 @@ async function overlapReplay(t, sf = product, { reverse = true, overlapDays = 1,
   const newer = { id: "posted-new", posted: epoch("2026-11-05T12:00:00Z"), amount: "123.45" };
   const rows = [stable];
   const r = await fixture(t, { sf, start: "2026-10-01", rows });
-  await r.pull("2026-11-04"); await r.assign();
+  await r.pull("2026-11-04"); await r.assign(); await r.review();
   const aSelected = deferred(), bSelected = deferred(), aReserved = deferred(), bReserved = deferred(), aResponse = deferred(), deliverA = deferred(), aDecision = deferred();
   const originalPrepare = r.f.DB.prepare;
   const originalBatch = r.f.DB.batch, databaseErrors = [];
   let delayedDecisions = 0;
   r.f.DB.batch = async statements => {
     const pattern = { ledger: /INSERT (?:OR IGNORE )?INTO fin_transactions/,
-      withdrawal: /SET removed_at=\?,removal_reason='Absent from verified/,
+      proposal: /INSERT INTO simplefin_promotion_intents/,
       promotion: /SET state='promoted',promoted_at=/ }[phase];
     if (reverse && pattern && statements[0].params?.some(value => typeof value === "string" && value.startsWith(`${product.POSTED_HISTORY_REVISION}~2026-11-05:`)) &&
         statements.some(statement => pattern.test(statement.sql))) {
@@ -240,7 +250,7 @@ async function overlapReplay(t, sf = product, { reverse = true, overlapDays = 1,
   assert.equal(calls.length, 2, "both overlapping provider requests were dispatched");
   assert.ok(calls[0].from < calls[1].to && calls[1].from < calls[0].to, "requests overlap");
   assert.notDeepEqual([calls[0].from, calls[0].to], [calls[1].from, calls[1].to], "distinct window keys reached");
-  assert.ok(r.f.seen.sql.some(sql => /Absent from verified SimpleFIN posted history/.test(sql)), "reconciliation write decision was reached");
+  assert.ok(r.f.seen.sql.some(sql => /INSERT INTO simplefin_promotion_intents/.test(sql)), "reconciliation proposal decision was reached");
   assert.equal(r.f.first("SELECT amount_minor FROM fin_transactions WHERE external_id='stable' AND removed_at IS NULL").amount_minor, 100, "stable positive control survives");
   assert.equal(r.f.first("SELECT count(*) AS n FROM fin_transactions WHERE external_id='posted-new' AND removed_at IS NULL").n, 1, "older overlap cannot withdraw newer posted money");
   assert.equal(r.f.first("SELECT sum(amount_minor) AS cents FROM fin_transactions WHERE removed_at IS NULL").cents, 12445, "independent inflow cents oracle");
@@ -248,12 +258,13 @@ async function overlapReplay(t, sf = product, { reverse = true, overlapDays = 1,
     now: now("2026-11-06"), grantScope: { all: true }, scopePrincipalKind: "owner" }, async gap => Response.json({ answer: null, gaps: [gap] }))).json();
   if (reply.ledger?.total_minor !== undefined) assert.equal(reply.ledger.total_minor, 12445, "no proved answer may lose newer money");
   if (reverse) {
-    if (phase !== "transport") assert.equal(delayedDecisions, 1, "the precise fenced ledger/withdrawal/promotion batch was reached");
+    if (phase !== "transport") assert.equal(delayedDecisions, 1, "the precise fenced ledger/proposal/promotion batch was reached");
     assert.equal(aResult.items[0].ok, false, "stale response reaches the ordered refusal decision");
     assert.equal(r.f.first("SELECT coverage_status FROM fin_account_coverage").coverage_status, "partial", "conflicting snapshots keep coverage unproved");
     await r.pull("2026-11-08");
     await r.pull("2026-11-09");
-    assert.equal(r.f.first("SELECT coverage_status FROM fin_account_coverage").coverage_status, "complete", "exact stale-window retry recovers coverage");
+    await r.review("2026-10-01","2026-11-09",now("2026-11-09"));
+    assert.equal(r.f.first("SELECT coverage_status FROM fin_account_coverage").coverage_status, "complete", "exact stale-window retry plus bank comparison recovers coverage");
     assert.equal((await payment(r.f, "2026-10-16", "0.01")).ledger?.found, false, "historical negative answer recovers after the exact retry");
   }
   return r;
@@ -261,12 +272,12 @@ async function overlapReplay(t, sf = product, { reverse = true, overlapDays = 1,
 for (const overlapDays of [1, 2]) for (const reverse of [false, true]) {
   test(`overlapping observation order delay=${reverse} days=${overlapDays}`, t => overlapReplay(t, product, { reverse, overlapDays }));
 }
-for (const phase of ["ledger", "withdrawal", "promotion"]) for (const reverse of [false, true]) {
+for (const phase of ["ledger", "proposal", "promotion"]) for (const reverse of [false, true]) {
   test(`overlapping observation fence at ${phase} delay=${reverse}`, t => overlapReplay(t, product, { phase, reverse }));
 }
 async function latestPositiveReplay(t, sf = product, removed = true) {
   const r = await fixture(t, { sf, start: "2026-10-01", rows: [{ id: "observed", posted: epoch("2026-10-16T12:00:00Z"), amount: "123.45" }] });
-  await r.pull("2026-11-04"); await r.assign();
+  await r.pull("2026-11-04"); await r.assign(); await r.review();
   assert.equal((await payment(r.f, "2026-10-16")).ledger?.found, true, "same positive evidence green control");
   if (removed) r.f.raw("UPDATE fin_transactions SET removed_at=?,removal_reason='Absent from verified SimpleFIN posted history'", now("2026-11-05"));
   r.f.raw("UPDATE fin_account_coverage SET coverage_status='partial'");
@@ -276,22 +287,23 @@ async function latestPositiveReplay(t, sf = product, removed = true) {
   assert.equal(r.f.first("SELECT coverage_status FROM fin_account_coverage").coverage_status, removed ? "partial" : "complete", "removed positive evidence cannot disappear from completeness admission");
 }
 for (const removed of [false, true]) test(`latest positive evidence checks removed=${removed}`, t => latestPositiveReplay(t, product, removed));
-for (const absent of [false, true]) test(`newer absence supersedes older positive=${absent}`, async t => {
+for (const absent of [false, true]) test(`newer subset retains older positive=${absent}`, async t => {
   const rows = [{ id: "posted", posted: epoch("2026-11-03T12:00:00Z"), amount: "123.45" }];
   const r = await fixture(t, { start: "2026-10-01", rows });
-  await r.pull("2026-11-04"); await r.assign();
+  await r.pull("2026-11-04"); await r.assign(); await r.review();
   assert.equal(r.f.first("SELECT count(*) AS n FROM fin_transactions WHERE removed_at IS NULL").n, 1, "positive green control reached import");
   await r.pull("2026-11-05", { responseRows: absent ? [] : rows });
   assert.equal(r.calls.length, 2, "both overlapping complete observations reached reconciliation");
   assert.equal(r.f.first("SELECT coverage_status FROM fin_account_coverage").coverage_status, "complete", "legitimate latest snapshot is provable");
-  assert.equal(r.f.first("SELECT count(*) AS n FROM fin_transactions WHERE removed_at IS NULL").n, absent ? 0 : 1);
+  assert.equal(r.f.first("SELECT count(*) AS n FROM fin_transactions WHERE removed_at IS NULL").n, 1,
+    "subset omission never authorizes an automatic withdrawal");
 });
 
 async function sameClockReplay(t, sf = product, { reverse = true, delayedClaim = false } = {}) {
   const stable = { id: "stable", posted: epoch("2026-11-04T12:00:00Z"), amount: "1.00" };
   const newer = { id: "posted-new", posted: epoch("2026-11-05T12:00:00Z"), amount: "123.45" };
   const r = await fixture(t, { sf, start: "2026-10-01", rows: [stable] });
-  await r.pull("2026-11-04"); await r.assign();
+  await r.pull("2026-11-04"); await r.assign(); await r.review();
   const reached = deferred(), release = deferred();
   const prepare = r.f.DB.prepare;
   let reservations = 0;
@@ -331,10 +343,11 @@ test("same-clock late claim cannot replace a newer window revision", t => sameCl
 test("daily green schedule and absent-account gap stay distinguishable", async t => {
   for (const omit of [false, true]) {
     const r = await fixture(t, { start: "2026-11-01" });
-    await r.pull("2026-11-04"); await r.assign();
+    await r.pull("2026-11-04"); await r.assign(); await r.review();
     await r.pull("2026-11-05", { omit });
     await r.pull("2026-11-08");
     assert.equal(r.calls.length, 3, "every gap/control request reached the provider");
+    await r.review(omit ? "2026-11-06" : "2026-11-01","2026-11-08",now("2026-11-08"));
     const coverage = r.f.first("SELECT * FROM fin_account_coverage");
     assert.equal(coverage.coverage_status, "complete");
     assert.equal(coverage.covered_from, omit ? "2026-11-06" : "2026-11-01", "an absent-account gap is never bridged");
@@ -369,10 +382,14 @@ async function upgradeReplay(t, sf = product, pending = true, ids = ["hold-a", "
   if (pending) rows.splice(0, 1, { id: ids[1], posted: epoch("2026-11-04T12:00:00Z"), amount: "-10.00", pending: false });
   await r.pull("2026-11-06", { using: sf });
   const active = r.f.rows("SELECT external_id,amount_minor FROM fin_transactions WHERE removed_at IS NULL ORDER BY external_id");
-  assert.deepEqual(active.map(row => row.external_id).sort(), [pending ? ids[1] : ids[0], "genuine"].sort(), "only independently posted events remain active");
-  assert.equal(active.reduce((n, row) => n + row.amount_minor, 0), 2000, "single settled purchase plus unchanged genuine row");
+  assert.deepEqual(active.map(row => row.external_id).sort(), [...(pending ? ids : [ids[0]]), "genuine"].sort(),
+    "legacy source rows remain visible until an exact owner reconciliation");
+  assert.equal(active.reduce((n, row) => n + row.amount_minor, 0), pending ? 3000 : 2000,
+    "legacy and settled rows retain their exact source cents");
   assert.equal(r.f.first("SELECT count(*) AS n FROM fin_transactions").n, pending ? 3 : 2, "retired history is preserved");
-  assert.equal(r.f.first("SELECT coverage_status FROM fin_account_coverage").coverage_status, "complete");
+  assert.equal(r.f.first("SELECT coverage_status FROM fin_account_coverage").coverage_status, "partial",
+    "upgrade alone cannot grant a bank comparison");
+  if (!pending) { await r.review(); assert.equal((await payment(r.f,"2026-10-16","0.01")).ledger?.found,false); }
 }
 for (const [pending, ids] of [[true, ["hold-a", "settled-a"]], [true, ["opaque-19", "opaque-2"]], [false, ["unchanged", "unused"]]]) {
   test(`retained database upgrade pending=${pending} id=${ids[0]}`, t => upgradeReplay(t, product, pending, ids));
@@ -395,6 +412,7 @@ test("upgrade re-fetches the legacy exclusive-end gap before an affirmative paym
   assert.equal(r.calls[1].from, r.calls[0].from);
   assert.equal(r.calls[1].to, epoch("2025-02-03T00:00:00Z"));
   assert.deepEqual(r.f.rows("SELECT external_id FROM fin_transactions WHERE removed_at IS NULL ORDER BY external_id").map(row => row.external_id), ["before", "edge", "next"]);
+  await r.review();
   assert.equal((await payment(r.f, "2025-02-02")).ledger?.found, true);
 });
 
@@ -410,17 +428,40 @@ for (const fault of ["fail", "partial", "unread", "omit"]) test(`upgrade preserv
   assert.equal(r.f.first("SELECT coverage_status FROM fin_account_coverage").coverage_status, "partial");
   await r.pull("2026-11-06", { using: product });
   if (fault !== "omit") {
-    assert.equal(r.f.first("SELECT count(*) AS n FROM fin_transactions WHERE removed_at IS NULL").n, 1, "same complete-response green control reconciles exactly");
-    assert.equal(r.f.first("SELECT coverage_status FROM fin_account_coverage").coverage_status, "complete");
+    assert.equal(r.f.first("SELECT count(*) AS n FROM fin_transactions WHERE removed_at IS NULL").n, 2, "a corrected subset still preserves legacy evidence");
+    assert.equal(r.f.first("SELECT coverage_status FROM fin_account_coverage").coverage_status, "partial");
+    const green = await fixture(t, { rows: [rows[1]] });
+    await green.pull("2026-11-04"); await green.assign(); await green.review();
+    assert.equal(green.f.first("SELECT coverage_status FROM fin_account_coverage").coverage_status,"complete", "clean posted control permits explicit comparison");
   } else assert.equal(r.f.first("SELECT coverage_status FROM fin_account_coverage").coverage_status, "partial", "a real absent-account gap stays unproved");
 });
 test("clean posted install controls the upgrade oracle", async t => {
   const r = await fixture(t, { rows: [{ id: "posted", posted: epoch("2026-11-03T12:00:00Z"), amount: "-10.00" }] });
-  await r.pull("2026-11-04"); await r.assign();
+  await r.pull("2026-11-04"); await r.assign(); await r.review();
   assert.equal(r.calls.length, 1);
   assert.deepEqual(r.f.rows("SELECT external_id,amount_minor FROM fin_transactions WHERE removed_at IS NULL").map(row => [row.external_id, row.amount_minor]), [["posted", 1000]]);
   assert.equal(r.f.first("SELECT coverage_status FROM fin_account_coverage").coverage_status, "complete");
 });
+
+async function replacementReplay(t, sf = product) {
+  const rows = [{ id:"old-reference", posted:epoch("2026-11-03T12:00:00Z"), amount:"-10.00" }];
+  const r = await fixture(t, { sf, start:"2026-10-01", rows });
+  await r.pull("2026-11-04"); await r.assign(); await r.review();
+  assert.equal(r.f.first("SELECT count(*) n FROM fin_transactions").n,1,"posted green control");
+  await r.pull("2026-11-05",{ responseRows:[{ ...rows[0],id:"new-reference" }] });
+  assert.equal(r.calls.length,2,"both listing decisions reached the provider");
+  assert.equal(r.f.first("SELECT count(*) n FROM fin_transactions WHERE superseded_by_id IS NULL").n,2,
+    "a listing cannot silently collapse source rows");
+  const proposal = r.f.first("SELECT * FROM simplefin_transaction_lineage");
+  assert.ok(proposal,"exact replacement proposal reached");
+  const options = { accountRef:proposal.account_ref,predecessorId:proposal.predecessor_id,
+    successorId:proposal.successor_id,now:now("2026-11-05") };
+  const preview = await reviewSimpleFinReplacement(r.f.env,options);
+  assert.equal(preview.blocked,false);
+  await reviewSimpleFinReplacement(r.f.env,{ ...options,dryRun:false,approve:preview.plan_hash,confirmSameEvent:true });
+  assert.equal(r.f.first("SELECT count(*) n FROM fin_transactions WHERE superseded_by_id IS NULL").n,1);
+  assert.equal(r.f.first("SELECT sum(amount_minor) n FROM fin_transactions WHERE superseded_by_id IS NULL").n,1000);
+}
 
 async function pendingStateReplay(t, sf = product, pending = "true") {
   const rows = [{ id: "opaque", posted: epoch("2026-11-03T12:00:00Z"), amount: "-10.00", pending }];
@@ -430,7 +471,7 @@ async function pendingStateReplay(t, sf = product, pending = "true") {
   assert.equal(refused.items[0].ok, false, "unknown pending evidence cannot be asserted posted");
   assert.equal(r.f.first("SELECT count(*) AS n FROM fin_transactions").n, 0);
   rows[0].pending = false;
-  await r.pull("2026-11-05"); await r.assign();
+  await r.pull("2026-11-05"); await r.assign(); await r.review();
   assert.equal(r.calls.length, 2, "same window is retried with only the pending field corrected");
   assert.equal(r.f.first("SELECT count(*) AS n FROM fin_transactions WHERE removed_at IS NULL").n, 1);
   assert.equal(r.f.first("SELECT coverage_status FROM fin_account_coverage").coverage_status, "complete");
@@ -450,14 +491,14 @@ test("legacy epoch-zero pending history stays visible and partial beyond a prove
   assert.equal(r.f.first("SELECT count(*) AS n FROM fin_transactions WHERE removed_at IS NULL").n, 2, "out-of-bound history is retained for explicit recovery");
   assert.equal(r.f.first("SELECT coverage_status FROM fin_account_coverage").coverage_status, "partial", "unexplained active history cannot acquire complete coverage");
   const green = await fixture(t, { rows: [{ id: "genuine", posted: epoch("2026-11-03T12:00:00Z"), amount: "-10.00", pending: false }] });
-  await green.pull("2026-11-04"); await green.assign();
+  await green.pull("2026-11-04"); await green.assign(); await green.review();
   assert.equal(green.f.first("SELECT coverage_status FROM fin_account_coverage").coverage_status, "complete", "same posted evidence without unexplained legacy row is complete");
 });
 
 for (const [field, value] of [["state", "staged"], ["staging_revision", "racing-response"], ["errlist_json", '["gap"]']]) {
   test(`reader refuses a retained complete receipt with unresolved ${field}`, async t => {
     const r = await fixture(t, { start: "2026-10-01" });
-    await r.pull("2026-11-04"); await r.assign();
+    await r.pull("2026-11-04"); await r.assign(); await r.review();
     assert.equal((await payment(r.f, "2026-10-16")).ledger?.found, false, "same covered-empty green control");
     r.f.raw(`UPDATE simplefin_sync_windows SET ${field}=?`, value);
     assert.notEqual((await payment(r.f, "2026-10-16")).ledger?.found, false, "incomplete receipt reached read admission");
@@ -466,7 +507,7 @@ for (const [field, value] of [["state", "staged"], ["staging_revision", "racing-
 
 for (const revision of ["unversioned-receipt", "legacy", "posted-history-999:unknown"]) test(`reader refuses retained complete coverage from ${revision}`, async t => {
   const r = await fixture(t, { start: "2026-10-01" });
-  await r.pull("2026-11-04"); await r.assign();
+  await r.pull("2026-11-04"); await r.assign(); await r.review();
   const green = await payment(r.f, "2026-10-16");
   assert.equal(green.ledger?.found, false, "modern complete empty-history green control reaches a certified negative");
   r.f.raw("UPDATE simplefin_sync_windows SET revision=?,staging_revision=?", revision, revision);
@@ -491,7 +532,7 @@ for (const ledger of [undefined, { kind: "merchant", total_minor: 100 }, { kind:
 }
 
 test("new parity fixture sources contain no complete authenticated URL literal", () => {
-  for (const path of [new URL("./simplefin-parity-guards.test.mjs", import.meta.url), new URL("./fixtures/simplefin-parity.mjs", import.meta.url)]) {
+  for (const path of [new URL("./simplefin-parity-guards.test.mjs", import.meta.url), new URL("./fixtures/simplefin-parity.mjs", import.meta.url), new URL("./simplefin-identity-upgrade.test.mjs", import.meta.url)]) {
     const source = readFileSync(path, "utf8");
     assert.match(source, /new Response\(/, "runtime provider response control remains present");
     assert.doesNotMatch(source, /https:\/\/[^\s/"'`]+:[^\s/"'`]+@/, "assemble synthetic URL credentials at runtime");
@@ -500,13 +541,12 @@ test("new parity fixture sources contain no complete authenticated URL literal",
 
 for (const [id, before, after, replay, failure] of [
   ["restore-moving-window-only-progress", 'const start = next < addDays(end, -2) ? next : addDays(end, -2);', 'const start = addDays(end, -2);', delayedRecovery, /outstanding history/],
-  ["remove-overlapping-observation-fence", 'function observationFence() {', 'function observationFence() { return "1";', overlapReplay, /older overlap cannot withdraw/],
-  ["hide-removed-positive-evidence", 'WHERE s.tenant_id=fin_account_coverage.tenant_id AND s.item_ref=? AND x.account_ref=?', 'WHERE 0 AND s.tenant_id=fin_account_coverage.tenant_id AND s.item_ref=? AND x.account_ref=?', latestPositiveReplay, /removed positive evidence/],
-  ["allow-late-lower-order-claim", 'WHERE excluded.staging_revision>simplefin_sync_windows.staging_revision', 'WHERE 1', (t, sf) => sameClockReplay(t, sf, { delayedClaim: true }), /independent cents oracle/],
+  ["remove-overlapping-observation-fence", 'function observationFence() {', 'function observationFence() { return "1";', overlapReplay, /stale response reaches the ordered refusal decision/],
+  ["allow-late-lower-order-claim", 'WHERE excluded.staging_revision>simplefin_sync_windows.staging_revision', 'WHERE 1', (t, sf) => sameClockReplay(t, sf, { delayedClaim: true }), /provider dispatch and claim decisions are distinguished/],
   ["restore-last-second-endpoint", '`${addDays(window.end, 1)}T00:00:00Z`', '`${window.end}T23:59:59Z`', boundaryReplay, /exclusive endpoint/],
   ["abandon-failed-daily-window", 'if (retry) return', 'if (false && retry) return', recoveryReplay, /oldest failed interval/],
-  ["trust-unversioned-history", 'export const POSTED_HISTORY_REVISION = SIMPLEFIN_POSTED_HISTORY_REVISION;', 'export const POSTED_HISTORY_REVISION = "";', upgradeReplay, /unversioned posted history/],
-  ["skip-posted-reconciliation", 'if (!unread && window.errlist_json === "[]"', 'if (false && !unread && window.errlist_json === "[]"', upgradeReplay, /only independently posted events/],
+  ["trust-unversioned-history", 'export const POSTED_HISTORY_REVISION = SIMPLEFIN_POSTED_HISTORY_REVISION;', 'export const POSTED_HISTORY_REVISION = "";', upgradeReplay, /old boundary window is re-fetched/],
+  ["skip-posted-reconciliation", 'if (reconciliation.statements.length)', 'if (false && reconciliation.statements.length)', replacementReplay, /exact replacement proposal reached/],
   ["accept-unknown-pending-state", 'if (Object.hasOwn(transaction, "pending")', 'if (false && Object.hasOwn(transaction, "pending")', pendingStateReplay, /unknown pending evidence/],
 ]) test(`recovery oracle kills ${id}`, async t => {
   await replay(t, product);
@@ -514,7 +554,10 @@ for (const [id, before, after, replay, failure] of [
   assert.equal(original.split(before).length, 2, "mutation reaches exactly one live product decision");
   const source = original.replace(before, after);
   const mutant = await moduleCopy(t, source, id);
-  await assert.rejects(replay(t, mutant), failure, "same oracle turns red while green product control passed");
+  await assert.rejects(replay(t, mutant), error => {
+    t.diagnostic(`${id} rejected: ${error.message}`);
+    return failure.test(error.message);
+  }, "same oracle turns red while green product control passed");
   mutants.push({ id, killed: true, original_sha256: createHash("sha256").update(original).digest("hex"),
     mutant_sha256: createHash("sha256").update(source).digest("hex") });
 });
@@ -536,6 +579,33 @@ test("refund oracle kills restore-pattern-based-activation", async t => {
     original_sha256: createHash("sha256").update(original).digest("hex"), mutant_sha256: createHash("sha256").update(source).digest("hex") });
 });
 
+test("recovery oracle kills hide-removed-positive-evidence", async t => {
+  const origin = new URL("../src/lib/simplefin-ledger.js", import.meta.url);
+  const original = readFileSync(origin,"utf8");
+  const before = "AND r.transactions_json=(${simpleFinReviewTransactionsSql('r.covered_from','r.covered_to')})";
+  assert.equal(original.split(before).length,2,"mutation reaches the live exact-facts decision");
+  const source = original.replace(before,"AND r.transactions_json IS NOT NULL");
+  const mutant = await moduleCopy(t,source,"hide-removed-positive-evidence",origin);
+  const r = await fixture(t, { start:"2026-10-01", rows:[{
+    id:"observed",posted:epoch("2026-10-16T12:00:00Z"),amount:"123.45",
+  }] });
+  await r.pull("2026-11-04"); await r.assign(); await r.review();
+  const account = r.f.first("SELECT account_ref FROM simplefin_account_assignments");
+  account.account_slug = r.f.first("SELECT account_slug FROM fin_accounts").account_slug;
+  const derive = async summary => {
+    const beforeReads = r.f.seen.sql.length;
+    await summary(r.f.env,{tenantId:"primary",itemRef:r.item,account,stamp:now("2026-11-05")}).run();
+    assert.ok(r.f.seen.sql.length>beforeReads,"both arms reach exact coverage derivation");
+    return r.f.first("SELECT coverage_status FROM fin_account_coverage").coverage_status;
+  };
+  assert.equal(await derive(simpleFinCoverageSummaryStatement),"complete");
+  assert.equal(await derive(mutant.simpleFinCoverageSummaryStatement),"complete","same unmodified facts are green");
+  r.f.raw("UPDATE fin_transactions SET removed_at=?,removal_reason='Synthetic removal'",now("2026-11-05"));
+  assert.equal(await derive(simpleFinCoverageSummaryStatement),"partial","removed positive evidence closes coverage");
+  assert.equal(await derive(mutant.simpleFinCoverageSummaryStatement),"complete","mutant hides the contradictory fact");
+  mutants.push({id:"hide-removed-positive-evidence",killed:true});
+});
+
 test("reader oracle kills trust-retained-coverage-before-maintenance", async t => {
   const origin = new URL("../src/lib/ledger-reader.js", import.meta.url);
   const original = readFileSync(origin, "utf8");
@@ -544,7 +614,7 @@ test("reader oracle kills trust-retained-coverage-before-maintenance", async t =
   const source = original.replace(before, 'OR 0 AND EXISTS (SELECT 1 FROM simplefin_account_assignments x');
   const mutant = await moduleCopy(t, source, "legacy-read-admission", origin);
   const r = await fixture(t, { start: "2026-10-01" });
-  await r.pull("2026-11-04"); await r.assign();
+  await r.pull("2026-11-04"); await r.assign(); await r.review();
   const covered = async module => module.effectivePeriodCovered((await module.readEffectiveAccounts(r.f.env))[0], "2026-10-01", "2026-10-31");
   assert.equal(await covered(reader), true);
   assert.equal(await covered(mutant), true, "modern green control passes both products");
@@ -555,9 +625,9 @@ test("reader oracle kills trust-retained-coverage-before-maintenance", async t =
     original_sha256: createHash("sha256").update(original).digest("hex"), mutant_sha256: createHash("sha256").update(source).digest("hex") });
 });
 
-test("fixture scanner kills reintroduce-authenticated-url-literal", () => {
+test("fixture scanner kills URL literal in fixture", () => {
   const pattern = /https:\/\/[^\s/"'`]+:[^\s/"'`]+@/;
-  for (const origin of [new URL("./fixtures/simplefin-parity.mjs", import.meta.url), new URL("./simplefin-parity-guards.test.mjs", import.meta.url)]) {
+  for (const origin of [new URL("./fixtures/simplefin-parity.mjs", import.meta.url), new URL("./simplefin-parity-guards.test.mjs", import.meta.url), new URL("./simplefin-identity-upgrade.test.mjs", import.meta.url)]) {
     const original = readFileSync(origin, "utf8");
     assert.doesNotMatch(original, pattern, "green source has no complete authenticated literal");
     const url = new URL("https://bridge.example.invalid/simplefin/fixture");
@@ -566,5 +636,5 @@ test("fixture scanner kills reintroduce-authenticated-url-literal", () => {
     const source = original.replace("new Response(access.href)", `new Response(${JSON.stringify(url.href)})`);
     assert.throws(() => assert.doesNotMatch(source, pattern), assert.AssertionError, "same scanner rejects the avoidable literal");
   }
-  mutants.push({ id: "reintroduce-authenticated-url-literal", killed: true });
+  mutants.push({ id: "URL literal in fixture", killed: true });
 });

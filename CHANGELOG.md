@@ -4,7 +4,177 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
-## 0.4.27 (unreleased)
+## 0.4.27 (2026-11-10)
+
+- **Ask more money questions in your own words.** Supported date questions keep
+  their requested period; unsupported or conflicting restrictions ask for
+  clarification. Business and personal selections use confirmed ownership.
+  Check the period, selected accounts and cited bank records before relying
+  on an answer.
+- Keyword search uses a smaller first pass with a full-query fallback for large
+  collections. Check that a known document still appears in search results.
+- SimpleFIN answers explain bank errors, history still loading and unconfirmed
+  account types. Check those gaps before reading an answer as complete.
+- Windows background work releases its operation lock with bounded retries and
+  protects against two operations taking ownership together. Final packaged
+  Windows update eligibility still needs its own end-to-end acceptance.
+
+- Loan-payment questions now explain when the records cannot confirm a payment
+  total and suggest asking about the loan account directly. A few dated loan questions ask you to clarify the dates instead; see Known limits. Possible moves
+  between your own accounts stay in money out and net, with a disclosure, until
+  a unique counterpart proves the movement. Spending and income leave possible
+  own movements out and explain why, or withhold the figure, except the cases listed under Known limits below. Check the account
+  endings and cited postings, and confirm any account-kind warning before
+  relying on a total. Linked pending holds disappear from pending
+  summaries once their posted transaction is present.
+
+- Bank descriptions that explicitly name an unconnected card or loan payment
+  are listed separately as possible payments and left out of spending, rankings
+  and recurring totals. A loan payment mentioning fees, interest or other
+  components withholds spending for that scope. Check the quoted bank text and
+  dates; the Brain does not split repayment from charges.
+
+- Everyday bank, named-account, inflow, recurring-payee and payer questions now
+  reach the existing ledger readers, including common syntax typos. Names stay
+  literal and missing history stays visible. Exact nicknames take precedence over
+  typo-tolerant ownership words. If two names fit, the Brain asks which account.
+  Check account endings and dates.
+  A proved owned card-payment pair is disclosed once, rather than counting both
+  postings as separate payments. Invoice payment arrival still does not establish
+  invoice settlement.
+
+- Recurring-charge questions with a paying account show detected patterns by
+  masked account, with cadence dates. Own-account movement questions show both
+  postings of identified pairs. Financing-payout questions explain that no
+  expected payout schedule is connected and show recent bank deposits instead.
+  Check the cited dates and account coverage; deposits do not establish whether
+  a payout is still due.
+
+- Money-in answers show gross recorded inflow, cited matched own transfers, and
+  outside inflow after subtracting those pairs. Unpaired transfer-looking credits
+  stay included and show their bank text as possible own transfers. Review those
+  credits before treating the outside figure as income.
+
+- An absent payee now gets a plain no-charges sentence with explicit dates and
+  covered accounts, without a dollar figure or follow-up padding. Missing
+  account history is disclosed by naming the omitted accounts. Only close
+  names appear under "Possible matches:"; they are never added together.
+  Check a store you have not used in a completed month, including a request
+  where one account is missing dates.
+
+- Payer answers quote an assumption when only a bank description names the
+  payer. Check that description before relying on the figure. Literal payer
+  month and year-to-date questions now use the ledger. Amount-only lookups show
+  nearby deposits within $1 and three days as possible, separate from exact
+  matches; an empty lookup states the requested amount, dates and accounts.
+  A description alone never establishes zero income from a payer.
+  Searches across both transaction directions also keep payment unconfirmed
+  when deposits do not identify the payer. Exact-amount candidates remain
+  unconfirmed until the bank details identify the payer.
+
+- Business and personal spending or deposits can use confirmed account membership when the complete question names only that role, a supported measure and a period. Unknown membership stays visible as an exclusion. Check the contributing accounts and exclusions; questions with account names or extra restrictions retain the ordinary reading.
+
+- Recurring patterns list unresolved owned-looking charges separately with payee, dates, and exact amounts. An incomplete list shows only a confirmed subtotal and no overall total. Review set-aside charges before relying on recurring spending.
+
+- Mixed money-in/out and net answers separate owned movements, loan proceeds, and repayments from income and expenses; gross activity remains available. Account lifecycle dates bound transaction membership.
+
+- Balance requests show dated recorded observations and keep pending movements
+  separate. Closed accounts and accounts never connected stay visible as
+  exclusions from current cash totals. Compound requests show independently
+  supported readings without a combined figure. Check account endings,
+  snapshot dates, and the excluded accounts before using a current total.
+
+- Category figures use confirmed labels only. Proposed and missing labels stay
+  visible with their row count and amount, excluded from confirmed category
+  totals. Refund candidates are not subtracted, and an "after refunds" figure
+  stays withheld. Check the confirmed subtotal and the rows awaiting category
+  review. Owned movements remain visible as
+  raw records, excluded from category spending; the raw money-in/out view
+  still shows both movement legs.
+
+- Transfer totals count only movements identified in both owned-account legs.
+  Other equal-amount matches stay visible as possible transfers, not counted.
+  Ask how much you moved from checking to savings last month, and verify the
+  account direction and any uncounted matches.
+
+- Business and personal money questions use confirmed account ownership. Unknown
+  ownership makes scoped answers partial; missing scoped accounts show no figure.
+  Named entities and accounts remain inside that boundary. Verify a business, personal and
+  named-account total after updating. Possessive wording remains unsupported.
+
+- Last-payment questions retain their latest dated receipts alongside strict
+  calendar checks. Verify a named payment in a month; an extra unsupported
+  date restriction should still ask for clarification before checking records.
+
+- A two-month request with one trailing year, including "last year", asks for
+  clarification before showing figures. Write the year beside each month to
+  check the intended periods.
+
+- Brand spending separates exact payees from similar names. Similar payees show
+  their amounts and a subtotal marked as unconfirmed, and ask whether they are
+  the same company. Check those names before treating them as one brand.
+  Words following store numbers now remain part of the payee's identity;
+  check the unconfirmed subtotal when a bank combines names and locations.
+  Recorded `vendor * product` payees now contribute to a cited family total.
+  Reviewed generic bank abbreviations, such as GOOG for Google, also count
+  through a whole-token alias table. Unlisted shortened roots and shared
+  substrings remain possible matches, even when the longer name is unique. Possible payees are quoted and cited separately
+  from the confirmed total. An empty covered snapshot says no charges were
+  found and withholds a merchant total.
+  Verify included payees, citations, and the stated bank-history coverage.
+
+- Future ledger periods say they have not happened yet and show no figure.
+  Periods extending beyond today show only activity through today and are
+  labeled partial. Check an upcoming month and a current month with its year;
+  neither should claim a complete zero for days that have not happened.
+  Money-in questions also accept since an ISO date, month to date, since Jan
+  or January, and previous month. Unsupported half-month or business-day
+  restrictions ask for clarification before checking records, including when
+  the restriction comes before the month. Verify that opening-day requests
+  never show an unrequested whole-month total. End-of-period restrictions also
+  ask for clarification; use explicit dates for an exact final-day total.
+
+- Ledger questions refuse an unread date constraint before checking records,
+  and quote the words that need clarification. Check that an unsupported day
+  bound after a named month produces a calendar gap rather than a full-month
+  total. Negated periods such as "not in September" also ask for clarification
+  before checking records. Complete supported date ranges retain their exact windows.
+
+- Loan and credit-card payments stay out of spending, income, category groups
+  and recurring estimates, including payments to cards that are not connected.
+  Alternate expense lists and monthly answers follow the same rule and show
+  excluded payments separately, including store-family queries. A bank fee
+  stays an expense when its payee shares a loan or card account's label.
+  A payment described as a refund cannot reduce net spending. Named recurring
+  queries and merchant queries keep their selected payee when its charges are
+  payments, with payment amounts and dates shown separately. If a named
+  recurring payee cannot be identified exactly, no named amount is shown. Exclusion
+  notes include receiving postings and relevant description matches, with
+  uncertain vendor attribution identified beside monthly amounts too.
+  After a reviewed update, check excluded payments alongside your spending
+  and recurring-charge answers. Refund-only merchants now show no spending
+  and their cited refunds. Description-only purchases alongside payments show
+  a separate ordinary subtotal with attribution still unconfirmed.
+  Named answers now check their cited payees before showing figures. A store
+  with no charges in the requested dates cannot inherit another store's total;
+  known charges outside those dates are listed separately by date. Monthly
+  answers need review of possible refund details, other received money and
+  payments. Refund candidates do not reduce the spending figure. Check a month
+  with refunds and a store with older charges after a reviewed update. Excluded loan and card payments now show
+  amounts, dates, account endings and citations, with the five largest itemized
+  when there are more than five. Truncated spending groups include the remaining
+  payees' amount, covered accounts are named, and excluded pending activity has
+  its own amount. A named payment with an exact amount can show possible matching
+  deposits with their bank text, without confirming who paid. Check these details
+  against the bank rows after a reviewed update. Every displayed spending group
+  now cites all contributing postings, including category groups. Monthly store
+  questions retain possible payment details even when the store total cannot be
+  confirmed; uncertain payee mentions are never described as no charges.
+  A month containing only a possible store payment now keeps its store total
+  unconfirmed instead of showing zero. Separate confirmed and possible store
+  subtotals cite their own bank rows, and each monthly figure cites only the
+  rows contributing to that amount. Check a month with purchases and excluded
+  payments, plus a month with only a possible payment, against the bank rows.
 
 - Stored-source inventory and removal reviews use indexed family membership
   after a resumable background preparation pass. Large Drive and mail refreshes
@@ -12,6 +182,36 @@ the brain, not for whoever built it: what changed for them, and what to check.
   Preparation retains the existing inventory results while it is incomplete.
   After a reviewed update, verify that preparation completes and the next
   refresh finishes its inventory and any required removal review.
+
+
+### Known limits and checks
+
+- Spending totals can include a move to your own account when the bank text shows a star-masked account number in brackets, like (****5678). Unchanged from the last version.
+- Spending can include a transfer to your own savings shown by a short label like "SAV 4567" when no matching deposit is recorded. Unchanged from the last version.
+- Business net income answers include money you put in yourself, like an owner contribution, without naming it, and are not accounting profit. Unchanged from the last version.
+- A question like "What did I pay toward the mortgage in October?" can show no figure and ask you to clarify the dates. No wrong figure is shown.
+- Store dashboard totals can silently leave out a row whose amount is blank or not a plain number, like "$125.40". Unchanged from the last version.
+- Turning on bank linking for the first time can stop at the deploy step. Bank linking is not ready in this version; it comes in the next one.
+- A question covering more than about 5,000 transactions can refuse, including
+  recurring questions spanning several months. Try a shorter period or one
+  account. A refusal does not establish zero activity.
+- Overlapping history from an old bank provider and SimpleFIN can count the
+  same activity twice. Ask about one provider's account and period, check the
+  cited rows and have the overlap reviewed. Keep the bank history intact.
+- Coverage and observation dates use UTC, so an evening local view can show
+  the next calendar date. Check the answer's period and coverage.
+- Possessive account wording and recurring cadence remain outside this release.
+  Use the exact account and a clear date range.
+- Review money answers against bank records. Bounded candidate checks do not
+  establish complete answer correctness or final release acceptance.
+
+### This release does NOT cover
+
+- Windows x64 is the only supported Windows runtime in this release. Windows
+  ARM64 ships unproven.
+- Bank breadth ships unproven. Bank invitations stay closed.
+- Email attachments, Drive images and Drive simple sync remain outside this
+  release.
 
 ## 0.4.26 (2026-11-03)
 

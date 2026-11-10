@@ -6,6 +6,7 @@ import * as simplefin from "../../src/lib/simplefin-bank-feed.js";
 import { createPlaidLinkToken, completePlaidLink, syncPlaidItem } from "../../src/lib/plaid-bank-feed.js";
 import { assignPlaidAccountEntity } from "../../src/lib/plaid-account-entities.js";
 import { withLedgerAnswer } from "../../src/lib/ledger-answer.js";
+import { maintainSimpleFinCoverage } from "../../src/lib/simplefin-coverage-review.js";
 
 export const NOW = "2026-11-04T12:00:00.000Z";
 export const START = "2026-08-07";
@@ -14,6 +15,20 @@ const epoch = day => Date.parse(`${day}T12:00:00Z`) / 1000;
 const decimal = cents => `${cents < 0 ? "-" : ""}${Math.floor(Math.abs(cents) / 100)}.${String(Math.abs(cents) % 100).padStart(2, "0")}`;
 const sum = rows => Number(rows.reduce((total, row) => total + BigInt(Math.abs(row.cents)), 0n));
 const normalize = value => value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+
+// A synthetic owner compares the independent book, then approves the exact
+// product preview. Import receipts alone never establish bank completeness.
+export async function reviewParityCoverage(f, from = START, to = END, now = NOW) {
+  const accounts = f.rows("SELECT account_ref FROM simplefin_account_assignments");
+  assert.ok(accounts.length, "owner comparison reached a nonempty account inventory");
+  for (const { account_ref: accountRef } of accounts) {
+    const options = { accountRef, from, to, now };
+    const preview = await maintainSimpleFinCoverage(f.env, options);
+    assert.equal(preview.blocked, false, `bounded comparison ${from} through ${to}`);
+    assert.equal((await maintainSimpleFinCoverage(f.env, { ...options, dryRun: false,
+      approve: preview.plan_hash, confirmSourceComparison: true })).complete, true);
+  }
+}
 
 export function moneyBook() {
   const accounts = [
@@ -64,10 +79,10 @@ export function oracleFor(book) {
     count: book.transactions.length,
     balances: Object.fromEntries(book.accounts.map(a => [a.label, a.balance])),
     expense: sum(expenses), largest: sorted.slice(0, 5).map(row => Math.abs(row.cents)),
-    // Money in/out omit proved transfers and card payments, while loan
-    // payments remain account cash movement. No income is inferred.
-    moneyIn: sum(october.filter(row => row.cents > 0 && !["transfer", "card-payment"].includes(row.move))),
-    moneyOut: sum(october.filter(row => row.cents < 0 && !["transfer", "card-payment"].includes(row.move))),
+    // Every authored owned movement leaves ordinary money in/out, including
+    // loan-payment counterparts. Gross account movements remain separately checked.
+    moneyIn: sum(october.filter(row => row.cents > 0 && !row.move)),
+    moneyOut: sum(october.filter(row => row.cents < 0 && !row.move)),
     grossIn: sum(october.filter(row => row.cents > 0)),
     grossOut: sum(october.filter(row => row.cents < 0)),
     outsideIn: sum(october.filter(row => row.cents > 0 && !row.move)),
@@ -115,7 +130,7 @@ export function simplefinRendering(book, phase, { from = -Infinity, to = Infinit
   })) };
 }
 
-export async function buildParityLedgers({ sf = simplefin, book = moneyBook(), payees = true } = {}) {
+export async function buildParityLedgers({ sf = simplefin, book = moneyBook(), payees = true, reviewCoverage = true } = {}) {
   const fixtures = [];
   try {
     const make = async provider => {
@@ -195,6 +210,10 @@ export async function buildParityLedgers({ sf = simplefin, book = moneyBook(), p
     phase = 1;
     simple.raw("UPDATE simplefin_connections SET next_pull_at=?", NOW);
     await pull(NOW);
+    assert.equal(simple.first("SELECT count(*) n FROM fin_account_coverage WHERE coverage_status='partial'").n, 4,
+      "nonempty published history still needs independent owner comparison");
+    if (reviewCoverage) await reviewParityCoverage(simple,
+      simple.first("SELECT backfill_start FROM simplefin_connections").backfill_start,END);
     // The current three-day slice must repeat without doubling posted rows.
     simple.raw("UPDATE simplefin_connections SET next_pull_at=?", NOW);
     await pull(NOW);
@@ -228,7 +247,8 @@ export function assertLedgerMatchesBook(f, book, provider) {
     const balance = f.first("SELECT * FROM fin_balance_snapshots WHERE account_slug=? ORDER BY as_of_date DESC LIMIT 1", saved.account_slug);
     const expectedBalance = ["card", "loan"].includes(account.kind) ? -account.balance : account.balance;
     assert.equal(balance.current_minor, expectedBalance, `${account.id}: normalized amount held or owed`);
-    assert.equal(balance.available_minor, account.available, `${account.id}: available balance`);
+    assert.equal(balance.available_minor, provider === "simplefin" ? account.available ?? account.balance : account.available,
+      `${account.id}: available balance (SimpleFIN omission means its stated balance)`);
     const rows = f.rows("SELECT * FROM fin_transactions WHERE account_slug=? AND removed_at IS NULL", saved.account_slug);
     const expected = book.transactions.filter(t => t.account === account.id);
     assert.equal(rows.length, expected.length, `${account.id}: no invented or missing event`);
@@ -322,7 +342,10 @@ export function scoreAnswer(group, body, book, oracle) {
       else {
         check(l.kind === "totals", "wrong movement answer kind");
         const total = (rows, key) => Number(rows.reduce((n, row) => n + BigInt(row[key]), 0n));
-        check(total(l.accounts, "credits_minor") === oracle.grossIn && total(l.accounts, "debits_minor") === oracle.grossOut, "wrong gross account movement");
+        const grossInflow = l.combined_inflow_minor != null;
+        check(total(l.accounts, "credits_minor") === oracle.grossIn &&
+          total(l.accounts, "debits_minor") === oracle.grossOut, "wrong account movement membership");
+        if (grossInflow) check(l.combined_inflow_minor === oracle.grossIn, "wrong primary gross inflow");
         check(total(l.lead_accounts, "credits_minor") === oracle.moneyIn && total(l.lead_accounts, "debits_minor") === oracle.moneyOut, "wrong movement exclusions");
         if (l.outside_inflow_minor != null) check(l.outside_inflow_minor === oracle.outsideIn, "wrong outside inflow");
       }

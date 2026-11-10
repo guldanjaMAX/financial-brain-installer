@@ -8,21 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { TABLES, sha256, figures, fail } from './private-ledger-contract.mjs';
 import { armReplayStall } from './child-stall.mjs';
 
-const SQL_CONTRACTS = new Map([
-  // Exact bounded inventory with the SimpleFIN posted-history admission guard.
-  ['0560a90893bdbca03eb46f39580b9d0e6fd87070fe7c3560a58d12de0a571b2e', 'inventory'],
-  // Reviewed inventory adds confirmed entity kind to the existing bounded
-  // owner-review read. Tenant, joins, limits and admission stay exact.
-  ['085a3cb746a3831a3f0a640f08a0ffbd57297d917c3e1dfe483d8d581d74efa6', 'inventory'],
-  // Inventory also reads the latest owner account-kind review.
-  ['511315a8f707696def73f2bcdf1759704fa16b1f636dabc5c983a4fdc562f3a6', 'inventory'],
-  ['4854d478915c18d7ae5b6a21138d35925f4053a5c5bf0f5499f412a88dea0c17', 'inventory'],
-  ['75a8b53f9dd622790714fac513fd4d5f38797b9a7f7667bf5967b80891223c7d', 'transactions'],
-  ['52e835bb7e812bb49c4b295f6bc663cc1a365d0fb13974d824997bf47fc45209', 'balances'],
-  // Batch 2 balance read: excludes future and malformed observations before
-  // ranking; its third bind is the owner-calendar day of the frozen clock.
-  ['e29880643e5fdfd0101290335d6e28395a1858558d043ca18de061e2f8b97fcd', 'balances'],
-]);
+import { SQL_CONTRACTS } from './ledger-sql-contracts.mjs';
 const LEGACY_BALANCES = '52e835bb7e812bb49c4b295f6bc663cc1a365d0fb13974d824997bf47fc45209';
 const copy = value => JSON.parse(JSON.stringify(value));
 function migrations(root) {
@@ -91,7 +77,7 @@ export async function executePrivateReplay(request) {
         if (!specifier.startsWith('./')) return deny('module');
         return load(resolve(dirname(parent.identifier), specifier));
       };
-      const load = async path => {
+      const load = path => {
         if (cache.has(path)) return cache.get(path);
         const inside = relative(base, path);
         if (!inside || inside === '..' || inside.startsWith(`..${sep}`) || !inside.endsWith('.js') || realpathSync(path) !== path) return deny('module');
@@ -101,21 +87,24 @@ export async function executePrivateReplay(request) {
         sourceFiles.set(sourceKey, sha256(source));
         const module = new SourceTextModule(source, { context, identifier: path, importModuleDynamically: () => deny('dynamic-import') });
         cache.set(path, module);
-        await module.link(linker);
-        if (path === resolve(base, 'ledger-question.js')) {
-          await module.evaluate({ timeout: 1000 });
-          const wrapped = new SyntheticModule(Object.keys(module.namespace), function () {
-            for (const name of Object.keys(module.namespace)) this.setExport(name, name === 'classifyLedgerQuestion'
-              ? (...args) => { const intent = module.namespace[name](...args); trace.parsed_intents.push(copy(intent)); return intent; }
-              : module.namespace[name]);
-          }, { context, identifier: `${path}:trace` });
-          await wrapped.link(() => deny('module'));
-          await wrapped.evaluate();
-          cache.set(path, wrapped);
-          return wrapped;
-        }
         return module;
       };
+      // Let VM link each whole graph once; recursive per-module linking races
+      // shared dependencies still in the linking state. Trace the leaf first.
+      {
+        const path = resolve(base, 'ledger-question.js');
+        const module = load(path);
+        await module.link(linker);
+        await module.evaluate({ timeout: 1000 });
+        const wrapped = new SyntheticModule(Object.keys(module.namespace), function () {
+          for (const name of Object.keys(module.namespace)) this.setExport(name, name === 'classifyLedgerQuestion'
+            ? (...args) => { const intent = module.namespace[name](...args); trace.parsed_intents.push(copy(intent)); return intent; }
+            : module.namespace[name]);
+        }, { context, identifier: path + ':trace' });
+        await wrapped.link(() => deny('module'));
+        await wrapped.evaluate();
+        cache.set(path, wrapped);
+      }
       let batchNumber = 0;
       const execute = (sql, binds, method, batch = null) => {
         const call = { sql, binds: binds.map(value => ({ type: value === null ? 'null' : typeof value, value })), method, batch };
@@ -149,7 +138,8 @@ export async function executePrivateReplay(request) {
       } };
       let body = null;
       try {
-        const module = await load(resolve(base, 'ledger-answer.js'));
+        const module = load(resolve(base, 'ledger-answer.js'));
+        await module.link(linker);
         await module.evaluate({ timeout: 1000 });
         const response = await module.namespace.withLedgerAnswer({
           env: { STORAGE: 'd1', BANK_FEED_TENANT: request.meta.tenant_id, BRAIN_TIMEZONE: request.meta.owner_time_zone, DB: binding,

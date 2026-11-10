@@ -91,6 +91,21 @@ function productFixture(t, { accounts = ACCOUNTS, transactions = TRANSACTIONS } 
 const reachedTransactions = result => result.sql.some(sql => /JOIN fin_transactions/.test(sql));
 const reachedAccounts = result => result.sql.some(sql => /FROM fin_accounts/.test(sql));
 const citationNumbers = answer => [...String(answer || "").matchAll(/\[(\d+)\]/g)].map(match => Number(match[1]));
+function exactCitationRows(f, body, rows, accounts = ACCOUNTS) {
+  const wanted = rows.map(row => ({ row,
+    ref: `ledger:transaction:${f.sqlite.prepare('SELECT id FROM fin_transactions WHERE txn_uid=?').get(row.id).id}` }));
+  assert.deepEqual(body.citations.map(ref => ref.ref).sort(), wanted.map(item => item.ref).sort(),
+    'ordinary rows, group remainders and excluded payments each retain their exact receipt');
+  for (const ref of body.citations) {
+    const { row } = wanted.find(item => item.ref === ref.ref);
+    assert.equal(ref.amount_minor, row.amount);
+    assert.equal(ref.posted_on, row.day);
+    assert.equal(ref.account_mask, accounts.find(account => account.slug === row.account).mask);
+  }
+  const rendered = new Set(citationNumbers(body.answer));
+  assert.deepEqual([...rendered].sort((a,b) => a-b), body.citations.map(ref => ref.n).sort((a,b) => a-b),
+    'every cited receipt is visible and no foreign marker is printed');
+}
 const coverageLineCount = answer => (String(answer || "").match(/^Bank history:/gm) || []).length;
 const intentShape = question => {
   const intent = classifyLedgerQuestion(question, { now: Date.parse(NOW), timeZone: OWNER_TIME_ZONE });
@@ -136,11 +151,13 @@ test("EA-R2 expenses group merchants and separate connected loan or card payment
     card_minor: positive.body.ledger.own_account_payments.card_minor,
     loan_minor: positive.body.ledger.own_account_payments.loan_minor,
   }, ANSWER_KEY.expenses.own_account_payments);
-  assert.ok(positive.body.citations.length <= 5);
-  assert.ok(citationNumbers(positive.body.answer).length <= 5);
+  assert.equal(positive.body.ledger.cited_row_count, ANSWER_KEY.expenses.row_count,
+    'group and Other references now cite every ordinary expense row');
+  exactCitationRows(f, positive.body, TRANSACTIONS.filter(row =>
+    row.direction === 'outflow' && !row.id.startsWith('own-move-')));
   assert.match(positive.body.answer, /^You spent \$3,265\.00 this month\./);
-  assert.match(positive.body.answer, /payments to your own loan\/card accounts/i);
-  assert.match(positive.body.answer, /and 9 more rows/i);
+  assert.match(positive.body.answer, /Payments to loans and cards \(excluded from spending and income\)/i);
+  assert.match(positive.body.answer, /Evidence: 14 of 14 expense rows cited\./);
   assert.equal(coverageLineCount(positive.body.answer), 1);
   assert.doesNotMatch(positive.body.answer, /\b(?:credits|debits)\b/i);
   assert.equal(f.modelCalls(), 0);
@@ -233,8 +250,10 @@ test("M3B one endpoint matcher drives came-in, spent, and vendor lead exclusions
 
   const analysisSource = readFileSync(new URL("../src/lib/ledger-analysis.js", import.meta.url), "utf8");
   const liabilityMatcher = /export function ownedLiabilityPaymentKind[\s\S]+?\n}/.exec(analysisSource)?.[0] || "";
-  assert.match(liabilityMatcher, /transferEndpoints\(/, "connected-liability parsing calls the shared matcher");
-  assert.doesNotMatch(liabilityMatcher, /\.match\(/, "connected-liability parsing has no private endpoint regex");
+  assert.match(liabilityMatcher, /ownedLiabilityPaymentAccount\(/, 'kind and destination share the same account decision');
+  const accountMatcher = /function ownedLiabilityPaymentAccount[\s\S]+?\n}/.exec(analysisSource)?.[0] || '';
+  assert.match(accountMatcher, /transferEndpoints\(/, "connected-liability parsing calls the shared matcher");
+  assert.doesNotMatch(accountMatcher, /\.match\(/, "connected-liability parsing has no private endpoint regex");
   assert.equal((analysisSource.match(/function transferEndpoints\(/g) || []).length, 1,
     "there is one endpoint matcher implementation");
   assert.equal(f.modelCalls() + negative.modelCalls(), 0);
@@ -455,12 +474,15 @@ test("EA-R2 partial coverage returns only the supported subtotal and names exclu
   assert.deepEqual(result.body.ledger.coverage.excluded_accounts.map(account => account.account_mask), ["3303", "4404"]);
   assert.equal(result.body.evidence_gate.complete, false);
   assert.equal(result.body.evidence_gate.partial, true, "partial coverage is explicit in the response contract");
-  assert.match(result.body.evidence_gate.reason, /partial ledger coverage/);
-  assert.match(result.body.answer, /^Spending I could check: \$465\.00 this month \(some accounts missing dates\)\./);
+  assert.equal(result.body.evidence_gate.reason, "available ledger rows are cited, but ledger coverage is not certified complete");
+  assert.equal(result.body.answer.split("\n")[0], "Partial view using 2 of 4 accounts for October 1 to 29. Covered accounts: checking unit (your account ending 1101); savings unit (your account ending 2202). Omitted accounts: card unit (your account ending 3303); loan unit (your account ending 4404); their bank history does not include every requested date. This is not a total for all requested accounts.");
+  assert.match(result.body.answer.split("\n")[1], /^Spending I could check: \$465\.00 this month \(some accounts missing dates\)\./);
   assert.match(result.body.answer, /^Bank history:.*excluded your account ending 3303, your account ending 4404\.$/m);
   assert.equal(coverageLineCount(result.body.answer), 1);
-  assert.equal(result.body.citations.length, 5);
-  assert.equal(result.body.ledger.omitted_row_count, 2);
+  assert.equal(result.body.ledger.cited_row_count, 7);
+  exactCitationRows(f, result.body, TRANSACTIONS.filter(row =>
+    ['checking-unit', 'savings-unit'].includes(row.account) && !row.id.startsWith('own-move-')));
+  assert.equal(result.body.ledger.omitted_row_count, 0);
   assert.equal(f.fallbackCalls, 0);
   assert.equal(f.modelCalls(), 0);
 });
@@ -718,11 +740,11 @@ for (const oracle of EXPENSE_COVERAGE_ORACLE) test(`EA-R2 coverage oracle ${orac
     assert.equal(result.body.ledger.coverage.omitted_account_count, oracle.candidates - oracle.covered);
     assert.equal(result.body.ledger.coverage.status, oracle.coverage);
     assert.equal(result.body.ledger.excluded_own_transfer_minor, oracle.transfer);
-    assert.equal(result.body.ledger.cited_row_count, oracle.cited);
-    assert.equal(result.body.ledger.omitted_row_count, oracle.omittedRows);
+    assert.equal(result.body.ledger.cited_row_count, oracle.rows.length);
+    assert.equal(result.body.ledger.omitted_row_count, 0);
     assert.deepEqual(result.body.ledger.groups.map(group => group.merchant),
       oracle.order.map(label => label.replaceAll("-", " ")), "oracle ordering signature survives product label normalization");
-    assert.equal(result.body.citations.length, oracle.cited);
+    exactCitationRows(f, result.body, transactions.filter(row => row.id.includes('-covered-')), accounts);
     assert.equal(coverageLineCount(result.body.answer), 1);
   }
   assert.equal(f.modelCalls(), 0);

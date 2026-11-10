@@ -72,8 +72,17 @@ test('N01 conditional cents, signs and account/window edges retain primary posti
       const q = question.replace('?', mask ? ` for account ending ${mask}?` : '?');
       const before = f.seen.length, b = await ask(f, q);
       assert.ok(f.seen.slice(before).some(sql => sql.includes('JOIN fin_transactions')));
-      assert.equal(b.evidence_gate.complete, true);
       const outSelected = mask !== '8765', inSelected = mask !== '4321';
+      if (outSelected && outDay.startsWith('2026-09')) {
+        assert.equal(b.evidence_gate.complete, false);
+        assert.equal(b.ledger.reason, 'money_out_destination_unconfirmed');
+        assert.equal(b.ledger.total_minor, null);
+        const candidate = b.ledger.possible_payments.find(row => row.amount_minor === 12345);
+        assert.ok(candidate, 'outgoing ownership decision reached');
+        assert.ok(b.citations.some(row => row.n === candidate.n && row.amount_minor === 12345));
+        continue;
+      }
+      assert.equal(b.evidence_gate.complete, true);
       assert.equal(total(b.ledger.accounts, 'debits_minor'), outSelected ? 19 + (outDay.startsWith('2026-09') ? 12345 : 0) : 0);
       assert.equal(total(b.ledger.accounts, 'credits_minor'), inSelected ? 23 + (inDay.startsWith('2026-09') ? 12345 : 0) : 0);
       assert.equal(total(b.ledger.if_own_transfers.accounts, 'debits_minor'), outSelected ? 19 : 0);
@@ -105,14 +114,23 @@ test('N01 duplicate peer control never subtracts one row as two candidate pairs'
   const f = setup(t); account(f, { slug: 'third-account', mask: '2468', from: '2026-08-01' });
   add(f, { uid: 'out', amount: 12345, direction: 'outflow', description: 'Transfer to account 8765' });
   add(f, { uid: 'in', slug: 'second-account', amount: 12345, direction: 'inflow' });
-  const control = await ask(f); assert.equal(control.ledger.candidate_transfer_count, 1);
+  const control = await ask(f);
+  assert.equal(control.ledger.reason, 'money_out_destination_unconfirmed');
+  assert.equal(control.ledger.possible_payments[0].amount_minor, 12345);
+  f.raw("UPDATE fin_transactions SET description='Transfer from account 4321' WHERE txn_uid='in'");
+  const proved = await ask(f);
+  assert.equal(proved.evidence_gate.complete, true);
+  assert.equal(proved.ledger.default_exclusions.own_transfer_minor, 12345);
+  f.raw("UPDATE fin_transactions SET description='Ordinary posting' WHERE txn_uid='in'");
   add(f, { uid: 'competitor', slug: 'third-account', amount: 12345, direction: 'inflow' });
   const before = f.seen.length, b = await ask(f);
   assert.ok(f.seen.slice(before).some(sql => sql.includes('JOIN fin_transactions')));
-  assert.equal(b.ledger.candidate_transfer_count, 0);
-  assert.equal(total(b.ledger.accounts, 'debits_minor'), 12345);
-  assert.equal(total(b.ledger.accounts, 'credits_minor'), 24690);
-  assert.deepEqual(b.ledger.if_own_transfers.accounts, b.ledger.accounts);
+  assert.equal(b.ledger.reason, 'money_out_destination_unconfirmed');
+  assert.equal(b.ledger.total_minor, null);
+  assert.equal(b.evidence_gate.complete, false);
+  const candidate = b.ledger.possible_payments.find(row => row.amount_minor === 12345);
+  assert.ok(candidate, 'competing receiving credits reach the ownership hold');
+  assert.ok(b.citations.some(row => row.n === candidate.n && row.amount_minor === 12345));
 });
 
 test('N02 common explicit body/title disclosures refuse and template discussion remains human', async t => {
@@ -194,24 +212,30 @@ test('P02 all collision edges are checked, including an earlier edge with unknow
   transaction(f, { slug: 'unrelated-account' });
   let documents = 0;
   const next = async gap => { documents++; return new Response(JSON.stringify({ answer: 'Document record.', gaps: [gap] })); };
-  assert.equal((await ask(f, question, next)).code, undefined);
-  assert.equal(documents, 1, 'all collisions outside the window allow retrieval');
+  const covered = await ask(f, question, next);
+  assert.equal(covered.code, undefined);
+  assert.equal(covered.ledger.accounts[0].credits_minor, 123450);
+  assert.equal(covered.ledger.coverage.candidate_account_count, 5);
+  assert.equal(covered.ledger.coverage.covered_account_count, 1);
+  assert.equal(covered.ledger.coverage.omitted_account_count, 4);
+  assert.equal(covered.evidence_gate.complete, false);
+  assert.equal(documents, 0, 'out-of-window collisions permit the labeled covered-account reading');
   f.raw("UPDATE fin_account_coverage SET covered_from=NULL,covered_to=NULL,coverage_status='missing' WHERE account_slug IN ('manual-a','live-a')");
   const before = f.seen.length, blocked = await ask(f, question, next);
   assert.ok(f.seen.slice(before).some(sql => sql.includes('FROM fin_accounts')));
-  assert.equal(blocked.code, 'ledger_account_link_required'); assert.equal(documents, 1);
+  assert.equal(blocked.code, 'ledger_account_link_required'); assert.equal(documents, 0);
   assert.match(blocked.gaps[0].detail, /^Want help reviewing them together\?$/mu);
   assert.doesNotMatch(blocked.gaps[0].detail, /ledger link-accounts|manual-a|live-a/iu);
   const selected = await ask(f, 'How much money came in September 2026 for account ending 2468?', next);
   assert.equal(selected.ledger.accounts[0].credits_minor, 123450);
-  assert.equal(documents, 1);
+  assert.equal(documents, 0);
   const raw = '{"answer":"Human record", "gaps":[]}';
   const response = new Response(raw);
   const readCount = f.seen.length;
   assert.equal(await withLedgerAnswer({ env: f.env, question: 'How do I balance work and rest?', now: NOW }, async gap => {
     documents++; assert.equal(gap, null); return response;
   }), response);
-  assert.equal(await response.text(), raw); assert.equal(documents, 2);
+  assert.equal(await response.text(), raw); assert.equal(documents, 1);
   assert.equal(f.seen.length, readCount, 'non-ledger questions perform no ledger reads');
 });
 

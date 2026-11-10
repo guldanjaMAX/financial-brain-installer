@@ -1,13 +1,13 @@
 import { existsSync, lstatSync, realpathSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { resolve, dirname, relative, isAbsolute, sep } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { ROOT, waitForQuiet } from './money-replay.mjs';
 import { TABLES, sha256, fail, d1Rows, validateEnvelope, exportQueries } from './private-ledger-contract.mjs';
 import { runReplayChild } from './child-run.mjs';
 export { TABLES } from './private-ledger-contract.mjs';
 
 const worker = fileURLToPath(new URL('./private-ledger-worker.mjs', import.meta.url));
-const tripwire = fileURLToPath(new URL('../../test/fixtures/cli-side-effect-tripwire.mjs', import.meta.url));
+const tripwire = new URL('../../test/fixtures/cli-side-effect-tripwire.mjs', import.meta.url).href;
 const inside = (parent, path) => { const r = relative(parent, path); return !r || (!isAbsolute(r) && r !== '..' && !r.startsWith(`..${sep}`)); };
 function canonicalFuture(path) {
   const absolute = resolve(path);
@@ -59,7 +59,7 @@ export function runPrivateArm(root, request, { spawn, writeStderr } = {}) {
   const child = runReplayChild({ label: 'PRIVATE_REPLAY', spawn, writeStderr, beforeAttempt: () => waitForQuiet(env),
     failureMessage: child => `PRIVATE_REPLAY_${child.status === 86 ? 'TRANSPORT_BLOCKED' : 'WORKER_FAILED'}`,
     args: ['--experimental-vm-modules', '--permission', '--no-warnings',
-    `--allow-fs-read=${ROOT}`, `--allow-fs-read=${root}`, '--import', pathToFileURL(tripwire).href, worker], options: {
+    `--allow-fs-read=${ROOT}`, `--allow-fs-read=${root}`, '--import', tripwire, worker], options: {
     cwd: ROOT, env, input: JSON.stringify({ ...request, root, trusted_root: ROOT }),
     stdio: ['pipe', 'ignore', 'pipe', 'pipe'], encoding: 'utf8', maxBuffer: 128 * 1024 * 1024,
   } });
@@ -67,9 +67,9 @@ export function runPrivateArm(root, request, { spawn, writeStderr } = {}) {
   try { result = JSON.parse(child.output[3]); }
   catch { fail('WORKER_FAILED'); }
   if (result.input_digest !== request.input_digest || result.observations?.length !== request.questions.length) fail('WORKER_FAILED');
-  result.harness_digest = sha256(['private-ledger-replay.mjs', 'private-ledger-worker.mjs', 'private-ledger-contract.mjs', 'money-replay.mjs', 'child-run.mjs', 'child-stall.mjs']
+  result.harness_digest = sha256(['private-ledger-replay.mjs', 'private-ledger-worker.mjs', 'private-ledger-contract.mjs', 'money-replay.mjs', 'child-run.mjs', 'child-stall.mjs', 'ledger-sql-contracts.mjs']
     .map(name => readFileSync(new URL(name, import.meta.url))));
-  result.transport_digest = sha256(readFileSync(tripwire));
+  result.transport_digest = sha256(readFileSync(new URL(tripwire)));
   result.worktree_path = root;
   return result;
 }

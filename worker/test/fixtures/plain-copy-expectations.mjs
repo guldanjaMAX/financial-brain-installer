@@ -65,6 +65,10 @@ export function reviewedTitleFields(value) {
 
 export const MONEY_JARGON = /\b(?:posted|reader|schema|intent|provider|manifest|scope|structured[ -]payee|ledger|coverage|classification|snapshot|documents path|selected|interval|certified|provenance|reconciliation)\b|\d{4}-\d{2}-\d{2}|T\d{2}:\d{2}:\d{2}|\*{4}/i;
 
+// The explicit absence contract uses ISO bounds; other prose still rejects ISO.
+export const absenceLintText = text => text.replace(/^No charges found for .+ from \d{4}-\d{2}-\d{2} to \d{4}-\d{2}-\d{2} on .+\.$/gm,
+  line => line.replace(/\d{4}-\d{2}-\d{2}/g, 'date'));
+
 export const MCP_DELETE_PLAIN = "I can help prepare a deletion preview, but this connection has no permission to delete. Want to use delete_preview with a break-glass connection, then have the owner approve its receipt with a fresh passkey?";
 export const MCP_WRITE_PLAIN = "I can help you read records with this connection, but it has no permission to save curated records. Want to reconnect as structured-contributor?";
 export const PAYER_PARTIAL_LINE = /^(?:I found \d+ deposits?, but the bank details do not identify (?:it|them) as that payer's payment, so payment is unconfirmed\.|(?:Income from that payer is at least \$[\d,.]+ \(matched subtotal, not complete\); )?I can help review the deposits, but the full income from that payer is unconfirmed\. There (?:is 1 deposit, and its bank label may|are \d+ deposits, and their bank labels may) not identify who paid\.)$/m;

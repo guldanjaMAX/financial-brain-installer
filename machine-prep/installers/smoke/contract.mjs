@@ -37,6 +37,9 @@ export async function runSmoke(host, emit) {
     failure = failure ? new AggregateError([failure, error], `${failure.message}; ${error.message}`) : error;
   }
   if (failure) throw failure;
-  emit("BUNDLED_CLI_VERSION_VERIFIED=0 reason=not_bundled");
-  emit("INSTALLER_SHELL_SMOKE_PASSED=1");
+  if (host.bundledPayload) emit('INSTALLER_PAYLOAD_SMOKE_PASSED=1');
+  else {
+    emit("BUNDLED_CLI_VERSION_VERIFIED=0 reason=not_bundled");
+    emit("INSTALLER_SHELL_SMOKE_PASSED=1");
+  }
 }

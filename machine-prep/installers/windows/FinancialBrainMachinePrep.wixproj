@@ -3,16 +3,67 @@
     <OutputName>FinancialBrainMachinePrep-unsigned</OutputName>
     <OutputType>Package</OutputType>
     <Platform>x64</Platform>
+    <PayloadVersion>0.4.27</PayloadVersion>
+    <DefineConstants>PayloadVersion=$(PayloadVersion)</DefineConstants>
   </PropertyGroup>
-  <!-- WiX v7 builds only after its OSMF EULA is accepted by name. The
-       workflow passes this property only after the dispatch input is true. -->
+  <!-- The founder approved acceptance on 10-07, below the revenue threshold.
+       Keep the explicit switch so CI records that decision with the build. -->
   <PropertyGroup Condition="'$(WixOsmfConfirmed)' == 'true'">
     <AcceptEula>wix7</AcceptEula>
   </PropertyGroup>
   <Target Name="RequireWixOsmfDecision" BeforeTargets="BeforeBuild" Condition="'$(WixOsmfConfirmed)' != 'true'">
-    <Error Text="WiX v7 requires its Open Source Maintenance Fee decision. Build with -p:WixOsmfConfirmed=true only after that decision is confirmed; nothing was built." />
+    <Error Text="Build requires the approved WiX v7 decision: -p:WixOsmfConfirmed=true (-acceptEula wix7)." />
   </Target>
-  <Target Name="GenerateClaudeHandoffUrl" BeforeTargets="BeforeBuild">
-    <Exec Command="node &quot;$(MSBuildProjectDirectory)\..\..\handoff\render-url.mjs&quot; &quot;$(MSBuildProjectDirectory)\..\..\handoff\message-windows.txt&quot; &gt; &quot;$(MSBuildProjectDirectory)\handoff-windows.url&quot;" />
+  <Target Name="RequireVerifiedPayload" BeforeTargets="BeforeBuild" Condition="!Exists('$(MSBuildProjectDirectory)\Payload.generated.wxs')">
+    <Error Text="Stage the exact payload with build-payload.mjs before building." />
+  </Target>
+  <UsingTask TaskName="VerifyWindowsPayload" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <Node ParameterType="System.String" Required="true" />
+      <Root ParameterType="System.String" Required="true" />
+      <Version ParameterType="System.String" Required="true" />
+      <Script ParameterType="System.String" Required="true" />
+      <Generated ParameterType="System.String" Required="true" />
+    </ParameterGroup>
+    <Task>
+      <Using Namespace="System" />
+      <Using Namespace="System.Diagnostics" />
+      <Code Type="Fragment" Language="cs"><![CDATA[
+        try {
+          var info = new ProcessStartInfo();
+          info.FileName = Node;
+          info.UseShellExecute = false;
+          info.CreateNoWindow = true;
+          info.RedirectStandardOutput = true;
+          info.RedirectStandardError = true;
+          // The task factory references netstandard2.0, without ArgumentList.
+          // Quote Windows CRT arguments directly; never invoke a command shell.
+          Func<string, string> quote = value => {
+            if (value.IndexOfAny(new[] { '"', '\r', '\n', '\0' }) >= 0) throw new ArgumentException();
+            int tail = 0;
+            while (tail < value.Length && value[value.Length - 1 - tail] == '\\') tail++;
+            return "\"" + value + new string('\\', tail) + "\"";
+          };
+          info.Arguments = quote(Script) + " " + quote(Root) + " " + quote(Generated) + " " + quote(Version);
+          info.Environment.Clear();
+          foreach (var name in new[] { "SystemRoot", "WINDIR", "TEMP", "TMP" }) {
+            var value = Environment.GetEnvironmentVariable(name);
+            if (value != null) info.Environment[name] = value;
+          }
+          using (var child = Process.Start(info)) {
+            var stdout = child.StandardOutput.ReadToEndAsync();
+            var stderr = child.StandardError.ReadToEndAsync();
+            child.WaitForExit();
+            System.Threading.Tasks.Task.WaitAll(stdout, stderr);
+            if (child.ExitCode != 0) { Log.LogError("PAYLOAD_BUILD_REFUSED=1"); return false; }
+          }
+          Log.LogMessage(Microsoft.Build.Framework.MessageImportance.High, "PAYLOAD_BUILD_READBACK=1");
+        } catch { Log.LogError("PAYLOAD_BUILD_REFUSED=1"); return false; }
+      ]]></Code>
+    </Task>
+  </UsingTask>
+  <Target Name="VerifyExactPayload" BeforeTargets="CoreCompile">
+    <Error Condition="'$(PayloadBuildNode)' == '' Or '$(PayloadRoot)' == ''" Text="Provide explicit PayloadBuildNode and PayloadRoot for exact readback." />
+    <VerifyWindowsPayload Node="$(PayloadBuildNode)" Root="$(PayloadRoot)" Version="$(PayloadVersion)" Script="$(MSBuildProjectDirectory)\verify-build.mjs" Generated="$(MSBuildProjectDirectory)\Payload.generated.wxs" />
   </Target>
 </Project>

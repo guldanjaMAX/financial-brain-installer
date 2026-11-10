@@ -42,7 +42,7 @@ for (const kind of ['merchant', 'totals', 'expense_summary']) {
   }
 }
 
-for (const vendor of ['Vendor Unit', null]) for (const phrase of ['minus returns', 'less refunds', 'net of credits', 'net spending']) {
+for (const vendor of ['Vendor Unit', null]) for (const phrase of ['minus returns', 'less refunds', 'net of credits', 'net spending', 'after returns']) {
   for (const reverse of [false, true]) test(`mixed operands: ${vendor ? 'payee' : 'overall'} ${phrase} ${reverse}`, async () => {
     const subject = vendor ? 'Vendor Unit spending' : 'spending';
     const netSubject = phrase === 'net spending' ? `net ${subject}` : subject;
@@ -117,7 +117,7 @@ test('requested-basis selector still withholds net if the metadata guard is remo
   assert.equal(net.body.ledger.comparison, undefined, 'missing supported net amount cannot fall through to gross');
 });
 
-test('injected supported description measure compares its net fields rather than gross fields', async () => {
+test('injected description measure cannot create refund authority or compare gross as net', async () => {
   const from = '  const hasForecast = extracted.some(intent => intent.forecastRequested);';
   const implementation = await answerWithReplacement(from,
     '  for (const intent of extracted) { delete intent.refundsNotNetted; intent.netRefunds = true; }\n' + from);
@@ -129,7 +129,25 @@ test('injected supported description measure compares its net fields rather than
   assert.equal(control.body.ledger.comparison, undefined);
   const measured = await execute(input, implementation);
   reached(measured, 2);
-  assert.deepEqual(parts(measured.body).map(p => p.net_expense_minor), [10000, 8000]);
+  assert.deepEqual(parts(measured.body).map(p => p.net_expense_minor), [undefined, undefined]);
+  assert.ok(parts(measured.body).every(p => p.net_refunds_unavailable));
+  assert.deepEqual(parts(measured.body).map(p => p.possible_refunds.length), [1, 1], 'candidate decision reached in both periods');
   assert.deepEqual(parts(measured.body).map(p => p.expense_total_minor), [12000, 9000]);
-  assert.deepEqual(measured.body.ledger.comparison, { figures_minor: [10000, 8000], difference_minor: 2000 });
+  assert.equal(measured.body.ledger.comparison, undefined, 'gross fields never stand in for an unavailable net');
+});
+
+for (const vendor of ['Vendor Unit', null]) test('net spending change retains its two gross numeric peers: ' + (vendor || 'overall'), async () => {
+  const input = { ...periods, id: 'net_change_regression',
+    question: 'How did our net spending' + (vendor ? ' at ' + vendor : '') + ' change this month versus last month?',
+    intents: [reply({ kind: vendor ? 'merchant' : 'expense_summary', vendor_text: vendor }),
+      reply({ kind: vendor ? 'merchant' : 'expense_summary', vendor_text: vendor, period: { type: 'last_month' } })] };
+  const subject = vendor ? vendor + ' spending' : 'spending';
+  const gross = await execute({ ...input, question: 'Could you compare gross ' + subject + ' this month versus last month?' });
+  reached(gross, 2);
+  assert.deepEqual(gross.body.ledger.comparison.figures_minor, [12000, 9000]);
+  const net = await execute(input);
+  reached(net, 2);
+  assert.ok(parts(net.body).some(p => p.net_refunds_unavailable));
+  assert.equal(net.body.ledger.comparison, undefined);
+  assert.equal(net.body.evidence_gate.complete, false);
 });

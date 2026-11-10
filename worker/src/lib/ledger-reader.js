@@ -18,9 +18,10 @@ async function rows(env, sql, binds) {
 
 // Labels identify transfer counterparts; provider references only validate the
 // owner's saved link. Neither reference nor credential is exposed in citations.
-const ACCOUNTS_SQL = `SELECT a.id,a.account_slug,a.entity_slug,e.kind AS entity_kind,a.mask,a.account_kind,a.institution,a.label,a.external_ref,a.source_feed,
-      a.currency,a.feed_mode,a.balance_role,a.basis_state,c.coverage_status,c.covered_from,c.covered_to,
-      c.basis_state AS coverage_basis,i.last_synced_at,
+const ACCOUNTS_SQL = `SELECT a.id,a.account_slug,a.entity_slug,e.kind AS entity_kind,e.display_label AS entity_label,a.mask,a.account_kind,a.institution,a.label,a.external_ref,a.source_feed,
+      a.status,a.currency,a.feed_mode,a.balance_role,a.basis_state,c.coverage_status,c.covered_from,c.covered_to,
+      c.basis_state AS coverage_basis,i.last_synced_at,i.status AS institution_status,
+      b.state AS backfill_state,
       CASE WHEN (c.coverage_status='complete' AND c.basis_note LIKE 'Read from a bank export covering %')
         OR EXISTS (SELECT 1 FROM simplefin_account_assignments x
           WHERE x.tenant_id=a.tenant_id AND x.account_ref=a.external_ref
@@ -46,6 +47,7 @@ const ACCOUNTS_SQL = `SELECT a.id,a.account_slug,a.entity_slug,e.kind AS entity_
           AND (z.current_minor IS NULL OR z.current_minor<>0 OR COALESCE(z.available_minor,0)<>0
             OR z.basis_state<>'confirmed' OR z.currency<>'USD'))
         THEN date(substr(b.queued_at,1,10),printf('-%d days',b.requested_days-1)) END AS empty_provider_from,
+      a.opened_on,a.closed_on,
       l.manual_account_slug AS link_manual,l.live_account_slug AS link_live,l.identity_json AS link_identity,
       ${accountKindReviewSql('a')} AS account_kind_review_json
     FROM fin_accounts a
@@ -62,6 +64,22 @@ const ACCOUNTS_SQL = `SELECT a.id,a.account_slug,a.entity_slug,e.kind AS entity_
 
 export async function readEffectiveAccounts(env, { tenantId = env.BANK_FEED_TENANT || DEFAULT_TENANT } = {}) {
   return groupAccounts(await rows(env, ACCOUNTS_SQL, [tenantId, MAX_ACCOUNTS + 1]));
+}
+
+// Disclosure-only owner inventory. Do not join these rows into ACCOUNTS_SQL:
+// that query and its atomic readback are the confirmed contributor boundary.
+// Missing membership cannot establish a role; an explicitly unowned entity
+// cannot enter even this inventory. No observations or source content is read.
+export async function readUncertainScopeAccounts(env, { tenantId = env.BANK_FEED_TENANT || DEFAULT_TENANT } = {}) {
+  const accounts = await rows(env, `SELECT a.account_slug,a.mask,a.label
+    FROM fin_accounts a
+    LEFT JOIN fin_entities e ON e.tenant_id=a.tenant_id AND e.entity_slug=a.entity_slug
+      AND e.superseded_by_id IS NULL
+    WHERE a.tenant_id=? AND a.superseded_by_id IS NULL
+      AND (e.entity_slug IS NULL OR (e.relationship='owned' AND e.basis_state<>'confirmed'))
+    ORDER BY a.entity_slug,a.account_slug LIMIT ?`, [tenantId, MAX_ACCOUNTS + 1]);
+  if (accounts.length > MAX_ACCOUNTS) throw new Error('ledger disclosure account limit');
+  return accounts;
 }
 
 function groupAccounts(accounts) {
@@ -227,8 +245,13 @@ export async function readEffectiveTransactions(env, accounts, { from, to, amoun
   effectiveAccountSlugs = null, pendingOnly = false } = {}) {
   const selected = selectedSnapshotAccounts(accounts, { mask, accountKind, effectiveAccountSlugs });
   if (selected.some(unknownTwinCoverage)) throw new Error("ledger twin coverage unknown");
+  // Pending rows are bank observations, not completed activity. Only completed
+  // activity needs a proven lifecycle interval; this includes direct closed-account reads.
+  if (!pendingOnly && selected.some(account => account.members.some(member => member.status === 'closed' &&
+      (!member.closed_on || ledgerDay(member.closed_on) !== member.closed_on)))) throw new Error("ledger closing date unknown");
   const mapping = selected.flatMap(account => account.members.map(member => ({
     slug: member.account_slug, effective: account.account_slug,
+    status: member.status, opened_on: member.opened_on, closed_on: member.closed_on,
     // A twin's live rows are authoritative only inside its proven interval;
     // the complete manual source supplies the outside interval alone.
     include_from: member.feed_mode === "live" && account.members.length > 1 ? member.covered_from : null,
@@ -254,7 +277,16 @@ export async function readEffectiveTransactions(env, accounts, { from, to, amoun
         NOT (t.posted_on BETWEEN json_extract(m.value,'$.exclude_from') AND json_extract(m.value,'$.exclude_to')))
       AND (json_extract(m.value,'$.include_from') IS NULL OR t.posted_on IS NULL OR
         t.posted_on BETWEEN json_extract(m.value,'$.include_from') AND json_extract(m.value,'$.include_to'))
-      AND (?5 IS NULL OR (t.amount_minor = ?5 AND t.direction='inflow') OR t.basis_state<>'confirmed' OR t.posted_on IS NULL)
+${pendingOnly ? "" : `      AND (json_extract(m.value,'$.opened_on') IS NULL OR t.posted_on IS NULL OR t.posted_on>=json_extract(m.value,'$.opened_on'))
+      AND (json_extract(m.value,'$.closed_on') IS NULL OR t.posted_on IS NULL OR t.posted_on<=json_extract(m.value,'$.closed_on'))
+      AND (COALESCE(json_extract(m.value,'$.status'),'open')<>'closed' OR json_extract(m.value,'$.closed_on') IS NOT NULL)`}
+${pendingOnly ? `      AND NOT EXISTS (
+        SELECT 1 FROM fin_transactions posted
+        WHERE posted.tenant_id=t.tenant_id AND posted.account_slug=t.account_slug
+          AND posted.pending=0 AND posted.superseded_by_id IS NULL AND posted.removed_at IS NULL
+          AND posted.pending_transaction_id=t.external_id
+      )
+` : ""}      AND (?5 IS NULL OR (t.amount_minor = ?5 AND t.direction='inflow') OR t.basis_state<>'confirmed' OR t.posted_on IS NULL)
     `;
   // Separate the undated refusal arm so both arms use the account/date index.
   // CROSS JOIN fixes the small mapping as the outer loop; SQLite otherwise
@@ -282,12 +314,23 @@ export async function readEffectiveBalances(env, accounts, {
   const selected = selectedSnapshotAccounts(accounts, { mask, accountKind, effectiveAccountSlugs });
   const mapping = selected.flatMap(account => account.members.map(member => ({
     slug: member.account_slug, effective: account.account_slug, live: member.feed_mode === "live" ? 1 : 0,
+    role: account.balance_role,
     last_synced_at: member.feed_mode === "live" ? member.last_synced_at : null,
   })));
   // Exclude invalid and future observations before ranking, so an eligible
   // prior snapshot can still answer. The cutoff comes from the owner calendar.
+  // Reviews change interpretation, not provider evidence. Always derive the
+  // effective sign from the durable position, never negate a normalized figure.
+  // Older SimpleFIN snapshots cannot prove that position until a fresh pull.
   return snapshotRows(env, accounts, `WITH observations AS (
-    SELECT b.id,b.account_slug AS source_account_slug,b.as_of_date,b.current_minor,${includeAvailable ? 'b.available_minor,' : ''}b.currency,b.basis_state,
+    SELECT b.id,b.account_slug AS source_account_slug,b.as_of_date,
+      CASE WHEN b.provider_position_minor IS NOT NULL THEN
+        CASE WHEN json_extract(m.value,'$.role')='liability' THEN -b.provider_position_minor ELSE b.provider_position_minor END
+        WHEN EXISTS(SELECT 1 FROM simplefin_account_assignments s
+          WHERE s.tenant_id=b.tenant_id AND ('simplefin-'||substr(s.account_ref,5))=b.account_slug
+            AND b.source_feed=('bank-feed:'||s.item_ref)) THEN NULL
+        ELSE b.current_minor END AS current_minor,
+      ${includeAvailable ? 'b.available_minor,' : ''}b.currency,b.basis_state,
       json_extract(m.value,'$.effective') AS effective_account_slug,
       json_extract(m.value,'$.last_synced_at') AS last_synced_at,
       ROW_NUMBER() OVER (PARTITION BY json_extract(m.value,'$.effective')

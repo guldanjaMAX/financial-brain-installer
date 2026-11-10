@@ -74,9 +74,11 @@ test('generic-payee admission preserves expense and mixed-outflow facts with rev
     assert.equal(o.execution_status, 'complete');
     assert.ok(o.trace.rows_read.some(row => row.id === 101));
     assert.ok(o.trace.rows_read.some(row => row.id === 102));
-    assert.equal(o.body.ledger.candidate_transfer_count, 0, 'default advisory admission retained');
-    assert.deepEqual(o.body, reviewedTitleFields({ ...baseline.observations[0].body,
-      answer: reviewedFinalOffer(reviewedPlainCopy(baseline.observations[0].body.answer)) }));
+    assert.equal(o.body.ledger.candidate_transfer_count, 1, 'reciprocal directed pair admitted in every reader');
+    if (o.body.ledger.kind === 'totals') {
+      assert.deepEqual(o.body.ledger.accounts, baseline.observations[0].body.ledger.accounts, 'gross rows remain unchanged');
+      assert.equal(o.body.ledger.lead_accounts.find(a => a.account_mask === '3131').debits_minor, 0);
+    } else assert.equal(o.body.ledger.expense_total_minor, 0, 'named owned outflow is not an ordinary expense');
     for (const [file, source] of Object.entries(sourceOverrides)) {
       assert.equal(baseline.source_files[`worker/src/lib/${file}`], sha(source), 'pinned bytes executed');
     }
@@ -130,7 +132,7 @@ function competitionDecision(o) {
     [a.account_slug, { ...a, members: [a] }]));
   assert.equal(pairOwnTransfers(o.trace.rows_read.filter(row => row.id !== 104), accounts,
     { directedEvidence: true }).pairs.length, 1, 'nonempty pairing decision without the competitor');
-  assert.equal(o.body.ledger.combined_inflow_minor, 12500, 'only the selected credit contributes');
+  assert.equal(o.body.ledger.combined_inflow_minor, 12500, 'recorded inflow stays gross independently of pairing');
   assert.equal(o.body.ledger.income_established, false);
   assert.equal(o.body.evidence_gate.complete, true);
   return accounts;
@@ -148,7 +150,7 @@ function competitionContract(o) {
   assert.equal(l.matched_own_transfers.count, 0);
   assert.deepEqual(l.matched_own_transfers.pairs, [], 'neither competing leg becomes a proven pair');
   assert.equal(l.candidate_transfer_count, 0);
-  assert.equal(l.outside_inflow_minor, 12500, 'unproved credit remains in the remainder');
+  assert.equal(l.outside_inflow_minor, 12500, 'an unpaired credit stays in the remainder');
   assert.deepEqual(l.transfer_related_credit_citations, [1]);
   assert.deepEqual(o.body.citations.map(c => c.ref), ['ledger:transaction:102']);
   assert.match(o.body.answer, /Matched transfers between your own accounts: \$0\.00 across 0 pairs/);
@@ -185,9 +187,9 @@ for (const competition of ['proposed-out', 'uncovered-in']) {
     competitionContract(observation('uncertain'));
     const c = competitionCases.find(c => c.competition === competition && c.arm === 'uncertain');
     const source = readFileSync(new URL('../src/lib/ledger-answer.js', import.meta.url), 'utf8');
-    const before = 'inflowPairing ? allRows : allRows.filter(eligible)';
+    const before = 'const pairingRows = allRows;';
     assert.equal(source.split(before).length - 1, 1, 'one early-filter restoration site');
-    const restored = source.replace(before, 'allRows.filter(eligible)');
+    const restored = source.replace(before, 'const pairingRows = allRows.filter(eligible);');
     const result = replay({ cases: [c], snapshotFor: competitionSnapshot,
       sourceOverrides: { 'ledger-answer.js': restored } });
     assert.equal(result.source_files['worker/src/lib/ledger-answer.js'], sha(restored), 'restored bytes executed');

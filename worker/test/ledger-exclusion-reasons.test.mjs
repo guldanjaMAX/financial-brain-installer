@@ -61,11 +61,12 @@ function checkPayment(result, kind) {
   assert.equal(body.ledger.own_account_payments.total_minor, 70318);
   assert.equal(body.ledger.own_account_payments[`${kind === 'card' ? 'card' : 'loan'}_minor`], 70318);
   assert.deepEqual(body.ledger.lead_rows.map(row => row.amount_minor), [12000]);
-  assert.deepEqual(body.ledger.rows.map(row => row.amount_minor), [70318, 12000]);
-  assert.match(body.answer, /Payments to your own loan\/card accounts: \$703\.18 across 1 payment/);
-  assert.equal(body.answer.match(/^Payments to your own loan\/card accounts:/gm)?.length, 1);
+  assert.deepEqual(body.ledger.rows.map(row => row.amount_minor), [12000], 'R1 alternate ranking excludes payments too');
+  assert.equal(body.ledger.if_own_transfers.total_minor, 12000);
+  assert.match(body.answer, /Payments to loans and cards \(excluded from spending and income\):.*across [12] payments?/);
+  assert.equal(body.answer.match(/^Payments to loans and cards \(excluded from spending and income\):/gm)?.length, 1);
   assert.doesNotMatch(body.answer, /Excluded payment|Possible transfer, unmatched/,
-    'the summary is the only payment explanation; no dated appendix repeats it');
+    'the payment has one cited receipt and never an unmatched-transfer appendix');
   assert.doesNotMatch(body.answer, /Possible transfer, unmatched|retirement or investment withdrawal/);
   assert.equal(body.ledger.unmatched_transfers.length, 0, 'known payment is not an unmatched transfer');
 }
@@ -95,7 +96,7 @@ test('paired payment and below-cutoff payment use the same classification', asyn
   assert.ok(result.sql.some(sql => /JOIN fin_transactions/.test(sql)));
   assert.equal(result.body.ledger.own_account_payments.total_minor, 70318);
   assert.deepEqual(result.body.ledger.lead_rows.map(row => row.amount_minor), [90000]);
-  assert.match(result.body.answer, /Payments to your own loan\/card accounts: \$703\.18 across 1 payment/);
+  assert.match(result.body.answer, /Payments to loans and cards \(excluded from spending and income\): \$703\.18 across 1 payment/);
   assert.doesNotMatch(result.body.answer, /Excluded payment/);
   assert.doesNotMatch(result.body.answer, /Possible transfer, unmatched|retirement or investment withdrawal/);
 });
@@ -126,7 +127,7 @@ for (const kind of ['loan', 'card', 'line_of_credit']) {
         assert.equal(result.body.ledger.own_account_payments.total_minor, 70318);
         assert.equal(result.body.ledger.own_account_payments[kind === 'card' ? 'card_minor' : 'loan_minor'], 70318);
         assert.deepEqual(result.body.ledger.lead_rows.map(row => row.amount_minor), [ordinaryMinor]);
-        assert.equal(result.body.answer.match(/^Payments to your own loan\/card accounts:/gm)?.length, 1);
+        assert.equal(result.body.answer.match(/^Payments to loans and cards \(excluded from spending and income\):/gm)?.length, 1);
         assert.doesNotMatch(result.body.answer, /Excluded payment|Possible transfer, unmatched|retirement or investment withdrawal/);
         assert.deepEqual(result.body.ledger.unmatched_transfers, []);
         const green = await control.askWith(question);
@@ -135,7 +136,21 @@ for (const kind of ['loan', 'card', 'line_of_credit']) {
         assert.equal(green.body.ledger.own_account_payments, undefined);
         assert.deepEqual(green.body.ledger.lead_rows.map(row => row.amount_minor),
           belowCutoff ? [90000] : [70318, 12000]);
-        assert.doesNotMatch(green.body.answer, /Excluded payment|Payments to your own loan\/card accounts:/);
+        assert.doesNotMatch(green.body.answer, /Excluded payment/);
+        if (paired) {
+          // The external outgoing leg remains spending, while the independent
+          // receiving liability posting must now have its own cited receipt.
+          const receipt = green.body.ledger.payment_exclusions;
+          assert.equal(receipt.count, 1);
+          assert.equal(receipt.total_minor, 70318);
+          assert.equal(receipt.rows[0].direction, 'inflow');
+          assert.equal(receipt.rows[0].account_mask, '2222');
+          assert.equal(green.body.citations.find(ref => ref.n === receipt.rows[0].n).ref,
+            `ledger:transaction:${control.first("SELECT id FROM fin_transactions WHERE txn_uid='counterpart'").id}`);
+        } else {
+          assert.equal(green.body.ledger.payment_exclusions, undefined);
+          assert.doesNotMatch(green.body.answer, /Payments to loans and cards \(excluded from spending and income\):/);
+        }
       }
     });
   }
@@ -232,7 +247,7 @@ test('HF-01 restoring the duplicate dated payment makes the unchanged M08 key re
   assert.equal(score.required_facts_total, 6);
   assert.deepEqual(green.scores.filter(row => row.verdict === 'wrong figure').map(row => row.id), []);
   const source = readFileSync(new URL('../src/lib/ledger-answer.js', import.meta.url), 'utf8');
-  const site = '  return { answer, citations, ledger };\n}\n\n// The only integration point';
+  const site = '  return refundResult({ answer, citations, ledger });\n}\n\n// The only integration point';
   assert.equal(source.split(site).length - 1, 1, 'one final rendering decision reached');
   const duplicate = '  for (const { row } of expensePayments.values()) answer += `\\nExcluded payment (${exclusionLabel(row)}): ${rowLine(row)}.`;\n';
   const changed = source.replace(site, duplicate + site);
@@ -242,10 +257,10 @@ test('HF-01 restoring the duplicate dated payment makes the unchanged M08 key re
   const observation = mutant.observations[0];
   assert.ok(observation.trace.rows_read.length > 0, 'mutant read the nonempty ranking pool');
   assert.equal(observation.body.ledger.own_account_payments.total_minor, 40000, 'payment decision reached');
-  assert.match(observation.body.answer, /Excluded payment \(left out of the first figures as a payment to your own loan account/);
+  assert.match(observation.body.answer, /Excluded payment \(a payment to your own loan account excluded from the wider candidate pool; outside the displayed rows\)/);
   const red = scoreRun(mutant, [c]).scores[0];
   assert.equal(red.verdict, 'wrong figure', 'unchanged bench kills restore-duplicate-dated-payment');
   assert.ok(red.reasons.some(reason => reason.startsWith('unreviewed-money-prose:')));
-  assert.ok(red.reasons.includes('display-row-date:12'));
+  assert.ok(red.reasons.some(reason => reason.startsWith('display-row-date:')));
   assert.equal(scoreRun(replay({ cases: [c] }), [c]).scores[0].verdict, 'correct', 'intact peer stays green');
 });

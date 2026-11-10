@@ -64,7 +64,7 @@ const documents = [
   "Is every 2025 bank statement present?", "Which bank statements are missing for 2025?",
   "What 2025 tax documents are missing?", "Do I have all my tax documents for 2025?",
   "How many months of cash runway do I have?", "How long will my cash last at the current spending rate?",
-  "What is the balance in my Fixture Bank account?", "Did a payment of $2,500 arrive in my Fixture Bank account?",
+  "Did a payment of $2,500 arrive in my Fixture Bank account?",
   "How do I balance work and rest?",
 ];
 
@@ -430,9 +430,18 @@ test("unsupported audit questions reach documents without reading the ledger, wi
   for (const question of documents) {
     const before = f.seen.sql.length;
     const body = await f.ask(question);
-    assert.equal(body.ledger, undefined, question);
-    assert.ok(f.seen.sql.length > before, "document decision reached");
-    assert.equal(f.seen.sql.slice(before).some(sql => /FROM fin_accounts/.test(sql)), false, question);
+    const compound = ["Which account pays my car loan, and what is the balance?", "What is my car loan payment account and loan balance?"].includes(question);
+    if (compound) {
+      assert.equal(body.ledger?.compound_refused, true, question);
+      assert.equal(body.evidence_gate.supported, false);
+      assert.equal(body.evidence_gate.complete, false);
+      assert.ok(f.seen.sql.slice(before).some(sql => /FROM fin_accounts/.test(sql)), "compound account decision reached");
+      assert.deepEqual(body.citations, []);
+    } else {
+      assert.equal(body.ledger, undefined, question);
+      assert.ok(f.seen.sql.length > before, "document decision reached");
+      assert.equal(f.seen.sql.slice(before).some(sql => /FROM fin_accounts/.test(sql)), false, question);
+    }
   }
 });
 
@@ -456,15 +465,30 @@ for (const [label, change] of [
   ["transaction activity", f => f.add("empty-activity", "empty", "2026-09-15", 1)],
   ["undated activity", f => f.add("empty-undated", "empty", null, 1)],
   ["different coverage source", f => f.raw("UPDATE fin_account_coverage SET source_feed='bank-feed:other' WHERE account_slug='empty'")],
-]) test(`empty coverage refuses ${label}`, async t => {
+]) test(`empty coverage stays uncertified while covered accounts answer: ${label}`, async t => {
   const f = await fixture(t);
   const question = "How much money came in and went out in September 2026?";
   assert.equal((await f.ask(question)).ledger?.kind, "totals", "green completed provider control");
+  const selectedQuestion = "How much money came in and went out in September 2026 for account 0002?";
+  const certifiedEmpty = await f.ask(selectedQuestion);
+  assert.deepEqual(certifiedEmpty.ledger.accounts.map(a => [a.account_mask, a.credits_minor, a.debits_minor]), [["0002", 0, 0]]);
+  assert.equal(certifiedEmpty.evidence_gate.complete, true);
   change(f);
   const before = f.seen.sql.length;
   const body = await f.ask(question);
-  assert.equal(body.ledger, undefined); assert.equal(body.gaps[0]?.reason, "period_outside_coverage");
-  assert.ok(f.seen.sql.slice(before).some(sql => /FROM fin_accounts/.test(sql)), "coverage refusal reached");
+  assert.equal(body.ledger.kind, "totals");
+  assert.deepEqual(body.ledger.accounts.map(a => [a.account_mask, a.credits_minor, a.debits_minor]).sort(), [["4417", 10001, 12345], ["8862", 250000, 6789]]);
+  assert.deepEqual([body.ledger.coverage.candidate_account_count, body.ledger.coverage.covered_account_count, body.ledger.coverage.omitted_account_count], [3, 2, 1]);
+  assert.deepEqual(body.ledger.coverage.excluded_accounts.map(a => a.account_mask), ["0002"]);
+  assert.equal(body.ledger.complete_total_minor, null);
+  assert.equal(body.evidence_gate.complete, false);
+  assert.equal(body.gaps[0]?.reason, "ledger_partial_coverage");
+  assert.match(body.answer, /2 of 3 accounts/);
+  assert.ok(f.seen.sql.slice(before).some(sql => /FROM fin_accounts/.test(sql)), "coverage decision reached");
+  const namedBefore = f.seen.sql.length;
+  const refused = await f.ask(selectedQuestion);
+  assert.equal(refused.ledger, undefined); assert.equal(refused.gaps[0]?.reason, "period_outside_coverage");
+  assert.ok(f.seen.sql.slice(namedBefore).some(sql => /FROM fin_accounts/.test(sql)), "uncertified empty account refusal reached");
 });
 
 test("top spending categories rank exact totals rather than posting order", async t => {
@@ -478,4 +502,12 @@ test("top spending categories rank exact totals rather than posting order", asyn
   assert.equal(body.ledger?.total_minor, 19144);
   assert.deepEqual(body.ledger.groups.map(g => [g.category, g.total_minor]), [["software", 12345], ["office", 6799]]);
   assert.ok(body.answer.indexOf("software: ") < body.answer.indexOf("office: "));
+});
+
+test('named balance-in syntax reaches identity guards without adopting a bank name', async t => {
+  const f = await fixture(t);
+  const body = await f.ask('What is the balance in my Fixture Bank account?');
+  assert.equal(body.ledger, undefined);
+  assert.equal(body.gaps[0]?.reason, 'no_accounts');
+  assert.equal(classifyLedgerQuestion('What is the balance in my Fixture Bank account?').kind, 'balance');
 });

@@ -1,5 +1,16 @@
 # brain-installer
 
+Closed store-owner question forms for recurring charges with the paying account,
+own-account movements last month, and financing payouts use deterministic ledger
+readers without model extraction. Only syntax words in complete, literal-free
+sentences accept a single edit; added identity selectors or qualifiers retain
+ordinary admission. Recurring detection runs separately per account for the
+paying-account forms and retains payment exclusions and unresolved-movement
+disclosures. Financing answers list recent deposits over 60 days,
+without treating bank labels as financing identity or proving expected amounts,
+lateness, or absence of an obligation. Missing bank coverage still returns the
+named payout-schedule boundary, with no invented deposit evidence.
+
 Provisions a retrieval brain into a **client's own Cloudflare account**. Text and
 keyword search live in D1, vectors live in Vectorize, and the Worker fuses them.
 Nothing runs on our infrastructure. Normal setup starts with an owner-approved
@@ -8,7 +19,7 @@ store. Pinned Wrangler 4.131.1 cannot request Vectorize permission for that
 profile, so the read-only preflight routes that exact refusal to an explicit,
 account-scoped recovery API-token choice before any mutation.
 
-**Package identity: brain-installer 0.4.26, schema59.** Publication, supported
+**Package identity: brain-installer 0.4.27, schema61.** Publication, supported
 platforms and field acceptance are established by the reviewed evidence for
 the exact package bytes, not by this README or its version number. Before an
 install or update, match the package to the current approved guide and release
@@ -22,7 +33,7 @@ until reviewed evidence closes it; a deferred capability remains unproven.
 Earlier candidate identities and their planning records remain historical and
 must not be reused as proof for changed bytes.
 
-The 41-row release audit has 37 unresolved incidents, zero 0.4.26 deferrals, and four
+The 41-row release audit has 37 unresolved incidents, zero 0.4.27 deferrals, and four
 rows closed on reviewed evidence.
 
 Engineering changes follow [the code, test, documentation, and tracking
@@ -2151,6 +2162,24 @@ The order is lifecycle, then source; readback and source release complete
 before the lifecycle lease is released. A busy holder refuses immediately
 with a plain instruction to wait and retry, matching interactive ingest and
 load. The byte comparison still protects against edits outside these commands.
+On Windows, lifecycle release retries transient directory-removal failures for
+up to one second and logs a final failure without raw error details. An empty
+lifecycle directory can be recovered after ten seconds, with an exact recheck
+before removal; an owned lock retains its existing stale recovery window.
+Acquisition publishes one exclusive `owner.json` claim and checks directory
+identity before and after publication. A paused acquirer must refuse if empty
+directory recovery replaced its directory. Legacy named owner records remain
+readable for contention and stale recovery. Stale-owner reclamation serializes
+its final owner read, liveness check and removal under an exclusive sibling
+`.recovery` directory, then verifies the observed directory identity before
+unlinking. Competing reapers refuse as busy. The guard is removed in a finally
+block, including refusal paths. It is deliberately never age-reaped: a paused
+reaper can resume after any timeout. A process crash inside that critical
+section leaves recovery blocked; removing its guard requires a separate exact
+preview and approval after all possible reapers have stopped. Ordinary lock
+publication still requires the exclusive owner slot and identity readback.
+A rejected publication releases only its matching claim so it cannot strand
+an owned lock ahead of the next command.
 Direct feed-reader helpers revalidate the saved declaration under the source
 lease before walking, so an old plan cannot read a stopped feed.
 
@@ -2392,33 +2421,158 @@ Phase one supports USD balances, deposits within seven days of a supplied date
 (otherwise the last 30 days), named months, last month, last N days and year to
 date. Relative periods use the configured owner IANA time zone. A missing or
 invalid owner zone refuses before ledger SQL even when a caller injects a test
-clock. An explicit `in <Month YYYY>` always means the complete calendar month
-and does not use an injected clock as a time-zone fallback. Reads are bounded to 200 source accounts and 5,000
+clock. An explicit `in <Month YYYY>` requests the complete calendar month.
+A period starting after the owner's today returns no figure and says it has
+not happened yet. A period extending beyond today reads only through today,
+labels the answer partial, retains `requested_to`, and sets ledger and coverage
+completeness false. Provider coverage extending into the future cannot override
+this boundary. Explicit windows that might reach the owner's future also need
+a valid owner zone; a wholly past explicit window retains its fixed bounds.
+Money-in grammar additionally consumes `since 2026-01-01` (any valid ISO day),
+`month to date`, `since Jan`, `since January`, and `previous month` completely.
+Reads are bounded to 200 source accounts and 5,000
 matching transaction rows; exceeding either bound falls back with a visible
-gap. Complete coverage is required for totals and negative deposit results.
+gap. Complete totals and negative deposit results require certified coverage.
+Totals, largest recorded charges and recurring evidence may instead use the
+accounts covering every requested date, with an explicit original denominator,
+omitted-account labels and coverage reasons. No covered accounts means refusal,
+including an unreviewed feed whose dated but partial history cannot certify the
+requested period. `worker/test/ledger-partial-coverage.test.mjs` exercises the
+real wrapper and SQLite reads with 41 requested accounts, 33 covered and eight
+without a coverage start, twelve new ranking phrasings, complete and unknown
+controls, certified empty periods, live/manual precedence and restoring mutants.
+Monthly composition applies the same policy independently to each month and
+keeps coverage, no exact payee, possible-only payee and read failures distinct.
+An empty covered subset refuses without a figure, names the missing accounts,
+and asks for bank history covering the requested dates. A nonempty covered
+subset with no matching activity supports zero or an empty ranking, including
+partial calendar dates; it stays partial while any requested account is omitted.
+Comparison operands retain these decisions separately.
+Partial figures carry `complete: false`; `complete_total_minor` and complete
+combined inflow/net/recurrence fields are null, with explicitly named covered
+subtotals or estimates. Partial operands cannot certify a comparison difference.
+Transfer competition uses all authorized padded rows in every derived view.
+Coverage is checked on endpoints after uniqueness, including named-account and
+per-account rankings. Rejected pairs retain the readable selected leg as an
+unproved candidate, with its amount included. Net measures need at least one
+covered checking, savings
+or card account; covered loan-only activity cannot become a supported zero when
+the only eligible account is omitted. An unavailable result lists the original
+requested denominator and the coverage/account-kind reasons without a figure.
+Largest-charge admission parses the ranked subject and amount metric, with
+grounded selector slots and per-account transaction lists kept separate from
+ranking aggregate account activity. Singular and plural aggregate subjects and
+unknown operations refuse before facts; literal payee/account labels remain
+filters. Deterministic ranks carry the validated core after bounded modifiers
+are consumed. Their inclusion/exclusion flags remain effective, and duplicate,
+conflicting or unknown modifiers still refuse.
+The early-month default keeps both dated amounts in its answer text.
+The partial-coverage regression includes nine coverage-gap states, every eligible
+and ineligible net account kind, unit/admission tables, and restoring mutants.
 `node --test worker/test/ledger-phase2.test.mjs` extends that same path with
 largest N expenses/deposits (1 through 100), recent deposits, merchant/category
 spend or income, recurring charges, and own-account transfers. Named months
 and Q1 through Q4 may omit the year, meaning the current year in the owner's
 configured time zone. Merchant
 matches use the exact NFKC-normalized, case-insensitive payee when present.
-Named outflow spend also admits whole-word structured-payee prefixes and the
-bounded descriptor aliases documented in the architecture. Single-word vendor
-selectors of five characters or fewer retain exact-only behavior and disclose
-ambiguous prefix candidates. Family totals include a cited per-payee breakdown,
-stored payee spellings and an explicit `also includes:` line when expanding an
-exact payee. Description-only outflows remain possible matches, never additions
-to the structured figure. `worker/test/ledger-vendor-selector.test.mjs` covers
-these boundaries and an exact-only restoring mutant. The development-only
-`node eval/fast-loop/vendor-family-bench.mjs` compares the pinned `cc679bb0`
-sources over the original, Batch 2, early-month and new synthetic family slices.
+For extracted multi-period requests, inventory-backed account literals are
+resolved before binding operand scopes, including mixed model intent kinds.
+A shared account literal binds every abbreviated period operand; unresolved
+scope refuses before transaction reads. Month-year spellings accept straight
+or curly apostrophes with two or four digits. Incomplete calendar suffixes and
+unsupported month ranges refuse with a scoped gap instead of defaulting a year
+or keeping only one month. `worker/test/c3-period-generated.test.mjs` exercises
+1,080 cases with real SQLite numeric peers. Calendar branches report the exact
+original character spans they consume, including expanded month/year spellings.
+Admission rejects calendar tokens outside those spans and quotes the unread words
+in a calendar-scoped gap before any inventory or transaction read. Unsupported
+ordinal bounds and mixed weekday/range forms therefore refuse rather than widen
+a recognized month. Payment-day parsing uses the same residue contract; literal
+selectors and recognized financial qualifications retain their separate meaning.
+Coordinated month operands with one shared trailing numeric or relative year
+refuse before ledger figures. Explicit years beside each month and yearless pairs retain their
+existing local-calendar grounding; selectors cannot supply calendar authority.
+All text before, between and after consumed calendar operands must belong to the closed
+financial remainder grammar. Unknown restrictions, including half-periods,
+bare day ranges and recurring business-day filters, refuse before ledger SQL.
+`worker/test/future-period.test.mjs` covers these restrictions and restoring
+mutants; `worker/test/period-property-generated.test.mjs` retains the independent
+original 2,444 cases plus fresh seeded prefix/suffix controls in both test-chain
+lists. It checks displayed cents even with an incomplete evidence gate, requires
+at least 1,600 answers and fewer than 766 over-refusals, and kills all-refusal
+and wrong-partial-cent response mutants.
+Named outflow spend separates exact structured payee identity from leading-token
+name matches after descriptor cleanup. Requested identities retain all their
+words and numbers. Payee words after store numbers remain identity, including
+unproven city-like suffixes; only terminal store numbers are decoration.
+Name matches show per-payee amounts and
+a combined subtotal labeled "matched by name, not confirmed", separately from
+the exact-payee subtotal, and ask whether they are the same company. They never
+produce a complete total or receipt, even with no exact payee. Short brands use
+the same rule. Description-only outflows remain possible matches.
+Without vendor evidence, absence copy gives explicit start/end dates and only
+the covered accounts, with no amount or follow-up padding. The shared period
+coverage rule appends a concise omitted-account history disclosure when any
+requested account lacks dates; metadata alone is insufficient. Suggested labels
+appear under "Possible matches:" only within normalized edit distance two;
+they are never summed. `worker/test/ledger-absent-copy.test.mjs` covers the
+threshold, seeded partial/full coverage pairs, and six product mutants. The 600-case absent-payee
+finder requires green copy/suggestion groups by default; `ABSENT_PAYEE_STRICT=1` additionally
+requires zero refusals. The two unbounded intent forms remain unsupported.
+Structured `vendor * product` payees are a separate family membership rule:
+the full normalized root must equal the requested identity or a whole alias in
+`worker/src/lib/vendor-aliases.js`. The reviewed table contains generic vendor
+families and common bank abbreviations; exact normalized lookup applies to both
+the requested family and the payee or star-delimited root. It never accepts a
+bare prefix, learns from co-occurrence, or grants a literal product selector
+family expansion. Shared character prefixes, suffixes and substrings of the
+requested identity or its reviewed aliases are possible identities only, even when one
+longer root is unique in the snapshot. Their original bank payees are quoted
+and cited separately, never included in a certified total. A covered confirmed
+identity total remains available beside this review list; possible identities
+alone do not establish a total. No owner-specific alias mapping is used. Plain name prefixes retain the unconfirmed-subtotal rule above.
+Family totals cite all contributing payees and preserve account, period, coverage and owned-movement exclusions.
+Literal bank-descriptor requests keep their protected full identity; they do
+not authorize root expansion. Monthly grouping retains its separate requirement
+for another month to prove the vendor before an empty month can become zero.
+Monthly identity review lists retain quoted bank payees and rebased citations;
+those references never enter the monthly amount membership, and a candidate-only
+month cannot inherit zero from another month's confirmed payee.
+An empty fully covered transaction snapshot retains bounded absence copy and
+withholds a merchant total. Coverage alone cannot establish payee identity.
+`worker/test/ledger-vendor-family-total.test.mjs` covers the empty and two-product
+witnesses across six phrasings, generic roots, collisions, coverage, and three
+isolated source mutants.
+`worker/test/ledger-vendor-prefix-identity.test.mjs` adds the separate-vendor
+short-root witness, 600 fixed collision cases, 600 mixed generic-alias cases,
+whole-alias and protected-selector controls, and five restoring mutants.
+`worker/test/ledger-vendor-selector.test.mjs` exercises the reached answer and
+four restoring mutants. `test/vendor-family-property-generated.test.mjs`
+checks 1,800 fixed-seed cases, 192 numbered-identity witnesses and controls,
+1,200 rename/unrelated-addition pairs and two identity-cleanup mutants against
+independent integer-cent expectations.
+
 Inflows require an explicit payee or a directional/opening sender phrase, never
 an invoice subject. Both amount-qualified and amountless payment checks use
-that attribution. Payer clauses are removed before account-kind selection.
+that attribution. When a named exact-amount payment has no sender match,
+only exact-cent posted rows from the requested accounts and dates may be offered
+as possible matches. Each quotes the bank text and leaves payer identity, receipt
+confirmation and payer totals unconfirmed. No exact-cent row produces a bounded
+amount/account/date absence statement, never a claim that the payer did not pay.
+Payer clauses are removed before account-kind selection.
 Merchant labels preserve literal `and` and `&`. Redacted, shortened or unknown
 labels refuse; an unmatched conjunction substitution refuses as ambiguous.
-Quote the original by-merchant line rather than substituting or guessing. Category totals separate confirmed and proposed categories; proposed
-ones say "bank's category (unconfirmed)". Unsorted is always a separate line.
+Quote the original by-merchant line rather than substituting or guessing.
+Category membership for figures comes only from confirmed labels, through
+`categoryFor`. Proposed, missing and unknown labels stay in Unsorted. For a resolved category, both
+renderers disclose their excluded row count and amount; a named category shows
+its confirmed subtotal while the full category total remains unconfirmed.
+A named category must resolve to one exact confirmed label before any category
+figure or absence is certified. Near forms and unknown words withhold the figure
+and list the exact category names in the scoped records. Shared words never merge
+two confirmed categories. Complete coverage is still required to certify zero. Refund candidates are listed and cited, never subtracted in 0.4.27.
+A requested net after refunds remains unavailable because current provider adapters
+do not supply a documented refund or reversal type.
 `node --test worker/test/ledger-phrasing.test.mjs` covers natural bank question
 forms, named payments without amounts (60-day default), recent deposits
 (14-day default), largest expenses without a count (ten), and bare current
@@ -2437,8 +2591,23 @@ pair. Equal cents, opposite directions, different effective accounts and nearby
 dates only identify candidates. One leg must name the other owned account by
 its unique mask or stored label; conflicting account kinds and explicit outside
 payees on both legs rule out the candidate. A leg must have exactly one possible
-counterpart within three days, mutually. Ambiguous candidates and unmatched
-hints remain counted and visible. Pairing never changes stored rows.
+counterpart within three days, mutually.
+Loan-payment subjects have a separate honest boundary: ordinary expenses and an
+unresolved loan selector cannot establish how much was repaid. Loan balances
+and ordinary purchases in a loan-named account retain their existing readers.
+The shared movement membership distinguishes proof from a possible unpaired
+endpoint. Money out and net keep possible own movements and disclose them;
+spending and income exclude and disclose them, or withhold. An equal connected
+counterpart within three days prevents a money-out or net certification unless
+reciprocal endpoint identity and mutual uniqueness prove the movement. Broader
+asset-pair exclusions also require confirmed account kinds without a current
+kind/role conflict. The fully consumed loan-payment, payment-from-account and transfer-to/from mask
+forms share that pairing rule. Reciprocal payment postings are disclosed once
+through the same three-day window. Pending reads suppress a hold only when a
+live posted row links its provider identity in the same account and tenant;
+amount/date similarity without linkage never suppresses it.
+
+Unproved hints never become transfer proof. Pairing never changes stored rows.
 
 Money answers lead with moves between connected checking, savings and card
 accounts left out when both accounts are in the question's scope and the pair
@@ -2448,10 +2617,125 @@ amounts counted. A connected card payment may use an exact directed outgoing
 reference and the card's unconflicted "PAYMENT THANK YOU" acknowledgement. Each leg
 changes only its own answer period, even across a month boundary. A note offers
 "including transfers" to restore them. When the other account is outside the
-question, the payment stays and the note offers "excluding transfers". Loan and
-line-of-credit payments, contributions to investment or retirement accounts,
-and pairs involving other account kinds stay, with a reason. These flags never
-remove a loan payment or contribution.
+question, a move stays and the note offers "excluding transfers". Loan and
+card payments have a separate shared exclusion rule in `ledger-analysis.js`:
+a bank loan/card-payment category or an exact owned-liability counterparty
+excludes the payment from spending, income, groups and recurring totals.
+Recognized channel payees and unresolved or bare movement guards call the same
+closed `isOwnedMovementChannel` predicate. Its existing optional automatic,
+internet, mobile and online prefixes apply consistently to payment, credit card
+payment, card payment, loan payment and transfer. Case normalization is shared;
+extra words and repeated prefixes stay outside this grammar. Exact endpoints
+and confirmed ownership still prove exclusions. An unresolved owner withholds
+the component with `owned_movement_unconfirmed`, including monthly, comparison,
+split and role-scoped readings. Bare channels without classification use
+`payment_membership_unconfirmed` for typed liability channels. Unqualified bare
+payment and transfer labels keep their advisory policy. Other recognized
+channels with directed descriptions consult the existing disclosure-only
+uncertain-account inventory and require its exact endpoint before inferring
+unresolved ownership; an outside or malformed locator alone cannot do so.
+Connectivity is not required for bank-coded payments. Receiving liability
+legs are also excluded from income. Answers disclose the payments separately,
+using `payment_exclusions` with exact cents and cited postings on every surface.
+Expense summaries, outgoing rankings, categories and recurring readings retain
+`own_account_payments` for their established fields. Those summaries stay
+outgoing-only; `payment_exclusions` also retains
+receiving liability postings. Closed role admission stays
+in `ledger-answer-role.js`; the public dispatcher injects the current monetary
+reader after that scope is admitted, including its exact payment citations and
+the role reader's unchanged unknown-membership exclusions. Ranking alternates and conditional account subtotals
+also exclude payments. Without a bank payment category, identity requires a unique
+counterparty mask or an exact stored label on an owner-reviewed liability. Explicit
+bank expense categories, including fees, purchases and services, veto identity-based
+exclusions. Linked account members use the same identity check. Monthly answers retain payment
+amounts, counts, kinds and remapped citations for each month. Named vendor
+answers disclose accepted family payments as well as exact payees. Every excluding
+surface now itemizes up to five largest payments with dates, posting-account
+endings and citations, plus a cited remainder. Proved owned-loan destinations
+have their own ending in the payment label. Truncated summary groups carry the
+remainder amount, covered accounts are named, and excluded pending activity is
+read separately within the covered window and disclosed with its amount.
+Every displayed summary merchant/category group and remainder cites all members,
+including groups beyond the first five postings. Monthly possible-attribution
+receipts preserve `match_basis`, `possible_citations` and any qualified
+`possible_subtotal_minor`; these never establish a named store total. The final
+guard admits possible posting references only inside their qualified month or
+payment receipt. Uncertain ordinary amounts cannot hide the separately cited
+payment dates and account endings, or become a claim that there were no charges.
+Payment-only possible attribution also blocks covered empty-month zero conversion.
+Monthly `citations` remains the full pool; `amount_citations`, `payment_citations`,
+`refund_citations`, `other_receipt_citations` and directional `inflow_citations` /
+`outflow_citations` identify separate rebased members. Render each figure from
+its own posting list. Mixed store subtotals retain separate confirmed and
+possible inline references, with `possible_citations` identifying only the
+possible ordinary postings. These postings remain outside confirmed totals.
+The refund-description operand also excludes payments. A literal recurring
+payee, merchant or accepted vendor family is resolved against the authorized
+unfiltered window before direction or payment partitioning. Refund-only
+merchants keep zero spending and cited receipts without category fallback.
+Conjunction ambiguity uses that identity snapshot and differing literal
+spellings. Mixed description-only purchases and payments retain a cited
+ordinary description subtotal and payment exclusions; the named merchant
+amount stays withheld and payee attribution unconfirmed. Payment-only selections keep
+their identity and show payment figures and dates separately. An unresolved
+named recurring selector withholds all recurring amounts and asks for a precise
+payee instead of returning a different series. Monthly excluded amounts retain
+the possible-attribution qualifier, including mixed exact and possible totals. Keyword-based exclusions
+use the same whole-word selector as the figure, and possible vendor-description
+matches remain explicitly unconfirmed. Internal posting membership tracks
+which exclusions the summary disclosed, so independent receiving postings
+cannot disappear behind an outgoing summary's label.
+The final named-figure guard keeps the original identity through routing and
+composition. A foreign cited posting discards the reading's figures and citations
+and names the requested dates and covered accounts. Known outside-window posting
+dates remain visible without contributing amounts. Explicit category-topic
+questions keep their category route; anonymous deposit-review context remains
+unattributed and cannot prove a named total. Named ranking payment summaries and
+conditional account figures remain inside the named selection. Monthly merchant
+answers carry `inflows_received_minor`, `refunds_received_minor`, `inflow_rows`
+and `refund_rows` with rebased citations, labeling refunds and other credits
+separately. `worker/test/ledger-named-guard.test.mjs` exercises the real reader
+with 600 deterministic window, direction, category and payment-mix cases.
+The final named-answer boundary sets the boolean `attribution_incomplete` from
+all possible identity rows in the requested scope, including uncited ranking
+candidates, partitioned payments and refunds. It does so independently of the
+branch's completeness or rendered amount. One scope renderer uses the flag to
+withhold absence phrases and aggregate zeros, including empty ranking and
+recurring results. The affected scope becomes incomplete and `found: false`
+becomes unknown. A withheld claim receives one replacement sentence saying
+the store total is not confirmed. A payment amount lookup without candidates
+keeps its explicit no-candidate result and its separate payer-identity
+limitation. Itemized payments, proven refunds, posting zeros and their
+citations remain. `worker/test/ledger-named-zero.test.mjs` retains the 16 earlier
+review attacks and 512 single-period/monthly cases, and adds the eight NZ-B1
+ranking attacks plus 864 generated cases across nine named-answer shapes.
+Per-account ranking parts pass through the same boundary before composition,
+with four extra uncited-refund cases checking local flags and exact empty
+results in the other account. It
+checks fixed absence phrases and structured fields, uncited identity rows,
+exact-only and genuinely empty zero controls. Named expense/category operands
+use the existing merchant alias, and named payer inflows use the merchant
+reader. Description-keyword deposit lists retain their keyword semantics.
+Other amounts and other months retain their existing arithmetic.
+`worker/test/ledger-payment-empty.test.mjs` covers empty exact-amount payment
+lookups in both directions, with and without account selectors. It witnesses the
+amount-free re-read and account-mapping validation, and refuses absence when
+that read fails. Monthly payer receipts keep their attributed subtotal and
+resolving citations without certifying the full payer income.
+Description-only payer positives quote the bank description and label the
+identity assumption in payment and income answers. Description-only zero rows
+cannot establish a payer payment or zero income. Literal whole-question payer
+month and year aliases retain period and residual-qualifier checks.
+Amount-only near-date lookups can list receipts within one dollar and three
+days as possible alternatives, separate from exact matches. Named exact-amount
+lookups retain S8's exact-cents candidate boundary, snapshot re-read and final
+selector guard; other amounts cannot displace or decorate a confirmed receipt.
+Both-direction unnamed-deposit uncertainty remains explicit when no exact
+amount constraint applies. The payer finder and copied product mutants cover
+these composition boundaries.
+Transfer flags cannot restore loan/card payments.
+Contributions to investment or retirement accounts and pairs involving other
+account kinds retain their previous transfer policy.
 
 An inflow into checking, savings or card is a withdrawal only when its category
 is `TRANSFER_IN_INVESTMENT_AND_RETIREMENT_FUNDS` (case-insensitive, proposed or
@@ -2498,13 +2782,40 @@ contains a money word preserves the ordinary document response byte for byte.
 SQL stops at 5,001 matching rows; sorting happens only after proving the bound,
 so an oversized covered range does not need a full sort before refusing.
 
+Money-in-only answers expose gross posted credits in `combined_inflow_minor`
+and `accounts`. `outside_inflow_minor` subtracts only cited structural own-transfer
+pairs. Unpaired owned-looking credits remain included in both figures with one
+quoted, cited possible-transfer disclosure. `lead_accounts` remains the ordinary
+money alternate; mixed in/out and net answers retain their membership rules.
+
 Recurring detection defaults to the last 120 UTC days and uses the normalized
 payee, or description if payee is absent. At least three charges must have all
 intervals in 6 through 8 days (weekly) or 25 through 35 days (monthly); every
 amount must be within exactly 10% of the upper median observed cent amount.
 The last charge must be no more than 8 or 35 days before the period ends.
-Transfer candidates are excluded from recurrence detection. All occurrences
-are cited. Weekly amounts convert to estimated monthly cents using 52/12 and
+Owned movements are excluded from recurring charges and their totals using the shared
+`isOwnedMovement` predicate: a proved owned counterpart, an owned mask, or an
+owned account-kind word. Intervening wording, unfamiliar action
+words and possessives do not make an owned-looking target a charge. An explicit
+service subject ending in subscription or membership, together with a separate
+external payee, can establish service identity regardless of word order. Only
+that subject is removed before checking for other account targets; matching
+mask locators always take priority. Missing or owned-looking payees fail closed.
+An external payee and an explicit invoice/reference role are both required to
+treat a matching number as coincidental; other bare masks fail closed, including
+when a stated account kind conflicts.
+Text-only outflow matches remain separately visible
+with dates and amounts as possible transfers or payments between your own
+accounts; their presence makes the recurring list incomplete. All occurrences
+are cited. `recurringReading` partitions proved movements before cadence
+detection. Repeated unresolved rows appear in `set_aside_recurring` with their
+recorded payee, typical `amount_minor`, cadence, dates and exact per-occurrence
+`amounts_minor`. With any set-aside series, `total_minor` and all monthly-total
+fields are null, `complete` is false, and `confirmed_subtotal_minor` contains
+only the detected external-charge estimate. Both answer surfaces render these
+lists instead of an overall total or an absence claim. Provider transfer and
+loan-payment types and proved owned counterparts seed neither charge list.
+Weekly amounts convert to estimated monthly cents using 52/12 and
 round half up per merchant. These are detected patterns, not confirmed active
 subscriptions. Account-data repairs and live owner verification remain field
 work.
@@ -2708,6 +3019,18 @@ remain unusable unless a matching completed provider receipt and entirely
 empty activity with confirmed zero balances prove the bounded interval. Unknown feed accounts prevent the obligation exposure
 from claiming all obligations, even when the snapshot requests no accounts.
 
+First-day ledger answers name accounts with institution sync errors and refuse
+their money figures until a successful sync. A coverage review alone does not
+clear a sync error. While backfill runs, answers and refusal details disclose
+that history is still loading and give the confirmed complete-through date, or
+say no date is confirmed yet and show the recorded-through date. Unconfirmed
+account kinds are named as excluded from cash and spending totals. Card
+purchases remain spending; bank loan/card repayment codes and
+proved owned-liability payments do not. Loan activity and unconfirmed kinds
+cannot enter the ordinary expense ranking; liability balances remain outside cash.
+An explicit net request including transfers also exposes cited `gross_activity`
+posted totals, labeled as neither spending nor income; ordinary net stays separate.
+
 SimpleFIN uses the same independent bank-feed wrapping key but no Plaid client
 ID, Plaid secret, manifest endpoint, or browser SDK. `brain connect bank` may
 create a missing wrapping key and open the owner page. The one-time Setup Token
@@ -2719,10 +3042,58 @@ Provider `errlist` messages, staged owner-assignment holds, and backfill progres
 remain visible on the owner page. SimpleFIN account type is not guessed: an
 untyped account enters the financial map as `other` with balance role `neither`.
 The first history window waits for account assignment and verified ledger
-promotion before its cursor advances. A corrected partial response supersedes
+promotion before its cursor advances. Missing transaction arrays, unread posted
+rows and out-of-window postings retain incomplete account receipts and a staged
+window, preserving usable rows and balances for an exact-interval retry. An
+explicit empty array permits progress. Retry selection, the verified-history
+walk and backfill completion also inspect already-promoted incomplete account
+receipts, so affected installs recover without manual cursor or sync-time edits.
+An omitted account retains its unresolved exact-interval receipt across parent
+revisions until that account supplies a complete replacement, including an
+explicit empty transaction array. Owner disconnect stops future pulls while
+retaining the unresolved history evidence.
+Each account observation records a pending exact-interval receipt before its
+staging row, under the same revision fence. This also replaces any older complete
+receipt with pending work. Final account publication resolves it only after the
+ledger writes succeed, so an interruption followed by account omission retains
+the historical retry, including across bounded staging and receipt batches.
+Publication still requires a separate owner comparison for complete coverage.
+A corrected partial response supersedes
 the prior promotion marker only after every staging chunk is durable. Revision
 guards in the same D1 transactions as staging, ledger writes, and promotion
 prevent interrupted or concurrent replacements from certifying incomplete work.
+Migration 0061 retains each SimpleFIN snapshot's signed provider position.
+Balance answers derive the amount from that evidence and the current reviewed
+role, so label changes and repeated reviews preserve the sign. An older
+SimpleFIN snapshot requires a fresh observation before a balance answer.
+Release 0.4.27 stays at schema 0061. No current provider adapter supplies a
+documented refund or reversal type, so no refund is subtracted and every requested
+net after refunds is withheld. Text, payee, amount and timing can only nominate a
+possible refund. Each candidate is listed once with its amount, date, masked
+account, quoted bank text and citation, labelled "possible refund, not subtracted".
+Gross spending keeps its exact period and integer cents. The bounded 90-day
+lookback nominates candidates only; it never establishes refund authority.
+Card and loan payments and proved or possible own-account movements remain under
+their payment and transfer rules and are excluded from refund candidates.
+An unrelated owned-account label alone cannot hide a merchant credit. A memo
+naming the effective account where the credit posted is posting context; only
+a different owned account can supply a movement counterparty mention.
+One request-local answer-boundary post-condition checks every nominated candidate
+after monthly, multi-operand and clarification composition. It checks distinct
+identities, exact fields, period placement, quoted text and rebased citations.
+Missing or duplicate disclosure produces an explicit "candidate disclosure
+unavailable" limitation and withholds the net. Composition carries each period's
+candidate metadata; losing it cannot silently certify an empty population.
+For 0.4.28, evaluate a documented provider refund/reversal type before considering
+any subtraction; matching and memo wording must never supply that authority.
+Replacement proposals and reappearance restorations use set-based writes under
+one revision fence and exact inventory guard, keeping large relationship
+populations within the retained batch bound.
+An upgraded source event withdrawn with the legacy SimpleFIN absence reason
+can return when the same bound account supplies current, readable posted
+evidence. Restoration clears only that reason under the revision and inventory
+guards. Other withdrawal reasons and owner-maintained evidence remain intact;
+omission from a subset does not withdraw or restore a row.
 Migration 0051 preserves old rows and rewinds legacy connections to their first
 retained window, since earlier cursors did not prove promotion. Those windows
 are fetched again before promotion. Requests construct explicit Basic authorization
@@ -3212,3 +3583,34 @@ overwritten, and are never uploaded. Deterministic answer results contain only
 counts, booleans, and typed failure codes, never expected phrases, values,
 answers, citation identities, or source titles. It is intentionally not labeled
 as the v2 run-artifact schema described in `docs/EVALUATION.md`.
+
+### Closed business-scope integration
+
+`ledger-answer.js` admits the separate role reader only after closed token consumption and independent selector admission. Account hints, payees, labels, symbols and other residue retain the ordinary reader and its provider response. The ordinary reader preserves the integration owner-scope rules, including full identifiers, confirmed ownership and possessives.
+
+`ledger-answer-role.js` selects confirmed business or personal memberships and discloses uncertain membership without treating it as authority. Its ordinary-money selection shares the proof-versus-possibility decision with the ordinary reader; scoped integration tests cover retained unpaired movements in both directions and their disclosures. The shared reader retains lifecycle guards and the existing vendor-family rules. Run all `business-scope-*.test.mjs` files alongside owner-scope, ledger and fast-loop suites.
+
+The closed ledger grammar also admits whole-question owner aliases in
+`worker/src/lib/ledger-owner-aliases.js`: money in the bank, named-account
+balances, money coming into accounts, one-payee monthly charges, payment
+arrival and payer lists. Only fixed syntax words tolerate one edit (including
+adjacent transpositions); captured names and numeric values remain literal.
+Aliases retain a nickname with and without a possible trailing account or
+balance noun. Exact inventory matches precede fuzzy role/kind interpretation;
+competing exact names stay together for clarification. Only an opening
+contraction is expanded, preserving contractions inside names. Aliases reuse
+the existing readers and coverage refusals. Invoice wording
+checks bank arrival only and explicitly leaves settlement unconfirmed.
+Payment disclosures collapse a uniquely matched, equal/opposite owned pair
+only when both directed references agree and the dates are at most one day
+apart; the stored postings remain unchanged.
+
+Unconnected card and loan repayment descriptions share the closed
+`possibleUnconnectedPayment` predicate. Spending, rankings and recurring
+readers exclude those nominated outflows and retain quoted bank text, date,
+amount and citation in `possible_payments`. Explicit loan components or
+multiple amounts withhold the scope without splitting. Monthly composition
+rebases candidate citations separately from amount membership. Run
+`ledger-unconnected-payment.test.mjs` and its mutation suite with the ordinary
+ledger and owner-route tests. Confirmed owned-account expense-category
+withholding remains the accepted conservative guard in this candidate.

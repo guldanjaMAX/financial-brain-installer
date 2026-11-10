@@ -29,8 +29,8 @@ const ACCOUNT_HEADING = "## My accounts (fill in once, after the owner confirms)
 const SAVE_HEADING = "## Financial Brain: at the end of a working session";
 const hashes = {
   "answer-contract-v1.md": "440a931d73efce5e226e7e44da5d84b52ca8497754f7fd40526c8736348f2451",
-  "money-rules-v3.md": "abc1e1af65fa4bd3e0c7425e1461ed6b7c1a16956506684e9818682c07ae322a",
-  "money-rules-v3-windows.md": "f57011e6fd09e448298bf40bf2e064d9cd83624589858bce6af2c80b820522fa",
+  "money-rules-v3.md": "3d0e43cfd63fe86e7b9ed29c614e072c2de32590e31ec5a20248fb5fe52e65ae",
+  "money-rules-v3-windows.md": "d176a9a525d2777d397720898087d7a90e6f20f34f11d9a3727395c7a4486b70",
 };
 // Repeated writer/race tests exercise real filesystem checks. Native reparse
 // detection has separate refusal/control and one bounded Windows smoke test;
@@ -484,7 +484,7 @@ function updateClosingBoundary({ platform = "win32", platformName, folder = "ord
     updateAttention: [guidance, guidance],
     schedulerResults: [],
     options: { platform, platformName, ...(raw ? { reportUpdateFinish: message => reports.push(message) } : {}) },
-    pin: { target }, PRODUCT_VERSION: "0.4.26", mailTransition: null,
+    pin: { target }, PRODUCT_VERSION: "0.4.27", mailTransition: null,
     ownerSessionFolderLabel: () => "another folder",
     ownerBrainFolderWarning: () => locator,
     dirname: win32.dirname, quotePowerShellArgument, quotePosixArgument,
@@ -952,7 +952,7 @@ test("R2/R5 installed money rules use the Brain lead and preserve the parser men
   assert.equal(resolving("money-rules-v3.md"), resolving("money-rules-v3-windows.md"), "shared account guidance is byte-aligned");
   for (const platformName of ["darwin", "win32"]) {
     const rules = workspace.renderOwnerRulesSection({ platformName });
-    assert.match(rules, /Financial Brain 0\.4\.26/);
+    assert.match(rules, /Financial Brain 0\.4\.27/);
     assert.match(rules, /Never subtract.*already left out/);
     assert.match(rules, /Note:/);
     assert.match(rules, /What was my profit <period>\?/);
@@ -1087,21 +1087,25 @@ test("current named-month guidance reaches current-to-date Think while finished 
   const current = await ask("How much money came in this month?");
   assert.deepEqual([current.ledger?.from, current.ledger?.to], ["2026-10-01", "2026-10-11"],
     "current-to-date translation reaches the real ledger path");
+  assert.equal(current.ledger.combined_inflow_minor, 23001, "current-month green control counts its posted deposit");
   const finished = await ask("How much money came in September 2026?");
   assert.deepEqual([finished.ledger?.from, finished.ledger?.to], ["2026-09-01", "2026-09-30"],
     "finished named-month green sibling reaches its fixed real Think window");
+  assert.equal(finished.ledger.combined_inflow_minor, 12001, "finished-month green control counts only its posted deposit");
   const fixedIntent = classifyLedgerQuestion("How much money came in October 2026?", {
     now, timeZone: "UTC",
   });
   assert.deepEqual([fixedIntent.from, fixedIntent.to], ["2026-10-01", "2026-10-31"],
     "explicit current month reaches the complete-calendar decision");
+  const beforeFixed = f.seen.sql.length;
   const unfinishedFixed = await ask("How much money came in October 2026?");
-  assert.equal(unfinishedFixed.ledger, undefined, "fixed unfinished month supplies no partial figure");
-  assert.equal(unfinishedFixed.gaps?.[0]?.reason, "period_outside_coverage",
-    "fixed unfinished month reaches the real incomplete-coverage decision");
-  assert.equal(unfinishedFixed.gaps[0].detail,
-    'I can help check the bank records for October, but some bank days are missing, so a complete answer is unconfirmed.\nYour account ending 1111 has records from September 1 to October 11, last update unavailable.\nWant me to show your account balances?',
-    "fixed unfinished month keeps the exact plain refusal and history");
+  assert.deepEqual([unfinishedFixed.ledger.from, unfinishedFixed.ledger.to], ['2026-10-01', '2026-10-11']);
+  assert.equal(unfinishedFixed.ledger.requested_to, '2026-10-31');
+  assert.equal(unfinishedFixed.ledger.combined_inflow_minor, 23001, 'only the observed slice contributes');
+  assert.equal(unfinishedFixed.ledger.complete, false);
+  assert.equal(unfinishedFixed.ledger.coverage.complete, false);
+  assert.equal(unfinishedFixed.evidence_gate.complete, false);
+  assert.match(unfinishedFixed.answer, /Partial period:.*through/);
 });
 
 test("Codex update requires a safe marker-owned sibling and current wiring proof", t => {
@@ -1595,7 +1599,7 @@ for (const arm of ["duplicate", "before-accounts", "misplaced-only", "fenced", "
 });
 
 for (const arm of ["none", "install", "after-return"]) test(`R4 original descriptor remains reachable: ${arm}`, {
-  skip: process.platform === "win32" ? "the 0.4.26 ordinary update path does not refresh an existing guide on Windows; see CHANGELOG known limitations" : false,
+  skip: process.platform === "win32" ? "the 0.4.27 ordinary update path does not refresh an existing guide on Windows; see CHANGELOG known limitations" : false,
 }, t => {
   const { root, manifest } = fixture(t), target = join(root, "AGENTS.md");
   const before = `${CODEX}\n# Older guide\n`, note = "\nRetain this concurrent owner annotation.\n";
