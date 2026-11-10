@@ -73,10 +73,10 @@ test("both ledgers match every independent posted event, signed balance, date, p
   assertLedgerMatchesBook(run.simple, run.book, "simplefin");
 });
 
-test("verified consecutive SimpleFIN windows establish coverage after backfill and retain it on current refresh", () => {
+test("explicit owner comparison establishes bounded coverage after verified backfill", () => {
   assert.equal(run.simple.first("SELECT state FROM bank_feed_backfill").state, "complete", "backfill completion decision reached");
   for (const row of run.simple.rows("SELECT * FROM fin_account_coverage")) {
-    assert.equal(row.coverage_status, "complete", "all successful windows have a durable promotion receipt");
+    assert.equal(row.coverage_status, "complete", "exact bank comparison follows durable publication receipts");
     assert.ok(row.covered_from <= "2026-08-07");
     assert.equal(row.covered_to, "2026-11-04");
   }
@@ -124,7 +124,7 @@ for (const [id, before, after, failure] of [
   const target = join(directory, "mutant.mjs");
   writeFileSync(target, source);
   const sf = await import(pathToFileURL(target).href);
-  const mutated = await buildParityLedgers({ sf });
+  const mutated = await buildParityLedgers({ sf, reviewCoverage: false });
   t.after(() => mutated.close());
   assertLedgerMatchesBook(mutated.plaid, mutated.book, "plaid");
   assert.throws(() => assertLedgerMatchesBook(mutated.simple, mutated.book, "simplefin"), failure,

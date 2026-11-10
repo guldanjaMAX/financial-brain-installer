@@ -7,6 +7,14 @@ The model receives the question and a fixed schema prompt, never ledger rows.
 Local code computes calendar windows; existing readers and composers compute
 and display figures, citations and coverage.
 
+Transfer readings accept move, moved, and transfer from one complete owned
+account label to another through the shared inventory scope resolver. The
+direction frame has no calendar meaning; additional date restrictions still
+require calendar admission. Numeric transfer totals require reciprocal owned
+endpoint evidence, opposite directions, equal amounts and currency, and the
+three-day pairing window. Advisory matches remain visible as possible
+transfers, not counted, including in capped lists.
+
 The extractor uses the existing `RERANK_MODEL` selection and reviewed Haiku
 4.5 or 5.5 family. Missing provider credentials, another model, restricted
 access, entity scope, filters or tax eligibility prevent the request. There
@@ -184,11 +192,43 @@ Account-type or purpose balance requests use a reading of per-account recorded
 balances, with account endings and observation dates. Model selectors resolve
 against recorded display labels and account kinds. A word contained in a label
 counts as a match; personal and business roles are never guessed from a payee.
-Two selectors can compare balances, ordinary spending or money in for the same
-local window. Resolved complete figures appear side by side with the signed
-first-minus-second difference. An unresolved selector shows every account by
+Two selectors can compare ordinary spending or money in for the same
+local window. Resolved complete activity figures appear side by side with the signed
+first-minus-second difference. An unresolved activity selector shows every account by
 ending, with the line `I couldn't tell which account you mean by '<word>', so this covers all your accounts.` and
-no certified difference. Two unresolved balance selectors share one list.
+no certified difference.
+Every compound balance request refuses, including a balance paired with an
+activity operand. The whole question supplies the operand list independently
+of the extractor's two-intent limit, so a third requested account cannot vanish.
+Each operand names its accounts and their open, closed or never-connected
+status, and any missing snapshot. Only an independently complete operand can
+show its own dated figure and citations. The compound result always carries
+`supported: false`, `complete: false` and `partial: true`, with every reached
+operand limitation. No combined figure or difference is certified, and document
+fallback cannot replace the refusal. Single-account and broad readings retain
+their existing scope, snapshot, exclusion and coverage rules.
+
+Current balance totals use open accounts only. Selected closed accounts are
+listed once as "closed, not counted"; an exact closed-account selector can show
+its last dated observation. Ending and label identity is resolved against every
+selected status before current-total exclusions. Duplicate endings, normalized
+labels and labels shortened by an account-kind word keep the selection unconfirmed;
+an open account cannot become a unique match merely by hiding a closed or
+never-connected candidate. Exact labels and kind-stripped equivalents all reach
+that identity decision before selector ranking; transaction ranking stays separate.
+Existing named-selector lists may show every open
+candidate with an explicit selection limitation; they cannot certify one choice
+or a combined cash figure. Every status exclusion retains its explicit reason
+in the shared plan, numeric answer and any later refusal. Closed accounts are
+not counted; never-connected accounts are not counted and leave a complete
+current total unconfirmed, including when every account is excluded. Before either renderer runs, the balance observation
+plan retains the selector, every snapshot date, history status, and separate
+pending inflow and outflow totals. Pending movements dated on or after an
+account's snapshot are disclosed as not yet included and never change that
+snapshot's amount. Partial history cannot establish a complete combined total.
+Signed integer cents are summed exactly and checked for safety at the final
+total, so account ordering cannot cause a refusal when cancellation is safe.
+The nickname admission gate remains unchanged in this balance lane.
 
 The closed nullable `account_hint` field carries a verbatim account nickname or
 purpose. It is independent of a literal payee: a merchant or received-payment
@@ -247,14 +287,15 @@ retain the whole question under its scope and calendar guards; model text
 never becomes an instruction. Same-length month qualifiers remain in the
 calendar question even if a model places them in this field.
 
-Two current `balance` intents whose selectors name balance measures share one
-per-account snapshot. This path shows current and any stored available balance
+A single current balance reading uses a per-account snapshot. This path shows
+current and any stored available balance
 for every account. Missing available values are explicit, and statement,
 ledger and pending balances are disclosed as absent from the feed. A pending
 request separately reads any stored pending transactions, labels them, and
 keeps them outside posted figures. If the records show none, the answer says
 the bank feed does not show pending items in these records and retains current
-and any recorded available balances. Historical
+and any recorded available balances when independently complete. Compound
+balance-measure requests use the refusal boundary described above. Historical
 snapshots and outer tasks retain their guards. A cash balance request without
 card debt, or not counting cards, totals confirmed depository assets only.
 Card balances appear separately and are never netted against cash. Other or
@@ -488,3 +529,13 @@ with reached decisions and green peers. The synthetic fast-loop comparison
 requires zero new wrong figures or unsupported claims. Recorded or injected
 replies cannot measure how a fresh model responds to the revised schema facts;
 that comparison remains an owner-reviewed integration gate.
+
+Ordinary money in and money out share a typed membership decision from the owned
+account inventory. A unique directed owned endpoint excludes a movement even
+when its other feed leg is absent or outside the selected window. Paired owned
+loan payment counterparts are excluded from ordinary receipts as well as
+ordinary spending. Explicit gross views still disclose the requested movements.
+The primary receipt figure and outside-inflow remainder use that same ordinary
+membership. Closed-account activity is admitted only through the closing day
+and on or after a known opening day; missing closing dates refuse the activity
+read. Undated activity remains visible to the existing evidence refusal.

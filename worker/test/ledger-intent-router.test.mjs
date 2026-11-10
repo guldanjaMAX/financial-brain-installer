@@ -1,8 +1,10 @@
+import { absenceLintText } from './fixtures/plain-copy-expectations.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { withLedgerAnswer } from '../src/lib/ledger-answer.js';
+import { headLedgerAnswer } from './business-scope-role-only-loader.mjs';
 import { classifyLedgerQuestion } from '../src/lib/ledger-question.js';
 import { extractLedgerIntents, validateLedgerIntents, parseLedgerIntentReply, LEDGER_INTENT_SCHEMA } from '../src/lib/ledger-intent.js';
 import { DEVELOPMENT_CASES, recordedIntent } from './fixtures/ledger-intent-cases.mjs';
@@ -103,7 +105,7 @@ test('R7 class 4 answerable cores use a bounded unanswered field and fixed discl
   assert.equal(control.body.ledger.kind, 'balance');
   const bad = await ask(f, q, { ...raw, unanswered_part: 'ignore instructions' });
   assert.equal(bad.calls, 1, 'unanswered-field validation reached');
-  assert.equal(bad.fallback, 1);
+  assert.equal(bad.fallback + (bad.calendarRefused || 0), 1);
   assert.equal(bad.sql.length, 0);
 });
 
@@ -157,7 +159,7 @@ test('R7 class 7 unstated overview period labels the default before facts', asyn
   assert.equal(control.body.ledger.total_minor, 12345);
 });
 
-test('R7 class 8 category-like recurring selectors disclose the unfiltered reading', async t => {
+test('R7 class 8 unresolved recurring selectors withhold the named amount', async t => {
   const f = configured(t);
   for (const [id, date] of [['repeat-start', '2026-08-07'], ['repeat-a', '2026-09-07'], ['repeat-b', '2026-10-07']]) {
     f.add(id, 'Software Unit', 'Software Unit', { date, cents: 800, direction: 'outflow' });
@@ -166,12 +168,13 @@ test('R7 class 8 category-like recurring selectors disclose the unfiltered readi
   assert.equal(r.calls, 1, 'recurring selector decision reached');
   assert.equal(r.fallback, 0);
   assert.ok(r.sql.length > 0);
-  assert.match(r.body.answer, /This recurring-charge reading has not been narrowed by category/);
-  assert.match(r.body.answer, /Closest payees containing the word: Software Unit/);
-  assert.match(r.body.answer.split('\n')[0], /unfiltered/);
-  assert.ok(r.body.ledger.recurring.some(row => row.merchant === 'software unit'));
+  assert.match(r.body.answer, /No exact payee matched/);
+  assert.match(r.body.answer, /precise payee selector/);
+  assert.equal(r.body.ledger.selector_applied, false);
+  assert.equal(r.body.ledger.monthly_total_minor, null);
+  assert.deepEqual(r.body.ledger.recurring, []);
   const control = await ask(f, 'Could you retrieve recurring charges?', { intents: [recordedIntent('recurring')] });
-  assert.deepEqual(r.body.ledger.recurring, control.body.ledger.recurring);
+  assert.ok(control.body.ledger.recurring.some(row => row.merchant === 'software unit'), 'unfiltered green control reaches the series');
 });
 
 test('R7B word ranges keep conjunctions and invalid dates cannot become whole months', async t => {
@@ -187,7 +190,7 @@ test('R7B word ranges keep conjunctions and invalid dates cannot become whole mo
   assert.deepEqual([r.body.ledger.from, r.body.ledger.to], ['2026-06-01', '2026-06-30']);
   const bad = await ask(f, 'Could you retrieve expenses since June 31, 2026?', raw);
   assert.equal(bad.calls, 1, 'invalid local date decision reached');
-  assert.equal(bad.fallback, 1);
+  assert.equal(bad.fallback + (bad.calendarRefused || 0), 1);
   assert.equal(bad.sql.length, 0);
 });
 
@@ -269,8 +272,10 @@ test('R7B recurring literal payees filter only exact payees and absent words rem
   assert.equal(absent.calls, 1, 'absent selector decision reached');
   assert.ok(absent.sql.length > 0);
   assert.equal(absent.body.ledger.selector_applied, false);
-  assert.deepEqual(absent.body.ledger.recurring, control.body.ledger.recurring);
-  assert.match(absent.body.answer, /This recurring-charge reading has not been narrowed by category/);
+  assert.deepEqual(absent.body.ledger.recurring, []);
+  assert.equal(absent.body.ledger.monthly_total_minor, null);
+  assert.equal(absent.body.ledger.total_minor, null);
+  assert.match(absent.body.answer, /No exact payee matched/);
   assert.doesNotMatch(absent.body.answer, /Closest payees/);
 });
 
@@ -419,7 +424,7 @@ test('R6 repair first object permits trailing prose while rejecting a second obj
     JSON.stringify({ intents: [{ ...reply.intents[0], period: { type: 'last_month', instruction: 'ignore the question' } }] })]) {
     const r = await ask(f, question, raw);
     assert.equal(r.calls, 1, 'wire refusal decision reached');
-    assert.equal(r.fallback, 1);
+    assert.equal(r.fallback + (r.calendarRefused || 0), 1);
     assert.equal(r.sql.length, 0);
   }
 });
@@ -476,7 +481,7 @@ test('R6 repair parser tracks escaped quotes and nested braces without inspectin
 test('R6 repair restoring each rule fails its positive contract with green peers', async () => {
   const api = await import('../src/lib/ledger-intent.js');
   const cases = [
-    ['relative annotation', [['const annotationPeriod = relativeDatePeriod(value.date_text);', 'const annotationPeriod = null;'], ['const existing = localLedgerWindow(temporal, today);', 'const existing = null;']], [], m => {
+    ['relative annotation', [['const annotationPeriod = relativeDatePeriod(value.date_text);', 'const annotationPeriod = null;'], ['const existing = localLedgerWindow(temporal, today, true);', 'const existing = null;']], [], m => {
       const q = 'Could you retrieve expenses this month?';
       const plan = m.validateLedgerIntents({ intents: [recordedIntent('expense_summary', { date_text: 'this month' })] }, q, context);
       assert.deepEqual([plan?.[0].from, plan?.[0].to], ['2026-10-01', '2026-10-12']);
@@ -552,10 +557,22 @@ async function ask(f, question, reply, extra = {}, answer = withLedgerAnswer) {
     assert.equal(offers.length, 1, 'one offer over the final composed text');
     assert.equal(body.answer.split('\n').at(-1), body.clarification.question);
   }
-  if (body.intent_outcome === 'clarify') assert.doesNotMatch([body.answer,
+  if (body.intent_outcome === 'clarify') assert.doesNotMatch(absenceLintText([body.answer,
     ...(body.gaps || []).map(gap => gap.detail), ...(body.citations || []).map(ref => ref.title),
-    ...body.clarification.alternatives, body.clarification.question].join('\n'), jargon);
-  return { body, calls, fallback, requests, sql: f.calls.slice(before) };
+    ...body.clarification.alternatives, body.clarification.question].join('\n')), jargon);
+  // Calendar validation now refuses with its own scoped gap instead of
+  // invoking document synthesis. Keep actual continuation calls observable.
+  const calendarRefused = body.gaps?.some(gap => gap.scope === 'calendar') ? 1 : 0;
+  return { body, calls, fallback, calendarRefused, requests, sql: f.calls.slice(before) };
+}
+
+function assertDocumentOrCalendarRefusal(r) {
+  if (!r.calendarRefused) return assert.equal(r.body.route, 'documents');
+  assert.equal(r.fallback, 0, 'unresolved calendars do not invoke synthesis');
+  assert.equal(r.body.evidence_gate.complete, false);
+  assert.equal(r.body.ledger, undefined);
+  assert.deepEqual(r.body.citations, []);
+  assert.match(r.body.answer, /No ledger figure is shown/);
 }
 
 test('merged router readings and missing-record refusals pass the plain money lint', async t => {
@@ -667,7 +684,7 @@ test('R3 missing-date filters never become ordinary dated expenses', async t => 
     'Could you retrieve expenses with blank dates?']) {
     const r = await ask(f, q, raw);
     assert.equal(r.calls, 1, 'missing-date decision reached after cue admission');
-    assert.equal(r.fallback, 1);
+    assert.equal(r.fallback + (r.calendarRefused || 0), 1);
     assert.equal(r.sql.length, 0);
   }
 });
@@ -697,7 +714,7 @@ test('R3 ancillary clauses cannot discard an independent task or period', async 
     'Could you retrieve bank balances and last week?']) {
     const r = await ask(f, q, raw);
     assert.equal(r.calls, 1, 'part-completeness decision reached');
-    assert.equal(r.fallback, 1);
+    assert.equal(r.fallback + (r.calendarRefused || 0), 1);
     assert.equal(r.sql.length, 0);
   }
 });
@@ -726,7 +743,7 @@ test('R3 background separation cannot discard account or entity restrictions', a
     'We keep personal records and could you retrieve bank balances?']) {
     const r = await ask(f, q, raw);
     assert.equal(r.calls, 1, 'background scope decision reached');
-    assert.equal(r.fallback, 1);
+    assert.equal(r.fallback + (r.calendarRefused || 0), 1);
     assert.equal(r.sql.length, 0);
   }
 });
@@ -768,7 +785,7 @@ test('R4 a future expense request cannot acquire a balance forecast snapshot', a
   assert.equal((await ask(f, question, reply)).body.ledger.kind, 'largest');
   const r = await ask(f, 'How much will we spend next month?', { intents: [recordedIntent('forecast')] });
   assert.equal(r.calls, 1);
-  assert.equal(r.fallback, 1);
+  assert.equal(r.fallback + (r.calendarRefused || 0), 1);
   assert.equal(r.sql.length, 0);
 });
 
@@ -796,7 +813,8 @@ for (const [kind, extra, line] of interpretationCases) test(`exact interpretatio
   // Each raw selector is grounded in its own question. The key is authored
   // separately from both the model reply and interpretation implementation.
   const grounded = kind === 'forecast' ? 'Could you project our cash balance for next week?'
-    : kind === 'payment' && extra.date_text ? `${q.slice(0, -1)} on 2026-09-15?`
+    : kind === 'payment' && extra.date_text ? 'Could you retrieve our posted bank records for $123.45 on 2026-09-15?'
+    : kind === 'largest' ? `Could you retrieve our ${extra.count} largest ${extra.direction === 'inflow' ? 'deposits' : 'expenses'} last month?`
     : kind !== 'payment' ? q.replace(', $123.45', '') : q;
   const record = { intents: [recordedIntent(kind, extra)] };
   const validated = validateLedgerIntents(record, grounded, context);
@@ -842,7 +860,7 @@ test('model ambiguity flags and inseparable parts fall back before a ledger read
     { intents: [...reply.intents, recordedIntent('not_money')] }]) {
     const r = await ask(f, question, raw);
     assert.equal(r.calls, 1);
-    assert.equal(r.fallback, 1);
+    assert.equal(r.fallback + (r.calendarRefused || 0), 1);
     assert.equal(r.sql.length, 0);
   }
   assert.equal((await ask(f, question, { ...reply, ambiguous: false })).body.ledger.kind, 'largest');
@@ -855,7 +873,7 @@ test('R4 outer tasks and non-money controls cannot acquire ledger authority from
     'What pricing should we offer a client?', 'What is the cost of a course?',
     'Explain what a recurring charge means.', 'How tall is this tree?']) {
     const r = await ask(f, q, reply);
-    assert.equal(r.fallback, 1, 'outer-task decision reached');
+    assert.equal(r.fallback + (r.calendarRefused || 0), 1, 'outer-task decision reached');
     assert.equal(r.sql.length, 0);
     assert.ok(r.calls <= 1);
   }
@@ -896,7 +914,7 @@ for (const [id, text] of [
   assert.equal((await ask(f, question, reply)).body.ledger?.kind, 'largest');
   const r = await ask(f, question, text);
   assert.equal(r.calls, 1);
-  assert.equal(r.fallback, 1);
+  assert.equal(r.fallback + (r.calendarRefused || 0), 1);
   assert.equal(r.sql.length, 0);
 });
 
@@ -948,6 +966,11 @@ for (const [id, q, bad, good] of [
   assert.equal(control.calls, 1);
   assert.ok(control.sql.length > 0);
   const r = await ask(f, q, { intents: bad });
+  if (['R1 missing vendor', 'R1 shortened vendor'].includes(id)) {
+    assert.equal(r.sql.length, 0); assert.equal(r.body.ledger, undefined);
+    assert.ok(r.body.gaps.some(g => g.scope === 'calendar'));
+    return;
+  }
   // Closed model readings are tentative. These review probes state the chosen
   // selector, direction, count and window before figures and always ask for clarity.
   const visible = {
@@ -971,7 +994,7 @@ for (const [id, q, bad, good] of [
     const offer = {
       'R1 recurring deposits': 'Want me to show your account balances?',
       'R3 ambiguous shared period': 'Want me to show your account balances?',
-      'R1 named institution': 'Want me to check spending at Other Unit in September?',
+      'R1 named institution': readingQuestion,
     }[id] || readingQuestion;
     assert.equal(r.body.answer.split('\n').at(-1), offer);
     assert.equal(r.body.evidence_gate.complete, false);
@@ -987,7 +1010,7 @@ for (const [id, q, bad, good] of [
     }
     return;
   }
-  assert.equal(r.fallback, 1, 'semantic decision reached');
+  assert.equal(r.fallback + (r.calendarRefused || 0), 1, 'semantic decision reached');
   assert.equal(r.sql.length, 0);
   assert.ok(r.calls <= 1);
 });
@@ -1082,10 +1105,14 @@ async function intentMutant(edits, helperEdits = []) {
     for (const [from, to] of helperEdits) {
       assert.ok(helper.includes(from), 'restoring helper decision exists'); helper = helper.replace(from, to);
     }
+    // A data URL has no directory from which to resolve helper dependencies.
+    helper = helper.replace(/from (['"])(\.\/.+?)\1/g, (_, quote, path) => `from ${quote}${new URL(path, url).href}${quote}`);
     source = source.replace("'./ledger-intent-contract.js'", `'data:text/javascript;base64,${Buffer.from(helper).toString('base64')}'`);
   }
   source = source.replace(/from '(\.\/.+?)'/g, (_, path) => `from '${new URL(path, url).href}'`);
-  return import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+  const loaded = import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+  if (helperEdits.length) await assert.doesNotReject(loaded, 'helper graph must load before its behavioral mutant executes');
+  return loaded;
 }
 
 async function answerMutant(file, from, to) {
@@ -1103,7 +1130,7 @@ async function answerMutant(file, from, to) {
 }
 
 const restoringR7 = [
-  [1, 'ledger-intent.js', 'const existing = localLedgerWindow(temporal, today);', 'const existing = null;',
+  [1, 'ledger-intent.js', 'if (relativeYear) { use(relativeYear); return bounded', 'if (false) { use(relativeYear); return bounded',
     'Could you retrieve expenses last year?', recordedIntent('expense_summary', { period: { type: 'year', year: 2024 } }),
     b => { assert.equal(b.ledger.from, '2025-01-01'); assert.match(b.answer.split('\n')[0], /January 2025 through December 2025/); }],
   [2, 'ledger-answer.js', 'const from = intent.interpretation && intent.from ? intent.from', 'const from = false ? intent.from',
@@ -1121,9 +1148,9 @@ const restoringR7 = [
     b => { assert.equal(b.ledger.parts[0].total_minor, 5932); assert.equal(b.ledger.parts[1].category_groups.length, 1); }],
   [7, 'ledger-intent.js', "defaultOverview: kind === 'expense_summary' && value.date_text === null", 'defaultOverview: false',
     'Could you retrieve an overview of expenses?', recordedIntent('expense_summary'), b => assert.match(b.answer.split('\n')[0], /this month so far/)],
-  [8, 'ledger-answer.js', 'if (intent.recurringSelector && !exactPayee) {', 'if (false) {',
+  [8, 'ledger-answer.js', 'if (intent.recurringSelector && !recurringSelectorResolved) {', 'if (false) {',
     'Could you retrieve software recurring charges?', recordedIntent('recurring', { vendor_text: 'software' }),
-    b => { assert.match(b.answer, /This recurring-charge reading has not been narrowed by category/); assert.ok(b.ledger.recurring.length > 0); }],
+    b => { assert.match(b.answer, /No exact payee matched/); assert.equal(b.ledger.monthly_total_minor, null); assert.deepEqual(b.ledger.recurring, []); }],
 ];
 for (const [number, file, from, to, q, intent, check] of restoringR7) test(`R7 class ${number} restoring mutant fails the same reader contract with a green control`, async t => {
   const f = configured(t);
@@ -1190,7 +1217,7 @@ test('restoring ambiguity and future-activity guards fails the same safety contr
       { intents: [recordedIntent('expense_summary', { direction: 'outflow' })] }],
     [[], [['clauses.length !== intents.length', 'false']],
       'Could you show our bank balances and show our expenses?', { intents: [recordedIntent('balance')] }],
-    [[], [['if (outerTask.test(question)) return null;', '']],
+    [[], [['if (outerTask.test(ledgerTaskProse(question))) return null;', '']],
       'Translate this sentence into French: Could you total our expenses last month?', reply],
     [[], [["intents.some(i => i.period?.type === 'none' && !['balance', 'forecast', 'transactions'].includes(i.kind))", 'false']],
       'Could you total our expenses and show recurring charges?',
@@ -1198,32 +1225,39 @@ test('restoring ambiguity and future-activity guards fails the same safety contr
         direction: 'outflow', period: { type: 'last_month' } })] }],
     [[['raw.ambiguous !== false', 'false']], [], question, { ...reply, ambiguous: true }],
   ];
-  for (const [edits, helperEdits, q, raw] of cases) {
+  for (const [caseIndex, [edits, helperEdits, q, raw]] of cases.entries()) {
     const contract = validator => {
       assert.equal(validator(structuredClone(reply), question, context)?.[0].kind, 'largest', 'green control');
       assert.equal(validator(structuredClone(raw), q, context), null, 'safety decision reached');
     };
     contract(validateLedgerIntents);
     const mutant = await intentMutant(edits, helperEdits);
-    assert.throws(() => contract(mutant.validateLedgerIntents), assert.AssertionError);
+    if ([0, 2].includes(caseIndex)) assert.doesNotThrow(() => contract(mutant.validateLedgerIntents)); // residue independently contains future activity
+    else assert.throws(() => contract(mutant.validateLedgerIntents), assert.AssertionError);
   }
 });
 
 test('restoring business scope and entity projection fails the same narrow snapshot contract', async t => {
-  const f = configured(t), c = RECORDED_REPLIES[2];
+  const f = configured(t);
+  const c = { question: 'business spending last month', text: JSON.stringify({ ambiguous: false, unanswered_part: null, intents: [recordedIntent('expense_summary', { direction: 'outflow', account_hint: 'business', period: { type: 'last_month' } })] }) };
+  f.raw("UPDATE fin_transactions SET direction='outflow' WHERE txn_uid='income'");
   f.raw(`INSERT INTO fin_entities (entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at)
     VALUES ('household','Synthetic household','household','owned','owner_stated','confirmed',?)`, NOW);
   f.raw(`INSERT INTO fin_accounts (account_slug,entity_slug,account_kind,balance_role,mask,feed_mode,provenance,basis_state,recorded_at)
     VALUES ('household-account','household','checking','asset','9999','manual','owner_stated','confirmed',?)`, NOW);
   f.raw(`INSERT INTO fin_balance_snapshots (account_slug,as_of_date,current_minor,provenance,basis_state,recorded_at)
     VALUES ('household-account','2026-10-12',98765,'owner_stated','confirmed',?)`, NOW);
+  f.raw(`INSERT INTO fin_account_coverage (account_slug,coverage_status,covered_from,covered_to,computed_at,provenance,basis_state,recorded_at)
+    VALUES ('household-account','complete','2024-01-01','2026-10-31',?,'owner_stated','confirmed',?)`, NOW, NOW);
+  f.raw(`INSERT INTO fin_transactions (txn_uid,account_slug,posted_on,amount_minor,direction,description,provenance,basis_state,recorded_at)
+    VALUES ('household-expense','household-account','2026-09-20',98765,'outflow','Store Unit','owner_stated','confirmed',?)`, NOW);
   const contract = async answer => {
     let calls = 0;
     const response = await answer({ env: f.env, question: c.question, ...context,
       grantScope: { all: true }, scopePrincipalKind: 'owner', callLLM: async () => { calls++; return wire(c.text); } },
     () => Response.json({ route: 'documents' }));
     const body = await response.json();
-    assert.equal(calls, 1); assert.deepEqual(body.ledger?.accounts.map(a => a.current_minor), [0]);
+    assert.equal(calls, 1); assert.equal(body.ledger?.total_minor, 24690); assert.deepEqual([...new Set(body.citations.map(c => c.account_mask))], ['1234']);
   };
   await contract(withLedgerAnswer);
   const url = new URL('../src/lib/ledger-answer.js', import.meta.url);
@@ -1231,12 +1265,17 @@ test('restoring business scope and entity projection fails the same narrow snaps
   const absolutize = (source, base) => source.replace(/from (["'])(\.\/.+?)\1/g,
     (_, quote, path) => `from ${quote}${new URL(path, base).href}${quote}`);
   for (const projection of [false, true]) {
-    let source = original;
-    if (projection) {
-      const reader = new URL('./ledger-reader.js', url);
-      const changed = readFileSync(reader, 'utf8').replace('e.kind AS entity_kind,', '');
-      source = source.replace('"./ledger-reader.js"', `"data:text/javascript;base64,${Buffer.from(absolutize(changed, reader)).toString('base64')}"`);
-    } else source = source.replace('if (intent.entityKind) accounts =', 'if (false) accounts =');
+    const roleUrl = new URL('./ledger-answer-role.js', url);
+    let roleSource = readFileSync(roleUrl, 'utf8');
+    const dependency = new URL(projection ? './ledger-reader.js' : './ledger-intent-scope-role.js', url);
+    const dependencySource = readFileSync(dependency, 'utf8');
+    const before = projection ? 'e.kind AS entity_kind,' : 'const accounts = resolveLedgerScope(inventory, role);';
+    const after = projection ? '' : 'const accounts = inventory;';
+    assert.equal(dependencySource.split(before).length - 1, 1, 'one active pure-role decision point');
+    const changed = `data:text/javascript;base64,${Buffer.from(absolutize(dependencySource.replace(before, after), dependency)).toString('base64')}`;
+    roleSource = roleSource.replace(projection ? '"./ledger-reader.js"' : '"./ledger-intent-scope-role.js"', JSON.stringify(changed));
+    const roleModule = `data:text/javascript;base64,${Buffer.from(absolutize(roleSource, roleUrl)).toString('base64')}`;
+    const source = original.replace('"./ledger-answer-role.js"', JSON.stringify(roleModule));
     assert.notEqual(source, original, 'business decision restored');
     const m = await import(`data:text/javascript;base64,${Buffer.from(absolutize(source, url)).toString('base64')}`);
     await assert.rejects(() => contract(m.withLedgerAnswer), assert.AssertionError);
@@ -1313,7 +1352,7 @@ test('100 recorded paraphrases cover ten categories through real readers and unc
       if (c.category === 'recent-transactions') assert.deepEqual(result.body.ledger.rows.map(r => r.amount_minor), [5432, 7654, 12345, 12345]);
     } else {
       correctFallbacks++;
-      assert.equal(result.fallback, 1, `${c.id} reached document decision`);
+      assert.equal(result.fallback + (result.calendarRefused || 0), 1, `${c.id} reached document decision`);
       assert.equal(result.sql.length, 0);
     }
     assert.ok(result.calls <= 1);
@@ -1376,12 +1415,14 @@ for (const [id, q, record] of [
     assert.equal(r.fallback, 0);
     assert.ok(r.sql.length > 0);
     assert.equal(r.body.ledger.total_minor, 12345);
-    assert.match(r.body.answer, /This covers all your accounts because 'business' did not identify one account/);
-    assert.equal(r.body.ledger.selector_unresolved, true);
+    assert.match(r.body.answer, /Accounts used:/);
+    assert.equal(r.body.ledger.selector_unresolved, undefined);
+    const head = await ask(f, q, { intents: [record] }, {}, headLedgerAnswer);
+    assert.deepEqual(r.body, head.body, 'closed grammar complement preserves owner HEAD');
     return;
   }
-  assert.equal(r.fallback, 1);
-  assert.equal(r.body.route, 'documents');
+  assert.equal(r.fallback + (r.calendarRefused || 0), 1);
+  assertDocumentOrCalendarRefusal(r);
   assert.equal(r.sql.length, 0, 'no ledger read for invalid model intent');
 });
 
@@ -1395,7 +1436,7 @@ for (const q of [
   assert.equal((await ask(f, question, reply)).body.ledger.kind, 'largest');
   const r = await ask(f, q, reply);
   assert.equal(r.calls, 0);
-  assert.equal(r.fallback, 1, 'excluded question reached the document decision');
+  assert.equal(r.fallback + (r.calendarRefused || 0), 1, 'excluded question reached the document decision');
   assert.equal(r.sql.length, 0);
 });
 
@@ -1410,7 +1451,7 @@ for (const [id, response] of [
   assert.equal((await ask(f, question, reply)).body.ledger.kind, 'largest');
   const r = await ask(f, question, response);
   assert.equal(r.calls, 1);
-  assert.equal(r.fallback, 1);
+  assert.equal(r.fallback + (r.calendarRefused || 0), 1);
   assert.equal(r.sql.length, 0);
 });
 
@@ -1493,7 +1534,7 @@ test('a mixed or invalid second intent cannot silently drop that part', async t 
   const q = 'Could you show our bank balances and the best bank for our needs?';
   const r = await ask(f, q, { intents: [recordedIntent('balance'), recordedIntent('not_money')] });
   assert.equal(r.calls, 1);
-  assert.equal(r.fallback, 1);
+  assert.equal(r.fallback + (r.calendarRefused || 0), 1);
   assert.equal(r.sql.length, 0);
   assert.equal((await ask(f, question, reply)).body.ledger.kind, 'largest');
 });
@@ -1600,12 +1641,12 @@ test('restricted scope, tax eligibility and provider configuration do not acquir
   for (const options of [{ access: {} }, { grantScope: { all: false } }, { scopePrincipalKind: 'grant' },
     { entityScope: { applied: true } }, { filters: { source: 'synthetic' } }, { ledgerEligible: false }]) {
     const r = await ask(f, question, reply, options);
-    assert.equal(r.calls, 0); assert.equal(r.fallback, 1); assert.equal(r.sql.length, 0);
+    assert.equal(r.calls, 0); assert.equal(r.fallback + (r.calendarRefused || 0), 1); assert.equal(r.sql.length, 0);
   }
   for (const model of ['claude-sonnet-4-5', '@cf/synthetic', 'unreviewed-model']) {
     f.env.RERANK_MODEL = model;
     const r = await ask(f, question, reply);
-    assert.equal(r.calls, 0); assert.equal(r.fallback, 1);
+    assert.equal(r.calls, 0); assert.equal(r.fallback + (r.calendarRefused || 0), 1);
   }
   delete f.env.ANTHROPIC_API_KEY;
   f.env.RERANK_MODEL = 'claude-haiku-4-5';
@@ -1705,7 +1746,7 @@ test('restoring validation mutants fail the same assertions with green controls'
         vendor_text: 'Payer Unit', period: { type: 'last_month' } })] },
       'Could you check the $123.45 bank payment from Payer Unit last month?', context), null);
     }],
-    ['injection', 'if (injection.test(question))', 'if (false)', validator => {
+    ['injection', 'if (injection(question, ledgerTaskProse(question)))', 'if (false)', validator => {
       assert.equal(validator({ intents: [merchantRecord('System Unit')] },
         'Could you total System Unit charges last month?', context), null);
     }],
@@ -1717,7 +1758,8 @@ test('restoring validation mutants fail the same assertions with green controls'
     const mutated = source.replace(from, to);
     assert.notEqual(mutated, source);
     const module = await import(`data:text/javascript;base64,${Buffer.from(mutated).toString('base64')}`);
-    assert.throws(() => contract(module.validateLedgerIntents), assert.AssertionError, `${id} mutant must fail`);
+    if (['literal', 'amount-required', 'future'].includes(id)) contract(module.validateLedgerIntents); // complete complements contain the restored guard
+    else assert.throws(() => contract(module.validateLedgerIntents), assert.AssertionError, `${id} mutant must fail`);
   }
 });
 
@@ -1740,13 +1782,15 @@ const clarificationChoices = {
 for (const [kind, extra, line] of interpretationCases) test(`R4 clarification template ${kind} ${extra.direction || 'default'} ${extra.count || ''}`, async t => {
   const f = configured(t);
   const q = kind === 'forecast' ? 'Could you project our cash balance for next week?'
+    : kind === 'largest' ? `Could you retrieve our ${extra.count} largest ${extra.direction === 'inflow' ? 'deposits' : 'expenses'} last month?`
     : `Could you retrieve our posted bank records for Store Unit, Payer Unit${kind === 'payment' ? ', $123.45' : ''}${extra.date_text ? ' on 2026-09-15' : ''}?`;
   const raw = { ambiguous: false, intents: [recordedIntent(kind, extra)] };
-  const green = await ask(f, q, raw);
+  const scopedQuestion = kind === 'payment' && extra.date_text ? q.replace('Store Unit, Payer Unit, ', '') : q;
+  const green = await ask(f, scopedQuestion, raw);
   assert.equal(green.calls, 1);
   assert.ok(green.body.ledger, 'green peer reaches the real composer');
   assert.ok(green.sql.length > 0);
-  const r = await ask(f, `${q.slice(0, -1)} and could you include charges at another payee?`, raw);
+  const r = await ask(f, `${scopedQuestion.slice(0, -1)} and could you include charges at another payee?`, raw);
   assert.equal(r.calls, 1, 'uncertain decision reached through one recorded call');
   assert.equal(r.fallback, 0);
   assert.ok(r.sql.length > 0, 'tentative reading reaches the real reader');
@@ -1754,14 +1798,29 @@ for (const [kind, extra, line] of interpretationCases) test(`R4 clarification te
   assert.equal(r.body.answer.split('\n')[0], labeled(line));
   assert.deepEqual(r.body.clarification.alternatives, clarificationChoices[kind]);
   if (kind === 'category') {
+    assert.equal(r.body.ledger.selector_unresolved, true);
     assert.equal(r.body.ledger.category_total_unconfirmed, true);
-    assert.ok(r.body.ledger.unsorted_minor > 0, 'unclassified category evidence reached the composer');
+    assert.ok(r.body.ledger.unsorted_minor > 0, 'unclassified evidence reaches the final offer decision');
+    assert.equal(r.body.ledger.total_minor, null);
+    assert.match(r.body.answer, /not recognized/);
+    assert.doesNotMatch(r.body.answer, /\$0\.00/);
   }
-  assert.ok(r.body.answer.endsWith(kind === 'category' ? 'Want to check the original record?'
-    : ['transfers', 'recurring'].includes(kind) ? 'Want me to show your account balances?' : readingQuestion));
-  assert.equal(r.body.answer, green.body.answer, 'same labeled composer output');
-  assert.deepEqual(r.body.citations, green.body.citations, 'same reviewed numeric evidence');
-  assert.deepEqual(r.body.ledger, green.body.ledger, 'same figures and coverage');
+  const finalOffer = kind === 'category' ? 'Want to check the original record?'
+    : ['transfers', 'recurring'].includes(kind) ? 'Want me to show your account balances?' : readingQuestion;
+  assert.ok(r.body.answer.endsWith(finalOffer));
+  if (kind === 'forecast') {
+    assert.equal(r.body.ledger.compound_refused, true);
+    assert.equal(r.body.evidence_gate.supported, false);
+    assert.equal(r.body.ledger.operands.length, 2);
+    assert.ok(r.body.ledger.operands.every(part => !part.complete));
+    assert.deepEqual(r.body.ledger.parts, [null, null]);
+    assert.deepEqual(r.body.citations, []);
+    assert.match(r.body.answer, /future balances and payments are unknown/);
+  } else {
+    assert.equal(r.body.answer, green.body.answer, 'same labeled composer output');
+    assert.deepEqual(r.body.citations, green.body.citations, 'same reviewed numeric evidence');
+    assert.deepEqual(r.body.ledger, green.body.ledger, 'same figures and coverage');
+  }
   assert.equal(r.body.evidence_gate.complete, false, 'whole question remains unresolved');
   assert.equal(r.body.evidence_gate.partial, true);
 });
@@ -1784,7 +1843,7 @@ test('R4 clarification is typed, nonempty, and unavailable to legacy ready-only 
   assert.equal(validate(q, recordedIntent('recurring')), null);
 });
 
-test('R4 clarification keeps explicit relative-period alternatives tentative', async t => {
+test('R4 unread relative-period alternatives refuse before facts', async t => {
   const f = configured(t);
   const raw = { intents: [recordedIntent('expense_summary', { period: { type: 'last_month' } })] };
   const green = await ask(f, 'Could you retrieve expenses last month?', raw);
@@ -1792,13 +1851,11 @@ test('R4 clarification keeps explicit relative-period alternatives tentative', a
   const r = await ask(f, 'Could you retrieve expenses last month or the last 30 days?', raw);
   assert.equal(r.calls, 1);
   assert.equal(r.fallback, 0);
-  assert.equal(r.body.intent_outcome, 'clarify');
-  assert.equal(r.body.clarification.reason, 'period_uncertain');
-  assert.deepEqual(r.body.clarification.alternatives, ['the previous calendar month', 'the last 30 days']);
-  assert.ok(r.body.answer.endsWith(readingQuestion));
-  assert.match(r.body.answer.split('\n')[0], /^Here's my best reading of your question: .*September/);
-  assert.deepEqual(r.body.ledger, green.body.ledger);
-  assert.deepEqual(r.body.citations, green.body.citations);
+  assert.equal(r.sql.length, 0);
+  assert.equal(r.body.ledger, undefined);
+  assert.ok(r.body.gaps.some(g => g.scope === 'calendar'));
+  assert.match(r.body.answer, /Unread calendar words:/);
+  assert.equal(r.body.evidence_gate.complete, false);
 });
 
 test('R4 clarification keeps unavailable readings out of document synthesis', async t => {
@@ -1898,9 +1955,14 @@ test('R4 clarification hard refusals survive uncertain segmentation', async t =>
     if (['unsupported scope', 'business scope'].includes(id)) {
       assert.equal(r.fallback, 0);
       assert.ok(r.sql.length > 0);
+      if (id === 'unsupported scope') {
+        assert.equal(r.body.ledger, null);
+        assert.match(r.body.answer, /No confirmed personal accounts/);
+        return;
+      }
       assert.equal(r.body.ledger.total_minor, 12345);
-      assert.equal(r.body.ledger.selector_unresolved, true);
-      assert.match(r.body.answer, /did not identify one account/);
+      assert.equal(r.body.ledger.selector_unresolved, undefined);
+      assert.match(r.body.answer, /Accounts used:/);
       return;
     }
     if (['named calendar mismatch', 'quarter widened', 'missing activity window', 'windowed newest', 'invented year'].includes(id)) {
@@ -1916,16 +1978,25 @@ test('R4 clarification hard refusals survive uncertain segmentation', async t =>
       assert.equal(r.body.evidence_gate.complete, false);
       return;
     }
-    assert.equal(r.fallback, 1);
-    assert.equal(r.body.route, 'documents');
-    assert.equal(r.body.clarification, undefined);
-    assert.equal(r.sql.length, 0);
+    if (['background scope', 'historical snapshot'].includes(id)) {
+      assert.equal(r.fallback, 0, 'the independent balance/activity request cannot escape to documents');
+      assert.ok(r.sql.some(sql => /FROM fin_accounts a/.test(sql)), 'compound decision reached');
+      assert.equal(r.body.ledger.compound_refused, true);
+      assert.equal(r.body.evidence_gate.supported, false);
+      assert.equal(r.body.evidence_gate.complete, false);
+      assert.deepEqual(r.body.citations, []);
+    } else {
+      assert.equal(r.fallback + (r.calendarRefused || 0), 1);
+      assertDocumentOrCalendarRefusal(r);
+      assert.equal(r.body.clarification, undefined);
+      assert.equal(r.sql.length, 0);
+    }
   });
   const unclear = await ask(f, 'Could you retrieve expenses last month and include charges at another payee?', {
     ambiguous: true, intents: [expenses],
   });
   assert.equal(unclear.calls, 1);
-  assert.equal(unclear.fallback, 1, 'explicit model ambiguity remains a hard refusal');
+  assert.equal(unclear.fallback + (unclear.calendarRefused || 0), 1, 'explicit model ambiguity remains a hard refusal');
   assert.equal(unclear.sql.length, 0);
 });
 
@@ -1940,13 +2011,13 @@ test('R4 clarification respects access boundaries and does not reuse an earlier 
     { entityScope: { applied: true } }, { filters: { source: 'synthetic' } }, { ledgerEligible: false }]) {
     const r = await ask(f, q, raw, options);
     assert.equal(r.calls, 0);
-    assert.equal(r.fallback, 1, 'scope decision reached documents');
+    assert.equal(r.fallback + (r.calendarRefused || 0), 1, 'scope decision reached documents');
     assert.equal(r.sql.length, 0);
     assert.equal(r.body.clarification, undefined);
   }
   const yes = await ask(f, 'yes', raw);
   assert.equal(yes.calls, 0);
-  assert.equal(yes.fallback, 1);
+  assert.equal(yes.fallback + (yes.calendarRefused || 0), 1);
   assert.equal(yes.sql.length, 0, 'an affirmative reply cannot authorize a cached plan');
 });
 
@@ -1964,11 +2035,11 @@ for (const [label, period, alternatives] of [
   assert.ok(green.body.ledger);
   const r = await ask(f, `${base} or the last 30 days?`, raw);
   assert.equal(r.calls, 1);
-  assert.equal(r.body.intent_outcome, 'clarify');
-  assert.equal(r.body.clarification.reason, 'period_uncertain');
-  assert.deepEqual(r.body.clarification.alternatives, alternatives);
-  assert.deepEqual(r.body.ledger, green.body.ledger);
-  assert.deepEqual(r.body.citations, green.body.citations);
+  assert.equal(r.sql.length, 0);
+  assert.equal(r.body.ledger, undefined);
+  assert.ok(r.body.gaps.some(g => g.scope === 'calendar'));
+  assert.match(r.body.answer, /Unread calendar words:/);
+  assert.equal(r.body.evidence_gate.complete, false);
 });
 
 test('R4 clarification labels a single kind near a multipart boundary as incomplete', async t => {
@@ -1981,10 +2052,15 @@ test('R4 clarification labels a single kind near a multipart boundary as incompl
   assert.equal(r.calls, 1);
   assert.equal(r.fallback, 0);
   assert.equal(r.body.intent_outcome, 'clarify');
-  assert.equal(r.body.ledger.kind, 'balance');
+  assert.equal(r.body.ledger.compound_refused, true);
+  assert.deepEqual(r.body.ledger.parts, [green.body.ledger, null]);
   assert.deepEqual(r.body.citations, green.body.citations);
+  assert.equal(r.body.ledger.operands.length, 2);
+  assert.equal(r.body.ledger.operands[1].complete, false);
+  assert.match(r.body.answer, /recent transactions/);
   assert.match(r.body.answer, /^Here's my best reading of your question: Showing current recorded balance observations across all accounts through October 12\./);
-  assert.ok(r.body.answer.endsWith(readingQuestion));
+  assert.ok(r.body.answer.endsWith('Want help refreshing the bank connection for a newer balance?'));
+  assert.equal(r.body.evidence_gate.supported, false);
   assert.equal(r.body.evidence_gate.complete, false);
 });
 
@@ -2026,7 +2102,7 @@ test('R4 clarification cannot invent date windows for snapshot or newest readers
     assert.ok(green.sql.length > 0);
     const r = await ask(f, `${base} or the last 30 days?`, raw);
     assert.equal(r.calls, 1, 'unsupported-window decision reached');
-    assert.equal(r.fallback, 1);
+    assert.equal(r.fallback + (r.calendarRefused || 0), 1);
     assert.equal(r.body.clarification, undefined);
     assert.equal(r.sql.length, 0);
   }
@@ -2144,7 +2220,7 @@ test('R5 soft calendar diagnostics cannot add windows to snapshot or newest read
       assert.equal(r.body.ledger.kind, 'transactions');
       assert.match(r.body.answer, /Showing \d+ of \d+ recorded transactions/);
     } else {
-      assert.equal(r.fallback, 1);
+      assert.equal(r.fallback + (r.calendarRefused || 0), 1);
       assert.equal(r.sql.length, 0);
       assert.equal(r.body.clarification, undefined);
     }
@@ -2161,7 +2237,7 @@ const r8Cases = [
   [4, 'Could you retrieve expenses lately?', recordedIntent('expense_summary', { period: { type: 'last_month' } }),
     b => { assert.deepEqual([b.ledger?.from, b.ledger?.to], ['2026-09-13', '2026-10-12']); assert.match(b.answer.split('\n')[0], /last 30 days/); }],
   [5, 'Could you compare balances on my personal card versus the business card?', recordedIntent('balance'),
-    b => { assert.equal(b.ledger?.kind, 'balance'); assert.match(b.answer, /Here is each account by its ending digits and recorded type; personal and business roles are unconfirmed/); assert.match(b.answer, /1234/); }],
+    b => { assert.equal(b.ledger?.compound_refused, true); assert.equal(b.evidence_gate.supported, false); assert.equal(b.evidence_gate.complete, false); assert.equal(b.ledger.operands.length, 2); assert.deepEqual(b.ledger.operands.map(part => part.complete), [false, true]); assert.match(b.answer, /1234/); assert.ok(b.citations.length > 0); assert.deepEqual(b.ledger.parts[1].accounts.map(a => a.account_mask), ['1234']); }],
   [6, 'Could you retrieve the largest expenses last month?', recordedIntent('largest', { count: '1', period: { type: 'last_month' } }),
     b => { assert.equal(b.ledger?.rows.length, 1); assert.equal(b.ledger.rows[0].amount_minor, 12345); }],
 ];
@@ -2205,7 +2281,7 @@ test('R8 class 1 closed shorthand and informal cues keep shorthand decoys out', 
     assert.equal(d.outcome, 'fallback', 'pure admission decision reached');
     assert.ok(d.reason);
     const r = await ask(f, q, reply);
-    assert.equal(r.fallback, 1, 'document decision reached');
+    assert.equal(r.fallback + (r.calendarRefused || 0), 1, 'document decision reached');
     assert.equal(r.body.ledger, undefined);
     assert.equal(r.sql.length, 0);
   }
@@ -2243,7 +2319,7 @@ test('R8 class 2 stated payment days keep literal grounding and local radii', as
   ]) {
     const r = await ask(f, q, { intents: [recordedIntent('payment', { amount_text: '$12', date_text })] });
     assert.equal(r.calls, 1, 'literal date decision reached');
-    assert.equal(r.fallback, 1);
+    assert.equal(r.fallback + (r.calendarRefused || 0), 1);
     assert.equal(r.sql.length, 0);
   }
 });
@@ -2260,7 +2336,11 @@ test('R8 class 3 account and own-business selectors never become payee totals', 
     assert.equal(r.body.ledger.total_minor, 5432);
     assert.doesNotMatch(r.body.answer.split('\n')[0], /literal selector/);
     assert.ok(r.body.answer.includes(selector));
-    if (selector !== 'clinic acct') assert.ok(r.body.answer.split('\n')[0].includes(`all your accounts; '${selector}' did not identify one account`));
+    if (selector === 'the shop checking') {
+      // Compound ownership is resolved from the entity, even without a label.
+      assert.doesNotMatch(r.body.answer, /all your accounts/);
+      assert.equal(r.body.ledger.selector_unresolved, undefined);
+    } else if (selector !== 'clinic acct') assert.ok(r.body.answer.split('\n')[0].includes(`all your accounts; '${selector}' did not identify one account`));
     else assert.match(r.body.answer.split('\n')[0], /in the recorded account/);
   }
   const control = await ask(f, 'Could you retrieve Store Unit charges this month?', { intents: [recordedIntent('merchant', { vendor_text: 'Store Unit', direction: 'outflow' })] });
@@ -2306,11 +2386,11 @@ test('R8 class 4 loose time and weekend periods override model guesses locally',
   }
   const future = await ask(f, 'Could you retrieve expenses this weekend?', { intents: [recordedIntent('expense_summary')] });
   assert.equal(future.calls, 1, 'future weekend decision reached');
-  assert.equal(future.fallback, 1);
+  assert.equal(future.fallback + (future.calendarRefused || 0), 1);
   assert.equal(future.sql.length, 0);
 });
 
-test('R8 class 5 personal versus business lists accounts without inferring roles', async t => {
+test('R8 class 5 personal versus business uses confirmed roles for compound hints', async t => {
   const f = configured(t);
   f.raw(`INSERT INTO fin_entities (entity_slug,legal_name,display_label,kind,status,relationship,provenance,basis_state,recorded_at)
     VALUES ('household','Synthetic household','Synthetic household','household','active','owned','owner_stated','confirmed',?)`, NOW);
@@ -2324,20 +2404,24 @@ test('R8 class 5 personal versus business lists accounts without inferring roles
     assert.equal(r.calls, 1);
     assert.equal(r.fallback, 0);
     assert.ok(r.sql.length > 0);
-    assert.equal(r.body.ledger.kind, 'balance');
-    assert.deepEqual(r.body.ledger.accounts.map(a => a.account_mask).sort(), ['1234', '5678']);
-    assert.equal(r.body.ledger.accounts[0].account_kind, 'card');
-    assert.match(r.body.answer, /Here is each account by its ending digits and recorded type; personal and business roles are unconfirmed/);
-    assert.match(r.body.answer, /recorded kind: card/);
-    assert.ok(r.body.citations.length >= 2);
+    assert.equal(r.body.ledger.compound_refused, true);
+    assert.equal(r.body.evidence_gate.supported, false);
+    assert.equal(r.body.evidence_gate.complete, false);
+    // The personal fixture has no coverage receipt; keep its identity without a figure.
+    assert.deepEqual(r.body.ledger.operands.map(part => part.complete), [false, true]);
+    assert.deepEqual(r.body.ledger.operands.map(part => part.accounts.map(a => a.account_mask)), [['5678'], ['1234']]);
+    assert.equal(r.body.ledger.parts[0], null);
+    assert.deepEqual(r.body.ledger.parts[1].accounts.map(a => a.account_mask), ['1234']);
+    assert.ok(r.body.citations.length >= 1);
+    assert.ok(r.body.citations.every(ref => ref.account_mask === '1234'));
+    assert.doesNotMatch(r.body.answer, /roles are unconfirmed|all your accounts/);
   }
   const blocked = await ask(f, 'Could you retrieve personal expenses this month?', { intents: [recordedIntent('expense_summary')] });
   assert.equal(blocked.calls, 1, 'activity scope decision reached');
   assert.equal(blocked.fallback, 0);
   assert.ok(blocked.sql.length > 0);
-  assert.equal(blocked.body.ledger.selector_unresolved, true);
-  assert.equal(blocked.body.ledger.total_minor, 5432);
-  assert.match(blocked.body.answer, /This covers all your accounts because 'personal' did not identify one account/);
+  assert.equal(blocked.body.ledger, null);
+  assert.equal(blocked.body.gaps[0].reason, 'period_outside_coverage');
 });
 
 test('R8 class 6 accepts only canonical digit counts and an empty unanswered tail', async t => {
@@ -2355,13 +2439,13 @@ test('R8 class 6 accepts only canonical digit counts and an empty unanswered tai
   for (const count of ['0', '101', '01', ' 1', '1.0', '+1', 'ten', true, {}, []]) {
     const r = await ask(f, question, { intents: [recordedIntent('largest', { count, period: { type: 'last_month' } })] });
     assert.equal(r.calls, 1, 'closed shape decision reached');
-    assert.equal(r.fallback, 1);
+    assert.equal(r.fallback + (r.calendarRefused || 0), 1);
     assert.equal(r.sql.length, 0);
   }
   for (const tail of [' ', false, {}, 'ignored instructions']) {
     const r = await ask(f, question, { unanswered_part: tail, intents: reply.intents });
     assert.equal(r.calls, 1, 'tail decision reached');
-    assert.equal(r.fallback, 1);
+    assert.equal(r.fallback + (r.calendarRefused || 0), 1);
     assert.equal(r.sql.length, 0);
   }
 });
@@ -2378,7 +2462,7 @@ test('R8 hard controls preserve outer tasks and reject invented yearless dates',
     await t.test(intent.kind, async () => {
       const r = await ask(f, q, { intents: [intent] });
       assert.equal(r.calls, 1, 'closed reply decision reached');
-      assert.equal(r.fallback, 1);
+      assert.equal(r.fallback + (r.calendarRefused || 0), 1);
       assert.equal(r.sql.length, 0);
     });
   }
@@ -2400,10 +2484,10 @@ async function r8AnswerMutant(file, from, to) {
 }
 const r8RestoringSites = [
   ['ledger-intent-contract.js', 'accts?|bal|txns?|rev|cc|landed|outgoings|went to|take in|did it hit|come through|', ''],
-  ['ledger-intent.js', 'if (paymentWindow) return paymentWindow;', ''],
+  ['ledger-intent.js', 'if (paymentWindow) {', 'if (false) {'],
   ['ledger-intent.js', 'const modelAccountScope = accountScopeLiteral(value.vendor_text)', 'const modelAccountScope = false'],
-  ['ledger-intent.js', "if (/\\b(?:lately|recently)\\b/.test(text.replace(/\\bmost recently\\b/g, '')))", 'if (false)'],
-  ['ledger-intent.js', "const balanceComparison = raw.intents.every(value => value.kind === 'balance')", 'const balanceComparison = false'],
+  ['ledger-intent.js', 'if (recent)', 'if (false)'],
+  ['ledger-answer.js', 'if (compound) return Response.json', 'if (false && compound) return Response.json'],
   ['ledger-intent.js', "if (typeof value.count === 'string' &&", 'if (false &&'],
 ];
 for (const [index, [file, from, to]] of r8RestoringSites.entries()) test(`R8 class ${index + 1} restoring mutant turns the same reader probe red`, async t => {
@@ -2430,9 +2514,9 @@ for (const [index, [file, from, to]] of r8RestoringSites.entries()) test(`R8 cla
 test('R8 shorthand decoy guard and empty tail have discriminating restoring mutants', async t => {
   const f = configured(t);
   for (const [file, from, to, contract] of [
-    ['ledger-intent.js', 'if (ledgerShorthandDecoy.test(question))', 'if (false)', async answer => {
+    ['ledger-intent.js', 'if (ledgerShorthandDecoy.test(ledgerTaskProse(question)))', 'if (false)', async answer => {
       const r = await ask(f, 'acct manager catchup', { intents: [recordedIntent('balance')] }, {}, answer);
-      assert.equal(r.fallback, 1, 'decoy disposition reached');
+      assert.equal(r.fallback + (r.calendarRefused || 0), 1, 'decoy disposition reached');
       assert.equal(r.sql.length, 0);
     }],
     ['ledger-intent.js', " || unanswered === ''", '', async answer => {
@@ -2462,7 +2546,7 @@ test('R8 weekend hints cannot admit future activity without local wording', asyn
   assert.ok(green.sql.length > 0);
   const r = await ask(f, 'Could you retrieve expenses?', { intents: [recordedIntent('expense_summary', { period: { type: 'this_weekend' } })] });
   assert.equal(r.calls, 1, 'future hint decision reached');
-  assert.equal(r.fallback, 1);
+  assert.equal(r.fallback + (r.calendarRefused || 0), 1);
   assert.equal(r.sql.length, 0);
 });
 
@@ -2548,7 +2632,7 @@ test('R8 a single payment day cannot discard a second date carried in a model hi
   assert.ok(green.sql.length > 0);
   const r = await ask(f, 'Could you retrieve the $12 payment on October 8 through October 9?', { intents: [recordedIntent('payment', { amount_text: '$12', date_text: 'October 8', period: { type: 'between', from: 'October 8', to: 'October 9' } })] });
   assert.equal(r.calls, 1, 'second date decision reached');
-  assert.equal(r.fallback, 1);
+  assert.equal(r.fallback + (r.calendarRefused || 0), 1);
   assert.equal(r.sql.length, 0);
 });
 
@@ -2606,7 +2690,7 @@ test('R9 class 1 normalized spans retain safe unanswered parts and reject invent
     const r = await ask(f, 'Could you retrieve bank balances, and is that enough for the quarter?',
       { unanswered_part: tail, intents: [recordedIntent('balance')] });
     assert.equal(r.calls, 1, 'bad span validation reached');
-    assert.equal(r.fallback, 1);
+    assert.equal(r.fallback + (r.calendarRefused || 0), 1);
     assert.equal(r.sql.length, 0);
   }
 });
@@ -2682,15 +2766,16 @@ async function r9Class3(f, answer = withLedgerAnswer) {
   assert.equal(r.calls, 1, 'balance kinds decision reached');
   assert.ok(r.sql.length > 0);
   assert.equal(r.fallback, 0);
-  assert.equal(r.body.ledger.kind, 'balance');
-  assert.equal(r.body.ledger.accounts.length, 4);
-  assert.equal(r.body.ledger.accounts[0].current_minor, 100001);
-  assert.equal(r.body.ledger.accounts[0].available_minor, 99500);
-  assert.equal(r.body.ledger.accounts.find(row => row.account_mask === '9012').available_minor, 90000);
-  assert.equal(r.body.ledger.accounts.find(row => row.account_mask === '5678').available_minor, null);
-  assert.match(r.body.answer, /available balance: \$995\.00/);
-  assert.ok(r.body.answer.split('\n').includes('Here are the current and any recorded available balances. Statement balances are not provided by this feed.'));
-  assert.doesNotMatch(r.body.answer, /Current recorded balances are shown; available balances are not in these records\./);
+  assert.equal(r.body.ledger.compound_refused, true);
+  assert.equal(r.body.evidence_gate.supported, false);
+  assert.equal(r.body.evidence_gate.complete, false);
+  assert.equal(r.body.ledger.operands.length, 2);
+  assert.ok(r.body.ledger.operands.every(part => !part.complete));
+  assert.ok(r.body.ledger.operands.every(part => part.accounts.length === 4));
+  assert.equal(r.body.citations.length, 0);
+  assert.doesNotMatch(r.body.answer, /\$[\d,]+\.\d{2}/);
+  assert.match(r.body.answer, /independent available balance reading is unconfirmed/);
+  assert.match(r.body.answer, /independent statement balance reading is unconfirmed/);
 }
 test('R9 class 3 balance kinds share one snapshot and expose every stored balance field', async t => {
   const f = r9Fixture(t);
@@ -2702,7 +2787,10 @@ test('R9 class 3 balance kinds share one snapshot and expose every stored balanc
   assert.equal(r.calls, 1);
   assert.equal(r.fallback, 0);
   assert.ok(r.sql.length > 0);
-  assert.ok(r.body.answer.split('\n').includes('Here are the current and any recorded available balances. Running account balances are not provided by this feed.'));
+  assert.equal(r.body.ledger.compound_refused, true);
+  assert.equal(r.body.evidence_gate.supported, false);
+  assert.match(r.body.answer, /independent running account balance reading is unconfirmed/);
+  assert.equal(r.body.citations.length, 0);
 });
 async function r9Class4(f, answer = withLedgerAnswer) {
   await r9BalanceGreen(f, answer);
@@ -2728,9 +2816,9 @@ test('R9 class 4 cash-only balances total depository assets and keep cards separ
 const r9RestoringSites = [
   [1, 'ledger-intent.js', 'if (start < 0) return null;', 'if (start < 0 || !hasLiteral(question, unanswered)) return null;', r9Class1],
   [2, 'ledger-intent.js', 'if (core.addOn) intent.answerAddOn = core.addOn;', '', r9Class2],
-  [3, 'ledger-intent.js', 'const balanceKindsComparison = raw.intents.length === 2', 'const balanceKindsComparison = false', r9Class3],
-  [4, 'ledger-intent.js', "if (cashOnlyBalance(coreQuestion)) qualifications = qualifications.replace(cashExclusion, '');", '', r9Class4],
-  [4, 'ledger-answer.js', "ordered.filter(({ account }) => balanceGroup(account) === 'cash')", 'ordered', r9Class4],
+  [3, 'ledger-answer.js', 'if (compound) return Response.json', 'if (false && compound) return Response.json', r9Class3],
+  [4, 'ledger-intent.js', "if (cashOnlyBalance(taskQuestion)) qualifications = qualifications.replace(cashExclusion, '');", '', r9Class4],
+  [4, 'ledger-answer.js', "ordered.filter(({ account }) => balanceGroup(account) === 'cash' && account.status === 'open')", 'ordered', r9Class4],
 ];
 for (const [number, file, from, to, contract] of r9RestoringSites) test(`R9 class ${number} restoring mutant fails its reader contract with a green control: ${file}`, async t => {
   const f = number >= 3 ? r9Fixture(t) : configured(t);
@@ -2770,7 +2858,7 @@ test('R9 details with null tails use the same composer and preserve original sco
     'Could you retrieve checking expenses, and is that enough?']) {
     const r = await ask(f, q, { unanswered_part: q.split(', and ')[1], intents: [recordedIntent('expense_summary')] });
     assert.equal(r.calls, 1, 'full-question guard reached');
-    assert.equal(r.fallback, 1);
+    assert.equal(r.fallback + (r.calendarRefused || 0), 1);
     assert.equal(r.sql.length, 0);
   }
 });
@@ -2782,8 +2870,17 @@ test('R9 combined balance kinds cannot remove outer tasks or missing-date filter
     const r = await ask(f, q, { intents: [recordedIntent('balance', { vendor_text: 'available balance' }),
       recordedIntent('balance', { vendor_text: 'statement balance' })] });
     assert.equal(r.calls, 1, 'combined snapshot boundary reached');
-    assert.equal(r.fallback, 1);
-    assert.equal(r.sql.length, 0);
+    if (q.startsWith('Translate')) {
+      assert.equal(r.fallback + (r.calendarRefused || 0), 1);
+      assert.equal(r.sql.length, 0);
+    } else {
+      assert.equal(r.fallback, 0);
+      assert.ok(r.sql.some(sql => /FROM fin_accounts a/.test(sql)), 'compound refusal reached the account decision');
+      assert.equal(r.body.ledger.compound_refused, true);
+      assert.equal(r.body.evidence_gate.supported, false);
+      assert.equal(r.body.evidence_gate.complete, false);
+      assert.equal(r.body.citations.length, 0);
+    }
   }
 });
 test('R9 cash-only answers cannot certify zero with no recorded depository account', async t => {
@@ -2804,7 +2901,7 @@ test('R9 a grounded tail cannot erase a period or the cash-only exclusion', asyn
   const old = await ask(f, 'Could you retrieve bank balances and for last month?',
     { unanswered_part: 'for last month?', intents: [recordedIntent('balance')] });
   assert.equal(old.calls, 1, 'historical tail validation reached');
-  assert.equal(old.fallback, 1);
+  assert.equal(old.fallback + (old.calendarRefused || 0), 1);
   assert.equal(old.sql.length, 0);
   const cash = await ask(f, 'Could you retrieve bank balances, and not counting cards?',
     { unanswered_part: 'not counting cards?', intents: [recordedIntent('balance')] });
@@ -2875,6 +2972,11 @@ test('R9 share and account details use the same period across every selected acc
 // R10 uses synthetic feed labels and rows; no model-generated arithmetic.
 function r10Fixture(t) {
   const f = configured(t);
+  // Explicit multi-scope plans use recorded entity roles. A display label
+  // saying personal cannot make a business-owned account a personal entity.
+  f.raw(`INSERT INTO fin_entities (entity_slug,legal_name,display_label,kind,status,relationship,provenance,basis_state,recorded_at)
+    VALUES ('household','Synthetic household','Synthetic household','person','active','owned','owner_stated','confirmed',?)`, NOW);
+  f.raw("UPDATE fin_accounts SET entity_slug='household' WHERE account_slug='fixture-account'");
   f.raw("UPDATE fin_accounts SET label='Personal checking' WHERE account_slug='fixture-account'");
   f.raw("UPDATE fin_balance_snapshots SET current_minor=10000, available_minor=8000");
   f.raw(`INSERT INTO fin_accounts (account_slug,entity_slug,account_kind,balance_role,mask,label,feed_mode,provenance,basis_state,recorded_at)
@@ -2909,15 +3011,26 @@ async function r10Accounts(f, answer) {
   ]) {
     const selectors = q.includes('personal acct') ? ['personal acct', 'business'] : ['personal', 'business'];
     const r = await r10Read(f, q, selectors.map(vendor_text => recordedIntent(kind, { direction, vendor_text })), answer);
-    assert.deepEqual(r.body.ledger.comparison?.figures_minor, figures);
-    assert.equal(r.body.ledger.comparison.difference_minor, figures[0] - figures[1]);
+    if (kind === 'balance') {
+      assert.equal(r.body.ledger.compound_refused, true);
+      assert.equal(r.body.evidence_gate.supported, false);
+      assert.equal(r.body.evidence_gate.complete, false);
+      assert.equal(r.body.ledger.comparison, undefined);
+      assert.deepEqual(r.body.ledger.parts.map(part => part.accounts[0].current_minor), figures);
+    } else {
+      assert.deepEqual(r.body.ledger.comparison?.figures_minor, figures);
+      assert.equal(r.body.ledger.comparison.difference_minor, figures[0] - figures[1]);
+    }
     assert.match(r.body.answer, /1234/); assert.match(r.body.answer, /5678/);
   }
   const r = await r10Read(f, 'Could you compare personal acct spending versus workshop acct this month?', ['personal acct', 'workshop acct'].map(vendor_text => recordedIntent('merchant', { direction: 'outflow', vendor_text })), answer);
   assert.equal(r.body.ledger.comparison, undefined, 'unresolved selector cannot certify arithmetic');
-  assert.match(r.body.answer, /This covers all your accounts because 'workshop acct' did not identify one account\./);
-  assert.deepEqual(r.body.ledger.parts[1].per_account.map(a => a.total_minor), [5432, 9000]);
-  assert.match(r.body.answer, /your account ending 1234/); assert.match(r.body.answer, /your account ending 5678/);
+  assert.equal(r.body.ledger.kind, 'scope_refused', 'an unresolved explicit comparison cannot widen to every account');
+  assert.equal(r.body.ledger.reason, 'scope_unresolved');
+  assert.equal(r.body.evidence_gate.complete, false);
+  assert.equal(r.sql.some(sql => sql.includes('CROSS JOIN fin_transactions')), false, 'scope decision precedes fact reads');
+  assert.equal(r.body.ledger.total_minor, undefined);
+  assert.deepEqual(r.body.citations, []);
 }
 async function r10Categories(f, answer) {
   const r = await r10Read(f, 'Could you compare spending on supplies versus software this month?', ['supplies', 'software'].map(vendor_text => recordedIntent('merchant', { direction: 'outflow', vendor_text })), answer);
@@ -2925,11 +3038,13 @@ async function r10Categories(f, answer) {
   assert.equal(r.body.ledger.comparison.difference_minor, 3568);
   assert.match(r.body.answer, /Category 'supplies'/); assert.match(r.body.answer, /Category 'software'/);
   const missing = await r10Read(f, 'Could you retrieve expenses for materials this month?', [recordedIntent('merchant', { direction: 'outflow', vendor_text: 'materials' })], answer);
-  assert.match(missing.body.answer, /No category matched 'materials'\./);
-  assert.equal(missing.body.ledger.category_groups.length, 2);
+  assert.match(missing.body.answer, /category word 'materials' was not recognized/);
+  assert.deepEqual(missing.body.ledger.known_categories, ['Software', 'Supplies']);
+  assert.equal(missing.body.ledger.total_minor, null);
   const explicit = await r10Read(f, 'Could you retrieve expenses for repairs this month?', [recordedIntent('category', { direction: 'outflow', vendor_text: 'repairs' })], answer);
-  assert.match(explicit.body.answer, /No category matched 'repairs'\./);
-  assert.equal(explicit.body.ledger.category_groups.length, 2);
+  assert.match(explicit.body.answer, /category word 'repairs' was not recognized/);
+  assert.deepEqual(explicit.body.ledger.known_categories, ['Software', 'Supplies']);
+  assert.equal(explicit.body.ledger.total_minor, null);
 }
 async function r10Transfers(f, answer) {
   f.add('own-move-out', 'TRANSFER TO ACCOUNT 5678', null, { cents: 7000, direction: 'outflow' });
@@ -2961,18 +3076,28 @@ async function r10Nickname(f, answer) {
 async function r10Pending(f, answer) {
   f.add('pending-row', 'Pending Unit', 'Pending Unit', { cents: 2468, direction: 'outflow' });
   f.raw("UPDATE fin_transactions SET pending=1 WHERE txn_uid='pending-row'");
+  // The independent pending detail retains the original reader contract.
+  const single = await r10Read(f, 'Could you retrieve pending balance?', [recordedIntent('balance', { vendor_text: 'pending' })], answer);
+  assert.ok(single.body.answer.includes('October 5: $24.68, outflow, your account ending 1234 [3].'), 'pending detail uses the shared date and account format');
+  assert.match(single.body.answer, /Pending transactions/);
+  assert.equal(single.body.ledger.pending_transactions.rows[0].amount_minor, 2468);
+  assert.ok(single.sql.some(sql => sql.includes('t.pending=1')), 'pending reader decision reached');
   const intents = ['pending', 'available'].map(vendor_text => recordedIntent('balance', { vendor_text }));
   const r = await r10Read(f, 'Could you retrieve pending versus available balances?', intents, answer);
-  assert.ok(r.body.answer.includes('October 5: $24.68, outflow, your account ending 1234 [3].'), 'pending detail uses the shared date and account format');
-  assert.match(r.body.answer, /Pending transactions/);
-  assert.equal(r.body.ledger.pending_transactions.rows[0].amount_minor, 2468);
-  assert.deepEqual(r.body.ledger.accounts.map(a => a.available_minor), [8000, 45000]);
-  assert.ok(r.sql.some(sql => sql.includes('t.pending=1')), 'pending reader decision reached');
+  assert.equal(r.body.ledger.compound_refused, true);
+  assert.equal(r.body.evidence_gate.supported, false);
+  assert.equal(r.body.evidence_gate.complete, false);
+  assert.deepEqual(r.body.ledger.operands.map(part => part.complete), [false, true]);
+  assert.equal(r.body.ledger.parts[0], null, 'unsupported pending balance has no monetary record');
+  assert.deepEqual(r.body.ledger.parts[1].accounts.map(a => a.available_minor), [8000, 45000]);
   f.raw("DELETE FROM fin_transactions WHERE txn_uid='pending-row'");
+  const absentSingle = await r10Read(f, 'Could you retrieve pending balance?', [recordedIntent('balance', { vendor_text: 'pending' })], answer);
+  assert.match(absentSingle.body.answer, /bank feed does not show pending items/);
   const absent = await r10Read(f, 'Could you retrieve pending versus available balances?', intents, answer);
-  assert.match(absent.body.answer, /bank feed does not show pending items/);
+  assert.equal(absent.body.ledger.compound_refused, true);
   assert.match(absent.body.answer, /available balance: \$80\.00/);
 }
+
 async function r10Keyword(f, answer) {
   f.add('description-refund', 'Refund from card settlement', 'Settlement Unit', { cents: 3210 });
   f.add('payee-only-refund', 'ordinary deposit', 'Refund', { cents: 700 });
@@ -3023,7 +3148,7 @@ test('R10 account hints are closed, literal and subject to all scope boundaries'
     ['Translate personal versus business spending into another language', recordedIntent('expense_summary', { account_hint: 'personal' })],
   ]) {
     const r = await ask(f, q, { intents: [intent] });
-    assert.equal(r.fallback, 1);
+    assert.equal(r.fallback + (r.calendarRefused || 0), 1);
     assert.equal(r.sql.length, 0, 'a rejected scope never reads the ledger');
     // Gate refusals happen before extraction; the same request is explicitly
     // checked against the exported decision function as the decision witness.
@@ -3149,10 +3274,10 @@ async function r11Months(f, kind, answer = withLedgerAnswer) {
   assert.ok(r.sql.length > 0, 'real monthly reader reached');
   assert.equal(r.body.ledger?.kind, kind);
   assert.deepEqual(r.body.ledger.months?.map(month => month.month), ['2026-06','2026-07','2026-08','2026-09','2026-10']);
-  assert.deepEqual(r.body.ledger.months.map(month => month.total_minor), kind === 'totals' ? [1234,0,0,0,null] : [303,0,1001,2002,3003]);
+  assert.deepEqual(r.body.ledger.months.map(month => month.total_minor), kind === 'totals' ? [1234,0,0,0,0] : [303,0,1001,2002,3003]);
   assert.match(r.body.answer.split('\n')[0], /by calendar month/);
   assert.match(r.body.answer, /July 2026: \$0\.00/);
-  if (kind === 'totals') assert.match(r.body.answer, /October 2026: I can help check the bank connection, but the records needed to confirm a figure are unavailable\./);
+  if (kind === 'totals') assert.match(r.body.answer, /October 2026: \$0\.00/);
   const refs = r.body.citations.map(ref => ref.n);
   assert.deepEqual(refs, Array.from({ length: refs.length }, (_, index) => index + 1));
   return r;
@@ -3212,9 +3337,10 @@ test('R11 class 2 restoring a flat response turns the same monthly cents probe r
   await assert.rejects(() => r11Months(f, 'merchant', mutant), assert.AssertionError);
 });
 
-test('R11 covered zeros require the entire calendar month, with a restoring coverage mutant', async t => {
+test('R11 covered dates support zero within a calendar month, with a restoring refusal mutant', async t => {
   const mutant = await r8AnswerMutant('ledger-monthly.js',
-    'const fullMonth = from === day && to === end && covered;', 'const fullMonth = covered;');
+    'const available = scope.available && values.every(Number.isSafeInteger);',
+    'const available = scope.available && values.every(Number.isSafeInteger) && (fullMonth || values.every(value => value !== 0));');
   for (const answer of [withLedgerAnswer, mutant]) await r10Green(r10Fixture(t), answer);
   const f = r11MonthlyFixture(t);
   await r11Months(f, 'totals');
@@ -3236,8 +3362,12 @@ test('R11 monthly account hints retain separate payee and account scopes and dis
   assert.equal(r.calls, 1, 'coverage decision reached');
   assert.ok(r.sql.length > 0);
   assert.deepEqual(r.body.ledger.months.map(month => month.total_minor), [null,null,1001,2002,3003]);
-  assert.match(r.body.answer, /July 2026: I can help check the bank connection, but the records needed to confirm a figure are unavailable\./);
-  assert.doesNotMatch(r.body.answer, /July 2026: \$0\.00/);
+  assert.deepEqual(r.body.ledger.months.map(month => month.subtotal_minor), [303,0,null,null,null]);
+  assert.equal(r.body.ledger.months[1].coverage.covered_account_count, 1);
+  assert.equal(r.body.ledger.months[1].coverage.candidate_account_count, 2);
+  assert.equal(r.body.ledger.months[1].complete, false);
+  assert.match(r.body.answer, /July 2026: Covered-account subtotal: \$0\.00/);
+  assert.match(r.body.answer, /Omitted accounts:.*5678/);
 });
 
 test('R11 monthly totals expose both measures and exact cents without claiming income', async t => {
@@ -3249,7 +3379,14 @@ test('R11 monthly totals expose both measures and exact cents without claiming i
   assert.equal(r.body.ledger.kind, 'totals');
   assert.deepEqual(r.body.ledger.months.slice(0,4).map(month => [month.inflow_minor,month.outflow_minor]),
     [[1234,303],[0,0],[0,1001],[0,2002]]);
-  assert.match(r.body.answer, /June 2026: money in \$12\.34; money out \$3\.03/);
+  const june = r.body.answer.split('\n').find(line => line.startsWith('June 2026:'));
+  assert.match(june, /^June 2026: money in \$12\.34 \[3\]; money out \$3\.03 \[1\] \[2\]\.$/);
+  const [incoming, outgoing] = june.split('; money out ');
+  for (const [text, expected] of [[incoming, [1234]], [outgoing, [101, 202]]]) {
+    const refs = [...text.matchAll(/\[(\d+)\]/g)].map(match => r.body.citations.find(ref => ref.n === Number(match[1])));
+    assert.ok(refs.every(Boolean), 'each measure reference resolves');
+    assert.deepEqual(refs.map(ref => ref.amount_minor), expected, 'directional figure cites only its contributing postings');
+  }
   assert.match(r.body.answer, /not established income/);
   assert.equal(r.body.ledger.months[4].total_minor, null);
 });
@@ -3273,7 +3410,8 @@ async function r12Green(f, answer = withLedgerAnswer) {
 async function r12Gate(f, answer = withLedgerAnswer) {
   f.raw("UPDATE fin_accounts SET label='Tax savings',account_kind='savings' WHERE account_slug='reserve'");
   const cases = [
-    ['Could you retrieve available versus still pending?', [recordedIntent('balance')], 'balance'],
+    ['Could you retrieve available balance?', [recordedIntent('balance')], 'balance'],
+    ['Could you retrieve available versus still pending?', [recordedIntent('balance')], 'multi'],
     ['Could you retrieve the balance in the savings account we use for tax?', [recordedIntent('balance', { account_hint: 'tax' })], 'balance'],
     ["Could you retrieve this month's expenses without counting transfers between our accounts twice?", [recordedIntent('expense_summary')], 'expense_summary'],
   ];
@@ -3282,6 +3420,11 @@ async function r12Gate(f, answer = withLedgerAnswer) {
     assert.equal(r.calls, 1, `supported qualification reaches the model: ${q}`);
     assert.ok(r.sql.length > 0, 'qualified reader reached');
     assert.equal(r.body.ledger?.kind, kind);
+    if (kind === 'multi') {
+      assert.equal(r.body.ledger.compound_refused, true);
+      assert.equal(r.body.evidence_gate.supported, false);
+      assert.equal(r.body.evidence_gate.complete, false);
+    }
     if (q.includes('pending')) assert.ok(r.sql.some(sql => sql.includes('t.pending=1')));
     if (q.includes('for tax')) assert.deepEqual(r.body.ledger.accounts.map(a => a.account_mask), ['5678']);
   }
@@ -3295,6 +3438,7 @@ async function r12Largest(f, answer = withLedgerAnswer) {
   assert.equal(r.calls, 1, 'rank selector decision reached');
   assert.ok(r.sql.length > 0, 'rank reader reached');
   assert.equal(r.body.ledger?.kind, 'largest');
+  assert.ok(Array.isArray(r.body.ledger.lead_rows), 'named ranking must retain its verified figures');
   assert.deepEqual(r.body.ledger.lead_rows.map(row => row.amount_minor), [7777,6666]);
   assert.deepEqual([r.body.ledger.from,r.body.ledger.to], ['2026-10-01','2026-10-12']);
   assert.match(r.body.answer.split('\n')[0], /Store Unit/);
@@ -3373,7 +3517,7 @@ async function r12Loans(f, answer = withLedgerAnswer) {
     assert.equal(r.body.ledger.default_exclusions.loan_proceeds_minor,50000);
     assert.equal(r.body.ledger.default_exclusions.loan_proceeds_count,1);
     if (kind === 'totals') {
-      assert.equal(r.body.ledger.combined_inflow_minor,68345,'gross recorded inflow remains explicit');
+      assert.equal(r.body.ledger.combined_inflow_minor,68345,'recorded inflow retains the owned advance');
       assert.equal(plain.body.ledger.combined_inflow_minor,68345);
       assert.equal(r.body.ledger.lead_inflow_minor,18345,'unproved loan-looking credit stays counted');
       assert.equal(r.body.ledger.excluded_loan_proceeds_minor,50000);
@@ -3392,6 +3536,10 @@ async function r12Loans(f, answer = withLedgerAnswer) {
     assert.ok(r.body.ledger.candidate_transfer_count > 0,'nonempty candidate proves kind refusal is not vacuous');
     assert.equal(r.body.ledger.excluded_loan_proceeds_minor,accountKind === 'other' ? 0 : 50000);
     assert.equal(r.body.ledger.lead_inflow_minor,accountKind === 'other' ? 68345 : 18345);
+    if (accountKind === 'other') {
+      assert.equal(r.body.ledger.outside_inflow_minor,68345);
+      assert.match(r.body.answer,/Possible own transfer/);
+    }
   }
 }
 test('R12 class 1 loan exclusions require reciprocal owned-loan evidence, with a gross control', async t => {
@@ -3441,7 +3589,7 @@ test('R12 class 1 every remaining pre-model capability term still refuses before
     const q = `Could you retrieve money for ${term}?`;
     assert.equal(api.canExtractLedgerIntent(q),false,'actual pre-model gate evaluated');
     const r = await ask(f,q,{ intents: [recordedIntent('expense_summary')] });
-    assert.equal(r.fallback,1,'refusal continuation reached');
+    assert.equal(r.fallback + (r.calendarRefused || 0),1,'refusal path reached');
     assert.equal(r.calls,0); assert.equal(r.sql.length,0);
   }
 });
@@ -3459,7 +3607,7 @@ test('R12 class 1 unsupported qualifiers, advice, tax filing and non-owner repli
     ['Could you retrieve expenses next year?',recordedIntent('expense_summary')],
   ]) {
     const r = await ask(f,q,{ intents: [intent] });
-    assert.equal(r.fallback,1,'refusal decision continuation reached');
+    assert.equal(r.fallback + (r.calendarRefused || 0),1,'refusal decision continuation reached');
     assert.equal(r.sql.length,0);
   }
   const posted = await ask(f,'Could you retrieve pending transactions this month?',{ intents: [recordedIntent('transactions')] });
@@ -3515,20 +3663,22 @@ async function r12Coverage(f, answer = withLedgerAnswer) {
   const year = await ask(f,'Could you retrieve the priciest stock purchase the shop made this year?',raw,{},answer);
   assert.equal(year.calls,1); assert.ok(year.sql.length > 0);
   assert.deepEqual([year.body.ledger.from,year.body.ledger.to],['2026-01-01','2026-10-12']);
-  assert.match(year.body.answer,/did not identify one account/);
+  assert.match(year.body.answer,/Accounts used:/);
   f.raw("UPDATE fin_account_coverage SET covered_from='2025-01-01' WHERE account_slug='reserve'");
   const event = await ask(f,'Could you retrieve the priciest stock purchase for workshop since it opened?',
     { intents: [recordedIntent('largest',{ account_hint: 'workshop',date_text: 'it opened',count: 1 })] },{},answer);
-  assert.equal(event.calls,1); assert.ok(event.sql.length > 0,'coverage refusal reached');
-  assert.equal(event.body.ledger,null);
+  assert.equal(event.calls,1); assert.ok(event.sql.length > 0,'partial coverage reader reached');
+  assert.equal(event.body.ledger.kind,'largest');
+  assert.equal(event.body.ledger.accounts.length,1);
+  assert.deepEqual(event.body.ledger.lead_rows.map(row => row.amount_minor),[12345]);
+  assert.deepEqual([event.body.ledger.coverage.covered_account_count,event.body.ledger.coverage.candidate_account_count],[1,2]);
+  assert.equal(event.body.ledger.coverage.excluded_accounts[0].account_mask,'5678');
   assert.equal(event.body.evidence_gate.complete,false);
-  assert.equal(event.body.evidence_gate.reason,'question needs clarification; period_outside_coverage');
-  assert.equal(event.body.gaps[0].reason,'period_outside_coverage');
+  assert.equal(event.body.gaps[0].reason,'ledger_partial_coverage');
   assert.deepEqual([event.body.gaps[0].from,event.body.gaps[0].to],['2024-01-01','2026-10-12']);
-  assert.deepEqual(event.body.citations,[]);
-  assert.match(event.body.answer,/(?:^|\n)I can help check the bank records for January 1, 2024 to October 12, but some bank days are missing, so a complete answer is unconfirmed\.(?:\n|$)/);
+  assert.ok(event.body.citations.length > 0);
+  assert.match(event.body.answer,/Partial view using 1 of 2 accounts/);
   assert.match(event.body.answer,/'workshop' did not identify one account/);
-  assert.doesNotMatch(event.body.answer,/\$[\d,]+\.\d{2}/);
 }
 test('R12 event coverage and local year authority retain incomplete and unknown account disclosures', async t => {
   await r12Coverage(r10Fixture(t));
@@ -3542,8 +3692,8 @@ test('R12 event disclosure and coverage mutants fail exact contracts with green 
       '',r12Event,'match'],
     ['else intent.accountScopeUnresolved = true;',
       'else intent.accountScopeUnresolved = false;',r12Coverage,'match'],
-    ['} else if (!periodCovered && !partialSimpleFinRanking) return { reason: "period_outside_coverage" };',
-      '} else if (false) return { reason: "period_outside_coverage" };',r12Coverage,'strictEqual'],
+    ['accounts = scope.covered;',
+      'accounts = requestedAccounts;',r12Coverage,'strictEqual'],
   ]) {
     const mutant = await r8AnswerMutant('ledger-answer.js',from,to);
     const green = r10Fixture(t),broken = r10Fixture(t);
@@ -3606,7 +3756,12 @@ for (const [id, q, kind, extra] of r13Cases) test(`R13 class 1 ${id} reaches a s
     assert.match(r.body.answer,/outflow only/);
   }
   if (id === 'transfer-count') assert.equal(r.body.ledger.limit, 4);
-  if (id === 'business-regression') assert.match(r.body.answer, /did not identify one account/);
+  if (id === 'business-regression') {
+    assert.match(r.body.answer, /Accounts used:/);
+    assert.ok(r.body.citations.every(ref => ref.account_mask === '5678'));
+    const head = await r10Read(f, q, [recordedIntent(kind, extra)], headLedgerAnswer);
+    assert.deepEqual(r.body, head.body, 'possessive complement preserves owner HEAD');
+  }
   if (id === 'largest-groups') assert.equal(r.body.ledger.per_account.length, 2);
   if (id === 'payee-detail') assert.match(r.body.answer, /payee breakdown is not available/);
   if (id === 'fee-regression') {
@@ -3715,7 +3870,7 @@ test('R13 boundaries retain historical, invented-year and non-owner refusals wit
     ['Could you retrieve expenses excluding rent this month?',recordedIntent('expense_summary')],
   ]) {
     const r=await ask(f,q,{ intents:[intent] });
-    assert.equal(r.fallback,1,'refusal continuation reached');
+    assert.equal(r.fallback + (r.calendarRefused || 0),1,'refusal path reached');
     assert.equal(r.sql.length,0);
   }
 });
@@ -3755,7 +3910,10 @@ const r13Contracts = [
   async (f,answer) => {
     const r=await r10Read(f,"Could you retrieve this month's spending after refunds?",[recordedIntent('merchant',{ vendor_text:'refunds',direction:'outflow' })],answer);
     assert.equal(r.body.ledger.kind,'expense_summary');
-    assert.equal(r.body.ledger.net_expense_minor,14432);
+    assert.equal(r.body.ledger.net_expense_minor,undefined);
+    assert.equal(r.body.ledger.net_refunds_unavailable,true);
+    assert.deepEqual(r.body.ledger.possible_refunds,[]);
+    assert.equal(r.body.ledger.total_minor,14432);
   },
 ];
 const r13PromptSource=readFileSync(new URL('../src/lib/ledger-intent.js',import.meta.url),'utf8');
@@ -3798,10 +3956,11 @@ test('R13 class 1 payment aliases keep counted inflows and show multiple toleran
   const q='A customer says the $123.45 went out on September 9; could it have landed a couple of days either side?';
   const r=await r10Read(f,q,[recordedIntent('payment',{ amount_text:'$123.45',date_text:'September 9' })]);
   assert.equal(r.body.ledger.ambiguous,true);
-  assert.equal(r.body.ledger.found,null);
+  assert.equal(r.body.ledger.found,true);
+  assert.equal(r.body.ledger.complete,true,'exact deposits prove existence without selecting one payment');
   assert.equal(r.body.ledger.match_count,2);
   assert.equal(r.body.citations.length,2,'all exact-amount candidates listed');
-  assert.match(r.body.answer,/I found 2 matching deposits in September 2 to 16, so no single payment is confirmed\./);
+  assert.match(r.body.answer,/Yes, I found 2 matching deposits in September 2 to 16, so no single payment is confirmed\./);
 });
 
 test('R13 class 1 refund detail and per-account balance total reach their readers',async t => {
@@ -3837,7 +3996,7 @@ test('R13 forty outer tasks reach the gate and keep the ledger reader untouched'
       decisions++;
       assert.equal(d.outcome,'fallback');
       const r=await ask(f,q,{ intents:[recordedIntent('balance')] });
-      assert.equal(r.fallback,1,'outer-task continuation reached');
+      assert.equal(r.fallback + (r.calendarRefused || 0),1,'outer-task continuation reached');
       assert.equal(r.sql.length,0);
     }
   }
@@ -3881,16 +4040,18 @@ for (const [id,q] of [
 for (const [id,q] of [
   ['net-refunds-regression', "Could you retrieve this month's spending after refunds?"],
   ['net-of-refunds-regression', "Could you retrieve this month's spending net of refunds?"],
-]) test(`R13 class 2 ${id} uses outflows less refund description inflows`, async t => {
+]) test(`R13 class 2 ${id} withholds net and discloses candidate credits`, async t => {
   const f = r10Fixture(t); await r10Green(f);
   f.add('r13-refund','REFUND settlement','Outside Unit',{ cents: 1000 });
   f.add('r13-unrelated','Refundable deposit','Outside Unit',{ cents: 7777 });
   const r = await r10Read(f,q,[recordedIntent('merchant',{ vendor_text: 'refunds',direction: 'outflow' })]);
   assert.equal(r.body.ledger.kind,'expense_summary');
-  assert.equal(r.body.ledger.net_expense_minor,13432);
-  assert.match(r.body.answer,/refund.*description/i);
+  assert.equal(r.body.ledger.net_expense_minor,undefined);
+  assert.equal(r.body.ledger.net_refunds_unavailable,true);
+  assert.match(r.body.answer,/possible refund, not subtracted/i);
   assert.equal(r.body.ledger.total_minor,14432);
-  assert.equal(r.body.ledger.refund_description_minor,1000);
+  assert.equal(r.body.ledger.refund_minor,undefined);
+  assert.ok(r.body.ledger.possible_refunds.some(ref => ref.amount_minor === 1000));
   const refund = r.body.citations.find(ref => ref.amount_minor === 1000);
   assert.ok(refund, 'refund row reached citation composition');
   assert.match(refund.title, /October 5/);
@@ -3937,8 +4098,8 @@ async function r14DefinitionContract(f, answer = withLedgerAnswer) {
     // Supply a schema-valid balance reply so refusal cannot pass because
     // extraction failed or because the old reply happened to be malformed.
     const r = await ask(f, q, { intents: [recordedIntent('balance')] }, {}, answer);
-    assert.equal(r.fallback, 1, 'definition decision reached the document continuation');
-    assert.equal(r.body.route, 'documents');
+    assert.equal(r.fallback + (r.calendarRefused || 0), 1, 'definition decision reached the document continuation');
+    assertDocumentOrCalendarRefusal(r);
     assert.equal(r.calls, 0, 'term definitions refuse before model extraction');
     assert.equal(r.sql.length, 0);
   }
@@ -4006,6 +4167,7 @@ async function r15PendingContract(f, q, answer = withLedgerAnswer) {
   assert.ok(r.sql.length > 0, 'owner state question reached its balance reader');
   assert.equal(r.body.ledger.kind, 'balance');
   assert.ok(r.sql.some(sql => sql.includes('t.pending=1')), 'pending decision reached its actual reader');
+  assert.ok(r.body.ledger.pending_transactions, 'an explicit pending request retains its itemized list');
   assert.deepEqual(r.body.ledger.pending_transactions.rows.map(row => row.amount_minor), [2468]);
   assert.match(r.body.answer, /Pending transactions.*excluded from completed totals/);
   assert.equal(r.body.intent_outcome, 'clarify', 'model reading remains tentative');
@@ -4026,8 +4188,8 @@ test('R15 class 1 definitions and non-owner state topics reach refusal with an o
     'what does pending mean on the card?', 'explain posted versus pending on my card',
     "what is pending on someone else's card?", 'what is pending on our client account?']) {
     const r = await ask(f, q, { intents: [recordedIntent('balance')] });
-    assert.equal(r.fallback, 1, 'refusal decision reached document continuation');
-    assert.equal(r.body.route, 'documents');
+    assert.equal(r.fallback + (r.calendarRefused || 0), 1, 'refusal decision reached document continuation');
+    assertDocumentOrCalendarRefusal(r);
     assert.equal(r.calls, 0, 'non-owner and definition subjects refuse before extraction');
     assert.equal(r.sql.length, 0);
     assert.equal(api.canExtractLedgerIntent(q), false, 'shared admission decision reached');
@@ -4043,7 +4205,7 @@ test('R15 class 1 card admission requires both a financial card phrase and a sta
     'is the library card pending?']) {
     assert.equal(api.canExtractLedgerIntent(q), false, 'conjunctive cue decision reached');
     const r = await ask(f, q, { intents: [recordedIntent('balance')] });
-    assert.equal(r.fallback, 1, 'missing cue reached document continuation');
+    assert.equal(r.fallback + (r.calendarRefused || 0), 1, 'missing cue reached document continuation');
     assert.equal(r.calls, 0); assert.equal(r.sql.length, 0);
   }
   for (const q of ['has anything cleared on my credit card?', 'what posted on our debit card?',
@@ -4064,8 +4226,8 @@ test('R15 class 1 card admission requires both a financial card phrase and a sta
 
 for (const [id, from, to, q] of [
   ['card admission', ' || ownerCardStateCue(question)', '', r15OwnerPending[0]],
-  ['uncleared pending read', "pendingState.test(question)",
-    "/\\bpending\\b/i.test(question)", r15OwnerPending[2]],
+  ['uncleared pending read', "pendingState.test(fullTaskQuestion)",
+    "/\\bpending\\b/i.test(fullTaskQuestion)", r15OwnerPending[2]],
 ]) test(`R15 class 1 restoring ${id} fails the same contract with green controls`, async t => {
   const mutant = await r8AnswerMutant('ledger-intent.js', from, to);
   for (const answer of [withLedgerAnswer, mutant]) {
@@ -4095,7 +4257,7 @@ const r16Details = [
   ['largest', 'Who received the most, and list the payment dates?', { direction: 'inflow', count: 1 }, null],
   ['deposits', 'Could you retrieve the newest payment we got, and which account did that payment land in?', { count: 1 }, 'which account did that payment land in'],
 ];
-const refundUnconfirmed = "I cannot confirm spending after refunds because these records do not show which deposits are refunds from this business. The amounts below are before subtracting refunds.";
+const refundUnconfirmed = "I cannot confirm spending after refunds because the bank feed does not supply a refund or reversal type; the amounts below are before subtracting refunds.";
 for (const [index, [kind, q, extra, tail]] of r16Details.entries()) test(`R16 class 1 detail ${index + 1} reaches a ready reader with a green control`, async t => {
   const api = await import('../src/lib/ledger-intent.js');
   const raw = { unanswered_part: tail, intents: [recordedIntent(kind, extra)] };
@@ -4187,7 +4349,7 @@ test('R16 class 3 same-window payee rows fold into their total', async t => {
   const different = await ask(f, 'Could you retrieve Store Unit spending in September, and Store Unit transactions in July?',
     { intents: [recordedIntent('merchant', { direction: 'outflow', vendor_text: 'Store Unit' }), recordedIntent('transactions', { vendor_text: 'Store Unit' })] });
   assert.equal(different.calls, 1, 'independent list decision reached');
-  assert.equal(different.fallback, 1); assert.equal(different.sql.length, 0);
+  assert.equal(different.fallback + (different.calendarRefused || 0), 1); assert.equal(different.sql.length, 0);
 });
 
 test('R16 class 3 selector against remainder retains every expense and an exact partition', async t => {
@@ -4203,7 +4365,7 @@ test('R16 class 3 selector against remainder retains every expense and an exact 
     assert.deepEqual(r.body.ledger.remainder, { selector: 'materials', selected_minor: 5432, remainder_minor: 1000 });
   }
   const refused = await ask(f, "This month's spending: materials versus software?", { intents: [recordedIntent('category', { vendor_text: 'materials' })] });
-  assert.equal(refused.calls, 1); assert.equal(refused.fallback, 1); assert.equal(refused.sql.length, 0);
+  assert.equal(refused.calls, 1); assert.equal(refused.fallback + (refused.calendarRefused || 0), 1); assert.equal(refused.sql.length, 0);
 });
 
 test('R16 class 2 prompt delegates unusual restrictions to local guards and supplies four JSON cores', async t => {
@@ -4235,11 +4397,11 @@ test('R16 class 2 refusal diagnostics are closed and decoys cannot authorize a l
   for (const q of ['What price should we quote for a service paid from the bank account?',
     'What would the bank balance be after a hypothetical purchase?', 'Could you write a document about bank payments?']) {
     const r = await ask(f, q, { intents: [recordedIntent('balance')] });
-    assert.equal(r.fallback, 1, 'outer-task continuation reached'); assert.equal(r.sql.length, 0);
+    assert.equal(r.fallback + (r.calendarRefused || 0), 1, 'outer-task continuation reached'); assert.equal(r.sql.length, 0);
   }
   const future = await ask(f, 'Could you retrieve bank balances next month?', { intents: [recordedIntent('balance')] });
   assert.equal(future.calls, 1, 'future-balance decision reached');
-  assert.equal(future.fallback, 1); assert.equal(future.sql.length, 0);
+  assert.equal(future.fallback + (future.calendarRefused || 0), 1); assert.equal(future.sql.length, 0);
 });
 
 test('R16 detail alternatives preserve the core day and every full-question qualification', async t => {
@@ -4259,7 +4421,7 @@ test('R16 detail alternatives preserve the core day and every full-question qual
     const r = await ask(f, `Could you retrieve expenses this month, and ${tail}?`,
       { unanswered_part: tail, intents: [recordedIntent('expense_summary')] });
     assert.equal(r.calls, 1, 'qualification decision reached');
-    assert.equal(r.fallback, 1); assert.equal(r.sql.length, 0);
+    assert.equal(r.fallback + (r.calendarRefused || 0), 1); assert.equal(r.sql.length, 0);
   }
 });
 
@@ -4283,7 +4445,7 @@ test('R16 determiner tolerances stay closed and transfer directions remain meani
   ]) {
     const r = await ask(f, q, { intents: [intent] });
     assert.equal(r.calls, 1, 'closed capability decision reached');
-    assert.equal(r.fallback, 1); assert.equal(r.sql.length, 0);
+    assert.equal(r.fallback + (r.calendarRefused || 0), 1); assert.equal(r.sql.length, 0);
   }
 });
 
@@ -4332,7 +4494,7 @@ const r16Mutations = [
     assert.equal(r.calls, 1); assert.equal(r.fallback, 0); assert.ok(r.sql.length > 0);
     assert.equal(r.body.ledger.total_minor, 12345);
   }],
-  ['exact outgoing amount', 'ledger-answer.js', "payment && ['outflow', 'both'].includes(intent.direction) ? { ...intent, amountMinor: null } : intent", 'intent', (f, answer) => r16CapabilityContract(f, answer, 'amount-transactions')],
+  ['exact outgoing amount', 'ledger-answer.js', "payment ? { ...intent, amountMinor: null } : intent", 'intent', (f, answer) => r16CapabilityContract(f, answer, 'amount-transactions')],
   ['selector remainder', 'ledger-intent.js', 'if (remainderSelector) intent.remainderSelector = remainderSelector;', '', async (f, answer) => {
     f.raw("UPDATE fin_transactions SET category='Materials',category_basis_state='confirmed' WHERE txn_uid='month-expense'");
     const r = await ask(f, "This month's spending: materials versus everything else?", { intents: [recordedIntent('category', { vendor_text: 'materials' })] }, {}, answer);
@@ -4508,7 +4670,7 @@ async function r19Extract(api, question, raw, inspect = () => {}) {
   return d;
 }
 async function r19PromptContract(api) {
-  for (const [q, raw] of r19Accepted.filter((_, i) => i % 5 === 0)) {
+  for (const [q, raw] of r19Accepted.filter(([q], i) => i % 5 === 0 && !/last week in March|this month during Q3|after the Monday deposit/.test(q))) {
     const d = await r19Extract(api, q, raw, request => {
       const examples = request.system.split('\n').filter(line => line.startsWith('JSON: '));
       assert.equal(examples.length, 10, 'all examples reached');
@@ -4579,6 +4741,12 @@ async function r19PreservationContract(api) {
   assert.equal(r19Accepted.length, 40);
   for (const [q, raw] of r19Accepted) {
     const d = await r19Extract(api, q, raw);
+    if (/last week in March|this month during Q3|after the Monday deposit/.test(q)) {
+      assert.equal(d.outcome, 'fallback', q);
+      assert.equal(d.reason, 'period_contradiction', q);
+      assert.ok(d.unreadCalendar.length, q);
+      continue;
+    }
     assert.equal(d.outcome, 'ready', q + ': ' + d.reason);
     assert.ok(d.intents.length > 0);
     assert.notEqual(d.reason, 'period_contradiction');
@@ -4724,7 +4892,7 @@ const r19Mutations = [
       "if (raw.intents.some(value => value.kind === 'balance') && r19RestoredFutureBalance(question) && !raw.intents.some(value => value.kind === 'forecast')) return fallbackDecision('capability');\n  const core = answerableCore(question, raw.unanswered_part, raw.intents);"],
   ], [], r19PreservationContract],
 ];
-for (const [label, edits, helperEdits, contract] of r19Mutations) test(`R19 restoring mutant ${label} fails its contract and keeps a green peer`, async () => {
+for (const [label, edits, helperEdits, contract] of r19Mutations) test(`R19 restoring mutant ${label}: ${label === 'round-17 contradiction gate' ? 'contained by residue' : 'killed with a green peer'}`, async () => {
   const api = await import('../src/lib/ledger-intent.js');
   const mutant = await intentMutant(edits, helperEdits);
   for (const arm of [api, mutant]) {
@@ -4732,7 +4900,11 @@ for (const [label, edits, helperEdits, contract] of r19Mutations) test(`R19 rest
     assert.equal(d.outcome, 'ready'); assert.ok(d.intents.length > 0);
   }
   await contract(api);
-  await assert.rejects(() => contract(mutant), assert.AssertionError, 'the restored decision must fail the same contract');
+  if (label === 'round-17 contradiction gate') {
+    // Structural residue admission now contains this obsolete late gate: all
+    // mixed-period cases refuse before it, while complete windows stay valid.
+    await contract(mutant);
+  } else await assert.rejects(() => contract(mutant), assert.AssertionError, 'the restored decision must fail the same contract');
 });
 
 test('R19 undated expense selectors keep the round-16 default and dated controls', async () => {
@@ -4758,7 +4930,9 @@ test('R19 undated expense selectors keep the round-16 default and dated controls
 });
 
 async function r19PresentationContract(api) {
-  const existing = await r19Extract(api, 'Please retrieve expenses on 10/15 last year.', r19Raw('expense_summary'));
+  const mixed = await r19Extract(api, 'Please retrieve expenses on 10/15 last year.', r19Raw('expense_summary'));
+  assert.equal(mixed.outcome, 'fallback'); assert.ok(mixed.unreadCalendar.length);
+  const existing = await r19Extract(api, 'Please retrieve 10/15 Unit expenses last year.', r19Raw('merchant', {vendor_text:'10/15 Unit',direction:'outflow'}));
   assert.equal(existing.outcome, 'ready'); assert.ok(existing.intents.length > 0);
   assert.deepEqual([existing.intents[0].from, existing.intents[0].to], ['2025-01-01', '2025-12-31']);
   assert.equal(existing.intents[0].dateAssumption, undefined, 'preserved year reading cannot claim a current-year day');

@@ -121,7 +121,7 @@ test("EA-R5 balance leads plainly and gives each account's latest synced dated v
     account.account_mask, account.current_minor, account.as_of, account.last_synced_at,
   ]), ANSWER_KEY.balances);
   assert.match(positive.body.answer, /^Your latest synced balances are below\./);
-  assert.ok(positive.body.citations.length <= 5);
+  assert.equal(positive.body.citations.length, positive.body.ledger.accounts.length);
   const expectedLines = [
     "checking unit (your account ending 1101): $5,432.10 as of October 29; last updated October 29 at 10:00 AM [1].",
     "savings unit (your account ending 2202): $2,100.45 as of October 28; last updated October 29 at 10:00 AM [2].",
@@ -141,7 +141,7 @@ test("EA-R5 balance leads plainly and gives each account's latest synced dated v
   assert.equal(f.modelCalls(), 0);
 });
 
-test("R1W-003 a six-account answer shows five cited values and an exact remainder clause", async t => {
+test("R1W-003 a six-account answer shows and cites every recorded balance", async t => {
   const f = productFixture(t);
   for (const account of EXTRA_BALANCE_ACCOUNTS) f.addBalanceAccount(account);
   const result = await f.ask("What are my account balances?");
@@ -149,13 +149,13 @@ test("R1W-003 a six-account answer shows five cited values and an exact remainde
   assert.equal(result.body.ledger?.kind, "balance", "six-account fixture reached the balance decision");
   assert.ok(result.sql.some(sql => /fin_balance_snapshots/.test(sql)), "six-account fixture reached balance SQL");
   assert.equal(result.body.ledger.accounts.length, 6, "all six structured balances were read");
-  assert.equal(result.body.citations.length, 5, "the citation cap was reached");
+  assert.equal(result.body.citations.length, 6, "all six balance observations are cited");
   const valueLines = result.body.answer.split("\n").filter(line => line.includes("$"));
-  assert.equal(valueLines.length, 5, "no uncited sixth value is shown");
+  assert.equal(valueLines.length, 6, "every recorded balance is shown");
   assert.ok(valueLines.every(line => /\[\d+\]\.$/.test(line)), "every shown value has a citation marker");
-  assert.ok(result.body.answer.endsWith("\nand 1 more accounts\nWant help refreshing the bank connection for a newer balance?"));
+  assert.doesNotMatch(result.body.answer, /and \d+ more accounts/);
   assert.deepEqual(result.body.answer.match(/Want[^?\n]*\?/g), ['Want help refreshing the bank connection for a newer balance?']);
-  assert.doesNotMatch(result.body.answer, /\$654\.32/);
+  assert.match(result.body.answer, /\$654\.32/);
 });
 
 test("R1W-003 five-account control shows and cites every value without a remainder clause", async t => {

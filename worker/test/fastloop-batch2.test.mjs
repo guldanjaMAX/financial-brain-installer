@@ -121,7 +121,7 @@ test('D6 exact-vendor absence, possible matches and partial coverage stay scoped
   assert.ok(absent.trace.rows_read.length > 0);
   assert.equal(absent.body.ledger.match_basis, 'none');
   assert.equal(absent.body.ledger.total_minor, null);
-  assert.match(absent.body.answer, /^I checked July 31 to October 31, but no payee exactly matched "Absent Store", so no store total is confirmed\. Closest payee names: Store Three; Store Five; Store Four\.$/m);
+  assert.equal(absent.body.answer, 'No charges found for Absent Store from 2026-07-31 to 2026-10-31 on your account ending 3131, your account ending 4242, your account ending 5353.');
   assert.doesNotMatch(absent.body.answer, /never used|\$0\.00/i);
   const possible = one('D6/months', null, s => { s.rows[0].payee = null; s.rows[0].description = 'Card purchase at Store One'; });
   assert.ok(possible.trace.rows_read.some(r => r.id === 1));
@@ -143,14 +143,25 @@ test('D7 near-date checks both inclusive boundaries, amount, explicit payer and 
   const q = 'Did a payment of $177.77 from Payer Unit come in around October 12, 2026?';
   for (const [date, payee, cents, found] of [
     ['2026-10-05', 'Payer Unit', '17777', true], ['2026-10-19', 'Payer Unit', '17777', true],
-    ['2026-10-04', 'Payer Unit', '17777', false], ['2026-10-20', 'Payer Unit', '17777', false],
+    ['2026-10-04', 'Payer Unit', '17777', null], ['2026-10-20', 'Payer Unit', '17777', null],
     ['2026-10-12', 'Other Payer', '17777', null], ['2026-10-12', 'Payer Unit', '17778', null],
   ]) {
     const o = one('D7/payer', q, s => { s.rows = [{ ...s.rows[8], date, payee, cents }]; });
     assert.ok(o.trace.dependencies.includes('transactions'));
     assert.equal(o.body.ledger.found, found, `${date}/${payee}/${cents}`);
     assert.match(o.body.answer, /October 5 to 19/);
-    if (found !== true) assert.doesNotMatch(o.body.answer, /Found a deposit/);
+    if (found !== true) {
+      assert.doesNotMatch(o.body.answer, /Found a deposit/);
+      assert.equal(o.body.ledger.total_minor, null);
+      if (payee === 'Other Payer') {
+        assert.equal(o.body.ledger.match_basis, 'possible');
+        assert.deepEqual(o.body.citations.map(ref => ref.amount_minor), [17777]);
+        assert.match(o.body.answer, /POSSIBLE match/);
+      } else {
+        assert.deepEqual(o.body.citations, []);
+        assert.match(o.body.answer, /No deposit of \$177\.77/);
+      }
+    }
   }
   contract(run.observations.find(o => o.id === 'D7/ambiguous'));
 });
@@ -176,7 +187,7 @@ test('D9 unproved transfer stays in the scoped total and is flagged', () => {
   assert.equal(o.body.ledger.combined_inflow_minor, 74611);
   assert.equal(o.body.ledger.income_established, false);
   assert.equal(o.body.ledger.transfer_related_credit_citations.length, 1);
-  assert.match(o.body.answer, /Transfer-related credits \(included; ownership not assumed\)/);
+  assert.match(o.body.answer, /Possible own transfer.*"Transfer from investment account" \[\d+\]/);
 });
 
 test('D9 repeated masks cannot mix account citation membership', () => {
@@ -313,15 +324,25 @@ function duplicateMaskProbe(typed, duplicate, sourceOverrides = {}) {
     if (duplicate) s.accounts[1].mask = '4242';
   }, sourceOverrides);
 }
-function uncertainRepayment(o) {
+function uncertainRepayment(o, typed = false) {
   assert.ok(o.trace.rows_read.some(r => r.id === 7), 'repayment decision reached');
   assert.equal(o.body.ledger.own_account_payments.total_minor, 0);
-  assert.equal(o.body.ledger.expense_total_minor, 101000);
+  assert.equal(o.body.ledger.expense_total_minor, typed ? 61000 : 101000);
+  if (typed) {
+    // The ending still proves no owner. Explicit loan-payment text nominates
+    // a cited candidate without adding it to certified ordinary spending.
+    assert.equal(o.body.ledger.possible_payments.length, 1);
+    const candidate = o.body.ledger.possible_payments[0];
+    assert.equal(candidate.payment_kind, 'loan');
+    assert.equal(candidate.amount_minor, 40000);
+    assert.ok(o.body.citations.some(c => c.n === candidate.n && c.ref === 'ledger:transaction:7' && c.amount_minor === 40000));
+    assert.ok(o.body.answer.includes('possible loan payment, not counted as spending: $400.00'));
+  } else assert.equal(o.body.ledger.possible_payments, undefined);
 }
 test('RB2-05 stated kind cannot resolve duplicate masks', () => {
   assert.equal(duplicateMaskProbe(true, false).body.ledger.own_account_payments.total_minor, 40000);
   uncertainRepayment(duplicateMaskProbe(false, true));
-  uncertainRepayment(duplicateMaskProbe(true, true));
+  uncertainRepayment(duplicateMaskProbe(true, true), true);
 });
 function unknownExpense(sourceOverrides = {}) {
   return one('gross/control', 'What are my expenses?', s => {
@@ -377,11 +398,11 @@ test('RB2-01 restoring payer token containment fails the same identity contract'
 });
 test('RB2-05 restoring kind-first filtering fails the same duplicate-mask contract', () => {
   assert.equal(duplicateMaskProbe(true, false).body.ledger.own_account_payments.total_minor, 40000);
-  uncertainRepayment(duplicateMaskProbe(true, true));
+  uncertainRepayment(duplicateMaskProbe(true, true), true);
   const overrides = restoreSource('ledger-analysis.js',
     '.filter(account => (account.members || []).some(member =>',
     '.filter(account => (!statedKind || statedKind === account.account_kind) && (account.members || []).some(member =>');
-  assert.throws(() => uncertainRepayment(duplicateMaskProbe(true, true, overrides)), { name: 'AssertionError' });
+  assert.throws(() => uncertainRepayment(duplicateMaskProbe(true, true, overrides), true), { name: 'AssertionError' });
 });
 test('RB2-06 restoring coverage-only completeness fails the same expense contract', () => {
   assert.equal(duplicateMaskProbe(true, false).body.ledger.complete, true);

@@ -57,16 +57,25 @@ jobs:
           dotnet-version: 10.0.401
       - name: test Windows installer source and refusal gates
         shell: powershell
-        run: node --test test/machine-prep-installers.test.mjs test/machine-prep.test.mjs
+        run: node --test test/windows-payload.test.mjs test/machine-prep-installers.test.mjs test/machine-prep.test.mjs
       - name: build and inspect unsigned Windows MSI
         shell: powershell
         run: |
-          dotnet build machine-prep/installers/windows/FinancialBrainMachinePrep.wixproj --configuration Release -p:WixOsmfConfirmed=true
+          $buildNode = (Get-Command node -CommandType Application | Select-Object -First 1).Source
+          $npmCli = Join-Path (Split-Path $buildNode) 'node_modules/npm/bin/npm-cli.js'
+          & $buildNode $npmCli ci --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency preparation failed' }
+          $payloadRoot = Join-Path $PWD '.lane-scratch/windows-payload'
+          & $buildNode machine-prep/installers/windows/build-payload.mjs $PWD $payloadRoot $npmCli $env:GITHUB_SHA
+          if ($LASTEXITCODE -ne 0) { throw 'Exact Windows payload staging failed' }
+          $payloadVersion = (Get-Content -Raw package.json | ConvertFrom-Json).version
+          dotnet build machine-prep/installers/windows/FinancialBrainMachinePrep.wixproj --configuration Release -p:WixOsmfConfirmed=true "-p:PayloadBuildNode=$buildNode" "-p:PayloadRoot=$payloadRoot/payload" "-p:PayloadVersion=$payloadVersion"
+          if ($LASTEXITCODE -ne 0) { throw 'Payload MSI build failed' }
           $msi = Get-ChildItem machine-prep/installers/windows/bin -Filter *.msi -Recurse | Select-Object -First 1
           if (-not $msi) { throw "WiX build did not produce an MSI" }
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           Copy-Item -LiteralPath $msi.FullName -Destination dist/FinancialBrainMachinePrep-unsigned.msi
-          & machine-prep/installers/windows/verify-msi.ps1 dist/FinancialBrainMachinePrep-unsigned.msi
+          & machine-prep/installers/windows/verify-msi.ps1 dist/FinancialBrainMachinePrep-unsigned.msi -PayloadRoot "$payloadRoot/payload"
           Get-FileHash -Algorithm SHA256 dist/FinancialBrainMachinePrep-unsigned.msi
       - name: upload unsigned Windows MSI only
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

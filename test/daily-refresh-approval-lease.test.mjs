@@ -117,15 +117,9 @@ async function run(race, mutateBeforeStart = false) {
   const result = await capture(() => runDailyRefreshCli(path, settings));
   const mutation = pending ? await pending : null;
   // A handled stale-definition refusal must release the real lease too.
-  // Known Windows limitation, tracked for 0.4.27: release can leave the emptied
-  // lock directory behind (Windows refuses the directory removal for a moment
-  // and release does not retry it), so an immediate re-acquire reports the lock
-  // as still being acquired. The re-acquire proof runs on macOS and Linux.
-  if (process.platform !== "win32") {
-    const next = acquireBrainLifecycleLock({ manifestPath: path, operation: "load", home, machineLockRoot });
-    next.assertOwned();
-    next.release();
-  }
+  const next = acquireBrainLifecycleLock({ manifestPath: path, operation: "load", home, machineLockRoot });
+  next.assertOwned();
+  next.release();
   const sources = JSON.parse(readFileSync(path, "utf8")).corpora.upload.folders.map((entry) => entry.source);
   const expected = renderCliCommands(`brain daily on ${quotePosixArgument(path)}`, { platform: "darwin" });
   return {

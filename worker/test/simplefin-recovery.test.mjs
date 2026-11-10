@@ -40,6 +40,9 @@ async function connected(f) {
   });
   assert.equal(claim.status, 201);
   assert.equal(claims, 1);
+  // These recovery cases exercise the historical cursor after discovery.
+  // The separate business suite proves the initial recent-history window.
+  f.raw("UPDATE bank_feed_items SET last_synced_at=?", NOW);
   return claim.body.item_ref;
 }
 async function assign(f) {
@@ -305,6 +308,17 @@ test("RR-02: concurrent incomplete staging cannot race a backfill completion mar
   const originalPrepare = f.env.DB.prepare.bind(f.env.DB);
   const originalBatch = f.env.DB.batch.bind(f.env.DB);
   let completionReached = 0, chunks = 0;
+  const windows = [];
+  const corrected = payload(123);
+  for (const row of corrected.accounts[0].transactions.slice(2)) row.posted = Date.parse('2025-01-10T12:00:00Z') / 1000;
+  const provider = async request => {
+    const url = new URL(request.url), from = Number(url.searchParams.get('start-date')), to = Number(url.searchParams.get('end-date'));
+    windows.push([from, to]);
+    const value = structuredClone(corrected);
+    value.accounts[0].transactions = value.accounts[0].transactions.filter(row => row.posted >= from && row.posted < to);
+    assert.equal(value.accounts[0].transactions.length, 121, 'nonempty next-window source reaches interruption and recovery');
+    return response(value);
+  };
   try {
     await connected(f);
     f.raw("UPDATE simplefin_connections SET backfill_end='2024-12-31'");
@@ -324,7 +338,7 @@ test("RR-02: concurrent incomplete staging cannot race a backfill completion mar
               }
               return originalBatch(statements);
             };
-            assert.equal((await pull(f, payload(123))).items[0].ok, false);
+            assert.equal((await pull(f, null, provider)).items[0].ok, false);
           }
           return bound.run();
         } };
@@ -337,8 +351,10 @@ test("RR-02: concurrent incomplete staging cannot race a backfill completion mar
       "completion must recheck pending revisions in its write transaction");
     ledger(f, 2);
     f.env.DB.prepare = originalPrepare; f.env.DB.batch = originalBatch; due(f);
-    assert.equal((await pull(f, payload(123))).items[0].ok, true);
+    assert.equal((await pull(f, null, provider)).items[0].ok, true);
     ledger(f, 123);
+    assert.deepEqual(windows, Array.from({ length: 2 }, () => [Date.parse('2025-01-01T00:00:00Z') / 1000,
+      Date.parse('2025-04-01T00:00:00Z') / 1000]), 'interrupted next history interval is retried exactly');
     assert.equal(f.first("SELECT state FROM bank_feed_backfill").state, "complete");
   } finally { f.env.DB.prepare = originalPrepare; f.env.DB.batch = originalBatch; f.close(); }
 });

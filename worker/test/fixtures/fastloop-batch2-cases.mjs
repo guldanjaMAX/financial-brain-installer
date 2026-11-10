@@ -25,7 +25,7 @@ export const cases = [
   make('D10/forecast', 'What will my bank balance be next month?'),
   make('D10/control', 'What are my account balances?'),
   make('Q6/control', 'Show my last ten transactions.', 'RECENT'),
-  make('gross/control', 'How much money came in and went out this month?', 'MTD'),
+  make('gross/control', 'How much money came in and went out this month including transfers?', 'MTD'),
 ];
 export function snapshotFor(c) {
   const snapshot = evidence(c.profile);
@@ -42,7 +42,7 @@ export function snapshotFor(c) {
 export const restoringMutants = [
   ['D5', 'D5/bank', 'ledger-question.js', 'if (balanceAlias || forecastSnapshot)', 'if (forecastSnapshot)'],
   ['D6', 'D6/months', 'ledger-question.js', '{ allowVendorWindow: true }', '{ allowVendorWindow: false }'],
-  ['D7', 'D7/payer', 'ledger-question.js', 'if (around.length) rest = rest.replace(/\\baround\\b/, "");', 'if (false) rest = rest.replace(/\\baround\\b/, "");'],
+  ['D7', 'D7/payer', 'ledger-question.js', 'if (around.length) claim("date", around[0]);', 'if (false) claim("date", around[0]);'],
   ['D8', 'D8/monthly', 'ledger-question.js', 'what do i pay for every month|', ''],
   ['D9', 'D9/combined', 'ledger-answer.js', 'if (intent.kind === "totals" && intent.inflowOnly)', 'if (false)'],
   ['D10', 'D10/forecast', 'ledger-question.js', 'if (balanceAlias || forecastSnapshot)', 'if (balanceAlias)'],

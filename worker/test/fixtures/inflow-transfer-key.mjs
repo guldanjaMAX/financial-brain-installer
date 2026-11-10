@@ -18,7 +18,8 @@ export function contract(o) {
   assert.equal(l.kind, 'totals');
   assert.deepEqual([l.from, l.to], ['2026-09-01', '2026-09-30']);
   const scoped = ['uncovered', 'scoped'].includes(id);
-  const combined = scoped ? 12500 : id === 'ambiguous-in' ? 49681 : id === 'two-pairs' ? 45181 : 37181;
+  // Gross posted inflows do not depend on transfer membership.
+  const combined = scoped ? 12500 : id === 'two-pairs' ? 45181 : id === 'ambiguous-in' ? 49681 : 37181;
   const total = id === 'two-pairs' ? 20500 : matched.has(id) ? 12500 : 0;
   const pairs = id === 'two-pairs' ? [[101, 102, 12500], [201, 202, 8000]]
     : matched.has(id) ? [[101, 102, 12500]] : [];
@@ -79,17 +80,16 @@ export function contract(o) {
   }
   const amounts = displayFigures(b.answer).map(a => Number(a.cents));
   assert.deepEqual(amounts.slice(0, 3), [combined, total, combined - total], 'all three lead figures');
+  const outgoing = ['boundary-before', 'boundary-after', 'boundary-competition', 'unmatched-credit', 'pending-out'].includes(id) ? 0 : id === 'ambiguous-out' ? 25000 : id === 'cent' ? 12501 : id === 'two-pairs' ? 20500 : 12500;
   const accountAmounts = scoped ? [12500, 0]
-    : id === 'same-account' ? [37181, 12500, 0, 0, 0, 0]
-      : [24681, ['boundary-before', 'boundary-after', 'boundary-competition', 'unmatched-credit', 'pending-out'].includes(id)
-        ? 0 : id === 'ambiguous-out' ? 25000 : id === 'cent' ? 12501 : id === 'two-pairs' ? 20500 : 12500,
-        0, 0, id === 'ambiguous-in' ? 25000 : id === 'two-pairs' ? 20500 : 12500, 0];
-  assert.deepEqual(amounts.slice(3), accountAmounts, 'unchanged gross account figures');
+    : id === 'same-account' ? [37181, outgoing, 0, 0, 0, 0]
+      : [24681, outgoing, 0, 0, combined - 24681, 0];
+  assert.deepEqual(amounts.slice(3), accountAmounts, 'gross account figures');
   const pairRefs = used.map(n => `[${n}]`).join(' ');
   const expectedLead = [
-    `Combined recorded inflow: ${fmt(combined)} across ${scoped ? 1 : 3} selected covered accounts, 2026-09-01 through 2026-09-30; not established income.`,
+    `Combined recorded inflow: ${fmt(combined)} gross across ${scoped ? 1 : 3} selected covered accounts, 2026-09-01 through 2026-09-30; not established income.`,
     `Matched transfers between your own accounts: ${fmt(total)} across ${pairs.length} ${pairs.length === 1 ? 'pair' : 'pairs'}${pairRefs ? ` ${pairRefs}` : ''}.`,
-    `Inflow from outside your covered accounts: ${fmt(combined - total)} (recorded inflow minus matched transfers; unmatched credits may include unproved own-account moves).`,
+    `Inflow from outside your covered accounts: ${fmt(combined - total)} (recorded gross inflow minus matched own transfers; includes any possible own transfer listed below).`,
     'Transfers are counted by the inflow posting date; counterpart outflows may fall up to 3 days before or after it.',
   ];
   assert.deepEqual(b.answer.split('\n').slice(0, 4), reviewedPlainCopy(expectedLead.join('\n')).split('\n'), 'closed lead prose contract');
@@ -105,11 +105,15 @@ export function contract(o) {
     ? id === 'ambiguous-in' ? [102, 104] : [102] : [];
   const uncertainRefs = uncertainIds.map(rowId => ids.indexOf(rowId) + 1);
   assert.deepEqual(l.transfer_related_credit_citations, uncertainRefs);
-  assert.equal(b.answer, reviewedFinalOffer(reviewedPlainCopy([...expectedLead, ...accountLines,
+  assert.equal(b.answer, reviewedFinalOffer(reviewedPlainCopy([...expectedLead, ...l.matched_own_transfers.pairs.map(p => `Matched own transfer pair: outgoing [${p.outgoing_citation}]; incoming [${p.incoming_citation}].`), ...accountLines,
     'Source and own-account transfer status are not established by a payer label; uncertain credits remain included.',
-    ...(uncertainRefs.length ? [`Transfer-related credits (included; ownership not assumed): ${uncertainRefs.map(n => `[${n}]`).join(' ')}.`] : []),
+    ...uncertainRefs.map(n => {
+      const text = id === 'refund' ? 'Refund from checking 3131' : id === 'one-direction' ? 'Unclassified credit' : 'Transfer from checking 3131';
+      return `Possible own transfer (included in recorded and outside inflow): "${text}" [${n}].`;
+    }),
     `Accounts: ${selectedAccounts.map(([, mask]) => `account ****${mask}`).join(', ')}; 2026-09-01 through 2026-09-30; ${selectedAccounts.map(([, mask]) => `account ****${mask}: covered through 2026-11-07`).join('; ')}.`,
     'Figures use recorded posted rows. Pending activity is not assessed here.',
+    ...(id === 'unknown-kind' ? ['Reserve account: not counted in cash or spending totals; account kind not confirmed (unconfirmed account type).'] : []),
   ].join('\n'))), 'closed complete factual prose contract');
   assert.doesNotMatch(b.answer, /\bprofit\b|\brevenue\b/i);
   if (id === 'boundary-before') assert.equal(citation(l.matched_own_transfers.pairs[0].outgoing_citation).posted_on, '2026-08-29');

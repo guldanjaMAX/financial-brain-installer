@@ -77,7 +77,7 @@ test("exact merchant prepositions outrank command-word vetoes without widening n
     "the existing command-word refusal remains a green control");
 });
 
-test("balance selectors resolve exact labels before aliases and syntactic kinds", async t => {
+test("balance selectors retain all label equivalents before syntactic kinds", async t => {
   const fixture = await ledgerFixture(t);
   for (const account of [
     { slug: `simplefin-${"a".repeat(32)}`, label: "Everyday Card", mask: "1111", amount: -12345,
@@ -98,10 +98,18 @@ test("balance selectors resolve exact labels before aliases and syntactic kinds"
   }
   const ambiguous = await fixture.ask("What is my Everyday Card balance?");
   assert.equal(ambiguous.ledger?.kind, "balance");
-  assert.deepEqual(ambiguous.ledger.accounts.map(account => account.account_mask), ["1111", "2222"]);
+  // R1 changes the balance identity contract: an exact label cannot hide an
+  // accepted kind-stripped equivalent, even when its recorded kind differs.
+  assert.deepEqual(ambiguous.ledger.accounts.map(account => [account.account_mask, account.current_minor]),
+    [["3333", -500], ["1111", -12345], ["2222", -6789]]);
   assert.match(ambiguous.answer, /Everyday Card.*1111[\s\S]*Everyday Card.*2222/);
-  assert.doesNotMatch(ambiguous.answer, /3333|4444/,
-    "exact label collisions outrank kind-stripped aliases and unrelated reviewed cards");
+  assert.match(ambiguous.answer, /Everyday.*3333/);
+  assert.match(ambiguous.answer, /separate candidates/);
+  assert.equal(ambiguous.ledger.observation.selection_complete, false);
+  assert.equal(ambiguous.ledger.complete, false);
+  assert.equal(ambiguous.evidence_gate.complete, false);
+  assert.equal(ambiguous.ledger.cash_only?.total_minor ?? null, null);
+  assert.doesNotMatch(ambiguous.answer, /4444/, "unrelated reviewed cards remain out of scope");
 
   const masked = await fixture.ask("What is the balance on my 4444?");
   assert.deepEqual(masked.ledger?.accounts.map(account => account.account_mask), ["4444"]);
@@ -285,7 +293,7 @@ test("named snapshot allow-lists still validate unrelated inventory atomically",
     "green control: the same structural selection succeeds when the inventory is stable");
 });
 
-test("SimpleFIN-shaped partial coverage returns a cited partial largest-expenses answer", async t => {
+test("SimpleFIN-shaped partial history refuses until the selected account covers the requested period", async t => {
   const fixture = await ledgerFixture(t);
   const slug = `simplefin-${"a".repeat(32)}`;
   fixture.addAccount({ slug, label: "Everyday Card", mask: null, kind: "other", role: "neither",
@@ -298,16 +306,22 @@ test("SimpleFIN-shaped partial coverage returns a cited partial largest-expenses
     fallbackCalls++;
     return Response.json({ answer: null, citations: [], gaps: [gap] });
   });
-  assert.equal(fallbackCalls, 0, "the ranked ledger answer does not disappear into document fallback");
+  assert.equal(fallbackCalls, 1, "the period refusal reaches the established fallback boundary");
   assert.ok(fixture.seen.sql.filter(sql => /FROM fin_accounts/.test(sql)).length > beforeInventory,
     "the production-shaped account reached the ledger coverage decision");
-  assert.equal(body.ledger?.kind, "largest");
-  assert.equal(body.ledger.complete, false);
-  assert.deepEqual(body.ledger.rows.map(row => row.amount_minor), [4500, 1200]);
-  assert.equal(body.citations.length, 2);
-  assert.match(body.answer, /^Here are the expenses I found in a partial ranking; the bank connection has not supplied every day in the requested period\.$/m);
-  assert.equal(body.gaps[0]?.code, "ledger_partial_coverage");
-  assert.equal(body.evidence_gate?.partial, true);
+  assert.equal(body.ledger ?? null, null);
+  assert.equal(body.citations.length, 0);
+  assert.equal(body.gaps[0]?.reason, "period_outside_coverage");
+  assert.equal(fixture.seen.sql.filter(sql => /json_each\(\?1\) m CROSS JOIN fin_transactions/.test(sql)).length, 0,
+    "no transaction ranking runs without a certified selected account");
+  // This policy deliberately replaces the unbounded feed-only exception.
+  // The identical posted rows remain readable after independent certification.
+  fixture.raw("UPDATE fin_account_coverage SET coverage_status='complete',basis_note='Fixture complete coverage.' WHERE account_slug=?", slug);
+  const covered = await fixture.ask("What were my 3 largest expenses this month?");
+  assert.equal(covered.ledger?.kind, "largest");
+  assert.deepEqual(covered.ledger.rows.map(row => row.amount_minor), [4500, 1200]);
+  assert.equal(covered.citations.length, 2);
+  assert.equal(covered.evidence_gate.complete, true);
 });
 
 async function captureAsk(body) {

@@ -1,6 +1,6 @@
 // Separate fact custodian. Membership is authored here, never learned from product output.
 import { sumRows, total } from '../../../eval/fast-loop/money-oracle.mjs';
-export const GOLD_VERSION = 'money-batch1-gold-v3';
+export const GOLD_VERSION = 'money-batch1-gold-v5';
 const facts = {
   1: { cents: '6000' }, 2: { cents: '5000' }, 3: { cents: '4000' },
   4: { cents: '3000' }, 5: { cents: '2000' }, 6: { cents: '1000' },
@@ -32,7 +32,8 @@ export const GOLD = {
   M05: expense({ require_posted_disclosure: true }),
   M06: expense({ classification_uncertain: true, answerability: 'clarify' }),
   M08: key('ranking', { ids: [8, 1, 2, 3, 4], cents: [8, 1, 2, 3, 4].map(id => facts[id].cents), excluded: [7, 12, 13],
-    repayment: '40000', repayment_ids: [7], gross_ids: [7, 8, 1, 2, 3], gross_cents: [7, 8, 1, 2, 3].map(id => facts[id].cents) }),
+    repayment: '40000', repayment_ids: [7], excluded_from_account_totals: [7],
+    gross_ids: [8, 1, 2, 3, 4], gross_cents: [8, 1, 2, 3, 4].map(id => facts[id].cents) }),
   M09: key('transactions', { ids: [1, 2, 3, 4, 5, 6, 11, 9, 8, 7],
     cents: ['-6000', '-5000', '-4000', '-3000', '-2000', '-1000', '3333', '17777', '-40000', '-40000'],
     dates: ['2026-10-25', '2026-10-24', '2026-10-23', '2026-10-22', '2026-10-21', '2026-10-20',
@@ -41,7 +42,7 @@ export const GOLD = {
   M11: key('absence', { ids: [], scope: 'exact structured payee in September only' }),
   M12: { ...balances, contract: 'forecast', answerability: 'partial', require_withholding: true },
   M16: key('repayment', { repayment: '40000', repayment_ids: [7], total: sumRows(facts, ordinary), included: ordinary }),
-  M17: key('vendor', { total: '40000', ids: [8] }),
+  M17: key('vendor', { total: '40000', ids: [8], excluded_from_account_totals: [7] }),
   M20: key('coverage', { answerability: 'partial', complete: false,
     accounts: ['3131', '5353', '4242'], from: '2026-09-01', to: '2026-09-30' }),
   'M01/supported': balances,
@@ -60,7 +61,10 @@ export const GOLD = {
   'M06/memo': expense(),
   'M06/reset': expense({ classification_uncertain: true, answerability: 'clarify' }),
   'M05/shorthand': expense(),
-  'M05/gross': key('gross', { debits: '101000', credits: '23332' }),
+  // An unpaired endpoint is possible ownership, not proof. Money out retains
+  // this posting and must cite its uncertainty; spending still excludes it.
+  'M05/gross': key('gross', { debits: '101000', credits: '23332', possible_payment_ids: [7],
+    ordinary_totals: true, ordinary_display: false, ordinary_excluded: [], ordinary_debits: '101000' }),
 };
 for (const [child, base] of [['M09/posted', 'M09'], ['M10/on', 'M10'], ['M11/exact', 'M11']]) GOLD[child] = GOLD[base];
 export function goldFor(id) {
@@ -87,5 +91,7 @@ export function goldFor(id) {
   if (result.classification_uncertain) obligations.push('unknown-classification-is-not-complete');
   if (result.require_roles) obligations.push('cash-and-liability-roles');
   if (result.require_combined) obligations.push('combined-scoped-receipts');
+  if (result.payment_exclusion_ids) obligations.push('payment-exclusions', 'payment-exclusions-disclosed');
+  if (result.possible_payment_ids) obligations.push('possible-payment-membership', 'possible-payment-included-total', ...result.possible_payment_ids.map(id => `possible-payment-disclosed:${id}`));
   return structuredClone({ ...result, required_obligations: obligations, fact_weight: 1 });
 }

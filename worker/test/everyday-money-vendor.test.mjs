@@ -132,7 +132,7 @@ test("EA-R3 vendor spend is one figure with exactly five requested-supplier cita
   assert.equal(f.modelCalls(), 0);
 });
 
-test("vendor payment exclusions require bilateral owned-liability evidence", async t => {
+test("vendor payment exclusions disclose exact owned-liability payments", async t => {
   for (const scenario of VENDOR_PAYMENT_EXCLUSION_CASES) await t.test(scenario.id, async st => {
     const f = productFixture(st, { accounts: scenario.accounts, transactions: scenario.rows });
     const result = await f.ask(`How much did I spend at ${scenario.selector} this month?`);
@@ -146,7 +146,14 @@ test("vendor payment exclusions require bilateral owned-liability evidence", asy
     assert.equal(result.body.citations.length, scenario.cited);
     assert.equal(result.body.ledger.excluded_own_movement_count, scenario.excludedOwnMovements);
     assert.equal(result.body.ledger.excluded_own_movement_minor, scenario.excludedOwnMovementMinor);
-    assert.equal(dollarFigures(result.body.answer).length, scenario.total === null ? 0 : 1);
+    if (scenario.paymentMinor) {
+      assert.equal(result.body.ledger.payment_exclusions.total_minor, scenario.paymentMinor);
+      assert.equal(result.body.ledger.payment_exclusions.count, 1);
+      assert.equal(result.body.ledger.payment_exclusions.rows[0].n, result.body.citations[0].n);
+      assert.equal(result.body.citations[0].amount_minor, scenario.paymentMinor);
+      assert.match(result.body.answer, /Payments to loans and cards/);
+    }
+    assert.equal(dollarFigures(result.body.answer).length, scenario.paymentMinor || scenario.total !== null ? 1 : 0);
     assert.equal(f.modelCalls(), 0);
   });
 });
@@ -193,7 +200,7 @@ test("vendor partial-coverage oracle keeps every supported figure bounded and pa
       assert.equal(result.body.ledger.complete, false);
       assert.equal(result.body.evidence_gate.complete, false);
       assert.equal(result.body.evidence_gate.partial, true);
-      assert.match(result.body.answer, /^Here is a partial subtotal for "[^"\n]+": the charges I can use total /);
+      assert.match(result.body.answer, /^Partial view using \d+ of \d+ accounts for October 1 to 29\. Covered accounts: [^\n]+\. Omitted accounts: [^\n]+; their bank history does not include every requested date\. This is not a total for all requested accounts\.\nHere is a partial subtotal for "[^"\n]+": the charges I can use total /);
       assert.match(result.body.answer, /^Here is a partial subtotal for "[^"\n]+": the charges I can use total \$[\d,.]+ in October 1 to 29; \d+ accounts? (?:is|are) missing some dates: your account ending \d{4}(?:, your account ending \d{4})*(?: \[\d+\])+(?: and \d+ more rows)?\.$/m);
     } else {
       assert.equal(result.body.ledger.total_minor, oracle.total);

@@ -12,6 +12,7 @@ export const VERDICTS = ['correct', 'partly', 'wrong figure', 'missing source', 
 // lines for the pinned comparison; do not admit a broader prose pattern.
 const PLAIN_ABSENCE = 'I can\'t give a total for "Absent Store" yet. No payee with that exact name was found from 2026-09-01 through 2026-09-30. The bank supplied no payee names for this period. Try: "What are my account balances?"';
 const PLAIN_LINES = new Set([
+  'No charges found for Absent Store from 2026-09-01 to 2026-09-30 on your account ending 3131, your account ending 4242, your account ending 5353.',
   PLAIN_ABSENCE,
   "I can't show your live or available cash. These balances were recorded earlier; check each account's date. Refresh the bank connection for a newer balance.",
   'Bank history: all 3 selected accounts include 2026-09-01 through 2026-09-30.',
@@ -29,6 +30,11 @@ const PLAIN_LINES = new Set([
 // The original figure, date, account, citation and prose checks run unchanged.
 // Consume the original input once so translations can never cascade.
 const REVIEWED_LINES = [
+  ['Combined recorded inflow: $746.11 gross across 3 accounts with records, September; not established income.', 'Combined recorded inflow: $746.11 across 3 selected covered accounts, 2026-09-01 through 2026-09-30; not established income.'],
+  ['Combined recorded inflow: $322.33 gross across 1 account with records, September; not established income.', 'Combined recorded inflow: $322.33 across 1 selected covered accounts, 2026-09-01 through 2026-09-30; not established income.'],
+  ['your account ending 3131, October: money in $233.32; money out $610.00.', 'account ****3131, 2026-10-01 through 2026-10-31: money in $233.32; money out $610.00.'],
+  ['your account ending 4242, October: money in $0.00; money out $0.00.', 'account ****4242, 2026-10-01 through 2026-10-31: money in $0.00; money out $0.00.'],
+  ['your account ending 5353, October: money in $0.00; money out $0.00.', 'account ****5353, 2026-10-01 through 2026-10-31: money in $0.00; money out $0.00.'],
   ["Found a deposit of $177.77 dated October 12 in your account ending 3131: Payer Unit [1].", "Found a deposit of $177.77 posted 2026-10-12 in account ****3131: Payer Unit [1]."],
 
   ["Here is the money out I could check, with spending still unconfirmed. The account types for your account ending 4242 have not been confirmed, so some payments may be between your own accounts.\nWant me to show your account balances?", "I can't confirm that all money out was spending. The account types for account ****4242 have not been confirmed, so some payments may be between your own accounts. Try: \"What are my account balances?\""],
@@ -41,6 +47,12 @@ const REVIEWED_LINES = [
   ["your account ending 5353, October: credits $0.00; debits $0.00 (no completed income or expenses in the covered period).", "account ****5353, 2026-10-01 through 2026-10-31: credits $0.00; debits $0.00 (no posted income or expenses in the covered period)."],
   ["This reading covers completed transactions only; pending activity is not included.\nWant me to show your account balances?", "I can't show pending activity. These figures include posted transactions only. Try: \"What are my account balances?\""],
 
+  // R1 removes the payment from alternate ranking citations as well.
+  ["$400.00 on September 12 in your account ending 3131: payment to outside lender [1]", "$400.00 on 2026-09-12 in account ****3131: payment to outside lender [1]"],
+  ["$60.00 on September 25 in your account ending 3131: Store One [2]", "$60.00 on 2026-09-25 in account ****3131: Store One [2]"],
+  ["$50.00 on September 24 in your account ending 3131: Store Two [3]", "$50.00 on 2026-09-24 in account ****3131: Store Two [3]"],
+  ["$40.00 on September 23 in your account ending 3131: Store Three [4]", "$40.00 on 2026-09-23 in account ****3131: Store Three [4]"],
+  ["$30.00 on September 22 in your account ending 3131: Store Four [5]", "$30.00 on 2026-09-22 in account ****3131: Store Four [5]"],
   ["$400.00 on September 12 in your account ending 3131: payment to outside lender [2]", "$400.00 on 2026-09-12 in account ****3131: payment to outside lender [2]"],
   ["$60.00 on September 25 in your account ending 3131: Store One [3]", "$60.00 on 2026-09-25 in account ****3131: Store One [3]"],
   ["$50.00 on September 24 in your account ending 3131: Store Two [4]", "$50.00 on 2026-09-24 in account ****3131: Store Two [4]"],
@@ -110,6 +122,10 @@ const REVIEWED_LINES = [
   [
     "your account ending 3131, October: credits $233.32; debits $1,010.00 [1] [2] [3] [4] [5] [6] [7] [8] [9] [10] [11].",
     "account ****3131, 2026-10-01 through 2026-10-31: credits $233.32; debits $1,010.00 [1] [2] [3] [4] [5] [6] [7] [8] [9] [10] [11]."
+  ],
+  [
+    "your account ending 3131, October: credits $233.32; debits $610.00 [1] [2] [3] [4] [5] [6] [7] [8] [9] [10].",
+    "account ****3131, 2026-10-01 through 2026-10-31: credits $233.32; debits $610.00 [1] [2] [3] [4] [5] [6] [7] [8] [9] [10]."
   ],
   [
     "Operating account (your account ending 3131): $5,023.45 as of October 30; last update unavailable [1].",
@@ -292,16 +308,33 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
     required_obligations: [...gold.required_obligations],
     required_facts_met: 0, required_facts_total: gold.required_obligations.length, utility: 0, document_answer_tested: false };
   if (result.execution_status !== 'complete') return result;
-  const body = observation.body, ledger = body?.ledger, answer = reviewedMoneyCopy(body?.answer || '');
+  const body = observation.body, ledger = body?.ledger ? structuredClone(body.ledger) : null;
+  let rawAnswer = body?.answer || '';
+  let answer = reviewedMoneyCopy(rawAnswer);
   const exactKnownLines = new Set();
   const nearPayment = gold.contract === 'payment' && input.period.rule === 'anchor minus/plus seven calendar days, inclusive';
   const snapshot = input.snapshot || evidence(input.profile, input.account_reviews), rows = new Map(snapshot.rows.map(r => [r.id, r]));
+  // Pending expectations come from the frozen independent envelope, never the answer.
+  const balanceContract = ['balance', 'forecast'].includes(gold.contract);
+  const balancePending = balanceContract ? snapshot.rows.filter(row => row.pending &&
+    snapshot.accounts.some(account => account.slug === row.account && gold.balances.some(b => b.mask === account.mask) &&
+      row.date >= account.observed) && row.date <= input.clock.now_utc.slice(0, 10)) : [];
+  const pendingOutflow = total(balancePending.filter(row => row.direction === 'outflow').map(row => row.cents));
+  const pendingInflow = total(balancePending.filter(row => row.direction === 'inflow').map(row => row.cents));
+  const pendingLine = 'Pending after the dated snapshots below (not yet included): outflows ' + formatMinor(pendingOutflow) +
+    '; inflows ' + formatMinor(pendingInflow) + '. These amounts are not added to or subtracted from the recorded balances.';
   // The frozen receipt envelopes contain no matching outgoing leg. Review the
   // additive zero-pair breakdown against that independent fact, while keeping
   // the unchanged pinned renderer scoreable by the very same scorer.
+  // Historical and current receipts have the same frozen no-owned-movement
+  // envelope; only their exact reviewed explanations are accepted.
+  const currentOutsideBasis = 'recorded gross inflow minus matched own transfers; includes any possible own transfer listed below';
+  const outsideBasis = answer.includes('(' + currentOutsideBasis + ').') ? currentOutsideBasis : answer.includes('(ordinary receipts excluding identified owned movements).')
+    ? 'ordinary receipts excluding identified owned movements'
+    : 'recorded inflow minus matched transfers; unmatched credits may include unproved own-account moves';
   const breakdownLines = gold.contract === 'receipts' ? [
     'Matched transfers between your own accounts: $0.00 across 0 pairs.',
-    `Inflow from outside your covered accounts: ${formatMinor(gold.combined)} (recorded inflow minus matched transfers; unmatched credits may include unproved own-account moves).`,
+    `Inflow from outside your covered accounts: ${formatMinor(gold.combined)} (${outsideBasis}).`,
     'Transfers are counted by the inflow posting date; counterpart outflows may fall up to 3 days before or after it.',
   ] : [];
   const hasInflowBreakdown = gold.contract === 'receipts' && (ledger?.matched_own_transfers !== undefined ||
@@ -331,20 +364,107 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
   if (!observation.trace?.parsed_intents?.length || observation.trace.fixture_accounts < 1) {
     result.execution_status = 'invalid_witness'; return result;
   }
+  // Review the added disclosure against independent synthetic rows before
+  // projecting it onto the frozen renderer contract. Historical arms keep
+  // their original citation cap and wording; new figures never bypass scoring.
+  const supplemental = new Set(), pendingRefs = new Set();
+  const newPayments = ledger?.payment_exclusions;
+  const hasItems = Boolean(newPayments && ['expense', 'repayment', 'ranking'].includes(gold.contract));
+  const dateCopy = value => {
+    const day = new Date(`${value}T00:00:00Z`);
+    const text = day.toLocaleDateString('en-US', { timeZone: 'UTC', month: 'long', day: 'numeric' });
+    const year = day.getUTCFullYear();
+    return year === new Date(input.clock.now_utc).getUTCFullYear() ? text : `${text}, ${year}`;
+  };
+  const allCitations = body.citations || [];
+  if (newPayments) {
+    const expectedIds = gold.repayment_ids || gold.payment_exclusion_ids || gold.excluded_from_account_totals || [];
+    const postings = newPayments.rows || [];
+    const expectedRows = expectedIds.map(id => rows.get(id));
+    check('itemized-payment-membership', same(postings.map(row => rowId(allCitations.find(ref => ref.n === row.n))), expectedIds), 'ownership');
+    const expectedMinor = total(expectedRows.map(row => row.cents));
+    check('itemized-payment-total', String(newPayments.total_minor) === expectedMinor && newPayments.count === expectedIds.length &&
+      String(newPayments.card_minor) === '0' && String(newPayments.loan_minor) === expectedMinor, 'wrong_figure');
+    const refs = postings.map(row => `[${row.n}]`).join(' ');
+    const header = `Payments to loans and cards (excluded from spending and income): ${formatMinor(expectedMinor)} across ${expectedIds.length} ${expectedIds.length === 1 ? 'payment' : 'payments'} ${refs}.`;
+    check('itemized-payment-header', rawAnswer.split('\n').filter(line => line === header).length === 1, 'ownership');
+    for (const posting of postings) {
+      const ref = allCitations.find(ref => ref.n === posting.n), row = rows.get(rowId(ref));
+      const account = snapshot.accounts.find(account => account.slug === row?.account);
+      const ownMask = row?.description.match(/\b(?:account |acct no\. xxxx)(\d{4})$/i)?.[1];
+      check(`itemized-payment-row:${posting.n}`, Boolean(row) && expectedIds.includes(row.id) &&
+        posting.amount_minor === Number(row.cents) && posting.posted_on === row.date && posting.account_mask === account?.mask &&
+        posting.payment_kind === 'loan' && posting.own_loan_mask === ownMask, 'ownership');
+      const label = ownMask ? `payment to your own loan (ending ${ownMask})` : 'payment to a loan';
+      const line = `${label}: ${formatMinor(row?.cents || '0')} on ${dateCopy(row?.date)} in your account ending ${account?.mask} [${posting.n}].`;
+      check(`itemized-payment-display:${posting.n}`, rawAnswer.split('\n').filter(text => text === line).length === 1, 'wrong_figure');
+      rawAnswer = rawAnswer.split('\n').filter(text => text !== line).join('\n');
+      if (hasItems) supplemental.add(posting.n);
+    }
+    if (hasItems) {
+      rawAnswer = rawAnswer.replace(/^Payments to loans and cards \(excluded from spending and income\): (\$[\d,]+\.\d{2}) across (\d+) payments? (?:\[\d+\] ?)+\.$/gm,
+        (_, amount, count) => `Payments to your own loan/card accounts: ${amount} across ${count} ${count === '1' ? 'payment' : 'payments'}.`);
+      delete ledger.payment_exclusions;
+    }
+  }
+  if (gold.possible_payment_ids || ledger?.possible_payments) {
+    // These independent fixtures contain one unpaired endpoint. Validate its
+    // full cited disclosure before projecting onto the historical renderer.
+    const expectedIds = gold.possible_payment_ids || [];
+    const postings = ledger?.possible_payments || [];
+    check('possible-payment-membership', same(postings.map(row => rowId(allCitations.find(ref => ref.n === row.n))), expectedIds), 'ownership');
+    const expectedMinor = total(expectedIds.map(id => rows.get(id).cents));
+    check('possible-payment-included-total', String(ledger?.possible_payments_included_minor) === expectedMinor, 'wrong_figure');
+    for (const posting of postings) {
+      const row = rows.get(rowId(allCitations.find(ref => ref.n === posting.n)));
+      const account = snapshot.accounts.find(account => account.slug === row?.account);
+      const label = 'included in money out above, possibly a transfer to your own account (counterpart not proved)';
+      check(`possible-payment-row:${posting.n}`, Boolean(row) && expectedIds.includes(row.id) &&
+        posting.amount_minor === Number(row.cents) && posting.posted_on === row.date && posting.account_mask === account?.mask &&
+        posting.bank_text === row.description && posting.payment_kind === 'own_account' && posting.basis === 'description' &&
+        posting.destination === 'account' && posting.included_in_total === true && posting.label === label, 'ownership');
+      const line = `${label}: ${formatMinor(row?.cents || '0')} on ${dateCopy(row?.date)}, bank text quoted: "${row?.description}" [${posting.n}].`;
+      check(`possible-payment-disclosed:${row?.id}`, rawAnswer.split('\n').filter(text => text === line).length === 1, 'ownership');
+      rawAnswer = rawAnswer.split('\n').filter(text => text !== line).join('\n');
+    }
+    delete ledger.possible_payments;
+    delete ledger.possible_payments_included_minor;
+  }
+  if (ledger?.pending_excluded) {
+    const covered = snapshot.accounts.filter(a => a.coverage === 'complete' && a.from <= input.period.from && a.to >= input.period.to);
+    const expected = [...rows.values()].filter(row => row.pending && row.date >= input.period.from && row.date <= input.period.to && covered.some(a => a.slug === row.account));
+    const pending = ledger.pending_excluded, ids = pending.citations.map(n => rowId(allCitations.find(ref => ref.n === n)));
+    check('pending-disclosure-membership', same(ids, expected.map(row => row.id)), 'ownership');
+    const cents = total(expected.map(row => row.cents));
+    check('pending-disclosure-amount', pending.count === expected.length && String(pending.total_minor) === cents, 'wrong_figure');
+    const line = `Pending activity: ${formatMinor(cents)} across ${expected.length} ${expected.length === 1 ? 'row' : 'rows'}, excluded from completed spending ${pending.citations.map(n => `[${n}]`).join(' ')}.`;
+    check('pending-disclosure-display', rawAnswer.split('\n').filter(text => text === line).length === 1, 'wrong_figure');
+    rawAnswer = rawAnswer.split('\n').filter(text => text !== line).join('\n');
+    for (const n of pending.citations) { supplemental.add(n); pendingRefs.add(n); }
+    delete ledger.pending_excluded;
+  }
+  if (rawAnswer.includes('Accounts covered:')) {
+    const covered = snapshot.accounts.filter(a => a.coverage === 'complete' && a.from <= input.period.from && a.to >= input.period.to)
+      .sort((a, b) => a.slug.localeCompare(b.slug));
+    const line = `Accounts covered: ${covered.map(a => { const label = snapshot.reset_import?.account === a.slug ? `account ending ${a.mask}` : a.label; return label ? `${label} (your account ending ${a.mask})` : `your account ending ${a.mask}`; }).join('; ')}.`;
+    check('covered-account-names', rawAnswer.split('\n').filter(text => text === line).length === 1, 'scope');
+    rawAnswer = rawAnswer.split('\n').filter(text => text !== line).join('\n');
+  }
+  answer = reviewedMoneyCopy(rawAnswer);
   const shown = displayFigures(answer);
-  const citations = body.citations || [];
-  const unresolvedRefs = [...answer.matchAll(/\[(\d+)\]/g)].filter(m => !citations.some(c => c.n === Number(m[1])));
+  const citations = allCitations.filter(ref => !supplemental.has(ref.n));
+  const unresolvedRefs = [...(body.answer || '').matchAll(/\[(\d+)\]/g)].filter(m => !allCitations.some(c => c.n === Number(m[1])));
   if (unresolvedRefs.length) check('all-displayed-references-resolve', false, 'missing_source');
   check('no-invented-pending-zero', !/\b(?:no|zero) pending|pending (?:charges|activity)(?: are| is|:)? (?:zero|0|none)/i.test(answer), 'unsupported_claim');
   check('no-invented-payment-split', !/\bprincipal\b|interest (?:portion|amount|split)/i.test(answer), 'unsupported_claim');
-  for (const citation of citations) {
+  for (const citation of allCitations) {
     result.source_checks++;
     const account = snapshot.accounts.find(a => a.mask === citation.account_mask);
     const row = rows.get(rowId(citation));
     const balance = String(citation.ref || '').startsWith('ledger:balance:');
     check(`citation:${citation.n}`, Boolean(account) && (balance
       ? citation.posted_on === account.observed && String(citation.amount_minor) === account.balance
-      : Boolean(row) && !row.pending && row.date === citation.posted_on && row.account === account.slug &&
+      : Boolean(row) && (!row.pending || pendingRefs.has(citation.n)) && row.date === citation.posted_on && row.account === account.slug &&
         String(citation.amount_minor) === row.cents), 'missing_source');
     const amounts = displayFigures(citation.title);
     figure(`citation-display:${citation.n}`, amounts.length === 1 ? amounts[0].cents : null,
@@ -427,7 +547,7 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
     if (gold.contract === 'forecast') check('withhold-future', /cannot|can.t|unavailable|unsupported/i.test(answer), 'unsupported_claim');
   } else if (gold.contract === 'receipts') {
     for (const [mask, cents] of Object.entries(gold.receipts)) {
-      figure(`receipts:${mask}`, ledger.lead_accounts?.find(a => a.account_mask === mask)?.credits_minor, cents);
+      figure(`receipts:${mask}`, ledger.accounts?.find(a => a.account_mask === mask)?.credits_minor, cents);
     }
     if (gold.require_combined) check('combined-scoped-receipts', answer.includes(formatMinor(gold.combined)));
     check('uncertain-credit-not-income', !/\b(?:earned|revenue|profit)\b/i.test(answer), 'unsupported_claim');
@@ -443,7 +563,8 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
     check('positive-arrival', ledger.found === true);
   } else if (gold.contract === 'absence') {
     check('scoped-exact-absence', ledger.found === false && ledger.match_basis === 'none' && ledger.total_minor === null &&
-      (/exact vendor spend in the covered window/.test(answer) || answer.split("\n").includes(PLAIN_ABSENCE)) && ledger.coverage?.complete === true);
+      (/exact vendor spend in the covered window/.test(answer) || answer.split("\n").includes(PLAIN_ABSENCE) ||
+        answer === 'No charges found for Absent Store from 2026-09-01 to 2026-09-30 on your account ending 3131, your account ending 4242, your account ending 5353.') && ledger.coverage?.complete === true);
     check('no-global-absence', !/never used|never paid|no spending anywhere/i.test(answer), 'unsupported_claim');
   } else if (gold.contract === 'vendor') {
     figure('outside-payment-retained', ledger.total_minor, gold.total);
@@ -452,6 +573,7 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
   } else if (gold.contract === 'gross') {
     figure('gross-outflow', total((ledger.accounts || []).map(a => String(a.debits_minor))), gold.debits);
     figure('gross-inflow', total((ledger.accounts || []).map(a => String(a.credits_minor))), gold.credits);
+    if (gold.ordinary_totals) figure('ordinary-outflow', total((ledger.lead_accounts || []).map(a => String(a.debits_minor))), gold.ordinary_debits);
   } else if (gold.contract === 'coverage' || gold.contract === 'refuse-coverage') {
     check('coverage-cannot-be-complete', ledger.complete === false, 'unsupported_claim');
     check('coverage-does-not-certify-zero', shown.length === 0, 'wrong_figure');
@@ -479,8 +601,22 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
   // Check every monetary structured field, including conditionals and notes.
   // Expected side is independently evaluated from the declared gold membership.
   const windowRows = [...rows.values()].filter(r => !r.pending && r.date >= (input.period.from || '0000') && r.date <= input.period.to);
-  const accountSum = (mask, direction) => total(windowRows.filter(r =>
-    r.account === snapshot.accounts.find(a => a.mask === mask)?.slug && r.direction === direction).map(r => r.cents));
+  const paymentIds = new Set(gold.payment_exclusion_ids || gold.excluded_from_account_totals || []);
+  const paymentMinor = total(windowRows.filter(row => paymentIds.has(row.id)).map(row => row.cents));
+  const paymentLine = `Payments to loans and cards (excluded from spending and income): ${formatMinor(paymentMinor)} across ${paymentIds.size} ${paymentIds.size === 1 ? 'payment' : 'payments'} `;
+  if (gold.payment_exclusion_ids) {
+    const excluded = ledger.payment_exclusions;
+    check('payment-exclusions', same((excluded?.rows || []).map(row => rowId(citations.find(c => c.n === row.n))), gold.payment_exclusion_ids) &&
+      excluded?.count === paymentIds.size && String(excluded?.total_minor) === paymentMinor, 'ownership');
+    const expectedLine = paymentLine + gold.payment_exclusion_ids.map(id => `[${citations.find(c => rowId(c) === id)?.n}]`).join(' ') + '.';
+    check('payment-exclusions-disclosed', answer.split('\n').filter(line => line === expectedLine).length === 1, 'ownership');
+  }
+  // Named conditionals follow the independently declared named membership.
+  // A whole-account subtotal cannot pass as an alternative named figure.
+  const namedConditionalRows = ['vendor', 'absence'].includes(gold.contract)
+    ? windowRows.filter(row => (gold.ids || []).includes(row.id)) : windowRows;
+  const accountSum = (mask, direction, ordinary = false, named = false) => total((named ? namedConditionalRows : windowRows).filter(r =>
+    !paymentIds.has(r.id) && (!ordinary || !(gold.ordinary_excluded || gold.excluded || []).includes(r.id)) && r.account === snapshot.accounts.find(a => a.mask === mask)?.slug && r.direction === direction).map(r => r.cents));
   if (ledger) {
     // Counts and scope are facts too. Their expected side comes from frozen
     // membership and input coverage, never another output count or its prose.
@@ -498,22 +634,32 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
       const label = row.payee.toLowerCase();
       groups.set(label, (groups.get(label) || 0) + 1);
     }
-    const cited = Math.min(included.length, 5), omitted = included.length - cited;
+    // Historical readers cap references at five. The current summary retains
+    // every posting; derive that contract from actual references and verify its
+    // entire independent membership before accepting the larger count.
+    const fullEvidence = citations.length > 5 || /\nUnsorted: [^\n]+ \[\d+\]/.test(rawAnswer);
+    const cited = fullEvidence ? included.length : Math.min(included.length, 5), omitted = included.length - cited;
+    if (expense && fullEvidence) check('complete-group-evidence-membership',
+      same(citations.map(rowId).sort((a, b) => a - b), included.map(row => row.id).sort((a, b) => a - b)), 'missing_source');
     const factual = (id, actual, expected) => check(id, expected !== undefined && same(actual, expected), 'unsupported_claim');
     const counters = (value, path = '') => {
       for (const [name, item] of Object.entries(value || {})) {
         const p = path ? `${path}.${name}` : name;
         if (name === 'count' || /_(?:count|pairs)$/.test(name)) {
           let expected;
-          if (p === 'own_account_payments.count') expected = repaymentCount;
+          if (p === 'observation.pending.count' && balanceContract) expected = balancePending.length;
+          else if (p === 'own_account_payments.count') expected = repaymentCount;
+          else if (p === 'payment_exclusions.count') expected = paymentIds.size;
           else if (p === 'match_count' && gold.contract === 'payment') expected = gold.ids.length;
           // The frozen receipt inputs have no outgoing counterpart; the new
           // nested count must satisfy the same independent zero-pair fact.
           else if (p === 'matched_own_transfers.count' && gold.contract === 'receipts') expected = 0;
-          else if (name === 'transaction_count') expected = windowRows.filter(r =>
-            r.account === snapshot.accounts.find(a => a.mask === value.account_mask)?.slug).length;
+          else if (name === 'transaction_count') expected = (path.startsWith('if_own_transfers.accounts.') ? namedConditionalRows : windowRows).filter(r =>
+            !paymentIds.has(r.id) && r.account === snapshot.accounts.find(a => a.mask === value.account_mask)?.slug &&
+            (!((gold.ordinary_totals && path.startsWith('lead_accounts.')) || path.startsWith('if_own_transfers.')) || !(gold.ordinary_excluded || gold.excluded || []).includes(r.id))).length;
           else if (path.startsWith('groups.') && name === 'count') expected = groups.get(value.merchant);
           else if (path.startsWith('category_groups.') && name === 'count') expected = value.category === 'Unsorted' ? included.length : undefined;
+          else if (p === 'unconfirmed_category_count' && expense) expected = included.length;
           else if (p === 'row_count') expected = expense ? included.length : (gold.ids || []).length;
           else if (p === 'cited_row_count') expected = cited;
           else if (p === 'omitted_row_count') expected = expense ? omitted : Math.max(0, (gold.ids || []).length - 5);
@@ -578,20 +724,26 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
           const requested = displayFigures(input.question);
           expected = requested.length === 1 ? requested[0].cents : undefined;
         } else if (name === 'amount_minor') expected = rows.get(rowId(value.ref ? value : citations.find(c => c.n === value.n)))?.cents;
+        else if (p === 'observation.pending.outflow_minor' && balanceContract) expected = pendingOutflow;
+        else if (p === 'observation.pending.inflow_minor' && balanceContract) expected = pendingInflow;
         else if (name === 'current_minor') expected = gold.balances?.find(b => b.mask === value.account_mask)?.cents;
-        else if (name === 'credits_minor' || name === 'debits_minor') expected = accountSum(value.account_mask, name === 'credits_minor' ? 'inflow' : 'outflow');
+        else if (name === 'credits_minor' || name === 'debits_minor') expected = accountSum(value.account_mask, name === 'credits_minor' ? 'inflow' : 'outflow', (gold.ordinary_totals && path.startsWith('lead_accounts.')) || path.startsWith('if_own_transfers.'), path.startsWith('if_own_transfers.accounts.'));
         else if (name === 'combined_inflow_minor' && gold.contract === 'receipts') expected = gold.combined;
         else if (p === 'outside_inflow_minor' && gold.contract === 'receipts') expected = gold.combined;
         else if (p === 'matched_own_transfers.total_minor' && gold.contract === 'receipts') expected = '0';
         else if (/^(?:default_exclusions\.|excluded_own_transfer_minor$|excluded_own_movement_minor$)/.test(p)) expected = '0';
         else if (p.startsWith('own_account_payments.')) expected = uncertainExpense || name === 'card_minor' ? '0' : gold.repayment;
+        else if (p === 'unsorted_minor' && expense) expected = total(retainedIds.map(id => rows.get(id).cents));
+        else if (p.startsWith('payment_exclusions.') && name !== 'amount_minor') expected = name === 'card_minor' ? '0' : paymentMinor;
         else if (p === 'retained_outflow_minor' && uncertainExpense) expected = retainedTotal;
         else if (/^(?:expense_total_minor|total_minor)$/.test(p)) expected = gold.total;
         else if (p.startsWith('groups.') && expense) {
           const ids = gold.included.filter(id => rows.get(id)?.payee?.toLowerCase() === value.merchant);
           expected = total(ids.map(id => rows.get(id).cents));
         } else if (p.startsWith('category_groups.') && expense) expected = gold.total;
-        else if (name === 'total_minor' && gold.contract === 'ranking') expected = total(gold.gross_cents || gold.cents);
+        else if (name === 'total_minor' && gold.contract === 'ranking') expected = p.startsWith('if_own_transfers.')
+          ? total((gold.gross_ids || gold.ids).filter(id => !(gold.excluded || []).includes(id)).map(id => rows.get(id).cents))
+          : total(gold.gross_cents || gold.cents);
         else if (['vendor', 'absence'].includes(gold.contract) &&
           /(?:total_minor|unsorted_minor)$/.test(name)) expected = gold.total;
         figure(`field:${p}`, item, expected ?? 'UNSUPPORTED');
@@ -600,11 +752,18 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
   };
   fieldCheck(ledger);
 
+  if (gold.ordinary_totals) exactKnownLines.add('Note: only checking, savings and card accounts contribute to money in minus money out.');
+  if (gold.payment_exclusion_ids)
+    exactKnownLines.add('Note: payments to loans and cards stay outside spending and income.');
   const lines = answer.split('\n');
   // Required display facts come from the key, independently of traversal.
   // An empty answer, omitted account, or moved heading must not earn credit
   // merely because every surviving amount happens to be correct.
   const validateRequiredDisplay = () => {
+    if (balanceContract && ledger.observation) {
+    check('pending-disclosure', balancePending.length ? lines.includes(pendingLine)
+      : lines.includes('No pending transactions are recorded after these snapshots.'));
+    }
     check('visible-answer', Boolean(answer.trim()), 'wrong_figure');
     if (gold.contract === 'balance' || gold.contract === 'forecast') {
       let group = null;
@@ -636,7 +795,13 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
       const masks = gold.receipts ? Object.keys(gold.receipts) : snapshot.accounts.map(a => a.mask);
       check('display-account-membership', same((ledger.accounts || []).map(a => a.account_mask).sort(), [...masks].sort()), 'scope');
       for (const mask of masks) {
-        const displayed = lines.filter(line => line.startsWith(`account ****${mask},`));
+        const displayed = lines.filter(line => line.startsWith(`account ****${mask},`) && (!gold.ordinary_totals || !line.includes(': money in ')));
+        if (gold.ordinary_totals && gold.ordinary_display !== false) {
+          const ordinary = lines.filter(line => line.startsWith(`account ****${mask},`) && line.includes(': money in '));
+          check(`required-ordinary-display:${mask}`, ordinary.length === 1 &&
+            same(displayFigures(ordinary[0]).map(f => f.cents), [accountSum(mask, 'inflow', true), accountSum(mask, 'outflow', true)]) &&
+            ordinary[0].includes(`${input.period.from} through ${input.period.to}`), 'wrong_figure');
+        }
         const present = displayed.length === 1 &&
           same(displayFigures(displayed[0]).map(f => f.cents), [accountSum(mask, 'inflow'), accountSum(mask, 'outflow')]) &&
           displayed[0].includes(`${input.period.from} through ${input.period.to}`);
@@ -667,6 +832,18 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
   };
   validateRequiredDisplay();
   const exactMoneyLines = new Set();
+  if (balanceContract && ledger.observation) {
+    check('pending-treatment', ledger.observation.pending?.treatment === 'not_included');
+
+    if (balancePending.length) exactMoneyLines.add(pendingLine);
+    exactKnownLines.add(snapshot.accounts.every(account => account.coverage === 'complete')
+      ? 'The saved account history is complete.' : 'The saved account history is partial; a complete current total is unconfirmed.');
+    if (!balancePending.length) exactKnownLines.add('No pending transactions are recorded after these snapshots.');
+  }
+  // These frozen snapshots have no category labels; the independent retained
+  // expense membership proves both the excluded amount and its row count.
+  if (expense && retainedIds.length) exactMoneyLines.add('Unconfirmed categories: ' + retainedIds.length +
+    ' rows totaling ' + formatMinor(total(retainedIds.map(id => rows.get(id).cents))) + '; left out of confirmed category totals.');
   if (gold.contract === 'vendor' && input.period.rule === 'trailing calendar months with month-end clamping' && gold.ids.length) {
     const payee = rows.get(gold.ids[0])?.payee;
     if (payee && gold.ids.every(id => rows.get(id)?.payee === payee)) exactMoneyLines.add(
@@ -685,13 +862,15 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
       check(`display-account-scope:${seenDisplay}:${match[1]}`, permitted.includes(match[1]), 'scope');
     }
     const d = '-?\\$[\\d,]+\\.\\d{2}', day = '\\d{4}-\\d{2}-\\d{2}', ref = '\\[\\d+\\]';
-    const allowedMoneyLine = exactMoneyLines.has(line) || PLAIN_LINES.has(line) || [
+    const ordinaryAccountLine = gold.ordinary_totals && /^account \*{4}\d{4}, \d{4}-\d{2}-\d{2} through \d{4}-\d{2}-\d{2}: money in -?\$[\d,]+\.\d{2}; money out -?\$[\d,]+\.\d{2}\.$/.test(line);
+    const allowedMoneyLine = ordinaryAccountLine || exactMoneyLines.has(line) || PLAIN_LINES.has(line) || [
       `^Recorded outgoing subtotal: ${d}\\.$`,
       `^You spent ${d} (?:this month|last month|today|yesterday|this week|${day} through ${day})\\.$`,
       `^Recorded outflow subtotal: ${d} (?:this month|last month|today|yesterday|this week|${day} through ${day}); account classification is unconfirmed, so expense interpretation is incomplete\\.$`,
       `^You spent ${d} at [A-Za-z ]+ (?:this month|in [A-Za-z]+ \\d{4})\\. ${ref}(?: ${ref})*\\.$`,
       `^[a-zA-Z ]+: ${d} across \\d+ rows?(?: ${ref})*\\.$`,
       `^Payments to your own loan/card accounts: ${d} across \\d+ payments?\\.$`,
+      `^Payments to loans and cards \\(excluded from spending and income\\): ${d} across \\d+ payments? ${ref}(?: ${ref})*\\.$`,
       `^[A-Za-z ]+ \\(account \\*{4}\\d{4}\\): ${d} as of ${day}; feed synced (?:${day}|unavailable) ${ref}\\.$`,
       `^${day}: [A-Za-z ]+, ${d}, [A-Za-z ]+ \\(account \\*{4}\\d{4}\\) ${ref}\\.$`,
       `^${d} on ${day} in account \\*{4}\\d{4}: [A-Za-z0-9 .]+ ${ref}$`,
@@ -701,8 +880,10 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
     ].some(pattern => new RegExp(pattern).test(line)) || breakdownLines.includes(line);
     if (!allowedMoneyLine) check(`unreviewed-money-prose:${sha(line)}`, false, 'unsupported_claim');
     let expected = null;
-    if (expense) {
-      if (/^Recorded outgoing subtotal:/.test(line) && uncertainExpense) expected = [retainedTotal];
+    if (gold.payment_exclusion_ids && line.startsWith(paymentLine)) expected = [paymentMinor];
+    else if (expense) {
+      if (line.startsWith('Unconfirmed categories:')) expected = [total(retainedIds.map(id => rows.get(id).cents))];
+      else if (/^Recorded outgoing subtotal:/.test(line) && uncertainExpense) expected = [retainedTotal];
       else if (/^(?:You spent|Recorded outflow subtotal|Covered-account expense subtotal|Unsorted:)/.test(line) || (PLAIN_LINES.has(line) && line.startsWith("Money out I could check: "))) expected = [gold.total];
       else if (/^Payments to your own loan\/card accounts:/.test(line)) expected = [gold.repayment];
       else {
@@ -710,6 +891,8 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
         const groupIds = gold.included.filter(id => rows.get(id)?.payee?.toLowerCase() === merchant);
         if (groupIds.length) expected = [total(groupIds.map(id => rows.get(id).cents))];
       }
+    } else if (balanceContract && line === pendingLine) {
+      expected = [pendingOutflow, pendingInflow];
     } else if (gold.contract === 'balance' || gold.contract === 'forecast') {
       const mask = /\*{4}(\d{4})/.exec(line)?.[1];
       const balance = gold.balances.find(b => b.mask === mask);
@@ -731,7 +914,7 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
       if (gold.contract === 'receipts' && line.startsWith('Combined recorded inflow:')) expected = [gold.combined];
       if (line === breakdownLines[0]) expected = ['0'];
       if (line === breakdownLines[1]) expected = [gold.combined];
-      if (mask && /credits|money in/.test(line)) expected = [accountSum(mask, 'inflow'), accountSum(mask, 'outflow')];
+      if (mask && /credits|money in/.test(line)) expected = [accountSum(mask, 'inflow', ordinaryAccountLine), accountSum(mask, 'outflow', ordinaryAccountLine)];
       check(`display-period:${seenDisplay}`, breakdownLines.includes(line) || line.includes(`${input.period.from} through ${input.period.to}`), 'scope');
     }
     figure(`display:${seenDisplay}`, JSON.stringify(amounts.map(a => a.cents)), JSON.stringify(expected));
