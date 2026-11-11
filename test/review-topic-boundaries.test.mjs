@@ -107,7 +107,11 @@ test('control: no matched categories and nonempty unclassified rows withhold all
   const body = await ask(t, f);
   withheld(body);
   assert.equal(body.ledger.found, null);
-  for (const text of Object.values(await surfaces(t, body))) assert.doesNotMatch(text, /\$0\.00/);
+  for (const text of Object.values(await surfaces(t, body))) {
+    assert.match(text, /was not recognized/);
+    assert.doesNotMatch(text, /Confirmed in .+ \(subtotal\):/);
+    assert.doesNotMatch(text, /(?:Total spend for [^:]+:|Category '[^']+':) \$0\.00/);
+  }
 });
 
 test('unknown total: confirmed category subtotal plus unclassified rows', async t => {
@@ -137,27 +141,45 @@ test('merchant word used as a category topic does not become a merchant total', 
   const body = await ask(t, f, q);
   assert.equal(body.ledger.kind, 'category');
   withheld(body);
-  for (const text of Object.values(await surfaces(t, body, q))) assert.doesNotMatch(text, /\$0\.00/);
+  for (const text of Object.values(await surfaces(t, body, q))) {
+    assert.match(text, /was not recognized/);
+    assert.doesNotMatch(text, /Confirmed in .+ \(subtotal\):/);
+    assert.doesNotMatch(text, /(?:Total spend for [^:]+:|Category '[^']+':) \$0\.00/);
+  }
 });
 
-test('covered month with no transactions still answers true zero with coverage', async t => {
+test('an empty covered month withholds an unresolved word; an exact confirmed zero stays green', async t => {
   const f = ledgerFixture(t);
   assert.equal(f.first('SELECT count(*) n FROM fin_transactions').n, 0);
   const body = await ask(t, f);
-  assert.equal(body.ledger.total_minor, 0);
-  assert.equal(body.evidence_gate.complete, true);
-  assert.match(body.answer, /Total spend for materials: \$0\.00/);
+  assert.equal(body.ledger.total_minor, null);
+  assert.equal(body.ledger.selector_unresolved, true);
+  assert.deepEqual(body.ledger.known_categories, []);
+  assert.equal(body.evidence_gate.complete, false);
+  assert.doesNotMatch(body.answer, /\$0\.00/);
   assert.match(body.answer, /Accounts:.*covered through/);
   await surfaces(t, body);
+  add(f, 'exact-zero', 0, 'materials');
+  const green = await ask(t, f);
+  assert.equal(green.ledger.total_minor, 0);
+  assert.equal(green.evidence_gate.complete, true);
+  assert.match(green.answer, /Total spend for materials: \$0\.00/);
 });
 
-test('confirmed unrelated categories still permit true topic zero', async t => {
+test('unrelated categories cannot certify an unknown word; exact zero remains available', async t => {
   const f = ledgerFixture(t);
   add(f, 'unrelated', 1250, 'travel');
   const body = await ask(t, f);
-  assert.equal(body.ledger.total_minor, 0);
-  assert.equal(body.ledger.unsorted_minor, 0);
-  assert.equal(body.evidence_gate.complete, true);
+  assert.equal(body.ledger.total_minor, null);
+  assert.equal(body.ledger.selector_unresolved, true);
+  assert.deepEqual(body.ledger.known_categories, ['travel']);
+  assert.equal(body.evidence_gate.complete, false);
+  assert.doesNotMatch(body.answer, /\$0\.00/);
+  add(f, 'exact-zero', 0, 'materials');
+  const green = await ask(t, f);
+  assert.equal(green.ledger.total_minor, 0);
+  assert.equal(green.ledger.unsorted_minor, 0);
+  assert.equal(green.evidence_gate.complete, true);
 });
 
 test('confirmed-only category control retains its total', async t => {

@@ -185,8 +185,9 @@ test('N02: Generated with ChatGPT in the body is explicit generated authorship',
 test('N01 genuine own-account pair leaves the lead and remains in every gross view', async t => {
   const f = pairFixture(t);
   const advisory = await ask(f);
-  assert.equal(advisory.ledger.candidate_transfer_count, 1, 'advisory pair reaches exclusion decision');
-  assert.equal(advisory.ledger.default_exclusions.own_transfer_minor, 0);
+  assert.equal(advisory.ledger.reason, 'money_out_destination_unconfirmed');
+  assert.equal(advisory.ledger.total_minor, null);
+  assert.equal(advisory.ledger.possible_payments[0].amount_minor, 50000, 'populated ownership decision');
   f.raw("UPDATE fin_transactions SET description='Transfer from account 4321' WHERE txn_uid='in'");
   const original = f.rows('SELECT * FROM fin_transactions');
   const before = f.seen.length, body = await ask(f);
@@ -227,13 +228,23 @@ test('N01 genuine own-account pair leaves the lead and remains in every gross vi
 
 test('N01 conflicting card kind rejects a candidate even when the other leg names its counterpart', async t => {
   const f = pairFixture(t);
-  assert.equal((await ask(f)).ledger.candidate_transfer_count, 1);
+  const unproved = await ask(f);
+  assert.equal(unproved.ledger.reason, 'money_out_destination_unconfirmed');
+  assert.equal(unproved.ledger.possible_payments[0].amount_minor, 50000);
   f.raw("UPDATE fin_transactions SET amount_minor=500");
   f.raw("UPDATE fin_transactions SET description='Receipt from card ending 4321' WHERE txn_uid='in'");
   const before = f.seen.length, b = await ask(f);
   assert.ok(f.seen.slice(before).some(sql => sql.includes('JOIN fin_transactions')));
-  assert.equal(total(b, 'debits_minor'), 500); assert.equal(total(b, 'credits_minor'), 500);
-  assert.equal(b.ledger.candidate_transfer_count, 0);
+  assert.equal(b.ledger.reason, 'money_out_destination_unconfirmed');
+  assert.equal(b.ledger.total_minor, null);
+  assert.equal(b.evidence_gate.complete, false);
+  const candidate = b.ledger.possible_payments.find(row => row.amount_minor === 500);
+  assert.ok(candidate, 'conflicting incoming kind reaches a populated ownership decision');
+  assert.ok(b.citations.some(row => row.n === candidate.n && row.amount_minor === 500));
+  f.raw("UPDATE fin_transactions SET description='Transfer from account 4321' WHERE txn_uid='in'");
+  const proved = await ask(f);
+  assert.equal(proved.evidence_gate.complete, true);
+  assert.equal(proved.ledger.default_exclusions.own_transfer_minor, 500);
 });
 
 test('N01 same-cent outside-payee collision is retained and has no own-account candidate', async t => {
@@ -334,7 +345,7 @@ test('N03 non-ledger questions preserve exact response identity while unsupporte
 });
 
 
-test('N01 recurring candidate legs leave the lead and remain in gross with a proposed transfer category', async t => {
+test('N01 owned recurring movements stay out of every total with a proposed transfer category', async t => {
   const f = fixture(); t.after(f.close); account(f); account(f, { slug: 'second-account', mask: '8765' });
   f.raw("UPDATE fin_account_coverage SET covered_from='2026-07-01'");
   for (const [i, day] of ['2026-07-15', '2026-08-15', '2026-09-15'].entries()) {
@@ -343,13 +354,13 @@ test('N01 recurring candidate legs leave the lead and remain in gross with a pro
   }
   const q = 'Show my recurring charges in Q3';
   const control = await ask(f, q);
-  assert.equal(control.ledger.recurring.length, 1); assert.equal(control.ledger.monthly_total_minor, 1000);
+  assert.equal(control.ledger.recurring.length, 0); assert.equal(control.ledger.monthly_total_minor, 0);
   f.raw("UPDATE fin_transactions SET category='TRANSFER_OUT_ACCOUNT_TRANSFER',category_basis_state='proposed' WHERE direction='outflow'");
   const before = f.seen.length, b = await ask(f, q);
   assert.ok(f.seen.slice(before).some(sql => sql.includes('JOIN fin_transactions')));
-  assert.equal(b.ledger.candidate_transfer_count, 3); assert.equal(b.ledger.recurring.length, 1);
-  assert.equal(b.ledger.recurring[0].possible_transfer_citations.length, 3);
-  assert.equal(b.ledger.monthly_total_minor, 1000); assert.equal(b.ledger.if_own_transfers.monthly_total_minor, 0);
+  assert.equal(b.ledger.candidate_transfer_count, 3); assert.equal(b.ledger.recurring.length, 0);
+  assert.deepEqual(b.ledger.possible_owned_movements, []);
+  assert.equal(b.ledger.monthly_total_minor, 0); assert.equal(b.ledger.if_own_transfers.monthly_total_minor, 0);
   assert.match(b.answer, /^Estimated monthly money out: \$0\.00/);
-  assert.match(b.answer, /With everything counted:[\s\S]*Estimated monthly total: \$10\.00/);
+  assert.match(b.answer, /With everything counted:[\s\S]*Estimated monthly total: \$0\.00/);
 });

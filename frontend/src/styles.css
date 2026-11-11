@@ -1,4 +1,7 @@
 @import "tailwindcss";
+/* Clean build sandboxes link installed dependencies. Keep dependency contents
+   outside the source scan so they cannot change the generated owner-app CSS. */
+@source not "../node_modules";
 
 /* The brain's own palette. Warm paper, deep ink, one accent — chosen to feel
    like a private notebook rather than a dashboard, because the first thing a

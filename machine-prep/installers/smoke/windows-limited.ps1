@@ -293,6 +293,8 @@ try {
   # Stage readable inputs outside the runner profile. Only disposable output
   # directories receive Modify rights; no runner credentials are inherited.
   Copy-Item -LiteralPath $PSScriptRoot -Destination (Join-Path $control 'smoke') -Recurse
+  New-Item -ItemType Directory -Path (Join-Path $control 'windows') | Out-Null
+  Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\windows\verify-msi.ps1') -Destination (Join-Path $control 'windows\verify-msi.ps1')
   Copy-Item -LiteralPath $ArtifactDirectory -Destination (Join-Path $control 'signed-input') -Recurse
   foreach ($directory in @($control, $LogDirectory)) {
     $acl = Get-Acl -LiteralPath $directory

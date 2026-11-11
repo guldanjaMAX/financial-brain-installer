@@ -4,8 +4,8 @@ import { goldFor } from '../fastloop-money/gold.mjs';
 const ledger = (id, extra = {}) => ({ ...goldFor(id), judge: 'ledger', ...extra });
 const fact = (id, source, text, evidence) => ({ id, source, text, evidence: evidence || text });
 const docs = (answerability, facts, extra = {}) => ({ judge: 'evidence', answerability, facts, ...extra });
-const rank = () => ledger('M08', { repayment: '40000', gross_ids: [7, 8, 1, 2, 3],
-  gross_cents: ['40000', '40000', '6000', '5000', '4000'] });
+const rank = () => ledger('M08', { repayment: '40000', gross_ids: [8, 1, 2, 3, 4],
+  gross_cents: ['40000', '6000', '5000', '4000', '3000'] });
 
 export const GOLD = {
   Q1: ledger('M01', { answerability: 'answer' }),
@@ -64,7 +64,7 @@ export const GOLD = {
   D19: docs('honest refusal', [fact('health-limit', 'status:health-limit', 'cannot certify current runtime health')]),
   D20: docs('answer', [fact('cancelled', 'gcal:workshop-cancellation', 'workshop was cancelled on 2026-10-30')]),
   R01: ledger('M17/outside-only', { answerability: 'answer' }),
-  R02: ledger('M05/gross', { answerability: 'answer' }),
+  R02: ledger('M05/gross', { answerability: 'answer', ordinary_totals: true, ordinary_excluded: [], ordinary_debits: '101000' }),
   R03: docs('answer', [fact('duration', 'gcal:inspection-duration', 'inspection lasts forty minutes')]),
   R04: docs('answer', [fact('material', 'gcal:session-material', 'bring the site sketch')]),
   R05: docs('answer', [fact('channel', 'gmail:delivery-channel', 'delivery through the portal')]),

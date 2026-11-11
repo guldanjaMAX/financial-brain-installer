@@ -1889,7 +1889,7 @@ test('Windows standard npm layout refuses a forwarding shim before install or di
 });
 
 for (const scenario of ['missing-node', 'missing-cli', 'directory-cli', 'linked-cli', 'linked-shim', 'renamed-shim', 'appended-forwarder']) {
-  test(`Windows standard npm layout refuses unsupported files: ${scenario}`, { skip: process.platform !== 'win32', timeout: 300_000 }, () => {
+  test(`Windows standard npm layout refuses unsupported files: ${scenario}`, { skip: process.platform !== 'win32', timeout: 300_000 }, (context) => {
     const directory = realpathSync.native(mkdtempSync(join(ROOT, '.machine-prep-npm-files-')));
     const home = join(directory, 'home'); const temp = join(home, 'temp');
     const bin = join(directory, 'node js'); let npm = join(bin, 'npm.cmd');
@@ -1909,7 +1909,13 @@ for (const scenario of ['missing-node', 'missing-cli', 'directory-cli', 'linked-
       if (scenario === 'linked-cli' || scenario === 'linked-shim') {
         const leaf = scenario === 'linked-cli' ? cli : npm;
         const other = join(directory, scenario === 'linked-cli' ? 'other-cli.js' : 'other.cmd');
-        cpSync(leaf, other); rmSync(leaf); symlinkSync(other, leaf, 'file');
+        cpSync(leaf, other); rmSync(leaf);
+        try { symlinkSync(other, leaf, 'file'); }
+        catch (error) {
+          if (error.code !== 'EPERM') throw error;
+          context.skip('file symlink creation requires a host privilege unavailable to this Standard account');
+          return;
+        }
         assert.equal(lstatSync(leaf).isSymbolicLink(), true, 'link fixture exists at the decision path');
       }
       if (scenario === 'renamed-shim') { npm = join(bin, 'custom.cmd'); cpSync(join(bin, 'npm.cmd'), npm); }

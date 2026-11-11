@@ -2165,6 +2165,37 @@ export async function handleBankFeed(env, request, url, path, ctx) {
       });
     }
 
+    if (path === "/api/bank-feed/simplefin/review" && request.method === "POST") {
+      const access = await ownerAccess();
+      if (!access.authorised) return privateNoStore(ownerRefusal(access));
+      if (env.BANK_FEED_PROVIDER !== "simplefin") return ownerJson({ code: "simplefin_provider_not_selected" },404);
+      const body = await readJson(request);
+      if (typeof body.dry_run !== 'boolean') return ownerJson({ code:'simplefin_review_preview_required' },400);
+      const options = { dryRun:body.dry_run,approve:body.approve,
+        ...(ctx?.bankFeedNow ? { now:ctx.bankFeedNow } : {}) };
+      try {
+        let receipt;
+        if (body.action === 'kind') {
+          const { maintainAccountKind } = await import('./fin-account-kinds.js');
+          receipt = await maintainAccountKind(env,{ ...options,selector:body.account_slug,kind:body.kind,role:body.role });
+        } else if (body.action === 'coverage') {
+          const { maintainSimpleFinCoverage } = await import('./simplefin-coverage-review.js');
+          receipt = await maintainSimpleFinCoverage(env,{ ...options,accountRef:body.account_ref,
+            from:body.from,to:body.to,confirmSourceComparison:body.confirm_source_comparison });
+        } else if (body.action === 'replacement') {
+          const { reviewSimpleFinReplacement } = await import('./simplefin-reconciliation.js');
+          receipt = await reviewSimpleFinReplacement(env,{ ...options,accountRef:body.account_ref,
+            predecessorId:body.predecessor_id,successorId:body.successor_id,confirmSameEvent:body.confirm_same_event });
+        } else if (body.action === 'identity') {
+          const { bindLegacySimpleFinAccount } = await import('./simplefin-ledger.js');
+          receipt = await bindLegacySimpleFinAccount(env,{ ...options,accountRef:body.account_ref,connectionId:body.connection_id });
+        } else return ownerJson({ code:'simplefin_review_action_invalid' },400);
+        return ownerJson(receipt);
+      } catch {
+        return ownerJson({ code:'simplefin_review_required',message:'This review could not be verified. Compare the bank record and preview again before confirming.' },409);
+      }
+    }
+
     if (path === "/api/bank-feed/simplefin/claim" && request.method === "POST") {
       const access = await ownerAccess();
       if (!access.authorised) return privateNoStore(ownerRefusal(access));

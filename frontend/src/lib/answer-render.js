@@ -104,7 +104,30 @@ export function answerText(r) {
   return finalAnswerText(composed.facts, composed.offers.at(-1));
 }
 
+// An incomplete recurring reading is a list, never a zero-valued total.
+export function recurringSetAsideText(ledger) {
+  if (!ledger?.set_aside_recurring?.length) return null;
+  const money = n => (n < 0 ? '-' : '') + '$' + Math.floor(Math.abs(n) / 100).toLocaleString('en-US') + '.' + String(Math.abs(n) % 100).padStart(2, '0');
+  const refs = g => (g.citations || []).map(n => '[' + n + ']').join(' ');
+  const confirmed = ledger.recurring || [];
+  const lines = confirmed.length ? ['Recurring charges detected, not confirmed subscriptions:',
+    ...confirmed.map(g => g.merchant + ': ' + g.cadence + ', typical ' + money(g.typical_minor) + '; last charge ' + money(g.last_amount_minor) + ' on ' + g.last_charge +
+      (g.cadence_dates ? '; paying account ' + (/^\d{1,4}$/.test(g.account_mask || '') ? 'ending ' + g.account_mask : '(mask unavailable)') + '; cadence evidence ' + g.cadence_dates.join(', ') : '') + ' ' + refs(g) + '.'),
+    'Confirmed recurring charges estimated monthly subtotal: ' + money(ledger.confirmed_subtotal_minor) + '.'] : [];
+  lines.push('Possible transfers or payments between your own accounts: set-aside recurring-pattern charges:');
+  for (const g of ledger.set_aside_recurring) lines.push(g.payee + ': ' + g.cadence + '; ' + g.dates.map((date, i) => money(g.amounts_minor?.[i] ?? g.amount_minor) + ' on ' + date).join('; ') + ' ' + refs(g) + '.');
+  lines.push('These may be payments to your own accounts, so they are not counted.');
+  return lines.join('\n');
+}
+
 function answerBodyText(r) {
+  const recurringList = recurringSetAsideText(r.ledger);
+  // Preserve the composer's scope warnings when its canonical lists are intact.
+  // Older or inconsistent prose must not turn a held charge into zero spending.
+  if (recurringList && (!r.answer?.includes(recurringList) ||
+      /(?:monthly (?:total|money out)|recurring (?:charges )?total|no recurring charges|none found|\$0\.00)/i.test(r.answer))) {
+    r = { ...r, answer: [recurringList, r.ledger.recurring_context].filter(Boolean).join('\n') };
+  }
   if (r.status === COVERAGE_INCOMPLETE) {
     const notice = r.notice || GENERIC_COVERAGE_NOTICE;
     return moneyExplanation(r) ? notice.replaceAll("Source coverage", "The connected records") : notice;

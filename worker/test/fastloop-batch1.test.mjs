@@ -45,23 +45,35 @@ const rankingContract = b => {
   assert.equal(b.ledger.kind, 'largest');
   assert.deepEqual(b.ledger.lead_rows.map(r => r.ref), [8, 1, 2, 3, 4].map(id => `ledger:transaction:${id}`));
   assert.deepEqual(b.ledger.lead_rows.map(r => r.amount_minor), [40000, 6000, 5000, 4000, 3000]);
-  assert.match(b.answer, /Payments to your own loan\/card accounts: \$400\.00/);
+  assert.match(b.answer, /Payments to loans and cards \(excluded from spending and income\): \$400\.00/);
   assert.equal(b.ledger.own_account_payments.total_minor, 40000);
 };
 const postedContract = b => {
   assert.match(b.answer, /This reading covers completed transactions only; pending activity is not included\./);
   assert.match(b.answer, /^This reading covers completed transactions only; pending activity is not included\.$/m);
-  assert.doesNotMatch(b.answer, /(?:no|zero) pending|pending.*\$|\bprincipal\b/i);
+  assert.doesNotMatch(b.answer, /(?:no|zero) pending|\bprincipal\b/i);
+  if (b.ledger.pending_excluded) {
+    assert.equal(b.ledger.pending_excluded.total_minor, 900001);
+    assert.equal(b.ledger.pending_excluded.count, 1);
+    assert.match(b.answer, /Pending activity: \$9,000\.01 across 1 row, excluded from completed spending/);
+    assert.equal(b.ledger.expense_total_minor, 61000, 'pending amount stays out of spending');
+  } else assert.doesNotMatch(b.answer, /\bpending\b.*\$/i);
 };
-const ambiguousRepaymentContract = b => {
-  if (b.ledger.kind === 'expense_summary') {
-    assert.equal(b.ledger.own_account_payments.total_minor, 0);
-    assert.equal(b.ledger.expense_total_minor, 101000);
-  } else {
+const ambiguousRepaymentContract = (b, kind = 'loan') => {
+  // A duplicate ending cannot prove an owned destination. Explicit repayment
+  // text still nominates a cited candidate, never ordinary spending.
+  assert.equal(b.ledger.own_account_payments?.total_minor || 0, 0);
+  assert.equal(b.ledger.possible_payments.length, 1);
+  const candidate = b.ledger.possible_payments[0];
+  assert.equal(candidate.payment_kind, kind);
+  assert.equal(candidate.amount_minor, 40000);
+  assert.ok(b.citations.some(c => c.n === candidate.n && c.amount_minor === 40000));
+  assert.ok(b.answer.includes(`possible ${kind} payment, not counted as spending: $400.00`));
+  if (b.ledger.kind === 'expense_summary') assert.equal(b.ledger.expense_total_minor, 61000);
+  else {
     assert.equal(b.ledger.kind, 'largest');
-    assert.equal(b.ledger.own_account_payments, undefined);
-    assert.ok(b.ledger.lead_rows.some(r => r.ref === 'ledger:transaction:7'));
-    assert.doesNotMatch(b.answer, /Payments to your own loan\/card accounts:/);
+    assert.deepEqual(b.ledger.lead_rows.map(r => r.ref), [8, 1, 2, 3, 4].map(id => `ledger:transaction:${id}`));
+    assert.deepEqual(b.ledger.lead_rows.map(r => r.amount_minor), [40000, 6000, 5000, 4000, 3000]);
   }
 };
 for (const memo of ['payment to loan account 4242', 'payment to loan acct no. 4242',
@@ -70,7 +82,7 @@ for (const memo of ['payment to loan account 4242', 'payment to loan acct no. 42
     const kind = memo.includes('card') ? 'card' : 'loan';
     const change = s => { s.accounts[2].kind = kind; s.rows[6].description = memo; };
     const f = seed(t, s => { change(s); s.accounts[1].mask = '4242'; });
-    for (const question of [summaryQuestion, rankQuestion]) ambiguousRepaymentContract(await f.ask(question));
+    for (const question of [summaryQuestion, rankQuestion]) ambiguousRepaymentContract(await f.ask(question), kind);
     const control = seed(t, change), summary = await control.ask(summaryQuestion);
     assert.equal(summary.ledger.expense_total_minor, 61000);
     assert.equal(summary.ledger.own_account_payments[`${kind}_minor`], 40000);
@@ -119,11 +131,18 @@ for (const [label, change] of [
   ['residual words', s => { s.rows[6].description = 'payment to acct no. 4242 outside'; }],
 ]) test(`F1 ${label} cannot prove owned repayment`, async t => {
   const f = seed(t, change), b = await f.ask(summaryQuestion);
-  if (label === 'unknown destination type' || label === 'unknown source type') {
+  if (label === 'unknown destination type') {
     assert.equal(b.answer, null, 'unknown subtype cannot establish ordinary expenses');
     assert.equal(b.gaps[0].reason, 'ledger_account_kind_review_required');
     assert.notEqual(b.ledger?.complete, true);
     assert.equal(b.ledger?.expense_total_minor, undefined);
+  } else if (label === 'unknown source type') {
+    assert.equal(b.ledger.complete, false, 'unknown source still cannot certify ordinary expenses');
+    assert.equal(b.ledger.expense_total_minor, null);
+    assert.equal(b.ledger.retained_outflow_minor, 61000);
+    assert.equal(b.ledger.own_account_payments.total_minor, 40000, 'known liability counterparty still proves the repayment');
+    assert.match(b.answer, /spending still unconfirmed/);
+    assert.match(b.answer, /Payments to loans and cards/);
   } else {
     assert.equal(b.ledger.own_account_payments.total_minor, 0, 'ownership decision retains uncertain outgoing row');
     assert.equal(b.ledger.expense_total_minor, 101000);
@@ -134,23 +153,26 @@ test('F2 eligibility precedes rank cutoff and preserves whole repayments separat
   const f = seed(t), b = await f.ask(rankQuestion);
   rankingContract(b);
   assert.equal(f.snapshot.rows.filter(r => !r.pending && r.direction === 'outflow' && r.date <= '2026-10-31').length, 8);
-  assert.equal(b.ledger.rows[0].ref, 'ledger:transaction:7', 'original gross rows remain available');
+  assert.deepEqual(b.ledger.rows.map(row => row.ref), [8, 1, 2, 3, 4].map(id => `ledger:transaction:${id}`),
+    'R1 alternate ranking contains ordinary expenses, with repayments disclosed separately');
   expenseContract(await f.ask(summaryQuestion));
   const gross = await f.ask(grossQuestion);
   assert.equal(gross.ledger.accounts.reduce((sum, a) => sum + a.debits_minor, 0), 101000);
+  assert.equal(gross.ledger.possible_payments_included_minor, 40000);
   const vendor = await f.ask('How much did I pay to Outside Lender this month?');
   assert.equal(vendor.ledger.total_minor, 40000);
   assert.equal(vendor.citations[0].ref, 'ledger:transaction:8');
   const transactions = await f.ask('Show my last ten transactions.');
   assert.deepEqual(transactions.citations.map(c => c.ref), [1, 2, 3, 4, 5, 6, 11, 9, 8, 7].map(id => `ledger:transaction:${id}`));
 });
-test('F3 expense synonyms take the actual expense route; explicit movement stays gross', async t => {
+test('F3 expense synonyms and movement totals share the repayment boundary', async t => {
   const f = seed(t);
   for (const q of ['Spend this month', 'What is my spending this month', 'How much have I spent this month?', summaryQuestion]) expenseContract(await f.ask(q));
   for (const q of [grossQuestion, 'What were my credits and debits this month?']) {
     const b = await f.ask(q);
     assert.equal(b.ledger.kind, 'totals');
     assert.equal(b.ledger.accounts.reduce((sum, a) => sum + a.debits_minor, 0), 101000);
+    assert.equal(b.ledger.possible_payments_included_minor, 40000);
   }
 });
 for (const pending of [true, false]) test(`F4 posted disclosure with pending row present=${pending}`, async t => {
@@ -160,8 +182,14 @@ for (const pending of [true, false]) test(`F4 posted disclosure with pending row
     'How much did I pay to Outside Lender this month?']) {
     const b = await f.ask(q); postedContract(b);
     assert.ok(f.calls.some(sql => sql.includes('t.pending=0')), 'real SQL pending predicate reached');
-    assert.ok(b.citations.every(c => c.ref !== 'ledger:transaction:12'), 'pending row never cited');
-    assert.doesNotMatch(b.answer, /9,000\.01/);
+    const pendingRefs = new Set(b.ledger.pending_excluded?.citations || []);
+    assert.ok(b.citations.every(c => c.ref !== 'ledger:transaction:12' || pendingRefs.has(c.n)), 'pending citations belong only to the exclusion receipt');
+    assert.ok((b.ledger.groups || []).every(group => group.citations.every(n => !pendingRefs.has(n))));
+    assert.ok((b.ledger.lead_rows || []).every(row => !pendingRefs.has(row.n)));
+    if (pending && b.ledger.kind === 'expense_summary') {
+      assert.equal(pendingRefs.size, 1);
+      assert.equal(b.citations.find(c => pendingRefs.has(c.n)).ref, 'ledger:transaction:12');
+    } else { assert.equal(pendingRefs.size, 0); assert.doesNotMatch(b.answer, /9,000\.01/); }
   }
 });
 
@@ -211,14 +239,16 @@ test('RM4 restoring coverage-only certification makes the uncertain-expense cont
 test('F1 restoring locator grammar makes the same typed-memo contract fail', async t => {
   const f = seed(t, s => { s.rows[6].description = 'payment to acct no. xxxx4242'; });
   expenseContract(await f.ask(summaryQuestion));
-  const answer = await mutant('ledger-analysis.js', '(?:number |no )?', '');
+  // Scope the restoration to the exact locator, not recurring advisory syntax.
+  const answer = await mutant('ledger-analysis.js', '(?: account| acct)? (?:number |no )?', '(?: account| acct)? ');
   const broken = await f.ask(summaryQuestion, answer);
   assert.throws(() => expenseContract(broken), { name: 'AssertionError' });
 });
 test('F2 restoring ranking exclusions makes the same ranking contract fail', async t => {
   const f = seed(t);
   rankingContract(await f.ask(rankQuestion));
-  const answer = await mutant('ledger-answer.js', 'if (intent.kind === "largest" && intent.direction === "outflow") {', 'if (false) {');
+  const answer = await mutant('ledger-answer.js', 'if (intent.kind === "largest" && intent.direction === "outflow") {', 'if (false) {',
+    [['const activity = intent.kind === "largest" && intent.direction === "outflow"\n    ? rows.filter(row => !loanCardPaymentKind(row, bySlug)) : rows;', 'const activity = rows;']]);
   const broken = await f.ask(rankQuestion, answer);
   assert.throws(() => rankingContract(broken), { name: 'AssertionError' });
   assert.equal(broken.ledger.lead_rows[0].ref, 'ledger:transaction:7');

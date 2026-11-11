@@ -1,4 +1,7 @@
 node_modules/
+# Generated lane homes, fixture credentials, caches and receipts stay local.
+/.lane-scratch/
+/home-test/
 .env
 .env.*
 *.log
@@ -104,3 +107,12 @@ machine-prep/installers/windows/handoff-windows.url
 
 # Offline family-index lane fixtures and measurements.
 /.lane-d1inv/
+
+# Disposable Windows payload build inputs and receipts.
+/.lane-scratch/
+/machine-prep/installers/windows/Payload.generated.wxs
+/machine-prep/installers/windows/bin/
+/machine-prep/installers/windows/obj/
+
+# Disposable offline test HOME; fixture manifests and keys must stay local.
+/home-test/

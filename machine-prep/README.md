@@ -66,3 +66,24 @@ Both install modes use offline npm on the authenticated local archive; missing
 bundled dependencies are a failure. The clean smoke plan records the sealed
 0.4.10 pins. Prior 0.4.9 hosted bootstrap receipts do not prove this kit; both
 platforms need rebuilt, signed artifacts and new bootstrap runs.
+
+## Windows payload installer candidate
+
+The Windows MSI now carries a private x64 Node 24.13.1 runtime (including npm
+and npx), the exact current-tree `npm pack` archive and its bundled dependency
+tree, and a setup launcher. It no longer runs the legacy 0.4.10 preparation
+script. The legacy scripts remain separately tested source, outside this MSI.
+See [the Windows payload contract](installers/windows/PAYLOAD-CONTRACT.md) for
+exact pins, the build seam, observed Standard-user checks and release gates.
+
+The Start-menu entry opens the Windows PowerShell launcher, which checks every
+installed payload digest before starting private Node. Node repeats inventory
+verification before starting the current CLI's terminal setup. It does not
+install Git or Claude, approve any sign-in, or prove a first answer. The CLI's
+remaining tool and account prerequisites still apply. No PATH or global npm
+installation is needed for the carried Node/CLI itself.
+
+Versions install side by side under LocalAppData\FinancialBrain\app\<version>.
+Native uninstall removes that version's app files; owner state remains. This is
+an unsigned review candidate until MAIN completes the signed-download and
+clean-VM first-open gates. Earlier shell-smoke receipts do not prove this MSI.

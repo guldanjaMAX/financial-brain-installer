@@ -1,6 +1,10 @@
+import { tmpdir } from 'node:os';
+import { grossCompatibility } from './comparison-compat.mjs';
+export { grossCompatibility };
+import { historicalCategoryBody } from './category-disclosure.mjs';
 import './guards.mjs';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { randomBytes, createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { runInNewContext } from 'node:vm';
@@ -30,7 +34,7 @@ export async function evaluate(c, baseline = false, injected = null) {
   const cleanups = [], f = ledgerFixture({ after: fn => cleanups.push(fn) });
   const implementation = injected || currentAnswer, validator = currentIntent;
   const raw = c.raw || { intents: c.intents };
-  const trace = { validation: 0, model: 0, document: 0, inventory: 0, transactions: 0 };
+  const trace = { validation: 0, model: 0, document: 0, inventory: 0, transactions: 0, pending: 0 };
   try {
     for (const row of c.rows) f.add(row.id, row.description, row.payee, { cents: row.cents, direction: row.direction, date: row.date });
     for (const row of c.rows) if (row.category) f.raw("UPDATE fin_transactions SET category=?,category_basis_state='confirmed' WHERE txn_uid=?", row.category, row.id);
@@ -45,10 +49,15 @@ export async function evaluate(c, baseline = false, injected = null) {
       } }, async () => { trace.document++; return Response.json({ answer: 'No amount supplied by the injected document path.', ledger: null, citations: [], results: [] }); });
     const bytes = await response.text(), body = JSON.parse(bytes);
     trace.inventory = f.calls.filter(sql => /FROM fin_accounts a/.test(sql)).length;
-    trace.transactions = f.calls.filter(sql => /CROSS JOIN fin_transactions/.test(sql)).length;
-    return { plan, trace, body, bytes };
+    // Disclosure reads use pending=1 and cannot prove a posted operand.
+    const transactionSql = f.calls.filter(sql => /CROSS JOIN fin_transactions/.test(sql));
+    trace.transactions = transactionSql.filter(sql => /t\.pending=0\b/.test(sql)).length;
+    trace.pending = transactionSql.filter(sql => /t\.pending=1\b/.test(sql)).length;
+    assert.equal(trace.transactions + trace.pending, transactionSql.length, 'every transaction read has an explicit posted/pending basis');
+    return { plan, trace, body, bytes, input: c };
   } finally { for (const fn of cleanups) fn(); }
 }
+export const historicalBytes = (o, rows) => JSON.stringify(grossCompatibility(historicalCategoryBody(o.body, rows)));
 export function reached(o) {
   assert.equal(o.trace.validation, 1);
   assert.ok(o.plan.intents.length, 'nonempty validated plan');
@@ -56,11 +65,23 @@ export function reached(o) {
   assert.equal(o.trace.document, 0);
   assert.ok(o.body.citations.length, 'nonempty citations');
 }
+// C3's closed calendar refusal stays out of document synthesis and ledger SQL.
+export function calendarRefusal(o) {
+  assert.equal(o.trace.validation, 1);
+  assert.equal(o.plan.outcome, 'fallback');
+  assert.equal(o.trace.document, 0);
+  assert.equal(o.trace.inventory, 0);
+  assert.equal(o.trace.transactions, 0);
+  assert.ok(o.body.gaps.some(g => g.scope === 'calendar'));
+  assert.equal(o.body.evidence_gate.complete, false);
+  assert.doesNotMatch(o.body.answer, /\$\d/);
+}
 export function safeBasis(o) {
   if (!o.body.ledger) {
     assert.equal(o.trace.validation, 1);
     assert.equal(o.plan.outcome, 'fallback', 'validation reached a closed refusal');
-    assert.equal(o.trace.document, 1, 'actual fallback callback reached');
+    if (o.body.gaps?.some(g => g.scope === 'calendar')) calendarRefusal(o);
+    else assert.equal(o.trace.document, 1, 'actual fallback callback reached');
     assert.ok(!/\$\d/.test(o.body.answer));
     return true;
   }
@@ -71,8 +92,20 @@ export function safeBasis(o) {
     assert.equal(o.body.evidence_gate.complete, false);
     assert.equal(o.body.evidence_gate.partial, true);
   }
-  return parts(o.body).every(p => p.net_refunds_unavailable ||
-    Number.isSafeInteger(p.net_expense_minor) && /less inflows with 'refund' in the description/.test(o.body.answer));
+  return parts(o.body).every(p => {
+    if (p.net_refunds_unavailable) return true;
+    if (p.amount_basis === 'net_after_explicit_category_refunds') {
+      const members = o.input.rows.filter(r => r.category === p.category_selector && r.date >= p.from && r.date <= p.to);
+      const gross = members.filter(r => r.direction === 'outflow').reduce((n, r) => n + r.cents, 0);
+      const refunds = members.filter(r => r.direction === 'inflow' && r.oracle === 'refund').reduce((n, r) => n + r.cents, 0);
+      assert.ok(refunds > 0, 'frozen input independently identifies an explicit categorized refund');
+      assert.equal(p.refund_minor, refunds);
+      assert.equal(p.net_expense_minor, gross - refunds);
+      assert.match(o.body.answer, /Confirmed category spending after explicit refunds:/);
+      return true;
+    }
+    return Number.isSafeInteger(p.net_expense_minor) && /less inflows with 'refund' in the description/.test(o.body.answer);
+  });
 }
 export function offer(text) {
   const matches = text.match(/\b(?:Want[^?\n]*\?|Which would help most\?|If you tell me[^.\n]*\.)/g) || [];
@@ -105,7 +138,8 @@ export function app(o, question) {
   return { html, paragraph, text: [paragraph, ...after].join('\n') };
 }
 export async function surfaces(t, o, question) {
-  const directory = join(process.env.HOME, 'review-surface'); mkdirSync(directory, { recursive: true });
+  const directory = mkdtempSync(join(tmpdir(), 'brain-net-review-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true })); mkdirSync(directory, { recursive: true });
   const keyPath = join(directory, 'fixture-admin-key'), manifest = join(directory, 'synthetic.manifest.json');
   const key = randomBytes(24).toString('hex');
   writeFileSync(keyPath, key, { mode: 0o600 });

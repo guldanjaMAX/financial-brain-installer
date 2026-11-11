@@ -17,6 +17,7 @@ function database() {
       if (/SELECT window_start,window_end FROM simplefin_sync_windows/.test(sql)) return null;
       if (/SELECT COUNT\(\*\) n FROM simplefin_stage_transactions/.test(sql)) return { n: staged };
       if (/SELECT backfill_next FROM simplefin_connections/.test(sql)) return connection;
+      if (/FROM simplefin_account_assignments/.test(sql)) return null;
       throw new Error("native database unexpected read");
     },
     async all() {

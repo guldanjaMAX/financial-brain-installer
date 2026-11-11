@@ -1,6 +1,15 @@
 // Closed amount adjustments exclude narrative such as receiving store credit
 // or shopping after a return. Do not infer subtraction from distant nouns.
 const adjustment = /\b(?:net of|after|minus|less)\s+(?:(?:the|any|all|their|its)\s+|['’]s\s+)?(?:refunds?|returns?|credits?)\b|\bwith (?:the |any |all |their |its )?refunds? taken off\b|\brefunds? are netted out\b|\bnet\s+spend(?:ing)?\b/i;
+const grossWords = /\bgross\b|\bbefore refunds\b/i;
+
+// Calendar admission reuses the financial basis grammar instead of treating
+// its before/after words as unconsumed date operators.
+export function refundBasisSpans(text) {
+  return [...text.matchAll(new RegExp(`${adjustment.source}|${grossWords.source}`, 'gi'))]
+    .map(match => [match.index, match.index + match[0].length]);
+}
+
 const descriptionAdjustment = /\b(?:after refunds|net of refunds|refunds are netted out)\b/i;
 
 // Selector words identify records, not a requested amount basis. Mask every
@@ -27,7 +36,7 @@ export function refundBasisForOperand({ question, clause, intents, comparison, o
   const localAdjustment = adjustment.test(local);
   // A shared comparison qualifier governs both periods. A locally requested
   // gross operand stays independently answerable.
-  const explicitGross = /\bgross\b|\bbefore refunds\b/i.test(local);
+  const explicitGross = grossWords.test(local);
   const expense = !operand || ['merchant', 'category', 'totals', 'expense_summary'].includes(operand.kind) && operand.direction !== 'inflow';
   const requested = expense && !explicitGross && (localAdjustment || Boolean(comparison) && adjustment.test(shared));
   const refundPayee = operand?.vendor && /^refunds?$/i.test(operand.vendor) &&

@@ -54,7 +54,7 @@ export function replay({ cases = [...BASE_CASES, ...CONTROLS], fault = null,
     encoding: 'utf8', maxBuffer: 16 * 1024 * 1024,
   } });
   const result = JSON.parse(child.stdout);
-  result.harness_digest = sha(['./money-replay.mjs', './money-worker.mjs', './child-run.mjs', './child-stall.mjs',
+  result.harness_digest = sha(['./money-replay.mjs', './money-worker.mjs', './child-run.mjs', './child-stall.mjs', './ledger-sql-contracts.mjs',
     '../../worker/src/lib/fin-account-kinds.js', '../../worker/src/lib/fin-account-links.js',
     '../../test/fixtures/cli-side-effect-tripwire.mjs', '../../test/fixtures/fastloop-money/input.mjs']
     .map(path => readFileSync(new URL(path, import.meta.url), 'utf8')));
