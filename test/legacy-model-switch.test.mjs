@@ -7,6 +7,7 @@ import * as setup from "../operations/answer-setup.mjs";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
 import { cmdDeploy, cmdUpdate, cmdUpdatePreview, workerBindings } from "../brain.mjs";
 import { modelSwitchFixture, PAIR, previewOptions, REFUSAL, SHA, SWITCH_LINE, updateAdapters } from "./fixtures/legacy-model-switch.mjs";
+import './legacy-location-isolation.cases.mjs';
 
 const RETRY_LINE = "Your Brain may already be answering with the new models. Run brain update again to finish.";
 

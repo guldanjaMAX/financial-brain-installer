@@ -57,3 +57,17 @@ CI secret boundary:
 3. Confirm whether the WiX OSMF applies and, if it does, approve the correct $10, $40, or $60 monthly tier before running the Windows artifact job.
 4. Choose the legal publisher names to display on macOS and Windows and complete both identity checks.
 5. Approve a protected signing environment and named reviewers. Until then, CI remains unsigned artifact-only.
+
+## Windows payload review boundary
+
+The founder approved WiX v7 EULA acceptance on 10-07 based on annual revenue
+below US$10,000 and no sponsorship fee. The build still records that approval
+with `WixOsmfConfirmed=true`, which sets `AcceptEula=wix7` (`-acceptEula wix7`).
+
+The Windows job stages the current exact CLI and the pinned official x64 Node
+archive before WiX restore/build. Its payload contract is
+[Windows PAYLOAD-CONTRACT.md](installers/windows/PAYLOAD-CONTRACT.md). Sign only
+the reviewed final MSI bytes, then rerun the signed payload smoke. Neither
+local digests nor an unsigned MSI establish publisher trust. MAIN still owns
+CI signing, SmartScreen from a signed browser download and clean-VM first-open.
+The legacy thin-shell and pinned-kit bootstrap receipts are separate evidence.

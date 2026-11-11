@@ -2,11 +2,12 @@
  * Preview and apply the one reviewed bank-provider transition.
  *
  * This command deliberately knows no provider credential shape. Its only
- * remote observation is one aggregate D1 row, and its only write is the
- * existing verified manifest replacement boundary.
+ * remote observations are aggregate D1 state and the Worker provider binding.
+ * Apply uses the zero-state D1 fence and verified manifest replacement boundary.
  */
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, lstatSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import {
@@ -343,15 +344,76 @@ function hasNonSimpleFinState(state) {
   return state.non_simplefin_connections > 0 || state.non_simplefin_ledger_rows > 0;
 }
 
+/** The original bytes and D1 plan hash jointly authorize this exact apply.
+ * Backups are evidence, never configuration: unrelated or altered bytes cannot
+ * authorize a missing binding or a different transition.
+ */
+function transitionOriginal(manifestPath, manifest, state) {
+  if (!manifestPath || state.transition_target !== "simplefin") return null;
+  const absolute = resolve(manifestPath);
+  const matchesPlan = (bytes) => {
+    const previous = JSON.parse(bytes.toString("utf8"));
+    if (!isDeepStrictEqual(intendedSimpleFinManifest(previous), manifest)) return null;
+    const plan = planFor({ manifestPath, bytes, manifest: previous,
+      state: { ...state, transition_target: null, transition_ref: null }, schema: defaultSchema() });
+    return plan.plan_id === state.transition_ref ? previous : null;
+  };
+  // An already-SimpleFIN manifest can require a fence without a manifest write.
+  try {
+    const original = matchesPlan(readFileSync(absolute));
+    if (original) return original;
+  } catch { /* Try the verified pre-apply backup next. */ }
+  const prefix = basename(absolute) + ".before-bank-provider-";
+  for (const name of readdirSync(dirname(absolute)).filter(name => name.startsWith(prefix))) {
+    try {
+      const path = join(dirname(absolute), name);
+      const stat = lstatSync(path);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) continue;
+      const original = matchesPlan(readFileSync(path));
+      if (original) return original;
+    } catch { /* Unreadable or unrelated backups supply no transition authority. */ }
+  }
+  return null;
+}
+
+export function assertBankProviderLiveState({ liveProvider, manifestPath, manifest, state, preview = false }) {
+  const original = state.transition_target === "simplefin" && manifest
+    ? transitionOriginal(manifestPath, manifest, state) : null;
+  if (state.transition_target === "simplefin" && manifest && !original) {
+    fail("BANK_PROVIDER_TRANSITION_REQUIRED",
+      "The D1 bank-provider transition fence does not match this manifest and its original backup. Review the backup and preview with brain bank-provider <manifest> --set simplefin --enable before deploying.");
+  }
+  if (liveProvider === null) {
+    const previous = original ?? (preview && state.transition_target === null ? manifest : null);
+    if (previous && previous.corpora?.bank_feed?.enabled !== true && state.deployed_provider === "unknown") return;
+    fail("BANK_PROVIDER_TRANSITION_REQUIRED",
+      "The live Worker bank-provider binding is missing without exact first-enable transition authority. Review the original manifest backup and D1 fence, then preview with brain bank-provider <manifest> --set simplefin --enable before deploying.");
+  }
+  const previous = original ?? (preview ? manifest : null);
+  const conflictingSimpleFin = liveProvider === "simplefin" &&
+    state.deployed_provider !== "simplefin" && state.transition_target !== "simplefin";
+  const conflictingPrevious = liveProvider !== "simplefin" &&
+    (liveProvider !== state.deployed_provider || (previous &&
+      (previous.corpora?.bank_feed?.enabled !== true ||
+        manifestBankFeedProvider(previous.corpora.bank_feed) !== liveProvider)));
+  if (conflictingSimpleFin || conflictingPrevious) {
+    fail("BANK_PROVIDER_TRANSITION_REQUIRED",
+      "The live Worker bank-provider binding disagrees with the recorded provider. Review Worker settings and preview with brain bank-provider <manifest> --set simplefin --enable before deploying.");
+  }
+}
+
 /** Fail-closed preflight for the standalone deploy continuation. */
 export async function prepareBankProviderDeployment({
   targetProvider,
   liveProvider,
   inspectBankState,
+  manifestPath,
+  manifest,
 }) {
   if (targetProvider !== "simplefin") return null;
   if (typeof inspectBankState !== "function") throw new TypeError("a bank-provider deploy inspector is required");
   const state = normalizeBankProviderStateRow(await inspectBankState());
+  assertBankProviderLiveState({ liveProvider, manifestPath, manifest, state });
   if (state.transition_target === "simplefin") {
     if (hasAnyBankState(state)) {
       fail(
@@ -703,6 +765,17 @@ export async function runBankProviderCommand(input, options = {}) {
           `${state.bank_ledger_rows} provider-derived ledger row(s) exist. Nothing was changed.`,
         receipt,
       );
+    }
+    if (typeof options.inspectWorkerBankProvider === "function") {
+      try {
+        const liveProvider = await options.inspectWorkerBankProvider(manifest);
+        assertBankProviderLiveState({ liveProvider, manifestPath, manifest, state, preview: true });
+      } catch (error) {
+        const code = "BANK_PROVIDER_TRANSITION_REQUIRED";
+        fail(code, error instanceof BankProviderCommandError ? error.message :
+          "The live Worker bank-provider binding could not be verified. Review Worker settings and rerun brain bank-provider <manifest> --set simplefin --enable.",
+          publicReceipt(plan, { mode: apply ? "apply" : "preview", status: "refused", errorCode: code }));
+      }
     }
     if (!apply) {
       return publicReceipt(plan, {

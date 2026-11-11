@@ -45,7 +45,13 @@ function witness(c, o) {
   assert.equal(o.trace.validation, 1);
   if (c.terminal === 'router') {
     assert.equal(o.plan.outcome, 'fallback');
-    assert.equal(o.trace.document, 1);
+    if (o.plan.unreadCalendar?.length) {
+      // Complete complements refuse a shortened selector before document fallback.
+      assert.equal(o.trace.document, 0); assert.equal(o.trace.render, 1);
+      assert.equal(o.body.ledger, undefined);
+      assert.ok(o.body.gaps.some(g => g.scope === 'calendar'));
+      assert.equal(o.body.evidence_gate.complete, false);
+    } else assert.equal(o.trace.document, 1);
     assert.equal(o.trace.inventory, 0);
   } else {
     assert.ok(o.plan.intents.length > 0, 'nonempty validated plan');
@@ -154,15 +160,28 @@ for (const c of extended) test('supplemental refund control: ' + c.id, async () 
     assert.equal(ps[netIndex].net_refunds_unavailable, true);
     assert.equal(o.body.ledger.comparison, undefined);
   } else {
-    assert.equal(ps[0].total_minor, recount(c).gross);
-    if (c.family) {
-      assert.equal(ps[0].match_basis, 'family');
-      assert.equal(ps[0].family_match_count, 1);
-    }
+    const checkAmount = ledger => {
+      if (c.family) {
+        assert.equal(ledger.total_minor, null);
+        assert.equal(ledger.exact_subtotal_minor, 12000);
+        assert.equal(ledger.name_match_subtotal_minor, 3000);
+        assert.equal(ledger.match_basis, 'name_match');
+        assert.equal(ledger.family_match_count, 1);
+        assert.equal(ledger.complete, false);
+      } else assert.equal(ledger.total_minor, recount(c).gross);
+    };
+    checkAmount(ps[0]);
     assert.equal(ps[0].net_refunds_unavailable, true);
     const gross = await execute(grossPeer(c));
     witness(grossPeer(c), gross);
-    assert.equal(gross.body.ledger.total_minor, recount(c).gross);
+    checkAmount(gross.body.ledger);
+    if (c.family) {
+      for (const body of [o.body, gross.body]) {
+        assert.equal(body.evidence_gate.complete, false);
+        assert.match(body.answer, /matched by name, not confirmed/i);
+        assert.match(body.answer, /same company\?/i);
+      }
+    }
     assert.equal(gross.body.ledger.net_refunds_unavailable, undefined);
   }
 });
@@ -174,7 +193,10 @@ test('restoring comparison arithmetic is detected on the real answer path', asyn
   assert.equal(source.split(guard).length - 1, 1, 'one comparison guard to restore');
   const basisGuard = ': intent.netRefunds || intent.refundsNotNetted ? part.net_expense_minor ?? null';
   assert.equal(source.split(basisGuard).length - 1, 1, 'one requested-basis selector to restore');
-  const restored = source.replace(guard, '').replace(basisGuard, '').replace(/from (["'])(\.[^"']+)\1/g,
+  // Restore every independent veto so the mutant reaches comparison arithmetic.
+  const evidenceGuard = ' && combined.find(entry => entry.ledger === part)?.evidence_gate?.complete === true';
+  assert.equal(source.split(evidenceGuard).length - 1, 1, 'one evidence guard to restore');
+  const restored = source.replace(evidenceGuard, '').replace(guard, '').replace(basisGuard, '').replace(/from (["'])(\.[^"']+)\1/g,
     (_, quote, path) => `from ${quote}${new URL(path, url).href}${quote}`);
   assert.notEqual(restored, source);
   const implementation = await import(`data:text/javascript;base64,${Buffer.from(restored).toString('base64')}`);
@@ -186,6 +208,7 @@ test('restoring comparison arithmetic is detected on the real answer path', asyn
   witness(c, mutant);
   assert.equal(mutant.trace.transactions, 2, 'mutant reached both real period reads');
   assert.ok(parts(mutant.body).every(p => p.net_refunds_unavailable));
+  assert.deepEqual(mutant.body.ledger.comparison, { figures_minor: [12000, 9000], difference_minor: 3000 });
   const judgment = inspect(c, mutant.body);
   assert.equal(judgment.reached, true);
   assert.deepEqual(judgment.wrong, ['comparison_0', 'comparison_1', 'comparison_difference']);

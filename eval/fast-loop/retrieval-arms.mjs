@@ -24,6 +24,10 @@ const SQL = new Map([
     { kind: 'schema', binds: ['custom_api_current_jobs', 'custom_api_document_versions'] }],
   ['8cf5312882805c3ff1bbbce4dd0105e2e17a9beee9b984306e2adcd72d48cceb',
     { kind: 'keyword', binds: ['"owner" OR "role" OR "record"', 100] }],
+  // Reviewed two-step statement, including its fixed candidate bound. Unknown
+  // SQL and changed bindings still fail before an injected result is returned.
+  ['e8767cd23214ad07ac4132731463625f9cbea5848d918f3d2850f1ac22b36fc2',
+    { kind: 'keyword', binds: ['"owner" OR "role" OR "record"', 100] }],
   ['f28d794f9606732c0d38274e74a5eb8463bef5a0f2b6b1614a90c83ac6250a33',
     { kind: 'hydration', binds: [ROLE_ROW.chunk_uid] }],
 ]);
@@ -53,6 +57,12 @@ export async function runRetrievalArm(search, arm, { fail, fault = null }) {
             calls.keyword_errors++; errors.push(keywordFailure); throw keywordFailure;
           }
           const evidence = keyword ? arm.keyword === 'evidence' : hydration && arm.vector === 'evidence';
+          if (keyword && sql.includes('WITH keyword_candidates AS MATERIALIZED')) {
+            const kept = evidence && fault !== 'drop-evidence';
+            return { results: kept
+              ? [{ ...ROLE_ROW, _keyword_rowid: 1, _keyword_candidate_count: 1 }]
+              : [{ chunk_uid: null, _keyword_rowid: null, _keyword_candidate_count: 0 }] };
+          }
           return { results: evidence && fault !== 'drop-evidence' ? [ROLE_ROW] : [] };
         },
       };

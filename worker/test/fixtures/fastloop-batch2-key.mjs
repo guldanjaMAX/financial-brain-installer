@@ -27,6 +27,7 @@ function reviewContract(o, wording) {
   const { body: b, id } = o, l = b.ledger;
   const balance = /^D5\/|^D10\//.test(id), recurring = id.startsWith('D8/');
   const ambiguous = id === 'D7/ambiguous', forecast = id === 'D10/forecast';
+  const possiblePayment = id === 'gross/control' && wording === 'current';
   assert.deepEqual(b.evidence_gate, { supported: true, complete: !ambiguous && !forecast,
     partial: ambiguous || forecast, reason: forecast ? 'forecast unavailable; current recorded balance observations only'
       : ambiguous ? 'multiple near-date deposits match; no unique payment is confirmed' : 'read from covered ledger rows' });
@@ -50,7 +51,10 @@ function reviewContract(o, wording) {
   if (balance) {
     expected = [
       ...(forecast ? ["I can't forecast next month's bank balance. Here is the current recorded snapshot instead."] : []),
-      'Your latest synced balances are below.', 'Recorded observations, not live or available cash.',
+      'Your latest synced balances are below.',
+      ...(wording === 'current' ? ['The saved account history is complete.',
+        'Pending after the dated snapshots below (not yet included): outflows $9,000.01; inflows $0.00. These amounts are not added to or subtracted from the recorded balances.'] : []),
+      'Recorded observations, not live or available cash.',
       'Cash accounts (recorded balances):',
       ...balances.slice(0, 2).map(([mask, cents, label], i) => `${label} (account ****${mask}): ${formatMinor(String(cents))} as of 2026-10-30; feed synced unavailable [${i + 1}].`),
       'Liabilities (separate from cash):',
@@ -88,9 +92,9 @@ function reviewContract(o, wording) {
     const selectedMasks = single ? ['3131'] : masks;
     const period = previous ? '2026-09-01 through 2026-09-30' : '2026-10-01 through 2026-10-31';
     expected = [...(combined ? [
-      `Combined recorded inflow: ${single ? '$322.33' : '$746.11'} across ${selectedMasks.length} selected covered accounts, ${period}; not established income.`,
+      `Combined recorded inflow: ${single ? '$322.33' : '$746.11'} ${wording === 'pinned' ? '' : 'gross '}across ${selectedMasks.length} selected covered accounts, ${period}; not established income.`,
       'Matched transfers between your own accounts: $0.00 across 0 pairs.',
-      `Inflow from outside your covered accounts: ${single ? '$322.33' : '$746.11'} (recorded inflow minus matched transfers; unmatched credits may include unproved own-account moves).`,
+      `Inflow from outside your covered accounts: ${single ? '$322.33' : '$746.11'} (${wording === "pinned" ? "recorded inflow minus matched transfers; unmatched credits may include unproved own-account moves" : "recorded gross inflow minus matched own transfers; includes any possible own transfer listed below"}).`,
       'Transfers are counted by the inflow posting date; counterpart outflows may fall up to 3 days before or after it.',
     ] : []),
       ...selectedMasks.map(mask => {
@@ -99,7 +103,8 @@ function reviewContract(o, wording) {
         const refs = expectedCitations.filter(c => c.account_mask === mask).map(c => `[${c.n}]`).join(' ');
         return `account ****${mask}, ${period}: credits ${credits}; debits ${debits} ${refs || '(no posted income or expenses in the covered period)'}.`;
       }), ...(combined ? ['Source and own-account transfer status are not established by a payer label; uncertain credits remain included.'] : []),
-      accountLine(selectedMasks, period), ...(!combined ? [transferNote] : []), posted];
+      accountLine(selectedMasks, period), ...(!combined ? [transferNote] : []),
+      ...(possiblePayment ? ['included in money out above, possibly a transfer to your own account (counterpart not proved): $400.00 on 2026-10-12, bank text quoted: "payment to account 4242" [2].'] : []), posted];
     if (combined) {
       assert.equal(l.income_established, false); assert.equal(l.includes_own_transfers, true);
       assert.equal(l.outside_inflow_minor, single ? 32233 : 74611);
@@ -138,6 +143,10 @@ export function contract(o, { wording = 'current' } = {}) {
     assert.match(b.answer, /Liabilities \(separate from cash\)/);
     assert.ok(b.answer.includes(wording === 'pinned' ? 'Recorded observations, not live or available cash.' : LIVE_PLAIN.split('\n')[0]));
     displayed = ['502345', '200001', '880000'];
+    if (wording === 'current') {
+      assert.deepEqual(l.observation.pending, { count: 1, outflow_minor: 900001, inflow_minor: 0, treatment: 'not_included' });
+      displayed = ['900001', '0', ...displayed];
+    }
     if (o.id === 'D10/forecast') {
       assert.equal(l.forecast_supported, false);
       assert.equal(b.evidence_gate.complete, false);
@@ -199,7 +208,16 @@ export function contract(o, { wording = 'current' } = {}) {
     assert.equal(o.id, 'gross/control');
     assert.deepEqual(l.accounts.map(a => [a.account_mask, a.credits_minor, a.debits_minor]),
       [['3131', 23332, 101000], ['4242', 0, 0], ['5353', 0, 0]]);
-    displayed = ['23332', '101000', '0', '0', '0', '0'];
+    displayed = ['23332', '101000', '0', '0', '0', '0', ...(wording === 'current' ? ['40000'] : [])];
+    if (wording === 'current') {
+      assert.equal(l.payment_exclusions, undefined, 'an unpaired endpoint is not proof of an own payment');
+      assert.equal(l.possible_payments_included_minor, 40000);
+      assert.deepEqual(l.possible_payments, [{ n: 2, payment_kind: 'own_account', amount_minor: 40000,
+        posted_on: '2026-10-12', account_mask: '3131', bank_text: 'payment to account 4242',
+        mixed_components: false, basis: 'description',
+        label: 'included in money out above, possibly a transfer to your own account (counterpart not proved)',
+        destination: 'account', included_in_total: true }]);
+    }
   }
   assert.deepEqual(displayFigures(b.answer).map(a => a.cents), displayed, 'every displayed amount');
   for (const ref of [...b.answer.matchAll(/\[(\d+)\]/g)]) assert.ok(b.citations.some(c => c.n === Number(ref[1])));

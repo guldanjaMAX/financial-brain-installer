@@ -23,7 +23,7 @@ const questions = [
   ["largest", "What were my ten largest expenses in the last 60 days?"],
   ["deposits", "What deposits came in over the last 14 days?"],
   ["merchant", "How much did I spend at Fixture Store in September 2026?"],
-  ["category", "How much did I spend on software/SaaS in Q3?"],
+  ["category", "How much did I spend on software in Q3?"],
   ["transfers", "How much did I transfer between my own accounts last month?"],
   ["recurring", "What recurring subscriptions am I paying for, and how much per month?"],
 ];
@@ -74,11 +74,25 @@ async function ledgerBodies(t) {
       // These recurring and transfer rows have no category. A confirmed match
       // cannot establish the full topic amount while their membership is unknown.
       const topicUnconfirmed = kind === "category" && !empty;
-      assert.equal(body.evidence_gate?.complete, !(kind === "merchant" && empty || topicUnconfirmed),
+      const unresolvedCategory = kind === "category" && empty;
+      assert.equal(body.evidence_gate?.complete, !(kind === "merchant" && empty || topicUnconfirmed || unresolvedCategory),
         `${kind}: completeness requires both selector and category membership`);
+      if (kind === "merchant" && empty) {
+        assert.equal(body.ledger.total_minor, null, 'empty coverage does not establish named-payee identity');
+        assert.equal(body.ledger.coverage.complete, true);
+        assert.match(body.answer, /^No charges found for /);
+        assert.doesNotMatch(body.answer, /\$/);
+      }
       assert.ok(f.seen.sql.filter(sql => readPattern.test(sql)).length > before, `${kind}: ledger read count increased`);
       if (kind === "totals") assert.equal(body.ledger.accounts.reduce((n, a) => n + a.transaction_count, 0) > 0, !empty);
-      else if (kind !== "balance") assert.equal(body.ledger.found, topicUnconfirmed ? null : !empty, `${kind}: populated/zero decision`);
+      else if (kind !== "balance") assert.equal(body.ledger.found, topicUnconfirmed || unresolvedCategory ? null : !empty, `${kind}: populated/zero decision`);
+      if (unresolvedCategory) {
+        assert.equal(body.ledger.selector_unresolved, true, 'the empty exact-name inventory reached the selector decision');
+        assert.deepEqual(body.ledger.known_categories, []);
+        assert.equal(body.ledger.total_minor, null);
+        assert.equal(body.ledger.complete, false);
+        assert.doesNotMatch(body.answer, /\$0\.00/);
+      }
       if (topicUnconfirmed) {
         assert.equal(body.ledger.category_total_unconfirmed, true);
         assert.equal(body.ledger.total_minor, null);
@@ -168,6 +182,13 @@ globalThis.fetch = async (url, init) => {
       assert.ok(!reply.result.isError);
       const text = reply.result.content[0].text;
       const invitations = body.answer.match(/(?:Want[^?\n]*\?|Which would help most\?|If you tell me[^.\n]*\.)/g) || [];
+      if (key === 'merchant-zero') {
+        assert.equal(invitations.length, 0, 'bounded absence has no invitation padding');
+        assert.ok(text.includes(body.answer), 'remote ask preserves the plain absence sentence');
+        assert.doesNotMatch(text, /Want[^?\n]*\?/);
+        assert.doesNotMatch(text, GLOBAL_ABSENCE);
+        return;
+      }
       assert.equal(invitations.length, 1, "real ledger composition selected one invitation");
       const facts = body.answer.replace(invitations[0], "").trim();
       assert.ok(text.includes(facts), "remote ask contains every real Worker fact verbatim");

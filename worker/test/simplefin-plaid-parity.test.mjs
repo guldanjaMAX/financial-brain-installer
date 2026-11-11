@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
-import { buildParityLedgers, moneyBook, oracleFor, plaidRendering, simplefinRendering, questionGroups, scoreAnswer,
+import { buildParityLedgers, moneyBook, oracleFor, plaidRendering, simplefinRendering, questionGroups, scoreAnswer, NOW,
   assertLedgerMatchesBook, ledgerDiff } from "./fixtures/simplefin-parity.mjs";
 
 let run;
@@ -73,10 +73,10 @@ test("both ledgers match every independent posted event, signed balance, date, p
   assertLedgerMatchesBook(run.simple, run.book, "simplefin");
 });
 
-test("verified consecutive SimpleFIN windows establish coverage after backfill and retain it on current refresh", () => {
+test("explicit owner comparison establishes bounded coverage after verified backfill", () => {
   assert.equal(run.simple.first("SELECT state FROM bank_feed_backfill").state, "complete", "backfill completion decision reached");
   for (const row of run.simple.rows("SELECT * FROM fin_account_coverage")) {
-    assert.equal(row.coverage_status, "complete", "all successful windows have a durable promotion receipt");
+    assert.equal(row.coverage_status, "complete", "exact bank comparison follows durable publication receipts");
     assert.ok(row.covered_from <= "2026-08-07");
     assert.equal(row.covered_to, "2026-11-04");
   }
@@ -124,11 +124,66 @@ for (const [id, before, after, failure] of [
   const target = join(directory, "mutant.mjs");
   writeFileSync(target, source);
   const sf = await import(pathToFileURL(target).href);
-  const mutated = await buildParityLedgers({ sf });
+  const mutated = await buildParityLedgers({ sf, reviewCoverage: false });
   t.after(() => mutated.close());
   assertLedgerMatchesBook(mutated.plaid, mutated.book, "plaid");
   assert.throws(() => assertLedgerMatchesBook(mutated.simple, mutated.book, "simplefin"), failure,
     "the identical parity assertion must turn red after the mutation");
   mutants.push({ id, killed: true, original_sha256: createHash("sha256").update(original).digest("hex"),
     copied_mutant_sha256: createHash("sha256").update(source).digest("hex"), failure: failure.source });
+});
+
+test("parity oracle kills the drop-non-repayment-account-posting mutant", async t => {
+  const posting = run.book.transactions.find(row => row.id === "reversal-out");
+  assert.ok(posting && !posting.move && posting.cents < 0 && posting.day.startsWith("2026-10-"),
+    "the book supplies an ordinary October debit, not a repayment leg");
+  assert.equal(run.book.transactions.filter(row => row.day === posting.day && row.cents === posting.cents).length, 1,
+    "the mutation selects exactly one authored posting");
+  const origin = new URL("../src/lib/ledger-answer.js", import.meta.url);
+  const original = readFileSync(origin, "utf8");
+  const before = 'ledger.accounts = accounts.map(account => {\n      const ownRows = activity.filter(row => row.effective_account_slug === account.account_slug);';
+  assert.equal(original.split(before).length, 2, "one live account-membership mutation decision");
+  const omit = `!(row.posted_on === ${JSON.stringify(posting.day)} && row.amount_minor === ${Math.abs(posting.cents)} && row.direction === "outflow")`;
+  const after = before.replace('row.effective_account_slug === account.account_slug',
+    `row.effective_account_slug === account.account_slug && ${omit}`);
+  let source = original.replace(before, after);
+  source = source.replace(/from "(\.\/[^\"]+)"/g, (_, dependency) =>
+    `from ${JSON.stringify(new URL(dependency, origin).href)}`);
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), "parity-account-mutant-")));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const target = join(directory, "mutant.mjs");
+  writeFileSync(target, source);
+  const { withLedgerAnswer } = await import(pathToFileURL(target).href);
+  const total = (body, key) => body.ledger.accounts.reduce((n, account) => n + account[key], 0);
+  let killed = 0;
+  for (const [provider, fixture] of [["plaid", run.plaid], ["simplefin", run.simple]]) {
+    assertLedgerMatchesBook(fixture, run.book, provider);
+    for (const [group, wordings] of questionGroups.filter(([group]) => ["money-in", "money-out"].includes(group))) {
+      for (const index of [1, 3]) {
+        const question = wordings[index], control = await run.ask(fixture, question);
+        assert.equal(scoreAnswer(group, control.body, run.book, run.oracle).score, "RIGHT",
+          `${provider}/${group}/${index + 1}: green product control`);
+        const reads = fixture.seen.sql.length;
+        const changed = await (await withLedgerAnswer({ env: fixture.env, question, now: NOW,
+          grantScope: { all: true }, scopePrincipalKind: "owner" }, () => assert.fail("mutant must reach the ledger"))).json();
+        assert.ok(fixture.seen.sql.slice(reads).some(sql => /JOIN fin_transactions/.test(sql)),
+          "the mutant reached the real transaction reader");
+        assert.equal(changed.ledger.kind, "totals");
+        assert.equal(total(changed, "credits_minor"), total(control.body, "credits_minor"));
+        assert.equal(total(changed, "debits_minor"), total(control.body, "debits_minor") - Math.abs(posting.cents),
+          "the populated account totals lost exactly the non-repayment debit");
+        assert.equal(total(changed, "transaction_count"), total(control.body, "transaction_count") - 1);
+        assert.deepEqual(changed.ledger.lead_accounts, control.body.ledger.lead_accounts, "headline membership is unchanged");
+        const score = scoreAnswer(group, changed, run.book, run.oracle);
+        assert.equal(score.score, "WRONG");
+        assert.equal(score.detail, "wrong account movement membership", "the same account check kills the mutant");
+        killed++;
+      }
+    }
+    assertLedgerMatchesBook(fixture, run.book, provider);
+  }
+  assert.equal(killed, 8, "both providers reach all four non-repayment membership decisions");
+  mutants.push({ id: "drop-non-repayment-account-posting", killed: true, decisions: killed,
+    original_sha256: createHash("sha256").update(original).digest("hex"),
+    copied_mutant_sha256: createHash("sha256").update(source).digest("hex"), failure: "wrong account movement membership" });
 });

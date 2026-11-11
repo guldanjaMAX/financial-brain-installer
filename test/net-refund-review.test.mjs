@@ -14,9 +14,7 @@ for (const vendor of ['Vendor Unit', null]) test(`plain refund wording: ${vendor
   assert.ok(parts(gross.body).every(p => !p.net_refunds_unavailable));
   const question = input.question.replace('?', ' with refunds taken off?');
   const actual = await evaluate({ ...input, question }); reached(actual);
-  const notice = vendor
-    ? 'I cannot confirm spending after refunds because these records do not show which deposits are refunds from this business. The amounts below are before subtracting refunds.'
-    : 'I cannot confirm spending after refunds because these records do not show which deposits refunded these expenses. The amounts below are before subtracting refunds.';
+  const notice = 'I cannot confirm spending after refunds because the bank feed does not supply a refund or reversal type; the amounts below are before subtracting refunds.';
   const offer = vendor ? 'Want to review the deposits for possible refunds from this business?'
     : 'Want to review the deposits for possible refunds?';
   const outputs = await surfaces(t, actual, question);

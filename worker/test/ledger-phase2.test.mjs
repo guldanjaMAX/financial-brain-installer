@@ -52,7 +52,7 @@ for (const [question, kind, seed] of [
   ["What were my 3 largest deposits in September 2026?", "largest", f => f.add("deposit", "2026-09-15", 12001, "inflow")],
   ["How much did I spend at Fixture Store in September 2026?", "merchant", f => f.add("merchant", "2026-09-15", 12001, "outflow", "FIXTURE-STORE purchase")],
   ["How much income came from Fixture payer in September 2026?", "merchant", f => f.add("payer", "2026-09-15", 12001, "inflow", "Fixture payer deposit")],
-  ["How much did I spend on software/SaaS in Q3?", "category", f => f.add("software", "2026-09-15", 12001, "outflow", "Fixture service", "SOFTWARE", "proposed")],
+  ["How much did I spend on software in Q3?", "category", f => f.add("software", "2026-09-15", 12001, "outflow", "Fixture service", "SOFTWARE", "confirmed")],
   ["How much income by category in September 2026?", "category", f => f.add("income", "2026-09-15", 12001, "inflow", "Fixture payer", "income", "confirmed")],
   ["What deposits came in over the last 14 days?", "deposits", f => f.add("recent", "2026-10-01", 12001, "inflow")],
   ["What recurring subscriptions am I paying for, and how much per month?", "recurring", f => {
@@ -73,11 +73,18 @@ for (const [question, kind, seed] of [
     f.raw("DELETE FROM fin_transactions");
     const before = transactionReads(f);
     const absent = await f.ask(question);
-    assert.equal(absent.ledger?.found, false);
+    assert.equal(absent.ledger?.found, kind === 'category' && question.includes('spend on') ? null : false);
+    if (kind === 'category' && question.includes('spend on')) {
+      assert.equal(absent.ledger.total_minor, null);
+      assert.equal(absent.ledger.selector_unresolved, true);
+      assert.match(absent.answer, /not recognized/);
+      assert.doesNotMatch(absent.answer, /\$0\.00/);
+    }
     assert.ok(transactionReads(f) > before, "absence inspected transactions");
     assert.match(absent.answer, /1111.*2222/);
-    assert.ok(absent.answer.includes(reviewedDateCopy(`${absent.ledger.from} through ${absent.ledger.to}`)));
-    assert.match(absent.answer, /covered through October 11/);
+    assert.ok((kind === 'category' && absent.ledger.selector_unresolved) || absent.answer.includes(absent.ledger.match_basis === 'none' ? `from ${absent.ledger.from} to ${absent.ledger.to}`
+      : reviewedDateCopy(`${absent.ledger.from} through ${absent.ledger.to}`)));
+    if (absent.ledger.match_basis !== 'none') assert.match(absent.answer, /covered through October 11/);
     seed(f);
     f.raw("UPDATE fin_account_coverage SET covered_from='2026-10-05'");
     const readCount = f.seen.sql.length;
@@ -120,26 +127,28 @@ test("merchant tokens are contiguous and category proposals and Unsorted stay ex
   assert.doesNotMatch(merchant.answer, /Unsorted|possible (?:transfer|move)/i);
   assert.equal(merchant.answer.match(/\$\d[\d,]*\.\d{2}/g)?.length, 1, "named vendor output has one currency figure");
   const beforeCategory = transactionReads(f);
-  const category = await f.ask("How much did I spend on software/SaaS in Q3?");
+  const category = await f.ask("How much did I spend on software in Q3?");
   assert.ok(transactionReads(f) > beforeCategory, "unknown category membership reached the real reader");
   assert.equal(category.ledger.total_minor, null);
   assert.equal(category.ledger.category_total_unconfirmed, true);
   assert.equal(category.ledger.confirmed_category_subtotal_minor, 500);
-  assert.equal(category.ledger.unsorted_minor, 99);
-  assert.match(category.answer, /Transactions without a confirmed category: \$0\.99/);
+  assert.equal(category.ledger.unsorted_minor, 10100);
+  assert.match(category.answer, /2 rows totaling \$101\.00.*left out/);
   const bucket = await f.ask("How much did I spend on Unsorted in Q3?");
-  assert.equal(bucket.ledger.total_minor, 99);
-  assert.match(bucket.answer, /Unsorted.*\$0\.99/);
+  assert.equal(bucket.ledger.total_minor, 10100);
+  assert.match(bucket.answer, /Unsorted.*\$101\.00/);
   const classified = await fixture(t);
   classified.add("exact", "2026-09-15", 10001, "outflow", "Fixture service", "SOFTWARE", "proposed");
   classified.add("other", "2026-09-16", 500, "outflow", "Fixture service", "SOFTWARE", "confirmed");
-  const control = await classified.ask("How much did I spend on software/SaaS in Q3?");
+  const control = await classified.ask("How much did I spend on software in Q3?");
   assert.ok(transactionReads(classified) > 0, "classified proposal control reached the reader");
-  assert.equal(control.ledger.total_minor, 10501);
-  assert.match(control.answer, /bank's category \(unconfirmed\)/);
+  assert.equal(control.ledger.total_minor, null);
+  assert.equal(control.ledger.confirmed_category_subtotal_minor, 500);
+  assert.equal(control.ledger.unsorted_minor, 10001);
+  assert.match(control.answer, /1 rows totaling \$100\.01.*left out/);
   const breakdown = await f.ask("How much did I spend by category in September 2026?");
   assert.equal(breakdown.ledger.total_minor, 10600);
-  assert.equal(breakdown.ledger.groups.filter(g => g.category === "software").length, 2);
+  assert.equal(breakdown.ledger.groups.filter(g => g.category === "software").length, 1);
 });
 
 test("directed transfers leave the lead; advisory pairs and near misses stay explicit", async t => {
@@ -152,15 +161,19 @@ test("directed transfers leave the lead; advisory pairs and near misses stay exp
   f.add("date-in", "2026-09-05", 30001, "inflow", "TRANSFER FROM account 1111", null, null, "account-b");
   f.add("expense", "2026-09-16", 77);
   const advisory = await f.ask("How much money came in and went out in September 2026?");
-  assert.equal(advisory.ledger.candidate_transfer_count, 1, "advisory pair reaches the lead decision");
-  assert.equal(advisory.ledger.default_exclusions.own_transfer_minor, 0, "one direction and a generic category do not prove the counterparty");
+  assert.equal(advisory.ledger.reason, 'money_out_destination_unconfirmed');
+  assert.equal(advisory.ledger.complete, false);
+  assert.equal(advisory.ledger.expense_total_minor, null);
+  assert.ok(advisory.ledger.possible_payments.some(row => row.amount_minor === 10001 && row.connected_counterpart_masks.length), 'advisory counterpart decision reached');
   f.raw("UPDATE fin_transactions SET description='TRANSFER FROM account 1111' WHERE txn_uid='in'");
   const changes = f.sqlite.prepare("SELECT total_changes() n").get().n;
   const totals = await f.ask("How much money came in and went out in September 2026?");
   assert.equal(sumAccounts(totals, "debits_minor"), 60080);
   assert.equal(sumAccounts(totals, "credits_minor"), 60004);
   assert.equal(totals.ledger.candidate_transfer_count, 1);
-  assert.equal(totals.ledger.unmatched_transfers.length, 4);
+  assert.equal(totals.ledger.unmatched_transfers.length, 2);
+  assert.equal(totals.ledger.possible_payments.length, 2, 'outgoing candidates use their cited included-in-money-out disclosures');
+  assert.ok(totals.ledger.possible_payments.every(row => row.included_in_total));
   assert.equal(totals.ledger.includes_own_transfers, true);
   assert.match(totals.answer, /Moves between your own connected accounts, left out of the first figures/);
   assert.match(totals.answer, /With everything counted:[\s\S]*credits \$0\.00; debits \$600\.80/);
@@ -186,7 +199,10 @@ test("three-account ambiguity never consumes a leg twice; unique second pair wor
   f.add("second-out", "2026-09-15", 7001, "outflow", "TRANSFER TO account 3333", null, null, "account-b");
   const unique = await f.ask("How much did I transfer between my own accounts last month?");
   assert.equal(unique.ledger.transfers.length, 2);
-  assert.equal(unique.ledger.total_minor, 17002);
+  // The second incoming leg names account-a, but its debit posts to account-b.
+  // It remains advisory evidence and cannot enter the identified transfer sum.
+  assert.equal(unique.ledger.total_minor, 10001);
+  assert.equal(unique.ledger.transfers.filter(pair => pair.excluded_from_totals).length, 1);
 });
 
 test("monthly and weekly detection have three occurrences, integer tolerance and cadence boundaries", async t => {
@@ -208,10 +224,10 @@ test("monthly and weekly detection have three occurrences, integer tolerance and
 
 test("phase-two grammar rejects unknown qualifiers, and dates use UTC", () => {
   const options = { now: "2026-10-01T00:30:00Z" };
-  const control = classifyLedgerQuestion("How much did I spend on software/SaaS in Q3?", options);
+  const control = classifyLedgerQuestion("How much did I spend on software in Q3?", options);
   assert.deepEqual([control.from, control.to], ["2026-07-01", "2026-09-30"]);
   for (const q of ["What were my 100000 largest expenses in the last 60 days?",
-    "How much did I spend on software/SaaS in Q3 excluding refunds?",
+    "How much did I spend on software in Q3 excluding refunds?",
     "How much did I spend at Fixture Store in September 2026 and October 2026?",
     "What recurring subscriptions will I pay next year?",
     "How much income by category for another entity in September 2026?"]) {
@@ -232,7 +248,9 @@ test("selected account still pairs with owned counterparts across month boundari
   assert.equal(income.gaps[0]?.reason, "period_outside_coverage");
   f.raw("UPDATE fin_account_coverage SET covered_to='2026-10-31'");
   const inResult = await f.ask("How much income by category in October 2026?");
-  assert.equal(inResult.ledger.total_minor, 5555);
+  assert.equal(inResult.ledger.total_minor, 0, 'own transfer credit is never category income');
+  assert.equal(inResult.ledger.not_payments.total_minor, 5555);
+  assert.match(inResult.answer, /Not counted as payments to you/);
   assert.equal(inResult.ledger.candidate_transfer_count, 1);
 });
 
@@ -272,7 +290,10 @@ async function mutantAnswer(from, to, target = "analysis") {
   const targetUrl = target === "analysis" ? analysisUrl : new URL("../src/lib/ledger-answer.js", import.meta.url);
   const analysis = readFileSync(targetUrl, "utf8");
   assert.equal(analysis.split(from).length - 1, 1, "exactly one mutation site");
-  const altered = analysis.replace(from, to);
+  // Mutant modules use data URLs, so resolve reviewed sibling dependencies
+  // against the original file rather than the data URL's absent directory.
+  const altered = analysis.replace(from, to).replace(/from "(\.\/.+?)"/g,
+    (_, path) => `from ${JSON.stringify(new URL(path, targetUrl).href)}`);
   const analysisModule = `data:text/javascript;base64,${Buffer.from(altered).toString("base64")}`;
   const answerUrl = new URL("../src/lib/ledger-answer.js", import.meta.url);
   const answer = (target === "analysis" ? readFileSync(answerUrl, "utf8") : altered).replace(/from "(\.\/.+?)"/g, (_, path) =>
@@ -292,7 +313,7 @@ test("mutation control catches automatic transfer removal through the real SQLit
   const control = await f.ask(question);
   assert.equal(control.ledger.candidate_transfer_count, 1);
   assert.equal(sumAccounts(control, "debits_minor"), 10078);
-  const mutant = await mutantAnswer("const activity = rows;", "const activity = rows.filter(row => !pairing.candidateRows.has(row.id));", "answer");
+  const mutant = await mutantAnswer('const activity = intent.kind === "largest" && intent.direction === "outflow"\n    ? rows.filter(row => !loanCardPaymentKind(row, bySlug)) : rows;', "const activity = rows.filter(row => !loanCardPaymentKind(row, bySlug) && !pairing.candidateRows.has(row.id));", "answer");
   const before = transactionReads(f);
   const changed = await askMutant(f, question, mutant);
   assert.ok(transactionReads(f) > before, "mutant reached SQL and pairing");
@@ -322,24 +343,28 @@ test("merchant punctuation and category words do not become implicit account sel
   f.add("punctuation", "2026-09-15", 1357, "outflow", "Fixture.Store payment", "SOFTWARE", "confirmed", "account-a", "Fixture.Store");
   f.add("account-word", "2026-09-16", 2468, "outflow", "Fixture Store card payment", "SOFTWARE", "confirmed", "account-a", "Fixture Store card");
   const punctuation = await f.ask("How much did I spend at Fixture.Store in September 2026?");
-  // A structured whole-word suffix is now disclosed family spend. The word
-  // "card" inside that payee must still never narrow the account inventory.
-  assert.equal(punctuation.ledger.total_minor, 3825);
-  assert.equal(punctuation.ledger.match_basis, "family");
+  // A whole-word suffix is an unconfirmed name match. The word "card"
+  // inside that payee must still never narrow the account inventory.
+  assert.equal(punctuation.ledger.total_minor, null);
+  assert.equal(punctuation.ledger.exact_subtotal_minor, 1357);
+  assert.equal(punctuation.ledger.name_match_subtotal_minor, 2468);
+  assert.equal(punctuation.ledger.match_basis, "name_match");
   assert.equal(punctuation.ledger.exact_match_count, 1);
   assert.equal(punctuation.ledger.family_match_count, 1);
-  assert.equal(punctuation.evidence_gate.complete, true);
-  assert.match(punctuation.answer, /^also includes: Fixture Store card\.$/m);
+  assert.equal(punctuation.evidence_gate.complete, false);
+  assert.match(punctuation.answer, /Fixture Store card \(matched by name, not confirmed\)/);
   assert.equal(punctuation.ledger.accounts.length, 2);
   const accountWord = await f.ask("How much did I spend at Fixture Store card in September 2026?");
   assert.equal(accountWord.ledger?.total_minor, 2468);
   const selected = await f.ask("How much did I spend at Fixture.Store in September 2026 for checking account 1111?");
-  assert.equal(selected.ledger.total_minor, 3825);
+  assert.equal(selected.ledger.total_minor, null);
+  assert.equal(selected.ledger.exact_subtotal_minor, 1357);
+  assert.equal(selected.ledger.name_match_subtotal_minor, 2468);
   assert.deepEqual(selected.ledger.groups.map(g => [g.merchant, g.total_minor, g.count]), [
     ["Fixture Store card", 2468, 1], ["Fixture.Store", 1357, 1],
   ]);
-  assert.equal(selected.evidence_gate.complete, true);
-  assert.match(selected.answer, /^also includes: Fixture Store card\.$/m);
+  assert.equal(selected.evidence_gate.complete, false);
+  assert.match(selected.answer, /Fixture Store card \(matched by name, not confirmed\)/);
   assert.equal(selected.ledger.accounts.length, 1);
 });
 
@@ -404,10 +429,11 @@ test("transfer uniqueness inspects competitors beyond a window-edge counterpart"
   const before = transactionReads(f);
   const ambiguous = await f.ask("How much money went out in September 2026 for account 1111?");
   assert.ok(transactionReads(f) > before);
-  assert.equal(ambiguous.ledger.total_minor, 12345);
-  assert.equal(ambiguous.ledger.excluded_own_transfer_minor, 0);
-  assert.equal(ambiguous.ledger.row_count, 1);
-  assert.equal(ambiguous.ledger.candidate_transfer_count, 0);
+  assert.equal(ambiguous.ledger.total_minor, null);
+  assert.equal(ambiguous.ledger.complete, false);
+  assert.equal(ambiguous.ledger.reason, 'money_out_destination_unconfirmed');
+  const candidate = ambiguous.ledger.possible_payments.find(row => row.amount_minor === 12345);
+  assert.ok(candidate && candidate.connected_counterpart_masks.includes('2222'), 'the competing counterpart decision is retained');
 });
 
 test("row LIMIT stops a large covered range before a global sort scans it all", async t => {

@@ -84,3 +84,11 @@ test/fixtures/fastloop-day3/historical-shared-v1.json text eol=lf
 test/fixtures/fastloop-day3/candidate-inventory-v1.json text eol=lf
 test/fixtures/fastloop-day3/candidate-router-v1.json text eol=lf
 test/fixtures/fastloop-day3/candidate-soft-copy-v1.json text eol=lf
+test/fixtures/fastloop-route/search-disclosure-v1.json text eol=lf
+
+
+# Installed helpers are inventoried byte-for-byte. Keep reviewed Windows
+# launcher bytes stable across Git checkout line-ending preferences.
+machine-prep/installers/windows/payload.mjs text eol=lf
+machine-prep/installers/windows/launcher.mjs text eol=lf
+machine-prep/installers/windows/start-brain-setup.ps1 text eol=lf

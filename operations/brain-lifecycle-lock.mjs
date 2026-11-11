@@ -25,6 +25,7 @@ import { restrictWindowsDirectoryToCurrentUser } from "./current-user-file.mjs";
 const CURRENT_PROCESS_INSTANCE = `process-lifetime:${randomBytes(16).toString("hex")}`;
 
 const OWNER_RE = /^owner-(\d+)-([a-f0-9]{32})\.json$/u;
+const OWNER_FILE = "owner.json";
 const MIN_STALE_MS = 60_000;
 const DEFAULT_STALE_MS = 30 * 60_000;
 
@@ -302,7 +303,8 @@ function readOwner(path, platform) {
     if (error?.code === "ENOENT") return null;
     throw error;
   }
-  const owners = entries.filter((entry) => OWNER_RE.test(entry.name));
+  // Continue reading pre-upgrade leases, but publish only one exclusive slot.
+  const owners = entries.filter((entry) => entry.name === OWNER_FILE || OWNER_RE.test(entry.name));
   if (entries.length !== 1 || owners.length !== 1 || !owners[0].isFile()) {
     throw failure("brain_lifecycle_unsafe", "the Brain lifecycle lock contains unexpected files");
   }
@@ -320,10 +322,11 @@ function readOwner(path, platform) {
   try { value = JSON.parse(readFileSync(ownerPath, "utf8")); } catch {
     throw failure("brain_lifecycle_unsafe", "the Brain lifecycle lock owner is malformed");
   }
-  const pid = Number(match[1]);
-  const token = match[2];
+  const pid = match ? Number(match[1]) : value?.pid;
+  const token = match ? match[2] : value?.token;
   const createdAt = typeof value?.created_at === "string" ? value.created_at : "";
-  if (value?.schema_version !== 2 || value?.pid !== pid || value?.token !== token ||
+  if (!Number.isSafeInteger(pid) || pid <= 0 || !/^[a-f0-9]{32}$/u.test(String(token || "")) ||
+      value?.schema_version !== 2 || value?.pid !== pid || value?.token !== token ||
       typeof value?.operation !== "string" || !Number.isFinite(Date.parse(createdAt))) {
     throw failure("brain_lifecycle_unsafe", "the Brain lifecycle lock owner is malformed");
   }
@@ -338,17 +341,38 @@ function readOwner(path, platform) {
   };
 }
 
+function assertSameDirectory(path, expected) {
+  let current;
+  // Native file IDs must not lose bits through Number conversion on Windows.
+  try { current = lstatSync(path, { bigint: true }); } catch {
+    throw failure("brain_lifecycle_lost", "the Brain lifecycle lock changed during acquisition");
+  }
+  if (!current.isDirectory() || current.isSymbolicLink() || current.dev !== expected.dev ||
+      current.ino !== expected.ino || current.birthtimeNs !== expected.birthtimeNs) {
+    throw failure("brain_lifecycle_lost", "the Brain lifecycle lock changed during acquisition");
+  }
+}
+
 function ownerAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (error) {
     return error?.code !== "ESRCH";
   }
 }
 
-function releaseOwner(path, token, platform) {
+function releaseOwner(path, token, platform, { removeDirectory, waitSync }) {
   const owner = readOwner(path, platform);
   if (!owner || owner.token !== token) return false;
   unlinkSync(owner.path);
-  rmdirSync(path);
+  // Windows scanners can retain the just-unlinked owner briefly. Bound the
+  // synchronous retry budget so even exit cleanup cannot hang indefinitely.
+  for (let attempt = 0; ; attempt++) {
+    try { removeDirectory(path); break; } catch (error) {
+      if (error?.code === "ENOENT") break;
+      if (platform !== "win32" || attempt >= 20 ||
+          !["EPERM", "EBUSY", "ENOTEMPTY"].includes(error?.code)) throw error;
+      waitSync(50);
+    }
+  }
   return true;
 }
 
@@ -362,6 +386,10 @@ export function acquireBrainLifecycleLock({
   staleMs = DEFAULT_STALE_MS,
   isOwnerAlive = ownerAlive,
   now = () => new Date(),
+  removeDirectory = rmdirSync,
+  publishOwner = writeFileSync,
+  waitSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms),
+  log = (message) => console.error(message),
   // Real ACLs only exist on a Windows host; a simulated win32 platform on POSIX has nothing to restrict.
   restrictWindowsDirectory = (path, options) => (process.platform === "win32"
     ? restrictWindowsDirectoryToCurrentUser(path, options)
@@ -382,11 +410,13 @@ export function acquireBrainLifecycleLock({
   for (;;) {
     try {
       mkdirSync(path, { mode: 0o700 });
+      const acquiredDirectory = lstatSync(path, { bigint: true });
       if (platform === "win32") {
         try {
           restrictWindowsDirectory(path, { label: "the Brain lifecycle lock" });
         } catch {
           try {
+            assertSameDirectory(path, acquiredDirectory);
             if (readdirSync(path).length === 0) rmdirSync(path);
           } catch {}
           throw failure("brain_lifecycle_unsafe", "the local Brain lifecycle lock is not private");
@@ -394,14 +424,33 @@ export function acquireBrainLifecycleLock({
       }
       assertPrivateDirectory(path, "Brain lifecycle lock", platform);
       token = randomBytes(16).toString("hex");
-      writeFileSync(join(path, `owner-${process.pid}-${token}.json`), JSON.stringify({
+      const publication = JSON.stringify({
         schema_version: 2,
         pid: process.pid,
         token,
         operation: String(operation),
         process_instance: CURRENT_PROCESS_INSTANCE,
         created_at: currentTime().toISOString(),
-      }), { encoding: "utf8", flag: "wx", mode: 0o600 });
+      });
+      // A suspended mkdir winner can resume after empty-directory recovery.
+      // Identity checks reject replacement directories; the fixed exclusive
+      // slot closes the check-to-write race without adding a second owner.
+      assertSameDirectory(path, acquiredDirectory);
+      publishOwner(join(path, OWNER_FILE), publication, { encoding: "utf8", flag: "wx", mode: 0o600 });
+      try {
+        assertSameDirectory(path, acquiredDirectory);
+        const published = readOwner(path, platform);
+        if (!published || published.token !== token) {
+          throw failure("brain_lifecycle_lost", "the Brain lifecycle lock changed during acquisition");
+        }
+      } catch (error) {
+        // If recovery replaced an empty directory, our exclusive write may
+        // have won its slot. Release only our token so refusal cannot strand
+        // an owned claim and block the next command for the full stale window.
+        try { releaseOwner(path, token, platform, { removeDirectory, waitSync }); }
+        catch { log("The Brain lifecycle lock could not be released; retry after its recovery grace period."); }
+        throw error;
+      }
       break;
     } catch (error) {
       if (error?.code !== "EEXIST") throw error;
@@ -420,7 +469,9 @@ export function acquireBrainLifecycleLock({
       const directoryState = lstatSync(path);
       const entries = readdirSync(path, { withFileTypes: true });
       if (entries.length === 0) {
-        if (currentTime().getTime() - directoryState.mtimeMs > staleAfter) {
+        // Only mkdir-to-owner-write needs this short grace. Owned locks retain
+        // the full stale window, and reaping still requires an exact recheck.
+        if (currentTime().getTime() - directoryState.mtimeMs > 10_000) {
           const currentState = lstatSync(path);
           if (currentState.mtimeMs === directoryState.mtimeMs && readdirSync(path).length === 0) {
             try { rmdirSync(path); } catch (reapError) {
@@ -446,20 +497,32 @@ export function acquireBrainLifecycleLock({
         contenderProcessInstance: contenderInstance,
       });
       if (stale && ownerDead) {
-        const current = readOwner(path, platform);
-        const currentLive = isOwnerAlive(current.pid);
-        const currentStale = currentTime().getTime() - current.mtimeMs > staleAfter;
-        const currentDead = lifecycleOwnerIsDead({
-          owner: current,
-          live: currentLive,
-          contenderProcessInstance: contenderInstance,
-        });
-        if (current.token === owner.token && current.mtimeMs === owner.mtimeMs &&
-            currentStale && currentDead) {
-          unlinkSync(current.path);
-          rmdirSync(path);
-          continue;
+        // Serialize the entire final observation/removal. Never age-reap this
+        // guard: a suspended reaper can resume after any timeout. A crash in
+        // recovery requires explicit intervention rather than a second writer.
+        const recoveryPath = path + ".recovery";
+        try { mkdirSync(recoveryPath, { mode: 0o700 }); } catch (error) {
+          if (error?.code !== "EEXIST") throw error;
+          throw failure("brain_lifecycle_busy", "the Brain lifecycle lock is being recovered; wait before retrying", { retryable: true });
         }
+        try {
+          const recoveryDirectory = lstatSync(path, { bigint: true });
+          const current = readOwner(path, platform);
+          const currentLive = isOwnerAlive(current.pid);
+          const currentStale = currentTime().getTime() - current.mtimeMs > staleAfter;
+          const currentDead = lifecycleOwnerIsDead({
+            owner: current,
+            live: currentLive,
+            contenderProcessInstance: contenderInstance,
+          });
+          if (current.token === owner.token && current.mtimeMs === owner.mtimeMs &&
+              currentStale && currentDead) {
+            assertSameDirectory(path, recoveryDirectory);
+            unlinkSync(current.path);
+            rmdirSync(path);
+            continue;
+          }
+        } finally { rmdirSync(recoveryPath); }
       }
       const holderStatus = !live
         ? "The recorded process is no longer running, but the lock is still inside its recovery window."
@@ -484,11 +547,12 @@ export function acquireBrainLifecycleLock({
     }
   }
 
-  const ownerPath = join(path, `owner-${process.pid}-${token}.json`);
+  const ownerPath = join(path, OWNER_FILE);
   if (operation !== "update") {
     const fence = readBrainRecoveryFence({ manifestPath, platform, machineLockRoot });
     if (fence) {
-      releaseOwner(path, token, platform);
+      try { releaseOwner(path, token, platform, { removeDirectory, waitSync }); }
+      catch { log("The Brain lifecycle lock could not be released; retry after its recovery grace period."); }
       throw failure(
         "brain_lifecycle_recovery_required",
         `a prior Brain update requires verified recovery before ${operation} can write`,
@@ -512,7 +576,11 @@ export function acquireBrainLifecycleLock({
     released = true;
     clearInterval(heartbeat);
     process.removeListener("exit", release);
-    try { return releaseOwner(path, token, platform); } catch { return false; }
+    try { return releaseOwner(path, token, platform, { removeDirectory, waitSync }); }
+    catch {
+      log("The Brain lifecycle lock could not be released; retry after its recovery grace period.");
+      return false;
+    }
   };
   process.once("exit", release);
   return Object.freeze({ path, operation: String(operation), assertOwned, release });

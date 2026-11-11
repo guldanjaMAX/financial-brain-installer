@@ -101,6 +101,7 @@ export function updateAdapters(f, { interrupt = false } = {}) {
   return {
     calls, uploads, secretWrites, lines, fetchImpl, originalBytes,
     options: {
+      installedManifestOptions: { stateDirectory: join(f.root, 'install-state') },
       lifecycleLockHeld: true,
       discoverInstalledManifest: () => { calls.push("discover"); return { path: f.manifestPath }; },
       answerSetupNeedsRecovery: () => false,

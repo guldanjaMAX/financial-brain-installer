@@ -65,7 +65,7 @@ function baseManifest(bankFeed = {}) {
   return {
     manifest_version: 1,
     client: { slug: "test-brain", display_name: "Test Brain" },
-    brain: { version: "0.4.26" },
+    brain: { version: "0.4.27" },
     infrastructure: {
       cloudflare: {
         account_id: "REQUIRED_client_account_id",
@@ -424,6 +424,7 @@ test("every malformed D1 binding refuses at the manifest boundary", async (t) =>
           manifestPath, "--set", "simplefin", "--enable", "--json",
         ], {
           commandOptions: dependencies(counters),
+          inspectWorkerBankProvider: async () => "plaid",
           async d1Query() {
             counters.queries += 1;
             return { results: [bankState()] };
@@ -678,7 +679,7 @@ test("the shared parser leaves bare --set to the existing check command decision
 });
 
 test("the provisioned adapter accepts zero only after one control wrapper and aggregate query", async (t) => {
-  const manifest = baseManifest({ enabled: false });
+  const manifest = baseManifest({ enabled: true, provider: "plaid", environment: "production" });
   manifest.infrastructure.cloudflare.account_id = "a".repeat(32);
   const { manifestPath } = fixture(t, manifest);
   const counters = {
@@ -689,6 +690,7 @@ test("the provisioned adapter accepts zero only after one control wrapper and ag
     manifestPath, "--set", "simplefin", "--enable", "--json",
   ], {
     commandOptions: dependencies(counters),
+    inspectWorkerBankProvider: async () => "plaid",
     async d1Query(accountId, databaseId, sql) {
       counters.queries += 1;
       assert.equal(accountId, "a".repeat(32));
@@ -722,12 +724,13 @@ test("query refusals keep only an allowlisted cause in JSON and preserve the own
   ]) {
     for (const mode of ["preview", "apply"]) {
       await t.test(`${label}: ${mode}`, async (t) => {
-        const manifest = baseManifest({ enabled: false });
+        const manifest = baseManifest({ enabled: true, provider: "plaid", environment: "production" });
         manifest.infrastructure.cloudflare.account_id = "a".repeat(32);
         const { manifestPath } = fixture(t, manifest);
         const counters = { recovery: 0, writes: 0, queries: 0, controls: 0, output: [], lifecycle: 0 };
         const options = {
           commandOptions: dependencies(counters),
+          inspectWorkerBankProvider: async () => "plaid",
           async d1Query(_accountId, _databaseId, sql) {
             counters.queries += 1;
             assert.equal(sql, BANK_PROVIDER_STATE_SQL, "the real adapter reached its aggregate query");

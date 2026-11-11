@@ -7,6 +7,9 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import { versionGuardArgs } from "../machine-prep/installers/smoke/bootstrap.mjs";
 import { inspectPerUserWix } from "./helpers/wix-authoring.mjs";
+import { fixture as windowsPayloadFixture } from './helpers/windows-payload-fixture.mjs';
+import { stagePayload } from '../machine-prep/installers/windows/payload.mjs';
+import { wixPayload } from '../machine-prep/installers/windows/build-payload.mjs';
 
 const ROOT = resolve(import.meta.dirname, "..");
 const HANDOFF = join(ROOT, "machine-prep", "handoff");
@@ -30,10 +33,17 @@ function read(relativePath) {
 }
 
 test("per-user WiX contract reaches every directory and component in the actual package", () => {
-  const inspected = inspectPerUserWix(read("machine-prep/installers/windows/Package.wxs"));
-  assert.equal(inspected.directories.length, 3, "actual per-user directory decisions reached");
-  assert.equal(inspected.components.length, 3, "actual component KeyPath decisions reached");
-  assert.deepEqual(inspected.issues, []);
+  const fixture = windowsPayloadFixture();
+  try {
+    stagePayload(fixture);
+    const generated = wixPayload(fixture.destination);
+    const body = /<DirectoryRef Id="INSTALLFOLDER">([\s\S]*?)<\/DirectoryRef>/.exec(generated)[1];
+    const authored = read('machine-prep/installers/windows/Package.wxs').replace('<Directory Id="INSTALLFOLDER" Name="$(var.PayloadVersion)" />', `<Directory Id="INSTALLFOLDER" Name="0.0.1">${body}</Directory>`);
+    const inspected = inspectPerUserWix(authored);
+    assert.ok(inspected.directories.length >= 6, 'generated payload directories reached');
+    assert.ok(inspected.components.length >= 4, 'generated HKCU key paths reached');
+    assert.deepEqual(inspected.issues, []);
+  } finally { rmSync(fixture.root, { recursive: true, force: true }); }
 });
 
 test("per-user WiX contract rejects missing cleanup and invalid key paths with a green control", () => {
@@ -1396,10 +1406,10 @@ test("Windows MSI is per-user, Windows 10+, and uses process-only policy bypass"
   assert.match(wix, /ProgramMenuFolder/);
   assert.match(wix, /<Shortcut/);
   assert.doesNotMatch(wix, /<CustomAction|InstallExecuteSequence/);
-  assert.match(wix, /prep-windows\.ps1/);
-  assert.match(wix, /run-machine-prep\.ps1/);
-  assert.match(wix, /message-windows\.txt/);
-  assert.match(wix, /handoff-windows\.url/);
+  assert.match(wix, /ComponentGroupRef Id="VerifiedPayload"/);
+  assert.match(wix, /start-brain-setup\.ps1/);
+  assert.match(wix, /Name="FinancialBrain"/);
+  assert.match(wix, /Name="app"/);
   assert.doesNotMatch(wix, /Set-ExecutionPolicy|MSIX/);
 });
 
@@ -1458,9 +1468,12 @@ test("visible setup launchers use the installed CLI and the standard fresh manif
   assert.match(mac, /"\$BRAIN" setup "\$MANIFEST"/);
 
   const windows = read("machine-prep/installers/windows/start-brain-setup.ps1");
-  assert.match(windows, /FinancialBrain\\brain\.cmd/);
-  assert.match(windows, /Financial Brain\\brain\.manifest\.json/);
-  assert.match(windows, /& \$brain setup \$manifest/);
+  assert.match(windows, /runtime\\node\.exe/);
+  assert.match(windows, /launcher\.mjs/);
+  assert.match(windows, /Get-FileHash/);
+  const launcher = read('machine-prep/installers/windows/launcher.mjs');
+  assert.match(launcher, /'Financial Brain', 'brain\.manifest\.json'/);
+  assert.match(launcher, /verifyPayload\(root\)/);
 });
 
 test("Windows package project names every reviewed payload file", () => {

@@ -50,7 +50,8 @@ export function plainBankGap(reason, accounts, intent) {
     ambiguous_account: withHistory("I can help choose the right account, but its details are still unconfirmed.", 'Want help confirming which account to use?'),
     unsupported_currency: withHistory("I can help review a US dollar account separately, but at least one of these accounts uses another currency, so a combined US dollar total is unconfirmed.", 'Want to choose a US dollar account?'),
     balance_unavailable: withHistory("I can help review the bank connection, but a confirmed US dollar balance dated on or before today is missing or unreadable, so not every balance is available.", 'Want help refreshing the bank connection?'),
-    period_outside_coverage: withHistory(`I can help check the bank records for ${intent.presentation.period(intent.from, intent.to)}, but some bank days are missing, so a complete answer is unconfirmed.`),
+    period_outside_coverage: withHistory(`I can help check the bank records for ${intent.presentation.period(intent.from, intent.to)}, but some bank days are missing, so a complete answer is unconfirmed.`) +
+      `\nAccounts missing bank history: ${accountEndings(accounts)}.\nRefresh the bank connection or import statements covering every requested date for these accounts, then try again.`,
     unreadable_transactions: withHistory("I can help review these transactions, but some amounts, dates, currencies, or directions are unconfirmed, so no total is confirmed."),
     retrieval_scope_restricted: "I can help with the records this session permits, but limited access or document filters keep bank accounts out of this answer.\nWant to use your owner session without document filters?",
     unsupported_question: "I can help review your completed bank transactions, but they do not establish this fact on their own.\nWant help finding records that establish it?",
@@ -58,4 +59,41 @@ export function plainBankGap(reason, accounts, intent) {
   };
   // Unknown future codes still fail visibly without echoing internal codes.
   return (details[reason] || "I can help check the bank connection, but the needed bank records are still unverified.\nWant help checking the bank connection?").trim();
+}
+
+// An incomplete recurring reading is a list, never a zero-valued total.
+export function recurringSetAsideText(ledger) {
+  if (!ledger?.set_aside_recurring?.length) return null;
+  const money = n => (n < 0 ? '-' : '') + '$' + Math.floor(Math.abs(n) / 100).toLocaleString('en-US') + '.' + String(Math.abs(n) % 100).padStart(2, '0');
+  const refs = g => (g.citations || []).map(n => '[' + n + ']').join(' ');
+  const confirmed = ledger.recurring || [];
+  const lines = confirmed.length ? ['Recurring charges detected, not confirmed subscriptions:',
+    ...confirmed.map(g => g.merchant + ': ' + g.cadence + ', typical ' + money(g.typical_minor) + '; last charge ' + money(g.last_amount_minor) + ' on ' + g.last_charge +
+      (g.cadence_dates ? '; paying account ' + (/^\d{1,4}$/.test(g.account_mask || '') ? 'ending ' + g.account_mask : '(mask unavailable)') + '; cadence evidence ' + g.cadence_dates.join(', ') : '') + ' ' + refs(g) + '.'),
+    'Confirmed recurring charges estimated monthly subtotal: ' + money(ledger.confirmed_subtotal_minor) + '.'] : [];
+  lines.push('Possible transfers or payments between your own accounts: set-aside recurring-pattern charges:');
+  for (const g of ledger.set_aside_recurring) lines.push(g.payee + ': ' + g.cadence + '; ' + g.dates.map((date, i) => money(g.amounts_minor?.[i] ?? g.amount_minor) + ' on ' + date).join('; ') + ' ' + refs(g) + '.');
+  lines.push('These may be payments to your own accounts, so they are not counted.');
+  return lines.join('\n');
+}
+
+// All surfaces render the same cited postings, including monthly composition.
+// The remainder preserves every omitted cent and its supporting references.
+export function paymentExclusionLines(payments, presentation, { omitTotal = false } = {}) {
+  const money = cents => `$${Math.floor(cents / 100).toLocaleString('en-US')}.${String(cents % 100).padStart(2, '0')}`;
+  const refs = rows => rows.map(row => `[${row.n}]`).join(' ');
+  const ordered = [...payments.rows].sort((a, b) => b.amount_minor - a.amount_minor ||
+    b.posted_on.localeCompare(a.posted_on) || a.n - b.n);
+  const pairingUncertain = ordered.some(row => row.pairing_uncertain);
+  const unit = pairingUncertain ? 'posting' : 'payment';
+  const lines = [`Payments to loans and cards (excluded from spending and income): ${omitTotal ? '' : `${money(payments.total_minor)} across `}${payments.count} ${unit}${payments.count === 1 ? '' : 's'} ${refs(ordered)}.`];
+  if (pairingUncertain) lines.push('Payment pairing is uncertain; all unpaired postings are retained. The economic payment count and total are unconfirmed.');
+  for (const row of ordered.slice(0, 5)) {
+    const label = row.payment_kind === 'card' ? 'payment to a card'
+      : row.own_loan_mask ? `payment to your own loan (ending ${row.own_loan_mask})` : 'payment to a loan';
+    lines.push(`${label}: ${money(row.amount_minor)} on ${presentation.date(row.posted_on)} in ${moneyAccount({ mask: row.account_mask })} [${row.n}]${row.match_basis === 'possible' ? '; possible vendor-description matches, payee attribution remains unconfirmed' : ''}.`);
+  }
+  const rest = ordered.slice(5);
+  if (rest.length) lines.push(`and ${rest.length} more: ${money(rest.reduce((sum, row) => sum + row.amount_minor, 0))} ${refs(rest)}.`);
+  return lines.join('\n');
 }

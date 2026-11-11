@@ -111,7 +111,8 @@ export async function createProductFixture(options = {}) {
   const product = await loadProduct(options.productRoot);
   const sqlite = new DatabaseSync(":memory:");
   const migrationDir = join(product.productRoot, "migrations", "d1");
-  const migrationFiles = readdirSync(migrationDir).filter((name) => name.endsWith(".sql")).sort();
+  const migrationFiles = readdirSync(migrationDir).filter((name) => name.endsWith(".sql") &&
+    (options.migrationThrough === undefined || Number.parseInt(name, 10) <= options.migrationThrough)).sort();
   for (const file of migrationFiles) {
     const source = readFileSync(join(migrationDir, file), "utf8");
     for (const sql of product.splitStatements(source)) sqlite.exec(sql);

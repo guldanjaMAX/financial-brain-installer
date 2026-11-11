@@ -65,6 +65,8 @@ export function validateReadKey(request, env) {
 
 /* ----------------------------------------------------------------- llm */
 
+const ANTHROPIC_API_VERSION = "2023-06-01";
+
 const CAP_TABLE = `CREATE TABLE IF NOT EXISTS llm_call_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts TEXT NOT NULL,
@@ -405,6 +407,7 @@ async function callLLMImpl(env, {
   messages,
   max_tokens,
   anthropic_max_tokens,
+  output_format,
   label,
   timeoutMs,
   image,
@@ -565,6 +568,10 @@ async function callLLMImpl(env, {
     throw e;
   }
   const anthropicModel = model;
+  const outputConfig = {
+    ...(anthropicEffort(anthropicModel) ? { effort: anthropicEffort(anthropicModel) } : {}),
+    ...(output_format ? { format: { type: "json_schema", schema: output_format } } : {}),
+  };
   const requestedAnthropicMaxTokens = Number(anthropic_max_tokens);
   const effectiveAnthropicMaxTokens = Number.isFinite(requestedAnthropicMaxTokens) &&
     requestedAnthropicMaxTokens > 0
@@ -587,7 +594,7 @@ async function callLLMImpl(env, {
         method: "POST",
         headers: {
           "x-api-key": apiKey,
-          "anthropic-version": "2023-06-01",
+          "anthropic-version": ANTHROPIC_API_VERSION,
           "content-type": "application/json",
         },
         body: JSON.stringify({
@@ -595,9 +602,11 @@ async function callLLMImpl(env, {
           max_tokens: effectiveAnthropicMaxTokens,
           system,
           messages,
-          ...(anthropicEffort(anthropicModel)
-            ? { output_config: { effort: anthropicEffort(anthropicModel) } }
-            : {}),
+          // Newer API versions reject sampling fields, even at their defaults.
+          // A version bump must drop this opt-in without changing other calls.
+          ...(label === "ledger_intent" && ANTHROPIC_API_VERSION === "2023-06-01"
+            ? { temperature: 0 } : {}),
+          ...(Object.keys(outputConfig).length ? { output_config: outputConfig } : {}),
         }),
         signal: AbortSignal.timeout(timeoutMs || 45_000),
       });

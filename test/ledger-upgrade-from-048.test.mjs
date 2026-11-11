@@ -186,6 +186,11 @@ test('populated schema 48 survives the candidate migration and approved money ma
     assert.deepEqual(pending.slice(0, 7).map(m => m.version), [49, 50, 51, 52, 53, 54, 55]);
     const receipt = await migrate();
     assert.equal(receipt.applied, pending.length); assert.equal(receipt.schemaVersion, migrations.at(-1).version);
+    // 0061 adds nullable evidence without changing any pre-existing field.
+    // Extend the independent expected record, retaining exact full-row equality.
+    const expected = JSON.parse(baseline);
+    for (const row of expected.fin_balance_snapshots) row.provider_position_minor = null;
+    baseline = JSON.stringify(expected);
     assert.equal(snapshot(f), baseline); assert.equal(totals(f), money);
     assert.deepEqual(f.rows('SELECT version,checksum FROM schema_migrations ORDER BY version').map(r => ({ ...r })),
       migrations.map(m => ({ version: m.version, checksum: m.checksum })));
@@ -271,14 +276,18 @@ test('populated schema 48 survives the candidate migration and approved money ma
     assert.deepEqual(month.ledger.accounts.map(a => [a.credits_minor, a.debits_minor]), [[12001, 9301]]);
     const transfer = await ask('How much did I transfer between my own accounts in September 2026 for account 4321?');
     assert.equal(transfer.ledger.kind, 'transfers'); assert.equal(transfer.ledger.total_minor, 7001);
-    assert.equal(transfer.ledger.candidate_transfer_count, 1); assert.equal(transfer.ledger.matched_transfer_count, 0);
+    // The migrated rows identify both owned endpoints. The structured view
+    // retains the pair and certifies its outgoing amount once.
+    assert.equal(transfer.ledger.match_count, 1);
+    assert.equal(transfer.ledger.transfers[0].candidate, true);
     assert.equal(transfer.ledger.transfers[0].excluded_from_totals, false);
-    assert.equal(transfer.ledger.includes_own_transfers, true);
+    assert.equal(transfer.ledger.transfers[0].counted, true);
     assert.deepEqual([transfer.ledger.transfers[0].outgoing.amount_minor,
       transfer.ledger.transfers[0].incoming.amount_minor], [7001, 7001]);
     const retained = await ask(monthQuestion);
     assert.deepEqual(retained.ledger.accounts.map(a => [a.credits_minor, a.debits_minor]), [[12001, 9301]]);
-    assert.match(transfer.answer, /no rows were removed as transfers/);
+    assert.match(transfer.answer, /identified owned transfer, counted once/);
+    assert.match(transfer.answer, /counted once by outgoing posting date/);
     assert.equal(modelCalls, models, 'successful money answers never use model arithmetic');
     for (const question of ['How much money came in July 2026 for account 4321?',
       'How much money came in September 2026 for account 9999?']) {

@@ -12,11 +12,11 @@ import { candidateTapes } from './day3-tapes.mjs';
 import { baselineSources, baselineHttpSources, workingTreeSources, verifyExecutedSources, verifyHistoricalSources, BASELINE } from './ledger-sources.mjs';
 
 export const CASES = [...PERMANENT, ...DEVELOPMENT, ...RESERVED];
-export function loadTapes({ router = true } = {}) {
+export function loadTapes({ router = true, disclosure = true } = {}) {
   const dev = JSON.parse(readFileSync(new URL('../../test/fixtures/fastloop-day3/development-tapes.json', import.meta.url)));
   const reserved = JSON.parse(readFileSync(new URL('../../test/fixtures/fastloop-day3/reserved-tapes.json', import.meta.url)));
   const historical = Object.fromEntries(['baseline', 'batch1'].map(k => [k, { ...dev[k], ...reserved[k] }]));
-  return { ...historical, candidate: candidateTapes(historical.batch1, { router }) };
+  return { ...historical, candidate: candidateTapes(historical.batch1, { router, disclosure }) };
 }
 export function controlsFor(run) {
   const controls = [];

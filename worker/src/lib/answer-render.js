@@ -1,3 +1,5 @@
+import { recurringSetAsideText } from './ledger-wording.js';
+export { recurringSetAsideText };
 /**
  * answer-render — how a /think response becomes the two sentences an owner
  * reads, and the one thing those sentences must never say.
@@ -127,6 +129,13 @@ export function answerText(r) {
 }
 
 function answerBodyText(r) {
+  const recurringList = recurringSetAsideText(r.ledger);
+  // Preserve the composer's scope warnings when its canonical lists are intact.
+  // Older or inconsistent prose must not turn a held charge into zero spending.
+  if (recurringList && (!r.answer?.includes(recurringList) ||
+      /(?:monthly (?:total|money out)|recurring (?:charges )?total|no recurring charges|none found|\$0\.00)/i.test(r.answer))) {
+    r = { ...r, answer: [recurringList, r.ledger.recurring_context].filter(Boolean).join('\n') };
+  }
   if (r.status === COVERAGE_INCOMPLETE) {
     const notice = r.notice || GENERIC_COVERAGE_NOTICE;
     return moneyExplanation(r) ? notice.replaceAll("Source coverage", "The connected records") : notice;

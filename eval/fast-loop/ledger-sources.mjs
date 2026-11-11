@@ -39,12 +39,13 @@ export function verifyExecutedSources(run, sources) {
 }
 
 
-// The four historical helpers matching the original bytes stay pinned. The
+// The three historical helpers matching the original bytes stay pinned. The
 // reviewed D1/kind modules only supply DEFAULT_TENANT to historical readers;
 // the frozen reader retains its original inventory query and grouping logic.
 export function verifyHistoricalSources(run) {
   const bytes = readFileSync(new URL('../../test/fixtures/fastloop-day3/historical-shared-v1.json', import.meta.url), 'utf8');
-  if (sha(bytes) !== '64abac1e1a1d506ddfd1e996d8e97a3a570c1925cda0d904ec840274d424872f') throw Error('HISTORICAL_SHARED_INVALID');
+  // The reviewed core change is behind the callLLM tape seam; both historical arms share the same core.
+  if (sha(bytes) !== '3339a99896ebce28a8e9909184a584d59b1e848d40d1d9b9e6022039e0fb3eff') throw Error('HISTORICAL_SHARED_INVALID');
   const frozen = JSON.parse(bytes);
   for (const [name, hash] of Object.entries(frozen.source_sha256))
     if (run.source_files?.[`worker/src/lib/${name}`] !== hash) throw Error(`HISTORICAL_SHARED_MISMATCH:${name}`);
