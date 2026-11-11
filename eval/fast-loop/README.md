@@ -22,6 +22,14 @@ remain explicit in `lane-evidence/day3-results.json` and `day3-table.md`; a fals
 direct migration setup and direct warm execution. HTTP replay includes compartment
 creation but excludes the separate synthetic tape-authoring command.
 
+The search/disclosure integration adds one versioned D1 overlay, authored only by
+`node eval/fast-loop/build-search-disclosure-tapes.mjs` (add `--check` for a
+non-writing reproduction check). It binds each replacement
+to the complete old entry hash and checks that typed bindings, model/provider
+streams, and existing row facts remain unchanged. It records the two-step keyword
+query and sync/backfill inventory projections. Replay applies only these sealed
+entries; altered or unknown dependencies still miss, and replay never captures.
+
 Inputs have typed money, document, call, mail, calendar and status records.
 Each has separate gold and an answerability verdict: answer, partial, scoped none
 or honest refusal. The existing money scorer evaluates money figures, sources
@@ -40,8 +48,10 @@ This is a 49-case synthetic bank, not an 80-case or private-quality claim.
 `baseline-sources.json` holds all four baseline modules with per-module SHA-256
 checks and a pinned inventory digest. `batch1-sources.json` retains the three
 historical candidate modules, paired with the baseline reader. Six shared dependencies are checked against
-`historical-shared-v1.json` in HTTP and direct historical arms. Four retain the
-original baseline bytes; the reviewed D1 and kind modules supply the unchanged
+`historical-shared-v1.json` in HTTP and direct historical arms. Three retain the
+original baseline bytes. The reviewed core change is behind the HTTP `callLLM`
+tape seam, direct replay makes no model calls, and both historical arms share
+the same core bytes. The reviewed D1 and kind modules supply the unchanged
 tenant constant to the frozen reader. A shared dependency change requires a
 separate compatibility review. Current-tree mode
 loads all four current modules once before replay and selects the separate

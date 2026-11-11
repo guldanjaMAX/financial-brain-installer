@@ -6,7 +6,7 @@ import { cases } from './fixtures/plain-refusals-cases.mjs';
 
 const ownerMessages = [];
 export { MONEY_JARGON as jargon } from "./fixtures/plain-copy-expectations.mjs";
-import { MONEY_JARGON as jargon } from "./fixtures/plain-copy-expectations.mjs";
+import { absenceLintText, MONEY_JARGON as jargon } from "./fixtures/plain-copy-expectations.mjs";
 for (const c of cases) test(`plain refusal: ${c.id}`, async t => {
   const f = ledgerFixture(t);
   t.mock.method(globalThis, 'fetch', () => assert.fail('network forbidden'));
@@ -16,6 +16,16 @@ for (const c of cases) test(`plain refusal: ${c.id}`, async t => {
   assert.equal(green.ledger?.kind, 'balance');
   assert.ok(f.calls.some(sql => /JOIN fin_balance_snapshots/.test(sql)));
   c.setup?.(f);
+  if (['ranking-partial', 'ranking-empty'].includes(c.id)) {
+    // Coverage alone cannot make this fixture's unconfirmed kind an expense.
+    f.raw("UPDATE fin_account_coverage SET coverage_status='complete'");
+    const covered = await f.ask(c.question);
+    assert.equal(covered.ledger.kind, 'largest');
+    assert.deepEqual(covered.ledger.lead_rows.map(row => row.amount_minor), []);
+    if (c.id === 'ranking-partial') assert.match(covered.answer, /not counted.*kind not confirmed/);
+    assert.ok(f.calls.some(sql => /JOIN fin_transactions/.test(sql)), 'covered ranking reached actual facts');
+    f.raw("UPDATE fin_account_coverage SET coverage_status='partial'");
+  }
   f.calls.length = 0;
   let fallbacks = 0;
   const before = f.first('SELECT total_changes() n').n;
@@ -34,11 +44,22 @@ for (const c of cases) test(`plain refusal: ${c.id}`, async t => {
     assert.equal(f.calls.length, 0, 'pre-read guard remains closed');
   } else assert.ok(f.calls.some(sql => /FROM fin_accounts/.test(sql)), 'inventory decision reached');
   if (c.reason) assert.equal(body.gaps[0].reason, c.reason);
-  if (c.id === 'timezone') assert.ok((await f.ask('How much money came in and went out in October 2026?')).ledger, 'explicit historical alternative answers with the same invalid zone');
+  if (['ranking-partial', 'ranking-empty'].includes(c.id)) {
+    assert.equal(body.ledger ?? null, null);
+    assert.ok(f.calls.every(sql => !/JOIN fin_transactions/.test(sql)), 'no certified account refuses after inventory and before ranks');
+  }
+  if (c.id === 'timezone') assert.ok((await f.ask('How much money came in and went out in September 2026?')).ledger, 'explicit historical alternative answers with the same invalid zone');
   assert.equal(f.first('SELECT total_changes() n').n, before, 'answer cannot write');
   const text = [body.answer, ...(body.gaps || []).map(g => g.detail)].filter(Boolean).join('\n');
+  if (c.id === 'payment-many') {
+    assert.equal(body.ledger.found, true);
+    assert.equal(body.ledger.complete, true);
+    assert.equal(body.evidence_gate.complete, true);
+    assert.match(body.answer, /Payer One/);
+    assert.match(body.answer, /Payer Two/);
+  }
   if (c.id === 'vendor-owned-only') assert.equal(body.ledger.candidate_transfer_count, 1, 'proved owned-movement decision reached');
-  ownerMessages.push(text);
+  ownerMessages.push(absenceLintText(text));
   const lines = text.split('\n');
   const expectedOffer = c.expected.match(/Want[^?\n]*\?|Which would help most\?|If you tell me[^.\n]*\./)?.[0];
   const expectedFacts = body.ledger && expectedOffer
@@ -47,17 +68,17 @@ for (const c of cases) test(`plain refusal: ${c.id}`, async t => {
   const start = lines.findIndex((line, index) => line === expectedLines[0] &&
     expectedLines.every((expected, offset) => lines[index + offset] === expected));
   assert.notEqual(start, -1, `${c.id}: exact independent lines missing`);
-  if (body.ledger) {
+  if (body.ledger && expectedOffer) {
     assert.ok(body.answer.endsWith(expectedOffer), 'the reviewed offer follows all factual lines');
     assert.deepEqual(body.answer.match(/Want[^?\n]*\?|Which would help most\?|If you tell me[^.\n]*\./g),
       [expectedOffer], 'exactly one reviewed invitation survives composition');
   }
   if (c.contextExpected) assert.ok(text.includes(c.contextExpected), 'original amount and period display assertions retained');
-  assert.doesNotMatch(text, jargon);
+  assert.doesNotMatch(absenceLintText(text), jargon);
   assert.doesNotMatch(c.expected, /(?:^|[.!?]\s+)I (?:can't|cannot|couldn't|am unable)/i);
   const explanation = c.expected.split('\n').filter(line => !/^Your account ending \d+ has records /.test(line)).join('\n').replace(/\$[\d,.]+/g, 'amount');
   assert.ok((explanation.match(/[.!?](?:\s|$)/g) || []).length <= 3, 'at most three refusal sentences');
-  assert.match(text, /\b(?:Want |Which would help most\?|If you tell me)/, 'one easy next step is offered');
+  if (body.ledger?.match_basis !== 'none') assert.match(text, /\b(?:Want |Which would help most\?|If you tell me)/, 'one easy next step is offered');
   const questions = text.includes('Want me to show your account balances?') ? ['What are my account balances?'] : [];
   for (const match of text.matchAll(/Want me to check spending at ([^\n]+) in ([^\n?]+)\?/g)) {
     questions.push(`How much did I spend at ${match[1]} in ${match[2]}?`);

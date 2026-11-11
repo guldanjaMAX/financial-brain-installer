@@ -140,7 +140,7 @@ function macHost() {
   };
 }
 
-const helper = join(import.meta.dirname, "windows.ps1");
+const helper = join(import.meta.dirname, "windows-payload.ps1");
 const host = platform === "macos" ? macHost() : Object.fromEntries([
   "verifySignature", "inspectPayload", "assertClean", "install", "verifyInstalled", "uninstall", "verifyRemoved",
 ].map((phase) => [phase, () => command(phase, "pwsh", ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", helper,
@@ -152,12 +152,13 @@ host.verifyHash = () => {
   }
   verifyHashRecord(readFileSync(artifact), readFileSync(`${artifact}.sha256`, "utf8"), basename(artifact));
 };
-if (mode === "--bootstrap") host.bootstrap = () => bootstrapInstalled({ platform, logs, environment, command, emit });
+if (platform === 'windows') host.bundledPayload = true;
+if (mode === "--bootstrap" && platform === 'macos') host.bootstrap = () => bootstrapInstalled({ platform, logs, environment, command, emit });
 try {
   await runSmoke(host, emit);
   if (mode === "--bootstrap") emit("INSTALLER_BOOTSTRAP_SMOKE_PASSED=1");
 } catch (error) {
-  emit("INSTALLER_SHELL_SMOKE_PASSED=0");
+  emit(platform === 'windows' ? 'INSTALLER_PAYLOAD_SMOKE_PASSED=0' : 'INSTALLER_SHELL_SMOKE_PASSED=0');
   throw error;
 } finally {
   // Expanded payload contains the deep-link note. Retain diagnostics, not a

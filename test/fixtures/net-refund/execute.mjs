@@ -38,7 +38,7 @@ export async function execute(c, implementation = {}) {
     if (c.malformed === 'invalid_direction') raw.intents[0].direction = 'sideways';
     if (c.malformed === 'nonliteral') raw.intents[0].vendor_text = 'Other Unit';
     const plan = validateLedgerIntentDecision(raw, c.question, { now: Date.parse(NOW), timeZone: 'UTC' });
-    const trace = { validation: 1, model: 0, document: 0, render: 0, inventory: 0, transactions: 0 };
+    const trace = { validation: 1, model: 0, document: 0, render: 0, inventory: 0, transactions: 0, pending: 0 };
     const response = await withLedgerAnswer({ env: f.env, question: c.question, now: Date.parse(NOW),
       grantScope: { all: true }, scopePrincipalKind: 'owner', callLLM: async () => {
         trace.model++; return { content: [{ type: 'text', text: JSON.stringify(raw) }] };
@@ -46,7 +46,11 @@ export async function execute(c, implementation = {}) {
     assert.equal(blocked.length, 0, 'STOP: forbidden adapter reached');
     const body = await response.json();
     trace.inventory = f.calls.filter(sql => /FROM fin_accounts a/.test(sql)).length;
-    trace.transactions = f.calls.filter(sql => /CROSS JOIN fin_transactions/.test(sql)).length;
+    // Disclosure reads use pending=1 and cannot prove a posted operand.
+    const transactionSql = f.calls.filter(sql => /CROSS JOIN fin_transactions/.test(sql));
+    trace.transactions = transactionSql.filter(sql => /t\.pending=0\b/.test(sql)).length;
+    trace.pending = transactionSql.filter(sql => /t\.pending=1\b/.test(sql)).length;
+    assert.equal(trace.transactions + trace.pending, transactionSql.length, 'every transaction read has an explicit posted/pending basis');
     trace.render = typeof body.answer === 'string' && (body.ledger !== null || body.clarification) ? 1 : 0;
     assert.equal(trace.model, 1, `${c.id}: recorded model decision reached`);
     if (!c.terminal || c.terminal !== 'router') assert.ok(plan.intents?.length, `${c.id}: nonempty validated plan`);

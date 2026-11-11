@@ -1,79 +1,54 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
-  <Package
-    Name="Financial Brain Machine Prep"
-    Manufacturer="Financial Brain LLC"
-    Version="0.2.0"
-    UpgradeCode="A49C8F6E-AD20-4C23-89B7-0E2A5B63C02D"
-    Scope="perUser"
-    InstallerVersion="500"
-    Compressed="yes">
-
-    <SummaryInformation Description="Prepares the local tools used before a guided Financial Brain setup" />
+  <Package Name="Financial Brain $(var.PayloadVersion)" Manufacturer="Financial Brain LLC"
+    Version="$(var.PayloadVersion)" UpgradeCode="A49C8F6E-AD20-4C23-89B7-0E2A5B63C02D"
+    Scope="perUser" InstallerVersion="500" Compressed="yes" UpgradeStrategy="none">
     <MediaTemplate EmbedCab="yes" />
-    <MajorUpgrade DowngradeErrorMessage="A newer Financial Brain Machine Prep is already installed." />
-    <!-- Windows Installer reports VersionNT64 as 603 on Windows 10 and 11, so
-         a VersionNT64 >= 1000 gate refused every supported PC. Read the real
-         build number instead; Windows 10 starts at build 10240. -->
-    <Property Id="WINDOWSBUILDNUMBER" Secure="yes">
-      <RegistrySearch
-        Id="WindowsBuildNumberSearch"
-        Root="HKLM"
-        Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion"
-        Name="CurrentBuildNumber"
-        Type="raw"
-        Bitness="always64" />
+    <!-- MSI must resolve the same physical location during native uninstall,
+         including a reviewed test install whose directory contains spaces. -->
+    <Property Id="INSTALLFOLDER" Secure="yes">
+      <RegistrySearch Id="InstalledPayloadDirectory" Root="HKCU"
+        Key="Software\FinancialBrain\Payload\$(var.PayloadVersion)" Name="installDirectory" Type="raw" Bitness="always64" />
     </Property>
-    <Launch
-      Condition="Installed OR (VersionNT64 AND WINDOWSBUILDNUMBER &gt;= 10240)"
+    <!-- Versions coexist. Never remove a working older version before the new
+         payload passes verification. No RemoveExistingProducts action. -->
+    <!-- VersionNT64 reports 603 on Windows 10 and 11. The earlier >= 1000
+         guard refused supported PCs; read the real build number instead. -->
+    <Property Id="WINDOWSBUILDNUMBER" Secure="yes">
+      <RegistrySearch Id="WindowsBuildNumberSearch" Root="HKLM"
+        Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion" Name="CurrentBuildNumber" Type="raw" Bitness="always64" />
+    </Property>
+    <Launch Condition="Installed OR (VersionNT64 AND WINDOWSBUILDNUMBER &gt;= 10240)"
       Message="Windows 10 or newer is required. No machine preparation was started." />
-
     <StandardDirectory Id="LocalAppDataFolder">
-      <Directory Id="INSTALLFOLDER" Name="Financial Brain Machine Prep">
-        <!-- Profile components require distinct HKCU key paths (ICE38/ICE57)
-             and empty-folder cleanup (ICE64). Changing the key-path resource
-             from a file to a registry value also requires a new component GUID. -->
-        <Component Id="MachinePrepScripts" Guid="E2059FA2-DF08-4209-865D-3C259D9CFF86">
-          <File Id="PrepWindowsScript" Source="..\..\prep-windows.ps1" Name="prep-windows.ps1" />
-          <File Id="RunMachinePrepScript" Source="run-machine-prep.ps1" Name="run-machine-prep.ps1" />
-          <File Id="StartBrainSetupScript" Source="start-brain-setup.ps1" Name="start-brain-setup.ps1" />
-          <File Id="UninstallNotes" Source="UNINSTALL.txt" Name="UNINSTALL.txt" />
-          <RemoveFolder Id="RemoveInstallFolder" On="uninstall" />
-          <RegistryValue Id="MachinePrepScriptsInstalled" Root="HKCU" Key="Software\FinancialBrain\MachinePrep" Name="scriptsInstalled" Type="integer" Value="1" KeyPath="yes" />
-        </Component>
-        <Directory Id="HANDOFFFOLDER" Name="handoff">
-          <Component Id="ClaudeHandoff" Guid="6839F543-80B2-428D-A11D-F2BD575612FB">
-            <File Id="ClaudeHandoffScript" Source="..\..\handoff\handoff-windows.ps1" Name="handoff-windows.ps1" />
-            <File Id="ClaudeHandoffMessage" Source="..\..\handoff\message-windows.txt" Name="message-windows.txt" />
-            <File Id="ClaudeHandoffUrl" Source="handoff-windows.url" Name="handoff-windows.url" />
-            <RemoveFolder Id="RemoveHandoffFolder" On="uninstall" />
-            <RegistryValue Id="ClaudeHandoffInstalled" Root="HKCU" Key="Software\FinancialBrain\MachinePrep" Name="handoffInstalled" Type="integer" Value="1" KeyPath="yes" />
-          </Component>
+      <Directory Id="OWNERROOT" Name="FinancialBrain">
+        <Directory Id="APPROOT" Name="app">
+          <Directory Id="INSTALLFOLDER" Name="$(var.PayloadVersion)" />
         </Directory>
       </Directory>
     </StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder">
-      <Directory Id="ApplicationProgramsFolder" Name="Financial Brain Machine Prep">
-        <Component Id="MachinePrepShortcut" Guid="8C61DEEB-2749-4F62-9446-B5DA941E4DBF">
-          <!-- Match the x64 package and native Node/CLI runtime. No payload
-               depends on the 32-bit PowerShell filesystem redirector. -->
-          <Shortcut
-            Id="RunMachinePrepShortcut"
-            Name="Run Financial Brain Machine Prep"
-            Description="Check prerequisites and open Financial Brain setup"
+      <Directory Id="ApplicationProgramsFolder" Name="Financial Brain">
+        <Component Id="PayloadShortcut" Guid="*">
+          <!-- PowerShell authenticates all local digests before private Node
+               runs. The JS launcher repeats verification before the CLI. -->
+          <Shortcut Id="SetupShortcut" Name="Financial Brain $(var.PayloadVersion) Setup"
+            Description="Open Financial Brain setup using its private runtime"
             Target="[System64Folder]WindowsPowerShell\v1.0\powershell.exe"
-            Arguments="-NoLogo -NoProfile -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]run-machine-prep.ps1&quot;"
+            Arguments="-NoLogo -NoProfile -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]start-brain-setup.ps1&quot;"
             WorkingDirectory="INSTALLFOLDER" />
-          <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
-          <RegistryValue Root="HKCU" Key="Software\FinancialBrain\MachinePrep" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+          <RemoveFolder Id="RemoveMenu" On="uninstall" />
+          <!-- Empty directory cleanup cannot delete owner state. Never add a
+               wildcard RemoveFile or recursive RemoveFolderEx here. -->
+          <RemoveFolder Id="RemoveAppRoot" Directory="APPROOT" On="uninstall" />
+          <RemoveFolder Id="RemoveOwnerRootIfEmpty" Directory="OWNERROOT" On="uninstall" />
+          <RegistryValue Root="HKCU" Key="Software\FinancialBrain\Payload\$(var.PayloadVersion)" Name="installDirectory" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
         </Component>
       </Directory>
     </StandardDirectory>
-
-    <Feature Id="Complete" Title="Financial Brain Machine Prep" Level="1">
-      <ComponentRef Id="MachinePrepScripts" />
-      <ComponentRef Id="ClaudeHandoff" />
-      <ComponentRef Id="MachinePrepShortcut" />
+    <Feature Id="Complete" Title="Financial Brain" Level="1">
+      <ComponentGroupRef Id="VerifiedPayload" />
+      <ComponentRef Id="PayloadShortcut" />
     </Feature>
   </Package>
 </Wix>

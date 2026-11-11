@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { replay } from '../../eval/fast-loop/money-replay.mjs';
 import { cases, snapshotFor } from '../../eval/fast-loop/early-month-cases.mjs';
 import { reviewedDateCopy } from './fixtures/plain-copy-expectations.mjs';
-import { reviewEarlyMonth } from '../../eval/fast-loop/early-month-key.mjs';
+import { legacyDisclosureView, reviewEarlyMonth } from '../../eval/fast-loop/early-month-key.mjs';
 import { fixture } from './ledger-review-fixture.mjs';
 import { withLedgerAnswer } from '../src/lib/ledger-answer.js';
 
@@ -17,7 +17,7 @@ const previousContract = (o, c) => {
   assert.equal(o.trace.product_writes, 0);
   assert.equal(o.trace.fallback_calls, 0);
   assert.equal(o.trace.model_calls, 0);
-  const b = o.body, l = b.ledger;
+  const b = legacyDisclosureView(o.body, c), l = b.ledger;
   assert.equal(l.kind, 'expense_summary');
   assert.deepEqual([l.from, l.to], ['2026-10-01', c.period.to]);
   assert.equal(l.expense_total_minor, c.unknown ? null : c.current ? 1234 : 0);
@@ -111,7 +111,9 @@ test('current coverage refusal retains the fully covered previous month and both
   assert.equal(o.body.ledger.previous_month.complete, true);
   assert.equal(o.body.evidence_gate.complete, false);
   assert.equal(o.body.evidence_gate.partial, true);
-  assert.deepEqual(o.body.citations.map(c => c.n), [1, 2, 3]);
+  assert.deepEqual(o.body.citations.map(c => c.n), [1, 2, 3, 4]);
+  assert.equal(o.body.citations[3].ref, 'ledger:transaction:3');
+  assert.equal(o.body.citations[3].amount_minor, 40000);
   assert.match(o.body.answer.split('\n')[0], /^Month to date .*Unavailable\..*I can help check the bank records for October 1, but some bank days are missing, so a complete answer is unconfirmed\./);
   assert.doesNotMatch(o.body.answer.split('\n')[0], /\$|Evidence:|Bank history:/);
   assert.match(o.body.answer, /Your account ending 3131 has records from July through September, last update unavailable/);
@@ -246,7 +248,7 @@ test('bounded undated spend aliases share the default expense contract', () => {
   assert.equal(gross.body.ledger, undefined);
 });
 
-test('restoring a UTC calendar fails the local month-boundary contract', () => {
+test('restoring a UTC calendar is contained by the owner-day reader guard', () => {
   const c = cases.find(c => c.id === 'early/local-boundary-empty');
   previousContract(run.observations.find(o => o.id === c.id), c);
   const source = readFileSync(new URL('../src/lib/ledger-question.js', import.meta.url), 'utf8');
@@ -255,7 +257,9 @@ test('restoring a UTC calendar fails the local month-boundary contract', () => {
   const broken = replay({ cases: [c], snapshotFor,
     sourceOverrides: { 'ledger-question.js': source.replace(site, 'const today = ledgerDay(now);') } }).observations[0];
   assert.equal(broken.execution_status, 'complete');
-  assert.ok(broken.trace.dependencies.includes('transactions'));
+  assert.equal(broken.trace.dependencies.includes('transactions'), false);
+  assert.equal(broken.body.evidence_gate.complete, false);
+  assert.match(broken.body.answer, /period has not happened yet/i);
   assert.throws(() => previousContract(broken, c), { name: 'AssertionError' });
 });
 
@@ -350,7 +354,7 @@ test('previous-month read failure preserves the current result and a scoped gap'
     return batch(statements);
   };
   const body = await f.askAtClock();
-  assert.equal(batches, 2, 'the second period reached its read decision');
+  assert.equal(batches, 3, 'both posted periods and the separate pending snapshot reached their read decisions');
   assert.equal(body.ledger.total_minor, 0);
   assert.equal(body.ledger.previous_month.reason, 'ledger_unavailable');
   assert.equal(body.ledger.previous_month.total_minor, undefined);

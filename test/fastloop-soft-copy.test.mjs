@@ -4,6 +4,27 @@ import { readFileSync } from 'node:fs';
 import { CASES, loadTapes } from '../eval/fast-loop/day3-bench.mjs';
 import { replayRoute } from '../eval/fast-loop/route-replay.mjs';
 import { workingTreeSources } from '../eval/fast-loop/ledger-sources.mjs';
+import { searchDisclosureTapes } from '../eval/fast-loop/search-disclosure-tapes.mjs';
+
+test('search/disclosure tape overlay preserves frozen streams and rejects altered dependencies', () => {
+  const original = loadTapes().baseline;
+  const fixed = searchDisclosureTapes(original);
+  const id = Object.keys(original).find(id => original[id].d1.some((entry, i) =>
+    JSON.stringify(entry.input) !== JSON.stringify(fixed[id].d1[i].input)));
+  assert.ok(id, 'the real historical HTTP stream reaches the new SQL contract');
+  assert.deepEqual(fixed[id].model, original[id].model);
+  assert.deepEqual(fixed[id].provider, original[id].provider);
+  assert.deepEqual(searchDisclosureTapes(fixed), fixed, 'overlay is idempotent');
+  const index = original[id].d1.findIndex((entry, i) =>
+    JSON.stringify(entry.input) !== JSON.stringify(fixed[id].d1[i].input));
+  const changed = structuredClone(original);
+  changed[id].d1[index].input.occurrence += 1;
+  assert.deepEqual(searchDisclosureTapes(changed)[id].d1[index], changed[id].d1[index],
+    'an altered entry cannot borrow the reviewed replacement');
+  // An omitted overlay must not silently advertise the new query contract.
+  const absent = searchDisclosureTapes(original, { entries: [] });
+  assert.notDeepEqual(absent[id].d1[index].input, fixed[id].d1[index].input);
+});
 
 test('reviewed copy keeps exact model replay with the old prompt as a negative control', () => {
   const current = loadTapes();

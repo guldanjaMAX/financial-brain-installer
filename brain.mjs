@@ -3133,9 +3133,10 @@ async function readWorkerBankProvider({ accountId, scriptName }) {
   const bindings = settings?.bindings;
   if (!Array.isArray(bindings)) throw new Error("the live Worker settings have no readable bindings");
   const matches = bindings.filter((binding) => binding?.name === "BANK_FEED_PROVIDER");
+  if (matches.length === 0) return null;
   if (matches.length !== 1 || matches[0]?.type !== "plain_text" ||
       !["plaid", "simplefin", "custom"].includes(matches[0]?.text)) {
-    throw new Error("the live Worker bank-provider binding is missing or ambiguous");
+    throw new Error("the live Worker bank-provider binding is ambiguous or invalid. Review Worker settings and rerun brain bank-provider <manifest> --set simplefin --enable.");
   }
   return matches[0].text;
 }
@@ -3168,6 +3169,8 @@ async function cmdDeployWithPrompts(manifestPath, options = {}) {
       bankProviderTransition = await prepareTransition({
         targetProvider: targetBankProvider,
         liveProvider,
+        manifestPath,
+        manifest: m,
         inspectBankState: async () => normalizeBankProviderState(
           await (options.d1Query ?? d1Query)(acct.id, cfg.d1_database_id, BANK_PROVIDER_STATE_SQL),
         ),
@@ -33767,6 +33770,12 @@ export async function cmdBankProvider(argv = process.argv.slice(3), options = {}
       ...(options.commandOptions || {}),
       inspectBankState,
       establishTransition,
+      inspectWorkerBankProvider: options.inspectWorkerBankProvider ?? options.commandOptions?.inspectWorkerBankProvider ??
+        (async (manifest) =>
+          (options.withManifestControl ?? withManifestCloudflareControl)(manifestPath, () =>
+            readWorkerBankProvider({ accountId: manifest.infrastructure.cloudflare.account_id,
+              scriptName: manifest.brain?.worker_name || `${manifest.client?.slug || "client"}-brain` }),
+            { command: "bank-provider" })),
       displayManifestPath: commandPath(displayPath(manifestPath)),
     });
     const write = options.write ?? ((line) => console.log(line));

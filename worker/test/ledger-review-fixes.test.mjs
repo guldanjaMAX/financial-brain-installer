@@ -313,7 +313,7 @@ test('RANGE-01 safe integer subtotals still require confirmed account roles befo
     [remainderQuestion, remainderIntents(), 'remainder', /all other recorded ordinary spending:/],
     ["Could you retrieve this month's spending after refunds?",
       [recordedIntent('merchant', { direction: 'outflow', vendor_text: 'refunds' })],
-      'net_expense_minor', /Ordinary expenses less inflows/],
+      'net_expense_minor', /cannot confirm spending after refunds/],
     ['Could you retrieve expenses for materials this month?',
       [recordedIntent('merchant', { direction: 'outflow', vendor_text: 'materials' })],
       null, /Category 'materials':/],
@@ -324,7 +324,11 @@ test('RANGE-01 safe integer subtotals still require confirmed account roles befo
     assert.ok(green.reads > 0);
     assert.equal(green.body.ledger.classification_uncertain, false);
     assert.match(green.body.answer, sentence);
-    if (key) assert.notEqual(green.body.ledger[key], undefined);
+    if (key === 'net_expense_minor') {
+      assert.equal(green.body.ledger.net_expense_minor, undefined);
+      assert.equal(green.body.ledger.net_refunds_unavailable, true);
+      assert.ok(green.body.ledger.possible_refunds.length > 0, 'refund disclosure decision reached');
+    } else if (key) assert.notEqual(green.body.ledger[key], undefined);
   }
   f.raw("UPDATE fin_accounts SET balance_role='liability'");
   for (const [question, intents, key, sentence] of cases) {
@@ -494,12 +498,12 @@ for (const [question, intent, fact, obsolete] of [
     'Store refunds are not split out in this view.', 'Here is the recorded spending;'],
   ['Could you retrieve Store Unit spending after refunds this month?',
     recordedIntent('merchant', { direction: 'outflow', vendor_text: 'Store Unit' }),
-    "I cannot confirm spending after refunds because these records do not show which deposits are refunds from this business. The amounts below are before subtracting refunds.",
+    "I cannot confirm spending after refunds because the bank feed does not supply a refund or reversal type; the amounts below are before subtracting refunds.",
     'Here is the recorded spending before refunds;'],
   ['Could you retrieve expenses this month by payee?', recordedIntent('expense_summary'),
     'A payee breakdown is not available in this view.', 'Here is the category summary;'],
   ['Could you retrieve software recurring charges?', recordedIntent('recurring', { vendor_text: 'software' }),
-    'This recurring-charge reading has not been narrowed by category.', 'Here is the recurring list'],
+    'no named recurring amount is confirmed.', 'Here is the recurring list'],
 ]) test(`R2 adjacent notices stay neutral for populated and empty readings: ${intent.kind}/${intent.vendor_text || 'all'}`, async t => {
   const f = fixture(t);
   for (const [id, date] of [['repeat-a', '2026-08-07'], ['repeat-b', '2026-09-07'], ['repeat-c', '2026-10-07']]) {
@@ -509,7 +513,11 @@ for (const [question, intent, fact, obsolete] of [
   assert.equal(green.extraction, 1);
   assert.ok(green.reads > 0);
   assert.equal(green.fallback, 0);
-  assert.ok(green.body.citations.length > 0, 'populated reading has real evidence');
+  if (intent.kind === 'recurring') {
+    assert.equal(green.body.ledger.monthly_total_minor, null, 'unresolved identity refuses an amount even with populated rows');
+    assert.deepEqual(green.body.ledger.recurring, []);
+    assert.equal(green.body.citations.length, 0, 'unrelated evidence is not substituted');
+  } else assert.ok(green.body.citations.length > 0, 'populated reading has real evidence');
   f.raw('DELETE FROM fin_transactions');
   const empty = await ask(f, question, [intent]);
   assert.equal(empty.extraction, 1);

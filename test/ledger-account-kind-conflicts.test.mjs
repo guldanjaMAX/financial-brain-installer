@@ -114,6 +114,11 @@ async function repaymentProbe(t, overrides) {
   f.transaction('store',21000);
   f.transaction('own',40000,'payment to account 4242','payment');
   assert.equal((await f.ask()).gaps[0].reason,'ledger_account_kind_review_required');
+  f.raw("UPDATE fin_accounts SET balance_role='liability' WHERE account_slug='debt'");
+  const unreviewed = await f.ask();
+  assert.equal(unreviewed.answer,null,'an unreviewed liability role still withholds the headline');
+  assert.equal(unreviewed.gaps[0].reason,'ledger_account_kind_review_required');
+  f.raw("UPDATE fin_accounts SET balance_role='neither' WHERE account_slug='debt'");
   for (const kind of ['loan','card','line_of_credit']) {
     await f.apply({kind});
     const body = await f.ask();
@@ -126,18 +131,19 @@ async function repaymentProbe(t, overrides) {
   const row = (await readEffectiveAccounts(f.env)).find(a => a.account_slug === 'debt');
   assert.equal(row.account_kind_review.state,'current'); assert.equal(row.balance_role,'liability');
   const body = await f.ask();
-  assert.equal(body.answer,null,'unsupported subtype withholds the expense headline');
-  assert.equal(body.gaps[0].reason,'ledger_account_kind_review_required');
-  assert.notEqual(body.ledger?.complete,true);
-  assert.equal(body.ledger?.expense_total_minor,undefined);
+  assert.equal(body.ledger.expense_total_minor,21000,'a current reviewed liability excludes its exactly identified payment');
+  assert.equal(body.ledger.own_account_payments.total_minor,40000);
+  assert.equal(body.ledger.own_account_payments.count,1);
+  assert.equal(body.ledger.complete,true);
+  assert.match(body.answer,/Payments to loans and cards \(excluded from spending and income\): \$400\.00 across 1 payment/);
   f.raw("UPDATE fin_transactions SET payee='outside lender' WHERE txn_uid='own'");
   assert.equal((await f.ask()).ledger.expense_total_minor,61000,'outside-payee control remains an expense');
   f.raw("UPDATE fin_transactions SET payee='payment',description='payment to account 9999' WHERE txn_uid='own'");
   assert.equal((await f.ask()).ledger.expense_total_minor,61000,'unmatched locator cannot prove ownership');
 }
-test('R5 reviewed other liability retains the directed-owned-payment uncertainty guard', t => repaymentProbe(t));
+test('R5 unreviewed liability retains the guard while a current reviewed liability excludes its payment', t => repaymentProbe(t));
 
-async function storedRepaymentProbe(t, overrides, { kind = 'checking', providerKind = 'loan', locator = 'account 4242' } = {}) {
+async function storedRepaymentProbe(t, overrides, { kind = 'checking', providerKind = 'loan', locator = 'account 4242', possibleOutsideLoan = false } = {}) {
   const f = seed(t, overrides);
   f.transaction('store',21000);
   f.transaction('own',40000,`payment to ${locator}`,'payment');
@@ -161,7 +167,19 @@ async function storedRepaymentProbe(t, overrides, { kind = 'checking', providerK
   assert.equal(cash.unavailable,true);
   assert.deepEqual(f.rows('SELECT * FROM fin_account_kind_reviews'),history,'reads preserve review history');
   f.raw("UPDATE fin_transactions SET payee='outside lender' WHERE txn_uid='own'");
-  assert.equal((await f.ask()).ledger.expense_total_minor,61000,'explicit outside-payee control');
+  const outside = await f.ask();
+  assert.equal(outside.ledger.expense_total_minor,possibleOutsideLoan ? 21000 : 61000,'explicit outside-payee control');
+  if (possibleOutsideLoan) {
+    // An outside payee vetoes owned identity. Explicit loan-payment text still
+    // nominates a cited repayment candidate outside certified spending.
+    assert.equal(outside.ledger.own_account_payments.total_minor,0);
+    assert.equal(outside.ledger.possible_payments.length,1);
+    const candidate = outside.ledger.possible_payments[0];
+    assert.equal(candidate.payment_kind,'loan');
+    assert.equal(candidate.amount_minor,40000);
+    assert.ok(outside.citations.some(c => c.n === candidate.n && c.amount_minor === 40000));
+    assert.match(outside.answer,/possible loan payment, not counted as spending: \$400\.00/);
+  }
   f.raw("UPDATE fin_transactions SET payee='payment',description='payment to account 9999' WHERE txn_uid='own'");
   assert.equal((await f.ask()).ledger.expense_total_minor,61000,'unmatched locator control');
   f.raw("UPDATE fin_transactions SET description=? WHERE txn_uid='own'",`payment to ${locator}`);
@@ -194,7 +212,7 @@ for (const providerKind of ['loan','card','line_of_credit','other']) {
   }
 }
 test('R6 a stated loan locator still reaches the saved deposit conflict',
-  t => storedRepaymentProbe(t,undefined,{locator:'loan 4242'}));
+  t => storedRepaymentProbe(t,undefined,{locator:'loan 4242',possibleOutsideLoan:true}));
 
 // Execute restored product decisions through the same SQLite and answer probes.
 // Data modules replace only the named site; relative imports still use the repo.
@@ -229,13 +247,15 @@ test('restoring R4 cash decision republishes the positive amount owed', async t 
     error => error.code === 'ERR_ASSERTION' && error.actual === 1000000 && error.expected === null);
 });
 
+// Removing these review guards now exposes the whole unary debit as money out;
+// the mutant must still fail the exact null-headline assertion, at 61000 cents.
 test('restoring R5 role exception fails the same reviewed-liability probe', async t => {
   await repaymentProbe(t);
   const mutant = await restored('ledger-analysis.js',
     ".some(account => account?.account_kind === 'other' || hasAccountKindConflict(account));",
     ".some(account => account?.account_kind === 'other' && account.balance_role === 'neither' || hasAccountKindConflict(account));");
   await assert.rejects(repaymentProbe(t, { answer:mutant.withLedgerAnswer }),
-    error => error.code === 'ERR_ASSERTION' && /You spent \$610\.00/.test(error.actual) && error.expected === null);
+    error => error.code === 'ERR_ASSERTION' && /Money out I could check: \$610\.00/.test(error.actual) && error.expected === null);
 });
 
 test('restoring R6 payment decision certifies the same conflicted repayment as spending', async t => {

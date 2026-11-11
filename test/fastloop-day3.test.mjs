@@ -237,7 +237,7 @@ test('the versioned candidate arm executes every current HTTP and direct case', 
   assert.equal(result.summary.scores.candidate.complete, 49);
   assert.equal(result.direct.candidate.run.observations.length, 19);
   assert.ok(result.direct.candidate.run.observations.every(o => o.execution_status === 'complete'));
-  assert.equal(result.summary.gates.headline_gate, true);
+  assert.equal(result.summary.gates.headline_gate, true, JSON.stringify(result.summary.transitions.filter(t => t.new_safety.length || t.new_wrong_figures.length)));
   assert.equal(result.summary.gates.controls_discriminate, true);
   assert.ok(result.runs.candidate.observations.some(o => o.trace.sql.some(s => s.request)));
 });
@@ -278,11 +278,18 @@ test('restoring historical candidate tapes blocks the gate and retains every cas
 
 
 test('historical shared-module drift is rejected after completed green replays', () => {
-  for (const run of [bench.runs.baseline, bench.direct.baseline.run]) {
+  const coreHash = sha(readFileSync(new URL('../worker/src/lib/core.js', import.meta.url), 'utf8'));
+  for (const run of [bench.runs.baseline, bench.direct.baseline.run, bench.runs.batch1, bench.direct.batch1.run]) {
     assert.ok(run.observations.length > 0);
+    assert.ok(run.observations.every(o => o.execution_status === 'complete'), 'green replay decision reached');
+    assert.equal(run.source_files['worker/src/lib/core.js'], coreHash, 'both arms execute the reviewed shared core');
     verifyHistoricalSources(run);
-    const bad = structuredClone(run);
-    bad.source_files['worker/src/lib/fin-account-links.js'] = sha('different shared identity');
-    assert.throws(() => verifyHistoricalSources(bad), /HISTORICAL_SHARED_MISMATCH/);
+    for (const name of ['core.js', 'fin-account-links.js']) {
+      const bad = structuredClone(run);
+      bad.source_files[`worker/src/lib/${name}`] = sha('different shared identity');
+      assert.throws(() => verifyHistoricalSources(bad), {
+        message: `HISTORICAL_SHARED_MISMATCH:${name}`,
+      });
+    }
   }
 });

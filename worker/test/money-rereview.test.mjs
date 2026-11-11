@@ -144,8 +144,16 @@ test('R01 own-mask candidate keeps genuine legs in totals and phase-two lists', 
   add(f, { uid: 'out', amount: 50000, direction: 'outflow', description: 'Transfer to account 8765' });
   add(f, { uid: 'in', slug: 'second-account', amount: 50000, direction: 'inflow', description: 'Bank credit' });
   const control = await ask(f, totalQuestion);
-  assert.equal(control.ledger.candidate_transfer_count, 1);
-  assert.equal(total(control, 'credits_minor'), 50000); assert.equal(total(control, 'debits_minor'), 50000);
+  assert.equal(control.ledger.reason, 'money_out_destination_unconfirmed');
+  assert.equal(control.ledger.total_minor, null);
+  assert.equal(control.evidence_gate.complete, false);
+  assert.equal(control.ledger.possible_payments[0].amount_minor, 50000);
+  assert.ok(control.citations.some(row => row.n === control.ledger.possible_payments[0].n && row.amount_minor === 50000));
+  f.raw("UPDATE fin_transactions SET description='Transfer from account 4321' WHERE txn_uid='in'");
+  const proved = await ask(f, totalQuestion);
+  assert.equal(proved.evidence_gate.complete, true);
+  assert.equal(proved.ledger.default_exclusions.own_transfer_minor, 50000);
+  f.raw("UPDATE fin_transactions SET description='Bank credit' WHERE txn_uid='in'");
   for (const [question, field] of [
     ['What were my 3 largest expenses in September 2026?', 'rows'],
     ['How much did I spend by category in September 2026?', 'total_minor'],
@@ -202,30 +210,42 @@ test('R01 a mask shared by two owned accounts cannot identify the counterparty',
   account(f, { slug: 'second-account', mask: '8765', institution: 'Bank Two' });
   add(f, { uid: 'out', amount: 50000, direction: 'outflow', description: 'Transfer to account 8765' });
   add(f, { uid: 'in', slug: 'second-account', amount: 50000, direction: 'inflow', description: 'Bank credit' });
-  assert.equal((await ask(f, totalQuestion)).ledger.candidate_transfer_count, 1);
+  const unproved = await ask(f, totalQuestion);
+  assert.equal(unproved.ledger.reason, 'money_out_destination_unconfirmed');
+  assert.equal(unproved.ledger.possible_payments[0].amount_minor, 50000);
   f.raw("UPDATE fin_accounts SET mask='4321' WHERE account_slug='second-account'");
   f.raw("UPDATE fin_transactions SET description='Transfer to account 4321' WHERE txn_uid='out'");
   const before = f.seen.length, result = await ask(f, totalQuestion);
   assert.ok(f.seen.slice(before).some(sql => sql.includes('JOIN fin_transactions')));
-  assert.equal(result.ledger.candidate_transfer_count, 0);
-  assert.equal(total(result, 'debits_minor'), 50000); assert.equal(total(result, 'credits_minor'), 50000);
+  assert.equal(result.ledger.reason, 'money_out_destination_unconfirmed');
+  assert.equal(result.ledger.total_minor, null);
+  assert.equal(result.ledger.complete, false);
+  assert.equal(result.evidence_gate.complete, false);
+  const [candidate] = result.ledger.possible_payments;
+  assert.equal(candidate.amount_minor, 50000);
+  assert.equal(candidate.destination_unconfirmed, true);
+  assert.ok(result.citations.some(c => c.n === candidate.n && c.amount_minor === 50000));
 });
 
-test('R02 an explicit whole-word payee suffix becomes cited family spend with disclosure', async t => {
+test('R02 a whole-word payee suffix stays separate as an unconfirmed name match', async t => {
   const f = fixture(); t.after(f.close); account(f);
   add(f, { uid: 'wanted', amount: 1200, direction: 'outflow', description: 'Cloud Tools', payee: 'Cloud Tools' });
   add(f, { uid: 'other', amount: 80000, direction: 'outflow', description: 'Cloud Tools', payee: 'Cloud Tools Consulting' });
   const before = f.seen.length;
   const result = await ask(f, 'How much did I spend at Cloud Tools in September 2026?');
-  assert.equal(result.ledger.total_minor, 81200);
-  assert.equal(result.ledger.match_basis, 'family');
+  assert.equal(result.ledger.total_minor, null);
+  assert.equal(result.ledger.exact_subtotal_minor, 1200);
+  assert.equal(result.ledger.name_match_subtotal_minor, 80000);
+  assert.equal(result.ledger.match_basis, 'name_match');
+  assert.equal(result.ledger.complete, false);
   assert.deepEqual(result.ledger.groups.map(g => [g.merchant, g.total_minor, g.count]), [
     ['Cloud Tools', 1200, 1], ['Cloud Tools Consulting', 80000, 1],
   ]);
   assert.equal(result.ledger.exact_match_count, 1);
   assert.equal(result.ledger.family_match_count, 1);
-  assert.equal(result.evidence_gate.complete, true);
-  assert.match(result.answer, /^also includes: Cloud Tools Consulting\.$/m);
+  assert.equal(result.evidence_gate.complete, false);
+  assert.match(result.answer, /Cloud Tools Consulting \(matched by name, not confirmed\)/);
+  assert.match(result.answer, /same company\?/i);
   assert.deepEqual(result.citations.map(c => c.amount_minor), [1200, 80000]);
   assert.ok(f.seen.slice(before).some(sql => sql.includes('JOIN fin_transactions')));
 });

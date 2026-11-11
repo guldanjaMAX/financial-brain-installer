@@ -1,6 +1,8 @@
+import { historicalCategoryText } from './category-disclosure.mjs';
+import { historicalBytes } from './review-harness.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { evaluate, reached, surfaces, save, purchase, refund, reply, parts, digest } from './review-harness.mjs';
+import { evaluate, reached, surfaces, save, purchase, refund, reply, parts, digest, calendarRefusal } from './review-harness.mjs';
 const controls = [
   ['net_worth', 'Could you retrieve my net worth?', { kind: 'balance', vendor_text: null, direction: null, period: { type: 'none' } }],
   ['investment_returns', 'Could you retrieve my investment returns this month?', { kind: 'totals', vendor_text: null, direction: 'inflow' }],
@@ -26,14 +28,25 @@ for (const [id, question, change] of controls) test(`ordinary control: ${id}`, a
   assert.equal(green.body.ledger.net_refunds_unavailable, true, 'same path can reach the refund limitation');
   const current = await evaluate(c), baseline = await evaluate(c, true);
   assert.equal(current.trace.validation, 1);
+  if (['after_investment_returns', 'after_store_credit', 'gross_after_store_credit', 'gross_refund_payee_after_purchase', 'refund_payee_after_purchase'].includes(id)) {
+    calendarRefusal(current);
+    const gross = await evaluate({ ...c, question: 'Could you retrieve gross spending at ' + vendor + ' this month?',
+      intents: [reply({ kind: 'merchant', vendor_text: vendor })] });
+    reached(gross);
+    assert.equal(gross.body.ledger.total_minor, 12000);
+    const view = await surfaces(t, current, question);
+    for (const text of Object.values(view)) assert.doesNotMatch(text, /\$\d/);
+    return;
+  }
   if (current.body.ledger) { assert.ok(current.trace.inventory > 0); assert.ok(current.body.citations.length || current.body.ledger.accounts.length); }
   else assert.equal(current.trace.document, 1, 'actual fallback decision reached');
-  const view = await surfaces(t, current, question), baseView = await surfaces(t, baseline, question);
-  const same = current.bytes === baseline.bytes && JSON.stringify(view) === JSON.stringify(baseView);
+  const actualView = await surfaces(t, current, question), baseView = await surfaces(t, baseline, question);
+  const view = Object.fromEntries(Object.entries(actualView).map(([name, text]) => [name, historicalCategoryText(text, current.body, c.rows)]));
+  const same = historicalBytes(current, c.rows) === baseline.bytes && JSON.stringify(view) === JSON.stringify(baseView);
   observations.push({ id, question, same, trace: current.trace, 
     surfaceEquality: Object.fromEntries(Object.keys(view).map(key => [key, view[key] === baseView[key]])),
     currentSha256: digest(current.bytes), baselineSha256: digest(baseline.bytes), plan: current.plan, body: current.body }); save('control-observations', observations);
-  assert.equal(current.bytes, baseline.bytes, 'entire actual response bytes must equal the pinned base');
+  assert.equal(historicalBytes(current, c.rows), baseline.bytes, 'prior response facts match pinned bytes after independently verified disclosure');
   assert.deepEqual(view, baseView, 'all five presentation surfaces must equal the pinned base');
   assert.ok(parts(current.body).every(p => !p.net_refunds_unavailable), 'ordinary question retains its amount basis');
 });

@@ -1,13 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { replayRoute } from '../eval/fast-loop/route-replay.mjs';
+import { loadRouteTapes, replayRoute } from '../eval/fast-loop/route-replay.mjs';
 import { BASE_CASES, CONTROLS } from './fixtures/fastloop-money/input.mjs';
 import { DOCUMENT_CASES, CLOCK_CASES } from './fixtures/fastloop-route/input.mjs';
 import { readFileSync } from 'node:fs';
 import { replay } from '../eval/fast-loop/money-replay.mjs';
 import { typed, exactTape, d1Tape } from '../eval/fast-loop/exact-tape.mjs';
 
-const fixtures = JSON.parse(readFileSync(new URL('./fixtures/fastloop-route/tapes.json', import.meta.url), 'utf8'));
+const fixtures = loadRouteTapes();
 const good = o => {
   assert.equal(o.execution_status, 'complete');
   assert.deepEqual(o.fatal, []);
@@ -293,4 +293,16 @@ test('actual HTTP entry reaches owner ledger and preserves frozen response bytes
   assert.equal(o.body.ledger.total_minor, 61000);
   assert.equal(o.http_status, 200);
   assert.equal(o.raw_body, replayRoute({ cases: [input], trace: false }).observations[0].raw_body);
+});
+
+test('pending disclosure tapes keep a nonempty green peer and reject the untouched older stream', () => {
+  const original = JSON.parse(readFileSync(new URL('./fixtures/fastloop-route/tapes.json', import.meta.url), 'utf8'));
+  const green = one({ cases: [control], fixtures });
+  good(green);
+  assert.equal(green.body.ledger.expense_total_minor, 61000);
+  assert.ok(green.trace.rows_read.length > 0, 'real posted decision reached');
+  const stale = one({ cases: [control], fixtures: original });
+  assert.equal(stale.execution_status, 'snapshot_miss');
+  assert.ok(stale.trace.rows_read.length > 0, 'old stream reached posted facts before the additional pending read');
+  assert.ok(stale.fatal.includes('SNAPSHOT_MISS'));
 });

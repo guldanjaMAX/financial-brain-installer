@@ -39,7 +39,7 @@ export const cases = [
     expected: `I can help check the bank records for September 2023, but some bank days are missing, so a complete answer is unconfirmed.\n${history}\n${balance}` },
   { id: 'not-synced', question: spend, reason: 'period_outside_coverage',
     setup: f => f.raw("UPDATE fin_account_coverage SET coverage_status='partial'"),
-    expected: `I can help check the bank records for October, but some bank days are missing, so a complete answer is unconfirmed.\n${history}\n${balance}` },
+    expected: `I can help check the bank records for October 1 to 12, but some bank days are missing, so a complete answer is unconfirmed.\n${history}\n${balance}` },
   { id: 'unreadable', question: spend, reason: 'unreadable_transactions',
     setup: f => f.raw("UPDATE fin_transactions SET basis_state='proposed'"),
     expected: `I can help review these transactions, but some amounts, dates, currencies, or directions are unconfirmed, so no total is confirmed.\n${history}\n${balance}` },
@@ -57,11 +57,11 @@ export const cases = [
     setup: f => f.add('possible', 'Store Missing charge', null, { direction: 'outflow' }),
     expected: `I found 1 transaction mentioning "Store Missing", but the bank did not name it as the payee, so no store total is confirmed.\n${balance}` },
   { id: 'vendor-absent', question: 'How much did I spend at Store Missing in October 2026?',
-    expected: `I checked October, but no payee exactly matched "Store Missing", so no store total is confirmed. Closest payee names: Store One.\nWant me to check spending at Store One in October?` },
+    expected: `No charges found for Store Missing from 2026-10-01 to 2026-10-12 on your account ending 1234.` },
   { id: 'vendor-mixed', question: spend,
     setup: f => f.add('possible', 'Store One charge', null, { direction: 'outflow', cents: 1200 }),
-    expected: `Here is a partial view for "Store One": the bank names it on charges totaling $25.00; another $12.00 only mentions it in the transaction text. These amounts stay separate, with no complete store total confirmed [1].\n${balance}` },
-  { id: 'expense-unknown', contextExpected: 'Money out I could check: $25.00 in October.\nPeriod: October.', question: 'What were my expenses in October 2026?',
+    expected: `Here is a partial view for "Store One": the bank names it on charges totaling $25.00 [1]; another $12.00 [2] only mentions it in the transaction text. These amounts stay separate, with no complete store total confirmed.\n${balance}` },
+  { id: 'expense-unknown', contextExpected: 'Money out I could check: $25.00 in October 1 to 12.\nPeriod: October 1 to 12.', question: 'What were my expenses in October 2026?',
     setup: f => f.raw("UPDATE fin_accounts SET account_kind='other',balance_role='neither'"),
     expected: `Here is the money out I could check, with spending still unconfirmed. The account types for your account ending 1234 have not been confirmed, so some payments may be between your own accounts.\n${balance}` },
   { id: 'payment-payer', question: 'Did the payment from Payer Missing arrive in October 2026?',
@@ -69,7 +69,7 @@ export const cases = [
     expected: `I found 1 deposit, but the bank details do not identify it as that payer's payment, so payment is unconfirmed.\n${balance}` },
   { id: 'payment-many', question: 'Did a payment of $25.00 arrive around October 5, 2026?',
     setup: f => { f.add('inflow-one', 'receipt one', 'Payer One'); f.add('inflow-two', 'receipt two', 'Payer Two'); },
-    expected: `I found 2 matching deposits in September 28 to October 12, so no single payment is confirmed.\n${balance}` },
+    expected: `Yes, I found 2 matching deposits in September 28 to October 12, so no single payment is confirmed.\n${balance}` },
   { id: 'forecast', question: 'What will my bank balance be next month?',
     expected: `I can show your recorded balances, but future balances and payments are unknown.\n${balance}` },
   { id: 'forecast-missing', question: 'What will my bank balance be next month?', reason: 'balance_unavailable', repair: 'Refresh the bank connection',
@@ -84,19 +84,19 @@ export const cases = [
   { id: 'account-link', question: spend, reason: 'ledger_account_link_required', repair: 'Ask the installer to review',
     setup: f => f.raw("INSERT INTO fin_accounts (account_slug,entity_slug,account_kind,balance_role,mask,feed_mode,provenance,basis_state,recorded_at) VALUES ('manual-copy','owner','checking','asset','1234','manual','owner_stated','confirmed','2026-10-12')"),
     expected: `I can help review these records, but an import and a bank connection may describe the same account, so they stay separate: your account ending 1234.\nWant help reviewing them together?` },
-  { id: 'expense-partial', contextExpected: 'Spending I could check: $25.00 in October (some accounts missing dates).\nPeriod: October.', question: 'What were my expenses in October 2026?',
+  { id: 'expense-partial', contextExpected: 'Spending I could check: $25.00 in October 1 to 12 (some accounts missing dates).\nPeriod: October 1 to 12.', question: 'What were my expenses in October 2026?',
     setup: f => extraAccount(f, 'partial'),
-    expected: `Here is a partial view using 1 of 2 accounts for October; your account ending 5678 is missing some dates.\n${balance}` },
+    expected: `Here is a partial view using 1 of 2 accounts for October 1 to 12; your account ending 5678 is missing some dates.\n${balance}` },
   { id: 'vendor-partial', question: spend, setup: f => extraAccount(f, 'partial'),
-    expected: `Here is a partial subtotal for "Store One": the charges I can use total $25.00 in October; 1 account is missing some dates: your account ending 5678 [1].\n${balance}` },
-  { id: 'ranking-partial', question: 'What were my five biggest expenses in October 2026?',
+    expected: `Here is a partial subtotal for "Store One": the charges I can use total $25.00 in October 1 to 12; 1 account is missing some dates: your account ending 5678 [1].\n${balance}` },
+  { id: 'ranking-partial', reason: 'period_outside_coverage', question: 'What were my five biggest expenses in October 2026?',
     setup: f => {
       const slug = 'simplefin-' + 'a'.repeat(16);
       for (const table of ['fin_accounts','fin_account_coverage','fin_transactions','fin_balance_snapshots']) f.raw(`UPDATE ${table} SET account_slug=?`, slug);
       f.raw("UPDATE fin_accounts SET account_kind='other',balance_role='neither'");
       f.raw("UPDATE fin_account_coverage SET coverage_status='partial'");
     },
-    expected: `Here are the expenses I found in a partial ranking; the bank connection has not supplied every day in the requested period.\n${balance}` },
+    expected: `I can help check the bank records for October 1 to 12, but some bank days are missing, so a complete answer is unconfirmed.\n${history}\n${balance}` },
   { id: 'income-payer', question: 'How much income came from Payer Missing in October 2026?',
     setup: f => f.add('payer-receipt', 'unidentified receipt', null),
     expected: `I can help review the deposits, but the full income from that payer is unconfirmed. There is 1 deposit, and its bank label may not identify who paid.\n${balance}` },
@@ -119,7 +119,7 @@ export const cases = [
     expected: `Income from that payer is at least $25.00 (matched subtotal, not complete); I can help review the deposits, but the full income from that payer is unconfirmed. There are 2 deposits, and their bank labels may not identify who paid.\n${balance} [1]` },
   { id: 'balance-live', question: 'What are my account balances?', repair: 'Refresh the bank connection',
     expected: "Here are your recorded balances, with the date for each account; these do not show live or available cash.\nWant help refreshing the bank connection for a newer balance?" },
-  { id: 'ranking-empty', question: 'What were my five biggest expenses in October 2026?',
+  { id: 'ranking-empty', reason: 'period_outside_coverage', question: 'What were my five biggest expenses in October 2026?',
     setup: f => {
       const slug = 'simplefin-' + 'a'.repeat(16);
       for (const table of ['fin_accounts','fin_account_coverage','fin_balance_snapshots']) f.raw(`UPDATE ${table} SET account_slug=?`, slug);
@@ -127,20 +127,20 @@ export const cases = [
       f.raw("UPDATE fin_accounts SET account_kind='other',balance_role='neither'");
       f.raw("UPDATE fin_account_coverage SET coverage_status='partial'");
     },
-    expected: `I checked the saved transactions and found no matches, but some days may be missing, so this is a partial ranking and does not confirm there were no expenses.\n${balance}` },
+    expected: `I can help check the bank records for October 1 to 12, but some bank days are missing, so a complete answer is unconfirmed.\n${history}\n${balance}` },
   { id: 'vendor-quoted-label', question: 'How much did I spend at Store Missing in October 2026?',
     setup: f => f.raw("UPDATE fin_transactions SET payee=?", 'Store "Q"'),
-    expected: `I checked October, but no payee exactly matched "Store Missing", so no store total is confirmed. Closest payee names: Store "Q".\n${balance}` },
+    expected: `No charges found for Store Missing from 2026-10-01 to 2026-10-12 on your account ending 1234.` },
   { id: 'vendor-owned-only', question: 'How much did I spend at Store Missing in October 2026?',
     setup: f => {
       extraAccount(f); f.raw('DELETE FROM fin_transactions');
       f.add('owned-out', 'TRANSFER TO account 5678', 'Transfer', { direction: 'outflow' });
       f.raw("INSERT INTO fin_transactions (txn_uid,account_slug,posted_on,amount_minor,direction,description,payee,provenance,basis_state,recorded_at) VALUES ('owned-in','reserve','2026-10-05',2500,'inflow','TRANSFER FROM account 1234',NULL,'owner_stated','confirmed','2026-10-12')");
     },
-    expected: `I checked October, but no payee exactly matched "Store Missing", so no store total is confirmed. Closest payee names: Transfer.\n${balance}` },
+    expected: `No charges found for Store Missing from 2026-10-01 to 2026-10-12 on your account ending 1234, your account ending 5678.` },
   { id: 'category-unconfirmed', question: 'Show my spending by category in October 2026?',
     setup: f => f.raw("UPDATE fin_transactions SET category='Supplies',category_basis_state='proposed'"),
-    expected: `Here are the spending categories from your bank; those marked unconfirmed have not been reviewed.\n${balance}` },
+    expected: `Unconfirmed categories: 1 rows totaling $25.00; left out of confirmed category totals.\n${balance}` },
   { id: 'partial-history-gap', question: 'Show my last ten transactions.', reason: 'ledger_partial_coverage',
     expected: `This is a partial reading of the bank records; some days may be missing, so the list or ranking may be incomplete.\n${history}\n${balance}` },
 ];

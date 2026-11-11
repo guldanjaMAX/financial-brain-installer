@@ -1,3 +1,4 @@
+import { historicalBytes } from './review-harness.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { evaluate, reached, safeBasis, surfaces, offer, save, purchase, refund, reply, parts } from './review-harness.mjs';
@@ -13,7 +14,7 @@ for (const vendor of ['Vendor Unit', null]) for (const phrase of ['after returns
   test(c.id, async t => {
     const gross = await evaluate({ ...c, question: `Could you retrieve gross spending ${subject}this month?` }); reached(gross);
     const baseGross = await evaluate({ ...c, question: `Could you retrieve gross spending ${subject}this month?` }, true);
-    assert.equal(gross.bytes, baseGross.bytes, 'reached gross peer is byte-identical to base');
+    assert.equal(historicalBytes(gross, rows), baseGross.bytes, 'reached gross peer is byte-identical to base');
     assert.equal(parts(gross.body)[0].total_minor, 12000);
     const actual = await evaluate(c), views = await surfaces(t, actual, c.question);
     const safe = safeBasis(actual);

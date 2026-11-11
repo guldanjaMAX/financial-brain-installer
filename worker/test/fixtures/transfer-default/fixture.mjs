@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createProductFixture, seedOwnedEntity } from "../../product-contract-fixture.mjs";
-import { withLedgerAnswer } from "../../../src/lib/ledger-answer.js";
+import { withLedgerAnswer as defaultLedgerAnswer } from "../../../src/lib/ledger-answer.js";
 
 export const NOW = "2026-10-11T12:00:00Z";
 const stamp = "2026-10-11T10:00:00Z";
@@ -56,7 +56,7 @@ export const refused = [
 
 // All values are invented. A pair's evidence comes from literal account
 // references, never a merchant label or a real institution name.
-export async function fixture(t, scenario = "own") {
+export async function fixture(t, scenario = "own", { answer = defaultLedgerAnswer } = {}) {
   const f = await createProductFixture({ env: { BRAIN_TIMEZONE: "UTC", AI: { async run() {
     f.modelCalls++; throw new Error("fixture model must not draft money");
   } } } });
@@ -80,7 +80,7 @@ export async function fixture(t, scenario = "own") {
   f.ask = async (question, route = false) => {
     const changes = f.changes();
     const response = route ? await f.post("/api/rag/think", { q: question }, { "X-Admin-Key": f.env.ADMIN_KEY }) :
-      await withLedgerAnswer({ env: f.env, question, now: NOW, grantScope: { all: true }, scopePrincipalKind: "owner" },
+      await answer({ env: f.env, question, now: NOW, grantScope: { all: true }, scopePrincipalKind: "owner" },
         async () => new Response(JSON.stringify({ answer: null, gaps: [] })));
     const body = await response.json();
     assert.equal(f.changes(), changes, "every question is read-only, including fall-throughs");
