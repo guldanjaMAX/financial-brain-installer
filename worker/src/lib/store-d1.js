@@ -626,6 +626,19 @@ const FTS_STOPWORDS = new Set([
   "say", "says", "should", "some", "tell", "than", "very",
 ]);
 
+const KEYWORD_INITIAL_CANDIDATES = 400;
+const KEYWORD_MAX_CANDIDATES = 25_600;
+const KEYWORD_WIDEN_FACTOR = 8;
+
+function keywordCandidateLimit(value) {
+  // Only a code-built, bounded integer may become SQL text. A literal keeps
+  // the exact same binding budget as the old query, including 98-zone scopes.
+  if (!Number.isSafeInteger(value) || value < 1 || value > KEYWORD_MAX_CANDIDATES) {
+    throw new RangeError("invalid keyword candidate limit");
+  }
+  return String(value);
+}
+
 export async function searchKeyword(env, query, { limit, filters = {}, access = null, scope = null } = {}) {
   // FTS5 treats bare punctuation as syntax. A user question with an apostrophe
   // or a hyphen is not a query language expression, so it is quoted as a
@@ -660,7 +673,7 @@ export async function searchKeyword(env, query, { limit, filters = {}, access = 
   const f = filterSql(filters, "c", 3);
   const sc = scopeSql(scope, "d", f.nextParam);
   const a = documentAccessSql(access, "c", "d", sc.nextParam);
-  const sql = (memoryClause, withCurrentPointer = true) => `
+  const projection = (score) => `
     SELECT c.chunk_uid, c.doc_uid, c.text, d.source AS source,
            COALESCE(src.kind, 'unregistered') AS source_kind,
            c.title, c.document_date,
@@ -671,19 +684,64 @@ export async function searchKeyword(env, query, { limit, filters = {}, access = 
              WHERE head.doc_uid = d.doc_uid AND head.chunk_ix = 0 LIMIT 1) AS authority_document_head,
            CASE WHEN d.date_source = 'calendar:event_start' AND json_valid(d.meta)
                 THEN json_extract(d.meta, '$.start') END AS occurred_at,
-           bm25(chunks_fts) AS score
-    FROM chunks_fts
-    JOIN chunks c ON c.id = chunks_fts.rowid
+           ${score} AS score`;
+  const joins = (rowid) => `
+    JOIN chunks c ON c.id = ${rowid}
     JOIN documents d ON d.doc_uid = c.doc_uid
-    LEFT JOIN sources src ON src.name = d.source
-    WHERE chunks_fts MATCH ?1${f.clause}${sc.clause}${a.clause}${customApiVisibilitySql("d", withCurrentPointer)}${memoryClause}
-    ORDER BY bm25(chunks_fts)
-    LIMIT ?2`;
+    LEFT JOIN sources src ON src.name = d.source`;
+  const predicates = (memoryClause, withCurrentPointer) =>
+    `${f.clause}${sc.clause}${a.clause}${customApiVisibilitySql("d", withCurrentPointer)}${memoryClause}`;
+
+  const sql = (memoryClause, withCurrentPointer, candidates = null) => candidates !== null ? `
+    WITH keyword_candidates AS MATERIALIZED (
+      SELECT rowid, bm25(chunks_fts) AS score
+      FROM chunks_fts WHERE chunks_fts MATCH ?1
+      ORDER BY score, rowid LIMIT ${keywordCandidateLimit(candidates)}
+    ), keyword_matches AS (
+      ${projection("top.score")}, top.rowid AS _keyword_rowid
+      FROM keyword_candidates top${joins("top.rowid")}
+      WHERE 1 = 1${predicates(memoryClause, withCurrentPointer)}
+      ORDER BY top.score, top.rowid LIMIT ?2
+    )
+    SELECT keyword_matches.*,
+           (SELECT count(*) FROM keyword_candidates) AS _keyword_candidate_count
+    FROM (SELECT 1) LEFT JOIN keyword_matches ON 1 = 1
+    ORDER BY score, _keyword_rowid` : `
+    ${projection("bm25(chunks_fts)")}
+    FROM chunks_fts${joins("chunks_fts.rowid")}
+    WHERE chunks_fts MATCH ?1${predicates(memoryClause, withCurrentPointer)}
+    ORDER BY bm25(chunks_fts), chunks_fts.rowid LIMIT ?2`;
 
   const run = async (memoryClause) => {
-    const execute = (withCurrentPointer) => env.DB.prepare(sql(memoryClause, withCurrentPointer)).bind(
-      terms, limit, ...f.params, ...sc.params, ...a.params,
-    ).all();
+    const execute = async (withCurrentPointer) => {
+      const params = [terms, limit, ...f.params, ...sc.params, ...a.params];
+      // Materialization keeps all joins and authority predicates behind the
+      // FTS-only bound, in the same statement snapshot. A full eligible page
+      // is exact: no later candidate can precede it by (score, rowid).
+      // Keep SQLite's zero/unbounded LIMIT behavior for direct store callers.
+      // Only positive integer limits admit a finite candidate-page proof.
+      let candidates = Number.isSafeInteger(limit) && limit > 0
+        ? Math.max(KEYWORD_INITIAL_CANDIDATES, 10 * limit)
+        : KEYWORD_MAX_CANDIDATES + 1;
+      while (candidates <= KEYWORD_MAX_CANDIDATES) {
+        const response = await env.DB.prepare(sql(memoryClause, withCurrentPointer, candidates))
+          .bind(...params).all();
+        const page = response.results || [];
+        const candidateCount = page[0]?._keyword_candidate_count;
+        // The outer join preserves the count even if every candidate was
+        // excluded. Never mistake that sentinel for an eligible chunk.
+        const results = page.filter(row => row.chunk_uid !== null).map((row) => {
+          const { _keyword_candidate_count, _keyword_rowid, ...result } = row;
+          return result;
+        });
+        if (results.length >= limit || candidateCount !== candidates) return { ...response, results };
+        if (candidates === KEYWORD_MAX_CANDIDATES) break;
+        candidates = Math.min(candidates * KEYWORD_WIDEN_FACTOR, KEYWORD_MAX_CANDIDATES);
+      }
+      // A sparse source/grant may hide every early match. The cap bounds fast
+      // attempts, never recall: use the complete query rather than truncate.
+      return env.DB.prepare(sql(memoryClause, withCurrentPointer)).bind(...params).all();
+    };
     return readWithCustomApiVisibility(env, execute);
   };
   let response;
@@ -893,6 +951,54 @@ export async function searchVector(env, embedding, { limit, filters = {}, scope 
   return resolved.map((id) => byUid.get(id)).filter(Boolean);
 }
 
+const SEARCH_FAILURE_MESSAGES = Object.freeze({
+  d1_overloaded: "D1 refused the search because it is overloaded.",
+  d1_timeout: "D1 search timed out.",
+  d1_sql_error: "D1 search failed because of a SQL or schema error.",
+  d1_bind_limit: "D1 search exceeded the parameter limit.",
+  vectorize_error: "The vector index could not complete the search stage.",
+  network: "A network failure interrupted the search stage.",
+  unknown: "The search stage failed for an unclassified reason.",
+});
+
+function searchFailureCategory(error) {
+  // Error names and messages can contain document text, SQL, transformed
+  // bindings or escaped queries. Inspect bounded strings only; none is ever
+  // copied to a log. Redacting known request strings cannot enforce privacy.
+  const name = typeof error?.name === "string" ? error.name.slice(0, 128) : "";
+  const message = typeof error?.message === "string" ? error.message.slice(0, 1024) : "";
+  const rawCode = error?.code;
+  const codeText = typeof rawCode === "string" ? rawCode.slice(0, 64) : "";
+  // Only reviewed constants may cross the logging boundary. The exact
+  // structured string code is also a reviewed signature mapped to 7429.
+  // Never parse message markers: echoed content can precede a real overload.
+  const overloaded = rawCode === 7429 || rawCode === "7429"
+    || /\b(?:D1 DB is overloaded|D1_ERROR:\s*overloaded)\b/i.test(message);
+  const code = overloaded ? 7429 : rawCode === 1 ? 1 : rawCode === 17 ? 17 : undefined;
+  const signature = `${name} ${codeText} ${message}`;
+  let category = "unknown";
+  if (overloaded) category = "d1_overloaded";
+  else if (/\bD1(?:_TIMEOUT|TimeoutError)\b/i.test(signature)
+    || (/\bD1(?:_ERROR|_EXEC_ERROR)?\b/i.test(signature) && /\b(?:timeout|timed out)\b/i.test(signature))) category = "d1_timeout";
+  else if (/\b(?:too many (?:SQL variables|bound parameters)|SQLITE_RANGE|D1_BIND_LIMIT)\b/i.test(signature)
+    || /variable number must be between \?1 and \?\d{1,6}\b/i.test(message)) category = "d1_bind_limit";
+  else if (/\b(?:syntax error|no such (?:table|column)|has no column named|SQLITE_(?:ERROR|SCHEMA))\b/i.test(signature)
+    || (name === "SqliteError" && (code === 1 || code === 17))) category = "d1_sql_error";
+  else if (/\b(?:NetworkError|TimeoutError|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN)\b/i.test(signature)
+    || /\b(?:fetch failed|network (?:error|failure)|failed to fetch)\b/i.test(message)) category = "network";
+  else if (/\b(?:VECTORIZE_ERROR|VectorizeError|Vectorize)\b/i.test(signature)
+    || /\bthe vector index (?:could not report readiness|returned an invalid vector count)\b/i.test(message)) category = "vectorize_error";
+  return { category, message: SEARCH_FAILURE_MESSAGES[category], ...(code === undefined ? {} : { code }) };
+}
+
+function warnSearchStageFailure(stage, error) {
+  console.warn(JSON.stringify({
+    event: "search_stage_failed",
+    stage,
+    error: searchFailureCategory(error),
+  }));
+}
+
 /**
  * Hybrid search: both lists, fused.
  *
@@ -914,15 +1020,24 @@ export async function search(env, {
   const pool = RETRIEVAL_CANDIDATE_DEPTH;
   const fusionK = Math.min(Math.max(Number(rrfK) || RRF_K, 1), 1e3);
 
-  const settleModality = (promise) => promise.then(
+  const failedStages = new Set();
+  const warnStage = (stage, error) => {
+    if (failedStages.has(stage)) return;
+    failedStages.add(stage);
+    warnSearchStageFailure(stage, error);
+  };
+  const settleModality = (stage, promise) => promise.then(
     (results) => ({ attempted: true, results, error: null }),
-    (error) => ({ attempted: true, results: [], error }),
+    (error) => {
+      warnStage(stage, error);
+      return { attempted: true, results: [], error };
+    },
   );
-  const keywordAttemptPromise = settleModality(
+  const keywordAttemptPromise = settleModality("keyword",
     measureQueryStage(timing, "keyword", () => searchKeyword(env, query, { limit: pool, filters, access, scope })),
   );
   const hintKeywordPromises = supplementalFilters.map((hint) =>
-    settleModality(measureQueryStage(timing, "keyword", () =>
+    settleModality("keyword", measureQueryStage(timing, "keyword", () =>
       searchKeyword(env, query, { limit: pool, filters: hint, access, scope }))));
   const resolvedEmbedding = access?.kind !== "grant" && scopeIsUnrestricted(scope)
     ? await Promise.resolve(embedding).catch(() => null)
@@ -932,7 +1047,7 @@ export async function search(env, {
     const [keyword, vector] = await Promise.all([
       hintKeywordPromises[index],
       vectorEligible
-        ? settleModality(measureQueryStage(timing, "vector", () => searchVector(env, resolvedEmbedding, { limit: pool, filters: hint, scope, timing })))
+        ? settleModality("vector", measureQueryStage(timing, "vector", () => searchVector(env, resolvedEmbedding, { limit: pool, filters: hint, scope, timing })))
         : Promise.resolve({ attempted: false, results: [], error: null }),
     ]);
     return { keyword, vector };
@@ -940,7 +1055,7 @@ export async function search(env, {
   const [keywordAttempt, vectorAttempt, projection, hintAttempts] = await Promise.all([
     keywordAttemptPromise,
     vectorEligible
-      ? settleModality(measureQueryStage(timing, "vector", () => searchVector(env, resolvedEmbedding, { limit: pool, filters, scope, timing })))
+      ? settleModality("vector", measureQueryStage(timing, "vector", () => searchVector(env, resolvedEmbedding, { limit: pool, filters, scope, timing })))
       : Promise.resolve({ attempted: false, results: [], error: null }),
     // Vectorize may return some old/current candidates while a newer accepted
     // changeset is still processing. Non-empty semantic results therefore do
@@ -949,7 +1064,10 @@ export async function search(env, {
     // advertises partial projection instead of looking fully healthy.
     vectorEligible
       ? projectionReadiness === null
-        ? measureQueryStage(timing, "projection_readiness", () => vectorReadiness(env)).catch(() => ({ ready: false }))
+        ? measureQueryStage(timing, "projection_readiness", () => vectorReadiness(env)).catch((error) => {
+          warnStage("projection_readiness", error);
+          return { ready: false };
+        })
         : Promise.resolve(projectionReadiness)
       : Promise.resolve(null),
     hintAttemptsPromise,
@@ -967,7 +1085,7 @@ export async function search(env, {
   const expansionRows = [];
   let expansionFailed = false;
   const extraKeyword = async (text, depth = pool) => {
-    const attempt = await settleModality(measureQueryStage(timing, "keyword", () =>
+    const attempt = await settleModality("keyword", measureQueryStage(timing, "keyword", () =>
       searchKeyword(env, text, { limit: depth, filters, access, scope })));
     if (memorySupersessionIntegrityFailure(attempt.error)) throw attempt.error;
     if (attempt.error) expansionFailed = true;

@@ -414,17 +414,20 @@ function statementRow(tenantId, account, source, envelope, stamp) {
 }
 
 function balanceSnapshot(tenantId, account, source, envelope, stamp) {
+  const hasPosition = Object.hasOwn(account, "providerPositionMinor");
+  if (hasPosition && account.providerPositionMinor !== null && !Number.isSafeInteger(account.providerPositionMinor))
+    throw new Error("provider balance position must use exact minor units");
   return [
     `INSERT INTO fin_balance_snapshots
        (tenant_id, account_slug, as_of_date, current_minor, available_minor, currency,
-        provenance, source_doc_uid, source_locator, source_feed, basis_state, recorded_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,'confirmed',?)
+        provenance, source_doc_uid, source_locator, source_feed, basis_state, recorded_at${hasPosition ? ', provider_position_minor' : ''})
+     VALUES (?,?,?,?,?,?,?,?,?,?,'confirmed',?${hasPosition ? ',?' : ''})
      ON CONFLICT (tenant_id, account_slug, as_of_date, provenance) DO UPDATE SET
        current_minor = excluded.current_minor,
        available_minor = excluded.available_minor,
        source_doc_uid = excluded.source_doc_uid,
        source_locator = excluded.source_locator,
-       recorded_at = excluded.recorded_at`,
+       recorded_at = excluded.recorded_at${hasPosition ? ', provider_position_minor = excluded.provider_position_minor' : ''}`,
     [
       tenantId, account.accountKey, account.balanceAsOf,
       account.ledgerBalanceMinor,
@@ -432,6 +435,7 @@ function balanceSnapshot(tenantId, account, source, envelope, stamp) {
       account.currency || "USD",
       source.provenance, source.sourceDocUid, locatorFor(envelope, "balance"),
       source.sourceFeed, stamp,
+      ...(hasPosition ? [account.providerPositionMinor] : []),
     ],
   ];
 }

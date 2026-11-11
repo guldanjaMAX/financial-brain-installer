@@ -88,7 +88,7 @@ export const CONTROLS = [
   make('M06/memo', 'What are my expenses?', 'NONE', 'memo'),
   make('M06/reset', 'What are my expenses?', 'NONE', 'reset'),
   make('M05/shorthand', 'Spend this month', 'MTD'),
-  make('M05/gross', 'How much money came in and went out this month?', 'MTD'),
+  make('M05/gross', 'How much money came in and went out this month including transfers?', 'MTD'),
 ].map(c => ({ ...c, base: false }));
 
 export function validateInputs(cases) {

@@ -108,7 +108,7 @@ jobs:
           node-version: 24.13.1
           package-manager-cache: false
       - name: test installer source before signing
-        run: node --test test/machine-prep-installers.test.mjs test/machine-prep.test.mjs
+        run: node --test test/windows-payload.test.mjs test/machine-prep-installers.test.mjs test/machine-prep.test.mjs
       - name: import both Developer ID identities into a temporary keychain
         shell: bash
         env:
@@ -248,13 +248,22 @@ jobs:
           WIX_OSMF_CONFIRMED: ${{ inputs.wix_osmf_confirmed }}
         run: |
           if ($env:WIX_OSMF_CONFIRMED -ne 'true') { throw 'WiX OSMF decision is not confirmed; nothing was built' }
-          node --test test/machine-prep-installers.test.mjs test/machine-prep.test.mjs
-          dotnet build machine-prep/installers/windows/FinancialBrainMachinePrep.wixproj --configuration Release -p:WixOsmfConfirmed=true
+          node --test test/windows-payload.test.mjs test/machine-prep-installers.test.mjs test/machine-prep.test.mjs
+          $buildNode = (Get-Command node -CommandType Application | Select-Object -First 1).Source
+          $npmCli = Join-Path (Split-Path $buildNode) 'node_modules/npm/bin/npm-cli.js'
+          & $buildNode $npmCli ci --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency preparation failed' }
+          $payloadRoot = Join-Path $PWD '.lane-scratch/windows-payload'
+          & $buildNode machine-prep/installers/windows/build-payload.mjs $PWD $payloadRoot $npmCli $env:GITHUB_SHA
+          if ($LASTEXITCODE -ne 0) { throw 'Exact Windows payload staging failed' }
+          $payloadVersion = (Get-Content -Raw package.json | ConvertFrom-Json).version
+          dotnet build machine-prep/installers/windows/FinancialBrainMachinePrep.wixproj --configuration Release -p:WixOsmfConfirmed=true "-p:PayloadBuildNode=$buildNode" "-p:PayloadRoot=$payloadRoot/payload" "-p:PayloadVersion=$payloadVersion"
+          if ($LASTEXITCODE -ne 0) { throw 'Payload MSI build failed' }
           $msi = Get-ChildItem machine-prep/installers/windows/bin -Filter *.msi -Recurse | Select-Object -First 1
           if (-not $msi) { throw 'WiX build did not produce an MSI' }
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           Copy-Item -LiteralPath $msi.FullName -Destination dist/FinancialBrainInstaller.msi
-          & machine-prep/installers/windows/verify-msi.ps1 dist/FinancialBrainInstaller.msi
+          & machine-prep/installers/windows/verify-msi.ps1 dist/FinancialBrainInstaller.msi -PayloadRoot "$payloadRoot/payload"
       - name: sign in to Azure with GitHub OIDC
         uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
@@ -348,7 +357,7 @@ jobs:
         run: echo "Installer-shell smoke only. The signed package does not bundle Node or the Brain CLI. CLI version and interactive first-open remain unproven; inspect the job result and logs." >> "$GITHUB_STEP_SUMMARY"
 
   windows-smoke:
-    name: signed Windows installer shell on a fresh runner
+    name: signed Windows installer payload on a fresh runner
     needs: [authorization, windows-sign]
     if: >-
       needs.authorization.outputs.authorized == 'true' &&
@@ -432,7 +441,7 @@ jobs:
           retention-days: 14
 
   windows-bootstrap:
-    name: signed Windows shell and pinned kit CLI as a standard user
+    name: signed Windows payload and carried CLI as a standard user
     needs: [authorization, windows-sign]
     if: >-
       needs.authorization.outputs.authorized == 'true' &&

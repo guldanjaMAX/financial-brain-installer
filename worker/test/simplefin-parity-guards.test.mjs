@@ -2,9 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createProductFixture, seedOwnedEntity } from "./product-contract-fixture.mjs";
 import { claimSimpleFinAccess, runSimpleFinMaintenance, assignSimpleFinAccountEntity, promoteSimpleFinWindows } from "../src/lib/simplefin-bank-feed.js";
-import { buildParityLedgers, NOW } from "./fixtures/simplefin-parity.mjs";
+import { buildParityLedgers, reviewParityCoverage, NOW } from "./fixtures/simplefin-parity.mjs";
+import { maintainSimpleFinCoverage } from "../src/lib/simplefin-coverage-review.js";
 
-async function feed(t, definitions = [{ id: "fixture", name: "Business Checking", balance: "25.00" }]) {
+async function feed(t, definitions = [{ id: "fixture", name: "Business Checking", balance: "25.00" }], { initialHistory = false } = {}) {
   const f = await createProductFixture({ env: { BANK_FEED_PROVIDER: "simplefin", BANK_FEED_ENV: "production",
     BANK_FEED_WRAPPING_KEY_V2: `v2.${"A".repeat(43)}`, BRAIN_TIMEZONE: "UTC" } });
   t.after(() => f.close());
@@ -15,6 +16,7 @@ async function feed(t, definitions = [{ id: "fixture", name: "Business Checking"
   const claim = await claimSimpleFinAccess(f.env, { requestId: "parity-guard-claim-0001", setupToken: btoa("https://bridge.example.invalid/claim/guard"), now: NOW,
     fetchImpl: async () => new Response(access.href) });
   const item = claim.body.item_ref;
+  if (initialHistory) f.raw("UPDATE bank_feed_items SET last_synced_at=?",NOW);
   const pull = async ({ partial = false, unread = false, omit = false, fail = false } = {}) => {
     f.raw("UPDATE simplefin_connections SET next_pull_at=?", NOW);
     return runSimpleFinMaintenance(f.env, { now: NOW, maxRequestsPerItem: 1, fetchImpl: async request => {
@@ -61,27 +63,34 @@ test("account-name rules work across labels, preserve overdrafts, and refuse amb
 
 test("an unread amount, partial response and failed replacement cannot certify coverage; corrected data recovers", async t => {
   const { f, item, pull, fetches } = await feed(t);
-  assert.equal(f.first("SELECT coverage_status FROM fin_account_coverage").coverage_status, "complete", "green receipt control");
+  assert.equal(f.first("SELECT coverage_status FROM fin_account_coverage").coverage_status, "partial", "ingest alone is not bank completeness");
+  await reviewParityCoverage(f);
+  assert.equal(f.first("SELECT coverage_status FROM fin_account_coverage").coverage_status, "complete", "green owner-comparison control");
   for (const fault of [{ unread: true }, { partial: true }, { fail: true }]) {
-    // Replay the same first window to exercise replacement, not a fresh range.
-    f.raw("UPDATE simplefin_connections SET backfill_next=backfill_start");
+    // Replay the first recent interval; older history is not fabricated.
+    f.raw("UPDATE bank_feed_items SET last_synced_at=NULL");
     const before = fetches();
     await pull(fault);
     assert.equal(fetches(), before + 1, "negative control reached the provider decision");
     assert.equal(f.first("SELECT coverage_status FROM fin_account_coverage").coverage_status, "partial");
     assert.ok(f.first("SELECT count(*) AS n FROM fin_transactions").n > 0, "saved data remains visible");
-    f.raw("UPDATE simplefin_connections SET backfill_next=backfill_start");
+    f.raw("UPDATE bank_feed_items SET last_synced_at=NULL");
     await pull();
-    assert.equal(f.first("SELECT coverage_status FROM fin_account_coverage").coverage_status, "complete", "successful replacement restores exact coverage");
+    await reviewParityCoverage(f);
+    assert.equal(f.first("SELECT coverage_status FROM fin_account_coverage").coverage_status, "complete", "successful replacement plus exact owner review restores coverage");
   }
   assert.equal(f.first("SELECT status FROM bank_feed_items WHERE item_ref=?", item).status, "connected");
 });
 
 test("an account absent from an intervening response leaves a coverage gap", async t => {
-  const { f, pull, fetches } = await feed(t);
+  const { f, pull, fetches } = await feed(t,undefined,{ initialHistory:true });
+  const initial = f.first("SELECT window_start,window_end FROM simplefin_account_windows");
+  await reviewParityCoverage(f,initial.window_start,initial.window_end);
   const first = f.first("SELECT covered_from,covered_to FROM fin_account_coverage");
   await pull({ omit: true });
   await pull();
+  const bounds = f.first("SELECT window_start,window_end FROM simplefin_account_windows ORDER BY window_end DESC LIMIT 1");
+  await reviewParityCoverage(f,bounds.window_start,bounds.window_end);
   const latest = f.first("SELECT covered_from,covered_to,coverage_status FROM fin_account_coverage");
   assert.equal(fetches(), 3, "the absent window and returning account were both read");
   assert.equal(latest.coverage_status, "complete", "the returning bounded segment is proved");
@@ -90,6 +99,7 @@ test("an account absent from an intervening response leaves a coverage gap", asy
 
 test("a revision racing coverage publication rolls back the attempted completeness claim", async t => {
   const { f, item } = await feed(t);
+  await reviewParityCoverage(f);
   f.raw("UPDATE fin_account_coverage SET coverage_status='partial'");
   const batch = f.DB.batch;
   let guards = 0;
@@ -125,6 +135,8 @@ test("coverage publication stays inside the existing bounded D1 batch size for a
   };
   await promoteSimpleFinWindows(f.env, { itemRef: item, now: NOW });
   assert.equal(publications, 2, "both publication slices reached the fenced write decision");
+  assert.equal(f.first("SELECT count(*) AS n FROM fin_account_coverage WHERE coverage_status='partial'").n, 63, "bounded publication cannot mint bank comparisons");
+  await reviewParityCoverage(f);
   assert.equal(f.first("SELECT count(*) AS n FROM fin_account_coverage WHERE coverage_status='complete'").n, 63);
 });
 
@@ -141,4 +153,32 @@ test("description-only SimpleFIN data offers matching rows without guessing vend
   assert.ok(run.simple.rows("SELECT category FROM fin_transactions").every(row => row.category === null));
   const control = await run.ask(run.plaid, "How much did I spend at Lumen Supply last month?");
   assert.equal(control.body.ledger.total_minor, run.oracle.vendor, "structured payee control establishes the vendor");
+});
+
+test("large-inventory replacement bounds every promotion batch", async t => {
+  const { f, pull } = await feed(t, Array.from({ length: 63 }, (_, index) => ({
+    id: `bounded-${index}`, name: `Fixture ${index} Checking`, balance: "20.00",
+  })));
+  const batch = f.DB.batch;
+  const sizes = [];
+  f.DB.batch = async statements => { sizes.push(statements.length); return batch(statements); };
+  await pull();
+  assert.ok(sizes.length > 2, "replacement reached staging and promotion batches");
+  assert.ok(sizes.every(size => size <= 51), `bounded batches: ${sizes.join(",")}`);
+  assert.equal(f.first("SELECT count(*) n FROM simplefin_account_windows").n, 126);
+});
+
+test("owner comparison refuses legacy posted-history revisions before writing a certificate", async t => {
+  const { f } = await feed(t);
+  const accountRef = f.first("SELECT account_ref FROM simplefin_account_assignments").account_ref;
+  const options = { accountRef, from: "2026-08-07", to: "2026-11-04", now: NOW };
+  const green = await maintainSimpleFinCoverage(f.env, options);
+  assert.equal(green.blocked, false, "modern posted-history control reaches preview");
+  f.raw("UPDATE simplefin_sync_windows SET revision='legacy',staging_revision='legacy'");
+  f.raw("UPDATE simplefin_account_windows SET revision='legacy'");
+  const refused = await maintainSimpleFinCoverage(f.env, options);
+  assert.equal(refused.blocked, true, "matching legacy receipts still lack posted authority");
+  await assert.rejects(maintainSimpleFinCoverage(f.env, { ...options, dryRun: false,
+    approve: refused.plan_hash, confirmSourceComparison: true }), /Compare the bank history/);
+  assert.equal(f.first("SELECT count(*) n FROM simplefin_coverage_reviews").n, 0);
 });

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { clone, sha256 } from './exact-tape.mjs';
 
 const PATCH_SHA256 = 'bf169f305299bff6df550eae3f66dba9077b97962fb4b4dfa2045bca51191bbf';
-export function candidateTapes(base, { router = true } = {}) {
+export function candidateTapes(base, { router = true, disclosure = true } = {}) {
   const bytes = readFileSync(new URL('../../test/fixtures/fastloop-day3/candidate-inventory-v1.json', import.meta.url), 'utf8');
   if (sha256(bytes) !== PATCH_SHA256) throw Error('CANDIDATE_TAPE_PATCH_INVALID');
   const patch = JSON.parse(bytes);
@@ -36,7 +36,9 @@ export function candidateTapes(base, { router = true } = {}) {
   // The router authoring command compares the current soft-copy candidate.
   // Apply that dependency first so the exact base digest and model bytes agree.
   const current = softCopyTapes(result);
-  return router ? routerTapes(current) : current;
+  if (!router) return current;
+  const routed = routerTapes(current);
+  return disclosure ? disclosureTapes(routed) : routed;
 }
 
 function routerTapes(base) {
@@ -64,7 +66,7 @@ function routerTapes(base) {
   return result;
 }
 
-const ROUTER_PATCH_SHA256 = '1ecfda6209f4231b212221b6321ca58c4c28c18259db219fd4f47c3ea4738d35';
+const ROUTER_PATCH_SHA256 = '062363f111e8e9561906a452b93979506c55c8f4504c2ef1331d2da3f178062e';
 
 // Change only the reviewed refusal inside one exact model request. Frozen SQL,
 // outputs and historical arms remain byte-for-byte inputs to the same matcher.
@@ -92,3 +94,21 @@ function softCopyTapes(result) {
 }
 
 const SOFT_COPY_PATCH_SHA256 = 'a95b2923f286f64e772db9cab8fcd4f92ecedc4652801d05a0943eb22fe67fcd';
+
+// Explicitly authored additional pending snapshots; old model/provider streams
+// and every old D1 read were proven unchanged by the owning authoring command.
+function disclosureTapes(base) {
+  const bytes = readFileSync(new URL('../../test/fixtures/fastloop-day3/candidate-disclosure-v1.json', import.meta.url), 'utf8');
+  if (sha256(bytes) !== DISCLOSURE_PATCH_SHA256) throw Error('DISCLOSURE_TAPE_PATCH_INVALID');
+  const patch = JSON.parse(bytes);
+  if (patch.schema !== 1 || patch.version !== 'pending-disclosure-v1' || sha256(base) !== patch.base_sha256)
+    throw Error('DISCLOSURE_TAPE_BASE_MISMATCH');
+  const result = clone(base);
+  for (const change of patch.changes) {
+    if (!Object.hasOwn(result, change.id) || sha256(result[change.id]) !== change.before_sha256)
+      throw Error('DISCLOSURE_TAPE_CASE_MISMATCH');
+    result[change.id] = clone(change.tape);
+  }
+  return result;
+}
+const DISCLOSURE_PATCH_SHA256 = '02b1e14834e98c612b51ef03d71bbf2e17b1a31b3c2d946ab054a81dd025ecbf';

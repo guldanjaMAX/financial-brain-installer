@@ -1,6 +1,7 @@
+import { historicalBytes } from './review-harness.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { evaluate, reached, safeBasis, surfaces, save, purchase, refund, reply, parts } from './review-harness.mjs';
+import { evaluate, reached, safeBasis, surfaces, save, purchase, refund, reply, parts, grossCompatibility } from './review-harness.mjs';
 const rows = [purchase, refund, { ...purchase, id: 'prior_purchase', cents: 9000, date: '2026-09-05' }].map(r => ({ ...r, category: 'Materials' }));
 const observations = [];
 for (const comparison of [false, true]) test(`confirmed category refund basis: ${comparison ? 'comparison' : 'single'}`, async t => {
@@ -8,7 +9,7 @@ for (const comparison of [false, true]) test(`confirmed category refund basis: $
   if (comparison) intents.push(reply({ kind: 'category', vendor_text: 'Materials', period: { type: 'last_month' } }));
   const grossQuestion = comparison ? 'Could you compare Materials spending this month versus last month?' : 'Could you retrieve Materials spending this month?';
   const gross = await evaluate({ rows, intents, question: grossQuestion }); reached(gross);
-  const base = await evaluate({ rows, intents, question: grossQuestion }, true); assert.equal(gross.bytes, base.bytes);
+  const base = await evaluate({ rows, intents, question: grossQuestion }, true); assert.equal(historicalBytes(gross, rows), base.bytes);
   assert.ok(parts(gross.body).every(p => !p.selector_unresolved && p.category_selector === 'Materials'));
   if (comparison) assert.deepEqual(gross.body.ledger.comparison, { figures_minor: [12000, 9000], difference_minor: 3000 });
   else assert.equal(gross.body.ledger.expense_total_minor, 12000);

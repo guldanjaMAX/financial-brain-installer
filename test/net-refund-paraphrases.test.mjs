@@ -1,7 +1,10 @@
+import { tmpdir } from 'node:os';
+import { grossCompatibility } from './fixtures/net-refund/comparison-compat.mjs';
+import { historicalCategoryBody } from './fixtures/net-refund/category-disclosure.mjs';
 import './fixtures/net-refund/guards.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { execute } from './fixtures/net-refund/execute.mjs';
 import { cases, purchase, refund, reply } from './fixtures/net-refund/cases.mjs';
@@ -33,7 +36,8 @@ function offer(text) {
 }
 
 async function surfaces(t, o, c) {
-  const directory = join(process.env.HOME, 'surface-fixture');
+  const directory = mkdtempSync(join(tmpdir(), 'brain-net-surfaces-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
   mkdirSync(directory, { recursive: true });
   const keyPath = join(directory, 'fixture-admin-key');
   const manifest = join(directory, 'synthetic.manifest.json');
@@ -68,7 +72,8 @@ for (const c of phraseCases) test(`${c.id}: requested net basis with a reached g
   const grossInput = grossPeer(c);
   const gross = await execute(grossInput);
   valid(gross);
-  assert.equal(digest(gross.body), baseline.responses[c.id], 'gross peer is byte-for-byte unchanged from the pinned base');
+  const originalView = grossCompatibility(historicalCategoryBody(gross.body, grossInput.rows));
+  assert.equal(digest(originalView), baseline.responses[c.id], 'gross peer retains pinned bytes except verified account names and category references');
   assert.ok(parts(gross.body).every(p => !p.net_refunds_unavailable));
   if (c.twoPeriods) assert.equal(gross.body.ledger.comparison.difference_minor, 3000);
   else assert.equal(gross.body.ledger.total_minor, 12000);
@@ -85,7 +90,7 @@ for (const c of phraseCases) test(`${c.id}: requested net basis with a reached g
   if (c.twoPeriods) assert.equal(net.body.ledger.comparison, undefined, 'unavailable net cannot certify arithmetic');
 });
 
-test('gross, refund-only and confirmed refund-list controls retain the parent response', async () => {
+test('gross and refund controls retain the parent response except named conditional scope', async () => {
   const controls = [
     { id: 'gross_plain', question: 'Could you retrieve Vendor Unit spending this month?', intents: [reply()] },
     { id: 'gross_explicit', question: 'Could you retrieve gross Vendor Unit spending this month?', intents: [reply()] },
@@ -115,7 +120,20 @@ test('gross, refund-only and confirmed refund-list controls retain the parent re
       } finally { for (const fn of cleanup) fn(); }
     };
     const candidate = await control(candidateAnswer);
-    assert.equal(digest(candidate.body), baseline.responses[c.id], c.id + ': exact response unchanged from the pinned base');
+    const comparable = structuredClone(candidate.body);
+    if (c.id.startsWith('gross')) {
+      // The final named-selector contract intentionally narrows this one
+      // alternative. Assert its new membership before comparing every other
+      // byte with the frozen parent receipt; keep that receipt unchanged.
+      const selected = input.rows.filter(row => row.payee === 'Vendor Unit');
+      const conditional = candidate.body.ledger.if_own_transfers.accounts[0];
+      const sum = (rows, direction) => rows.filter(row => row.direction === direction).reduce((n, row) => n + row.cents, 0);
+      assert.deepEqual(conditional, { account_mask: '1234', credits_minor: sum(selected, 'inflow'),
+        debits_minor: sum(selected, 'outflow'), transaction_count: selected.length });
+      comparable.ledger.if_own_transfers.accounts[0] = { account_mask: '1234', credits_minor: sum(input.rows, 'inflow'),
+        debits_minor: sum(input.rows, 'outflow'), transaction_count: input.rows.length };
+    }
+    assert.equal(digest(comparable), baseline.responses[c.id], c.id + ': all other response fields unchanged from the pinned base');
     if (c.id.startsWith('refund')) {
       assert.equal(candidate.body.ledger.rows.length, 1, 'confirmed description-list membership');
       assert.equal(candidate.body.ledger.rows[0].amount_minor, 2000);

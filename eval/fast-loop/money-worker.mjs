@@ -1,6 +1,6 @@
 // Trusted host adapter. Product modules run without host filesystem/process imports.
 import { DatabaseSync } from 'node:sqlite';
-import { SourceTextModule, SyntheticModule, createContext } from 'node:vm';
+import { SourceTextModule, createContext } from 'node:vm';
 import { readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { resolve, relative, dirname, sep } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -12,21 +12,8 @@ const digest = value => createHash('sha256').update(value).digest('hex');
 const copy = value => JSON.parse(JSON.stringify(value));
 // Exact reviewed templates over a complete tiny relational envelope. A SQL
 // edit needs an explicit adapter review, rather than a successful empty read.
-export const SQL_CONTRACTS = new Map([
-  // Same bounded inventory and bindings; the added SimpleFIN receipt check
-  // refuses legacy or incomplete proof before a covered answer is admitted.
-  ['0560a90893bdbca03eb46f39580b9d0e6fd87070fe7c3560a58d12de0a571b2e', 'inventory'],
-  // The merged inventory retains owner-reviewed account kinds and adds the
-  // confirmed entity kind. No tenant, limit, join or admission guard changes.
-  ['085a3cb746a3831a3f0a640f08a0ffbd57297d917c3e1dfe483d8d581d74efa6', 'inventory'],
-  // Same bounded inventory, with confirmed entity type for business snapshots.
-  ['8d1126285386dfebc08c6d886859e8ee4cd569a519b4f9349e01db85ef0367ba', 'inventory'],
-  ['4854d478915c18d7ae5b6a21138d35925f4053a5c5bf0f5499f412a88dea0c17', 'inventory'],
-  ['511315a8f707696def73f2bcdf1759704fa16b1f636dabc5c983a4fdc562f3a6', 'inventory'],
-  ['75a8b53f9dd622790714fac513fd4d5f38797b9a7f7667bf5967b80891223c7d', 'transactions'],
-  ['52e835bb7e812bb49c4b295f6bc663cc1a365d0fb13974d824997bf47fc45209', 'balances'],
-  ['e29880643e5fdfd0101290335d6e28395a1858558d043ca18de061e2f8b97fcd', 'balances'],
-]);
+import { SQL_CONTRACTS } from './ledger-sql-contracts.mjs';
+export { SQL_CONTRACTS } from './ledger-sql-contracts.mjs';
 export async function executeReplay(request) {
   const started = performance.now();
   const root = realpathSync(request.root);
@@ -55,6 +42,7 @@ export async function executeReplay(request) {
       const fail = (code, kind = code) => { fatal.push(code); trace.denied_effects.push(kind); throw Error(code); };
       const context = createContext({
         Response, Request, Headers, URL, TextEncoder, TextDecoder,
+        __traceLedgerClassifier: intent => trace.parsed_intents.push(copy(intent)),
         fetch: () => fail('CAPABILITY_DENIED', 'network'),
         WebSocket: function () { return fail('CAPABILITY_DENIED', 'network'); },
         process: new Proxy({}, { get: () => fail('CAPABILITY_DENIED', 'process') }),
@@ -73,31 +61,16 @@ export async function executeReplay(request) {
           realpathSync(path) !== path) return fail('CAPABILITY_DENIED', 'module');
         const source = request.sourceOverrides?.[inside] ?? readFileSync(path, 'utf8');
         sourceDigests.set(relative(root, path).split(sep).join('/'), digest(source));
-        const module = new SourceTextModule(source, { context, identifier: path,
+        // Observe both active classifiers while retaining the exact executed
+        // source digest above. Instrumentation belongs to this trusted adapter.
+        const observedClassifier = inside === 'ledger-question.js';
+        const observedSource = observedClassifier ? source.replace('export function classifyLedgerQuestion(', 'function classifyLedgerQuestionActual(') +
+          '\nexport function classifyLedgerQuestion(...args) { const intent = classifyLedgerQuestionActual(...args); globalThis.__traceLedgerClassifier(intent); return intent; }' : source;
+        const module = new SourceTextModule(observedSource, { context, identifier: path,
           importModuleDynamically: () => fail('CAPABILITY_DENIED', 'dynamic-import') });
-        // Observe the actual exported classifier called inside withLedgerAnswer.
-        // Cache the pending wrapper, not its unobserved source module. A new
-        // sibling importing calendar helpers can otherwise capture the raw
-        // classifier while this asynchronous link is still in flight.
-        if (path === resolve(base, 'ledger-question.js')) {
-          const observed = (async () => {
-            await module.link(linker);
-            await module.evaluate({ timeout: 1000 });
-            const names = Object.keys(module.namespace);
-            const wrapped = new SyntheticModule(names, function () {
-              for (const name of names) this.setExport(name, name === 'classifyLedgerQuestion'
-                ? (...args) => { const intent = module.namespace[name](...args); trace.parsed_intents.push(copy(intent)); return intent; }
-                : module.namespace[name]);
-            }, { context, identifier: `${path}:trace` });
-            await wrapped.link(() => fail('CAPABILITY_DENIED', 'module'));
-            await wrapped.evaluate();
-            return wrapped;
-          })();
-          moduleCache.set(path, observed);
-          return observed;
-        }
+        // Link each root once. Recursively linking dependencies inside the
+        // linker races shared descendants when two compatibility graphs meet.
         moduleCache.set(path, module);
-        await module.link(linker);
         return module;
       };
       db.exec('BEGIN');
@@ -125,6 +98,7 @@ export async function executeReplay(request) {
         }
         if (input.snapshot.reset_import) {
           const importer = await load(resolve(base, 'fin-import.js'));
+          await importer.link(linker);
           await importer.evaluate({ timeout: 1000 });
           const reset = input.snapshot.reset_import;
           const plan = importer.namespace.prepareBankExportImport({ ok: true, accounts: [{
@@ -151,7 +125,7 @@ export async function executeReplay(request) {
           if (!kind || (kind !== 'inventory' && batch === null) ||
             (batch === null && method !== 'all') ||
             (kind === 'inventory' && (binds.length !== 2 || binds[0] !== 'primary' || binds[1] !== 201))) return fail('SNAPSHOT_MISS');
-          if (kind === 'transactions') {
+          if (kind === 'transactions' || kind === 'pending') {
             // The envelope is the complete tiny synthetic database, including
             // padding, pending and future rows. Wider requests are never empty defaults.
             if (binds.length !== 6 || binds[1] !== 'primary' || binds[2] < '2026-06-25' || binds[3] > '2026-11-07' || binds[5] !== 5001 ||
@@ -195,6 +169,7 @@ export async function executeReplay(request) {
           AI: { run: () => { trace.model_calls++; return fail('MODEL_TAPE_MISS'); } },
           VECTORIZE: new Proxy({}, { get: () => fail('SNAPSHOT_MISS') }) };
         const module = await load(resolve(base, 'ledger-answer.js'));
+        await module.link(linker);
         await module.evaluate({ timeout: 1000 });
         if (request.fault === 'transport') await fetch('https://synthetic.invalid');
         if (request.fault === 'network') { try { await context.fetch('https://synthetic.invalid'); } catch {} }

@@ -44,16 +44,19 @@ const ownedLiabilityPayment = kind => ({
   ],
   rows: [
     { id: `${kind}-out`, account: "checking-unit", day: "2026-10-08", amount: 9100,
-      direction: "outflow", description: "PAYMENT TO OWNED LIABILITY UNIT", payee: "Owned Liability Unit" },
+      direction: "outflow", description: "PAYMENT TO ACCOUNT 4004", payee: "Owned Liability Unit" },
     { id: `${kind}-in`, account: "liability-unit", day: "2026-10-08", amount: 9100,
-      direction: "inflow", description: "TRANSFER FROM CHECKING UNIT", payee: "Checking Unit" },
+      direction: "inflow", description: "TRANSFER FROM ACCOUNT 1001", payee: "Checking Unit" },
   ],
-  total: null, rowCount: 0, cited: 0, matchBasis: "none",
-  excludedOwnMovements: 1, excludedOwnMovementMinor: 9100,
+  // FIX-0427-LOAN-CARD-SELECTOR-FIRST-R2: selector-first keeps exact
+  // loan/line-of-credit identity and zero ordinary spend, as S1 requires,
+  // while displaying the payment amount separately.
+  total: 0, rowCount: 0, cited: 1, matchBasis: "exact",
+  excludedOwnMovements: 0, excludedOwnMovementMinor: 0, paymentMinor: 9100,
 });
 
 // One matrix owns the whole vendor-payment exclusion class: both supported
-// owned-liability kinds are excluded only with bilateral evidence, while the
+// owned-liability kinds disclose payments outside vendor spending, while the
 // adjacent external payment remains a counted green control.
 export const VENDOR_PAYMENT_EXCLUSION_CASES = Object.freeze([
   ownedLiabilityPayment("loan"),

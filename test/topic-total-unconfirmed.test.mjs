@@ -70,9 +70,11 @@ function unconfirmed(body, unsorted = 2000) {
 }
 
 function offerLast(text) {
-  assert.doesNotMatch(text, /\$0\.00/, 'an unavailable topic total never becomes zero');
+  assert.doesNotMatch(text, /(?:Category 'materials':|Total spend for materials:) \$[0-9]/, 'an unavailable full topic total never becomes a certified amount');
+  assert.doesNotMatch(text, /Confirmed in materials \(subtotal\):/, 'an unresolved selector has no category subtotal');
+  assert.match(text, /category word 'materials' was not recognized/);
   assert.match(text, /total for materials is unconfirmed/);
-  assert.match(text, /Transactions without a confirmed category: \$20\.00 \[1\] \[2\]\./);
+  assert.match(text, /Transactions without a confirmed category: 2 rows totaling \$20\.00 \[1\] \[2\]; left out/);
   assert.deepEqual(separateOffers(text).offers, [originalRecordSuggestion], 'exactly one reviewed offer');
   assert.equal(text.trim().split('\n').at(-1), originalRecordSuggestion, 'all facts precede the offer');
 }
@@ -156,7 +158,7 @@ test('a confirmed category match withholds its total beside unclassified evidenc
   unconfirmed(body, 1250);
   assert.equal(body.ledger.confirmed_category_subtotal_minor, 750);
   assert.match(body.answer, /Confirmed in materials \(subtotal\): \$7\.50 \[1\]\./);
-  assert.match(body.answer, /Transactions without a confirmed category: \$12\.50 \[2\]\./);
+  assert.match(body.answer, /Transactions without a confirmed category: 1 rows totaling \$12\.50 \[2\]; left out/);
   assert.doesNotMatch(body.answer, /separate from the requested category|Total spend for/);
 });
 
@@ -182,17 +184,18 @@ test('disabling the category guard in memory fails the same contract beside a gr
   assert.notEqual(restored, source, 'the guard is disabled only in memory');
   const mutant = (await import(`data:text/javascript;base64,${Buffer.from(restored).toString('base64')}`)).withLedgerAnswer;
   const f = fixture(t);
-  unconfirmed(await ask(f));
+  confirm(f, "WHERE txn_uid='description-0'");
+  unconfirmed(await ask(f), 1250);
   const bad = await ask(f, mutant);
-  assert.equal(bad.ledger.total_minor, 0, 'the mutant reached the erroneous zero decision');
-  assert.match(bad.answer, /Total spend for materials: \$0\.00/);
-  assert.throws(() => unconfirmed(bad), error => {
+  assert.equal(bad.ledger.total_minor, 750, 'the mutant certifies a subtotal while another row has unknown membership');
+  assert.match(bad.answer, /Total spend for materials: \$7\.50/);
+  assert.throws(() => unconfirmed(bad, 1250), error => {
     assert.ok(error instanceof assert.AssertionError);
     assert.ok(error.message.startsWith('topic total is withheld'), 'the money assertion turns red');
     return true;
   });
   for (const text of await surfaces(t, bad)) {
-    assert.match(text, /Total spend for materials: \$0\.00/, 'the mutant reaches each real surface');
+    assert.match(text, /Total spend for materials: \$7\.50/, 'the mutant reaches each real surface');
     assert.throws(() => offerLast(text), assert.AssertionError, 'the same surface contract rejects the mutant');
   }
   confirm(f);

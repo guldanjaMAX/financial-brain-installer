@@ -30,7 +30,8 @@ async function positive(f) {
   f.raw("UPDATE fin_transactions SET payee='Payer One'");
   const paid = await reachedAnswer(f, payment);
   assert.equal(paid.ledger.found, true);
-  assert.equal(paid.evidence_gate.complete, true);
+  assert.equal(paid.evidence_gate.complete, false, "October still has a future part");
+  assert.equal(paid.ledger.requested_to, "2026-10-31");
   assert.match(paid.answer, /Found a deposit/);
   const received = await reachedAnswer(f, income);
   assert.equal(received.ledger.found, true);
@@ -53,9 +54,17 @@ for (const [id, description, payee] of [
   f.add('receipt', description, payee);
   const bodies = [await reachedAnswer(f, payment), await reachedAnswer(f, income)];
   const groups = await reachedAnswer(f, grouped);
+  // Adding a payer label cannot turn an external-account nomination into
+  // income. The positive peer explicitly supplies an outside deposit instead.
+  if (id === 'N01-account') f.raw("UPDATE fin_transactions SET description='Outside deposit'");
   await positive(f);
   for (const body of bodies) uncertain(body);
-  assert.equal(groups.ledger.total_minor, 2500);
+  assert.equal(groups.ledger.total_minor, id === 'N01-account' ? 0 : 2500);
+  if (id === 'N01-account') {
+    assert.equal(groups.ledger.not_payments.total_minor, 2500);
+    assert.ok(groups.ledger.not_payments.rows.every(row => groups.citations.some(ref => ref.n === row.n && ref.amount_minor === row.amount_minor)));
+    assert.match(groups.answer, /Not counted as payments to you/);
+  }
   assert.equal(groups.ledger.complete, false);
   assert.equal(groups.evidence_gate.complete, false);
   assert.ok(groups.answer.includes(labelNote));
@@ -163,11 +172,20 @@ test('only a proven window without any inflows permits absence, even with an amo
   for (const q of [payment, income]) {
     const empty = await reachedAnswer(f, q);
     assert.equal(empty.ledger.found, false);
-    assert.equal(empty.evidence_gate.complete, true);
+    assert.equal(empty.evidence_gate.complete, false, 'absence is only through today, not the future part of October');
+    assert.equal(empty.ledger.requested_to, '2026-10-31');
+    assert.match(empty.answer, /Partial period:.*through/);
     assert.match(empty.answer, /no deposits at all in this period/i);
   }
   f.add('other', 'Settlement', 'Payer Two', { cents: 3900 });
-  for (const q of [payment, income, 'Did the payment of $25 from Payer One arrive in October 2026?']) uncertain(await reachedAnswer(f, q));
+  for (const q of [payment, income]) uncertain(await reachedAnswer(f, q));
+  const exact = await reachedAnswer(f, 'Did the payment of $25 from Payer One arrive in October 2026?');
+  assert.equal(exact.ledger.found, null);
+  assert.equal(exact.ledger.total_minor, null);
+  assert.equal(exact.ledger.match_basis, 'none');
+  assert.deepEqual(exact.citations, []);
+  assert.match(exact.answer, /No deposit of \$25\.00 on .* from October 1 to October 12/);
+  assert.equal(exact.ledger.requested_to, '2026-10-31', 'S7 preserves the requested end separately');
   f.raw("UPDATE fin_account_coverage SET coverage_status='partial'");
   const before = f.calls.length;
   const unproven = await f.ask(payment);
@@ -176,7 +194,7 @@ test('only a proven window without any inflows permits absence, even with an amo
   assert.equal(unproven.gaps[0].reason, 'period_outside_coverage');
 });
 
-test('inflow list caps at ten and keeps the account and date scope, not the amount filter', async t => {
+test('exact amount limits anonymous candidates while account and date scope stay exact', async t => {
   const f = ledgerFixture(t);
   for (let i = 0; i < 12; i++) f.add(`row-${i}`, 'Secret bank narration', 'Payer Two', { cents: 3900 + i });
   f.add('outside', 'Deposit', null, { date: '2026-09-30' });
@@ -190,7 +208,11 @@ test('inflow list caps at ten and keeps the account and date scope, not the amou
   assert.equal((await reachedAnswer(f, payment)).ledger.found, true, 'other account positive control');
   const body = await reachedAnswer(f, 'Did the payment of $25 from Payer One arrive in October 2026 in account 1234?');
   assert.equal((await reachedAnswer(f, 'Did the payment of $39 from Payer Two arrive in October 2026?')).ledger.found, true);
-  uncertain(body, 12);
+  assert.equal(body.ledger.found, null);
+  assert.equal(body.ledger.match_basis, 'none');
+  assert.equal(body.ledger.total_minor, null);
+  assert.deepEqual(body.citations, []);
+  assert.match(body.answer, /No deposit of \$25\.00/);
   assert.doesNotMatch(JSON.stringify(body), /Secret bank narration|Payer Two|2026-09-30|9876|Outside selected account/);
 });
 

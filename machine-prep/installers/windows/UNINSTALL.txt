@@ -1,10 +1,18 @@
-Financial Brain Machine Prep - Windows uninstall notes
+Financial Brain per-user application removal
 
-The MSI shell is separate from the user-owned tools it prepares.
+Use Windows Settings > Apps > Installed apps and uninstall the named Financial
+Brain version. Each version has its own entry and Start-menu setup shortcut.
+Older application versions remain installed until explicitly removed.
 
-1. Open Settings > Apps > Installed apps.
-2. Select Financial Brain Machine Prep, then Uninstall. The per-user package does not require administrator approval.
-3. The metadata-only support log remains at %LOCALAPPDATA%\FinancialBrainMachinePrep\installer.log until you delete it.
-4. Node.js, Git, Claude Code, Codex, and the Financial Brain installation remain in their documented per-user or vendor-managed locations. They are deliberately not removed with the MSI shell because other work may use them.
+Native uninstall removes that version's registered application files and its
+shortcut. It removes empty application directories only. Unknown extra files
+remain visible for review; uninstall does not recursively erase a directory.
 
-No uninstall step removes source documents, manifests, credentials, or a Brain. Those require their own reviewed owner workflow.
+Owner state under LocalAppData\FinancialBrain, the manifest and documents under
+the owner's Financial Brain folder, .brain state, OAuth records, credentials,
+provider resources and Brain data are preserved. Removing an application is
+not permission to delete a Brain or revoke its credentials.
+
+The private runtime and npm have no global installation and no PATH change.
+The review build is unsigned. Signing, signed browser-download SmartScreen,
+and clean-VM first-open remain release gates for MAIN.

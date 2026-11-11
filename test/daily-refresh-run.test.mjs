@@ -1746,6 +1746,16 @@ test("iMessage quiet check proves this daily invocation without advancing accept
 });
 
 
+// A loaded Windows stack run exceeded 30 seconds although isolated reruns
+// passed. Allow four times that budget for startup; keep every canary check.
+const canaryChildTimeoutMs = (platform) => platform === "win32" ? 120_000 : 30_000;
+
+test("daily home canary gives Windows startup headroom and preserves other platform budgets", () => {
+  assert.equal(canaryChildTimeoutMs("win32"), 120_000);
+  assert.equal(canaryChildTimeoutMs("darwin"), 30_000);
+  assert.equal(canaryChildTimeoutMs("linux"), 30_000);
+});
+
 test("daily CLI suites keep the ambient home log canary byte-identical", () => {
   const sandbox = mkdtempSync(join(tmpdir(), "daily-home-guard-"));
   const canaryHome = join(sandbox, "home-sealed");
@@ -1814,7 +1824,7 @@ test("daily CLI suites keep the ambient home log canary byte-identical", () => {
       const child = spawnSync(process.execPath, ["--test", "--test-reporter=tap",
         `--test-name-pattern=${suite.pattern}`, suite.file], {
         cwd: fileURLToPath(new URL("../", import.meta.url)), env: environment,
-        encoding: "utf8", timeout: 30_000, windowsHide: true,
+        encoding: "utf8", timeout: canaryChildTimeoutMs(process.platform), windowsHide: true,
       });
       assert.equal(child.error, undefined, "the selected suite started");
       assert.equal(child.signal, null, "the selected suite completed without a signal");

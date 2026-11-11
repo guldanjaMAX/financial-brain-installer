@@ -29,7 +29,7 @@ export function reviewEarlyMonth(o, c, { wording = 'current' } = {}) {
   assert.equal(o.trace.parsed_intents.length, 1);
   assert.equal(o.trace.product_writes, 0);
   assert.equal(o.trace.model_calls, 0);
-  const b = o.body, l = b.ledger;
+  const b = wording === 'pinned' ? o.body : legacyDisclosureView(o.body, c), l = b.ledger;
   // The newly admitted bare spend form previously had no deterministic answer.
   if (!l && c.id === 'early/bare-spend') {
     assert.equal(o.trace.fallback_calls, 1, 'baseline unsupported wording decision reached');
@@ -91,6 +91,7 @@ export function reviewEarlyMonth(o, c, { wording = 'current' } = {}) {
       'Want me to show your account balances?', '', 'Previous complete calendar month (September):',
       "Unavailable. Before I count this as spending, I need to know which accounts are cards or loans. It's a one-time question. Want to do it now?",
       reviewedPlainCopy(posted),
+      'Owned loan: not counted in cash or spending totals; account kind not confirmed (unconfirmed account type).',
     ].join('\n');
     assert.deepEqual(displayFigures(b.answer).map(figure => figure.cents), ['0']);
     assert.equal(b.answer, wording === 'pinned' ? expected : reviewedFinalOffer(expected, 'Want to do it now?'));
@@ -158,6 +159,7 @@ export function reviewEarlyMonth(o, c, { wording = 'current' } = {}) {
       'Period: 2026-09-01 through 2026-09-30.', 'Merchant groups:',
       ...groups.map(([merchant, cents], i) => `${merchant}: ${formatMinor(String(cents))} across 1 row [${offset + i + 1}].`),
       'Category groups:', `Unsorted: ${c.unknown ? '$991.34' : '$591.34'} across ${count} rows.`,
+      `Unconfirmed categories: ${count} rows totaling ${c.unknown ? '$991.34' : '$591.34'}; left out of confirmed category totals.`,
       ...(!c.unknown ? ['Payments to your own loan/card accounts: $400.00 across 1 payment.'] : []),
       `Evidence: ${count} of ${count} expense rows cited.`,
       c.coverage === 'partial'
@@ -191,6 +193,8 @@ function reviewedEarlyPlain(original, c) {
   }
   if (c.coverage === 'partial') {
     text = text.replace('Covered-account expense subtotal: $591.34 last month (partial coverage).',
+      'Partial view using 2 of 3 accounts for September. Covered accounts: Operating account (your account ending 3131); Reserve account (your account ending 5353). ' +
+      'Omitted accounts: Owned loan (your account ending 4242); their bank history does not include every requested date. This is not a total for all requested accounts.\n' +
       'Spending I could check: $591.34 last month (some accounts missing dates).');
     text = text.replace('Period: 2026-09-01 through 2026-09-30.\n', `Period: 2026-09-01 through 2026-09-30.\nHere is a partial view using 2 of 3 accounts for 2026-09-01 through 2026-09-30; account ****4242 is missing some dates.\n${suggestion}\n`);
     text = text.replace('Coverage: partial, 2 of 3 selected accounts include ', 'Bank history: 2 of 3 selected accounts include ');
@@ -205,4 +209,75 @@ function reviewedEarlyPlain(original, c) {
       `I can help check the bank records for ${from} through ${to}, but some bank days are missing, so a complete answer is unconfirmed.\n${history}\n${suggestion}`);
   }
   return reviewedFinalOffer(reviewedDateCopy(text));
+}
+
+// Validate additive receipts against the frozen early-month facts, then rebase
+// the older exact-copy oracle. This keeps its cents, scope and prose checks
+// intact while making the new payment and pending figures independently fail.
+export function legacyDisclosureView(body, c) {
+  const b = structuredClone(body), removed = new Set();
+  if (b.answer == null) return b;
+  const rawLines = b.answer?.split('\n') || [];
+  let lines = [...rawLines];
+  for (const ledger of [b.ledger, b.ledger?.previous_month].filter(Boolean)) {
+    for (const group of ledger.category_groups || []) {
+      const line = lines.find(line => line.startsWith(`${group.category}:`) && /\[\d+\]/.test(line) &&
+        JSON.stringify([...line.matchAll(/\[(\d+)\]/g)].map(match => Number(match[1]))) === JSON.stringify(group.citations));
+      if (!line) continue;
+      const numbers = [...line.matchAll(/\[(\d+)\]/g)].map(match => Number(match[1]));
+      const refs = numbers.map(n => b.citations.find(ref => ref.n === n));
+      const expectedIds = ledger.from === '2026-09-01' ? [1, 2, 4] : c.current ? [11] : [];
+      assert.deepEqual(numbers, group.citations);
+      assert.ok(refs.every(Boolean), 'every category reference resolves before rebasing');
+      assert.deepEqual(refs.map(ref => Number(ref.ref.split(':').at(-1))).sort((a, b) => a - b), expectedIds);
+      assert.equal(refs.reduce((sum, ref) => sum + ref.amount_minor, 0), ledger.from === '2026-09-01' ? 59134 : 1234);
+      assert.equal(refs.length, group.count);
+      lines = lines.map(text => text === line ? text.replace(/(?: \[\d+\])+\.$/, '.') : text);
+    }
+    const payments = ledger.payment_exclusions;
+    if (!payments) continue;
+    const id = ledger.from === '2026-09-01' ? 3 : 12;
+    const amount = id === 3 ? 40000 : 22222, day = id === 3 ? 'September 20' : 'October 1';
+    assert.equal(payments.count, 1);
+    assert.equal(payments.total_minor, amount);
+    assert.equal(payments.rows.length, 1);
+    const row = payments.rows[0], ref = b.citations.find(ref => ref.n === row.n);
+    assert.equal(ref.ref, `ledger:transaction:${id}`);
+    assert.equal(ref.amount_minor, amount);
+    assert.equal(row.account_mask, '3131');
+    assert.equal(row.own_loan_mask, '4242');
+    const item = `payment to your own loan (ending 4242): ${formatMinor(String(amount))} on ${day} in your account ending 3131 [${row.n}].`;
+    assert.equal(rawLines.filter(line => line === item).length, 1);
+    lines = lines.filter(line => line !== item);
+    const header = `Payments to loans and cards (excluded from spending and income): ${formatMinor(String(amount))} across 1 payment [${row.n}].`;
+    assert.ok(b.answer.includes(header));
+    lines = lines.map(line => line.replace(header, `Payments to your own loan/card accounts: ${formatMinor(String(amount))} across 1 payment.`));
+    removed.add(row.n);
+    delete ledger.payment_exclusions;
+  }
+  const pending = b.ledger?.pending_excluded;
+  if (pending) {
+    const id = b.ledger.from === '2026-09-01' ? 7 : 8, amount = id === 7 ? 99999 : 777;
+    assert.equal(pending.count, 1); assert.equal(pending.total_minor, amount); assert.equal(pending.citations.length, 1);
+    const n = pending.citations[0], ref = b.citations.find(ref => ref.n === n);
+    assert.equal(ref.ref, `ledger:transaction:${id}`); assert.equal(ref.amount_minor, amount);
+    const line = `Pending activity: ${formatMinor(String(amount))} across 1 row, excluded from completed spending [${n}].`;
+    assert.equal(rawLines.filter(text => text === line).length, 1);
+    lines = lines.filter(text => text !== line); removed.add(n);
+    delete b.ledger.pending_excluded;
+  }
+  if (lines.some(line => line.startsWith('Accounts covered:'))) {
+    const line = lines.find(line => line.startsWith('Accounts covered:'));
+    const masks = c.currentUnavailable && !c.coveredTo ? [] : ['3131', '4242', '5353'];
+    assert.deepEqual([...line.matchAll(/ending (\d{4})/g)].map(match => match[1]).sort(), masks);
+    lines = lines.filter(text => text !== line);
+  }
+  b.citations = b.citations.filter(ref => !removed.has(ref.n));
+  const numbering = new Map(b.citations.map((ref, i) => [ref.n, i + 1]));
+  const rebase = (value, key = '') => Array.isArray(value) ? value.map(entry => key === 'citations' && Number.isInteger(entry) ? numbering.get(entry) : rebase(entry))
+    : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, key === 'n' ? numbering.get(entry) : rebase(entry, key)])) : value;
+  b.ledger = rebase(b.ledger); b.citations = b.citations.map(ref => ({ ...ref, n: numbering.get(ref.n) }));
+  b.answer = lines.map(line => line.replace(/\[(\d+)\]/g, (_, n) => removed.has(Number(n)) ? '' : `[${numbering.get(Number(n))}]`)
+    .replace(/ {2,}/g, ' ').trimEnd()).join('\n');
+  return b;
 }
