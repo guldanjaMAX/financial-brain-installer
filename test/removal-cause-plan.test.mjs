@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { buildDriveRemovalPlan, DriveRemovalReviewRequired } from "../operations/drive-removal-plan.mjs";
 import { createIngestRemovalReview, removalDigest } from "../operations/ingest-removal-plan.mjs";
-import { canAutoApplyRemoval, removalOwnerSentence, removalReviewFacts } from "../operations/load-removal-review.mjs";
+import { runLoadRemovalLeg, canAutoApplyRemoval, removalOwnerSentence, removalReviewFacts } from "../operations/load-removal-review.mjs";
 import { REMOVAL_CAUSES } from "../operations/removal-causes.mjs";
 
 async function fixture(causes, { members = {}, legacy = false } = {}) {
@@ -47,20 +47,16 @@ for (const cause of [...REMOVAL_CAUSES, "unrecognized", null]) {
   test(`exact automatic apply and owner wording use the per-target cause: ${cause}`, async () => {
     const f = await fixture([cause]);
     const explicit = cause === "explicit_deletion";
-    assert.equal(canAutoApplyRemoval(f.facts, "gmail", "gmail"), explicit);
+    assert.equal(canAutoApplyRemoval(f.facts, "gmail", "gmail"), false);
     assert.equal(removalOwnerSentence(f.facts).includes("deleted"), explicit);
     assert.ok(!removalOwnerSentence(f.facts).includes("you deleted"));
-    if (explicit) {
-      assert.equal((await f.review.apply(f.plan.fingerprint, undefined, { automatic: true })).removed, 1);
-      assert.equal(f.calls.apply, 1);
-    } else {
-      await assert.rejects(f.review.apply(f.plan.fingerprint, undefined, { automatic: true }), /explicit deletion evidence/);
-      assert.equal(f.calls.apply, 0);
-      assert.equal(f.stored.size, 1);
-      // The owner's separate exact approval remains available for held causes.
-      assert.equal((await f.review.apply(f.plan.fingerprint)).removed, 1);
-      assert.equal(f.calls.apply, 1);
-    }
+    await assert.rejects(f.review.apply(f.plan.fingerprint, undefined, { automatic: true }), /explicit deletion evidence/);
+    assert.equal(f.calls.apply, 0);
+    assert.equal(f.stored.size, 1);
+    // Provider evidence cannot authorize removal. The owner can still apply
+    // the exact reviewed fingerprint, for every cause, with exact readback.
+    assert.equal((await f.review.apply(f.plan.fingerprint)).removed, 1);
+    assert.equal(f.calls.apply, 1);
   });
 }
 
@@ -114,4 +110,21 @@ test("overlapping family evidence fails closed", async () => {
   assert.equal(f.facts.removal_causes.unknown, 1);
   await assert.rejects(f.review.apply(f.plan.fingerprint, undefined, { automatic: true }), /explicit deletion evidence/);
   assert.equal(f.calls.apply, 0);
+});
+
+
+test("GMAIL-01: load reaches an eligible preview but preserves it for an owner decision", async () => {
+  const f = await fixture(["explicit_deletion"]);
+  let runCalls = 0; let applyCalls = 0;
+  const run = async () => {
+    runCalls++;
+    throw Object.assign(new DriveRemovalReviewRequired("owner decision pending"), { removal_review: f.facts });
+  };
+  await assert.rejects(runLoadRemovalLeg({ run, kind: "gmail", source: "gmail", dryRun: false,
+    apply: async () => { applyCalls++; return f.review.apply(f.plan.fingerprint); } }), DriveRemovalReviewRequired);
+  assert.ok(f.calls.preview > 0 && f.plan.targets.length > 0 && runCalls > 0);
+  assert.equal(applyCalls, 0, "load never invokes automatic apply");
+  assert.equal(f.stored.size, 1, "stored message preserved");
+  assert.equal((await f.review.apply(f.plan.fingerprint)).removed, 1, "separately approved exact apply control");
+  assert.equal(f.stored.size, 0);
 });

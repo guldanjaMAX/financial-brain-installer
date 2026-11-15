@@ -8,6 +8,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   realpathSync,
   readdirSync,
@@ -17,10 +18,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve, win32 as pathWin32 } from "node:path";
+import { dirname, isAbsolute, join, resolve, win32 as pathWin32 } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { restrictWindowsDirectoryToCurrentUser } from "./current-user-file.mjs";
+import { removeFileWithRetrySync, replaceFileWithRetrySync } from "./rename-retry.mjs";
 
 const CURRENT_PROCESS_INSTANCE = `process-lifetime:${randomBytes(16).toString("hex")}`;
 
@@ -28,6 +30,7 @@ const OWNER_RE = /^owner-(\d+)-([a-f0-9]{32})\.json$/u;
 const OWNER_FILE = "owner.json";
 const MIN_STALE_MS = 60_000;
 const DEFAULT_STALE_MS = 30 * 60_000;
+export const BRAIN_LIFECYCLE_PARENT_ENV = "BRAIN_LIFECYCLE_PARENT";
 
 export class BrainLifecycleLockError extends Error {
   constructor(code, message, { retryable = false } = {}) {
@@ -293,7 +296,7 @@ export function clearBrainRecoveryFence({
   if (existing.transaction_id !== transactionId) {
     throw failure("brain_lifecycle_recovery_required", "the Brain update recovery fence belongs to another transaction");
   }
-  unlinkSync(existing.path);
+  removeFileWithRetrySync(existing.path, { platform });
   return true;
 }
 
@@ -547,7 +550,6 @@ export function acquireBrainLifecycleLock({
     }
   }
 
-  const ownerPath = join(path, OWNER_FILE);
   if (operation !== "update") {
     const fence = readBrainRecoveryFence({ manifestPath, platform, machineLockRoot });
     if (fence) {
@@ -559,6 +561,11 @@ export function acquireBrainLifecycleLock({
       );
     }
   }
+  return ownedLifecycleLock({ path, token, operation, platform, staleAfter, removeDirectory, waitSync, log });
+}
+
+function ownedLifecycleLock({ path, token, operation, platform, staleAfter, removeDirectory, waitSync, log }) {
+  const ownerPath = join(path, OWNER_FILE);
   const assertOwned = () => {
     const owner = readOwner(path, platform);
     if (!owner || owner.token !== token) {
@@ -583,7 +590,70 @@ export function acquireBrainLifecycleLock({
     }
   };
   process.once("exit", release);
-  return Object.freeze({ path, operation: String(operation), assertOwned, release });
+  const childDelegation = () => {
+    assertOwned();
+    if (operation !== "update") throw failure("brain_lifecycle_unsafe", "only an update lease can pass to its child");
+    return { schema_version: 1, pid: process.pid, token, process_instance: CURRENT_PROCESS_INSTANCE };
+  };
+  return Object.freeze({ path, operation: String(operation), assertOwned, release, childDelegation });
+}
+
+/** Transfer the occupied slot without ever releasing the writer boundary. The
+ * child gets a fresh token, so parent exit cleanup cannot release its lease. */
+export function adoptParentBrainLifecycleLock({ manifestPath, delegation, platform = process.platform,
+  machineLockRoot, parentPid = process.ppid, isOwnerAlive = ownerAlive,
+  log = message => console.error(message),
+  restrictWindowsDirectory = (path, options) => (process.platform === "win32"
+    ? restrictWindowsDirectoryToCurrentUser(path, options) : undefined),
+} = {}) {
+  const path = lockDirectory({ manifestPath, platform, machineLockRoot });
+  try { assertPrivateDirectory(path, "Brain lifecycle lock", platform); }
+  catch { throw failure("brain_lifecycle_lost", "the parent update lease could not be verified"); }
+  const directory = lstatSync(path, { bigint: true });
+  const owner = readOwner(path, platform);
+  if (delegation?.schema_version !== 1 || !Number.isSafeInteger(delegation.pid) || delegation.pid !== parentPid ||
+      !owner || owner.pid !== parentPid || owner.operation !== "update" || owner.token !== delegation.token ||
+      owner.path !== join(path, OWNER_FILE) || owner.process_instance !== delegation.process_instance || !isOwnerAlive(parentPid)) {
+    throw failure("brain_lifecycle_lost", "the parent update lease could not be verified");
+  }
+  const token = randomBytes(16).toString("hex");
+  // Stage outside the occupied directory. A crash before rename must not leave
+  // an extra entry that would make stale-owner recovery permanently refuse.
+  const staging = mkdtempSync(join(dirname(path), "brain-lifecycle-handoff-"));
+  const staged = join(staging, OWNER_FILE);
+  let written = false;
+  try {
+    if (platform === "win32") {
+      try { restrictWindowsDirectory(staging, { label: "the update lease handoff" }); }
+      catch { throw failure("brain_lifecycle_unsafe", "the update lease handoff is not private"); }
+    }
+    assertPrivateDirectory(staging, "update lease handoff", platform);
+    writeFileSync(staged, JSON.stringify({ schema_version: 2, pid: process.pid, token,
+      operation: "update", process_instance: CURRENT_PROCESS_INSTANCE, created_at: owner.created_at,
+    }), { encoding: "utf8", flag: "wx", mode: 0o600 });
+    written = true;
+    // Windows can briefly hold owner.json open. Every attempt, including the
+    // first, re-proves the unchanged parent lease before replacing it.
+    replaceFileWithRetrySync(staged, owner.path, { platform, revalidate: () => {
+      assertSameDirectory(path, directory);
+      const current = readOwner(path, platform);
+      if (!current || current.token !== owner.token || current.pid !== owner.pid ||
+          current.process_instance !== owner.process_instance || !isOwnerAlive(parentPid)) {
+        throw failure("brain_lifecycle_lost", "the parent update lease changed during handoff");
+      }
+    } });
+    written = false;
+    const lock = ownedLifecycleLock({ path, token, operation: "update", platform,
+      staleAfter: DEFAULT_STALE_MS, removeDirectory: rmdirSync,
+      waitSync: ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms), log });
+    try { lock.assertOwned(); } catch (error) { lock.release(); throw error; }
+    return lock;
+  } finally {
+    try {
+      if (written) unlinkSync(staged);
+      rmdirSync(staging);
+    } catch { log("The temporary update lease handoff could not be removed."); }
+  }
 }
 
 export async function withBrainLifecycleLock(options, task) {

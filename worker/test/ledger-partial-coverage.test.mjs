@@ -215,9 +215,17 @@ test('R2-C1-01 dated aggregate and invented calendar roles keep honest refusals'
 test('R2-C1-01 invalid and future calendar operands cannot supply ranking authority', async () => {
   const intent = { kind: 'largest', direction: 'outflow' };
   for (const date of ['October 32, 2026', 'November 2, 2026', '2026-02-30']) {
+    const future = date === 'November 2, 2026';
     const result = await ask(`Could you retrieve my largest individual charges since ${date}?`, 'mixed',
-      { intent, setup: datedPool, expectInventory: false });
+      { intent, setup: datedPool, expectInventory: future });
     assert.equal(result.trace.models, 1, 'schema-valid nonempty provider extraction reached calendar validation');
+    if (future) {
+      assert.equal(result.body.ledger.projection, true);
+      assert.equal(result.body.ledger.total_minor, 0);
+      assert.equal(result.body.evidence_gate.complete, false);
+      assert.match(result.body.answer, /pattern-only estimate/);
+      continue;
+    }
     assert.equal(result.body.ledger ?? null, null);
     assert.equal(result.body.gaps[0].reason, 'period_contradiction');
     assert.equal(result.body.gaps[0].scope, 'calendar');
@@ -397,8 +405,11 @@ test('C1 controls: ordering, unrelated uncovered rows, missing counterpart and a
     db.exec("UPDATE fin_transactions SET description='payment to account 1040',payee=NULL WHERE id=1");
   } });
   assert.ok(review.trace.facts > 0 && review.trace.rows.some(row => row.id === 1));
-  assert.equal(review.body.ledger ?? null, null);
-  assert.equal(review.body.gaps[0].reason, 'ledger_account_kind_review_required');
+  assert.deepEqual(rankAmounts(review), [9000, 4000, 2000], 'unconfirmed account type retains ranked observed candidates');
+  assert.equal(review.body.ledger.reason, 'ledger_account_kind_review_required');
+  assert.equal(review.body.ledger.complete, false);
+  assert.match(review.body.answer, /observed ranked candidates/);
+  assert.doesNotMatch(review.body.answer, /withheld|cannot|can't/i);
 });
 
 function linkedTwin(db, approved) {
@@ -412,8 +423,15 @@ function linkedTwin(db, approved) {
 }
 test('C1 live/manual twins: unresolved overlap refuses and approved precedence remains intact', async () => {
   const disputed = await ask(QUESTIONS[0], 'mixed', { setup: db => linkedTwin(db, false) });
-  assert.equal(disputed.trace.facts, 0);
-  assert.equal(disputed.body.ledger ?? null, null);
+  assert.equal(disputed.trace.facts, 33, 'each covered source is read separately');
+  assert.ok(disputed.trace.mappings.every(mapping => mapping.length === 1), 'no source mappings are merged');
+  const sources = disputed.body.ledger.source_readings.filter(row => row.account_mask === '1000');
+  assert.deepEqual(sources.map(row => [row.source, row.amount_minor]), [['manual', 15000], ['live', 9000]]);
+  assert.match(disputed.body.answer, /\$90\.00.*bank.feed/s);
+  assert.match(disputed.body.answer, /sum of listed ranked transactions/);
+  assert.match(disputed.body.answer, /\$150\.00 may be counted twice/);
+  assert.equal(disputed.body.ledger.complete, false);
+  assert.doesNotMatch(disputed.body.answer, /withheld|cannot|can't/i);
   assert.equal(disputed.body.gaps[0].reason, 'ledger_account_link_required');
   const approved = await ask(QUESTIONS[0], 'mixed', { setup: db => linkedTwin(db, true) });
   assert.deepEqual(rankAmounts(approved), [9000]);
@@ -715,13 +733,9 @@ test('R1-C1-03 only a proved individual transaction unit enters ranking', async 
   for (const question of UNIT_QUESTIONS) for (const profile of ['full', 'mixed']) {
     const intent = { ...RANK_INTENT, count: 1 };
     assert.deepEqual(rankAmounts(await ask('Could you retrieve my largest individual charge this month?', profile, { intent, setup: unitRows })), [10000]);
-    if (/\b(?:stores?|suppliers?|categorys|unrecognized)\b/.test(question)) {
-      const refused = await ask(question, profile, { intent, setup: unitRows, expectInventory: false });
-      assert.equal(refused.body.gaps[0].reason, 'period_contradiction');
-      assert.equal(refused.body.gaps[0].scope, 'calendar');
-      assert.equal(refused.trace.facts, 0);
-      assert.equal(refused.body.ledger ?? null, null);
-    } else refusedUnit(await ask(question, profile, { intent, setup: unitRows }));
+    // Ordinary unit words reach unit admission, never a calendar refusal.
+    // A transaction ranking still cannot answer an aggregate ranking request.
+    refusedUnit(await ask(question, profile, { intent, setup: unitRows }));
   }
   for (const literal of ['Largest Total Vendors', 'Merchant Ranking', 'Combined Charges']) for (const field of ['vendor_text', 'account_hint']) {
     const intent = { ...RANK_INTENT, count: 1, [field]: literal };
@@ -963,13 +977,14 @@ function boundaryUnmatched(result) {
   assert.ok([960, 961].every(id => result.trace.rows.some(row => row.id === id)), 'both padded endpoints reached the eligibility decision');
   assert.equal(result.body.ledger.reason, 'money_out_destination_unconfirmed');
   assert.equal(result.body.ledger.complete, false);
-  assert.equal(result.body.ledger.expense_total_minor, null);
+  assert.equal(result.body.ledger.lead_accounts.reduce((sum,a)=>sum+a.debits_minor,0),27653, 'the rejected outgoing leg stays counted');
   assert.ok(result.body.ledger.possible_payments.length > 0, 'rejected counterpart has a disclosure');
   const row = result.body.ledger.possible_payments.find(row => row.amount_minor === 27653);
   assert.ok(row); assert.ok(row.connected_counterpart_masks.length > 0);
   assert.ok(result.body.citations.some(ref => ref.n === row.n && ref.amount_minor === 27653));
-  assert.match(result.body.answer, /money out.*withheld|withheld.*money out/i);
-  assert.ok(!(result.body.ledger.lead_accounts || []).some(account => Number.isSafeInteger(account.credits_minor) || Number.isSafeInteger(account.debits_minor)), 'withholding admits no account-level money figure');
+  assert.match(result.body.answer, /up to \$276\.53 may be counted twice/);
+  assert.doesNotMatch(result.body.answer, /withheld|cannot|can't/i);
+  assert.equal(result.body.ledger.lead_accounts.reduce((sum,a)=>sum+a.credits_minor,0),0, 'October receipt is outside the September answer');
 }
 test('R2 rejected pair endpoints remain visible as unproved transfer candidates', async () => {
   for (const profile of ['full', 'mixed']) for (const gap of ENDPOINT_GAPS) {

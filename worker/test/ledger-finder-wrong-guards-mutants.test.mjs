@@ -9,9 +9,12 @@ import { tmpdir } from 'node:os';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const mutations = [
-  ['monthly refusal reason lost', 'ledger-monthly.js', 'part?.reason || ledger?.reason ||', 'part?.reason ||', 'monthly payment refusal'],
-  ['monthly refund references lost', 'ledger-monthly.js', ' || ledger?.refund_disclosure)', ')', 'monthly payment refusal'],
-  ['untyped payment refusal disabled', 'ledger-answer.js', "if (untypedPayments.length &&", 'if (false &&', 'untyped.*payment must withhold'],
+  // 0.4.28 observed months keep their causal reason on the available-amount branch.
+  ['monthly refusal reason lost', 'ledger-monthly.js', 'available ? ledger.observed_reading ? ledger.reason || null : null', 'available ? null', 'monthly payment refusal'],
+  // 0.4.28 available monthly readings carry refund references through the rebased metadata.
+  ['monthly refund references lost', 'ledger-monthly.js', 'n: candidate.n + citations.length - refs.length', 'n: candidate.n + citations.length - refs.length + 1', 'monthly payment refusal'],
+  // 0.4.28 broad readers retain the nominator's uncertainty metadata rather than a terminal refusal.
+  ['untyped payment nomination disabled', 'ledger-answer.js', 'const untypedPayments = identityRows.filter(row =>', 'const untypedPayments = identityRows.filter(row => false &&', 'untyped.*payment must withhold'],
   ['directed memo payee veto restored', 'ledger-analysis.js', "endpoint?.form === 'unary' && resolvesExactAccount(endpoint.locator, account, accounts)", 'false', 'composite components'],
   ['card channel payee veto restored', 'ledger-analysis.js', '(?:(?:(?:credit card|card|loan) )?payment|transfer)', '(?:payment|transfer)', 'owned card-payment channel'],
   ['unknown selector guard disabled', 'ledger-answer.js', 'if (categoryResolution && !categoryResolution.resolved)', 'if (false)', 'unresolved category|unknown selector'],

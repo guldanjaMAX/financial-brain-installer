@@ -14,12 +14,11 @@ const pageStart = source.indexOf("export function connectPageHtml(");
 const pageEnd = source.indexOf("\nasync function readJson(request)", pageStart);
 assert.ok(errorStart >= 0 && errorEnd > errorStart && pageStart >= 0 && pageEnd > pageStart,
   "the reviewed page and error functions exist at their source boundaries");
-const generator = vm.createContext({ FAVICON: "data:image/svg+xml,fixture" });
-vm.runInContext(source.slice(errorStart, errorEnd).replace(/^export /, "") + "\n" +
-  source.slice(pageStart, pageEnd).replace(/^export /, ""), generator, { timeout: 1000 });
-const html = vm.runInContext(
-  "connectPageHtml({ provider: 'plaid', environment: 'sandbox' }, { ownerEntityCount: 3 }).html",
-  generator, { timeout: 1000 });
+// Mutant inputs still load the whole module and retain all lexical helpers.
+const { sourceModuleHarness } = await import('../../test/helpers/source-module-harness.mjs');
+const pageModule = await sourceModuleHarness(new URL('../src/lib/bank-feed.js',import.meta.url),{source});
+const {result:connectPageHtml} = pageModule({FAVICON:'data:image/svg+xml,fixture'},'connectPageHtml');
+const html = connectPageHtml({provider:'plaid',environment:'sandbox'},{ownerEntityCount:3}).html;
 const scripts = [...html.matchAll(/<script(?: [^>]*)?>([\s\S]*?)<\/script>/g)]
   .map((match) => match[1]).filter(Boolean);
 assert.equal(scripts.length, 1, "the hosted page supplies its actual inline script");

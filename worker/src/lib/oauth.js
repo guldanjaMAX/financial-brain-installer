@@ -213,13 +213,15 @@ export async function handleAuthorizePage(env, url) {
   const name = esc(client.client_name || "A connector");
   const profile = profileDescription(params.scope);
   const profileSentences = {
-    librarian: "It can ask questions and read documents. It cannot add, diagnose, change, or remove anything.",
-    "structured-contributor": "It can read and add contract-checked facts, decisions, preferences, notes, or corrections. It cannot diagnose or remove anything.",
+    librarian: "It can ask questions, read documents, and read bank transactions. It cannot add, diagnose, change, or remove anything.",
+    "structured-contributor": "It can read documents and bank transactions and add contract-checked facts, decisions, preferences, notes, or corrections. It cannot diagnose or remove anything.",
     technician: "It can read documents and whole-brain diagnostics. It cannot add, change, or remove anything.",
     "break-glass": "It can read, diagnose, and prepare an exact short-lived deletion preview. It cannot execute a deletion. Execution always requires your fresh passkey in the owner app.",
   };
   const grantSentence = `${esc(client.client_name || "A connector")} is requesting the ${profile.label} profile. ` +
-    profileSentences[profile.name];
+    profileSentences[profile.name] + (profileHas(profile.name, "money:read")
+      ? " It can also read your bank and card transactions, balances, account names with last 4 digits, and money records, through read-only money tools."
+      : " It cannot read bank or card transactions, balances, or money SQL. Those reads need a separately owner-approved librarian or structured-contributor connection.");
   const owner = String(env.BRAIN_OWNER || "").trim();
   // "Dana's brain", not "acme-brain-shadow". The consent screen is the
   // second thing a client ever sees and the first that names a third party, so

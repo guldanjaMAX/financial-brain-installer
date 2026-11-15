@@ -15,7 +15,6 @@ import {
   openSync,
   readFileSync,
   realpathSync,
-  renameSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -23,6 +22,7 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { replaceFileWithRetrySync } from "./rename-retry.mjs";
 
 const POINTER_SCHEMA_VERSION = 1;
 const MAX_POINTER_BYTES = 8 * 1024;
@@ -329,7 +329,8 @@ export function rememberInstalledManifest(manifestPath, options = {}) {
     descriptor = undefined;
     // The private state directory is owner-only, so this atomic replacement
     // cannot be redirected between the safety check and rename.
-    renameSync(temporary, destination);
+    // A Windows reader can briefly hold the saved location open.
+    replaceFileWithRetrySync(temporary, destination, { platform: options.platform });
     created = false;
     syncRenamedPointer(directory, destination, options);
     const readback = readInstalledManifest(options);

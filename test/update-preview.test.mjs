@@ -1759,6 +1759,7 @@ test("brain update help is plain text and an unknown live flag names the no-opti
 
   const unknown = spawnSync(process.execPath, [cli, "update", "--mystery"], { encoding: "utf8", env });
   assert.notEqual(unknown.status, 0);
+  assert.doesNotMatch(unknown.stdout, /The update is incomplete|saved checkpoint/u);
   // The refusal is rendered per platform, so the expectation is built with the
   // same renderer: on Windows both commands are the runnable node invocation.
   assert.ok(unknown.stdout.includes(renderCliCommands(

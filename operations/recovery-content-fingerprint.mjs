@@ -45,7 +45,9 @@ function sameInode(left, right) {
 }
 
 function assertMaximum(value) {
-  if (!Number.isSafeInteger(value) || value < 1 || value > DEFAULT_MAX_BYTES) {
+  // This is a streaming local read limit, distinct from a provider import
+  // limit. Callers retaining the default keep the original single-file bound.
+  if (!Number.isSafeInteger(value) || value < 1 || value > 64 * 1024 ** 3) {
     refuse("RECOVERY_CONTENT_FINGERPRINT_LIMIT_INVALID");
   }
   return value;

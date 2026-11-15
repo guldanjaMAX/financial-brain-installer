@@ -1,3 +1,4 @@
+import { assertLedgerAnswer } from '../../worker/test/helpers/document-answer-contract.mjs';
 import { goldFor, GOLD_VERSION } from '../../test/fixtures/fastloop-money/gold.mjs';
 import { evidence } from '../../test/fixtures/fastloop-money/input.mjs';
 import { displayFigures, formatMinor, same, total, ORACLE_VERSION } from './money-oracle.mjs';
@@ -5,7 +6,7 @@ import { sha } from './money-replay.mjs';
 import { readFileSync } from 'node:fs';
 
 export const SCORING_IDENTITY = sha(['./money-score.mjs', './money-oracle.mjs',
-  '../../test/fixtures/fastloop-money/gold.mjs'].map(path => readFileSync(new URL(path, import.meta.url), 'utf8')));
+  '../../test/fixtures/fastloop-money/gold.mjs', '../../worker/test/helpers/document-answer-contract.mjs'].map(path => readFileSync(new URL(path, import.meta.url), 'utf8')));
 
 export const VERDICTS = ['correct', 'partly', 'wrong figure', 'missing source', 'honest refusal', 'over-refusal'];
 // Exact reviewed renderer lines for the frozen synthetic bank. Retain the old
@@ -310,10 +311,24 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
   if (result.execution_status !== 'complete') return result;
   const body = observation.body, ledger = body?.ledger ? structuredClone(body.ledger) : null;
   let rawAnswer = body?.answer || '';
+  let contractValid = true;
+  if (body?.answer_contract?.kind === 'ledger') {
+    const boundary = rawAnswer.indexOf('\n\nCoverage: ');
+    const reading = boundary < 0 ? rawAnswer : rawAnswer.slice(0,boundary);
+    try { assertLedgerAnswer(body, { ...body, answer:reading }); }
+    catch { contractValid = false; }
+    if (contractValid) rawAnswer = reading;
+  }
+  const recordedAnswer = rawAnswer;
   let answer = reviewedMoneyCopy(rawAnswer);
   const exactKnownLines = new Set();
   const nearPayment = gold.contract === 'payment' && input.period.rule === 'anchor minus/plus seven calendar days, inclusive';
   const snapshot = input.snapshot || evidence(input.profile, input.account_reviews), rows = new Map(snapshot.rows.map(r => [r.id, r]));
+  if (ledger?.classification_uncertain && ledger.expense_total_minor === null) {
+    for (const account of snapshot.accounts.filter(account => account.kind === 'other'))
+      exactKnownLines.add(`${account.label || 'your account ending ' + account.mask}: not counted in cash or spending totals; account kind not confirmed (unconfirmed account type).`);
+  }
+
   // Pending expectations come from the frozen independent envelope, never the answer.
   const balanceContract = ['balance', 'forecast'].includes(gold.contract);
   const balancePending = balanceContract ? snapshot.rows.filter(row => row.pending &&
@@ -350,6 +365,7 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
     if (!ok) result.reasons.push(id);
     if (!ok && ['wrong_figure', 'unsupported_claim', 'scope', 'ownership'].includes(failure)) result.safety_failures.push(`${failure}:${id}`);
   };
+  if (!contractValid) check('owner-answer-contract',false,'unsupported_claim');
   const finish = () => {
     result.required_facts_total = gold.required_obligations.length;
     result.required_facts_met = gold.required_obligations.filter(id => result.checks.some(c => c.id === id && c.ok)).length;
@@ -503,7 +519,11 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
     ledger.complete === false && ledger.expense_total_minor === null && ledger.total_minor === null;
   const retainedIds = uncertainExpense ? [...new Set([...gold.included, ...gold.repayment_ids])] : gold.included || [];
   const retainedTotal = total(retainedIds.map(id => rows.get(id).cents));
-  const current = body?.answer || '';
+  // The authored repayment membership, not the reader's classifier, supplies
+  // both sides of the displayed uncertain spending bound.
+  const uncertainPaymentTotal = total((gold.repayment_ids || []).map(id => rows.get(id).cents));
+  const spendingLowerBound = total((gold.included || []).map(id => rows.get(id).cents));
+  const current = recordedAnswer;
   if (current.includes('This reading covers completed transactions only;') || current.includes('Here are your recorded balances, with the date for each account;')) {
     const offers = current.match(/Want[^?\n]*\?/g) || [];
     check('one-final-reviewed-offer', offers.length === 1 &&
@@ -736,6 +756,8 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
         else if (p === 'unsorted_minor' && expense) expected = total(retainedIds.map(id => rows.get(id).cents));
         else if (p.startsWith('payment_exclusions.') && name !== 'amount_minor') expected = name === 'card_minor' ? '0' : paymentMinor;
         else if (p === 'retained_outflow_minor' && uncertainExpense) expected = retainedTotal;
+        else if (p === 'observed_spending_lower_bound_minor' && uncertainExpense) expected = spendingLowerBound;
+        else if (p === 'classification_uncertain_minor' && uncertainExpense) expected = uncertainPaymentTotal;
         else if (/^(?:expense_total_minor|total_minor)$/.test(p)) expected = gold.total;
         else if (p.startsWith('groups.') && expense) {
           const ids = gold.included.filter(id => rows.get(id)?.payee?.toLowerCase() === value.merchant);
@@ -832,6 +854,17 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
   };
   validateRequiredDisplay();
   const exactMoneyLines = new Set();
+  const boundedLines = new Map();
+  if (uncertainExpense) {
+    boundedLines.set(`Spending this month: at least ${formatMinor(spendingLowerBound)}; ${formatMinor(uncertainPaymentTotal)} more may be a card payment (unconfirmed).`, [spendingLowerBound, uncertainPaymentTotal]);
+    for (const id of gold.repayment_ids || []) {
+      const row = rows.get(id), source = snapshot.accounts.find(a => a.slug === row.account);
+      const destination = snapshot.accounts.find(a => (row.description || '').includes(a.mask));
+      if (source && destination) boundedLines.set(`${formatMinor(row.cents)} in your account ending ${source.mask}, bank text: "${row.description}"; destination your account ending ${destination.mask}.`, [row.cents]);
+    }
+    for (const line of boundedLines.keys()) exactMoneyLines.add(line);
+  }
+
   if (balanceContract && ledger.observation) {
     check('pending-treatment', ledger.observation.pending?.treatment === 'not_included');
 
@@ -880,7 +913,8 @@ export function scoreObservation(observation, input, gold = goldFor(input.id)) {
     ].some(pattern => new RegExp(pattern).test(line)) || breakdownLines.includes(line);
     if (!allowedMoneyLine) check(`unreviewed-money-prose:${sha(line)}`, false, 'unsupported_claim');
     let expected = null;
-    if (gold.payment_exclusion_ids && line.startsWith(paymentLine)) expected = [paymentMinor];
+    if (boundedLines.has(line)) expected = boundedLines.get(line);
+    else if (gold.payment_exclusion_ids && line.startsWith(paymentLine)) expected = [paymentMinor];
     else if (expense) {
       if (line.startsWith('Unconfirmed categories:')) expected = [total(retainedIds.map(id => rows.get(id).cents))];
       else if (/^Recorded outgoing subtotal:/.test(line) && uncertainExpense) expected = [retainedTotal];

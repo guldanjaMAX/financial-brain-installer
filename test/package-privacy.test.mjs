@@ -432,6 +432,7 @@ const expected = [
   "connectors/zoom.mjs",
   "connectors/whatsapp.mjs",
   "docs/ARCHITECTURE.md",
+  "docs/drive-incremental-recovery.md",
   "docs/account-kind-reviews.md",
   "docs/COMPETITIVE-BENCHMARK.md",
   "docs/CONNECTOR-BACKLOG.md",
@@ -550,9 +551,15 @@ const expected = [
   "operations/upgrade-bookmark.mjs",
   "operations/daily-refresh-plan.mjs",
   "operations/daily-refresh-run.mjs",
+  "operations/bank-feed-daily.mjs",
+  "operations/bank-feed-status.mjs",
   "operations/daily-refresh-scheduler.mjs",
   "operations/windows-task-contract.mjs",
   "operations/windows-update-bridge.mjs",
+  // Current-user sign-in console: fixed helper, non-secret profile argv,
+  // allowlisted environment, no captured output, no manifest or token handoff.
+  "operations/windows-update-signin.mjs",
+  "operations/windows-update-signin-cli.mjs",
   "operations/feed-folders.mjs",
   "operations/wrangler-oauth.mjs",
   "operations/wrangler-runtime-contract.mjs",
@@ -653,6 +660,9 @@ const expected = [
   "operations/private-update-command.mjs",
   "operations/private-update-offer.mjs",
   "operations/private-update-package.mjs",
+  "operations/private-update-recovery.mjs",
+  "operations/private-update-runtime.mjs",
+  "operations/private-update-swap.mjs",
   // Claude Code connection discovery and the structural trust gate for
   // connections an earlier installer wrote (0.4.6 up to the running version).
   // They read .claude.json and installer package metadata only; no credential.
@@ -661,6 +671,9 @@ const expected = [
   // Shared byte contract for a normalized install-state prefix plus one direct
   // D1 data export. It owns no credential, provider, or command transport.
   "operations/recovery-content-fingerprint.mjs",
+  // Provider-neutral encrypted multipart recovery. No transport or key lookup.
+  "operations/recovery-multipart.mjs",
+  "operations/recovery-sql-parts.mjs",
   "operations/rename-retry.mjs",
   // Reviewed v0.4.8 campaign contracts. Seven are dependency-free or pure
   // hash/shape validators. The teardown D1 proof accepts only an injected,
@@ -717,6 +730,11 @@ const expected = [
   "worker/src/lib/version.js",
   // Release-line scripts, now shipped because scripts/ is in package files.
   "scripts/check-install-page-version.mjs",
+  "scripts/check-private-offer-release-key.mjs",
+  // Public metadata authoring only; all private-key transport stays in the stdin signer.
+  "scripts/create-unsigned-private-offer.mjs",
+  // Stdin-only maintainer signer; no key generation, key files or credential lookup.
+  "scripts/sign-private-offer.mjs",
   // Dependency-free literal oracle for the two public supervised-install guides.
   // It performs no I/O and carries only reviewed public URLs, no credential or owner data.
   "scripts/supervised-install-guide-oracle.mjs",
@@ -813,6 +831,10 @@ const expected = [
   "migrations/d1/0059_document_family_index.sql",
   "migrations/d1/0060_simplefin_account_identity.sql",
   "migrations/d1/0061_balance_position_evidence.sql",
+  "migrations/d1/0062_fin_expectations.sql",
+  "migrations/d1/0063_bank_feed_health.sql",
+  "migrations/d1/0064_plaid_retry_floor.sql",
+  "migrations/d1/0065_retained_ingest_stages.sql",
   "operations/bank-access-wrapping-key.mjs",
   // Generic owner-present bank secret custody. Reviewed 2026-09-17: takes only
   // injected list, write, and hidden-prompt callbacks; refuses ambient values
@@ -960,6 +982,7 @@ const expected = [
   "worker/src/lib/app-page.js",
   "worker/src/lib/auth-store.js",
   "worker/src/lib/bank-feed.js",
+  "worker/src/lib/bank-feed-health.js",
   "worker/src/lib/simplefin-bank-feed.js",
   "worker/src/lib/simplefin-ledger.js",
   "worker/src/lib/simplefin-coverage-review.js",
@@ -970,6 +993,8 @@ const expected = [
   "worker/src/lib/custom-api-visibility.js",
   "worker/src/lib/diagnose-scan.js",
   "worker/src/lib/document-access.js",
+  // Final source-attributed document answer boundary and authorized remainder reads.
+  "worker/src/lib/document-answer.js",
   "worker/src/lib/evidence-authority.js",
   "worker/src/lib/evidence-lineage.js",
   "worker/src/lib/ingest-envelope.js",
@@ -991,7 +1016,54 @@ const expected = [
   "worker/src/lib/fin-d1.js",
   "worker/src/lib/ledger-question.js",
   "worker/src/lib/ledger-reader.js",
+  "worker/src/lib/clean-money.js",
+  // Reviewed pure platform identity/types and request-local transfer proof.
+  "worker/src/lib/money-platform.js",
+  "worker/src/lib/clean-money-transfers.js",
+  // Pure request-local contributions, frozen periods and portable medians.
+  "worker/src/lib/clean-money-contributions.js",
+  // Pure request-local money-type evidence decisions; no instance state.
+  "worker/src/lib/clean-money-evidence.js",
+  "worker/src/lib/clean-money-risk.js",
+  // Pure request-local repayment contributions; no instance state.
+  "worker/src/lib/clean-interest.js",
+  "worker/src/lib/clean-repayments.js",
+  // Pure request-local loan-proceeds movement decisions; no instance state.
+  "worker/src/lib/clean-money-loan-proceeds.js",
+  "worker/src/lib/money-loan-proceeds-confidence.js",
+  // Pure request-local balance evidence checks; no instance state.
+  "worker/src/lib/money-balance-evidence.js",
+  "worker/src/lib/money-balance-recompute.js",
+  // Pure request-local duplicate decisions, history holes and pending
+  // projection; read-only SQL fragments, no instance state.
+  "worker/src/lib/clean-money-duplicates.js",
+  "worker/src/lib/money-history.js",
+  "worker/src/lib/money-pending.js",
+  "worker/src/lib/clean-money-period.js",
+  "worker/src/lib/money-query-median.js",
+  "worker/src/lib/money-query-budget.js",
+  "worker/src/lib/money-handoff.js",
+  // Public ordered columns and pure SQLite work estimates; no instance state.
+  "worker/src/lib/money-query-columns.js",
+  "worker/src/lib/money-query-contract.js",
+  "worker/src/lib/money-query-plan.js",
+  "worker/src/lib/money-query.js",
+  "worker/src/lib/money-query-quality.js",
+  "worker/src/lib/money-query-risk.js",
+  "worker/src/lib/money-query-confidence.js",
+  "worker/src/lib/money-query-overlap.js",
+  "worker/src/lib/money-confidence.js",
+  "worker/src/lib/money-overview.js",
+  "worker/src/lib/money-tools/_expected-income-helpers.js",
+  "worker/src/lib/money-tools/expected_income.js",
+  "worker/src/lib/money-tools/_coverage-helpers.js",
   "worker/src/lib/ledger-answer.js",
+  "worker/src/lib/document-answer-context.js",
+  "worker/src/lib/document-answer-provenance.js",
+  "worker/src/lib/document-answer-reading.js",
+  "worker/src/lib/ledger-reading-qualification.js",
+  "worker/src/lib/ledger-refund-wording.js",
+  "worker/src/lib/ledger-activity-reading.js",
   "worker/src/lib/ledger-balance-compound.js",
   "worker/src/lib/ledger-monthly.js",
   "worker/src/lib/ledger-owner-scope.js",
@@ -1005,6 +1077,7 @@ const expected = [
   "worker/src/lib/ledger-intent-calendar.js",
   "worker/src/lib/ledger-intent-scope.js",
   "worker/src/lib/ledger-analysis.js",
+  "worker/src/lib/money-analysis.js",
   "worker/src/lib/vendor-aliases.js",
   "worker/src/lib/ledger-refund-basis.js",
   "worker/src/lib/fin-import.js",
@@ -1054,6 +1127,24 @@ const expected = [
   "worker/src/lib/supabase.js",
   "worker/src/lib/vtt.js",
   "worker/src/lib/zoom.js",
+  // Reviewed sync entry boundaries, durable part planning and rollback proofs.
+  // Instance identities and provider state remain injected, never packaged.
+  "docs/gmail-bounded-rollout.md",
+  "operations/drive-incremental.mjs",
+  "operations/gmail-batch-window.mjs",
+  "operations/gmail-entry.mjs",
+  "operations/gmail-part-progress.mjs",
+  "operations/rollback-cutover.mjs",
+  "operations/rollback-writer-proof.mjs",
+  "worker/src/lib/drive-family.js",
+  "worker/src/lib/retained-ingest.js",
+  // Reviewed connector restore proofs and composed newest-document/High evidence modules.
+  "operations/ingest-part-proof.mjs",
+  "worker/src/lib/ingest-part-proof.js",
+  "worker/src/lib/document-read-coverage.js",
+  "worker/src/lib/document-successors.js",
+  "worker/src/lib/money-query-certificate.js",
+  "worker/src/lib/money-type-certificate.js",
 ];
 const allowed = new Set(expected);
 const missing = SCAN_ONLY ? [] : expected.filter((path) => !files.includes(path));

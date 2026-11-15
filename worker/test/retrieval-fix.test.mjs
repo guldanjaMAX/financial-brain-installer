@@ -1,3 +1,4 @@
+import { assertDocumentAnswer } from "./helpers/document-answer-contract.mjs";
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -93,14 +94,14 @@ function fixture(rows, { select, draft = 'The recorded setting is enabled [1].',
   assert.deepEqual(result.results.map(r => r.source_id), ['canonical', 'next']);
  });
  test('a missing exact name expands only to one metadata spelling', async () => {
-  const rows = [row('record', 'Zorvyn project notes', 'Review the launch checklist.', {
-    authority_meta: JSON.stringify({ attendees: ['Zorvyn'] }),
+  const rows = [row('record', 'Vendar project notes', 'Review the launch checklist.', {
+    authority_meta: JSON.stringify({ attendees: ['Vendar'] }),
   })];
-  const { env, calls } = fixture(rows, { select: terms => /Zorvyn/i.test(terms) ? rows : [] });
-  const result = await search(env, { query: 'What was agreed with Zorvan?', limit: 5 });
+  const { env, calls } = fixture(rows, { select: terms => /Vendar/i.test(terms) ? rows : [] });
+  const result = await search(env, { query: 'What was agreed with Vendor?', limit: 5 });
   assert.ok(calls.keyword.length, 'exact lookup reached');
   assert.equal(result.results[0]?.source_id, 'record');
-  assert.equal(result.results[0]?.query_variant?.matched, 'Zorvyn');
+  assert.equal(result.results[0]?.query_variant?.matched, 'Vendar');
  });
  test('domain expansion adds a candidate lane and leaves other queries alone', async () => {
   const target = row('primary', 'Owner panel results.md', 'Panel results are recorded.');
@@ -119,7 +120,9 @@ function fixture(rows, { select, draft = 'The recorded setting is enabled [1].',
   const { think, calls } = fixture([primary], { draft: 'The current workspace setup is a docking station and external display [1].' });
   const result = await think('What is my current workspace setup?');
   assert.equal(calls.verifier, 1, 'verifier decision reached');
-  assert.match(result.answer || '', /as of 2026-09-10 \(31 days old\)/i, JSON.stringify(result));
+  assertDocumentAnswer(result, { expected: 'The current workspace setup is a docking station and external display [1].', exact: true });
+  assert.match(result.answer, /As of 2026-09-10/);
+  assert.match(JSON.stringify(result.gaps), /31 days old/);
   assert.ok(result.gaps.some(gap => gap.type === 'stale'));
  });
  test('synthesis verifies individual cited spans and drops one unsupported item', async () => {
@@ -166,13 +169,13 @@ test('family selection keeps newest canonical, separates sources and leaves unre
 });
 
 test('exact and ambiguous names do not silently select a variant', async () => {
-  const exactRows = [row('exact', 'Zorvan review', 'Zorvan review')];
+  const exactRows = [row('exact', 'Vendor review', 'Vendor review')];
   const exact = fixture(exactRows);
-  assert.equal((await search(exact.env, { query: 'Review Zorvan', limit: 5 })).results.length, 1);
+  assert.equal((await search(exact.env, { query: 'Review Vendor', limit: 5 })).results.length, 1);
   assert.equal(exact.calls.metadata, 0);
-  const ambiguousRows = [row('a', 'Zorvyn review', ''), row('b', 'Zorven review', '')];
+  const ambiguousRows = [row('a', 'Vendar review', ''), row('b', 'Vender review', '')];
   const ambiguous = fixture(ambiguousRows, { select: () => [] });
-  const result = await search(ambiguous.env, { query: 'Review Zorvan', limit: 5 });
+  const result = await search(ambiguous.env, { query: 'Review Vendor', limit: 5 });
   assert.ok(ambiguous.calls.metadata > 0, 'ambiguity decision reached metadata');
   assert.equal(result.results.length, 0);
   const lower = fixture([], { select: () => [] });
@@ -189,16 +192,20 @@ test('dated status refuses unreliable evidence and surfaces a newer conflict', a
   });
   const draft = 'The current workspace setup is a docking station and external display [1].';
   const good = fixture([primary], { draft });
-  assert.match((await good.think('What is my current workspace setup?')).answer || '', /31 days old/);
+  const green = await good.think('What is my current workspace setup?');
+  assertDocumentAnswer(green, { expected: draft, exact: true });
+  assert.match(JSON.stringify(green.gaps), /31 days old/);
   const untrusted = fixture([{ ...primary, text_source: 'ocr', text_reliable: 0 }], { draft });
-  assert.equal((await untrusted.think('What is my current workspace setup?')).answer, null);
+  const partial = await untrusted.think('What is my current workspace setup?');
+  assertDocumentAnswer(partial, { provisional: true, exact: true });
+  assert.ok(partial.confidence.basis.some(reason => /reliable|partial|text/i.test(reason)));
   assert.equal(untrusted.calls.verifier, 1);
   const conflict = row('conflict', 'Fixture Owner workspace change.md', 'The external display was removed.', { document_date: Date.parse('2026-10-01') });
   const checked = fixture([primary, conflict], { draft: draft.replace('[1]', '[2]'), verdict: { supported: true, complete: true, evidence: [2],
     conflicts: [{ n: 1, quote: 'The external display was removed.' }] } });
   const result = await checked.think('What is my current workspace setup?');
   assert.equal(checked.calls.verifier, 1);
-  assert.equal(result.answer, null);
+  assertDocumentAnswer(result, { provisional: true, exact: true });
   assert.ok(result.gaps.some(gap => gap.type === 'status_conflict'));
   assert.ok(checked.calls.prompts.some(prompt => prompt.includes('The external display was removed.')));
 });
@@ -213,12 +220,14 @@ test('synthesis requires each span in its own citation and keeps non-list answer
   const result = await checked.think('What is left for Workspace?');
   assert.ok(checked.calls.verifier > 0);
   assert.match(result.answer || '', /Prepare the launch checklist/);
-  assert.doesNotMatch(result.answer || '', /Review the access roles/);
-  assert.equal(result.citations.length, 1);
+  assertDocumentAnswer(result, { provisional: true, exact: true });
+  assert.match(result.answer, /record .* says: .*Review the access roles/);
+  assert.deepEqual(result.evidence_gate.evidence, [1], 'the rejected draft item remains unapproved');
+  assert.equal(result.citations.length, 2);
   const control = fixture(rows, { draft: 'Prepare the launch checklist [1].' });
   const ordinary = await control.think('What was recorded for Workspace?');
   assert.equal(control.calls.verifier, 1);
-  assert.equal(ordinary.answer, 'Prepare the launch checklist [1].');
+  assertDocumentAnswer(ordinary, { expected: 'Prepare the launch checklist [1].', exact: true });
 });
 
 test('an already dated status gets an age, while a historical question is unchanged', async () => {
@@ -239,8 +248,10 @@ test('rejecting every synthesis item remains failed verification, never a claim 
   const result = await checked.think('List all the workspace tasks');
   assert.equal(checked.calls.verifier, 1);
   assert.equal(result.results.length, 1);
-  assert.equal(result.answer, null);
-  assert.equal(result.status, 'answer_withheld');
-  assert.equal(result.citations.length, 0);
-  assert.match(result.notice || '', /evidence check did not support the draft/i);
+  assertDocumentAnswer(result, { provisional: true, exact: true });
+  assert.equal(result.status, undefined);
+  assert.equal(result.citations.length, 1);
+  assert.deepEqual(result.evidence_gate.evidence, []);
+  assert.doesNotMatch(result.answer, /Close the project/);
+  assert.match(result.answer, /Prepare the checklist/);
 });

@@ -4,7 +4,113 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.28 (2026-11-15)
+
+- **Drive and Gmail sync finish and resume safely.** Refreshes save confirmed
+  progress and retry unfinished work after an interruption. Routine sync never
+  deletes your stored records; removal decisions wait for a separate review.
+  Check source status for unfinished work, skipped items and the dates covered.
+- **Ask more money questions in your own words.** Get the best answer the
+  available data supports, with honest confidence. High requires proof from
+  the records; below 100%, the answer explains why and what is missing. Check
+  the number and period first, covered accounts and dates, missing or repeated
+  dollars, likely estimates, and how to verify the answer.
+- **Backups for big Brains.** Large backups can be split into checked parts so
+  recovery can handle a larger collection. Keep the complete backup set and
+  check its verification receipt before relying on it for recovery.
+- **Find the newest record.** Search can put the newest reliably dated record
+  first. Check its source and date, including any warning about newer records
+  whose dates are unverified, before treating it as the current answer.
+- **Say "Update my Brain" in Claude.** Claude can guide you through checking
+  the available update and completing the approved update steps. Check the
+  reported version and source status afterwards.
+
+- Drive refresh uses bounded additions and updates from the change feed. A
+  first run without a saved token seeds one and retains existing documents.
+  Removal signals stay pending your review and cannot pause new additions.
+  Check local Drive status for the last token-check time, file counts, pending
+  decisions, and exact failed files, including files over the 8 MiB limit.
+  Deterministic size, extraction and storage-admission failures stay listed as
+  skipped items while later changes continue. A skipped update keeps the older
+  accepted text and coverage remains incomplete. Storage skips retain their
+  specific reason and recovery class. Per-file write failures stay outstanding
+  while later changes continue; unconfirmed batch transport or receipts retry
+  the saved page.
+  Interrupted replacements retain the accepted text, and damaged checkpoints
+  stop for recovery without silently skipping history. Update the paired CLI
+  and Worker before syncing. This offline candidate does not establish
+  historical backfill or live proof.
+- **Money questions get an answer with confidence.** Answers give the best
+  figure the available records support, even when history is incomplete. Each
+  answer shows a confidence word and percentage computed from the data. The
+  assistant may lower that score, never raise it. Below 100%, the answer says
+  why and what is missing. Check the period, covered accounts, possible missing
+  or double-counted dollars, likely estimates and how to verify the figure.
+- The assistant has read-only money tools to inspect recorded transactions and
+  explain its figures. Document answers say "the record says", cite the source,
+  and show confidence and gaps. Check the cited record before treating its
+  statement as a current fact.
+- The bank health screen shows connection and history status, with an overdue
+  warning when a feed needs attention. SimpleFIN and Plaid history catch-up no
+  longer leaves the affected older activity behind. Check the dates loaded for
+  each account and compare them with your bank statement.
+- Windows self-update fixes help the installed copy finish replacing its files
+  and resume correctly. After an approved update, check the installed version
+  and bank health screen.
+
+**Known limits:** SimpleFIN evening purchases can appear on the next UTC day.
+Acceptance checks still trust the Worker's own explanation fields; they do not
+independently prove those explanations. Three audit answers still have lower
+confidence. Review their stated gaps and cited records before relying on them.
+This entry supplies no release approval or new field evidence.
+
+### This release does NOT cover
+
+- Bank connections whose stored keys cannot be read still need reconnecting.
+- Some answers say Medium or Low more often than ideal until the next update.
+  Read the stated gaps and check the cited records before relying on a figure.
+- QuickBooks direct connection is pending Intuit approval.
+- Windows x64 is the only supported Windows runtime in this release. Windows
+  ARM64 ships unproven.
+- Bank breadth ships unproven. Bank invitations stay closed.
+
 ## 0.4.27 (2026-11-10)
+
+- Card and loan repayment readings identify the destination and separate money
+  sent from credits received. Nearby repeated payments are counted once as a
+  likely match, with the possible difference in dollars and lowered confidence.
+  Moving debt between cards or loans is separate from repayment. Check both
+  account endings, posting dates and the bank or lender statement links.
+  A question about one card selects that destination; a card-only reading uses
+  credits received. Proposed opening dates no longer reduce missing coverage.
+  A generic bank payment that matches a card or loan credit up to ten days
+  later stays in spending, marked as a possible card payment with its dollars.
+
+- Money SQL flags deposits that may be loans, owner funding, processor advances
+  or vendor credits. It recognizes more returned-payment and bounced-deposit
+  wordings and keeps returned deposits in signed income totals. Debt-payment
+  wording and stated loan splits show likely dollars with lower confidence.
+  Check the named rows against the bank and lender statements.
+
+- Future deposit estimates keep your requested payer and accounts, and pending
+  deposits leave out pending purchases. Open-ended future dates show an estimate
+  through the end of the first requested month. Check the stated dates, payer,
+  account coverage and repeating payments behind each estimate.
+
+- Money questions using “before” or “after” show the available date bounds.
+  Future activity gets a labeled estimate from repeating history. Top vendors,
+  pending items and identifiable loan payments show their own figures; requests
+  comparing personal and business keep both sides. Check the stated dates,
+  account coverage and projection basis before relying on the amounts.
+- Money SQL accepts ordinary SQLite quoting, comments, a final semicolon, JSON
+  rows and harmless CTE names. Read permissions now follow SQLite compilation
+  rather than words in your query. Check the returned rows and coverage; the
+  transaction input budget and private-table protections remain in place.
+
+- Money totals keep bank bonuses, interest and cashback as income, and separate
+  uniquely identified payments to your own card or loan from spending even when
+  the other feed is missing. Uncertain money classifications are labeled as
+  estimates. Check the listed payment rows, account endings and coverage gaps.
 
 - **Ask more money questions in your own words.** Supported date questions keep
   their requested period; unsupported or conflicting restrictions ask for

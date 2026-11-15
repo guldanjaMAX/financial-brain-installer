@@ -370,8 +370,8 @@ test("brain ask prints a safe ledger gap code and never labels a refusal high-co
     confidence: { percent: 80, band: "high", basis: ["cited ledger row"] },
     evidence_gate: { supported: true, complete: true, reason: "read from covered ledger rows" },
   });
-  assert.match(answered, /Confidence: 80% \(high\)/,
-    "a supported cited answer remains the green high-confidence control");
+  assert.match(answered, /Confidence: Medium \(80%\).*Why: cited ledger row\. Missing:/,
+    "the computed percent sets the band and retains the evidence gap");
 });
 
 class Element {
@@ -387,15 +387,14 @@ async function renderConnectionStatus(statusBody) {
   const { html } = simpleFinConnectPageHtml({});
   const script = html.match(/<script>([\s\S]*?)<\/script>/)?.[1];
   assert.ok(script, "the owner page script was found");
-  const elements = new Map([
-    "claim", "claim-button", "claim-status", "token", "entity-create", "entity-name", "entity-kind",
-    "entity-status", "entity-details", "account-status", "accounts", "refresh", "connections",
-  ].map(id => [id, new Element(id === "entity-kind" ? "select" : "div")]));
+  const elements = new Map([...html.matchAll(/\bid="([^"]+)"/g)]
+    .map(([, id]) => [id, new Element(id === "entity-kind" ? "select" : "div")]));
   elements.get("entity-name").value = "";
   elements.get("entity-kind").value = "business";
   const calls = [];
   const response = body => ({ ok: true, async json() { return body; } });
   const context = {
+    URLSearchParams, window: { location: { search: "" } },
     document: {
       getElementById: id => elements.get(id),
       createElement: tag => new Element(tag),

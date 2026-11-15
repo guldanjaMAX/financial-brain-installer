@@ -47,9 +47,11 @@ function connectorDb() {
           return null;
         },
         async all() {
-          if (/FROM chunks WHERE doc_uid/.test(sql)) {
+          if (/FROM chunks WHERE doc_uid|FROM chunks c JOIN documents d/.test(sql)) {
             calls.chunkQueries++;
-            return { results: tables.chunks.filter((c) => c.doc_uid === bound[0]) };
+            const rows=tables.chunks.filter(c=>c.doc_uid===bound[0]);
+            return {results:rows.map((row,i)=>({...row,chunk_ix:i,total_chunks:rows.length,
+              content_hash:tables.documents.get(bound[0])?.content_hash}))};
           }
           // A session now names the passkey device behind it, so resolving one
           // reads the device list. Without this branch every owner cookie
@@ -196,7 +198,7 @@ test("the full connector journey, register through revocation", async () => {
   const tools = await (await worker.fetch(jsonPost("/mcp", {
     jsonrpc: "2.0", id: 2, method: "tools/list",
   }, bearer), testEnv)).json();
-  assert.deepEqual(tools.result.tools.map((t) => t.name), ["ask", "search", "fetch"]);
+  assert.deepEqual(tools.result.tools.map((t) => t.name), ["brain_money_query", "brain_money_overview", "brain_money_guide", "ask", "search", "fetch"]);
   const fetchTool = tools.result.tools.find((tool) => tool.name === "fetch");
   assert.deepEqual(fetchTool.inputSchema.properties.offset, {
     type: "integer",
@@ -512,7 +514,7 @@ test("structured-contributor can correct the brain and the contract still applie
   const listed = await (await handleMcp({ BRAIN_NAME: "fixture" },
     jsonPost("/mcp", { jsonrpc: "2.0", id: 9, method: "tools/list" }), url, deps)).json();
   assert.deepEqual(listed.result.tools.map((t) => t.name),
-    ["ask", "search", "fetch", "remember"]);
+    ["brain_money_query", "brain_money_overview", "brain_money_guide", "ask", "search", "fetch", "remember"]);
   const remember = listed.result.tools.find((tool) => tool.name === "remember");
   assert.equal(remember.annotations.readOnlyHint, false);
   assert.equal(remember.annotations.destructiveHint, false);
@@ -601,7 +603,7 @@ test("a read-only grant is neither shown nor allowed the write tools", async () 
   const url = new URL(ORIGIN + "/mcp");
   const listed = await (await handleMcp({ BRAIN_NAME: "fixture" },
     jsonPost("/mcp", { jsonrpc: "2.0", id: 1, method: "tools/list" }), url, deps)).json();
-  assert.deepEqual(listed.result.tools.map((t) => t.name), ["ask", "search", "fetch"],
+  assert.deepEqual(listed.result.tools.map((t) => t.name), ["brain_money_query", "brain_money_overview", "brain_money_guide", "ask", "search", "fetch"],
     "advertising a tool the token cannot use teaches the model to fail in front of the owner");
 
   for (const name of ["remember", "forget"]) {

@@ -78,8 +78,8 @@ export class DriveError extends Error {
 
 function googlePageToken(value, lane, { required = false } = {}) {
   if (value == null && !required) return null;
-  const token = typeof value === "string" ? value.trim() : "";
-  if (!token || token.length > GOOGLE_PAGE_TOKEN_MAX_LENGTH) {
+  const token = typeof value === "string" ? value : "";
+  if (!token || token !== token.trim() || token.length > GOOGLE_PAGE_TOKEN_MAX_LENGTH) {
     throw new DriveError(`Google Drive returned an invalid ${lane} page token`, 200, "invalidPageToken");
   }
   return token;
@@ -116,6 +116,27 @@ export function isPermanentFileFailure(error) {
   return PERMANENT_FILE_REASONS.has(String(error.reason || ""));
 }
 
+// Bound bytes before JSON parsing. Oversized Gmail history switches to its
+// checkpointed mailbox walk instead of expanding or replaying an unbounded page.
+async function boundedJsonResponse(response, limit) {
+  if (!response.body?.getReader) throw new DriveError("bounded response stream unavailable", 200, "responseLimit");
+  const reader = response.body.getReader();
+  const chunks = []; let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > limit) {
+        await reader.cancel();
+        throw new DriveError("Google response exceeded the bounded read budget", 200, "responseLimit");
+      }
+      chunks.push(value);
+    }
+    return JSON.parse(Buffer.concat(chunks, size).toString("utf8"));
+  } finally { reader.releaseLock(); }
+}
+
 /**
  * One API call with the retry policy Google actually requires.
  *
@@ -128,17 +149,27 @@ export async function api(getAccessToken, path, {
   raw = false,
   attempts = 5,
   requestTimeoutMs = 60_000,
+  deadlineAt = Infinity,
+  now = Date.now,
+  maxResponseBytes = null,
   fetchImpl = fetch,
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
 } = {}) {
+  const remaining = () => {
+    const ms = deadlineAt - now();
+    if (ms <= 0) throw new DriveError("Google read deadline reached; resume the saved window", 0, "requestDeadline");
+    return ms;
+  };
+  const pauseRetry = async ms => { await sleep(Math.min(ms, remaining())); remaining(); };
   let lastErr;
   let forceRefresh = false;
   let authRefreshAttempted = false;
   const totalAttempts = Math.max(1, Number(attempts) || 1);
   for (let i = 0; i < totalAttempts; i++) {
+    remaining();
     let token;
     try {
-      token = await getAccessToken({ force: forceRefresh });
+      token = await getAccessToken({ force: forceRefresh, deadlineAt, now });
       if (forceRefresh) {
         authRefreshAttempted = true;
         forceRefresh = false;
@@ -148,6 +179,7 @@ export async function api(getAccessToken, path, {
       // are fatal immediately, while a transport/provider outage is retried and
       // remains fatal after the retry budget. Neither is a document skip.
       if (error?.needsReauth) throw error;
+      remaining();
       lastErr = new DriveError(
         `access token could not be obtained: ${errorMessage(error)}`,
         0,
@@ -155,7 +187,7 @@ export async function api(getAccessToken, path, {
         { retryable: true, cause: error },
       );
       if (i + 1 >= totalAttempts) throw lastErr;
-      await sleep(retryDelay(i));
+      await pauseRetry(retryDelay(i));
       continue;
     }
 
@@ -164,16 +196,20 @@ export async function api(getAccessToken, path, {
 
     let res;
     try {
-      const signal = Number(requestTimeoutMs) > 0 && typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
-        ? AbortSignal.timeout(Number(requestTimeoutMs))
+      const timeout = Math.max(1, Math.min(Number(requestTimeoutMs) || 60_000, remaining()));
+      const signal = Number(timeout) > 0 && typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
+        ? AbortSignal.timeout(timeout)
         : undefined;
       res = await fetchImpl(url, { headers: { authorization: `Bearer ${token}` }, ...(signal ? { signal } : {}) });
       if (res.ok) {
         // Reading a response body can fail or hang independently of receiving
         // its headers. Keep it inside the same retry boundary as fetch itself.
-        return raw ? new Uint8Array(await res.arrayBuffer()) : await res.json();
+        return raw ? new Uint8Array(await res.arrayBuffer())
+          : maxResponseBytes !== null ? await boundedJsonResponse(res, maxResponseBytes) : await res.json();
       }
     } catch (error) {
+      if (error?.reason === "responseLimit") throw error;
+      remaining();
       lastErr = new DriveError(
         `Google API request or response failed: ${errorMessage(error)}`,
         0,
@@ -181,11 +217,14 @@ export async function api(getAccessToken, path, {
         { retryable: true, cause: error },
       );
       if (i + 1 >= totalAttempts) throw lastErr;
-      await sleep(retryDelay(i));
+      await pauseRetry(retryDelay(i));
       continue;
     }
 
-    const body = await res.json().catch(() => ({}));
+    const body = await (maxResponseBytes !== null ? boundedJsonResponse(res, maxResponseBytes) : res.json()).catch(error => {
+      if (error?.reason === "responseLimit") throw error;
+      remaining(); return {};
+    });
     const reason = body?.error?.errors?.[0]?.reason || body?.error?.status || "";
     // One 401 gets a forced access-token refresh. A second 401 is not a file
     // quality problem; it is a broken connection and must abort the sync.
@@ -206,7 +245,7 @@ export async function api(getAccessToken, path, {
     if (i + 1 >= totalAttempts) throw lastErr;
     // Exponential with jitter. Google's own guidance, and without the jitter a
     // large parallel walk re-collides on every retry.
-    await sleep(retryDelay(i));
+    await pauseRetry(retryDelay(i));
   }
   throw lastErr;
 }
@@ -634,7 +673,96 @@ export async function startPageToken(getAccessToken, opts = {}) {
     search: { supportsAllDrives: true },
     ...opts,
   });
-  return r.startPageToken;
+  return googlePageToken(r.startPageToken, "start", { required: true });
+}
+
+/** One bounded changes page. The consumer owns durable page settlement. */
+export async function listChangePage(getAccessToken, pageToken, { pageSize = 50, ...opts } = {}) {
+  if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) {
+    throw new TypeError("Drive incremental pageSize must be from 1 through 100");
+  }
+  const token = googlePageToken(pageToken, "changes", { required: true });
+  const page = await api(getAccessToken, "/changes", {
+    ...opts,
+    search: { pageToken: token, pageSize, supportsAllDrives: true,
+      includeItemsFromAllDrives: true, includeRemoved: true,
+      fields: `nextPageToken,newStartPageToken,changes(fileId,removed,file(${FILE_FIELDS}))` },
+  });
+  if (!Array.isArray(page.changes) || page.changes.length > pageSize) {
+    throw new DriveError("Google Drive returned an invalid bounded changes list", 200, "invalidChangeList");
+  }
+  for (const change of page.changes) {
+    if (typeof change?.fileId !== "string" || !/^[\x21-\x7e]+$/.test(change.fileId) ||
+        change.fileId.length > 250 || (change.removed !== true &&
+          (!change.file || change.file.id !== change.fileId || (change.file.trashed !== true &&
+            (!Array.isArray(change.file.parents) || change.file.parents.length > 1))))) {
+      throw new DriveError("Google Drive returned an invalid change identity or metadata", 200, "invalidChangeList");
+    }
+  }
+  const terminal = page.newStartPageToken != null;
+  const nextToken = googlePageToken(terminal ? page.newStartPageToken : page.nextPageToken, "next changes", { required: true });
+  if ((nextToken === token && (!terminal || page.changes.length > 0)) || (terminal && page.nextPageToken != null)) {
+    throw new DriveError("Google Drive returned an ambiguous or repeated changes token", 200, "repeatedPageToken");
+  }
+  return { changes: page.changes, nextToken, terminal };
+}
+
+/** Resolve current ancestors, never trusting the old full-walk index for scope. */
+export async function changeScope(getAccessToken, file, {
+  rootFolderIds = [], includeMyDriveRootFiles = false, metadata = new Map(),
+  maxDepth = 100, opts = {},
+} = {}) {
+  if (!Number.isInteger(maxDepth) || maxDepth < 1 || maxDepth > 100) throw new TypeError("Drive ancestor depth must be from 1 through 100");
+  const unresolved = (code) => ({ unresolved: { code, reason: code === 'ancestor_depth_limit'
+    ? 'Scope could not be proved within 100 ancestors; accepted text is retained. Review the source scope before retrying.'
+    : 'A required ancestor is unavailable for this file; scope is unproved and accepted text is retained. Restore ancestor access before retrying.' } });
+  const get = async (id) => {
+    if (!metadata.has(id)) {
+      try { metadata.set(id, await getFileMetadata(getAccessToken, id, opts)); }
+      catch (error) {
+        // A provider's file-specific denial can settle this event, but auth,
+        // account policy, malformed replies and unknown transport cannot.
+        if (error instanceof DriveError && !error.retryable &&
+            ((error.status === 404 && ['', 'notFound', 'NOT_FOUND'].includes(error.reason || '')) ||
+             (error.status === 403 && PERMANENT_FILE_REASONS.has(error.reason)))) return null;
+        throw error;
+      }
+    }
+    const value = metadata.get(id);
+    if (!value?.id || (id !== "root" && value.id !== id) || value.mimeType !== FOLDER_MIME ||
+        (value.parents != null && (!Array.isArray(value.parents) || value.parents.length > 1))) {
+      throw new DriveError("Drive ancestor metadata is incomplete or mismatched", 200, "invalidAncestor");
+    }
+    return { ...value, parents: value.parents || [] };
+  };
+  const canonicalRoot = includeMyDriveRootFiles || rootFolderIds.includes("root") ? await get("root") : null;
+  if ((includeMyDriveRootFiles || rootFolderIds.includes('root')) && !canonicalRoot) return unresolved('ancestor_unavailable');
+  const roots = new Set(rootFolderIds.map((id) => id === "root" ? canonicalRoot.id : id));
+  const seen = new Set([file.id]);
+  const folders = {};
+  let id = file.parents?.[0];
+  const directRootFile = includeMyDriveRootFiles && id === canonicalRoot.id && file.mimeType !== FOLDER_MIME;
+  let inScope = directRootFile;
+  const matchedRoots = [];
+  for (let depth = 0; id; depth++) {
+    if (seen.has(id)) throw new DriveError("Drive ancestor chain is cyclic", 200, "ancestorLimit");
+    if (depth >= maxDepth) return unresolved('ancestor_depth_limit');
+    seen.add(id);
+    const parent = await get(id);
+    if (!parent) return unresolved('ancestor_unavailable');
+    if (parent.trashed) return { inScope: false, folders, rootIds: [] };
+    folders[parent.id] = { name: parent.id === canonicalRoot?.id ? "" : parent.name || "", parents: parent.parents };
+    if (roots.has(id)) { inScope = true; matchedRoots.push(id); }
+    // Continue to the highest configured ancestor to preserve exclusion paths
+    // when selected roots overlap. No subtree listing or content read occurs.
+    id = parent.parents[0];
+  }
+  if (directRootFile && !roots.has(canonicalRoot.id)) {
+    return { inScope: true, folders: { [canonicalRoot.id]: { name: "", parents: [] } }, rootIds: [] };
+  }
+  const highestRoot = matchedRoots.at(-1);
+  if (highestRoot) folders[highestRoot] = { ...folders[highestRoot], parents: [] };
+  return { inScope, folders, rootIds: matchedRoots.sort() };
 }
 
 /**

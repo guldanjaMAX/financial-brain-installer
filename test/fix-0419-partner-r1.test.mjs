@@ -831,7 +831,7 @@ test("the take-over-a-live-PID-on-identity-difference mutant is killed", async (
   const mutant = await importMutant("operations/brain-lifecycle-lock.mjs", [[
     "return live !== true || ownerIsPriorProcessWithContenderPid(owner, contenderProcessInstance);",
     "return live !== true || owner.process_instance !== contenderProcessInstance;",
-  ]], ["operations/current-user-file.mjs"]);
+  ]], ["operations/current-user-file.mjs", "operations/rename-retry.mjs"]);
   assert.throws(
     () => verifyLiveIdentityMismatchStaysBusy(mutant),
     (error) => error?.code === "ERR_ASSERTION",
@@ -885,7 +885,7 @@ test("the per-acquisition self-observation mutant is killed", async () => {
     ],
     ["process_instance: CURRENT_PROCESS_INSTANCE,", "process_instance: contenderProcessInstance(),"],
     ["const contenderInstance = CURRENT_PROCESS_INSTANCE;", "const contenderInstance = contenderProcessInstance();"],
-  ], ["operations/current-user-file.mjs"]);
+  ], ["operations/current-user-file.mjs", "operations/rename-retry.mjs"]);
   assert.throws(
     () => verifyProcessWideSelfInstance(mutant),
     (error) => error?.code === "ERR_ASSERTION",
@@ -920,7 +920,7 @@ test("the fresh-empty-as-damaged mutant is killed", async () => {
   const mutant = await importMutant("operations/brain-lifecycle-lock.mjs", [[
     "\"brain_lifecycle_busy\",\n          `the Brain lifecycle lock is being acquired.",
     "\"brain_lifecycle_unsafe\",\n          `the Brain lifecycle lock is being acquired.",
-  ]], ["operations/current-user-file.mjs"]);
+  ]], ["operations/current-user-file.mjs", "operations/rename-retry.mjs"]);
   assert.throws(
     () => verifyFreshEmptyRetry(mutant),
     (error) => error?.code === "ERR_ASSERTION",
@@ -962,7 +962,7 @@ test("the former lock-busy copy mutant is killed", async () => {
   const mutant = await importMutant("operations/brain-lifecycle-lock.mjs", [[
     "`${holderStatus} Wait for it to finish, ${busyRetryInstruction(retryCommand)}`",
     "`That process is still running. Wait for it to finish, then run brain ${operation} again.`",
-  ]], ["operations/current-user-file.mjs"]);
+  ]], ["operations/current-user-file.mjs", "operations/rename-retry.mjs"]);
   assert.throws(
     () => verifyBusyMessage(mutant),
     (error) => error?.code === "ERR_ASSERTION",

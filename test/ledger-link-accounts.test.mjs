@@ -61,7 +61,11 @@ test('R03 actual CLI: bounded refusal, preview, authentication, approval, replay
     } };
   const original = f.rows('SELECT * FROM fin_transactions'), accounts = f.rows('SELECT * FROM fin_accounts');
   const refusal = await ask(f);
-  assert.equal(refusal.answer, null); assert.equal(refusal.gaps.length, 1);
+  assert.match(refusal.answer, /^\$1,234\.50/);
+  assert.deepEqual(refusal.ledger.source_readings.map(row => row.amount_minor), [123450, 123450]);
+  assert.equal(refusal.ledger.complete, false);
+  assert.match(refusal.answer, /may be counted twice/);
+  assert.doesNotMatch(refusal.answer, /withheld|cannot|can't/i); assert.equal(refusal.gaps.length, 1);
   assert.equal(refusal.gaps[0].reason, 'ledger_account_link_required');
   const assertReviewDetail = detail => assert.deepEqual(detail.split('\n'), [
     "I can help review these records, but an import and a bank connection may describe the same account, so they stay separate: your account ending 4321.",
@@ -87,7 +91,9 @@ test('R03 actual CLI: bounded refusal, preview, authentication, approval, replay
     headers: { 'Content-Type': 'application/json', 'X-Admin-Key': f.env.ADMIN_KEY },
     body: JSON.stringify({ q: 'How much money came in September 2026?' }) }), f.env, {}).then(r => r.json());
   const routeRefusal = await think();
-  assert.equal(routeRefusal.answer, null); assert.equal(routeRefusal.gaps.length, 1);
+  assert.match(routeRefusal.answer, /^\$1,234\.50/);
+  assert.equal(routeRefusal.confidence.percent, 0);
+  assert.match(routeRefusal.confidence_text, /Why:.*Missing:/s); assert.equal(routeRefusal.gaps.length, 1);
   assert.equal(routeRefusal.code, 'ledger_account_link_required');
   const plan = await cmdLedger([...base, '--preview'], deps);
   assert.equal(plan.accounts.length, 2); assert.equal(plan.mutation_count, 0); assert.equal(plan.blocked, false);

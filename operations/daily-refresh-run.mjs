@@ -203,6 +203,7 @@ export async function runDailyRefresh({
   validatePlan = (currentPlan) => currentPlan,
   acquireLock = (options) => acquireBrainLifecycleLock(options),
   runSource,
+  runBankFeed,
   readFreshness,
   writeReceipt = () => {},
   now = () => new Date(),
@@ -308,6 +309,20 @@ export async function runDailyRefresh({
       try { return { inventory: await readFreshness(source), unavailable: false }; }
       catch { return { inventory: null, unavailable: true }; }
     };
+    if (plan.sources.some(source=>source.key==='bank_feed' && source.enabled && source.class==='server-managed')) {
+      lock.assertOwned();
+      let bankResult;
+      try { bankResult=typeof runBankFeed==='function' ? await runBankFeed() : {complete:false}; }
+      catch { bankResult={complete:false}; }
+      lock.assertOwned();
+      const receipt=Object.freeze({schema_version:1,kind:'daily_refresh_source',identity:plan.identity.id,
+        source:'bank_activity',status:bankResult.complete ? 'complete':'partial',started_at:startedAt,
+        completed_at:timestamp(now),freshness_advanced:false,reason_code:bankResult.complete ? 'bank_safety_net_checked':'bank_sync_needs_attention',
+        reason:bankResult.message || 'Bank sync needs attention. Review Access > Banks.',
+        overdue_detected:bankResult.overdue_detected || 0});
+      sourceResults.push(receipt);
+      await writeReceipt(receipt);
+    }
     const baselineObservation = await observeFreshness();
     const baseline = baselineObservation.inventory;
     for (const source of plan.sources.filter((entry) => entry.class === "held")) {
@@ -370,7 +385,32 @@ export async function runDailyRefresh({
       let outcome = "complete";
       let reason = null;
       try {
-        runResult = await runSource(source, { assertOwned: lock.assertOwned });
+        let windows = 0;
+        do {
+          runResult = await runSource(source, { assertOwned: lock.assertOwned, deadlineAt });
+          windows++;
+          lock.assertOwned();
+        } while (source.key === "gmail" && runResult?.more_history === true &&
+          windows < 32 && Date.parse(timestamp(now)) < deadlineAt);
+        if (source.key === "gmail" && runResult?.more_history === true) {
+          const receipt = Object.freeze({ schema_version: 1, kind: "daily_refresh_source",
+            identity: plan.identity.id, source: source.source_names?.[0] || source.key,
+            status: "deferred", started_at: sourceStartedAt, completed_at: timestamp(now),
+            freshness_advanced: false, more_history: true, windows_completed: windows,
+            reason_code: "gmail_continuation_budget", retry_policy: "next_scheduled_daily_run",
+            reason: "Bounded Gmail progress was saved; the next scheduled daily run resumes its checkpoint." });
+          sourceResults.push(receipt);
+          await writeReceipt(receipt);
+          continue;
+        }
+        if (source.key === "gmail" && runResult?.pending_removals > 0) {
+          const receipt = Object.freeze({ schema_version: 1, kind: "daily_refresh_source",
+            identity: plan.identity.id, source: source.source_names?.[0] || source.key,
+            status: "waiting_for_owner", started_at: sourceStartedAt, completed_at: timestamp(now),
+            freshness_advanced: false, pending_removals: runResult.pending_removals,
+            reason_code: "removal_review", reason: "Gmail additions are saved. Removals await an owner decision; run Gmail ingestion to preview exact targets." });
+          sourceResults.push(receipt); await writeReceipt(receipt); continue;
+        }
         lock.assertOwned();
         const afterObservation = await observeFreshness(source);
         const afterInventory = afterObservation.inventory;
@@ -521,9 +561,10 @@ export async function runDailyRefresh({
         });
       }
     }
-    const status = sourceResults.length === 0 || sourceResults.some((entry) => !["complete", "partial", "held", "waiting_for_owner"].includes(entry.status)) ? "failed"
+    const status = sourceResults.length === 0 || sourceResults.some((entry) => !["complete", "partial", "held", "waiting_for_owner"].includes(entry.status) &&
+      !(entry.status === "deferred" && entry.more_history === true)) ? "failed"
       : sourceResults.some(entry => entry.status === "waiting_for_owner") ? "waiting_for_owner"
-      : sourceResults.some((entry) => ["partial", "held"].includes(entry.status)) ? "partial" : "complete";
+      : sourceResults.some((entry) => ["partial", "held", "deferred"].includes(entry.status)) ? "partial" : "complete";
     const result = Object.freeze({
       schema_version: 1,
       kind: "daily_refresh",
@@ -670,8 +711,11 @@ async function executeDailyRefreshCli(path, m, options, observationStarted) {
         flags: { only: source.run_key },
         lifecycleLockHeld: true,
         allowPartialRefresh: true,
+        deferGmailRemovals: true,
+        ingestDeadlineAt: lease.deadlineAt,
         assertOwned: lease.assertOwned,
       })),
+      runBankFeed: options.runBankFeed ?? (() => brain.refreshDailyBankFeed(path)),
       readFreshness,
       writeReceipt: receiptWriter,
       now: options.now,

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 // conversion. Provider text is captured only in memory, never test output.
 export async function keywordFailureProbe(search, { query = 'payment', filters = {}, failure = null } = {}) {
   const warnings = [];
-  let calls = 0;
+  let calls = 0, recoveryCalls = 0;
   const saved = console.warn;
   console.warn = line => warnings.push(line);
   const prepare = (sql, params = []) => ({
@@ -12,6 +12,7 @@ export async function keywordFailureProbe(search, { query = 'payment', filters =
     async all() {
       if (/chunks_fts MATCH/.test(sql)) {
         calls++;
+        if (/keyword_recovery_candidates/.test(sql)) recoveryCalls++;
         if (failure) throw failure(params, sql);
         return { results: [] };
       }
@@ -23,7 +24,10 @@ export async function keywordFailureProbe(search, { query = 'payment', filters =
       { query, filters, embedding: [0.1], projectionReadiness: { ready: true }, now: 0 });
     assert.ok(calls > 0, 'real keyword SQL decision reached');
     assert.equal(warnings.length, failure ? 1 : 0, 'exact warning count at failed or healthy decision');
-    assert.equal(result.degraded_reason, failure ? 'keyword-query-failed' : null);
+    const recovered = recoveryCalls === 1;
+    assert.ok(recoveryCalls<=1,'at most one bounded recovery decision');
+    assert.equal(result.degraded_reason, failure ? recovered ? 'bounded-keyword-recovery-failed' : 'keyword-query-failed' : null);
+    if(recovered) assert.equal(result.retrieval_coverage.state,'failed','classified overload/timeout reached bounded recovery');
     return warnings.map(line => JSON.parse(line));
   } finally { console.warn = saved; }
 }

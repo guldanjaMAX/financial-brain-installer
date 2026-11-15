@@ -1,3 +1,5 @@
+// 0.4.28 owner confidence is attached after the legacy-reader seam used by this fixture.
+import { finalizeOwnerLedgerAnswer } from '../worker/src/lib/document-answer.js';
 import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
@@ -150,7 +152,11 @@ test('a null provider mask uses an exact stored label, with no inferred mask', a
   const f = seed(t);
   f.raw("UPDATE fin_accounts SET mask=NULL WHERE account_slug='debt'");
   f.raw("UPDATE fin_transactions SET description='payment to debt' WHERE txn_uid='own'");
-  assert.equal((await f.ask()).answer,null);
+  // 0.4.28 no-refusal boundary returns the observed lower bound and its unconfirmed payment.
+  const partial = await f.ask();
+  assert.match(partial.answer, /at least \$610\.00; \$400\.00 more may be a card payment/);
+  assert.equal(finalizeOwnerLedgerAnswer(partial).confidence.percent,0);
+  assert.equal(partial.evidence_gate.complete, false);
   const plan = await f.command(['--kind','loan','--preview'],'debt');
   assert.equal(plan.accounts[0].mask,null);
   await f.command(['--kind','loan','--apply','--approve',plan.plan_hash],'debt');
@@ -163,7 +169,11 @@ test('an untyped source also requires its own review before a repayment is prove
   const f = seed(t);
   f.raw("UPDATE fin_accounts SET account_kind='other',balance_role='neither' WHERE account_slug='cash'");
   await f.review();
-  assert.equal((await f.ask()).answer,null);
+  // 0.4.28 no-refusal boundary returns the observed lower bound and its unconfirmed payment.
+  const partial = await f.ask();
+  assert.match(partial.answer, /at least \$610\.00; \$400\.00 more may be a card payment/);
+  assert.equal(finalizeOwnerLedgerAnswer(partial).confidence.percent,0);
+  assert.equal(partial.evidence_gate.complete, false);
   const plan = await f.command(['--kind','checking','--preview'],'cash');
   assert.equal(plan.accounts.length,1);
   await f.command(['--kind','checking','--apply','--approve',plan.plan_hash],'cash');
@@ -379,7 +389,10 @@ test('R3 a kind review preserves an unresolved provider duplicate until independ
   assert.ok(f.calls.length > before, 'real account inventory reached');
   assert.equal(accounts.find(a => a.account_slug === 'cash-copy').account_kind, 'savings');
   const reviewed = await ask();
-  assert.equal(reviewed.answer, null);
+  // 0.4.28 duplicate-source reading answers with gaps while identity remains unresolved.
+  assert.ok(reviewed.answer.length);
+  assert.equal(finalizeOwnerLedgerAnswer(reviewed).confidence.percent,0);
+  assert.equal(reviewed.evidence_gate.complete, false);
   assert.equal(reviewed.gaps[0].reason, 'ledger_account_link_required', 'classification cannot settle identity');
   const stop = await f.command(['--revoke','--preview'], 'cash-copy');
   await f.command(['--revoke','--apply','--approve',stop.plan_hash], 'cash-copy');

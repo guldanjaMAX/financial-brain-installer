@@ -432,7 +432,10 @@ test("unsupported audit questions reach documents without reading the ledger, wi
     const body = await f.ask(question);
     const compound = ["Which account pays my car loan, and what is the balance?", "What is my car loan payment account and loan balance?"].includes(question);
     if (compound) {
-      assert.equal(body.ledger?.compound_refused, true, question);
+      // 0.4.28 Worker finalizes the unresolved compound request as a provisional document reading.
+      assert.equal(body.ledger, undefined, question);
+      assert.equal(body.answer_contract.kind,'document');
+      assert.ok(body.answer.length);assert.ok(body.confidence.percent<90);
       assert.equal(body.evidence_gate.supported, false);
       assert.equal(body.evidence_gate.complete, false);
       assert.ok(f.seen.sql.slice(before).some(sql => /FROM fin_accounts/.test(sql)), "compound account decision reached");

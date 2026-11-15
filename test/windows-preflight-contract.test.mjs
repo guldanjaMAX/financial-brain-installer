@@ -58,7 +58,7 @@ test("Windows preflight never reuses missing, malformed, or unsupported Node for
   assert.match(script, /\$nodeSupported = \$false/);
   assert.match(
     script,
-    /\$node = @\(Get-Command node -CommandType Application -ErrorAction SilentlyContinue\)\[0\]/,
+    /\$node = Get-Command node -CommandType Application -ErrorAction SilentlyContinue \| Select-Object -First 1/,
   );
   assert.match(script, /\$nodeExecutable = \$node\.Source/);
   assert.match(script, /versionMatch = \[regex\]::Match/);

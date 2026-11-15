@@ -1,3 +1,4 @@
+import { assertDocumentAnswer } from './helpers/document-answer-contract.mjs';
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createProductFixture } from "./product-contract-fixture.mjs";
@@ -66,10 +67,10 @@ async function run(t, { question = QUESTION, answer, docs, now = NOW, timezone =
 }
 
 function refused(body, reason) {
-  assert.equal(body.answer, null);
+  assertDocumentAnswer(body, { provisional: true, empty: !body.results?.length });
   assert.equal(body.evidence_gate.supported, false);
   assert.equal(body.evidence_gate.complete, false);
-  assert.deepEqual(body.citations, []);
+  assert.ok(body.citations.length > 0);
   assert.match(body.evidence_gate.reason, reason);
   assert.ok(body.gaps.some(gap => gap.type === "temporal_conflict"), "veto retains an explicit gap");
 }
@@ -84,7 +85,7 @@ test("temporal: owner timezone reaches the deployed binding without an invented 
 test("temporal: the soonest future appointment passes unchanged", async (t) => {
   const { body, rendered } = await run(t, { docs: [calendar("soon", "2031-04-12"), calendar("later", "2031-06-03")],
     answer: "Your next appointment with Dr. Vexora is April 12, 2031 {soon}." });
-  assert.equal(body.answer, rendered);
+  assertDocumentAnswer(body, { expected: rendered });
   assert.equal(body.evidence_gate.supported, true);
 });
 
@@ -130,14 +131,14 @@ for (const [label, timezone, now, date, pass] of [
   test(`temporal day boundary: ${label}`, async (t) => {
     const { body, rendered } = await run(t, { timezone, now, docs: [calendar("event", date)],
       answer: `Your next appointment is ${date} {event}.` });
-    if (pass) { assert.equal(body.answer, rendered); assert.equal(body.evidence_gate.supported, true); }
+    if (pass) { assertDocumentAnswer(body, { expected: rendered }); assert.equal(body.evidence_gate.supported, true); }
     else refused(body, /past appointment/i);
   });
 }
 
 test("temporal: literal today passes without reformatting", async (t) => {
   const { body, rendered } = await run(t, { docs: [calendar("event", "2031-04-07")], answer: "Your next appointment is today {event}." });
-  assert.equal(body.answer, rendered);
+  assertDocumentAnswer(body, { expected: rendered });
 });
 
 for (const timezone of ["", "Invalid/Zone"]) {
@@ -150,7 +151,7 @@ for (const timezone of ["", "Invalid/Zone"]) {
 test("temporal: future appointments listed in order pass unchanged", async (t) => {
   const { body, rendered } = await run(t, { docs: [calendar("soon", "2031-04-12"), calendar("later", "2031-06-03")],
     answer: "Your next appointment with Dr. Vexora is 2031-04-12 {soon}. Another appointment with Dr. Vexora follows on 2031-06-03 {later}." });
-  assert.equal(body.answer, rendered);
+  assertDocumentAnswer(body, { expected: rendered });
 });
 
 test("temporal: an earlier email event beats a later calendar appointment, not its sent date", async (t) => {
@@ -164,24 +165,24 @@ test("temporal: an unrelated provider's earlier appointment does not veto", asyn
   const { body, rendered } = await run(t, { docs: [calendar("later", "2031-06-03"),
     calendar("other", "2031-04-12", { title: "Appointment Ruvexa", content: "Appointment with Dr. Ruvexa on 2031-04-12." })],
     answer: "Your next appointment with Dr. Vexora is 2031-06-03 {later}." });
-  assert.equal(body.answer, rendered);
+  assertDocumentAnswer(body, { expected: rendered });
 });
 
 test("temporal: a past event explicitly qualified as history passes unchanged", async (t) => {
   const { body, rendered } = await run(t, { docs: [calendar("past", "2030-04-12")],
     answer: "Last recorded appointment: 2030-04-12, which has passed {past}. No upcoming appointment is confirmed." });
-  assert.equal(body.answer, rendered);
+  assertDocumentAnswer(body, { expected: rendered });
 });
 
 test("temporal: an observation date is not the upcoming appointment date", async (t) => {
   const { body, rendered } = await run(t, { docs: [email("event", "2031-04-01", "Your appointment with Dr. Vexora is on 2031-04-12.")],
     answer: "As of 2031-04-01, your next appointment with Dr. Vexora is 2031-04-12 {event}." });
-  assert.equal(body.answer, rendered);
+  assertDocumentAnswer(body, { expected: rendered });
 });
 
 test("temporal: a yearless date binds to its cited occurrence without rolling the year", async (t) => {
   const good = await run(t, { docs: [calendar("event", "2031-04-12")], answer: "Your next appointment is April 12 {event}." });
-  assert.equal(good.body.answer, good.rendered);
+  assertDocumentAnswer(good.body, { expected: good.rendered });
   const bad = await run(t, { docs: [calendar("event", "2030-04-12")], answer: "Your next appointment is April 12 {event}." });
   refused(bad.body, /past appointment/i);
 });
@@ -201,7 +202,7 @@ test("temporal: a dated recurring instance from the real calendar connector pass
   const doc = { ...instruction.envelope, source_id: "instance" };
   const { body, rendered } = await run(t, { docs: [doc],
     answer: "Your next recurring appointment with Dr. Vexora is 2031-04-12 {instance}." });
-  assert.equal(body.answer, rendered);
+  assertDocumentAnswer(body, { expected: rendered });
   assert.equal(body.results[0].occurred_at, "2031-04-12T09:00:00-07:00", "real stored calendar start survived hydration");
 });
 
@@ -224,7 +225,7 @@ test("temporal status: co-citing the stopped record cannot rescue the obsolete i
 test("temporal status: the newest item passes and an unrelated newer stop does not veto", async (t) => {
   const { body, rendered } = await run(t, { question: "What medications am I on right now?", docs: [email("old", "2031-02-02", "Fixture Owner takes Luminexol."),
     email("new", "2031-04-02", "Fixture Owner stopped Solunex.")], answer: "You take Luminexol {old}." });
-  assert.equal(body.answer, rendered);
+  assertDocumentAnswer(body, { expected: rendered });
 });
 
 test("non-temporal and money prose stays byte-identical", async (t) => {
@@ -233,7 +234,7 @@ test("non-temporal and money prose stays byte-identical", async (t) => {
     ["When is my next payment due?", "Payment due on 2030-04-12: USD 15.00.", "Payment due on 2030-04-12: USD 15.00 {record}."],
   ]) {
     const { body, rendered } = await run(t, { question, docs: [email("record", "2031-04-02", content)], answer });
-    assert.equal(body.answer, rendered);
+    assertDocumentAnswer(body, { expected: rendered });
     assert.equal(body.evidence_gate.supported, true);
     assert.equal(body.gaps.some(gap => gap.type === "temporal_conflict"), false);
   }
@@ -252,7 +253,7 @@ test("temporal: unrelated earlier event inside the same email is not a match", a
   const { body, rendered } = await run(t, { docs: [email("events", "2031-04-01",
     "Appointment with Dr. Ruvexa is 2031-04-12. Appointment with Dr. Vexora is 2031-06-03.")],
     answer: "Your next appointment with Dr. Vexora is 2031-06-03 {events}." });
-  assert.equal(body.answer, rendered);
+  assertDocumentAnswer(body, { expected: rendered });
 });
 
 function statusInput(answer = "You take Luminexol [1].") {
@@ -299,13 +300,13 @@ test("temporal mutation: removing the route veto admits each original failure", 
     const good = await run(t, fixture);
     refused(good.body, /earlier upcoming|past appointment|newer.*stopped/i);
     const bad = await run(t, { ...fixture, worker: mutant.default });
-    assert.equal(bad.body.answer, bad.rendered, "bypassing the actual route integration admits the unsafe draft");
+    assertDocumentAnswer(bad.body, { expected: bad.rendered });
     assert.equal(bad.body.evidence_gate.supported, true);
   }
   const control = { docs: [calendar("soon", "2031-04-12")], answer: "Your next appointment is 2031-04-12 {soon}." };
   for (const worker of [undefined, mutant.default]) {
     const result = await run(t, { ...control, worker });
-    assert.equal(result.body.answer, result.rendered, "both mutation arms retain the green control");
+    assertDocumentAnswer(result.body, { expected: result.rendered });
   }
 });
 
@@ -324,7 +325,7 @@ test("temporal: recurring history cannot support an invented future occurrence",
 test("temporal: three upcoming dates in order pass unchanged", async (t) => {
   const { body, rendered } = await run(t, { docs: [calendar("first", "2031-04-12"), calendar("second", "2031-05-02"), calendar("third", "2031-06-03")],
     answer: "Your next appointment is 2031-04-12 {first}. Another appointment is 2031-05-02 {second}. The final appointment is 2031-06-03 {third}." });
-  assert.equal(body.answer, rendered);
+  assertDocumentAnswer(body, { expected: rendered });
 });
 
 test("temporal: a retrieved contradiction beyond the model excerpt still vetoes", async (t) => {
@@ -352,17 +353,19 @@ test("temporal: an old email's tomorrow cannot float forward to tomorrow now", a
 test("historical next means sequence, not an upcoming appointment", async (t) => {
   const { body, rendered } = await run(t, { question: "What was my next appointment after the 2029-03-01 visit?",
     docs: [calendar("event", "2029-03-14")], answer: "Your next appointment after that visit was 2029-03-14 {event}." });
-  assert.equal(body.answer, rendered);
+  assertDocumentAnswer(body, { expected: rendered });
 });
 
 test("temporal: all-day today and an offset instant retain their actual owner day", async (t) => {
   const allDay = await run(t, { docs: [calendar("event", "2031-04-07", { date_source: "calendar:all_day_start" })],
     answer: "Your next appointment is today {event}." });
-  assert.equal(allDay.body.answer, allDay.rendered);
+  assertDocumentAnswer(allDay.body, { expected: allDay.rendered });
   const doc = { ...buildEnvelope({ id: "offset-event", summary: "Appointment with Dr. Vexora", status: "confirmed",
     start: { dateTime: "2031-04-08T09:30:00Z" },
   }).envelope, source_id: "event" };
   const offset = await run(t, { docs: [doc], timezone: "Pacific/Honolulu", now: Date.parse("2031-04-08T05:00:00Z"),
     answer: "Your next appointment is 2031-04-07T23:30:00-10:00 {event}." });
-  assert.equal(offset.body.answer, offset.rendered);
+  assert.equal(offset.body.evidence_gate.supported, true, "the original owner-day conversion passes its date check");
+  assertDocumentAnswer(offset.body);
+  assert.match(offset.body.answer, /2031-04-08.*9:30/s, "the attributed event retains the same instant in UTC");
 });

@@ -189,7 +189,7 @@ export type Citation = {
   authority?: EvidenceAuthority | null;
 };
 export type AnswerGap = { type?: string; detail?: string; count?: number; total?: number };
-export type Confidence = { percent: number; band: string; basis: string[] };
+export type Confidence = { percent: number; band: string; basis?: string[]; reasons?: string[]; missing?: string[] };
 export type EntityScopeEcho = { entity_slug: string | null; applied: boolean };
 export type EvidenceGate = {
   supported?: boolean;
@@ -242,6 +242,16 @@ export type BankConnection = {
   status_detail?: string | null;
   connected_at?: string | null;
   last_synced_at?: string | null;
+  status_line?: string;
+  health?: {
+    state: string;
+    overdue?: boolean;
+    pending_overdue?: boolean;
+    needs_sign_in?: boolean;
+    last_successful_sync_at?: string | null;
+    next_due_at?: string | null;
+  };
+  accounts_needing_owner?: number;
 };
 export type BankStatus = {
   configured?: boolean;

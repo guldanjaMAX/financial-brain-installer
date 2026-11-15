@@ -4,11 +4,14 @@ import { createHash as boundaryHash } from "node:crypto";
 import { createWindowsUpdateBridgeGuard as boundaryGuard } from "../operations/windows-update-bridge.mjs";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
+import { injectRenameFaults, injectUnlinkFaults, isDailyUpdateReceipt, isRecoveryFence, refusedThenRemoved,
+  refusedThenReplaced } from "./helpers/rename-faults.mjs";
 import { cmdDrain, cmdHealth, cmdRollback, cmdUpdate } from "../brain.mjs";
+import * as brainCli from "../brain.mjs";
 import {
   buildDailyRefreshDefinition,
   dailyRefreshUpdateTransactionPath,
@@ -29,6 +32,7 @@ function manifestFixture() {
         auth_profile: `financial-brain-${"2".repeat(24)}`,
         storage: "d1",
         d1_database_id: "11111111-2222-4333-8444-555555555555",
+        vectorize_index: "fixture-index",
       },
     },
     corpora: { google_drive: { enabled: true } },
@@ -650,11 +654,16 @@ test("real rollback leaves daily imports paused, reports recovery, and a healthy
       rollback = await cmdRollback(manifestPath, "fixture-bookmark", {
         confirmed: true,
         resolveAccount: async () => ({ id: "1".repeat(32) }),
-        cf: async () => ({ restored: true }),
+        cf: async (path) => path.endsWith("/info")
+          ? { vectorCount: 0, processedUpToMutation: null } : { restored: true },
         cmdDeploy: async () => {},
         cmdHealth: async () => {},
         waitForVectorDrainQuiescence: async () => {},
         d1Query: async (_account, _database, sql) => {
+          // Reviewed composed rollback needs the complete quiet-writer row before restore.
+          if (/AS in_flight/iu.test(sql)) return { results: [{ schema_version: 65,
+            owner: null, expires_at: null, in_flight: 0, pending: 0, ambiguous: 0,
+            bootstrap_pending: 0, projection_status: "verified", mutation_id: null, submitted_at: null }] };
           if (/SELECT schema_version/iu.test(sql)) return { results: [{ schema_version: 48 }] };
           if (/SELECT vector_projection_status/iu.test(sql)) {
             return { results: [{
@@ -894,13 +903,13 @@ const BRIDGE_NAME = boundaryBridgeName("brain.example.invalid", "S-1-5-21-100-20
 const BRIDGE_SID = "S-1-5-21-100-200-300-1001";
 const BRIDGE_TIME = "2026-10-07T15:00:00.000Z";
 
-function bridgeNativeHarness({ manifestPath = "C:\\Fixture\\brain.manifest.json", tasks = [], failDisable = false, ignoreDisable = false, onDisable = () => {}, onDelete = () => {}, failRestore = false, failDelete = false, fieldShape = false, explicitEnabled = false } = {}) {
+function bridgeNativeHarness({ manifestPath = "C:\\Fixture\\brain.manifest.json", home = mkdtempSync(join(tmpdir(), "bridge-native-home-")), tasks = [], failDisable = false, ignoreDisable = false, onDisable = () => {}, onDelete = () => {}, failRestore = false, failDelete = false, fieldShape = false, explicitEnabled = false } = {}) {
   const calls = [];
   const rows = new Map(tasks.map((entry) => [entry.name || BRIDGE_NAME, {
     sid: BRIDGE_SID, enabled: true, action: `brain load '${manifestPath.replaceAll("'", "''")}' --only google_drive`, ...entry,
   }]));
   const options = {
-    domain: "brain.example.invalid", manifestPath,
+    domain: "brain.example.invalid", manifestPath, home,
     environment: { SystemRoot: String.raw`C:\Windows`, PRIVATE_SENTINEL: "must-not-inherit" },
     now: () => new Date(BRIDGE_TIME),
     spawn: (command, args, child) => {
@@ -955,7 +964,7 @@ function bridgeNativeHarness({ manifestPath = "C:\\Fixture\\brain.manifest.json"
 
 function attachBridge(harness, manifestPath, fixture = {}) {
   const native = bridgeNativeHarness({
-    manifestPath,
+    manifestPath, home: dirname(manifestPath),
     ...fixture,
     onDelete: () => {
       assert.equal(harness.state().enabled, true, "permanent task is enabled before bridge deletion");
@@ -980,6 +989,27 @@ function bridgeArchive(manifestPath) {
   const names = readdirSync(root);
   assert.equal(names.length, 1);
   return JSON.parse(readFileSync(join(root, names[0]), "utf8"));
+}
+
+function captureWindowsUpdateOutput(t, harness) {
+  const lines = [];
+  for (const method of ["log", "warn", "error"]) t.mock.method(console, method, line => lines.push(String(line)));
+  harness.options.platform = "win32";
+  harness.options.reportUpdateFinish = message => { harness.finish.push(message); lines.push(message); };
+  return () => lines.join("\n");
+}
+
+async function assertVerifiedDailyControl() {
+  await withFixture(async ({ manifestPath }) => {
+    const harness = productionHarness(manifestPath);
+    harness.options.platform = "win32";
+    const native = attachBridge(harness, manifestPath, { tasks: [{}] });
+    await cmdUpdate(manifestPath, harness.options);
+    assert.ok(harness.events.includes("schedule:true"), "the same harness reaches permanent daily readback");
+    assert.equal(harness.state().enabled, true, "verified daily task is the green control");
+    assert.equal(native.rows.size, 0, "verified permanent work permits bridge retirement");
+    assert.doesNotMatch(harness.finish.join("\n"), /daily_imports_paused/u);
+  });
 }
 
 test("Windows bridge is journaled, disabled before update, and deleted only after permanent readback", async () => {
@@ -1180,6 +1210,7 @@ test("Windows bridge inventory failure is a refusal before deployment with no ta
 });
 
 test("Windows bridge replacement after update is never deleted or re-enabled", async () => {
+  await assertVerifiedDailyControl();
   await withFixture(async ({ manifestPath }) => {
     const harness = productionHarness(manifestPath);
     const native = attachBridge(harness, manifestPath, { tasks: [{}] });
@@ -2035,6 +2066,213 @@ test("S2 active local ingest owns the update boundary until it releases custody"
     await cmdUpdate(manifestPath, h.options);
     assert.ok(h.events.includes("deploy:paused"));
     assert.ok(h.events.includes("acceptance"));
+    assert.equal(h.state().enabled, true);
+  });
+});
+
+test("audit R1 private child leaves pre-dispatch task restoration to package rollback", async () => {
+  const outcomeEnv = "BRAIN_PRIVATE_UPDATE_OUTCOME", bindingEnv = "BRAIN_PRIVATE_UPDATE_BINDING";
+  const priorOutcome = process.env[outcomeEnv], priorBinding = process.env[bindingEnv];
+  try {
+    await withFixture(async ({ directory, manifestPath }) => {
+      const harness = productionHarness(manifestPath, { failStage: () => "preflight" });
+      const pin = brainCli.pinUpdateManifest(manifestPath);
+      const { privateOfferTarget } = await import("../operations/private-update-offer.mjs");
+      process.env[bindingEnv] = JSON.stringify({ target: privateOfferTarget(pin.manifest), fingerprint: pin.fingerprint });
+      process.env[outcomeEnv] = join(directory, "outcome.json");
+      await assert.rejects(cmdUpdate(manifestPath, harness.options), /fixture preflight refusal/);
+      assert.ok(harness.events.includes("install-state-preflight"), "the real pre-dispatch failure was reached");
+      assert.ok(harness.events.includes("schedule:false"), "the daily pause was reached");
+      assert.equal(harness.state().enabled, false, "the parent must restore its runtime before imports can resume");
+      assert.equal(harness.events.includes("schedule:true"), false);
+      assert.equal(JSON.parse(readFileSync(process.env[outcomeEnv], "utf8")).remote, "not_started");
+      assert.equal(readDailyRefreshUpdateTransaction(harness.plan, {
+        home: directory, manifestPath, platform: "win32", machineLockRoot: harness.machineLockRoot,
+      }).remote_mutation_may_have_started, false);
+    });
+  } finally {
+    if (priorOutcome === undefined) delete process.env[outcomeEnv]; else process.env[outcomeEnv] = priorOutcome;
+    if (priorBinding === undefined) delete process.env[bindingEnv]; else process.env[bindingEnv] = priorBinding;
+  }
+  await withFixture(async ({ manifestPath }) => {
+    const control = productionHarness(manifestPath, { failStage: () => "preflight" });
+    await assert.rejects(cmdUpdate(manifestPath, control.options), /fixture preflight refusal/);
+    assert.ok(control.events.includes("install-state-preflight"));
+    assert.equal(control.state().enabled, true, "the ordinary update still restores its original task");
+    assert.ok(control.events.includes("schedule:true"));
+  });
+});
+
+test("audit R2 private child defers historical bridge restoration to its parent", async () => {
+  const outcomeEnv = "BRAIN_PRIVATE_UPDATE_OUTCOME", bindingEnv = "BRAIN_PRIVATE_UPDATE_BINDING";
+  const priorOutcome = process.env[outcomeEnv], priorBinding = process.env[bindingEnv];
+  try {
+    for (const privateChild of [true, false]) {
+      await withFixture(async ({ directory, manifestPath }) => {
+        const harness = productionHarness(manifestPath, { failStage: () => "preflight" });
+        const native = attachBridge(harness, manifestPath, { tasks: [{}] });
+        const pin = brainCli.pinUpdateManifest(manifestPath);
+        const { privateOfferTarget } = await import("../operations/private-update-offer.mjs");
+        if (privateChild) {
+          process.env[bindingEnv] = JSON.stringify({ target: privateOfferTarget(pin.manifest), fingerprint: pin.fingerprint });
+          process.env[outcomeEnv] = join(directory, "outcome.json");
+        } else { delete process.env[bindingEnv]; delete process.env[outcomeEnv]; }
+        await assert.rejects(cmdUpdate(manifestPath, harness.options), /fixture preflight refusal/);
+        assert.ok(harness.events.includes("install-state-preflight"), "production pre-dispatch failure reached");
+        assert.ok(harness.events.includes("bridge:disable"), "bridge pause reached");
+        assert.equal(native.rows.get(BRIDGE_NAME).enabled, !privateChild);
+        assert.equal(native.calls.some(({ args }) => args.includes("/ENABLE")), !privateChild);
+      });
+    }
+  } finally {
+    if (priorOutcome === undefined) delete process.env[outcomeEnv]; else process.env[outcomeEnv] = priorOutcome;
+    if (priorBinding === undefined) delete process.env[bindingEnv]; else process.env[bindingEnv] = priorBinding;
+  }
+});
+
+test("audit R2 private parent receipt with no installed schedulers completes reconciliation", async () => {
+  const outcomeEnv = "BRAIN_PRIVATE_UPDATE_OUTCOME", bindingEnv = "BRAIN_PRIVATE_UPDATE_BINDING";
+  const priorOutcome = process.env[outcomeEnv], priorBinding = process.env[bindingEnv];
+  try {
+    await withFixture(async ({ directory, manifestPath }) => {
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+      delete manifest.operations.daily_refresh;
+      writeFileSync(manifestPath, JSON.stringify(manifest));
+      const harness = productionHarness(manifestPath, { activeDailyTransaction: false });
+      const { writeDailyRefreshUpdateTransaction } = await import("../operations/daily-refresh-scheduler.mjs");
+      const txOptions = { home: directory, manifestPath, platform: "win32", machineLockRoot: harness.machineLockRoot };
+      writeDailyRefreshUpdateTransaction({ plan: harness.plan,
+        snapshot: { identity: harness.plan.identity, exists: false, enabled: false, definition: null },
+        phase: "paused", remoteMutationMayHaveStarted: false }, txOptions);
+      const pin = brainCli.pinUpdateManifest(manifestPath);
+      const { privateOfferTarget } = await import("../operations/private-update-offer.mjs");
+      process.env[bindingEnv] = JSON.stringify({ target: privateOfferTarget(pin.manifest), fingerprint: pin.fingerprint });
+      process.env[outcomeEnv] = join(directory, "outcome.json");
+      await cmdUpdate(manifestPath, harness.options);
+      assert.ok(harness.events.includes("acceptance"), "verified upgrade acceptance reached");
+      assert.equal(readDailyRefreshUpdateTransaction(harness.plan, txOptions), null,
+        "an empty parent snapshot cannot leave a false recovery hold after success");
+      assert.equal(harness.state().exists, false, "the update preserves the absence of a daily task");
+    });
+  } finally {
+    if (priorOutcome === undefined) delete process.env[outcomeEnv]; else process.env[outcomeEnv] = priorOutcome;
+    if (priorBinding === undefined) delete process.env[bindingEnv]; else process.env[bindingEnv] = priorBinding;
+  }
+});
+
+
+// A parallel test process may hold the same synthetic bridge name. Its lock
+// belongs to its own fixture home, never to every test sharing the runner HOME.
+test("R4 bridge replacement reaches retirement even when another fixture owns the shared-home lock", async () => {
+  for (const occupied of [false, true]) await withFixture(async ({ directory, manifestPath }) => {
+    const sharedHome = join(directory, "other-fixture-home");
+    const digest = boundaryHash("sha256").update(`${Buffer.byteLength(BRIDGE_NAME)}:${BRIDGE_NAME},`, "utf8").digest("hex");
+    const lock = join(sharedHome, ".brain", "schedule-mutations", `bridge-${digest}.lock`);
+    if (occupied) {
+      mkdirSync(lock, { recursive: true });
+      const token = "f".repeat(32);
+      writeFileSync(join(lock, `owner-${process.pid}-${token}.json`), JSON.stringify({
+        pid: process.pid, token, started_at: BRIDGE_TIME,
+      }));
+    }
+    const previous = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+    process.env.HOME = sharedHome; process.env.USERPROFILE = sharedHome;
+    try {
+      const harness = productionHarness(manifestPath);
+      const native = attachBridge(harness, manifestPath, { tasks: [{}] });
+      const restore = harness.adapter.setEnabled;
+      let replacements = 0;
+      harness.adapter.setEnabled = (identity, enabled) => {
+        restore(identity, enabled);
+        if (enabled) { replacements++; native.rows.get(BRIDGE_NAME).action = "replacement fixture action"; }
+      };
+      let failure;
+      try { await cmdUpdate(manifestPath, harness.options); } catch (error) { failure = error; }
+      assert.equal(replacements, 1, `retirement boundary must be reached with sibling lock occupied=${occupied}`);
+      assert.match(failure?.message || "", /daily.*recovery|recovery.*daily/i);
+      assert.equal(native.rows.get(BRIDGE_NAME).action, "replacement fixture action");
+      assert.deepEqual(native.mutations().map(({ args }) => args.at(-1)), ["/DISABLE"]);
+      assert.equal(harness.finish.length, 0);
+      if (occupied) assert.equal(readdirSync(lock).length, 1, "the sibling lock is never adopted or removed");
+    } finally {
+      for (const [name, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[name]; else process.env[name] = value;
+      }
+    }
+  });
+});
+
+// R6: a native Windows run met an intermittent EPERM when a receipt replaced
+// its previous version. A virus scan, indexer or sync client can hold either
+// name for a moment; the update retries that refusal, bounded, then names it.
+test("R6 a Windows update retries transient locks on every receipt, history and manifest replacement", async t => {
+  await withFixture(async ({ manifestPath }) => {
+    const harness = productionHarness(manifestPath);
+    captureWindowsUpdateOutput(t, harness);
+    attachBridge(harness, manifestPath, { tasks: [{}] });
+    // The version commit models no platform, so only a Windows host retries
+    // it here; the direct manifest test below models Windows on any host.
+    const manifestCommit = to => process.platform === "win32" && basename(to) === basename(manifestPath);
+    const locks = to => isDailyUpdateReceipt(to) || manifestCommit(to);
+    const { calls, restore } = injectRenameFaults(t, (from, to, attempt) => locks(to) && attempt <= 2 ? "EPERM" : null);
+    // The finished receipt and the fence are removed last; a brief hold on
+    // either must not fail an update whose work is complete.
+    const removals = path => (isDailyUpdateReceipt(path) && !/[\\/]history[\\/]/u.test(path)) || isRecoveryFence(path);
+    const unlinks = injectUnlinkFaults(t, (path, attempt) => removals(path) && attempt <= 2 ? "EBUSY" : null);
+    try { await cmdUpdate(manifestPath, harness.options); } finally { restore(); unlinks.restore(); }
+    const refused = calls.filter(call => call.code);
+    assert.ok(refused.some(call => /daily-update-transactions[\\/]v1-/u.test(call.to)), "the transaction receipt decision was reached");
+    assert.ok(refused.some(call => /[\\/]history[\\/]/u.test(call.to)), "the bridge history decision was reached");
+    if (process.platform === "win32") assert.ok(refused.some(call => manifestCommit(call.to)), "the manifest version commit decision was reached");
+    assert.ok(refusedThenReplaced(calls), "every refused replacement later succeeded from the same staged file");
+    const refusedRemovals = unlinks.calls.filter(call => call.code);
+    assert.ok(refusedRemovals.some(call => isDailyUpdateReceipt(call.path)), "the finished receipt removal decision was reached");
+    assert.ok(refusedRemovals.some(call => isRecoveryFence(call.path)), "the recovery fence removal decision was reached");
+    assert.ok(refusedThenRemoved(unlinks.calls), "every refused removal later succeeded for the same file");
+    assert.equal(harness.finish.length, 1, "the update completed");
+    assert.equal(harness.state().enabled, true);
+    assert.equal(JSON.parse(readFileSync(manifestPath, "utf8")).brain.version, PRODUCT_VERSION);
+    assert.equal(bridgeArchive(manifestPath).bridge_snapshots[0].state, "retired");
+  });
+});
+
+test("R6 the manifest version commit retries a transient Windows lock under a fresh pin", async t => {
+  await withFixture(async ({ manifestPath }) => {
+    const target = to => basename(to) === basename(manifestPath);
+    const { calls, restore } = injectRenameFaults(t, (from, to, attempt) => target(to) && attempt <= 2 ? "EBUSY" : null);
+    let committed;
+    try { committed = brainCli.commitManifestVersion(manifestPath, PRODUCT_VERSION, { platform: "win32" }); } finally { restore(); }
+    assert.deepEqual(calls.filter(call => target(call.to)).map(call => call.code), ["EBUSY", "EBUSY", null]);
+    assert.equal(committed.brain.version, PRODUCT_VERSION);
+    assert.equal(JSON.parse(readFileSync(manifestPath, "utf8")).brain.version, PRODUCT_VERSION);
+    assert.equal(readdirSync(dirname(manifestPath)).some(name => name.endsWith(".tmp")), false, "no staged manifest copy remains");
+  });
+});
+
+// Dispatch is inside the staged upgrade; pause is before it, where a bridge
+// wrapper adds update context around the original error.
+for (const boundary of ["dispatch", "pause"]) test(`R6 an exhausted Windows receipt lock at ${boundary} stops before deployment with LOCAL_FILE_LOCKED, not a remote code`, async t => {
+  await withFixture(async ({ manifestPath }) => {
+    const h = productionHarness(manifestPath);
+    h.options.platform = "win32";
+    if (boundary === "pause") attachBridge(h, manifestPath, { tasks: [{}] });
+    const dispatchReceipt = (from, to) => {
+      if (!isDailyUpdateReceipt(to)) return false;
+      const staged = JSON.parse(readFileSync(from, "utf8"));
+      return boundary === "dispatch" ? staged.remote_mutation_may_have_started === true : staged.phase === "preparing";
+    };
+    const { calls, restore } = injectRenameFaults(t, (from, to) => dispatchReceipt(from, to) ? "EPERM" : null);
+    let failure;
+    try { await cmdUpdate(manifestPath, h.options); } catch (error) { failure = error; } finally { restore(); }
+    const first = calls.find(call => call.code);
+    assert.ok(first, "the dispatch receipt decision was reached");
+    assert.equal(calls.filter(call => call.from === first.from).length, 6, "one receipt write is bounded to six attempts");
+    if (boundary === "dispatch") assert.equal(failure?.supportCode, "LOCAL_FILE_LOCKED");
+    else assert.equal(failure?.cause?.supportCode, "LOCAL_FILE_LOCKED", "the bridge wrapper keeps the lock as its cause");
+    assert.equal(brainCli.supportErrorCode(failure, { command: "update" }), "LOCAL_FILE_LOCKED");
+    assert.equal(h.events.includes("deploy:paused"), false, "no deployment follows an unsaved dispatch receipt");
+    await cmdUpdate(manifestPath, h.options);
+    assert.equal(h.finish.length, 1, "the same update completes once the lock clears");
     assert.equal(h.state().enabled, true);
   });
 });

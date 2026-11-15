@@ -334,28 +334,48 @@ export function reliableDocumentTime(row) {
   return value;
 }
 
+// Calendar's corpus date answers when the event is scheduled. It cannot date
+// an observation, establish freshness, or order revisions. Project only the
+// provider's canonical modification timestamp; a missing timestamp stays
+// unknown rather than borrowing the event day or the current retrieval clock.
+export function recordObservation(row) {
+  if (!/^calendar:(?:event_start|all_day_start)$/.test(row?.date_source || '')) {
+    const raw = row?.ts ?? row?.date ?? row?.document_date;
+    return { ts:typeof raw === 'number' ? Number.isFinite(new Date(raw).getTime()) ? new Date(raw).toISOString() : null : raw || null,
+      date_reliable:row?.date_reliable, date_source:row?.date_source || null };
+  }
+  let meta = row?.authority_meta ?? row?._authority_meta ?? row?.metadata ?? row?.meta;
+  if (typeof meta === 'string') { try { meta=JSON.parse(meta); } catch { meta=null; } }
+  const projected = row?.record_observation;
+  const raw = projected ? projected.date_source === 'calendar:updated' && projected.date_reliable === true ? projected.ts : null : meta?.updated;
+  const time = parseCanonicalEvidenceDate(raw);
+  return { ts:time === null ? null : new Date(time).toISOString(), date_reliable:time !== null,
+    date_source:time === null ? null : 'calendar:updated' };
+}
+
+export function reliableRecordObservationTime(row) {
+  if (!/^calendar:(?:event_start|all_day_start)$/.test(row?.date_source || '')) return reliableDocumentTime(row);
+  const observation = recordObservation(row);
+  if (![true,1,'1'].includes(observation.date_reliable)) return null;
+  return parseCanonicalEvidenceDate(observation.ts);
+}
+
 /**
- * The citation day is the primary recency key. Calendar's exact start is a
- * secondary key only inside that day, because comparing the absolute instants
- * across different offsets can reverse two adjacent local calendar dates.
+ * Revision chronology uses observation time. An explicit request for the
+ * latest scheduled event asks for occurrence order, not the newest revision;
+ * keep its local day primary and the exact start as a same-day tie breaker.
  */
-function evidenceSortKey(row) {
-  const storedTime = reliableDocumentTime(row);
+const scheduledEventOrder = query => /\b(?:latest|most recent)\s+scheduled\s+(?:meetings?|appointments?|calls?|events?|visits?|sessions?|flights?|trips?|deadlines?)\b/i.test(String(query || ''));
+function evidenceSortKey(row, scheduled = false) {
+  const calendar=/^calendar:(?:event_start|all_day_start)$/.test(row?.date_source || '');
+  const storedTime = calendar && !scheduled
+    ? reliableRecordObservationTime(row) : reliableDocumentTime(row);
   if (storedTime === null) return null;
   const day = Date.parse(new Date(storedTime).toISOString().slice(0, 10));
-  const dateSource = row?.date_source;
-  // A Calendar day without a verified instant has day precision only. Giving
-  // an all-day event an invented UTC-midnight tie-breaker makes its order
-  // against timed events depend on whether their offsets cross UTC midnight.
-  let exact = dateSource === "calendar:event_start" || dateSource === "calendar:all_day_start"
-    ? null
-    : storedTime;
-  const occurredAt = row?.occurred_at;
-  if (dateSource === "calendar:event_start" && typeof occurredAt === "string" && occurredAt.includes("T")) {
-    const exactTime = parseCanonicalEvidenceDate(occurredAt);
-    if (exactTime !== null && occurredAt.slice(0, 10) === new Date(day).toISOString().slice(0, 10)) {
-      exact = exactTime;
-    }
+  let exact=calendar && scheduled ? null : storedTime;
+  if (calendar && scheduled && row.date_source==='calendar:event_start' && typeof row.occurred_at==='string' && row.occurred_at.includes('T')) {
+    const start=parseCanonicalEvidenceDate(row.occurred_at);
+    if (start!==null && row.occurred_at.slice(0,10)===new Date(day).toISOString().slice(0,10)) exact=start;
   }
   return { day, exact };
 }
@@ -387,16 +407,16 @@ export function currentEvidenceCandidates(query, rows, { filters = {}, owner = n
   const anchors = queryEntityAnchors(query, filters, { owner });
   if (!anchors.length) return [];
   return (Array.isArray(rows) ? rows : [])
-    .map((row, index) => ({ row, index, order: evidenceSortKey(row) }))
+    .map((row, index) => ({ row, index, order: evidenceSortKey(row, scheduledEventOrder(query)) }))
     .filter((entry) => entry.order !== null && matchesEntityAnchors(entry.row, anchors))
     .sort((a, b) => compareDocumentOrder(a.order, b.order) || a.index - b.index)
     .map((entry) => entry.row);
 }
 
-/** All equally-new direct candidates. More than one can share an event date. */
+/** All equally-new direct candidates can share an observation timestamp. */
 export function newestCurrentEvidence(query, rows, options = {}) {
   const candidates = currentEvidenceCandidates(query, rows, options);
   if (!candidates.length) return [];
-  const newest = evidenceSortKey(candidates[0]);
-  return candidates.filter((row) => sameDocumentOrder(evidenceSortKey(row), newest));
+  const newest = evidenceSortKey(candidates[0], scheduledEventOrder(query));
+  return candidates.filter((row) => sameDocumentOrder(evidenceSortKey(row, scheduledEventOrder(query)), newest));
 }

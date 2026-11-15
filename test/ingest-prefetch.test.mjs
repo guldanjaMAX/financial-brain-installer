@@ -13,7 +13,7 @@
 // yielded before a fast later one.
 import { prefetch, batchStream } from "../ingest/run.mjs";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -151,6 +151,7 @@ const collect = async (it) => { const out = []; for await (const v of it) out.pu
       BRAIN_GMAIL_POLICY_EVIDENCE: evidencePath,
       BRAIN_GMAIL_POLICY_USER_ROOT: userRoot,
     });
+    const beforeState = readFileSync(statePath, "utf8");
     const result = spawnSync(process.execPath, [
       "--import", fixture, join(root, "brain.mjs"), "ingest", manifestPath,
       "--from", "gmail", "--dry-run", "--limit", "200",
@@ -159,10 +160,13 @@ const collect = async (it) => { const out = []; for await (const v of it) out.pu
     check("a resumed Gmail first pass finishes its synthetic recovery scan",
       result.error === undefined && result.signal === null && result.status === 0,
       output.slice(-500));
-    check("unchanged and skipped recovery work reports progress before returning",
+    check("legacy accepted and skipped recovery work reports progress without proof reuse",
       /fetched 200\.\.\./.test(output) &&
-        /200 scanned; 0 document\(s\) prepared in 0 batch\(es\); 100 unchanged; 100 skipped/.test(output),
+        // Reviewed restore repair cannot reuse a local accepted hash in a dry run.
+        /200 scanned; 100 document\(s\) prepared in 100 batch\(es\); 0 unchanged; 100 skipped/.test(output),
       output.slice(-500));
+    check("the populated dry-run recovery decision preserves exact checkpoint bytes",
+      readFileSync(statePath, "utf8") === beforeState);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

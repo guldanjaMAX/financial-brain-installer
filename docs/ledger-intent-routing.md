@@ -320,6 +320,15 @@ monthly measures and do not establish accounting income or profit.
 stale or future integer year in the model period hint. Monthly breakdowns use
 that same authority and never substitute the model's year.
 
+In the closed `total <selector> charges` or `purchases` frame, a missing or
+shortened selector cannot replace the full requested identity. The answer
+shows ordinary expenses for the admitted accounts and dates, states
+`I did not narrow it by '<selector>'`, retains `unused_activity_limits`, and
+marks the requested reading incomplete. A fully grounded selector keeps the
+named reader. A payer-income reading with an account hint keeps payer
+membership: possible own-account credits stay excluded and disclosed, and
+the account hint still limits the selected ownership scope.
+
 Two locally determined periods may use the same reader kind. Complete
 expense, literal selector or money-in figures appear side by side with the
 exact signed first-minus-second difference. Money-in-and-out comparisons

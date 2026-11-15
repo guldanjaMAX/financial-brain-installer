@@ -119,7 +119,7 @@ for (const [id, before, after, failure] of [
   const original = readFileSync(new URL("../src/lib/simplefin-bank-feed.js", import.meta.url), "utf8");
   assert.equal(original.split(before).length, 2, "one live mutation decision, never a stale text replacement");
   let source = original.replace(before, after);
-  source = source.replace(/from "(\.\/[^\"]+)"/g, (_, dependency) =>
+  source = source.replace(/from (["'])(\.{1,2}\/[^"']+)\1/g, (_, quote, dependency) =>
     `from ${JSON.stringify(new URL(dependency, new URL("../src/lib/simplefin-bank-feed.js", import.meta.url)).href)}`);
   const target = join(directory, "mutant.mjs");
   writeFileSync(target, source);
@@ -147,7 +147,7 @@ test("parity oracle kills the drop-non-repayment-account-posting mutant", async 
   const after = before.replace('row.effective_account_slug === account.account_slug',
     `row.effective_account_slug === account.account_slug && ${omit}`);
   let source = original.replace(before, after);
-  source = source.replace(/from "(\.\/[^\"]+)"/g, (_, dependency) =>
+  source = source.replace(/from (["'])(\.{1,2}\/[^"']+)\1/g, (_, quote, dependency) =>
     `from ${JSON.stringify(new URL(dependency, origin).href)}`);
   const directory = realpathSync.native(mkdtempSync(join(tmpdir(), "parity-account-mutant-")));
   t.after(() => rmSync(directory, { recursive: true, force: true }));

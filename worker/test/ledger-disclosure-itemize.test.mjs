@@ -605,9 +605,10 @@ for (const [label, edits, monthlyEdits, kind] of [
     '${ledger.possible_citations.map(n => `[${n}]`).join(" ")} only mentions',
     'only mentions',
   ]], [], 'mixed'],
+  // 0.4.28 monthly rendering selects its amount from coverage completeness.
   ['whole month pool supports ordinary amount', [], [[
-    '${money(month.complete ? month.total_minor : month.subtotal_minor)}${refsFor(month.amount_citations)}',
-    '${money(month.complete ? month.total_minor : month.subtotal_minor)}${refsFor(month.citations)}',
+    '${money(month.coverage.complete ? month.total_minor : month.subtotal_minor)}${refsFor(month.amount_citations)}',
+    '${money(month.coverage.complete ? month.total_minor : month.subtotal_minor)}${refsFor(month.citations)}',
   ]], 'members'],
   ['amount posting list not rebased', [], [[
     'const rebase = numbers => (numbers || []).map(n => citationOffset + n);',

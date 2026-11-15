@@ -111,6 +111,10 @@ check("the unshipped suffix is exactly OCR, custom API, SimpleFIN, bank-activity
       "0059_document_family_index.sql",
       "0060_simplefin_account_identity.sql",
       "0061_balance_position_evidence.sql",
+      "0062_fin_expectations.sql",
+      "0063_bank_feed_health.sql",
+      "0064_plaid_retry_floor.sql",
+      "0065_retained_ingest_stages.sql",
     ]),
   JSON.stringify(unshippedMigrationFiles));
 
@@ -1457,6 +1461,7 @@ check("restart guard refuses an existing migration column with the wrong contrac
   check("the real sync_runs join detects a seven-hour stuck run",
     stuck.sources?.[0]?.state === "broken" && /7 hour/.test(stuck.sources[0].reason || ""), JSON.stringify(stuck));
 
+  const priorRegistryCount = db.prepare("SELECT document_count FROM sources WHERE name='drive'").get().document_count;
   const ready = await (await post({
     source: "drive", kind: "drive", status: "ready", run_id: "real_run_1",
     lane: "sweep", started_at: oldStart, complete_sweep: true, walk_complete: true,
@@ -1465,8 +1470,14 @@ check("restart guard refuses an existing migration column with the wrong contrac
     confirmed_range: { from: "2025-01-01T00:00:00.000Z", through: "2026-09-06T00:00:00.000Z" },
     target_range: { from: "2025-01-01T00:00:00.000Z", through: null },
   })).json();
-  check("a real completion counts one split family as one logical document",
-    ready.documents === 2 && ready.stored_documents === 3, JSON.stringify(ready));
+  // Reviewed Drive R6 completion never expands families or recounts the corpus.
+  check("a real completion explicitly leaves corpus totals unmeasured",
+    ready.documents === null && ready.logical_documents === null && ready.stored_documents === null &&
+      ready.counts_measured === false, JSON.stringify(ready));
+  const physical = db.prepare("SELECT count(*) AS n FROM documents WHERE source='drive'").get().n;
+  const logical = db.prepare("SELECT count(DISTINCT CASE WHEN json_valid(meta) AND json_type(meta,'$.part_of')='text' THEN json_extract(meta,'$.part_of') ELSE source_id END) AS n FROM documents WHERE source='drive'").get().n;
+  check("the independent measurement control still distinguishes split families from rows",
+    physical === 3 && logical === 2, JSON.stringify({ physical, logical }));
   const measuredRun = db.prepare(
     `SELECT files_seen,docs_added,docs_updated,docs_unchanged,docs_refused,docs_failed,metrics_version,
             confirmed_from,confirmed_through,target_from,target_through
@@ -1506,8 +1517,8 @@ check("restart guard refuses an existing migration column with the wrong contrac
   check("a real failed receipt is stored as an error without advancing last success",
     failed.status === "error" && failedSource.status === "error" && failedSource.last_ingest_at === successfulAt,
     JSON.stringify({ failed, failedSource, successfulAt }));
-  check("the real source registry keeps the logical count and stable failure code",
-    failedSource.document_count === 2 && failed.issue_code === "INGEST_FAILED" &&
+  check("the real source registry preserves its prior count cache and stable failure code",
+    failedSource.document_count === priorRegistryCount && failed.counts_measured === false && failed.issue_code === "INGEST_FAILED" &&
       failedSource.stale_reason === "INGEST_FAILED" && failedRun.error === "INGEST_FAILED",
     JSON.stringify({ failed, failedSource, failedRun }));
   check("private connector failure text reaches no stored receipt or response surface",

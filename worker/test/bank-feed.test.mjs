@@ -111,8 +111,18 @@ const refuses = (db, sql, params = []) => {
   const db = freshDb();
   const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'bank_feed%'")
     .all().map((r) => r.name).sort();
+  const through0018 = new DatabaseSync(":memory:");
+  for (const file of readdirSync(MIGRATIONS).filter((f) => f.endsWith(".sql") && f.slice(0, 4) <= "0018").sort()) {
+    for (const statement of splitStatements(readFileSync(join(MIGRATIONS, file), "utf-8"))) through0018.exec(statement);
+  }
+  const tables0018 = through0018.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'bank_feed%'")
+    .all().map((r) => r.name).sort();
+  through0018.close();
   check("0018 creates the three connector tables and nothing else",
-    JSON.stringify(tables) === JSON.stringify(["bank_feed_backfill", "bank_feed_items", "bank_feed_link_sessions"]),
+    JSON.stringify(tables0018) === JSON.stringify(["bank_feed_backfill", "bank_feed_items", "bank_feed_link_sessions"]),
+    JSON.stringify(tables0018));
+  check("the full schema adds only 0063's bank_feed_health to the connector tables",
+    JSON.stringify(tables) === JSON.stringify(["bank_feed_backfill", "bank_feed_health", "bank_feed_items", "bank_feed_link_sessions"]),
     JSON.stringify(tables));
 
   const insert = `INSERT INTO bank_feed_items

@@ -457,6 +457,8 @@ export function buildVerifiedRecoveryPlan(sourceManifestPath, targetManifestPath
       owner_only: true,
       refuse_existing: true,
       max_single_import_bytes: MAX_SINGLE_D1_IMPORT_BYTES,
+      multipart_format: "financial_brain_recovery_multipart_v1",
+      multipart_relative_name: ".brain-recovery-export.parts",
     },
     isolation: {
       source_and_target_resources_distinct: true,
@@ -626,15 +628,21 @@ export function validateVerifiedRecoveryPlan(input) {
       "verified recovery plan Vectorize mutation quiescence attestation",
     );
   }
+  const multipartPolicy = Object.hasOwn(input.artifact || {}, "multipart_format");
   if (!exactKeys(input.artifact, new Set([
     "format", "relative_name", "digest", "owner_only", "refuse_existing",
     "max_single_import_bytes",
+    ...(multipartPolicy ? ["multipart_format", "multipart_relative_name"] : []),
   ])) || input.artifact.format !== "financial_brain_recovery_ciphertext_v1" ||
       input.artifact.relative_name !== ".brain-recovery-export.sql.fbrenc" ||
       input.artifact.digest !== "sha256" ||
       input.artifact.owner_only !== true || input.artifact.refuse_existing !== true ||
       input.artifact.max_single_import_bytes !== MAX_SINGLE_D1_IMPORT_BYTES) {
     fail("verified recovery export policy is invalid");
+  }
+  if (multipartPolicy && (input.artifact.multipart_format !== "financial_brain_recovery_multipart_v1" ||
+      input.artifact.multipart_relative_name !== ".brain-recovery-export.parts")) {
+    fail("verified recovery multipart policy is invalid");
   }
   if (!exactKeys(input.isolation, new Set([
     "source_and_target_resources_distinct", "required_initial_user_tables",
@@ -759,6 +767,10 @@ function validateRecoveryFieldProof(input, completed) {
 
 function validateStageEvidence(stage, input, plan, completed, fieldProof = null) {
   const expected = evidenceKeys(stage, fieldProof);
+  const exportedArtifact = completedEvidence(completed, "export_d1");
+  const multipart = ["export_d1", "verify_export"].includes(stage) && Object.hasOwn(input || {}, "multipart");
+  if (multipart) expected.add("multipart");
+  if (stage === "restore_d1" && exportedArtifact?.multipart) expected.add("imported_part_count");
   const planRequiresVectorizeMutationQuiescence =
     ["rebuild_vectorize", "verify_eval"].includes(stage) &&
     plan.vectorize_mutation_quiescence_sha256 !== null;
@@ -781,10 +793,32 @@ function validateStageEvidence(stage, input, plan, completed, fieldProof = null)
   }
   if (!expected.size || !exactKeys(input, expected)) fail(`verified recovery ${stage} evidence is invalid`);
   const evidence = structuredClone(input);
+  if (multipart) {
+    const set = evidence.multipart;
+    if (plan.artifact.multipart_format !== "financial_brain_recovery_multipart_v1" ||
+        !exactKeys(set, new Set(["part_count", "manifest_bytes", "parts"])) ||
+        !Number.isSafeInteger(set.part_count) || set.part_count < 1 || set.part_count > 10_000 ||
+        !Number.isSafeInteger(set.manifest_bytes) || set.manifest_bytes < 1 || set.manifest_bytes > 16 * 1024 ** 2 ||
+        !Array.isArray(set.parts) || set.parts.length !== set.part_count) {
+      fail("verified recovery multipart evidence is invalid");
+    }
+    let total = set.manifest_bytes;
+    set.parts.forEach((part, index) => {
+      if (!exactKeys(part, new Set(["index", "bytes", "sha256"])) || part.index !== index + 1 ||
+          !Number.isSafeInteger(part.bytes) || part.bytes <= 52 || part.bytes > plan.artifact.max_single_import_bytes) {
+        fail("verified recovery multipart part is invalid");
+      }
+      hashValue(part.sha256, "verified recovery multipart part");
+      total += part.bytes;
+    });
+    if (!Number.isSafeInteger(total) || total !== evidence.artifact_bytes) {
+      fail("verified recovery multipart byte count is invalid");
+    }
+  }
   if (stage === "export_d1") {
     hashValue(evidence.artifact_sha256, "recovery export artifact");
     const bytes = positiveInteger(evidence.artifact_bytes, "recovery export artifact bytes");
-    if (bytes > plan.artifact.max_single_import_bytes) {
+    if (!multipart && bytes > plan.artifact.max_single_import_bytes) {
       fail("recovery export exceeds the verified single-import limit");
     }
   } else if (stage === "verify_export") {
@@ -803,7 +837,8 @@ function validateStageEvidence(stage, input, plan, completed, fieldProof = null)
     nonNegativeInteger(evidence.fts_count, "verified recovery export FTS count");
     if (evidence.integrity !== "ok" || evidence.chunk_count !== evidence.fts_count ||
         evidence.artifact_sha256 !== exported?.artifact_sha256 ||
-        evidence.artifact_bytes !== exported?.artifact_bytes) {
+        evidence.artifact_bytes !== exported?.artifact_bytes ||
+        canonical(evidence.multipart ?? null) !== canonical(exported?.multipart ?? null)) {
       fail("verified recovery export readback did not match its artifact");
     }
   } else if (stage === "prove_target_clean") {
@@ -820,7 +855,8 @@ function validateStageEvidence(stage, input, plan, completed, fieldProof = null)
   } else if (stage === "restore_d1") {
     const exported = completedEvidence(completed, "export_d1");
     hashValue(evidence.artifact_sha256, "restored encrypted provenance artifact");
-    if (evidence.import_completed !== true || evidence.artifact_sha256 !== exported?.artifact_sha256) {
+    if (evidence.import_completed !== true || evidence.artifact_sha256 !== exported?.artifact_sha256 ||
+        (exported?.multipart && evidence.imported_part_count !== exported.multipart.part_count)) {
       fail("recovery target did not confirm the reviewed export import");
     }
   } else if (stage === "verify_d1") {
@@ -1425,6 +1461,7 @@ export function initializeVerifiedRecovery(
 export function verifiedRecoveryStatus(planInput, stateInput) {
   const plan = validateVerifiedRecoveryPlan(planInput);
   const state = validateVerifiedRecoveryState(stateInput, plan);
+  const exported = completedEvidence(state.completed, "export_d1");
   return Object.freeze({
     plan_fingerprint: plan.plan_fingerprint,
     status: state.status,
@@ -1434,6 +1471,10 @@ export function verifiedRecoveryStatus(planInput, stateInput) {
     completed_stages: state.completed.length,
     total_stages: STAGE_IDS.length,
     failure_code: state.failure?.code ?? null,
+    ...(exported?.multipart ? { artifact: {
+      format: plan.artifact.multipart_format, part_count: exported.multipart.part_count,
+      artifact_bytes: exported.artifact_bytes, manifest_sha256: exported.artifact_sha256,
+    } } : {}),
   });
 }
 

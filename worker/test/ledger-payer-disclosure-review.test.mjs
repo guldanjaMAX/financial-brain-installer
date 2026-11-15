@@ -108,7 +108,9 @@ test('F2 retained movement describes an unproved counterpart without inventing a
     assert.ok(row, 'movement nomination and disclosure reached');
     assert.ok(body.citations.some(ref => ref.n === row.n && ref.amount_minor === 12345));
     if (state === 'connected-same-day') {
-      assert.equal(body.ledger.expense_total_minor, null, 'nearby unproved counterpart withholds');
+      assert.equal(body.ledger.expense_total_minor, 12912, '567 ordinary plus 12345 unproved outflow');
+      assert.match(body.answer, /up to \$123\.45 may be counted twice/);
+      assert.doesNotMatch(body.answer, /withheld|cannot|can't/i);
       assert.equal(body.ledger.reason, 'money_out_destination_unconfirmed');
       assert.ok(row.connected_counterpart_masks.length > 0, 'connected counterpart decision reached');
     } else {

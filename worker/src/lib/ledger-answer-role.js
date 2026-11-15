@@ -1,3 +1,4 @@
+import { refundBasisAnswer } from './ledger-refund-wording.js';
 import { ledgerRoleSelectorOverlap, ledgerRoleCategoryShape, ledgerPureRole, ledgerGrammarRoleIntent, ledgerAccountComplementAdmission } from "./ledger-role-boundary.js";
 import { ledgerOperandScopePlan, resolvedLedgerScopePlan, resolveLedgerScope, resolveLedgerOperationScope, ledgerUnknownScopeAccounts, ledgerAccountKindSelector, ledgerAdmittedRestriction } from "./ledger-intent-scope-role.js";
 import { moneyAccount, moneyPresentation } from "./money-format.js";
@@ -1966,10 +1967,7 @@ async function withParsedLedgerAnswer(options, next, intent) {
             // Covered gross rows do not prove refund attribution. Preserve
             // gross completeness separately from the unavailable net field.
             Object.assign(answer.ledger, { net_refunds_unavailable: true, amount_basis: 'gross_before_refunds' });
-            answer.answer = (intent.kind === 'merchant'
-              ? "I cannot confirm spending after refunds because these records do not show which deposits are refunds from this business. "
-              : "I cannot confirm spending after refunds because these records do not show which deposits refunded these expenses. ") +
-              "The amounts below are before subtracting refunds.\n" + answer.answer;
+            answer.answer = refundBasisAnswer(answer.answer);
           }
           if (intent.exactPaymentOnly) answer.answer += '\nThis lookup checks exact amounts only; payouts changed by fees are not inferred. Want to review the deposit amounts?';
           if (intent.payeeBreakdownUnavailable) answer.answer += '\nA payee breakdown is not available in this view. Want to review individual transactions?';

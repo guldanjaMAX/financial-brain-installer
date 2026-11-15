@@ -1,3 +1,5 @@
+// 0.4.28 owner confidence is attached after the legacy-reader seam used by this fixture.
+import { finalizeOwnerLedgerAnswer } from '../src/lib/document-answer.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ledgerFixture } from './ledger-review-fixture.mjs';
@@ -40,6 +42,7 @@ const witnesses = families.flatMap(([family, institution, kind, channel, destina
     description: describe(institution, kind, channel),
     category: categories[(familyIndex + formIndex + SEED) % categories.length] })));
 const wentOut = 'How much went out this month?';
+// 0.4.28 names money-out inclusion explicitly; every cited amount and exclusion stays pinned.
 const questions = ['How much did I spend this month?', wentOut,
   'What were my biggest expenses this month?', 'Show recurring charges'];
 // "went out" measures money out (went-out v2): no connected account could have
@@ -79,7 +82,7 @@ for (const w of witnesses) {
         assert.ok(w.destinations.includes(r.destination), `bounded destination role: ${r.destination}`);
         assert.equal(r.amount_minor, 12345);
         assert.ok(b.citations.some(c => c.n === r.n && c.amount_minor === r.amount_minor && c.posted_on === r.posted_on));
-        assert.ok(b.answer.includes(q === wentOut ? `included above, possibly a transfer to your own ${r.destination} (counterpart not proved): $123.45`
+        assert.ok(b.answer.includes(q === wentOut ? `included in money out above, possibly a transfer to your own ${r.destination} (counterpart not proved): $123.45`
           : `possible transfer to your own ${r.destination}, not counted as spending: $123.45`), 'own line');
         assert.equal(r.included_in_total, q === wentOut ? true : undefined);
         assert.ok(b.answer.includes(w.description), 'bank text quoted without parsing');
@@ -107,7 +110,7 @@ for (const w of witnesses.filter(w => w.category[0] === 'owner-expense')) {
         const [r] = l.possible_payments;
         assert.ok(w.destinations.includes(r.destination));
         assert.equal(r.included_in_total, true);
-        assert.ok(b.answer.includes(`included above, possibly a transfer to your own ${r.destination} (counterpart not proved): $123.45`), 'own line');
+        assert.ok(b.answer.includes(`included in money out above, possibly a transfer to your own ${r.destination} (counterpart not proved): $123.45`), 'own line');
         continue;
       }
       assert.equal(l.possible_payments, undefined, 'veto: never excluded as an own movement');
@@ -203,10 +206,16 @@ for (const text of ['ONLINE TRANSFER TO SAVINGS XXXX6789 FEE 2.00', 'WIRE TRANSF
   for (const q of [questions[0], questions[2]]) {
     const b = await reached(f, q), l = b.ledger;
     assert.equal(l.complete, false);
-    assert.equal(l.total_minor, null);
-    assert.equal(l.expense_total_minor, null);
+    // 0.4.28 retains the full mixed posting as an observed amount, without certifying its split.
+    if(l.kind==='expense_summary') {
+      assert.equal(l.total_minor,12912);assert.equal(l.expense_total_minor,12912);
+    } else {
+      assert.equal(l.total_minor,undefined);assert.equal(l.expense_total_minor,undefined);
+      assert.deepEqual(amounts(l),[12345,567],'ranking retains each complete observed posting');
+    }
+    assert.equal(finalizeOwnerLedgerAnswer(b).confidence.percent,0);
     assert.equal(l.reason, 'own_movement_mixed_components');
-    assert.match(b.answer, /possible transfer to your own account also names a fee, charge or second amount/);
+    assert.match(b.answer, /full possible transfer is counted and includes a fee, charge or second amount/);
     assert.ok(l.possible_payments?.length > 0);
     assert.ok(b.answer.includes(text));
   }
@@ -233,8 +242,10 @@ test('monthly components keep own-movement lines and conflict refusals', async t
         assert.ok(b.citations.some(c => c.n === m.possible_payments[0].n && c.posted_on === m.possible_payments[0].posted_on));
         assert.equal(m.total_minor, m.month === '2026-10' ? 567 : 0, 'ordinary store control');
       } else {
-        assert.equal(m.available, false);
-        assert.equal(m.total_minor, null);
+        // 0.4.28 keeps observed monthly amounts while marking category conflicts incomplete.
+        assert.equal(m.available, true);
+        assert.equal(m.total_minor, m.month === '2026-10' ? 12912 : 12345);
+        assert.equal(m.complete, false);
         assert.equal(m.reason, 'own_movement_category_conflict');
         assert.equal(m.own_movement_conflicts.length, 1);
         assert.ok(b.citations.some(c => c.n === m.own_movement_conflicts[0].n));

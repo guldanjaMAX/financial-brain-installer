@@ -7,6 +7,9 @@ import { execute } from './fixtures/net-refund/execute.mjs';
 import { blocked } from './fixtures/net-refund/guards.mjs';
 import { cases, recount } from './fixtures/net-refund/cases.mjs';
 import { extended } from './fixtures/net-refund/extended-cases.mjs';
+import { ledgerFixture } from '../worker/test/ledger-review-fixture.mjs';
+import { queryMoney } from '../worker/src/lib/money-query.js';
+import { fixtureMoneyMeasures } from './fixtures/money-measure-oracle.mjs';
 
 const parts = body => body.ledger?.parts || (body.ledger ? [body.ledger] : []);
 const grossPeer = c => ({ ...c, id: c.id + '_gross_peer', grossRequest: true,
@@ -240,4 +243,30 @@ test('amount and qualification mutations cannot pass the monetary oracle', async
   assert.deepEqual(judgment.wrong, ['net_0']);
   assert.throws(() => assert.equal(judgment.unqualifiedGrossClaims, 0, 'gross must not be asserted as net'),
     /gross must not be asserted as net/);
+});
+
+
+test('unreviewed account keeps a possible refund estimated at Low with a reviewed-account control', async t => {
+  const f = ledgerFixture(t);
+  f.add('purchase', 'Posted purchase', 'Vendor Unit', { cents: 12000, direction: 'outflow', date: '2026-10-05' });
+  f.add('refund', 'Refund posted', 'Vendor Unit', { cents: 2000, direction: 'inflow', date: '2026-10-06' });
+  const sql = 'SELECT SUM(refund_minor) refunds,SUM(estimated) estimates FROM txn';
+  const read = () => queryMoney(f.env, { sql }, { now: () => Date.parse('2026-10-12T12:00:00Z') });
+  const green = await read();
+  assert.deepEqual(green.rows.map(row => ({ ...row })), [{ refunds: 2000, estimates: 0 }]);
+  f.raw("UPDATE fin_accounts SET account_kind='other'");
+  const uncertain = await read();
+  assert.equal(uncertain.rows.length, 1, 'the real clean aggregate decision was reached');
+  assert.equal(uncertain.rows[0].refunds, 0);
+  assert.ok(uncertain.rows[0].estimates > 0, 'unreviewed credits stay estimated');
+  assert.ok(uncertain.confidence.percent <= 35, uncertain.confidence_text);
+  assert.ok(uncertain.confidence.reasons.length && uncertain.confidence.missing.length);
+  const c = cases.find(c => c.missingAccountKind);
+  const measure = fixtureMoneyMeasures(f, { question: c.question, oracleRows: c.rows })[0];
+  assert.deepEqual(measure.expected, [{ gross_minor: 12000, refund_minor: 0, total: 12000 }]);
+  const o = await execute(c);
+  witness(c, o);
+  assert.equal(o.body.ledger.net_refunds_unavailable, true);
+  assert.equal(o.body.ledger.net_expense_minor, undefined);
+  assert.match(o.body.answer, /net amount (?:is unknown|unknown)/i);
 });

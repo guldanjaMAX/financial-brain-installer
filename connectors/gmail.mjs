@@ -114,7 +114,8 @@ export function gmailPolicyFingerprint({ credentialScannerFingerprint = "", sinc
  * History.list cannot apply Gmail's search query. Recheck the labels returned
  * by messages.get so the incremental lane enforces the exact same policy as a
  * full list. Missing label or configured-floor date evidence is a coverage
- * gap, never permission to ingest or to advance the history cursor.
+ * gap, never permission to ingest. The runner may cross it only after saving
+ * its exact identity and reason as a durable recovery obligation.
  */
 export function gmailLabelDecision(labelIds, { since = null, internalDate = null } = {}) {
   const floor = normalizeGmailSince(since);
@@ -226,6 +227,84 @@ export async function* listMessages(getAccessToken, {
   }
 }
 
+/** One durable mailbox page. No generator-local pagination can be lost. */
+export async function listMessagePage(getAccessToken, { query = DEFAULT_QUERY, pageToken = null, opts = {} } = {}) {
+  try {
+    const page = await api(getAccessToken, "/users/me/messages", {
+      search: { q: query, maxResults: 500, pageToken: pageToken || undefined }, ...opts, maxResponseBytes: 256 * 1024,
+    });
+    if (page.messages != null && !Array.isArray(page.messages)) throw new Error("invalid Gmail message page");
+    if ((page.messages?.length || 0) > 500) throw new Error("Gmail message page exceeded its bound");
+    const next = nextPageToken(page.nextPageToken, "message-list");
+    if (next && next === pageToken) throw new Error("Gmail repeated a message-list page token");
+    return { ids: [...new Set((page.messages || []).map(m => requireMessageId(m?.id, "message-list")))], nextPageToken: next };
+  } catch (error) { throw gmailOperationError(error, GMAIL_OPERATIONS.list); }
+}
+
+// History records can contain arbitrarily many identities. Slice the final
+// per-page actions, not the history records. The digest fences an offset against
+// changed provider data; the mailbox marker stays behind the entire pending page.
+async function boundedHistory(getAccessToken, startHistoryId, opts) {
+  const cap = opts.maxWindowMessages ?? 1000;
+  if (!Number.isSafeInteger(cap) || cap < 1 || cap > 1000) throw new TypeError("invalid Gmail history identity bound");
+  const c = opts.continuation;
+  if (c && (c.version !== 1 || c.start_history_id !== startHistoryId ||
+      !Number.isSafeInteger(c.offset) || c.offset < 0 ||
+      (c.page_token !== null && (typeof c.page_token !== "string" || !c.page_token || c.page_token.length > GMAIL_PAGE_TOKEN_MAX_LENGTH)) ||
+      (c.digest !== null && !/^[a-f0-9]{64}$/.test(c.digest)))) throw new Error("invalid Gmail history continuation");
+  const apiOpts = { ...opts };
+  for (const key of ["windowPages", "maxWindowMessages", "continuation", "maxPages"]) delete apiOpts[key];
+  try {
+    const page = await api(getAccessToken, "/users/me/history", {
+      ...apiOpts, maxResponseBytes: 256 * 1024, search: { startHistoryId, pageToken: c?.page_token || undefined, maxResults: 500 },
+    });
+    if (page.history != null && !Array.isArray(page.history)) throw new Error("invalid Gmail history list");
+    const actions = new Map();
+    const fencedEnd = c?.offset > 0 ? c.page_end_history_id : null;
+    if (fencedEnd !== null && (typeof fencedEnd !== "string" || !/^\d+$/.test(fencedEnd))) throw new Error("invalid Gmail history page fence");
+    for (const record of page.history || []) {
+      if (!record || typeof record !== "object" || Array.isArray(record)) throw new Error("invalid Gmail history record");
+      if (fencedEnd !== null) {
+        if (typeof record.id !== "string" || !/^\d+$/.test(record.id)) throw new Error("invalid Gmail history record fence");
+        if (BigInt(record.id) > BigInt(fencedEnd)) continue;
+      }
+      for (const field of ["messagesAdded", "labelsAdded", "labelsRemoved", "messagesDeleted"]) {
+        if (record[field] != null && !Array.isArray(record[field])) throw new Error("invalid Gmail history actions");
+        for (const item of record[field] || []) actions.set(requireMessageId(item?.message?.id, field), field === "messagesDeleted" ? "delete" : "fetch");
+      }
+    }
+    const entries = [...actions].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
+    const digest = createHash("sha256").update(JSON.stringify(entries)).digest("hex");
+    const offset = c?.offset || 0;
+    if ((offset > 0 && c.digest !== digest) || offset > entries.length) throw new Error("Gmail history page changed before its pending suffix settled");
+    const slice = entries.slice(offset, offset + cap);
+    const next = c?.offset > 0 ? c.next_page_token : nextPageToken(page.nextPageToken, "history");
+    if (next && (typeof page.history?.at(-1)?.id !== "string" || !/^\d+$/.test(page.history.at(-1).id))) {
+      throw new Error("Gmail bounded history returned no advancing record marker");
+    }
+    if (next && next === c?.page_token) throw new Error("Gmail repeated a history page token");
+    const partialPage = offset + slice.length < entries.length;
+    const pageEnd = fencedEnd || page.history?.at(-1)?.id;
+    if (partialPage && (typeof pageEnd !== "string" || !/^\d+$/.test(pageEnd))) throw new Error("oversized Gmail history has no stable record fence");
+    const marker = c?.offset > 0 ? c.terminal_history_id : page.historyId;
+    const continuation = partialPage
+      ? { version: 1, start_history_id: startHistoryId, page_token: c?.page_token || null, offset: offset + slice.length, digest,
+          page_end_history_id: pageEnd, next_page_token: next, terminal_history_id: marker }
+      : next ? { version: 1, start_history_id: startHistoryId, page_token: next, offset: 0, digest: null } : null;
+    if (!continuation && (typeof marker !== "string" || !marker.trim())) throw new Error("Gmail history response returned no valid terminal history marker");
+    const deletedIds = slice.filter(([, action]) => action === "delete").map(([id]) => id);
+    return { ids: slice.filter(([, action]) => action === "fetch").map(([id]) => id), deletedIds,
+      removal_causes: Object.fromEntries(deletedIds.map(id => [id, "explicit_deletion"])),
+      expired: false, historyId: continuation ? startHistoryId : marker, hasMore: Boolean(continuation) || (c?.offset > 0 && page.historyId !== marker), continuation };
+  } catch (error) {
+    if (error instanceof DriveError && error.reason === "responseLimit") {
+      return { ids: [], deletedIds: [], expired: true, historyId: null, recovery_reason: "oversized_history" };
+    }
+    if (error instanceof DriveError && error.status === 404) return { ids: [], deletedIds: [], expired: true, historyId: null };
+    throw gmailOperationError(error, GMAIL_OPERATIONS.history);
+  }
+}
+
 const fromB64Url = (s) => Buffer.from(String(s).replace(/-/g, "+").replace(/_/g, "/"), "base64");
 
 /** The current history id, saved so the NEXT run only fetches what arrived. */
@@ -248,6 +327,7 @@ export async function currentHistoryId(getAccessToken, opts = {}) {
  * full list, and the caller is told so explicitly rather than left with nothing.
  */
 export async function listHistory(getAccessToken, startHistoryId, opts = {}) {
+  if (opts.windowPages !== undefined) return boundedHistory(getAccessToken, startHistoryId, opts);
   // Gmail returns history records in chronological order. Keep only the final
   // action for each message across the complete paginated window. A later
   // delete beats an earlier add; a later label change requires a fresh policy
@@ -264,11 +344,22 @@ export async function listHistory(getAccessToken, startHistoryId, opts = {}) {
   };
   let pageToken;
   let terminalHistoryId = null;
+  let hasMore = false;
   let pages = 0;
   const maxPages = opts.maxPages ?? GMAIL_MAX_PAGES;
   if (!Number.isInteger(maxPages) || maxPages < 1) throw new TypeError("Gmail maxPages must be a positive integer");
+  const windowPages = opts.windowPages ?? Infinity;
+  const maxWindowMessages = opts.maxWindowMessages ?? Infinity;
+  if (windowPages !== Infinity && (!Number.isInteger(windowPages) || windowPages < 1)) {
+    throw new TypeError("Gmail windowPages must be a positive integer");
+  }
+  if (maxWindowMessages !== Infinity && (!Number.isInteger(maxWindowMessages) || maxWindowMessages < 1)) {
+    throw new TypeError("Gmail maxWindowMessages must be a positive integer");
+  }
   const apiOpts = { ...opts };
   delete apiOpts.maxPages;
+  delete apiOpts.windowPages;
+  delete apiOpts.maxWindowMessages;
   const requestedPageTokens = new Set();
   try {
     do {
@@ -300,6 +391,9 @@ export async function listHistory(getAccessToken, startHistoryId, opts = {}) {
         // Within one record an explicit deletion is the safest final state.
         // A later record may still restore the same id to fetch.
         mark(h.messagesDeleted, "delete", "messagesDeleted");
+        if (actions.size > maxWindowMessages) {
+          throw new DriveError("Gmail history page exceeded the message bound; the history cursor was kept", 200, "pageLimit");
+        }
       }
       // Gmail also returns the current mailbox history marker at the page
       // level. An empty change window has no row id to fall back to, and saving
@@ -316,6 +410,18 @@ export async function listHistory(getAccessToken, startHistoryId, opts = {}) {
       }
       pageToken = followingPageToken;
       terminalHistoryId = pageToken ? null : pageHistoryId;
+      if (pageToken && pages >= windowPages) {
+        // A page-level marker describes the entire mailbox, including pages
+        // not read yet. Only the last consumed record can bound this window.
+        const marker = page.history?.at(-1)?.id;
+        if (typeof marker !== "string" || !/^\d+$/.test(marker) ||
+            !/^\d+$/.test(String(startHistoryId)) || BigInt(marker) <= BigInt(startHistoryId)) {
+          throw new DriveError("Gmail bounded history returned no advancing record marker", 200, "invalidHistoryId");
+        }
+        terminalHistoryId = marker;
+        hasMore = true;
+        break;
+      }
     } while (pageToken);
   } catch (e) {
     if (e instanceof DriveError && e.status === 404) {
@@ -336,6 +442,7 @@ export async function listHistory(getAccessToken, startHistoryId, opts = {}) {
       .map(([id]) => [id, "explicit_deletion"])),
     expired: false,
     historyId: terminalHistoryId,
+    ...(hasMore ? { hasMore: true } : {}),
   };
 }
 
@@ -353,10 +460,9 @@ export function isPermanentMessageFailure(error) {
 /**
  * Read only the policy fields needed to classify one incremental-history message.
  *
- * A history window cannot use Gmail's search query. The caller preflights the
- * complete window through this cheap shape before it sends any sibling, so one
- * response with missing label or date evidence can stop the window atomically
- * without retaining every raw message body in memory.
+ * A history window cannot use Gmail's search query. The caller checks this
+ * cheap shape before each message's body. Missing label/date evidence holds
+ * that identity for retry while independently eligible siblings continue.
  */
 export async function messagePolicy(getAccessToken, id, opts = {}) {
   const { since: rawSince = null, ...apiOpts } = opts;

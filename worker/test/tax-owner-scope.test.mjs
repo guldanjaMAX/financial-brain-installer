@@ -249,7 +249,7 @@ test("AR-07 tax preparation fees remain outside the tax-return evidence gate", a
   );
 });
 
-test("AR-07 a dated owner money question reaches the real ledger while owner-tax wording bypasses it", async (t) => {
+test("AR-07 a dated owner money question hands off while tax scope and legacy evidence remain guarded", async (t) => {
   t.mock.method(Date, "now", () => NOW);
   const fixture = await createProductFixture({
     productRoot: productRoot(),
@@ -271,8 +271,19 @@ test("AR-07 a dated owner money question reaches the real ledger while owner-tax
       VALUES ('fixture-income','fixture-checking','2025-09-15',12345,'inflow','Invoice payment','Example Customer','owner_stated','confirmed',?)`, recordedAt);
 
     const moneyQuestion = "How much income came from Example Customer in September 2025 for my checking account ending 0100?";
+    const beforeHandoff = fixture.seen.sql.length;
+    const handoff = await (await fixture.post("/api/rag/think", { q: moneyQuestion }, headers(fixture))).json();
+    assert.equal(handoff.money_handoff, undefined, "the human Worker request reaches the shipped reader");
+    assert.match(handoff.answer, /123\.45/);
+    assert.deepEqual(handoff.gaps, []);
+    assert.equal(fixture.seen.sql.slice(beforeHandoff).some((sql) => /JOIN fin_transactions/.test(sql)), true,
+      "the hand-off precedes the retained compatibility reader");
+    // Keep every stored-amount and scope assertion on the compatibility path.
+    // The public think route now delegates these calculations to money tools.
+    const { withLedgerAnswer } = await moduleAt("worker/src/lib/ledger-answer.js");
     const beforeMoney = fixture.seen.sql.length;
-    const money = await (await fixture.post("/api/rag/think", { q: moneyQuestion }, headers(fixture))).json();
+    const money = await (await withLedgerAnswer({ env: fixture.env, question: moneyQuestion, now: NOW,
+      grantScope: { all: true }, scopePrincipalKind: "owner" }, () => assert.fail("unexpected document fallback"))).json();
     const moneySql = fixture.seen.sql.slice(beforeMoney);
     assert.equal(money.ledger?.kind, "merchant", "the real ledger answered the dated owner-money question");
     assert.equal(money.ledger.attributed_subtotal_minor, 12345,

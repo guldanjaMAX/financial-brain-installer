@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
-  cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
+  cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   buildNpmCliInvocation,
@@ -31,6 +31,15 @@ function copyFrontend(source, target) {
       return first !== "node_modules" && first !== "dist" && !first.startsWith(".env");
     },
   });
+  // The app shares the Worker's confidence formatter. Preserve its dependency
+  // closure so this isolated build checks the same source as an ordinary build.
+  const shared = join(dirname(target), "worker", "src", "lib");
+  mkdirSync(shared, { recursive: true });
+  for (const name of ["confidence.js", "evidence-lineage.js", "document-answer-reading.js", "answer-sentences.js", "quickbooks-label.js",
+    // 0.4.28 provenance reading adds this pure-JS dependency closure.
+    "document-answer-provenance.js", "document-answer-context.js", "evidence-authority.js", "query-intent.js", "tax-evidence-scope.js"]) {
+    cpSync(join(dirname(source), "worker", "src", "lib", name), join(shared, name));
+  }
 }
 
 function buildEnvironment(sandbox) {
@@ -68,6 +77,21 @@ function runBuild(frontend, environment) {
   assert.equal(result.status, 0, result.error?.message || result.stderr || result.stdout);
 }
 
+test("isolated frontend fixture retains shared answer rendering modules", async () => {
+  const sandbox = mkdtempSync(join(tmpdir(), "brain-frontend-import-"));
+  try {
+    const frontend = join(sandbox, "frontend");
+    copyFrontend(FRONTEND, frontend);
+    const render = await import(pathToFileURL(join(frontend, "src", "lib", "answer-render.js")));
+    const response = { answer: "$42.00 for October 2026.", answer_contract: { version: 1, kind: "ledger" },
+      confidence: { percent: 69, basis: ["A payment remains unmatched."], missing: ["The receiving statement."] } };
+    assert.equal(render.answerText(response), response.answer);
+    assert.equal(render.confidenceText(response), "Confidence: Low (69%). Why: A payment remains unmatched. Missing: The receiving statement.");
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
 test("two consecutive owner-app builds reproduce the reviewed Worker bundle", () => {
   const installedModules = join(FRONTEND, "node_modules");
   assert.equal(existsSync(installedModules), true, "install frontend dependencies before this test");
@@ -78,7 +102,15 @@ test("two consecutive owner-app builds reproduce the reviewed Worker bundle", ()
     const generatedBundle = join(sandbox, "worker", "src", "lib", "app-assets.js");
     copyFrontend(FRONTEND, frontend);
     mkdirSync(dirname(generatedBundle), { recursive: true });
-    symlinkSync(installedModules, join(frontend, "node_modules"), process.platform === "win32" ? "junction" : "dir");
+    // Vite writes .vite-temp beside the installed packages. Link packages
+    // individually so build caches never write into a shared dependency tree.
+    const fixtureModules = join(frontend, "node_modules");
+    mkdirSync(fixtureModules);
+    for (const entry of readdirSync(installedModules, { withFileTypes: true })) {
+      if (!entry.isDirectory() || entry.name.startsWith(".vite")) continue;
+      symlinkSync(join(installedModules, entry.name), join(fixtureModules, entry.name),
+        process.platform === "win32" ? "junction" : "dir");
+    }
 
     const environment = buildEnvironment(sandbox);
     runBuild(frontend, environment);

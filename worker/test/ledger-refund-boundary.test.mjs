@@ -1,10 +1,11 @@
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ledgerFixture } from './ledger-review-fixture.mjs';
 import { withLedgerAnswer } from '../src/lib/ledger-answer.js';
 import { total, displayFigures } from '../../eval/fast-loop/money-oracle.mjs';
 const NOW = Date.parse('2026-11-06T12:00:00Z');
-function setup(t) {
+function setup(t, answerPath = withLedgerAnswer) {
   const f = ledgerFixture(t);
   t.mock.method(globalThis, 'fetch', () => assert.fail('offline boundary'));
   f.env.ANTHROPIC_API_KEY = ['synthetic', 'value'].join('-');
@@ -21,7 +22,7 @@ function setup(t) {
   f.read = async (ordinary=false, month=10, extra={}) => {
     const before=f.calls.length, changes=f.first('SELECT total_changes() n').n;
     let models=0;
-    const response=await withLedgerAnswer({env:f.env,question:extra.question || (ordinary?'Could you retrieve spending last month after refunds?':'Could you retrieve spending in the category software last month after refunds?'),now:NOW,grantScope:{all:true},scopePrincipalKind:'owner',callLLM:async()=>{
+    const response=await answerPath({env:f.env,question:extra.question || (ordinary?'Could you retrieve spending last month after refunds?':'Could you retrieve spending in the category software last month after refunds?'),now:NOW,grantScope:{all:true},scopePrincipalKind:'owner',callLLM:async()=>{
       models++;
       return {content:[{type:'text',text:JSON.stringify({ambiguous:false,unanswered_part:null,intents:[{kind:extra.kind || (ordinary?'merchant':'category'),direction:'outflow',count:null,vendor_text:extra.vendor || (extra.kind === 'expense_summary' ? null : (ordinary?'refunds':'software')),account_hint:null,amount_text:null,date_text:null,period:extra.period || {type:'between',from:`2026-${String(month).padStart(2,'0')}-01`,to:`2026-${String(month).padStart(2,'0')}-${month===9?30:31}`}}]})}]};
     }},()=>assert.fail('ledger decision not reached'));
@@ -41,7 +42,7 @@ function checked(body, gross, ids) {
   assert.equal(l.refund_minor, undefined, 'no certified refund amount');
   assert.equal(l.refund_description_minor, undefined, 'no description deduction');
   assert.equal(l.net_refunds_unavailable, true, 'net unavailable decision reached');
-  assert.match(body.answer, /cannot confirm spending after refunds/i);
+  assert.match(body.answer, /before subtracting refunds.*net amount (?:is unknown|unknown)/is);
   const candidates = l.possible_refunds || [];
   assert.equal(candidates.length, ids.length, 'exact expected candidate population');
   assert.equal(new Set(candidates.map(c => c.n)).size, candidates.length, 'distinct identity citations');
@@ -175,7 +176,7 @@ for (const ordinary of [false,true]) test(`${ordinary?'ordinary':'merchant'}: mo
   assert.deepEqual(body.ledger.months.map(m=>m.total_minor),[0,113],'monthly gross remains exact');
   assert.equal(body.ledger.net_refunds_unavailable,true);
   assert.equal(body.ledger.net_expense_minor,undefined);
-  assert.match(body.answer,/cannot confirm spending after refunds/i);
+  assert.match(body.answer,/before subtracting refunds.*net amount (?:is unknown|unknown)/is);
   if (!ordinary) assert.ok(body.citations.some(c=>c.amount_minor===37),'inner merchant candidate reached rollup citation list');
   assert.ok(body.answer.includes('possible refund, not subtracted'),'monthly candidate label retained');
   assert.ok(body.answer.includes('"Store refund"'),'monthly bank text retained');
@@ -183,7 +184,40 @@ for (const ordinary of [false,true]) test(`${ordinary?'ordinary':'merchant'}: mo
 });
 
 if (process.env.REFUND_BOUNDARY_FAULT) test('boundary fault witness refuses an incomplete disclosure after the real monthly decision', async t => {
-  const f = setup(t);
+  const url = new URL('../src/lib/ledger-answer.js', import.meta.url);
+  const monthlyUrl = new URL('./ledger-monthly.js', url);
+  const monthly = readFileSync(monthlyUrl, 'utf8');
+  // The rollup repairs a missing child line from its retained metadata. Omit
+  // the final monthly line to exercise the outer guard with the candidate kept.
+  const site = 'rows[index].possible_refunds?.length ?';
+  assert.equal(monthly.split(site).length - 1, 1, 'one real monthly disclosure mutation site');
+  const absolute = (source, base) => source.replace(/from (["'])(\.\/[^"'\n]+)\1/g,
+    (_, quote, path) => `from ${JSON.stringify(new URL(path, base).href)}`);
+  const data = source => `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
+  const monthlyData = data(absolute(monthly.replace(site, 'false && ' + site), monthlyUrl));
+  const source = readFileSync(url, 'utf8');
+  assert.equal(source.split('./ledger-monthly.js').length - 1, 1, 'real rollup import reached');
+  const changed = source.replace(/from (["'])\.\/ledger-monthly\.js\1/, `from ${JSON.stringify(monthlyData)}`);
+  // Witness the frozen nomination before rendering. The omit-nominee fault
+  // deliberately removes final metadata, which cannot witness its own loss.
+  const nominationSite = 'intent.refundBoundary.plans.push(plan);';
+  assert.equal(changed.split(nominationSite).length - 1, 1, 'one frozen nomination decision reached');
+  const witnessed = 'export const nominations = [];\n' + changed.replace(nominationSite,
+    'nominations.push(structuredClone(plan)); ' + nominationSite);
+  const { withLedgerAnswer: damaged, nominations } = await import(data(absolute(witnessed, url)));
+  // 0.4.28 external faults already changed the imported monthly module; use the preserved green copy.
+  assert.ok(process.env.REFUND_BOUNDARY_GREEN_READER, 'the mutation harness supplied its independent green reader');
+  const { withLedgerAnswer: greenReader } = await import(process.env.REFUND_BOUNDARY_GREEN_READER);
+  const green = setup(t, greenReader);
+  green.put('charge', 113, { direction: 'outflow', date: '2026-10-04' });
+  green.put('credit', 37, { description: 'Store refund' });
+  const control = await green.read(true, 10, { kind: 'expense_summary', vendor: null,
+    question: 'Could you retrieve spending by month from September 1 through October 31, 2026 after refunds?',
+    period: { type: 'between', from: '2026-09-01', to: '2026-10-31' } });
+  assert.deepEqual(control.ledger.months.map(m => m.total_minor), [0, 113]);
+  assert.equal(control.ledger.candidate_disclosure_unavailable, undefined, 'undamaged renderer is the populated green control');
+  assert.equal(control.ledger.months[1].possible_refunds[0].amount_minor, 37);
+  const f = setup(t, damaged);
   f.put('charge', 113, { direction: 'outflow', date: '2026-10-04' });
   f.put('credit', 37, { description: 'Store refund' });
   const body = await f.read(true, 10, { kind: 'expense_summary', vendor: null,
@@ -191,12 +225,18 @@ if (process.env.REFUND_BOUNDARY_FAULT) test('boundary fault witness refuses an i
     period: { type: 'between', from: '2026-09-01', to: '2026-10-31' } });
   assert.deepEqual(body.ledger.months.map(m => m.total_minor), [0, 113], 'nonempty monthly decision reached');
   assert.equal(f.first("SELECT count(*) n FROM fin_transactions WHERE txn_uid='credit' AND amount_minor=37").n, 1, 'nonempty nominated input reached');
-  assert.equal(body.ledger.candidate_disclosure_unavailable, true, 'boundary failure must withhold disclosure');
-  assert.match(body.answer, /candidate disclosure unavailable/i);
-  assert.match(body.answer, /cannot confirm spending after refunds/i);
+  assert.equal(body.ledger.candidate_disclosure_unavailable, true, 'boundary failure must disclose the missing rendered candidate');
+  assert.equal(nominations.length, 2, 'both monthly nomination decisions were reached');
+  assert.deepEqual(nominations.flatMap(plan => plan.candidates.map(candidate => ({
+    from: plan.from, to: plan.to, amount_minor: candidate.amount_minor, posted_on: candidate.posted_on,
+  }))), [{ from: '2026-10-01', to: '2026-10-31', amount_minor: 37, posted_on: '2026-10-05' }],
+  'the exact nominee existed before the renderer could omit it');
+  assert.match(body.answer, /candidate disclosure (?:is )?unavailable/i);
+  assert.match(body.answer, /before subtracting refunds.*net amount (?:is unknown|unknown)/is);
   assert.equal(body.evidence_gate.complete, false);
   assert.equal(body.evidence_gate.partial, true);
   assert.equal(body.ledger.net_expense_minor, undefined);
+  assert.doesNotMatch(body.answer, /withheld|cannot|can't/i);
 });
 
 // The R0 population is crossed with every admitted phrase and both single and

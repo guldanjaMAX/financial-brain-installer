@@ -5,7 +5,8 @@ import { ledgerFixture, NOW } from './ledger-review-fixture.mjs';
 import { withLedgerAnswer } from '../src/lib/ledger-answer.js';
 import { recordedIntent } from './fixtures/ledger-intent-cases.mjs';
 import { supplementalLedgerWindow } from '../src/lib/ledger-intent-calendar.js';
-import { localLedgerWindow, explainLedgerIntentDecision } from '../src/lib/ledger-intent.js';
+import { finalizeOwnerLedgerAnswer } from '../src/lib/document-answer.js';
+import { localLedgerWindow, validateLedgerIntentDecision, explainLedgerIntentDecision } from '../src/lib/ledger-intent.js';
 // C3 owns month admission in the canonical parser; the supplemental parser
 // supplies short day literals when no canonical month window was admitted.
 const calendarWindow = (question, today) => localLedgerWindow(question, today) || supplementalLedgerWindow(question, today);
@@ -49,15 +50,20 @@ test('month admission keeps day literals, invalid labels and future months bound
     const window = calendarWindow(`in ${label}`, '2026-10-12');
     assert.deepEqual([window?.from, window?.to], [from, to]);
   }
-  for (const label of ['Nov. 2026', 'Sep. 1999', 'Sepx 2026', 'Sep. 20266'])
+  const future = calendarWindow('in Nov. 2026', '2026-10-12');
+  assert.deepEqual([future.from, future.to, future.projection], ['2026-11-01', '2026-11-30', true]);
+  for (const label of ['Sep. 1999', 'Sepx 2026', 'Sep. 20266'])
     assert.equal(calendarWindow(`in ${label}`, '2026-10-12')?.invalid, true);
 });
 function displayed(body, allowed) {
-  const tokens = [body.answer, ...(body.citations || []).map(c => c.title)].join('\n').match(/-?\$[\d,]+\.\d+/g) || [];
+  const reading = finalizeOwnerLedgerAnswer(body);
+  const tokens = [reading.answer, ...(reading.citations || []).map(c => c.title)].join('\n').match(/-?\$[\d,]+\.\d+/g) || [];
   assert.ok(tokens.length, 'nonempty amount display');
   const expected = new Set(allowed.map(dollars));
   for (const token of tokens) assert.ok(expected.has(token), `unexpected amount ${token}`);
-  assert.doesNotMatch(body.answer, /\d+(?:\.\d+)?%/, 'this contract produces no percentage');
+  assert.equal(reading.confidence.percent, 0, 'missing money-tool assessment remains unverified');
+  assert.match(reading.confidence_text, /Confidence: Low \(0%\).*Why:.*Missing:/s);
+  assert.match(reading.answer, /Coverage:.*Missing or counted twice:.*Estimates:.*How to check:/s);
 }
 
 test('signed cents: refunds, card debt and loans preserve every displayed cent', async t => {
@@ -202,8 +208,9 @@ for (const expression of ['following Sep.', 'following Sep. 2026', 'subsequent t
     f.calls.length = 0;
     const question = `Could you retrieve expenses ${expression}?`;
     const decision = explainLedgerIntentDecision(question, JSON.stringify({ intents: [expenses()] }), { now: NOW, timeZone: 'UTC' });
-    assert.equal(decision.outcome, 'fallback');
-    assert.equal(decision.reason, expression.startsWith('excluding ') ? 'capability' : 'period_contradiction');
+    const boundedReading = !['excluding Sep.', 'from Sep. to Oct.', 'Sep. through Oct.', 'Sep. until Oct.', 'Sep. to 2026-10-05'].includes(expression);
+    assert.equal(decision.outcome, boundedReading ? 'ready' : 'fallback');
+    if (!boundedReading) assert.equal(decision.reason, expression.startsWith('excluding ') ? 'capability' : 'period_contradiction');
     let model = 0, fallback = 0;
     const response = await withLedgerAnswer({ env: f.env, question, now: NOW,
       grantScope: { all: true }, scopePrincipalKind: 'owner',
@@ -212,7 +219,24 @@ for (const expression of ['following Sep.', 'following Sep. 2026', 'subsequent t
     const body = await response.json();
     assert.equal(model, 1, 'recorded extraction reached');
     assert.equal(fallback, expression.startsWith('excluding ') ? 1 : 0, 'calendar clarification does not enter document synthesis');
-    assert.ok(!f.calls.some(sql => /JOIN fin_transactions/.test(sql)), 'refused plan never reads totals');
+    if (boundedReading) {
+      assert.ok(f.calls.some(sql => /JOIN fin_transactions/.test(sql)), 'bounded reading reached the exact transaction decision');
+      const reading = finalizeOwnerLedgerAnswer(body);
+      assert.ok(reading.confidence.percent < 90);
+      assert.match(reading.confidence_text, /Confidence: Low \(0%\).*Why:.*Missing:/s);
+      assert.match(reading.answer, /Coverage:.*Missing or counted twice:.*Estimates:.*How to check:/s);
+      if (expression.startsWith('between ')) {
+        assert.equal(body.ledger.kind, 'multi');
+        assert.deepEqual(body.ledger.parts.map(part => part.expense_total_minor), [29, 57]);
+        assert.deepEqual(body.ledger.parts.map(part => [part.from, part.to]), [['2026-09-01', '2026-09-30'], ['2026-10-01', '2026-10-12']]);
+      } else {
+        assert.equal(body.ledger.expense_total_minor, 29);
+        assert.deepEqual([body.ledger.from, body.ledger.to], ['2026-09-01', '2026-09-30']);
+        assert.match(body.answer, /I did not narrow it by/);
+      }
+      return;
+    }
+    assert.ok(!f.calls.some(sql => /JOIN fin_transactions/.test(sql)), 'discarded plan never reads totals');
     assert.equal(body.ledger, undefined, 'no total for a discarded date operand');
     if (expression.startsWith('excluding ')) assert.equal(body.route, 'documents');
     else {
@@ -234,7 +258,17 @@ test('standalone admission applies the same refusal rule to every abbreviated mo
       `from ${label} ${year} to Oct. 2026`, `between ${label} ${year} and Oct. 2026`,
       `${label} ${year} through Oct. 2026`, `${label} ${year} until 2026-10-05`,
       `${label} ${year} to October 2026`, `${label} ${year} or Oct. 2026`])
-      assert.equal(decisionFor(`expenses ${expression}?`, '2026-10-12').outcome, 'fallback', expression);
+      {
+        const question = `expenses ${expression}?`;
+        const window = calendarWindow(question, '2026-10-12');
+        const decision = decisionFor(question, '2026-10-12');
+        if (decision.outcome === 'ready') {
+          const read = validateLedgerIntentDecision({ intents: [expenses()] }, question, { now: NOW, timeZone: 'UTC' });
+          assert.ok(read.intents?.length, 'ready admission has a concrete plan');
+          assert.ok(read.intents.every(intent => !intent.defaultedPeriod), expression);
+          assert.ok(window?.unread?.length || /between| or /.test(expression), 'unused operator is disclosed or retains both month operands');
+        } else assert.equal(decision.outcome, 'fallback', expression);
+      }
   }
 });
 
@@ -246,7 +280,9 @@ test('closed month grammar refuses modifiers independently of activity, account 
       for (const modifier of ['following', 'subsequent to', 'not in', 'outside', 'excluding', 'unrecognized_modifier']) {
         const control = calendarWindow(`Could you retrieve ${activity} in Sep. 2026?`, today);
         assert.deepEqual([control.from, control.to], ['2026-09-01', '2026-09-30']);
-        assert.equal(decisionFor(`Could you retrieve ${activity} ${modifier} Sep. 2026?`, today).outcome, 'fallback');
+        const question = `Could you retrieve ${activity} ${modifier} Sep. 2026?`;
+        assert.equal(decisionFor(question, today).outcome, modifier === 'excluding' || activity === 'refunds' ? 'fallback' : 'ready');
+        if (modifier !== 'excluding') assert.ok(calendarWindow(question, today).unusedCalendarLimits.includes(modifier));
       }
     }
   }
@@ -278,10 +314,15 @@ for (const kind of ['checking', 'savings', 'card', 'loan', 'line_of_credit', 'in
     assert.equal(model, 1);
     assert.equal(fallback, 0, 'unread calendar words are clarified before document synthesis');
     const body = await response.json();
-    assert.equal(body.ledger, undefined);
-    assert.ok(body.gaps.some(g => g.scope === 'calendar'));
-    assert.equal(f.calls.length, 0, 'clarification precedes inventory and transaction reads');
-    assert.ok(!f.calls.some(sql => /JOIN fin_transactions/.test(sql)), 'no row or total reads on refusal');
+    assert.ok(f.calls.some(sql => /JOIN fin_transactions/.test(sql)), 'recorded transaction decision reached');
+    const { unused_calendar_limits, ...ledger } = body.ledger;
+    assert.deepEqual(unused_calendar_limits, ['following']);
+    assert.deepEqual(ledger, green.body.ledger, 'same bounded records retain every original figure and exclusion');
+    assert.match(body.answer, /I did not narrow it by 'following'/);
+    const reading = finalizeOwnerLedgerAnswer(body);
+    assert.equal(reading.confidence.percent, 0);
+    assert.match(reading.confidence_text, /Confidence: Low \(0%\).*Why:.*Missing:/s);
+    assert.match(reading.answer, /Coverage:.*Missing or counted twice:.*Estimates:.*How to check:/s);
   });
 }
 
@@ -294,5 +335,53 @@ test('since abbreviated months retain both numeric peers under C3 admission', as
     assert.deepEqual([r.body.ledger.from, r.body.ledger.to], [from, '2026-10-12']);
     assert.equal(r.body.ledger.expense_total_minor, 86);
     displayed(r.body, [29, 57, 86]);
+  }
+});
+
+// The public decimal column and the confidence explanation must use the same
+// currency units as the stored integer, including both snapshot encodings.
+test('currency units: real money SQL and uncertainty retain zero, two and three decimals', async t => {
+  const { overviewFixture } = await import('./helpers/money-overview-fixture.mjs');
+  const { queryMoney } = await import('../src/lib/money-query.js');
+  const { cleanMoneyCtes, classifiedMoneyCtes } = await import('../src/lib/clean-money.js');
+  const f = overviewFixture(t);
+  const cases = [['USD', 123.45, '123.45'], ['JPY', 12345, '12,345'],
+    ['ISK', 12345, '12,345'], ['KWD', 12.345, '12.345'], ['BHD', 12.345, '12.345']];
+  for (const [currency, expected, text] of cases) {
+    await t.test(currency, async () => {
+      const slug = currency.toLowerCase();
+      f.account(slug, 'live', 'checking', currency);
+      f.connection(slug);
+      f.run('UPDATE bank_feed_items SET last_synced_at=?', '2025-12-31T18:00:00Z');
+      f.run("UPDATE fin_accounts SET opened_on='2025-12-01' WHERE account_slug=?", slug);
+      f.coverage(slug, '2025-12-01', '2025-12-31');
+      f.row(slug, slug, '2025-12-10', 12345, 'inflow', { currency });
+      const sql = `SELECT currency,amount_minor,amount,typeof(amount) AS amount_type FROM txn WHERE currency='${currency}'`;
+      const read = await queryMoney(f.env, { sql }, { now: () => Date.parse('2025-12-31T18:00:00Z') });
+      assert.equal(read.rows?.length, 1, 'real SQL decision reached the populated currency row');
+      assert.equal(read.rows[0].amount_minor, 12345, 'minor-unit figure stays identical');
+      assert.equal(read.rows[0].amount, expected, 'wrong currency conversion is a wrong figure');
+      assert.equal(read.rows[0].amount_type, 'real', 'whole amounts retain REAL division');
+      assert.ok(read.confidence.percent < 90, 'unknown income membership cannot be High');
+      assert.ok(read.confidence.reasons.some(reason => reason.includes(text)), 'uncertain amount uses its actual currency units');
+      f.run("UPDATE fin_transactions SET description='Payroll income' WHERE txn_uid=?", slug);
+      const measured = await queryMoney(f.env, { sql:`SELECT SUM(amount) AS total FROM txn WHERE currency='${currency}' AND posted_on BETWEEN '2025-12-01' AND '2025-12-31'` }, { now: () => Date.parse('2025-12-31T18:00:00Z') });
+      assert.equal(measured.rows[0].total, expected, 'High-confidence totals use the same correct currency units');
+      assert.ok(measured.confidence.percent >= 90, 'complete classified green control reaches High');
+
+      const direct = f.db.prepare(`WITH ${cleanMoneyCtes()} ${sql.replace('FROM txn', 'FROM mq_rows')}`).get();
+      assert.equal(direct.amount, expected, 'unfrozen SQL units');
+      const snapshot = { coverage: [] };
+      for (const [key, table] of [['rows', 'mq_rows'], ['accounts', 'mq_accounts'], ['pairs', 'mq_pairs_all']])
+        snapshot[key] = f.db.prepare(`WITH ${cleanMoneyCtes()} SELECT * FROM ${table}`).all();
+      for (const maxBinds of [90, 1]) {
+        const binds = [];
+        const ctes = classifiedMoneyCtes(snapshot, binds, null, undefined, { maxBinds });
+        const row = f.db.prepare(`WITH ${ctes} ${sql}`).get(...binds);
+        assert.equal(row.amount_minor, 12345);
+        assert.equal(row.amount, expected, `frozen SQL units, bind budget ${maxBinds}`);
+        assert.equal(row.amount_type, 'real');
+      }
+    });
   }
 });

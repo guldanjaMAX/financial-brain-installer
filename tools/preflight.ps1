@@ -1,4 +1,6 @@
 # Financial Brain preflight (Windows). Reads the machine, changes nothing.
+Set-StrictMode -Version 2.0
+$ErrorActionPreference = 'Stop'
 $script:Warned = 0; $script:Stopped = 0; $script:Fresh = $false; $script:NoManifest = $false
 function Ok  ($m){ Write-Host "  ok    $m" }
 function Warn($m){ Write-Host "  WARN  $m"; $script:Warned++ }
@@ -80,7 +82,7 @@ $nodeSupported = $false
 $nodeExecutable = $null
 # Windows PowerShell can return both .cmd and .exe applications for one name.
 # Preserve its command-resolution order, but invoke exactly the first candidate.
-$node = @(Get-Command node -CommandType Application -ErrorAction SilentlyContinue)[0]
+$node = Get-Command node -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($node) {
   $nodeExecutable = $node.Source
   $nodeOutput = @(& $nodeExecutable -v 2>$null)
@@ -100,7 +102,11 @@ if ($node) {
 } else { Stop_ "node is not installed" }
 $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
 if ($npm) {
-  if ($nodeSupported) { Write-Host ("  npm             " + (& $npm.Source -v)) }
+  if ($nodeSupported) {
+    $npmOutput = @(& $npm.Source -v)
+    if ($LASTEXITCODE -ne 0 -or $npmOutput.Count -ne 1) { Stop_ "npm.cmd version could not be read" }
+    else { Write-Host ("  npm             " + $npmOutput[0]) }
+  }
   else { Write-Host "  npm             found (version check waits for Node 22 or newer)" }
 } else { Stop_ "npm.cmd not found" }
 Write-Host ""
@@ -133,13 +139,13 @@ foreach ($n in @('brain','brain.cmd')) {
   $c = Get-Command $n -All -ErrorAction SilentlyContinue
   if ($c) { $copies += ($c | ForEach-Object { $_.Source }) }
 }
-$copies = $copies | Where-Object { $_ } | Sort-Object -Unique
+$copies = @($copies | Where-Object { $_ } | Sort-Object -Unique)
 if ($copies.Count -eq 0) {
   $packageRoot = Split-Path $PSScriptRoot -Parent
   $packagePrefix = Split-Path (Split-Path $packageRoot -Parent) -Parent
   $packageCli = Join-Path $packagePrefix "brain.cmd"
-  $knownCandidates = @($packageCli, "$env:LOCALAPPDATA\FinancialBrain\brain.cmd") |
-    Where-Object { $_ -and (Test-Path $_ -PathType Leaf) } | Sort-Object -Unique
+  $knownCandidates = @(@($packageCli, "$env:LOCALAPPDATA\FinancialBrain\brain.cmd") |
+    Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | Sort-Object -Unique)
   if ($knownCandidates.Count -eq 1) {
     Warn "'brain' is not on PATH, but the installed CLI is available at $($knownCandidates[0]); use that full path in this PowerShell window"
   } elseif ($knownCandidates.Count -gt 1) {
@@ -155,7 +161,7 @@ else {
   $copies | ForEach-Object { Write-Host "          $_" }
 }
 $fb = "$env:LOCALAPPDATA\FinancialBrain"
-if (Test-Path "$fb\brain.cmd") { Ok "install target exists: $fb" } else { Warn "no $fb yet; install with --prefix to that path so there is one home" }
+if (Test-Path -LiteralPath "$fb\brain.cmd") { Ok "install target exists: $fb" } else { Warn "no $fb yet; install with --prefix to that path so there is one home" }
 Write-Host ""
 
 Write-Host "CLOUDFLARE ACCESS"
@@ -178,8 +184,8 @@ $session = $null
 foreach ($cfg in $cfgCandidates) {
   $toml = Join-Path $cfg "default.toml"
   $enc = Join-Path $cfg "default.enc"
-  if (Test-Path $toml) { $session = @{ Path = $toml; Format = "toml" }; break }
-  if (Test-Path $enc) { $session = @{ Path = $enc; Format = "encrypted" }; break }
+  if (Test-Path -LiteralPath $toml) { $session = @{ Path = $toml; Format = "toml" }; break }
+  if (Test-Path -LiteralPath $enc) { $session = @{ Path = $enc; Format = "encrypted" }; break }
 }
 if ($session -and $session.Format -eq "toml") { Ok "wrangler session found (legacy default.toml only; current named-profile authorization is not checked)" }
 elseif ($session -and $session.Format -eq "encrypted") { Warn "wrangler wrote default.enc; legacy-file discovery cannot verify the current named browser profile" }
@@ -190,7 +196,7 @@ Write-Host ""
 Write-Host "NETWORK"
 foreach ($p in @(@('api.github.com','https://api.github.com'), @('github.com','https://github.com'), @('release assets','https://release-assets.githubusercontent.com'))) {
   try { $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 12 -Uri $p[1] -MaximumRedirection 0 -ErrorAction Stop; Ok "$($p[0]) reachable (http $($r.StatusCode))" }
-  catch { if ($_.Exception.Response) { Ok "$($p[0]) reachable (http $([int]$_.Exception.Response.StatusCode))" } else { Stop_ "$($p[0]) unreachable; the download will fail" } }
+  catch { if ($_.Exception.PSObject.Properties['Response'] -and $_.Exception.Response) { Ok "$($p[0]) reachable (http $([int]$_.Exception.Response.StatusCode))" } else { Stop_ "$($p[0]) unreachable; the download will fail" } }
 }
 Write-Host ""
 
@@ -215,7 +221,7 @@ if (-not $nodeSupported) {
     $mf = @([pscustomobject]@{ FullName = $selectedManifest[0] })
     Ok "using the saved installed manifest: $($mf[0].FullName)"
   } elseif ($pointerStatus -eq 2) {
-    $mf = @(Get-ChildItem -Path $HOME -Recurse -Depth 4 -Filter brain.manifest.json -ErrorAction SilentlyContinue |
+    $mf = @(Get-ChildItem -LiteralPath $HOME -Recurse -Depth 4 -Filter brain.manifest.json -ErrorAction SilentlyContinue |
             Where-Object { $_.FullName -notmatch 'node_modules|templates' })
   } elseif ($pointerStatus -eq 3) {
     Stop_ "the saved installed Brain location is unsafe, unreadable, or missing; repair that private pointer before choosing a manifest"
@@ -229,7 +235,7 @@ elseif ($pointerStatus -eq 2 -and $mf.Count -eq 1) {
 }
 if ($mf.Count -eq 1 -and $pointerStatus -ne 3) {
   try {
-    $m = Get-Content $mf[0].FullName -Raw | ConvertFrom-Json
+    $m = Get-Content -LiteralPath $mf[0].FullName -Raw -Encoding UTF8 | ConvertFrom-Json
     $dom = $m.brain.domain
     if ($dom) {
       $h = Invoke-RestMethod -TimeoutSec 15 "https://$dom/health"

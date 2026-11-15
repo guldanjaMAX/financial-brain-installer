@@ -24,8 +24,8 @@ export async function monthlyLedgerAnswer(intent, accounts, readMonth) {
     try { part = scope.available ? await readMonth({ ...intent, from, to, monthlyBreakdown: false, paymentCitationDetails: true, refundPeriodLabel: label }) : null; }
     catch { part = { reason: 'ledger_unavailable' }; }
     const ledger = part?.ledger;
-    const readable = Boolean(ledger && (ledger.complete !== false || ledger.partial_reason === 'ledger_partial_coverage') &&
-      !ledger.classification_uncertain && !ledger.attribution_incomplete && !ledger.selector_unresolved);
+    const readable = Boolean(ledger && (ledger.complete !== false || ledger.partial_reason === 'ledger_partial_coverage' || ledger.payment_ambiguity === true && !ledger.reason || ledger.observed_reading === true) &&
+      (!ledger.classification_uncertain || Number.isSafeInteger(ledger.observed_spending_lower_bound_minor)) && !ledger.attribution_incomplete && !ledger.selector_unresolved);
     // Coverage cannot certify all payer income. A proven matched receipt is
     // still useful, with its own citations and an explicit subtotal label.
     const attributedSubtotal = intent.kind === 'merchant' && intent.direction === 'inflow' && intent.match &&
@@ -34,7 +34,7 @@ export async function monthlyLedgerAnswer(intent, accounts, readMonth) {
       ? ledger.lead_attributed_subtotal_minor : null;
     const both = intent.kind === 'totals' && !intent.inflowOnly;
     const total = !readable || both ? null : intent.kind === 'totals' ? ledger.combined_inflow_minor ?? ledger.covered_inflow_subtotal_minor
-      : intent.kind === 'expense_summary' ? ledger.expense_total_minor : ledger.lead_total_minor ?? ledger.total_minor;
+      : intent.kind === 'expense_summary' ? ledger.expense_total_minor ?? ledger.observed_spending_lower_bound_minor : ledger.lead_total_minor ?? ledger.total_minor;
     // A refused month (e.g. money out withheld) states no per-account figures,
     // even when its coverage label is partial.
     const measures = readable && both && Array.isArray(ledger.lead_accounts) ? {
@@ -108,11 +108,13 @@ export async function monthlyLedgerAnswer(intent, accounts, readMonth) {
     const refundCitations = (receipts?.refund_rows || []).map(row => row.n);
     const otherReceiptCitations = (receipts?.inflow_rows || []).filter(row => !refundCitations.includes(row.n)).map(row => row.n);
     citations.push(...refs);
-    const reason = available ? null : !scope.available ? 'period_outside_coverage'
+    const reason = available ? ledger.observed_reading ? ledger.reason || null : null : !scope.available ? 'period_outside_coverage'
       : part?.reason || ledger?.reason || (ledger?.match_basis === 'none' ? 'merchant_no_exact_match'
         : ledger?.match_basis === 'possible' ? 'merchant_possible_matches' : 'reading_unavailable');
-    months.push({ month: day.slice(0, 7), label, from, to, complete: available && covered, available,
-      total_minor: available && covered ? total : null, subtotal_minor: available && !covered ? total : null,
+    months.push({ month: day.slice(0, 7), label, from, to, complete: available && covered && ledger?.complete !== false, available,
+      total_minor: available && covered && !ledger?.classification_uncertain ? total : null, subtotal_minor: available && !covered && !ledger?.classification_uncertain ? total : null,
+      ...(Number.isSafeInteger(ledger?.observed_spending_lower_bound_minor) ? { observed_spending_lower_bound_minor: ledger.observed_spending_lower_bound_minor, classification_uncertain_minor: ledger.classification_uncertain_minor } : {}),
+      ...(ledger?.qualification ? { qualification: ledger.qualification.replace(/ \[\d+\]/g, '') } : {}),
       ...(available && measures ? covered ? measures : {
         inflow_subtotal_minor: measures.inflow_minor, outflow_subtotal_minor: measures.outflow_minor,
       } : {}), reason, coverage: scope.coverage,
@@ -156,20 +158,20 @@ export async function monthlyLedgerAnswer(intent, accounts, readMonth) {
         merchant_possible_matches: 'Possible payee mentions only; no store total is confirmed.',
         ledger_unavailable: 'The bank data could not be read.',
         payment_membership_unconfirmed: 'A possible card or loan payment has no confirmed payment code or owned-account endpoint; confirm its classification before using this month.',
-        payment_expense_category_conflict: 'Spending is withheld because bank payment text conflicts with a confirmed category; review its classification.',
-        loan_payment_mixed_components: 'Spending is withheld because a loan payment mixes repayment and charges; no components have been split.',
-        owned_movement_unconfirmed: 'A possible own-account movement or card payment has unconfirmed ownership or payment role; this month is withheld.',
-        own_movement_mixed_components: 'Spending is withheld because a possible transfer to your own account also names a fee, charge or second amount; no components have been split.',
+        payment_expense_category_conflict: 'The observed amount includes payment text that conflicts with a confirmed category; review its classification.',
+        loan_payment_mixed_components: 'The full observed loan payment includes charges; components have not been split.',
+        owned_movement_unconfirmed: 'A possible own-account movement or card payment has unconfirmed ownership or payment role; observed amounts remain counted.',
+        own_movement_mixed_components: 'The full observed possible transfer includes a fee, charge or second amount; components have not been split.',
         own_movement_category_conflict: month.own_movement_conflicts?.some(row => row.identity_unconfirmed)
           ? 'An outflow you confirmed as an expense also names a transfer with an unconfirmed destination; this month is not certified.'
           : 'An outflow you confirmed as an expense also names a possible transfer to your own account; this month is not certified.',
-        own_movement_identity_unconfirmed: 'A transfer destination could name an outside party or your own account; spending for this month is withheld.',
-        money_out_destination_unconfirmed: 'A possible payment or transfer could have gone to one of your own connected accounts; money out for this month is withheld.',
+        own_movement_identity_unconfirmed: 'A transfer destination could name an outside party or your own account; observed amounts remain counted.',
+        money_out_destination_unconfirmed: 'A possible payment or transfer could have gone to your own connected account; observed money out may be counted twice.',
       };
       const refsFor = numbers => numbers.length ? ` ${numbers.map(n => `[${n}]`).join(' ')}` : '';
-      const figures = month.inflow_minor !== undefined ? `money in ${money(month.inflow_minor)}${refsFor(month.inflow_citations)}; money out ${money(month.outflow_minor)}${refsFor(month.outflow_citations)}`
+      const figures = Number.isSafeInteger(month.observed_spending_lower_bound_minor) ? `at least ${money(month.observed_spending_lower_bound_minor)}; ${money(month.classification_uncertain_minor)} more may be a card payment (unconfirmed)` : month.inflow_minor !== undefined ? `money in ${money(month.inflow_minor)}${refsFor(month.inflow_citations)}; money out ${money(month.outflow_minor)}${refsFor(month.outflow_citations)}`
         : month.inflow_subtotal_minor !== undefined ? `money in ${money(month.inflow_subtotal_minor)}${refsFor(month.inflow_citations)}; money out ${money(month.outflow_subtotal_minor)}${refsFor(month.outflow_citations)}`
-          : `${money(month.complete ? month.total_minor : month.subtotal_minor)}${refsFor(month.amount_citations)}`;
+          : `${money(month.coverage.complete ? month.total_minor : month.subtotal_minor)}${refsFor(month.amount_citations)}`;
       const identityLine = month.possible_identity_members?.length
         ? '\nPossible vendor matches, not included in the confirmed total: ' + month.possible_identity_members
           .map(member => `"${member.payee}" ${member.citations.map(n => `[${n}]`).join(' ')}`).join('; ') + '.' : '';
@@ -190,7 +192,7 @@ export async function monthlyLedgerAnswer(intent, accounts, readMonth) {
         ? `${month.complete ? '' : 'Covered-account subtotal: '}${figures}.`
         : Number.isSafeInteger(month.attributed_subtotal_minor)
           ? `At least ${money(month.attributed_subtotal_minor)}${refsFor(month.amount_citations)} (matched subtotal); full payer income remains unconfirmed.`
-          : `${plainRouterLimitation('reading_unavailable')} ${reasons[month.reason] || ''}`}${notPaymentLine}${receiptLine}${paymentLine}${identityLine}${month.possible_payments?.length ? '\n' + month.possible_payments.map(row => `${row.label || `possible ${row.destination ? `transfer to your own ${row.destination}` : `${row.payment_kind} payment`}, not counted as spending`}: ${money(row.amount_minor)} on ${intent.presentation.date(row.posted_on)}, bank text quoted: "${row.bank_text}" [${row.n}].`).join('\n') : ''}${month.own_movement_conflicts?.length ? '\n' + month.own_movement_conflicts.map(row => `confirmed as ${row.category} but the bank text names ${row.identity_unconfirmed ? 'a transfer with an unconfirmed destination' : `a possible transfer to your own ${row.destination}`}: ${money(row.amount_minor)} on ${intent.presentation.date(row.posted_on)}, bank text quoted: "${row.bank_text}" [${row.n}].`).join('\n') : ''}${month.scope_detail ? `\n${month.scope_detail}` : ''}`;
+          : `${plainRouterLimitation('reading_unavailable')} ${reasons[month.reason] || ''}`}${month.qualification ? ` ${month.qualification}` : ''}${notPaymentLine}${receiptLine}${paymentLine}${identityLine}${month.possible_payments?.length ? '\n' + month.possible_payments.map(row => `${row.label || `possible ${row.destination ? `transfer to your own ${row.destination}` : `${row.payment_kind} payment`}, not counted as spending`}: ${money(row.amount_minor)} on ${intent.presentation.date(row.posted_on)}, bank text quoted: "${row.bank_text}" [${row.n}].`).join('\n') : ''}${month.own_movement_conflicts?.length ? '\n' + month.own_movement_conflicts.map(row => `confirmed as ${row.category} but the bank text names ${row.identity_unconfirmed ? 'a transfer with an unconfirmed destination' : `a possible transfer to your own ${row.destination}`}: ${money(row.amount_minor)} on ${intent.presentation.date(row.posted_on)}, bank text quoted: "${row.bank_text}" [${row.n}].`).join('\n') : ''}${month.scope_detail ? `\n${month.scope_detail}` : ''}`;
     }).map((line, index) => line + (rows[index].possible_refunds?.length ? '\n' + rows[index].possible_refunds.map(candidate =>
       `possible refund, not subtracted: ${money(candidate.amount_minor)} on ${intent.presentation.date(candidate.posted_on)}, ${moneyAccount({ mask: candidate.account_mask })}, "${candidate.bank_text}" [${candidate.n}]`).join('\n') : '')).join('\n') +
     `\nAccounts: ${scopedAccounts.map(account => moneyAccount({ mask: account.account_mask })).join('; ')}.` +

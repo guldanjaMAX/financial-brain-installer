@@ -1,0 +1,3045 @@
+{
+  "lane": "CLAUDE-FINDER-CLEAN-CARDS-R1-1112",
+  "base": "82312ac665dc84855043572956ba6c9d03f9b038",
+  "summary": {
+    "cases": 70,
+    "pass": 30,
+    "fail": 40,
+    "wrong_figures": 24,
+    "wrong_confidence_only": 16
+  },
+  "how_to_read": {
+    "expected": "Result after the REPORT.md design D1-D10 is built; follows the founder answer contract and the guide policy that unproved guesses stay counted and flagged.",
+    "code": "Result at base, traced through worker/src/lib/clean-money.js, worker/src/lib/ledger-analysis.js and money-query-quality.js.",
+    "verdict": "PASS when code.figure_minor == expected.figure_minor AND code.confidence == expected.confidence. failure=figure: number wrong; failure=confidence: only score/word wrong.",
+    "rule": "file:line deciding the code result."
+  },
+  "fixture": {
+    "tenant_id": "t1",
+    "entity": {
+      "entity_slug": "biz",
+      "kind": "business",
+      "relationship": "owned",
+      "basis_state": "confirmed"
+    },
+    "accounts": {
+      "chk": {
+        "mask": "1111",
+        "account_kind": "checking",
+        "label": "Operating",
+        "institution": "Deposit Bank",
+        "balance_role": "asset"
+      },
+      "sav": {
+        "mask": "4444",
+        "account_kind": "savings",
+        "label": "Reserve",
+        "institution": "Deposit Bank",
+        "balance_role": "asset"
+      },
+      "card": {
+        "mask": "2222",
+        "account_kind": "card",
+        "label": "Biz Card",
+        "institution": "Card Issuer",
+        "balance_role": "liability"
+      },
+      "card2": {
+        "mask": "5555",
+        "account_kind": "card",
+        "label": "Travel Card",
+        "institution": "Other Issuer",
+        "balance_role": "liability"
+      },
+      "loan": {
+        "mask": "3333",
+        "account_kind": "loan",
+        "label": "Equipment Loan",
+        "institution": "Lender Bank",
+        "balance_role": "liability"
+      }
+    },
+    "account_defaults": {
+      "entity_slug": "biz",
+      "currency": "USD",
+      "basis_state": "confirmed",
+      "feed_mode": "manual",
+      "status": "open",
+      "opened_on": null,
+      "closed_on": null,
+      "account_kind_review": "none"
+    },
+    "coverage_defaults": {
+      "coverage_status": "complete",
+      "basis_state": "confirmed",
+      "covered_from": "2026-10-01",
+      "covered_to": "2026-10-31",
+      "basis_note": "statement"
+    },
+    "row_defaults": {
+      "currency": "USD",
+      "basis_state": "confirmed",
+      "pending": 0,
+      "provenance": "import",
+      "payee": null,
+      "category": null,
+      "category_basis_state": null,
+      "removed_at": null,
+      "superseded_by_id": null
+    },
+    "account_sets": {
+      "S1": [
+        "chk",
+        "card"
+      ],
+      "S2": [
+        "chk",
+        "card",
+        "card2"
+      ],
+      "S3": [
+        "chk",
+        "loan"
+      ],
+      "S4": [
+        "chk"
+      ],
+      "S5": [
+        "chk",
+        "card2"
+      ],
+      "S6": [
+        "sav",
+        "card"
+      ]
+    },
+    "note": "Every account in a case's set gets one coverage row with coverage_defaults. Only listed accounts exist in that case."
+  },
+  "queries": {
+    "window": "posted_on BETWEEN '2026-10-01' AND '2026-10-31' (also passed as from/to)",
+    "Q_SPEND": "SELECT SUM(expense_minor) FROM txn WHERE <window> [AND account='<mask>']",
+    "Q_NET_SPEND": "SELECT SUM(expense_minor) - SUM(CASE WHEN money_kind='refund' AND direction='inflow' THEN amount_minor ELSE 0 END) FROM txn WHERE <window> AND account='<mask>'",
+    "Q_INCOME": "SELECT SUM(income_minor) FROM txn WHERE <window>",
+    "Q_FEES": "SELECT SUM(CASE WHEN lower(description) LIKE '%fee%' THEN expense_minor ELSE 0 END) - SUM(CASE WHEN money_kind='refund' AND direction='inflow' AND lower(description) LIKE '%fee%' THEN amount_minor ELSE 0 END) FROM txn WHERE <window> [AND account='<mask>']",
+    "Q_INTEREST": "SELECT SUM(CASE WHEN lower(description||' '||COALESCE(category,'')) LIKE '%interest%' THEN expense_minor ELSE 0 END) - SUM(CASE WHEN money_kind='refund' AND direction='inflow' AND lower(description) LIKE '%interest%' THEN amount_minor ELSE 0 END) FROM txn WHERE <window>",
+    "Q_PAID_TO_code": "SELECT SUM(amount_minor) FROM txn WHERE <window> AND account='<mask>' AND direction='inflow' AND money_kind IN ('card_payment','loan_payment')",
+    "Q_PAID_TO_design": "SELECT SUM(payment_minor) FROM txn WHERE <window> AND account='<mask>'",
+    "Q_PRINCIPAL_code": "Q_PAID_TO_code with account='3333'",
+    "Q_PRINCIPAL_design": "SELECT SUM(payment_minor) FROM txn WHERE <window> AND account='3333'",
+    "Q_GUIDE_PAYMENTS": "SELECT SUM(amount_minor) FROM txn WHERE <window> AND money_kind='card_payment'"
+  },
+  "confidence_rule": "moneyQueryQuality with selection {from:'2026-10-01',to:'2026-10-31'}; complete confirmed coverage, so only estimated_membership applies: penalty=min(35,max(11,ceil(35*estimated_minor/total_minor))), total=all window rows both directions (money-query-quality.js:41-42); >=90 High, >=70 Medium, else Low (line 75).",
+  "cases": [
+    {
+      "id": "C01",
+      "theme": "card_spending_vs_payments",
+      "accounts": "S1",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "card",
+          "posted_on": "2026-10-03",
+          "direction": "outflow",
+          "amount_minor": 12000,
+          "description": "OFFICE SUPPLY STORE #12",
+          "payee": "Office Supply Store"
+        },
+        {
+          "id": "r2",
+          "account": "card",
+          "posted_on": "2026-10-10",
+          "direction": "outflow",
+          "amount_minor": 8000,
+          "description": "COFFEE ROASTERS",
+          "payee": "Coffee Roasters"
+        },
+        {
+          "id": "r3",
+          "account": "chk",
+          "posted_on": "2026-10-20",
+          "direction": "outflow",
+          "amount_minor": 20000,
+          "description": "PAYMENT TO CARD 2222"
+        },
+        {
+          "id": "r4",
+          "account": "card",
+          "posted_on": "2026-10-21",
+          "direction": "inflow",
+          "amount_minor": 20000,
+          "description": "PAYMENT THANK YOU"
+        }
+      ],
+      "question": "How much did we spend on the Biz Card (2222) in October 2026?",
+      "query": "Q_SPEND account=2222",
+      "expected": {
+        "figure_minor": 20000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 20000,
+        "confidence": "High (100%)",
+        "readings": {
+          "r3": "card_payment (pair proved reciprocal_bank_locators)",
+          "r4": "card_payment"
+        }
+      },
+      "verdict": "PASS",
+      "failure": null,
+      "rule": "worker/src/lib/ledger-analysis.js:799-802; clean-money.js:288; ledger-analysis.js:876-880"
+    },
+    {
+      "id": "C02",
+      "theme": "card_spending_vs_payments",
+      "accounts": "S1",
+      "rows": "same as C01",
+      "question": "How much did we pay toward the Biz Card in October?",
+      "query": "Q_PAID_TO account=2222",
+      "expected": {
+        "figure_minor": 20000,
+        "rows": [
+          "r4"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 20000,
+        "confidence": "High (100%)"
+      },
+      "verdict": "PASS",
+      "failure": null,
+      "rule": "worker/src/lib/ledger-analysis.js:462-466"
+    },
+    {
+      "id": "C03",
+      "theme": "card_spending_vs_payments",
+      "accounts": "S1",
+      "rows": "same as C01",
+      "question": "What did the business spend in October?",
+      "query": "Q_SPEND",
+      "expected": {
+        "figure_minor": 20000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 20000,
+        "confidence": "High (100%)"
+      },
+      "verdict": "PASS",
+      "failure": null,
+      "rule": "worker/src/lib/clean-money.js:188"
+    },
+    {
+      "id": "C04",
+      "theme": "card_spending_vs_payments",
+      "accounts": "S1",
+      "rows": "same as C01",
+      "question": "How much went to card payments in October?",
+      "query": "Q_GUIDE_PAYMENTS (design: Q_PAID_TO_design over all accounts)",
+      "expected": {
+        "figure_minor": 20000,
+        "rows": [
+          "r4"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 40000,
+        "confidence": "High (100%)",
+        "readings": {
+          "r3": "card_payment",
+          "r4": "card_payment"
+        }
+      },
+      "verdict": "FAIL",
+      "failure": "figure",
+      "rule": "worker/src/lib/ledger-analysis.js:398-399; clean-money.js:182; money-query-contract.js:18,23",
+      "design": "D8"
+    },
+    {
+      "id": "C05",
+      "theme": "card_spending_vs_payments",
+      "accounts": "S1",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "card",
+          "posted_on": "2026-10-04",
+          "direction": "outflow",
+          "amount_minor": 15000,
+          "description": "HARDWARE DEPOT",
+          "payee": "Hardware Depot"
+        },
+        {
+          "id": "r2",
+          "account": "chk",
+          "posted_on": "2026-10-15",
+          "direction": "outflow",
+          "amount_minor": 30000,
+          "description": "CREDIT CARD PAYMENT",
+          "payee": "Card Issuer"
+        },
+        {
+          "id": "r3",
+          "account": "card",
+          "posted_on": "2026-10-16",
+          "direction": "inflow",
+          "amount_minor": 30000,
+          "description": "PAYMENT THANK YOU"
+        }
+      ],
+      "question": "What did the business spend in October?",
+      "query": "Q_SPEND",
+      "expected": {
+        "figure_minor": 45000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "Medium (86%)",
+        "disclose": "r2 $300.00 on 1111 2026-10-15 likely the card payment matched by the 2222 credit 2026-10-16; may be counted twice"
+      },
+      "code": {
+        "figure_minor": 45000,
+        "confidence": "Medium (86%)",
+        "readings": {
+          "r2": "ordinary / possible_card_payment_matched_credit_counted"
+        }
+      },
+      "verdict": "PASS",
+      "failure": null,
+      "rule": "worker/src/lib/clean-money.js:289-296; ledger-analysis.js:486-487"
+    },
+    {
+      "id": "C06",
+      "theme": "card_spending_vs_payments",
+      "accounts": "S1",
+      "rows": "same as C05",
+      "question": "How much did we spend on the Biz Card in October?",
+      "query": "Q_SPEND account=2222",
+      "expected": {
+        "figure_minor": 15000,
+        "rows": [
+          "r1"
+        ],
+        "confidence": "Medium (86%)"
+      },
+      "code": {
+        "figure_minor": 15000,
+        "confidence": "Medium (86%)"
+      },
+      "verdict": "PASS",
+      "failure": null,
+      "rule": "worker/src/lib/ledger-analysis.js:506"
+    },
+    {
+      "id": "C07",
+      "theme": "card_spending_vs_payments",
+      "accounts": "S1",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "card",
+          "posted_on": "2026-10-05",
+          "direction": "outflow",
+          "amount_minor": 9000,
+          "description": "PRINTING CO",
+          "payee": "Printing Co"
+        },
+        {
+          "id": "r2",
+          "account": "card",
+          "posted_on": "2026-10-22",
+          "direction": "inflow",
+          "amount_minor": 25000,
+          "description": "AUTOPAY PAYMENT - THANK YOU"
+        }
+      ],
+      "question": "How much did we spend on the Biz Card in October?",
+      "query": "Q_SPEND account=2222",
+      "expected": {
+        "figure_minor": 9000,
+        "rows": [
+          "r1"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 9000,
+        "confidence": "Medium (74%)",
+        "readings": {
+          "r2": "card_payment / liability_credit_without_repayment_evidence"
+        }
+      },
+      "verdict": "FAIL",
+      "failure": "confidence",
+      "rule": "worker/src/lib/ledger-analysis.js:739; 465-466",
+      "design": "D7"
+    },
+    {
+      "id": "C08",
+      "theme": "card_spending_vs_payments",
+      "accounts": "S1",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "card",
+          "posted_on": "2026-10-12",
+          "direction": "inflow",
+          "amount_minor": 40000,
+          "description": "MOBILE PAYMENT - THANK YOU"
+        },
+        {
+          "id": "r2",
+          "account": "card",
+          "posted_on": "2026-10-02",
+          "direction": "outflow",
+          "amount_minor": 6000,
+          "description": "SOFTWARE SUB",
+          "payee": "Software Co"
+        }
+      ],
+      "question": "How much did we pay toward the Biz Card in October?",
+      "query": "Q_PAID_TO account=2222",
+      "expected": {
+        "figure_minor": 40000,
+        "rows": [
+          "r1"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 40000,
+        "confidence": "Low (69%)"
+      },
+      "verdict": "FAIL",
+      "failure": "confidence",
+      "rule": "worker/src/lib/ledger-analysis.js:739; 465-466",
+      "design": "D7"
+    },
+    {
+      "id": "C09",
+      "theme": "card_spending_vs_payments",
+      "accounts": "S4",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "chk",
+          "posted_on": "2026-10-09",
+          "direction": "outflow",
+          "amount_minor": 50000,
+          "description": "ISSUER CREDIT CRD AUTOPAY"
+        },
+        {
+          "id": "r2",
+          "account": "chk",
+          "posted_on": "2026-10-11",
+          "direction": "outflow",
+          "amount_minor": 7500,
+          "description": "LUNCH CAFE",
+          "payee": "Lunch Cafe"
+        }
+      ],
+      "question": "What did the business spend in October?",
+      "query": "Q_SPEND",
+      "expected": {
+        "figure_minor": 57500,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "Low (69%)",
+        "disclose": "r1 $500.00 likely a payment to an unconnected card; counted"
+      },
+      "code": {
+        "figure_minor": 57500,
+        "confidence": "Low (69%)",
+        "readings": {
+          "r1": "ordinary / possible_own_transfer_counted"
+        }
+      },
+      "verdict": "PASS",
+      "failure": null,
+      "rule": "worker/src/lib/ledger-analysis.js:502",
+      "note": "reason label wrong (m4)"
+    },
+    {
+      "id": "C10",
+      "theme": "card_spending_vs_payments",
+      "accounts": "S4",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "chk",
+          "posted_on": "2026-10-09",
+          "direction": "outflow",
+          "amount_minor": 50000,
+          "description": "ISSUER CARD ONLINE PMT",
+          "payee": "Issuer Card"
+        },
+        {
+          "id": "r2",
+          "account": "chk",
+          "posted_on": "2026-10-11",
+          "direction": "outflow",
+          "amount_minor": 7500,
+          "description": "LUNCH CAFE",
+          "payee": "Lunch Cafe"
+        }
+      ],
+      "question": "What did the business spend in October?",
+      "query": "Q_SPEND",
+      "expected": {
+        "figure_minor": 57500,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "Low (69%)"
+      },
+      "code": {
+        "figure_minor": 57500,
+        "confidence": "High (100%)",
+        "readings": {
+          "r1": "ordinary / spending, not estimated"
+        }
+      },
+      "verdict": "FAIL",
+      "failure": "confidence",
+      "rule": "worker/src/lib/ledger-analysis.js:422, 495, 506",
+      "design": "D6"
+    },
+    {
+      "id": "C11",
+      "theme": "card_spending_vs_payments",
+      "accounts": "S1",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "card",
+          "posted_on": "2026-10-03",
+          "direction": "outflow",
+          "amount_minor": 13000,
+          "description": "HARDWARE DEPOT",
+          "payee": "Hardware Depot"
+        },
+        {
+          "id": "r2",
+          "account": "chk",
+          "posted_on": "2026-10-20",
+          "direction": "outflow",
+          "amount_minor": 60000,
+          "description": "ISSUER CARD ONLINE PMT",
+          "payee": "Issuer Card"
+        },
+        {
+          "id": "r3",
+          "account": "card",
+          "posted_on": "2026-10-26",
+          "direction": "inflow",
+          "amount_minor": 60000,
+          "description": "PAYMENT THANK YOU"
+        }
+      ],
+      "question": "What did the business spend in October?",
+      "query": "Q_SPEND",
+      "expected": {
+        "figure_minor": 73000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "Medium (84%)",
+        "disclose": "r2 $600.00 likely paid 2222; may be counted twice"
+      },
+      "code": {
+        "figure_minor": 73000,
+        "confidence": "High (100%)"
+      },
+      "verdict": "FAIL",
+      "failure": "confidence",
+      "rule": "worker/src/lib/clean-money.js:164; ledger-analysis.js:495, 506",
+      "design": "D6"
+    },
+    {
+      "id": "C12",
+      "theme": "card_spending_vs_payments",
+      "accounts": "S1",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "chk",
+          "posted_on": "2026-10-30",
+          "direction": "outflow",
+          "amount_minor": 35000,
+          "description": "ONLINE PAYMENT TO CARD ENDING 2222"
+        },
+        {
+          "id": "r2",
+          "account": "card",
+          "posted_on": "2026-10-08",
+          "direction": "outflow",
+          "amount_minor": 21000,
+          "description": "SUPPLIES INC",
+          "payee": "Supplies Inc"
+        }
+      ],
+      "question": "What did the business spend in October?",
+      "query": "Q_SPEND",
+      "expected": {
+        "figure_minor": 21000,
+        "rows": [
+          "r2"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 21000,
+        "confidence": "High (100%)"
+      },
+      "verdict": "PASS",
+      "failure": null,
+      "rule": "worker/src/lib/ledger-analysis.js:276-287, 327"
+    },
+    {
+      "id": "C13",
+      "theme": "card_spending_vs_payments",
+      "accounts": "S1",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "chk",
+          "posted_on": "2026-10-14",
+          "direction": "outflow",
+          "amount_minor": 27500,
+          "description": "PAYMENT TO CARD 9876"
+        },
+        {
+          "id": "r2",
+          "account": "card",
+          "posted_on": "2026-10-02",
+          "direction": "outflow",
+          "amount_minor": 4000,
+          "description": "PARKING",
+          "payee": "City Parking"
+        }
+      ],
+      "question": "What did the business spend in October?",
+      "query": "Q_SPEND",
+      "expected": {
+        "figure_minor": 31500,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "Low (69%)",
+        "disclose": "r1 $275.00 likely pays unconnected card 9876"
+      },
+      "code": {
+        "figure_minor": 31500,
+        "confidence": "Low (69%)"
+      },
+      "verdict": "PASS",
+      "failure": null,
+      "rule": "worker/src/lib/ledger-analysis.js:495-496"
+    },
+    {
+      "id": "C14",
+      "theme": "card_spending_vs_payments",
+      "accounts": "S1",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "card",
+          "posted_on": "2026-10-06",
+          "direction": "outflow",
+          "amount_minor": 4500,
+          "description": "CARD PAYMENT SOLUTIONS LLC",
+          "payee": "Card Payment Solutions LLC"
+        },
+        {
+          "id": "r2",
+          "account": "card",
+          "posted_on": "2026-10-07",
+          "direction": "outflow",
+          "amount_minor": 5500,
+          "description": "PAPER CO",
+          "payee": "Paper Co"
+        }
+      ],
+      "question": "How much did we spend on the Biz Card in October?",
+      "query": "Q_SPEND account=2222",
+      "expected": {
+        "figure_minor": 10000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "Medium (84%)"
+      },
+      "code": {
+        "figure_minor": 10000,
+        "confidence": "Medium (84%)"
+      },
+      "verdict": "PASS",
+      "failure": null,
+      "rule": "worker/src/lib/ledger-analysis.js:495-496"
+    },
+    {
+      "id": "C15",
+      "theme": "card_spending_vs_payments",
+      "accounts": "S1",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "card",
+          "posted_on": "2026-10-03",
+          "direction": "outflow",
+          "amount_minor": 22000,
+          "description": "OUTDOOR GEAR",
+          "payee": "Outdoor Gear"
+        },
+        {
+          "id": "r2",
+          "account": "card",
+          "posted_on": "2026-10-09",
+          "direction": "inflow",
+          "amount_minor": 22000,
+          "description": "OUTDOOR GEAR REFUND",
+          "payee": "Outdoor Gear"
+        }
+      ],
+      "question": "What was our net spending on the Biz Card in October?",
+      "query": "Q_NET_SPEND account=2222",
+      "expected": {
+        "figure_minor": 0,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 0,
+        "confidence": "High (100%)"
+      },
+      "verdict": "PASS",
+      "failure": null,
+      "rule": "worker/src/lib/ledger-analysis.js:326, 392-396, 463"
+    },
+    {
+      "id": "C16",
+      "theme": "card_spending_vs_payments",
+      "accounts": "S1",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "card",
+          "posted_on": "2026-10-12",
+          "direction": "outflow",
+          "amount_minor": 30000,
+          "description": "CASH ADVANCE"
+        },
+        {
+          "id": "r2",
+          "account": "chk",
+          "posted_on": "2026-10-12",
+          "direction": "inflow",
+          "amount_minor": 30000,
+          "description": "ONLINE TRANSFER FROM CARD 2222"
+        },
+        {
+          "id": "r3",
+          "account": "card",
+          "posted_on": "2026-10-13",
+          "direction": "outflow",
+          "amount_minor": 1500,
+          "description": "CASH ADVANCE FEE"
+        }
+      ],
+      "question": "How much did we spend on the Biz Card in October?",
+      "query": "Q_SPEND account=2222",
+      "expected": {
+        "figure_minor": 1500,
+        "rows": [
+          "r3"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 31500,
+        "confidence": "Medium (82%)",
+        "readings": {
+          "r1": "ordinary / possible_own_transfer_counted",
+          "r2": "own_transfer"
+        }
+      },
+      "verdict": "FAIL",
+      "failure": "figure",
+      "rule": "worker/src/lib/ledger-analysis.js:329+485 vs 502",
+      "design": "D9"
+    },
+    {
+      "id": "C17",
+      "theme": "statement_credits",
+      "accounts": "S1",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "card",
+          "posted_on": "2026-10-01",
+          "direction": "outflow",
+          "amount_minor": 9500,
+          "description": "ANNUAL FEE"
+        },
+        {
+          "id": "r2",
+          "account": "card",
+          "posted_on": "2026-10-01",
+          "direction": "inflow",
+          "amount_minor": 9500,
+          "description": "ANNUAL FEE CREDIT"
+        },
+        {
+          "id": "r3",
+          "account": "card",
+          "posted_on": "2026-10-05",
+          "direction": "outflow",
+          "amount_minor": 50000,
+          "description": "EQUIPMENT RENTAL",
+          "payee": "Rental Co"
+        }
+      ],
+      "question": "How much did we pay in card fees in October?",
+      "query": "Q_FEES account=2222",
+      "expected": {
+        "figure_minor": 0,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 9500,
+        "confidence": "Medium (89%)",
+        "readings": {
+          "r2": "card_payment / liability_credit_without_repayment_evidence"
+        }
+      },
+      "verdict": "FAIL",
+      "failure": "figure",
+      "rule": "worker/src/lib/ledger-analysis.js:400-402, 465-466",
+      "design": "D1a"
+    },
+    {
+      "id": "C18",
+      "theme": "statement_credits",
+      "accounts": "S1",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "card",
+          "posted_on": "2026-10-02",
+          "direction": "outflow",
+          "amount_minor": 3900,
+          "description": "LATE FEE"
+        },
+        {
+          "id": "r2",
+          "account": "card",
+          "posted_on": "2026-10-06",
+          "direction": "inflow",
+          "amount_minor": 3900,
+          "description": "LATE FEE REVERSAL"
+        },
+        {
+          "id": "r3",
+          "account": "card",
+          "posted_on": "2026-10-05",
+          "direction": "outflow",
+          "amount_minor": 50000,
+          "description": "EQUIPMENT RENTAL",
+          "payee": "Rental Co"
+        }
+      ],
+      "question": "How much did we pay in card fees in October?",
+      "query": "Q_FEES account=2222",
+      "expected": {
+        "figure_minor": 0,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 0,
+        "confidence": "High (100%)"
+      },
+      "verdict": "PASS",
+      "failure": null,
+      "rule": "worker/src/lib/ledger-analysis.js:326, 463"
+    },
+    {
+      "id": "C19",
+      "theme": "statement_credits",
+      "accounts": "S1",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "card",
+          "posted_on": "2026-10-02",
+          "direction": "outflow",
+          "amount_minor": 40000,
+          "description": "AIRLINE CO",
+          "payee": "Airline Co"
+        },
+        {
+          "id": "r2",
+          "account": "card",
+          "posted_on": "2026-10-20",
+          "direction": "inflow",
+          "amount_minor": 15000,
+          "description": "STATEMENT CREDIT",
+          "payee": "Airline Co"
+        },
+        {
+          "id": "r3",
+          "account": "chk",
+          "posted_on": "2026-10-25",
+          "direction": "outflow",
+          "amount_minor": 25000,
+          "description": "PAYMENT TO CARD 2222"
+        },
+        {
+          "id": "r4",
+          "account": "card",
+          "posted_on": "2026-10-26",
+          "direction": "inflow",
+          "amount_minor": 25000,
+          "description": "PAYMENT THANK YOU"
+        }
+      ],
+      "question": "How much did we pay toward the Biz Card in October?",
+      "query": "Q_PAID_TO account=2222",
+      "expected": {
+        "figure_minor": 25000,
+        "rows": [
+          "r4"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 40000,
+        "confidence": "Medium (89%)",
+        "readings": {
+          "r2": "card_payment / liability_credit_without_repayment_evidence"
+        }
+      },
+      "verdict": "FAIL",
+      "failure": "figure",
+      "rule": "worker/src/lib/ledger-analysis.js:465-466",
+      "design": "D1b"
+    },
+    {
+      "id": "C20",
+      "theme": "statement_credits",
+      "accounts": "S1",
+      "rows": "same as C19",
+      "question": "What was our net spending on the Biz Card in October?",
+      "query": "Q_NET_SPEND account=2222",
+      "expected": {
+        "figure_minor": 25000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 40000,
+        "confidence": "Medium (89%)"
+      },
+      "verdict": "FAIL",
+      "failure": "figure",
+      "rule": "worker/src/lib/ledger-analysis.js:465-466",
+      "design": "D1b"
+    },
+    {
+      "id": "C21",
+      "theme": "statement_credits",
+      "accounts": "S1",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "card",
+          "posted_on": "2026-10-03",
+          "direction": "outflow",
+          "amount_minor": 18000,
+          "description": "SUPPLY STORE",
+          "payee": "Supply Store"
+        },
+        {
+          "id": "r2",
+          "account": "card",
+          "posted_on": "2026-10-10",
+          "direction": "inflow",
+          "amount_minor": 6000,
+          "description": "SUPPLY STORE RETURN",
+          "payee": "Supply Store"
+        }
+      ],
+      "question": "What was our net spending on the Biz Card in October?",
+      "query": "Q_NET_SPEND account=2222",
+      "expected": {
+        "figure_minor": 12000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 18000,
+        "confidence": "Medium (89%)"
+      },
+      "verdict": "FAIL",
+      "failure": "figure",
+      "rule": "worker/src/lib/ledger-analysis.js:341, 465-466",
+      "design": "D1b"
+    },
+    {
+      "id": "C22",
+      "theme": "statement_credits",
+      "accounts": "S1",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "card",
+          "posted_on": "2026-10-03",
+          "direction": "outflow",
+          "amount_minor": 18000,
+          "description": "SUPPLY STORE",
+          "payee": "Supply Store"
+        },
+        {
+          "id": "r2",
+          "account": "card",
+          "posted_on": "2026-10-10",
+          "direction": "inflow",
+          "amount_minor": 6000,
+          "description": "MERCHANDISE RETURN",
+          "payee": "Supply Store"
+        }
+      ],
+      "question": "What was our net spending on the Biz Card in October?",
+      "query": "Q_NET_SPEND account=2222",
+      "expected": {
+        "figure_minor": 12000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 12000,
+        "confidence": "High (100%)"
+      },
+      "verdict": "PASS",
+      "failure": null,
+      "rule": "worker/src/lib/ledger-analysis.js:341, 392"
+    },
+    {
+      "id": "C23",
+      "theme": "statement_credits",
+      "accounts": "S1",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "card",
+          "posted_on": "2026-10-15",
+          "direction": "inflow",
+          "amount_minor": 5000,
+          "description": "CASHBACK REWARD"
+        },
+        {
+          "id": "r2",
+          "account": "card",
+          "posted_on": "2026-10-03",
+          "direction": "outflow",
+          "amount_minor": 70000,
+          "description": "CONTRACTOR SUPPLY",
+          "payee": "Contractor Supply"
+        }
+      ],
+      "question": "How much did we pay toward the Biz Card in October?",
+      "query": "Q_PAID_TO account=2222",
+      "expected": {
+        "figure_minor": 0,
+        "rows": [],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 0,
+        "confidence": "High (100%)"
+      },
+      "verdict": "PASS",
+      "failure": null,
+      "rule": "worker/src/lib/ledger-analysis.js:330, 373-374, 464"
+    },
+    {
+      "id": "C24",
+      "theme": "statement_credits",
+      "accounts": "S1",
+      "rows": "same as C23",
+      "question": "How much income did we get in October?",
+      "query": "Q_INCOME",
+      "expected": {
+        "figure_minor": 0,
+        "rows": [],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 0,
+        "confidence": "High (100%)"
+      },
+      "verdict": "PASS",
+      "failure": null,
+      "rule": "worker/src/lib/clean-money.js:185; ledger-analysis.js:373-374"
+    },
+    {
+      "id": "C25",
+      "theme": "statement_credits",
+      "accounts": "S1",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "card",
+          "posted_on": "2026-10-18",
+          "direction": "inflow",
+          "amount_minor": 2500,
+          "description": "STATEMENT CREDIT"
+        },
+        {
+          "id": "r2",
+          "account": "card",
+          "posted_on": "2026-10-04",
+          "direction": "outflow",
+          "amount_minor": 30000,
+          "description": "SIGN SHOP",
+          "payee": "Sign Shop"
+        }
+      ],
+      "question": "How much did we pay toward the Biz Card in October?",
+      "query": "Q_PAID_TO account=2222",
+      "expected": {
+        "figure_minor": 0,
+        "rows": [],
+        "confidence": "Medium (89%)",
+        "disclose": "r1 $25.00 statement credit on 2222 2026-10-18, source not shown; not a payment"
+      },
+      "code": {
+        "figure_minor": 2500,
+        "confidence": "Medium (89%)"
+      },
+      "verdict": "FAIL",
+      "failure": "figure",
+      "rule": "worker/src/lib/ledger-analysis.js:465-466",
+      "design": "D1c"
+    },
+    {
+      "id": "C26",
+      "theme": "statement_credits",
+      "accounts": "S1",
+      "rows": "same as C25",
+      "question": "How much did we spend on the Biz Card in October?",
+      "query": "Q_SPEND account=2222",
+      "expected": {
+        "figure_minor": 30000,
+        "rows": [
+          "r2"
+        ],
+        "confidence": "Medium (89%)"
+      },
+      "code": {
+        "figure_minor": 30000,
+        "confidence": "Medium (89%)"
+      },
+      "verdict": "PASS",
+      "failure": null,
+      "rule": "worker/src/lib/ledger-analysis.js:506"
+    },
+    {
+      "id": "C27",
+      "theme": "statement_credits",
+      "accounts": "S1",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "card",
+          "posted_on": "2026-10-01",
+          "direction": "outflow",
+          "amount_minor": 3500,
+          "description": "INTEREST CHARGE ON PURCHASES"
+        },
+        {
+          "id": "r2",
+          "account": "card",
+          "posted_on": "2026-10-20",
+          "direction": "inflow",
+          "amount_minor": 3500,
+          "description": "PURCHASE INTEREST CREDIT"
+        },
+        {
+          "id": "r3",
+          "account": "card",
+          "posted_on": "2026-10-05",
+          "direction": "outflow",
+          "amount_minor": 41000,
+          "description": "TOOL RENTAL",
+          "payee": "Tool Rental"
+        }
+      ],
+      "question": "How much card interest did we pay in October?",
+      "query": "Q_INTEREST",
+      "expected": {
+        "figure_minor": 0,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 3500,
+        "confidence": "Medium (89%)"
+      },
+      "verdict": "FAIL",
+      "failure": "figure",
+      "rule": "worker/src/lib/ledger-analysis.js:330, 465-466",
+      "design": "D1a"
+    },
+    {
+      "id": "C28",
+      "theme": "statement_credits",
+      "accounts": "S1",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "card",
+          "posted_on": "2026-10-01",
+          "direction": "outflow",
+          "amount_minor": 3500,
+          "description": "INTEREST CHARGE ON PURCHASES"
+        },
+        {
+          "id": "r2",
+          "account": "card",
+          "posted_on": "2026-10-20",
+          "direction": "inflow",
+          "amount_minor": 3500,
+          "description": "INTEREST CHARGE REVERSAL"
+        },
+        {
+          "id": "r3",
+          "account": "card",
+          "posted_on": "2026-10-05",
+          "direction": "outflow",
+          "amount_minor": 41000,
+          "description": "TOOL RENTAL",
+          "payee": "Tool Rental"
+        }
+      ],
+      "question": "How much card interest did we pay in October?",
+      "query": "Q_INTEREST",
+      "expected": {
+        "figure_minor": 0,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 0,
+        "confidence": "High (100%)"
+      },
+      "verdict": "PASS",
+      "failure": null,
+      "rule": "worker/src/lib/ledger-analysis.js:326, 463"
+    },
+    {
+      "id": "C29",
+      "theme": "statement_credits",
+      "accounts": "S3",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "loan",
+          "posted_on": "2026-10-02",
+          "direction": "outflow",
+          "amount_minor": 10000,
+          "description": "LATE FEE"
+        },
+        {
+          "id": "r2",
+          "account": "loan",
+          "posted_on": "2026-10-10",
+          "direction": "inflow",
+          "amount_minor": 10000,
+          "description": "LATE FEE WAIVED"
+        }
+      ],
+      "question": "How much did we pay in loan fees in October?",
+      "query": "Q_FEES account=3333",
+      "expected": {
+        "figure_minor": 0,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 10000,
+        "confidence": "Medium (82%)",
+        "readings": {
+          "r2": "loan_payment / liability_credit_without_repayment_evidence"
+        }
+      },
+      "verdict": "FAIL",
+      "failure": "figure",
+      "rule": "worker/src/lib/ledger-analysis.js:465-466",
+      "design": "D1a"
+    },
+    {
+      "id": "C30",
+      "theme": "statement_credits",
+      "accounts": "S1",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "card",
+          "posted_on": "2026-10-12",
+          "direction": "inflow",
+          "amount_minor": 8000,
+          "description": "STATEMENT CREDIT - REWARDS REDEMPTION"
+        },
+        {
+          "id": "r2",
+          "account": "card",
+          "posted_on": "2026-10-03",
+          "direction": "outflow",
+          "amount_minor": 26000,
+          "description": "PRINT SHOP",
+          "payee": "Print Shop"
+        }
+      ],
+      "question": "How much did we pay toward the Biz Card in October?",
+      "query": "Q_PAID_TO account=2222",
+      "expected": {
+        "figure_minor": 0,
+        "rows": [],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 0,
+        "confidence": "High (100%)"
+      },
+      "verdict": "PASS",
+      "failure": null,
+      "rule": "worker/src/lib/ledger-analysis.js:373-374, 464"
+    },
+    {
+      "id": "C31",
+      "theme": "balance_transfers",
+      "accounts": "S2",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "card2",
+          "posted_on": "2026-10-10",
+          "direction": "outflow",
+          "amount_minor": 200000,
+          "description": "BALANCE TRANSFER"
+        },
+        {
+          "id": "r2",
+          "account": "card",
+          "posted_on": "2026-10-11",
+          "direction": "inflow",
+          "amount_minor": 200000,
+          "description": "BALANCE TRANSFER"
+        },
+        {
+          "id": "r3",
+          "account": "card2",
+          "posted_on": "2026-10-10",
+          "direction": "outflow",
+          "amount_minor": 6000,
+          "description": "BALANCE TRANSFER FEE"
+        },
+        {
+          "id": "r4",
+          "account": "card",
+          "posted_on": "2026-10-04",
+          "direction": "outflow",
+          "amount_minor": 34000,
+          "description": "SUPPLY CO",
+          "payee": "Supply Co"
+        }
+      ],
+      "question": "What did we spend on our cards in October?",
+      "query": "Q_SPEND",
+      "expected": {
+        "figure_minor": 40000,
+        "rows": [
+          "r3",
+          "r4"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 240000,
+        "confidence": "Low (68%)",
+        "readings": {
+          "r1": "ordinary / possible_own_transfer_counted",
+          "r2": "card_payment / liability_credit_without_repayment_evidence"
+        }
+      },
+      "verdict": "FAIL",
+      "failure": "figure",
+      "rule": "worker/src/lib/ledger-analysis.js:502, 465-466; clean-money.js:289-290",
+      "design": "D2"
+    },
+    {
+      "id": "C32",
+      "theme": "balance_transfers",
+      "accounts": "S2",
+      "rows": "same as C31",
+      "question": "How much did we pay toward card 2222 in October?",
+      "query": "Q_PAID_TO account=2222",
+      "expected": {
+        "figure_minor": 0,
+        "rows": [],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 200000,
+        "confidence": "Low (68%)"
+      },
+      "verdict": "FAIL",
+      "failure": "figure",
+      "rule": "worker/src/lib/ledger-analysis.js:465-466",
+      "design": "D2"
+    },
+    {
+      "id": "C33",
+      "theme": "balance_transfers",
+      "accounts": "S2",
+      "rows": "same as C31",
+      "question": "What fees did we pay on card 5555 in October?",
+      "query": "Q_FEES account=5555",
+      "expected": {
+        "figure_minor": 6000,
+        "rows": [
+          "r3"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 6000,
+        "confidence": "Low (68%)"
+      },
+      "verdict": "FAIL",
+      "failure": "confidence",
+      "rule": "worker/src/lib/ledger-analysis.js:502; money-query-quality.js:41-42",
+      "design": "D2"
+    },
+    {
+      "id": "C34",
+      "theme": "balance_transfers",
+      "accounts": "S5",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "card2",
+          "posted_on": "2026-10-10",
+          "direction": "outflow",
+          "amount_minor": 150000,
+          "description": "BALANCE TRANSFER"
+        },
+        {
+          "id": "r2",
+          "account": "card2",
+          "posted_on": "2026-10-10",
+          "direction": "outflow",
+          "amount_minor": 4500,
+          "description": "BALANCE TRANSFER FEE"
+        },
+        {
+          "id": "r3",
+          "account": "card2",
+          "posted_on": "2026-10-15",
+          "direction": "outflow",
+          "amount_minor": 12000,
+          "description": "FUEL STATION",
+          "payee": "Fuel Station"
+        }
+      ],
+      "question": "What did we spend on card 5555 in October?",
+      "query": "Q_SPEND account=5555",
+      "expected": {
+        "figure_minor": 166500,
+        "rows": [
+          "r1",
+          "r2",
+          "r3"
+        ],
+        "confidence": "Low (68%)",
+        "disclose": "r1 $1,500.00 likely a balance transfer from an unconnected card; counted"
+      },
+      "code": {
+        "figure_minor": 166500,
+        "confidence": "Low (68%)"
+      },
+      "verdict": "PASS",
+      "failure": null,
+      "rule": "worker/src/lib/ledger-analysis.js:502"
+    },
+    {
+      "id": "C35",
+      "theme": "balance_transfers",
+      "accounts": "S2",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "card2",
+          "posted_on": "2026-10-10",
+          "direction": "outflow",
+          "amount_minor": 90000,
+          "description": "BALANCE TRANSFER TO CARD 2222"
+        },
+        {
+          "id": "r2",
+          "account": "card",
+          "posted_on": "2026-10-12",
+          "direction": "inflow",
+          "amount_minor": 90000,
+          "description": "BALANCE TRANSFER CREDIT"
+        }
+      ],
+      "question": "What did we spend on our cards in October?",
+      "query": "Q_SPEND",
+      "expected": {
+        "figure_minor": 0,
+        "rows": [],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 90000,
+        "confidence": "Low (65%)"
+      },
+      "verdict": "FAIL",
+      "failure": "figure",
+      "rule": "worker/src/lib/ledger-analysis.js:221-231, 502",
+      "design": "D2"
+    },
+    {
+      "id": "C36",
+      "theme": "balance_transfers",
+      "accounts": "S2",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "card2",
+          "posted_on": "2026-10-10",
+          "direction": "outflow",
+          "amount_minor": 120000,
+          "description": "BALANCE TRANSFER"
+        },
+        {
+          "id": "r2",
+          "account": "card",
+          "posted_on": "2026-10-12",
+          "direction": "inflow",
+          "amount_minor": 120000,
+          "description": "PAYMENT THANK YOU"
+        },
+        {
+          "id": "r3",
+          "account": "card",
+          "posted_on": "2026-10-03",
+          "direction": "outflow",
+          "amount_minor": 7500,
+          "description": "LUNCH",
+          "payee": "Lunch Cafe"
+        }
+      ],
+      "question": "What did we spend on our cards in October?",
+      "query": "Q_SPEND",
+      "expected": {
+        "figure_minor": 7500,
+        "rows": [
+          "r3"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 127500,
+        "confidence": "Medium (83%)"
+      },
+      "verdict": "FAIL",
+      "failure": "figure",
+      "rule": "worker/src/lib/clean-money.js:289-290; ledger-analysis.js:502",
+      "design": "D2"
+    },
+    {
+      "id": "C37",
+      "theme": "balance_transfers",
+      "accounts": "S2",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "card2",
+          "posted_on": "2026-10-10",
+          "direction": "outflow",
+          "amount_minor": 120000,
+          "description": "BALANCE TRANSFER"
+        },
+        {
+          "id": "r2",
+          "account": "card",
+          "posted_on": "2026-10-11",
+          "direction": "inflow",
+          "amount_minor": 120000,
+          "description": "BALANCE TRANSFER"
+        },
+        {
+          "id": "r3",
+          "account": "card",
+          "posted_on": "2026-10-12",
+          "direction": "inflow",
+          "amount_minor": 120000,
+          "description": "PAYMENT THANK YOU"
+        },
+        {
+          "id": "r4",
+          "account": "chk",
+          "posted_on": "2026-10-12",
+          "direction": "outflow",
+          "amount_minor": 120000,
+          "description": "PAYMENT TO CARD 2222"
+        }
+      ],
+      "question": "What did we spend on our cards in October?",
+      "query": "Q_SPEND",
+      "expected": {
+        "figure_minor": 120000,
+        "rows": [
+          "r1"
+        ],
+        "confidence": "Medium (82%)",
+        "disclose": "r1 $1,200.00 likely a balance transfer; two equal credits on 2222 so the match is not unique; counted"
+      },
+      "code": {
+        "figure_minor": 120000,
+        "confidence": "Medium (82%)"
+      },
+      "verdict": "PASS",
+      "failure": null,
+      "rule": "worker/src/lib/clean-money.js:138, 166; ledger-analysis.js:502"
+    },
+    {
+      "id": "C38",
+      "theme": "balance_transfers",
+      "accounts": "S5",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "card2",
+          "posted_on": "2026-10-08",
+          "direction": "outflow",
+          "amount_minor": 250000,
+          "description": "BALANCE TRANSFER CHECK 1001"
+        },
+        {
+          "id": "r2",
+          "account": "chk",
+          "posted_on": "2026-10-09",
+          "direction": "inflow",
+          "amount_minor": 250000,
+          "description": "DEPOSIT"
+        }
+      ],
+      "question": "How much income did we get in October?",
+      "query": "Q_INCOME",
+      "expected": {
+        "figure_minor": 250000,
+        "rows": [
+          "r2"
+        ],
+        "confidence": "Low (65%)",
+        "disclose": "r2 $2,500.00 likely borrowed from card 5555; counted"
+      },
+      "code": {
+        "figure_minor": 250000,
+        "confidence": "Low (65%)"
+      },
+      "verdict": "PASS",
+      "failure": null,
+      "rule": "worker/src/lib/ledger-analysis.js:502"
+    },
+    {
+      "id": "C39",
+      "theme": "balance_transfers",
+      "accounts": "S5",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "card2",
+          "posted_on": "2026-10-10",
+          "direction": "outflow",
+          "amount_minor": 4500,
+          "description": "BALANCE TRANSFER FEE"
+        },
+        {
+          "id": "r2",
+          "account": "card2",
+          "posted_on": "2026-10-11",
+          "direction": "outflow",
+          "amount_minor": 22000,
+          "description": "FURNITURE",
+          "payee": "Furniture Co"
+        }
+      ],
+      "question": "What did we spend on card 5555 in October?",
+      "query": "Q_SPEND account=5555",
+      "expected": {
+        "figure_minor": 26500,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 26500,
+        "confidence": "High (100%)"
+      },
+      "verdict": "PASS",
+      "failure": null,
+      "rule": "worker/src/lib/ledger-analysis.js:423, 450"
+    },
+    {
+      "id": "C40",
+      "theme": "balance_transfers",
+      "accounts": "S5",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "card2",
+          "posted_on": "2026-10-20",
+          "direction": "outflow",
+          "amount_minor": 1850,
+          "description": "INTEREST CHARGE BALANCE TRANSFER"
+        },
+        {
+          "id": "r2",
+          "account": "card2",
+          "posted_on": "2026-10-05",
+          "direction": "outflow",
+          "amount_minor": 30000,
+          "description": "PRINTER",
+          "payee": "Printer Co"
+        }
+      ],
+      "question": "How much card interest did we pay in October?",
+      "query": "Q_INTEREST",
+      "expected": {
+        "figure_minor": 1850,
+        "rows": [
+          "r1"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 1850,
+        "confidence": "High (100%)"
+      },
+      "verdict": "PASS",
+      "failure": null,
+      "rule": "worker/src/lib/ledger-analysis.js:423, 450"
+    },
+    {
+      "id": "C41",
+      "theme": "loan_principal_interest",
+      "accounts": "S3",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "chk",
+          "posted_on": "2026-10-05",
+          "direction": "outflow",
+          "amount_minor": 125000,
+          "description": "LOAN PAYMENT",
+          "payee": "Lender Bank"
+        },
+        {
+          "id": "r2",
+          "account": "chk",
+          "posted_on": "2026-10-07",
+          "direction": "outflow",
+          "amount_minor": 30000,
+          "description": "SUPPLIES",
+          "payee": "Supplies Inc"
+        }
+      ],
+      "question": "What did the business spend in October?",
+      "query": "Q_SPEND",
+      "expected": {
+        "figure_minor": 30000,
+        "rows": [
+          "r2"
+        ],
+        "confidence": "Medium (71%)",
+        "disclose": "r1 $1,250.00 on 1111 2026-10-05 likely includes unseparated interest; may be missing from spending"
+      },
+      "code": {
+        "figure_minor": 30000,
+        "confidence": "High (100%)",
+        "readings": {
+          "r1": "loan_payment, not estimated"
+        }
+      },
+      "verdict": "FAIL",
+      "failure": "confidence",
+      "rule": "worker/src/lib/ledger-analysis.js:491-494",
+      "design": "D5"
+    },
+    {
+      "id": "C42",
+      "theme": "loan_principal_interest",
+      "accounts": "S3",
+      "rows": "same as C41",
+      "question": "How much loan interest did we pay in October?",
+      "query": "Q_INTEREST",
+      "expected": {
+        "figure_minor": 0,
+        "rows": [],
+        "confidence": "Medium (71%)",
+        "disclose": "no separate interest posting; the $1,250.00 payment likely includes interest"
+      },
+      "code": {
+        "figure_minor": 0,
+        "confidence": "High (100%)"
+      },
+      "verdict": "FAIL",
+      "failure": "confidence",
+      "rule": "worker/src/lib/ledger-analysis.js:491-494",
+      "design": "D5"
+    },
+    {
+      "id": "C43",
+      "theme": "loan_principal_interest",
+      "accounts": "S3",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "chk",
+          "posted_on": "2026-10-05",
+          "direction": "outflow",
+          "amount_minor": 125000,
+          "description": "LOAN PAYMENT",
+          "payee": "Lender Bank"
+        },
+        {
+          "id": "r2",
+          "account": "loan",
+          "posted_on": "2026-10-05",
+          "direction": "inflow",
+          "amount_minor": 90000,
+          "description": "PRINCIPAL PAYMENT"
+        },
+        {
+          "id": "r3",
+          "account": "loan",
+          "posted_on": "2026-10-05",
+          "direction": "inflow",
+          "amount_minor": 35000,
+          "description": "INTEREST PAYMENT"
+        }
+      ],
+      "question": "How much loan interest did we pay in October?",
+      "query": "Q_INTEREST",
+      "expected": {
+        "figure_minor": 35000,
+        "rows": [
+          "r3"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 0,
+        "confidence": "Medium (82%)",
+        "readings": {
+          "r2": "loan_payment / liability_credit_without_repayment_evidence",
+          "r3": "loan_payment / liability_credit_without_repayment_evidence"
+        }
+      },
+      "verdict": "FAIL",
+      "failure": "figure",
+      "rule": "worker/src/lib/ledger-analysis.js:330, 465-466; clean-money.js:188",
+      "design": "D5"
+    },
+    {
+      "id": "C44",
+      "theme": "loan_principal_interest",
+      "accounts": "S3",
+      "rows": "same as C43",
+      "question": "What did the business spend in October?",
+      "query": "Q_SPEND",
+      "expected": {
+        "figure_minor": 35000,
+        "rows": [
+          "r3"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 0,
+        "confidence": "Medium (82%)"
+      },
+      "verdict": "FAIL",
+      "failure": "figure",
+      "rule": "worker/src/lib/ledger-analysis.js:465-466; clean-money.js:188",
+      "design": "D5"
+    },
+    {
+      "id": "C45",
+      "theme": "loan_principal_interest",
+      "accounts": "S3",
+      "rows": "same as C43",
+      "question": "How much loan principal did we pay down in October?",
+      "query": "Q_PRINCIPAL",
+      "expected": {
+        "figure_minor": 90000,
+        "rows": [
+          "r2"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 125000,
+        "confidence": "Medium (82%)"
+      },
+      "verdict": "FAIL",
+      "failure": "figure",
+      "rule": "worker/src/lib/ledger-analysis.js:465-466",
+      "design": "D5"
+    },
+    {
+      "id": "C46",
+      "theme": "loan_principal_interest",
+      "accounts": "S3",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "chk",
+          "posted_on": "2026-10-05",
+          "direction": "outflow",
+          "amount_minor": 125000,
+          "description": "LOAN PAYMENT",
+          "payee": "Lender Bank"
+        },
+        {
+          "id": "r2",
+          "account": "loan",
+          "posted_on": "2026-10-01",
+          "direction": "outflow",
+          "amount_minor": 31000,
+          "description": "INTEREST CHARGE"
+        },
+        {
+          "id": "r3",
+          "account": "loan",
+          "posted_on": "2026-10-05",
+          "direction": "inflow",
+          "amount_minor": 125000,
+          "description": "PAYMENT RECEIVED"
+        }
+      ],
+      "question": "What did the business spend in October?",
+      "query": "Q_SPEND",
+      "expected": {
+        "figure_minor": 31000,
+        "rows": [
+          "r2"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 31000,
+        "confidence": "Medium (84%)",
+        "readings": {
+          "r3": "loan_payment / liability_credit_without_repayment_evidence"
+        }
+      },
+      "verdict": "FAIL",
+      "failure": "confidence",
+      "rule": "worker/src/lib/ledger-analysis.js:739, 465-466",
+      "design": "D7"
+    },
+    {
+      "id": "C47",
+      "theme": "loan_principal_interest",
+      "accounts": "S4",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "chk",
+          "posted_on": "2026-10-01",
+          "direction": "outflow",
+          "amount_minor": 240000,
+          "description": "MORTGAGE PAYMENT",
+          "payee": "Home Mortgage Co"
+        },
+        {
+          "id": "r2",
+          "account": "chk",
+          "posted_on": "2026-10-03",
+          "direction": "outflow",
+          "amount_minor": 60000,
+          "description": "UTILITY CO",
+          "payee": "Utility Co"
+        }
+      ],
+      "question": "What did the business spend in October?",
+      "query": "Q_SPEND",
+      "expected": {
+        "figure_minor": 60000,
+        "rows": [
+          "r2"
+        ],
+        "confidence": "Medium (72%)",
+        "disclose": "r1 $2,400.00 likely includes interest and possibly escrow"
+      },
+      "code": {
+        "figure_minor": 60000,
+        "confidence": "High (100%)"
+      },
+      "verdict": "FAIL",
+      "failure": "confidence",
+      "rule": "worker/src/lib/ledger-analysis.js:491-494",
+      "design": "D5"
+    },
+    {
+      "id": "C48",
+      "theme": "loan_principal_interest",
+      "accounts": "S4",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "chk",
+          "posted_on": "2026-10-12",
+          "direction": "outflow",
+          "amount_minor": 45000,
+          "description": "AUTO LOAN PAYMENT",
+          "payee": "Car Finance"
+        },
+        {
+          "id": "r2",
+          "account": "chk",
+          "posted_on": "2026-10-04",
+          "direction": "outflow",
+          "amount_minor": 30000,
+          "description": "SUPPLIES",
+          "payee": "Supplies Inc"
+        }
+      ],
+      "question": "What did the business spend in October?",
+      "query": "Q_SPEND",
+      "expected": {
+        "figure_minor": 30000,
+        "rows": [
+          "r2"
+        ],
+        "confidence": "Medium (79%)"
+      },
+      "code": {
+        "figure_minor": 75000,
+        "confidence": "High (100%)",
+        "readings": {
+          "r1": "ordinary / spending, not estimated"
+        }
+      },
+      "verdict": "FAIL",
+      "failure": "figure",
+      "rule": "worker/src/lib/ledger-analysis.js:422, 492, 506",
+      "design": "D6"
+    },
+    {
+      "id": "C49",
+      "theme": "loan_principal_interest",
+      "accounts": "S4",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "chk",
+          "posted_on": "2026-10-15",
+          "direction": "outflow",
+          "amount_minor": 80000,
+          "description": "SBA LOAN PMT",
+          "payee": "Lender Bank"
+        },
+        {
+          "id": "r2",
+          "account": "chk",
+          "posted_on": "2026-10-02",
+          "direction": "outflow",
+          "amount_minor": 20000,
+          "description": "INTERNET SERVICE",
+          "payee": "Net Co"
+        }
+      ],
+      "question": "What did the business spend in October?",
+      "query": "Q_SPEND",
+      "expected": {
+        "figure_minor": 20000,
+        "rows": [
+          "r2"
+        ],
+        "confidence": "Medium (72%)"
+      },
+      "code": {
+        "figure_minor": 100000,
+        "confidence": "High (100%)"
+      },
+      "verdict": "FAIL",
+      "failure": "figure",
+      "rule": "worker/src/lib/ledger-analysis.js:422, 492, 506",
+      "design": "D6"
+    },
+    {
+      "id": "C50",
+      "theme": "loan_principal_interest",
+      "accounts": "S4",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "chk",
+          "posted_on": "2026-10-15",
+          "direction": "outflow",
+          "amount_minor": 80000,
+          "description": "LOAN PMT",
+          "payee": "Lender Bank"
+        },
+        {
+          "id": "r2",
+          "account": "chk",
+          "posted_on": "2026-10-02",
+          "direction": "outflow",
+          "amount_minor": 20000,
+          "description": "INTERNET SERVICE",
+          "payee": "Net Co"
+        }
+      ],
+      "question": "What did the business spend in October?",
+      "query": "Q_SPEND",
+      "expected": {
+        "figure_minor": 20000,
+        "rows": [
+          "r2"
+        ],
+        "confidence": "Medium (72%)"
+      },
+      "code": {
+        "figure_minor": 100000,
+        "confidence": "Medium (72%)",
+        "readings": {
+          "r1": "ordinary / payment_wording_unresolved_party_counted"
+        }
+      },
+      "verdict": "FAIL",
+      "failure": "figure",
+      "rule": "worker/src/lib/ledger-analysis.js:492 (no pmt) vs 422",
+      "design": "D6"
+    },
+    {
+      "id": "C51",
+      "theme": "loan_principal_interest",
+      "accounts": "S4",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "chk",
+          "posted_on": "2026-10-15",
+          "direction": "outflow",
+          "amount_minor": 80000,
+          "description": "LOAN PAYMENT"
+        },
+        {
+          "id": "r2",
+          "account": "chk",
+          "posted_on": "2026-10-02",
+          "direction": "outflow",
+          "amount_minor": 20000,
+          "description": "INTERNET SERVICE",
+          "payee": "Net Co"
+        }
+      ],
+      "question": "What did the business spend in October?",
+      "query": "Q_SPEND",
+      "expected": {
+        "figure_minor": 100000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "Medium (72%)",
+        "disclose": "r1 $800.00 likely a loan payment, no lender recorded; counted"
+      },
+      "code": {
+        "figure_minor": 100000,
+        "confidence": "Medium (72%)"
+      },
+      "verdict": "PASS",
+      "failure": null,
+      "rule": "worker/src/lib/ledger-analysis.js:491-496"
+    },
+    {
+      "id": "C52",
+      "theme": "loan_principal_interest",
+      "accounts": "S4",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "chk",
+          "posted_on": "2026-10-15",
+          "direction": "outflow",
+          "amount_minor": 80000,
+          "description": "LOAN PAYMENT ACME FURNITURE",
+          "payee": "Acme Furniture"
+        },
+        {
+          "id": "r2",
+          "account": "chk",
+          "posted_on": "2026-10-02",
+          "direction": "outflow",
+          "amount_minor": 20000,
+          "description": "INTERNET SERVICE",
+          "payee": "Net Co"
+        }
+      ],
+      "question": "What did the business spend in October?",
+      "query": "Q_SPEND",
+      "expected": {
+        "figure_minor": 100000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "Medium (72%)"
+      },
+      "code": {
+        "figure_minor": 100000,
+        "confidence": "Medium (72%)"
+      },
+      "verdict": "PASS",
+      "failure": null,
+      "rule": "worker/src/lib/ledger-analysis.js:491-496"
+    },
+    {
+      "id": "C53",
+      "theme": "loan_principal_interest",
+      "accounts": "S3",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "chk",
+          "posted_on": "2026-10-10",
+          "direction": "outflow",
+          "amount_minor": 100000,
+          "description": "ONLINE TRANSFER TO LOAN 3333"
+        },
+        {
+          "id": "r2",
+          "account": "loan",
+          "posted_on": "2026-10-10",
+          "direction": "inflow",
+          "amount_minor": 100000,
+          "description": "ONLINE TRANSFER FROM CHECKING 1111"
+        },
+        {
+          "id": "r3",
+          "account": "chk",
+          "posted_on": "2026-10-12",
+          "direction": "outflow",
+          "amount_minor": 25000,
+          "description": "SUPPLIES",
+          "payee": "Supplies Inc"
+        }
+      ],
+      "question": "What did the business spend in October?",
+      "query": "Q_SPEND",
+      "expected": {
+        "figure_minor": 25000,
+        "rows": [
+          "r3"
+        ],
+        "confidence": "Medium (84%)",
+        "disclose": "r1 $1,000.00 to loan 3333 likely includes interest; no interest posting on 3333"
+      },
+      "code": {
+        "figure_minor": 25000,
+        "confidence": "High (100%)"
+      },
+      "verdict": "FAIL",
+      "failure": "confidence",
+      "rule": "worker/src/lib/clean-money.js:288; ledger-analysis.js:876-880, 485",
+      "design": "D5"
+    },
+    {
+      "id": "C54",
+      "theme": "loan_principal_interest",
+      "accounts": "S3",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "chk",
+          "posted_on": "2026-10-10",
+          "direction": "outflow",
+          "amount_minor": 100000,
+          "description": "ONLINE TRANSFER TO LOAN 3333"
+        },
+        {
+          "id": "r2",
+          "account": "loan",
+          "posted_on": "2026-10-10",
+          "direction": "inflow",
+          "amount_minor": 100000,
+          "description": "ONLINE TRANSFER FROM CHECKING 1111"
+        },
+        {
+          "id": "r3",
+          "account": "chk",
+          "posted_on": "2026-10-12",
+          "direction": "outflow",
+          "amount_minor": 25000,
+          "description": "SUPPLIES",
+          "payee": "Supplies Inc"
+        },
+        {
+          "id": "r4",
+          "account": "loan",
+          "posted_on": "2026-10-01",
+          "direction": "outflow",
+          "amount_minor": 9500,
+          "description": "INTEREST"
+        }
+      ],
+      "question": "What did the business spend in October?",
+      "query": "Q_SPEND",
+      "expected": {
+        "figure_minor": 34500,
+        "rows": [
+          "r3",
+          "r4"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 34500,
+        "confidence": "High (100%)"
+      },
+      "verdict": "PASS",
+      "failure": null,
+      "rule": "worker/src/lib/ledger-analysis.js:506"
+    },
+    {
+      "id": "C55",
+      "theme": "loan_principal_interest",
+      "accounts": "S4",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "chk",
+          "posted_on": "2026-10-05",
+          "direction": "outflow",
+          "amount_minor": 125000,
+          "description": "LOAN PAYMENT PRINCIPAL 900.00 INTEREST 350.00",
+          "payee": "Lender Bank"
+        },
+        {
+          "id": "r2",
+          "account": "chk",
+          "posted_on": "2026-10-06",
+          "direction": "outflow",
+          "amount_minor": 10000,
+          "description": "SUPPLIES",
+          "payee": "Supplies Inc"
+        }
+      ],
+      "question": "What did the business spend in October?",
+      "query": "Q_SPEND",
+      "expected": {
+        "figure_minor": 135000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "Low (67%)",
+        "disclose": "r1 memo names a split but no split records exist; counted whole"
+      },
+      "code": {
+        "figure_minor": 135000,
+        "confidence": "Low (67%)"
+      },
+      "verdict": "PASS",
+      "failure": null,
+      "rule": "worker/src/lib/ledger-analysis.js:344, 495"
+    },
+    {
+      "id": "C56",
+      "theme": "loan_principal_interest",
+      "accounts": "S4",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "chk",
+          "posted_on": "2026-10-05",
+          "direction": "outflow",
+          "amount_minor": 90000,
+          "description": "LOAN PAYMENT PRINCIPAL",
+          "payee": "Lender Bank"
+        },
+        {
+          "id": "r2",
+          "account": "chk",
+          "posted_on": "2026-10-05",
+          "direction": "outflow",
+          "amount_minor": 35000,
+          "description": "LOAN PAYMENT INTEREST",
+          "payee": "Lender Bank"
+        }
+      ],
+      "question": "What did the business spend in October?",
+      "query": "Q_SPEND",
+      "expected": {
+        "figure_minor": 35000,
+        "rows": [
+          "r2"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 125000,
+        "confidence": "Low (65%)",
+        "readings": {
+          "r1": "ordinary / payment_wording_unresolved_party_counted",
+          "r2": "ordinary / payment_wording_unresolved_party_counted"
+        }
+      },
+      "verdict": "FAIL",
+      "failure": "figure",
+      "rule": "worker/src/lib/ledger-analysis.js:347-348 overridden by 495-496; 492",
+      "design": "D6"
+    },
+    {
+      "id": "C57",
+      "theme": "loan_principal_interest",
+      "accounts": "S4",
+      "rows": "same as C56",
+      "question": "How much loan interest did we pay in October?",
+      "query": "Q_INTEREST",
+      "expected": {
+        "figure_minor": 35000,
+        "rows": [
+          "r2"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 35000,
+        "confidence": "Low (65%)"
+      },
+      "verdict": "FAIL",
+      "failure": "confidence",
+      "rule": "worker/src/lib/ledger-analysis.js:495-496",
+      "design": "D6"
+    },
+    {
+      "id": "C58",
+      "theme": "loan_principal_interest",
+      "accounts": "S3",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "loan",
+          "posted_on": "2026-10-10",
+          "direction": "inflow",
+          "amount_minor": 70000,
+          "description": "PAYMENT RECEIVED - THANK YOU"
+        },
+        {
+          "id": "r2",
+          "account": "loan",
+          "posted_on": "2026-10-01",
+          "direction": "outflow",
+          "amount_minor": 6000,
+          "description": "INTEREST CHARGE"
+        }
+      ],
+      "question": "How much did we pay toward the equipment loan in October?",
+      "query": "Q_PAID_TO account=3333",
+      "expected": {
+        "figure_minor": 70000,
+        "rows": [
+          "r1"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 70000,
+        "confidence": "Low (67%)"
+      },
+      "verdict": "FAIL",
+      "failure": "confidence",
+      "rule": "worker/src/lib/ledger-analysis.js:739, 465-466",
+      "design": "D7"
+    },
+    {
+      "id": "C59",
+      "theme": "loan_principal_interest",
+      "accounts": "S3",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "loan",
+          "posted_on": "2026-10-02",
+          "direction": "outflow",
+          "amount_minor": 1000000,
+          "description": "LOAN DISBURSEMENT"
+        },
+        {
+          "id": "r2",
+          "account": "chk",
+          "posted_on": "2026-10-02",
+          "direction": "inflow",
+          "amount_minor": 1000000,
+          "description": "LOAN PROCEEDS",
+          "category": "LOAN_DISBURSEMENTS",
+          "provenance": "feed"
+        }
+      ],
+      "question": "What did the business spend in October?",
+      "query": "Q_SPEND",
+      "expected": {
+        "figure_minor": 0,
+        "rows": [],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 1000000,
+        "confidence": "Medium (82%)",
+        "readings": {
+          "r1": "ordinary / possible_own_transfer_counted",
+          "r2": "loan_proceeds"
+        }
+      },
+      "verdict": "FAIL",
+      "failure": "figure",
+      "rule": "worker/src/lib/ledger-analysis.js:382-385 vs 502",
+      "design": "D9"
+    },
+    {
+      "id": "C60",
+      "theme": "card_spending_vs_payments",
+      "accounts": "S6",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "sav",
+          "posted_on": "2026-10-09",
+          "direction": "outflow",
+          "amount_minor": 45000,
+          "description": "TRANSFER TO CARD 2222"
+        },
+        {
+          "id": "r2",
+          "account": "card",
+          "posted_on": "2026-10-09",
+          "direction": "inflow",
+          "amount_minor": 45000,
+          "description": "TRANSFER FROM SAVINGS 4444"
+        },
+        {
+          "id": "r3",
+          "account": "card",
+          "posted_on": "2026-10-01",
+          "direction": "outflow",
+          "amount_minor": 13000,
+          "description": "GAS",
+          "payee": "Gas Station"
+        }
+      ],
+      "question": "What did the business spend in October?",
+      "query": "Q_SPEND",
+      "expected": {
+        "figure_minor": 13000,
+        "rows": [
+          "r3"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 13000,
+        "confidence": "High (100%)"
+      },
+      "verdict": "PASS",
+      "failure": null,
+      "rule": "worker/src/lib/clean-money.js:288; ledger-analysis.js:438, 876-880"
+    },
+    {
+      "id": "C61",
+      "theme": "card_spending_vs_payments",
+      "accounts": "S1",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "chk",
+          "posted_on": "2026-10-09",
+          "direction": "outflow",
+          "amount_minor": 41000,
+          "description": "TRANSFER TO 2222"
+        },
+        {
+          "id": "r2",
+          "account": "card",
+          "posted_on": "2026-10-09",
+          "direction": "inflow",
+          "amount_minor": 41000,
+          "description": "TRANSFER FROM 1111"
+        },
+        {
+          "id": "r3",
+          "account": "card",
+          "posted_on": "2026-10-02",
+          "direction": "outflow",
+          "amount_minor": 6500,
+          "description": "GAS",
+          "payee": "Gas Station"
+        }
+      ],
+      "question": "What did the business spend in October?",
+      "query": "Q_SPEND",
+      "expected": {
+        "figure_minor": 6500,
+        "rows": [
+          "r3"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 6500,
+        "confidence": "High (100%)"
+      },
+      "verdict": "PASS",
+      "failure": null,
+      "rule": "worker/src/lib/clean-money.js:156-160"
+    },
+    {
+      "id": "C62",
+      "theme": "card_spending_vs_payments",
+      "accounts": "S1",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "card",
+          "posted_on": "2026-10-14",
+          "direction": "outflow",
+          "amount_minor": 48000,
+          "description": "EQUIPMENT CO",
+          "payee": "Equipment Co"
+        },
+        {
+          "id": "r2",
+          "account": "chk",
+          "posted_on": "2026-10-15",
+          "direction": "inflow",
+          "amount_minor": 48000,
+          "description": "CLIENT DEPOSIT",
+          "payee": "Client"
+        }
+      ],
+      "question": "How much did we spend on the Biz Card in October?",
+      "query": "Q_SPEND account=2222",
+      "expected": {
+        "figure_minor": 48000,
+        "rows": [
+          "r1"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 48000,
+        "confidence": "Low (65%)"
+      },
+      "verdict": "FAIL",
+      "failure": "confidence",
+      "rule": "worker/src/lib/clean-money.js:284-285; ledger-analysis.js:502",
+      "design": "D10"
+    },
+    {
+      "id": "C63",
+      "theme": "card_spending_vs_payments",
+      "accounts": "S1",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "card",
+          "posted_on": "2026-10-05",
+          "direction": "outflow",
+          "amount_minor": 2900,
+          "description": "AUTOPAY SOFTWARE INC",
+          "payee": "Autopay Software Inc"
+        },
+        {
+          "id": "r2",
+          "account": "card",
+          "posted_on": "2026-10-06",
+          "direction": "outflow",
+          "amount_minor": 7100,
+          "description": "PAPER CO",
+          "payee": "Paper Co"
+        }
+      ],
+      "question": "How much did we spend on the Biz Card in October?",
+      "query": "Q_SPEND account=2222",
+      "expected": {
+        "figure_minor": 10000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 10000,
+        "confidence": "Medium (89%)"
+      },
+      "verdict": "FAIL",
+      "failure": "confidence",
+      "rule": "worker/src/lib/ledger-analysis.js:502",
+      "design": "D10"
+    },
+    {
+      "id": "C64",
+      "theme": "card_spending_vs_payments",
+      "accounts": "S1",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "card",
+          "posted_on": "2026-10-20",
+          "direction": "inflow",
+          "amount_minor": 30000,
+          "description": "PAYMENT THANK YOU",
+          "payee": "Card Issuer"
+        },
+        {
+          "id": "r2",
+          "account": "card",
+          "posted_on": "2026-10-02",
+          "direction": "outflow",
+          "amount_minor": 14000,
+          "description": "SUPPLIES",
+          "payee": "Supplies Inc"
+        }
+      ],
+      "question": "How much did we pay toward the Biz Card in October?",
+      "query": "Q_PAID_TO account=2222",
+      "expected": {
+        "figure_minor": 30000,
+        "rows": [
+          "r1"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 30000,
+        "confidence": "Medium (76%)"
+      },
+      "verdict": "FAIL",
+      "failure": "confidence",
+      "rule": "worker/src/lib/ledger-analysis.js:739",
+      "design": "D7"
+    },
+    {
+      "id": "C65",
+      "theme": "card_spending_vs_payments",
+      "accounts": "S4",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "chk",
+          "posted_on": "2026-10-12",
+          "direction": "outflow",
+          "amount_minor": 52000,
+          "description": "ISSUER ONLINE PMT",
+          "category": "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT",
+          "provenance": "feed"
+        },
+        {
+          "id": "r2",
+          "account": "chk",
+          "posted_on": "2026-10-03",
+          "direction": "outflow",
+          "amount_minor": 9000,
+          "description": "SUPPLIES",
+          "payee": "Supplies Inc"
+        }
+      ],
+      "question": "What did the business spend in October?",
+      "query": "Q_SPEND",
+      "expected": {
+        "figure_minor": 9000,
+        "rows": [
+          "r2"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 9000,
+        "confidence": "High (100%)"
+      },
+      "verdict": "PASS",
+      "failure": null,
+      "rule": "worker/src/lib/ledger-analysis.js:300-306, 485"
+    },
+    {
+      "id": "C66",
+      "theme": "card_spending_vs_payments",
+      "accounts": "S4",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "chk",
+          "posted_on": "2026-10-12",
+          "direction": "outflow",
+          "amount_minor": 52000,
+          "description": "ISSUER ONLINE PMT",
+          "category": "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT",
+          "category_basis_state": "proposed",
+          "provenance": "import"
+        },
+        {
+          "id": "r2",
+          "account": "chk",
+          "posted_on": "2026-10-03",
+          "direction": "outflow",
+          "amount_minor": 9000,
+          "description": "SUPPLIES",
+          "payee": "Supplies Inc"
+        }
+      ],
+      "question": "What did the business spend in October?",
+      "query": "Q_SPEND",
+      "expected": {
+        "figure_minor": 61000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "Medium (70%)",
+        "disclose": "r1 $520.00 proposed card-payment category not confirmed; counted"
+      },
+      "code": {
+        "figure_minor": 61000,
+        "confidence": "Medium (70%)"
+      },
+      "verdict": "PASS",
+      "failure": null,
+      "rule": "worker/src/lib/ledger-analysis.js:453-454, 497"
+    },
+    {
+      "id": "C67",
+      "theme": "loan_principal_interest",
+      "accounts": "S4",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "chk",
+          "posted_on": "2026-10-12",
+          "direction": "outflow",
+          "amount_minor": 45000,
+          "description": "CAR FINANCE",
+          "payee": "Car Finance",
+          "category": "LOAN_PAYMENTS_CAR_PAYMENT",
+          "provenance": "feed"
+        },
+        {
+          "id": "r2",
+          "account": "chk",
+          "posted_on": "2026-10-03",
+          "direction": "outflow",
+          "amount_minor": 15000,
+          "description": "SUPPLIES",
+          "payee": "Supplies Inc"
+        }
+      ],
+      "question": "What did the business spend in October?",
+      "query": "Q_SPEND",
+      "expected": {
+        "figure_minor": 15000,
+        "rows": [
+          "r2"
+        ],
+        "confidence": "Medium (73%)",
+        "disclose": "r1 $450.00 likely includes interest"
+      },
+      "code": {
+        "figure_minor": 15000,
+        "confidence": "High (100%)"
+      },
+      "verdict": "FAIL",
+      "failure": "confidence",
+      "rule": "worker/src/lib/ledger-analysis.js:300-306, 485",
+      "design": "D5"
+    },
+    {
+      "id": "C68",
+      "theme": "card_spending_vs_payments",
+      "accounts": "S1",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "card",
+          "posted_on": "2026-10-05",
+          "direction": "inflow",
+          "amount_minor": 50000,
+          "description": "PAYMENT THANK YOU"
+        },
+        {
+          "id": "r2",
+          "account": "card",
+          "posted_on": "2026-10-08",
+          "direction": "outflow",
+          "amount_minor": 50000,
+          "description": "PAYMENT RETURNED"
+        },
+        {
+          "id": "r3",
+          "account": "card",
+          "posted_on": "2026-10-02",
+          "direction": "outflow",
+          "amount_minor": 8500,
+          "description": "OFFICE CHAIRS",
+          "payee": "Chair Co"
+        }
+      ],
+      "question": "How much did we spend on the Biz Card in October?",
+      "query": "Q_SPEND account=2222",
+      "expected": {
+        "figure_minor": 8500,
+        "rows": [
+          "r3"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 58500,
+        "confidence": "High (100%)",
+        "readings": {
+          "r2": "ordinary / spending, not estimated"
+        }
+      },
+      "verdict": "FAIL",
+      "failure": "figure",
+      "rule": "worker/src/lib/ledger-analysis.js:392-394, 506",
+      "design": "D3"
+    },
+    {
+      "id": "C69",
+      "theme": "card_spending_vs_payments",
+      "accounts": "S1",
+      "rows": "same as C68",
+      "question": "How much did we pay toward the Biz Card in October?",
+      "query": "Q_PAID_TO account=2222",
+      "expected": {
+        "figure_minor": 0,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 50000,
+        "confidence": "High (100%)"
+      },
+      "verdict": "FAIL",
+      "failure": "figure",
+      "rule": "worker/src/lib/ledger-analysis.js:506",
+      "design": "D3"
+    },
+    {
+      "id": "C70",
+      "theme": "loan_principal_interest",
+      "accounts": "S3",
+      "rows": [
+        {
+          "id": "r1",
+          "account": "loan",
+          "posted_on": "2026-10-05",
+          "direction": "inflow",
+          "amount_minor": 125000,
+          "description": "PAYMENT RECEIVED"
+        },
+        {
+          "id": "r2",
+          "account": "loan",
+          "posted_on": "2026-10-09",
+          "direction": "outflow",
+          "amount_minor": 125000,
+          "description": "RETURNED PAYMENT"
+        },
+        {
+          "id": "r3",
+          "account": "loan",
+          "posted_on": "2026-10-09",
+          "direction": "outflow",
+          "amount_minor": 3500,
+          "description": "RETURNED PAYMENT FEE"
+        }
+      ],
+      "question": "What did the business spend in October?",
+      "query": "Q_SPEND",
+      "expected": {
+        "figure_minor": 3500,
+        "rows": [
+          "r3"
+        ],
+        "confidence": "High (100%)"
+      },
+      "code": {
+        "figure_minor": 128500,
+        "confidence": "Medium (82%)"
+      },
+      "verdict": "FAIL",
+      "failure": "figure",
+      "rule": "worker/src/lib/ledger-analysis.js:506",
+      "design": "D3"
+    }
+  ]
+}

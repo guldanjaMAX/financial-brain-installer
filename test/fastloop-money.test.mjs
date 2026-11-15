@@ -1,3 +1,5 @@
+// 0.4.28 owner confidence is attached after the legacy-reader seam used by this fixture.
+import { finalizeOwnerLedgerAnswer } from '../worker/src/lib/document-answer.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -242,7 +244,8 @@ test('RM4 uncertain expense output remains partial with the original gold obliga
     assert.equal(o.body.ledger.complete, false);
     assert.equal(o.body.ledger.expense_total_minor, null);
     assert.equal(o.body.ledger.retained_outflow_minor, 101000);
-    assert.equal(actual.verdict, 'partly');
+    // 0.4.28 scorer treats a missing figure as wrong, preserving every required-fact check.
+    assert.equal(actual.verdict, 'wrong figure');
     for (const fact of ['expense-total', 'whole-repayment', 'expense-row-count', 'expense-evidence-membership'])
       assert.equal(actual.checks.find(c => c.id === fact).ok, false, fact);
     assert.equal(goldFor(id).total, '61000');
@@ -259,13 +262,15 @@ test('RM4 restoring expense certification fails the independent oracle and compa
   const mutant = seal(replay({ cases, sourceOverrides: { [file]: restored } }));
   assert.equal(mutant.source_files[`worker/src/lib/${file}`], sha(restored));
   assert.ok(mutant.observations.every(o => o.trace.rows_read.some(r => r.id === 7)));
-  assert.ok(scoreRun(control, cases).scores.every(s => s.verdict === 'partly'));
+  // 0.4.28 no-withheld-totals scorer fails missing numeric answers.
+  assert.ok(scoreRun(control, cases).scores.every(s => s.verdict === 'wrong figure'));
   assert.ok(scoreRun(mutant, cases).scores.every(s => s.verdict === 'wrong figure'));
   assert.equal(compareRuns(control, mutant, cases).regression_gate, false);
 });
 test('RM4 partial output cannot hide invented retained amounts or counts', () => {
   const partial = partialReplay();
-  assert.equal(scoreRun(partial, partialCases).scores[0].verdict, 'partly');
+  // 0.4.28 missing figures fail the scorer even when their retained rows are disclosed.
+  assert.equal(scoreRun(partial, partialCases).scores[0].verdict, 'wrong figure');
   for (const corrupt of [o => { o.body.ledger.retained_outflow_minor++; },
     o => { o.body.answer = o.body.answer.replace('$1,010.00', '$1,010.01'); },
     o => { o.body.ledger.cited_row_count = 999; }]) {
@@ -281,8 +286,11 @@ test('unknown classification and import reset stay held while typed memo and sho
     const o = observation(id);
     assert.ok(o.trace.rows_read.some(r => r.id === 7));
     assert.ok(o.trace.rows_read.some(r => r.id === 8));
-    assert.equal(score(id).verdict, 'over-refusal');
-    assert.equal(o.body.answer, null);
+    // 0.4.28 no-refusal boundary retains the unconfirmed observed subtotal.
+    assert.equal(score(id).verdict, 'partly');
+    assert.match(o.body.answer, /at least \$610\.00; \$400\.00 more may be a card payment/);
+    assert.equal(finalizeOwnerLedgerAnswer(o.body).confidence.percent,0);
+    assert.equal(o.body.evidence_gate.complete, false);
     assert.equal(o.body.gaps[0].reason, 'ledger_account_kind_review_required');
   }
   for (const id of ['M06/memo', 'M05/shorthand']) {
@@ -293,7 +301,10 @@ test('unknown classification and import reset stay held while typed memo and sho
     assert.equal(o.body.ledger.expense_total_minor, 61000);
     assert.equal(score(id).verdict, 'correct');
   }
-  assert.equal(observation('M06').body.ledger, undefined);
+  // 0.4.28 retains observed evidence instead of dropping the uncertain ledger reading.
+  assert.equal(observation('M06').body.ledger.observed_spending_lower_bound_minor,61000);
+  assert.equal(observation('M06').body.ledger.classification_uncertain_minor,40000);
+  assert.equal(observation('M06').body.ledger.expense_total_minor,null);
   const reset = observation('M06/reset').trace.import;
   assert.ok(reset.statements >= 2); assert.equal(reset.before.account_kind, 'loan');
   assert.equal(reset.after.account_kind, 'other'); assert.equal(reset.after.balance_role, 'neither');
@@ -372,7 +383,8 @@ test('integrated forecast keeps current observations outside the future period a
 test('integrated uncertainty preserves missing expense facts and admits only the exact supported coverage line', () => {
   const partial = partialReplay(), actual = scoreRun(partial, partialCases).scores[0];
   assert.ok(partial.observations[0].trace.rows_read.length > 0);
-  assert.equal(actual.verdict, 'partly');
+  // 0.4.28 scorer treats a missing figure as wrong, preserving every required-fact check.
+    assert.equal(actual.verdict, 'wrong figure');
   assert.ok(actual.required_facts_met < actual.required_facts_total);
   for (const mutate of [o => { o.body.ledger.retained_outflow_minor++; },
     o => { o.body.answer = o.body.answer.replace('Bank history: all 3', 'Bank history: all 2'); },
@@ -447,7 +459,8 @@ test('reviewed unknown and reset fixtures pass the independent typed key; bypass
     assert.equal(o.body.ledger.expense_total_minor,61000); assert.equal(o.body.ledger.own_account_payments.total_minor,40000);
     const bad = seal(replay({ cases, sourceOverrides: { 'ledger-reader.js':source.replace(site,'accounts = accounts.map(row => row);') } }));
     assert.equal(bad.observations[0].trace.account_reviews.length,1);
-    assert.equal(scoreRun(bad,cases).scores[0].verdict,'over-refusal');
+    // 0.4.28 a bypassed review now answers provisionally and still fails the typed oracle.
+    assert.equal(scoreRun(bad,cases).scores[0].verdict,'wrong figure');
     assert.equal(compareRuns(green,bad,cases).regression_gate,false);
   }
 });

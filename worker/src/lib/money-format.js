@@ -1,3 +1,5 @@
+import { FINANCIAL_CURRENCY_EXPONENTS } from './financial-money.js';
+
 // Calendar days describe bank records, so never shift them through UTC. Only
 // instants (the injected clock and sync time) use the owner's time zone.
 const months = ['January', 'February', 'March', 'April', 'May', 'June',
@@ -30,6 +32,13 @@ export function moneyAccount(account = {}, { label = false } = {}) {
   return name ? `${name} (${ending})` : ending;
 }
 export const moneyAccounts = accounts => [...new Set(accounts.map(account => moneyAccount(account)))].join(', ');
+// Money SQL shares presentation's owner-day calculation without importing the
+// compatibility question grammar (historical readers do not export this clock).
+export function ownerMoneyDay(value, timeZone) {
+  if (typeof timeZone !== 'string' || !timeZone || timeZone !== timeZone.trim()) return null;
+  const day = localParts(value, timeZone);
+  return day ? { day: `${String(day.year).padStart(4, '0')}-${String(day.month).padStart(2, '0')}-${String(day.day).padStart(2, '0')}`, timeZone } : null;
+}
 export function moneyPresentation({ now, timeZone }) {
   const today = localParts(now, timeZone);
   const yearSuffix = day => day.year === today?.year ? '' : ` ${day.year}`;
@@ -71,4 +80,21 @@ export function moneyPresentation({ now, timeZone }) {
     return `${moneyAccount(account).replace(/^your/, 'Your')} has records ${span}, ${updated(account.last_synced_at)}${more}.`;
   };
   return { date, month, period, updated, history };
+}
+
+// Match the reviewed statement-import units. Unknown codes keep the importer's
+// two-digit convention; ISK is also supported by the bank export reader.
+const currencyExponents = { ...FINANCIAL_CURRENCY_EXPONENTS, ISK: 0 };
+export const moneyMinorDigits = currency => Object.hasOwn(currencyExponents, currency) ? currencyExponents[currency] : 2;
+export const moneyMinorNumber = (minor, currency) => Number(minor) / 10 ** moneyMinorDigits(currency);
+export function moneyMinorText(minor, currency, { grouped = true } = {}) {
+  const digits = moneyMinorDigits(currency), n = BigInt(minor), a = n < 0n ? -n : n;
+  const scale = 10n ** BigInt(digits), whole = String(a / scale);
+  return `${n < 0n ? '-' : ''}${grouped ? whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',') : whole}${digits ? '.' + String(a % scale).padStart(digits, '0') : ''}`;
+}
+// Trusted expressions only. A REAL divisor preserves SQL averages and ratios
+// even for currencies whose amounts have no fractional minor units.
+export function moneyMinorSql(amount, currency) {
+  const group = digits => Object.keys(currencyExponents).filter(code => currencyExponents[code] === digits).map(code => `'${code}'`).join(',');
+  return `${amount}/(CASE WHEN ${currency} IN (${group(0)}) THEN 1.0 WHEN ${currency} IN (${group(3)}) THEN 1000.0 ELSE 100.0 END)`;
 }

@@ -1,10 +1,13 @@
 import { MCP_DELETE_PLAIN, MCP_WRITE_PLAIN } from './fixtures/plain-copy-expectations.mjs';
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { spawn } from "node:child_process";
-import { createServer } from "node:http";
-import { fileURLToPath } from "node:url";
+import { fixtureTransport, fixtureFetchHook, connectFixtureTransport } from "../../test/fixtures/mcp-fetch-transport.mjs";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { createProductFixture, json, seedOwnedEntity } from "./product-contract-fixture.mjs";
 import { makeCredential, signAssertion } from "./webauthn-fixtures.mjs";
@@ -22,6 +25,23 @@ import {
 import {
   OWNER_NOTES_KIND, OWNER_NOTES_ROUTE, OWNER_NOTES_SOURCE,
 } from "../src/lib/owner-note-contract.js";
+
+// Keep the real stdio process and every receipt assertion, but carry synthetic
+// fetches over its pipe so offline tests need neither a socket nor host state.
+function startLocalMcp(t, server, profile, key) {
+  const home = mkdtempSync(join(tmpdir(),'brain-authority-synthetic-'));
+  t.after(()=>rmSync(home,{recursive:true,force:true}));
+  const launcher = join(home,'launchctl');
+  writeFileSync(launcher,'#!/bin/sh\nexit 99\n',{mode:0o700});
+  const script = fileURLToPath(new URL('../../components/brain-mcp.mjs',import.meta.url));
+  const child = spawn(process.execPath,['--import',fixtureFetchHook,script],{
+    env:{HOME:home,PATH:home,BRAIN_URL:server.url,BRAIN_NAME:'synthetic',BRAIN_KEY:key,
+      BRAIN_MANIFEST:'',BRAIN_AGENT_PROFILE:profile,BRAIN_NO_WRANGLER_LOGIN:'1',BRAIN_TEST_LAUNCHCTL:launcher},
+    stdio:['pipe','pipe','pipe','ipc'],
+  });
+  connectFixtureTransport(child,server.url);
+  return child;
+}
 
 const ORIGIN = "https://brain.invalid";
 const RP_ID = "brain.invalid";
@@ -123,13 +143,13 @@ test("named agent profiles are exact, least-privilege bundles", () => {
     "librarian", "structured-contributor", "technician", "break-glass", "owner-assistant",
   ]);
   assert.equal(LOCAL_OWNER_AGENT_PROFILE, "owner-assistant");
-  assert.deepEqual(AGENT_PROFILES.librarian.capabilities, ["corpus:read"]);
+  assert.deepEqual(AGENT_PROFILES.librarian.capabilities, ["corpus:read", "money:read"]);
   assert.equal(profileHas("structured-contributor", "curated:write"), true);
   assert.equal(profileHas("technician", "diagnostics:read"), true);
   assert.equal(profileHas("break-glass", "corpus:delete:preview"), true);
   assert.equal(profileHas("break-glass", "corpus:delete:execute"), false);
   assert.deepEqual(AGENT_PROFILES[LOCAL_OWNER_AGENT_PROFILE].capabilities, [
-    "corpus:read", "curated:write", "diagnostics:read",
+    "corpus:read", "curated:write", "diagnostics:read", "money:read",
   ]);
   assert.equal(profileHas(LOCAL_OWNER_AGENT_PROFILE, "corpus:delete:preview"), false);
   assert.equal(profileHas(LOCAL_OWNER_AGENT_PROFILE, "corpus:delete:execute"), false);
@@ -143,24 +163,40 @@ test("named agent profiles are exact, least-privilege bundles", () => {
 
 async function localMcpToolDefinitions(profile) {
   const script = fileURLToPath(new URL("../../components/brain-mcp.mjs", import.meta.url));
-  const child = spawn(process.execPath, [script], {
-    env: {
-      ...process.env,
-      BRAIN_URL: ORIGIN,
-      BRAIN_KEY: "fixture-only-not-a-secret",
-      ...(profile ? { BRAIN_AGENT_PROFILE: profile } : {}),
-    },
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  let stdout = "";
-  let stderr = "";
-  child.stdout.on("data", (chunk) => { stdout += chunk; });
-  child.stderr.on("data", (chunk) => { stderr += chunk; });
-  child.stdin.end(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" })}\n`);
-  const code = await new Promise((resolve) => child.on("close", resolve));
-  assert.equal(code, 0, stderr);
-  assert.equal(`${stdout}\n${stderr}`.includes("fixture-only-not-a-secret"), false);
-  return JSON.parse(stdout.trim()).result.tools;
+  const root = mkdtempSync(join(tmpdir(), 'home-mcp-inventory-'));
+  const keyFile = join(root, '.brain-admin-key'), config = join(root, 'config.json');
+  const manifest = join(root, 'manifest.json'), launchctl = join(root, 'launchctl-fixture');
+  const hook = join(root, 'offline.mjs');
+  const key = randomBytes(24).toString('hex');
+  writeFileSync(keyFile, key, { mode: 0o600 });
+  writeFileSync(config, JSON.stringify({ key_file: keyFile }));
+  writeFileSync(manifest, JSON.stringify({ brain: { domain: 'brain.invalid' }, operations: {} }));
+  writeFileSync(launchctl, '#!/bin/sh\nexit 99\n', { mode: 0o700 });
+  writeFileSync(hook, `import cp from 'node:child_process'; import {syncBuiltinESMExports} from 'node:module';
+for(const name of ['spawn','spawnSync','exec','execSync','execFile','execFileSync']) cp[name]=()=>{throw new Error('host process forbidden')};
+syncBuiltinESMExports(); globalThis.fetch=()=>{throw new Error('network forbidden')};`);
+  try {
+    const child = spawn(process.execPath, ['--import', pathToFileURL(hook).href, script], {
+      env: {
+        HOME: root, USERPROFILE: root, TMPDIR: root, TEMP: root, TMP: root, PATH: process.env.PATH,
+        BRAIN_URL: ORIGIN,
+        BRAIN_CONFIG: config, BRAIN_MANIFEST: manifest,
+        BRAIN_NO_WRANGLER_LOGIN: '1', BRAIN_TEST_LAUNCHCTL: launchctl,
+        ...(process.platform === 'win32' ? { SystemRoot: process.env.SystemRoot, ComSpec: process.env.ComSpec, USERNAME: process.env.USERNAME } : {}),
+        ...(profile ? { BRAIN_AGENT_PROFILE: profile } : {}),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.stdin.end(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" })}\n`);
+    const code = await new Promise((resolve) => child.on("close", resolve));
+    assert.equal(code, 0, stderr);
+    assert.equal(`${stdout}\n${stderr}`.includes(key), false, 'the fixture file credential never reaches output');
+    return JSON.parse(stdout.trim()).result.tools;
+  } finally { rmSync(root, { recursive: true, force: true }); }
 }
 
 const localMcpTools = async (profile) =>
@@ -332,15 +368,16 @@ test("remember batches are bounded and every record validates before the first w
 });
 
 test("an unprofiled MCP fails closed while the installed owner assistant can remember and diagnose", async () => {
-  assert.deepEqual(await localMcpTools(), ["brain_think", "brain_search"]);
+  assert.deepEqual(await localMcpTools(), ["brain_think", "brain_search", "brain_fetch"]);
   assert.deepEqual(await localMcpTools("structured-contributor"), [
-    "brain_think", "brain_search", "brain_remember",
+    "brain_think", "brain_search", "brain_fetch", "brain_remember",
   ]);
   assert.deepEqual(await localMcpTools("technician"), [
-    "brain_think", "brain_search", "brain_health", "brain_financial_map",
+    "brain_think", "brain_search", "brain_fetch", "brain_health", "brain_financial_map",
   ]);
   assert.deepEqual(await localMcpTools(LOCAL_OWNER_AGENT_PROFILE), [
-    "brain_think", "brain_search", "brain_remember", "brain_health", "brain_financial_map",
+    "brain_money_query", "brain_money_overview", "brain_money_guide",
+    "brain_think", "brain_search", "brain_fetch", "brain_remember", "brain_health", "brain_financial_map",
   ]);
   const remember = (await localMcpToolDefinitions(LOCAL_OWNER_AGENT_PROFILE))
     .find((tool) => tool.name === "brain_remember");
@@ -382,9 +419,15 @@ test("an unprofiled MCP fails closed while the installed owner assistant can rem
   assert.match(financialMap.description, /curated:write/i);
 });
 
+function isolatedMcpHome(t) {
+  const root = mkdtempSync(join(tmpdir(), "synthetic-mcp-home-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  return root;
+}
+
 test("a technician can read the financial map but cannot persist a preview", async (t) => {
   const received = [];
-  const server = createServer((request, response) => {
+  const server = fixtureTransport((request, response) => {
     let raw = "";
     request.on("data", (chunk) => { raw += chunk; });
     request.on("end", () => {
@@ -393,20 +436,9 @@ test("a technician can read the financial map but cannot persist a preview", asy
       response.end(JSON.stringify({ authoritative: false, map_status: "not_established" }));
     });
   });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => server.close());
   const script = fileURLToPath(new URL("../../components/brain-mcp.mjs", import.meta.url));
-  const child = spawn(process.execPath, [script], {
-    env: {
-      ...process.env,
-      BRAIN_URL: `http://127.0.0.1:${server.address().port}`,
-      BRAIN_NAME: "fixture-brain",
-      BRAIN_KEY: "fixture-technician-map-credential-not-for-output",
-      BRAIN_MANIFEST: "",
-      BRAIN_AGENT_PROFILE: "technician",
-    },
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+  const child = startLocalMcp(t, server, "technician", "fixture-technician-map-credential-not-for-output");
   let stdout = "";
   let stderr = "";
   child.stdout.on("data", (chunk) => { stdout += chunk; });
@@ -429,7 +461,7 @@ test("a technician can read the financial map but cannot persist a preview", asy
 
 test("the local MCP can read or preview a financial map but has no activation mode", async (t) => {
   const received = [];
-  const server = createServer((request, response) => {
+  const server = fixtureTransport((request, response) => {
     let raw = "";
     request.on("data", (chunk) => { raw += chunk; });
     request.on("end", () => {
@@ -438,20 +470,9 @@ test("the local MCP can read or preview a financial map but has no activation mo
       response.end(JSON.stringify({ authoritative: false, map_status: "not_established" }));
     });
   });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => server.close());
   const script = fileURLToPath(new URL("../../components/brain-mcp.mjs", import.meta.url));
-  const child = spawn(process.execPath, [script], {
-    env: {
-      ...process.env,
-      BRAIN_URL: `http://127.0.0.1:${server.address().port}`,
-      BRAIN_NAME: "fixture-brain",
-      BRAIN_KEY: "fixture-map-credential-not-for-output",
-      BRAIN_MANIFEST: "",
-      BRAIN_AGENT_PROFILE: LOCAL_OWNER_AGENT_PROFILE,
-    },
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+  const child = startLocalMcp(t, server, LOCAL_OWNER_AGENT_PROFILE, "fixture-map-credential-not-for-output");
   let stdout = "";
   let stderr = "";
   child.stdout.on("data", (chunk) => { stdout += chunk; });
@@ -476,7 +497,7 @@ test("the local MCP can read or preview a financial map but has no activation mo
 
 test("the local owner assistant sends a contract-checked write with provenance and an exact receipt", async (t) => {
   const received = [];
-  const server = createServer((request, response) => {
+  const server = fixtureTransport((request, response) => {
     let raw = "";
     request.on("data", (chunk) => { raw += chunk; });
     request.on("end", () => {
@@ -498,21 +519,9 @@ test("the local owner assistant sends a contract-checked write with provenance a
         : { ok: true }));
     });
   });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => server.close());
-  const port = server.address().port;
   const script = fileURLToPath(new URL("../../components/brain-mcp.mjs", import.meta.url));
-  const child = spawn(process.execPath, [script], {
-    env: {
-      ...process.env,
-      BRAIN_URL: `http://127.0.0.1:${port}`,
-      BRAIN_NAME: "fixture-brain",
-      BRAIN_KEY: "fixture-only-not-a-secret",
-      BRAIN_MANIFEST: "",
-      BRAIN_AGENT_PROFILE: LOCAL_OWNER_AGENT_PROFILE,
-    },
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+  const child = startLocalMcp(t, server, LOCAL_OWNER_AGENT_PROFILE, "fixture-only-not-a-secret");
   let stdout = "";
   let stderr = "";
   child.stdout.on("data", (chunk) => { stdout += chunk; });
@@ -604,17 +613,7 @@ test("the local owner assistant sends a contract-checked write with provenance a
   // capabilities still control the tool menu, but local write provenance is
   // derived from the authenticated admin-key channel, not caller-selected
   // profile text, so the preserved registration must remain usable.
-  const contributor = spawn(process.execPath, [script], {
-    env: {
-      ...process.env,
-      BRAIN_URL: `http://127.0.0.1:${port}`,
-      BRAIN_NAME: "fixture-brain",
-      BRAIN_KEY: "fixture-only-not-a-secret",
-      BRAIN_MANIFEST: "",
-      BRAIN_AGENT_PROFILE: "structured-contributor",
-    },
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+  const contributor = startLocalMcp(t, server, "structured-contributor", "fixture-only-not-a-secret");
   let contributorStdout = "";
   let contributorStderr = "";
   contributor.stdout.on("data", (chunk) => { contributorStdout += chunk; });
@@ -645,7 +644,7 @@ test("the local owner assistant sends a contract-checked write with provenance a
 
 test("the local owner assistant writes one approved batch and reports every exact receipt", async (t) => {
   const received = [];
-  const server = createServer((request, response) => {
+  const server = fixtureTransport((request, response) => {
     let raw = "";
     request.on("data", (chunk) => { raw += chunk; });
     request.on("end", () => {
@@ -661,19 +660,9 @@ test("the local owner assistant writes one approved batch and reports every exac
       }));
     });
   });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => server.close());
   const script = fileURLToPath(new URL("../../components/brain-mcp.mjs", import.meta.url));
-  const child = spawn(process.execPath, [script], {
-    env: {
-      ...process.env,
-      BRAIN_URL: `http://127.0.0.1:${server.address().port}`,
-      BRAIN_KEY: "fixture-only-not-a-secret",
-      BRAIN_MANIFEST: "",
-      BRAIN_AGENT_PROFILE: LOCAL_OWNER_AGENT_PROFILE,
-    },
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+  const child = startLocalMcp(t, server, LOCAL_OWNER_AGENT_PROFILE, "fixture-only-not-a-secret");
   let stdout = "";
   let stderr = "";
   child.stdout.on("data", (chunk) => { stdout += chunk; });

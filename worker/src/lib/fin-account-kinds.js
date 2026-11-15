@@ -22,6 +22,9 @@ const identitySql = a => `json_array(${a}.tenant_id,${a}.id,${a}.account_slug,${
 export const effectiveAccountKindSql = a => `COALESCE((SELECT r.kind FROM fin_account_kind_reviews r
   WHERE r.tenant_id=${a}.tenant_id AND r.account_id=${a}.id AND r.revoked_at IS NULL
     AND r.identity_json=${identitySql(a)}),${a}.account_kind,'')`;
+export const effectiveAccountRoleSql = a => `COALESCE((SELECT r.role FROM fin_account_kind_reviews r
+  WHERE r.tenant_id=${a}.tenant_id AND r.account_id=${a}.id AND r.revoked_at IS NULL
+    AND r.identity_json=${identitySql(a)}),${a}.balance_role,'')`;
 export const accountKindReviewSql = a => `(SELECT json_object('id',r.id,'kind',r.kind,'role',r.role,
   'reviewer',r.reviewer,'source',r.source,'reviewed_at',r.reviewed_at,'revoked_at',r.revoked_at,
   'identity_json',r.identity_json,'identity_matches',r.identity_json=${identitySql(a)})

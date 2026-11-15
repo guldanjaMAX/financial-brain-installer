@@ -1,3 +1,5 @@
+// 0.4.28 owner confidence is attached after the legacy-reader seam used by this fixture.
+import { finalizeOwnerLedgerAnswer } from '../worker/src/lib/document-answer.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -116,7 +118,10 @@ async function repaymentProbe(t, overrides) {
   assert.equal((await f.ask()).gaps[0].reason,'ledger_account_kind_review_required');
   f.raw("UPDATE fin_accounts SET balance_role='liability' WHERE account_slug='debt'");
   const unreviewed = await f.ask();
-  assert.equal(unreviewed.answer,null,'an unreviewed liability role still withholds the headline');
+  // 0.4.28 no-refusal boundary retains the exact observed lower bound, below High.
+  assert.match(unreviewed.answer,/at least \$210\.00; \$400\.00 more may be a card payment/);
+  assert.equal(finalizeOwnerLedgerAnswer(unreviewed).confidence.percent,0);
+  assert.equal(unreviewed.evidence_gate.complete,false);
   assert.equal(unreviewed.gaps[0].reason,'ledger_account_kind_review_required');
   f.raw("UPDATE fin_accounts SET balance_role='neither' WHERE account_slug='debt'");
   for (const kind of ['loan','card','line_of_credit']) {
@@ -189,19 +194,33 @@ async function storedRepaymentProbe(t, overrides, { kind = 'checking', providerK
   if (providerKind !== 'other') {
     assert.equal(restored.ledger.expense_total_minor,21000,'revocation restores provider repayment control');
     assert.equal(restored.ledger.own_account_payments.total_minor,40000);
-  } else assert.equal(restored.code,'ledger_account_kind_review_required','unknown provider subtype still needs review');
+  } else {
+    // 0.4.28 records the unresolved kind in gaps beside its provisional answer.
+    assert.equal(restored.gaps[0].reason,'ledger_account_kind_review_required');
+    assert.ok(restored.answer.length); assert.equal(finalizeOwnerLedgerAnswer(restored).confidence.percent,0);
+  }
   assert.equal(f.rows('SELECT * FROM fin_account_kind_reviews').length,history.length,'revocation preserves history');
   await f.apply({kind:'loan'});
   const supported = await f.ask();
   assert.equal(supported.ledger.expense_total_minor,21000,'supported replacement review control');
   assert.equal(supported.ledger.own_account_payments.total_minor,40000);
-  assert.equal(body.answer,null,'conflicted deposit review withholds the ordinary-expense headline');
+  // 0.4.28 answers the conflict with a lower bound, retaining the no-certification guard.
+  assert.match(body.answer,/at least \$210\.00; \$400\.00 more may be a card payment/);
   for (const result of [body,ranking]) {
-    assert.equal(result.code,'ledger_account_kind_review_required');
-    assert.equal(result.gaps[0].reason,'ledger_account_kind_review_required');
+    assert.ok(result.answer.length);
+    assert.equal(finalizeOwnerLedgerAnswer(result).confidence.percent,0);
+    // 0.4.28 rankings carry classification uncertainty on the ledger instead of a gap.
+    assert.equal(result===body?result.gaps[0].reason:result.ledger.reason,'ledger_account_kind_review_required');
+    assert.equal(result.ledger.complete,false);
+    if(result===ranking) {
+      assert.deepEqual(result.ledger.rows.map(row=>row.amount_minor),[40000,21000]);
+      assert.match(result.answer,/observed ranked candidates, with account kinds unconfirmed/);
+    }
     assert.equal(result.evidence_gate.complete,false);
-    assert.equal(result.ledger?.expense_total_minor,undefined);
-    assert.equal(result.ledger?.own_account_payments,undefined,'a conflict cannot establish a repayment bucket');
+    // 0.4.28 an uncertain summary has an explicit unknown total; ranking has no total field.
+    assert.equal(result.ledger?.expense_total_minor,result===body?null:undefined);
+    assert.deepEqual(result.ledger?.own_account_payments,result===body?{total_minor:0,count:0,card_minor:0,loan_minor:0}:undefined,
+      'a conflict proves no repayment dollars or events');
   }
 }
 
@@ -248,14 +267,16 @@ test('restoring R4 cash decision republishes the positive amount owed', async t 
 });
 
 // Removing these review guards now exposes the whole unary debit as money out;
-// the mutant must still fail the exact null-headline assertion, at 61000 cents.
+// 0.4.28 mutants must fail the exact $210 lower-bound / $400 uncertainty reading, at $610.
 test('restoring R5 role exception fails the same reviewed-liability probe', async t => {
   await repaymentProbe(t);
   const mutant = await restored('ledger-analysis.js',
     ".some(account => account?.account_kind === 'other' || hasAccountKindConflict(account));",
     ".some(account => account?.account_kind === 'other' && account.balance_role === 'neither' || hasAccountKindConflict(account));");
   await assert.rejects(repaymentProbe(t, { answer:mutant.withLedgerAnswer }),
-    error => error.code === 'ERR_ASSERTION' && /Money out I could check: \$610\.00/.test(error.actual) && error.expected === null);
+    error => error.code === 'ERR_ASSERTION' && error.operator === 'match' &&
+      /at least \$610\.00; \$0\.00 more may be a card payment/.test(error.actual) &&
+      error.expected.source === /at least \$210\.00; \$400\.00 more may be a card payment/.source);
 });
 
 test('restoring R6 payment decision certifies the same conflicted repayment as spending', async t => {
@@ -264,5 +285,7 @@ test('restoring R6 payment decision certifies the same conflicted repayment as s
     ".some(account => account?.account_kind === 'other' || hasAccountKindConflict(account));",
     ".some(account => account?.account_kind === 'other');");
   await assert.rejects(storedRepaymentProbe(t,{answer:mutant.withLedgerAnswer}),
-    error => error.code === 'ERR_ASSERTION' && /You spent \$610\.00/.test(error.actual) && error.expected === null);
+    error => error.code === 'ERR_ASSERTION' && error.operator === 'match' &&
+      /You spent \$610\.00/.test(error.actual) &&
+      error.expected.source === /at least \$210\.00; \$400\.00 more may be a card payment/.source);
 });

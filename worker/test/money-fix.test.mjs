@@ -366,7 +366,11 @@ test('F03 normalized institution remains a candidate until approved; changed ide
   const result = await ask(f, totalQuestion);
   assert.ok(f.seen.slice(before).some(sql => sql.includes('FROM fin_accounts')));
   assert.equal(result.gaps[0].reason, 'ledger_account_link_required');
-  assert.equal(result.ledger, undefined);
+  assert.equal(result.ledger.complete, false);
+  assert.deepEqual(result.ledger.source_readings.map(row => row.amount_minor), [123450, 123450]);
+  assert.match(result.answer, /^\$1,234\.50/);
+  assert.match(result.answer, /may be counted twice/);
+  assert.doesNotMatch(result.answer, /withheld|cannot|can't/i);
 });
 
 for (const event of ['due', 'paid', 'posted']) {

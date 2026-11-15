@@ -1,3 +1,4 @@
+import { assertDocumentAnswer } from "./helpers/document-answer-contract.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -138,7 +139,8 @@ test("a verified correction becomes current, preserves fetchable history, chains
   assert.ok((await unified(fixture, "emeraldcurrentmarker")).results.some((row) => row.doc_uid === correctionId));
   const historicalAnswer = await think(fixture, "cobaltwrongmarker");
   assert.equal(historicalAnswer.results.some((row) => row.doc_uid === oldId), false);
-  assert.equal(historicalAnswer.answer, null);
+  assertDocumentAnswer(historicalAnswer, { provisional: true, exact: historicalAnswer.results.length > 0, empty: historicalAnswer.results.length === 0 });
+  assert.doesNotMatch(historicalAnswer.answer, /cobaltwrongmarker/, "a superseded value cannot return as current evidence");
   const currentAnswer = await think(fixture, "emeraldcurrentmarker");
   assert.ok(currentAnswer.results.some((row) => row.doc_uid === correctionId));
 
@@ -399,7 +401,11 @@ test("a concurrent correction loser remains unconfirmed and invisible", async (t
   assert.ok((await unified(fixture, "concurrentwinnermarker")).results.some((row) =>
     row.doc_uid === `${OWNER_NOTES_SOURCE}:${winner.source_id}`));
   assert.equal((await unified(fixture, "concurrentlosermarker")).results.length, 0);
-  assert.equal((await unified(fixture, "concurrentoldmarker")).results.length, 0);
+  const oldLabelSearch=await unified(fixture,"concurrentoldmarker");
+  assert.deepEqual(oldLabelSearch.results.map(row=>row.doc_uid),[`${OWNER_NOTES_SOURCE}:${winner.source_id}`],
+    'the verified successor answers the old label without reviving the historical target');
+  assert.ok(fixture.seen.sql.some(sql=>/verified-correction-search/.test(sql)),
+    'the authorized historical-seed decision was reached');
   const token = await connectorToken(fixture, "concurrent");
   const fetched = JSON.parse((await mcp(fixture, token, "fetch", {
     id: `${OWNER_NOTES_SOURCE}:${loser.source_id}`,

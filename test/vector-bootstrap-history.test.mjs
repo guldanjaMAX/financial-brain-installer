@@ -195,10 +195,7 @@ const insertDocument = (db, uid, source = "drive") => {
     `INSERT INTO documents (doc_uid, source, source_id, title, ingested_at, content_hash)
      VALUES (?, ?, ?, ?, ?, ?)`,
   ).run(uid, source, uid, uid, Date.now(), `hash:${uid}`);
-  db.prepare(
-    `INSERT INTO corpus_stats (source, documents, chunks) VALUES (?1, 1, 0)
-     ON CONFLICT(source) DO UPDATE SET documents=documents + 1`,
-  ).run(source);
+  // Reviewed Drive schema 65 maintains physical counters through row triggers.
   return result;
 };
 
@@ -207,10 +204,7 @@ const insertChunk = (db, uid, doc, ix, vectorId = uid) => {
     `INSERT INTO chunks (chunk_uid, doc_uid, chunk_ix, text, source, vector_id)
      VALUES (?, ?, ?, ?, 'drive', ?)`,
   ).run(uid, doc, ix, `old text ${ix}`, vectorId);
-  db.prepare(
-    `INSERT INTO corpus_stats (source, documents, chunks) VALUES ('drive', 0, 1)
-     ON CONFLICT(source) DO UPDATE SET chunks=chunks + 1`,
-  ).run();
+  // Reviewed Drive schema 65 maintains physical counters through row triggers.
   return result;
 };
 

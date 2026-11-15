@@ -350,7 +350,8 @@ test('mutation oracle detects an apply path that silently manufactures its own a
   assert.equal(source.split(decision).length, 2, 'mutation names the real approval decision exactly once');
   const mutant = source.replace(decision,
     "  if (!dryRun && approve === undefined) approve = (await refreshContentDates(env, { after, limit, now })).plan_hash;\n" + decision)
-    .replace(/from '(\.\/[^']+)'/g, (_match, path) => `from '${new URL(path, sourceUrl).href}'`);
+    // Reviewed retained-range filtering adds a double-quoted relative import.
+    .replace(/from (["'])(\.\/[^"']+)\1/g, (_match, _quote, path) => `from '${new URL(path, sourceUrl).href}'`);
   const mutated = await import(`data:text/javascript;base64,${Buffer.from(mutant).toString('base64')}`);
   async function refuses(handler) {
     try { await handler(f.env, { dryRun: false, now: NOW }); return false; }

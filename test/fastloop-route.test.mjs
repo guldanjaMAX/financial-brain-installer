@@ -1,3 +1,5 @@
+import { assertDocumentAnswer, assertLedgerAnswer } from '../worker/test/helpers/document-answer-contract.mjs';
+import { decode } from '../eval/fast-loop/search-disclosure-tape-review.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadRouteTapes, replayRoute } from '../eval/fast-loop/route-replay.mjs';
@@ -20,7 +22,7 @@ test('all twelve base cases execute through both actual paths and preserve ledge
   const direct = replay({ cases: BASE_CASES });
   assert.equal(route.observations.length, 12);
   assert.equal(direct.observations.length, 12);
-  let ledger = 0, documents = 0, refused = 0;
+  let ledger = 0, documents = 0, uncertain = 0;
   for (const o of route.observations) {
     good(o);
     assert.equal(o.trace.ledger_entries.length, 1);
@@ -30,33 +32,36 @@ test('all twelve base cases execute through both actual paths and preserve ledge
     const peer = direct.observations.find(p => p.id === o.id);
     if (o.body.ledger) {
       ledger++;
-      assert.ok(['M01', 'M04', 'M05', 'M08', 'M09', 'M10', 'M12', 'M17'].includes(o.id));
+      assert.ok(['M01', 'M04', 'M05', 'M06', 'M08', 'M09', 'M10', 'M12', 'M17'].includes(o.id));
       const { timing, ...body } = o.body;
-      assert.deepEqual(body, peer.body);
+      assertLedgerAnswer(body, peer.body);
+      const { answer, confidence, confidence_text, answer_contract, ...preserved } = body;
+      const { answer: directAnswer, ...directPreserved } = peer.body;
+      assert.deepEqual(preserved, directPreserved);
       assert.ok(o.trace.sql.length > 0);
-    } else if (o.id === 'M06') {
-      refused++;
-      assert.equal(o.body.code, 'ledger_account_kind_review_required');
-      assert.equal(o.trace.parsed_intents[0].kind, 'expense_summary');
-      assert.ok(o.trace.rows_read.length > 0, 'unreviewed destination decision reached posted rows');
-      assert.equal(o.trace.fallback_calls, 0);
-      assert.equal(o.body.answer, null);
-      assert.deepEqual(o.body.citations, []);
-      assert.deepEqual(o.body.results, []);
-      assert.equal(o.body.evidence_gate.complete, false);
-      const { timing, ...body } = o.body;
-      assert.deepEqual(body, peer.body);
+      if (o.id === 'M06') {
+        uncertain++;
+        assert.equal(o.trace.parsed_intents[0].kind, 'expense_summary');
+        assert.ok(o.trace.rows_read.length > 0, 'unreviewed destination decision reached posted rows');
+        assert.equal(o.trace.fallback_calls, 0);
+        assert.equal(o.body.ledger.expense_total_minor, null);
+        assert.equal(o.body.ledger.total_minor, null);
+        assert.equal(o.body.ledger.retained_outflow_minor, 101000);
+        assert.equal(o.body.ledger.own_account_payments.total_minor, 0);
+        assert.ok(o.body.gaps.some(g => g.reason === 'ledger_account_kind_review_required'));
+        assert.equal(o.body.evidence_gate.complete, false);
+      }
     } else {
       documents++;
       assert.ok(['M11', 'M16', 'M20'].includes(o.id));
       assert.equal(o.trace.fallback_calls, 1);
       assert.equal(o.trace.retrieval.length, 1);
-      assert.equal(o.body.answer, null);
+      assertDocumentAnswer(o.body, { empty:true, provisional:true });
       assert.deepEqual(o.body.results, []);
       assert.ok(o.trace.providers.length > 0);
     }
   }
-  assert.equal(ledger, 8); assert.equal(documents, 3); assert.equal(refused, 1);
+  assert.equal(ledger, 9); assert.equal(documents, 3); assert.equal(uncertain, 1);
   assert.equal(one({ cases: [control] }).body.ledger.expense_total_minor, 61000,
     'the reviewed account peer still certifies the ordinary expense total');
   assert.equal(route.provider_calls, 0); assert.equal(route.production_writes, 0);
@@ -111,7 +116,8 @@ test('exact synthetic tapes drive draft, answer repair, check and check retry th
   assert.deepEqual(observations.map(o => o.trace.models.length), [2, 3, 3, 2, 2, 2]);
   for (const o of observations) {
     good(o);
-    assert.equal(o.body.answer, 'The protocol release color is violet [1].');
+    assertDocumentAnswer(o.body, { expected:'The protocol release color is violet [1].' });
+    assert.ok(o.body.confidence.percent < 90, 'source gaps prevent High');
     assert.equal(o.body.evidence_gate.supported, true);
     assert.deepEqual(o.body.evidence_gate.evidence, [1]);
     assert.equal(o.body.citations.length, 1);
@@ -137,8 +143,8 @@ for (const fault of ['model', 'model-check', 'model-prompt', 'model-name', 'mode
     assert.equal(bad.execution_status, 'model_tape_miss');
     assert.ok(bad.fatal.includes('MODEL_TAPE_MISS'));
     assert.ok(bad.trace.models.length > 0);
-    assert.equal(bad.body.answer, null);
-    assert.ok(bad.body.answer_error);
+    assertDocumentAnswer(bad.body, { expected:'The protocol release color is violet [1].', provisional:true });
+    assert.equal(bad.body.answer_error, undefined);
     assert.throws(() => good(bad));
     good(one({ cases: [DOCUMENT_CASES[0]] }));
   });
@@ -280,8 +286,15 @@ test('cropped source tracing cannot claim undelivered repeated tail spans', () =
   assert.equal(o.execution_status, 'complete');
   assert.equal(o.trace.models.length, 2);
   assert.ok(o.trace.delivered_spans.length > 0);
-  assert.ok(o.trace.delivered_spans.every(s => s.source_end < 900));
-  assert.ok(o.trace.delivered_spans.every(s => !s.text.includes('not authorized')));
+  const prompt = decode(o.trace.models[0].request).messages[0].content;
+  const source = DOCUMENT_CASES.find(c => c.id === 'D05/crop').documents[0].text;
+  const exactSpan = span => {
+    assert.equal(Array.from(source).slice(span.source_start, span.source_end).join(''), span.text);
+    assert.equal(Array.from(prompt).slice(span.prompt_start, span.prompt_end).join('').replace(/\s+/g,' ').trim(), span.text.replace(/\s+/g,' ').trim());
+  };
+  for (const span of o.trace.delivered_spans) exactSpan(span);
+  const bad = { ...o.trace.delivered_spans[0], text:o.trace.delivered_spans[0].text + ' Undelivered assertion.' };
+  assert.throws(() => exactSpan(bad), 'a populated source/prompt witness rejects an invented tail');
 });
 
 test('actual HTTP entry reaches owner ledger and preserves frozen response bytes', () => {

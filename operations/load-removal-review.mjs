@@ -34,16 +34,9 @@ export function removalReviewFacts(review, source) {
 }
 
 export function canAutoApplyRemoval(review, kind, source) {
-  const total = review?.stored_documents_to_remove;
-  // Physical targets must agree with the complete, disjoint source reasons.
-  // Missing facts and replacement parts cannot borrow a logical-family ratio.
-  return ["calendar", "gmail"].includes(kind) && review?.kind === kind && review.source === source &&
-    total > 0 && total <= 25 && review.source_stored_documents > 0 &&
-    total * 100 <= review.source_stored_documents &&
-    review.source_removals === total && review.replacement_family_reviews === 0 &&
-    review.reasons?.source_deleted === total && review.reasons.source_policy === 0 &&
-    review.reasons.intentional_skip === 0 && review.approval_fingerprint === null &&
-    checkedRemovalCauseCounts(review.removal_causes, total)?.explicit_deletion === total;
+  // Provider deletion is evidence for an owner decision, never authorization.
+  // Keep this shared gate closed for load, daily, and direct automatic apply.
+  return false;
 }
 
 export function removalOwnerSentence(review) {

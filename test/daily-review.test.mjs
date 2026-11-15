@@ -1,18 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import vm from 'node:vm';
 import { readFileSync, writeFileSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { uploadFolderEntriesOf, feedPathsOverlap } from '../operations/feed-folders.mjs';
 import { planDailyRefresh } from '../operations/daily-refresh-plan.mjs';
-import { resolveSourceKind, isSourceKindConflict } from '../worker/src/lib/source-receipt.js';
 import { fixture, NOW } from '../worker/test/ledger-review-fixture.mjs';
 
-// Port of the independent review probe, using this checkout's function bodies.
-// CLI initialization and credential helpers are not imported. Readiness and
-// transport boundaries are injected; registration uses the real Worker handler.
 const cli = readFileSync(new URL('../brain.mjs', import.meta.url), 'utf8');
 const worker = readFileSync(new URL('../worker/src/index.js', import.meta.url), 'utf8');
 function fn(source, name) {
@@ -20,30 +14,28 @@ function fn(source, name) {
   assert.ok(match, `pinned function exists: ${name}`);
   const end = source.indexOf('\n}', match.index) + 2;
   assert.ok(end > match.index);
-  return source.slice(match.index, end).replace(/^export /, '');
 }
 function constant(source, name) {
   const match = source.match(new RegExp(`(?:export )?const ${name} =\\s*[\\s\\S]+?;(?=\\r?\\n|$)`));
   assert.ok(match, `pinned constant exists: ${name}`);
-  return match[0].replace(/^export /, '');
 }
+for(const name of ['PROVIDER_CONNECTOR_IDS','PROVIDER_LOAD_METADATA','PROVIDER_LOAD_PROOF_NOTE','DAILY_PLAN_KEY_WORKER_KIND'])constant(cli,name);
+constant(worker,'SOURCE_KINDS');
+for(const name of ['uploadFoldersOf','uploadFeedTopologyConflict','normalizeLoadKey','loadSourceRegistry','planLoad','syncDailySourceExpectations'])fn(cli,name);
+fn(worker,'handleSourceExpectation');
+
+const {sourceModuleHarness} = await import('./helpers/source-module-harness.mjs');
+const cliModule = await sourceModuleHarness(new URL('../brain.mjs',import.meta.url));
+const workerModule = await sourceModuleHarness(new URL('../worker/src/index.js',import.meta.url));
 const never = () => { throw new Error('Uninjected external operation'); };
-const context = vm.createContext({
+const {result:context} = cliModule({
   Date: class extends Date { constructor(...args) { super(...(args.length ? args : [NOW])); } static now() { return Date.parse(NOW); } },
-  uploadFolderEntriesOf, feedPathsOverlap,
   cmdIngestCalendar: never, cmdIngestImessage: never, cmdIngestWhatsapp: never,
   cmdIngestLocal: never, cmdIngestRemote: never, cmdIngestIphoneBackup: never, cmdIngestProvider: never,
-  defaultLoadProbes: () => ({}), die: never, process: { platform: 'win32' },
-  resolveSourceKind, isSourceKindConflict, D1: 'd1', backendOf: env => env.STORAGE,
-  jsonResponse: (body, status = 200) => Response.json(body, { status }),
-});
-vm.runInContext([
-  constant(cli, 'PROVIDER_CONNECTOR_IDS'), constant(cli, 'PROVIDER_LOAD_METADATA'),
-  constant(cli, 'PROVIDER_LOAD_PROOF_NOTE'), constant(cli, 'DAILY_PLAN_KEY_WORKER_KIND'),
-  constant(worker, 'SOURCE_KINDS'),
-  ...['uploadFoldersOf', 'uploadFeedTopologyConflict', 'normalizeLoadKey', 'loadSourceRegistry', 'planLoad', 'syncDailySourceExpectations'].map(name => fn(cli, name)),
-  fn(worker, 'handleSourceExpectation'),
-].join('\n'), context);
+  defaultLoadProbes: () => ({}), die: never,
+},'({planLoad,syncDailySourceExpectations,loadSourceRegistry})');
+const {result:workerContext} = workerModule({},'({handleSourceExpectation,SOURCE_KINDS})');
+Object.assign(context,workerContext);
 
 async function registration(t, key) {
   const f = fixture(t);
@@ -95,6 +87,6 @@ const dailyKeys = Object.entries(context.loadSourceRegistry()).filter(([, entry]
 assert.ok(dailyKeys.length > 0, 'registry enumeration is nonempty');
 for (const key of dailyKeys) test(`F4 every daily-eligible registry entry registers an actual Worker kind: ${key}`, async t => {
   const result = await registration(t, key);
-  assert.ok(vm.runInContext('SOURCE_KINDS', context).has(result.kind), `${key}: unsupported posted kind ${result.kind}`);
+  assert.ok(context.SOURCE_KINDS.has(result.kind), `${key}: unsupported posted kind ${result.kind}`);
   assert.equal(result.status, 200);
 });

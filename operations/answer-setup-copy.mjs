@@ -108,5 +108,5 @@ export const CONTRACT_SECTION = `## If answers are paused
 - If answer_error says the Anthropic account needs attention, say once that the key was not accepted or the credit ran out, and offer to open the Claude Console. Do not retry the same question.
 - If answer_error says today's spending limit was reached, give the time answers start again in the owner's own time zone (answer_resumes_at, which is midnight UTC), and say the limit can be raised with {{CAP_COMMAND}}. The same limit also covers reading scanned pages. Do not retry.
 - If answer_error says answers are paused for a few minutes, wait a few minutes before asking again.`;
-export const MONEY_RULES_LINE = "If answer_error says answers are paused or today's spending limit was reached, skip only the CLI fallback for that question and say when answers start again. The ledger templates keep working through brain_think, so continue using them for supported money questions.";
+export const MONEY_RULES_LINE = "For money questions, call brain_money_overview first, read brain_money_guide, then go straight to brain_money_query.";
 

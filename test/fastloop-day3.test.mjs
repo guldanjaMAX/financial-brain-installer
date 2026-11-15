@@ -152,7 +152,13 @@ test('source omissions have full-route supported peers that can satisfy the same
   ]) {
     const input = CASES.find(c => c.id === id);
     const before = bench.runs.baseline.observations.find(o => o.id === id);
-    assert.equal(scoreCase(before, input).verdict, 'missing source');
+    assert.equal(scoreCase(before, input).verdict, verdict, 'the final source reading retains the formerly omitted record');
+    for (const fault of ['citation','delivery']) {
+      const omitted = structuredClone(before);
+      if (fault === 'citation') omitted.body.citations = omitted.body.citations.filter(c => c.ref !== source);
+      else omitted.trace.delivered_spans = omitted.trace.delivered_spans.filter(s => s.doc_uid !== source);
+      assert.equal(scoreCase(omitted, input).verdict, 'missing source', 'a real omission still fails the identical fact key');
+    }
     assert.ok(before.trace.delivered_spans.some(s => s.doc_uid === source));
     const number = before.body.results.findIndex(r => r.doc_uid === source) + 1;
     assert.ok(number > 0, 'the source reached actual retrieval and the delivered prompt');
@@ -292,4 +298,44 @@ test('historical shared-module drift is rejected after completed green replays',
       });
     }
   }
+});
+
+
+test('a completed money reading rejects absent confidence, invented High and an altered account', () => {
+  const input = CASES.find(c => c.id === 'D02');
+  const good = bench.runs.batch1.observations.find(o => o.id === input.id);
+  assert.ok(good.trace.sql.length > 0 && good.trace.rows_read.length > 0, 'populated money decision reached');
+  assert.equal(scoreCase(good, input).verdict, 'correct');
+  for (const fault of ['absent', 'High', 'account']) {
+    const bad = structuredClone(good);
+    if (fault === 'absent') delete bad.body.confidence;
+    else if (fault === 'High') { bad.body.confidence.percent = 95; bad.body.confidence_text = 'Confidence: High (95%)'; }
+    else bad.body.answer = bad.body.answer.replace('Coverage: Accounts: ending 3131', 'Coverage: Accounts: ending 9999');
+    assert.notEqual(JSON.stringify(bad), JSON.stringify(good), fault);
+    assert.ok(scoreCase(bad, input).safety_failures.length > 0, fault);
+  }
+});
+
+
+test('unconfirmed type retains the observed subtotal and only its recorded account notice', () => {
+  const input = CASES.find(c => c.id === 'Q8');
+  const good = replayRoute({ cases:[input], fixtures:loadTapes().candidate, sourceOverrides:workingTreeSources() }).observations[0];
+  assert.equal(good.execution_status, 'complete');
+  assert.ok(good.trace.rows_read.length > 0, 'the actual nonempty transaction decision ran');
+  assert.equal(good.body.ledger.retained_outflow_minor, 101000);
+  assert.equal(good.body.ledger.observed_spending_lower_bound_minor,61000);
+  assert.equal(good.body.ledger.classification_uncertain_minor,40000);
+  assert.match(good.body.answer,/at least \$610\.00; \$400\.00 more may be a card payment \(unconfirmed\)/i);
+  assert.equal(good.body.ledger.total_minor, null);
+  assert.equal(good.body.ledger.expense_total_minor, null);
+  assert.equal(good.body.confidence.percent, 0);
+  assert.deepEqual(scoreCase(good,input).safety_failures,[]);
+  for (const field of ['observed_spending_lower_bound_minor','classification_uncertain_minor']) {
+    const wrong = structuredClone(good); wrong.body.ledger[field]++;
+    assert.ok(scoreCase(wrong,input).safety_failures.length>0, 'a changed bound remains wrong');
+  }
+  const bad = structuredClone(good);
+  bad.body.answer = bad.body.answer.replace('Owned loan: not counted','Unrecognized account: not counted');
+  assert.notEqual(bad.body.answer,good.body.answer);
+  assert.ok(scoreCase(bad,input).safety_failures.length > 0, 'a different account notice stays unsupported');
 });

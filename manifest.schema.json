@@ -149,6 +149,7 @@
       "properties": {
         "google_drive": {
           "type": "object",
+          "description": "Bounded incremental add/update-only Drive ingestion. First use without a token seeds the changes feed and retains indexed documents. Removal signals become pending owner decisions; routine refresh never mirrors or removes documents.",
           "allOf": [
             {
               "if": {

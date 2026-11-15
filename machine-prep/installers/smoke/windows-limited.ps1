@@ -124,7 +124,7 @@ function Remove-BootstrapAccount($State, [scriptblock]$Now = { [DateTime]::UtcNo
         $profileCleanupError = 'IDENTITY_CHANGED'; throw 'Account identity changed'
       }
       $State.sid = $user.SID.Value
-      $State | ConvertTo-Json | Set-Content -LiteralPath $statePath
+      $State | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding UTF8
     }
     if ($State.sid) {
       Wait-BootstrapProcesses $State.sid
@@ -138,7 +138,7 @@ function Remove-BootstrapAccount($State, [scriptblock]$Now = { [DateTime]::UtcNo
       } while ($true)
       if ($profiles.Count -eq 1) {
         $State.profilePath = $profiles[0].LocalPath
-        $State | ConvertTo-Json | Set-Content -LiteralPath $statePath
+        $State | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding UTF8
       }
       $profiles | Remove-CimInstance
       if (@(Get-CimInstance Win32_UserProfile -Filter "SID='$($State.sid)'").Count -ne 0 -or
@@ -178,7 +178,7 @@ function Remove-BootstrapAccount($State, [scriptblock]$Now = { [DateTime]::UtcNo
 }
 
 if ($ContextFile) {
-  $context = Get-Content -LiteralPath $ContextFile -Raw | ConvertFrom-Json
+  $context = Get-Content -LiteralPath $ContextFile -Raw -Encoding UTF8 | ConvertFrom-Json
   $code = 1
   try {
     if ($context.githubActions -cne 'true' -or $context.runnerEnvironment -cne 'github-hosted') { throw 'Hosted runner required' }
@@ -251,7 +251,7 @@ if ($AdminControl) {
   exit 0
 }
 if ($Cleanup) {
-  if (Test-Path -LiteralPath $statePath) { Remove-BootstrapAccount (Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json) }
+  if (Test-Path -LiteralPath $statePath) { Remove-BootstrapAccount (Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json) }
   exit 0
 }
 if (-not $ArtifactDirectory) { throw 'Signed artifact directory required' }
@@ -265,7 +265,7 @@ $state = @{
   sid = ''
   profilePath = ''
 }
-$state | ConvertTo-Json | Set-Content -LiteralPath $statePath
+$state | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding UTF8
 $password = $null
 $securePassword = $null
 $phase = 'account'
@@ -278,7 +278,7 @@ try {
   $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
   $user = New-LocalUser -Name $state.userName -Password $securePassword -AccountNeverExpires
   $state.sid = $user.SID.Value
-  $state | ConvertTo-Json | Set-Content -LiteralPath $statePath
+  $state | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding UTF8
   # SID-based built-in groups also work on localized runner images.
   $users = Get-LocalGroup -SID 'S-1-5-32-545'
   Add-LocalGroupMember -Group $users -Member $user
@@ -314,7 +314,7 @@ try {
     path = (Split-Path $node) + ';' + (Split-Path $pwsh) + ';' + [Environment]::GetEnvironmentVariable('Path', 'Machine')
   }
   $contextPath = Join-Path $control 'context.json'
-  $context | ConvertTo-Json | Set-Content -LiteralPath $contextPath
+  $context | ConvertTo-Json | Set-Content -LiteralPath $contextPath -Encoding UTF8
   $phase = 'logon-right'
   # Windows Server grants "Log on as a batch job" only to Administrators, Backup
   # Operators and Performance Log Users. A Password-logon task for a new standard

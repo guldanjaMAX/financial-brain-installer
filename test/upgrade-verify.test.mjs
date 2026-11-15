@@ -4,7 +4,7 @@ import { isolateUpdateSchedulers } from "./fixtures/isolated-update-schedulers.m
 // `brain upgrade` probed /health, got a 200 from the worker it was REPLACING,
 // printed that worker's version, and declared the new one verified:
 //
-//     ok deployed "rivera-brain"
+//     ok deployed "owner-brain"
 //     ok /health 200 {"ok":true,"version":"0.1.1", ...}
 //     ok upgrade verified, now at 0.1.2
 //
@@ -63,6 +63,7 @@ import {
   validateAcceleratedBootstrapProgress,
   validateAcceleratedBootstrapReceipt,
   VECTOR_DRAIN_CUTOVER_QUIESCENCE_MS,
+  VECTOR_DRAIN_CUTOVER_POLL_MS,
   waitForVectorDrainCutover,
 } from "../brain.mjs";
 const cmdUpdate = isolateUpdateSchedulers(cmdUpdateWithNativeSchedulers);
@@ -2264,7 +2265,9 @@ for (const boundary of ["open", "read"]) {
   const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-rollback-confirmation-")));
   try {
     const manifestPath = join(sandbox, "brain.manifest.json");
-    writeFileSync(manifestPath, JSON.stringify(manifestFixture()));
+    const rollbackManifest = manifestFixture();
+    rollbackManifest.infrastructure.cloudflare.vectorize_index = "fixture-index";
+    writeFileSync(manifestPath, JSON.stringify(rollbackManifest));
     let accountReads = 0;
     let remoteMutations = 0;
     let historyWrites = 0;
@@ -2317,6 +2320,7 @@ for (const boundary of ["open", "read"]) {
     const actions = [];
     const restored = await cmdRollback(manifestPath, "fixture-bookmark", {
       confirmed: true,
+      withBrainLifecycleLock: async (_opts, task) => task({ assertOwned() {} }),
       resolveAccount: async () => { actions.push("account"); return { id: "fixture-account" }; },
       cmdDeploy: async (_path, options) => {
         actions.push(options.pauseVectorDrainForUpgrade ? "deploy-paused" : "deploy-active");
@@ -2333,10 +2337,12 @@ for (const boundary of ["open", "read"]) {
       },
       waitForVectorDrainQuiescence: async (milliseconds) => {
         actions.push("quiesce");
-        check("rollback waits one full old-writer window before D1 time travel",
-          milliseconds === VECTOR_DRAIN_CUTOVER_QUIESCENCE_MS, String(milliseconds));
+        // R5 requires two observed quiet readings rather than an unproved delay.
+        check("rollback separates its two verified quiet readings before D1 time travel",
+          milliseconds === VECTOR_DRAIN_CUTOVER_POLL_MS, String(milliseconds));
       },
       cf: async (path, request) => {
+        if (path.endsWith("/fixture-index/info")) return { vectorCount: 0, processedUpToMutation: null };
         actions.push("restore");
         check(
           "confirmed rollback restores only the pinned database bookmark",
@@ -2346,6 +2352,11 @@ for (const boundary of ["open", "read"]) {
         );
       },
       d1Query: async (_account, _database, sql) => {
+        if (/SELECT schema_version, vector_drain_lease_owner/.test(sql)) {
+          actions.push("idle-proof");
+          return { results: [{ schema_version:65, owner:null, expires_at:null, in_flight:0,
+              pending:0, ambiguous:0, bootstrap_pending:0, projection_status:"verified", mutation_id:null, submitted_at:null }] };
+        }
         if (/SELECT schema_version FROM install_state/.test(sql)) {
           actions.push("schema");
           return { results: [{ schema_version: 13 }] };
@@ -2397,7 +2408,7 @@ for (const boundary of ["open", "read"]) {
       "explicit confirmation is the only path that performs the restore",
       restored?.confirmed === true && restored?.restored === true &&
         restored?.requiresVectorizeRecreation === true &&
-        actions.join(",") === "account,deploy-paused,health-paused,quiesce,restore,schema,invalidate,reset-batches,reset-receipts,readback,history",
+        actions.join(",") === "account,deploy-paused,health-paused,idle-proof,quiesce,idle-proof,restore,schema,invalidate,reset-batches,reset-receipts,readback,history",
       actions.join(","),
     );
     check("rollback never reactivates a Worker against an orphaned provider index",
@@ -2406,13 +2417,18 @@ for (const boundary of ["open", "read"]) {
     const schema12Sql = [];
     const schema12Restore = await cmdRollback(manifestPath, "fixture-bookmark", {
       confirmed: true,
+      withBrainLifecycleLock: async (_opts, task) => task({ assertOwned() {} }),
       resolveAccount: async () => ({ id: "fixture-account" }),
       cmdDeploy: async () => {},
       cmdHealth: async () => {},
       waitForVectorDrainQuiescence: async () => {},
-      cf: async () => {},
+      cf: async () => ({ vectorCount: 0, processedUpToMutation: null }),
       d1Query: async (_account, _database, sql) => {
         schema12Sql.push(sql);
+        if (/SELECT schema_version, vector_drain_lease_owner/.test(sql)) {
+          return { results: [{ schema_version:65, owner:null, expires_at:null, in_flight:0,
+              pending:0, ambiguous:0, bootstrap_pending:0, projection_status:"verified", mutation_id:null, submitted_at:null }] };
+        }
         if (/SELECT schema_version FROM install_state/.test(sql)) {
           return { results: [{ schema_version: 12 }] };
         }
@@ -2436,7 +2452,9 @@ for (const boundary of ["open", "read"]) {
       schema12Restore?.restored === true &&
         schema12Sql.some((sql) => /UPDATE install_state/.test(sql)) &&
         schema12Sql.some((sql) => /UPDATE vector_outbox/.test(sql)) &&
-        !schema12Sql.some((sql) =>
+        // The pre-restore proof checks the current schema; this assertion is
+        // about invalidating the restored schema-12 database only.
+        !schema12Sql.filter(sql => !sql.includes("AS in_flight")).some((sql) =>
           /vector_bootstrap_batches|vector_projection_bootstrap_protocol|\bbootstrap_epoch\s*=\s*NULL|\bbootstrap_batch\s*=/.test(sql)),
       schema12Sql.join("\n"));
 
@@ -2445,6 +2463,7 @@ for (const boundary of ["open", "read"]) {
     try {
       await cmdRollback(manifestPath, "fixture-bookmark", {
         confirmed: true,
+      withBrainLifecycleLock: async (_opts, task) => task({ assertOwned() {} }),
         resolveAccount: async () => ({ id: "fixture-account" }),
         cmdDeploy: async (_path, options) => {
           prefixActions.push(options.pauseVectorDrainForUpgrade ? "deploy-paused" : "DEPLOY-ACTIVE");
@@ -2453,8 +2472,16 @@ for (const boundary of ["open", "read"]) {
           prefixActions.push(`health:${options.expectDrainMode}`);
         },
         waitForVectorDrainQuiescence: async () => { prefixActions.push("quiesce"); },
-        cf: async () => { prefixActions.push("restore-prefix"); },
+        cf: async (path) => {
+          if (path.endsWith("/fixture-index/info")) return { vectorCount: 0, processedUpToMutation: null };
+          prefixActions.push("restore-prefix");
+        },
         d1Query: async (_account, _database, sql) => {
+          if (/SELECT schema_version, vector_drain_lease_owner/.test(sql)) {
+            prefixActions.push("idle-proof");
+            return { results: [{ schema_version:65, owner:null, expires_at:null, in_flight:0,
+              pending:0, ambiguous:0, bootstrap_pending:0, projection_status:"verified", mutation_id:null, submitted_at:null }] };
+          }
           prefixActions.push("schema-prefix-read");
           if (/SELECT schema_version FROM install_state/.test(sql)) {
             return { results: [{ schema_version: 11 }] };
@@ -2467,7 +2494,7 @@ for (const boundary of ["open", "read"]) {
       "a pre-schema12 bookmark fails closed after restore with the Worker still paused",
       /Worker remains paused.*brain update.*forward-migrate/is.test(prefixRollbackError?.message || "") &&
         prefixActions.join(",") ===
-          "deploy-paused,health:paused-for-upgrade,quiesce,restore-prefix,schema-prefix-read" &&
+          "deploy-paused,health:paused-for-upgrade,idle-proof,quiesce,idle-proof,restore-prefix,schema-prefix-read" &&
         !prefixActions.includes("DEPLOY-ACTIVE"),
       `${prefixRollbackError?.message}; ${prefixActions.join(",")}`,
     );
@@ -2477,6 +2504,7 @@ for (const boundary of ["open", "read"]) {
     try {
       await cmdRollback(manifestPath, "fixture-bookmark", {
         confirmed: true,
+      withBrainLifecycleLock: async (_opts, task) => task({ assertOwned() {} }),
         resolveAccount: async () => ({ id: "wrong-account" }),
         cf: async () => { wrongAccountMutation++; },
       });
@@ -2492,6 +2520,7 @@ for (const boundary of ["open", "read"]) {
     try {
       await cmdRollback(manifestPath, "fixture-bookmark", {
         confirmed: true,
+      withBrainLifecycleLock: async (_opts, task) => task({ assertOwned() {} }),
         resolveAccount: async () => {
           writeFileSync(manifestPath, JSON.stringify(manifestFixture("0.1.8")));
           return { id: "fixture-account" };
@@ -3506,6 +3535,7 @@ globalThis.fetch = async (input, init = {}) => {
           });
           const adoption = shown("brain update <manifest> --adopt-cloudflare-profile");
           return result.status === 1 && /Cloudflare access is not available/.test(failureOutput) &&
+            !/The update is incomplete|saved checkpoint/u.test(failureOutput) &&
             failureOutput.includes(shown("brain support --explain AUTH_REQUIRED")) &&
             (process.platform === "win32"
               ? failureOutput.split(adoption).length === 2 &&
@@ -3595,6 +3625,7 @@ globalThis.fetch = async (input, init = {}) => {
         check(
           "the installed launcher refuses an update while the fake Worker reports queued vector work",
           pendingUpdate.status !== 0 &&
+            !/The update is incomplete|saved checkpoint/u.test(pendingOutput) &&
             /still indexing 5 recent items so they can be found by meaning/i.test(pendingOutput) &&
             /nothing was changed/i.test(pendingOutput),
           pendingOutput,

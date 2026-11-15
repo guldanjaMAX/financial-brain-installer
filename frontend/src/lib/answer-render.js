@@ -1,3 +1,5 @@
+export { documentResponseConfidence };
+import { legacyDocumentResponse } from '../../../worker/src/lib/document-answer-reading.js';
 /**
  * answer-render — how a /think response becomes the two sentences an owner
  * reads, and the one thing those sentences must never say.
@@ -20,6 +22,7 @@
  * brain is sold on.
  */
 
+import { documentResponseConfidence, ownerConfidenceLine } from "../../../worker/src/lib/confidence.js";
 import {
   absenceUnproven, ANSWER_WITHHELD, COVERAGE_INCOMPLETE, coverageIncompleteNotice,
   REFUSAL_NEXT_ACTIONS, refusalNextAction, SEARCH_UNAVAILABLE, unavailableNotice,
@@ -94,6 +97,7 @@ export function finalAnswerText(facts, selectedOffer) {
 }
 
 export function answerText(r) {
+  r = legacyDocumentResponse(r);
   const text = answerBodyText(r);
   // The surface renders the reviewed Next action separately. It is already
   // the repair invitation, so another question here would duplicate it.
@@ -121,6 +125,7 @@ export function recurringSetAsideText(ledger) {
 }
 
 function answerBodyText(r) {
+  if (r.answer_contract && typeof r.answer === "string" && r.answer.trim()) return r.answer;
   const recurringList = recurringSetAsideText(r.ledger);
   // Preserve the composer's scope warnings when its canonical lists are intact.
   // Older or inconsistent prose must not turn a held charge into zero spending.
@@ -192,22 +197,7 @@ export function scannedEvidenceNotice(r) {
 }
 
 export function confidenceText(r) {
-  if (r.status === ANSWER_WITHHELD) {
-    return "The evidence check left this answer unconfirmed, so no confidence percentage is shown.";
-  }
-  if (r.status === COVERAGE_INCOMPLETE) {
-    return moneyExplanation(r)
-      ? "Some connected records may be missing or still loading. This answer is incomplete."
-      : "Source coverage is incomplete. This result is provisional.";
-  }
-  // No rubric for a search that never ran: "how sure are we that nothing is
-  // recorded" has no answer when nothing was read. A percentage here would put
-  // a number on an absence nobody measured.
-  if (unavailableSearch(r)) return "The search is incomplete, so what your records hold is still unconfirmed.";
-  const conf = r.confidence;
-  if (!conf) return "";
-  return (r.answer && !/^The documents do not answer/i.test(r.answer || "") ? "Confidence" : "Confidence in this search result") +
-    ": " + conf.percent + "% (" + conf.band + "). " + conf.basis.join("; ") + ".";
+  return ownerConfidenceLine(documentResponseConfidence(r));
 }
 
 /** Render only locally reviewed actions; older Workers fall back by status. */

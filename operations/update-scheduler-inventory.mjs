@@ -392,7 +392,11 @@ export async function pauseAdditionalUpdateScheduler(m, manifestPath, entry, opt
   if (snapshot.jobKind === "quickbooks-task") {
     const q = qbContext(m, manifestPath, options);
     const current = q.adapter.read(q.plan.identity);
-    if (JSON.stringify(current) !== JSON.stringify(snapshot.state)) throw new Error("QuickBooks task changed after capture");
+    if (JSON.stringify(current) !== JSON.stringify(snapshot.state) &&
+        !(options.allowAlreadyPaused === true && current?.enabled === false &&
+          sameQuickBooksContract(current, snapshot.state, q.plan, manifestPath))) {
+      throw new Error("QuickBooks task changed after capture");
+    }
     q.adapter.setEnabled(q.plan.identity, false, { expected: current });
     const paused = q.adapter.read(q.plan.identity);
     if (paused.enabled !== false || !sameQuickBooksContract(paused, snapshot.state, q.plan, manifestPath)) throw new Error("QuickBooks pause readback failed");

@@ -24,6 +24,7 @@ for (const [mode, group, markers] of [["good", "gmail", 0], ["f1", "gmail", 2],
       assert.equal(result.status, 0, output);
       assert.match(output, /TOTAL .* safety probes passed/);
     } else {
+      if (mode === "f1") assert.match(output, /REMOVAL_CAUSE_MUTANT_DECISION/, "unsafe policy removal reached the mutated gate");
       assert.notEqual(result.status, 0);
       assert.match(output, /AssertionError/);
       assert.doesNotMatch(output, /TOTAL .* safety probes passed/);

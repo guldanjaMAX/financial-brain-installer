@@ -34,21 +34,24 @@ export const mutations = {
   held_exit: ["brain", "failed: tally.failed - gmailPreviouslyHeldFailures,", "failed: tally.failed,"],
   held_receipt: ["brain", 'const finalStatus = hasRemoteGap ? "error" : "ready";', 'const finalStatus = "ready";'],
   held_summary: ["brain", "if (gmailRetryBacklog) info(", "if (false) info("],
-  completion: ["brain", "complete: !hasRemoteGap", "complete: true"],
-  retry_first: ["brain", "[...new Set([...retryIds, ...h.ids])]", "[...new Set([...h.ids, ...retryIds])]"],
-  sweep_retry: ["brain", "if (authoritativeSnapshot && gmailRetriesAtStart.size > 0)", "if (false)"],
-  sweep_dedup: ["brain", "if (!gmailRetriesAtStart.has(id)) yield id;", "yield id;"],
-  sweep_policy: ["brain", "policyById.set(id, policy);", "void 0;"],
+  completion: ["brain", "complete: !hasRemoteGap && !gmailMoreHistory", "complete: true"],
+  retry_first: ["window", "[...new Set([...retryIds, ...history.ids])]", "[...new Set([...history.ids, ...retryIds])]"],
+  sweep_retry: ["brain", "const retryIds = gmailRetryMessageIds(state, sourceName)", "const retryIds = []"],
+  sweep_dedup: ["window", "[...new Set([...retryIds, ...history.ids])]", "[...new Set([...retryIds, ...history.ids]), ...history.ids]"],
+  // Policy gaps hold only their own identities; mutating that filter must
+  // expose an unsafe send without restoring the former all-window veto.
+  sweep_policy: ["brain", "if (policy && !policy.allowed) return { id, policyResult: policy, fetched: policy };", "void 0;"],
   sweep_resume: ["brain", "if (gmailRetriesAtStart.has(id)) return null;", "void 0;"],
   incremental_resume: ["brain", "if (!gmailRetriesAtStart.has(id) && storedFamilyConfirmed &&", "if (storedFamilyConfirmed &&"],
-  coverage: ["brain", "gmailCredentialRefusalSkips - (which === \"gmail\" ? gmailDurableRetryFailures : 0)", "gmailCredentialRefusalSkips"],
+  coverage: ["brain", "gmailCredentialRefusalSkips - (which === \"gmail\" ? gmailDurableRetryFailures + gmailRetainedRetrySkips : 0)", "gmailCredentialRefusalSkips"],
 };
 
 const chosen = process.env.BRAIN_GMAIL_FINALIZATION_MUTANT;
 if (chosen) {
   if (!Object.hasOwn(mutations, chosen)) throw new Error("Unknown finalization mutation");
   const [kind, target, replacement] = mutations[chosen];
-  const suffix = kind === "brain" ? "/brain.mjs" : "/operations/ingest-finalization-retry.mjs";
+  const suffix = kind === "brain" ? "/brain.mjs" : kind === "window"
+    ? "/operations/gmail-batch-window.mjs" : "/operations/ingest-finalization-retry.mjs";
   registerHooks({ load(url, context, nextLoad) {
     const result = nextLoad(url, context);
     if (!url.endsWith(suffix)) return result;

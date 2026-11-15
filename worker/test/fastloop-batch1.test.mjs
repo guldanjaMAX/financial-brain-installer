@@ -132,10 +132,11 @@ for (const [label, change] of [
 ]) test(`F1 ${label} cannot prove owned repayment`, async t => {
   const f = seed(t, change), b = await f.ask(summaryQuestion);
   if (label === 'unknown destination type') {
-    assert.equal(b.answer, null, 'unknown subtype cannot establish ordinary expenses');
+    expenseContract(await seed(t).ask(summaryQuestion));
+    uncertainExpenseContract(b);
     assert.equal(b.gaps[0].reason, 'ledger_account_kind_review_required');
     assert.notEqual(b.ledger?.complete, true);
-    assert.equal(b.ledger?.expense_total_minor, undefined);
+    assert.equal(b.ledger?.expense_total_minor, null, 'unknown subtype never certifies ordinary expenses');
   } else if (label === 'unknown source type') {
     assert.equal(b.ledger.complete, false, 'unknown source still cannot certify ordinary expenses');
     assert.equal(b.ledger.expense_total_minor, null);
@@ -203,8 +204,8 @@ async function mutant(file, from, to, additional = []) {
   }
   assert.equal(source.split(from).length - 1, 1, 'one restoring mutation site');
   const altered = source.replace(from, to);
-  const moduleUrl = (code, base) => `data:text/javascript;base64,${Buffer.from(code.replace(/from "(\.\/.+?)"/g,
-    (_, path) => `from ${JSON.stringify(new URL(path, base).href)}`)).toString('base64')}`;
+  const moduleUrl = (code, base) => `data:text/javascript;base64,${Buffer.from(code.replace(/from (["'])(\.\.?\/[^"']+)\1/g,
+    (_, quote, path) => `from ${JSON.stringify(new URL(path, base).href)}`)).toString('base64')}`;
   if (file === 'ledger-answer.js') return (await import(moduleUrl(altered, url))).withLedgerAnswer;
   const target = moduleUrl(altered, url), answerUrl = new URL('../src/lib/ledger-answer.js', import.meta.url);
   const answerSource = readFileSync(answerUrl, 'utf8').replace(`from "./${file}"`, `from "${target}"`);

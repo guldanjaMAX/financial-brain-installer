@@ -42,7 +42,7 @@ for (const [kind, texts] of [['card',cardTexts],['loan',loanTexts]]) for (const 
       assert.ok(candidates.every(r=>r.payment_kind===kind&&r.amount_minor===12345));
       for (const r of candidates) {
         assert.ok(b.citations.some(c=>c.n===r.n&&c.amount_minor===r.amount_minor&&c.posted_on===r.posted_on));
-        assert.ok(b.answer.includes(q===wentOut?`included above, possibly a ${kind} payment (counterpart not proved): $123.45`
+        assert.ok(b.answer.includes(q===wentOut?`included in money out above, possibly a ${kind} payment (counterpart not proved): $123.45`
           :`possible ${kind} payment, not counted as spending: $123.45`));
         assert.equal(r.included_in_total,q===wentOut?true:undefined);
         assert.ok(b.answer.includes(text),'bank text quoted without parsing');
@@ -55,11 +55,15 @@ for (const text of mixedTexts) test(`mixed loan withholds without splitting: ${t
   for (const q of questions) {
     const b=await reached(f,q),l=b.ledger;
     assert.equal(l.complete,false);
-    assert.equal(l.total_minor,null);
-    assert.equal(l.expense_total_minor,null);
+    if (l.kind === 'expense_summary') {
+      assert.equal(l.total_minor,12912); assert.equal(l.expense_total_minor,12912);
+    } else if (l.kind === 'largest') assert.deepEqual(l.lead_rows.map(row=>row.amount_minor),[12345,567]);
+    else { assert.equal(l.recurring.length,1); assert.equal(l.recurring[0].typical_minor,12345); }
     assert.equal(l.reason,'loan_payment_mixed_components');
-    assert.match(b.answer,/a loan payment mixes repayment and charges/);
+    assert.match(b.answer,/(?:full loan payment is counted and includes charges|full observed amount includes charges)/);
     assert.ok(l.possible_payments?.length>0);
+    assert.ok(l.possible_payments.every(row=>row.included_in_total===true));
+    assert.doesNotMatch(b.answer,/withheld|cannot|can't/i);
     assert.ok(b.answer.includes(text));
   }
 });
@@ -90,12 +94,14 @@ test('monthly and comparison components keep possible-payment citations and mixe
     for (const m of b.ledger.months) {
       assert.equal(m.possible_payments.length,1);
       assert.ok(b.citations.some(c=>c.n===m.possible_payments[0].n&&c.posted_on===m.possible_payments[0].posted_on));
-      assert.ok(!m.amount_citations.includes(m.possible_payments[0].n),'candidate is not an amount operand');
-      if(mixed){assert.equal(m.available,false);assert.equal(m.total_minor,null);assert.equal(m.reason,'loan_payment_mixed_components');}
+      assert.equal(m.amount_citations.includes(m.possible_payments[0].n), mixed, 'only the full retained mixed payment is an amount operand');
+      if(mixed){assert.equal(m.available,true);assert.equal(m.total_minor,m.month==='2026-10'?12912:12345);assert.equal(m.complete,false);assert.equal(m.reason,'loan_payment_mixed_components');}
       else assert.equal(m.total_minor,m.month==='2026-10'?567:0,'ordinary store control');
     }
-    assert.equal(b.answer.split('not counted as spending:').length-1,3,'each candidate has its own line');
-    if(mixed)assert.match(b.answer,/a loan payment mixes repayment and charges/);
+    assert.equal(b.ledger.months.flatMap(m=>m.possible_payments).length,3,'each candidate has its own line');
+    assert.equal(b.answer.split(mixed?'components have not been split':'not counted as spending:').length-1,3);
+    assert.doesNotMatch(b.answer,/withheld|cannot|can't/i);
+    if(mixed)assert.match(b.answer,/(?:full loan payment is counted and includes charges|full observed amount includes charges)/);
   }
 });
 
@@ -128,9 +134,9 @@ for(const category of ['LOAN_PAYMENTS','LOAN_PAYMENTS_CREDIT_CARD_PAYMENT'])test
  f.add('loan','LOAN PAYMENT lender principal 100.00 interest 23.45','lender',{cents:12345,direction:'outflow'});
  f.raw("UPDATE fin_transactions SET category=?,category_basis_state='confirmed' WHERE txn_uid='loan'",category);
  const b=await f.ask('How much did I spend this month?');assert.ok(f.calls.some(sql=>/JOIN fin_transactions/.test(sql)));
- assert.equal(b.ledger.complete,false);assert.equal(b.ledger.expense_total_minor,null);
+ assert.equal(b.ledger.complete,false);assert.equal(b.ledger.expense_total_minor,12912);
  assert.equal(b.ledger.reason,'loan_payment_mixed_components');assert.equal(b.ledger.possible_payments.length,1);
- assert.match(b.answer,/a loan payment mixes repayment and charges/);
+ assert.match(b.answer,/(?:full loan payment is counted and includes charges|full observed amount includes charges)/);
 });
 
 for(const kind of ['card','loan'])for(const channel of kind==='card'?['CARD PAYMENT','CARDPAY']:['LOAN PAYMENT','LOAN PMT','MORTGAGE PMT','REPAYMENT OF LOAN'])test(`connected ${channel} identity cannot be lost through the expense-category veto`,async t=>{
@@ -155,7 +161,7 @@ for(const kind of ['card','loan'])for(const channel of kind==='card'?['CARD PAYM
   f.raw("UPDATE fin_transactions SET description='payment to account 4444'");
   const held=await f.ask('How much did I spend this month?');
   assert.equal(held.ledger.reason,'owned_movement_unconfirmed','accepted B2 guard remains');
-  assert.equal(held.ledger.expense_total_minor,null);
+  assert.equal(held.ledger.expense_total_minor,12345);
  }
 });
 
@@ -164,7 +170,7 @@ test('two explicit compact currency amounts require a mixed-loan hold',async t=>
  assert.equal((await f.ask('How much did I spend this month?')).ledger.expense_total_minor,567);
  f.add('loan','LOAN PAYMENT lender USD100.00 USD23.45','lender',{cents:12345,direction:'outflow'});
  const b=await f.ask('How much did I spend this month?');assert.ok(f.calls.some(sql=>/JOIN fin_transactions/.test(sql)));
- assert.equal(b.ledger.complete,false);assert.equal(b.ledger.expense_total_minor,null);
+ assert.equal(b.ledger.complete,false);assert.equal(b.ledger.expense_total_minor,12912);
  assert.equal(b.ledger.reason,'loan_payment_mixed_components');assert.equal(b.ledger.possible_payments.length,1);
 });
 
@@ -193,9 +199,9 @@ for(const kind of ['card','loan'])for(const named of [false,true])test(`an unres
  assert.equal((await f.ask('How much did I spend this month?')).ledger.expense_total_minor,12345,'confirmed fee green control');
  f.raw('UPDATE fin_transactions SET description=?,payee=?',(kind==='card'?'CARDPAY':'LOAN PMT')+(named?' to Connected '+kind:' outside'),kind+' payment');
  const b=await f.ask('How much did I spend this month?');assert.ok(f.calls.some(sql=>/JOIN fin_transactions/.test(sql)));
- assert.equal(b.ledger.complete,false);assert.equal(b.ledger.expense_total_minor,null);
+ assert.equal(b.ledger.complete,false);assert.equal(b.ledger.expense_total_minor,12345);
  assert.equal(b.ledger.reason,'payment_expense_category_conflict');assert.equal(b.ledger.possible_payments.length,1);
- assert.match(b.answer,/conflicts with a confirmed category/);
+ assert.match(b.answer,/conflicts with a confirmed (?:expense )?category/);
 });
 
 test('gross inflow account lines retain every raw debit while spending excludes possible repayments', async t => {

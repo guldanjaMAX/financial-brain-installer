@@ -8,6 +8,7 @@ const config :Workerd.Config = (services = [
     (name = "worker/src/lib/app-page.js", esModule = embed "../../../src/lib/app-page.js"),
     (name = "worker/src/lib/auth-store.js", esModule = embed "../../../src/lib/auth-store.js"),
     (name = "worker/src/lib/bank-activity-doc.js", esModule = embed "../../../src/lib/bank-activity-doc.js"),
+    (name = "worker/src/lib/bank-feed-health.js", esModule = embed "../../../src/lib/bank-feed-health.js"),
     (name = "worker/src/lib/bank-feed-profiles.js", esModule = embed "../../../src/lib/bank-feed-profiles.js"),
     (name = "worker/src/lib/bank-feed.js", esModule = embed "../../../src/lib/bank-feed.js"),
     (name = "worker/src/lib/connections.js", esModule = embed "../../../src/lib/connections.js"),

@@ -9,7 +9,7 @@ import {
 } from "./store.js";
 import { gatedIngest } from "./zoom.js";
 import { withFirstPartySourceProvenance } from "./provenance-receipt.js";
-import { isDirectedOwnedTransfer, pairOwnTransfers } from "./ledger-analysis.js";
+import { isDirectedOwnedTransfer, pairOwnTransfers } from "./money-analysis.js";
 import { shiftLedgerDay } from "./ledger-question.js";
 import { readEffectiveAccounts, readEffectiveTransactions } from "./ledger-reader.js";
 
@@ -428,7 +428,7 @@ async function recordSourcePass(env, {
           last_ingest_at=CASE WHEN ?2=1 THEN ?3 ELSE last_ingest_at END,
           last_complete_sweep_at=CASE WHEN ?4=1 THEN ?3 ELSE NULL END,
           document_count=(SELECT COUNT(*) FROM documents WHERE source=?1 AND deleted_at IS NULL),
-          sync_cursor=?5,expected_refresh_seconds=NULL,
+          sync_cursor=?5,expected_refresh_seconds=86400,
           stale_reason=CASE WHEN ?4=1 THEN NULL ELSE stale_reason END
         WHERE name=?1 AND kind=?6
           AND EXISTS (SELECT 1 FROM bank_activity_refresh_state WHERE id=1 AND generation=?7)`,

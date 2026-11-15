@@ -13,6 +13,7 @@ import {
 } from "./brain-lifecycle-lock.mjs";
 
 import { observedWindowsContract, decodeWindowsTaskXml, windowsTaskDescription, withWindowsTaskMutationLock } from "./windows-task-contract.mjs";
+import { removeFileWithRetrySync, replaceFileWithRetrySync } from "./rename-retry.mjs";
 export { observedWindowsContract } from "./windows-task-contract.mjs";
 
 const OWNER_MARKER = "financial-brain-daily-refresh-v1";
@@ -683,7 +684,8 @@ export function writeDailyRefreshUpdateTransaction(input = {}, options = {}) {
   const temporary = `${path}.tmp-${process.pid}-${randomBytes(8).toString("hex")}`;
   try {
     writeFileSync(temporary, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-    renameSync(temporary, path);
+    // Windows can briefly hold the previous receipt open (scan, index, sync).
+    replaceFileWithRetrySync(temporary, path, { platform: options.platform });
     chmodSync(path, 0o600);
     writeBrainRecoveryFence({
       manifestPath: plan.manifest_path,
@@ -795,7 +797,7 @@ export function clearDailyRefreshUpdateTransaction(identityOrPlan, options = {})
     const temporary = `${archive}.tmp-${randomBytes(8).toString("hex")}`;
     try {
       writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-      renameSync(temporary, archive);
+      replaceFileWithRetrySync(temporary, archive, { platform: options.platform });
     } finally {
       try { unlinkSync(temporary); } catch {}
     }
@@ -808,7 +810,9 @@ export function clearDailyRefreshUpdateTransaction(identityOrPlan, options = {})
       machineLockRoot: options.machineLockRoot,
     });
   }
-  unlinkSync(path);
+  // The fence is already gone, so a brief Windows hold on the finished receipt
+  // must not turn completed work into a failure at its last step.
+  removeFileWithRetrySync(path, { platform: options.platform });
   return true;
 }
 

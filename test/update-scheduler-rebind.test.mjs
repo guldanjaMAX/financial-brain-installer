@@ -17,13 +17,10 @@ import { acquireSourceIngestLock, probeSourceIngestLock } from '../operations/so
 import { acquireBrainLifecycleLock, writeBrainRecoveryFence, clearBrainRecoveryFence } from '../operations/brain-lifecycle-lock.mjs';
 import { loadCuratedSyncPlan, prepareCuratedCorpus, runCuratedDualSync } from '../operations/curated-dual-sync.mjs';
 const root = fileURLToPath(new URL('../', import.meta.url));
-// Exercise the exact orchestration bodies without starting the CLI dispatcher.
-const cli = readFileSync(join(root, 'brain.mjs'), 'utf8');
-const bodies = cli.slice(cli.indexOf('async function pauseCapturedOwnedSchedulers('), cli.indexOf('async function hydrateExistingOwnedSchedulerSnapshots('));
-const binding = `import { readFileSync } from 'node:fs';
-import { pauseAdditionalUpdateScheduler, restoreAdditionalUpdateScheduler } from '${new URL('../operations/update-scheduler-inventory.mjs', import.meta.url).href}';
-const loadManifest = path => ({ m: JSON.parse(readFileSync(path, 'utf8')) });`;
-const { pauseCapturedOwnedSchedulers, restoreExistingOwnedSchedulers } = await import('data:text/javascript;base64,' + Buffer.from(binding + bodies.replaceAll('async function ', 'export async function ')).toString('base64'));
+const {sourceModuleHarness} = await import('./helpers/source-module-harness.mjs');
+const schedulerModule = await sourceModuleHarness(new URL('../brain.mjs',import.meta.url));
+const {result:{pauseCapturedOwnedSchedulers,restoreExistingOwnedSchedulers}} = schedulerModule({},'({pauseCapturedOwnedSchedulers,restoreExistingOwnedSchedulers})');
+
 
 
 const uid = process.getuid?.() ?? 501;

@@ -1,0 +1,146 @@
+// Round 2: corrected designs (title words covered by the claim, fresh sources
+// via non-retrieved filler records), more period/date, amendment, draft and
+// totals probes, and legitimate High controls.
+
+const T = '2026-11-11T19:00:00Z';
+const FRESH = '2026-11-10T19:00:00Z';
+const filler = k => ({ key: `f${k}`, source: `records-${k}`, title: 'Office Supplies Receipt', content: 'Pens and paper were bought.',
+  occurred_at: FRESH, retrieve: false });
+const fillers = ['a', 'b', 'c', 'd'].map(filler);
+const three = (title, content, extra = {}) => ['a', 'b', 'c'].map(k => ({ key: k, source: `records-${k}`, title, content,
+  occurred_at: T, ...extra }));
+const cite3 = '{a}{b}{c}';
+
+export const probes = [
+  // ---------- dates and periods ----------
+  { id: 'E01', kind: 'probe', area: 'March statement (dated April 2) answers an April question at High',
+    question: 'How much rent was collected in April 2026 according to the rent statement?',
+    docs: [...three('March Rent Statement', 'Rent collected was $18,400.', { occurred_at: '2026-04-02T17:00:00Z' }), ...fillers],
+    draft: `Rent collected was $18,400 ${cite3}.`,
+    oracle: 'not stated for April; $18,400 is March rent', wrong_if_high: true },
+  { id: 'E02', kind: 'probe', area: 'annual statement for 2025 answers a 2026 question (year only in the question)',
+    question: 'How much rent did we collect in 2026 according to the annual rent statement?',
+    docs: [...three('Annual Rent Statement', 'Total rent collected was $210,000.', { occurred_at: '2025-12-31T17:00:00Z' }), ...fillers],
+    draft: `Total rent collected was $210,000 ${cite3}.`,
+    oracle: 'not stated for 2026; $210,000 is the 2025 annual statement', wrong_if_high: true },
+  { id: 'E03', kind: 'probe', area: 'Monthly title vs annual question',
+    question: 'What is the annual parking fee under the parking agreement?',
+    docs: three('Monthly Parking Agreement', 'The parking fee is $150.'),
+    draft: `The parking fee is $150 ${cite3}.`,
+    oracle: '$1,800 per year ($150 is monthly)', wrong_if_high: true },
+  { id: 'E04', kind: 'control', area: 'Annual title with annual question (legit High)',
+    question: 'What is the annual insurance premium under the insurance policy?',
+    docs: three('Annual Insurance Policy', 'The insurance premium is $6,000.'),
+    draft: `The insurance premium is $6,000 ${cite3}.`,
+    oracle: '$6,000', wrong_if_high: false },
+  { id: 'E05', kind: 'control', area: 'plain lease, monthly question (legit High)',
+    question: 'What is the monthly rent under the lease?',
+    docs: three('Lease', 'The monthly rent is $2,000.'),
+    draft: `The monthly rent is $2,000 ${cite3}.`,
+    oracle: '$2,000', wrong_if_high: false },
+
+  // ---------- amendments and superseded versions ----------
+  { id: 'E06', kind: 'probe', area: 'amendment dated before a later re-filed copy of the original is ignored',
+    question: 'What is the monthly rent under the lease?',
+    docs: [
+      { key: 'a', source: 'records-a', title: 'Lease', content: 'The monthly rent is $2,000.', occurred_at: '2025-01-05T17:00:00Z' },
+      { key: 'b', source: 'records-b', title: 'Lease', content: 'The monthly rent is $2,000.', occurred_at: '2025-01-05T17:00:00Z' },
+      { key: 'c', source: 'records-c', title: 'Lease', content: 'The monthly rent is $2,000.', occurred_at: '2026-10-20T17:00:00Z' },
+      { key: 'd', source: 'records-d', title: 'Amendment No 1', content: 'Rent increases to $2,300 per month starting June 1, 2026.', occurred_at: '2026-05-15T17:00:00Z' },
+      ...fillers,
+    ],
+    draft: `The monthly rent is $2,000 ${cite3}.`,
+    oracle: '$2,300 per month from June 1, 2026 (amendment)', wrong_if_high: true },
+  { id: 'E06C', kind: 'control', area: 'same amendment when every copy predates it',
+    question: 'What is the monthly rent under the lease?',
+    docs: [
+      { key: 'a', source: 'records-a', title: 'Lease', content: 'The monthly rent is $2,000.', occurred_at: '2025-01-05T17:00:00Z' },
+      { key: 'b', source: 'records-b', title: 'Lease', content: 'The monthly rent is $2,000.', occurred_at: '2025-01-05T17:00:00Z' },
+      { key: 'c', source: 'records-c', title: 'Lease', content: 'The monthly rent is $2,000.', occurred_at: '2025-01-06T17:00:00Z' },
+      { key: 'd', source: 'records-d', title: 'Amendment No 1', content: 'Rent increases to $2,300 per month starting June 1, 2026.', occurred_at: '2026-05-15T17:00:00Z' },
+      ...fillers,
+    ],
+    draft: `The monthly rent is $2,000 ${cite3}.`,
+    oracle: '$2,300; must not be High at $2,000', wrong_if_high: true },
+  { id: 'E07', kind: 'probe', area: 'superseding agreement (older reliable date than a re-sent copy) in different wording is ignored',
+    question: 'What is the monthly fee in the service agreement?',
+    docs: [
+      { key: 'a', source: 'records-a', title: 'Service Agreement', content: 'The monthly fee is $900.', occurred_at: '2025-03-01T17:00:00Z' },
+      { key: 'b', source: 'records-b', title: 'Service Agreement', content: 'The monthly fee is $900.', occurred_at: '2025-03-01T17:00:00Z' },
+      { key: 'c', source: 'records-c', title: 'Service Agreement', content: 'The monthly fee is $900.', occurred_at: '2026-11-02T17:00:00Z' },
+      { key: 'd', source: 'records-d', title: 'Replacement Terms', content: 'From September 1, 2026 the charge is $1,100 each month.', occurred_at: '2026-08-20T17:00:00Z' },
+      ...fillers,
+    ],
+    draft: `The monthly fee is $900 ${cite3}.`,
+    oracle: '$1,100 per month from September 1, 2026', wrong_if_high: true },
+
+  // ---------- signed vs draft vs example ----------
+  { id: 'E08', kind: 'probe', area: 'draft kept in a Drafts folder; older signed lease in other wording',
+    question: 'What is the monthly rent under the lease?',
+    docs: [
+      ...['a', 'b', 'c'].map(k => ({ key: k, source: `records-${k}`, title: 'Lease', content: 'The monthly rent is $2,300.',
+        occurred_at: FRESH, uri: `drive://Drafts/Lease renewal ${k}.docx`, top_folder: 'Drafts' })),
+      { key: 'd', source: 'records-d', title: 'Signed Lease', content: 'Rent: $2,000 per month.', occurred_at: '2025-01-05T17:00:00Z' },
+      ...fillers,
+    ],
+    draft: `The monthly rent is $2,300 ${cite3}.`,
+    oracle: '$2,000 (signed); $2,300 is an unsigned renewal draft', wrong_if_high: true },
+  { id: 'E09', kind: 'probe', area: 'draft marker glued to a digit in the title (draft2)',
+    question: 'What is the monthly rent for Unit 2 under the lease?',
+    docs: [
+      ...three('Unit 2 Lease draft2', 'The monthly rent for Unit 2 is $2,000.', { occurred_at: FRESH }),
+      { key: 'd', source: 'records-d', title: 'Signed Unit Lease', content: 'Unit 2 rent: $1,850 per month.', occurred_at: '2025-01-05T17:00:00Z' },
+      ...fillers,
+    ],
+    draft: `The monthly rent for Unit 2 is $2,000 ${cite3}.`,
+    oracle: '$1,850 (signed lease)', wrong_if_high: true },
+  { id: 'E09B', kind: 'probe', area: 'unsigned marker glued to a digit (UNSIGNED2), draft only',
+    question: 'What is the monthly rent for Unit 2 under the lease?',
+    docs: three('Unit 2 Lease UNSIGNED2', 'The monthly rent for Unit 2 is $2,000.'),
+    draft: `The monthly rent for Unit 2 is $2,000 ${cite3}.`,
+    oracle: 'not operative (unsigned); figure must not be High', wrong_if_high: true },
+  { id: 'E10', kind: 'probe', area: 'discussion-only marker sentence carried as a plain claim',
+    question: 'What is the monthly rent under the lease?',
+    docs: three('Lease', 'For discussion only.\nThe monthly rent is $2,300.'),
+    draft: `For discussion only ${cite3}. The monthly rent is $2,300 ${cite3}.`,
+    oracle: 'not operative; discussion copy', wrong_if_high: 'qualifier-visible' },
+  { id: 'E11', kind: 'probe', area: 'Sample clause (no doubt word)',
+    question: 'What is the monthly rent under the lease?',
+    docs: three('Lease', 'Sample clause: the monthly rent is $1,500.'),
+    draft: `Sample clause: the monthly rent is $1,500 ${cite3}.`,
+    oracle: 'no operative rent; sample only', wrong_if_high: 'qualifier-visible' },
+
+  // ---------- currency and percent ----------
+  { id: 'E12', kind: 'probe', area: 'pound sign only in title',
+    question: 'What is the annual supply fee in the supply agreement?',
+    docs: three('Supply Agreement (£)', 'The annual supply fee is 12,000.'),
+    draft: `The annual supply fee is 12,000 ${cite3}.`,
+    oracle: 'GBP 12,000', wrong_if_high: true },
+  { id: 'E13', kind: 'control', area: 'currency code word in title',
+    question: 'What is the annual supply fee in the supply agreement?',
+    docs: three('Supply Agreement EUR', 'The annual supply fee is 12,000.'),
+    draft: `The annual supply fee is 12,000 ${cite3}.`,
+    oracle: 'must not be High', wrong_if_high: true },
+
+  // ---------- totals vs line items ----------
+  { id: 'E14', kind: 'probe', area: 'three separate monthly invoices counted as one corroborated total',
+    question: 'What is the combined total of the three cleaning invoices?',
+    docs: [
+      { key: 'a', source: 'records-a', title: 'Cleaning Invoice', content: 'The cleaning invoice total is $2,000.', occurred_at: '2026-08-31T17:00:00Z' },
+      { key: 'b', source: 'records-b', title: 'Cleaning Invoice', content: 'The cleaning invoice total is $2,000.', occurred_at: '2026-09-30T17:00:00Z' },
+      { key: 'c', source: 'records-c', title: 'Cleaning Invoice', content: 'The cleaning invoice total is $2,000.', occurred_at: '2026-10-31T17:00:00Z' },
+      ...fillers,
+    ],
+    draft: `The cleaning invoice total is $2,000 ${cite3}.`,
+    oracle: '$6,000 combined', wrong_if_high: true },
+  { id: 'E15', kind: 'probe', area: 'stated total disagrees with its own line items (all lines quoted)',
+    question: 'What is the repair invoice total?',
+    docs: three('Repair Invoice', 'Labor is $1,200.\nMaterials are $800.\nThe repair invoice total is $2,500.'),
+    draft: `Labor is $1,200 ${cite3}. Materials are $800 ${cite3}. The repair invoice total is $2,500 ${cite3}.`,
+    oracle: 'contested: lines sum to $2,000; stated total $2,500', wrong_if_high: 'contested' },
+  { id: 'E16', kind: 'probe', area: 'deposit invoice line only (question asks total due)',
+    question: 'What is the total due on the move-in invoice?',
+    docs: three('Move-in Invoice', 'The move-in invoice deposit is $2,000.'),
+    draft: `The move-in invoice deposit is $2,000 ${cite3}.`,
+    oracle: 'not the total; only the deposit line', wrong_if_high: 'qualifier-visible' },
+];

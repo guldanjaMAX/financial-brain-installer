@@ -59,16 +59,20 @@ const surfaces = [
   ['business', f => recorded(f, 'How much did my business spend in September?',
     [{ kind: 'expense_summary', direction: 'outflow', account_hint: 'business', period: period('09') }]), b => b.ledger],
 ];
-function withheld(part, body, surface) {
+function observed(part, body, surface, side) {
   assert.equal(part.reason, 'owned_movement_unconfirmed', 'specific ownership decision reached');
   assert.ok(part.complete === false || part.available === false);
-  for (const field of ['total_minor', 'expense_total_minor', 'combined_inflow_minor', 'outside_inflow_minor', 'net_minor'])
-    assert.equal(part[field] ?? null, null, field + ' withheld');
-  assert.equal(part.lead_accounts, undefined, 'no certified ordinary account totals');
+  const outgoing = side === 'card' ? 80000 : 0;
+  if (surface === 'inflow') assert.equal(part.combined_inflow_minor, side === 'business' ? 80000 : 0);
+  else if (surface === 'inout') assert.equal(part.lead_accounts.reduce((sum,a)=>sum+a.debits_minor,0), outgoing);
+  else if (surface === 'monthly') assert.equal(part.total_minor, outgoing);
+  else assert.equal(part.expense_total_minor, outgoing);
   if (surface === 'single' || surface === 'inflow')
     assert.ok(body.citations.some(c => c.amount_minor === 80000), 'movement evidence retained');
   assert.match(body.answer, /possible own.account movement|ownership.*unconfirmed/i);
+  assert.doesNotMatch(body.answer, /withheld|cannot|can't/i);
 }
+
 for (const channel of channels) for (const [caseIndex, transform] of cases.entries()) for (const side of ['business', 'card']) {
   const label = transform(channel);
   test(`channel ownership ${channel} case=${caseIndex} side=${side}: six surfaces and inflow`, async t => {
@@ -90,13 +94,13 @@ for (const channel of channels) for (const [caseIndex, transform] of cases.entri
     for (const [name, read, select] of surfaces) {
       const before = f.calls.length, body = await read(f);
       assert.ok(f.calls.slice(before).some(sql => /JOIN fin_transactions/.test(sql)), name + ': unresolved reader reached');
-      withheld(select(body), body, name);
+      observed(select(body), body, name, side);
       if (name === 'single') assert.ok(body.ledger.possible_own_movement_count > 0, 'nonempty possible movement');
       if (name === 'comparison' && side === 'card') assert.equal(body.ledger.parts[0].expense_total_minor, 137);
       if (name === 'monthly' && side === 'card') assert.equal(body.ledger.months[0].total_minor, 137);
     }
     const uncertainInflow = await f.ask('How much money came in last month?');
-    withheld(uncertainInflow.ledger, uncertainInflow, 'inflow');
+    observed(uncertainInflow.ledger, uncertainInflow, 'inflow', side);
   });
 }
 for (const channel of channels) for (const [caseIndex, transform] of cases.entries()) test(`bare channel ${channel} case=${caseIndex}`, async t => {
@@ -111,8 +115,13 @@ for (const channel of channels) for (const [caseIndex, transform] of cases.entri
   // explicitly typed liability channels had the untyped-repayment guard.
   if (/\b(?:card|loan) payment$/.test(channel)) {
     assert.equal(body.ledger.possible_payment_count, 1, 'bare-channel decision reached');
-    assert.equal(body.ledger.reason, 'payment_membership_unconfirmed');
-    assert.equal(body.ledger.expense_total_minor, null); assert.equal(body.ledger.complete, false);
+    assert.equal(body.ledger.reason, undefined);
+    assert.equal(body.ledger.expense_total_minor, 80137, '137 ordinary + 80000 observed payment');
+    assert.equal(body.ledger.complete, false);
+    assert.equal(body.ledger.possible_payments[0].amount_minor, 80000);
+    assert.equal(body.ledger.possible_payments[0].included_in_total, true);
+    assert.match(body.answer, /included in money out above/);
+    assert.doesNotMatch(body.answer, /withheld|cannot|can't/i);
   } else {
     assert.equal(body.ledger.expense_total_minor, 80137, 'unqualified advisory channel is retained');
     assert.equal(body.ledger.reason, undefined);
@@ -162,10 +171,12 @@ for (const channel of channels.filter(label => !/\bcard payment$/.test(label)))
     const before = f.calls.length, body = await f.ask('How much money went out last month?');
     assert.ok(f.calls.slice(before).some(sql => /JOIN fin_transactions/.test(sql)), 'outside endpoint decision reached');
     assert.ok(f.calls.slice(before).some(sql => sql.includes("e.basis_state<>'confirmed'")), 'uncertain inventory decision reached');
-    assert.equal(body.ledger.expense_total_minor, null, 'an unproved endpoint with an equal connected credit withholds money out');
+    assert.equal(body.ledger.expense_total_minor, 80000, 'unproved outflow stays counted');
+    assert.match(body.answer, /up to \$800\.00 may be counted twice/);
+    assert.doesNotMatch(body.answer, /withheld|cannot|can't/i);
     assert.equal(body.ledger.reason, 'money_out_destination_unconfirmed');
     const candidate = body.ledger.possible_payments.find(row => row.amount_minor === 80000);
     assert.ok(candidate && candidate.connected_counterpart_masks.includes('4106'), 'the equal counterpart decision was reached');
-    assert.equal(candidate.included_in_total, undefined);
+    assert.equal(candidate.included_in_total, true);
     assert.equal(body.ledger.complete, false);
   });

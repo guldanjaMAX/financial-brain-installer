@@ -435,7 +435,7 @@ try {
       CLOUDFLARE_API_TOKEN: "deployment-secret",
       OPENAI_API_KEY: "openai-fixture-secret",
     },
-  }), true, "the exact descriptor initializes and advertises owner read, remember, and health tools");
+  }), true, "the exact descriptor initializes and advertises owner money, read, remember, and health tools");
   let lifecycleMethods = [];
   const orderIndependentRuntime = verifyMcpRuntime(descriptor, {
     spawn(_command, _args, options) {
@@ -453,11 +453,15 @@ try {
           JSON.stringify({
             jsonrpc: "2.0", id: 2,
             result: { tools: [
+              { name: "brain_money_guide" },
               { name: "brain_health" },
               { name: "brain_financial_map" },
               { name: "brain_remember" },
               { name: "brain_search" },
+              { name: "brain_fetch" },
               { name: "brain_think" },
+              { name: "brain_money_query" },
+              { name: "brain_money_overview" },
             ] },
           }),
         ].join("\n") + "\n",

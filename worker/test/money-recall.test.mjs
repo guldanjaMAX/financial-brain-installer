@@ -1,3 +1,4 @@
+import { assertDocumentAnswer } from './helpers/document-answer-contract.mjs';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createProductFixture } from './product-contract-fixture.mjs';
@@ -83,15 +84,15 @@ async function run(t, { q = question, records = [record(charge)], draft = `${cha
   } finally { fixture.close(); }
 }
 const accepted = (r, text) => {
-  assert.equal(r.body.answer, text, r.body.evidence_gate?.reason);
+  assertDocumentAnswer(r.body, { expected: text, exact: true });
   assert.equal(r.body.evidence_gate.supported, true);
   assert.ok(r.body.citations.length > 0);
   assert.equal(r.verifiers, 1, 'a real verifier decision was reached');
 };
 const refused = (r, reason) => {
-  assert.equal(r.body.answer, null);
+  assertDocumentAnswer(r.body, { provisional: true, empty: !r.body.results?.length });
   assert.equal(r.body.evidence_gate?.supported, false);
-  assert.deepEqual(r.body.citations, []);
+  assert.ok(r.body.citations.length > 0);
   assert.equal(r.verifiers, 1, 'refusal followed the real verifier decision');
   if (reason) assert.match(r.body.evidence_gate.reason, reason);
 };
@@ -162,7 +163,7 @@ test('C control: an unchanged whole-window absence still refuses', async t => {
 
 test('D: search with no surfaced evidence stays null and never calls an answer model', async t => {
   const r = await run(t, { empty: true, q: 'What revenue breakdown?', records: [record('Mechanical settings stable.')] });
-  assert.equal(r.body.answer, null); assert.deepEqual(r.body.results, []);
+  assertDocumentAnswer(r.body, { provisional: true, empty: !r.body.results?.length }); assert.deepEqual(r.body.results, []);
   assert.equal(r.drafts, 0); assert.equal(r.verifiers, 0);
   assert.notEqual(r.body.status, 'search_unavailable', 'a healthy miss is distinguished from failed search');
 });
@@ -171,14 +172,25 @@ test('D control: surfacing the record permits its cited answer', async t => {
   accepted(await run(t), `${charge} [1].`);
 });
 
-test('E: verifier unavailability stays null with an explicit error', async t => {
+test('E: verifier unavailability keeps the source figure with an explicit confidence gap', async t => {
+  const control = await run(t); accepted(control, `${charge} [1].`);
   const r = await run(t, { verifierFails: true });
-  refused(r); assert.ok(r.body.answer_error);
+  // Rule table row 5 and GOAL: failed verification lowers certainty, never erases readable figures.
+  refused(r); assert.equal(r.body.answer_error, undefined);
+  assertDocumentAnswer(r.body, { provisional: true, expected: `${charge} [1].`, exact: true });
+  assert.equal(r.body.answer_contract.rung, 3);
+  assert.doesNotMatch(r.body.answer.split('\n\nCoverage:')[0], /withheld|cannot|can't/i);
+  assert.ok(r.body.confidence.basis.some(x => /unavailable/i.test(x)));
+  assert.ok(r.body.confidence.missing.some(x => /unavailable/i.test(x)));
+  assert.ok(r.body.confidence.percent <= control.body.confidence.percent, 'a failed verifier cannot raise certainty');
+  t.diagnostic(JSON.stringify({ rung: r.body.answer_contract.rung, confidence: r.body.confidence.percent,
+    check_gaps: r.body.confidence.basis.filter(x => /unavailable/i.test(x)) }));
 });
 
 test('E: both search paths failing stay search_unavailable', async t => {
   const r = await run(t, { searchFails: true });
-  assert.equal(r.body.answer, null); assert.equal(r.body.status, 'search_unavailable');
+  assertDocumentAnswer(r.body, { provisional: true, empty: !r.body.results?.length }); assert.equal(r.body.answer_contract.rung, 4);
+  assert.ok(r.body.confidence.percent <= 10);
   assert.equal(r.drafts, 0); assert.equal(r.verifiers, 0);
 });
 
@@ -295,13 +307,22 @@ test('E: one empty money completion gets a bounded model retry and verification'
   accepted(r, answer); assert.equal(r.drafts, 2);
 });
 
-test('E control: repeated empty completions remain null with a reviewed error', async t => {
+test('E control: repeated empty completions keep the source figure with a confidence gap', async t => {
+  const control = await run(t); accepted(control, `${charge} [1].`);
   const r = await run(t, { draft: '' });
-  assert.equal(r.body.answer, null);
-  assert.deepEqual(r.body.citations, []);
+  // Rule table row 5 and GOAL: readable record text answers even when both model drafts are empty.
+  assertDocumentAnswer(r.body, { provisional: true, expected: `${charge} [1].`, exact: true });
+  assert.equal(r.body.answer_contract.rung, 3);
+  assert.doesNotMatch(r.body.answer.split('\n\nCoverage:')[0], /withheld|cannot|can't/i);
+  assert.ok(r.body.citations.length > 0);
   assert.equal(r.drafts, 2, 'both generation decisions were reached');
   assert.equal(r.verifiers, 0, 'empty drafts never enter a verifier');
-  assert.equal(r.body.answer_error, 'I can help you try again, but answers are unavailable right now. Want to try again in a moment?');
+  assert.equal(r.body.answer_error, undefined);
+  assert.ok(r.body.confidence.basis.some(x => /unavailable/i.test(x)));
+  assert.ok(r.body.confidence.missing.some(x => /unavailable/i.test(x)));
+  assert.ok(r.body.confidence.percent <= control.body.confidence.percent, 'empty drafts cannot raise certainty');
+  t.diagnostic(JSON.stringify({ rung: r.body.answer_contract.rung, confidence: r.body.confidence.percent,
+    check_gaps: r.body.confidence.basis.filter(x => /unavailable/i.test(x)) }));
 });
 
 const paymentQuestion = 'Payer North paid, right?';
@@ -656,8 +677,8 @@ for (const [label, prefix, dropped] of [
   assert.equal(r.chunks.length, 1);
   assert.match(r.chunks[0], dropped, 'the stored record contains the qualifier');
   const seen = visibleExcerpt(r.prompts[0].prompt);
-  assert.ok(seen.startsWith('…Payer North charged USD 50.00'));
-  assert.doesNotMatch(seen, dropped, 'actual retrieval cut the qualifier');
+  assert.match(seen, dropped, "the whole-record read preserves the correction");
+  assert.match(r.body.answer, dropped, 'the answer preserves the correction');
   assert.ok(r.body.evidence_gate.quoted_spans.length, 'exact displayed quote recognition was reached');
   assert.equal(r.drafts, 1);
   refused(r, /span/);
@@ -671,7 +692,8 @@ test('R4 cut-window control: intact single-sentence April quotation survives', a
 test('R4 cut-window safe over-refusal: an unqualified multi-sentence window also refuses', async t => {
   const prefix = 'Shared ledger for Payer North, issuer copy. The issuer posted the following line exactly as entered:';
   const r = await run(t, { q: windowQuestion, records: [record(windowed(prefix))], draft: draftVisible });
-  assert.ok(visibleExcerpt(r.prompts[0].prompt).startsWith('…Payer North charged USD 50.00'));
+  assert.match(visibleExcerpt(r.prompts[0].prompt), /Shared ledger for Payer North/);
+  assertDocumentAnswer(r.body, {expected: 'USD 50.00'});
   refused(r, /span/);
 });
 const storageHeader = '[Payment record 0] ';
@@ -684,7 +706,8 @@ test('R4 cut window: the 400-character tail inside a figure refuses', async t =>
   assert.equal(`${storageHeader}${content}`.indexOf('276.40 on the shared card ledger') + 3, 400);
   const r = await run(t, { q: windowQuestion, records: [record(content)], draft: draftVisible });
   assert.ok(r.chunks[0].includes('card fee of USD 276.40 on the shared card ledger.'));
-  assert.match(visibleExcerpt(r.prompts[0].prompt), /card fee of USD 27…$/);
+  assert.match(visibleExcerpt(r.prompts[0].prompt), /card fee of USD 276\.40 on the shared card ledger/);
+  assert.match(r.body.answer, /USD 276\.40/);
   refused(r, /span/);
 });
 test('R4 citation cut: 900 characters inside a figure refuses during keyword outage', async t => {
@@ -697,7 +720,8 @@ test('R4 citation cut: 900 characters inside a figure refuses during keyword out
   assert.equal(`${storageHeader}${content}`.slice(0, 900).slice(-keep.length), keep);
   const r = await run(t, { q: 'What did Payer North charge for March?', records: [record(content)], draft: draftVisible, ftsFails: true });
   assert.ok(r.chunks[0].includes('USD 276.40 for March.'));
-  assert.ok(visibleExcerpt(r.prompts[0].prompt).endsWith(keep));
+  assert.match(visibleExcerpt(r.prompts[0].prompt), /USD 276\.40 for March/);
+  assert.match(r.body.answer, /USD 276\.40/);
   assert.equal(r.drafts, 1);
   refused(r, /span/);
 });

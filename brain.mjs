@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { processGmailEntries, gmailDeadlineError, gmailDeadlineSleep } from "./operations/gmail-entry.mjs";
+import { planGmailParts, acceptGmailPart, clearGmailParts } from "./operations/gmail-part-progress.mjs";
+import { readCurrentIngestParts, revalidateIngestProgress } from "./operations/ingest-part-proof.mjs";
 /**
  * brain — provision and manage a client-owned brain install.
  *
@@ -37,9 +40,11 @@ import { basename, delimiter, isAbsolute, join, dirname, relative, resolve, sep,
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { windowsUpdatePlatform, windowsUpdateStopMessage } from "./operations/windows-update-signin.mjs";
 import { discoverClaudeMcpCommand } from "./operations/claude-mcp-discovery.mjs";
 import { recognizedPriorInstallerRuntime } from "./operations/mcp-prior-runtime.mjs";
 import { hasPrivateUpdateFlags, parsePrivateUpdateArgv, runPrivateUpdate } from "./operations/private-update-command.mjs";
+import { PRIVATE_UPDATE_OUTCOME_ENV, writePrivateUpdateOutcome } from "./operations/private-update-recovery.mjs";
 import { PRIVATE_UPDATE_BINDING_ENV, PrivateOfferError,
   assertPrivateUpdateBinding, privateOfferTarget } from "./operations/private-update-offer.mjs";
 import { removalDigest, createIngestRemovalReview, applyApprovedProvenanceFamily } from "./operations/ingest-removal-plan.mjs";
@@ -49,6 +54,8 @@ import { createInterface } from "node:readline";
 import { TextDecoder, isDeepStrictEqual } from "node:util";
 import { assertIngestionOutcome, ingestionOutcome } from "./ingest/outcome.mjs";
 import { microsoftMailTransition, microsoftMailTransitionSummary, normalizeMailStartAt } from "./connectors/microsoft-mail-transition.mjs";
+import { readGmailBatchWindow, openGmailBatchWindow, checkpointGmailBatch,
+  gmailNeedsFamilyReconciliation, pruneGmailSinglePartPlans, GMAIL_BATCH_WINDOW_MAX_IDS, isGmailItemFailure } from "./operations/gmail-batch-window.mjs";
 import {
   PUBLIC_INSTALL_SMOKE_DOC_UID,
   PUBLIC_INSTALL_SMOKE_SOURCE,
@@ -96,6 +103,8 @@ import {
 import { BANK_ACCESS_WRAPPING_KEY_SECRET } from "./operations/bank-access-wrapping-key.mjs";
 import {
   BrainLifecycleLockError,
+  BRAIN_LIFECYCLE_PARENT_ENV,
+  adoptParentBrainLifecycleLock,
   withBrainLifecycleLock,
   withBrainLifecycleLockWait,
 } from "./operations/brain-lifecycle-lock.mjs";
@@ -427,7 +436,8 @@ import {
   technicianPlan,
 } from "./operations/technician-setup.mjs";
 import { fetchBrainWithAdminKey, guardBrainAdminFetch, secureBrainRequestUrl } from "./components/brain-http.mjs";
-import { confidenceLine } from "./worker/src/lib/confidence.js";
+import { documentResponseConfidence, confidenceLine } from "./worker/src/lib/confidence.js";
+import { legacyDocumentResponse } from './worker/src/lib/document-answer.js';
 import { answerReasonText, answerText as renderAnswerText, finalAnswerText, moneyExplanation, nextActionText, separateOffers } from "./worker/src/lib/answer-render.js";
 import {
   absenceUnproven, COVERAGE_INCOMPLETE, coverageIncompleteNotice,
@@ -438,6 +448,7 @@ import {
 } from "./worker/src/lib/answer-render.js";
 import {
   LOCAL_OWNER_AGENT_PROFILE,
+  normalizeAgentProfile,
   profileHas,
 } from "./worker/src/lib/agent-authority.js";
 import {
@@ -464,6 +475,7 @@ import {
   discoverInstalledManifest,
   rememberInstalledManifest,
 } from "./operations/installed-manifest.mjs";
+import { LOCAL_FILE_LOCKED, replaceFileWithRetrySync } from "./operations/rename-retry.mjs";
 import {
   auditMachineContinuity,
   manifestHasProvisionedResourceBindings,
@@ -488,7 +500,7 @@ export {
 // fileURLToPath, never `new URL(...).pathname`. The latter is percent-encoded,
 // so any install path containing a space resolves to a directory that does not
 // exist, and on Windows it keeps a leading slash before the drive letter
-// (/C:/Users/...), which readdirSync rejects outright. The first client install
+// (a slash before a Windows drive letter), which readdirSync rejects outright. The first client install
 // runs on Windows, so this is not hypothetical.
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -640,12 +652,22 @@ export function supportSourceForCommand(command = "") {
   return "installer";
 }
 
+// A Windows file lock stays named through wrappers that add update context;
+// its native "operation not permitted" text is not a remote permission.
+function heldByLocalFileLock(error) {
+  for (let current = error, depth = 0; current && depth < 8; current = current.cause, depth++) {
+    if (current.supportCode === LOCAL_FILE_LOCKED) return true;
+  }
+  return false;
+}
+
 /** Classify in memory; the raw message is never passed to the journal. */
 export function supportErrorCode(error, { command = "", unexpected = false } = {}) {
   if (error instanceof DriveRemovalReviewRequired) return "SAFETY_REVIEW_REQUIRED";
   const declaredCode = typeof error?.supportCode === "string" ? error.supportCode : error?.code;
   const typedCode = typeof declaredCode === "string" ? declaredCode.trim().toUpperCase() : "";
   if (SUPPORT_ERROR_CODES.includes(typedCode)) return typedCode;
+  if (heldByLocalFileLock(error)) return LOCAL_FILE_LOCKED;
   const message = String(error?.message || "");
   if (error?.credentialSource !== "wrangler-session" &&
       /\b9109\b/.test(message) && /(?:invalid access token|failed \((?:401|403)\))/i.test(message)) {
@@ -1500,7 +1522,9 @@ export async function withCloudflareControlCredential(action, options = {}) {
     if (!forceToken && !authProfile && !cloudflareTokenAvailable()) {
       info(
         (options.platform ?? options.oauthOptions?.platformName ?? process.platform) === "win32"
-          ? "this manifest records no browser sign-in for this Brain. " +
+          ? options.oauthOptions?.windowsSignInWindow === true
+            ? "This Brain has no approved browser sign-in profile yet. The assistant must review sign-in approval before continuing."
+            : "this manifest records no browser sign-in for this Brain. " +
             "Use `brain update <manifest> --adopt-cloudflare-profile` in a visible PowerShell window to approve one. " +
             "Windows has no saved Cloudflare-token recovery or supported hidden token entry in this release."
           : "this manifest records no browser sign-in for this Brain, so it is using the token lane.\n" +
@@ -1594,6 +1618,8 @@ export async function withCloudflareControlCredential(action, options = {}) {
     recoveryCommand: options.recoveryCommand || null,
     platformName: options.platform ?? oauthSessionOptions.platformName ?? process.platform,
   };
+  const windowReauth = failureOptions.platformName === "win32" && oauthSessionOptions.windowsSignInWindow === true &&
+    !((oauthSessionOptions.input ?? process.stdin).isTTY && (oauthSessionOptions.output ?? process.stdout).isTTY);
   const offerTokenRecovery = async (error) => {
     // An account setting answered by a working sign-in, whichever attempt met
     // it: a recovery token reads the same account and cannot change it.
@@ -1650,10 +1676,12 @@ export async function withCloudflareControlCredential(action, options = {}) {
     }
     const mayRefresh = error instanceof CloudflareOAuthSessionError &&
       (error.code === "CLOUDFLARE_OAUTH_REAUTH_REQUIRED" ||
+        (windowReauth && error.code === "CLOUDFLARE_KEYRING_UNAVAILABLE") ||
         (error.code === "CLOUDFLARE_OAUTH_SCOPE_MISSING" && !isKnownOAuthScopeRecovery(error))) &&
-      !initiallyReauthorize && options.allowBrowserReauth === true && options.interactive !== false;
+      !initiallyReauthorize && options.allowBrowserReauth === true && (options.interactive !== false || windowReauth);
     if (mayRefresh) {
-      const answer = String(await (options.askFn ?? ask)(
+      if (windowReauth) info("Sign in to Cloudflare in the separate Financial Brain window. The update will continue here.");
+      const answer = windowReauth ? "y" : String(await (options.askFn ?? ask)(
         "Cloudflare sign-in needs a quick refresh in the browser. Open it now? (y/n)",
         "y",
       )).trim().toLowerCase();
@@ -3080,6 +3108,8 @@ export function workerBindings(m, cfg, options = {}) {
       ...(options.pauseVectorDrainForUpgrade === true
         ? [{ type: "plain_text", name: "VECTOR_DRAIN_MODE", text: "paused-for-upgrade" }]
         : []),
+      ...(options.rollbackWriteFence === true
+        ? [{ type: "plain_text", name: "VECTOR_ROLLBACK_FENCE", text: "1" }] : []),
       {
         type: "plain_text",
         name: "CHUNK_SIZE",
@@ -4024,6 +4054,7 @@ export function healthProbeVerdict({
   body,
   expectVersion = null,
   expectDrainMode = null,
+  expectRollbackFence = false,
   attempt = 1,
   attempts = 6,
 }) {
@@ -4043,7 +4074,8 @@ export function healthProbeVerdict({
       parsed.vector_writer_protocol === "lease-v1" && stateMatches;
     const versionMatches = !expectVersion || parsed?.version === expectVersion;
     const drainModeMatches = !expectDrainMode || mode === expectDrainMode;
-    if (receiptIsExact && versionMatches && drainModeMatches) return "accept";
+    if (receiptIsExact && versionMatches && drainModeMatches &&
+        (!expectRollbackFence || parsed?.rollback_write_fence === true)) return "accept";
     return attempt < attempts ? "retry" : "fail";
   }
   return attempt < attempts ? "retry" : "fail";
@@ -4117,6 +4149,7 @@ export function vectorCountMismatchFailure(expected, actual, {
 export async function cmdHealth(manifestPath, {
   expectVersion = null,
   expectDrainMode = null,
+  expectRollbackFence = false,
   durableAdminKeyOnly = false,
   reachOnly = false,
   requireProjectionReady = false,
@@ -4189,6 +4222,7 @@ export async function cmdHealth(manifestPath, {
       body,
       expectVersion,
       expectDrainMode,
+      expectRollbackFence,
       attempt: i,
       attempts: healthAttempts,
     });
@@ -4600,6 +4634,8 @@ export async function cmdAsk(manifestPath, options = {}) {
     die(`the Brain could not answer (HTTP ${response.status}). Run \`brain support --preview\` for the safe issue note.`);
   }
 
+  body = legacyDocumentResponse(body);
+
   // An empty result from a search that could not run is not an absence, and
   // the canonical refusal sentence would state one. The owner reads this line
   // and nothing else, so the distinction has to survive to here.
@@ -4623,7 +4659,7 @@ export async function cmdAsk(manifestPath, options = {}) {
   const refused = body.evidence_gate?.supported === false || typeof body.answer !== "string" || !body.answer.trim() || /^The documents do not answer/i.test(body.answer.trim());
   // A refusal is not an answer-confidence result. Its scoped search facts and
   // gaps remain visible below, without a high-confidence label beside "no".
-  const trust = cannotSupportAbsence || refused ? null : confidenceLine(body.confidence, { refused: false });
+  const trust = confidenceLine(documentResponseConfidence(body));
   if (trust) print(`  ${c.dim(trust)}\n`);
   // Say WHY when the answer was refused or cut short. The gate already
   // records it; hiding it left the owner with one sentence that meant five
@@ -5755,10 +5791,14 @@ export async function cmdCheck(manifestPath, options = {}) {
 
 export async function cmdStatus(manifestPath, options = {}) {
   const { m } = (options.loadManifest ?? loadManifest)(manifestPath);
-  const acct = await (options.resolveAccount ?? resolveAccount)(m);
-  const queryDatabase = options.d1Query ?? d1Query;
   const write = options.write ?? console.log;
   const reportWarning = options.warn ?? warn;
+  if (m.corpora?.bank_feed?.enabled === true) {
+    try { await cmdBankStatus(['status',manifestPath],{...options,loadManifest:()=>({m}),write}); }
+    catch { reportWarning('Bank connection health could not be verified. Review Access > Banks and restore the saved connection settings.'); }
+  }
+  const acct = await (options.resolveAccount ?? resolveAccount)(m);
+  const queryDatabase = options.d1Query ?? d1Query;
   const dbId = m.infrastructure?.cloudflare?.d1_database_id;
   if (!dbId) die("no d1_database_id in the manifest.");
 
@@ -5854,8 +5894,9 @@ export function commitManifestVersion(manifestPath, version, options = {}) {
     fsyncSync(fd);
     closeSync(fd);
     fd = undefined;
-    revalidateUpdateManifest(pin, "local manifest version commit");
-    renameSync(temporary, target);
+    // A Windows reader can briefly hold the manifest. Re-pin before each try.
+    replaceFileWithRetrySync(temporary, target, { platform: options.platform,
+      revalidate: () => revalidateUpdateManifest(pin, "local manifest version commit") });
     const verifiedPin = pinUpdateManifest(target);
     const verified = verifiedPin.manifest;
     if (verified?.brain?.version !== version) {
@@ -7504,6 +7545,7 @@ export async function cmdUpgrade(manifestPath, options = {}) {
           slowMigration ? "MIGRATION_STILL_APPLYING" : "NETWORK_UNREACHABLE",
         );
       }
+      if (heldByLocalFileLock(error)) dieWithSupportCode(failureMessage, LOCAL_FILE_LOCKED);
       die(failureMessage);
     }
     ok(`upgrade verified, now at ${toVersion}`);
@@ -7534,6 +7576,15 @@ function printRollbackPreview({ bookmark, databaseId }) {
 export async function cmdRollback(manifestPath, bookmarkArg, options = {}) {
   const preflight = rollbackLocalPreflight(manifestPath, bookmarkArg);
   if (options.confirmed !== true) return printRollbackPreview(preflight);
+  // Daily and manual writers share this lease. Stopping the schedule does not
+  // stop an already running job; restore must acquire and retain the idle fence.
+  if (options.lifecycleLockHeld !== true) {
+    return (options.withBrainLifecycleLock ?? withBrainLifecycleLock)({
+      manifestPath, operation: "rollback", ...(options.lifecycleLockOptions || {}),
+    }, lease => cmdRollback(manifestPath, bookmarkArg, {
+      ...options, lifecycleLockHeld: true, assertRollbackOwned: () => lease.assertOwned(),
+    }));
+  }
 
   const { bookmark, pin, m, databaseId: dbId, declaredAccountId } = preflight;
   const resolveRollbackAccount = options.resolveAccount ?? resolveAccount;
@@ -7561,23 +7612,30 @@ export async function cmdRollback(manifestPath, bookmarkArg, options = {}) {
     await deployRollbackWorker(pin.target, {
       persistDomain: false,
       pauseVectorDrainForUpgrade: true,
+      rollbackWriteFence: true,
     });
     revalidateUpdateManifest(pin, "rollback paused vector-drain deployment");
     await verifyRollbackHealth(pin.target, {
       expectVersion: PRODUCT_VERSION,
       expectDrainMode: "paused-for-upgrade",
+      expectRollbackFence: true,
       reachOnly: true,
     });
     revalidateUpdateManifest(pin, "rollback paused vector-drain health verification");
-    const rollbackCutover = await waitForVectorDrainCutover(waitForVectorDrainQuiescence, {
-      nextStep: "the D1 restore",
+    const { requireRollbackWriterQuiescence } = await import('./operations/rollback-cutover.mjs');
+    await requireRollbackWriterQuiescence({
+      queryDatabase, accountId: acct.id, databaseId: dbId,
+      waitForCutover: waitForVectorDrainCutover, wait: waitForVectorDrainQuiescence,
+      now: options.now ?? Date.now, cutoverOptions: options.rollbackCutoverOptions,
+      readProvider: async () => {
+        const index = m.infrastructure?.cloudflare?.vectorize_index;
+        if (typeof index !== "string" || !index) throw new Error("the exact vector index is unavailable");
+        return callCloudflare(`/accounts/${acct.id}/vectorize/v2/indexes/${encodeURIComponent(index)}/info`);
+      },
     });
-    if (rollbackCutover?.proven !== true) {
-      warn(`the safety pause elapsed but quiescence was NOT verified (${rollbackCutover?.reason || "unknown"}).`);
-      warn("continuing to the D1 restore with an unverified writer state; a mutation started before the restore can land after it with no surviving receipt.");
-    }
     revalidateUpdateManifest(pin, "rollback vector-drain quiescence");
   }
+  options.assertRollbackOwned?.();
   await callCloudflare(`/accounts/${acct.id}/d1/database/${dbId}/time_travel/restore?bookmark=${encodeURIComponent(bookmark)}`, {
     method: "POST",
   });
@@ -8479,11 +8537,11 @@ function localMcpRepairItem(scope, desired, options = {}) {
     return {
       scope,
       status: "blocked",
-      detail: `The packaged Owner assistant runtime did not initialize with exactly brain_think, brain_search, brain_remember, brain_health, and brain_financial_map. No ${label} setting will change.`,
+      detail: `The packaged Owner assistant runtime did not initialize with exactly brain_money_query, brain_money_overview, brain_money_guide, brain_think, brain_search, brain_fetch, brain_remember, brain_health, and brain_financial_map. No ${label} setting will change.`,
       destinations: [{ path: before.path, setting, action: "blocked runtime mismatch" }],
       write_set: [],
       rollback: "No write is attempted unless the packaged runtime passes first.",
-      verification: "Require protocol initialization and the exact five-tool Owner assistant list before a new preview can be approved.",
+      verification: "Require protocol initialization and the exact seven-tool Owner assistant list before a new preview can be approved.",
       protocol_discovery_verified: false,
       state_fingerprint: stateFingerprint,
     };
@@ -8493,11 +8551,11 @@ function localMcpRepairItem(scope, desired, options = {}) {
     return {
       scope,
       status: "ready",
-      detail: `${label}'s Owner assistant entry and packaged five-tool runtime are already exact.`,
+      detail: `${label}'s Owner assistant entry and packaged seven-tool runtime are already exact.`,
       destinations: [{ path: before.path, setting, action: "already current" }],
       write_set: [],
       rollback: "No write is needed.",
-      verification: "The exact locator, owner-assistant profile, protocol initialization, and five-tool list passed.",
+      verification: "The exact locator, owner-assistant profile, protocol initialization, and seven-tool list passed.",
       protocol_discovery_verified: true,
       state_fingerprint: stateFingerprint,
     };
@@ -8526,7 +8584,7 @@ function localMcpRepairItem(scope, desired, options = {}) {
     destinations,
     write_set: destinations,
     rollback: "The reconciler snapshots a safe prior locator or absence, changes only this named entry, and restores it if exact readback fails.",
-    verification: "Require the exact locator, owner-assistant profile, protocol initialization, and exactly brain_think, brain_search, brain_remember, brain_health, and brain_financial_map.",
+    verification: "Require the exact locator, owner-assistant profile, protocol initialization, and exactly brain_money_query, brain_money_overview, brain_money_guide, brain_think, brain_search, brain_fetch, brain_remember, brain_health, and brain_financial_map.",
     protocol_discovery_verified: true,
     state_fingerprint: stateFingerprint,
   };
@@ -9195,12 +9253,13 @@ export function drivePolicyFingerprint(
   // folders Drive may read changes what it is allowed to see. Without it, a
   // newly added root would only ever surface files that CHANGED after the
   // change token was taken, so everything already sitting in that folder would
-  // stay invisible. A fingerprint mismatch forces one full comparison.
+  // stay invisible. Only the explicit legacy comparison forces a full walk;
+  // the default feed leaves historical coverage for owner review.
   for (const key of ["rootFolderIds", "excludeFileIds", "excludePaths", "excludeNameParts", "privatePrefixes"]) {
     normalized[key] = [...new Set((config[key] || []).map((value) => String(value)))].sort();
   }
   // Preserve existing fingerprints when omitted or false. Either direction of
-  // an explicit opt-in change forces a sweep, including unchanged loose files.
+  // an explicit opt-in change forces a sweep only in the legacy comparison.
   if (config.includeMyDriveRootFiles === true) normalized.includeMyDriveRootFiles = true;
   normalized.credentialScanner = credentialScannerFingerprint(scannerEnabled);
   normalized.extractorPolicyVersion = Number(extractorPolicyVersion);
@@ -9640,10 +9699,16 @@ function recordGmailRetry(state, plan, sourceName) {
   const ids = gmailRetryMessageIds(state, sourceName);
   // Read the legacy revision-valued map, but write only exact identities.
   state.gmail_retry = Object.fromEntries(ids.map((id) => [`${sourceName}:${id}`, true]));
+  delete state.gmail_retry[plan.stateKey];
   state.gmail_retry[plan.stateKey] = true;
 }
 
 function clearGmailRetry(state, stateKey, sourceName) {
+  clearGmailParts(state, stateKey);
+  if (state.gmail_entry_failures) {
+    delete state.gmail_entry_failures[stateKey];
+    if (!Object.keys(state.gmail_entry_failures).length) delete state.gmail_entry_failures;
+  }
   if (state.gmail_retry === undefined) return;
   gmailRetryMessageIds(state, sourceName);
   delete state.gmail_retry[stateKey];
@@ -9676,7 +9741,8 @@ export const sourceReceiptHasRemoteGap = ({
  * receipt. Refusals and reasoned skips are deliberately not failures: they are
  * accepted source-policy outcomes. A store result of `failed` is different. If
  * it returned exit 0, launchd recorded a green scheduled run even though the
- * source was left in error and its cursor was withheld for retry.
+ * source was left in error. Drive may settle its feed independently while
+ * a durable per-file retry remains outstanding.
  */
 export function assertNoIngestFailures(tally, { noun = "stored part" } = {}) {
   const failed = Math.max(0, Math.trunc(Number(tally?.failed || 0)));
@@ -9744,10 +9810,11 @@ export function makeRemotePreparationErrorIsolator({
   assertOwned = null,
   stateKeyOf,
   protectPriorFamily = () => {},
+  isSystemicError = isSystemicIngestPreparationError,
 }) {
   return (error, item) => {
     // This must precede every state, tally, or protection mutation.
-    if (isSystemicIngestPreparationError(error)) throw error;
+    if (isSystemicError(error)) throw error;
     const stateKey = stateKeyOf(item);
     if (typeof stateKey !== "string" || !stateKey) throw error;
     assertOwned?.();
@@ -13204,7 +13271,15 @@ async function cmdIngestUnlocked(manifestPath, options = {}) {
   if (PROVIDER_CONNECTOR_IDS.includes(String(flags.from).toLowerCase())) {
     return cmdIngestProvider(m, manifestPath, flags);
   }
-  if (flags.from) return cmdIngestRemote(m, manifestPath, flags);
+  if (flags.from) {
+    const result = await cmdIngestRemote(m, manifestPath, flags);
+    // Finish bounded independent work and its receipt before signalling the
+    // scheduler. A durable retry gap must not look like a green scheduled run.
+    if (String(flags.from).toLowerCase() === 'drive' && !flags.status) {
+      assertNoIngestFailures({ failed:result.retryable_failures }, { noun:'Drive file' });
+    }
+    return result;
+  }
   return cmdIngestLocal(m, manifestPath, flags);
 }
 
@@ -14399,8 +14474,13 @@ export async function listStoredSourceFamilies({
   includeServerObservedAt = false,
   includeLabels = false,
   uids = null,
+  requireIndexed = false,
+  singlePage = false,
+  pageCursor = "",
   retryDelaysMs = SOURCE_FAMILY_INVENTORY_RETRY_DELAYS_MS,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  deadlineAt = Infinity,
+  now = Date.now,
 }) {
   const normalizedSource = assertSourceName(source);
   if (uids !== null && (!Array.isArray(uids) || uids.length < 1 ||
@@ -14420,7 +14500,7 @@ export async function listStoredSourceFamilies({
   let requestLabels = includeLabels;
   let requestUids = uids === null ? null : [...new Set(uids)].sort();
   let uidFilterAvailable = true;
-  let cursor = "";
+  let cursor = pageCursor;
   const restartWalk = () => {
     families.clear();
     labels.clear();
@@ -14435,6 +14515,11 @@ export async function listStoredSourceFamilies({
     // across attempts, so the repeated-cursor guard above is never re-entered and
     // the walk is never restarted or widened. A 400 is not retried here: it is the
     // compatibility ladder's signal, and repeating it cannot change the answer.
+    const inventoryRemaining = () => {
+      const remaining = deadlineAt - now();
+      if (remaining <= 0) throw Object.assign(new Error("inventory read reached its runtime deadline"), { reason: "requestDeadline" });
+      return remaining;
+    };
     const page = await requestSourceFamilyPageWithRetry(() => http(
       `${base}/api/admin/brain/source-families`,
       {
@@ -14449,10 +14534,11 @@ export async function listStoredSourceFamilies({
           limit: 1000,
           ...(requestLabels ? { include_labels: true } : {}),
           ...(requestUids ? { uids: requestUids } : {}),
+          ...(requireIndexed ? { require_index: true } : {}),
           ...(cursor ? { cursor } : {}),
         }),
       },
-      { what: "the source-family inventory" },
+      { what: "the source-family inventory", timeoutMs: Math.max(1, Math.min(HTTP_TIMEOUT_MS, inventoryRemaining())) },
     ), {
       // D1-SCOPED, NOT STATUS-SCOPED. A 413 or a bare 500 at this site is a
       // capability signal the walk must not repeat; only a body naming a D1
@@ -14461,13 +14547,16 @@ export async function listStoredSourceFamilies({
       // exactly. The status argument is ignored on purpose.
       isRetryableStatus: (_status, body) => isD1TransientFaultBody(body),
       delaysMs: retryDelaysMs,
-      sleep,
+      sleep: async ms => { if (ms >= inventoryRemaining()) throw Object.assign(new Error("inventory retry reached its runtime deadline"), { reason: "requestDeadline" }); await sleep(ms); },
       onRetry: (attempt) => info(sourceFamilyInventoryRetryNotice(attempt)),
     });
     const res = page.res;
     const raw = page.raw;
     let body = null;
     try { body = JSON.parse(raw); } catch { /* validated below */ }
+    if (requireIndexed && (!res.ok || body?.indexed !== true)) {
+      throw new Error("Bounded Gmail inventory requires the completed family projection and a matching Worker; no compatibility scan was attempted");
+    }
     if (cursor === "" && requestLabels && res.status === 400 &&
         body?.code === "unknown_field" && body?.field === "include_labels") {
       // A newer CLI can run before its matching Worker is deployed. Older
@@ -14564,6 +14653,11 @@ export async function listStoredSourceFamilies({
       }
       previous = uid;
     }
+    if (singlePage && body.next_cursor !== null && (typeof body.next_cursor !== "string" ||
+        body.next_cursor !== body.families.at(-1) || compareUtf8Bytes(body.next_cursor, cursor) <= 0)) {
+      throw new Error("bounded inventory returned an invalid continuation");
+    }
+    if (singlePage) return { families, nextCursor: body.next_cursor };
     if (body.next_cursor === null) {
       return includeServerObservedAt || includeLabels
         ? {
@@ -16634,15 +16728,18 @@ export function loadSourceRegistry(commands = {}) {
       scope: "mail threads, excluding bulk mail by default",
       dailyClass: "machine-pull",
       dailyOwner: "daily-task",
-      legs: ({ m, manifestPath, flags }) => [{
+      // Registry callers may omit optional execution dependencies.
+      legs: ({ m, manifestPath, flags, options = {} }) => [{
         source: "gmail",
-        run: () => ingestRemote(m, manifestPath, { ...flags, from: "gmail" }),
+        run: () => ingestRemote(m, manifestPath, { ...flags, from: "gmail" }, {
+          ...options, deferGmailRemovals: options.deferGmailRemovals === true,
+        }),
       }],
     },
     google_drive: {
       order: 60,
       label: "Google Drive",
-      scope: "documents, sheets, slides and PDFs with a text layer",
+      scope: "bounded incremental additions and updates; existing documents retained",
       dailyClass: "machine-pull",
       dailyOwner: "daily-task",
       legs: ({ m, manifestPath, flags }) => [{
@@ -16958,6 +17055,8 @@ export function describeLoadResult(result) {
       return {
         known: true,
         counts,
+        more_history: result.more_history === true,
+        pending_removals: result.pending_removals || 0,
         partial: !!(refused || excluded || incomplete),
         refused,
         excluded,
@@ -17189,6 +17288,8 @@ export async function cmdLoad(manifestPath, options = {}) {
     entry.elapsed_ms = Date.now() - started;
     entry.legFailures = legFailures;
     entry.legLines = legLines;
+    entry.pending_removals = legResults.reduce((sum, result) => sum + (result.pending_removals || 0), 0);
+    entry.more_history = legResults.some(result => result.more_history === true);
     entry.counts = legResults.map((r) => r.counts).filter(Boolean);
     entry.countsKnown = legResults.length > 0 && legResults.every((r) => r.known);
     entry.documents = legResults.reduce((n, r) => n + (Number.isFinite(r.documents) ? r.documents : 0), 0);
@@ -17292,6 +17393,8 @@ export async function cmdLoad(manifestPath, options = {}) {
     skipped: skippedCount,
     unavailable: unavailableCount,
     failed: failedCount,
+    pending_removals: entries.reduce((sum, entry) => sum + (entry.pending_removals || 0), 0),
+    more_history: entries.some(entry => entry.more_history === true),
     removal_reviews: entries.flatMap(entry => entry.removal_reviews || []),
     auto_applied_removals: entries.flatMap(entry => entry.auto_applied_removals || []),
   };
@@ -17321,7 +17424,7 @@ export async function cmdLoad(manifestPath, options = {}) {
   // measured file omissions reach that check without claiming a full sweep.
   const incompleteRefresh = entries.some((entry) => entry.status === "partial" && !entry.refreshSucceeded);
   if (unavailableCount || (!dryRun && partialCount &&
-      (options.allowPartialRefresh !== true || incompleteRefresh))) {
+      (options.allowPartialRefresh !== true || (incompleteRefresh && !summary.more_history && !(options.deferGmailRemovals && summary.pending_removals))))) {
     const parts = [
       unavailableCount ? `${unavailableCount} unavailable` : null,
       !dryRun && partialCount ? `${partialCount} partial` : null,
@@ -17427,6 +17530,12 @@ export async function cmdIngestRemote(m, manifestPath, flags, options = {}) {
   if (!["drive", "gmail", "imap"].includes(which)) {
     die(`--from ${which} is not a source. Available: drive, gmail, imap.`);
   }
+  if (flags["full-walk-review"] !== undefined && (which !== "drive" || flags["full-walk-review"] !== true)) {
+    die("--full-walk-review is a boolean flag for Drive only.");
+  }
+  if (which === "drive" && flags["full-walk-review"] === true && flags["dry-run"] !== true) {
+    dieWithSupportCode("Drive full-walk review is read-only. Add --dry-run for provider review; use ordinary incremental ingest for bounded writes.", "CONFIG_INVALID");
+  }
 
   const removalApproval = flags["approve-removals"];
   if (removalApproval !== undefined) {
@@ -17473,6 +17582,13 @@ export async function cmdIngestRemote(m, manifestPath, flags, options = {}) {
   const statePath = ["drive", "gmail"].includes(which)
     ? canonicalSourceIngestStatePath({ manifestPath, sourceName })
     : join(dirname(resolve(manifestPath)), `.brain-ingest-${sourceName}.json`);
+  if (which === "drive" && flags.status === true) {
+    const { renderDriveIncrementalStatus } = await import("./operations/drive-incremental.mjs");
+    const lib = await (options.ingestLib ?? ingestLib)();
+    const state = lib.loadState(statePath, { strict: true });
+    (options.write ?? console.log)(renderDriveIncrementalStatus(state, safeIngestDisplay));
+    return state.drive_incremental_last_run || { complete: false };
+  }
   const run = (assertLockOwned = null) => cmdIngestRemoteRun(
     m,
     manifestPath,
@@ -17534,6 +17650,9 @@ const cmdIngestRemoteRun = async (
     assertLockOwned = null,
   },
 ) => {
+  // Validate a saved Drive cursor before credentials, receipts or provider calls.
+  const ingest = await (options.ingestLib ?? ingestLib)();
+  const savedState = ingest.loadState(statePath, { strict: which === "drive" });
   // A deployed connector talks to the brain's authenticated data-plane route.
   // The Cloudflare control token is an install/deploy credential, not something
   // a daily Drive or Gmail refresh should retain forever. A dry run talks only
@@ -17557,10 +17676,15 @@ const cmdIngestRemoteRun = async (
     loadState,
     saveState: persistState,
     prefetch,
-  } = await (options.ingestLib ?? ingestLib)();
+  } = ingest;
   const saveState = (path, value) => {
     assertLockOwned?.();
-    return persistState(path, value);
+    try { return persistState(path, value); }
+    catch (error) {
+      // A failed durable write cannot become a settled per-message skip.
+      if (error && typeof error === "object") error.ingestStateWriteFailed = true;
+      throw error;
+    }
   };
   const sendPreparedBatches = options.sendBatches ?? sendBatches;
   const listPreparedSourceFamilies = options.listStoredSourceFamilies ?? listStoredSourceFamilies;
@@ -17585,7 +17709,7 @@ const cmdIngestRemoteRun = async (
   // tool stays the cheapest one.
   const ocrCfg = ocrPolicy(m);
   let ocrPages = 0;
-  const ocrCallback = dry || !ocrCfg.enabled ? null : makeOcrCallback({
+  const ocrCallback = dry || !ocrCfg.enabled ? null : (options.makeOcrCallback ?? makeOcrCallback)({
     base, adminKey, model: ocrCfg.model, maxPages: ocrCfg.maxPages,
     assertOwned: assertLockOwned,
     onPage: ({ page, totalPages }) => {
@@ -17604,7 +17728,6 @@ const cmdIngestRemoteRun = async (
     info("OCR is ON, but a dry run never sends a page to a model and never spends anything.");
   }
 
-  const savedState = loadState(statePath);
   const gmailRetriesAtStart = new Set(which === "gmail" ? gmailRetryMessageIds(savedState, sourceName) : []);
   // Capture only enough in-memory state to prove the post-failure file kept
   // the prior Gmail cursor. The cursor itself never crosses the process
@@ -17612,7 +17735,9 @@ const cmdIngestRemoteRun = async (
   const gmailCheckpointBefore = which === "gmail"
     ? readGmailCheckpointState(statePath, { missingIsEmpty: true })
     : null;
-  const state = flags.reset
+  // Reset cannot discard a pending Gmail approval or Drive's retained feed.
+  const resumePendingGmail = which === "gmail" && savedState.ingest_removal_plan;
+  const state = flags.reset && !resumePendingGmail && (which !== "drive" || flags["full-walk-review"] === true)
     ? {
         version: 1,
         done: {},
@@ -17627,7 +17752,7 @@ const cmdIngestRemoteRun = async (
           ? { gmail_retry: { ...savedState.gmail_retry } }
           : {}),
         ...Object.fromEntries(
-          ["drive_removal_safety_baseline", "drive_removal_review", "gmail_removal_safety_baseline", "imap_removal_safety_baseline"]
+          ["drive_removal_safety_baseline", "drive_removal_review", "gmail_removal_safety_baseline", "imap_removal_safety_baseline", "gmail_owner_removals", "ingest_pending_families"]
             .filter((key) => savedState[key] != null)
             .map((key) => [key, savedState[key]])
         ),
@@ -17651,6 +17776,35 @@ const cmdIngestRemoteRun = async (
       die(error.message);
     }
     policyFingerprint = drivePolicyFingerprint(sourcePolicy, scannerOn, ocrCfg.enabled);
+    if (!dry && flags["full-walk-review"] !== true) {
+      const { driveIncrementalCommand, verifyDriveIncrementalWorker } = await import("./operations/drive-incremental.mjs");
+      await (options.verifyDriveIncrementalWorker ?? verifyDriveIncrementalWorker)(base, adminKey, { request: http, assertOwned: assertLockOwned });
+      const drive = options.drive ?? await import("./connectors/google-drive.mjs");
+      const incrementalRunId = `sync_${randomBytes(16).toString("hex")}`;
+      return driveIncrementalCommand({
+        drive, getToken, state, save: () => saveState(statePath, state), sourceName,
+        policy: sourcePolicy, policyFingerprint, scannerOn, scannerFingerprint, ocr: ocrCallback,
+        batchStream, splitOversized, sendBatches: sendPreparedBatches,
+        sanitize: sanitizeIngestEnvelope, refusalOf: credentialRefusalOf,
+        rememberAccepted: recordAcceptedDocumentState, rememberFamily: removalReview.remember, display: safeIngestDisplay,
+        acknowledgeOcr: (requestIds) => acknowledgeStoredOcrPages({ base, adminKey, requestIds, assertOwned: assertLockOwned }),
+        receipt: (receipt) => recordSourceReceipt({ ...receipt, run_id: incrementalRunId }),
+        base, adminKey, statePath, assertOwned: assertLockOwned, flags,
+        now: options.driveNow ?? Date.now, limits: options.driveLimits,
+        readDriveFamily: options.readDriveFamily, readCurrentParts: options.readCurrentIngestParts, request: http,
+        write: options.write ?? console.log,
+        translateFailure: (error, { settled } = {}) => {
+          // OCR uncertainty carries the retry/no-double-charge contract through the CLI.
+          if (error?.code === "source_ingest_lock_lost" || error?.system_evidence === true) return error;
+          const failure = new Fatal(`Drive sync is incomplete: ${safeIngestDisplay(error.message)}\n` +
+            (settled ? "The local checkpoint was saved, but the final receipt was not confirmed. Re-run to continue."
+              : "The source cursor was NOT advanced for the failed page. Accepted work was saved; re-run to continue."));
+          failure.supportCode = "INGEST_FAILED";
+          failure.status = error.status;
+          return failure;
+        },
+      });
+    }
     driveDecision = driveSyncDecision({
       reset: !!flags.reset,
       syncToken: state.sync_token,
@@ -17703,7 +17857,9 @@ const cmdIngestRemoteRun = async (
     delete state.credential_scanner_progress;
     saveState(statePath, state);
   }
-  let lane = incremental ? "incremental" : "sweep";
+  if (which === "gmail" && state.gmail_recovery?.awaiting_owner && state.history_id &&
+      state.gmail_recovery.policy_fingerprint === policyFingerprint) incremental = true;
+  let lane = incremental && !(which === "gmail" && state.gmail_sweep_pending) ? "incremental" : "sweep";
   if (assistantJson) {
     incremental = false;
     lane = "bounded_preview";
@@ -17732,6 +17888,8 @@ const cmdIngestRemoteRun = async (
   let gmailHistoryMarkerMissing = 0;
   let gmailPendingRemovalGaps = 0;
   let gmailOperationalFailure = null;
+  let gmailMoreHistory = false;
+  let gmailWindowPaused = false;
   let imapSnapshotGaps = 0;
   const storedDriveRemovalReview = which === "drive" &&
     state.drive_removal_review?.issue_code === "SAFETY_REVIEW_REQUIRED"
@@ -18068,13 +18226,15 @@ const cmdIngestRemoteRun = async (
   // A scanner migration is complete only when every previously accepted item
   // was either rechecked or deliberately removed. A transient unreadable item
   // may keep its old Brain copy, but it must also keep the migration pending.
-  let scannerProgressCanCommit = true;
+  let scannerProgressCanCommit = !(which === "gmail" && state.gmail_recovery?.awaiting_owner &&
+    (Object.keys(state.gmail_owner_removals || {}).length || Object.keys(state.ingest_pending_families || {}).length || gmailRetriesAtStart.size));
   let unchanged = 0;
   let scanned = 0;
   let prepared = 0;
   let batchNo = 0;
   let retryableOcrSkips = 0;
   let gmailDurableRetryFailures = 0;
+  let gmailRetainedRetrySkips = 0;
   let gmailPreviouslyHeldFailures = 0;
   const finalizationRetryBudget = createIngestFinalizationRetryBudget();
   // Held back until every batch receipt is settled. A failed Gmail part may
@@ -18123,10 +18283,19 @@ const cmdIngestRemoteRun = async (
     let pacedChunks = 0;
     let paceReceiptError = null;
     const part = await sendPreparedBatches({
-      base, adminKey, groups: [group], state, statePath, skips, quiet: true,
+      base, adminKey, groups: group.length ? [group] : [], state, statePath, skips, quiet: true,
       saveState, assertOwned: assertLockOwned,
       retryFinalization: which === "gmail", retrySleep: options.ingestRetrySleep,
       retryBudget: finalizationRetryBudget,
+      ...(which === "gmail" ? { deadlineAt: options.ingestDeadlineAt, now: options.ingestNowMs || Date.now } : {}),
+      onAccepted: (item) => {
+        if (which !== "gmail" || !item.familyPlan?.gmailParts) return;
+        if (acceptGmailPart(state, item.stateKey, item.familyPlan.gmailParts, item.envelope)) {
+          // Save before any next dispatch, retry sleep, settlement or deadline
+          // check. Logical done and family cleanup still require every part.
+          saveState(statePath, state);
+        }
+      },
       onResult: (item, result) => {
         if (paceVectorsPerMinute !== null && ["created", "updated"].includes(result.status)) {
           if (!Number.isSafeInteger(result.chunks) || result.chunks < 0) {
@@ -18154,8 +18323,23 @@ const cmdIngestRemoteRun = async (
     }
 
     const outcome = remoteFamilyOutcomes(familyPlans.values(), sentFamilyParts, acceptedFamilyParts);
+    if (which === "gmail") for (const plan of outcome.completed) {
+      // Local receipts and structural keep lists cannot prove current D1.
+      // Re-read after writes too, before done/cursor settlement can clear debt.
+      const proof = await (options.readCurrentIngestParts ?? readCurrentIngestParts)({
+        base, adminKey, source: sourceName, envelopes: plan.envelopes, request: http,
+        // Finish the in-flight write's bounded readback before the next
+        // admission deadline, as with its durable checkpoint. No source read
+        // or next part dispatch is admitted here.
+        assertOwned: assertLockOwned,
+      });
+      if (proof?.parts.length !== plan.expectedParts) throw new Error("Gmail parts are not all readable in the current database; retry the message.");
+      state.gmail_accepted_parts ||= {};
+      state.gmail_accepted_parts[plan.stateKey] = { ...proof, revision:plan.hash, policy_fingerprint:policyFingerprint };
+    }
     const settlement = remoteFamilySettlement(outcome, rejectedFamilyParts);
-    removalReview.remember(outcome.completed);
+    removalReview.remember(which === "gmail"
+      ? outcome.completed.filter(gmailNeedsFamilyReconciliation) : outcome.completed);
     for (const plan of outcome.completed) {
       await acknowledgeStoredOcrPages({
         base,
@@ -18182,12 +18366,28 @@ const cmdIngestRemoteRun = async (
         .filter((status) => status === "failed").length;
       if (which === "gmail" && failedParts > 0) {
         recordGmailRetry(state, plan, sourceName);
+        state.gmail_entry_failures ||= {};
+        state.gmail_entry_failures[plan.stateKey] = { version: 1, class: "store_unconfirmed",
+          reason: "Gmail storage remains unconfirmed; the message was retained for retry" };
+        checkpointGmailBatch(state, [plan.stateKey], sourceName, options.gmailBatchNow);
         gmailDurableRetryFailures += failedParts;
         if (gmailRetriesAtStart.has(plan.stateKey.slice(sourceName.length + 1))) {
           gmailPreviouslyHeldFailures += failedParts;
         }
       } else if (which === "gmail") {
         clearGmailRetry(state, plan.stateKey, sourceName);
+        const window = state.gmail_batch_window;
+        if (window) {
+          const id = plan.stateKey.slice(sourceName.length + 1);
+          window.skip_outcomes ||= {};
+          window.skip_outcomes[id] = "credential";
+          window.refusal_counts ||= {};
+          const refusedPartStatuses = rejectedFamilyParts.get(plan.stateKey);
+          window.refusal_counts[id] = refusedPartStatuses?.length || statuses.length;
+          state.gmail_owner_removals ||= {};
+          state.gmail_owner_removals[plan.stateKey] = "blank_or_quality";
+          checkpointGmailBatch(state, [plan.stateKey], sourceName, options.gmailBatchNow);
+        }
       }
     }
     for (const plan of [...outcome.completed, ...outcome.incomplete]) {
@@ -18195,6 +18395,9 @@ const cmdIngestRemoteRun = async (
       sentFamilyParts.delete(plan.stateKey);
       acceptedFamilyParts.delete(plan.stateKey);
       rejectedFamilyParts.delete(plan.stateKey);
+    }
+    if (which === "gmail" && outcome.completed.length) {
+      checkpointGmailBatch(state, outcome.completed.map(plan => plan.stateKey), sourceName, options.gmailBatchNow);
     }
     if (outcome.completed.length || outcome.incomplete.length) saveState(statePath, state);
     if (paceReceiptError) {
@@ -18756,10 +18959,45 @@ const cmdIngestRemoteRun = async (
     };
   } else if (which === "gmail") {
     const gmail = options.gmail ?? await import("./connectors/gmail.mjs");
+    const gmailNow = options.ingestNowMs || Date.now;
+    const gmailBudgetExpired = () => {
+      if (!Number.isFinite(options.ingestDeadlineAt) || gmailNow() < options.ingestDeadlineAt) return false;
+      gmailWindowPaused = true; gmailMoreHistory = true; return true;
+    };
+    const gmailRead = async task => {
+      if (gmailBudgetExpired()) return null;
+      try { return await task({ deadlineAt: options.ingestDeadlineAt, now: gmailNow }); }
+      catch (error) {
+        if (error?.reason !== "requestDeadline") throw error;
+        gmailWindowPaused = true; gmailMoreHistory = true; return null;
+      }
+    };
+    const verifyGmailAccepted = async (key, version) => {
+      const saved = state.gmail_accepted_parts?.[key];
+      if (!saved || saved.revision !== version || saved.policy_fingerprint !== policyFingerprint) {
+        delete state.done[key];
+        if (state.gmail_accepted_parts) delete state.gmail_accepted_parts[key];
+        if (!dry) saveState(statePath,state);
+        return false;
+      }
+      const proof = await gmailRead(opts => (options.readCurrentIngestParts ?? readCurrentIngestParts)({
+        base, adminKey, source:sourceName, proof:saved, request:http, assertOwned:assertLockOwned, ...opts,
+      }));
+      if (!proof) return false;
+      if (proof.parts.length !== saved.parts.length) {
+        delete state.done[key]; delete state.gmail_accepted_parts[key];
+        if (!dry) saveState(statePath,state);
+        return false;
+      }
+      state.gmail_accepted_parts[key] = {...saved,...proof};
+      return true;
+    };
+    const savedGmailWindow = !dry ? readGmailBatchWindow(state, policyFingerprint) : null;
+    if (!dry) pruneGmailSinglePartPlans(state, sourceName);
     let nextHistory = null;
     let ids;
     let policyById = null;
-    let storedBeforeSweep = null;
+    let storedBeforeSweep = new Set();
     let authoritativeSnapshot = !incremental;
     const gmailActiveUids = new Set();
     const gmailAcceptedUids = new Set();
@@ -18767,114 +19005,206 @@ const cmdIngestRemoteRun = async (
     const gmailDeletedUids = [];
     const gmailIntentionalUids = [];
     const gmailRemovalCauses = {};
-
-    const capturePrewalkHistory = async () => {
-      try {
-        nextHistory = await gmail.currentHistoryId(getToken);
-      } catch (error) {
-        // The data can still be streamed and saved resumably, but a full sweep
-        // cannot declare completion without a marker captured before the walk.
-        // A marker captured after it could skip mail that arrived mid-sweep.
-        gmailHistoryMarkerMissing = 1;
-        gmailOperationalFailure = error;
-      }
-    };
-
-    if (incremental) {
-      const h = await gmail.listHistory(getToken, state.history_id);
-      if (h.expired) {
-        warn("the saved Gmail history id is too old to answer from, so this is a full pass");
-        incremental = false;
-        lane = "sweep";
-        authoritativeSnapshot = true;
-        await capturePrewalkHistory();
-        ids = gmail.listMessages(getToken, { max: limit, query: gmailFullQuery });
-      } else {
-        const deletedIds = new Set(h.deletedIds);
-        const retryIds = gmailRetryMessageIds(state, sourceName)
-          .filter((id) => !deletedIds.has(id));
-        info(
-          `incremental: ${h.ids.length} changed message(s), ${h.deletedIds.length} deleted message(s), ` +
-          `${retryIds.length} durable retry message(s)`,
-        );
-        gmailDeletedUids.push(...h.deletedIds.map((id) => `${sourceName}:${id}`));
-        for (const id of h.deletedIds) gmailRemovalCauses[`${sourceName}:${id}`] = h.removal_causes?.[id];
-        nextHistory = h.historyId || nextHistory;
-        gmailHistoryMarkerMissing = nextHistory ? 0 : 1;
-        ids = [...new Set([...retryIds, ...h.ids])].slice(0, limit);
-
-        // History.list cannot apply DEFAULT_QUERY. Classify the complete window
-        // using label/date policy reads before any document or removal is sent. This is
-        // the atomicity boundary: buffering raw mail would recreate the multi-GB
-        // first-sync failure that batchStream was built to avoid.
-        policyById = new Map();
-        for await (const item of prefetch(
-          ids,
-          async (id) => ({ id, policy: await gmail.messagePolicy(getToken, id, { since: gmailSince }) }),
-          { concurrency: GMAIL_FETCH_CONCURRENCY },
-        )) {
-          policyById.set(item.id, item.policy);
-          if (item.policy.cursor_blocking === true) gmailLabelGaps++;
-        }
-        if (gmailLabelGaps) {
-          scanned = ids.length;
-          for (const [id, policy] of policyById) {
-            if (policy.cursor_blocking !== true) continue;
-            const key = `${sourceName}:${id}`;
-            state.skipped[key] = policy.skip.reason;
-            skips.push(policy.skip);
-          }
-          if (!dry) saveState(statePath, state);
-          warn(
-            `${gmailLabelGaps} Gmail message(s) had no trustworthy label classification, so this history window was refused before any message or removal was sent`,
-          );
-          ids = [];
-        }
-      }
+    let window = savedGmailWindow;
+    let history;
+    if (window) {
+      authoritativeSnapshot = window.mode === "bootstrap";
+      incremental = !authoritativeSnapshot;
     } else {
-      await capturePrewalkHistory();
-      ids = gmail.listMessages(getToken, { max: limit, query: gmailFullQuery });
-    }
-
-    // A reset, expired history or policy sweep must also service the durable
-    // list, including ids absent from the current query. Those ids have no
-    // query-derived eligibility, so classify them using current metadata.
-    if (authoritativeSnapshot && gmailRetriesAtStart.size > 0) {
-      const listed = ids;
-      policyById = new Map();
-      for (const id of gmailRetriesAtStart) {
-        const policy = await gmail.messagePolicy(getToken, id, { since: gmailSince });
-        policyById.set(id, policy);
-        if (policy.cursor_blocking === true) gmailLabelGaps++;
+      if (incremental) {
+        history = await gmailRead(opts => gmail.listHistory(getToken, state.history_id, {
+          ...opts, windowPages: 1, maxWindowMessages: 1_000, continuation: state.gmail_history_continuation || null,
+        }));
+        if (!history) history = { ids: [], deletedIds: [], historyId: state.history_id, hasMore: true };
+        if (history.expired) {
+          incremental = false;
+          authoritativeSnapshot = true;
+          lane = "sweep";
+          info(history.recovery_reason === "oversized_history"
+            ? "Gmail history exceeded the read budget; starting bounded recovery"
+            : "Gmail history expired; starting bounded recovery");
+        }
       }
-      ids = (async function* () {
-        yield* gmailRetriesAtStart;
-        for await (const id of listed) if (!gmailRetriesAtStart.has(id)) yield id;
-      })();
+      if (!incremental && !gmailWindowPaused) {
+        let recovery = state.gmail_recovery;
+        if (!recovery || recovery.policy_fingerprint !== policyFingerprint ||
+            recovery.complete === true) {
+          const anchor = await gmailRead(opts => gmail.currentHistoryId(getToken, opts));
+          if (anchor) recovery = { version: 1, policy_fingerprint: policyFingerprint,
+            anchor_history_id: anchor, page_token: null, pages_completed: 0,
+            review_stored: true };
+          if (!dry && anchor) { state.gmail_recovery = recovery; saveState(statePath, state); }
+        }
+        if (!gmailWindowPaused) {
+          if (recovery.version !== 1 || !recovery.anchor_history_id ||
+              !Number.isSafeInteger(recovery.pages_completed) || recovery.pages_completed < 0 ||
+              (recovery.page_token !== null && typeof recovery.page_token !== "string")) {
+            throw new Error("invalid saved Gmail recovery; progress was kept");
+          }
+          let page;
+          let nextRecovery;
+          if (recovery.stage === "stored") {
+            const storedPage = dry ? { families: new Set(), nextCursor: null }
+              : await listPreparedSourceFamilies({ base, adminKey, source: sourceName,
+                requireIndexed: true, singlePage: true, pageCursor: recovery.page_cursor || "" });
+            page = { ids: [...storedPage.families].map(uid => uid.slice(sourceName.length + 1)), nextPageToken: null };
+            nextRecovery = { ...recovery, page_cursor: storedPage.nextCursor,
+              pages_completed: recovery.pages_completed + 1, complete: storedPage.nextCursor === null };
+          } else {
+            page = await gmailRead(opts => gmail.listMessagePage(getToken, { query: gmailFullQuery, pageToken: recovery.page_token, opts }));
+            const needsStoredReview = page?.nextPageToken === null && recovery.review_stored === true;
+            nextRecovery = { ...recovery, page_token: page?.nextPageToken,
+              pages_completed: recovery.pages_completed + 1, complete: page?.nextPageToken === null && !needsStoredReview,
+              ...(needsStoredReview ? { stage: "stored", page_cursor: "" } : {}) };
+          }
+          if (page) history = { ids: page.ids, deletedIds: [], removal_causes: {}, mode: "bootstrap",
+            historyId: recovery.anchor_history_id, hasMore: true, policy_all: recovery.stage === "stored", recovery: nextRecovery };
+        }
+      }
+      if (!history || gmailWindowPaused) history = { ids: [], deletedIds: [], historyId: state.history_id || "budget-pending", hasMore: true };
+      const deletedIds = new Set(history.deletedIds);
+      const retryIds = gmailRetryMessageIds(state, sourceName)
+        .filter(id => !deletedIds.has(id) && !history.ids.includes(id))
+        .slice(0, Math.min(100, GMAIL_BATCH_WINDOW_MAX_IDS - history.ids.length - history.deletedIds.length));
+      if (!dry && !gmailWindowPaused) {
+        window = openGmailBatchWindow(state, history, policyFingerprint, retryIds);
+        saveState(statePath, state);
+      }
     }
-
-    // Capture the pre-run inventory before new mail expands it. It is both the
-    // authority for scanner migration and the removal-plan denominator. Using
-    // a post-ingest count could let a wrong-account sweep dilute removal of the
-    // entire prior corpus below the unattended ratio limit.
-    const gmailHasPotentialRemovalWork = authoritativeSnapshot ||
-      (Array.isArray(ids) && ids.length > 0) ||
-      gmailDeletedUids.length > 0 ||
-      Object.keys(state.removed || {}).some((uid) => uid.startsWith(`${sourceName}:`));
-    let gmailRemovalSafetyCount = null;
-    if (!dry && gmailLabelGaps === 0 && gmailHasPotentialRemovalWork) {
-      storedBeforeSweep = await listPreparedSourceFamilies({ base, adminKey, source: sourceName });
-      const baselineKey = JSON.stringify({
-        policy_fingerprint: policyFingerprint,
-      });
-      gmailRemovalSafetyCount = recordRemovalSafetyBaseline({
-        stateKey: "gmail_removal_safety_baseline",
-        key: baselineKey,
-        inventory: storedBeforeSweep,
-      });
+    const progressChecked = dry || await revalidateIngestProgress({
+      state, source:sourceName, proofs:state.gmail_accepted_parts, checkpointKey:"gmail_progress_recheck",
+      policyFingerprint, expired:() => Number.isFinite(options.ingestDeadlineAt) && gmailNow() >= options.ingestDeadlineAt,
+      read:args => gmailRead(opts => (options.readCurrentIngestParts ?? readCurrentIngestParts)({
+        base,adminKey,source:sourceName,request:http,assertOwned:assertLockOwned,...args,...opts,
+      })),
+      invalidate:key => {
+        delete state.done[key];
+        recordGmailRetry(state,{stateKey:key},sourceName);
+      }, save:() => saveState(statePath,state),
+    });
+    if (window) {
+      // Recovery is independent of provider history. Enroll restored entries
+      // behind a saved inventory offset, keeping the earliest window order.
+      const retry = new Set(gmailRetryMessageIds(state,sourceName));
+      const remaining = new Set(window.remaining_ids);
+      for (const id of window.ids) {
+        const key = `${sourceName}:${id}`;
+        if (retry.has(id) || (!remaining.has(id) && !Object.hasOwn(state.skipped || {},key) &&
+            !state.gmail_accepted_parts?.[key])) remaining.add(id);
+      }
+      window.remaining_ids = window.ids.filter(id => remaining.has(id));
+      saveState(statePath,state);
     }
+    const work = window || { ids: history.ids, remaining_ids: history.ids,
+      deleted_ids: history.deletedIds, removal_causes: history.removal_causes,
+      to_history_id: history.historyId, has_more: history.hasMore,
+      mode: history.mode || "history", policy_all: history.policy_all === true, continuation: history.continuation || null, recovery: history.recovery || null };
+    // Resolved skips still belong to a resumed window. Keep its measured
+    // coverage/refusal counters and owner decisions, without rereading bodies.
+    for (const [id, outcome] of Object.entries(window?.skip_outcomes || {})) {
+      if (work.remaining_ids.includes(id)) continue;
+      const uid = `${sourceName}:${id}`;
+      scanned++;
+      skips.push({ id, path: id, reason: state.skipped?.[uid] || "saved source outcome" });
+      if (outcome === "credential") { localRefused += window.refusal_counts?.[id] || 1; gmailIntentionalUids.push(uid); }
+      else if (outcome === "policy") { policySkipped++; gmailPolicyUids.push(uid); }
+      else if (outcome === "deleted") { sourceResolvedSkipped++; gmailDeletedUids.push(uid); }
+      else if (outcome === "quality") gmailIntentionalUids.push(uid);
+      else if (outcome === "retained" && state.gmail_retry?.[uid]) gmailRetainedRetrySkips++;
+      if (outcome !== "retained") gmailRemovalCauses[uid] = outcome === "deleted"
+        ? "explicit_deletion" : outcome === "policy" ? "scope_or_filter_change" : "blank_or_quality";
+    }
+    gmailMoreHistory = gmailWindowPaused || !progressChecked || work.has_more === true;
+    nextHistory = work.to_history_id;
+    gmailHistoryMarkerMissing = nextHistory ? 0 : 1;
+    gmailDeletedUids.push(...work.deleted_ids.map(id => `${sourceName}:${id}`));
+    for (const id of work.deleted_ids) gmailRemovalCauses[`${sourceName}:${id}`] = work.removal_causes?.[id];
+    if (!dry && work.deleted_ids.length) {
+      // A budgeted inventory may not visit a deleted identity this run. Its
+      // owner decision must survive even if all healthy window work settles.
+      state.gmail_owner_removals ||= {};
+      for (const id of work.deleted_ids) state.gmail_owner_removals[`${sourceName}:${id}`] = "explicit_deletion";
+      saveState(statePath, state);
+    }
+    info(`Gmail mode=${work.mode}; window=${work.ids.length}; pending=${work.remaining_ids.length}; deleted=${work.deleted_ids.length}`);
+    ids = work.remaining_ids.slice(0, limit);
+    for (const id of work.ids) {
+      gmailActiveUids.add(`${sourceName}:${id}`);
+      if (!work.remaining_ids.includes(id) && !Object.hasOwn(state.skipped || {}, `${sourceName}:${id}`)) {
+        gmailAcceptedUids.add(`${sourceName}:${id}`);
+      }
+    }
+    for (const [id, outcome] of Object.entries(window?.skip_outcomes || {})) {
+      if (outcome === "deleted" && !work.remaining_ids.includes(id)) gmailActiveUids.delete(`${sourceName}:${id}`);
+    }
+    // Only this window and a bounded pending-removal prefix may read D1.
+    // requireIndexed forbids both an unfinished projection's legacy scan and
+    // an old Worker's compatibility widening. Every request fits D1's bind cap.
+    const pendingScope = Object.keys({ ...state.removed, ...state.gmail_owner_removals }).filter(uid => uid.startsWith(`${sourceName}:`)).slice(0, 1000);
+    // Save only a fair continuation, never stored/absent evidence. Each run
+    // rechecks its admitted slice against D1, then leaves time to process it.
+    // A slow inventory cannot spend every daily budget on the same prefix.
+    const inventory = window?.inventory || {
+      ids: [...new Set([...work.ids, ...work.deleted_ids, ...pendingScope.map(uid => uid.slice(sourceName.length + 1))])], next: 0,
+    };
+    if (window) window.inventory = inventory;
+    const checked = new Set();
+    const inventoryStarted = gmailNow();
+    const inventoryDeadline = Number.isFinite(options.ingestDeadlineAt)
+      ? inventoryStarted + Math.max(1, (options.ingestDeadlineAt - inventoryStarted) / 3) : Infinity;
+    let walked = 0;
+    if (!dry) while (walked < inventory.ids.length && !gmailBudgetExpired()) {
+      if (walked && gmailNow() >= inventoryDeadline) break;
+      const selected = inventory.ids.slice(inventory.next, inventory.next + Math.min(97, inventory.ids.length - walked));
+      const requested = selected.map(id => `${sourceName}:${id}`);
+      const found = await gmailRead(opts => listPreparedSourceFamilies({ base, adminKey, source: sourceName,
+        uids: requested, requireIndexed: true, ...opts }));
+      if (!found) break;
+      for (const uid of found) {
+        if (!requested.includes(uid)) throw new Error("bounded Gmail inventory returned an unrequested identity");
+        storedBeforeSweep.add(uid);
+      }
+      for (const uid of requested) checked.add(uid);
+      walked += selected.length;
+      inventory.next = (inventory.next + selected.length) % inventory.ids.length;
+      if (window) saveState(statePath, state);
+    }
+    const scope = [...checked];
+    const gmailRemovalSafetyCount = storedBeforeSweep.size;
+    if (!dry && window && !gmailWindowPaused) {
+      const remaining = new Set(window.remaining_ids);
+      for (const id of window.ids) if (checked.has(`${sourceName}:${id}`) && !remaining.has(id) &&
+          !Object.hasOwn(state.skipped || {}, `${sourceName}:${id}`)) {
+        const key = `${sourceName}:${id}`;
+        // A locally settled window prefix is also resume evidence. Family
+        // presence cannot hide a missing part after a database recovery.
+        if (!storedBeforeSweep.has(key) || !await verifyGmailAccepted(key,state.done[key])) {
+          remaining.add(id); gmailAcceptedUids.delete(key);
+        }
+      }
+      window.remaining_ids = [...remaining]; ids = [...remaining].slice(0, limit);
+      saveState(statePath, state);
+    }
+    if (!dry) ids = ids.filter(id => checked.has(`${sourceName}:${id}`));
+    if (gmailWindowPaused) ids = [];
+    const holdGmailItem = (id, reason, failureClass = "source_read") => {
+      const key = `${sourceName}:${id}`;
+      assertLockOwned?.();
+      state.skipped[key] = reason;
+      state.gmail_entry_failures ||= {};
+      state.gmail_entry_failures[key] = { version: 1, class: failureClass, reason };
+      recordGmailRetry(state, { stateKey: key }, sourceName);
+      // The cursor may cross this identity only in the same durable save as
+      // its recovery obligation. Its previous document is deliberately kept.
+      if (!dry) {
+        checkpointGmailBatch(state, [key], sourceName, options.gmailBatchNow);
+        saveState(statePath, state);
+      }
+      if (scannerPolicyChanged) scannerProgressCanCommit = false;
+    };
+    policyById = new Map(Object.entries(window?.policy_results || {}).filter(([, result]) => !result.cursor_blocking));
 
-    const resumableStoredRevision = (id) => {
+    const resumableStoredRevision = async (id) => {
       if (gmailRetriesAtStart.has(id)) return null;
       if (!authoritativeSnapshot || !storedBeforeSweep) return null;
       const key = `${sourceName}:${id}`;
@@ -18883,49 +19213,33 @@ const cmdIngestRemoteRun = async (
       if (scannerPolicyChanged && !hasCredentialScannerProgress(
         state, scannerFingerprint, key, version
       )) return null;
-      return version;
+      return await verifyGmailAccepted(key,version) ? version : null;
     };
 
-    // One `messages.get` per message, about 300 ms each. Awaited one at a time
-    // that is ~160 messages a minute, so a 190k-message mailbox took twenty
-    // hours regardless of how fast the brain accepted batches (measured on a
-    // real first pass, 2026-09-05). Fetching a bounded window ahead, in order,
-    // measured seven times faster with no errors at eight in flight. The Google
-    // helper already retries 429 and 5xx with backoff, and Gmail's per-user
-    // budget (250 units/s, 5 per get) sits well above eight concurrent gets.
-    // Only the fetch overlaps: the credential scan, batching and resume state
-    // below still see one message at a time, in source order, exactly as before.
-    const fetched = prefetch(
-      ids,
-      async (id) => {
-        // A full list is still repeated after an interruption because it is the
-        // authoritative deletion snapshot. Gmail message bodies are immutable,
-        // so a listed id whose accepted revision still exists in D1 does not
-        // need another expensive messages.get. Scanner migrations additionally
-        // require the exact in-progress acceptance receipt before taking this
-        // path. Label policy remains current because listMessages applied the
-        // complete source query that selected this id.
-        const resumedVersion = resumableStoredRevision(id);
-        if (resumedVersion !== null) return { id, resumedVersion };
-        const policy = policyById?.get(id);
-        if (policy && !policy.allowed) return { id, fetched: policy };
-        try {
-          return {
-            id,
-            fetched: await gmail.toEnvelope(getToken, id, {
-              sourceName,
-              // A full-list id matched DEFAULT_QUERY. An incremental id reached
-              // this point only after its label/date preflight allowed it.
-              trustedEligible: (!incremental && !gmailRetriesAtStart.has(id)) || policy?.allowed === true,
-            }),
-          };
-        } catch (preparationError) {
-          return { id, preparationError };
-        }
-      },
-      { concurrency: GMAIL_FETCH_CONCURRENCY },
-    );
-    const prepareGmail = async ({ id, fetched: r, preparationError, resumedVersion = null }) => {
+    const readGmailEntry = async id => {
+      if (gmailBudgetExpired()) return { id, deferred: true };
+      let policy = policyById.get(id);
+      if (!policy && (incremental || work.policy_all || gmailRetriesAtStart.has(id))) {
+        policy = await gmailRead(opts => gmail.messagePolicy(getToken, id, { ...opts, since: gmailSince }));
+        if (!policy) return { id, deferred: true };
+      }
+      if (policy && !policy.allowed) return { id, policyResult: policy, fetched: policy };
+      const resumedVersion = await resumableStoredRevision(id);
+      if (resumedVersion !== null) return { id, policyResult: policy, resumedVersion };
+      return { id, policyResult: policy, fetched: await gmailRead(opts => gmail.toEnvelope(getToken, id, {
+        sourceName,
+        trustedEligible: (!incremental && !gmailRetriesAtStart.has(id)) || policy?.allowed === true,
+      }, opts)) };
+    };
+    let resolvedSinceSave = 0;
+    const checkpointResolvedGmail = (key, outcome = null) => {
+      const id = key.slice(sourceName.length + 1);
+      if (outcome) { window.skip_outcomes ||= {}; window.skip_outcomes[id] = outcome; }
+      checkpointGmailBatch(state, [key], sourceName, options.gmailBatchNow);
+      if (++resolvedSinceSave >= 50) { saveState(statePath, state); resolvedSinceSave = 0; }
+    };
+    const prepareGmail = async ({ id, fetched: r, deferred, resumedVersion = null }) => {
+      if (deferred || (!r && resumedVersion === null)) return null;
       scanned++;
       // Report the scan before any unchanged or skip return. A resumed first
       // pass may recheck thousands of already-accepted messages before it
@@ -18939,14 +19253,11 @@ const cmdIngestRemoteRun = async (
           stateKey: key, hash: resumedVersion, skipKeys: [id], legacyPartRoot: id,
         });
         gmailAcceptedUids.add(key);
+        if (!dry && state.gmail_batch_window) {
+          checkpointResolvedGmail(key);
+        }
         unchanged++;
         return { unchanged: true };
-      }
-      if (preparationError) {
-        if (preparationError && typeof preparationError === "object") {
-          countedPreparationErrors.add(preparationError);
-        }
-        throw preparationError;
       }
       if (r.skip) {
         gmailRemovalCauses[key] = r.removal_cause;
@@ -18964,10 +19275,23 @@ const cmdIngestRemoteRun = async (
         } else if (r.retain_existing !== true) {
           gmailIntentionalUids.push(key);
         }
-        if (r.cursor_blocking === true) gmailLabelGaps++;
-        if (r.cursor_blocking !== true) clearGmailRetry(state, key, sourceName);
-        if (scannerPolicyChanged && previouslyAccepted && r.retain_existing === true) {
+        if (r.cursor_blocking === true || r.retain_existing === true) {
+          holdGmailItem(id, r.skip.reason);
+          gmailRetainedRetrySkips++;
+        }
+        if (r.cursor_blocking !== true && r.retain_existing !== true) clearGmailRetry(state, key, sourceName);
+        if (scannerPolicyChanged && previouslyAccepted) {
           scannerProgressCanCommit = false;
+        }
+        if (!dry && state.gmail_batch_window && r.cursor_blocking !== true) {
+          // An interrupt must not replay a slow skip-only prefix forever. Save
+          // its owner decision before settling the identity, just like a batch.
+          if (previouslyAccepted && r.retain_existing !== true) {
+            state.gmail_owner_removals ||= {};
+            state.gmail_owner_removals[key] = r.removal_cause || "unknown";
+          }
+          checkpointResolvedGmail(key, r.policy_skip === true ? "policy" : r.source_deleted === true
+            ? "deleted" : r.retain_existing === true ? "retained" : "quality");
         }
         return { skip: r.skip };
       }
@@ -18980,11 +19304,15 @@ const cmdIngestRemoteRun = async (
       // unchanged locally.
       const storedFamilyConfirmed = storedBeforeSweep == null || storedBeforeSweep.has(key);
       if (!gmailRetriesAtStart.has(id) && storedFamilyConfirmed &&
-          (!scannerPolicyChanged || scannerResumeAccepted) && state.done[key] === r.version) {
+          (!scannerPolicyChanged || scannerResumeAccepted) && state.done[key] === r.version &&
+          !dry && await verifyGmailAccepted(key,r.version)) {
         recordAcceptedDocumentState(state, {
           stateKey: key, hash: r.version, skipKeys: [id], legacyPartRoot: id,
         });
         gmailAcceptedUids.add(key);
+        if (!dry && state.gmail_batch_window) {
+          checkpointResolvedGmail(key);
+        }
         unchanged++;
         return { unchanged: true };
       }
@@ -18997,46 +19325,110 @@ const cmdIngestRemoteRun = async (
         gmailIntentionalUids.push(key);
         gmailRemovalCauses[key] = "blank_or_quality";
         clearGmailRetry(state, key, sourceName);
+        if (!dry && state.gmail_batch_window) {
+          if (storedBeforeSweep.has(key)) {
+            state.gmail_owner_removals ||= {};
+            state.gmail_owner_removals[key] = "blank_or_quality";
+          }
+          checkpointResolvedGmail(key, "credential");
+        }
         return { skip };
       }
       const envelopes = splitOversized(envelope);
+      const currentProof = !dry && state.gmail_part_progress?.[key]
+        ? await gmailRead(opts => (options.readCurrentIngestParts ?? readCurrentIngestParts)({
+          base, adminKey, source:sourceName, envelopes, request:http, assertOwned:assertLockOwned, ...opts,
+        })) : null;
+      if (!dry && state.gmail_part_progress?.[key] && !currentProof) return null;
+      const gmailParts = planGmailParts(state, { stateKey: key, revision: r.version,
+        envelopes, policyFingerprint, stored: storedFamilyConfirmed, currentProof });
+      if (!dry && state.gmail_part_progress?.[key]) saveState(statePath,state);
+      sentFamilyParts.set(key, gmailParts.accepted);
+      acceptedFamilyParts.set(key, gmailParts.accepted);
+      const familyPlan = {
+        stateKey: key, hash: r.version, expectedParts: envelopes.length,
+        base_doc_uid: key,
+        keep_doc_uids: envelopes.map(envelope => `${envelope.source_type}:${envelope.source_id}`),
+        family_kind: "structural",
+        skipKeys: [key, ...envelopes.map(envelope => envelope.source_id)],
+        legacyPartRoot: id, gmailParts, envelopes,
+      };
+      familyPlans.set(key, familyPlan);
       return {
-        hash: r.version, envelopes, rel: id, stateKey: key, deferState: true,
-        familyPlan: {
-          stateKey: key,
-          hash: r.version,
-          expectedParts: envelopes.length,
-          base_doc_uid: key,
-          keep_doc_uids: envelopes.map((envelope) => `${envelope.source_type}:${envelope.source_id}`),
-          family_kind: "structural",
-          skipKeys: [key, ...envelopes.map((envelope) => envelope.source_id)],
-          legacyPartRoot: id,
-        },
+        hash: r.version, envelopes: gmailParts.pending, rel: id, stateKey: key, deferState: true, familyPlan,
       };
     };
-    const isolateGmailPreparationError = makeRemotePreparationErrorIsolator({
-      sourceLabel: "Gmail",
-      state,
-      statePath,
-      dryRun: dry,
-      saveState,
-      tally,
-      skips,
-      assertOwned: assertLockOwned,
-      stateKeyOf: (item) => typeof item?.id === "string" ? `${sourceName}:${item.id}` : "",
-      protectPriorFamily: (stateKey) => gmailActiveUids.add(stateKey),
-    });
-    for await (const group of batchStream(fetched, prepareGmail, {
-      onSkip: (skip) => skips.push(skip),
-      onPrepareError: isolateGmailPreparationError,
-    })) {
-      await consumeGroup(group);
-      for (const item of group) {
-        if (item?.familyPlan?.stateKey && state.done?.[item.familyPlan.stateKey] === item.familyPlan.hash) {
-          gmailAcceptedUids.add(item.familyPlan.stateKey);
+    const entryAccounting = new Map();
+    await processGmailEntries({
+      ids, prefetch, read: readGmailEntry, concurrency: GMAIL_FETCH_CONCURRENCY,
+      isItemFailure: error => !(error instanceof Fatal) && isGmailItemFailure(error),
+      onDeadline: () => {
+        gmailWindowPaused = true; gmailMoreHistory = true;
+        // A timed-out split or retry still belongs to the saved window. Never
+        // settle an identity merely because some of its parts may have landed.
+        if (!dry) saveState(statePath, state);
+      },
+      budgetExpired: () => {
+        const expired = gmailBudgetExpired();
+        // Resolved skips may amortize disk writes, but never cross a deadline
+        // without their exact decisions and queue positions in the same save.
+        if (!dry && expired && resolvedSinceSave) { saveState(statePath, state); resolvedSinceSave = 0; }
+        return expired;
+      },
+      processEntry: async (id, item) => {
+        entryAccounting.set(id, { failed: tally.failed, durable: gmailDurableRetryFailures,
+          previous: gmailPreviouslyHeldFailures, skips: skips.length });
+        if (!dry && window && item.policyResult && !item.policyResult.cursor_blocking) {
+          window.policy_results ||= {};
+          window.policy_results[id] = item.policyResult;
+          resolvedSinceSave++;
         }
-      }
-    }
+        // Each logical message flushes independently. Split parts still obey
+        // the normal byte/statement caps, and acceptance requires all parts.
+        for await (const group of batchStream([item], prepareGmail, {
+          onSkip: skip => skips.push(skip),
+        })) {
+          await consumeGroup(group);
+          for (const part of group) {
+            if (part?.familyPlan?.stateKey && state.done?.[part.familyPlan.stateKey] === part.familyPlan.hash) {
+              gmailAcceptedUids.add(part.familyPlan.stateKey);
+            }
+          }
+        }
+        // A stop after the last part receipt but before logical settlement
+        // needs no HTTP replay. Run the same settlement with the saved counts.
+        const key = `${sourceName}:${id}`;
+        const plan = familyPlans.get(key);
+        if (!dry && plan && acceptedFamilyParts.get(key) === plan.expectedParts) {
+          await consumeGroup([]);
+          if (state.done[key] === plan.hash) gmailAcceptedUids.add(key);
+        }
+      },
+      hold: async (id) => {
+        const key = `${sourceName}:${id}`;
+        const reason = "Gmail item processing failed; its prior family was retained for retry";
+        assertLockOwned?.();
+        gmailActiveUids.add(key);
+        holdGmailItem(id, reason, "item_processing");
+        // A failure during settlement may follow measured failed parts. Keep
+        // those counts once, and replace their transient skips with this one
+        // durable logical outcome rather than inventing a second coverage gap.
+        const before = entryAccounting.get(id) || { failed: tally.failed, durable: gmailDurableRetryFailures,
+          previous: gmailPreviouslyHeldFailures, skips: skips.length };
+        const failures = Math.max(1, tally.failed - before.failed);
+        tally.failed = before.failed + failures;
+        gmailDurableRetryFailures = before.durable + failures;
+        gmailPreviouslyHeldFailures = before.previous + (gmailRetriesAtStart.has(id) ? failures : 0);
+        skips.splice(before.skips);
+        for (let part = 0; part < failures; part++) skips.push({ path: "Gmail item", reason, failed: true });
+        // Discard only transient accounting for this failed logical family.
+        // Exact accepted parts remain in durable revision-bound continuation.
+        familyPlans.delete(key); sentFamilyParts.delete(key);
+        acceptedFamilyParts.delete(key); rejectedFamilyParts.delete(key);
+      },
+    });
+
+    if (!dry && resolvedSinceSave) saveState(statePath, state);
 
     const currentGmailRemovalUids = new Set([
       ...gmailPolicyUids,
@@ -19048,15 +19440,15 @@ const cmdIngestRemoteRun = async (
     // lost. Pre-run D1 truth settles that ambiguity. Clear an absent pending
     // family before counting active unreadable messages as unresolved; keep a
     // newly accepted re-post's fresh done marker intact.
-    if (storedBeforeSweep) {
+    if (storedBeforeSweep && !gmailWindowPaused) {
       for (const uid of Object.keys(state.removed || {})) {
-        if (!uid.startsWith(`${sourceName}:`) || storedBeforeSweep.has(uid)) continue;
+        if (!scope.includes(uid) || storedBeforeSweep.has(uid)) continue;
         delete state.removed[uid];
         if (!gmailAcceptedUids.has(uid) && state.done) delete state.done[uid];
       }
     }
     const pendingGmailUids = Object.keys(state.removed || {}).filter((uid) =>
-      uid.startsWith(`${sourceName}:`) &&
+      scope.includes(uid) &&
       !gmailAcceptedUids.has(uid) &&
       // A visible message whose current read is incomplete is not deletion
       // proof. Preserve its existing family until a successful replacement or
@@ -19064,7 +19456,7 @@ const cmdIngestRemoteRun = async (
       (!gmailActiveUids.has(uid) || currentGmailRemovalUids.has(uid))
     );
     const unresolvedActivePendingUids = Object.keys(state.removed || {}).filter((uid) =>
-      uid.startsWith(`${sourceName}:`) &&
+      scope.includes(uid) &&
       gmailActiveUids.has(uid) &&
       !gmailAcceptedUids.has(uid) &&
       !currentGmailRemovalUids.has(uid)
@@ -19073,8 +19465,12 @@ const cmdIngestRemoteRun = async (
     // a source deletion or a security refusal. Visibility alone cannot safely
     // clear it. Keep the marker and replay this Gmail window until the message
     // is accepted or a current typed decision resolves the removal.
-    gmailPendingRemovalGaps = unresolvedActivePendingUids.length;
+    gmailPendingRemovalGaps = unresolvedActivePendingUids.filter(uid => !state.gmail_retry?.[uid]).length;
     for (const uid of gmailAcceptedUids) {
+      // Resumed accepted outcomes may lie outside this run's inventory slice.
+      // Only a freshly checked family can resolve its saved owner decision.
+      if (!checked.has(uid)) continue;
+      if (state.gmail_owner_removals) delete state.gmail_owner_removals[uid];
       if (state.removed) delete state.removed[uid];
     }
 
@@ -19089,13 +19485,17 @@ const cmdIngestRemoteRun = async (
         uids: [...gmailIntentionalUids, ...intentionalRemovalUids],
         base, adminKey, state, dryRun: true, label: "intentional source skip",
       });
-    } else if (gmailLabelGaps === 0 && gmailHistoryMarkerMissing === 0) {
-      const needsGmailInventory = authoritativeSnapshot || gmailPolicyUids.length ||
+    } else if (!gmailWindowPaused && gmailLabelGaps === 0 && gmailHistoryMarkerMissing === 0) {
+      const pendingDecisionUids = pendingScope.filter(uid => checked.has(uid) && !gmailAcceptedUids.has(uid) &&
+        (!gmailActiveUids.has(uid) || currentGmailRemovalUids.has(uid)) &&
+        (Object.hasOwn(state.removed || {}, uid) || Object.hasOwn(state.gmail_owner_removals || {}, uid)));
+      const needsGmailInventory = pendingDecisionUids.length || gmailPolicyUids.length ||
         gmailDeletedUids.length || gmailIntentionalUids.length ||
         pendingGmailUids.length || intentionalRemovalUids.length;
       if (needsGmailInventory) {
         const storedGmailUids = new Set(storedBeforeSweep || []);
         const currentRemovalCandidates = new Set([
+          ...pendingDecisionUids,
           ...gmailPolicyUids,
           ...gmailDeletedUids,
           ...gmailIntentionalUids,
@@ -19104,15 +19504,14 @@ const cmdIngestRemoteRun = async (
         ]);
         const currentDeletedCandidates = new Set(gmailDeletedUids);
         for (const uid of currentRemovalCandidates) {
-          if (storedGmailUids.has(uid)) continue;
+          if (!checked.has(uid) || storedGmailUids.has(uid)) continue;
           if (state.done) delete state.done[uid];
           if (state.removed) delete state.removed[uid];
+          if (state.gmail_owner_removals) delete state.gmail_owner_removals[uid];
           if (currentDeletedCandidates.has(uid) && state.skipped) delete state.skipped[uid];
         }
 
-        const vanishedSnapshotUids = authoritativeSnapshot
-          ? [...storedGmailUids].filter((uid) => !gmailActiveUids.has(uid))
-          : [];
+        const vanishedSnapshotUids = []; // An incomplete mailbox walk is never absence evidence.
         const currentTypedRemovalUids = new Set([
           ...gmailPolicyUids,
           ...gmailDeletedUids,
@@ -19127,31 +19526,52 @@ const cmdIngestRemoteRun = async (
           currentTypedRemovalUids.size === 1;
         const gmailRemovalPlan = buildDriveRemovalPlan({
           storedFamilies: storedGmailUids,
-          targetCauses: gmailRemovalCauses,
+          targetCauses: { ...state.gmail_owner_removals, ...gmailRemovalCauses },
           activeFamilies: gmailActiveUids,
           policyCandidates: gmailPolicyUids,
           vanishedCandidates: [...gmailDeletedUids, ...vanishedSnapshotUids],
           intentionalCandidates: [
             ...gmailIntentionalUids,
+            ...pendingDecisionUids,
             ...pendingGmailUids,
             ...intentionalRemovalUids,
           ],
         }, {
           safetyBaselineCount: gmailRemovalSafetyCount ?? storedGmailUids.size,
+          maxCount: 0, // Every nonempty Gmail source removal needs the additional owner approval.
           ratioFloorCount: oneTypedRoutineRemoval ? 1 : 0,
           fingerprintContext: oneTypedRoutineRemoval ? "gmail-current-typed" : "gmail-strict",
         });
-        await removalReview.finish({ sourcePlan: gmailRemovalPlan });
+        gmailRemovalPlan.inventoryScope = "bounded-window";
+        if (scannerPolicyChanged && gmailRemovalPlan.total > 0) scannerProgressCanCommit = false;
+        if (options.deferGmailRemovals === true) {
+          state.gmail_owner_removals ||= {};
+          for (const uid of Object.values(gmailRemovalPlan.targets).flat()) {
+            state.gmail_owner_removals[uid] = gmailRemovalCauses[uid] || state.gmail_owner_removals[uid] || "unknown";
+          }
+          saveState(statePath, state);
+        } else await removalReview.finish({ sourcePlan: gmailRemovalPlan });
       }
     }
     intentionalRemovalUids.length = 0;
+    if (!dry && (window?.remaining_ids.length || !progressChecked)) { gmailMoreHistory = true; gmailWindowPaused = true; }
+    const recoveryPending = work.mode === "bootstrap" && !work.recovery?.complete;
+    const sweepPending = work.mode === "bootstrap" || state.gmail_sweep_pending
+      ? { blocked: state.gmail_sweep_pending?.blocked === true || localRefused + tally.refused > 0 } : null;
+    const retainedRecovery = !scannerProgressCanCommit
+      ? { ...(work.recovery || state.gmail_recovery), awaiting_owner: true } : null;
     pendingCursor = {
       key: "history_id",
-      value: nextHistory || state.history_id,
-      statePatch: {
+      value: recoveryPending ? state.history_id : nextHistory || state.history_id,
+      statePatch: recoveryPending ? { gmail_recovery: work.recovery, gmail_sweep_pending: sweepPending } : {
         gmail_policy_fingerprint: policyFingerprint,
         credential_scanner_fingerprint: scannerFingerprint,
+        gmail_history_continuation: work.continuation || null,
+        gmail_recovery: retainedRecovery,
+        gmail_sweep_pending: sweepPending,
       },
+      deferScannerCommit: recoveryPending,
+      gmailRecovery: work.recovery || state.gmail_recovery,
       deleteKeysOnScannerCommit: ["gmail_removal_safety_baseline"],
     };
   } else {
@@ -19497,7 +19917,7 @@ const cmdIngestRemoteRun = async (
 
   const gmailCredentialRefusalSkips = which === "gmail" ? localRefused + tally.refused : 0;
   const coverageGaps = Math.max(0, skips.length - policySkipped - sourceResolvedSkipped - adjudicatedSkipped -
-    gmailCredentialRefusalSkips - (which === "gmail" ? gmailDurableRetryFailures : 0)) +
+    gmailCredentialRefusalSkips - (which === "gmail" ? gmailDurableRetryFailures + gmailRetainedRetrySkips : 0)) +
     gmailHistoryMarkerMissing + imapSnapshotGaps;
 
   if (dry) {
@@ -19510,7 +19930,21 @@ const cmdIngestRemoteRun = async (
     return { dry_run: true, would_send: prepared, unchanged, skipped: skips.length, failed: 0 };
   }
 
-  await removalReview.finish();
+  if (which === "gmail" && options.deferGmailRemovals === true) {
+    try { await removalReview.finish(); }
+    catch (error) {
+      // A proved nonempty preview is a durable owner decision. Read failures
+      // still stop; a zero-target review clears itself without deleting data.
+      if (!(error instanceof DriveRemovalReviewRequired) || !state.ingest_removal_plan?.targets?.length) throw error;
+    }
+    if (scannerPolicyChanged && (Object.keys(state.gmail_owner_removals || {}).length ||
+        Object.keys(state.ingest_pending_families || {}).length)) {
+      scannerProgressCanCommit = false;
+      if (pendingCursor && !pendingCursor.deferScannerCommit && pendingCursor.gmailRecovery) {
+        pendingCursor.statePatch.gmail_recovery = { ...pendingCursor.gmailRecovery, awaiting_owner: true };
+      }
+    }
+  } else await removalReview.finish();
 
   // Gmail may advance past a failed Worker part only after the exact logical
   // message identity is durable in its retry list. Other sources retain the
@@ -19520,14 +19954,15 @@ const cmdIngestRemoteRun = async (
     durableRetryFailures: which === "gmail" ? gmailDurableRetryFailures : 0,
   }) &&
     !(which === "gmail" &&
-      (gmailLabelGaps > 0 || gmailHistoryMarkerMissing > 0 || gmailPendingRemovalGaps > 0)) &&
+      (gmailWindowPaused || gmailLabelGaps > 0 || gmailHistoryMarkerMissing > 0 || gmailPendingRemovalGaps > 0)) &&
     !(which === "imap" && imapSnapshotGaps > 0);
   if (pendingCursor && cursorCanAdvance) {
     state[pendingCursor.key] = pendingCursor.value;
     const statePatch = { ...(pendingCursor.statePatch || {}) };
     if (!scannerProgressCanCommit) delete statePatch.credential_scanner_fingerprint;
     Object.assign(state, statePatch);
-    if (scannerProgressCanCommit) {
+    if (which === "gmail") delete state.gmail_batch_window;
+    if (scannerProgressCanCommit && !pendingCursor.deferScannerCommit) {
       commitCredentialScannerProgress(state, scannerFingerprint);
       for (const key of pendingCursor.deleteKeysOnScannerCommit || []) delete state[key];
     }
@@ -19551,25 +19986,29 @@ const cmdIngestRemoteRun = async (
   // the cursor above.
   const totalRefused = tally.refused + localRefused;
   const gmailRetryBacklog = which === "gmail" ? gmailRetryMessageIds(state, sourceName).length : 0;
+  if (gmailRetryBacklog) gmailMoreHistory = true;
   const gmailNewRetryFailures = which === "gmail"
     ? gmailRetryMessageIds(state, sourceName).filter((id) => !gmailRetriesAtStart.has(id)).length : 0;
   const driveReviewRequired = which === "drive" &&
     (protectedDriveUids().size > 0 || malformedDriveIdentityCount > 0);
+  const gmailOwnerPending = which === "gmail" ? Object.keys(state.gmail_owner_removals || {}).length +
+    Object.keys(state.ingest_pending_families || {}).length : 0;
   const hasRemoteGap = sourceReceiptHasRemoteGap({
     source: which, tally, totalRefused, coverageGaps, driveReviewRequired, retryableSkips: retryableOcrSkips,
     durableRetries: gmailRetryBacklog,
-  });
+  }) || gmailMoreHistory || gmailOwnerPending > 0;
   const finalStatus = hasRemoteGap ? "error" : "ready";
   assertLockOwned?.();
   await recordSourceReceipt({
     source: sourceName, kind: which, status: finalStatus, run_id: runId,
     lane, started_at: runStartedAt, completed_at: new Date().toISOString(),
-    complete_sweep: ["drive", "gmail", "imap"].includes(which) && !incremental &&
+    complete_sweep: ["drive", "gmail", "imap"].includes(which) &&
+      (!incremental || (which === "gmail" && Boolean(state.gmail_sweep_pending) && !state.gmail_sweep_pending.blocked)) &&
       !hasRemoteGap && totalRefused === 0,
     // Reaching this terminal path means the provider enumeration itself
     // finished. Refused/failed documents and unresolved coverage remain
     // separate measured outcomes and still block complete_sweep.
-    walk_complete: true,
+    walk_complete: !gmailMoreHistory,
     files_seen: scanned,
     docs_added: tally.created,
     docs_updated: tally.updated,
@@ -19594,15 +20033,21 @@ const cmdIngestRemoteRun = async (
             `policy_skipped=${policySkipped}; coverage_gaps=${coverageGaps}; ` +
             `source_resolved=${sourceResolvedSkipped}; adjudicated_skips=${adjudicatedSkipped}` +
             (which === "imap" ? `; folder_policy_skipped=${folderPolicySkipped}` : "") +
-            (which === "gmail" ? `; withheld_for_secrets=${totalRefused}` : ""),
+            (which === "gmail" ? `${gmailMoreHistory ? "; more_history=1" : ""}; withheld_for_secrets=${totalRefused}` : ""),
         }),
   });
   runClosed = true;
 
   const summary = `${tally.created} created, ${tally.updated} updated, ${unchanged + tally.unchanged} unchanged`;
+  if (which === "gmail" && !gmailMoreHistory && !hasRemoteGap && state.gmail_sweep_pending) {
+    delete state.gmail_sweep_pending;
+    saveState(statePath, state);
+  }
   if (tally.failed || retryableOcrSkips || gmailRetryBacklog) info(summary);
   else ok(summary);
   if (gmailRetryBacklog) info(`${gmailRetryBacklog} held for retry; ${gmailNewRetryFailures} newly held. This ingest remains incomplete.`);
+  if (which === "gmail" && state.gmail_last_batch_at) info(`Last successful Gmail batch: ${state.gmail_last_batch_at}`);
+  if (gmailMoreHistory) info("The bounded Gmail window was saved; more history remains for the next run.");
   if (totalRefused) {
     if (which === "gmail") {
       info(`${totalRefused} Gmail message(s) withheld for carrying live credentials by design.`);
@@ -19613,7 +20058,7 @@ const cmdIngestRemoteRun = async (
   reportOcrRetryStats(ocrCallback);
   await reportSkips(skips);
   info(`progress saved to ${relative(process.cwd(), statePath)}`);
-  assertNoIngestFailures({
+  if (!(which === "gmail" && options.deferGmailRemovals === true)) assertNoIngestFailures({
     ...tally,
     failed: tally.failed - gmailPreviouslyHeldFailures,
   });
@@ -19693,7 +20138,9 @@ const cmdIngestRemoteRun = async (
     refused: totalRefused,
     scanned,
     skipped: skips.length,
-    ...(which === "gmail" ? { held_for_retry: gmailRetryBacklog, complete: !hasRemoteGap } : {}),
+    ...(which === "gmail" ? { held_for_retry: gmailRetryBacklog,
+      complete: !hasRemoteGap && !gmailMoreHistory, more_history: gmailMoreHistory,
+      last_batch_at: state.gmail_last_batch_at || null, pending_removals: gmailOwnerPending } : {}),
   };
   } catch (error) {
     // The cursor is deliberately outside this path: it is written only after
@@ -19750,11 +20197,13 @@ async function sendBatches({
   assertOwned = null,
   retryFinalization = false, retrySleep = undefined,
   retryBudget = undefined,
+  deadlineAt = Infinity, now = Date.now,
 }) {
   // Loaded here rather than closed over: sendBatches is top-level and shared by
   // both ingest paths, so it cannot rely on a caller's destructured import.
   const { saveState: persistState } = await ingestLib();
   const saveState = saveStateOverride || persistState;
+  retrySleep = gmailDeadlineSleep(retrySleep, deadlineAt, now);
   const tally = { created: 0, updated: 0, unchanged: 0, refused: 0, failed: 0 };
   let n = 0;
   for (const group of groups) {
@@ -19766,6 +20215,7 @@ async function sendBatches({
         base,
         adminKey,
         docs,
+        deadlineAt, now,
         ...(attempts ? { attempts } : {}),
         assertOwned,
         onRetry: (_error, attempt, attempts) => info(
@@ -19777,16 +20227,18 @@ async function sendBatches({
       ({ res, raw } = retryFinalization
         ? await retryIngestFinalization({
             docs, send: (pending) => request(pending, 1), assertOwned, sleep: retrySleep, retryBudget,
+            onAccepted: (doc, result) => onAccepted?.(group.find(item => String(item.envelope.source_id) === String(doc.source_id)), result),
             validate: (body, pending) => validateBatchReceipt(body, pending.map((envelope) => ({ envelope }))),
             onRetry: (attempt, retries) => info(`Gmail ingest is temporarily unconfirmed. Retrying ${attempt}/${retries}.`),
           })
         : await request(docs));
     } catch (error) {
       saveState(statePath, state);
-      die(
+      if (retryFinalization) throw error;
+      throw Object.assign(new Fatal(
         `batch ${n}/${groups.length} could not be confirmed: ${String(error?.message || error)}\n` +
           "      Progress was saved. Re-run the same command to continue."
-      );
+      ), { driveRunWide:true, cause:error });
     }
     // A 200 is NOT proof anything was ingested. Cloudflare Access pages, SSO
     // interstitials and misrouted requests all answer 200 with HTML, and
@@ -19800,31 +20252,32 @@ async function sendBatches({
 
     if (!res.ok) {
       saveState(statePath, state);
-      die(
+      throw Object.assign(new Fatal(
         `batch ${n}/${groups.length} failed with ${res.status}: ${raw.slice(0, 200)}\n` +
           "      Progress was saved. Fix the cause and re-run the same command to continue."
-      );
+      ), { driveRunWide:true, status:res.status });
     }
     if (!body || !Array.isArray(body.results)) {
       saveState(statePath, state);
-      die(
+      throw Object.assign(new Fatal(
         `batch ${n}/${groups.length} returned ${res.status} but not an ingest receipt, so nothing is confirmed loaded.\n` +
           (/^\s*</.test(raw)
             ? "      The response is HTML, which usually means an Access or SSO page answered\n" +
               "      instead of the brain. Check that the worker route is not behind Access.\n"
             : `      Expected JSON with a results array. Got: ${raw.slice(0, 120)}\n`) +
           "      Nothing was marked as loaded."
-      );
+      ), { driveRunWide:true });
     }
     let results;
     try {
       results = validateBatchReceipt(body, group);
     } catch (error) {
       saveState(statePath, state);
-      die(
+      if (retryFinalization) throw error;
+      throw Object.assign(new Fatal(
         `batch ${n}/${groups.length} returned an incomplete ingest receipt: ${error.message}\n` +
           "      Nothing missing was marked as loaded. Re-run the same command to retry it."
-      );
+      ), { driveRunWide:true, cause:error });
     }
     for (const r of results) {
       tally[r.status]++;
@@ -23451,8 +23904,9 @@ export function verifyMcpRuntime(desired, options = {}) {
     const replies = String(result.stdout || "").split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
     const initialized = replies.find((value) => value?.id === 1);
     const listed = replies.find((value) => value?.id === 2);
-    const expectedTools = ["brain_think", "brain_search"];
-    const profile = desired.env.BRAIN_AGENT_PROFILE;
+    const expectedTools = ["brain_think", "brain_search", "brain_fetch"];
+    const profile = normalizeAgentProfile(desired.env.BRAIN_AGENT_PROFILE);
+    if (profile === LOCAL_OWNER_AGENT_PROFILE) expectedTools.push("brain_money_query", "brain_money_overview", "brain_money_guide");
     if (profileHas(profile, "curated:write")) expectedTools.push("brain_remember");
     if (profileHas(profile, "diagnostics:read")) expectedTools.push("brain_health");
     if (profileHas(profile, "diagnostics:read")) expectedTools.push("brain_financial_map");
@@ -24977,6 +25431,10 @@ function crash(err) {
   const msg = renderCliCommands(err && err.message ? err.message : String(err));
   const supportEventId = recordSupportFailure(err, { unexpected: true });
   const write = (line) => console.log(line);
+  if (err?.ownerMessage) {
+    write(`\n${c.red("fail")}  ${err.ownerMessage}`);
+    process.exit(1);
+  }
   const networkCode = String(err?.cause?.code || err?.code || "");
   if (err instanceof BrainLifecycleLockError || /^brain_lifecycle_/u.test(networkCode)) {
     write(`\n${c.red("fail")}  ${msg}`);
@@ -25208,6 +25666,7 @@ export async function requestIngestBatch({
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   onRetry = () => {},
   assertOwned = null,
+  deadlineAt = Infinity, now = Date.now,
 } = {}) {
   const url = `${base}/api/admin/brain/ingest/batch`;
   try {
@@ -25216,13 +25675,16 @@ export async function requestIngestBatch({
       // replaced. Recheck before every retry so the former owner cannot start
       // another mutation after a successor takes responsibility for the state.
       assertOwned?.();
+      const timeoutMs = Number.isFinite(deadlineAt)
+        ? Math.max(0, Math.min(180_000, Math.floor(deadlineAt - now()))) : 180_000;
+      if (timeoutMs <= 0) throw gmailDeadlineError();
       const res = await http(url, {
         method: "POST",
         headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" },
         body: JSON.stringify({ docs }),
       // A batch is up to 50 documents to chunk, hash and queue, so it is allowed
       // materially longer than a health probe before it is called dead.
-      }, { timeoutMs: 180_000, what: "the ingest batch", fetchImpl });
+      }, { timeoutMs, what: "the ingest batch", fetchImpl });
       let raw;
       try {
         // The server can commit a safe write and then lose the response body.
@@ -25231,7 +25693,7 @@ export async function requestIngestBatch({
         raw = await res.text();
       } catch (error) {
         const translated = translatedHttpFailure(error, url, {
-          timeoutMs: 180_000,
+          timeoutMs,
           what: "the ingest batch response",
         });
         if (!res.ok && !isRetryableHttpStatus(res.status)) translated.retryable = false;
@@ -27729,7 +28191,7 @@ async function pauseCapturedOwnedSchedulers(manifestPath, snapshots, options = {
     }
     return snapshots;
   } catch (error) {
-    try { await restoreExistingOwnedSchedulers(manifestPath, paused, options); } catch (restoreError) {
+    try { if (!options.deferSchedulerRestoration) await restoreExistingOwnedSchedulers(manifestPath, paused, options); } catch (restoreError) {
       throw new Error(`${error.message}; restoring an already-paused owned scheduler also failed: ${restoreError.message}`, { cause: error });
     }
     throw error;
@@ -27921,11 +28383,22 @@ export async function reconcileDailyDefinitionAfterManifestEdit(manifestPath, op
   return Object.freeze({ installed: true, enabled: false, changed: paused.changed !== false, verified: true });
 }
 
+// Reuse existing data-plane key custody and HTTP transport, with injected
+// dependencies for offline probes. The provider work remains in the Worker.
+export async function refreshDailyBankFeed(manifestPath, options = {}) {
+  const { refreshDailyBankFeed: refresh } = await import('./operations/bank-feed-daily.mjs');
+  const m=options.manifest ?? loadManifest(manifestPath).m;
+  const base=await (options.resolveBaseUrl ?? resolveBaseUrl)(m,null);
+  const adminKey=(options.resolveAdminKey ?? resolveAdminKey)(manifestPath, {ignoreEnvironment:true});
+  if (!adminKey) throw new Error('No data-plane key is available for the scheduled bank sync.');
+  return refresh({base,adminKey,request:options.request ?? http,...(options.now ? {now:options.now} : {})});
+}
+
 export function dailyFreshnessRows(plan, inventory, schedule = null) {
   const inventoryRows = new Map((inventory?.sources || []).map((row) => [row.name, row]));
   return plan.sources.map((source) => {
     const names = source.source_names?.length ? source.source_names : [source.key];
-    const receiptRows = names.map((name) => inventoryRows.get(name));
+    const receiptRows = names.map((name) => inventoryRows.get(name === 'bank_feed' ? 'bank_activity' : name));
     const receiptTimestamps = receiptRows.map((row) => {
       const value = row?.receipt?.last_successful_run_at;
       return typeof value === "string" && Number.isFinite(Date.parse(value)) ? value : null;
@@ -27937,7 +28410,9 @@ export function dailyFreshnessRows(plan, inventory, schedule = null) {
       .at(-1) || null;
     const states = receiptRows.map((row, index) =>
       ["broken", "review"].includes(row?.freshness?.state) ? row.freshness.state
-        : row?.freshness?.state && receiptTimestamps[index] ? row.freshness.state : "unknown");
+        : row?.freshness?.state && (receiptTimestamps[index] ||
+          (source.key === 'bank_feed' && ['never_synced','stale'].includes(row.freshness.state)))
+          ? row.freshness.state : "unknown");
     const latestRuns = receiptRows.map((row) => row?.receipt?.latest_run);
     const noChangeTimestamps = receiptRows.map(row => providerNoChangeCheckAt(row?.kind, row?.receipt?.latest_run));
     const checkTimestamps = receiptRows.map((row, index) => noChangeTimestamps[index] ||
@@ -28002,7 +28477,9 @@ export function dailyFreshnessRows(plan, inventory, schedule = null) {
       owner: effectiveOwner,
       reason: inventory?.freshness_unavailable
         ? "source freshness is unknown because the source inventory could not be read"
-        : folderReason || source.reason,
+        : source.key==='bank_feed' && receiptRows.some(row=>row?.freshness?.reason)
+          ? receiptRows.map(row=>row?.freshness?.reason).filter(Boolean).join('; ')
+          : folderReason || source.reason,
       ...(source.selection === undefined ? {} : { selection: source.selection, hold_reason: source.hold_reason }),
     });
   });
@@ -28020,6 +28497,7 @@ function renderDailyFreshnessRows(rows, log = console.log) {
       (!showRun && setAsideCopy ? ` | ${setAsideCopy}` : "") +
       (row.last_run_outcome === "no_change" ? ` | checked ${row.last_check_at}; no changes` : "") +
       (row.zoom ? ` | Zoom ${row.zoom.state}; last check ${row.zoom.last_check_at || "never"}; history unproven` : "") +
+      (row.source === 'bank_feed' && row.reason ? ` | ${row.reason}` : '') +
       (!row.docs_withheld && row.last_withheld_count > 0 ? ` | last withholding: ${row.last_withheld_count} item(s) on ${row.last_withheld_at}` : "") +
       (!row.docs_withheld && ["partial", "refused", "empty"].includes(row.last_run_outcome)
         ? ` | ${row.last_run_outcome}; ${row.docs_refused ?? "unknown"} refused` : "") +
@@ -28686,6 +29164,11 @@ export async function adoptCloudflareAuthProfile(manifestPath, options = {}) {
       info("continuing without it. This run uses the existing Cloudflare access.");
       return null;
     }
+  } else if (options.oauthOptions?.windowsSignInWindow === true &&
+      (options.oauthOptions.platformName ?? process.platform) === "win32") {
+    write("  A separate Financial Brain sign-in window will open for this approved update.");
+    write("  Sign in to Cloudflare in its browser. The update will continue here after account verification.");
+    write("");
   } else {
     // Consent already answered the question a prompt would have asked, and
     // there is no terminal to ask it in. The owner still has to complete the
@@ -28722,6 +29205,9 @@ export async function adoptCloudflareAuthProfile(manifestPath, options = {}) {
       prompt: (request) => promptForCloudflareOAuthAccount(request, { askFn }),
     });
   } catch (error) {
+    if (oauthOptions.windowsSignInWindow === true && (oauthOptions.platformName ?? process.platform) === "win32") {
+      throwCloudflareOAuthFailure(error, { platformName: "win32" });
+    }
     // Without existing access Windows cannot recover through the token prompt.
     // Preserve the reached keyring diagnosis before update pins or mutates the
     // manifest, instead of replacing it with an unrelated AUTH_REQUIRED.
@@ -30254,9 +30740,10 @@ function writeAssistantWorkspaceGuide(manifestPath, assistant, options, writerOp
   // Windows can retain the writer's lock when an editor holds the original
   // guide open. Keep this check adjacent to the writer; a concurrent creator
   // still needs a create-only writer mode or lock recovery in 0.4.19.
-  // Part B refreshes an existing managed guide after exact model readback. It
-  // still enters this common ownership guard, then relies on the writer's
-  // foreign, link, damage, staging, and exact-readback refusals on Windows.
+  // Verified updates and Part B refreshes use the retained-original writer
+  // after exact runtime/model readback. Its foreign, link, damage, staging
+  // and exact-readback checks still apply on Windows. Byte equality makes
+  // subsequent updates a verification without another retained original.
   if (run.allowExistingWindowsRefresh === true ||
       writerOptions.platformName !== "win32" || !existsSync(path)) {
     return writeGuide(manifestPath, writerOptions);
@@ -30284,7 +30771,7 @@ function refreshWorkspaceGuideAfterUpdate(manifestPath, options, assistant) {
       platformName: options.platformName ?? options.platform ?? process.platform,
       existingOnly: true,
       verifiedCodexWiring: codex && options.verifiedCodexWiring === true,
-    }, options.workspaceGuideRun ?? { action: "update", reportInfo });
+    }, { ...options.workspaceGuideRun, action: "update", reportInfo, allowExistingWindowsRefresh: true });
   } catch {
     safelyReportUpdateResult(
       reportWarning,
@@ -30881,7 +31368,9 @@ export function dispatchUpdateCli(argv = process.argv.slice(3), options = {}) {
       if (!(error instanceof PrivateOfferError)) throw error;
       const refusal = new Fatal(error.message);
       refusal.code = error.code;
-      refusal.supportCode = "UPGRADE_FAILED";
+      // Keep a specific local cause (a Windows file lock) that the package
+      // proved; every other private refusal stays an update failure.
+      refusal.supportCode = SUPPORT_ERROR_CODES.includes(error.supportCode) ? error.supportCode : "UPGRADE_FAILED";
       throw refusal;
     });
   }
@@ -31599,6 +32088,8 @@ class DailyRecoveryPersistenceError extends Error {}
 class DailyRecoveryReportedError extends Fatal {}
 
 async function cmdUpdateWithPrompts(manifestPath, options = {}) {
+  // Remote dispatch evidence for a private-update parent (see cmdUpdate).
+  const failureState = options.updateFailureState ?? { remote: "not_started" };
   let installed;
   try {
     if (options.preDiscoveredInstalled) installed = options.preDiscoveredInstalled;
@@ -31693,6 +32184,9 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
   }
   const interactive = options.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
   const automationToken = !interactive && Boolean(process.env.CLOUDFLARE_API_TOKEN);
+  const windowsSignInWindow = windowsUpdatePlatform(options) === "win32";
+  const updateOAuthOptions = { ...(options.oauthOptions || {}),
+    ...(windowsSignInWindow ? { platformName: "win32", windowsSignInWindow: true } : {}) };
   const resultingAnswerManifest = updateAnswerManifest(installedManifest, { legacyModelSwitch: true });
   const runControl = options.withCloudflareControl ?? withCloudflareControlCredential;
   let keyProven = answerSetupOf(resultingAnswerManifest) === "built-in";
@@ -31714,7 +32208,8 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
       accountId: installedManifest.infrastructure?.cloudflare?.account_id,
       authProfile,
       forceToken: options.forceToken === true || automationToken,
-      allowBrowserReauth: interactive, allowTokenRecovery: interactive,
+      oauthOptions: updateOAuthOptions,
+      allowBrowserReauth: interactive || windowsSignInWindow, allowTokenRecovery: interactive,
       interactive, askFn: options.askFn ?? ask,
     });
     revalidateUpdateManifest(keyPreflightPin, "update answer key preflight");
@@ -31736,7 +32231,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
     adoptConsent: options.adoptConsent,
     askFn: options.askFn ?? ask,
     forceToken: options.forceToken === true || automationToken,
-    oauthOptions: options.oauthOptions,
+    oauthOptions: updateOAuthOptions,
     ...(options.authProfileAdoption || {}),
     beforePersist: session => proveKey(session.profile),
   });
@@ -31821,6 +32316,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
     let bridgeInventory = null;
     let bridgeSnapshots = [];
     let upgradeResult;
+    const parentOwnsPackageRollback = process.env[PRIVATE_UPDATE_OUTCOME_ENV] !== undefined;
     try {
     const beforeUpdateManifest = loadManifest(pin.target).m;
     const dailyPlatform = options.dailyRefreshOptions?.platform ?? process.platform;
@@ -31870,6 +32366,11 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
       manageDailyDefinition = Object.hasOwn(beforeUpdateManifest?.operations || {}, "daily_refresh") ||
         dailyStatus.installed === true;
       existingDailyTransaction = readDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions);
+      // A resumed receipt that may have dispatched keeps the remote state
+      // unknown, so a private parent never restores pre-migration files.
+      if (existingDailyTransaction) {
+        failureState.remote = existingDailyTransaction.remote_mutation_may_have_started === false ? "not_started" : "unknown";
+      }
       if (existingDailyTransaction?.shared_fence === true || (existingDailyTransaction && !existingDailyTransaction.snapshot)) {
         throw new Error("this Brain has an update recovery fence, but this user has no verified schedule snapshot; imports remain paused");
       }
@@ -31909,7 +32410,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         reconciliation: dailyReconciliation,
         remoteMutationMayHaveStarted,
       }, dailyTransactionOptions);
-      manageAnyLocalSchedule = manageDailyDefinition || legacySnapshots.some((entry) => entry.snapshot?.exists) || bridgeSnapshots.length > 0;
+      manageAnyLocalSchedule = Boolean(existingDailyTransaction) || manageDailyDefinition || legacySnapshots.some((entry) => entry.snapshot?.exists) || bridgeSnapshots.length > 0;
       if (manageAnyLocalSchedule) {
         persistDailyTransaction("preparing");
         dailyTransactionActive = true;
@@ -31924,7 +32425,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         info("Daily imports are paused for the verified update window.");
       }
       try {
-        if (resumingDailyRecovery && !remoteMutationMayHaveStarted) {
+        if (resumingDailyRecovery && !remoteMutationMayHaveStarted && !parentOwnsPackageRollback) {
           // An interrupted local pause may have left the exact original job
           // loaded. Restore that pre-dispatch state before taking a new pause.
           await restoreExistingOwnedSchedulers(pin.target, legacySnapshots, options.dailyRefreshOptions || {});
@@ -31933,7 +32434,8 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
           legacySnapshots = await pauseCapturedOwnedSchedulers(
             pin.target,
             legacySnapshots,
-            options.dailyRefreshOptions || {},
+            { ...(options.dailyRefreshOptions || {}), allowAlreadyPaused: parentOwnsPackageRollback,
+              deferSchedulerRestoration: parentOwnsPackageRollback },
           );
         }
         if (dailyTransactionActive) {
@@ -31957,6 +32459,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
           ...(modelSwitch ? { legacyModelSwitch: true } : {}),
           ...(backlog ? { initialUpdateBacklog: backlog } : {}),
           beforeRemoteMutation: () => {
+            failureState.remote = "unknown";
             if (dailyTransactionActive) persistDailyTransaction("paused", true);
             remoteMutationMayHaveStarted = true;
           },
@@ -31966,6 +32469,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
       // injected adapter omitted its dispatch callback. Final-state failure
       // must never be reclassified as a pre-mutation refusal.
       if (!remoteMutationMayHaveStarted) {
+        failureState.remote = "unknown";
         if (dailyTransactionActive) persistDailyTransaction("paused", true);
         remoteMutationMayHaveStarted = true;
       }
@@ -31985,6 +32489,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
       if (dailyTransactionActive) persistDailyTransaction("recovery_required");
       throw error;
     }
+    failureState.remote = "verified";
     if (dailyPlan) {
       try {
         let permanentDailyVerified = false;
@@ -32126,9 +32631,11 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
       }
       if (provenPreMutation && (dailySnapshot || legacySnapshots.some(entry => entry.snapshot?.exists))) {
         try {
-          await restoreExistingOwnedSchedulers(pin.target, legacySnapshots, options.dailyRefreshOptions || {});
-          if (dailySnapshot) restoreDailyRefreshSchedule(dailySnapshot, dailySchedulerOptions);
-          if (dailyTransactionActive && !bridgeSnapshots.length) {
+          if (!parentOwnsPackageRollback) await restoreExistingOwnedSchedulers(pin.target, legacySnapshots, options.dailyRefreshOptions || {});
+          // The private parent must first restore and verify its old executable
+          // files. Enabling here could launch a task during that local rollback.
+          if (dailySnapshot && !parentOwnsPackageRollback) restoreDailyRefreshSchedule(dailySnapshot, dailySchedulerOptions);
+          if (dailyTransactionActive && !bridgeSnapshots.length && !parentOwnsPackageRollback) {
             clearDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions);
             dailyTransactionActive = false;
           }
@@ -32142,7 +32649,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
       if (dailyTransactionActive && !String(error.message).includes("Daily recovery receipt:")) {
         error.message += `\nDaily recovery receipt: ${dailyRefreshUpdateTransactionPath(dailyPlan.identity, dailyTransactionOptions)}`;
       }
-      if (bridgeGuard && bridgeSnapshots.length) {
+      if (bridgeGuard && bridgeSnapshots.length && !parentOwnsPackageRollback) {
         // Re-read the durable transaction, including on a fresh retry. A
         // current preflight refusal cannot undo an earlier ambiguous dispatch.
         let provenPreChange = false;
@@ -32200,7 +32707,8 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
     accountId: binding.accountId,
     authProfile: binding.authProfile,
     forceToken: options.forceToken === true || automationToken,
-    allowBrowserReauth: interactive,
+    oauthOptions: updateOAuthOptions,
+    allowBrowserReauth: interactive || windowsSignInWindow,
     allowTokenRecovery: interactive,
     interactive,
     askFn: options.askFn ?? ask,
@@ -32318,6 +32826,11 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
 /** Release shared prompt state after every update outcome, including local
  * assistant refresh warnings that happen after the verified upgrade. */
 export async function cmdUpdate(manifestPath, options = {}) {
+  // Only the remote dispatch decision this invocation reached crosses to a
+  // private-update parent: not_started, unknown (dispatch may have begun) or
+  // verified. The parent restores old files only on not_started.
+  const failureState = { remote: "not_started" };
+  options = { ...options, updateFailureState: failureState };
   try {
     if (options.lifecycleLockHeld === true) return await cmdUpdateWithPrompts(manifestPath, options);
     let lockManifestPath = manifestPath;
@@ -32336,6 +32849,22 @@ export async function cmdUpdate(manifestPath, options = {}) {
     }
     const lockTask = options.withBrainLifecycleLockWait ?? withBrainLifecycleLockWait;
     try {
+      const parentLease = process.env[BRAIN_LIFECYCLE_PARENT_ENV];
+      if (parentLease !== undefined) {
+        let delegation;
+        try {
+          if (process.env[PRIVATE_UPDATE_BINDING_ENV] === undefined || parentLease.length > 1024) throw new Error();
+          delegation = JSON.parse(parentLease);
+        } catch {
+          throw new BrainLifecycleLockError("brain_lifecycle_lost", "the parent update lease could not be verified");
+        }
+        const lock = adoptParentBrainLifecycleLock({ ...(options.lifecycleLockOptions || {}),
+          manifestPath: lockManifestPath, delegation });
+        try {
+          return await cmdUpdateWithPrompts(manifestPath, { ...options, lifecycleLockHeld: true,
+            ...(preDiscoveredInstalled ? { preDiscoveredInstalled } : {}) });
+        } finally { lock.release(); }
+      }
       return await lockTask({
         manifestPath: lockManifestPath,
         operation: "update",
@@ -32361,9 +32890,18 @@ export async function cmdUpdate(manifestPath, options = {}) {
     if (error.scheduler_results) {
       safelyReportUpdateResult(options.reportUpdateSchedulers ?? (() => {}), error.scheduler_results);
     }
+    // Preserve the technical error, support classification and recovery data
+    // for the assistant. Only the CLI's owner-facing rendering changes.
+    // Missing sign-in approval and queued indexing are preflight decisions,
+    // with their own exact recovery guidance. Neither is an incomplete update.
+    const preflightGuidance = ["AUTH_REQUIRED", "UPDATE_WAITING_FOR_INDEXING"].includes(error.code || error.supportCode);
+    if (windowsUpdatePlatform(options) === "win32" && !preflightGuidance) {
+      error.ownerMessage = windowsUpdateStopMessage(error);
+    }
     throw error;
   } finally {
     closePrompts();
+    writePrivateUpdateOutcome(process.env, failureState.remote);
   }
 }
 
@@ -33714,6 +34252,19 @@ export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
   };
 }
 
+/** Read-only bank status uses the existing durable data-plane credential. */
+export async function cmdBankStatus(argv, options = {}) {
+  if (!Array.isArray(argv) || argv[0] !== 'status' || !argv[1] || argv[1].startsWith('--') ||
+      argv.slice(2).some(arg=>arg !== '--json') || argv.length>3) {
+    die('usage: brain bank status <manifest> [--json]');
+  }
+  const {runBankStatusCommand}=await import('./operations/bank-feed-status.mjs');
+  return runBankStatusCommand({manifestPath:argv[1],json:argv[2]==='--json'}, {
+    loadManifest:options.loadManifest ?? loadManifest,resolveAdminKey:options.resolveAdminKey ?? resolveAdminKey,
+    request:options.request ?? http,write:options.write ?? console.log,now:options.now ?? Date.now,
+  });
+}
+
 /**
  * Preview or apply the zero-history transition from Plaid/default to SimpleFIN.
  * The command module owns validation, approval binding, the lifecycle fence,
@@ -34160,6 +34711,7 @@ const commands = {
   "custom-api": cmdCustomApi,
   load: cmdLoad,
   "bank-provider": () => cmdBankProvider(process.argv.slice(3)),
+  bank: () => cmdBankStatus(process.argv.slice(3)),
   connect: cmdConnect,
   disconnect: cmdDisconnect,
   status: (path) => withManifestCloudflareControl(path, () => cmdStatus(path)),
@@ -34228,6 +34780,7 @@ const WRANGLER_SESSION_EXEMPT_COMMANDS = new Set([
   "ocr-preflight",
   "custom-api",
   "bank-provider",
+  "bank",
   "folder",
   "schedule",
   "daily",
@@ -34357,6 +34910,7 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain connect zoom     <manifest>      Zoom cloud-recording transcripts (needs a paid Zoom seat)
     brain connect imap     <manifest>      any IMAP mailbox (Yahoo, Fastmail, iCloud, a host): app
                                            password entered hidden, proven by a real read first
+    brain bank status      <manifest>      read-only bank health and Worker /health; --json prints safe fields
     brain connect bank     <manifest>      owner-present Plaid pilot: hidden prompt for missing Plaid keys, checked
                                            with Plaid before they are saved, then owner-only Plaid Link and masked
                                            account assignment. --replace-keys re-enters both keys
@@ -34384,6 +34938,11 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain ingest     <manifest> --from drive  load from a connected remote source
                                            add --dry-run --json for one bounded,
                                            aggregate-only assistant preview
+    brain ingest     <manifest> --from drive --status  local token time, file counts,
+                                           pending owner decisions and exact failures
+                                           default sync adds/updates only; --reset retries
+                                           held failures; --full-walk-review requires
+                                           --dry-run for read-only provider review
     brain ingest     <manifest> --from gmail  sync connected Gmail (--dry-run to preview;
                                            --pace-vectors-per-minute N bounds new vector work)
     brain ingest     <manifest> --from calendar  sync Google Calendar (--dry-run to preview)
@@ -34471,8 +35030,9 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain support    --clear --yes         clear private local issue notes
 
   brain ingest takes --source <name>, --limit <n>, --dry-run, and --reset. It is
-  resumable: re-run the same command to continue an interrupted load. Folder,
-  Drive, Gmail, IMAP and provider removals always stop for a separate
+  resumable: re-run the same command to continue an interrupted load. Drive
+  defaults to bounded additions/updates; removal decisions never pause additions.
+  Folder, Gmail, IMAP and provider removals stop for a separate
   --apply-removals command. Larger or protected plans also need the printed
   --approve-removals fingerprint. Accepted additions and updates are saved.
 
@@ -34540,6 +35100,8 @@ if (IS_MAIN) {
     // this boundary is the final guard for every installed CLI command.
     closePrompts();
   }).catch((e) => {
+    // Dispatch validation precedes the update and keeps its specific guidance.
+    // cmdUpdate owns rendering once an update invocation has begun.
     // Fatal is a failure this code ANTICIPATED and already explained: a missing
     // token, a free-tier account, a typo'd source name. A Drive removal review
     // is an intentional safety stop with the same no-crash treatment and a
@@ -34557,8 +35119,8 @@ if (IS_MAIN) {
       // makes a clear explanation look like the tool itself fell over.
       const supportEventId = recordSupportFailure(e);
       const label = reviewRequired ? c.yellow("review required") : c.red("fail");
-      console.log(`${label}  ${renderCliCommands(e.message)}`);
-      printSupportReceipt(supportEventId, (line) => console.log(line));
+      console.log(`${label}  ${renderCliCommands(e.ownerMessage || e.message)}`);
+      if (!e.ownerMessage) printSupportReceipt(supportEventId, (line) => console.log(line));
       if (e instanceof DriveRemovalReviewRequired) {
         // Exact approvals must survive piped output. Immediate exit can drop
         // the queued review even though its saved plan already exists.

@@ -4,13 +4,13 @@ import { cpSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, realpathSy
 import { createHash } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const monthlyMetadata = 'refund_disclosure: ledger.refund_disclosure,';
 const mutations = [
-  ['boundary disabled', 'ledger-answer.js', '  enforceRefundDisclosure(body, refundBoundary);', '', /boundary failure must withhold disclosure/],
+  ['boundary disabled', 'ledger-answer.js', '  if (refundBoundary.requested) enforceRefundDisclosure(body, refundBoundary);', '', /boundary failure must disclose the missing rendered candidate/],
   ['monthly candidate metadata lost', 'ledger-monthly.js', monthlyMetadata, 'lost_disclosure: ledger.refund_disclosure,', /monthly candidate label retained/],
   ['posting account treated as counterparty', 'ledger-analysis.js',
     'account.account_slug !== row.effective_account_slug && ', '', /exact expected candidate population/],
@@ -36,11 +36,26 @@ test('four boundary mutants killed with green controls and restored copies', () 
     mkdirSync(dirname(join(folder, path)), { recursive: true });
     cpSync(join(root, path), join(folder, path), { recursive: true });
   }
+  // 0.4.28 guard probes need an independent green reader while the ordinary monthly module is mutated.
+  const greenMonthly = readFileSync(join(folder, 'worker/src/lib/ledger-monthly.js'), 'utf8');
+  const greenSource = readFileSync(join(folder, 'worker/src/lib/ledger-answer.js'), 'utf8');
+  assert.equal(greenSource.split('"./ledger-monthly.js"').length-1,1,'the green reader binds one preserved monthly module');
+  const greenAnswer = greenSource.replace('"./ledger-monthly.js"', '"./ledger-monthly-reviewed-green.js"');
+  for (const [name, bytes] of [['ledger-monthly-reviewed-green.js', greenMonthly], ['ledger-answer-reviewed-green.js', greenAnswer]]) {
+    writeFileSync(join(folder, 'worker/src/lib', name), bytes);
+    assert.equal(readFileSync(join(folder, 'worker/src/lib', name),'utf8'),bytes,'exact green source readback');
+    inventory.push(createHash('sha256').update(bytes).digest('hex') + '  worker/src/lib/' + name);
+  }
   writeFileSync(join(folder, 'copied-sources.sha256'), inventory.join('\n') + '\n');
   const env = Object.fromEntries(['PATH', 'TMPDIR', 'NODE_COMPILE_CACHE'].filter(key => process.env[key])
     .map(key => [key, process.env[key]]));
   env.HOME = join(root, 'home-test'); env.BRAIN_NO_WRANGLER_LOGIN = '1';
+  env.REFUND_BOUNDARY_GREEN_READER = pathToFileURL(join(folder, 'worker/src/lib/ledger-answer-reviewed-green.js')).href;
   const run = (pattern, fault = false) => {
+    if (process.env.BRAIN_LANE_NODE_WAIT) {
+      const quiet = spawnSync('/bin/sh', ['-c', process.env.BRAIN_LANE_NODE_WAIT], { encoding: 'utf8' });
+      assert.equal(quiet.status, 0);
+    }
     return spawnSync(process.execPath, ['--test', '--test-name-pattern', pattern, 'worker/test/ledger-refund-boundary.test.mjs'],
       { cwd: folder, env: { ...env, ...(fault ? { REFUND_BOUNDARY_FAULT: '1' } : {}) }, encoding: 'utf8', timeout: 120000 });
   };

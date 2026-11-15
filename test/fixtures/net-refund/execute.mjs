@@ -1,3 +1,4 @@
+import { sameLedgerFigure } from '../remote-money-follow-through.mjs';
 import { blocked } from './guards.mjs';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
@@ -55,6 +56,7 @@ export async function execute(c, implementation = {}) {
     assert.equal(trace.model, 1, `${c.id}: recorded model decision reached`);
     if (!c.terminal || c.terminal !== 'router') assert.ok(plan.intents?.length, `${c.id}: nonempty validated plan`);
     if (!c.terminal) { assert.ok(trace.inventory > 0); assert.ok(trace.transactions > 0); assert.equal(trace.render, 1); }
+    await sameLedgerFigure(f, { question: c.question, intents: plan.intents, oracleRows: c.rows });
     return { id: c.id, plan, trace, body, recounted: recount(c), sql: f.calls.map(sql => ({ transaction: /CROSS JOIN fin_transactions/.test(sql) })) };
   } finally { for (const fn of cleanups) fn(); }
 }

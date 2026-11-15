@@ -8,8 +8,10 @@ before a two-digit year, such as `in '25`, means the corresponding year in the
 2000s. A month plus a straight or curly apostrophe year is one operand, so
 `Oct '25` cannot default to the current year's October. Invalid dates, future
 activity and ambiguous month prefixes refuse. Negated intervals such as
-`not in September` and `not during October` refuse; neither may select the
-positive month. Both the direct grammar and extracted-intent path enforce this.
+`not in September` and `not during October` retain the readable positive dates
+only as an explicitly labeled broader reading. The answer quotes the unused
+negation beside its figure and does not claim the requested limit was applied.
+The direct grammar sends these restrictions to the extracted-intent path.
 Literal payees and account labels are removed before calendar resolution.
 
 A period-only operand inherits the one grounded scope of its substantive core,
@@ -23,12 +25,20 @@ Inventory-backed merchant-to-account recognition happens before committing an
 operand's selected slugs. Each reader rechecks that same inventory and selected
 set; a late reinterpretation cannot bypass narrowing because a plan exists.
 
+Explicit month lists retain separate windows in request order, including
+noncontiguous months. A list cannot supply an implied interval or share one
+trailing year across yearless operands. Each expanded operation rechecks the
+complete surrounding question, scope, coverage and calendar restrictions.
+
 Two explicitly combined months retain two separate windows, including when the
 labeler returns one core. Period comparisons retain both sides and their
 coverage even when a reader refuses. A difference requires complete compatible
 operands with safe integer amounts. Money direction, requested refund basis
 and exclusion rules must agree. The response exposes a closed reason when no
-difference is shown. No cross-period amount is inferred from a partial subtotal.
+difference is shown. Same-days comparisons read the source window first and
+derive the prior window after coverage capping, preserving question order in
+the response. Unequal day counts or unused temporal limits prevent exact
+arithmetic. No cross-period amount is inferred from a partial subtotal.
 
 A bounded spending split can contain two or three explicit selectors. Local
 code expands one spending core without raising the general model intent limit.
@@ -66,11 +76,15 @@ all frozen response values. Only a one-rounding-bit host difference in an FTS
 score may compare equal while retaining the original score bytes; this does
 not apply to amounts, binds or model requests.
 
-An unconsumed end-of-period restriction refuses before facts, including prefixes
-and suffixes. The financial idiom `end up paying` or `end up spending` is admitted
-as a complete phrase; bare `end` cannot license a whole-month answer.
+An unconsumed temporal restriction, including a prefix or suffix, travels with
+the independently readable dates. The response states "I did not narrow it by"
+and quotes each unused limit, retains it in `unused_calendar_limits`, and marks
+the requested reading incomplete. Early/late qualifiers, outside a month, clock
+cutoffs and historical progress wording follow this rule. The financial idiom
+`end up paying` or `end up spending` is admitted as a complete phrase; an
+unread end-of-period limit must be disclosed.
 
 Within a payment core, `last pay`, `last paid`, and `last payment` describe
 receipt ranking. Only that closed ranking phrase is masked before calendar
-consumption; an additional unsupported date constraint still refuses before
-facts. Latest-date ties keep every matching receipt.
+consumption; an additional unsupported date constraint is disclosed as unused beside
+the readable dates and figure. Latest-date ties keep every matching receipt.

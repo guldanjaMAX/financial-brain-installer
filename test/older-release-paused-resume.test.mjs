@@ -218,6 +218,9 @@ function installation(installed, { activeFolder = false } = {}) {
   const manifestPath = join(sandbox, "brain.manifest.json");
   writeFileSync(manifestPath, `${JSON.stringify(manifestFor(installed.version, { watchedPath }), null, 2)}\n`);
   const db = brainDatabase(installed.version);
+  // The fixture starts after a confirmed provider write, not just equal counts.
+  db.prepare("UPDATE install_state SET vector_projection_mutation_id=?, vector_projection_submitted_at=? WHERE id=1")
+    .run("fixture-settled-mutation", 1_750_000_000_000);
   const live = { release: installed, mode: "active", vectors: 1 };
   const events = [];
   const restore = { beforeFirstIngest: false };
@@ -227,7 +230,9 @@ function installation(installed, { activeFolder = false } = {}) {
     STORAGE: "d1",
     ADMIN_KEY,
     DB: workerD1(db),
-    VECTORIZE: { describe: async () => ({ vectorCount: live.vectors }) },
+    ...(live.rollbackFence ? { VECTOR_ROLLBACK_FENCE: "1" } : {}),
+    VECTORIZE: { describe: async () => ({ vectorCount: live.vectors,
+      processedUpToMutation: db.prepare("SELECT vector_projection_mutation_id AS id FROM install_state WHERE id=1").get().id }) },
     ...(live.mode === "paused-for-upgrade" ? { VECTOR_DRAIN_MODE: "paused-for-upgrade" } : {}),
   });
   // Every request reaches the real router of the release deployed right now.
@@ -248,6 +253,10 @@ function installation(installed, { activeFolder = false } = {}) {
     return { results: [], success: true, meta: { changes: Number(result.changes || 0) } };
   };
   const cf = async (path) => {
+    if (path.endsWith("/info")) {
+      events.push("provider-proof");
+      return { vectorCount: live.vectors, processedUpToMutation: "fixture-settled-mutation" };
+    }
     if (path.endsWith("/time_travel/bookmark")) return { bookmark: BOOKMARK };
     if (path.includes("/time_travel/restore")) {
       events.push("d1-restore");
@@ -267,7 +276,9 @@ function installation(installed, { activeFolder = false } = {}) {
     // A deploy uploads the Worker of the kit that runs it.
     const cmdDeploy = async (_path, options = {}) => {
       live.release = release;
-      live.mode = options.pauseVectorDrainForUpgrade === true ? "paused-for-upgrade" : "active";
+      // Reviewed sync rollback requires the deployed fence in the actual health reply.
+    live.rollbackFence = options.rollbackWriteFence === true;
+    live.mode = options.pauseVectorDrainForUpgrade === true ? "paused-for-upgrade" : "active";
       events.push(`deploy:${release.version}:${live.mode}`);
       return { ok: true };
     };

@@ -62,8 +62,8 @@ function scenarios(today, rng) {
     { family: 'malformed', text: `on ${year}-02-30`, invalid: true },
     { family: 'malformed', text: 'in Q5 2025', invalid: true },
     { family: 'malformed', text: 'in the last 0 days', invalid: true },
-    { family: 'future', text: `in January ${y + 1}`, invalid: true },
-    { family: 'future', text: `since January ${y + 1}`, invalid: true },
+    { family: 'future', text: `in January ${y + 1}`, projection: true, from: `${y + 1}-01-01`, to: `${y + 1}-01-31` },
+    { family: 'future', text: `since January ${y + 1}`, projection: true, from: `${y + 1}-01-01`, to: `${y + 1}-01-31` },
   ];
 }
 const raw = { ambiguous: false, unanswered_part: null, intents: [{ kind: 'totals', direction: 'inflow', count: null,
@@ -105,7 +105,13 @@ test('seeded period properties through real ledger readers; all discovered failu
       ?? ledger?.accounts?.reduce((n, a) => n + a.credits_minor, 0);
     if (amount == null) return { status: 'refused' };
     assert.ok(Number.isSafeInteger(amount), 'reader exposes integer cents');
-    const expected = c.invalid ? null : total(rows.filter(r => r.date >= c.from && r.date <= (c.to < ownerDay(c.now, c.timeZone) ? c.to : ownerDay(c.now, c.timeZone))).map(r => r.cents));
+    if (c.projection) {
+      assert.equal(ledger.projection, true, 'future coverage never supplies observed cash');
+      assert.equal(ledger.estimate, true);
+      assert.match(body.answer, /projection: about|likely only/i);
+      assert.equal(ledger.basis.patterns.length, 0, 'random nonrepeating amounts do not establish a pattern');
+    }
+    const expected = c.projection ? '0' : c.invalid ? null : total(rows.filter(r => r.date >= c.from && r.date <= (c.to < ownerDay(c.now, c.timeZone) ? c.to : ownerDay(c.now, c.timeZone))).map(r => r.cents));
     assert.equal(String(amount), expected, 'wrong figures are blockers, including partial evidence');
     // A coincidentally equal amount cannot hide the local parser's explicit
     // default label after a date operand was left unconsumed.

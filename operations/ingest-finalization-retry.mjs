@@ -28,6 +28,7 @@ export async function retryIngestFinalization({
   docs, send, validate, assertOwned = () => {},
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   onRetry = () => {},
+  onAccepted = null,
   retryBudget = createIngestFinalizationRetryBudget(),
 }) {
   let pending = docs;
@@ -48,6 +49,11 @@ export async function retryIngestFinalization({
         const results = validate(JSON.parse(raw), pending);
         const retryIds = new Set();
         for (const result of results) {
+          // An accepted subset must survive a deadline during the following
+          // member retry. The complete subset was validated before this hook.
+          if (["created", "updated", "unchanged"].includes(result.status)) {
+            await onAccepted?.(pending.find(doc => String(doc.source_id) === String(result.source_id)), result);
+          }
           if (transientMember(result)) retryIds.add(String(result.source_id));
           else settled.set(String(result.source_id), result);
         }

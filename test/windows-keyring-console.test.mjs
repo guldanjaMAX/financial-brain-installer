@@ -20,6 +20,7 @@ import {
 } from "../operations/cloudflare-oauth-session.mjs";
 import { renderSupportRecovery, supportRecovery } from "../support-recovery.mjs";
 import { cliTestEnvironment } from "./helpers/cli-test-environment.mjs";
+import { WINDOWS_SIGNIN_EXIT } from "../operations/windows-update-signin.mjs";
 
 const COMMAND = "$env:CLOUDFLARE_AUTH_USE_KEYRING='true'; & npx.cmd --yes wrangler@4.131.1 auth keyring enable --env-file=NUL";
 const CLEANUP = "Remove-Item Env:CLOUDFLARE_AUTH_USE_KEYRING";
@@ -195,7 +196,7 @@ test("CLI releases its real shared readline for keyring and restores the next qu
   } finally { closePromptsForTesting(); input.destroy(); output.destroy(); }
 });
 
-test("brain update preserves the reached keyring refusal and one runnable Windows next step", async () => {
+test("brain update preserves a separate-console keyring refusal and gives the owner one click", async () => {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-keyring-update-")));
   const manifestPath = join(root, "brain.manifest.json");
   const original = JSON.stringify({
@@ -204,7 +205,7 @@ test("brain update preserves the reached keyring refusal and one runnable Window
     infrastructure: { cloudflare: { account_id: accountId, storage: "d1" } },
   });
   writeFileSync(manifestPath, original);
-  let keyringCalls = 0, promptCalls = 0, actions = 0;
+  let windowCalls = 0, promptCalls = 0, actions = 0;
   const priorLog = console.log;
   console.log = () => {};
   const options = {
@@ -216,25 +217,29 @@ test("brain update preserves the reached keyring refusal and one runnable Window
     cmdVerify: async () => { actions++; }, cmdUpgrade: async () => { actions++; return "updated"; },
     installTechnicianSkills: () => [], reportSkillRefreshOk: () => {}, reportSkillRefreshWarning: () => {},
     oauthOptions: {
-      platformName: "win32", input: { isTTY: false }, output: { isTTY: false }, environment: {},
-      processRunner: (_command, args) => {
-        keyringCalls++;
-        assert.ok(args.includes("keyring"));
-        return { status: 1, stderr: Buffer.from(MISSING) };
+      platformName: "win32", input: { isTTY: false }, output: { isTTY: false }, environment: { SystemRoot: "C:\\Windows" },
+      processRunner: (command, args, child) => {
+        windowCalls++;
+        assert.match(command, /powershell\.exe$/);
+        assert.ok(args.includes("-EncodedCommand"));
+        assert.equal(child.stdio, "ignore");
+        return { status: WINDOWS_SIGNIN_EXIT.keyring };
       },
     },
   };
   try {
     await assert.rejects(cmdUpdate(manifestPath, options), (error) => {
       assert.equal(error.code, "CLOUDFLARE_KEYRING_UNAVAILABLE");
-      assert.ok(error.message.includes(COMMAND));
-      assert.match(error.message, /binding_missing/);
-      assert.equal(error.message.split(COMMAND).length, 2, "one runnable install command");
-      assert.doesNotMatch(error.message, /hidden token entry|saved Cloudflare key/);
-      assertOneNextStep(error.message, "install");
+      // Inherited console output is deliberately unavailable for diagnosis.
+      // Preserve the bounded keyring refusal and replace CLI homework only
+      // in the owner rendering; the assistant retains the technical message.
+      assert.match(error.ownerMessage, /protected storage/);
+      assert.equal((error.ownerMessage.match(/Click /g) || []).length, 1);
+      assert.match(error.ownerMessage, /Click back into this assistant conversation/);
+      assert.doesNotMatch(error.ownerMessage, /\brun\b|\btype\b|hidden token entry|saved Cloudflare key/i);
       return true;
     });
-    assert.equal(keyringCalls, 1);
+    assert.equal(windowCalls, 1, "the actual new-console launch decision was reached");
     assert.equal(promptCalls, 0);
     assert.equal(actions, 0);
     assert.equal(readFileSync(manifestPath, "utf8"), original);

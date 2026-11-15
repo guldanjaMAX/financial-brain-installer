@@ -88,18 +88,23 @@ for (const mode of ["collision", "malformed lookup", "lookup error", "delete err
     if (mode === "invalid receipt") f.env.VECTORIZE.deleteByIds = async ids => { await remove(ids); return { mutationId: "invalid\nreceipt" }; };
     if (mode === "lost lease before") f.env.VECTORIZE.getByIds = async ids => { const result = await get(ids); steal(); return result; };
     if (mode === "lost lease after") f.env.VECTORIZE.deleteByIds = async ids => { const result = await remove(ids); steal(); return result; };
-    if (mode === "receipt persistence error") f.db.exec("CREATE TRIGGER fail_probe BEFORE UPDATE OF vector_projection_mutation_id ON install_state BEGIN SELECT RAISE(ABORT, 'fixture persistence failure'); END");
+    if (mode === "receipt persistence error") f.db.exec("CREATE TRIGGER fail_probe BEFORE UPDATE OF vector_projection_mutation_id ON install_state WHEN NEW.vector_projection_mutation_id NOT LIKE 'brain-fence-unknown:%' BEGIN SELECT RAISE(ABORT, 'fixture persistence failure'); END");
     await assert.rejects(f.drain());
-    assert.deepEqual(rows(f.db), before); assert.deepEqual(fence(f.db), f.original);
+    assert.deepEqual(rows(f.db), before);
+    const beforeSubmission = ["collision", "malformed lookup", "lookup error", "lost lease before"].includes(mode);
+    if (beforeSubmission) assert.deepEqual(fence(f.db), f.original);
+    else assert.match(fence(f.db).mutationId, /^brain-fence-unknown:/,
+      "after intent, an unknown outcome cannot retain the old certifiable watermark");
     if (["collision", "malformed lookup", "lookup error", "lost lease before"].includes(mode)) assert.equal(f.probeIds.length, 0);
     if (mode.startsWith("lost lease")) assert.equal(f.db.prepare("SELECT vector_drain_lease_owner AS owner FROM install_state").get().owner, "replacement-owner");
     if (mode === "receipt persistence error") {
       f.db.exec("DROP TRIGGER fail_probe");
-      // Provider accepted the unrecorded probe, then this process died. Resuming
-      // still reaches exact rows without manufacturing a processed timestamp.
+      // Even after provider processing, an unknown receipt cannot automatically
+      // recertify the old watermark. Supervised clean-index recovery is required.
       f.process();
-      for (let i = 0; i < 5 && remaining(f.db); i++) { await f.drain(); f.process(); }
-      assert.equal(remaining(f.db), 0);
+      await assert.rejects(f.drain(), /probe submission is unconfirmed/);
+      assert.deepEqual(rows(f.db), before);
+      assert.equal(f.probeIds.length, 1, "ordinary retry cannot submit another mutation");
     }
   });
 }

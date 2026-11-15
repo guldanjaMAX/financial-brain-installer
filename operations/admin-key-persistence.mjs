@@ -76,7 +76,7 @@ export function macKeychainUsable(options = {}) {
   const readdir = options.readdir ?? readdirSync;
   // macOS paths on purpose: this check only means anything for darwin, and a
   // darwin shape simulated on another host (tests, Windows CI) must still build
-  // "/Users/.../Library/Keychains", not a backslash path the host would produce.
+  // a POSIX login-Keychain path, not a backslash path the host would produce.
   const keychainsDir = posix.join(home, "Library", "Keychains");
   if (exists(posix.join(keychainsDir, "login.keychain-db"))) return true;
   try {
