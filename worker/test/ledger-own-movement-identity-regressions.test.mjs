@@ -43,7 +43,9 @@ test('whole destination rejects trailing identity and unresolved identity never 
     'SAVINGS UNIT ACCOUNT XXXX6789', 'BROKERAGE UNIT ACCOUNT XXXX6789', 'RETIREMENT UNIT ACCOUNT XXXX6789', 'ESCROW UNIT ACCOUNT XXXX6789']) {
     const b = await reached(book(t, 'WIRE TRANSFER TO ' + destination));
     assert.equal(b.ledger.complete, false, destination + ': unresolved identity cannot certify spending');
-    assert.equal(b.ledger.expense_total_minor, null, 'withheld without an own-movement subtraction');
+    assert.equal(b.ledger.expense_total_minor, 12912, 'ordinary 567 plus observed uncertain 12345; no own-movement subtraction');
+    assert.match(b.answer, /up to \$123\.45 may be a transfer to your own account/);
+    assert.doesNotMatch(b.answer, /withheld|cannot|can't/i);
     assert.ok(!b.ledger.possible_payments?.some(row => !row.included_in_total), 'ambiguous identity is never excluded');
   }
   for (const description of ['TRANSFER TO MY SAVINGS ACCOUNT ****5678', 'TRANSFER TO SAVINGS xx5678']) {
@@ -76,7 +78,8 @@ test('retirement remittance uses closed retirement forms and leaves service fees
     }
   }
   const mixed = await reached(book(t, 'ACH DEBIT 401K REMITTANCE FEE 2.00'));
-  assert.equal(mixed.ledger.expense_total_minor, null, 'unresolved components are never split');
+  assert.equal(mixed.ledger.expense_total_minor, 12912, 'full observed amount retained without inferring components');
+  assert.match(mixed.answer, /components have not been split/);
   assert.equal(mixed.ledger.reason, 'own_movement_mixed_components');
   for (const [description, payee] of [['ACH DEBIT PLAN UNIT 401K REMITTANCE', 'Plan Unit'],
     ['ACH DEBIT 401K ADMIN FEE', 'Plan Unit'], ['ACH DEBIT 401K REMITTANCE SERVICES', null]]) {
@@ -125,12 +128,15 @@ test('ambiguous wire identity retains the money-out counterpart decision', async
   f.add('other-in', 'Incoming credit', null, { cents: 12345 });
   f.raw("UPDATE fin_transactions SET account_slug='reserve' WHERE txn_uid='other-in'");
   const b = await reached(f, moneyOut);
-  assert.equal(b.ledger.expense_total_minor, null, 'an unproved matching deposit withholds money out');
+  assert.equal(b.ledger.expense_total_minor, 12912, 'ordinary 567 plus unproved outgoing 12345');
+  assert.match(b.answer, /ending 5678.*up to \$123\.45 may be counted twice/s);
   assert.equal(b.ledger.complete, false);
-  assert.equal(b.ledger.reason, 'money_out_destination_unconfirmed');
+  assert.equal(b.ledger.payment_ambiguity, true);
   assert.equal(b.ledger.possible_transfers.length, 1, 'ambiguous identity stays a generic transfer candidate');
   assert.equal(b.ledger.possible_transfers[0].destination, undefined, 'no owned destination is invented');
-  assert.equal((await reached(f)).ledger.expense_total_minor, null, 'spending identity remains withheld');
+  const spent = await reached(f);
+  assert.equal(spent.ledger.expense_total_minor, 12912, 'unresolved spending identity keeps the observed debit');
+  assert.match(spent.answer, /up to \$123\.45 may be a transfer to your own account/);
 });
 
 test('monthly category conflicts retain the ambiguous destination without inventing an owned role', async t => {
@@ -179,7 +185,7 @@ test('non-unique owned payee locators withhold instead of becoming outside evide
     }
     const b = await reached(f);
     assert.equal(b.ledger.complete, false, mode + ': owned ambiguity cannot certify outside spending');
-    assert.equal(b.ledger.expense_total_minor, category ? 12912 : null);
+    assert.equal(b.ledger.expense_total_minor, 12912);
     assert.equal(b.ledger.reason, category ? 'own_movement_category_conflict' : 'own_movement_identity_unconfirmed');
     assert.ok(b.citations.some(c => c.amount_minor === 12345), 'ambiguous posting remains visible');
     if (category) assert.equal(b.ledger.own_movement_conflicts[0].identity_unconfirmed, true);
@@ -197,8 +203,9 @@ test('non-unique owned payee locators withhold instead of becoming outside evide
     f.add('matching-in', 'Incoming credit', null, { cents: 12345 });
     f.raw("UPDATE fin_transactions SET account_slug='reserve-one' WHERE txn_uid='matching-in'");
     const counterpart = await reached(f, moneyOut);
-    assert.equal(counterpart.ledger.expense_total_minor, null, 'owned locator ambiguity retains the equal-amount counterpart hold');
-    assert.equal(counterpart.ledger.reason, 'money_out_destination_unconfirmed');
+    assert.equal(counterpart.ledger.expense_total_minor, 12912, 'owned locator ambiguity retains observed outflow with an equal-amount duplicate bound');
+    assert.match(counterpart.answer, /up to \$123\.45 may be counted twice/);
+    assert.equal(counterpart.ledger.payment_ambiguity, true);
     assert.ok(Array.isArray(counterpart.ledger.possible_payments), 'withheld possible-payment receipt list remains present');
     const withheld = counterpart.ledger.possible_payments.find(row => row.amount_minor === 12345);
     assert.ok(withheld, 'the withheld posting retains its receipt');

@@ -5,6 +5,44 @@ The product code stays the same. Each install differs through its manifest,
 source selections, credentials, local resume state, and resources inside the
 owner's Cloudflare account.
 
+Expected-income settlement has three states: paid, not yet, and can't tell.
+Paid requires one exact payer deposit for the full expectation, available once,
+with clear period evidence and no competing evidence or coverage gaps. One
+deposit must identify one obligation; competing contracts or weekly dues within
+the same invoice month remain uncertain. Excluded inflows and refunds from the
+same payer are checked before allocation, preserving uncertainty and the upper
+forecast when they conflict with an ordinary deposit. Month-only invoice evidence
+cannot certify payment when that invoice month extends outside the requested
+window; an earlier weekly or one-time due may otherwise be mistaken for this one. Partial,
+multiple, oversized, prior-period, mixed invoice clauses, and memo amount or
+allocation annotations cannot certify full settlement. A memo without invoice
+wording must be a plain deposit description to support a new expectation;
+unclassified descriptions stay uncertain. No matching deposit with
+complete coverage is not yet; other uncertainty is can't tell. Each expectation
+includes a plain reason, also included in its ready-to-say line. Cash remains
+actual; uncertain overlap preserves the lower and upper likely estimates.
+
+Schema 62 adds `fin_expectations`: document-backed, initially unconfirmed USD
+contract proposals. These are durable metadata, included in current recovery
+exports without changing historical inventories. They never write transactions
+or balances. The `expected_income` tool joins confirmed expectations to deposits
+through the existing effective-account reader, keeps cash and likely remaining
+income separate, and returns partial figures with named gaps. It also reads a
+bounded three-month deposit history and lists evidenced monthly repeats as
+likely income separately, without duplicating exact-payer confirmed expectations.
+Possible payer-name overlap stays visible. Current cash and optional history
+have independent read budgets, so history overflow cannot discard current cash.
+Only dates attached to invoice wording establish a payment's invoice period;
+processing dates cannot override it. Unsupported invoice evidence remains
+uncertain even for a newly starting expectation; it cannot fall back to absent
+evidence and certify settlement. Ambiguous continuing-invoice
+settlement keeps an uncertain status and lower/upper estimates. Owner-confirmed
+notes count with their source date. Its bounded v1
+extractor uses existing keyword search and requires a complete explicit terms
+block and reliable document date; unsupported terms remain visible for review.
+Tool registration and an explicit owner confirmation surface are integration
+work, not implicit authority granted by extraction or by reading a forecast.
+
 ## Deployment model
 
 ```text
@@ -119,6 +157,34 @@ commit, and the fixed command entry points. A same-user machine compromise is
 outside the ceremony's proof claim.
 
 ## Install and upgrade lifecycle
+
+The private-package update parent takes the canonical lifecycle lease and
+captures, persists and verifies the current user's daily-task pause before npm
+runs. On Windows this includes historical daily bridge and separate accounting
+tasks through the normal update's full owned-task inventory. npm uses a separate private prefix, an empty user npmrc and an offline
+cache. Signed package rows must read back exactly before a same-volume rename
+replaces the CLI; the original runtime stays in the private staging directory.
+The child adopts the occupied lease and the saved original task snapshot.
+Its bounded outcome receipt records whether remote dispatch started. A failed
+install leaves the original CLI in place. A proved pre-dispatch child failure
+restores and hashes the entire original runtime before restoring the task's
+original enabled state. All pre-dispatch task restoration stays with the parent.
+Every captured scheduler must restore exactly before its transaction and fence
+can clear. A failed task restore retains original enabled intent for retry.
+The private staging directory also contains a saved executable recovery entry
+and a durable swap-phase journal, independent of the renamed package. A denied
+restore puts the verified candidate back when possible. After process loss,
+the saved entry reacquires the canonical lease and restores exact original
+bytes only with pre-dispatch authorization; it never clears scheduler recovery.
+Missing dispatch proof, possible remote changes or
+failed rollback keep recovery material and never authorize enabling imports.
+The release workflow separately requires an approved Ed25519 offer public key
+and a matching approved signature over the synthetic fixture. Either missing
+proof holds publication; a generated test key cannot establish trust. Public
+metadata authoring has no key handling, and the stdin-only signer is the only
+signing path. The child updater receives an explicit environment allowlist
+separate from npm's installation environment. Windows directory sharing locks
+have bounded retries only while the source remains and the destination is absent.
 
 `brain setup` is intentionally ordered:
 
@@ -320,6 +386,90 @@ held count as partial with no successful refresh.
 Other source cursors and removal approval boundaries retain their existing
 rules.
 
+Gmail uses durable identity windows for incremental history and bootstrap.
+One invocation reads one provider page and at most 1,000 history identities
+plus 100 durable retries. History transport stops at 256 KiB before parsing;
+larger responses enter checkpointed mailbox recovery. Bounded oversized
+records use a digest-fenced page offset;
+provider continuation tokens stay in private state, and the mailbox marker
+stays before unread work. Accepted batches atomically checkpoint their suffix.
+The runner verifies stored identities only in groups of 97 with `require_index`;
+an older Worker or unfinished projection cannot widen this read or use the
+legacy documents scan. Scanner/policy recovery first walks mailbox pages,
+then walks stored families in separately checkpointed indexed 1,000-family
+pages, classifying omitted old items without inferring deletion from absence.
+
+Inventory preparation saves a fair offset in the fenced window, retaining no
+presence or absence evidence across runs. It spends at most one third of the
+remaining daily budget admitting indexed groups, with each request/retry also
+bounded by the overall deadline. Only freshly checked identities enter message
+work or absence-based bookkeeping. Unvisited work remains in the window.
+Missing policy/date evidence, item permission failures and preparation failures
+retain the exact identity and visible reason in the durable fair retry queue;
+they preserve prior copies and allow healthy siblings and later history through.
+Account, auth and transport failures still stop the run. Pending retries keep
+coverage incomplete and prevent scanner certification of retained old content.
+
+The daily consumer drains at most 32 Gmail windows under its runtime budget.
+One ordered per-message boundary observes metadata, policy, download,
+extraction, admission, split preparation, send, retry and family settlement.
+Read-only acquisition still overlaps up to eight messages. Each logical
+message flushes its own bounded parts and saves accepted state before the next
+deadline check, so later slow reads cannot discard an unsent healthy prefix.
+Each validated accepted part also saves an exact message/revision/index/content
+hash receipt in private `gmail_part_progress` state before another dispatch or
+finalization retry wait. Restart regenerates and scans the logical message,
+then reuses only matching receipts whose exact content hash and complete active
+chunk range read back from current D1. The owner-only `ingest-part-proof` route
+reads at most 50 exact identities per snapshot, with the schema-52 database
+instance, generation and random fork nonce. A restored or imported database
+cannot inherit local acceptance from family presence or equal counters. Missing
+parts are resent; intact parts are reused after fresh proof. A changed revision
+restarts that message alone. Logical acceptance, cursor settlement and
+obsolete-family review require a final current readback of every part, including
+zero-send settlement. This bounded finalization finishes the in-flight write
+before the next admission deadline. Complete Gmail and Drive version receipts
+retain private part proofs and revalidate them before an unchanged shortcut.
+Both connectors audit the entire private accepted-version map, including entries
+behind saved window/page offsets and entries absent from the current provider
+feed. The shared bounded recheck binds its continuation to the current database
+instance, mutation generation, random nonce, policy and exact acceptance map.
+Marker or acceptance-set drift restarts from the earliest unconfirmed entry.
+An unfinished recheck keeps coverage incomplete; a missing part atomically
+invalidates acceptance and saves an exact retry identity before cursor work.
+Gmail re-enrolls affected saved-window entries in original order. Drive retains
+a separate recovery queue through page advancement and quiet later feeds.
+Legacy page prefixes without exact proof rewind to their first unconfirmed file.
+Legacy receipts without exact proof replay through the normal writer. Missing active chunks
+prevent that writer from returning an unchanged no-op.
+With capacity for P accepted parts per invocation, N unchanged parts settle in
+at most `ceil(N/P)+1` runs, allowing one initial zero-progress interruption.
+This bound assumes successful receipts and enough budget for preparation and
+P sends. Lost responses or local durable-write failure retain uncertainty and
+may require idempotent transport replay; they are not acceptance proof.
+Ordinary entry failures save a visible reason, failure class and record version
+with the exact retry identity. Account, authentication, transport, lease and
+durable-state failures stop the run. Policy-read prefixes and resolved skips
+checkpoint; a deadline flushes any buffered resolved outcomes. Failed
+retry identities rotate behind unvisited work. Deferred work
+resumes on the next scheduled daily run. No automatic removal is authorized
+by load or daily. Daily records removals as durable owner decisions while
+continuing additions; exact preview and separately approved apply remain
+available. Pending decisions, retries and unread history keep source coverage
+incomplete. Single-part replacements issue no reconciliation. Split families
+retain protected current parts and bounded owner reviews. See
+`docs/gmail-bounded-rollout.md` for backup, readback and rollback ordering.
+
+Partial indexed inventory can add or confirm an owner decision. It clears an
+absence-based decision, accepted marker or reconstructed skip only when that
+exact identity was checked in the current invocation and proved absent.
+Unvisited decisions survive both history advancement and subsequent prefixes.
+The fault sweep and checkpoint deadline sweep are in
+`test/gmail-entry-sweep.test.mjs`; both have positive and global-stop controls.
+`test/gmail-part-resume.test.mjs` exhausts every recurring prefix capacity for
+N=1 through 50, including an initial deadline before the first send, and tests
+the real daily/load runner with default three-part geometry and finite budgets.
+
 Local OCR planning stops before the mutating half of this lifecycle. `brain
 ocr-preflight <manifest> --path <folder> --json` runs the same link-refusing
 walker and PDF extraction boundary with an explicit null OCR callback. The PDF
@@ -440,9 +590,12 @@ receipts keep a redacted reason for audit without storing the refused content.
 
 Local and remote state is saved adjacent to the manifest as
 `.brain-ingest-<source>.json`. Content hashes and source versions make reruns
-resumable. A failure stays retryable. Drive policy changes and periodic full
-sweeps compare source truth with stored families so excluded, deleted, moved,
-or no-longer-accessible files can be removed safely.
+resumable. A failure stays retryable. Drive defaults to bounded add/update-only
+change-feed ingestion. With no saved token, the first run seeds a token without
+walking or changing existing indexed documents. Existing tokens survive policy
+changes, old full-sweep dates, reset, and errors. An expired token stops visibly;
+it never silently triggers a walk or reseed. `--full-walk-review --dry-run` explicitly
+opts into provider-only comparison. Mutating full walks are refused.
 For Gmail, a recoverable Worker part failure adds the exact logical message to
 the private `gmail_retry` map before the history cursor can advance. The source
 receipt stays failed, and the next incremental run retries that map even if the
@@ -530,8 +683,8 @@ guidance to send fewer or smaller documents; it never discovers that ceiling
 after creating partial pending revisions.
 
 Every chunk delete, chunk write, outbox write, and final commit is conditional
-on still owning the exact marker. The compare-and-swap and one derived
-statistics refresh commit together per touched source, followed by exact
+on still owning the exact marker. The compare-and-swap and one candidate-bound
+freshness update commit together per touched source, followed by exact
 readback. The refresh derives freshness only from markers that still belong to
 that transaction, so an all-stale finalizer leaves counts and `last_ingest_at`
 unchanged. The same atomic rule covers ordinary one-document ingest. A final
@@ -546,7 +699,7 @@ The batch's `corpus_stats` upsert is proved the same way, from its own returned
 row, but it owns no document and so condemns none: its candidate join carries
 exactly the CAS predicates and runs first in the transaction, so a legitimate
 miss already fails each document's own proof, and what is left when its proof
-fails is freshness bookkeeping that the next ingest recomputes.
+fails is freshness bookkeeping; source-wide counts are left to the bounded report.
 Repeated identities in one request deliberately use the
 original sequential path because revision order is part of their correctness
 contract.
@@ -558,21 +711,20 @@ or a separately approved plan removes those exact members. Source deletions and
 replacement cleanup enter the same boundary. A nonempty plan always stops before
 removal and cursor advancement; accepted additions and updates remain durable.
 
-The shared load orchestrator may explicitly apply a saved Calendar or Gmail
-plan containing only explicit provider deletions, bounded by both 25 physical targets and
-1% of its authenticated stored source inventory. All aggregate reason counts
-must match, with no policy, skip, replacement or additional approval. It calls
-the existing exact-fingerprint executor and requires the removed count and
-successful readback before one source replay can advance the cursor. No other
-connector qualifies. A failed apply/readback retains the review and records
-`waiting_for_owner`; daily receipts and local status retain aggregate counts,
-reasons, the apply command and the readback outcome without target identities.
+The shared load orchestrator keeps automatic removal disabled for every source,
+including explicit Calendar and Gmail provider deletions. Removal evidence creates
+an owner decision; it does not authorize apply. The separately approved exact-
+fingerprint executor requires the removed count and successful readback before
+a source replay can settle its removal checkpoint. A failed apply/readback retains
+the review and records `waiting_for_owner`; daily receipts and local status retain
+aggregate counts, reasons, the apply command and the readback outcome without
+target identities.
 
 Each adapter supplies a per-item removal cause from a closed set:
 `explicit_deletion`, `window_exit`, `scope_or_filter_change`, `blank_or_quality`,
 `permission_or_visibility`, or `unknown`. Both source and exact-plan fingerprints
 cover these causes. Authenticated previews bind each physical family member to
-its cause; automatic apply rechecks the saved causes at every mutation boundary.
+its cause; approved apply rechecks the saved causes at every mutation boundary.
 Missing or legacy evidence stays held. Gmail filtered-list absence is unknown,
 including after history expiry. Microsoft window exits and blank events retain
 their distinct causes and remain outside automatic apply. Owner review text
@@ -643,14 +795,91 @@ exclusion and extraction pipeline. A root-only selection may have an empty
 root list. The canonical My Drive root is retained as a nameless folder-index
 entry so loose files keep null folder metadata and remain in scope during
 absence classification. Unselected child folders never enter that index.
-Changing the option changes the policy fingerprint and forces a full sweep.
-The existing removal-plan builder receives only the classified candidates;
-null `top_folder` alone is never proof of membership or permission to remove.
+The default runner rechecks current file metadata and ancestors before reading
+content. It never inventories the corpus or invokes removal planning. Removed, trashed,
+out-of-scope, policy-excluded, and changed-folder events become local owner
+decisions; they cannot block additions. It persists each exact changes page and
+its settled offset before requesting the next token. Defaults are 50 events per
+page, two pages or 100 events per run, and a 60-second admission budget. An
+in-flight extraction/request finishes under its existing timeout; the budget
+stops admission of the next file. Existing batch byte and statement limits apply.
+Unknown current-page transport failure retains that exact page and position.
+Per-document retries and deterministic skips,
+including the 8 MiB ceiling, remain in a durable per-file failure map even after
+page settlement. Recognized file-specific ancestor denials and the 100-ancestor
+depth limit are unresolved scope skips; no bytes are read without proved scope.
+Auth/account errors and unknown transport keep the page for retry. Cycles and
+malformed per-file metadata are visible retryable gaps. Ordinary runs fairly
+retry these gaps and family holds; `--reset` also admits permanent held skips,
+up to ten identities using a durable cursor
+saved before each attempt, without erasing holds, resetting accepted versions or
+replacing the saved token. Retry admission reserves one feed slot when the file
+budget exceeds one; at one, checkpointed turns alternate retries and the feed.
+A held-item retry failure remains durable and incomplete while unrelated feed
+work continues. Before retry admission, a pending feed turn is saved; if recovery
+exhausts the time budget or is interrupted, the next run starts with the feed.
+The same entry boundary handles current-page and held work, including typed
+OCR pending-page retries. A failed current item also saves a feed turn so a slow
+PDF cannot own the saved-page suffix on every restart. Family readback errors
+flow through that boundary; no helper hides authentication or ownership loss.
+Auth/account failures, OCR system errors, unconfirmed batch transport/receipts,
+source-lock loss and checkpoint errors remain run-wide. Offset/token save failure
+restores the replay boundary before later diagnostic saves. The CLI reports
+outstanding retry gaps to its scheduler after independent bounded work finishes.
+Current-page transport failures retain their own unsettled position.
+`--status` reports local token-check time,
+file counts, pending decisions, and exact failed file/reason without credentials
+or network. Incremental completion never proves historical backfill or Vectorize
+drain completion. Folder moves require descendant review because Drive emits no
+change for every descendant. Split-family replacement cleanup remains pending
+owner review; this runner never deletes obsolete physical documents. A same-identity
+single-part update completes after an owner-only `POST /api/admin/brain/drive-family`
+readback proves the exact live base and absence of a part candidate. One snapshot
+uses a base PK lookup and a part-range seek, each limited to one row; it never
+expands a family. Old false family holds are retried in bounded rotating slices
+on quiet runs, checked against their exact local accepted plan, and cleared only
+with that proof. Missing readback, ambiguous parts or real obsolete parts keep
+the hold visible. Pending
+decisions keep coverage partial without holding the change-feed cursor or
+stopping additions. Existing scanner migration proof is never replaced by a
+claim that the incremental window rechecked the entire old corpus.
+
+The incremental producer requires the authenticated schema-65 retained-revision
+capability before its first receipt or document write. `retained-ingest.js`
+checkpoints both representations, then activates one complete document in a
+single transaction. Packed statements read at most 48 incoming chunks; a prior
+snapshot and exact validation admit at most 512 chunks. A larger legacy document
+is checkpointed as a skipped item for explicit recovery without changing its
+accepted text or holding later feed changes. The closed admission code, safe
+reason, retry class, source version and failed-part identities survive restart.
+Known admission codes retain their matching retry flags. Mixed transient failures
+and unknown per-part codes save a retryable gap while later feed entries advance;
+unconfirmed batch transport or malformed receipts retain the page. Source status and receipts
+stay incomplete until held skips are resolved, even on a later quiet check. No corpus
+backfill runs in migration 0065. Superseded snapshots and abandoned stages stay
+in the recovery export. Shortened physical tails stay in D1 but are excluded
+by the active-range predicate in keyword, semantic hydration and document reads.
+The active range is writer-owned, never accepted from producer metadata.
+Source finalization uses candidate PK lookups for freshness only. Schema 65
+maintains the existing physical corpus counters through transactional row
+triggers; it preserves the prior schema-34/writer baseline without a new scan. Completion
+receipts never recount documents or families: their totals are explicitly
+unmeasured, and the prior registry count stays a non-authoritative cache.
+Measured accepted-work, certified quiet checks and history completeness remain
+separate evidence. Invalid existing checkpoints cannot silently seed a cursor.
+Mutating `--full-walk-review` is rejected before credentials or database work.
+Only its `--dry-run` provider preview remains available.
+Exact identity-filtered source-family inventory requires its completed index;
+it returns a visible 503 while backfill is unfinished instead of widening to a
+corpus scan. Destructive rollback uses `operations/rollback-cutover.mjs` to
+require two observed quiet writer readings before restoring D1. Unknown idle
+retains the pause and starts no restore. The backup-first apply and recovery
+procedure is [Drive incremental recovery](drive-incremental-recovery.md).
 
 | Source | Current path |
 |---|---|
 | Local folders, including an Obsidian vault | Built through `--path`; Obsidian is file ingest, not a separate connector |
-| Google Drive | Built, resumable, incremental, deletion-aware, and schedulable on macOS |
+| Google Drive | Built, bounded incremental add/update-only, owner removal decisions, schedulable on macOS; new runner awaits field proof |
 | Gmail | Built with cursor safety; full real-account production validation remains a field gate |
 | Google Calendar | Built and wired through `brain ingest --from calendar`; row and receipt namespaces match, and event failure, refusal, or pending cancellation cleanup withholds the Google sync token; real-account validation remains a field gate |
 | Local watched folder | Built through the ordinary resumable folder ingest path and schedulable on macOS; multi-cycle field proof remains open |
@@ -751,6 +980,21 @@ written. The same D1 transaction that stores chunk state queues a vector-outbox
 operation. The Worker's cron, or `brain drain`, embeds queued text with the
 declared Cloudflare Workers AI model and applies vector upserts or deletes.
 Failed work remains queued.
+
+Database rollback first deploys the upgrade pause plus a verified
+`VECTOR_ROLLBACK_FENCE=1` binding. This additionally closes bootstrap, including
+its paused-drain override. Two complete D1 observations must show a null lease,
+an empty outbox, no ambiguous receipt failures or unconfirmed bootstrap batches,
+and a verified projection. Each observation also checks the exact global
+mutation against the provider's processed watermark. Unknown evidence leaves
+the Worker paused with zero restores. Ordering probes durably invalidate a
+verified projection before submission because they have no outbox row. Their
+private unknown-submission marker persists before the provider call and is
+replaced only by its exact accepted receipt. A later drain or timestamp cannot
+recertify the prior watermark after receipt loss; supervised clean-index
+recovery is required. The
+post-restore clean-index rebuild and post-backup write accounting remain
+separate owner-approved recovery steps.
 
 `queued_at` measures backlog age and may legitimately repeat within one
 millisecond. It is not a revision identity. D1 assigns every enqueue a strictly
@@ -880,16 +1124,57 @@ Anthropic key refuses configured Claude answer and check calls without a Workers
 the authenticated documents receipt reports `anthropic_key_missing: true` for
 `brain health`.
 
-Think first offers unrestricted owner money questions to a read-only ledger
-path. `ledger-question.js` recognizes current balances, exact-cent deposits and
+The owner MCP money path reads `brain_money_guide` and then `brain_money_query`
+instead of relaying the older question engine's figure. The request-local clean
+SQL snapshot freezes the rows, classification evidence, account coverage and
+pending amounts used for the result and its deterministic confidence rubric.
+Coverage exposes its basis state so a proposed complete interval cannot look
+confirmed. No schema or durable view is added. The guide preserves observed
+figures during empty-data and large-history fallback paths and requires the
+five ordered answer lines plus the tool-derived confidence line. The owner MCP answer contract
+uses High at 90-100%, Medium at 70-89%, Low below 70%; the assistant may lower
+the score and must name the reason and missing evidence below 100%.
+The raw and metadata SQL paths explicitly score the absence of clean membership
+and coverage evidence instead of promoting a successful SELECT to certainty.
+
+Money questions reaching remote `ask` or local `brain_think` receive a short hand-off to `brain_money_overview`, then
+`brain_money_guide` and `brain_money_query`. The shared `money-handoff.js` boundary runs before the
+legacy question reader, model extraction, or account reads. Questions such as
+"What is in each account?", ordinary movement wording such as "came in and
+went out", and recorded tax spending, payments or refunds take this path.
+Missing observations on another account do not prevent the assistant from
+querying a known balance and disclosing the missing account separately.
+Exact tax-return facts retain their entity, year and form
+guards. Document requests, including ordinary request prefixes, policies,
+definitions and nonfinancial time savings keep their retrieval path. Asking
+for supporting receipts does not turn a spending calculation into a document
+request. The requested object decides this distinction: "Show the loan
+agreement with payment terms" still retrieves the agreement.
+The shared answer instructions lead with amount and period, include account
+last four digits and covered dates, explain missing or possibly double-counted
+money with its dollar impact or unknown impact, label and explain estimates,
+and give a concrete check step. The hand-off grants no additional access.
+Local default and limited profiles receive an explicit transition to a separate
+owner-approved `owner-assistant` registration, with available document evidence
+in the meantime. Their hand-off and metadata do not direct calls to unlisted
+money tools. Only the authorized owner profile receives immediate guide/query
+instructions; tool-list filtering and direct-call authorization stay intact.
+
+The retained legacy reader and its direct compatibility tests use
+`ledger-question.js` for balances and posted activity and `ledger-answer.js`
+for stored-amount formatting. Its behavior is described below.
+
+The retained legacy compatibility reader supports owner money questions
+through a read-only ledger path. `ledger-question.js` recognizes current balances, exact-cent deposits and
 account inflow/outflow periods, largest expenses/deposits, merchant/category
 totals, recent deposits, recurring charges and own-account transfers;
 `ledger-answer.js` formats the stored amounts without an answer model.
 Each composite operand uses the same ordinary-expense membership as its
 single-period reader. A directed movement memo copied into payee, or a generic
 card-payment channel label, cannot veto exact owned-account endpoint evidence.
-Bare card or loan payment labels without a confirmed payment code or owned
-endpoint withhold each broad component instead of certifying an exclusion.
+Bare card or loan payment labels without a proved owned endpoint withhold each
+broad component instead of certifying an exclusion. The clean SQL view keeps
+unproved outgoing candidates in spending with explicit uncertainty columns.
 Unresolved card-payment endpoints withhold certified spending and income and
 are disclosed as possible own movements. Gross recorded credits retain their
 separate raw-activity meaning; outside inflow subtracts proved reciprocal pairs.
@@ -957,6 +1242,81 @@ through the same three-day window. Pending reads suppress a hold only when a
 live posted row links its provider identity in the same account and tenant;
 amount/date similarity without linkage never suppresses it.
 
+`brain_money_overview` shares the money tools' authorization and clean-view
+reader. It returns account coverage, twelve monthly currency-separated totals,
+the owner's local calendar date and plain coverage text before a money answer.
+A fixed private-state projection returns only a per-account connection boolean;
+it does not widen the public SQL table allowlist. Connection status is not sync
+freshness. Coverage gaps require confirmed coverage evidence, and row dates
+remain observations. Unknown time zones use an explicit UTC fallback. Scan or
+output limits and read failures produce an explicitly partial overview, retaining
+the calendar and each independent read that completed. Unread totals and account
+fields are unknown, never zero or certified coverage. A fixed private projection
+applies the existing account-kind review helper and exposes only the effective
+kind, provider kind, role, review state and conflict flag; private review records
+remain outside caller SQL. Both MCP surfaces use a fixed body-free fallback when
+the overview transport fails: do not repeat the empty request, read the guide,
+continue with permitted evidence and keep bounded raw investigations scoped.
+Unavailable calendar evidence is disclosed rather than inferred.
+
+Money-query balance SQL freezes observations, effective owner-reviewed account kinds, statements
+and their posted rows and coverage in one bounded read before computing file-only corrections.
+An independently recorded opening balance must prove the complete closing identity
+or the unique earliest-row running-balance defect. A parsed row count proves only
+membership, never full-period activity. Replacing a legacy closing or interpreting
+its liability sign additionally requires independently owner-confirmed complete
+coverage for that account, source document and entire statement period, without
+borrowed-account coverage or an import-generated completeness claim. An exact
+latest closing source cell is retained when arithmetic conflicts, below High with
+the missing activity proof named. Liability signs additionally
+need signed charge/payment evidence and an unambiguous balance identity. Corrections
+change only request-local projections and are disclosed in balance confidence;
+feeds and stored records are unchanged. The historical file writer discarded opening
+balances even when the source supplied them. Those imports retain their recorded
+figures below High, naming the missing opening or sign evidence. Arithmetic failures
+and bounds also retain readable figures below High. Historical observations cannot
+borrow a later feed's confidence or suppress a correction disclosure, including
+after a confirmed zero on a closed account. Imported history with an unresolved gap
+or a read-time correction caps balance confidence at 80%, even for an exact-date
+selection. Same-date observations and timestamp ties never clear the gap. A
+read-time correction also stays below High when it is the latest observation,
+with the independent closing-statement check still needed. Reconciled unchanged
+imports and provider-only controls retain their existing confidence.
+The coarse import ceiling runs before closed-account exclusion and examines
+counted and excluded accounts alike, regardless of account declarations or
+observation timestamp ties. Any imported observation without a stored opening
+balance also stays at 80% or lower, including exact source cells and signed
+positions. Each affected account names its reason and missing statement evidence;
+returned figures and correction arithmetic do not change.
+Signed imported positions also require agreement with the stored current field
+and exact statement closing in the account's sign convention. A retained opening
+does not clear disagreement. Current and historical conflicts cap confidence at
+80% before lifecycle exclusions, with each conflicting figure disclosed.
+
+Money queries read row, account, account-review, approved-link and pair evidence
+in one bounded SQLite snapshot. The pure membership classifier in
+`ledger-analysis.js` serves both product analysis and the clean `txn` view.
+The final read-only SQL runs over request-local JSON CTEs frozen from that
+snapshot, so concurrent sync cannot combine fresh amounts with old decisions.
+Each frozen JSON array is at most 900,000 UTF-8 bytes and holds whole records;
+UNION ALL reads them without rebuilding an oversized SQLite value. Snapshot
+objects use at most 30 function arguments. Transfer ambiguity flags are grouped
+once by endpoint before joining transactions, preserving ambiguous rows without
+repeated scans of every candidate pair.
+Unknown classifications retain the existing counting defaults with an explicit
+estimate flag; the guide requires disclosure, never a refusal or hidden row.
+Money SQL supports indexed calendar windows with a six-day pairing margin,
+while whole-history feed edges preserve precedence. Caller plans and trusted
+pairing have fan-out guards; timeout starts a 40-second cool-down because D1
+statements cannot be cancelled here. Frozen classification decisions are bound
+beside their own rows, avoiding a quadratic JSON-backed membership join.
+Document SQL metadata follows the same live/custom-API visibility policy as
+fetch and exposes only safe source status columns. Remote connector consent
+discloses read-only bank/card access; the direct SQL route remains owner-only.
+Local and remote MCP retain the same bounded reviewed money repair messages.
+Returned rows also have a 1,000,000-character output budget with an explicit
+truncation reason; D1 builds results before this Worker output check.
+
 Money answers leave qualifying own
 moves out of the lead figures when both accounts are connected checking,
 savings or card accounts in scope and reciprocal directed references resolve
@@ -966,9 +1326,10 @@ an exact directed outgoing reference plus an unconflicted "PAYMENT THANK YOU"
 acknowledgement. Each leg affects only its own period. The
 note offers "including transfers". A counterpart outside the question stays
 counted unless "excluding transfers" is requested. Loan and card payments use
-the shared `loanCardPaymentKind` rule: a bank payment category or an exactly
-identified owned liability excludes the row from spending and income aggregates. A bank
-payment code does not require a connected counterparty. Receiving liability
+the shared `loanCardPaymentKind` rule: outgoing exclusions require an exactly
+identified owned liability or a proved pair. A bank payment category alone
+nominates uncertainty, never proof of an owned destination. An exact owned
+endpoint does not require a reciprocal posting. Receiving liability
 legs are not income. Answers disclose the payments separately; transfer flags
 do not restore them. An explicit net request including transfers may additionally
 show cited gross posted activity, labeled as neither spending nor income, while
@@ -981,7 +1342,7 @@ postings with dates, account endings and citations. Additional postings have a
 cited count and remainder amount. Only an exact owned endpoint supports the
 label "payment to your own loan" and its destination ending. Every ranking list and conditional account total
 also excludes these payments. A matching institution label alone cannot prove
-repayment: without a bank payment code, account identity requires a unique mask
+repayment: destination identity requires a unique mask
 or an exact stored label on an owner-reviewed liability, including linked account
 members. Explicit bank expense categories, including fees, purchases and services,
 veto identity-based exclusions. Monthly composition carries
@@ -1093,7 +1454,7 @@ The recognized-payee and unresolved-component readers share `isOwnedMovementChan
 in `ledger-analysis.js`. It accepts only payment, card payment, credit card
 payment, loan payment or transfer, with at most one of those channel prefixes
 after normal text normalization. Unconfirmed ownership withholds the component
-and discloses a possible own movement. Bare typed liability channels without a payment code or
+and discloses a possible own movement. Bare typed liability channels without an
 exact owned endpoint also withhold; a prefix cannot change either decision.
 Unqualified payment and transfer channels keep the advisory policy unless an
 exact endpoint matches the disclosure-only unresolved-ownership inventory.
@@ -1901,3 +2262,739 @@ remain not observable until a richer read-only snapshot exists.
 | Change scheduling | `operations/drive-scheduler.mjs` and its connector specs (`imessage-scheduler.mjs`, `folder-scheduler.mjs`), launchd tests, freshness expectations, private log and lock behavior |
 | Add an issue category | Support schema, typed classification, privacy tests, error-path test, troubleshooting remedy |
 | Cut a release | Package and lock versions, template version, current-version test, changelog, pack inspection, six CI jobs, release tag |
+
+## Clean money quality
+
+`money-platform.js` owns normalized platform identity and the clean platform
+transaction grammar. SQL consumes that identity from frozen membership rather
+than maintaining a second public attribution rule. Provider detailed categories
+take precedence over primary categories when available; adapters persist that
+choice in the ledger category. Inferred returns and reserves remain estimated.
+Reserve releases consume only earlier excluded same-entity, currency and
+platform holds; unmatched bank releases stay counted and flagged.
+
+`clean-money-transfers.js` refines clean snapshot pairs before membership and
+freezing. It preserves independent outside-party and expense vetoes, recognizes
+reciprocal account locators, and separates proved merchant sweeps from likely
+sales-covered payouts. An unmatched endpoint cannot certify an own transfer.
+Partial reads cannot acquire new pair proof. Every likely exclusion keeps its
+directional dollars and missing counterpart evidence in the confidence result.
+
+Request-local duplicate decisions preserve source provenance. Same-mask records
+within three days and distinct-source imports in one account are review signals;
+only dense mirrors with unique daily postings may exclude likely copies. Owner
+links retain exact identity authority. Suspected history holes and undelivered
+Plaid history lower confidence without inventing missing transactions. One shared
+pending projection supplies period margins, settled-twin exclusions and separate
+stale holds; a provider that does not collect pending cannot prove zero pending.
+Signed income and per-side bank cash flow consume explicit contribution columns,
+including reversal payer attribution and proved cross-side transfers.
+
+`money-query-median.js` converts scalar money-column medians to ranked-window SQL
+before validation, independent of SQLite's optional percentile extension. The
+rewritten statement goes through the existing read-target and work/input guards;
+unsupported median shapes retain a partial response with a stated calculation
+limit and Low (0%) confidence. NULL populations do not become zero amounts.
+Selection quality shares `moneyAccountStart` with the main confidence rubric.
+Only a private account-history/sync projection whose financial snapshot matches
+the amount snapshot may narrow the expected lifetime or establish sync freshness.
+
+Clean readings additionally distinguish coded loan proceeds, liability rewards,
+processor sweeps, purchase returns and customer-refund principal. Separate
+payment fees stay expenses. Every liability credit stays out of income even
+when its memo says bonus, interest or cashback. Unproved merchant-payment or
+loan-proceeds wording stays counted with an `estimate_reason`.
+The query response computes deterministic confidence from that same frozen
+membership and coverage evidence, including excluded pending amounts. The
+score describes the whole available snapshot and carries explicit reasons and
+missing evidence whenever it is below 100%; it is not a completeness claim for
+an arbitrary SQL selection or unrecorded accounts.
+
+The guide's Profit recipe composes signed net income and net spending:
+sales adjustments reduce or restore sales, spending refunds and their reversals
+use their posting dates, and `interest_expense_minor` is the additive interest
+contribution. `interest_stated_minor` retains the source amount for inspection;
+it must not be summed as another expense. `clean-interest.js` reconciles one
+unique bank payment with an exact same-currency lender principal/interest group
+on one receipt date within three days. Recorded lender identity nominates the
+group; it does not prove repayment. A counted bank debit stays in full as
+provisional spending, with the possible overlapping interest dollars named and
+a lender-statement gap below High. A separate interest payment remains counted.
+Competing bank payments never consume a lender group twice and keep their
+figures with a quantified overlap warning pending reconciliation.
+
+Recognition of a return is not proof that its economic components were undone.
+After all contribution reconciliation, every matched original/return pair is
+checked across signed contribution fields. An unnegated component retains the
+figure at a maximum 89% confidence, naming the exact disputed dollars and the
+missing statement reconciliation. The consumed original remains private scoring
+evidence; it is not a public SQL column. Cross-period selection cannot bypass
+this check, and a fully negated repayment retains its existing confidence.
+
+Signed estimated contributions stay in the likely columns. Refundable deposit
+memo/category evidence nominates principal, never proves an operating expense
+or merchant refund. The available cash figure remains, below High, with exact
+disputed dollars and missing deposit terms, ledger and original posting. A net
+cash total that includes a deposit recovery remains distinct from operating
+profit. Third-party funds or payable signals retain the cash debit as an
+estimated expense until the beneficiary ledger reconciles it; a payee name alone
+supplies no transaction-type evidence. No deposit exclusion or statement split
+is invented from wording.
+
+Beneficiary proceeds in memo/category evidence receive the same unresolved
+expense treatment as entrusted funds. An invoice subject containing return
+words, or a memo negating a refund, retains its provisional figure below High
+with exact affected dollars and the missing invoice/payment or issuer credit
+records. Wording alone does not prove a replacement transaction type.
+`clean-money-evidence.js` applies the type-evidence requirement after all signed
+contribution reconciliation. A sale, refund, recovery or reversal supported only
+by description wording keeps its figure with estimated membership. Compatible
+confirmed transaction categories, a uniquely matched original, or a proved
+processor/account role supply independent evidence; a checking account alone
+does not prove seller-side recovery. The private wording-evidence flag requires
+a below-High ceiling and exact affected dollars plus missing source records in
+query confidence, even when an older estimate reason already exists. This also
+lowers older memo-only refund controls that previously assumed certainty.
+Buyer dispute recoveries on liability accounts offset spending rather than
+sales. Separate lender interest receipts contribute to paid and credited totals;
+the existing lender-group reconciliation removes their paid contribution when
+a recorded bank payment already supplies the total. Interest expense remains a
+separate, reconciled contribution.
+
+Closed, confirmed, uncategorized card cash-advance postings represent borrowed
+principal rather than purchase spending. This rule requires the complete
+transaction type and no independent outside payee; bank debits, open merchant
+descriptors and categorized or unconfirmed rows retain their earlier treatment.
+The principal stays visible with estimated membership, its exact dollars and
+the missing cash ledger/receipts. Separately posted fees remain spending.
+Combined transfer/payment fees retain their provisional figure at at most 65%
+until the confirmation and both statements reconcile the principal/fee split.
+
+Offset-bearing SQL and recoverable window bounds are converted into posting
+days in the request's validated owner time zone before repair. Equivalent UTC
+and owner-offset month endpoints therefore share the same selected days,
+including positive offsets and daylight-saving transitions. A timestamp repair
+still carries an adjustment caveat and cannot earn High from the repair alone.
+
+## Bank operational freshness (schema 63, offline candidate)
+
+`bank_feed_health` holds credential-free connection health beside the provider
+state. The Plaid success receipt commits inside the existing sync lease and
+promotion transaction. SimpleFIN success requires the exact current published
+revision, complete account listings and active custody at the health write.
+Provider attempts and sanitized error meanings are recorded independently of
+transaction counts. A zero-transaction complete window is a successful check;
+a partial response or an old staged snapshot is not. Legacy SimpleFIN pull
+timestamps do not seed successful current health because they also advanced
+on partial reads. Legacy Plaid health is seeded only from settled complete
+history receipts. Recovery exports and restores the table with the ledger it
+describes. `sources` restores before `bank_feed_items`, so the bank_activity
+freshness triggers do not fire during a restore; schema-62 and older recovery
+inventories are unchanged.
+
+Schema 63 makes unobserved SimpleFIN connections due immediately instead of
+waiting for their legacy next-pull time. Without a health row, owner status says
+it is waiting for the first complete sync, regardless of the connection's age.
+Daily selection also admits a missing attempt timestamp, while recorded errors
+retain their retry timing. Migration replay preserves timing once health has
+been observed. Money confidence still names missing current-sync evidence until
+a complete provider pull proves it; waiting status does not certify freshness.
+
+SimpleFIN daily and timer wakes reserve at most one additional current request
+before a slice that owes history. It does not consume the three historical
+request slots, and all requests share the durable 24-request daily ceiling.
+Ordinary recovery slices preserve historical interval selection and their
+injected request bound. With no history debt, a current read needs no extra slot.
+
+Shipped successful Plaid syncs already rebook pending reconciliation at the
+configured interval, even without another webhook. The 24-hour selector fallback
+is defence in depth for an anomalous settled receipt, not an incident diagnosis.
+It does not bypass leases, revocation, pauses or retry due times. Daily refresh
+uses the same provider path and drains bounded slices, continuing other
+connections when one fails. A partial drain remains visible in the daily
+receipt. Login states stop automatic provider retries until owner recovery.
+
+Maintenance reconciles overdue, provider-error, partial-read and login exceptions
+even when no provider work is due. Success older than 48 hours, or pending work
+more than 12 hours past its due time, is overdue. The laptop daily refresh reads
+connection receipts and `/health` with its own clock before waking the bounded
+sync route. It detects a stall without any cron invocation and retains that
+warning if the wake fails. Upgrade pauses remain authoritative and are reported
+without a write. A final status read is required to claim daily success.
+Missing provider settings preserve the read-only inventory. An authenticated
+daily wake reconciles operational exceptions before provider configuration can
+reject the sync, without choosing a provider from stored names or identifiers.
+Active connections govern the bank source's daily expectation and
+oldest successful sync. Database triggers prevent derived bank document writes
+from advancing that clock. Source inventory exposes that measured bank sync as
+its successful-run receipt; daily rendering maps the corpus key to the actual
+source. Owner status exposes a safe health object and a plain connection line.
+Money SQL receives a read-only freshness projection from trusted code, without
+adding private connection tables to its SQL allowlist. Its computed confidence
+ceiling cannot suppress an available figure, including when the health read
+fails. Coverage of saved ledger accounts retains disconnected connections' sync
+receipts without restarting their feeds. The successful observation instant is
+converted to the owner's calendar; provider window dates do not prove the
+unobserved remainder of a day. Login classification is shared by health and
+provider retry selection. Provider cooldowns survive deadline wrapping and set
+a durable retry floor, with increasing backoff for repeated throttles. Schema
+64 stores that floor in `plaid_reconciliation.provider_retry_not_before`, apart
+from notification due time. The maintenance selector and the final sync boundary
+under the Item lease both enforce it. Webhook and owner-choice debt remains
+pending; status and health expose the later of due time and the provider floor.
+
+SimpleFIN Repair revalidates the existing encrypted Access URL through an
+owner-session-only route after the owner corrects sign-in in SimpleFIN Bridge.
+One bounded, budgeted accounts read must contain every saved account identity
+and no provider warnings. It neither claims another item nor replaces account
+assignments, history or cursors. A reservation fence prevents a later read or
+disconnect from being undone. Exact readback proves reactivation. The connection
+is then due for bounded catch-up; access verification cannot advance the saved
+successful-sync boundary or resolve the operational exception.
+
+`brain bank status <manifest> [--json]` reads only the saved HTTPS Brain address,
+durable manifest credential, `/health` and the existing bank status route. The
+output is an explicit projection of bank labels, status, successful sync, due
+time, overdue and sign-in flags, and owner-choice counts. It excludes connection
+identifiers, raw provider errors and credentials. It never opens a control-plane
+session. Access > Banks renders the same plain health line and sign-in guidance.
+
+The integrated clean SQL path uses `moneyMovementReading(..., {clean:true})`, retaining the ordinary reader's contract for existing callers. Posted rows outside lifecycle or declared coverage dates remain counted and flagged through `rows_outside_account_dates`. Unproved repayment wording and lender names do not establish an owned destination; these debits remain spending with typed uncertainty. Credits on cards, loans and lines of credit never enter income.
+
+Clean reads support `from`/`to` as well as `from`/`through`, preserve plausible posting-date SQL literals while ignoring lifecycle sentinels, and pair with a six-day margin while retaining full-history feed precedence. The initial scan budget can expand to a bounded complete snapshot; exhausted row or bind budgets return a frozen partial figure with exact omitted directional amounts, counts and dates at 0% confidence. The SQL plan guard, pairing work cap, native value limits and read guards remain in force. Snapshot transport uses independent UTF-8 JSON arrays of at most 900,000 bytes and at most 90 binds by default (95 only through the injected compatibility budget).
+
+`clean-money-contributions.js` exposes signed payment, refund, sales and stated-interest contributions without changing stored rows. A proved payment pair counts its paying leg once, and a reversal matches at most one original. Memo splits must reconcile exactly and remain estimated pending a lender statement. `confidence.selection_score` grades literal account/date coverage; the final evidence `percent` and its score/display aliases also require connections, sync evidence and the founder's uncertainty limits. Selection coverage alone never overrides the final confidence ceiling.
+
+The clean classifier keeps ordinary deposits counted under the contrary-evidence
+income policy. Borrowing, owner money, processor advances, rewards redemption
+and credits from vendors with payment evidence lower confidence with their exact dollars. Vendor
+flows stay tenant- and currency-specific. Bank-feed category evidence uses its
+existing detailed/primary projection; memo grammar only supplies fallback
+estimates. Broader debt wording nominates likely payments without excluding
+spending. Return grammar respects direction and posting-account kind, leaves
+fees alone, and requires a prior equal deposit for ambiguous returned items.
+Matching uses the same six-day margin as the frozen read, consumes each original
+once and never lowers income for a matched own transfer. Newly inferred return
+readings remain estimated. Signed income totals retain deposit reversals, and
+expanded memo splits still require two labeled parts to reconcile exactly.
+
+`clean-repayments.js` derives one repayment event from frozen membership and
+owned endpoints. Paying rows carry destination slug/last four, credit rows
+carry a separate `credited_minor`, and liability funding is `debt_moved_minor`
+with zero repayment. Same-destination equal payments reconcile once in posting
+order, separately by tenant and currency; amount/date-only matches carry a
+`likely_` basis and quantified uncertainty below High. This does not establish
+transfer proof or exclude an ordinary expense. A card-only `paid_minor` read
+that leaves its paying account outside scope retains its numeric result and
+names the omitted credit dollars, both accounts and the correct credit measure.
+A generic bank payment debit outside the three-day pair window whose equal
+card or loan credit posts within ten days stays counted and is flagged
+`possible_card_payment_lagged_credit_counted` (or the loan form) with its exact
+dollars; it never lowers spending.
+
+Named-repayment recipes filter the destination while preserving paying rows;
+an all-card sum retains its all-card meaning. Liability-only recipes sum credits
+on their credit dates. The selection-quality ceiling checks the frozen account
+review state before accepting an opening date from the private projection, so
+a proposed opening cannot hide missing account-days.
+
+Money query results now carry `evidence.as_of`, the declared period and exact account evidence. `period_from`/`period_to` and `account_slugs` filter public `txn` and `coverage` only after all-history classification and pairing. The fresh result clock overrides an earlier guide read. Coverage verification rejects export-note observations and invalid calendar bounds. Per-account evidence reports observed/stated dates, unverified intervals, pending and unreadable amounts, actual exclusions, and counted lifecycle conflicts separately; a counted conflict is never described as an exclusion.
+
+The guide's account-period rubric is exposed as `confidence.evidence_percent`; `selection_score` grades clean selection coverage. The final owner-facing percent, word, score and display are the minimum of required evidence and retain the candidate's connection, sync, uncertainty, truncation and failure ceilings. Neither component score can raise the final percent. Optional raw-ledger and balance evidence runs after the amount read; unavailable assessment retains that figure at lowered confidence. Non-answer document results use an answer-confidence ceiling of 30, never confidence in a refusal. Technician and break-glass profiles cannot execute money tools; available document evidence still carries confidence and a path to the owner-approved money connection.
+
+The fixed overview retains its original 10,000-row summary budget; an incomplete clean read leaves calendar and independent inventory available while marking monthly totals unknown. Raw references, including mixed raw/clean SQL, count dead history in their input budget and repeat the measured bound inside execution. The guide-specific evidence ceiling does not replace the overview's trusted connection/coverage assessment.
+
+A memo-only principal/interest split never changes an ordinary debit into an excluded repayment. Its full expense remains counted and flagged. Memo-stated interest is a likely component already inside that amount; reconciliation queries do not add it again. A proved repayment may contribute stated interest separately because its full debit is already excluded from spending.
+
+
+Explicit request windows expand to retain plausible posting-date SQL literals
+(1900 through 2999), excluding lifecycle sentinels. JavaScript computes clamped
+calendar margins so SQLite date overflow cannot empty a valid read. Confidence
+uses the closed SQL period or the expanded window for opaque queries and keeps
+the combined connection, sync and uncertainty ceilings.
+
+The frozen `clean-money-period.js` projection supplies selected coverage counts,
+unreadable/unconfirmed evidence and pending margins to both SQL and confidence.
+Exact provider links resolve settled holds across the input boundary; unproved
+cross-provider matches remain pending and disclosed. Fee wording inside a
+payment/transfer never turns the whole movement into certain spending. Closed
+standalone fee types do. Processor identity is frozen from the shared movement
+reader rather than reinterpreted by a second SQL grammar. Gross-sales and reserve
+questions explicitly request the corresponding evidence assessment; a bank
+receipt alone cannot prove either figure. Every result includes a local calendar
+context with its IANA zone or identified UTC fallback.
+
+## Document answer boundary (offline candidate)
+
+`finalizeDocumentAnswer` in `worker/src/lib/document-answer.js` is the final
+owner document answer boundary. Draft facts require positive binding to readable
+source clauses; a substring inside a negated, rejected or conditional statement
+does not establish its positive claim. Unresolved context stays in an attributed
+quote below High confidence. Unbound paraphrases become attributed source extracts. Authorization and credential screening happen
+before it. An approved draft survives; a doubted draft becomes dated,
+attributed source statements; a missing or failed draft becomes quoted record
+text. Only a completed search returning zero records can use the bounded
+not-found wording. Failed checks remain visible and lower confidence instead
+of deleting the answer. A document statement never establishes a bank payment
+or the owner's identity. Actual paid, spent and owed calculations retain the
+money-tool route for assistant callers. Human callers of the Worker think
+route retain the shipped ledger reader; they receive figures instead of
+assistant instructions. QuickBooks questions retain their books reader.
+The human reader uses the shipped `ledger-analysis.js` counting rules. Money
+tools and bank activity documents use the separate `money-analysis.js` rules,
+so changes to the clean SQL classification cannot change human spending totals.
+Known partial balance observations remain readable when another account has
+no observation. Whole shorthand requests for rent, payroll by quarter, a
+company payee this year, card debt and this week's deposits reuse the existing
+exact selectors and calendar guards; spending and balance assumptions are
+disclosed. Document tasks containing the same nouns retain document retrieval.
+Company shorthand consumes only an entire recorded payee label, optionally
+followed by this year, this month or last month. Its allowlist comes from readable
+outflows through the bounded authorized snapshot reader. If the requested period
+does not identify the exact payee, nomination consults up to 3,660 days through
+the owner day, retaining the same 5,000-row and atomic account-mapping guards.
+Only identity comes from that history; the ordinary requested-period reader
+determines activity and coverage. A known payee with no matching activity keeps
+the scoped no-charges observation, not a numeric zero. An in-period match avoids
+the historical lookup, so dense older activity cannot consume its read budget.
+A suffix or substring alone never admits a request. Failed lookups retain
+document retrieval with a visible read gap. Named-category spending and the
+bounded `What did I spend at <payee> <period>?` frame with incomplete
+date coverage retain their authorized observed subtotal as a lower bound, with
+the complete total unset, account-specific missing dates and required statements.
+The owner confidence explanation carries those same gaps below High.
+Remote profiles without `money:read` use documents and name an owner-approved
+librarian or structured-contributor connection for bank rows.
+
+Inferred time phrases label records instead of filtering them out. Explicit
+caller filters and access scopes retain their authority. The answer route reads
+whole authorized chunks, rechecking exact document access, source zones and
+custom API current pointers. A bounded or failed remainder read is explicitly
+partial and retains matching chunks already found by retrieval. Authenticated
+think failures use the same finalizer with an incomplete-search score, retaining
+only evidence that already passed access and sensitive-record checks. A failed
+correction-store read never retries around that authority. Neither storage composition nor the model prompt cuts figures at a
+400- or 900-character boundary. Local `brain_fetch` uses the owner-key-only
+private document-read route and the paged document reader; credential-bearing
+legacy text remains screened.
+
+High-figure grounding is closed-world full consumption, not a list of
+retraction words. A drafted figure is stated as-is (High is possible) only
+when every cited record is consumed by the draft: each of its lines and
+sentences is an exact, case-sensitive draft clause (250 mW is not 250 MW, mL
+is not ML) or a heading made of the record's own title words, the title's own
+words are figures, claim words, question subjects corroborated by record-body
+words, or neutral record-kind words (so "WITHDRAWN", "Superseded" or "Draft" in a title is
+unchecked), and citations sit only at sentence ends. Any other sentence, in
+any language and in any position, including a scale header such as "values in
+thousands", is unchecked context: the answer becomes what the record says,
+with records of up to 1,200 characters quoted whole (a leading OCR transport
+warning dropped) and longer records quoted by selection and named as partly
+quoted. Each unchecked sentence or title is named in the reasons and the score
+stays at 89 or below. An uncited readable record is shown beside the answer
+and caps it unless it is provably older than every cited record (unknown or
+unreliable dates are not) and names neither the claim's field (at least two
+of its field words, or its one field word, and at least half of them, lightly
+stemmed so pumps, pump's and per-pump all name "pump") nor a cited record's
+title. A title qualification repeated only in the question is still unchecked;
+the answer attributes the figure to that titled record below High and names
+the missing applicable terms and authority. Non-neutral body headings omitted
+from an admitted draft also cap it at 89.
+
+Every `/api/rag/think` response for a question leaves through one post-
+condition in `handleThink`. A response that already carries a non-empty answer,
+a confidence object and the answer contract passes unchanged. Any other
+response, including returned scope-read failures, scope and parameter
+validation refusals and thrown exceptions, is finalized with no document text.
+Validation refusals keep their HTTP status and code; operational failures are
+an incomplete reading capped at 10. The search is never widened to work around
+a failed scope or access check. Workflow actions and bodies without a question
+keep their own route contract.
+
+The sensitive-record screen reads every line and sentence of a record with one
+heading grammar. A form identifier (any numbered form, W-2, K-1) is a heading
+when only form preamble (agency names, OMB numbers, copy labels, years, box and
+page marks: a closed list) precedes it in its line or sentence and lowercase
+prose does not follow it, so dashes, OMB lines and printed layouts cannot hide
+a filing. A sensitive record type (passport, credit report, tax return,
+licence, identity card) is a heading only when it ends its line or sentence
+with no prose before it. Titles and other labels that name a sensitive kind,
+and identity numbers anywhere, remain screened. A form or record type named
+inside prose ("bring your passport", "the advisor may request Form 1040",
+"Re: Form 1099-NEC Request") remains readable, and explicitly requested forms,
+including suffixed and other numbered forms, remain readable. Assistant callers
+asking about payment state (whether money was paid, settled, cleared, went
+through or is still owed or outstanding, by the owner or another payer) take
+the bank-tool handoff whatever record noun they use; only a question whose main
+clause asks what a record states, terms in a conditional clause, and plans or
+obligations ("do I need to pay") stay with documents. Every scalar question the
+route accepts as `q`, including a boolean, reaches the response post-condition.
+
+Numerical document answers also pass `document-answer-provenance.js` at the
+final answer boundary. High requires affirmative source proof of the governing
+current document and amendment check, the exact subject and measure, the rate
+basis, the scale and currency, and coverage of the whole requested period.
+Title words, copy dates, agreeing records and model approval fill none of these
+checks. Full titles and storage labels reach this boundary. Unknown checks
+retain the exact source figure as a quote at 89 or below and name the missing
+proof in the owner answer and confidence explanation.
+
+Labelled-field and relative-date provenance checks separate stored title
+wrappers and bracketed, colon or Markdown prefixes before splitting source
+clauses. Unknown heading text remains unchecked context; brackets and colons
+inside fact values retain their meaning.
+
+Exclusive-fact consistency has a separate closed-world projection. `sole`,
+`single` and `exclusive` are adjectives: whenever an explicit `is`/`are` and a
+nonempty value follow, the assertion binds the following subject to that value,
+whatever text precedes the word (a determiner, a possessive such as `The
+Company's sole member`, an adjective such as `designated sole custodian`, a
+title wrapper or a Markdown marker). `only` is ambiguous (`The deposit's only
+custodian is A` versus `Only A is the custodian`), so both readings are
+recorded, subject-to-value and value-to-subject, and a conflict in either
+lowers certainty. `Only A may hold the deposit`, `is solely/exclusively A` and
+`is held solely/exclusively by A` have separate productions. Comparison keys
+ignore party-name case and singular/plural subjects; numeric values retain
+unit case and numeric brackets. Text before the operator never changes the
+subject, including an unknown heading flattened into the sentence. Title
+words and prose outside these fact productions are not applicable to this
+check. They retain the existing grounding and context checks. This projection
+removes no context from labelled-field proof or source quotations.
+
+The check compares all authorized retrieved records, including uncited older
+records, for exclusive subjects present in the cited reading. Conflicting
+values retain the source statements as attributed quotations below High, with
+the missing operative reconciliation named. Only records participating in
+those conflicts become additional consistency evidence; unrelated uncited
+records and structured provider entities retain their existing selection
+rules. Adding contrary records cannot raise the original reading's computed
+score. A failed exclusive check retains all five numeric provenance checks
+when applicable. Verify the exact-heading A/A High control, A/B counterexample,
+prefix variants and complete Worker/MCP parity in
+`worker/test/doc-high-provenance-1114.test.mjs`, the R3 review examples in
+`worker/test/document-exclusive-consistency-1115-r3.test.mjs`, and the account
+label control in `worker/test/quickbooks-answers.test.mjs`.
+
+The initial positive proof grammar is deliberately narrow: complete source
+sentences labelled `Status`, `Amendments checked through`, `Subject`, `Measure`,
+`Rate basis`, `Scale`, `Currency` and `Covered dates`, plus one matching monetary
+clause. Every source fact must be quoted in the draft, the subject and measure
+must equal the independently parsed request scope with the same subject and
+unit letter case, and the amendment check must cover the answer date. Request
+grammar ignores capitalization of interrogatives and connecting words and
+composes leading and trailing subject/date clauses through the same parser.
+Grammatical determiners (`the`, `a`, or none) are separate from the exact
+subject identifier. Subject, requested period and rate basis must be explicit;
+the answer date cannot fill an omitted period. Duplicate scope clauses remain
+unresolved. Request wording never supplies source truth.
+
+`document-answer-context.js` checks title and storage context separately. A
+title must be consumed by the existing neutral primary-record-kind grammar,
+optionally with a source-matched signed/executed/final prefix or an exact SI
+unit symbol, and bind to the source subject. Repeating an arbitrary title in
+the subject or question does not resolve status. Unconsumed modifiers or
+versions remain unproved even beside a signed/current label.
+
+Neutral record/document containers and HTTPS locator paths keep their separate
+checked-context receipt. Known opaque file/document-editor locator shapes
+carry record IDs, not status evidence. A URI or folder alone never proves or
+disproves governing status. Unknown labels, extra URI context and conflicting
+folders remain unresolved; all other five source checks still apply.
+Unrecognized source clauses, storage context, request grammar or percentage
+denominators remain unproved. These are internal proof rules, not
+instructions for an owner to rewrite records. Normal prose still answers with
+its actual figure and a named evidence gap. The regression suite is
+`worker/test/doc-high-provenance-1114.test.mjs`.
+
+The Worker computes one deterministic document confidence object. Failed
+checks, source coverage gaps, partial readings and newer uncited records each
+carry a reason and missing evidence. Failed checks and partial readings cap at
+89, source extracts at 69, empty completed searches at 30, and incomplete
+searches at 10. Agreement requires the cited records to support the same claim.
+Standalone model confidence labels are removed and may only lower the score.
+The CLI, app and MCP answer renderers preserve that score and use
+`Confidence: High|Medium|Low (<n>%)`, with reasons and missing evidence below
+100%. Every finalized answer retains coverage, missing or possibly duplicate
+amounts, estimate qualifications and a check step. These offline checks are
+not release or live-account evidence.
+
+Calendar dates have two roles. The scheduled local day and exact event start
+remain occurrence facts and date-filter inputs. The canonical provider
+modification timestamp travels as `record_observation` through retrieval,
+candidates, citations and MCP search. Attribution, record-age gaps and revision
+ordering use that observation, never the scheduled day. Missing modification
+evidence stays undated; retrieval time does not invent a revision timestamp.
+An explicit latest-scheduled-event request retains occurrence ordering; that
+ordering never supplies its record attribution or freshness date.
+
+Search presentation and source text also remain separate. Composed retrieval
+keeps pure `source_excerpts` beside its labelled snippet. A complete authorized
+read replaces the snippet with source chunks alone. An incomplete read retains
+out-of-page source spans in `retrieval_excerpts`; answer and model rendering
+label each additional excerpt outside its source quotation. The reading remains
+partial and keeps the existing confidence caps. Source-authored text that
+resembles a presentation heading is preserved.
+
+Human compatibility ledger replies retain their arithmetic and receive the
+five-part contract. The compatibility reader does not return the money tools'
+connection, freshness and ambiguity assessment. That absence computes Low
+(0%), with the missing assessment named, rather than implying that a successful
+read establishes confidence. Acceptance continues to another saved document
+probe after a ledger reading, or records an explicit document/model warning
+when every saved probe is a ledger question.
+If one selected account has no balance snapshot, the reader keeps the other
+accounts' dated observations and labels the result partial. Its missing account
+is listed with an unknown amount; a cash subtotal includes only observed
+depository balances and never treats the missing observation as zero.
+
+## Closed money-kind certificates and bound interest
+
+Money membership and contribution amounts are computed before type assessment.
+Ordinary customer receipts, merchant purchases and separate bank fees count at
+face value. High means a careful bookkeeper with the same records would use the
+same number. The `face_value` receipt is a counting assumption, not a new source
+fact. Unknown rail-only postings and unreviewed account kinds still need review.
+
+`clean-money-risk.js` nominates the short risky list: own-account moves, borrowed
+principal, refunds and returns, deposits/bonds and funds held for others, owner
+money, collected tax and possible duplicate imports. Wording can flag risk but
+cannot establish its safety. A processor role cannot certify a capital advance
+or reversed payout. Independent categories, matched originals and uniquely
+reconciled endpoints retain their existing proof paths. Earlier risky estimates
+and every economic contribution stay intact. Ordinary payout descriptors no
+longer require a separate type certificate; gross sales and withheld fees,
+returns, taxes, reserves and processor financing require their own records.
+
+`money-query-risk.js` checks returned measures, payer/group identity, cash-account
+boundaries, recorded reconciliation conflicts, processor financing and fiscal
+periods. The private snapshot retains provider/source identity for duplicate
+risk; it adds no public transaction columns. Same-account imports shifted up to
+three days and repeated provider identities remain counted, with duplicate
+uncertainty. Source identifiers or matching amounts nominate copies, not removal.
+
+For a closed single-currency monetary SUM, the materiality assessment still
+discloses quantified risky dollars below both 2% of every returned amount and
+$100 in USD. It cannot supply a missing party type certificate or raise the
+final answer to High. Counts, scaling, averages, unknown amounts, non-USD or
+mixed currencies and zero denominators cannot grant a materiality exception.
+Coverage, freshness, unreadable records and unknown withheld components retain
+independent ceilings. Confidence evidence uses the selected
+accounts and requested period after all-history pairing. The latest declared,
+SQL or read-window end governs bank freshness; a legacy `period_end` hint
+cannot hide a stopped feed or extend the asked period. It is a fallback only
+when no actual requested/SQL window end is available. Opening-deposit wording cannot establish an account
+lifetime or erase required history. Only an independently recorded opening date
+clips that requirement. Figures survive every confidence qualification.
+
+The optional `net_receipts` measure means posted cash received, with payouts at
+net bank settlement and before purchase refunds. `posted_spending` means separately
+posted expenses before refunds, excluding repayments and unrecorded withholding.
+The tool guide requires a scoped database aggregate for the headline. Its score
+belongs to that measure and its required accounts/dates; an unrelated raw
+lifecycle diagnostic does not replace it. Relevant diagnostic findings must be
+reconciled into the aggregate evidence before High is used. After diagnostic
+queries, the guide requires a final scoped headline aggregate and its confidence;
+raw lifecycle diagnostics retain their own conservative score.
+These explicit question measures scope evidence after classification, retain
+uncertain excluded rows, and disclose pending holds without treating them as
+received or spent cash. They cannot certify gross sales, total processor fees or
+full operating profit. A simple positive income or expense SUM can declare its
+posted measure without a special tool argument, including supporting row counts,
+posting dates and row IDs. Counts describe contributing bank rows, never sales
+inside a settlement. Scaled or mixed expressions and gross-sales, fee, profit or
+reserve labels cannot use that inference. Explicit measure context takes priority.
+Unspecified settlement measures outside this closed shape retain their ambiguity
+ceiling. Inclusive paired literal date comparisons prove the same interval as
+BETWEEN; repeated, exclusive or incomplete comparisons do not.
+Literal null-safe category filters and complete fixed-month recurrence
+predicates can prove their scope; unsupported predicates remain below High.
+Category spelling variants remain possible omissions, and raw vendor spelling
+variants cannot certify a party ranking. A fixed-month recurrence requires one
+charge per party/currency/month; a per-charge minimum is not a monthly total.
+Pending rows in the wider matching margin do not lower an answer about a later
+posting period. Inside-period pending uncertainty remains qualified.
+A top-N spending result requires the SQL LIMIT and descending grouped expense
+SUM to agree with `rank_limit` when supplied. The SQL can declare its own N;
+neither path certifies a full total.
+
+`money-type-certificate.js` enforces one final boundary for income and expense
+types, after contributions are frozen. High requires every contributing party
+to resolve to one group, have its full relevant recorded history in the read,
+and have no contrary or unproved type evidence. Missing proof defaults below
+High, with each affected party's dollars and the missing evidence named. This
+also applies to the internal monthly overview. A category, processor role,
+explicit measure, rank context, 90-day margin or small dollar share supplies
+none of the missing history or identity proof. The supplier-history classifier
+has no purchase-age cutoff. Ordinary all-history receipts and purchases with
+resolved parties retain High controls. Closed bank fee/earnings forms identify
+the recorded account rather than inventing an outside party.
+
+An owner-confirmed category must map to a recognised operating category at this
+final boundary, independently of earlier proof and ordinary purchase, service
+or payment wording. `money-operating-categories.js` shares the existing ordinary
+code-proof lists and enumerates accepted personal-finance categories; an unknown
+suffix is not accepted because its primary category is familiar. Whole-label
+matching handles camel case, joined names and singular/plural forms. Unknown or
+non-operating categories keep the provisional figure below High, naming the
+category, affected dollars and missing ownership/principal or asset/expense
+allocation. Existing risk caps remain. Rows with no category keep their prior
+path. This additional check does not mark rows estimated account-wide: gross
+cash and unrelated category or income selections retain their base confidence.
+Separately typed `loan_interest` contributions to `interest_expense_minor` skip
+this category check; their principal exclusion and other evidence checks remain.
+
+A certified aggregate returns a private replay reference in `certificate`: the
+exact allowlisted query arguments, an ID and separate figure, source-population
+and confidence-evidence digests. It holds no credential or caller-assigned score.
+A direct `txn` row query may pass that object unchanged as `supports`. Both MCP
+surfaces forward it. `money-headline-support.js` replays the aggregate through
+`queryMoney`, checks the reference and compares unique row identities and every
+displayed value with the frozen headline `txn` population. It checks declared
+dates, account scope, explicit measures and returned groups, including top-N.
+The supporting WHERE must match the certified population predicate exactly.
+SQL identifier case/quoting and source qualifiers are equivalent; string literal
+case is preserved. The only added predicates allowed are equalities on certified
+group keys selecting a group actually returned by the headline. ORDER BY and
+LIMIT may select illustrative rows. Empty results and other narrower or broader
+selections return `support_selection_uncertified`, with answer confidence no
+higher than the minimum of the headline and support's own score.
+
+This is membership-only proof, explicitly labeled
+`support.proof_basis=population_membership_only` and `support.matched_rows`.
+It does not compare supporting row sums/counts with the aggregate or certify
+subtotals derived from examples. The replay verifies the original aggregate and
+its source-population/evidence digests. Digests use bounded chunks rather than
+another whole-book object and UTF-8 copy. No persistent cache, new table, signing
+credential or cross-request mutable state is involved.
+
+The completed amount read ends its deadline before optional support proof.
+Replay and subsequent membership reads share their own budget of at most two
+seconds and the replay's bounded row/work guards. They cannot write the normal
+query cooldown. A proof timeout aborts further proof reads, returns the readable
+support rows with `support_replay_timeout`, Low confidence and exact reasons
+and missing evidence, and leaves the next normal query available.
+
+The row query retains its own `confidence`. Its separate `answer_confidence`
+keeps the headline score only when `support.consistent_with_certificate` is true;
+otherwise named inconsistencies lower it. Nonzero or zero outside-scope rows,
+changed totals or source populations, unverifiable projections and raw pending,
+removed or superseded rows cannot borrow a posted certificate. Malformed, nested
+or failed support references retain readable detail rows with a lowered answer
+score. Supporting rows do not acquire their own aggregate certificate. Unchecked
+supporting rows or totals used in an answer, including when `supports` is omitted,
+cap the answer at their own score. The guide preserves only-lower scoring and all
+five answer parts, and requires exact reasons and missing evidence below 100%.
+
+`money-query-certificate.js` makes High a closed-world decision, independently
+of type inference, explicit measure arguments, source coverage or an internal
+scope override. The default is uncertified. The whole token stream must match
+one of these productions, and all existing data ceilings still apply:
+
+- A literal-date, AND-only `txn` selection with a one-column minor-unit SUM,
+  optionally wrapped in `COALESCE(...,0)`, or a bank-row COUNT. Distinct counts
+  admit only payee, payer group, transaction ID or account slug. Every relevant
+  party needs resolved identity, fully read history and consistent type evidence.
+- The same aggregates grouped by direct party, category, account, entity, side,
+  tenant or currency keys, optionally the literal `substr(posted_on,1,7)` month.
+  Every displayed dimension must match a grouping key and every key must be
+  displayed. GROUP BY follows SQLite source-column precedence; ORDER BY follows
+  output-alias precedence. Duplicate output names and false identity aliases
+  cannot inherit a certificate. Named contribution aliases must match the source
+  measure; the cash-paid form admits gross amounts over literal outflows. Party
+  proof uses parsed source fields, so output aliases cannot skip history checks.
+  Currency and category populations need proof.
+- Top-N spending groups with the same expense SUM as the first descending order
+  key, a positive bounded literal LIMIT, and agreement with the existing posted
+  measure and requested-rank checks. This certifies the requested top groups.
+- Supporting row counts, `SUM(estimated)`, genuine one-argument
+  `MIN/MAX(posted_on)`, and `GROUP_CONCAT([DISTINCT] txn_uid/account_slug)` over
+  that same population. Dates and IDs cannot become vendor/payer identities.
+- The existing fixed monthly-charge query: one-argument `MIN/MAX(amount_minor)`,
+  resolved payee/currency groups, the closed full-month HAVING predicate and the
+  independent snapshot check for exactly one charge per party/month.
+- Exactly `SUM(income_minor)-SUM(expense_minor)` for an operating subtotal, with
+  both sums' party, period, currency and cash-boundary evidence.
+
+Scalar MIN/MAX, AVG, arbitrary arithmetic, CASE, windows, joins, subqueries,
+unions, unlisted functions, free scalar projections and unconsumed/unparsable
+tokens cannot earn High. This includes the internal overview's compound JSON
+query and an internal scope without literal SQL dates. Successful results are
+retained at most 89%, with the reason `query shape not certified`, the unproved
+arithmetic/attribution impact and the missing proof named. A constant vendor
+label cannot establish identity. The old generic aggregate-depth recognizer is
+removed; no function name can hide its scalar arguments from this boundary.
+The party boundary still checks the overview's income/expense contributions.
+Failed certificate assessment keeps the successful figure below High, never
+erases it. Supported ordinary grouped/monthly totals retain High controls.
+The final type boundary also requires an ordinary operating purpose when the
+only earlier proof was a party name or face-value assumption. Unknown posting
+purposes remain provisional. Categories and small amounts cannot resolve
+contrary principal, agency, lease-period or return evidence, including a deposit
+promoted to a customer refund. Debt-account accruals need bound cash settlement.
+Duplicate matching uses the full read history before applying the answer's
+period, account, direction or category selection. Same-party equal postings
+within 31 elapsed days remain candidates across account records, month ends,
+year ends and leap days; same-mask short drift and same-day coincidences retain
+their existing checks. A repeated provider posting identity remains a candidate
+even outside that elapsed-day margin. Connected candidate groups price possible
+extra copies once, bounded to the dollars selected for the answer. A partner
+outside the requested period or account still caps the contributing dollars
+below High, independently of materiality, and names the possible repeated amount.
+Unrelated groups wholly outside the answer scope do not lower its confidence.
+A month label alone does not establish independent cash movements. Three or more
+consecutive single-charge months on the same recorded account, with identical
+party, amount and confirmed category, consistent recorded purpose when present,
+and calendar cadence, support ordinary
+monthly recurrence, including a calendar day clipped to month end. This evidence
+cannot exempt same-day copies, mirrored account records or reused provider IDs.
+Closed reversal grammar also checks the full read history within the existing
+six-day matching margin. An original and possible reversal straddling the asked
+period retain the figure at their actual posting dates, stay below High, and
+name the dollars, both dates and missing statement/return proof. All contributions
+and readable figures survive these checks. Ordinary supported receipts, purchases
+and bank fees retain their existing practical proof paths.
+The ordinary-purpose check admits a known processor's closed payout/settlement
+descriptor with optional posting identifiers, while unknown added purpose words
+remain unresolved. It does not certify gross sales, capital advances or reserves.
+Incoming rent still needs beneficial-ownership and earned-period evidence;
+ordinary outgoing rent is not presumed entrusted principal. A closed posted
+spending selection may retain its tax-type-only exception at the final boundary:
+it certifies cash spending, not a government-tax population, and cannot erase
+another source risk, missing history or duplicate uncertainty.
+Explicit work-payment and own-office-rent purposes retain their ordinary paths.
+Closed lender-side payment acknowledgements establish received cash without
+inventing a paying debit; debt charges and capitalized interest still require
+bound settlement evidence.
+Confirmed complete manual statements cover quiet days without a live connection.
+Unique reciprocal owned-account locators can independently prove a transfer even
+when the selected pair label is bank category; category-only matches stay uncertain.
+
+Refund originals must be counted and certified, with excluded or estimated
+same-party/equal originals vetoing certification. The same-account exact-amount
+window is 60 days; the same normalized merchant window is 180 days. A consumption
+budget prevents one original proving more refunded dollars than it contains.
+An owner-confirmed refund code can supply type evidence when no contradictory
+original is present; an original outside available history is not silently
+invented. Customer-return wording, provisional credits, buyer re-debits and
+processor hold releases retain their current figures with type uncertainty.
+
+The bounded snapshot includes current entity names, and the second read compares
+them along with transaction/account evidence. These names remain private scoring
+inputs and are not added to the public transaction projection. Optional missing
+`entities` arrays in hand-built snapshots remain compatible. No schema migration
+is required.
+
+A lender interest row is bound only to one exact dated principal-plus-interest
+receipt group and one uniquely reconciled debit. The private binding retains the
+payment ID/date on each interest row. An unrelated interest word cannot suppress
+the unsplit-payment gap. Memo splits remain estimated. Period boundaries name
+interest dollars and both posting dates, and possible duplicate interest charges
+and receipts remain disclosed. Query, overview, HTTP and MCP confidence outputs
+name affected dollars, the missing record and a plain "Confirm these rows" line.
+
+The default example retains its earlier economic row membership. A new kind-only
+estimate does not add an excluded payment or transfer to that example merely
+because estimated becomes 1. Earlier estimates retain the previous behavior;
+all flagged rows remain in txn and account/date confidence still names their
+dollars, including excluded rows. The predicate uses the frozen doubt list so
+there is no second independent list of money-type reasons.

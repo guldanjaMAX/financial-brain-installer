@@ -68,7 +68,7 @@ if (-not [System.String]::Equals($currentDirectory, $repositoryRoot, [System.Str
   Stop-Rehearsal "run this command from the reviewed repository's top-level folder, not a default or unrelated folder"
 }
 
-$git = Get-Command git -CommandType Application -ErrorAction SilentlyContinue
+$git = Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $git) {
   Stop-Rehearsal "Git is not available in this PowerShell window. Install Git for Windows, then open a new normal PowerShell window and start again in a new empty folder"
 }
@@ -95,7 +95,7 @@ if ($dirtyExit -ne 0 -or $dirty.Count -ne 0) {
   Stop-Rehearsal "this checkout has local changes. Use a new, clean checkout of the reviewed commit"
 }
 
-$node = Get-Command node -CommandType Application -ErrorAction SilentlyContinue
+$node = Get-Command node -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $node) {
   Stop-Rehearsal "Node.js is not available. Install Node.js 22 or newer, then open a new normal PowerShell window"
 }

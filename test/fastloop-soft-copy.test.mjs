@@ -7,7 +7,7 @@ import { workingTreeSources } from '../eval/fast-loop/ledger-sources.mjs';
 import { searchDisclosureTapes } from '../eval/fast-loop/search-disclosure-tapes.mjs';
 
 test('search/disclosure tape overlay preserves frozen streams and rejects altered dependencies', () => {
-  const original = loadTapes().baseline;
+  const original = loadTapes({ answer: false }).baseline;
   const fixed = searchDisclosureTapes(original);
   const id = Object.keys(original).find(id => original[id].d1.some((entry, i) =>
     JSON.stringify(entry.input) !== JSON.stringify(fixed[id].d1[i].input)));

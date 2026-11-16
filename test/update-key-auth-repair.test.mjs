@@ -162,7 +162,9 @@ async function authUpdate(t, { named = false, consent = true, interactive = fals
   };
   try {
     await cmdUpdate(f.manifestPath, {
-      lifecycleLockHeld: true, interactive, adoptConsent: consent,
+      // This fixture exercises terminal consent; Windows window consent has
+      // its own background-update coverage in windows-update-signin.test.mjs.
+      platform: "darwin", lifecycleLockHeld: true, interactive, adoptConsent: consent,
       discoverInstalledManifest: () => ({ path: f.manifestPath }), answerSetupNeedsRecovery: () => false,
       readUpdateBacklog: async () => { calls.push("backlog"); return { pending: 0 }; },
       adoptCloudflareAuthProfile: async (path, options) => {

@@ -59,13 +59,13 @@ switch ($Phase) {
   'inspectPayload' { & (Join-Path $PSScriptRoot '..\windows\verify-msi.ps1') -MsiPath $Artifact }
   'assertClean' {
     if ((Test-Path -LiteralPath $root) -or (Test-Path -LiteralPath $menu) -or (Test-Path -LiteralPath $state) -or (Test-Path -LiteralPath $sentinel)) { throw 'Destination occupied' }
-    [pscustomobject]@{root=$root;product=(Property 'ProductCode');attempted=$false} | ConvertTo-Json | Set-Content -LiteralPath $state
+    [pscustomobject]@{root=$root;product=(Property 'ProductCode');attempted=$false} | ConvertTo-Json | Set-Content -LiteralPath $state -Encoding UTF8
   }
   'install' {
-    $checkpoint=Get-Content -Raw -LiteralPath $state | ConvertFrom-Json
+    $checkpoint=Get-Content -Raw -LiteralPath $state -Encoding UTF8 | ConvertFrom-Json
     if ($checkpoint.root -cne $root -or $checkpoint.product -cne (Property 'ProductCode') -or $checkpoint.attempted) { throw 'Invalid install checkpoint' }
     $checkpoint.attempted=$true
-    $checkpoint | ConvertTo-Json | Set-Content -LiteralPath $state
+    $checkpoint | ConvertTo-Json | Set-Content -LiteralPath $state -Encoding UTF8
     [IO.Directory]::CreateDirectory((Split-Path -Parent $sentinel)) | Out-Null
     [IO.File]::WriteAllText($sentinel,'synthetic owner state')
     Msi '/i'
@@ -99,11 +99,11 @@ switch ($Phase) {
     $stdout=$probe.StandardOutput.ReadToEndAsync(); $stderr=$probe.StandardError.ReadToEndAsync()
     $probe.WaitForExit()
     if ($probe.ExitCode -ne 0 -or $stdout.Result.Trim() -cne $version) { throw 'Installed CLI version probe failed' }
-    Get-ChildItem -LiteralPath $root -Recurse -File | ForEach-Object { [pscustomobject]@{path=$_.FullName.Substring($root.Length+1).Replace('\','/');size=$_.Length;sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()} } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $LogDirectory 'installed-inventory.json')
+    Get-ChildItem -LiteralPath $root -Recurse -File | ForEach-Object { [pscustomobject]@{path=$_.FullName.Substring($root.Length+1).Replace('\','/');size=$_.Length;sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()} } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $LogDirectory 'installed-inventory.json') -Encoding UTF8
     Write-Output ('BUNDLED_CLI_VERSION_VERIFIED='+$version)
   }
   'uninstall' {
-    $checkpoint=Get-Content -Raw -LiteralPath $state | ConvertFrom-Json
+    $checkpoint=Get-Content -Raw -LiteralPath $state -Encoding UTF8 | ConvertFrom-Json
     if ($checkpoint.root -cne $root -or $checkpoint.product -cne (Property 'ProductCode') -or -not $checkpoint.attempted) { throw 'Invalid removal checkpoint' }
     Msi '/x'
   }

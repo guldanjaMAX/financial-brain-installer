@@ -1,3 +1,5 @@
+import { ownerConfidenceLine, documentResponseConfidence } from "../src/lib/confidence.js";
+import { assertDocumentAnswer } from "./helpers/document-answer-contract.mjs";
 /**
  * "Which of my entities are still open and which are closed?"
  *
@@ -244,7 +246,7 @@ test("the intent detector fires on entity and account status questions and stays
   // response is exactly today's. A false positive puts financial-map copy
   // under an ordinary question, which is the product's worst face.
   const silent = [
-    "what did I pay Acme in March",
+    "what did I pay Store in March",
     "how much is in my checking account",
     "when did I open my business checking account",
     "when is my next quarterly tax payment due",
@@ -325,7 +327,8 @@ test("a not-established map turns a bare refusal into the reason, the candidates
   assert.equal(body.evidence_gate?.reason, "answer model found no direct support",
     "the refusal itself is unchanged; this change only adds a field beside it");
   assert.equal(body.evidence_gate?.supported, false);
-  assert.deepEqual(body.citations, [], "no document is promoted to a citation by this change");
+  assertDocumentAnswer(body, { provisional: true, exact: true });
+  assert.equal(body.citations.length, 1, "the formation record is attributed without approving current status");
 
   const guidance = body.map_guidance;
   assert.ok(guidance, "an entity-status question on an unset map must not end as a bare refusal");
@@ -380,7 +383,7 @@ test("ordinary questions never read the map and never carry guidance", async (t)
   seedFormationDocument(fixture);
 
   const ordinary = [
-    "what did I pay Acme in March",
+    "what did I pay Store in March",
     "how much is in my checking account",
     "when did I open my business checking account",
     "when is my next quarterly tax payment due",
@@ -449,7 +452,7 @@ test("a map read that throws leaves the think response exactly as it is without 
   for (const timing of [brokenTiming, workingTiming]) {
     assert.equal(timing.version, 1);
     assert.equal(timing.route, "think");
-    assert.equal(timing.outcome, "refused");
+    assert.equal(timing.outcome, "ok");
     assert.equal(timing.stages.financial_map.calls, 1);
     assert.ok(Number.isFinite(timing.total_ms) && timing.total_ms >= 0);
     assert.match(timing.request_id, /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/);
@@ -725,6 +728,7 @@ test("the remote MCP renders the guidance above the refusal and leaves the incom
   const refusalBlock = [
     "I can try a more specific search, but I didn't find a matching record in this search.",
     "Why: answer model found no direct support",
+    "", ownerConfidenceLine(documentResponseConfidence(refused)),
     "Next: ask again with a name, date or exact phrase the record would contain.",
   ].join("\n");
   assert.ok(rendered.includes(refusalBlock), "the healthy refusal keeps its reviewed Why and Next lines");
@@ -752,7 +756,7 @@ test("the remote MCP renders the guidance above the refusal and leaves the incom
   const noticeBlock = [
     answerText(incomplete),
     "",
-    confidenceText(incomplete),
+    ownerConfidenceLine(documentResponseConfidence(incomplete)),
     'Next: ask again in a minute; if it fails twice, say "check my Brain".',
   ].join("\n");
 

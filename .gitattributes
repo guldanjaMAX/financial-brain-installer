@@ -1,3 +1,13 @@
+# Exact fixture hashes, replay tapes, and generated-source checks must see the
+# same text bytes on every host, including core.autocrlf=true checkouts.
+* text=auto eol=lf
+
+# cmd.exe scripts use CRLF. PowerShell accepts LF; keep its byte-pinned helpers
+# identical to the package built on Linux. Immutable fixture exceptions follow.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=lf
+
 # Applied schema migrations are checksummed byte-for-byte (see cmdMigrate's
 # checksum guard in brain.mjs). A line-ending change made by a different git
 # client, editor, or `core.autocrlf` setting silently changes that checksum

@@ -22,7 +22,7 @@ function fixture({ upgrade = false, path = ":memory:" } = {}) {
       reads.push({ sql, params });
       return { results: db.prepare(sql).all(...params) };
     },
-    first: async () => db.prepare(sql).get(...params) ?? null,
+    first: async () => { reads.push({ sql, params }); return db.prepare(sql).get(...params) ?? null; },
     run: async () => ({ results: db.prepare(sql).all(...params), success: true }),
   });
   const batches = [];
@@ -123,8 +123,14 @@ test("all inventory pages and labels are byte-identical during and after backfil
   corpus(f);
   const cases = [null, ...sources, "missing"].flatMap(source => [false, true].flatMap(includeLabels =>
     [1, 7, 500].map(limit => ({ source, includeLabels, limit }))));
-  cases.push({ source: "drive", includeLabels: true, limit: 1,
-    uids: ["drive:0000", "drive:0002", "drive:control"] });
+  // Reviewed Drive bounded inventory forbids exact-identity fallback before backfill.
+  const exact = { source: "drive", includeLabels: true, limit: 1,
+    uids: ["drive:0000", "drive:0002", "drive:control"] };
+  const readCount = f.reads.length;
+  await assert.rejects(listSourceFamilies(f.env, exact), { code: "source_family_index_not_ready" });
+  assert.ok(f.reads.length > readCount, "the index-readiness decision executed");
+  assert.ok(!f.reads.slice(readCount).some(r => /FROM documents/.test(r.sql)),
+    "a refused exact inventory cannot widen to a document scan");
   const before = [];
   for (const options of cases) before.push(await pages(f, options));
   f.db.exec(migration);
@@ -135,6 +141,9 @@ test("all inventory pages and labels are byte-identical during and after backfil
   assert.deepEqual(await pages(f, { source: "drive", includeLabels: true, limit: 7 }),
     before[cases.findIndex(o => o.source === "drive" && o.includeLabels && o.limit === 7)]);
   await finish(f);
+  const exactPages = (await pages(f, exact)).map(page => JSON.parse(page));
+  assert.deepEqual(exactPages.flatMap(page => page.families), exact.uids,
+    "completed-index green control returns every selected identity in bounded pages");
   f.reads.length = 0;
   for (let i = 0; i < cases.length; i++) assert.deepEqual(await pages(f, cases[i]), before[i]);
   assert.ok(f.reads.some(r => /FROM document_family_index/.test(r.sql)), "indexed page arm executed");

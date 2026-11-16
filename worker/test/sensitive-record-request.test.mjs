@@ -73,7 +73,7 @@ for (const [label, row, question, control] of [
   }, 'What expiry date is on my passport?', 'How much did I spend on passport fees?'],
 ]) test(`${label}: the record subject rule also applies outside tax`, () => assertPair(row, question, control));
 
-test('record-kind solicitation hands related tax candidates to the existing evidence guard', () => {
+test('a requested return does not solicit a different filing kind', () => {
   const question = 'What ordinary business income did Store Entity report on its 2023 Form 1065?';
   const row = {
     title: 'Other Entity 2023 Schedule K-1',
@@ -81,7 +81,13 @@ test('record-kind solicitation hands related tax candidates to the existing evid
     authority: { tax_scope: { applicable: true, matched: false } },
   };
   assert.equal(taxQuestionScopeAssessment(question, options).resolved, true, 'real tax scope decision resolves the question');
-  assertPair(row, question, 'What did the business spend in 2023?');
+  const rejected=decide(row,question);
+  assert.equal(rejected.withheld?.examined_count,2,'the populated candidate and benign control reached screening');
+  assert.equal(rejected.withheld?.count,1);
+  assert.deepEqual(rejected.rows,[benign],'the unrequested K-1 stays screened');
+  const requested={...row,title:'Store Entity 2023 Form 1065',snippet:'Form 1065. Ordinary business income.',authority:{tax_scope:{applicable:true,matched:true,form_matched:true}}};
+  assert.deepEqual(decide(requested,question).rows,[requested,benign],'the requested filing is a readable green control');
+  assert.deepEqual(decide(row,'What did the business spend in 2023?').rows,[benign]);
   const strict = filterThinkCandidates([row, benign], {
     ...options, deferTaxScope: false, question, taxQuestion: taxQuestionScopeAssessment(question, options),
   });

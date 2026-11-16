@@ -240,3 +240,125 @@ export async function renameWithRetry(from, to, {
     }
   }
 }
+
+// Receipts and update state are staged beside their destination, then renamed
+// over it. Windows refuses that rename while a virus scan, indexer, backup or
+// sync client still holds either name open. Retry only that sharing refusal,
+// with a short growing backoff (1,900 ms in all), and only while our own staged
+// file is still present: a vanished source means the outcome is unknown, so
+// the original error stands. A Windows host retries whichever platform a
+// caller models, because the host's file system is what holds the lock.
+export const LOCAL_FILE_LOCKED = "LOCAL_FILE_LOCKED";
+export const FILE_REPLACE_DELAYS_MS = Object.freeze([50, 100, 250, 500, 1000]);
+const FILE_SHARING_REFUSALS = Object.freeze(["EPERM", "EACCES", "EBUSY"]);
+
+function localFileLocked(cause, attempts, action = "save") {
+  const error = new Error(
+    `Windows kept a Brain file in use through ${attempts} ${action} attempts (${cause.code}), so it was left unchanged. ` +
+      "Close any program that may be reading the Brain folder, such as a backup, sync or virus scan, then run the same command again.",
+    { cause },
+  );
+  error.code = cause.code;
+  error.supportCode = LOCAL_FILE_LOCKED;
+  error.renameAttempts = attempts;
+  return error;
+}
+
+// Windows refuses to replace a file that carries the read-only attribute with
+// the same EPERM a sharing lock gives. Waiting never clears it, so it is named
+// at once rather than retried and misreported as a program holding the file.
+function localFileReadOnly(cause) {
+  const error = new Error(
+    `Windows would not replace a Brain file because the file is marked read-only (${cause.code}), so it was left unchanged. ` +
+      "Turn off the read-only setting on the files in the Brain folder, then run the same command again.",
+    { cause },
+  );
+  error.code = cause.code;
+  error.supportCode = LOCAL_FILE_LOCKED;
+  error.readOnlyDestination = true;
+  error.renameAttempts = 1;
+  return error;
+}
+
+// Node reports the Windows read-only attribute as a missing owner write bit.
+function readOnlyFile(path) {
+  try {
+    const state = lstatSync(path);
+    return state.isFile() && (state.mode & 0o200) === 0;
+  } catch { return false; }
+}
+
+// An unobservable path counts as present: present staging keeps a retry
+// possible, and a present destination stops one.
+function pathPresent(path) {
+  try { return captureRenameIdentity(path) !== null; }
+  catch { return true; }
+}
+
+export function replaceFileWithRetrySync(from, to, {
+  platform = process.platform,
+  rename: renameImpl = renameSync,
+  sleep = sleepSync,
+  revalidate = () => {},
+} = {}) {
+  const windows = platform === "win32" || process.platform === "win32";
+  for (let attempt = 0; ; attempt++) {
+    revalidate();
+    try {
+      return renameImpl(from, to);
+    } catch (error) {
+      if (!windows || !FILE_SHARING_REFUSALS.includes(error?.code) || !pathPresent(from)) throw error;
+      if (readOnlyFile(to)) throw localFileReadOnly(error);
+      if (attempt >= FILE_REPLACE_DELAYS_MS.length) throw localFileLocked(error, attempt + 1);
+      sleep(FILE_REPLACE_DELAYS_MS[attempt]);
+    }
+  }
+}
+
+// A finished step removes its receipt. A reader that opened the receipt
+// without delete sharing makes Windows refuse that removal for a moment. Retry
+// only that refusal, on the same file: a file that is already gone is the
+// intended result, and a file replaced under the same name is never removed.
+export function removeFileWithRetrySync(path, {
+  platform = process.platform,
+  unlink: unlinkImpl = unlinkSync,
+  sleep = sleepSync,
+} = {}) {
+  const windows = platform === "win32" || process.platform === "win32";
+  let pinned = null;
+  try { pinned = captureRenameIdentity(path); } catch { /* The removal below reports it. */ }
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return unlinkImpl(path);
+    } catch (error) {
+      if (!windows || !FILE_SHARING_REFUSALS.includes(error?.code) || !regularSingleFile(pinned)) throw error;
+      let current;
+      try { current = captureRenameIdentity(path); } catch { throw error; }
+      if (current === null) return undefined;
+      if (!sameInode(current, pinned)) throw error;
+      if (attempt >= FILE_REPLACE_DELAYS_MS.length) throw localFileLocked(error, attempt + 1, "removal");
+      sleep(FILE_REPLACE_DELAYS_MS[attempt]);
+    }
+  }
+}
+
+// A lock folder is written under a private name, then renamed into place.
+// Windows refuses that rename while a scanner still holds the new owner
+// record. Retry only while our folder is still staged and nothing has taken
+// the name: an existing destination is a real competitor, never waited for.
+export function publishDirectoryWithRetrySync(from, to, {
+  platform = process.platform,
+  rename: renameImpl = renameSync,
+  sleep = sleepSync,
+} = {}) {
+  const windows = platform === "win32" || process.platform === "win32";
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return renameImpl(from, to);
+    } catch (error) {
+      if (!windows || !FILE_SHARING_REFUSALS.includes(error?.code) || !pathPresent(from) || pathPresent(to)) throw error;
+      if (attempt >= FILE_REPLACE_DELAYS_MS.length) throw localFileLocked(error, attempt + 1, "publish");
+      sleep(FILE_REPLACE_DELAYS_MS[attempt]);
+    }
+  }
+}

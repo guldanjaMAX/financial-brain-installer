@@ -1,3 +1,5 @@
+import { finalizeOwnerLedgerAnswer } from '../../../worker/src/lib/document-answer.js';
+import { remoteMoneyFollowThrough, sameLedgerFigure } from '../remote-money-follow-through.mjs';
 import { tmpdir } from 'node:os';
 import { grossCompatibility } from './comparison-compat.mjs';
 export { grossCompatibility };
@@ -54,6 +56,7 @@ export async function evaluate(c, baseline = false, injected = null) {
     trace.transactions = transactionSql.filter(sql => /t\.pending=0\b/.test(sql)).length;
     trace.pending = transactionSql.filter(sql => /t\.pending=1\b/.test(sql)).length;
     assert.equal(trace.transactions + trace.pending, transactionSql.length, 'every transaction read has an explicit posted/pending basis');
+    await sameLedgerFigure(f, { question: c.question, intents: plan.intents, oracleRows: c.rows });
     return { plan, trace, body, bytes, input: c };
   } finally { for (const fn of cleanups) fn(); }
 }
@@ -149,11 +152,8 @@ export async function surfaces(t, o, question) {
   try { await cmdAsk(manifest, { ask: async () => question, adminKey: key,
     launchctl: () => assert.fail('SCHEDULER_BOUNDARY_REACHED'), http: async () => { cli++; return Response.json(o.body); } }); }
   finally { mock.mock.restore(); }
-  const url = new URL('https://brain.invalid/mcp');
-  const response = await handleMcp({}, new Request(url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1,
-    method: 'tools/call', params: { name: 'ask', arguments: { question } } }) }), url,
-    { think: async () => { remote++; return o.body; }, grant: { profile: 'read-only' } });
-  const rpc = await response.json(); assert.equal(cli, 1); assert.equal(remote, 1);
+  const rpc = await remoteMoneyFollowThrough(question, async () => { remote++; return o.body; });
+  assert.equal(cli, 1); assert.equal(remote, 1);
   const rendered = app(o, question);
   if (parts(o.body).some(part => part.net_refunds_unavailable)) {
     const intents = o.plan.intents;
@@ -169,3 +169,17 @@ export async function surfaces(t, o, question) {
     remote: rpc.result.content.map(item => item.text).join('\n'), app: rendered.text };
 }
 export function save() {}
+
+// The row-based oracle is supplied by the caller, before any product reading.
+export function calendarFigure(o, expected) {
+  reached(o);
+  const figures = Array.isArray(expected) ? o.body.ledger.comparison?.figures_minor : o.body.ledger.total_minor;
+  assert.deepEqual(figures, expected, 'independent fixture rows retain the supported figures');
+  if (Array.isArray(expected)) assert.equal(o.body.ledger.comparison.difference_minor, expected[0] - expected[1]);
+  assert.equal(o.body.ledger.complete, false);
+  assert.match(o.body.answer, /Qualification not applied:/);
+  o.body = finalizeOwnerLedgerAnswer(o.body);
+  assert.doesNotMatch(o.body.answer, /withheld|cannot|can't/i);
+  assert.match(o.body.confidence_text, /Confidence: Low \(0%\).*Why:.*Missing:/s);
+  assert.match(o.body.answer, /Coverage:.*Missing or counted twice:.*Estimates:.*How to check:/s);
+}

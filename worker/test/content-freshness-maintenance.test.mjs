@@ -66,7 +66,7 @@ test('maintenance detects revision races and truncated documents without advanci
     await assert.rejects(refreshContentDates(f.env, { dryRun: false, approve: bounded.plan_hash, now: NOW }), /500 chunks/);
     assert.equal(bounded.cursor, 0);
     assert.equal(bounded.updated, 0);
-    assert.ok(f.seen.sql.some(sql => /ORDER BY chunk_ix LIMIT 501/.test(sql)));
+    assert.ok(f.seen.sql.some(sql => /ORDER BY (?:c\.)?chunk_ix LIMIT 501/.test(sql)));
   } finally { f.sqlite.close(); }
 });
 

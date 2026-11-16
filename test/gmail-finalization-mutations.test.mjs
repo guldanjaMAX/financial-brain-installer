@@ -11,10 +11,18 @@ const environment = Object.fromEntries([
 ].filter((key) => process.env[key] !== undefined).map((key) => [key, process.env[key]]));
 environment.BRAIN_NO_WRANGLER_LOGIN = "1";
 
+const nodeSpawn = (...args) => {
+  if (process.env.BRAIN_LANE_NODE_WAIT) {
+    const quiet = spawnSync("/bin/sh", ["-c", process.env.BRAIN_LANE_NODE_WAIT], { encoding: "utf8" });
+    assert.equal(quiet.status, 0);
+  }
+  return spawnSync(...args);
+};
+
 // Node interprets a drive-letter --import argument as a URL scheme, on every
 // host. Keep this exact CI failure distinct from a behavioral mutation failure.
 const windowsPath = fileURLToPath(new URL("file:///D:/offline%20suite/test/fixtures/gmail-finalization-mutant.mjs"), { windows: true });
-const rejectedImport = spawnSync(process.execPath, ["--import", windowsPath, "--eval", ""], {
+const rejectedImport = nodeSpawn(process.execPath, ["--import", windowsPath, "--eval", ""], {
   env: environment, encoding: "utf8", timeout: 30_000,
 });
 assert.equal(rejectedImport.error, undefined);
@@ -33,7 +41,7 @@ for (const baseUrl of [
 }
 console.log("PASS portable mutation import specifiers");
 
-const acceptedImport = spawnSync(process.execPath, ["--import", fixture, "--eval", ""], {
+const acceptedImport = nodeSpawn(process.execPath, ["--import", fixture, "--eval", ""], {
   env: environment, encoding: "utf8", timeout: 30_000,
 });
 assert.equal(acceptedImport.error, undefined);
@@ -41,7 +49,7 @@ assert.equal(acceptedImport.signal, null);
 assert.equal(acceptedImport.status, 0, acceptedImport.stdout + acceptedImport.stderr);
 console.log("PASS mutation fixture import green control");
 
-const probe = (mutation) => spawnSync(process.execPath, [
+const probe = (mutation) => nodeSpawn(process.execPath, [
   "--test", ...(mutation ? ["--import", fixture] : []), suite,
 ], {
   env: { ...environment, ...(mutation ? { BRAIN_GMAIL_FINALIZATION_MUTANT: mutation } : {}) },

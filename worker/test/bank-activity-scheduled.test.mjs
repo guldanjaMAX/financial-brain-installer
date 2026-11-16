@@ -15,7 +15,7 @@ import {
   BANK_ACTIVITY_DOCUMENT_CAP,
   writeBankActivityDocuments,
 } from "../src/lib/bank-activity-doc.js";
-import { coverageGapReport } from "../src/lib/store-d1.js";
+import { coverageGapReport, freshnessReport } from "../src/lib/store-d1.js";
 
 const ORIGIN = "https://brain.invalid";
 const PRIMARY_ENTITY = "mesa-coffee";
@@ -770,7 +770,8 @@ test("the bounded sweep marker covers full owned-account and account-link state"
   }
 });
 
-test("coverage, freshness, health inventory, and entity scope remain honest through backfill", async () => {
+test("coverage, freshness, health inventory, and entity scope remain honest through backfill", async (t) => {
+  t.mock.timers.enable({apis:['Date'],now:Date.parse('2026-10-05T17:00:00.000Z')});
   const fixture = await newFixture();
   const provider = new BankActivityPlaidFake();
   try {
@@ -793,7 +794,7 @@ test("coverage, freshness, health inventory, and entity scope remain honest thro
     assert.equal(partial.complete_sweep, false);
     const mid = await coverageGapReport(fixture.env);
     const midBankGaps = mid.gaps.filter((gap) => gap.source === "bank_activity");
-    assert.deepEqual(midBankGaps.map((gap) => gap.type), ["history_unproven"]);
+    assert.deepEqual(midBankGaps.map((gap) => gap.type), ["sync_broken", "never_synced", "history_unproven"]);
 
     const firstCursor = JSON.parse(fixture.first(
       "SELECT sync_cursor FROM sources WHERE name='bank_activity'",
@@ -824,9 +825,24 @@ test("coverage, freshness, health inventory, and entity scope remain honest thro
     assert.equal(completed.complete_sweep, true);
     await drain(fixture);
     const after = await search(fixture, { q: "bank activity September 2026", source: "bank_activity" });
-    assert.equal(after.status, control.status);
+    assert.equal(after.status, "coverage_incomplete", "provider gaps survive a completed document projection");
     assert.equal(after.degraded, control.degraded);
-    assert.equal((after.gaps || []).some((gap) => gap.source === "bank_activity"), false);
+    assert.deepEqual((after.gaps || []).filter((gap) => gap.source === "bank_activity").map((gap) => gap.type),
+      ["never_synced"], "completed documents do not certify a complete provider sync");
+
+    // First prove the original partial-read gaps above, then reach a current
+    // provider read as the green control. Moving it before those checks would
+    // erase the very missing-sync evidence the negative arm is meant to prove.
+    // Resuming a staged historical page proves its rows, not a current poll.
+    // This freshness control needs a separate complete current provider read.
+    fixture.raw("UPDATE plaid_reconciliation SET due_at='2026-10-05T17:00:00.000Z'");
+    const current=await runPlaidFeedSlice(fixture.env,{
+      fetchImpl:provider.fetch.bind(provider),now:'2026-10-05T17:00:00.000Z',
+    });
+    assert.equal(current.items[0]?.ok,true,'fresh provider control reached');
+    assert.equal(fixture.first('SELECT last_successful_sync_at FROM bank_feed_health').last_successful_sync_at,
+      '2026-10-05T17:00:00.000Z');
+
 
     const primary = await search(fixture, {
       q: "Fixture Bakery Supply",
@@ -845,12 +861,21 @@ test("coverage, freshness, health inventory, and entity scope remain honest thro
     assert.ok(secondary.results.length > 0);
     assert.ok(secondary.results.every((row) => row.entity_slug === SECONDARY_ENTITY));
 
-    const freshnessResponse = await ownerGet(fixture, "/api/admin/brain/freshness");
-    assert.equal(freshnessResponse.status, 200);
-    const freshness = await freshnessResponse.json();
+    // The current pull invalidates the old document sweep. Complete the new
+    // bounded projection before asserting its independent sweep receipt.
+    let refreshed;
+    for(let slice=0;slice<4;slice++) {
+      refreshed=await writeBankActivityDocuments(fixture.env,{committedPromotions:1,at:'2026-10-05T17:04:00.000Z'});
+      if(refreshed.complete_sweep)break;
+    }
+    assert.equal(refreshed.complete_sweep,true,'green current-read projection completes its own sweep');
+    const syncAt=fixture.first("SELECT MIN(last_successful_sync_at) AS at FROM bank_feed_health").at;
+    const freshness = await freshnessReport(fixture.env, {now:Date.parse(syncAt || "2026-10-05T17:00:00.000Z")+49*3600_000});
     const bankSource = freshness.sources.find((source) => source.name === "bank_activity");
     assert.equal(bankSource.documents, 15);
-    assert.equal(bankSource.state, "manual");
+    // Derived documents cannot make a bank feed manual or advance its sync clock.
+    assert.equal(bankSource.state, syncAt ? "stale" : "never_synced");
+    assert.equal(bankSource.expected_every_days, 1);
     assert.equal(bankSource.source_status, "ready");
     assert.equal(typeof bankSource.last_complete_sweep_at, "string");
 

@@ -1,3 +1,5 @@
+import { assertLedgerAnswer } from '../../worker/test/helpers/document-answer-contract.mjs';
+import { searchDisclosureTapes, ownerAnswerTapes } from './search-disclosure-tapes.mjs';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { PERMANENT } from '../../test/fixtures/fastloop-day3/permanent.mjs';
@@ -12,11 +14,12 @@ import { candidateTapes } from './day3-tapes.mjs';
 import { baselineSources, baselineHttpSources, workingTreeSources, verifyExecutedSources, verifyHistoricalSources, BASELINE } from './ledger-sources.mjs';
 
 export const CASES = [...PERMANENT, ...DEVELOPMENT, ...RESERVED];
-export function loadTapes({ router = true, disclosure = true } = {}) {
+export function loadTapes({ router = true, disclosure = true, answer = true } = {}) {
   const dev = JSON.parse(readFileSync(new URL('../../test/fixtures/fastloop-day3/development-tapes.json', import.meta.url)));
   const reserved = JSON.parse(readFileSync(new URL('../../test/fixtures/fastloop-day3/reserved-tapes.json', import.meta.url)));
   const historical = Object.fromEntries(['baseline', 'batch1'].map(k => [k, { ...dev[k], ...reserved[k] }]));
-  return { ...historical, candidate: candidateTapes(historical.batch1, { router, disclosure }) };
+  const result = { ...historical, candidate: candidateTapes(historical.batch1, { router, disclosure }) };
+  return answer ? Object.fromEntries(Object.entries(result).map(([label,tapes]) => [label,ownerAnswerTapes(searchDisclosureTapes(tapes))])) : result;
 }
 export function controlsFor(run) {
   const controls = [];
@@ -87,7 +90,10 @@ export function runBench({ candidate = 'batch1', fixtures = loadTapes() } = {}) 
       }
       if (o.body.ledger) {
         const { timing, ...body } = peer.body;
-        assert.deepEqual(body, o.body, `${label}:${o.id}: direct/HTTP parity`);
+        assertLedgerAnswer(body, o.body);
+        const { answer, confidence, confidence_text, answer_contract, ...preserved } = body;
+        const { answer: directAnswer, ...directPreserved } = o.body;
+        assert.deepEqual(preserved, directPreserved, `${label}:${o.id}: direct/HTTP parity`);
       } else assert.ok(o.trace.fallback_calls > 0 || o.trace.sql.length > 0);
       parity[label].push({ id: o.id, status: 'checked' });
     }

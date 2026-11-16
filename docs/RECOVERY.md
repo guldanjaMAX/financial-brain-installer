@@ -1,5 +1,114 @@
 # Verified Cloudflare recovery
 
+## Multipart durable artifacts (offline integration candidate)
+
+New verified-recovery plans approve automatic multipart export when the complete
+encrypted durable export would exceed the existing 5 GiB single-import bound.
+Below that bound the existing single-artifact format and import path remain.
+Existing plans keep their approved policy: create a new plan and obtain fresh
+preview approvals to enable multipart. Never edit a generated plan or state.
+No new CLI switch, credential store, provider endpoint or deployment step is added.
+This integration has offline evidence only; it establishes no owner backup,
+release approval or permission for a live drill.
+
+The adapter exports the same reviewed migration prefix, normalized install row,
+durable tables, family-history import marker and finalization as the single
+artifact. It compares the local restore with independent source schema,
+aggregates, content and exact table counts. Direct content/deletion readbacks
+now allow streamed local exports through 64 GiB for current schemas; the frozen
+schema-48 campaign retains its original contract. This local read budget is
+separate from the unchanged per-import provider ceiling.
+
+The set lives at `.brain-recovery-export.parts` under the private artifact
+directory. Each part has authenticated AES-256-GCM encryption, ciphertext and
+plaintext SHA-256/byte counts, exact ordinal/table coverage, and a fixed name
+and order in encrypted `manifest.json.fbrenc`. Production parts are at most
+256 MiB including the 52-byte envelope, below the 5 GiB import ceiling. The
+producer streams complete statements through a 16 MiB unit budget; schema
+migrations remain whole atomic units. Unsupported dump statements or an
+indivisible oversized unit fail visibly. SQL strings, embedded newlines,
+UTF-8, comments and escaped quotes cannot become accidental byte boundaries.
+
+The local multipart verifier uses a private disk-backed SQLite database and a
+fresh connection for every part, checking FTS integrity, complete migration and
+table inventories, schema, aggregates and exact counts. Temporary verifier
+files are removed by their owning callback. The adapter avoids constructing a
+single SQL assembly when the data-only stream already exceeds the single
+bound. Actual disk use, export/import duration and provider compatibility still
+require the representative field drill below.
+
+Export first authenticates a transient `export-binding.json.fbrenc` containing
+the original source/snapshot binding. Resume regenerates the same frozen stream,
+authenticates and skips completed parts without replacing them, and refuses a
+changed source even if its prefix still matches. The binding is removed only
+after the completion manifest is sealed and reverified. Abrupt termination may
+leave a lock or plaintext residue: preserve it for private operator review.
+A lost export receipt can be reconciled only on a later journaled attempt.
+
+The existing preview shows `artifact_policy`. Plan/state bind the completed
+manifest pin, exact part ordinals, ciphertext byte counts and hashes. Status
+shows format, part count, total artifact bytes and manifest SHA-256 after export.
+Retain the trusted pin independently of the artifact directory, along with an
+independent encrypted copy and the declared custody identifier. A hash placed
+beside mutable artifacts is insufficient restore authority.
+
+Before any import the adapter authenticates the entire exact set. Missing,
+extra, altered or reordered files stop before target mutation. Every part is
+imported in manifest order, with fresh exact account/database/Worker identity,
+paused-target health, and zero-vector checks adjacent to it. The approved
+resource fingerprint binds the disposable nonce to the actual provider identity.
+Only a target with zero user tables may begin multipart restore. A partially
+restored target is preserved and never cleared or replayed; retry requires a
+separately approved empty target. Final schema/content/aggregate fingerprints,
+complete table counts and every artifact are rechecked before success.
+Security reconciliation, derived-index rebuild and useful-answer verification
+remain later mandatory stages.
+
+Operator drill for the integrating session, after separate owner approval:
+
+1. Pin the reviewed integrated runtime and package. Establish coherent T0 and
+   exclusion of every writer. Retain bookmarks, private local checkpoints and
+   paired runtime separately. Verify exact source and disposable target identity,
+   zero target user tables/vectors, and custody without exposing any value.
+2. Initialize fresh private controls with
+   `node operations/verified-recovery.mjs init <source-manifest> <target-manifest> <private-plan> <private-state>`.
+   For a fixed campaign, also supply its separately derived quiescence approval
+   as described below. Review `artifact.multipart_format` and both resource pins.
+3. Run the existing adapter `preview` with source/target manifests, plan/state,
+   private artifact directory, reviewed wrapper and release golden. Include the
+   final deployment receipt when the campaign requires it. Retain every exact
+   approval returned by that preview. The full flag templates below remain valid.
+4. Run the same configuration and approvals with `--stop-after-stage export_d1`.
+   The deliberate checkpoint reports `RECOVERY_FIELD_GATE_INTENTIONAL_INTERRUPTION`
+   after persisting success. Inspect with
+   `node operations/verified-recovery.mjs status <private-plan> <private-state>`.
+   Record actual SQL/ciphertext bytes, part sizes/counts, duration, peak disk use,
+   manifest pin, source fingerprints and every table count. Prove an interrupted
+   export resumes the same T0 prefix with unchanged ciphertext hashes. Never
+   force removal of a lock or plaintext to manufacture that result.
+5. Retain an independent protected encrypted set and trusted pin. On copies,
+   run altered, missing, extra and reordered controls through the existing run
+   command. Confirm the exact verification decision and zero imports, with an
+   unmodified green control. Separately prove the nonempty-target refusal.
+6. Continue the approved run with `--stop-after-stage restore_d1`. Record the
+   ordered per-part import log and actual provider readback: all fingerprints,
+   table/row coverage and database/FTS integrity. An interrupted import keeps
+   its partial target; provision a fresh target and obtain new plan approvals.
+7. Continue through `reconcile_security`, `rebuild_vectorize`, and `verify_eval`
+   checkpoints. Complete clean-index exact-set/barrier proof, runtime/checkpoint
+   pairing, post-T0 accepted-write preservation/replay, and independent owner
+   answer baselines. Every answer needs deterministic confidence, reasons and
+   missing data below 100%, and all five answer parts. A multipart D1 restore
+   alone cannot authorize sync apply or production cutover.
+
+Offline coverage is split deliberately: the adapter fixture physically encrypts
+and imports every small representative part; the actual plan/state validator
+counts 6,400,000,000 virtual bytes without allocating them. A scaled part model
+connects their byte accounting. Neither is a representative provider restore.
+The suites are `test/recovery-adapter-multipart-run-1114.test.mjs`,
+`test/recovery-size-probe-1114.test.mjs`, `test/recovery-sql-parts-1114.test.mjs`,
+and `test/recovery-multipart-1114.test.mjs`.
+
 Recovery is complete only when an isolated Brain can be rebuilt from a D1
 export and pass retrieval evaluation. A D1 bookmark or SQL file by itself is
 not that proof because Vectorize is derived state and cannot be restored with

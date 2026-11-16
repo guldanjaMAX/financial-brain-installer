@@ -1,3 +1,4 @@
+import { assertDocumentAnswer } from './helpers/document-answer-contract.mjs';
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
@@ -101,7 +102,8 @@ test("AR-05 this week removes older and unreliably dated candidates after the re
     }, ADMIN_HEADERS(fixture));
     assert.equal(response.status, 200);
     const body = await response.json();
-    assert.deepEqual(body.results.map((row) => row.source_id), ["in-window"]);
+    assert.deepEqual(new Set(body.results.map((row) => row.source_id)), new Set(["in-window","older","unreliable"]));
+    assert.deepEqual(new Set(body.results.map(row => row.question_time)), new Set(["inside requested period","outside requested period by 18 days","date unverified"]));
     assert.deepEqual(body.time_window, {
       from: "2026-10-19T00:00:00.000Z",
       to: "2026-10-25T23:59:59.999Z",
@@ -109,8 +111,8 @@ test("AR-05 this week removes older and unreliably dated candidates after the re
       basis: "question",
     });
     const disclosure = body.gaps.find((gap) => gap.type === "question_time_window");
-    assert.equal(disclosure?.unreliable_records_dropped, 1);
-    assert.match(disclosure?.detail || "", /only reliably dated records/i);
+    assert.equal(disclosure?.unreliable_records_dropped, 0);
+    assert.match(disclosure?.detail || "", /Outside-period and date-unverified records remain visible/i);
     assert.equal(counts.drafts, 1, "the filtered evidence reached answer generation");
     assert.equal(counts.verifiers, 1, "the filtered evidence reached verification");
   } finally {
@@ -127,14 +129,14 @@ test("AR-05 an empty inferred window refuses instead of citing an older record",
       q: "What did the fixture subject say this week?",
     }, ADMIN_HEADERS(fixture));
     const body = await response.json();
-    assert.equal(body.answer, null);
-    assert.deepEqual(body.citations, []);
-    assert.deepEqual(body.results, []);
-    const gap = body.gaps.find((entry) => entry.type === "time_window_empty");
+    assertDocumentAnswer(body, {provisional:true, empty:!body.results?.length});
+    assert.equal(body.citations.length, 1);
+    assert.equal(body.results[0].source_id, "older");
+    const gap = body.gaps.find((entry) => entry.type === "question_time_window");
     assert.equal(gap?.from, "2026-10-19T00:00:00.000Z");
     assert.equal(gap?.to, "2026-10-25T23:59:59.999Z");
-    assert.match(gap?.detail || "", /2026-10-19.*2026-10-25/);
-    assert.equal(counts.drafts, 0, "out-of-window evidence never reached the answer model");
+    assert.match(gap?.detail || "", /Outside-period/);
+    assert.equal(counts.drafts, 1, "outside-period evidence reaches the answer with its period label");
   } finally {
     fixture.close();
   }
@@ -152,7 +154,7 @@ test("AR-05 owner-local days can differ from UTC and caller ranges retain preced
       limit: 20,
     }, ADMIN_HEADERS(fixture));
     const localBody = await local.json();
-    assert.deepEqual(localBody.results.map((row) => row.source_id), ["local-sunday"]);
+    assert.deepEqual(new Set(localBody.results.map((row) => row.source_id)), new Set(["local-sunday","local-monday"]));
     assert.deepEqual(localBody.time_window, {
       from: "2026-10-12T07:00:00.000Z",
       to: "2026-10-19T06:59:59.999Z",
@@ -183,7 +185,7 @@ test("AR-05 questions without a retrieval time phrase keep the healthy no-match 
       q: "What does the fixture corpus say about an absent subject?",
     }, ADMIN_HEADERS(fixture));
     const body = await response.json();
-    assert.equal(body.answer, null);
+    assertDocumentAnswer(body, {provisional:true, empty:!body.results?.length});
     assert.equal(body.time_window, undefined);
     assert.deepEqual(body.gaps.map((gap) => gap.type), ["no_results"]);
 

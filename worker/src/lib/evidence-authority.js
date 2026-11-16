@@ -34,6 +34,12 @@ export const CLAIM_KINDS = Object.freeze({
 });
 
 const PRIMARY_TITLE = /\b(registrar|transcript of record|decree|judgment|judgement|docket|exhibit|affidavit|subpoena|deed|lease|contract|agreement|settlement|title|policy|passport|licen[cs]e|certificate|articles of (?:incorporation|organization)|k-?1|w-?2|1099|statement|payoff|lien|patent)\b/i;
+// A whole neutral record-kind name is identity context only, never authority.
+// Reuse the kind grammar without accepting unmatched title/version modifiers.
+export function isPrimaryRecordKind(value) {
+  const match = PRIMARY_TITLE.exec(String(value || ''));
+  return Boolean(match && match[0] === value);
+}
 const COURT_ORDER_TITLE = /\b(?:(?:temporary|interim|final|protective|restraining|custody|support|withholding)[\s_-]+orders?|order[\s_-]+(?:granting|denying|vacating|adopting|on|of|re)|minute[\s_-]+entry|ruling|parenting[\s_-]+plan)\b/i;
 const DRAFT_TITLE = /\b(draft|unsigned|not[\s_-]+signed|unexecuted|proposed|redline|template|for[\s_-]+review)\b/i;
 const PLAIN_TEXT_NOTE = /\.(?:md|markdown|txt|text)(?:$|[?#])/i;

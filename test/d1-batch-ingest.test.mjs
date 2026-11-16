@@ -385,7 +385,9 @@ const assertOneUpsert = (docUid) => {
 
   const stale = statsFor("message");
   const authoritative = actualCountsFor("message");
-  assert.equal(stale.chunks - authoritative.chunks, long.chunks - staged.chunks);
+  // Reviewed Drive schema 65 keeps physical counters transactional even on failed CAS.
+  assert.ok(long.chunks > staged.chunks, "the shortening decision was reached");
+  assert.equal(stale.chunks, authoritative.chunks);
   const inventory = await store.stats(env);
   const informational = inventory.rows.find((row) => row.source_type === "message");
   assert.equal(informational.chunks, null);
@@ -401,17 +403,14 @@ const assertOneUpsert = (docUid) => {
   assertStatsMatchRows("message", statsFor("message").last_ingest_at);
 }
 
-// A successful marker-bound commit must repair a dirty cache from authoritative
-// live D1 rows. A valid metadata-only document with no chunk still counts as a
-// document, while the chunk cache remains the exact live joined chunk count.
+// Reviewed Drive R6 replaces per-commit recounts with schema-65 physical triggers.
+// A metadata-only row still counts as a document, without a corpus-wide repair.
 {
   sqlite.prepare(
     `INSERT INTO documents (doc_uid,source,source_id,title,ingested_at,content_hash,meta)
      VALUES ('message:metadata-only','message','metadata-only','Metadata only',1,?1,'{}')`
   ).run("f".repeat(64));
-  sqlite.prepare(
-    "UPDATE corpus_stats SET documents=1,chunks=1 WHERE source='message'"
-  ).run();
+  assertStatsMatchRows("message", statsFor("message").last_ingest_at);
   const repairedCache = await post([envelope("cache-repair")]);
   assert.equal(repairedCache.created, 1);
   assertStatsMatchRows("message", statsFor("message").last_ingest_at);
@@ -1012,6 +1011,29 @@ for (const anomaly of ["inflated-count", "missing-row", "foreign-row"]) {
   const accepted = await store.ingest(env, envelope("stats-scope-single-inflated"));
   assert.equal(accepted.action, "created",
     "a trigger-inflated stats count does not fail a single-document commit that returned its row");
+}
+
+// Retain the dirty-cache regression on a separate synthetic source. The reviewed
+// bounded finalizer intentionally preserves a prior offset instead of recounting;
+// an explicit exact report remains independent of that non-authoritative cache.
+{
+  control.alter_finalize_results = null;
+  const source = "counter-fixture";
+  const doc = id => ({ ...envelope(id), source_type: source });
+  await post([doc("counter-a"), doc("counter-b")]);
+  assertStatsMatchRows(source, statsFor(source).last_ingest_at);
+  sqlite.prepare("UPDATE corpus_stats SET documents=1,chunks=1 WHERE source=?").run(source);
+  const added = await post([doc("counter-c")]);
+  assert.equal(added.created, 1, "the accepted-write decision reached the dirty counter baseline");
+  const actual = actualCountsFor(source);
+  assert.equal(actual.documents, 3);
+  assert.equal(statsFor(source).documents, 2, "a bounded commit does not silently claim a full repair");
+  const summary = (await store.stats(env)).rows.find(row => row.source_type === source);
+  assert.equal(summary.chunks, null);
+  assert.equal(summary.chunk_counts_exact, false);
+  const exact = (await readExactDocumentReport(env)).rows.find(row => row.source_type === source);
+  assert.equal(exact.chunks, actual.chunks);
+  assert.equal(exact.chunk_counts_exact, true);
 }
 
 console.log("d1-batch-ingest: real SQLite integration, trigger-aware CAS, statement-0 scope, readback races, and performance structure passed");

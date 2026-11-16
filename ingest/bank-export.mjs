@@ -300,7 +300,7 @@ export const OFX_SIGN_CONVENTION = "ofx_trnamt_negative_is_outflow";
 
 const OFX_ACCOUNT_KIND = new Map([
   ["CHECKING", "checking"], ["SAVINGS", "savings"], ["MONEYMRKT", "savings"],
-  ["CD", "savings"], ["CREDITLINE", "line_of_credit"],
+  ["CD", "savings"], ["CREDITLINE", "line_of_credit"], ["LOAN", "loan"], ["MORTGAGE", "loan"],
 ]);
 
 function accountKindFor(acctType, isCard) {
@@ -436,6 +436,13 @@ export function verifyOfxDirection(account) {
         "stated closing balance exactly, and do not when every sign is read the other way",
     };
   }
+  // Liability statements may state positive debt while transaction amounts
+  // remain signed from the holder's side. Prove the balance convention without
+  // reversing purchases and payments.
+  if (flipped && account.balanceRole === "liability") return {
+    state: "verified", ...figures, balanceSignBasis: "owed_positive",
+    reason: "the stated opening and closing debt balances reconcile exactly against the holder-signed transactions",
+  };
   if (flipped) return { state: "inverted", ...figures };
   return { state: "unreconciled", ...figures };
 }
@@ -553,6 +560,7 @@ function readOfxStatement(node, { isCard }) {
     openingBalanceMinor: opening.minor,
     openingBalanceLabel: opening.label,
     balanceAsOf,
+    balanceSource: { format: "ofx", minor: ledgerAmount.error ? null : ledgerAmount.minor, date: balanceAsOf },
     transactions,
   };
 }
@@ -600,6 +608,7 @@ export function parseOfx(text) {
   for (const account of accounts) {
     const check = verifyOfxDirection(account);
     account.directionCheck = check;
+    account.balanceSignBasis = check.state === "verified" ? (check.balanceSignBasis || "position") : "unproved";
     account.directionBasis = check.state === "verified" ? "verified" : "trusted";
     account.directionNote = check.reason || null;
     if (check.state === "inverted" || check.state === "unreconciled") refusals.push(directionRefusal(account, check));
@@ -1022,9 +1031,33 @@ export function parseBankCsv(text, { currency = "USD", accountHint = null } = {}
   });
 
   const dated = transactions.map((t) => t.postedOn).filter(Boolean).sort();
-  const closing = mapping.balanceIndex === null
-    ? { error: "absent" }
-    : parseMinorUnits(body[body.length - 1]?.[mapping.balanceIndex], { exponent });
+  const balances = body.map(row => mapping.balanceIndex === null ? null :
+    parseMinorUnits(row[mapping.balanceIndex], { exponent }));
+  const latest = transactions.map((t,i) => ({...t,i})).filter(t => t.postedOn === dated.at(-1));
+  // File order breaks same-day ties only when the running arithmetic proves
+  // which end is chronological closing. Date order alone cannot settle a tie.
+  const readings = [];
+  for (const descending of [false,true]) for (const sign of [1,-1]) {
+    const order = transactions.map((_,i) => i);
+    if (descending) order.reverse();
+    if (order.length < 2 || mapping.shape === "signed" && sign === -1) continue;
+    let moving = false;
+    const fits = order.every((index,n) => {
+      const t = transactions[index], b = balances[index];
+      if (!t.postedOn || t.unparsedReason || !b || b.error) return false;
+      if (!n) return true;
+      const previous = order[n-1];
+      if (transactions[previous].postedOn > t.postedOn) return false;
+      moving ||= t.amountMinor !== 0;
+      return sign * (b.minor - balances[previous].minor) === (t.direction === "outflow" ? -t.amountMinor : t.amountMinor);
+    });
+    if (fits && moving) readings.push({index:order.at(-1),sign});
+  }
+  const endpoints = [...new Set(readings.map(r => r.index))];
+  const closingIndex = latest.length === 1 ? latest[0].i : endpoints.length === 1 ? endpoints[0] : latest.at(-1)?.i;
+  const closing = balances[closingIndex] || {error:"absent"};
+  const signs = [...new Set(readings.map(r => r.sign))];
+  const liability = balanceRoleFor(accountHint?.accountKind || "other") === "liability";
 
   return {
     ok: true,
@@ -1048,6 +1081,10 @@ export function parseBankCsv(text, { currency = "USD", accountHint = null } = {}
       periodStart: dated[0] || null,
       periodEnd: dated[dated.length - 1] || null,
       ledgerBalanceMinor: closing.error ? null : closing.minor,
+      balanceSource: closing.error ? null : { format: "csv", minor: closing.minor, date: dated.at(-1),
+        row: closingIndex + 2, column: mapping.balanceIndex + 1 },
+      balanceSignBasis: liability && (mapping.shape === "signed" || signs.length !== 1) ? "unproved" : signs[0] === -1 ? "owed_positive" : "position",
+      balanceOrderUnproved: latest.length > 1 && endpoints.length !== 1,
       availableBalanceMinor: null,
       balanceAsOf: closing.error ? null : (dated[dated.length - 1] || null),
       transactions,

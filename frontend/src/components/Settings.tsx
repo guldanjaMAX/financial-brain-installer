@@ -46,6 +46,11 @@ export function BankConnectionsSection({ readState, banks, busy, rehearsal = fal
 }) {
   const bankRows = banks?.connections || [];
   const attention = new Set((banks?.needs_attention || []).map((bank) => bank.item_ref));
+  for (const bank of bankRows) {
+    if ((bank.health && bank.health.state !== 'healthy') || bank.health?.overdue ||
+        bank.health?.needs_sign_in || ['reauth_required','permission_revoked'].includes(bank.status) ||
+        (bank.accounts_needing_owner || 0) > 0) attention.add(bank.item_ref);
+  }
   return (
     <Section
       title="Banks"
@@ -59,12 +64,15 @@ export function BankConnectionsSection({ readState, banks, busy, rehearsal = fal
           This is not the same as no bank. Do not reconnect or disconnect anything here. Ask your
           installer to check the Brain and then reload Access.
         </Attention>
-      ) : !banks?.configured ? (
+      ) : !banks?.configured && bankRows.length === 0 ? (
         <Empty>
           Bank connections aren't set up for this Brain yet. Your installer can turn them on.
         </Empty>
       ) : (
         <>
+          {!banks?.configured && (
+            <Attention>Bank syncing is not configured. Ask your installer to restore the bank feed settings. Your saved bank status and history remain available below.</Attention>
+          )}
           {rehearsal && bankRows.length > 0 ? (
             <Note>
               Bank review and repair are intentionally unavailable in this local rehearsal. This row
@@ -91,9 +99,21 @@ export function BankConnectionsSection({ readState, banks, busy, rehearsal = fal
                 </span>
                 <span className="block text-[13px] text-ink-soft mt-0.5">
                   {bank.last_synced_at ? `Last checked ${agoISO(bank.last_synced_at)}` : "Not checked yet"}
+                  {(bank.status_line || bank.health?.needs_sign_in || ['reauth_required','permission_revoked'].includes(bank.status)) && (
+                    <span className={`block mt-0.5 break-words ${attention.has(bank.item_ref) ? 'text-amber-800' : ''}`}>
+                      {bank.health?.needs_sign_in || ['reauth_required','permission_revoked'].includes(bank.status)
+                        ? 'Your bank needs you to sign in again. Use Repair connection to continue.'
+                        : bank.status_line}
+                    </span>
+                  )}
+                  {(bank.accounts_needing_owner || 0) > 0 && (
+                    <span className="block text-amber-800 mt-0.5">Accounts waiting for you to choose an owner: {bank.accounts_needing_owner}. Choose an owner for each account in Access &gt; Banks to continue.</span>
+                  )}
                   {attention.has(bank.item_ref) && (
                     <span className="block text-amber-800 mt-0.5">
-                      {bank.status_detail
+                      {(bank.accounts_needing_owner || 0) > 0
+                        ? 'This connection is waiting for your account choices. '
+                        : bank.status_detail
                         ? `${bank.status_detail.replace(/[.\s]+$/, "")}. `
                         : "This connection stopped working. "}
                       Answers about money are missing anything that has happened here since.
@@ -113,12 +133,12 @@ export function BankConnectionsSection({ readState, banks, busy, rehearsal = fal
                     </a>
                   )
                 )}
-                <Confirm
+                {!attention.has(bank.item_ref) && <Confirm
                   label="Disconnect"
                   question={DISCONNECT_BANK_QUESTION}
                   disabled={busy}
                   onConfirm={() => onDisconnect(bank.item_ref)}
-                />
+                />}
               </span>
             </Row>
           ))}

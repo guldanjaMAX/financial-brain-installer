@@ -150,8 +150,8 @@ import {
 async function verifyRecoveryMigrationPrefixes(directory, { currentFingerprint } = {}) {
   const files = readdirSync(join(process.cwd(), "migrations", "d1"))
     .filter((name) => /^\d+_.*\.sql$/.test(name)).sort();
-  assert.equal(files.length, 61, "the current migration contract is explicitly pinned");
-  assert.equal(files.at(-1), "0061_balance_position_evidence.sql");
+  assert.equal(files.length, 65, "the current migration contract is explicitly pinned");
+  assert.equal(files.at(-1), "0065_retained_ingest_stages.sql");
   const migrations = files.map((file, index) => {
     assert.equal(Number(file.split("_")[0]), index + 1, "migration files are contiguous");
     const sql = readFileSync(join(process.cwd(), "migrations", "d1", file), "utf8");
@@ -223,7 +223,7 @@ async function verifyRecoveryMigrationPrefixes(directory, { currentFingerprint }
   }
   // Schema 10, 12 and 33 retain their original verifier behavior; testing every
   // prefix also covers both sides of each later table-introduction boundary.
-  for (let version = 10; version <= 61; version++) {
+  for (let version = 10; version <= 65; version++) {
     const checked = await verify(version);
     evidence.set(version, checked);
     for (const table of derivedTables) {
@@ -238,21 +238,25 @@ async function verifyRecoveryMigrationPrefixes(directory, { currentFingerprint }
       assert.equal(RECOVERY_EXPORT_TABLES.includes(table), true, table);
       assert.equal(V048_RECOVERY_DURABLE_TABLES.includes(table), false, table);
     }
+    assert.equal(checked.tables.includes('fin_expectations'), version >= 62);
+    assert.equal(recoveryExportTables(migrations.slice(0, version)).includes('fin_expectations'), version >= 62);
+    assert.equal(checked.tables.includes('bank_feed_health'), version >= 63);
+    assert.equal(recoveryExportTables(migrations.slice(0, version)).includes('bank_feed_health'), version >= 63);
   }
   assert.notEqual(evidence.get(33).result.schema_fingerprint, evidence.get(61).result.schema_fingerprint);
-  if (currentFingerprint) assert.equal(evidence.get(61).result.schema_fingerprint, currentFingerprint);
+  if (currentFingerprint) assert.equal(evidence.get(65).result.schema_fingerprint, currentFingerprint);
   assert.deepEqual([...V048_RECOVERY_DURABLE_TABLES].sort(), evidence.get(48).tables,
     "the frozen inventory exactly matches a real schema-48 artifact");
   await verify(58, null, true);
-  for (const table of [...derivedTables, ...identityTables]) {
+  for (const table of [...derivedTables, ...identityTables, 'fin_expectations', 'bank_feed_health', 'retained_ingest_stages', 'retained_ingest_activations']) {
     assert.equal(V048_RECOVERY_DURABLE_TABLES.includes(table), false);
-    const control = await verify(61, null, true);
+    const control = await verify(65, null, true);
     assert.equal(control.tables.includes(table), true);
-    const refused = await verify(61, table, true);
+    const refused = await verify(65, table, true);
     assert.deepEqual(refused.tables, control.tables.filter(name => name !== table),
       "the refused table is the only inventory difference from its green control");
   }
-  console.log("PASS  52 historical SQL prefixes, 7 paired missing-table refusals, frozen inventory and schema-60 durable exports");
+  console.log("PASS  56 historical SQL prefixes, 11 paired missing-table checks, frozen inventory and schema-65 durable exports");
 }
 
 if (process.env.BRAIN_RECOVERY_SQL_ARTIFACT_TEST_ONLY === "1") {
@@ -391,7 +395,7 @@ const wrapperPath = join(sandbox, "wrangler-owner-wrapper");
 const goldenPath = join(sandbox, "brain.golden.json");
 const fieldPreparationDirectory = join(sandbox, "private-v048-field-preparation");
 const fieldReceiptPath = join(fieldPreparationDirectory, "field-prepare-receipt.json");
-const fieldPackagePath = join(fieldPreparationDirectory, "brain-installer-0.4.27.tgz");
+const fieldPackagePath = join(fieldPreparationDirectory, "brain-installer-0.4.28.tgz");
 const fieldSourcePreflightReceiptPath = join(
   fieldPreparationDirectory,
   DISPOSABLE_RECOVERY_SOURCE_PREFLIGHT_RECEIPT_NAME,
@@ -423,7 +427,10 @@ const wrapperScript = "#!/bin/sh\n" +
   "exec \"${BRAIN_RECOVERY_NODE:?}\" --no-global-search-paths --require " +
   "\"${BRAIN_RECOVERY_WRANGLER_RESOLUTION_GUARD:?}\" " +
   "\"${BRAIN_RECOVERY_WRANGLER_ENTRYPOINT:?}\" \"$@\"\n";
-let lockedWranglerRuntime = inspectLockedWranglerRuntime(process.cwd());
+// The multipart-only transport fixture never materializes or executes a
+// Wrangler runtime. Full adapter coverage retains its real runtime gate.
+let lockedWranglerRuntime = process.env.BRAIN_RECOVERY_MULTIPART_TEST_ONLY === "1"
+  ? null : inspectLockedWranglerRuntime(process.cwd());
 const sourceWorkerVersionId = "fixture-source-version-id";
 const pausedWorkerVersionId = "fixture-paused-version-id";
 const activeWorkerVersionId = "fixture-active-version-id";
@@ -501,7 +508,7 @@ const syntheticFieldSourceManifest = {
   ...structuredClone(sourceManifest),
   client: { slug: "v048-field-proof", display_name: "Synthetic Field Gate v0.4.8" },
   brain: {
-    version: "0.4.27",
+    version: "0.4.28",
     worker_name: syntheticFieldSourceResource,
     domain: `${syntheticFieldSourceResource}.fixture.workers.dev`,
   },
@@ -576,7 +583,7 @@ function npmPackageFixture(destination) {
   assert.equal(packed.status, 0, "focused recovery test must build its exact local npm package");
   const metadata = JSON.parse(packed.stdout);
   assert.equal(metadata.length, 1);
-  assert.equal(metadata[0].filename, "brain-installer-0.4.27.tgz");
+  assert.equal(metadata[0].filename, "brain-installer-0.4.28.tgz");
   assert.equal(metadata[0].entryCount, metadata[0].files.length);
   return Object.freeze({
     bytes: readFileSync(join(destination, metadata[0].filename)),
@@ -733,13 +740,13 @@ function fullFieldPreparationReceipt(candidateSha, packageBytes, packageFileCoun
       head_sha: candidateSha,
       tree_sha: "b".repeat(40),
       package_name: "brain-installer",
-      package_version: "0.4.27",
+      package_version: "0.4.28",
       package_alignment: {
         aligned: true,
         package_lock_name: "brain-installer",
-        package_lock_version: "0.4.27",
+        package_lock_version: "0.4.28",
         package_lock_root_name: "brain-installer",
-        package_lock_root_version: "0.4.27",
+        package_lock_root_version: "0.4.28",
       },
       package_json_sha256: hash(readFileSync(join(process.cwd(), "package.json"))),
       package_lock_sha256: hash(readFileSync(join(process.cwd(), "package-lock.json"))),
@@ -750,7 +757,7 @@ function fullFieldPreparationReceipt(candidateSha, packageBytes, packageFileCoun
       end_clean: true,
     },
     package: {
-      filename: "brain-installer-0.4.27.tgz",
+      filename: "brain-installer-0.4.28.tgz",
       bytes: packageBytes.length,
       sha256: hash(packageBytes),
       identity_scheme: UPDATE_RUNTIME_IDENTITY_SCHEME,
@@ -1433,7 +1440,7 @@ function fullDisposableSeedReceipt(binding, {
       independently_verified_empty: true,
     },
     d1: {
-      worker_version: "0.4.27",
+      worker_version: "0.4.28",
       documents: DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
       chunks,
       fts: chunks,
@@ -1928,6 +1935,7 @@ function providerHarness({
   sourceFamilyRecoveryStateActive = false,
   targetFamilyRecoveryStateActive = false,
   dataExport = deterministicDataExport,
+  multipartImports = false,
   inspectCombinedArtifact = null,
   sourceWrappingSecret = false,
   partialZoomSecretGroup = false,
@@ -2390,8 +2398,8 @@ function providerHarness({
       const importPath = args[args.indexOf("--file") + 1];
       assert.match(importPath, /\.brain-recovery-plaintext\.tmp-[0-9a-f]+$/);
       const importSql = readFileSync(importPath, "utf8");
-      assert.equal(importSql.includes("CREATE TABLE"), true);
-      if (sourceMigrationVersion >= 44) {
+      if (!multipartImports) assert.equal(importSql.includes("CREATE TABLE"), true);
+      if (!multipartImports && sourceMigrationVersion >= 44) {
         const markerOpen = importSql.indexOf(
           `INSERT INTO "source_original_result_family_recovery_state" ("id","mode")`,
         );
@@ -2504,6 +2512,9 @@ function providerHarness({
           protocol: bootstrapProtocol,
           cursor_value: bootstrapCursor,
         }];
+      } else if (/AS table_name,COUNT/.test(sql)) {
+        rows = [...sql.matchAll(/SELECT '([A-Za-z_][A-Za-z0-9_]*)' AS table_name/g)]
+          .map((match) => ({ table_name: match[1], row_count: match[1] === "install_state" ? 1 : 0 }));
       } else if (/user_table_count/.test(sql)) {
         rows = [{ user_table_count: targetRestored
           ? durableTablesForVersion(targetMigrationVersion).length + 1
@@ -2975,7 +2986,14 @@ function providerHarness({
         return fixtureAdminKey;
       },
       readRecoveryArtifactKey: () => recoveryArtifactKey,
-      verifySqlArtifact: async (path) => {
+      verifySqlArtifact: async (path, options = {}) => {
+        if (options.consumeParts) {
+          let reached = 0;
+          await options.consumeParts(async (part) => { assert.ok(readFileSync(part).length); reached++; });
+          assert.ok(reached > 0);
+          return { ...sourceSnapshot, tables: options.coverageTables.map((table) =>
+            ({ table, rows: table === "install_state" ? 1 : 0 })) };
+        }
         const text = readFileSync(path, "utf8");
         assert.match(text, /CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts/);
         assert.equal(text.includes(privateSentinel), false);
@@ -3063,6 +3081,7 @@ function providerHarness({
 }
 
 try {
+  recoveryCases: {
   const recoveryFieldGateSchema = JSON.parse(
     readFileSync(join(process.cwd(), "manifest.schema.json"), "utf8"),
   ).properties.operations.properties.recovery_field_gate;
@@ -3134,6 +3153,12 @@ try {
     approveVectorizeMutationQuiescence:
       preview.vectorize_mutation_quiescence_approval_fingerprint,
   });
+
+  if (process.env.BRAIN_RECOVERY_MULTIPART_TEST_ONLY === "1") {
+    const { runMultipartAdapterCases } = await import("./recovery-adapter-multipart-1114.test.mjs");
+    await runMultipartAdapterCases({ sandbox, baseConfig, providerHarness });
+    break recoveryCases;
+  }
 
   const legacyTargetManifestPath = join(sandbox, "legacy-one-etag-target.manifest.json");
   const legacyPlanPath = join(sandbox, ".legacy-one-etag-plan.json");
@@ -5207,7 +5232,7 @@ try {
   );
   const mismatchedRuntimePackagePath = join(
     mismatchedRuntimeDirectory,
-    "brain-installer-0.4.27.tgz",
+    "brain-installer-0.4.28.tgz",
   );
   mkdirSync(mismatchedRuntimeDirectory, { mode: 0o700 });
   if (process.platform !== "win32") chmodSync(mismatchedRuntimeDirectory, 0o700);
@@ -5251,7 +5276,7 @@ try {
   );
   const omittedRuntimePackagePath = join(
     omittedRuntimeDirectory,
-    "brain-installer-0.4.27.tgz",
+    "brain-installer-0.4.28.tgz",
   );
   mkdirSync(omittedRuntimeDirectory, { mode: 0o700 });
   if (process.platform !== "win32") chmodSync(omittedRuntimeDirectory, 0o700);
@@ -5322,7 +5347,7 @@ try {
   // field-preparation receipt. A copied approval cannot authorize a later run.
   const replayReceiptDirectory = join(sandbox, "private-v048-field-preparation-replay");
   const replayReceiptPath = join(replayReceiptDirectory, "field-prepare-receipt.json");
-  const replayPackagePath = join(replayReceiptDirectory, "brain-installer-0.4.27.tgz");
+  const replayPackagePath = join(replayReceiptDirectory, "brain-installer-0.4.28.tgz");
   const replaySourcePreflightReceiptPath = join(
     replayReceiptDirectory,
     DISPOSABLE_RECOVERY_SOURCE_PREFLIGHT_RECEIPT_NAME,
@@ -7864,6 +7889,7 @@ try {
 
   console.log("PASS  Cloudflare recovery adapter is disposable-only, credential-safe, redirect-safe, and " +
     `resumable; ${skippedLinkChecks} skipped`);
+  }
 } finally {
   try { unlinkSync(join(artifactDirectory, ".brain-recovery-field-gate.lock")); } catch { /* absent */ }
   rmSync(sandbox, { recursive: true, force: true });

@@ -10,6 +10,66 @@ export const SENSITIVE_DOCUMENTS_NOTICE = 'Retrieved material was withheld by th
 const normalized = value => String(value || '').normalize('NFKC').toLowerCase().replace(/[\s_]+/g, ' ').trim();
 const recordType = /\b(?:tax[\s_-]+returns?|credit[\s_-]+reports?|consumer[\s_-]+reports?|passport|driver['’]?s?[\s_-]+licen[cs]e|identity[\s_-]+(?:card|document)|national[\s_-]+id|social[\s_-]+security[\s_-]+card|birth[\s_-]+certificate)\b/i;
 const taxForm = /\b(?:form[\s_-]+(?:1040|1065|1120|1099|941|940)\b|(?:schedule[\s_-]+)?k[\s_-]?1\b|w[\s_-]?2\b)/i;
+const filingHeader = /^(?:\[[^\]]+\]\s*)?(?:(?:department of the treasury|internal revenue service)[\s.,:;-]*)*(?:(?:19|20)\d{2}\s+)?(?:form[ -]+(?:1040|1065|1120|1099|941|940)\b|(?:schedule[ -]+)?k[ -]?1\b|w[ -]?2\b)/i;
+// A filing header can follow any preamble: an OCR or transport warning, a
+// page marker, a bracketed upload tag, a cover line or agency text. Read the
+// opening lines and sentences before normalization flattens them, and treat
+// any opening segment that begins with a form identifier as a header. An
+// incidental mention inside a sentence never begins a segment.
+const FILING_HEADER_SEGMENTS = 12;
+const filingSegment = /^(?:\[\[?[^\]]*\]\]?\s*)*(?:(?:department of the treasury|internal revenue service)[\s.,:;-]*)*(?:(?:19|20)\d{2}\s+)?(?:form[ -]+(?:1040|1065|1120|1099|941|940)\b|(?:form[ -]+|schedule[ -]+)?k[ -]?1\b|(?:form[ -]+)?w[ -]?2\b)/i;
+function hasFilingHeader(value) {
+  const raw = String(value || '').normalize('NFKC');
+  if (filingHeader.test(normalized(raw))) return true;
+  return raw.split(/\r?\n|(?<=[.!?;])\s+/).map(normalized).filter(Boolean)
+    .slice(0, FILING_HEADER_SEGMENTS).some(segment => filingSegment.test(segment));
+}
+
+// One heading grammar for sensitive kinds in record text, read on every line
+// and sentence, with case kept because case is the grammar.
+// A form identifier (any numbered form, W-2, K-1) is a heading when every
+// word before it in its line or sentence is form preamble (agency names, OMB
+// numbers, copy labels, years, page and box marks: a closed list) and the
+// word after it is not lowercase prose ("Form 1040 is mentioned"). Dashes,
+// OMB lines and layouts cannot hide it; "Re: Form 1099-NEC Request" and "the
+// advisor may request Form 1040" are mentions.
+// A sensitive record type (passport, credit report, tax return, licence,
+// identity card) is a heading only when it ends its line or sentence, or is
+// followed only by a date or number, with no prose before it. "Bring your
+// passport", "tax returns costs" and "Tax Return Preparation Engagement
+// Letter" are mentions; "CONSUMER CREDIT REPORT" and "Passport" are headings.
+const FORM_IN_TEXT = /\b(?:form[\s_-]+(?:\d{3,5}|w[\s_-]?2)(?:\s?-\s?[a-z0-9]{1,4}\b)?|(?:schedule[\s_-]+)?k[\s_-]?1\b|w[\s_-]?2\b)/gi;
+const RECORD_TYPE_IN_TEXT = /\b(?:tax[\s_-]+returns?|credit[\s_-]+reports?|consumer[\s_-]+reports?|passports?|driver['’]?s?[\s_-]+licen[cs]es?|identity[\s_-]+(?:cards?|documents?)|national[\s_-]+ids?|social[\s_-]+security[\s_-]+cards?|birth[\s_-]+certificates?)\b/gi;
+const FORM_PREAMBLE = new Set(('department of the treasury internal revenue service irs omb no copy for employee employer recipient payer ' +
+  'records record state federal page void corrected and to be filed with tax return calendar year attach this form schedule us u s ' +
+  'partner partnership shareholder beneficiary final amended').split(' '));
+const wordsOf = value => value.match(/[\p{L}\p{N}][\p{L}\p{N}'’]*/gu) || [];
+const HEADING_FUNCTION_WORDS = new Set(['of', 'the', 'and', 'for', 'no', 'a', 'an', 'de', 'del', 'y']);
+const proseWord = word => /^\p{Ll}/u.test(word) && !HEADING_FUNCTION_WORDS.has(word);
+const preambleWord = word => /\d/.test(word) || word.length === 1 || FORM_PREAMBLE.has(word.toLowerCase().replace(/['’]s$/, ''));
+function headingKind(value) {
+  const raw = String(value || '').normalize('NFKC');
+  return raw.split(/\r?\n|(?<=[.!?;])\s+/).some(segment => {
+    const form = [...segment.matchAll(FORM_IN_TEXT)].some(match => {
+      if (!wordsOf(segment.slice(0, match.index)).every(preambleWord)) return false;
+      const after = wordsOf(segment.slice(match.index + match[0].length));
+      if (!after.length) return true;
+      // "Form 941 for 2025": a function word followed by a year is a heading.
+      if (/^(?:for|of)$/.test(after[0])) return /^(?:19|20)\d{2}$/.test(after[1] || '');
+      return !/^\p{Ll}/u.test(after[0]);
+    });
+    return form || [...segment.matchAll(RECORD_TYPE_IN_TEXT)].some(match => {
+      if (wordsOf(segment.slice(0, match.index)).some(proseWord)) return false;
+      const after = wordsOf(segment.slice(match.index + match[0].length));
+      return after.length === 0 || /\d/.test(after[0]) || segment === segment.toUpperCase();
+    });
+  });
+}
+// Body text fields are read by the heading grammar; every other string on a
+// row (title, file name, metadata) is a label that names what the record is.
+const BODY_FIELDS = new Set(['snippet', 'text', 'content', 'body', 'excerpt', 'highlight', 'chunk_text']);
+const labelsOf = row => row && typeof row === 'object' ? Object.fromEntries(Object.entries(row).filter(([key]) => !BODY_FIELDS.has(key))) : row;
+const bodiesOf = row => row && typeof row === 'object' ? Object.entries(row).filter(([key, value]) => BODY_FIELDS.has(key) && typeof value === 'string').map(([, value]) => value) : [];
 const identityField = /\b(?:(?:ssn|social[\s_-]+security(?:[\s_-]+(?:number|no))?|taxpayer[\s_-]+(?:id|identification)(?:[\s_-]+number)?)\s*[:#=]?\s*(?:\d{3}[ -]?\d{2}[ -]?\d{4}|[x*]{3}[ -]?[x*]{2}[ -]?\d{4})|(?:passport|driver['’]?s?[\s_-]+licen[cs]e|national[\s_-]+id)\s*(?:number|no\.?|#)\s*[:#=]?\s*[a-z0-9][a-z0-9 -]{4,}|(?:date[\s_-]+of[\s_-]+birth|dob)\s*[:=]\s*\d{1,4}[-/]\d{1,2}[-/]\d{1,4})\b/i;
 const identityKey = /^(?:ssn|social[\s_-]+security(?:[\s_-]+number)?|passport[\s_-]+(?:number|no)|driver['’]?s?[\s_-]+licen[cs]e[\s_-]+(?:number|no)|national[\s_-]+id|taxpayer[\s_-]+(?:id|identification)[\s_-]+number|date[\s_-]+of[\s_-]+birth|dob)$/i;
 
@@ -76,20 +136,54 @@ function requestedRecord(question) {
   return contents ? { reference: contents[1], direct: false } : null;
 }
 
+const canonicalForm = value => normalized(value).replace(/\b(?:form|schedule)\b/g,'').replace(/[^a-z0-9]/g,'');
+// A form the owner names: the known filings, or any numbered form, since the
+// heading grammar screens every numbered form heading.
+const namedForm = /\b(?:form[\s_-]+\d{3,5}\b|(?:schedule[\s_-]+)?k[\s_-]?1\b|w[\s_-]?2\b)/i;
+
+function namedFormRequest(row, question) {
+  const otherKind=recordType.exec(normalized(row.title));
+  if (otherKind && !/^tax[ -]+returns?$/i.test(otherKind[0])) return false;
+  const direct = /^(?:please )?(?:what(?:'s| is) (?:on|in)|what does|show(?: me)?|open|read)\s+(?:(?:my|our|the)\s+)?(.+)$/i.exec(normalized(question).replace(/[.!?]+$/,''));
+  if (!direct) return false;
+  const reference=direct[1].replace(/\s+(?:say|show|report)$/i,'');
+  const form=namedForm.exec(reference);
+  if (!form || reference.slice(0,form.index).replace(/\b(?:19|20)\d{2}\b/g,'').trim()) return false;
+  const recordText=normalized(`${row.title || ''} ${row.snippet || row.text || ''}`);
+  const recordForm=namedForm.exec(recordText);
+  if (!recordForm || canonicalForm(form[0])!==canonicalForm(recordForm[0])) return false;
+  const tail=reference.slice(form.index+form[0].length).trim();
+  if (!tail || /^(?:for )?(?:19|20)\d{2}$/.test(tail)) return true;
+  // A form suffix the owner names (1099-INT) must be the record's own.
+  if (/^-\s?[a-z0-9]{1,4}$/.test(tail)) return canonicalForm(recordText).includes(canonicalForm(form[0]+tail));
+  const party=/^(?:from|of)\s+(.+)$/.exec(tail);
+  return Boolean(party && normalized(`${row.title || ''} ${row.snippet || row.text || ''}`).includes(normalized(party[1])));
+}
+
 function explicitlyRequested(row, question, taxQuestion, options) {
+  const quoted = /^(?:please\s+)?(?:show(?:\s+me)?|open|read)\s+(?:the\s+)?(?:document|record|file)\s+(?:titled|named|called)\s+["“]([^"”]+)["”][.!?]*$/i.exec(question.trim());
+  if (quoted) return normalized(row.title) === normalized(quoted[1]);
   // Sensitive screening is on for every candidate. Unknown intent stays
   // withheld; neither a money cue nor word overlap activates an exception.
+  if (namedFormRequest(row,question)) return true;
   if (taxQuestion?.applicable) {
-    if (taxQuestion.resolved !== true) return false;
+    const otherKind=recordType.exec(normalized(row.title));
+    if (otherKind && !/^tax[ -]+returns?$/i.test(otherKind[0])) return false;
+    if (taxQuestion.resolved !== true) {
+      // A form named by the owner is a solicited record read. Unknown entity
+      // or year lowers answer confidence; it never turns this into your filing.
+      const form = namedForm.exec(question);
+      const recordForm=namedForm.exec(normalized(`${row.title || ''} ${row.snippet || row.text || ''}`));
+      if (form && recordForm && canonicalForm(form[0])===canonicalForm(recordForm[0])) return true;
+      return false;
+    }
     // Native-header authority stays authoritative for strict callers. Only
     // the resolved production answer guard may receive related tax evidence.
     const scope = row.authority?.tax_scope ?? taxEvidenceScope(row, question, options);
     if (scope?.matched === true) return true;
     if (!options.deferTaxScope) return false;
-    return taxForm.test(normalized(row.title)) || /\btax[\s_-]+returns?\b/i.test(row.title || '');
+    return scope?.form_matched === true;
   }
-  const quoted = /^(?:please\s+)?(?:show(?:\s+me)?|open|read)\s+(?:the\s+)?(?:document|record|file)\s+(?:titled|named|called)\s+["“]([^"”]+)["”][.!?]*$/i.exec(question.trim());
-  if (quoted) return normalized(row.title) === normalized(quoted[1]);
   const request = requestedRecord(question);
   if (!request) return false;
   const { reference, direct } = request;
@@ -115,10 +209,14 @@ export function filterThinkCandidates(candidates, { question = '', taxQuestion =
     const credential = scanEnvelope({ candidate: row });
     const capability = hasSensitiveTransportIdentity({ source_id: row });
     const requested = explicitlyRequested(row, question, taxQuestion, options);
-    const sensitive = hasIdentityField(row) || stringsIn(row).some(value => {
-      const text = normalized(value);
-      return recordType.test(text) || taxForm.test(text) || identityField.test(text);
-    });
+    // A label naming a sensitive kind, an identity number anywhere, or a
+    // sensitive heading in the body is a sensitive record. A passing mention
+    // inside body prose is not: "bring your passport" stays readable.
+    const sensitive = hasIdentityField(row) || taxForm.test(normalized(row.title)) || hasFilingHeader(row.snippet || row.text) ||
+      stringsIn(labelsOf(row)).some(value => {
+        const text = normalized(value);
+        return recordType.test(text) || identityField.test(text);
+      }) || bodiesOf(row).some(value => identityField.test(normalized(value)) || headingKind(value));
     const reason = credential.shouldFlag || capability
       ? 'credential'
       : sensitive && !requested ? 'unsolicited_sensitive_record' : null;

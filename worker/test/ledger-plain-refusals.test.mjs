@@ -98,7 +98,9 @@ test('owner renderer uses the plain bank refusal and keeps search failure notice
     evidence_gate: { supported: false, reason: 'period_outside_coverage' } };
   assert.equal(response.gaps.length, 1, 'real refusal supplied');
   assert.equal(answerText(response), detail);
-  assert.equal(answerText({ ...response, status: 'coverage_incomplete', notice: 'Search is still incomplete.' }), 'Search is still incomplete.');
+  const provisional = answerText({ ...response, status: 'coverage_incomplete', notice: 'Search is still incomplete.' });
+  assert.ok(provisional.startsWith('Search is still incomplete.'));
+  assert.match(provisional, /Coverage:.*Missing or counted twice:.*Estimates:.*How to check:/s);
   assert.equal(answerText({ answer: 'Ordinary answer.', gaps: [] }), 'Ordinary answer.\nWant to check the original record?');
   assert.equal(answerText({ ...response, answer: 'A dated document answer.', gaps: [{ ...response.gaps[0], detail: "This answer comes from your documents; I did not match it to your bank data." }] }), "A dated document answer.\n\nThis answer comes from your documents; I did not match it to your bank data.\nWant to check the original record?");
 });
@@ -171,6 +173,8 @@ test('CLI and MCP preserve the bank explanation without printing decision codes'
   const detail = "I can help find the right account, but no connected account matches this request.\nWant help connecting the account you want to ask about?";
   const body = { answer: null, citations: [], results: [], gaps: [{ type: 'ledger_not_consulted', reason: 'no_accounts', detail }],
     evidence_gate: { supported: false, complete: false, reason: 'no_accounts' } };
+  const { computeAnswerConfidence } = await import('../src/lib/confidence.js');
+  body.confidence = computeAnswerConfidence({ gaps: body.gaps });
   let reads = 0;
   const printed = [];
   t.mock.method(console, 'log', (...parts) => printed.push(parts.join(' ')));
@@ -179,16 +183,31 @@ test('CLI and MCP preserve the bank explanation without printing decision codes'
     launchctl: () => assert.fail('host tool forbidden'), http: async () => { reads++; return Response.json(body); } });
   const url = new URL('https://brain.invalid/mcp');
   const response = await handleMcp({}, new Request(url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1,
-    method: 'tools/call', params: { name: 'ask', arguments: { question: 'What are my account balances?' } } }) }), url,
+    method: 'tools/call', params: { name: 'ask', arguments: { question: 'What does the statement say?' } } }) }), url,
     { think: async () => { reads++; return body; }, grant: { profile: 'read-only' } });
   const rpc = await response.json();
-  assert.equal(reads, 2, 'both real renderers reached their injected read');
+  // Assistant money work now uses the money tools. The same legacy bank gap
+  // remains renderable when received by the document path.
+  const handoff = await handleMcp({}, new Request(url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 2,
+    method: 'tools/call', params: { name: 'ask', arguments: { question: 'What are my account balances?' } } }) }), url,
+    { think: async () => { reads++; return body; }, grant: { profile: 'read-only' } });
+  const handoffText = (await handoff.json()).result.content.map(c => c.text).join('\n');
+  assert.match(handoffText, /Confidence: Low \(0%\).*(?:Why|Reasons):.*Missing:/s);
+  assert.match(handoffText, /brain_money_overview.*brain_money_guide.*brain_money_query/s);
+  assert.equal(reads, 2, 'CLI and document MCP read; the bank handoff never borrows document evidence');
   for (const text of [printed.join('\n'), rpc.result.content.map(c => c.text).join('\n')]) {
-    ownerMessages.push(text);
+    // The new confidence explanation has its own contract. Keep the frozen
+    // bank-copy jargon oracle on the original explanation and next action.
+    const score = text.match(/Confidence: (?:High|Medium|Low) \(\d+%\)[\s\S]*?Missing:[^\n]*(?:\n(?![^\n]*(?:Coverage:|Next:|How to check:))[^\n]*)*/)?.[0];
+    assert.ok(score, 'each surface includes a computed confidence line');
+    assert.match(score, /Why:.*Missing:/s);
+    const facts = text.replace(score, '');
+    ownerMessages.push(facts);
     assert.ok(text.includes(detail.split('\n')[0]), 'every factual bank qualification retained');
     assert.equal(text.trim().split('\n').at(-1), 'Next: ask again with a name, date or exact phrase the record would contain.');
     assert.equal((text.match(/\bWant[^?]*\?/g) || []).length, 0, 'reviewed Next is the only invitation');
-    assert.doesNotMatch(text, /no_accounts|Ledger gap|\bcoverage\b/i);
+    assert.doesNotMatch(text, /no_accounts|Ledger gap/i);
+    assert.doesNotMatch(facts, /\bcoverage\b/i);
   }
 });
 
@@ -240,11 +259,13 @@ test('money search progress uses plain words and keeps the incomplete-search ref
     notice: 'The search returned zero matches. Source coverage could not be checked, so treat this result as provisional until source status is available.',
     gaps: [{ type: 'ledger_not_consulted', reason: 'no_accounts', detail: 'Connect the bank account.' }] };
   for (const renderer of [worker, app]) {
-    assert.equal(renderer.answerText(body), 'The search returned zero matches. The connected records could not be checked, so treat this result as provisional until source status is available.');
-    assert.equal(renderer.confidenceText(body), 'Some connected records may be missing or still loading. This answer is incomplete.');
-    assert.doesNotMatch(renderer.answerText(body) + renderer.confidenceText(body), jargon);
+    assert.ok(renderer.answerText(body).startsWith(body.notice.replace('Source coverage', 'The connected records')));
+    assert.match(renderer.answerText(body), /Coverage:.*Missing or counted twice:.*Estimates:.*How to check:/s);
+    assert.match(renderer.confidenceText(body), /Confidence: Low \(10%\).*Why:.*Missing:/s);
+    // The mandated contract headings follow the plain owner facts.
+    assert.doesNotMatch(renderer.answerText(body).split('\n\nCoverage:')[0], jargon);
     assert.doesNotMatch(renderer.answerText(body), /\$/);
-    assert.equal(renderer.answerText({ ...body, gaps: [] }), body.notice, 'ordinary search copy stays unchanged');
+    assert.ok(renderer.answerText({ ...body, gaps: [] }).startsWith(body.notice), 'ordinary search notice stays intact');
   }
 });
 

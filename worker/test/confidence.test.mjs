@@ -9,6 +9,7 @@ import { looksLikeRefusal } from "../../eval/scorer.mjs";
 const dated = (ref, reliable = true, family = ref) => ({
   ref,
   title: ref,
+  snippet: "The review date is November 13.",
   ts: "2026-07-31T00:00:00Z",
   date_reliable: reliable,
   lineage: { status: "known", family_tokens: [`family-${family}`] },
@@ -20,7 +21,7 @@ test("the rubric is deterministic and bounded", () => {
   const second = computeAnswerConfidence(input);
   assert.deepEqual(first, second, "same inputs must give the same number");
   assert.ok(first.percent >= 5 && first.percent <= 95, "never certain, never worthless");
-  assert.ok(["high", "moderate", "low"].includes(first.band));
+  assert.ok(["High", "Medium", "Low"].includes(first.band));
   assert.ok(first.basis.length >= 2, "the basis must say where the number came from");
 });
 
@@ -67,7 +68,7 @@ test("a refusal during healthy retrieval outranks one during a blind spot", () =
     degraded: "vector",
     gaps: [{ type: "coverage", detail: "the drive source stopped updating 4 days ago" }],
   });
-  assert.ok(healthy.percent >= 80, "healthy search supports the scoped refusal rubric");
+  assert.ok(healthy.percent <= 30, "an empty-search answer never exceeds Low 30");
   assert.ok(blind.percent <= healthy.percent - 20, "a blind spot limits the search result");
   assert.ok(healthy.basis[0].includes("8 nearest candidates"), "the basis states the scope checked");
 });
@@ -80,7 +81,7 @@ test("confidence never leaks into the answer text a refusal scorer reads", () =>
   const canonical = "The documents do not answer the question.";
   assert.ok(looksLikeRefusal(canonical), "the canonical refusal must keep passing the scorer");
   const line = confidenceLine(refusalConfidence({ resultCount: 5, sources: ["drive"] }), { refused: true });
-  assert.ok(line.startsWith("Confidence in this search result:"), "refusal phrasing names what the number means");
+  assert.ok(line.startsWith("Confidence: Low ("), "refusal phrasing names what the number means");
   assert.ok(!looksLikeRefusal(`${canonical} ${line}`),
     "concatenating the confidence line breaks the refusal contract — it must stay a separate field");
 });
@@ -89,5 +90,5 @@ test("confidenceLine is null-safe for older responses", () => {
   assert.equal(confidenceLine(undefined), null);
   assert.equal(confidenceLine({}), null);
   const line = confidenceLine(computeAnswerConfidence({ approvedDocs: [dated("a")] }));
-  assert.match(line, /^Confidence: \d{1,2}% \((high|moderate|low)\)\. .+\.$/);
+  assert.match(line, /^Confidence: (High|Medium|Low) \(\d{1,2}%\)\. Why: .+ Missing: .+\.$/);
 });

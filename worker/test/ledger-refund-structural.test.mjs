@@ -52,7 +52,7 @@ function withheld(body, gross) {
   assert.equal(body.ledger.refund_minor, undefined, 'no inferred refund amount');
   assert.equal(body.ledger.net_refunds_unavailable, true, 'refund decision reached');
   assert.equal(body.ledger.amount_basis, 'gross_before_refunds');
-  assert.match(body.answer, /cannot confirm spending after refunds/i);
+  assert.match(body.answer, /before subtracting refunds.*net amount (?:is unknown|unknown)/is);
   assert.ok(displayFigures(body.answer).some(fig => fig.cents === String(gross)), 'oracle gross rendered');
 }
 function listed(body, descriptions) {
@@ -274,11 +274,12 @@ test('unconfirmed expense membership cannot hide a possible category refund', as
   assert.equal(body.ledger.net_refunds_unavailable, true);
   listed(body, ['Store refund']);
 });
-test('release schema remains 61 without a provider-type migration', t => {
+test('schema 62 adds expectations without a provider-type migration', t => {
   const f = setup(t);
-  assert.equal(f.first('SELECT schema_version FROM install_state').schema_version, 61);
+  // Schema 64 adds a retry floor; schemas 62 through 64 add no provider type.
+  assert.equal(f.first('SELECT schema_version FROM install_state').schema_version, 64);
   const files = readdirSync(new URL('../../migrations/d1/', import.meta.url)).filter(f => f.endsWith('.sql'));
-  assert.equal(Math.max(...files.map(f => Number(f.slice(0, 4)))), 61);
+  assert.equal(Math.max(...files.map(f => Number(f.slice(0, 4)))), 64);
   assert.ok(!f.rows('PRAGMA table_info(fin_transactions)').some(column => column.name === 'source_transaction_type'));
 });
 test('description-only merchant refusal retains the closed-world refund candidate disclosure', async t => {

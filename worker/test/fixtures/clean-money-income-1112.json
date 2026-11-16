@@ -1,0 +1,4369 @@
+{
+  "lane": "CLAUDE-FINDER-CLEAN-INCOME-1112",
+  "base": "4bbffce2cbc11dd1fb7629b78c3a1074e60192df",
+  "scope": "Income questions over the clean money view (txn.income_minor), traced by reading worker/src/lib/clean-money.js, worker/src/lib/ledger-analysis.js and worker/src/lib/money-query-quality.js at base.",
+  "schema": {
+    "defaults": "Unless a case overrides: tenant 'primary'; every account owned, basis_state confirmed, entity 'business' (kind business) except entity 'household' where stated; feed_mode live; one current fin_account_coverage row per account: coverage_status complete, basis_state confirmed, covered_from 2026-01-01, covered_to 2026-10-31, basis_note NULL; every row posted (pending 0), basis_state confirmed, provenance feed, currency USD, payee NULL, category NULL.",
+    "account": "{slug, kind, last4, [label], [institution], [entity], [feed_mode], [status], [closed_on], [opened_on], [coverage], [link]}",
+    "row": "{id, date (posted_on), amount (dollars), dir ('in'|'out'), desc, acct, [payee], [cat], [cat_basis], [provenance], [pending], [currency], [amount_null]}",
+    "expected": "Bookkeeper answer: figure, figure_minor, rows counted, not_counted (row + why), confidence word.",
+    "confidence_rule": "High = no uncertain income dollars (every counted or excluded inflow has income words, processor identity, interest/proceeds code, owner-confirmed category, account-kind rule or proved/resolved endpoint), coverage complete, nothing pending/unreadable/duplicated/outside dates. Medium = uncertain dollars (counted or left out) at most 50% of the headline, or a pending/duplicate/coverage note. Low = uncertain dollars over 50% of the headline (including a $0 headline with uncertain items), or unreadable rows.",
+    "code": "Base behaviour: figure_minor = SUM(txn.income_minor) for the period/side (+ guide net-sales adjustment for C19-C21), counted rows, moneyQueryQuality display, verdicts, deciding rule."
+  },
+  "cases": [
+    {
+      "id": "C01",
+      "theme": "unknown_deposit",
+      "question": "What was my income in March 2026?",
+      "period": [
+        "2026-03-01",
+        "2026-03-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-04",
+          "amount": 1250.0,
+          "dir": "in",
+          "desc": "Mobile deposit",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$1,250.00",
+        "figure_minor": 125000,
+        "rows": [
+          "r1"
+        ],
+        "not_counted": [],
+        "confidence": "Low"
+      },
+      "code": {
+        "figure_minor": 125000,
+        "rows": [
+          "r1"
+        ],
+        "confidence": "Low (50%)",
+        "figure": "PASS",
+        "confidence_verdict": "PASS",
+        "rule": "ledger-analysis.js:332,415; clean-money.js:177; money-query-quality.js:34"
+      }
+    },
+    {
+      "id": "C02",
+      "theme": "client_payment",
+      "question": "How much did clients pay me in March 2026?",
+      "period": [
+        "2026-03-01",
+        "2026-03-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-09",
+          "amount": 2400.0,
+          "dir": "in",
+          "desc": "Client payment - Invoice 1043",
+          "payee": "Owner Design LLC",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$2,400.00",
+        "figure_minor": 240000,
+        "rows": [
+          "r1"
+        ],
+        "not_counted": [],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 240000,
+        "rows": [
+          "r1"
+        ],
+        "confidence": "Medium (85%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "ledger-analysis.js:331; money-query-quality.js:23,49 + clean-money.js:207 cap at 85"
+      }
+    },
+    {
+      "id": "C03",
+      "theme": "unknown_deposit",
+      "question": "What came in during April 2026?",
+      "period": [
+        "2026-04-01",
+        "2026-04-30"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-04-02",
+          "amount": 3100.0,
+          "dir": "in",
+          "desc": "ACH CREDIT NORTHWIND LLC PAYMENT",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$3,100.00",
+        "figure_minor": 310000,
+        "rows": [
+          "r1"
+        ],
+        "not_counted": [],
+        "confidence": "Low"
+      },
+      "code": {
+        "figure_minor": 310000,
+        "rows": [
+          "r1"
+        ],
+        "confidence": "Low (50%)",
+        "figure": "PASS",
+        "confidence_verdict": "PASS",
+        "rule": "ledger-analysis.js:332; clean-money.js:177"
+      }
+    },
+    {
+      "id": "C04",
+      "theme": "unknown_deposit_mixed",
+      "question": "What was my income in May 2026?",
+      "period": [
+        "2026-05-01",
+        "2026-05-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-05-03",
+          "amount": 400.0,
+          "dir": "in",
+          "desc": "Zelle payment from an owner",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-05-12",
+          "amount": 2000.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$2,400.00",
+        "figure_minor": 240000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "not_counted": [],
+        "confidence": "Medium"
+      },
+      "code": {
+        "figure_minor": 240000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "Low (62%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "money-query-quality.js:34 row-count weighting"
+      }
+    },
+    {
+      "id": "C05",
+      "theme": "unknown_deposit",
+      "question": "What was my income in June 2026?",
+      "period": [
+        "2026-06-01",
+        "2026-06-30"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-06-05",
+          "amount": 600.0,
+          "dir": "in",
+          "desc": "ATM cash deposit",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$600.00",
+        "figure_minor": 60000,
+        "rows": [
+          "r1"
+        ],
+        "not_counted": [],
+        "confidence": "Low"
+      },
+      "code": {
+        "figure_minor": 60000,
+        "rows": [
+          "r1"
+        ],
+        "confidence": "Low (50%)",
+        "figure": "PASS",
+        "confidence_verdict": "PASS",
+        "rule": "ledger-analysis.js:332"
+      }
+    },
+    {
+      "id": "C06",
+      "theme": "processor_payout",
+      "question": "How much did Stripe pay out to me in March 2026?",
+      "period": [
+        "2026-03-01",
+        "2026-03-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-06",
+          "amount": 1940.0,
+          "dir": "in",
+          "desc": "STRIPE PAYOUT",
+          "payee": "Stripe",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$1,940.00",
+        "figure_minor": 194000,
+        "rows": [
+          "r1"
+        ],
+        "not_counted": [],
+        "confidence": "High",
+        "note": "Net of fees; gross not in data."
+      },
+      "code": {
+        "figure_minor": 194000,
+        "rows": [
+          "r1"
+        ],
+        "confidence": "Low (50%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "clean-money.js:170,174; ledger-analysis.js:332,368"
+      }
+    },
+    {
+      "id": "C07",
+      "theme": "processor_payout",
+      "question": "What were my Shopify deposits in July 2026?",
+      "period": [
+        "2026-07-01",
+        "2026-07-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-07-08",
+          "amount": 3200.0,
+          "dir": "in",
+          "desc": "SHOPIFY PAYOUT 88213",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$3,200.00",
+        "figure_minor": 320000,
+        "rows": [
+          "r1"
+        ],
+        "not_counted": [],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 320000,
+        "rows": [
+          "r1"
+        ],
+        "confidence": "Low (50%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "clean-money.js:47,174; ledger-analysis.js:368"
+      }
+    },
+    {
+      "id": "C08",
+      "theme": "payout_reversal",
+      "question": "What was my income in March 2026?",
+      "period": [
+        "2026-03-01",
+        "2026-03-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-02",
+          "amount": 1000.0,
+          "dir": "in",
+          "desc": "SQUARE PAYOUT",
+          "payee": "Square",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-09",
+          "amount": 150.0,
+          "dir": "out",
+          "desc": "SQUARE PAYOUT REVERSAL",
+          "cat": "PAYOUT_REVERSAL",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$850.00",
+        "figure_minor": 85000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "not_counted": [],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 85000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "Low (62%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "ledger-analysis.js:391-395; clean-money.js:178-179"
+      }
+    },
+    {
+      "id": "C09",
+      "theme": "processor_sweep_gross",
+      "question": "What were my sales in March 2026?",
+      "period": [
+        "2026-03-01",
+        "2026-03-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        },
+        {
+          "slug": "stripe",
+          "kind": "merchant",
+          "last4": "0001",
+          "institution": "Stripe",
+          "label": "Stripe Balance"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-02",
+          "amount": 500.0,
+          "dir": "in",
+          "desc": "Payment from customer ch_1",
+          "acct": "stripe"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-03",
+          "amount": 520.0,
+          "dir": "in",
+          "desc": "Payment from customer ch_2",
+          "acct": "stripe"
+        },
+        {
+          "id": "r3",
+          "date": "2026-03-04",
+          "amount": 30.0,
+          "dir": "out",
+          "desc": "Processing fee",
+          "cat": "BANK_FEES",
+          "acct": "stripe"
+        },
+        {
+          "id": "r4",
+          "date": "2026-03-05",
+          "amount": 990.0,
+          "dir": "out",
+          "desc": "STRIPE PAYOUT",
+          "payee": "Stripe",
+          "cat": "TRANSFER",
+          "acct": "stripe"
+        },
+        {
+          "id": "r5",
+          "date": "2026-03-07",
+          "amount": 990.0,
+          "dir": "in",
+          "desc": "STRIPE PAYOUT",
+          "payee": "Stripe",
+          "cat": "TRANSFER",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$1,020.00",
+        "figure_minor": 102000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "not_counted": [
+          {
+            "row": "r5",
+            "why": "sweep of r1+r2 less fee r3"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 102000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "Medium (85%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "clean-money.js:131-137; ledger-analysis.js:322-323"
+      }
+    },
+    {
+      "id": "C10",
+      "theme": "processor_sweep_imported",
+      "question": "What were my sales in March 2026?",
+      "period": [
+        "2026-03-01",
+        "2026-03-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821",
+          "feed_mode": "manual"
+        },
+        {
+          "slug": "stripe",
+          "kind": "merchant",
+          "last4": "0001",
+          "institution": "Stripe",
+          "label": "Stripe Balance",
+          "feed_mode": "manual"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-02",
+          "amount": 500.0,
+          "dir": "in",
+          "desc": "Payment from customer ch_1",
+          "acct": "stripe",
+          "provenance": "import"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-03",
+          "amount": 520.0,
+          "dir": "in",
+          "desc": "Payment from customer ch_2",
+          "acct": "stripe",
+          "provenance": "import"
+        },
+        {
+          "id": "r3",
+          "date": "2026-03-04",
+          "amount": 30.0,
+          "dir": "out",
+          "desc": "Processing fee",
+          "cat": "BANK_FEES",
+          "cat_basis": "confirmed",
+          "acct": "stripe",
+          "provenance": "import"
+        },
+        {
+          "id": "r4",
+          "date": "2026-03-05",
+          "amount": 990.0,
+          "dir": "out",
+          "desc": "STRIPE PAYOUT",
+          "payee": "Stripe",
+          "acct": "stripe",
+          "provenance": "import"
+        },
+        {
+          "id": "r5",
+          "date": "2026-03-07",
+          "amount": 990.0,
+          "dir": "in",
+          "desc": "STRIPE PAYOUT",
+          "payee": "Stripe",
+          "acct": "chk",
+          "provenance": "import"
+        }
+      ],
+      "expected": {
+        "figure": "$1,020.00",
+        "figure_minor": 102000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "not_counted": [
+          {
+            "row": "r5",
+            "why": "sweep from the owner's own Stripe balance"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 201000,
+        "rows": [
+          "r1",
+          "r2",
+          "r5"
+        ],
+        "confidence": "Low (65%)",
+        "figure": "FAIL",
+        "confidence_verdict": "FAIL",
+        "rule": "clean-money.js:134 needs TRANSFER category on both legs"
+      }
+    },
+    {
+      "id": "C11",
+      "theme": "processor_payout",
+      "question": "What was my income in August 2026?",
+      "period": [
+        "2026-08-01",
+        "2026-08-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-08-14",
+          "amount": 700.0,
+          "dir": "in",
+          "desc": "PAYPAL TRANSFER",
+          "payee": "PayPal",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$700.00",
+        "figure_minor": 70000,
+        "rows": [
+          "r1"
+        ],
+        "not_counted": [],
+        "confidence": "High",
+        "note": "Processor identity; say a PayPal transfer can also be the owner's own wallet."
+      },
+      "code": {
+        "figure_minor": 70000,
+        "rows": [
+          "r1"
+        ],
+        "confidence": "Low (50%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "clean-money.js:44,174; ledger-analysis.js:368"
+      }
+    },
+    {
+      "id": "C12",
+      "theme": "possible_transfer_coincidence",
+      "question": "What was my income in April 2026?",
+      "period": [
+        "2026-04-01",
+        "2026-04-30"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        },
+        {
+          "slug": "sav",
+          "kind": "savings",
+          "last4": "3307"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-04-10",
+          "amount": 800.0,
+          "dir": "in",
+          "desc": "STRIPE PAYOUT",
+          "payee": "Stripe",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-04-10",
+          "amount": 800.0,
+          "dir": "out",
+          "desc": "Withdrawal",
+          "acct": "sav"
+        }
+      ],
+      "expected": {
+        "figure": "$800.00",
+        "figure_minor": 80000,
+        "rows": [
+          "r1"
+        ],
+        "not_counted": [],
+        "confidence": "High",
+        "note": "Name the same-amount savings withdrawal as a possible transfer."
+      },
+      "code": {
+        "figure_minor": 80000,
+        "rows": [
+          "r1"
+        ],
+        "confidence": "Low (50%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "clean-money.js:140,166"
+      }
+    },
+    {
+      "id": "C13",
+      "theme": "vendor_refund",
+      "question": "What was my income in May 2026?",
+      "period": [
+        "2026-05-01",
+        "2026-05-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-05-04",
+          "amount": 120.0,
+          "dir": "in",
+          "desc": "Refund - Office Supply Co",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-05-06",
+          "amount": 1000.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$1,000.00",
+        "figure_minor": 100000,
+        "rows": [
+          "r2"
+        ],
+        "not_counted": [
+          {
+            "row": "r1",
+            "why": "vendor refund"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 100000,
+        "rows": [
+          "r2"
+        ],
+        "confidence": "Medium (85%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "ledger-analysis.js:326"
+      }
+    },
+    {
+      "id": "C14",
+      "theme": "card_refund",
+      "question": "What was my income in May 2026?",
+      "period": [
+        "2026-05-01",
+        "2026-05-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        },
+        {
+          "slug": "card",
+          "kind": "card",
+          "last4": "9914"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-05-04",
+          "amount": 64.99,
+          "dir": "in",
+          "desc": "AMAZON MKTPLACE REFUND",
+          "acct": "card"
+        },
+        {
+          "id": "r2",
+          "date": "2026-05-06",
+          "amount": 900.0,
+          "dir": "in",
+          "desc": "Client payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$900.00",
+        "figure_minor": 90000,
+        "rows": [
+          "r2"
+        ],
+        "not_counted": [
+          {
+            "row": "r1",
+            "why": "card refund"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 90000,
+        "rows": [
+          "r2"
+        ],
+        "confidence": "Medium (85%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "ledger-analysis.js:326,391-395"
+      }
+    },
+    {
+      "id": "C15",
+      "theme": "fee_reversal",
+      "question": "What was my income in June 2026?",
+      "period": [
+        "2026-06-01",
+        "2026-06-30"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-06-02",
+          "amount": 15.0,
+          "dir": "in",
+          "desc": "Monthly service fee reversal",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-06-11",
+          "amount": 2000.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$2,000.00",
+        "figure_minor": 200000,
+        "rows": [
+          "r2"
+        ],
+        "not_counted": [
+          {
+            "row": "r1",
+            "why": "fee reversal"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 200000,
+        "rows": [
+          "r2"
+        ],
+        "confidence": "Medium (85%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "ledger-analysis.js:326"
+      }
+    },
+    {
+      "id": "C16",
+      "theme": "returned_outgoing_ach",
+      "question": "What was my income in May 2026?",
+      "period": [
+        "2026-05-01",
+        "2026-05-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-05-02",
+          "amount": 450.0,
+          "dir": "out",
+          "desc": "ACH payment Vendor Co",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-05-06",
+          "amount": 450.0,
+          "dir": "in",
+          "desc": "ACH RETURN Vendor Co R01",
+          "payee": "Vendor Co",
+          "acct": "chk"
+        },
+        {
+          "id": "r3",
+          "date": "2026-05-09",
+          "amount": 1500.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$1,500.00",
+        "figure_minor": 150000,
+        "rows": [
+          "r3"
+        ],
+        "not_counted": [
+          {
+            "row": "r2",
+            "why": "own ACH payment r1 returned"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 195000,
+        "rows": [
+          "r2",
+          "r3"
+        ],
+        "confidence": "Low (58%)",
+        "figure": "FAIL",
+        "confidence_verdict": "FAIL",
+        "rule": "ledger-analysis.js:326,341,332"
+      }
+    },
+    {
+      "id": "C17",
+      "theme": "bounced_customer_check",
+      "question": "What was my income in June 2026?",
+      "period": [
+        "2026-06-01",
+        "2026-06-30"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-06-03",
+          "amount": 800.0,
+          "dir": "in",
+          "desc": "Mobile deposit check 2231",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-06-07",
+          "amount": 800.0,
+          "dir": "out",
+          "desc": "DEPOSITED ITEM RETURNED NSF",
+          "acct": "chk"
+        },
+        {
+          "id": "r3",
+          "date": "2026-06-07",
+          "amount": 12.0,
+          "dir": "out",
+          "desc": "Returned item fee",
+          "cat": "BANK_FEES",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$0.00",
+        "figure_minor": 0,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "not_counted": [],
+        "confidence": "Low",
+        "note": "r2 reverses r1; $12 fee is spending."
+      },
+      "code": {
+        "figure_minor": 80000,
+        "rows": [
+          "r1"
+        ],
+        "confidence": "Low (58%)",
+        "figure": "FAIL",
+        "confidence_verdict": "PASS",
+        "rule": "clean-money.js:177-179; ledger-analysis.js:391-393"
+      }
+    },
+    {
+      "id": "C18",
+      "theme": "customer_ach_reversal",
+      "question": "What was my income in July 2026?",
+      "period": [
+        "2026-07-01",
+        "2026-07-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-07-01",
+          "amount": 2000.0,
+          "dir": "in",
+          "desc": "ACH CREDIT CUSTOMER CO",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-07-03",
+          "amount": 2000.0,
+          "dir": "out",
+          "desc": "ACH REVERSAL CUSTOMER CO",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$0.00",
+        "figure_minor": 0,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "not_counted": [],
+        "confidence": "Low"
+      },
+      "code": {
+        "figure_minor": 200000,
+        "rows": [
+          "r1"
+        ],
+        "confidence": "Low (50%)",
+        "figure": "FAIL",
+        "confidence_verdict": "PASS",
+        "rule": "ledger-analysis.js:393; clean-money.js:178"
+      }
+    },
+    {
+      "id": "C19",
+      "theme": "customer_refund_net_sales",
+      "question": "What were my sales after refunds in August 2026?",
+      "period": [
+        "2026-08-01",
+        "2026-08-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-08-04",
+          "amount": 1200.0,
+          "dir": "in",
+          "desc": "Customer payment INV 77",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-08-20",
+          "amount": 200.0,
+          "dir": "out",
+          "desc": "Refund to customer INV 77",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$1,000.00",
+        "figure_minor": 100000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "not_counted": [],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 100000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "Medium (85%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "ledger-analysis.js:393; money-query-contract.js:23"
+      }
+    },
+    {
+      "id": "C20",
+      "theme": "chargeback",
+      "question": "What were my net sales in March 2026?",
+      "period": [
+        "2026-03-01",
+        "2026-03-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-01",
+          "amount": 600.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-20",
+          "amount": 600.0,
+          "dir": "out",
+          "desc": "CHARGEBACK debit",
+          "acct": "chk"
+        },
+        {
+          "id": "r3",
+          "date": "2026-03-20",
+          "amount": 15.0,
+          "dir": "out",
+          "desc": "Chargeback fee",
+          "cat": "BANK_FEES",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$0.00",
+        "figure_minor": 0,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "not_counted": [],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 0,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "Medium (85%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "ledger-analysis.js:393; money-query-contract.js:23"
+      }
+    },
+    {
+      "id": "C21",
+      "theme": "chargeback_won",
+      "question": "What were my net sales in April 2026?",
+      "period": [
+        "2026-04-01",
+        "2026-04-30"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r0",
+          "date": "2026-03-01",
+          "amount": 600.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        },
+        {
+          "id": "r1",
+          "date": "2026-03-20",
+          "amount": 600.0,
+          "dir": "out",
+          "desc": "CHARGEBACK debit",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-20",
+          "amount": 15.0,
+          "dir": "out",
+          "desc": "Chargeback fee",
+          "cat": "BANK_FEES",
+          "acct": "chk"
+        },
+        {
+          "id": "r3",
+          "date": "2026-04-10",
+          "amount": 600.0,
+          "dir": "in",
+          "desc": "CHARGEBACK REVERSAL credit",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$600.00",
+        "figure_minor": 60000,
+        "rows": [
+          "r3"
+        ],
+        "not_counted": [],
+        "confidence": "High",
+        "note": "Recovered sale."
+      },
+      "code": {
+        "figure_minor": 60000,
+        "rows": [
+          "r3"
+        ],
+        "confidence": "Medium (85%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "ledger-analysis.js:326; money-query-contract.js:23 (needs description reading, m4)"
+      }
+    },
+    {
+      "id": "C22",
+      "theme": "interest_savings",
+      "question": "How much interest did I earn in September 2026?",
+      "period": [
+        "2026-09-01",
+        "2026-09-30"
+      ],
+      "accounts": [
+        {
+          "slug": "sav",
+          "kind": "savings",
+          "last4": "3307"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-09-30",
+          "amount": 4.12,
+          "dir": "in",
+          "desc": "INTEREST PAYMENT",
+          "acct": "sav"
+        }
+      ],
+      "expected": {
+        "figure": "$4.12",
+        "figure_minor": 412,
+        "rows": [
+          "r1"
+        ],
+        "not_counted": [],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 412,
+        "rows": [
+          "r1"
+        ],
+        "confidence": "Medium (85%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "ledger-analysis.js:331"
+      }
+    },
+    {
+      "id": "C23",
+      "theme": "interest_checking_code",
+      "question": "How much interest did I earn in September 2026?",
+      "period": [
+        "2026-09-01",
+        "2026-09-30"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-09-30",
+          "amount": 1.05,
+          "dir": "in",
+          "desc": "INTEREST EARNED",
+          "cat": "INCOME_INTEREST_EARNED",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$1.05",
+        "figure_minor": 105,
+        "rows": [
+          "r1"
+        ],
+        "not_counted": [],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 105,
+        "rows": [
+          "r1"
+        ],
+        "confidence": "Medium (85%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "ledger-analysis.js:330-331"
+      }
+    },
+    {
+      "id": "C24",
+      "theme": "credit_union_dividend",
+      "question": "How much interest did I earn in September 2026?",
+      "period": [
+        "2026-09-01",
+        "2026-09-30"
+      ],
+      "accounts": [
+        {
+          "slug": "sav",
+          "kind": "savings",
+          "last4": "3307"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-09-30",
+          "amount": 3.4,
+          "dir": "in",
+          "desc": "DIVIDEND",
+          "acct": "sav"
+        }
+      ],
+      "expected": {
+        "figure": "$3.40",
+        "figure_minor": 340,
+        "rows": [
+          "r1"
+        ],
+        "not_counted": [],
+        "confidence": "Low",
+        "note": "Likely credit-union interest."
+      },
+      "code": {
+        "figure_minor": 340,
+        "rows": [
+          "r1"
+        ],
+        "confidence": "Low (50%)",
+        "figure": "PASS",
+        "confidence_verdict": "PASS",
+        "rule": "ledger-analysis.js:332"
+      }
+    },
+    {
+      "id": "C25",
+      "theme": "card_interest_reversal",
+      "question": "What was my income in May 2026?",
+      "period": [
+        "2026-05-01",
+        "2026-05-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        },
+        {
+          "slug": "card",
+          "kind": "card",
+          "last4": "9914"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-05-05",
+          "amount": 22.1,
+          "dir": "in",
+          "desc": "Interest charge reversal",
+          "acct": "card"
+        },
+        {
+          "id": "r2",
+          "date": "2026-05-06",
+          "amount": 500.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$500.00",
+        "figure_minor": 50000,
+        "rows": [
+          "r2"
+        ],
+        "not_counted": [
+          {
+            "row": "r1",
+            "why": "card interest reversal"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 50000,
+        "rows": [
+          "r2"
+        ],
+        "confidence": "Medium (85%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "ledger-analysis.js:326"
+      }
+    },
+    {
+      "id": "C26",
+      "theme": "card_cashback",
+      "question": "What was my income in May 2026?",
+      "period": [
+        "2026-05-01",
+        "2026-05-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        },
+        {
+          "slug": "card",
+          "kind": "card",
+          "last4": "9914"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-05-05",
+          "amount": 25.0,
+          "dir": "in",
+          "desc": "CASHBACK REWARD",
+          "acct": "card"
+        },
+        {
+          "id": "r2",
+          "date": "2026-05-06",
+          "amount": 700.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$700.00",
+        "figure_minor": 70000,
+        "rows": [
+          "r2"
+        ],
+        "not_counted": [
+          {
+            "row": "r1",
+            "why": "card reward"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 70000,
+        "rows": [
+          "r2"
+        ],
+        "confidence": "Medium (85%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "ledger-analysis.js:372-373"
+      }
+    },
+    {
+      "id": "C27",
+      "theme": "bank_bonus_and_interest",
+      "question": "What other income did I get in October 2026?",
+      "period": [
+        "2026-10-01",
+        "2026-10-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-10-03",
+          "amount": 300.0,
+          "dir": "in",
+          "desc": "New account bonus",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-10-31",
+          "amount": 0.5,
+          "dir": "in",
+          "desc": "INTEREST PAID",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$300.50",
+        "figure_minor": 30050,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "not_counted": [],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 30050,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "Medium (85%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "ledger-analysis.js:330"
+      }
+    },
+    {
+      "id": "C28",
+      "theme": "loan_account_credit",
+      "question": "What was my income in June 2026?",
+      "period": [
+        "2026-06-01",
+        "2026-06-30"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        },
+        {
+          "slug": "loan",
+          "kind": "loan",
+          "last4": "6650"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-06-05",
+          "amount": 12.0,
+          "dir": "in",
+          "desc": "Interest adjustment credit",
+          "acct": "loan"
+        },
+        {
+          "id": "r2",
+          "date": "2026-06-06",
+          "amount": 400.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$400.00",
+        "figure_minor": 40000,
+        "rows": [
+          "r2"
+        ],
+        "not_counted": [
+          {
+            "row": "r1",
+            "why": "a loan credit is never income"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 40000,
+        "rows": [
+          "r2"
+        ],
+        "confidence": "Low (62%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "ledger-analysis.js:400-401; :368; money-query-quality.js:34 whole snapshot"
+      }
+    },
+    {
+      "id": "C29",
+      "theme": "loan_proceeds_code",
+      "question": "What was my income in March 2026?",
+      "period": [
+        "2026-03-01",
+        "2026-03-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-10",
+          "amount": 50000.0,
+          "dir": "in",
+          "desc": "SBA LOAN DISBURSEMENT",
+          "cat": "LOAN_DISBURSEMENTS",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-12",
+          "amount": 3000.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$3,000.00",
+        "figure_minor": 300000,
+        "rows": [
+          "r2"
+        ],
+        "not_counted": [
+          {
+            "row": "r1",
+            "why": "loan proceeds (bank code)"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 300000,
+        "rows": [
+          "r2"
+        ],
+        "confidence": "Low (62%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "ledger-analysis.js:379-384; :368"
+      }
+    },
+    {
+      "id": "C30",
+      "theme": "loc_draw_pfc_code",
+      "question": "What was my income in April 2026?",
+      "period": [
+        "2026-04-01",
+        "2026-04-30"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-04-03",
+          "amount": 10000.0,
+          "dir": "in",
+          "desc": "LOC ADVANCE",
+          "cat": "TRANSFER_IN_CASH_ADVANCES_AND_LOANS",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-04-08",
+          "amount": 1000.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$1,000.00",
+        "figure_minor": 100000,
+        "rows": [
+          "r2"
+        ],
+        "not_counted": [
+          {
+            "row": "r1",
+            "why": "credit-line draw"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 100000,
+        "rows": [
+          "r2"
+        ],
+        "confidence": "Low (62%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "ledger-analysis.js:340,384; :368"
+      }
+    },
+    {
+      "id": "C31",
+      "theme": "loan_wording_only",
+      "question": "What was my income in March 2026?",
+      "period": [
+        "2026-03-01",
+        "2026-03-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821",
+          "feed_mode": "manual"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-10",
+          "amount": 50000.0,
+          "dir": "in",
+          "desc": "SBA LOAN DISBURSEMENT",
+          "acct": "chk",
+          "provenance": "import"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-12",
+          "amount": 3000.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk",
+          "provenance": "import"
+        }
+      ],
+      "expected": {
+        "figure": "$3,000.00",
+        "figure_minor": 300000,
+        "rows": [
+          "r2"
+        ],
+        "not_counted": [
+          {
+            "row": "r1",
+            "why": "likely loan proceeds, $50,000"
+          }
+        ],
+        "confidence": "Low"
+      },
+      "code": {
+        "figure_minor": 5300000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "Low (62%)",
+        "figure": "FAIL",
+        "confidence_verdict": "PASS",
+        "rule": "ledger-analysis.js:416-418; policy money-query-contract.js:24"
+      }
+    },
+    {
+      "id": "C32",
+      "theme": "owner_confirmed_loan_category",
+      "question": "What was my income in May 2026?",
+      "period": [
+        "2026-05-01",
+        "2026-05-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-05-02",
+          "amount": 25000.0,
+          "dir": "in",
+          "desc": "Deposit",
+          "cat": "Loan Proceeds",
+          "cat_basis": "confirmed",
+          "provenance": "owner_stated",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-05-09",
+          "amount": 2000.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$2,000.00",
+        "figure_minor": 200000,
+        "rows": [
+          "r2"
+        ],
+        "not_counted": [
+          {
+            "row": "r1",
+            "why": "owner-confirmed loan proceeds"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 2700000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "Low (62%)",
+        "figure": "FAIL",
+        "confidence_verdict": "FAIL",
+        "rule": "ledger-analysis.js:340,417"
+      }
+    },
+    {
+      "id": "C33",
+      "theme": "loc_draw_proved_pair",
+      "question": "What was my income in May 2026?",
+      "period": [
+        "2026-05-01",
+        "2026-05-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        },
+        {
+          "slug": "loc",
+          "kind": "line_of_credit",
+          "last4": "7720"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-05-10",
+          "amount": 5000.0,
+          "dir": "out",
+          "desc": "Transfer to 4821",
+          "acct": "loc"
+        },
+        {
+          "id": "r2",
+          "date": "2026-05-10",
+          "amount": 5000.0,
+          "dir": "in",
+          "desc": "Transfer from 7720",
+          "acct": "chk"
+        },
+        {
+          "id": "r3",
+          "date": "2026-05-15",
+          "amount": 1000.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$1,000.00",
+        "figure_minor": 100000,
+        "rows": [
+          "r3"
+        ],
+        "not_counted": [
+          {
+            "row": "r2",
+            "why": "draw on credit line 7720"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 100000,
+        "rows": [
+          "r3"
+        ],
+        "confidence": "Medium (85%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "clean-money.js:148-151; ledger-analysis.js:322-323,381"
+      }
+    },
+    {
+      "id": "C34",
+      "theme": "owner_loan",
+      "question": "What was my income in June 2026?",
+      "period": [
+        "2026-06-01",
+        "2026-06-30"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-06-01",
+          "amount": 10000.0,
+          "dir": "in",
+          "desc": "Loan from owner",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-06-14",
+          "amount": 2000.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$2,000.00",
+        "figure_minor": 200000,
+        "rows": [
+          "r2"
+        ],
+        "not_counted": [
+          {
+            "row": "r1",
+            "why": "likely loan from the owner, $10,000"
+          }
+        ],
+        "confidence": "Low"
+      },
+      "code": {
+        "figure_minor": 1200000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "Low (62%)",
+        "figure": "FAIL",
+        "confidence_verdict": "PASS",
+        "rule": "ledger-analysis.js:417"
+      }
+    },
+    {
+      "id": "C35",
+      "theme": "loc_draw_wording",
+      "question": "What was my income in July 2026?",
+      "period": [
+        "2026-07-01",
+        "2026-07-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-07-02",
+          "amount": 8000.0,
+          "dir": "in",
+          "desc": "LINE OF CREDIT DRAW",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-07-09",
+          "amount": 1000.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$1,000.00",
+        "figure_minor": 100000,
+        "rows": [
+          "r2"
+        ],
+        "not_counted": [
+          {
+            "row": "r1",
+            "why": "likely credit-line draw, $8,000"
+          }
+        ],
+        "confidence": "Low"
+      },
+      "code": {
+        "figure_minor": 900000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "Low (62%)",
+        "figure": "FAIL",
+        "confidence_verdict": "PASS",
+        "rule": "ledger-analysis.js:416-418; money-query-contract.js:24"
+      }
+    },
+    {
+      "id": "C36",
+      "theme": "loan_endpoint_unpaired",
+      "question": "What was my income in August 2026?",
+      "period": [
+        "2026-08-01",
+        "2026-08-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        },
+        {
+          "slug": "loan",
+          "kind": "loan",
+          "last4": "6650"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-08-03",
+          "amount": 20000.0,
+          "dir": "out",
+          "desc": "Disbursement",
+          "acct": "loan"
+        },
+        {
+          "id": "r2",
+          "date": "2026-08-03",
+          "amount": 20000.0,
+          "dir": "in",
+          "desc": "Transfer from loan 6650",
+          "acct": "chk"
+        },
+        {
+          "id": "r3",
+          "date": "2026-08-10",
+          "amount": 1000.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$1,000.00",
+        "figure_minor": 100000,
+        "rows": [
+          "r3"
+        ],
+        "not_counted": [
+          {
+            "row": "r2",
+            "why": "loan 6650 proceeds"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 100000,
+        "rows": [
+          "r3"
+        ],
+        "confidence": "Low (66%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "clean-money.js:144; ledger-analysis.js:737-743,381"
+      }
+    },
+    {
+      "id": "C37",
+      "theme": "owner_contribution_proved",
+      "question": "What was my business income in June 2026?",
+      "period": [
+        "2026-06-01",
+        "2026-06-30"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        },
+        {
+          "slug": "pchk",
+          "kind": "checking",
+          "last4": "5510",
+          "entity": "household"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-06-04",
+          "amount": 3000.0,
+          "dir": "out",
+          "desc": "Transfer to 4821",
+          "acct": "pchk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-06-04",
+          "amount": 3000.0,
+          "dir": "in",
+          "desc": "Transfer from 5510",
+          "acct": "chk"
+        },
+        {
+          "id": "r3",
+          "date": "2026-06-09",
+          "amount": 1500.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$1,500.00",
+        "figure_minor": 150000,
+        "rows": [
+          "r3"
+        ],
+        "not_counted": [
+          {
+            "row": "r2",
+            "why": "owner contribution from household 5510"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 150000,
+        "rows": [
+          "r3"
+        ],
+        "confidence": "Medium (85%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "clean-money.js:148-151; ledger-analysis.js:792-793"
+      }
+    },
+    {
+      "id": "C38",
+      "theme": "owner_contribution_text",
+      "question": "What was my income in June 2026?",
+      "period": [
+        "2026-06-01",
+        "2026-06-30"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-06-02",
+          "amount": 5000.0,
+          "dir": "in",
+          "desc": "Owner contribution",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-06-09",
+          "amount": 1500.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$1,500.00",
+        "figure_minor": 150000,
+        "rows": [
+          "r2"
+        ],
+        "not_counted": [
+          {
+            "row": "r1",
+            "why": "likely owner contribution, $5,000"
+          }
+        ],
+        "confidence": "Low"
+      },
+      "code": {
+        "figure_minor": 650000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "Low (62%)",
+        "figure": "FAIL",
+        "confidence_verdict": "PASS",
+        "rule": "ledger-analysis.js:314-332 (ownMovementRole :495 unused for inflows)"
+      }
+    },
+    {
+      "id": "C39",
+      "theme": "owner_contribution_confirmed_category",
+      "question": "What was my income in July 2026?",
+      "period": [
+        "2026-07-01",
+        "2026-07-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-07-01",
+          "amount": 10000.0,
+          "dir": "in",
+          "desc": "Capital contribution - an owner",
+          "cat": "OWNER_CONTRIBUTION",
+          "cat_basis": "confirmed",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-07-09",
+          "amount": 1500.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$1,500.00",
+        "figure_minor": 150000,
+        "rows": [
+          "r2"
+        ],
+        "not_counted": [
+          {
+            "row": "r1",
+            "why": "owner-confirmed contribution"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 1150000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "Low (62%)",
+        "figure": "FAIL",
+        "confidence_verdict": "FAIL",
+        "rule": "ledger-analysis.js:314-332; clean-money.js:177"
+      }
+    },
+    {
+      "id": "C40",
+      "theme": "unconnected_personal_transfer",
+      "question": "What was my income in August 2026?",
+      "period": [
+        "2026-08-01",
+        "2026-08-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-08-05",
+          "amount": 4000.0,
+          "dir": "in",
+          "desc": "Transfer from personal checking x5510",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-08-12",
+          "amount": 1000.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$1,000.00",
+        "figure_minor": 100000,
+        "rows": [
+          "r2"
+        ],
+        "not_counted": [
+          {
+            "row": "r1",
+            "why": "likely owner money from unconnected 5510, $4,000"
+          }
+        ],
+        "confidence": "Low"
+      },
+      "code": {
+        "figure_minor": 500000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "Low (62%)",
+        "figure": "FAIL",
+        "confidence_verdict": "PASS",
+        "rule": "ledger-analysis.js:746-748 then :329,:332 (contradicts :721-723)"
+      }
+    },
+    {
+      "id": "C41",
+      "theme": "unconnected_personal_transfer_bare",
+      "question": "What was my income in August 2026?",
+      "period": [
+        "2026-08-01",
+        "2026-08-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-08-05",
+          "amount": 2500.0,
+          "dir": "in",
+          "desc": "Transfer from personal",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-08-12",
+          "amount": 1000.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$1,000.00",
+        "figure_minor": 100000,
+        "rows": [
+          "r2"
+        ],
+        "not_counted": [
+          {
+            "row": "r1",
+            "why": "likely owner money, $2,500"
+          }
+        ],
+        "confidence": "Low"
+      },
+      "code": {
+        "figure_minor": 350000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "Low (62%)",
+        "figure": "FAIL",
+        "confidence_verdict": "PASS",
+        "rule": "ledger-analysis.js:466,748,329,332"
+      }
+    },
+    {
+      "id": "C42",
+      "theme": "p2p_from_self",
+      "question": "What was my income in September 2026?",
+      "period": [
+        "2026-09-01",
+        "2026-09-30"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-09-02",
+          "amount": 600.0,
+          "dir": "in",
+          "desc": "Zelle transfer from self",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-09-08",
+          "amount": 1500.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$1,500.00",
+        "figure_minor": 150000,
+        "rows": [
+          "r2"
+        ],
+        "not_counted": [
+          {
+            "row": "r1",
+            "why": "owner sent money to themself, $600"
+          }
+        ],
+        "confidence": "Medium"
+      },
+      "code": {
+        "figure_minor": 210000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "Low (62%)",
+        "figure": "FAIL",
+        "confidence_verdict": "FAIL",
+        "rule": "ledger-analysis.js:225-230; :477 used only for outflows (:569)"
+      }
+    },
+    {
+      "id": "C43",
+      "theme": "transfer_no_mask",
+      "question": "What was my income in October 2026?",
+      "period": [
+        "2026-10-01",
+        "2026-10-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821",
+          "label": "Operating Checking"
+        },
+        {
+          "slug": "sav",
+          "kind": "savings",
+          "last4": "3307",
+          "label": "Business Reserve"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-10-06",
+          "amount": 1000.0,
+          "dir": "out",
+          "desc": "Online transfer to checking",
+          "acct": "sav"
+        },
+        {
+          "id": "r2",
+          "date": "2026-10-06",
+          "amount": 1000.0,
+          "dir": "in",
+          "desc": "Online transfer from savings",
+          "acct": "chk"
+        },
+        {
+          "id": "r3",
+          "date": "2026-10-14",
+          "amount": 2000.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$2,000.00",
+        "figure_minor": 200000,
+        "rows": [
+          "r3"
+        ],
+        "not_counted": [
+          {
+            "row": "r2",
+            "why": "likely transfer from the only savings account 3307"
+          }
+        ],
+        "confidence": "Medium"
+      },
+      "code": {
+        "figure_minor": 300000,
+        "rows": [
+          "r2",
+          "r3"
+        ],
+        "confidence": "Low (58%)",
+        "figure": "FAIL",
+        "confidence_verdict": "FAIL",
+        "rule": "clean-money.js:143-144; ledger-analysis.js:196"
+      }
+    },
+    {
+      "id": "C44",
+      "theme": "transfer_abbrev",
+      "question": "What was my income in October 2026?",
+      "period": [
+        "2026-10-01",
+        "2026-10-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        },
+        {
+          "slug": "sav",
+          "kind": "savings",
+          "last4": "3307"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-10-06",
+          "amount": 1000.0,
+          "dir": "out",
+          "desc": "Online transfer to CHK 4821",
+          "acct": "sav"
+        },
+        {
+          "id": "r2",
+          "date": "2026-10-06",
+          "amount": 1000.0,
+          "dir": "in",
+          "desc": "Online transfer from SAV 3307",
+          "acct": "chk"
+        },
+        {
+          "id": "r3",
+          "date": "2026-10-14",
+          "amount": 2000.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$2,000.00",
+        "figure_minor": 200000,
+        "rows": [
+          "r3"
+        ],
+        "not_counted": [
+          {
+            "row": "r2",
+            "why": "transfer from savings 3307"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 300000,
+        "rows": [
+          "r2",
+          "r3"
+        ],
+        "confidence": "Low (58%)",
+        "figure": "FAIL",
+        "confidence_verdict": "FAIL",
+        "rule": "clean-money.js:144; ledger-analysis.js:196,747"
+      }
+    },
+    {
+      "id": "C45",
+      "theme": "transfer_bank_confirmation",
+      "question": "What was my income in October 2026?",
+      "period": [
+        "2026-10-01",
+        "2026-10-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        },
+        {
+          "slug": "sav",
+          "kind": "savings",
+          "last4": "3307"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-10-06",
+          "amount": 1000.0,
+          "dir": "out",
+          "desc": "Online Banking transfer to CHK 4821 Confirmation# 1234567",
+          "acct": "sav"
+        },
+        {
+          "id": "r2",
+          "date": "2026-10-06",
+          "amount": 1000.0,
+          "dir": "in",
+          "desc": "Online Banking transfer from SAV 3307 Confirmation# 1234567",
+          "acct": "chk"
+        },
+        {
+          "id": "r3",
+          "date": "2026-10-14",
+          "amount": 2000.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$2,000.00",
+        "figure_minor": 200000,
+        "rows": [
+          "r3"
+        ],
+        "not_counted": [
+          {
+            "row": "r2",
+            "why": "transfer from savings 3307"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 300000,
+        "rows": [
+          "r2",
+          "r3"
+        ],
+        "confidence": "Low (58%)",
+        "figure": "FAIL",
+        "confidence_verdict": "FAIL",
+        "rule": "ledger-analysis.js:223-230; clean-money.js:143-144"
+      }
+    },
+    {
+      "id": "C46",
+      "theme": "transfer_clean_masks",
+      "question": "What was my income in October 2026?",
+      "period": [
+        "2026-10-01",
+        "2026-10-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        },
+        {
+          "slug": "sav",
+          "kind": "savings",
+          "last4": "3307"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-10-06",
+          "amount": 1000.0,
+          "dir": "out",
+          "desc": "Transfer to 4821",
+          "acct": "sav"
+        },
+        {
+          "id": "r2",
+          "date": "2026-10-06",
+          "amount": 1000.0,
+          "dir": "in",
+          "desc": "Transfer from 3307",
+          "acct": "chk"
+        },
+        {
+          "id": "r3",
+          "date": "2026-10-14",
+          "amount": 1000.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$1,000.00",
+        "figure_minor": 100000,
+        "rows": [
+          "r3"
+        ],
+        "not_counted": [
+          {
+            "row": "r2",
+            "why": "transfer from savings 3307"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 100000,
+        "rows": [
+          "r3"
+        ],
+        "confidence": "Medium (85%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "clean-money.js:148-151"
+      }
+    },
+    {
+      "id": "C47",
+      "theme": "transfer_across_month",
+      "question": "What was my income in February 2026?",
+      "period": [
+        "2026-02-01",
+        "2026-02-28"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        },
+        {
+          "slug": "sav",
+          "kind": "savings",
+          "last4": "3307"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-01-31",
+          "amount": 2000.0,
+          "dir": "out",
+          "desc": "Transfer to 4821",
+          "acct": "sav"
+        },
+        {
+          "id": "r2",
+          "date": "2026-02-02",
+          "amount": 2000.0,
+          "dir": "in",
+          "desc": "Transfer from 3307",
+          "acct": "chk"
+        },
+        {
+          "id": "r3",
+          "date": "2026-02-10",
+          "amount": 500.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$500.00",
+        "figure_minor": 50000,
+        "rows": [
+          "r3"
+        ],
+        "not_counted": [
+          {
+            "row": "r2",
+            "why": "transfer begun 2026-01-31"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 50000,
+        "rows": [
+          "r3"
+        ],
+        "confidence": "Medium (85%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "clean-money.js:156,216-217"
+      }
+    },
+    {
+      "id": "C48",
+      "theme": "transfer_over_3_days",
+      "question": "What was my income in April 2026?",
+      "period": [
+        "2026-04-01",
+        "2026-04-30"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        },
+        {
+          "slug": "sav",
+          "kind": "savings",
+          "last4": "3307"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-27",
+          "amount": 3000.0,
+          "dir": "out",
+          "desc": "Transfer to 4821",
+          "acct": "sav"
+        },
+        {
+          "id": "r2",
+          "date": "2026-04-01",
+          "amount": 3000.0,
+          "dir": "in",
+          "desc": "Transfer from 3307",
+          "acct": "chk"
+        },
+        {
+          "id": "r3",
+          "date": "2026-04-15",
+          "amount": 1000.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$1,000.00",
+        "figure_minor": 100000,
+        "rows": [
+          "r3"
+        ],
+        "not_counted": [
+          {
+            "row": "r2",
+            "why": "transfer from savings 3307"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 100000,
+        "rows": [
+          "r3"
+        ],
+        "confidence": "Medium (85%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "clean-money.js:156; ledger-analysis.js:742-743,329"
+      }
+    },
+    {
+      "id": "C49",
+      "theme": "transfer_bank_category_blank_memo",
+      "question": "What was my income in May 2026?",
+      "period": [
+        "2026-05-01",
+        "2026-05-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        },
+        {
+          "slug": "sav",
+          "kind": "savings",
+          "last4": "3307"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-05-06",
+          "amount": 1500.0,
+          "dir": "out",
+          "desc": "",
+          "cat": "TRANSFER_OUT",
+          "acct": "sav"
+        },
+        {
+          "id": "r2",
+          "date": "2026-05-06",
+          "amount": 1500.0,
+          "dir": "in",
+          "desc": "",
+          "cat": "TRANSFER_IN",
+          "acct": "chk"
+        },
+        {
+          "id": "r3",
+          "date": "2026-05-14",
+          "amount": 800.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$800.00",
+        "figure_minor": 80000,
+        "rows": [
+          "r3"
+        ],
+        "not_counted": [
+          {
+            "row": "r2",
+            "why": "bank-coded transfer from 3307"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 80000,
+        "rows": [
+          "r3"
+        ],
+        "confidence": "Medium (85%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "clean-money.js:145-147"
+      }
+    },
+    {
+      "id": "C50",
+      "theme": "customer_wire_transfer_in",
+      "question": "What was my income in May 2026?",
+      "period": [
+        "2026-05-01",
+        "2026-05-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        },
+        {
+          "slug": "sav",
+          "kind": "savings",
+          "last4": "3307"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-05-07",
+          "amount": 5000.0,
+          "dir": "in",
+          "desc": "WIRE TRANSFER IN CUSTOMER CO",
+          "payee": "Acme Corp",
+          "cat": "TRANSFER_IN",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-05-07",
+          "amount": 5000.0,
+          "dir": "out",
+          "desc": "Transfer to 9001",
+          "cat": "TRANSFER_OUT",
+          "acct": "sav"
+        }
+      ],
+      "expected": {
+        "figure": "$5,000.00",
+        "figure_minor": 500000,
+        "rows": [
+          "r1"
+        ],
+        "not_counted": [],
+        "confidence": "Low",
+        "note": "Unlabeled wire; name the same-amount savings move."
+      },
+      "code": {
+        "figure_minor": 500000,
+        "rows": [
+          "r1"
+        ],
+        "confidence": "Low (50%)",
+        "figure": "PASS",
+        "confidence_verdict": "PASS",
+        "rule": "clean-money.js:140,147"
+      }
+    },
+    {
+      "id": "C51",
+      "theme": "same_amount_ambiguity",
+      "question": "What was my income in June 2026?",
+      "period": [
+        "2026-06-01",
+        "2026-06-30"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        },
+        {
+          "slug": "sav",
+          "kind": "savings",
+          "last4": "3307"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-06-05",
+          "amount": 1000.0,
+          "dir": "out",
+          "desc": "Transfer to 4821",
+          "acct": "sav"
+        },
+        {
+          "id": "r2",
+          "date": "2026-06-05",
+          "amount": 1000.0,
+          "dir": "in",
+          "desc": "Transfer from 3307",
+          "acct": "chk"
+        },
+        {
+          "id": "r3",
+          "date": "2026-06-05",
+          "amount": 1000.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$1,000.00",
+        "figure_minor": 100000,
+        "rows": [
+          "r3"
+        ],
+        "not_counted": [
+          {
+            "row": "r2",
+            "why": "transfer from savings 3307"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 100000,
+        "rows": [
+          "r3"
+        ],
+        "confidence": "Medium (85%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "clean-money.js:158-159; ledger-analysis.js:742-743"
+      }
+    },
+    {
+      "id": "C52",
+      "theme": "linked_import_and_feed",
+      "question": "What was my income in March 2026?",
+      "period": [
+        "2026-03-01",
+        "2026-03-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        },
+        {
+          "slug": "chk-import",
+          "kind": "checking",
+          "last4": "4821",
+          "feed_mode": "manual",
+          "link": "owner-approved link to chk"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-05",
+          "amount": 900.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-05",
+          "amount": 900.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk-import",
+          "provenance": "import"
+        }
+      ],
+      "expected": {
+        "figure": "$900.00",
+        "figure_minor": 90000,
+        "rows": [
+          "r1"
+        ],
+        "not_counted": [
+          {
+            "row": "r2",
+            "why": "same posting via linked import"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 90000,
+        "rows": [
+          "r1"
+        ],
+        "confidence": "Medium (70%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "clean-money.js:103-109; :197-199 + money-query-quality.js:46"
+      }
+    },
+    {
+      "id": "C53",
+      "theme": "unlinked_double_import",
+      "question": "What was my income in March 2026?",
+      "period": [
+        "2026-03-01",
+        "2026-03-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk-a",
+          "kind": "checking",
+          "last4": "4821",
+          "feed_mode": "manual"
+        },
+        {
+          "slug": "chk-b",
+          "kind": "checking",
+          "last4": "4821",
+          "feed_mode": "manual"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-05",
+          "amount": 900.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk-a",
+          "provenance": "import"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-05",
+          "amount": 900.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk-b",
+          "provenance": "import"
+        }
+      ],
+      "expected": {
+        "figure": "$900.00",
+        "figure_minor": 90000,
+        "rows": [
+          "r1"
+        ],
+        "not_counted": [
+          {
+            "row": "r2",
+            "why": "likely the same statement imported twice, $900"
+          }
+        ],
+        "confidence": "Medium"
+      },
+      "code": {
+        "figure_minor": 180000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "Medium (70%)",
+        "figure": "FAIL",
+        "confidence_verdict": "PASS",
+        "rule": "clean-money.js:104"
+      }
+    },
+    {
+      "id": "C54",
+      "theme": "pending_deposit",
+      "question": "What was my income in October 2026?",
+      "period": [
+        "2026-10-01",
+        "2026-10-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-10-10",
+          "amount": 1000.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-10-30",
+          "amount": 700.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk",
+          "pending": 1
+        }
+      ],
+      "expected": {
+        "figure": "$1,000.00",
+        "figure_minor": 100000,
+        "rows": [
+          "r1"
+        ],
+        "not_counted": [
+          {
+            "row": "r2",
+            "why": "pending $700"
+          }
+        ],
+        "confidence": "Medium"
+      },
+      "code": {
+        "figure_minor": 100000,
+        "rows": [
+          "r1"
+        ],
+        "confidence": "Medium (70%)",
+        "figure": "PASS",
+        "confidence_verdict": "PASS",
+        "rule": "clean-money.js:86; money-query-quality.js:39"
+      }
+    },
+    {
+      "id": "C55",
+      "theme": "closed_account_no_close_date",
+      "question": "What was my income in February 2026?",
+      "period": [
+        "2026-02-01",
+        "2026-02-28"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        },
+        {
+          "slug": "old",
+          "kind": "checking",
+          "last4": "2290",
+          "status": "closed",
+          "closed_on": null,
+          "feed_mode": "manual"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-02-11",
+          "amount": 3000.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "old",
+          "provenance": "import"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-04",
+          "amount": 500.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$3,000.00",
+        "figure_minor": 300000,
+        "rows": [
+          "r1"
+        ],
+        "not_counted": [],
+        "confidence": "Medium",
+        "note": "Account 2290 closed, close date unknown."
+      },
+      "code": {
+        "figure_minor": 0,
+        "rows": [],
+        "confidence": "Medium (85%)",
+        "figure": "FAIL",
+        "confidence_verdict": "PASS",
+        "rule": "clean-money.js:117"
+      }
+    },
+    {
+      "id": "C56",
+      "theme": "live_rows_after_coverage",
+      "question": "What was my income in April 2026?",
+      "period": [
+        "2026-04-01",
+        "2026-04-30"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821",
+          "coverage": {
+            "status": "complete",
+            "from": "2026-01-01",
+            "to": "2026-03-31"
+          }
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-02-10",
+          "amount": 700.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-04-15",
+          "amount": 2200.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$2,200.00",
+        "figure_minor": 220000,
+        "rows": [
+          "r2"
+        ],
+        "not_counted": [],
+        "confidence": "Medium",
+        "note": "Posted after confirmed coverage end 2026-03-31."
+      },
+      "code": {
+        "figure_minor": 0,
+        "rows": [],
+        "confidence": "Medium (85%)",
+        "figure": "FAIL",
+        "confidence_verdict": "PASS",
+        "rule": "clean-money.js:96-97,118"
+      }
+    },
+    {
+      "id": "C57",
+      "theme": "row_before_opened_on",
+      "question": "What was my income in March 2026?",
+      "period": [
+        "2026-03-01",
+        "2026-03-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821",
+          "opened_on": "2026-03-05"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-02",
+          "amount": 1000.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-20",
+          "amount": 50.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$1,050.00",
+        "figure_minor": 105000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "not_counted": [],
+        "confidence": "Medium",
+        "note": "r1 posts before the recorded open date."
+      },
+      "code": {
+        "figure_minor": 5000,
+        "rows": [
+          "r2"
+        ],
+        "confidence": "Medium (85%)",
+        "figure": "FAIL",
+        "confidence_verdict": "PASS",
+        "rule": "clean-money.js:115"
+      }
+    },
+    {
+      "id": "C58",
+      "theme": "unreadable_row",
+      "question": "What was my income in May 2026?",
+      "period": [
+        "2026-05-01",
+        "2026-05-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-05-03",
+          "amount": 500.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-05-09",
+          "amount_null": true,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$500.00",
+        "figure_minor": 50000,
+        "rows": [
+          "r1"
+        ],
+        "not_counted": [
+          {
+            "row": "r2",
+            "why": "amount unreadable"
+          }
+        ],
+        "confidence": "Low"
+      },
+      "code": {
+        "figure_minor": 50000,
+        "rows": [
+          "r1"
+        ],
+        "confidence": "Low (55%)",
+        "figure": "PASS",
+        "confidence_verdict": "PASS",
+        "rule": "clean-money.js:114; money-query-quality.js:42"
+      }
+    },
+    {
+      "id": "C59",
+      "theme": "two_currencies",
+      "question": "What was my income in June 2026?",
+      "period": [
+        "2026-06-01",
+        "2026-06-30"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-06-03",
+          "amount": 1000.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-06-04",
+          "amount": 500.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk",
+          "currency": "CAD"
+        }
+      ],
+      "expected": {
+        "figure": "USD $1,000.00 and CAD $500.00, not added",
+        "figure_minor": {
+          "USD": 100000,
+          "CAD": 50000
+        },
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "not_counted": [],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": {
+          "USD": 100000,
+          "CAD": 50000
+        },
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "Medium (85%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "money-query-contract.js:18"
+      }
+    },
+    {
+      "id": "C60",
+      "theme": "personal_side_payroll",
+      "question": "What was my business income in June 2026?",
+      "period": [
+        "2026-06-01",
+        "2026-06-30"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        },
+        {
+          "slug": "pchk",
+          "kind": "checking",
+          "last4": "5510",
+          "entity": "household"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-06-15",
+          "amount": 2800.0,
+          "dir": "in",
+          "desc": "CUSTOMER PAYROLL",
+          "acct": "pchk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-06-16",
+          "amount": 1200.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$1,200.00",
+        "figure_minor": 120000,
+        "rows": [
+          "r2"
+        ],
+        "not_counted": [
+          {
+            "row": "r1",
+            "why": "household side"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 120000,
+        "rows": [
+          "r2"
+        ],
+        "confidence": "Medium (85%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "clean-money.js:57-58"
+      }
+    },
+    {
+      "id": "C61",
+      "theme": "unassigned_entity_own_account",
+      "question": "What was my income in July 2026?",
+      "period": [
+        "2026-07-01",
+        "2026-07-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        },
+        {
+          "slug": "sav2",
+          "kind": "savings",
+          "last4": "2210",
+          "entity": null
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-07-07",
+          "amount": 1000.0,
+          "dir": "out",
+          "desc": "Transfer to 4821",
+          "acct": "sav2"
+        },
+        {
+          "id": "r2",
+          "date": "2026-07-07",
+          "amount": 1000.0,
+          "dir": "in",
+          "desc": "Transfer from 2210",
+          "acct": "chk"
+        },
+        {
+          "id": "r3",
+          "date": "2026-07-12",
+          "amount": 500.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$500.00",
+        "figure_minor": 50000,
+        "rows": [
+          "r3"
+        ],
+        "not_counted": [
+          {
+            "row": "r2",
+            "why": "likely transfer from connected 2210 (no owner assigned), $1,000"
+          }
+        ],
+        "confidence": "Low"
+      },
+      "code": {
+        "figure_minor": 150000,
+        "rows": [
+          "r2",
+          "r3"
+        ],
+        "confidence": "Low (58%)",
+        "figure": "FAIL",
+        "confidence_verdict": "PASS",
+        "rule": "clean-money.js:131,138,257-258; ledger-analysis.js:747,332"
+      }
+    },
+    {
+      "id": "C62",
+      "theme": "tax_refund_abbrev",
+      "question": "What was my income in April 2026?",
+      "period": [
+        "2026-04-01",
+        "2026-04-30"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-04-18",
+          "amount": 1840.0,
+          "dir": "in",
+          "desc": "IRS TREAS 310 TAX REF",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-04-20",
+          "amount": 2000.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$2,000.00",
+        "figure_minor": 200000,
+        "rows": [
+          "r2"
+        ],
+        "not_counted": [
+          {
+            "row": "r1",
+            "why": "tax refund"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 384000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "Low (62%)",
+        "figure": "FAIL",
+        "confidence_verdict": "FAIL",
+        "rule": "ledger-analysis.js:326,341"
+      }
+    },
+    {
+      "id": "C63",
+      "theme": "tax_refund_full_word",
+      "question": "What was my income in April 2026?",
+      "period": [
+        "2026-04-01",
+        "2026-04-30"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-04-18",
+          "amount": 1840.0,
+          "dir": "in",
+          "desc": "IRS TAX REFUND",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-04-20",
+          "amount": 2000.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$2,000.00",
+        "figure_minor": 200000,
+        "rows": [
+          "r2"
+        ],
+        "not_counted": [
+          {
+            "row": "r1",
+            "why": "tax refund"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 200000,
+        "rows": [
+          "r2"
+        ],
+        "confidence": "Medium (85%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "ledger-analysis.js:326"
+      }
+    },
+    {
+      "id": "C64",
+      "theme": "security_deposit_returned",
+      "question": "What was my income in September 2026?",
+      "period": [
+        "2026-09-01",
+        "2026-09-30"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-09-02",
+          "amount": 2000.0,
+          "dir": "in",
+          "desc": "Security deposit returned - landlord",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-09-10",
+          "amount": 1500.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$1,500.00",
+        "figure_minor": 150000,
+        "rows": [
+          "r2"
+        ],
+        "not_counted": [
+          {
+            "row": "r1",
+            "why": "own security deposit returned"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 350000,
+        "rows": [
+          "r1",
+          "r2"
+        ],
+        "confidence": "Low (62%)",
+        "figure": "FAIL",
+        "confidence_verdict": "FAIL",
+        "rule": "ledger-analysis.js:341"
+      }
+    },
+    {
+      "id": "C65",
+      "theme": "venmo_cashout",
+      "question": "What was my income in September 2026?",
+      "period": [
+        "2026-09-01",
+        "2026-09-30"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-09-05",
+          "amount": 350.0,
+          "dir": "in",
+          "desc": "VENMO CASHOUT",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$350.00",
+        "figure_minor": 35000,
+        "rows": [
+          "r1"
+        ],
+        "not_counted": [],
+        "confidence": "Low"
+      },
+      "code": {
+        "figure_minor": 35000,
+        "rows": [
+          "r1"
+        ],
+        "confidence": "Low (50%)",
+        "figure": "PASS",
+        "confidence_verdict": "PASS",
+        "rule": "ledger-analysis.js:332"
+      }
+    },
+    {
+      "id": "C66",
+      "theme": "card_statement_credit",
+      "question": "What was my income in May 2026?",
+      "period": [
+        "2026-05-01",
+        "2026-05-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        },
+        {
+          "slug": "card",
+          "kind": "card",
+          "last4": "9914"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-05-05",
+          "amount": 50.0,
+          "dir": "in",
+          "desc": "STATEMENT CREDIT",
+          "acct": "card"
+        },
+        {
+          "id": "r2",
+          "date": "2026-05-06",
+          "amount": 1000.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$1,000.00",
+        "figure_minor": 100000,
+        "rows": [
+          "r2"
+        ],
+        "not_counted": [
+          {
+            "row": "r1",
+            "why": "card credit"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 100000,
+        "rows": [
+          "r2"
+        ],
+        "confidence": "Low (62%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "ledger-analysis.js:400-401,368"
+      }
+    },
+    {
+      "id": "C67",
+      "theme": "card_payment_ack",
+      "question": "What was my income in May 2026?",
+      "period": [
+        "2026-05-01",
+        "2026-05-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        },
+        {
+          "slug": "card",
+          "kind": "card",
+          "last4": "9914"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-05-05",
+          "amount": 1000.0,
+          "dir": "in",
+          "desc": "Payment thank you",
+          "acct": "card"
+        },
+        {
+          "id": "r2",
+          "date": "2026-05-06",
+          "amount": 2000.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$2,000.00",
+        "figure_minor": 200000,
+        "rows": [
+          "r2"
+        ],
+        "not_counted": [
+          {
+            "row": "r1",
+            "why": "card payment received"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 200000,
+        "rows": [
+          "r2"
+        ],
+        "confidence": "Medium (85%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "ledger-analysis.js:649"
+      }
+    },
+    {
+      "id": "C68",
+      "theme": "purchase_return_credit",
+      "question": "What was my income in June 2026?",
+      "period": [
+        "2026-06-01",
+        "2026-06-30"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-06-04",
+          "amount": 80.0,
+          "dir": "in",
+          "desc": "Purchase return credit - Example Hardware",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-06-08",
+          "amount": 1200.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$1,200.00",
+        "figure_minor": 120000,
+        "rows": [
+          "r2"
+        ],
+        "not_counted": [
+          {
+            "row": "r1",
+            "why": "purchase return"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 120000,
+        "rows": [
+          "r2"
+        ],
+        "confidence": "Medium (85%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "ledger-analysis.js:341,391-395"
+      }
+    },
+    {
+      "id": "C69",
+      "theme": "refund_word_inside_income",
+      "question": "What was my income in July 2026?",
+      "period": [
+        "2026-07-01",
+        "2026-07-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-07-03",
+          "amount": 1500.0,
+          "dir": "in",
+          "desc": "Customer payment - non-refundable retainer",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$1,500.00",
+        "figure_minor": 150000,
+        "rows": [
+          "r1"
+        ],
+        "not_counted": [],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 150000,
+        "rows": [
+          "r1"
+        ],
+        "confidence": "Medium (85%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "ledger-analysis.js:326 word boundary; :331"
+      }
+    },
+    {
+      "id": "C70",
+      "theme": "zero_income_month",
+      "question": "What was my income in October 2026?",
+      "period": [
+        "2026-10-01",
+        "2026-10-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        },
+        {
+          "slug": "sav",
+          "kind": "savings",
+          "last4": "3307"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-10-06",
+          "amount": 1000.0,
+          "dir": "out",
+          "desc": "Transfer to 4821",
+          "acct": "sav"
+        },
+        {
+          "id": "r2",
+          "date": "2026-10-06",
+          "amount": 1000.0,
+          "dir": "in",
+          "desc": "Transfer from 3307",
+          "acct": "chk"
+        }
+      ],
+      "expected": {
+        "figure": "$0.00",
+        "figure_minor": 0,
+        "rows": [],
+        "not_counted": [
+          {
+            "row": "r2",
+            "why": "transfer from savings 3307"
+          }
+        ],
+        "confidence": "High"
+      },
+      "code": {
+        "figure_minor": 0,
+        "rows": [],
+        "confidence": "Medium (85%)",
+        "figure": "PASS",
+        "confidence_verdict": "FAIL",
+        "rule": "clean-money.js:148-151"
+      }
+    },
+    {
+      "id": "C71",
+      "theme": "pending_only",
+      "question": "What was my income in October 2026?",
+      "period": [
+        "2026-10-01",
+        "2026-10-31"
+      ],
+      "accounts": [
+        {
+          "slug": "chk",
+          "kind": "checking",
+          "last4": "4821"
+        }
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-09-20",
+          "amount": 900.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk"
+        },
+        {
+          "id": "r2",
+          "date": "2026-10-30",
+          "amount": 400.0,
+          "dir": "in",
+          "desc": "Customer payment",
+          "acct": "chk",
+          "pending": 1
+        }
+      ],
+      "expected": {
+        "figure": "$0.00 posted; $400.00 pending",
+        "figure_minor": 0,
+        "rows": [],
+        "not_counted": [
+          {
+            "row": "r2",
+            "why": "pending, may change"
+          }
+        ],
+        "confidence": "Medium"
+      },
+      "code": {
+        "figure_minor": 0,
+        "rows": [],
+        "confidence": "Medium (70%)",
+        "figure": "PASS",
+        "confidence_verdict": "PASS",
+        "rule": "clean-money.js:86; money-query-quality.js:39"
+      }
+    }
+  ],
+  "totals": {
+    "cases": 71,
+    "figure_pass": 48,
+    "wrong_figures": 23,
+    "confidence_mismatch": 49,
+    "wrong_figure_ids": [
+      "C10",
+      "C16",
+      "C17",
+      "C18",
+      "C31",
+      "C32",
+      "C34",
+      "C35",
+      "C38",
+      "C39",
+      "C40",
+      "C41",
+      "C42",
+      "C43",
+      "C44",
+      "C45",
+      "C53",
+      "C55",
+      "C56",
+      "C57",
+      "C61",
+      "C62",
+      "C64"
+    ]
+  }
+}

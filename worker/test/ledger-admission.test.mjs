@@ -1,4 +1,7 @@
 import test from 'node:test';
+import { classifyLedgerQuestion } from '../src/lib/ledger-question.js';
+import worker from '../src/index.js';
+import { assertDocumentAnswer } from './helpers/document-answer-contract.mjs';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -176,8 +179,19 @@ for (const future of ['future', 'forecast', 'predict', 'tomorrow', 'next week', 
     assert.equal(r.calls, 1, 'substantive future candidate reaches extraction and validation');
     assert.equal(r.inventory, 0);
     assert.equal(r.facts, 0);
-    assert.equal(r.documents, 0, 'calendar clarification stays out of document synthesis');
-    assert.ok(r.body.gaps.some(gap => gap.scope === 'calendar'));
+    if (['future', 'forecast', 'predict'].includes(future)) {
+      assert.equal(r.documents, 1, 'an ungrounded forecast retains the document route');
+      assert.equal(r.body.route, 'documents', 'the fallback decision was reached');
+      const response = await worker.fetch(new Request('https://brain.invalid/api/rag/think', {
+        method: 'POST', headers: { 'content-type': 'application/json', 'X-Admin-Key': f.env.ADMIN_KEY },
+        body: JSON.stringify({ q: question }),
+      }), f.env, { waitUntil() {} });
+      assert.equal(response.status, 200);
+      assertDocumentAnswer(await response.json(), { empty: true, provisional: true });
+    } else {
+      assert.equal(r.documents, 0, 'calendar clarification stays out of document synthesis');
+      assert.ok(r.body.gaps.some(gap => gap.scope === 'calendar'));
+    }
     await descriptorReading(t, descriptorFrames[0]('MARKET*UNIT 0042'), 'MARKET*UNIT 0042');
   });
 }
@@ -1073,7 +1087,7 @@ test('mutant reinterpret descriptor as account loses the explicit account hint w
 test('restoring only the old admission gate loses the new routes and retains a green control', async t => {
   const url = new URL('../src/lib/ledger-intent.js', import.meta.url);
   const source = readFileSync(url, 'utf8');
-  const site = 'cue.test(question) || boundedLedgerMoneyCue(question) ||';
+  const site = 'boundedLedgerMoneyCue(question) ||';
   assert.equal(source.split(site).length - 1, 1, 'one admission restoration site');
   // A distinct wrapper URL gets a fresh intent dependency with the restored gate.
   const wrapperUrl = new URL('../src/lib/ledger-answer.js', import.meta.url);
@@ -1085,7 +1099,7 @@ test('restoring only the old admission gate loses the new routes and retains a g
   const second = registerHooks({ load(target, options, next) {
     if (target === `${url.href}?old-admission`) {
       restoredLoads++;
-      return { format: 'module', source: source.replace(site, 'cue.test(question) ||'), shortCircuit: true };
+      return { format: 'module', source: source.replace(site, ''), shortCircuit: true };
     }
     if (target === `${wrapperUrl.href}?old-admission`) return { format: 'module', source: wrapperSource, shortCircuit: true };
     return next(target, options);
@@ -1093,20 +1107,26 @@ test('restoring only the old admission gate loses the new routes and retains a g
   t.after(() => second.deregister());
   const restored = (await import(`${wrapperUrl.href}?old-admission`)).withLedgerAnswer;
   assert.equal(restoredLoads, 1, 'restored admission module actually loaded');
+  let restoredFailures = 0, preservedRoutes = 0;
   for (const [id, question, value] of cases) {
     const f = configured(t, value);
     const mutant = await ask(f, question, value, restored);
-    if (id === 'card-current') {
-      assert.equal(mutant.calls, 1, 'existing credit vocabulary still enters extraction');
+    if (id === 'card-current' || classifyLedgerQuestion(question, context).kind) {
       const current = await ask(f, question, value);
+      assert.equal(mutant.calls, current.calls, 'deterministic aliases bypass the extraction gate in both arms');
+      assert.ok(mutant.inventory > 0, 'the preserved balance route actually reads inventory');
       assert.deepEqual(current.body, mutant.body);
+      assert.equal(mutant.body.ledger.accounts[0].current_minor, 4321);
+      preservedRoutes++;
       continue;
     }
+    restoredFailures++;
     assert.equal(mutant.calls, 0);
     assert.equal(mutant.documents, 1);
     assert.equal(mutant.inventory, 0);
     assert.equal(canExtractLedgerIntent(question), true, 'current gate remains active outside the mutant');
   }
+  assert.ok(restoredFailures > 0 && preservedRoutes > 0, 'gate mutations and independent aliases have nonuniform outcomes');
   const f = configured(t, intent('balance'));
   const green = await ask(f, 'What are my current balances?', intent('balance'), restored);
   assert.equal(green.body.ledger.kind, 'balance');

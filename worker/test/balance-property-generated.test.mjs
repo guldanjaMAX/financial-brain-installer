@@ -1,3 +1,5 @@
+// 0.4.28 owner confidence is attached after the legacy-reader seam used by this fixture.
+import { finalizeOwnerLedgerAnswer } from '../src/lib/document-answer.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fixture, NOW } from './ledger-review-fixture.mjs';
@@ -43,7 +45,7 @@ function generate() {
 }
 
 let f;
-async function evaluate(c) {
+async function evaluate(c, mutateBody = body => body) {
   try {
     f.owner();
     f.raw(`INSERT INTO fin_entities (entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at)
@@ -69,9 +71,11 @@ async function evaluate(c) {
         intents: [{ kind: 'balance', account_hint: c.hint, direction: null, count: null, vendor_text: null,
           amount_text: null, date_text: null, period: { type: 'none' } }] }) }] }) },
     async gap => Response.json({ gaps: gap ? [gap] : [], answer: null }));
-    const body = await response.json(), ledger = body.ledger;
+    const body = mutateBody(await response.json()), ledger = body.ledger;
     const issues = [];
     const expected = c.accounts.filter(a => c.expected.includes(a.mask));
+    const recorded = expected.filter(a => !a.missing);
+    const missing = expected.filter(a => a.missing);
     const figures = displayFigures(body.answer);
     // ROUTE-GAPS owns the nickname gate; retain these cases as expected refusals.
     if (c.mode === 1) { assert.notEqual(ledger?.kind, 'balance'); return { issues: [], body }; }
@@ -88,10 +92,12 @@ async function evaluate(c) {
     // Business ownership selection is already owned by the owner-scope lane.
     if (c.mode !== 3) {
       const actual = ledger.accounts.map(a => a.account_mask).sort();
-      const wanted = expected.map(a => a.mask).sort();
+      const wanted = recorded.map(a => a.mask).sort();
       const openActual = actual.filter(mask => !c.accounts.some(a => a.closed && a.mask === mask));
       if (JSON.stringify(c.closedLookup ? actual : openActual) !== JSON.stringify(wanted)) issues.push('selector-scope');
     }
+    const excluded = (ledger.excluded_accounts || []).filter(a => a.reason === 'balance_unavailable').map(a => a.account_mask).sort();
+    if (JSON.stringify(excluded) !== JSON.stringify(missing.map(a => a.mask).sort())) issues.push('missing-denominator');
     for (const row of ledger.accounts) {
       const candidates = c.accounts.filter(a => a.mask === row.account_mask);
       if (row.balance_group === 'cash' && candidates.every(a => ['card', 'loan'].includes(a.kind))) issues.push('liability-in-cash');
@@ -99,7 +105,7 @@ async function evaluate(c) {
       if (!candidates.some(a => row.as_of === a.date) || !/as of/i.test(body.answer)) issues.push('snapshot-date');
     }
     if (ledger.cash_only?.total_minor != null) {
-      const cash = expected.filter(a => ['checking', 'savings'].includes(a.kind));
+      const cash = recorded.filter(a => ['checking', 'savings'].includes(a.kind));
       if (String(ledger.cash_only.total_minor) !== total(cash.map(a => a.cents))) issues.push('current-account-denominator');
     }
     const allowed = new Set(ledger.accounts.map(a => String(a.current_minor)));
@@ -122,7 +128,10 @@ async function evaluate(c) {
     // a complete combined figure requires a complete denominator.
     if (expected.some(a => a.partial) && ledger.cash_only?.total_minor != null && body.evidence_gate?.complete !== false)
       issues.push('partial-confident-total');
-    if (expected.some(a => a.missing) && figures.length) issues.push('missing-confident');
+    if (missing.length && (ledger.complete !== false || body.evidence_gate?.complete !== false ||
+        body.evidence_gate?.partial !== true || !/partial recorded balances/i.test(body.answer) ||
+        missing.some(a => !body.answer.includes(a.mask) || !/amount is unknown/i.test(body.answer))))
+      issues.push('missing-confident');
     return { issues: [...new Set(issues)], body };
   } finally {
     for (const table of ['fin_transactions', 'fin_balance_snapshots', 'fin_account_coverage', 'fin_accounts', 'fin_entities'])
@@ -181,6 +190,34 @@ test('seeded balance properties: independent cents and explicit uncertainty', as
   console.log(JSON.stringify(summary));
   assert.equal(cases.length, 640);
   if (!diagnostic) assert.equal(violations.size, 0, 'generated balance violations; use --find-balances for a grouped inventory');
+});
+
+test('partial balance oracle rejects invented cents, omitted accounts and unqualified totals', async t => {
+  f = fixture(t);
+  t.mock.method(globalThis, 'fetch', () => assert.fail('network forbidden'));
+  f.env.RERANK_MODEL = 'claude-haiku-4-5-20251001';
+  f.env.ANTHROPIC_API_KEY = randomBytes(24).toString('hex');
+  const c = generate()[9];
+  c.accounts = c.accounts.slice(0, 2);
+  c.rows = []; c.mode = 2; c.question = 'how much cash do I have without card debt'; c.hint = null;
+  c.expected = c.accounts.map(a => a.mask);
+  c.accounts[0].missing = false;
+  const before = f.calls.length;
+  const complete = await evaluate(c);
+  assert.ok(f.calls.slice(before).some(sql => /fin_balance_snapshots/.test(sql)), 'real balance read reached');
+  assert.deepEqual(complete.issues, []);
+  assert.equal(String(complete.body.ledger.cash_only.total_minor), total(c.accounts.map(a => a.cents)));
+  c.accounts[0].missing = true;
+  const partial = await evaluate(c);
+  assert.deepEqual(partial.issues, []);
+  assert.equal(String(partial.body.ledger.cash_only.total_minor), c.accounts[1].cents);
+  assert.equal(partial.body.evidence_gate.complete, false);
+  const mutate = async fn => (await evaluate(c, body => { fn(body); return body; })).issues;
+  assert.ok((await mutate(body => { body.ledger.accounts[0].current_minor++; })).includes('snapshot-value'));
+  assert.ok((await mutate(body => { body.ledger.accounts = []; })).includes('selector-scope'));
+  assert.ok((await mutate(body => { body.ledger.excluded_accounts = []; })).includes('missing-denominator'));
+  assert.ok((await mutate(body => { body.ledger.cash_only.total_minor = Number(total(c.accounts.map(a => a.cents))); })).includes('current-account-denominator'));
+  assert.ok((await mutate(body => { body.evidence_gate.complete = true; })).includes('missing-confident'));
 });
 
 
@@ -374,10 +411,14 @@ for (const status of ['open', 'closed', 'never_connected']) test(`duplicate endi
   const bad = await askIdentity(f, question, '321', 'direct');
   assert.equal(bad.body.gaps?.[0]?.reason, 'ledger_account_link_required');
   assert.ok(bad.calls.some(sql => /LEFT JOIN fin_account_links/.test(sql)), 'real inventory reached link approval review');
-  assert.equal(bad.body.evidence_gate?.supported, false);
+  // 0.4.28 reads each unlinked source separately; identity cannot certify a combined total.
+  assert.equal(bad.body.evidence_gate?.supported, true);
   assert.equal(bad.body.evidence_gate?.complete, false);
-  assert.equal(bad.body.ledger, undefined);
-  assert.equal(bad.calls.some(sql => /WITH observations/.test(sql)), false);
+  assert.equal(finalizeOwnerLedgerAnswer(bad.body).confidence.percent,0);
+  assert.deepEqual(bad.body.ledger.source_readings.map(r => r.amount_minor).sort((a,b)=>a-b), [12345,98765]);
+  assert.match(bad.body.answer,/\$123\.45 may be counted twice/);
+  assert.match(bad.body.answer,/no link or combined total has been assumed/);
+  assert.ok(bad.calls.some(sql => /WITH observations/.test(sql)), 'separate source figures were read');
 });
 
 test('an ambiguous open-account selector cannot authorize a combined cash figure', async t => {

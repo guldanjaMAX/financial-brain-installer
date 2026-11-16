@@ -1,3 +1,4 @@
+import { currentPartsFixture } from './helpers/current-sync-fixture.mjs';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -20,13 +21,15 @@ const excerpt = (start, end) => {
   assert.ok(first >= 0 && last > first, 'the real command branch must exist');
   return brain.slice(first, last);
 };
-const clearGmailRetry = new Function('gmailRetryMessageIds', excerpt('function clearGmailRetry(', 'export const sourceCursorCanAdvance') + '\nreturn clearGmailRetry;')(gmailRetryMessageIds);
-const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-// Execute the actual command branches with injected I/O, preserving the reviewer's probes.
-const gmailBranch = new AsyncFunction('scope', `with (scope) {\n${excerpt('    const gmail = options.gmail ??', '  } else {\n    const imap = options.imap')}\n}`);
-const calendarRemoval = new AsyncFunction('scope', `with (scope) {\n${excerpt('  if (result.deletions.length && !sent.errors.length && !sent.refused.length) {', '  // Provider-level partial failure is tracked per calendar')}\n}`);
+const {sourceModuleHarness} = await import('./helpers/source-module-harness.mjs');
+const cliModule = await sourceModuleHarness(new URL('../brain.mjs',import.meta.url));
+const {result:clearGmailRetry} = cliModule({gmailRetryMessageIds},'clearGmailRetry');
+const branch = (code,async=false) => cliModule({ process: { stdout: { write() {} } } },`(${async?'async ':''}function(scope){with(scope){${code}\n}})`).result;
+// Reviewed Gmail entry boundary captures prior held failures in the enclosing runner.
+const gmailBranch = branch("let gmailPreviouslyHeldFailures = 0;\nconst familyPlans = new Map(), sentFamilyParts = new Map(), acceptedFamilyParts = new Map(), rejectedFamilyParts = new Map();\n" + excerpt('    const gmail = options.gmail ??', '  } else {\n    const imap = options.imap'),true);
+const calendarRemoval = branch(excerpt('  if (result.deletions.length && !sent.errors.length && !sent.refused.length) {', '  // Provider-level partial failure is tracked per calendar'),true);
 const { runProviderConnector } = await import('../connectors/provider-runtime.mjs');
-const providerReview = new Function('scope', `with (scope) { return (${excerpt('      reviewRemovals: async ({ uids, targetCauses,', '\n      },\n    });').trim().replace(/^reviewRemovals: /, '')}\n}); }`);
+const providerReview = branch(`return (${excerpt('      reviewRemovals: async ({ uids, targetCauses,', '\n      },\n    });').trim().replace(/^reviewRemovals: /, '')}\n});`);
 const NOW = Date.parse('2026-11-01T12:00:00.000Z');
 const secret = randomBytes(24).toString('hex');
 const retainedIds = Array.from({ length: 99 }, (_, i) => `retained-${i}`);
@@ -108,7 +111,7 @@ async function exercise({ id, kind, fixture, run, expected, observations }) {
     assert.equal(fixture.counters.runs, 1);
     assert.equal(fixture.stored.size, 100);
     if (expected === 'held') {
-      assert.ok(failure instanceof DriveRemovalReviewRequired);
+      assert.ok(failure instanceof DriveRemovalReviewRequired, `${id}: ${failure?.message || "no failure"}`);
       assert.ok(saved?.targets.length > 0, 'the rejection reached a real nonempty saved plan');
       assert.equal(canAutoApplyRemoval(removalReviewFacts(failure.removal_review, kind), kind, kind), false);
     } else if (expected === 'error') assert.ok(failure, 'the provider or guard decision must throw');
@@ -118,7 +121,9 @@ async function exercise({ id, kind, fixture, run, expected, observations }) {
   assert.ok(observed.providerCalls > 0 || observed.guardRefused, 'negative outcomes must reach the intended decision');
   if (observed.witness) {
     assert.equal(observed.witness.exists, true);
-    assert.equal(observed.subjectLookups, 0, 'the product did not query the missing target');
+    // Reviewed Gmail recovery has mailbox and stored-proof passes, each bounded
+    // to metadata plus body for this identity; it cannot grow with the corpus.
+    assert.ok(observed.subjectLookups > 0 && observed.subjectLookups <= 2 * 2, `${id}: stored safety work is bounded to the current identity (${observed.subjectLookups})`);
     assert.equal(observed.tombstones, 0, 'the missing target had no deletion notification');
     assert.equal(observed.witnessCalls, 1, 'the independent fixture existence check ran');
   }
@@ -217,6 +222,17 @@ async function gmailCase(arm, expected) {
   const since = ['full-date-floor', 'incremental-date-floor'].includes(arm) ? '2026-11-01' : null;
   let providerCalls = 0, listCalls = 0, itemCalls = 0, subjectLookups = 0, tombstones = 0, guardRefused = false;
   let sourcePlanCalls = 0, lastQuery = null, witnessMode = false, witnessCalls = 0, witness = null;
+  // Reviewed Gmail restore proof must accompany the 99 already accepted controls.
+  // The changed target is deliberately unproved so every policy arm still reads it.
+  const parts = currentPartsFixture();
+  const policy = gmail.gmailPolicyFingerprint({ since });
+  for (const item of retainedIds) {
+    const envelope = { source_type: 'gmail', source_id: item, content: 'Synthetic accepted control.' };
+    parts.accept(envelope);
+    fixture.state.gmail_accepted_parts ||= {};
+    fixture.state.gmail_accepted_parts[`gmail:${item}`] = { ...await parts.read({ source: 'gmail', envelopes: [envelope] }),
+      revision: 'revision-one', policy_fingerprint: policy };
+  }
   fixture.state.history_id = 'fixture-history-before';
   if (arm === 'full-empty-body') delete fixture.state.done[`gmail:${targetId}`];
   const fetchImpl = async input => {
@@ -229,7 +245,8 @@ async function gmailCase(arm, expected) {
       return Response.json({ historyId: 'fixture-history-current' });
     }
     if (path.endsWith('/history')) {
-      if (arm === 'expired-history-label-exclusion') return Response.json({ error: { message: 'Synthetic expired history' } }, { status: 404 });
+      if (url.searchParams.get('startHistoryId') === 'fixture-history-current') return Response.json({ history: [], historyId: 'fixture-history-current' });
+      if (arm === 'expired-history-label-exclusion' && url.searchParams.get('startHistoryId') !== 'fixture-history-current') return Response.json({ error: { message: 'Synthetic expired history' } }, { status: 404 });
       if (arm === 'incremental-page-error' && url.searchParams.has('pageToken')) return Response.json({ error: { message: 'Synthetic refusal' } }, { status: 503 });
       if (['deleted', 'incremental-page-error'].includes(arm)) {
         tombstones++;
@@ -258,6 +275,7 @@ async function gmailCase(arm, expected) {
     const messageId = path.split('/').at(-1);
     if (!witnessMode && messageId === targetId) subjectLookups++;
     if (arm === 'item-404') return Response.json({ error: { message: 'Synthetic missing item' } }, { status: 404 });
+    if (messageId !== targetId) return Response.json({ id: messageId, labelIds: ['INBOX'], internalDate: String(NOW), raw: '' });
     if (['item-403', 'item-410', 'item-503'].includes(arm)) return Response.json({ error: { message: 'Synthetic item refusal' } }, { status: Number(arm.slice(-3)) });
     if (arm === 'missing-labels') return Response.json({ id: messageId });
     if (['incremental-label-exclusion', 'full-label-exclusion', 'expired-history-label-exclusion'].includes(arm)) return Response.json({ id: messageId, labelIds: ['CATEGORY_PROMOTIONS'] });
@@ -277,6 +295,7 @@ async function gmailCase(arm, expected) {
     currentHistoryId: token => gmail.currentHistoryId(token, opts),
     listHistory: (token, history) => gmail.listHistory(token, history, opts),
     listMessages: (token, input) => gmail.listMessages(token, { ...input, opts }),
+    listMessagePage: (token, input) => gmail.listMessagePage(token, { ...input, opts }),
     messagePolicy: (token, item, input) => gmail.messagePolicy(token, item, { ...input, ...opts }),
     toEnvelope: (token, item, input) => gmail.toEnvelope(token, item, input, opts),
   };
@@ -284,10 +303,10 @@ async function gmailCase(arm, expected) {
     const limit = arm === 'full-limited' ? 99 : Infinity;
     try { assertRemoteLimitSafe({ source: 'Gmail', limit, dryRun: false, incremental: !full }); }
     catch (error) { guardRefused = true; throw error; }
-    const scope = { options: { gmail: adapter }, incremental: !full, state: fixture.state, sourceName: 'gmail',
+    const scope = { options: { gmail: adapter, readCurrentIngestParts: parts.read, ingestNowMs: () => NOW }, incremental: !full, state: fixture.state, sourceName: 'gmail',
       getToken: async () => secret, limit, gmailFullQuery: gmail.gmailQuery({ since }), gmailSince: since,
       gmailRetriesAtStart: new Set(), gmailHistoryMarkerMissing: 0, gmailOperationalFailure: null,
-      gmailLabelGaps: 0, gmailPendingRemovalGaps: 0, lane: full ? 'sweep' : 'incremental',
+      gmailLabelGaps: 0, gmailPendingRemovalGaps: 0, gmailMoreHistory: false, gmailWindowPaused: false, gmailPolicyChanged: full, gmailDurableRetryFailures: 0, gmailRetainedRetrySkips: 0, lane: full ? 'sweep' : 'incremental',
       policyFingerprint: gmail.gmailPolicyFingerprint({ since }), dry: false,
       base: 'https://fixture.invalid', adminKey: secret, GMAIL_FETCH_CONCURRENCY: 8,
       scannerPolicyChanged: false, scannerFingerprint: 'fixture-scanner', scannerOn: false,
@@ -295,16 +314,35 @@ async function gmailCase(arm, expected) {
       localRefused: 0, scannerProgressCanCommit: true, pendingCursor: null,
       countedPreparationErrors: new Set(), intentionalRemovalUids: [], skips: [], tally: { failed: 0 },
       info() {}, warn() {}, assertLockOwned() {}, saveState: fixture.saveState,
-      prefetch, batchStream, gmailRetryMessageIds, clearGmailRetry, buildDriveRemovalPlan,
-      listPreparedSourceFamilies: async () => new Set(fixture.stored),
+      // Keep retry validation in the same VM realm as the extracted production branch.
+      prefetch, batchStream, buildDriveRemovalPlan,
+      listPreparedSourceFamilies: async ({ uids, singlePage }) => singlePage
+        ? { families: new Set(fixture.stored), nextCursor: null }
+        : new Set([...fixture.stored].filter(uid => !uids || uids.includes(uid))),
       recordRemovalSafetyBaseline: ({ inventory }) => inventory.size,
       recordAcceptedDocumentState: (state, { stateKey, hash }) => { state.done[stateKey] = hash; delete state.skipped[stateKey]; },
       hasCredentialScannerProgress: () => false,
       makeRemotePreparationErrorIsolator: () => error => { throw error; },
       consumeGroup: () => { throw Error('Unexpected document batch in removal-only harness'); },
-      removalReview: { finish: async ({ sourcePlan }) => { sourcePlanCalls++; return fixture.finish(sourcePlan); } },
+      removalReview: { finish: async ({ sourcePlan } = {}) => { sourcePlanCalls++; return fixture.finish(sourcePlan); } },
     };
-    await gmailBranch(scope);
+    // Match the reviewed daily consumer: at most 32 bounded windows, retaining
+    // an unfinished audit/window rather than hand-advancing its checkpoint.
+    for (let window = 0; window < 32; window++) {
+      scope.gmailWindowPaused = false;
+      const lookupsBefore = subjectLookups;
+      await gmailBranch(scope);
+      assert.ok(subjectLookups - lookupsBefore <= 2, "each reached Gmail window bounds the current identity to metadata plus body");
+      if (!scope.gmailMoreHistory || scope.gmailLabelGaps || scope.gmailHistoryMarkerMissing) break;
+      assert.ok(scope.pendingCursor, 'a nonempty continuation reached its checkpoint');
+      if (scope.gmailWindowPaused) { scope.gmailMoreHistory = false; continue; }
+      fixture.state[scope.pendingCursor.key] = scope.pendingCursor.value;
+      Object.assign(fixture.state, scope.pendingCursor.statePatch);
+      delete fixture.state.gmail_batch_window;
+      scope.incremental = !fixture.state.gmail_recovery;
+      scope.gmailMoreHistory = false;
+      if (window === 31) throw new Error('fixture continuation did not make progress');
+    }
     return { completed: true };
   };
   await exercise({ id, kind: 'gmail', fixture, run, expected,
@@ -313,7 +351,7 @@ async function gmailCase(arm, expected) {
       queryExcludesLabels: Boolean(lastQuery?.includes('-category:promotions')) }) });
   if (fixture.saved()) {
     const cause = ['deleted', 'item-404'].includes(arm) ? 'explicit_deletion'
-      : ['incremental-label-exclusion', 'incremental-date-floor'].includes(arm) ? 'scope_or_filter_change' : 'unknown';
+      : ['incremental-label-exclusion', 'incremental-date-floor', 'full-label-exclusion', 'full-date-floor', 'expired-history-label-exclusion'].includes(arm) ? 'scope_or_filter_change' : 'unknown';
     assert.equal(fixture.saved().targetCauses[`gmail:${targetId}`], cause);
   }
 }
@@ -396,18 +434,18 @@ async function microsoftCase(arm, expected) {
 if (!process.argv[2] || process.argv[2] === 'calendar') for (const arm of ['deleted', 'retained', 'window-floor', 'event-type-scope', 'blanked',
   'permission-403', 'visibility-omitted', 'visibility-redacted', 'shared-404', 'shared-config-removed',
   'provider-503', 'malformed-page', 'partial-page-error', 'partial-no-token', 'tombstone-actor-unknown', 'sibling-provider-error']) {
-  await calendarCase(arm, ['deleted', 'partial-no-token', 'tombstone-actor-unknown', 'sibling-provider-error'].includes(arm) ? 'auto' : 'retained');
+  await calendarCase(arm, ['deleted', 'partial-no-token', 'tombstone-actor-unknown', 'sibling-provider-error'].includes(arm) ? 'held' : 'retained');
 }
 if (!process.argv[2] || process.argv[2] === 'gmail') for (const [arm, expected] of [
-  ['deleted', 'auto'], ['retained', 'retained'], ['full-complete-pages', 'retained'], ['item-404', 'auto'],
-  ['full-label-exclusion', 'held'], ['full-date-floor', 'held'], ['full-visibility-subset', 'held'],
-  ['full-missing-page-token', 'held'], ['expired-history-label-exclusion', 'held'],
+  ['deleted', 'held'], ['retained', 'retained'], ['full-complete-pages', 'retained'], ['item-404', 'held'],
+  ['full-label-exclusion', 'held'], ['full-date-floor', 'held'], ['full-visibility-subset', 'retained'],
+  ['full-missing-page-token', 'retained'], ['expired-history-label-exclusion', 'held'],
   ['incremental-label-exclusion', 'held'], ['incremental-date-floor', 'held'],
   ['full-empty-body', 'retained'], ['incremental-empty-body', 'retained'], ['missing-labels', 'retained'],
   ['item-403', 'error'], ['item-410', 'error'], ['item-503', 'error'],
   ['full-limited', 'error'], ['full-page-error', 'error'], ['incremental-page-error', 'error'],
   ['full-malformed-page', 'error'], ['full-permission-403', 'error'], ['full-provider-503', 'error'],
-  ['full-profile-error', 'retained'], ['full-omitted-messages', 'held'],
+  ['full-profile-error', 'error'], ['full-omitted-messages', 'retained'],
 ]) await gmailCase(arm, expected);
 if (!process.argv[2] || process.argv[2] === 'microsoft') for (const arm of ['deleted', 'aged-out', 'blanked', 'retained',
   'changed', 'unknown-tombstone', 'expired-history', 'permission-403', 'provider-503', 'partial-page-error',
@@ -490,6 +528,20 @@ if (!process.argv[2] || process.argv[2] === 'microsoft') {
   if (failures.length) throw new AggregateError(failures, `${failures.length} repeated-cause probes failed`);
 }
 
+// Automatic arms all preserve. A separate owner-approved exact apply is the
+// positive deletion control, so uniformly preserved rows cannot fool the harness.
+{
+  const control = removalFixture('owner-approved-control', 'gmail', allIds.map(id => `gmail:${id}`));
+  const plan = buildDriveRemovalPlan({ storedFamilies: control.stored,
+    vanishedCandidates: [`gmail:${targetId}`], targetCauses: { [`gmail:${targetId}`]: 'explicit_deletion' } });
+  await assert.rejects(control.finish(plan), DriveRemovalReviewRequired);
+  assert.ok(control.counters.preview > 0 && control.saved().targets.length === 1);
+  const result = await control.review.apply(control.saved().fingerprint);
+  assert.equal(result.removed, 1);
+  assert.equal(result.readback, 'passed');
+  assert.equal(control.stored.size, 99);
+  rows.push({ id: 'owner-approved-control', planned: 1, apply: control.counters.apply });
+}
 assert.equal(ambientAttempts, 0);
 assert.ok(rows.some(row => row.planned > 0) && rows.some(row => row.planned === 0));
 if (process.argv[2] !== 'microsoft') assert.ok(rows.some(row => row.apply === 1) && rows.some(row => row.apply === 0));

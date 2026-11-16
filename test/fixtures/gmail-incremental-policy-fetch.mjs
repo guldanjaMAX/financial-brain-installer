@@ -3,6 +3,8 @@ import { installRemovalPlanAdapter } from "./removal-plan-adapter.mjs";
 
 import { readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
+import { createHash } from "node:crypto";
+import { chunkText } from "../../worker/src/lib/store.js";
 import { syncBuiltinESMExports } from "node:module";
 
 const evidencePath = String(process.env.BRAIN_GMAIL_POLICY_EVIDENCE || "");
@@ -56,6 +58,8 @@ syncBuiltinESMExports();
 
 const blank = () => ({
   ingested_ids: [],
+  part_proofs: {},
+  part_proof_reads: 0,
   batch_attempts: {},
   forget_targets: [],
   receipts: { indexing: 0, ready: 0, error: 0 },
@@ -173,6 +177,7 @@ globalThis.fetch = async (input, options = {}) => {
     const idsByMode = {
       mixed: ["promotion", "inbox"],
       "refusal-only": ["refusal-only-001", "refusal-only-002"],
+      "refusal-only-sweep": ["refusal-sweep-001", "refusal-sweep-002"],
       "refusal-with-failure": ["refusal-failure-secret", "refusal-failure-worker"],
       unclassified: [...lateEligibleIds, "unclassified"],
       "credential-refusal": ["credential-refused", "credential-clean"],
@@ -186,6 +191,7 @@ globalThis.fetch = async (input, options = {}) => {
       "since-incremental": ["since-incremental-older", "since-incremental-current"],
     };
     const ids = idsByMode[mode];
+    if (!ids && url.searchParams.get("startHistoryId") === "history-current") return json({ historyId: "history-current", history: [] });
     if (!ids) throw new Error("the full-sweep fixture must use Gmail messages.list");
     return json({
       historyId: "history-current",
@@ -253,7 +259,9 @@ globalThis.fetch = async (input, options = {}) => {
     }
     if (mode === "scanner-v5-dilution-guard") {
       requireDefaultFilteredQuery(url);
-      return json({ messages: dilutionNewIds.map((id) => ({ id })) });
+      const tail = url.searchParams.has("pageToken");
+      return json({ messages: dilutionNewIds.slice(tail ? 500 : 0, tail ? 1000 : 500).map(id => ({ id })),
+        ...(!tail ? { nextPageToken: "fixture-dilution-tail" } : {}) });
     }
     throw new Error("the incremental fixture must use Gmail history");
   }
@@ -352,6 +360,7 @@ globalThis.fetch = async (input, options = {}) => {
         raw: rawMail("Retry fixture mail", `This invented message ${id} proves durable retry convergence after a recoverable storage failure.`),
       });
     }
+    if (id === "sweep-inbox" && url.searchParams.get("format") === "minimal") return json({ id, labelIds: ["INBOX"], internalDate: "1788030000000" });
     if (id === "sweep-inbox") {
       return json({
         id, historyId: "history-current", internalDate: "1788030000000",
@@ -364,6 +373,8 @@ globalThis.fetch = async (input, options = {}) => {
         raw: rawMail("Oldest retained mail", "This invented message is newer than the configured Gmail date floor."),
       });
     }
+    if (id === "since-older") return json({ id, labelIds: ["INBOX"], internalDate: "1646092799000" });
+    if (id === "migration-omitted" || dilutionOldIds.includes(id)) return json({ error: { message: "synthetic provider deletion" } }, 404);
     if (id === "since-retained") {
       return json({
         id, historyId: "since-retained-v1", internalDate: "1650456000000", labelIds: ["INBOX"],
@@ -435,6 +446,20 @@ globalThis.fetch = async (input, options = {}) => {
     }
   }
 
+  if (url.hostname === "fixture.invalid" && url.pathname === "/api/admin/brain/ingest-part-proof") {
+    const request = bodyOf(options);
+    if (options.method !== "POST" || request.source !== "gmail" || !Array.isArray(request.source_ids) ||
+        !request.source_ids.length || request.source_ids.length > 50 ||
+        new Set(request.source_ids).size !== request.source_ids.length) throw new Error("invalid part-proof read");
+    const evidence = readEvidence();
+    evidence.part_proof_reads++;
+    saveEvidence(evidence);
+    return json({ source: request.source,
+      database: { instance: "1".repeat(32), nonce: "2".repeat(32), generation: 1 },
+      geometry: { size: 1200, overlap: 150 },
+      parts: request.source_ids.flatMap(id => Object.hasOwn(evidence.part_proofs, id) ? [evidence.part_proofs[id]] : []),
+    });
+  }
   if (url.hostname === "fixture.invalid" && url.pathname === "/api/admin/brain/ingest/batch") {
     const request = bodyOf(options);
     const evidence = readEvidence();
@@ -442,17 +467,26 @@ globalThis.fetch = async (input, options = {}) => {
     for (const doc of request.docs) {
       evidence.batch_attempts[doc.source_id] = Number(evidence.batch_attempts[doc.source_id] || 0) + 1;
     }
-    saveEvidence(evidence);
-    return json({
-      results: request.docs.map((doc) => mode === "worker-refusal"
+    const results = request.docs.map((doc) => mode === "worker-refusal"
         ? { source_id: doc.source_id, status: "refused", labels: ["synthetic_test_label"] }
         : mode === "refusal-with-failure" && doc.source_id === "refusal-failure-worker"
           ? { source_id: doc.source_id, status: "failed" }
         : mode === "recoverable-worker-failure" && doc.source_id === "retry-failed" &&
             evidence.batch_attempts[doc.source_id] === 1
           ? { source_id: doc.source_id, status: "failed" }
-        : { source_id: doc.source_id, status: "created" }),
-    });
+        : { source_id: doc.source_id, status: "created" });
+    // Current-D1 proof comes only from accepted content; failed/refused parts
+    // cannot manufacture progress or advance the connector's saved cursor.
+    for (const doc of request.docs) {
+      const result = results.find(result => result.source_id === doc.source_id);
+      if (!["created", "updated", "unchanged"].includes(result.status)) continue;
+      const geometry = { size: 1200, overlap: 150 };
+      evidence.part_proofs[doc.source_id] = { source_id: doc.source_id,
+        content_hash: createHash("sha256").update(`chunk-v1:${geometry.size}:${geometry.overlap}\0${doc.content}`).digest("hex"),
+        chunk_count: chunkText(doc.content, geometry).length };
+    }
+    saveEvidence(evidence);
+    return json({ results });
   }
   if (url.hostname === "fixture.invalid" && url.pathname === "/api/admin/brain/forget") {
     const request = bodyOf(options);
@@ -470,6 +504,11 @@ globalThis.fetch = async (input, options = {}) => {
     }
     const targets = families.map((item) => item.base_doc_uid);
     evidence.forget_targets.push(...targets);
+    for (const id of Object.keys(evidence.part_proofs)) {
+      if (targets.some(uid => `gmail:${id}` === uid || `gmail:${id}`.startsWith(`${uid}#part`))) {
+        delete evidence.part_proofs[id];
+      }
+    }
     saveEvidence(evidence);
     return json({
       dry_run: false, documents: targets.length, chunks: targets.length, vectors: targets.length,
@@ -486,7 +525,7 @@ globalThis.fetch = async (input, options = {}) => {
   }
   if (url.hostname === "fixture.invalid" && url.pathname === "/api/admin/brain/source-families") {
     const request = bodyOf(options);
-    const ordered = currentStoredFamilies();
+    const ordered = currentStoredFamilies().filter(uid => !request.uids || request.uids.includes(uid));
     const limit = Math.max(1, Math.min(1000, Number(request.limit) || 1000));
     const start = request.cursor
       ? ordered.findIndex((uid) => uid > request.cursor)
@@ -495,7 +534,7 @@ globalThis.fetch = async (input, options = {}) => {
     const nextCursor = start >= 0 && start + page.length < ordered.length
       ? page.at(-1)
       : null;
-    return json({ source: "gmail", families: page, next_cursor: nextCursor });
+    return json({ source: "gmail", families: page, next_cursor: nextCursor, ...(request.require_index ? { indexed: true } : {}) });
   }
   if (url.hostname === "fixture.invalid" && url.pathname === "/api/admin/brain/documents") {
     return json({ vector_backlog: { pending: 0, upserts: 0, deletes: 0, submitted: 0 } });

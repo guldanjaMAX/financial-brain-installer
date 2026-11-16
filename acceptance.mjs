@@ -36,6 +36,8 @@
 import { fetchBrainWithAdminKey } from "./components/brain-http.mjs";
 import { answerSetupOf, resolvedAnswerModels } from "./operations/answer-setup.mjs";
 import { safeAnswerErrorText } from "./worker/src/lib/answer-render.js";
+import { ownerConfidenceLine } from "./worker/src/lib/confidence.js";
+import { documentAnswerHasRefusal, documentDateLabel, documentRecordTitle, markerSafe } from "./worker/src/lib/document-answer.js";
 
 const PASS = "pass";
 const FAIL = "fail";
@@ -66,6 +68,136 @@ function normalizedEvidenceNumbers(value, resultCount) {
     seen.add(number);
   }
   return true;
+}
+
+// This is a smoke-test guard for the owner's Worker, not independent proof of
+// finalization. Source quotations may contain figures; explanation, footer
+// and routing/contract text may not introduce another claim or confidence.
+// Run before shortcuts too: a ledger/handoff marker cannot hide unsafe text
+// while the response still declares a document boundary reading.
+function documentBoundaryTextDiagnostic(payload) {
+  if (payload?.answer_contract?.kind !== "document" ||
+      ![2, 3, 4].includes(payload.answer_contract.rung)) return null;
+  const texts = [];
+  const collect = value => {
+    if (typeof value === "string") texts.push(value);
+    else if (value && typeof value === "object") Object.values(value).forEach(collect);
+  };
+  for (const [key, value] of Object.entries(payload)) {
+    // Direct finalizer callers can retain usedDocs; like results/citations,
+    // it is source evidence, whose figures do not become explanation claims.
+    if (!["answer", "confidence_text", "results", "citations", "usedDocs"].includes(key)) collect(value);
+  }
+  if (typeof payload.answer === "string") {
+    const footerAt = payload.answer.indexOf("\n\nCoverage:");
+    collect(payload.answer_contract.rung === 4 ? payload.answer
+      : footerAt < 0 ? "" : payload.answer.slice(footerAt));
+  }
+  if (typeof payload.confidence_text === "string") {
+    // Only the one official prefix is exempt. Any further confidence label
+    // in the rendered reasons is response-controlled explanation text.
+    collect(payload.confidence_text.replace(/^Confidence: (?:High|Medium|Low) \(\d+%\)/, ""));
+  }
+  const amount = "(?:\\d[\\d,.]*|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion)";
+  const money = new RegExp(`[$€£¥]|\\b(?:USD|EUR|GBP|CAD|AUD|JPY)\\b|\\b${amount}\\s+(?:dollars?|euros?|pounds?|yen|cents?)\\b|\\b(?:rent|payment|balance|income|revenue|expense|spend|cost|price|amount|total)\\b\\s*(?:(?:per\\s+(?:month|year)|is|was|of|at|totals?|equals?)\\s*|[:=]\\s*)?${amount}\\b`, "i");
+  if (texts.some(text => documentAnswerHasRefusal(text) || money.test(text) || /\bConfidence\s*:/i.test(text))) {
+    return "the Worker's document boundary explanation or routing text contained a refusal, money figure or additional confidence label";
+  }
+  return null;
+}
+
+// A rung marker is not a finalizer receipt. Admit only the finalizer's
+// attributed/bounded grammar and complete footer, with counts and displayed
+// confidence bound to the structured fields. In particular, rung 4 has no
+// evidence from which to assert a figure or accept arbitrary leading prose.
+function documentBoundaryDiagnostic(payload, cited = []) {
+  const { answer, answer_contract: contract, confidence: c } = payload;
+  const { rung, read_count: read, retrieved_count: retrieved } = contract;
+  if (!Number.isSafeInteger(read) || !Number.isSafeInteger(retrieved) ||
+      read !== cited.length || retrieved < read || c.percent > ({ 2: 89, 3: 69, 4: 30 })[rung]) {
+    return "the Worker's document boundary counts or confidence contradicted its reading";
+  }
+  // The Worker's own label over the same date fields its citation candidate
+  // projects, so calendar observation dates, numeric timestamps and the
+  // "event" prefix agree with the Worker by construction.
+  const dateLabel = row => documentDateLabel({ ts: row.ts || null,
+    ...(row.record_observation ? { record_observation: row.record_observation } : {}),
+    date_reliable: row.date_reliable === true, date_source: row.date_source || null, question_time: row.question_time });
+  const docs = cited.map(n => payload.results[n - 1]);
+  const coverage = `Read ${read} of ${retrieved} retrieved records from ${[...new Set(docs.map(d => d.source || "?"))].join(", ") || "sources unverified"}, dated ${[...new Set(docs.map(dateLabel))].join(", ") || "dates unverified"}.`;
+  const footer = `\n\nCoverage: ${coverage}\nMissing or counted twice: ${c.missing.join(" ")} Any monetary impact or duplicate amount is unknown unless stated in the quoted records.\nEstimates: Likely record relevance; attributed statements are not confirmation of your identity, present status or bank payment.\nHow to check: ${read ? "Open the cited originals and reconcile their dates, subjects and figures" : "Complete the source search and read the matching originals"}.`;
+  if (!answer.endsWith(footer)) return "the Worker returned an incompatible document boundary footer";
+  let prose = answer.slice(0, -footer.length);
+  if (rung === 4) {
+    if (payload.results.length || payload.citations.length || read !== 0) {
+      return "the Worker's bounded no-match reading contradicted its evidence";
+    }
+    // With no readable source and no money-tool receipt, even a matching
+    // confidence/footer cannot supply a monetary figure for this reading.
+    const moneyFigure = /[$€£¥]|\b(?:USD|EUR|GBP|CAD|AUD|JPY)\b|\b(?:\d[\d,.]*|zero|one|two|three|four|five|six|seven|eight|nine|ten|hundred|thousand|million|billion)\s+(?:dollars?|euros?|pounds?|yen)\b/i;
+    if (moneyFigure.test(answer) || moneyFigure.test(payload.confidence_text)) {
+      return "the Worker's bounded reading contained a money figure without evidence";
+    }
+    const screened = Number(prose.match(/^(\d+) retrieved record\(s\) reached the sensitive-record screen\./)?.[1] || 0);
+    const screenedReading = Number.isSafeInteger(screened) && screened > 0 && screened <= retrieved &&
+      (payload.withheld_documents == null || payload.withheld_documents.count === screened) &&
+      prose === `${screened} retrieved record(s) reached the sensitive-record screen. No permitted readable text was available for this question; their contents remain unverified.`;
+    // handleThink's post-condition adds only these fixed public notices. A
+    // returned error string or a model-supplied preamble is never a notice.
+    const unreadNotices = [
+      "The requested business scope could not be checked right now, so no records were read for it. The search was not widened to work around that failure.",
+      "The requested business scope name is not valid, so no records were read for it.",
+      "The requested business scope is not a recorded entity, so no records were read for it.",
+      "The requested business scope is not one of your owned entities, so no records were read for it.",
+      "The request named two different business scopes, so no records were read for it.",
+      "The request's filters, dates or parameters could not be applied as asked, so no records were read. The search was not widened to ignore them.",
+      "The question could not be completed, so no records were read after the failure. The search was not widened to work around it.",
+    ];
+    const notice = unreadNotices.find(value => prose.startsWith(value + " "));
+    if (notice && retrieved === 0 && c.percent <= 10) prose = prose.slice(notice.length + 1);
+    const unreadReading = [
+      `The available reading contains no readable matching statement. ${retrieved} record(s) were returned; their missing text is unverified.`,
+      `The available reading contains no readable matching statement. ${retrieved} record(s) were returned; the search is incomplete and matching records may be missing.`,
+    ].includes(prose);
+    // Source names and ISO ingestion dates are labels in this one completed
+    // zero-result sentence. No free-form claim, currency or extra sentence
+    // may be smuggled into those label slots.
+    const source = "[\\p{L}\\p{N}_-]+(?:[ .][\\p{L}\\p{N}_-]+)*";
+    const date = "\\d{4}-\\d{2}-\\d{2}(?:T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z)?";
+    const noMatch = new RegExp(`^Not found in 0 records returned by this search from (?:the requested sources \\(source inventory unverified\\)|${source}(?:, ${source})*), read through (?:dates unverified|${source}: ${date}(?:, ${source}: ${date})*)\\.$`, "u");
+    if (screenedReading || unreadReading || (retrieved === 0 && !screened && !notice && noMatch.test(prose))) return null;
+    return "the Worker returned prose outside the finalized bounded-reading shapes";
+  }
+  // Consume the whole source reading with exact attribution strings, not
+  // just one valid quote beside unsupported prose. Build each string from
+  // its numbered result so even labels containing newlines remain data.
+  // The quote binding itself is checked below against the source snippet.
+  const allowed = [
+    "Newer retrieved records were not cited in the draft:",
+    "Retrieved records that are not provably older, or that name the same subject, were not cited in the draft:",
+    ...docs.map((row, i) => `"${markerSafe(row.title)}" (${dateLabel(row)}) [${cited[i]}]; its statement is included above.`),
+  ];
+  const flatText = value => String(value || "").replace(/\s+/g, " ").trim();
+  for (const match of prose.matchAll(/says: ("(?:\\.|[^"\\])*") \[(\d+)\]/g)) {
+    const n = Number(match[2]), row = payload.results[n - 1];
+    if (!row || !cited.includes(n)) continue;
+    const attribution = `As of ${dateLabel(row)}, the record "${markerSafe(documentRecordTitle({ ...row, title: typeof row.title === "string" ? row.title.slice(0, 140) : row.title }))}" says: ${match[1]} [${n}].`;
+    allowed.push(attribution, "Likely relevant: " + attribution);
+    // A record read past its 500-chunk page keeps each out-of-page retrieval
+    // hit as its own line; it is admitted only as one of that row's spans.
+    let span = null;
+    try { span = flatText(JSON.parse(match[1])); } catch { span = null; }
+    if (span !== null && (row.retrieval_excerpts || []).some(value => flatText(value) === span)) {
+      allowed.push(`An additional retrieved excerpt from the same record says: ${match[1]} [${n}].`);
+    }
+  }
+  let remaining = prose;
+  while (remaining) {
+    const next = allowed.find(value => remaining === value || remaining.startsWith(value + "\n"));
+    if (!next) return "the Worker returned prose outside the finalized source-reading shapes";
+    remaining = remaining.slice(next.length + 1);
+  }
+  return null;
 }
 
 /**
@@ -116,7 +248,29 @@ export function answerResponseContractDiagnostic(payload) {
   const evidenceGateHasError = Boolean(evidenceGate) &&
     Object.prototype.hasOwnProperty.call(evidenceGate, "error");
 
+  const boundaryTextDiagnostic = documentBoundaryTextDiagnostic(payload);
+  if (boundaryTextDiagnostic) return boundaryTextDiagnostic;
+
+  if (payload.money_handoff === true) {
+    // Routing guidance reads no bank rows and proves neither a document
+    // answer nor model execution. Accept only that distinct, error-free shape;
+    // a marker alone must never hide a broken ordinary answer response.
+    if (!nonemptyResponseText(payload.answer) ||
+        typeof payload.money_tools_available !== "boolean" ||
+        payload.results.length !== 0 || payload.citations.length !== 0 || payload.gaps.length !== 0 ||
+        owns("answer_error") || evidenceGate || payload.model != null ||
+        hasStatus || degradedToken(payload.degraded) !== null) {
+      return "the Worker returned an incomplete or incompatible money hand-off";
+    }
+    return null;
+  }
+
   if (payload.answer === null) {
+    // Current document envelopes never use legacy null-answer compatibility,
+    // including when an error/status or absent confidence accompanies a rung.
+    if (payload.answer_contract?.kind === "document") {
+      return "the Worker returned no answer for its document answer contract";
+    }
     if (payload.citations.length > 0) {
       return "the Worker returned citations without an answer";
     }
@@ -147,6 +301,55 @@ export function answerResponseContractDiagnostic(payload) {
 
   const answer = payload.answer.trim();
   if (!answer) return "the Worker returned empty answer text instead of null";
+
+  if (payload.answer_contract?.kind === "document") {
+    const contract = payload.answer_contract, c = payload.confidence;
+    const strings = values => Array.isArray(values) && values.length > 0 && values.every(nonemptyResponseText);
+    if (contract.version !== 1 || ![1, 2, 3, 4].includes(contract.rung) ||
+        hasStatus || owns("answer_error") || !Number.isInteger(c?.percent) || c.percent < 0 || c.percent > 100 ||
+        c.band !== (c.percent >= 90 ? "High" : c.percent >= 70 ? "Medium" : "Low") ||
+        !strings(c.basis) || !strings(c.missing) ||
+        payload.confidence_text !== ownerConfidenceLine(c) ||
+        !/Coverage:.*Missing or counted twice:.*Estimates:.*How to check:/s.test(answer)) {
+      return "the Worker returned an incomplete document answer contract";
+    }
+    if (contract.rung === 4) {
+      return documentBoundaryDiagnostic(payload);
+    }
+    const prose = answer.split("\n\nCoverage:")[0];
+    const markers = new Set([...prose.matchAll(/\[(\d+)\]/g)].map(m => Number(m[1])));
+    const cited = new Set();
+    const flat = value => String(value || "").replace(/\s+/g, " ").trim();
+    for (const citation of payload.citations) {
+      const row = payload.results[citation?.n - 1];
+      if (!row || !Number.isInteger(citation.n) || cited.has(citation.n) ||
+          citation.title !== String(row.title || "untitled").slice(0, 140) || citation.source !== String(row.source || "?")) {
+        return "the Worker's document citation did not identify its numbered result";
+      }
+      cited.add(citation.n);
+    }
+    if (!markers.size || cited.size !== markers.size || [...markers].some(n => !cited.has(n))) {
+      return "the Worker's document answer and citations did not agree";
+    }
+    if (contract.rung === 1) {
+      if (evidenceGate?.supported !== true || evidenceGate.complete !== true || evidenceGateHasError) {
+        return "the Worker's approved document draft lacked its evidence check";
+      }
+    } else {
+      const boundaryDiagnostic = documentBoundaryDiagnostic(payload, [...cited]);
+      if (boundaryDiagnostic) return boundaryDiagnostic;
+      const quotes = [...prose.matchAll(/says: ("(?:\\.|[^"\\])*") \[(\d+)\]/g)];
+      if (c.percent >= 90 || !quotes.length || new Set(quotes.map(m => Number(m[2]))).size !== cited.size ||
+          quotes.some(m => {
+            try {
+              const row = payload.results[Number(m[2]) - 1];
+              return ![row?.snippet, ...(row?.retrieval_excerpts || [])].some(span => flat(span).includes(flat(JSON.parse(m[1]))));
+            }
+            catch { return true; }
+          })) return "the Worker's provisional document answer was not bound to its source text";
+    }
+    return null;
+  }
 
   if (ANSWER_UNAVAILABLE_STATUSES.has(payload.status) ||
       owns("answer_error") ||
@@ -222,6 +425,20 @@ function cleanConfiguredWithhold(payload, expectedModel) {
     !isRetrievalFailureDegradation(payload.degraded);
 }
 
+// A deterministic bank reading is not a document/model probe. Continue to a
+// saved document question; if all probes are bank readings, retain a warning
+// rather than claiming the configured answer model or document gate ran.
+function ledgerAnswerProbe(payload) {
+  return responseObject(payload) && payload.mode === 'think' &&
+    !documentBoundaryTextDiagnostic(payload) &&
+    nonemptyResponseText(payload.answer) && responseObject(payload.ledger) &&
+    nonemptyResponseText(payload.ledger.kind) && !payload.model && !payload.answer_error && !payload.error &&
+    !payload.status && Array.isArray(payload.results) && payload.results.length === 0 &&
+    Array.isArray(payload.citations) && Array.isArray(payload.gaps) &&
+    responseObject(payload.evidence_gate) && typeof payload.evidence_gate.supported === 'boolean' &&
+    typeof payload.evidence_gate.complete === 'boolean';
+}
+
 /**
  * Name the exact stage that left `/api/rag/think` without an answer.
  *
@@ -240,6 +457,12 @@ export function answerUnavailableDiagnostic(payload) {
     return {
       stage: "response_contract",
       detail: contractDiagnostic,
+    };
+  }
+  if (payload.money_handoff === true) {
+    return {
+      stage: "money_handoff",
+      detail: "money routing guidance received; bank figures, answer-model execution, and document citations were not verified by this probe",
     };
   }
 
@@ -1088,22 +1311,48 @@ export class Acceptance {
     // question.
     const configuredAnswer = answerSetupOf(this.m) !== "built-in";
     const expectedAnswerModel = resolvedAnswerModels(this.m).answer_model;
-    const answerQuestions = configuredAnswer ? savedQuestions.slice(0, 3) : savedQuestions.slice(0, 1);
+    const answerProbeLimit = configuredAnswer ? 3 : 1;
+    let answerProbeCount = 0;
     let thinkAttempt;
+    let ledgerAttempt;
     let allWithheldCleanly = false;
     let recoveredRetries = 0;
-    for (const q of answerQuestions) {
-      thinkAttempt = await this.retryTransientProbe(budget, async () => {
+    for (const q of savedQuestions) {
+      const attempt = await this.retryTransientProbe(budget, async () => {
         const r = await this.post("/api/rag/think", { q, limit: 5 });
         // Preserve the existing transient-retrieval retry classification and
         // the shared tier budget for every saved answer probe.
         return { failing: isRetrievalFailureDegradation(r.json?.degraded), value: r };
       });
-      if (thinkAttempt.recovered) recoveredRetries += thinkAttempt.retries;
+      const response = attempt.value;
+      const diagnostic = response.ok ? answerUnavailableDiagnostic(response.json) : null;
+      if (diagnostic?.stage === "money_handoff") {
+        // A saved money question must not strand an already deployed update.
+        // Keep the limitation visible and spend the unchanged document-probe
+        // budget on later questions instead. Iteration is bounded by the saved
+        // list and every request still shares the same retry budget.
+        this.record(t, "think money hand-off", WARN, diagnostic.detail);
+        continue;
+      }
+      if (attempt.recovered) recoveredRetries += attempt.retries;
+      // A deterministic bank reading is not a document/model probe either.
+      // Like a hand-off it spends none of the document-probe budget and
+      // cannot replace an earlier document receipt; it is reported only
+      // when no saved question reached the document answer path.
+      if (response.ok && ledgerAnswerProbe(response.json)) {
+        ledgerAttempt = attempt;
+        continue;
+      }
+      thinkAttempt = attempt;
+      answerProbeCount++;
       allWithheldCleanly = configuredAnswer && thinkAttempt.value.ok &&
         cleanConfiguredWithhold(thinkAttempt.value.json, expectedAnswerModel);
-      if (!allWithheldCleanly) break;
+      if (!allWithheldCleanly || answerProbeCount >= answerProbeLimit) break;
     }
+    // An all-money list proves routing only. Its warnings must not become a
+    // false claim that an answer model ran or a factual answer was cited.
+    thinkAttempt ??= ledgerAttempt;
+    if (!thinkAttempt) return;
     const think = thinkAttempt.value;
     if (isRetrievalFailureDegradation(think.json?.degraded)) {
       const why = workerDegradationDetail(think.json);
@@ -1132,6 +1381,9 @@ export class Acceptance {
     }
     if (!think.ok) {
       this.record(t, "think endpoint", FAIL, `HTTP ${think.status}`);
+    } else if (ledgerAnswerProbe(think.json)) {
+      this.record(t, "document answer probe", WARN,
+        "saved answer probes returned deterministic bank readings; document synthesis and the configured answer model remain unverified");
     } else {
       // Validate the complete public response envelope before trusting answer
       // text. A malformed 200 containing plausible prose is not proof that the
@@ -1139,7 +1391,21 @@ export class Acceptance {
       // green merely because `answer` is truthy.
       const diagnostic = answerUnavailableDiagnostic(think.json);
       const answerPresent = typeof think.json?.answer === "string" && think.json.answer.trim().length > 0;
-      if (configuredAnswer && diagnostic.stage !== "response_contract") {
+      // The finalizer can replace a missing or rejected draft with source
+      // extracts or a bounded no-match/screened reading. The complete contract
+      // above validates that answer; it does not certify model execution.
+      // Keep that limitation visible without stranding an already deployed
+      // update for returning the owner's required reading.
+      const boundaryReading = answerPresent && diagnostic.stage !== "response_contract" &&
+        think.json?.answer_contract?.kind === "document" &&
+        [2, 3, 4].includes(think.json.answer_contract.rung);
+      if (boundaryReading) {
+        this.record(t, "document boundary reading", WARN,
+          think.json.answer_contract.rung === 4
+            ? "bounded no-match or screened reading returned; no source claim to cite; document synthesis and configured answer-model execution remain unverified"
+            : "attributed source reading returned below High confidence; document synthesis and configured answer-model execution remain unverified");
+      }
+      if (configuredAnswer && diagnostic.stage !== "response_contract" && !boundaryReading) {
         if (allWithheldCleanly) {
           this.record(t, "configured answer model ran", WARN,
             "answers were honestly withheld by the evidence check");
@@ -1170,13 +1436,14 @@ export class Acceptance {
       } else if (think.json?.answer) {
         const answer = think.json.answer;
         this.record(t, "think returns an answer", PASS, `${answer.length} chars`);
-        // A refusal ("the documents do not answer this") correctly carries no
-        // citations, because it makes no factual claim to cite. Requiring
-        // markers unconditionally fails the brain for behaving honestly, which
-        // is the opposite of what this check is for.
+        // A validated rung-4 reading describes the bounded search or screen,
+        // not a source fact. It owes no invented citation. Legacy Workers'
+        // canonical refusal retains its existing compatibility discipline.
         const isRefusal = answerIsRefusal(answer);
         const cited = /\[\d+\]/.test(answer);
-        if (isRefusal && !cited) {
+        if (boundaryReading && think.json.answer_contract.rung === 4) {
+          this.record(t, "answer citation discipline", PASS, "validated bounded reading, no source claim to cite");
+        } else if (isRefusal && !cited) {
           this.record(t, "answer citation discipline", PASS, "honest refusal, nothing to cite");
         } else {
           this.record(

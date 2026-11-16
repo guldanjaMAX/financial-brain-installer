@@ -108,7 +108,7 @@ function Get-ToolVersion([string]$Name) {
     return "codex-cli $([string](([IO.File]::ReadAllText($packageJson) | ConvertFrom-Json).version))"
   }
   $output = @(& $paths[0] --version 2>$null)
-  if ($output.Count -eq 0) { return $null }
+  if ($LASTEXITCODE -ne 0 -or $output.Count -eq 0) { return $null }
   return [string]$output[0]
 }
 

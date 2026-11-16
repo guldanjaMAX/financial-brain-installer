@@ -20,7 +20,7 @@ import { writeAdminKeyFile } from "../operations/admin-key-file.mjs";
 import { handleMcp } from "../worker/src/lib/mcp-endpoint.js";
 import { createProductFixture, seedOwnedEntity } from "../worker/test/product-contract-fixture.mjs";
 import { withLedgerAnswer } from "../worker/src/lib/ledger-answer.js";
-import { createServer } from "node:http";
+import { fixtureFetchHook, fixtureTransport, connectFixtureTransport, hasFixtureTransport } from "./fixtures/mcp-fetch-transport.mjs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const MCP = fileURLToPath(new URL("../components/brain-mcp.mjs", import.meta.url));
@@ -31,9 +31,9 @@ const REMOTE_NO_HITS = 'No hits in this search. This is not proof that no such r
 const SCOPED_GAP = "No match in this search. This is not proof that no such record exists.";
 const REFUSAL = "I can try a more specific search, but I didn't find a matching record in this search. Want to add a detail?";
 const NEXT_NO_MATCH = "Next: ask again with a name, date or exact phrase the record would contain.";
-const PRESERVE = "Preserve the ledger answer's exact amounts, account masks, dates, and coverage bounds.";
+const PRESERVE = "This reply contains a money figure from the Brain's older question engine. Read brain_money_guide, recompute with brain_money_query, and answer in five parts.";
 const LATEST = 'Before any status, "latest", or absence claim, run one brain_search for the subject with sort "newest", read newest_record, and say "as of <record date>" for the record you relied on.';
-const MONEY = "For a money question the bank ledger answers (a balance, a payment received, money in and out, largest expenses, deposits, spend by merchant or category, transfers between the owner's own accounts, recurring charges, profit, net income, withdrawals, loan proceeds), use brain_think: it reads the ledger directly. Cash flow is unsupported: relay cash_flow_unsupported with no figure or model fallback. The profit and net-income view is money in minus money out, not accounting profit or cash flow. Keep its exact amounts, account masks, dates and coverage bounds.";
+const MONEY = "For money calculations use txn and coverage through the owner money tools. Keep exact amounts and show supporting rows or one statement comparison. Never add up search snippets.";
 const NEWEST_DESCRIPTION = 'Before any status, "latest", or absence claim, search the subject once with sort "newest" and check newest_record, the newest reliably dated record among the results this search returned before pagination (at most 50), or the newest unverified date if none is reliable. Before a latest claim, re-search the subject with a recent date window; relevance ranking may omit newer matches.';
 const BROAD_PROMPT_FIXTURES = [
   {
@@ -82,12 +82,13 @@ function broadQuestionGuard(text, label) {
     `${label}: the single-document control does not reach a broad cue`);
   assert.match(guard, /List what each record says, record by record, with its source title and date\./,
     `${label}: broad output stays record by record`);
-  assert.match(guard,
-    /Never calculate or state a total from excerpts, reconcile the records, conclude how an entity was funded, or call the result all current or complete\./,
-    `${label}: excerpts cannot support synthesis verdicts`);
-  assert.match(guard,
-    /Use a money figure only from brain_think's deterministic ledger answer, or quote it verbatim from one cited record without combining it with another record\./,
-    `${label}: broad money stays on an exact evidence path`);
+  if (label.startsWith("owner answer contract")) {
+    assert.match(guard, /Never calculate or state a total from excerpts, reconcile the records, conclude how an entity was funded, or call the result all current or complete\./);
+    assert.match(guard, /For money calculations call brain_money_overview first, then read brain_money_guide and use brain_money_query\. Use overview coverage_text for every money answer\. Quote a document figure verbatim from one cited record without combining it with another record\. Never add up search snippets\./);
+  } else {
+    assert.match(guard, /For calculations and reconciliation use brain_money_query, then explain the records, assumptions and coverage; label any extrapolation as an estimate\./);
+    assert.match(guard, /Use brain_money_query for money calculations and label any document-based forecast as an estimate with its sources\./);
+  }
   assert.match(guard,
     /Say which sources and periods you did not search, and what evidence or completed search would make the list complete\./,
     `${label}: broad output discloses unchecked scope and the completeness condition`);
@@ -100,10 +101,9 @@ function broadQuestionGuard(text, label) {
 function broadGuardMutants(text, guard) {
   return [
     ["drop the guard", text.replace(guard, "")],
-    ["allow computed totals", text.replace(
-      "Never calculate or state a total from excerpts",
-      "You may calculate or state a total from excerpts",
-    )],
+    ["allow unsupported computed totals", guard.includes("For calculations and reconciliation use brain_money_query")
+      ? text.replace("For calculations and reconciliation use brain_money_query", "Calculate from memory")
+      : text.replace("Never calculate or state a total from excerpts", "You may calculate or state a total from excerpts")],
     ["drop say what was not searched", text.replace(
       "Say which sources and periods you did not search, and what evidence or completed search would make the list complete.",
       "",
@@ -132,9 +132,11 @@ function fixtureRuntime(url, profile = "") {
 }
 
 async function localMessages(runtime, messages) {
-  const child = spawn(process.execPath, [MCP], {
-    stdio: ["pipe", "pipe", "pipe"], env: runtime.env, timeout: 15000,
+  const child = spawn(process.execPath, [...(hasFixtureTransport(runtime.env.BRAIN_URL) ? ["--import",fixtureFetchHook] : []), MCP], {
+    stdio: ["pipe", "pipe", "pipe", "ipc"], env: runtime.env, timeout: 15000,
   });
+  connectFixtureTransport(child,runtime.env.BRAIN_URL);
+  child.channel?.unref();
   let stdout = "", stderr = "";
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
@@ -189,23 +191,29 @@ globalThis.fetch = async (input, init = {}) => {
   } finally { runtime.close(); }
 }
 
+test('R4 M-7: local brain_think scores the unanswered question, not the refusal', async () => {
+  const {results} = await localThinkBodies({
+    'When does the synthetic lease renew?':{answer:null,results:[],gaps:[],confidence:{percent:80,band:'moderate',basis:['x']}},
+    'When does the synthetic note end?':{answer:'The documents do not answer this question.',results:[],gaps:[],confidence:{percent:80,band:'moderate',basis:['x']}},
+  });
+  for (const out of Object.values(results)) {
+    assert.ok(out.confidence.percent<=30); assert.equal(out.confidence.band,'Low');
+    assert.equal(out.confidence.basis[0],'No record read here answers the question.');
+    assert.equal(out.confidence.missing[0],'A record that states the answer.');
+  }
+});
+
 /** Serve one canned body; every assertion must first reach the requested route. */
 async function thinkReturns(body, tool = "brain_think", args = {}) {
   const requests = [];
-  const server = createServer((req, res) => {
-    let raw = "";
-    req.on("data", c => { raw += c; });
-    req.on("end", () => {
-      requests.push({ path: req.url, body: JSON.parse(raw), method: req.method });
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(body));
-    });
+  const endpoint = fixtureTransport(async (req,res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    requests.push({path:req.url,body:JSON.parse(raw),method:req.method});
+    res.writeHead(200,{'Content-Type':'application/json'});
+    res.end(JSON.stringify(body));
   });
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
-  });
-  const runtime = fixtureRuntime(`http://127.0.0.1:${server.address().port}`);
+  const runtime = fixtureRuntime(endpoint.url);
   try {
     const [reply] = await localMessages(runtime, [{ jsonrpc: "2.0", id: 1,
       method: "tools/call", params: { name: tool, arguments: { q: "anything", ...args } } }]);
@@ -219,7 +227,7 @@ async function thinkReturns(body, tool = "brain_think", args = {}) {
     return JSON.parse(reply.result.content[0].text);
   } finally {
     runtime.close();
-    await new Promise(resolve => server.close(resolve));
+    await endpoint.close();
   }
 }
 
@@ -441,7 +449,10 @@ await test("answer_withheld keeps the reviewed notice, reason, and candidate row
   });
   assert.equal(out.search_status, "answer_withheld");
   assert.equal(out.answer, null);
-  assert.equal(out.confidence, undefined, "withheld answers have no percentage");
+  assert.equal(out.confidence.band, "Low", "incomplete answers retain a data-based score");
+  assert.ok(out.confidence.percent <= 30);
+  assert.ok(out.confidence.missing.length);
+  assert.doesNotMatch(JSON.stringify(out.confidence), /must not cross/);
   assert.equal(out.results?.length, 1, "the held-back candidate remains available");
   assert.match(out.note || "", /money evidence check/i);
   assert.match(out.note || "", /FOUND 1 document/);
@@ -488,6 +499,10 @@ await test("raw search keeps provenance", async () => {
   assert.equal(out.results[0].text_source, "ocr_partial");
   assert.equal(out.results[0].text_reliable, false);
   assert.equal(out.results[0].lineage.status, "unknown");
+  assert.equal(out.confidence.percent,55);
+  assert.equal(out.confidence.band,"Low");
+  assert.match(out.confidence.basis.join(' '),/partial text reading/);
+  assert.ok(out.confidence.missing.length);
   console.log("PASS raw search keeps date and extraction provenance");
 });
 
@@ -554,19 +569,20 @@ await test("local MCP routes non-money answers through search and preserves expl
   const { instructions, tools } = await initializeResponse("owner-assistant");
   const readOnly = await initializeResponse("librarian");
   assert.deepEqual(tools.map(tool => tool.name), [
-    "brain_think", "brain_search", "brain_remember", "brain_health", "brain_financial_map",
-  ], "the owner-assistant write profile keeps its exact five-tool surface");
-  assert.deepEqual(readOnly.tools.map(tool => tool.name), ["brain_think", "brain_search"],
-    "the librarian read-only profile keeps its exact two-tool surface");
+    "brain_money_query", "brain_money_overview", "brain_money_guide", "brain_think", "brain_search", "brain_fetch", "brain_remember", "brain_health", "brain_financial_map",
+  ], "the owner-assistant write profile keeps its exact nine-tool surface");
+  assert.deepEqual(readOnly.tools.map(tool => tool.name), ["brain_think", "brain_search", "brain_fetch"],
+    "the librarian read-only profile keeps its exact three-tool surface without owner money tools");
+
   const think = tools.find(tool => tool.name === "brain_think").description;
   const search = tools.find(tool => tool.name === "brain_search").description;
-  assert.match(think, /^Ledger money and explicitly requested Brain answers\./);
-  assert.match(think, /For every other question, use brain_search/i);
+  assert.match(think, /^Documents and context when the owner explicitly asks/);
+  assert.match(think, /For every other non-money question, use brain_search/i);
   assert.match(think, /owner explicitly asks for the Brain's own answer/i);
   assert.match(think, /brain_financial_map flow calls for it/i);
   assert.doesNotMatch(think, /short lookup|single-fact/i);
-  for (const phrase of ["balance", "payment received", "money in and out", "largest expenses", "deposits", "merchant or category", "transfers", "recurring charges", "profit", "net income", "withdrawals", "loan proceeds"])
-    assert.ok(think.includes(phrase), `think routes ${phrase}`);
+  for (const phrase of ["brain_money_guide", "go straight to brain_money_query", "one call at a time", "Never add up search snippets", "zero bank rows"])
+    assert.ok(think.includes(phrase), `think describes direct money routing: ${phrase}`);
   assert.match(search, /^Default answer route for non-money questions\./);
   assert.match(search, /read the returned excerpts/i);
   assert.match(search, /each fact's source title and date/i);
@@ -588,7 +604,7 @@ await test("local MCP routes non-money answers through search and preserves expl
 await test("broad search-first prompts use the guarded route while one-document questions stay plain", async () => {
   const { instructions, tools } = await initializeResponse("owner-assistant");
   assert.deepEqual(tools.map(tool => tool.name), [
-    "brain_think", "brain_search", "brain_remember", "brain_health", "brain_financial_map",
+    "brain_money_query", "brain_money_overview", "brain_money_guide", "brain_think", "brain_search", "brain_fetch", "brain_remember", "brain_health", "brain_financial_map",
   ], "the real MCP initialize and tool-list decision points were reached");
   const renderedOwnerContract = readFileSync(
     new URL("../templates/owner-contract/answer-contract-v1.md", import.meta.url),
@@ -718,10 +734,15 @@ await test("local empty search is scoped and unavailable search keeps its notice
   assert.equal(empty.note, NO_HITS);
   assert.equal(empty.newest_record, null);
   const found = await thinkReturns({ results: [reliable] }, "brain_search");
+  assert.ok(found.confidence.percent>0);
+  assert.ok(found.confidence.basis.length);
   assert.deepEqual(found.newest_record, localRecord(reliable));
   assert.equal(found.note, undefined);
   const unavailable = await thinkReturns({ status: "search_unavailable", degraded: "vector", degraded_reason: "vector-query-failed", results: [] }, "brain_search");
   assert.equal(unavailable.search_status, "search_unavailable");
+  assert.equal(unavailable.confidence.band,"Low");
+  assert.ok(unavailable.confidence.percent<found.confidence.percent);
+  assert.match(unavailable.confidence.basis.join(' '),/vector/);
   assert.match(unavailable.note, /could not be completed/);
   assert.notEqual(unavailable.note, NO_HITS);
 });
@@ -779,24 +800,27 @@ await test("remote incomplete coverage retains newest metadata and unavailable s
   assert.equal(partial.newer_unreliably_dated, 1);
   assert.equal(partial.results.length, 2);
   assert.deepEqual(partial.gaps, gaps);
-  assert.match(partial.note, /provisional/i);
+  // 0.4.28 keeps readable candidates as attributed, likely statements with gaps.
+  assert.match(partial.note, /^Likely relevant:/);
   const unavailable = await remoteCall({ status: "search_unavailable", results: [], gaps: [] }, "search");
-  assert.deepEqual(Object.keys(unavailable).sort(), ["gaps", "note", "results"]);
-  assert.match(unavailable.note, /could not be completed/i);
+  assert.deepEqual(Object.keys(unavailable).sort(), ["confidence", "confidence_text", "gaps", "note", "results"]);
+  assert.equal(unavailable.confidence.band, "Low");
+  assert.match(unavailable.note, /coverage is incomplete.*provisional/i);
   assert.deepEqual(unavailable.results, []);
 });
 
 await test("remote refused ask scopes its line and confidence beside an unchanged cited control", async () => {
   const confidence = { percent: 80, band: "high", basis: ["fixture evidence"] };
   const refused = await remoteCall({ answer: "The documents do not answer the question.", confidence, results: [], citations: [], gaps: [] }, "ask");
-  assert.equal(refused, `${REFUSAL.split(" Want")[0]}\n\nConfidence in this search result: 80% (high). fixture evidence.\n${NEXT_NO_MATCH}`);
+  assert.equal(refused, `${REFUSAL.split(" Want")[0]}\n\nConfidence: Low (20%). Why: No record read here answers the question; 0 retrieved records; retrieval alone does not verify an answer. Missing: A record that states the answer; The complete relevant document set and independent verification of the answer; A matching readable source record.\n${NEXT_NO_MATCH}`);
   assert.doesNotMatch(refused, /Confidence nothing is recorded|The documents do not answer/);
   const cited = await remoteCall({ answer: "Fixture answer [1].", confidence,
     citations: [{ n: 1, title: "Fixture record", source: "fixture", lineage: { status: "known" } }], results: [], gaps: [] }, "ask");
-  assert.equal(cited, "Fixture answer [1].\n\nConfidence: 80% (high). fixture evidence.\n\nSources:\n[1] Fixture record · fixture\nWant to check the original record?");
+  assert.equal(cited, "Fixture answer [1].\n\nConfidence: Medium (80%). Why: fixture evidence. Missing: Independent verification and complete relevant source coverage.\n\nSources:\n[1] Fixture record · fixture\nWant to check the original record?");
   const unavailable = await remoteCall({ status: "search_unavailable", answer: "The documents do not answer the question.", confidence, results: [], citations: [], gaps: [] }, "ask");
-  assert.match(unavailable, /could not be completed/i);
-  assert.doesNotMatch(unavailable, /\d+%|Confidence nothing is recorded|I didn't find a matching record/);
+  assert.match(unavailable, /coverage is incomplete.*provisional/i);
+  assert.match(unavailable, /Confidence: Low \(10%\).*Why:.*Missing:/);
+  assert.doesNotMatch(unavailable, /Confidence nothing is recorded|I didn't find a matching record|fixture evidence/);
 });
 
 await test("remote refusal renders Why before the exact reviewed Next action", async () => {
@@ -817,20 +841,21 @@ await test("remote descriptions and initialize route money and newest-record rea
   const deps = { think() { backendCalls++; throw new Error("unexpected think"); }, search() { backendCalls++; throw new Error("unexpected search"); } };
   const rpc = async method => (await (await handleMcp({}, new Request(url, { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params: {} }) }), url, deps)).json()).result;
   const { tools } = await rpc("tools/list");
-  assert.equal(tools.length, 3, "read-only tool listing was reached");
+  assert.equal(tools.length, 6, "read-only tool listing with all three money tools was reached");
+  for (const name of ["brain_money_query", "brain_money_overview", "brain_money_guide"]) assert.ok(tools.some(tool => tool.name === name));
   const ask = tools.find(tool => tool.name === "ask").description;
   const search = tools.find(tool => tool.name === "search").description;
-  assert.match(ask, /^Money and short lookups\./);
-  assert.match(ask, /For anything else, use search, then fetch\./);
-  assert.match(search, /^Default tool for questions about the owner's records\./);
+  assert.match(ask, /^Short non-money document and context lookups\./);
+  assert.match(ask, /For other document questions use search, then fetch\./);
+  assert.match(search, /^Default tool for non-money document and context questions about the owner's records\./);
   assert.match(search, /newest_record/);
   assert.match(search, /among the results this search returned/);
   assert.match(search, /does not support date bounds or sorting/);
   assert.match(search, /Before any status, "latest", or absence claim, fetch the newest matching record returned here and state its date and these search limits\./);
   assert.ok(search.endsWith("Relay any provisional coverage note and do not turn an incomplete empty result into a corpus-wide absence claim."));
   const { instructions } = await rpc("initialize");
-  assert.match(instructions, /ask is for money and short lookups/);
-  assert.match(instructions, /relevance-ranked search and reading the returned records come before any status or absence claim/);
+  assert.match(instructions, /ask is for short non-money document and context lookups/);
+  assert.match(instructions, /Relevance-ranked search and reading the returned records come before any status or absence claim/);
   assert.match(instructions, /a search with no match is not proof that no record exists/i);
   assert.equal(backendCalls, 0, "metadata never reads records");
 });
@@ -853,12 +878,12 @@ await test("remote connector routing follows the Worker answer pair", async () =
   });
   const claude = await metadata({ ANSWER_MODEL: "claude-opus-5-5", GATE_MODEL: "claude-sonnet-5-5" });
   assert.match(builtIn.tools.find((tool) => tool.name === "ask").description,
-    /^Money and short lookups\./);
+    /^Short non-money document and context lookups\./);
   assert.match(builtIn.tools.find((tool) => tool.name === "search").description,
-    /^Default tool for questions about the owner's records\./);
+    /^Default tool for non-money document and context questions about the owner's records\./);
   assert.match(builtIn.instructions, /search and fetch read the underlying documents/);
   assert.match(claude.tools.find((tool) => tool.name === "ask").description,
-    /^Default answer route for non-money questions with Claude Opus answers and a Claude Sonnet check\./);
+    /^Default answer route for non-money document and context questions with Claude Opus answers and a Claude Sonnet check\./);
   assert.match(claude.tools.find((tool) => tool.name === "search").description,
     /^Fallback route when ask returns answer_error or anthropic_key_missing\./);
   assert.match(claude.instructions, /For non-money questions, use ask first.*Claude Opus.*Claude Sonnet/is);
@@ -888,7 +913,7 @@ await test("R4 remote refusal preserves ledger and source coverage limits", asyn
     const empty = await remoteCall({ answer: null, results: [], citations: [], gaps: [{ type, detail }] }, "ask");
     assert.ok(empty.includes(detail), "empty synthesis still carries the real reason");
   }
-  assert.equal(await remoteCall({ answer: "Fixture supported answer.", results: [], citations: [], gaps: [] }, "ask"), "Fixture supported answer.\nWant to check the original record?");
+  assert.equal(await remoteCall({ answer: "Fixture supported answer.", results: [], citations: [], gaps: [] }, "ask"), "Fixture supported answer.\n\nConfidence: Low (20%). Why: 0 retrieved records; retrieval alone does not verify an answer. Missing: The complete relevant document set and independent verification of the answer; A matching readable source record.\nWant to check the original record?");
 });
 
 for (const status of ["coverage_incomplete", "search_unavailable"]) for (const type of ["ledger_out_of_coverage", "ledger_not_consulted"]) await test(`F5 ${status} retains authorized ${type} without candidate records`, async () => {
@@ -897,14 +922,17 @@ for (const status of ["coverage_incomplete", "search_unavailable"]) for (const t
   const payload = { answer: null, status, notice, results: [reliable],
     citations: [{ n: 1, title: "Candidate citation must stay hidden" }], gaps: [{ type, detail }] };
   const out = await remoteCall(payload, "ask");
-  assert.ok(out.includes(notice), "the unavailable document branch was reached");
+  // 0.4.28 returns the authorized candidate reading even when document coverage is incomplete.
+  assert.match(out, /Likely relevant:.*Fixture reliable/s, "the returned-record decision was reached");
   assert.ok(out.includes(detail));
   const nextStep = status === "coverage_incomplete"
     ? 'Next: say "check my Brain" to see which source is still loading, then ask again.'
     : 'Next: ask again in a minute; if it fails twice, say "check my Brain".';
   assert.equal(out.split("\n").at(-1), nextStep, "reviewed refusal action is final");
   assert.equal((out.match(/\bWant[^?]*\?/g) || []).length, 0, "no extra bank invitation beside Next");
-  assert.doesNotMatch(out, /Fixture reliable|Candidate citation|Sources:|I found 1 record/);
+  assert.doesNotMatch(out, /Candidate citation|I found 1 record/);
+  // 0.4.28 the completed partial search reads one candidate (30); unavailable search remains 10.
+  assert.match(out, new RegExp(`Confidence: Low \\(${status==='coverage_incomplete'?30:10}%\\).*Why:.*Missing:`, 's'));
   const control = await remoteCall({ ...payload, status: undefined, notice: undefined, results: [], citations: [] }, "ask");
   assert.ok(control.includes(detail));
 });
@@ -925,5 +953,5 @@ await test("R5 remote search guidance matches its query-only schema", async () =
   assert.match(spec.description, /does not support date bounds or sorting/);
   const { instructions } = await rpc("initialize");
   assert.doesNotMatch(instructions, /search, newest first/);
-  assert.match(instructions, /relevance-ranked/);
+  assert.match(instructions, /relevance-ranked/i);
 });

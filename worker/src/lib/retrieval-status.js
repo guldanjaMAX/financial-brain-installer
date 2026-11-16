@@ -284,6 +284,18 @@ export function emptyRetrievalDisclosure(
       gaps: [NO_RESULTS_GAP],
     };
   }
+  if (token === "bounded-keyword") {
+    const completed = degradedReason === "bounded-keyword-recovery";
+    return {
+      unavailable: false, incomplete: true, status: COVERAGE_INCOMPLETE, degraded: token, cause: null,
+      notice: completed
+        ? "Bounded keyword recovery returned a partial search reading. Relevant records may be outside its candidate bound."
+        : "Bounded keyword recovery did not complete. The requested status or amount remains unverified in this reading.",
+      gaps: [{type:"bounded_keyword_recovery",detail:completed
+        ? "The bounded keyword plan completed without proving relevant search coverage. Missing matches cannot establish absence, current status, payment, a total or zero dollars."
+        : "The ordinary keyword search and bounded recovery failed. Missing: a completed authorized source search; the requested status or amount remains unknown, never zero."}],
+    };
+  }
   if (projectionPending(token, degradedReason)) {
     return {
       unavailable: false,

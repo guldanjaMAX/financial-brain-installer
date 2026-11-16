@@ -1,3 +1,4 @@
+import { bankAttemptStatement, bankErrorStatement, bankHealthMap, bankOwnerRecoveryRequired, reconcileBankFeedHealth } from './bank-feed-health.js';
 import { providerJson, ProviderSyncError } from "./provider-sync.js";
 import {
   bankActivityRefreshPending,
@@ -316,14 +317,15 @@ function providerOptions(fetchImpl, body, path) {
   };
 }
 
-export async function callPlaid(env, path, body, { fetchImpl = fetch } = {}) {
+export async function callPlaid(env, path, body, { fetchImpl = fetch, now = null, nowImpl = null } = {}) {
   const config = bankFeedConfig(env);
   if (config.provider !== PROVIDER) throw new Error("the Plaid runtime requires the named Plaid profile");
-  const { data } = await providerJson(PROVIDER, `${config.apiBase}${path}`, providerOptions(fetchImpl, {
+  const clockStart = Date.now();
+  const { data } = await providerJson(PROVIDER, `${config.apiBase}${path}`, {...providerOptions(fetchImpl, {
     client_id: config.clientId,
     secret: config.secret,
     ...body,
-  }, path));
+  }, path), ...(nowImpl ? {nowImpl} : now ? {nowImpl:()=>Date.parse(now)+Math.max(0,Date.now()-clockStart)} : {})});
   return data || {};
 }
 
@@ -1201,6 +1203,11 @@ function promotionStatements(env, {
             ELSE 'Plaid is still preparing historical transactions. The available activity is partial.' END,
           last_error_at=NULL WHERE tenant_id=?1 AND item_ref=?2`,
     ).bind(tenantId, itemRef, finalCursor, stamp, observedAt, historicalComplete ? 1 : 0),
+    env.DB.prepare(`INSERT INTO bank_feed_health (tenant_id,item_ref,last_successful_sync_at,data_through)
+      SELECT ?1,?2,?3,substr(?3,1,10) WHERE ?4 AND NOT (${pendingItem})
+      ON CONFLICT(tenant_id,item_ref) DO UPDATE SET last_successful_sync_at=excluded.last_successful_sync_at,
+        data_through=excluded.data_through,last_error_code=NULL,last_error_meaning=NULL`)
+      .bind(tenantId,itemRef,stamp,historicalComplete ? 1 : 0),
     // History progress comes from the promoted window itself, read inside this
     // batch before the window row is deleted below, so a mutation restart or a
     // replayed ready window can never count its pages twice. Like the generic
@@ -1316,6 +1323,10 @@ async function promotePlaidWindow(env, details, receipt = {}) {
 export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = null, hardDeadlineAt = null } = {}) {
   const { tenantId } = tenantReference(env);
   const stamp = nowIso(now);
+  // Retry timing spans the whole invocation, including successful account reads
+  // and earlier pages. Keep the ledger observation stamp separate and fixed.
+  const clockStart = Date.now();
+  const providerNow = () => Date.parse(stamp) + Math.max(0, Date.now() - clockStart);
   const custodyResult = (code, status = "retryable") => ({
     item_ref: itemRef, ok: false, status, code, cursor_advanced: false,
     ...(status === "busy" ? { busy: true } : {}),
@@ -1338,7 +1349,7 @@ export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = nul
     // An owner may finish assignment after our readiness read while this lease
     // is held. Preserve that newer due-now wakeup instead of delaying it again.
     const dueAt = new Date(Date.parse(stamp) + 5 * 60_000).toISOString();
-    const statements = [env.DB.prepare(
+    const statements = [bankErrorStatement(env,tenantId,itemRef,stamp,'BANK_SYNC_PARTIAL'),env.DB.prepare(
       `INSERT INTO plaid_reconciliation
          (tenant_id,item_ref,reason,state,due_at,attempts,last_error_code,updated_at)
        VALUES (?,?,'assignment_wait','pending',?,0,?,?)
@@ -1363,6 +1374,13 @@ export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = nul
   };
   try {
     await renewPlaidSyncLease(env, lease);
+    // Every entry point, including an explicit owner wake, shares this floor.
+    // Queue writers can retain webhook debt without granting provider access.
+    const cooldown = await env.DB.prepare(
+      `SELECT provider_retry_not_before FROM plaid_reconciliation WHERE tenant_id=? AND item_ref=?`,
+    ).bind(tenantId, itemRef).first();
+    if (cooldown?.provider_retry_not_before > stamp) return custodyResult("PLAID_SYNC_COOLDOWN");
+    await runPlaidSyncBatch(env, lease, [bankAttemptStatement(env,tenantId,itemRef,stamp)]);
     const accessToken = await decryptAccessReference(env, {
       ciphertext: item.access_ciphertext,
       iv: item.access_iv,
@@ -1389,6 +1407,7 @@ export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = nul
       });
       if (!promoted.promoted) return await deferIncomplete(promoted);
       const historicalComplete = Boolean(window.resume_cursor) && window.provider_history_state === PLAID_HISTORY_STATE.HISTORICAL && !promoted.refresh_pending;
+      if (!historicalComplete) await runPlaidSyncBatch(env,lease,[bankErrorStatement(env,tenantId,itemRef,stamp,'BANK_SYNC_PARTIAL')]);
       return {
         item_ref: itemRef,
         refresh_pending: promoted.refresh_pending,
@@ -1420,7 +1439,7 @@ export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = nul
        ON CONFLICT(tenant_id,item_ref) DO UPDATE SET
          reason='sync_fetch',state='pending',due_at=excluded.due_at,updated_at=excluded.updated_at`,
     ).bind(tenantId, itemRef, stamp, stamp)]);
-    const accountPayload = await callPlaid(env, "/accounts/get", { access_token: accessToken }, { fetchImpl });
+    const accountPayload = await callPlaid(env, "/accounts/get", { access_token: accessToken }, { fetchImpl, nowImpl:providerNow });
     await renewPlaidSyncLease(env, lease);
     const normalizedAccounts = (Array.isArray(accountPayload.accounts) ? accountPayload.accounts : [])
       .map(account => stagedAccount(account, stamp));
@@ -1447,7 +1466,7 @@ export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = nul
         await renewPlaidSyncLease(env, lease);
         const page = await callPlaid(env, "/transactions/sync", {
           access_token: accessToken, ...(cursor ? { cursor } : {}), count,
-        }, { fetchImpl });
+        }, { fetchImpl, nowImpl:providerNow });
         await renewPlaidSyncLease(env, lease);
         return page;
       },
@@ -1497,6 +1516,7 @@ export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = nul
     if (result.promoted !== true) return await deferIncomplete(result);
     const { historyState: providerHistoryState, ...syncResult } = result;
     const historicalComplete = Boolean(result.finalCursor) && providerHistoryState === PLAID_HISTORY_STATE.HISTORICAL && !result.refresh_pending;
+    if (!historicalComplete) await runPlaidSyncBatch(env,lease,[bankErrorStatement(env,tenantId,itemRef,stamp,'BANK_SYNC_PARTIAL')]);
     return {
       item_ref: itemRef,
       ok: historicalComplete,
@@ -1513,13 +1533,14 @@ export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = nul
     }
     const kind = error instanceof ProviderSyncError ? error.outcome?.kind : "retryable";
     const state = kind === "unavailable" ? "unavailable" : kind === "refused" ? "refused" : "retryable";
-    const code = boundedCode(error);
+    let providerError=error;
+    while (providerError?.cause instanceof ProviderSyncError) providerError=providerError.cause;
+    const throttled=providerError?.status===429 || boundedCode(providerError)==='RATE_LIMIT_EXCEEDED';
+    const code = throttled ? 'RATE_LIMIT_EXCEEDED' : boundedCode(error);
     const detail = safeFeedError(error);
-    const itemStatus = ["ITEM_LOGIN_REQUIRED", "PENDING_EXPIRATION"].includes(code)
-      ? "reauth_required"
-      : ["USER_PERMISSION_REVOKED", "ITEM_NOT_FOUND"].includes(code)
-        ? "permission_revoked"
-        : "error";
+    const itemStatus = bankOwnerRecoveryRequired(code)
+      ? (["USER_PERMISSION_REVOKED", "ITEM_NOT_FOUND", "ACCESS_NOT_GRANTED"].includes(code) ? "permission_revoked" : "reauth_required")
+      : "error";
     try {
       const prior = await env.DB.prepare(
         "SELECT attempts,last_error_code FROM plaid_reconciliation WHERE tenant_id=? AND item_ref=?",
@@ -1531,8 +1552,13 @@ export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = nul
       const attempts = repeatedInvalidPage
         ? Math.min(Math.max(Number(prior.attempts) || 0, 0) + 1, 1_000_000)
         : code === "INVALID_SYNC_PAGE" ? 1 : (Number(prior?.attempts) || 0) + 1;
-      const retryMinutes = code === "INVALID_SYNC_PAGE" ? Math.min(1440, 5 * 2 ** Math.min(attempts - 1, 9)) : 5;
+      const consecutiveThrottle=throttled && prior?.last_error_code===code;
+      const retryMinutes = code === "INVALID_SYNC_PAGE" || throttled
+        ? Math.min(1440, 5 * 2 ** Math.min((throttled && !consecutiveThrottle ? 1 : attempts) - 1, 9)) : 5;
+      const dueAt=new Date(Math.max(providerNow()+retryMinutes*60_000,
+        Number(error.retry_not_before_ms)||0)).toISOString();
       await runPlaidSyncBatch(env, lease, [
+        bankErrorStatement(env,tenantId,itemRef,stamp,code),
         env.DB.prepare(
           `UPDATE plaid_sync_windows SET state=CASE WHEN state='ready' THEN 'ready' ELSE ? END,
               last_error_code=?,updated_at=?
@@ -1545,12 +1571,14 @@ export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = nul
           tenantId, itemRef),
         env.DB.prepare(
           `INSERT INTO plaid_reconciliation
-             (tenant_id,item_ref,reason,state,due_at,attempts,last_error_code,updated_at)
-           VALUES (?,?,'sync_failure','retryable',?,?,?,?)
+             (tenant_id,item_ref,reason,state,due_at,attempts,last_error_code,updated_at,provider_retry_not_before)
+           VALUES (?,?,'sync_failure','retryable',?,?,?,?,?)
            ON CONFLICT(tenant_id,item_ref) DO UPDATE SET state='retryable',due_at=excluded.due_at,
              attempts=excluded.attempts,last_error_code=excluded.last_error_code,
-             updated_at=excluded.updated_at`,
-        ).bind(tenantId, itemRef, new Date(Date.parse(stamp) + retryMinutes * 60_000).toISOString(), attempts, code, stamp),
+             updated_at=excluded.updated_at,provider_retry_not_before=CASE
+               WHEN excluded.provider_retry_not_before IS NULL THEN plaid_reconciliation.provider_retry_not_before
+               ELSE MAX(COALESCE(plaid_reconciliation.provider_retry_not_before,''),excluded.provider_retry_not_before) END`,
+        ).bind(tenantId, itemRef, dueAt, attempts, code, stamp, throttled ? dueAt : null),
       ]);
     } catch (receiptError) {
       if (receiptError instanceof PlaidSyncLeaseError) return custodyResult(receiptError.code);
@@ -1559,6 +1587,7 @@ export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = nul
     return { item_ref: itemRef, ok: false, status: state, code, reason: safeFeedError(error), cursor_advanced: false };
   } finally {
     await releasePlaidSyncLease(env, lease);
+    await reconcileBankFeedHealth(env, stamp);
   }
 }
 
@@ -1566,10 +1595,12 @@ export async function runPlaidFeedSlice(env, {
   maxItems = 3,
   fetchImpl = fetch,
   now = null,
+  daily = false,
 } = {}) {
   const { tenantId } = tenantReference(env);
   const stamp = nowIso(now);
   if (env.VECTOR_DRAIN_MODE === "paused-for-upgrade") return { ran: 0, items: [], paused: true };
+  await reconcileBankFeedHealth(env, stamp);
   // One database-clock budget covers the entire invocation. Moving to another
   // Item must not restart the deadline of an older deployment during cutover.
   const clock = await env.DB.prepare("SELECT unixepoch('now')+? AS hard_deadline_at")
@@ -1579,14 +1610,19 @@ export async function runPlaidFeedSlice(env, {
     `SELECT i.item_ref
        FROM bank_feed_items i
        LEFT JOIN plaid_reconciliation r ON r.tenant_id=i.tenant_id AND r.item_ref=i.item_ref
-      WHERE i.tenant_id=? AND i.removed_at IS NULL AND i.status IN ('connected','error')
-        AND (r.item_ref IS NULL OR (r.state IN ('pending','retryable') AND r.due_at<=?))
+       LEFT JOIN bank_feed_health h ON h.tenant_id=i.tenant_id AND h.item_ref=i.item_ref
+      WHERE i.tenant_id=?1 AND i.removed_at IS NULL AND i.status IN ('connected','error')
+        AND (r.provider_retry_not_before IS NULL OR r.provider_retry_not_before<=?2)
+        AND (r.item_ref IS NULL OR (r.state IN ('pending','retryable') AND r.due_at<=?2)
+          OR (COALESCE(h.last_attempt_at,i.last_synced_at,i.connected_at)<=?4
+            AND (r.state='complete' OR r.due_at<=?2)))
         AND NOT EXISTS (SELECT 1 FROM plaid_sync_leases l
           WHERE l.tenant_id=i.tenant_id AND l.item_ref=i.item_ref AND l.expires_at>unixepoch('now'))
         AND NOT EXISTS (SELECT 1 FROM plaid_revocation_outbox o
           WHERE o.tenant_id=i.tenant_id AND o.item_ref=i.item_ref)
-      ORDER BY COALESCE(r.updated_at,i.last_synced_at,''),i.item_ref LIMIT ?`,
-  ).bind(tenantId, stamp, Math.min(Math.max(Number(maxItems) || 3, 1), 10)).all())?.results || [];
+      ORDER BY COALESCE(h.last_attempt_at,i.last_synced_at,''),i.item_ref LIMIT ?3`,
+  ).bind(tenantId, stamp, Math.min(Math.max(Number(maxItems) || 3, 1), 10),
+    new Date(Date.parse(stamp) - (daily ? 15*60 : 86400)*1000).toISOString()).all())?.results || [];
   const items = [];
   for (const row of rows) {
     const result = await syncPlaidItem(env, row.item_ref, { fetchImpl, now: stamp, hardDeadlineAt: clock.hard_deadline_at });
@@ -1627,7 +1663,8 @@ export async function runPlaidFeedSlice(env, {
       failed: 1,
     };
   }
-  return { ran: items.length, items, bank_activity: bankActivity };
+  const health=await reconcileBankFeedHealth(env, stamp);
+  return { ran: items.length, items, bank_activity: bankActivity, health_attention:health?.needs_attention || 0 };
 }
 
 async function plaidJwk(env, keyId, fetchImpl, stamp) {
@@ -1711,6 +1748,10 @@ export async function handlePlaidWebhook(env, request, { fetchImpl = fetch, now 
       payload.webhook_code || null, verified.kid, verified.issuedAt, verified.bodyHash,
       disposition.state, stamp),
   ];
+  if (payload.item_id) statements.push(env.DB.prepare(`INSERT INTO bank_feed_health (tenant_id,item_ref,last_webhook_at)
+    SELECT tenant_id,item_ref,? FROM bank_feed_items WHERE tenant_id=? AND item_ref=? AND removed_at IS NULL
+    ON CONFLICT(tenant_id,item_ref) DO UPDATE SET last_webhook_at=excluded.last_webhook_at`)
+    .bind(stamp,tenantId,String(payload.item_id)));
   if (disposition.scheduleReconciliation && disposition.itemId) {
     const reason = disposition.state === "out_of_order"
       ? "out_of_order_webhook"
@@ -1882,19 +1923,13 @@ export async function disconnectPlaidItem(env, itemRef, {
   };
 }
 
-export async function plaidFeedStatus(env) {
+export async function plaidFeedStatus(env, {now=null}={}) {
   const { tenantId } = tenantReference(env);
   let config;
-  try { config = bankFeedConfig(env); } catch {
-    return {
-      configured: false,
-      provider: PROVIDER,
-      environment: env.BANK_FEED_ENV === "production" ? "production" : "sandbox",
-      signed_webhook_path: PLAID_WEBHOOK_PATH,
-      connections: [],
-      needs_attention: [],
-    };
-  }
+  // Missing provider settings stop sync, but must not erase saved health from
+  // the read-only inventory. That is exactly when the safety net is needed.
+  try { config = bankFeedConfig(env); } catch { config=null; }
+  const health = await bankHealthMap(env, nowIso(now));
   // A staged window is fetched provider history that has not reached the ledger
   // yet. The owner-choice count mirrors plaidAccountAssignmentReadiness, the
   // exact guard that holds promotion, so status and sync can never disagree.
@@ -1902,7 +1937,8 @@ export async function plaidFeedStatus(env) {
     `SELECT i.item_ref,i.institution_label,i.environment,i.status,i.status_detail,i.connected_at,
             i.last_synced_at,b.state AS history_state,b.provider_history_state,
             b.pages_done,b.transactions_seen,b.unread_lines,
-            r.state AS reconciliation_state,r.reason AS reconciliation_reason,r.due_at,o.state AS revocation_state,
+            r.state AS reconciliation_state,r.reason AS reconciliation_reason,
+            MAX(COALESCE(r.due_at,''),COALESCE(r.provider_retry_not_before,'')) AS due_at,o.state AS revocation_state,
             o.outcome_state AS revocation_outcome_state,o.attempts AS revocation_attempts,
             CASE WHEN w.state IN ('staging','ready','retryable') THEN w.next_page_index ELSE 0 END AS staged_pages,
             CASE WHEN w.state IN ('staging','ready','retryable')
@@ -1978,9 +2014,9 @@ export async function plaidFeedStatus(env) {
     });
   }
   return {
-    configured: true,
+    configured: Boolean(config),
     provider: PROVIDER,
-    environment: config.environment,
+    environment: config?.environment || (env.BANK_FEED_ENV==='production' ? 'production':'sandbox'),
     signed_webhook_path: PLAID_WEBHOOK_PATH,
     reconciliation_interval_minutes: Number(env.BANK_FEED_RECONCILE_MINUTES || DEFAULT_RECONCILE_MINUTES),
     connections: rows.map((row) => ({
@@ -1991,6 +2027,8 @@ export async function plaidFeedStatus(env) {
       status_detail: statusDetail(row),
       connected_at: row.connected_at,
       last_synced_at: row.last_synced_at,
+      health: health.get(row.item_ref),
+      status_line: health.get(row.item_ref)?.status_line,
       history: {
         state: row.history_state || "none",
         provider_history_state: row.provider_history_state || PLAID_HISTORY_STATE.UNKNOWN,
@@ -2016,7 +2054,7 @@ export async function plaidFeedStatus(env) {
         attempts: row.revocation_attempts || 0,
       },
     })),
-    needs_attention: rows.filter((row) => row.status !== "connected" ||
+    needs_attention: rows.filter((row) => ['overdue','login_required','error','waiting'].includes(health.get(row.item_ref)?.state) || row.status !== "connected" ||
       ["retryable", "unavailable", "refused"].includes(row.reconciliation_state) ||
       row.revocation_state === "retryable" || row.revocation_outcome_state === "unknown" ||
       accountsNeedingOwner(row) > 0).map((row) => {

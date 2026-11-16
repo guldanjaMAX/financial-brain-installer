@@ -1,7 +1,7 @@
 import { historicalBytes } from './review-harness.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { evaluate, reached, safeBasis, surfaces, offer, save, purchase, refund, reply, parts, calendarRefusal } from './review-harness.mjs';
+import { evaluate, reached, safeBasis, surfaces, offer, save, purchase, refund, reply, parts, calendarFigure } from './review-harness.mjs';
 const rows = [purchase, refund, { ...purchase, id: 'prior_purchase', cents: 9000, date: '2026-09-05' },
   { ...purchase, id: 'older_purchase', cents: 6000, date: '2026-08-05' }];
 const observations = [];
@@ -33,12 +33,13 @@ for (const [id, suffix, vendor] of [
     question: `Could you compare gross spending at ${vendor} this month versus last month ${suffix}?` };
   const base = await evaluate(input, true); assert.equal(base.body.ledger.comparison.difference_minor, 3000);
   const current = await evaluate(input);
-  calendarRefusal(current);
+  const expected = [['2026-10-01', '2026-10-12'], ['2026-09-01', '2026-09-30']].map(([from, to]) => input.rows.filter(row => row.direction === 'outflow' && row.date >= from && row.date <= to).reduce((n, row) => n + row.cents, 0));
+  calendarFigure(current, expected);
   const green = await evaluate({ ...input, question: input.question.replace(' ' + suffix, '') });
   reached(green);
   assert.equal(green.body.ledger.comparison.difference_minor, 3000);
   const views = await surfaces(t, current, input.question);
-  for (const text of Object.values(views)) assert.doesNotMatch(text, /\$\d/);
+  for (const text of Object.values(views)) for (const figure of ['120.00', '90.00', '30.00']) assert.ok(text.includes(figure));
 });
 for (const question of [
   'How much did I spend at Vendor Unit this month after returns?',

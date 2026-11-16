@@ -2,21 +2,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join, relative, sep } from "node:path";
-import { legacyModelSwitchFor } from "../operations/answer-setup.mjs";
 
-// Execute the complete pinned production function with boundary replacements.
-// This function currently closes over control-plane dependencies, so extracting
-// its exact declaration avoids either a credential lookup or a real upload.
 const source = readFileSync(new URL("../brain.mjs", import.meta.url), "utf8");
 const start = source.indexOf("async function cmdDeployWithPrompts(");
 const end = source.indexOf("\n/**\n * A control-plane prompt owns stdin", start);
 assert.ok(start > 0 && end > start);
-const deploySource = source.slice(start, end);
 const modelStart = source.indexOf("function updateAnswerManifest(");
 const modelEnd = source.indexOf("\nfunction answerSetupLine(", modelStart);
 assert.ok(modelStart > 0 && modelEnd > modelStart);
-const updateAnswerManifest = new Function("legacyModelSwitchFor",
-  `${source.slice(modelStart, modelEnd)}\nreturn updateAnswerManifest;`)(legacyModelSwitchFor);
+
+const {sourceModuleHarness} = await import('./helpers/source-module-harness.mjs');
+const cliModule = await sourceModuleHarness(new URL('../brain.mjs',import.meta.url));
+const {result:updateAnswerManifest} = cliModule({},'updateAnswerManifest');
 function scheduleFixture(arm) {
   let schedules = arm === "present" ? ["* * * * *", "7 6 * * *"] : ["7 6 * * *"];
   const events = [], messages = [];
@@ -53,7 +50,7 @@ function scheduleFixture(arm) {
       return schedules.map(cron => ({ cron }));
     },
   };
-  const deploy = new Function(...Object.keys(bindings), `${deploySource}\nreturn cmdDeployWithPrompts;`)(...Object.values(bindings));
+  const {result:deploy} = cliModule(bindings,'cmdDeployWithPrompts');
   return { run: () => deploy("fixture-manifest", { persistDomain: false, nextSteps: false }),
     state: () => ({ reads, writes, schedules, messages, events, modelPreparations }) };
 }
@@ -112,17 +109,18 @@ for (const arm of ["candidates", "no-candidates", "missing-results", "incomplete
     assert.equal(requests, 1);
     const text = printed.join("\n");
     assert.doesNotMatch(text, /Confidence nothing is recorded/i);
+    // 0.4.28 record reading answers provisionally at Low 10 instead of refusing at Low 30.
     if (arm === "incomplete") {
-      assert.match(text, /search could not be completed/i);
-      assert.doesNotMatch(text, /Confidence[^\n]*%/i);
+      assert.match(text, /Source coverage is incomplete.*provisional/i);
+      assert.match(text, /Confidence: Low \(10%\).*Why:.*Missing:/i);
     } else if (arm === "candidates") {
       assert.match(text, /I found 2 records in this search, but none supported an answer/);
-      assert.doesNotMatch(text, /Confidence[^\n]*%/i);
+      assert.match(text, /Confidence: Low \(10%\).*Why:.*Missing:/i);
       assert.match(text, /Fixture evidence limit/);
       assert.match(text, /Next: ask about one record at a time/);
     } else if (arm === "no-candidates") {
       assert.match(text, /I didn't find a matching record in this search/);
-      assert.doesNotMatch(text, /Confidence[^\n]*%/i);
+      assert.match(text, /Confidence: Low \(10%\).*Why:.*Missing:/i);
       assert.match(text, /Fixture evidence limit/);
       assert.match(text, /Next: ask again with a name, date or exact phrase/);
     } else if (arm === "missing-results") {

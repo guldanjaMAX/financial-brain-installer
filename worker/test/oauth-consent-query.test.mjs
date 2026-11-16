@@ -33,6 +33,23 @@ const REDIRECT = "https://claude.ai/api/mcp/auth_callback";
 const b64u = (buffer) => buffer.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 const ctx = { waitUntil() {}, passThroughOnException() {} };
 
+test('MJ3 every remote profile discloses its actual bank capability before owner approval', async () => {
+  const fixture = await createProductFixture();
+  try {
+    for (const scope of ['librarian','structured-contributor','technician','break-glass']) {
+      const {html} = await consentPage(fixture, {clientName:'Owner connector',scope});
+      if (['librarian','structured-contributor'].includes(scope)) {
+        assert.match(html,/bank and card transactions/);
+        assert.match(html,/balances, account names with last 4 digits, and money records/);
+        assert.match(html,/read-only money tools/);
+      } else {
+        assert.match(html,/cannot read bank or card transactions/);
+        assert.doesNotMatch(html,/It can also read your bank/);
+      }
+    }
+  } finally { fixture.close(); }
+});
+
 async function consentPage(fixture, { clientName = "Claude", state = "xyz", scope = null, rawQuery = null } = {}) {
   const registered = await (await fixture.post("/oauth/register", {
     client_name: clientName, redirect_uris: [REDIRECT],

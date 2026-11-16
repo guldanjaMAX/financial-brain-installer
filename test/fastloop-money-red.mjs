@@ -1,3 +1,5 @@
+// 0.4.28 owner confidence is attached after the legacy-reader seam used by this fixture.
+import { finalizeOwnerLedgerAnswer } from '../worker/src/lib/document-answer.js';
 // Original desired-behavior probes, now with an explicit durable owner review.
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -54,7 +56,10 @@ test('GREEN supported expense headline', async t => {
 });
 test('RED unclassified debt cannot certify the full expense headline', async t => {
   const b = await seed(t, { kind: 'other' }).ask('What are my expenses?');
-  assert.equal(b.answer, null);
+  // 0.4.28 no-refusal boundary answers with its exact lower bound and uncertainty.
+  assert.match(b.answer,/at least \$210\.00; \$400\.00 more may be a card payment/);
+  assert.equal(finalizeOwnerLedgerAnswer(b).confidence.percent,0);
+  assert.equal(b.evidence_gate.complete,false);
   assert.equal(b.gaps[0].reason, 'ledger_account_kind_review_required');
 });
 test('GREEN typed debt separates whole payment', async t => {

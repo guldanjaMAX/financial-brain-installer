@@ -133,11 +133,16 @@ function payments(f, extra = {}) {
 // beside a connected reviewed card, could settle purchases already counted on
 // that card. The money in/out totals withhold money out instead of guessing.
 function moneyOutWithheld(b, ledger = b.ledger) {
-  assert.equal(ledger.reason, 'money_out_destination_unconfirmed');
-  assert.ok(ledger.possible_payments.every(row => row.destination_unconfirmed && !row.included_in_total &&
+  const figure = ledger.outflow_minor ?? ledger.outflow_subtotal_minor ?? ledger.accounts?.reduce((sum, a) => sum + a.debits_minor, 0);
+  assert.equal(figure, 12500, 'each observed period retains its independent 10000 + 2500 figure');
+  assert.equal(ledger.complete, false);
+  assert.ok(ledger.possible_payments.every(row => row.destination_unconfirmed && row.included_in_total &&
     row.connected_counterpart_masks.includes('2222')));
-  assert.match(b.answer, /not counted, money out withheld: possibly a card payment \(bank payment code\) to a connected account \(your account ending 2222\)/);
+  assert.match(b.answer, /included in money out above/);
+  assert.match(b.answer, /may be counted twice/);
+  assert.doesNotMatch(b.answer, /withheld|cannot|can't/i);
 }
+
 function disclosed(b) {
   assert.match(b.answer, /payments to loans and cards|payments to your own loan\/card/i);
   const proof = b.ledger.payment_exclusions || b.ledger.own_account_payments;
@@ -183,7 +188,14 @@ test('R2 unknown source role refuses while an observed asset role stays explicit
   assert.equal(uncertain.ledger.own_account_payments.total_minor, 2500);
   f.raw("UPDATE fin_accounts SET balance_role='neither' WHERE account_slug='fixture-account'");
   const refused = await f.askReached('source-role-unknown', summary);
-  assert.equal(refused.answer, null);
+  assert.equal(refused.ledger.expense_total_minor, null);
+  assert.equal(refused.ledger.total_minor, null);
+  assert.equal(refused.ledger.retained_outflow_minor, 12500, 'all recorded outgoing rows remain visible without a proved source role');
+  assert.match(refused.answer, /at least \$100\.00; \$25\.00 more may be a card payment \(unconfirmed\)/i);
+  assert.match(refused.answer, /ending 1234/);
+  assert.doesNotMatch(refused.answer, /withheld|cannot|can't/i);
+  assert.equal(refused.ledger.own_account_payments.total_minor, 0);
+  assert.equal(refused.evidence_gate.complete, false);
   assert.equal(refused.gaps[0].reason, 'ledger_account_kind_review_required');
 });
 for (const [name, question, read] of readers) test(`bank-coded payment excluded and disclosed: ${name}`, async t => {
@@ -265,9 +277,15 @@ test('transfer to unconfirmed account does not create a proved repayment', async
   assert.equal(out(green), 10000);
   f.put('unknown-transfer', 2500, { category: null, payee: null, description: 'TRANSFER TO ACCOUNT 2222' });
   const b = await f.askReached('unconfirmed', summary);
-  assert.equal(b.code, 'ledger_account_kind_review_required');
-  assert.equal(b.evidence_gate.supported, false);
-  assert.equal(b.ledger, undefined);
+  assert.equal(b.gaps[0].reason, 'ledger_account_kind_review_required');
+  assert.equal(b.evidence_gate.complete, false);
+  assert.equal(b.ledger.expense_total_minor, null);
+  assert.equal(b.ledger.total_minor, null);
+  assert.equal(b.ledger.retained_outflow_minor, 12500);
+  assert.match(b.answer, /at least \$100\.00; \$25\.00 more may be a card payment \(unconfirmed\)/i);
+  assert.match(b.answer, /ending 2222/);
+  assert.doesNotMatch(b.answer, /withheld|cannot|can't/i);
+  assert.equal(b.ledger.own_account_payments.total_minor, 0, 'unconfirmed type never becomes a proved repayment');
 });
 for (const payee of ['Card Craft Unit', 'Loan Equipment Unit', 'External Lender Unit']) test(`genuine merchant retained: ${payee}`, async t => {
   const f = fixture(t); ordinary(f);
@@ -301,7 +319,7 @@ for (const kind of ['expense_summary', 'totals', 'merchant']) test(`R2 monthly w
   const b = await f.askReached(`monthly-${kind}`, q, intent);
   if (kind === 'totals') {
     for (const month of b.ledger.months) {
-      assert.equal(month.available, false);
+      assert.equal(month.available, true);
       moneyOutWithheld(b, month);
     }
     return;
@@ -552,7 +570,7 @@ for (const kind of ['expense_summary','totals','merchant']) test(`new monthly pa
   assert.equal(b.ledger.complete,false);
   assert.equal(b.evidence_gate.complete,false);
   assert.equal(b.ledger.months[0].complete,false);
-  if (kind==='totals') { for (const month of b.ledger.months) { assert.equal(month.available,false); moneyOutWithheld(b,month); } return; }
+  if (kind==='totals') { for (const month of b.ledger.months) { assert.equal(month.available,true); moneyOutWithheld(b,month); } return; }
   for (const month of b.ledger.months){
     assert.equal(month.payment_exclusions.total_minor,2500);
     const field=kind==='totals'?(month.complete?'outflow_minor':'outflow_subtotal_minor'):(month.complete?'total_minor':'subtotal_minor');

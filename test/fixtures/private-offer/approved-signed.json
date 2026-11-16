@@ -1,0 +1,14 @@
+{
+  "schema": "fb-private-offer/1",
+  "target": "d725f01c5f870123ba238a8242a8b4599d7424c117b2c819b67f9e8263bc871e",
+  "from_version": "77.0.1",
+  "to_version": "77.0.2",
+  "package_url": "https://packages.example.invalid/owner-update.tgz",
+  "package_sha256": "1ccb8853258c68b3773c7670398b04a04a78bdd295ea11c3d65107524689e94e",
+  "package_bytes": 23,
+  "reason": "Synthetic owner update for offline signature verification only.",
+  "issued_at": "2026-11-12T12:00:00.000Z",
+  "expires_at": "2026-11-26T12:00:00.000Z",
+  "nonce": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "signature": "0mxBHD6lCNAx4XO9LkP6olsIVVRKGXAOgM6THaHbDn-joNL_bY-7aCT_Iob6hOEzuKz7DHxY6d0pwvpIV_rUCQ"
+}

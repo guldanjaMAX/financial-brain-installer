@@ -285,7 +285,7 @@ check("a nonsense value does not silently pick d1", backendOf({ STORAGE: "mongo"
             return {
               sql, binds,
               first: async () => {
-                if (/SELECT content_hash/i.test(sql)) return rows.document ? { ...rows.document } : null;
+                if (/SELECT content_hash/i.test(sql)) return rows.document ? { ...rows.document, stored_chunk_count:rows.chunks.size } : null;
                 if (/SELECT client, category/i.test(sql)) return rows.document ? { ...rows.document } : null;
                 if (/SELECT doc_uid,source,content_hash/i.test(sql)) return rows.document ? { ...rows.document } : null;
                 return null;
@@ -301,7 +301,7 @@ check("a nonsense value does not silently pick d1", backendOf({ STORAGE: "mongo"
       },
       async batch(statements) {
         if (statements.every((statement) => /SELECT content_hash/i.test(statement.sql))) {
-          return statements.map(() => ({ results: rows.document ? [{ ...rows.document }] : [] }));
+          return statements.map(() => ({ results: rows.document ? [{ ...rows.document, stored_chunk_count:rows.chunks.size }] : [] }));
         }
         batches++;
         if (failAfterDocumentWrite) {

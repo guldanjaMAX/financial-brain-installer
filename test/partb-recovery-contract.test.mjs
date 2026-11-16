@@ -2225,7 +2225,8 @@ test("successful connect keeps every supported daily scheduler contract runnable
         `${schedulerPlatform}: the later run reached the scheduled source decision once`);
       assert.equal(changed.freshnessReads, 2,
         `${schedulerPlatform}: the later run read source freshness before and after the scheduled source`);
-      assert.equal(changed.lockAssertions, 4,
+      // Reviewed daily Gmail draining rechecks ownership before terminal settlement.
+      assert.equal(changed.lockAssertions, 5,
         `${schedulerPlatform}: the later run retained the daily lifecycle lock throughout`);
       assert.equal(changed.lockReleases, 1,
         `${schedulerPlatform}: the later run released the daily lifecycle lock`);
@@ -2247,7 +2248,7 @@ test("successful connect keeps every supported daily scheduler contract runnable
         `${schedulerPlatform}: the control reached the scheduled source decision once`);
       assert.equal(control.freshnessReads, 2,
         `${schedulerPlatform}: the control read source freshness before and after the scheduled source`);
-      assert.equal(control.lockAssertions, 4,
+      assert.equal(control.lockAssertions, 5,
         `${schedulerPlatform}: the control retained the daily lifecycle lock throughout`);
       assert.equal(control.lockReleases, 1,
         `${schedulerPlatform}: the control released the daily lifecycle lock`);

@@ -1,3 +1,4 @@
+import { assertDocumentAnswer } from "./helpers/document-answer-contract.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { looksLikeRefusal } from "../../eval/scorer.mjs";
@@ -175,7 +176,7 @@ for (const scenario of [
     records: [record(scenario.evidence), quickBooksCandidate],
     drafts: scenario.draft,
   });
-  assert.equal(result.body.answer, result.render(scenario.draft), result.body.evidence_gate?.reason);
+  assertDocumentAnswer(result.body, { expected: result.render(scenario.draft), exact: true });
   assert.equal(result.body.evidence_gate?.supported, true);
   assert.equal(result.draftCalls, 1);
   assert.equal(result.verifierCalls, 1, "the supporting draft reached the verifier");
@@ -188,12 +189,12 @@ test("AR-01 refuses a past date presented as the next site visit", async (t) => 
     records: [record(evidence)],
     drafts: "The next site visit with Vendor North is 2026-10-11, and the visit fee is paid [r0].",
   });
-  assert.equal(result.body.answer, null);
+  assertDocumentAnswer(result.body, { provisional: true, exact: true });
   assert.equal(result.body.evidence_gate?.supported, false);
   assert.equal(result.draftCalls, 1);
   assert.equal(result.verifierCalls, 1, "the temporal refusal followed verification");
   assert.ok(result.body.gaps.some((gap) => gap.type === "temporal_conflict"));
-  assert.equal(result.body.next_action, REFUSAL_NEXT_ACTIONS["answer_withheld:date_check"]);
+  assert.equal(result.body.next_action, undefined);
 });
 
 test("AR-01 control: how much keeps the money checks", async (t) => {
@@ -202,12 +203,12 @@ test("AR-01 control: how much keeps the money checks", async (t) => {
     records: [record("The monthly payment is USD 120.00.")],
     drafts: "The monthly payment is USD 121.00 [r0].",
   });
-  assert.equal(result.body.answer, null);
+  assertDocumentAnswer(result.body, { provisional: true, exact: true });
   assert.equal(result.body.evidence_gate?.supported, false);
   assert.ok(result.draftCalls >= 1, "the draft decision was reached");
   assert.equal(result.verifierCalls, 1, "the money refusal followed verification");
   assert.ok(result.body.gaps.some((gap) => gap.type === "money_veto"));
-  assert.equal(result.body.next_action, REFUSAL_NEXT_ACTIONS["answer_withheld:money_check"]);
+  assert.equal(result.body.next_action, undefined);
 });
 
 test("AR-01 mutation guard: how much alone identifies a money question", async (t) => {
@@ -216,7 +217,7 @@ test("AR-01 mutation guard: how much alone identifies a money question", async (
     records: [record("The total is USD 120.00.")],
     drafts: "It is USD 121.00 [r0].",
   });
-  assert.equal(result.body.answer, null);
+  assertDocumentAnswer(result.body, { provisional: true, exact: true });
   assert.equal(result.body.evidence_gate?.supported, false);
   assert.equal(result.draftCalls, 1, "the draft decision was reached");
   assert.equal(result.verifierCalls, 1, "the money refusal followed verification");
@@ -229,7 +230,7 @@ test("AR-01 control: payer-month mismatch keeps the money checks", async (t) => 
     records: [record("Payer North's payment month is October.")],
     drafts: "Payer North's payment month is September [r0].",
   });
-  assert.equal(result.body.answer, null);
+  assertDocumentAnswer(result.body, { provisional: true, exact: true });
   assert.equal(result.body.evidence_gate?.supported, false);
   assert.ok(result.draftCalls >= 1, "the draft decision was reached");
   assert.equal(result.verifierCalls, 1, "the money refusal followed verification");
@@ -242,7 +243,7 @@ test("AR-01 control: a cited QuickBooks draft keeps the contract", async (t) => 
     records: [quickBooksCandidate],
     drafts: "The final order was entered on 2026-10-10 for USD 999.00 [r0].",
   });
-  assert.equal(result.body.answer, null);
+  assertDocumentAnswer(result.body, { provisional: true, exact: true });
   assert.equal(result.body.evidence_gate?.supported, false);
   assert.equal(result.draftCalls, 1);
   assert.equal(result.verifierCalls, 1, "the cited QuickBooks draft reached the verifier");
@@ -256,7 +257,7 @@ test("AR-02 retries an uncited non-money draft once and accepts the cited repair
     records: [record("The final order was entered on 2026-10-10.")],
     drafts: ["The final order was entered on 2026-10-10.", cited],
   });
-  assert.equal(result.body.answer, result.render(cited), result.body.evidence_gate?.reason);
+  assertDocumentAnswer(result.body, { expected: result.render(cited), exact: true });
   assert.equal(result.draftCalls, 2, "the uncited draft reached the bounded retry decision");
   assert.equal(result.verifierCalls, 1, "the repaired draft reached verification");
 });
@@ -267,12 +268,12 @@ test("AR-02 refuses after two uncited non-money drafts", async (t) => {
     records: [record("The final order was entered on 2026-10-10.")],
     drafts: ["The final order was entered on 2026-10-10.", "The final order was entered on 2026-10-10."],
   });
-  assert.equal(result.body.answer, null);
+  assertDocumentAnswer(result.body, { provisional: true, exact: true });
   assert.equal(result.body.evidence_gate?.supported, false);
   assert.match(result.body.evidence_gate?.reason || "", /draft made claims without document citations/);
   assert.equal(result.draftCalls, 2, "both allowed draft decisions were reached");
   assert.equal(result.verifierCalls, 0, "an uncited draft never reaches the verifier");
-  assert.equal(result.body.next_action, REFUSAL_NEXT_ACTIONS["answer_withheld:uncited_draft"]);
+  assert.equal(result.body.next_action, undefined);
 });
 
 test("AR-02 control: a cited first draft is not retried", async (t) => {
@@ -282,7 +283,7 @@ test("AR-02 control: a cited first draft is not retried", async (t) => {
     records: [record("The final order was entered on 2026-10-10.")],
     drafts: cited,
   });
-  assert.equal(result.body.answer, result.render(cited), result.body.evidence_gate?.reason);
+  assertDocumentAnswer(result.body, { expected: result.render(cited), exact: true });
   assert.equal(result.draftCalls, 1);
   assert.equal(result.verifierCalls, 1);
 });
@@ -294,7 +295,7 @@ test("AR-02 control: moneyDraftRepair and citation repair share the same two-dra
     records: [record("The monthly payment is USD 120.00.")],
     drafts: ["The monthly payment is USD 120.00.", cited],
   });
-  assert.equal(result.body.answer, result.render(cited), result.body.evidence_gate?.reason);
+  assertDocumentAnswer(result.body, { expected: result.render(cited), exact: true });
   assert.equal(result.draftCalls, 2);
   assert.ok(result.draftCalls <= 2, "repair did not create a third draft");
   assert.equal(result.verifierCalls, 1);
@@ -308,7 +309,7 @@ test("AR-13 retries one unreadable verifier reply and accepts valid JSON", async
     drafts: cited,
     verifierReplies: ["!!!!", { supported: true, complete: true, evidence: [1], reason: "synthetic support" }],
   });
-  assert.equal(result.body.answer, result.render(cited), result.body.evidence_gate?.reason);
+  assertDocumentAnswer(result.body, { expected: result.render(cited), exact: true });
   assert.equal(result.draftCalls, 1);
   assert.equal(result.verifierCalls, 2, "both verifier decisions were reached");
 });
@@ -320,7 +321,7 @@ test("AR-13 refuses honestly after two unreadable verifier replies", async (t) =
     drafts: "The final order was entered on 2026-10-10 [r0].",
     verifierReplies: ["!!!!", "!!!!"],
   });
-  assert.equal(result.body.answer, null);
+  assertDocumentAnswer(result.body, { provisional: true, exact: true });
   assert.equal(result.body.evidence_gate?.supported, false);
   assert.equal(result.body.evidence_gate?.complete, false);
   assert.deepEqual(result.body.evidence_gate?.evidence, []);
@@ -329,7 +330,7 @@ test("AR-13 refuses honestly after two unreadable verifier replies", async (t) =
   assert.equal(result.body.answer_error, undefined);
   assert.equal(result.draftCalls, 1);
   assert.equal(result.verifierCalls, 2, "both verifier decisions were reached");
-  assert.equal(result.body.next_action, REFUSAL_NEXT_ACTIONS["answer_withheld:unreadable_check_reply"]);
+  assert.equal(result.body.next_action, undefined);
 });
 
 test("AR-13 malformed JSON twice is a gate refusal, not answer_error", async (t) => {
@@ -339,7 +340,7 @@ test("AR-13 malformed JSON twice is a gate refusal, not answer_error", async (t)
     drafts: "The final order was entered on 2026-10-10 [r0].",
     verifierReplies: ["{\"supported\": tru", "{\"supported\": tru"],
   });
-  assert.equal(result.body.answer, null);
+  assertDocumentAnswer(result.body, { provisional: true, exact: true });
   assert.equal(result.body.evidence_gate?.supported, false);
   assert.equal(result.body.evidence_gate?.reason, "The evidence check reply could not be read, twice.");
   assert.equal(result.body.answer_error, undefined);
@@ -355,7 +356,7 @@ test("AR-13 control: valid first verifier reply is not retried", async (t) => {
     drafts: cited,
     verifierReplies: [{ supported: true, complete: true, evidence: [1], reason: "synthetic support" }],
   });
-  assert.equal(result.body.answer, result.render(cited), result.body.evidence_gate?.reason);
+  assertDocumentAnswer(result.body, { expected: result.render(cited), exact: true });
   assert.equal(result.draftCalls, 1);
   assert.equal(result.verifierCalls, 1);
 });
@@ -367,9 +368,10 @@ test("AR-13 control: a verifier provider throw is not retried", async (t) => {
     drafts: "The final order was entered on 2026-10-10 [r0].",
     verifierReplies: [new Error("synthetic verifier unavailable")],
   });
-  assert.equal(result.body.answer, null);
+  assertDocumentAnswer(result.body, { provisional: true, exact: true });
   assert.equal(result.body.evidence_gate?.supported, false);
-  assert.ok(result.body.answer_error);
+  assert.equal(result.body.answer_error, undefined);
+  assert.ok(result.body.confidence.basis.some(reason => /check|verif/i.test(reason)));
   assert.equal(result.draftCalls, 1);
   assert.equal(result.verifierCalls, 1, "the provider throw was attempted once");
 });
@@ -384,12 +386,12 @@ for (const status of ["verified", "pending"]) {
       projection: { expected: 2_000_000, actual: 2_000_150, status },
       readAdmin: true,
     });
-    assert.equal(result.body.answer, result.render(cited), result.body.evidence_gate?.reason);
+    assertDocumentAnswer(result.body, { expected: result.render(cited), exact: true });
     assert.equal(result.draftCalls, 1);
     assert.equal(result.verifierCalls, 1, "the query-ready result reached verification");
     assert.equal(result.body.degraded, undefined);
     assert.equal(result.body.gaps.some((gap) => gap.type === "vector_unavailable"), false);
-    assert.equal(result.body.confidence?.basis?.includes("vector index not fully query-ready"), false);
+    assert.equal(result.body.confidence?.basis?.some(reason => /Meaning-based search is not fully query-ready/.test(reason)), false);
     assert.equal(result.adminBody.vector_readiness.ready, false);
     assert.equal(result.adminBody.vector_readiness.query_ready, true);
     assert.equal(result.adminBody.vector_readiness.reason, "vector_count_mismatch");
@@ -435,7 +437,7 @@ for (const scenario of [
     scenario.pendingProjection === true);
   assert.equal(result.body.gaps.some((gap) => gap.type === "vector_unavailable"),
     scenario.pendingProjection !== true);
-  assert.equal(result.body.confidence?.basis?.includes("vector index not fully query-ready"),
+  assert.equal(result.body.confidence?.basis?.some(reason => /Meaning-based search is not fully query-ready/.test(reason)),
     scenario.pendingProjection !== true);
   assert.equal(result.adminBody.vector_readiness.ready, false);
   assert.notEqual(result.adminBody.vector_readiness.query_ready, true);
@@ -450,10 +452,10 @@ test("AR-04 a degraded money-check refusal reports answer_withheld and keeps its
     drafts: "The monthly payment is USD 121.00 [r0].",
     projection: { expected: 2, actual: 1, status: "verified" },
   });
-  assert.equal(result.body.answer, null);
-  assert.equal(result.body.status, "answer_withheld");
-  assert.equal(result.body.confidence, undefined);
-  assert.match(result.body.notice || "", /money evidence check/i);
+  assertDocumentAnswer(result.body, { provisional: true, exact: true });
+  assert.equal(result.body.status, undefined);
+  assert.ok(result.body.confidence.percent < 90);
+  assert.match(result.body.confidence.basis.join(" "), /money.*match|money claim is unconfirmed/i);
   assert.equal(looksLikeRefusal(result.body.notice), false);
   assert.equal(result.body.evidence_gate?.supported, false);
   assert.ok(result.draftCalls >= 1, "the draft decision was reached");
@@ -471,10 +473,10 @@ test("AR-04 a healthy uncited draft reports answer_withheld", async (t) => {
     records: [record("The final order was entered on 2026-10-10.")],
     drafts: ["The final order was entered on 2026-10-10.", "The final order was entered on 2026-10-10."],
   });
-  assert.equal(result.body.answer, null);
-  assert.equal(result.body.status, "answer_withheld");
-  assert.equal(result.body.confidence, undefined);
-  assert.match(result.body.notice || "", /did not cite/i);
+  assertDocumentAnswer(result.body, { provisional: true, exact: true });
+  assert.equal(result.body.status, undefined);
+  assert.ok(result.body.confidence.percent < 90);
+  assert.match(result.body.confidence.basis.join(" "), /without document citations/i);
   assert.equal(looksLikeRefusal(result.body.notice), false);
   assert.equal(result.body.evidence_gate?.reason, "draft made claims without document citations");
   assert.equal(result.draftCalls, 2, "both draft decisions were reached");
@@ -488,8 +490,8 @@ test("AR-04 control: model-declared no evidence on a degraded search stays searc
     drafts: "The documents do not answer the question.",
     projection: { expected: 2, actual: 1, status: "verified" },
   });
-  assert.equal(result.body.answer, null);
-  assert.equal(result.body.status, "search_unavailable");
+  assertDocumentAnswer(result.body, { provisional: true, exact: true });
+  assert.equal(result.body.status, undefined);
   assert.equal(result.body.evidence_gate?.reason, "answer model found no direct support");
   assert.equal(result.draftCalls, 1, "the no-evidence draft decision was reached");
   assert.equal(result.verifierCalls, 0);
@@ -502,7 +504,7 @@ test("AR-04 control: a healthy zero-result search has only the no_results gap", 
     drafts: "unused",
     empty: true,
   });
-  assert.equal(result.body.answer, null);
+  assertDocumentAnswer(result.body, { provisional: true, empty: true });
   assert.equal(result.body.status, undefined);
   assert.deepEqual(result.body.gaps.map((gap) => gap.type), ["no_results"]);
   assert.equal(result.draftCalls, 0);

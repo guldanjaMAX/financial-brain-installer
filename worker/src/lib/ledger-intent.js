@@ -1,11 +1,12 @@
+import { ledgerReadingQualification } from './ledger-reading-qualification.js';
 import { ledgerScopePlan, ledgerOperandScopePlan } from './ledger-intent-scope.js';
 import { callLLM, llmText } from './core.js';
 import { refundBasisForOperand } from './ledger-refund-basis.js';
-import { shortLedgerDay, namedLedgerDay, supplementalLedgerWindow, ledgerDatePresentation, ledgerPeriodLiteral, expandLedgerCalendarWords, combinedLedgerMonths, sharedLedgerMonthYear, ledgerCalendarResidue, calendarConsumption } from './ledger-intent-calendar.js';
+import { shortLedgerDay, namedLedgerDay, supplementalLedgerWindow, ledgerDatePresentation, ledgerPeriodLiteral, expandLedgerCalendarWords, combinedLedgerMonths, sharedLedgerMonthYear, ledgerMonthList, ledgerCalendarResidue, calendarConsumption } from './ledger-intent-calendar.js';
 import { ledgerDay, ownerLedgerDay, shiftLedgerDay } from './ledger-question.js';
 import { moneyPresentation } from './money-format.js';
 import { plainRouterLimitation } from './ledger-wording.js';
-import { ledgerClauseDecision, ledgerClauseRefusalReason, ledgerClauseIsDetail, ledgerMoneyCue, ledgerShorthandDecoy, boundedLedgerMoneyCue, ledgerTaskProse, ledgerDescriptorTotal } from './ledger-intent-contract.js';
+import { ledgerClauseDecision, ledgerClauseRefusalReason, ledgerClauseIsDetail, ledgerMoneyCue, ledgerShorthandDecoy, boundedLedgerMoneyCue, ledgerTaskProse, ledgerDescriptorTotal, unusedChargeSelector } from './ledger-intent-contract.js';
 
 const KINDS = ['balance', 'totals', 'expense_summary', 'largest', 'transactions',
   'payment', 'merchant', 'category', 'deposits', 'transfers', 'recurring', 'forecast', 'not_money'];
@@ -154,7 +155,7 @@ const fallbackDecision = reason => ({ outcome: 'fallback', intents: [], reason }
 function gateReason(question) {
   if (typeof question !== 'string' || !question || question.length > 1600) return 'gate_refused';
   if (ledgerTermDefinition(question)) return 'decoy_outer_task';
-  if (!(cue.test(question) || boundedLedgerMoneyCue(question) || ownerCardStateCue(question) || /\b(?:available (?:versus|vs|and) (?:still )?pending|pending (?:versus|vs|and) (?:currently )?available)(?: balances?)?[?.!]*$/i.test(question))) return 'gate_refused';
+  if (!(cue.test(question) || /\b(?:anything|items?|transactions?) (?:showing as |showing |marked as )pending\b/i.test(question) || boundedLedgerMoneyCue(question) || ownerCardStateCue(question) || /\b(?:available (?:versus|vs|and) (?:still )?pending|pending (?:versus|vs|and) (?:currently )?available)(?: balances?)?[?.!]*$/i.test(question))) return 'gate_refused';
   if (ledgerShorthandDecoy.test(ledgerTaskProse(question))) return 'decoy_outer_task';
   // Structural syntax is always raw. Lexical task authority uses the same
   // bounded selector/prose boundary as every other task classifier.
@@ -217,14 +218,24 @@ function parseLocalLedgerWindow(question, today, strict = false) {
   // Normalize every locally admitted window, including weekend aliases. A
   // provider's future coverage cannot turn its unobserved remainder complete.
   const report = value => value && ({ ...value,
-    ...(value.to > today ? { to: today, requestedTo: value.to } : {}),
-    ...(value.from > today ? { invalid: true, futurePeriod: true } : {}), consumed });
-  const bounded = (from, to, periodLabel) => from > today ? report({ invalid: true, futurePeriod: true, from, to }) : from && to && from <= to && from >= '2000-01-01' &&
-    (!strict || [...text.matchAll(/\b\d{4}\b/g)].every(match => Number(match[0]) >= Number(from.slice(0, 4)) && Number(match[0]) <= Number(to.slice(0, 4))))
+    ...(value.to > today && value.from <= today ? { to: today, requestedTo: value.to } : {}),
+    ...(value.from > today ? { projection: true } : {}), consumed });
+  // An exclusive anchor can be in the previous year (after Dec 31). It is
+  // still a consumed date, even though its year is outside the result window.
+  const bounded = (from, to, periodLabel, anchor = from) => from && to && from <= to && from >= '2000-01-01' &&
+    (!strict || [...text.matchAll(/\b\d{4}\b/g)].every(match => Number(match[0]) >= Math.min(Number(from.slice(0, 4)), Number(anchor.slice(0, 4))) && Number(match[0]) <= Math.max(Number(to.slice(0, 4)), Number(anchor.slice(0, 4)))))
     ? report({ from, to, ...(periodLabel ? { periodLabel } : {}) }) : { invalid: true };
   const resolve = (label, year = y) => {
     const withYear = new RegExp(`^${month} \\d{1,2}(?:st|nd|rd|th)?$`).test(label) ? `${label} ${year}` : label;
     return groundedDay(withYear, today) || saneDay(withYear, '9999-12-31');
+  };
+  // Open future periods need one finite, validated forecast horizon. Historical
+  // coverage may bound actuals, but must never pull a projection back to today.
+  const openForward = (start, anchor = start) => {
+    if (!start) return { invalid: true };
+    const future = start > today;
+    const end = future ? ledgerDay(Date.UTC(Number(start.slice(0, 4)), Number(start.slice(5, 7)), 0)) : today;
+    return { ...bounded(start, end, undefined, anchor), ...(future ? { openProjection: true } : {}) };
   };
   const range = text.match(new RegExp(`\\b(?:from|between) (${day}) (?:through|to|until|and) (${day})(?=$|[\\s?.!,;])`));
   if (range) {
@@ -236,7 +247,17 @@ function parseLocalLedgerWindow(question, today, strict = false) {
   // interval contract, refuse rather than keep just its first month.
   if (/\b(?:from|between)\s+(?:january|february|march|april|may|june|july|august|september|october|november|december)\b.*\b(?:to|through|until|and)\b/.test(text)) return { invalid: true };
   const since = text.match(new RegExp(`\\b(?:since|on or after) (${day})(?=$|[\\s?.!,;])`));
-  if (since) { use(since); return { ...bounded(resolve(since[1]), today), calendarRole: since[0] }; }
+  if (since) { use(since); return { ...openForward(resolve(since[1])), calendarRole: since[0] }; }
+  const open = text.match(new RegExp(`\\b(before|after) (${day})(?=$|[\\s?.!,;])`));
+  if (open && !new RegExp(`\\b${month}\\b`).test(text.replace(open[0], ''))) {
+    use(open);
+    const anchor = resolve(open[2]);
+    if (!anchor) return { invalid: true };
+    return { ...(open[1] === 'after' ? openForward(shiftLedgerDay(anchor, 1), anchor) : report({ from: '2000-01-01', to: shiftLedgerDay(anchor, -1) })),
+      earliestCoveredDate: open[1] === 'before',
+      latestCoveredDate: open[1] === 'after' && shiftLedgerDay(anchor, 1) <= today,
+      openAnchor: anchor, calendarRole: open[0] };
+  }
   if (/\bsame (?:days|dates)(?: of)? last month\b/.test(text) ||
       (/\blast month\b/.test(text) && /\bsame (?:number of days|length|period|days)\b/.test(text))) {
     use(text.match(/\bsame (?:days|dates)(?: of)? last month\b/) || text.match(/\blast month\b/));
@@ -247,7 +268,7 @@ function parseLocalLedgerWindow(question, today, strict = false) {
   const relativeYear = text.match(/\b(last|previous|this|current) year\b|\byear[ -]to[ -]date\b/);
   const contextYear = relativeYear && ['last', 'previous'].includes(relativeYear[1]) ? y - 1 : y;
   const sinceMonth = text.match(new RegExp(`\\bsince (${months.join('|')})(?: (\\d{4}))?\\b(?! \\d)`));
-  if (sinceMonth) { use(sinceMonth); return bounded(ledgerDay(Date.UTC(Number(sinceMonth[2] || contextYear), months.indexOf(sinceMonth[1]), 1)), today); }
+  if (sinceMonth) { use(sinceMonth); const start = ledgerDay(Date.UTC(Number(sinceMonth[2] || contextYear), months.indexOf(sinceMonth[1]), 1)); return bounded(start, start > today ? ledgerDay(Date.UTC(Number(sinceMonth[2] || contextYear), months.indexOf(sinceMonth[1]) + 1, 0)) : today); }
   const quarter = text.match(/\bq([1-4])(?:\s+(\d{4}))?\b|\b(first|second|third|fourth) quarter(?: (\d{4}))?\b|\b(this|current|last|previous) quarter\b/);
   if (quarter) {
     // An explicit year cannot turn a relative-year constraint into an ignored annotation.
@@ -267,12 +288,37 @@ function parseLocalLedgerWindow(question, today, strict = false) {
     if (strict && [...text.matchAll(new RegExp(`\\b(?:${months.join('|')}|q[1-4])\\b`, 'g'))].length > 1) return { invalid: true };
     const year = Number(named[2] || contextYear), index = months.indexOf(named[1]);
     const end = ledgerDay(Date.UTC(year, index + 1, 0));
+    const counts = 'one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty'.split(' ');
+    const subset = text.match(/\b(?:for (?:the |its )?)?(?:opening|first|initial) (\d{1,2}|[a-z]+) days(?: of)?(?: only)?\b/);
+    if (subset) {
+      const count = /^\d+$/.test(subset[1]) ? Number(subset[1]) : counts.indexOf(subset[1]) + 1;
+      if (!count || count > Number(end.slice(8))) return { invalid: true };
+      use(named, relativeYear, subset);
+      return bounded(ledgerDay(Date.UTC(year, index, 1)), ledgerDay(Date.UTC(year, index, count)));
+    }
+    const closing = text.match(/\b(?:only )?at (?:the |its )(?:very )?end\b/);
+    if (closing) {
+      // A vague end-of-period phrase cannot authorize a whole-month amount.
+      // Keep it unresolved for the owner answer boundary to explain.
+      return { invalid: true, unread: [closing[0]] };
+    }
     return bounded(ledgerDay(Date.UTC(year, index, 1)), named[2] ? end : end > today ? today : end);
   }
   if (relativeYear) { use(relativeYear); return bounded(`${contextYear}-01-01`, contextYear === y ? today : `${contextYear}-12-31`); }
   const year = text.match(/\b(?:in|during|for|year) (\d{4})\b/) || (!new RegExp(`${month} \\d{1,2}(?:st|nd|rd|th)?(?:,? \\d{4})?`).test(text) && text.match(/(?<![\d/-])\b(\d{4})\b(?![-/\d])/));
   if (year) { use(year); return bounded(`${year[1]}-01-01`, `${year[1]}-12-31`); }
   const relative = text.match(/\b(?:since )?(this|current|last|previous|prior) (?:calendar )?(month|week)(?: began)?\b|\b(month|week)[ -]to[ -]date\b/);
+  const next = text.match(/\bnext (month|week|quarter|year)\b|\btomorrow\b/);
+  if (next) {
+    use(next);
+    const unit = next[1];
+    const start = unit === 'month' ? ledgerDay(Date.UTC(y, m + 1, 1)) : unit === 'year' ? `${y + 1}-01-01`
+      : unit === 'quarter' ? ledgerDay(Date.UTC(y, Math.floor(m / 3) * 3 + 3, 1))
+      : shiftLedgerDay(today, unit === 'week' ? 7 - (new Date(`${today}T00:00Z`).getUTCDay() + 6) % 7 : 1);
+    const end = unit === 'month' ? ledgerDay(Date.UTC(y, m + 2, 0)) : unit === 'year' ? `${y + 1}-12-31`
+      : unit === 'quarter' ? ledgerDay(Date.UTC(y, Math.floor(m / 3) * 3 + 6, 0)) : shiftLedgerDay(start, unit === 'week' ? 6 : 0);
+    return bounded(start, end);
+  }
   if (relative) {
     use(relative);
     const window = windowFor({ type: `${['last', 'previous', 'prior'].includes(relative[1]) ? 'last' : 'this'}_${relative[2] || relative[3]}` }, question, today);
@@ -522,6 +568,9 @@ export function ledgerIntentInterpretation(intent, presentation = intent.present
   const scope = intent.accountScopeUnresolved ? `across all your accounts; '${intent.modelAccountScope}' did not identify one account`
     : intent.modelAccountScope ? `in the recorded account '${intent.modelAccountScope}'` : intent.entityKind === 'business' ? 'across confirmed owned business accounts' : 'across all accounts';
   const period = intent.from ? `for ${presentation.period(intent.from, intent.to)}${intent.defaultOverview ? ' (this month so far)' : intent.periodLabel && /last 30 days|weekend|stated day/.test(intent.periodLabel) ? ` (${intent.periodLabel})` : ''}` : `through ${presentation.date(intent.observationTo || intent.to)}`;
+  if (intent.projection) return `Showing a likely projection from repeating history ${scope} ${period}; this is an estimate, not completed activity.`;
+  if (intent.pendingActivity) return `Showing pending activity ${scope} ${period}, separately from completed money.`;
+  if (intent.loanPaymentSubject) return `Showing identifiable loan payments ${scope} ${period}; principal and interest are not separated.`;
   if (intent.forecastRequested) return `Showing current recorded balance observations ${scope} ${period}; future balances are unknown.`;
   if (intent.latestSyncedReading) return `Showing latest recorded balance observations ${scope}${intent.latestSyncedDay ? ` as of the latest synced date ${presentation.date(intent.latestSyncedDay)}` : '; the latest synced date is unavailable'}; each account's observation and sync dates follow.`;
   if (intent.kind === 'balance') return `Showing current recorded balance observations ${scope} ${period}${intent.balanceScopeReading ? '; all per-account balances shown for the requested account or balance type' : ''}.`;
@@ -541,7 +590,8 @@ export function ledgerIntentInterpretation(intent, presentation = intent.present
     recurring: `detected ${intent.recurringSelector ? 'charges for an exact literal payee, withholding the named amount if identity is unresolved,' : 'recurring charges, without confirming subscriptions,'}${intent.occurrenceLimit ? ` showing the last ${intent.occurrenceLimit} occurrences of each series` : ''}`,
     payment: `${intent.direction === 'outflow' ? 'completed outflow transactions' : intent.direction === 'both' ? 'completed transactions in both directions' : 'received completed deposits'}${intent.counterpartyText ? ` from "${intent.counterpartyText}"` : ''}${intent.amountText ? ` matching ${intent.amountText}` : ''}`,
   };
-  return `Showing ${descriptions[intent.kind]} ${intent.monthlyBreakdown ? 'by calendar month ' : ''}${scope} ${period}${intent.loanProceeds === 'exclude' ? '; excluding only detected owned-loan proceeds, with uncertain credits kept' : ''}${intent.refundsNotNetted || intent.netRefunds || amountBasis === 'gross_before_refunds' ? '; refunds have not been subtracted, so spending after refunds is unconfirmed' : ''}.${intent.dateAssumption ? ` ${intent.dateAssumption}` : ''}`;
+  const unusedLimits = [...(intent.unusedCalendarLimits || []), ...(intent.unusedActivityLimits || [])].map(words => ` I did not narrow it by '${words}'.`).join('');
+  return `${intent.monthToDateActuals ? 'Recorded month-to-date actuals only; future client payments are not included. ' : ''}Showing ${descriptions[intent.kind]} ${intent.monthlyBreakdown ? 'by calendar month ' : ''}${scope} ${period}${intent.loanProceeds === 'exclude' ? '; excluding only detected owned-loan proceeds, with uncertain credits kept' : ''}${intent.refundsNotNetted || intent.netRefunds || amountBasis === 'gross_before_refunds' ? '; refunds have not been subtracted, so spending after refunds is unconfirmed' : ''}.${intent.dateAssumption ? ` ${intent.dateAssumption}` : ''}${unusedLimits}`;
 }
 
 function compileLedgerIntents(raw, question, { now, timeZone } = {}) {
@@ -580,8 +630,25 @@ function compileLedgerIntents(raw, question, { now, timeZone } = {}) {
   let calendarText = coreQuestion;
   for (const value of raw.intents) for (const literal of [value.vendor_text, value.account_hint, value.amount_text]) {
     if (!literal || !hasLiteral(calendarText, literal)) continue;
-    const offset = calendarText.toLowerCase().indexOf(literal.toLowerCase());
-    calendarText = calendarText.slice(0, offset) + calendarText.slice(offset + literal.length);
+    calendarText = calendarWithoutSelector(calendarText, literal);
+  }
+  const monthList = !scopePlan && ledgerMonthList(calendarText);
+  if (monthList) {
+    if (monthList.invalid) return fallbackDecision('period_contradiction');
+    // Expand only a single shared operation. Keep every other word in each
+    // question so no date restriction, selector or second task disappears.
+    const first = raw.intents[0];
+    if (coreQuestion !== question || !['expense_summary', 'totals', 'merchant', 'category'].includes(first.kind) ||
+        first.count !== null || first.amount_text !== null || !raw.intents.every(value =>
+          ['kind', 'direction', 'vendor_text', 'account_hint', 'count', 'amount_text'].every(key => value[key] === first[key]) &&
+          closedPeriod(value.period) && (value.date_text === null || hasLiteral(question, value.date_text)))) return fallbackDecision('capability');
+    const [start, end] = monthList.span;
+    const decisions = monthList.labels.map(label => compileLedgerIntents({
+      intents: [{ ...first, date_text: label }], ambiguous: false, unanswered_part: null,
+    }, question.slice(0, start) + label + question.slice(end), { now, timeZone }));
+    const refused = decisions.find(value => value.outcome !== 'ready' || value.intents?.length !== 1);
+    if (refused) return refused.outcome === 'ready' ? fallbackDecision('capability') : refused;
+    return { outcome: 'ready', intents: decisions.map(value => ({ ...value.intents[0], monthlyBreakdown: false })), reason: 'model_reading', period: first.period };
   }
   const combinedMonths = !scopePlan && combinedLedgerMonths(calendarText);
   // Refuse ambiguous shared-year authority before expanding or reading operands.
@@ -603,6 +670,13 @@ function compileLedgerIntents(raw, question, { now, timeZone } = {}) {
       (raw.intents[0].account_hint !== null && ![scopePlan.source, scopePlan.destination].includes(raw.intents[0].account_hint)) ||
       raw.intents[0].amount_text !== null)) return fallbackDecision('capability');
   for (const value of raw.intents) {
+    // This bounded current-month phrasing gets recorded receipts, never a
+    // forecast. The owner-facing interpretation states that limitation.
+    if (/\b(?:am i|are we) going to make\b/i.test(calendarText) && /\b(?:this|current) month\b/i.test(calendarText) &&
+        /\bmoney\b/i.test(calendarText) && raw.intents.length === 1 &&
+        ['totals', 'forecast'].includes(value.kind) && value.vendor_text === null && value.amount_text === null) {
+      value.kind = 'totals'; value.direction = 'inflow';
+    }
     if (['balance', 'forecast'].includes(value.kind) && ['inflow', 'outflow', 'both'].includes(value.direction)) value.direction = null;
     if (value.kind === 'transfers' && value.direction === 'both') value.direction = null;
   }
@@ -664,6 +738,12 @@ function compileLedgerIntents(raw, question, { now, timeZone } = {}) {
   const separateRefunds = raw.intents.every(value => value.kind === 'merchant' && value.direction !== 'inflow') &&
     /\bincluding (?:(?:any|the|all|their) )?refunds separately\b/i.test(qualifications);
   if (separateRefunds) qualifications = qualifications.replace(/\bincluding (?:(?:any|the|all|their) )?refunds separately\b/gi, '');
+  // A temporal exception is disclosed by the calendar reader; financial and
+  // account exclusions keep their independent capability guards.
+  const qualifiedWindow = localLedgerWindow(calendarText, today, true);
+  for (const limit of qualifiedWindow?.unusedCalendarLimits || []) {
+    qualifications = qualifications.replaceAll(limit, ' '.repeat(limit.length));
+  }
   if (qualification.test(qualifications)) return fallbackDecision('capability');
   // A month inside a literal selector is not a calendar operand shared by
   // other clauses. Apply the same masking as the clause-local parser.
@@ -808,16 +888,29 @@ function compileLedgerIntents(raw, question, { now, timeZone } = {}) {
   } else if (sharedWindow?.from && !sharedWindow.invalid && raw.intents.length > 1) {
     for (let i = 0; i < localWindows.length; i++) if (!localWindows[i] && !['balance', 'forecast'].includes(raw.intents[i].kind)) localWindows[i] = sharedWindow;
   }
+  for (let i = 0; i < localWindows.length; i++) {
+    const window = localWindows[i];
+    if (window?.unusedCalendarLimits) {
+      // The readable dates remain usable, but every unparsed limit must travel
+      // with that operand through account selection and answer composition.
+      localWindows[i] = { ...window, invalid: false, unread: [] };
+    }
+    if (window?.from && window?.to < today && !window.invalid) {
+      const progress = calendarInputs[i].match(/\b(?:so far|to[ -]date)\b/gi);
+      if (progress) localWindows[i] = { ...localWindows[i], unusedCalendarLimits:
+        [...(localWindows[i].unusedCalendarLimits || []), ...progress] };
+    }
+  }
   const unreadCalendar = localWindows.flatMap(window => window?.unread || []);
   if (unreadCalendar.length) return { ...fallbackDecision('period_contradiction'), unreadCalendar };
-  if (localWindows.some(window => window?.invalid || window?.from > today || window?.to > today)) return { ...fallbackDecision('period_contradiction'), ...(localWindows.some(window => window?.futurePeriod) ? { futurePeriod: true } : {}) };
+  if (localWindows.some(window => window?.invalid)) return { ...fallbackDecision('period_contradiction') };
   const sourceDates = [...fullTaskQuestion.matchAll(/\b\d{4}-\d{2}-\d{2}\b|\b(?:january|february|march|april|may|june|july|august|september|october|november|december) \d{1,2}(?:st|nd|rd|th)?(?:,? \d{4})?\b/gi)].map(m => m[0]);
   for (const date of sourceDates) {
     const literalDay = groundedDay(date, today) || saneDay(date, '9999-12-31') || saneDay(`${date} ${today.slice(0,4)}`, '9999-12-31');
     if (!literalDay || !raw.intents.some((value, index) => {
       const window = localWindows[index];
       if ((value.kind === 'payment' || amountLookup(value)) && window?.paymentDay) return groundedDay(date, today) === window.paymentAnchor && hasLiteral(date, value.date_text);
-      return (window && value.kind !== 'payment' && literalDay >= window.from && literalDay <= (window.requestedTo || window.to)) ||
+      return (window && value.kind !== 'payment' && (literalDay === window.openAnchor || literalDay >= window.from && literalDay <= (window.requestedTo || window.to))) ||
         [value?.date_text, value?.period?.date, value?.period?.from, value?.period?.to]
           .some(literal => typeof literal === 'string' && literal.toLowerCase() === date.toLowerCase());
     })) return fallbackDecision('date_literal_mismatch');
@@ -825,6 +918,12 @@ function compileLedgerIntents(raw, question, { now, timeZone } = {}) {
   const sourceAmounts = [...fullTaskQuestion.matchAll(/(?:\$\s*|\busd\s+)\d[\d,]*(?:\.\d+)?|\b\d[\d,]*(?:\.\d+)?\s+dollars?\b/gi)].map(m => m[0]);
   if (sourceAmounts.some(amount => !raw.intents.some(value =>
     typeof value.amount_text === 'string' && value.amount_text.toLowerCase() === amount.toLowerCase()))) return fallbackDecision('ungrounded_amount');
+  // A spelling variant in an explicit role comparison is syntax only after
+  // excluding named selectors. Never rewrite question or account-name bytes.
+  const misspelledRoleComparison = raw.intents.length === 1 &&
+    ['expense_summary', 'totals'].includes(raw.intents[0].kind) && raw.intents[0].vendor_text === null &&
+    (raw.intents[0].account_hint === null || /^(?:personal|business)(?: accounts?)?$/i.test(raw.intents[0].account_hint)) &&
+    /\b(?:personal (?:vs|versus|and) buisness|buisness (?:vs|versus|and) personal)\b/i.test(fullTaskQuestion);
   const result = [];
   let reason = clauseDecision.reason || 'model_reading';
   for (const value of raw.intents) {
@@ -840,12 +939,16 @@ function compileLedgerIntents(raw, question, { now, timeZone } = {}) {
     const relativeDay = value.date_text !== null && !saneDay(value.date_text, today) && groundedDay(value.date_text, today);
     for (const field of ['vendor_text', 'account_hint', 'amount_text', 'date_text']) {
       if (field === 'date_text' && (annotationPeriod || relativeDay)) continue;
-      const grounded = field === 'account_hint' ? hasLiteral(normalizeLedgerIntentWords(question), normalizeLedgerIntentWords(value[field])) : hasLiteral(question, value[field]);
+      const grounded = field === 'account_hint' ? misspelledRoleComparison || hasLiteral(normalizeLedgerIntentWords(question), normalizeLedgerIntentWords(value[field])) : hasLiteral(question, value[field]);
       if (value[field] !== null && !grounded) return fallbackDecision(
         ({ vendor_text: 'ungrounded_vendor', account_hint: 'ungrounded_vendor', amount_text: 'ungrounded_amount', date_text: 'date_literal_mismatch' })[field]);
     }
-    const modelAccountScope = accountScopeLiteral(value.vendor_text) && !descriptorTotal ? value.vendor_text : value.account_hint;
-    const vendor = (modelAccountScope && (!value.account_hint || value.vendor_text === value.account_hint)) || (value.kind === 'balance' && balanceMeasureLiteral(value.vendor_text)) ? null : value.vendor_text;
+    let modelAccountScope = accountScopeLiteral(value.vendor_text) && !descriptorTotal ? value.vendor_text : value.account_hint;
+    // A single model role cannot erase the other side of an explicit two-role
+    // comparison. Named accounts still retain their literal restrictions.
+    if (raw.intents.length === 1 && (misspelledRoleComparison || /\b(?:personal (?:vs|versus|and) business|business (?:vs|versus|and) personal)\b/i.test(clause)) &&
+        /^(?:personal|business)(?: accounts?)?$/i.test(modelAccountScope || '')) modelAccountScope = null;
+    let vendor = (modelAccountScope && (!value.account_hint || value.vendor_text === value.account_hint)) || (value.kind === 'balance' && balanceMeasureLiteral(value.vendor_text)) ? null : value.vendor_text;
     const amountMinor = centsFor(value.amount_text);
     if (Number.isNaN(amountMinor)) return fallbackDecision('ungrounded_amount');
     // Only snapshots accept the closed current alias. Unknown keys survive
@@ -860,7 +963,7 @@ function compileLedgerIntents(raw, question, { now, timeZone } = {}) {
     const localWindow = value.kind === 'payment' && value.date_text !== null && value.period.type === 'none' && !parsedWindow?.paymentDay && !literalPeriod ? null : parsedWindow;
     if (value.kind === 'balance' && localWindow?.snapshotNow) value.period = { type: 'none' };
     const window = localWindow || windowFor(value.period, clause, today);
-    if (!window || window.from > today || window.to > today) return fallbackDecision('period_contradiction');
+    if (!window || !window.projection && (window.from > today || window.to > today)) return fallbackDecision('period_contradiction');
     // A label repeated beside a period is grounded annotation, not a second
     // date filter. Only a standalone payment day uses the seven-day lookup.
     const eventDate = !localWindow?.from && value.date_text !== null && !groundedDay(value.date_text, today) &&
@@ -877,9 +980,16 @@ function compileLedgerIntents(raw, question, { now, timeZone } = {}) {
     let kind = amountLookup(value) ? 'payment'
       : ['category', 'merchant'].includes(value.kind) && vendor === null && [null, 'outflow'].includes(value.direction) ? 'expense_summary'
       : value.kind === 'payment' && vendor === null && amountMinor === null && (value.period.type !== 'none' || explicitDate || localWindow?.paymentDay) ? 'deposits'
-      : modelAccountScope && vendor === null && ['merchant', 'category'].includes(value.kind) ? (value.direction === 'inflow' ? (selectorComparison ? 'totals' : 'deposits') : 'expense_summary')
+      : modelAccountScope && vendor === null && ['merchant', 'category'].includes(value.kind) && !(value.kind === 'merchant' && value.direction === 'inflow' && !selectorComparison) ? (value.direction === 'inflow' ? (selectorComparison ? 'totals' : 'deposits') : 'expense_summary')
       : ['totals', 'expense_summary'].includes(value.kind) && vendor !== null ? 'merchant'
       : value.kind === 'totals' && value.direction === 'outflow' ? 'expense_summary' : value.kind;
+    const vendorRanking = kind === 'largest' && vendor === null && value.direction === 'outflow' && /\b(?:top|largest|biggest) (?:\d+ )?(?:vendors?|merchants?|payees?)\b/i.test(clause);
+    if (vendorRanking) kind = 'expense_summary';
+    const unusedActivityLimits = ['expense_summary', 'merchant'].includes(kind) && value.direction === 'outflow' && !descriptorTotal
+      ? unusedChargeSelector(clause, [vendor, modelAccountScope]) : [];
+    // A shortened identity cannot stand in for the full requested payee. Use
+    // the disclosed ordinary-expense reading rather than inventing that match.
+    if (unusedActivityLimits.length && kind === 'merchant') { kind = 'expense_summary'; vendor = null; }
     const monthlyBreakdown = /\b(?:by|per|each) month\b|\bmonth[ -]by[ -]month\b/i.test(clause);
     // Decide once after operation aliases, so category expense readings and
     // monthly gross selections retain the same requested-basis boundary.
@@ -906,7 +1016,7 @@ function compileLedgerIntents(raw, question, { now, timeZone } = {}) {
     if ((!netRefunds && vendor !== null && !['merchant', 'category', 'payment', 'recurring', 'largest', 'deposits'].includes(kind)) ||
         (value.amount_text !== null && kind !== 'payment') ||
         (explicitDate && !['payment', 'merchant', 'category', 'expense_summary', 'largest', 'deposits', 'recurring', 'transactions'].includes(kind)) ||
-        (value.count !== null && !topCategory && !['largest', 'transactions', 'deposits', 'transfers', 'recurring'].includes(kind))) return fallbackDecision('capability');
+        (value.count !== null && !topCategory && !vendorRanking && !['largest', 'transactions', 'deposits', 'transfers', 'recurring'].includes(kind))) return fallbackDecision('capability');
     if ((['expense_summary', 'recurring'].includes(kind) && value.direction !== 'outflow') ||
         (kind === 'payment' && !['inflow', 'outflow', 'both'].includes(value.direction)) ||
         (kind === 'deposits' && value.direction !== 'inflow') ||
@@ -923,6 +1033,11 @@ function compileLedgerIntents(raw, question, { now, timeZone } = {}) {
           vendor && ` ${normalizeLedgerIntentWords(clause).toLowerCase()} `.includes(` ${normalizeLedgerIntentWords(vendor).toLowerCase()} spending `)) &&
         !/\b(?:at|from|to|via|merchant|payee|vendor|named|called)\b/i.test(clause)) categoryTopic = true;
     const intent = { broad: true, kind, mask: null, accountKind: null, timeZone, ...window };
+    if (vendorRanking) intent.vendorLimit = Number(/\b(?:top|largest|biggest) (\d+)\b/i.exec(clause)?.[1] || value.count || 10);
+    if (kind === 'transactions' && /\bpending\b/i.test(clause)) intent.pendingActivity = true;
+    if (unusedActivityLimits.length) intent.unusedActivityLimits = unusedActivityLimits;
+    if (kind === 'totals' && /\b(?:am i|are we) going to make\b/i.test(calendarText) &&
+        /\b(?:this|current) month\b/i.test(calendarText)) intent.monthToDateActuals = true;
     // One measure word across the question binds every outgoing operand; a
     // question mixing both measures decides each operand by its own clause.
     if (kind === 'expense_summary' && moneyOutMeasure(raw.intents.length === 1 || moneyOutMeasure(taskQuestion) ? taskQuestion : clause)) intent.outflowMeasure = true;
@@ -942,6 +1057,8 @@ function compileLedgerIntents(raw, question, { now, timeZone } = {}) {
     if (kind === 'payment' && /\b(?:either side|a (?:few|couple of) days)\b/i.test(taskQuestion)) intent.paymentCandidates = true;
     if (['expense_summary', 'category'].includes(kind) && (/\bby payee\b/i.test(taskQuestion) || value.kind === 'merchant' && vendor === null)) intent.payeeBreakdownUnavailable = true;
     if (eventDate) intent.earliestCoveredDate = true;
+    if (localWindow?.earliestCoveredDate) intent.earliestCoveredDate = true;
+    if (localWindow?.latestCoveredDate) intent.latestCoveredDate = true;
     if (excludesLoans) intent.loanProceeds = 'exclude';
     if (kind === 'expense_summary' && new RegExp(ownTransferExclusion.source, 'i').test(normalizeLedgerIntentWords(fullTaskQuestion))) intent.showExcludedTransfers = true;
     if (kind === 'balance' && (pendingState.test(fullTaskQuestion) || /^(?:cleared|posted)(?: balances?)?$/i.test(value.vendor_text || ''))) intent.pendingRequested = true;
@@ -966,17 +1083,20 @@ function compileLedgerIntents(raw, question, { now, timeZone } = {}) {
     // verb with an explicit auxiliary; bare checking retains its scope guard.
     const scopeText = (excludesLoans ? scopeClause.replace(loanExclusion, '') : scopeClause)
       .replace(vendor ? normalizeLedgerIntentWords(vendor) : /$^/, '')
-      .replace(/\b(?:mind|am|are|is|was|were|been|be) checking (?=(?:our|my|the|whether|if)\b)/gi, '');
+      .replace(/\b(?:mind|am|are|is|was|were|been|be|i['’]m|we['’]re|you['’]re) checking\b(?!\s+(?:accounts?|accts?)\b)/gi, '')
+      .replace(/\bchecking (?=something\b|whether\b|if\b)/gi, '');
     const accountType = /\b(?:checking|savings|card|loan|investment|retirement|escrow)\b/i.exec(scopeText)?.[0]?.toLowerCase();
     const balanceScope = kind === 'balance' && (balanceComparison || modelAccountScope || accountType || /\baccounts? (?:called|named|for)\b|\b(?:available|pending|ending|mask)\b/i.test(scopeClause));
     if (balanceScope) Object.assign(intent, { balanceScopeReading: true,
       preferredAccountKind: accountType || null,
       unavailableBalance: /\bavailable\b/i.test(scopeClause) ? 'available' : /\bpending\b/i.test(scopeClause) ? 'pending' : null });
-    const bareRole = !modelAccountScope && kind !== 'transfers' && !['balance', 'forecast'].includes(kind) &&
+    const bothRoles = misspelledRoleComparison || /\bpersonal\b/i.test(scopeText) && /\bbusiness\b/i.test(scopeText);
+    if (bothRoles) intent.bothRolesReading = true;
+    const bareRole = !bothRoles && !modelAccountScope && kind !== 'transfers' && !['balance', 'forecast'].includes(kind) &&
       scopeText.match(/\b(?:business|personal)\b/i)?.[0];
     if (bareRole) Object.assign(intent, { modelAccountScope: bareRole.toLowerCase(), unresolvedAccountRole: true });
-    if ((!balanceComparison && !modelAccountScope && !bareRole && kind !== 'transfers' && /\b(?:personal|household)\b/i.test(scopeText)) ||
-      (!scopePlan && !balanceScope && !modelAccountScope && (/\b(?:checking|savings|card|loan|investment|retirement|escrow|ending|mask)\b/i.test(scopeText) || /\baccounts? (?:called|named)\b/i.test(scopeClause)))) return fallbackDecision('capability');
+    if ((!bothRoles && !balanceComparison && !modelAccountScope && !bareRole && kind !== 'transfers' && /\b(?:personal|household)\b/i.test(scopeText)) ||
+      (!scopePlan && !balanceScope && !modelAccountScope && (/\b(?:checking|savings|card|investment|retirement|escrow|ending|mask)\b/i.test(scopeText) || /\bloan accounts?\b|\baccounts? (?:called|named)\b/i.test(scopeClause)))) return fallbackDecision('capability');
     if (business && !balanceComparison && !modelAccountScope && ['balance', 'forecast'].includes(kind)) intent.entityKind = 'business';
     if (balanceComparison) intent.balancePurposeComparison = true;
     if (kind === 'balance' && localWindow?.snapshotNow) intent.latestSyncedReading = true;
@@ -990,9 +1110,9 @@ function compileLedgerIntents(raw, question, { now, timeZone } = {}) {
       if (!/\b(?:balances?|money|cash)\b/i.test(clause)) return fallbackDecision('capability');
       Object.assign(intent, { kind: 'balance', forecastRequested: true, modelForecast: true });
     }
-    if (!intent.forecastRequested && /\b(?:next (?:week|month|quarter|year)|tomorrow|future|forecast|predict)\b/i.test(clause)) return fallbackDecision('capability');
+    if (!window.projection && !intent.forecastRequested && /\b(?:next (?:week|month|quarter|year)|tomorrow|future|forecast|predict)\b/i.test(clause)) return fallbackDecision('capability');
     if (intent.kind === 'balance') intent.observationTo = today;
-    if (intent.kind === 'balance') { delete intent.from; delete intent.to; }
+    if (intent.kind === 'balance') { delete intent.from; delete intent.to; delete intent.projection; }
     if (kind === 'totals' && value.direction === 'inflow') intent.inflowOnly = true;
     // Unspecified activity gets a local current-month reading. The label
     // exposes this choice before figures; it never implies a missing-date filter.
@@ -1021,8 +1141,10 @@ function compileLedgerIntents(raw, question, { now, timeZone } = {}) {
     if (kind === 'largest' && localWindow?.calendarRole) intent.rankingCalendarRole = localWindow.calendarRole;
     if (kind === 'deposits' && vendor !== null) intent.descriptionKeyword = vendor;
     if (kind === 'merchant' || kind === 'category') {
-      if (!vendor) return fallbackDecision('capability');
-      intent.match = vendor;
+      // An unfiltered payer listing still uses income membership. An account
+      // hint cannot turn possible own credits into customer payments.
+      if (!vendor && !(kind === 'merchant' && value.direction === 'inflow')) return fallbackDecision('capability');
+      if (vendor !== null) intent.match = vendor;
       if (vendor !== null && kind === 'merchant') intent.merchantPreposition = value.direction === 'inflow' ? 'from' : 'at';
     }
     if (kind === 'payment') {
@@ -1052,6 +1174,14 @@ function compileLedgerIntents(raw, question, { now, timeZone } = {}) {
   const comparison = result.length === 2 && result[0].kind === result[1].kind &&
     localWindows.every(Boolean) && ['expense_summary', 'totals', 'merchant', 'category'].includes(result[0].kind) &&
     (result[0].from !== result[1].from || result[0].to !== result[1].to);
+  if (comparison && clauseDecision.comparison && /\b(?:so far|at this point|same dates|same days|same number of days|same length|same period)\b/i.test(taskQuestion)) {
+    for (let i = 0; i < result.length; i++) {
+      const unit = /\blast month\b/i.test(calendarInputs[i]) ? 'month' : /\blast year\b/i.test(calendarInputs[i]) ? 'year' : null;
+      if (unit && !/\blast (?:month|year)\b/i.test(calendarInputs[1 - i])) {
+        result[i].comparisonWindow = { source: 1 - i, unit };
+      }
+    }
+  }
   if (balanceComparison || balanceKindsComparison) result.splice(1);
   if (clauseDecision.comparison && !comparison && !selectorComparison) return { ...fallbackDecision('capability'), calendarRefused: localWindows.every(window => window?.from) };
   if (!scopePlan && /\b(?:compare|versus|against)\b/i.test(taskQuestion) && !comparison && !selectorComparison && !remainderSelector && !['balance', 'recurring'].includes(result[0].kind)) return { ...fallbackDecision('capability'), calendarRefused: localWindows.every(window => window?.from) };
@@ -1080,7 +1210,13 @@ function compileLedgerIntents(raw, question, { now, timeZone } = {}) {
 }
 
 export function validateLedgerIntentDecision(raw, question, context) {
-  return compileLedgerIntents(raw, question, context);
+  const reading = ledgerReadingQualification(question);
+  const decision = compileLedgerIntents(raw, reading.question, context);
+  if (reading.unapplied && decision.intents.length) for (const intent of decision.intents) {
+    intent.unusedActivityLimits = [...(intent.unusedActivityLimits || []), reading.unapplied];
+    intent.interpretation = ledgerIntentInterpretation(intent, moneyPresentation(context));
+  }
+  return decision;
 }
 
 export function validateLedgerIntents(raw, question, context) {

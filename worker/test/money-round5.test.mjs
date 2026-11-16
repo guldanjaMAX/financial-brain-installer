@@ -1,3 +1,5 @@
+import { assertDocumentAnswer } from "./helpers/document-answer-contract.mjs";
+import { assertCountedMovement } from './helpers/payment-rule-answer.mjs';
 import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
@@ -76,13 +78,13 @@ test('N01 conditional cents, signs and account/window edges retain primary posti
       if (outSelected && outDay.startsWith('2026-09')) {
         assert.equal(b.evidence_gate.complete, false);
         assert.equal(b.ledger.reason, 'money_out_destination_unconfirmed');
-        assert.equal(b.ledger.total_minor, null);
+        // Rule table row 1: keep exact selected cents and signs, with the unproved transfer counted.
+        assertCountedMovement(b, { debits: 12364,
+          credits: inSelected ? 23 + (inDay.startsWith('2026-09') ? 12345 : 0) : 0, amount: 12345 });
         const candidate = b.ledger.possible_payments.find(row => row.amount_minor === 12345);
         assert.ok(candidate, 'outgoing ownership decision reached');
         assert.ok(b.citations.some(row => row.n === candidate.n && row.amount_minor === 12345));
-        continue;
-      }
-      assert.equal(b.evidence_gate.complete, true);
+      } else assert.equal(b.evidence_gate.complete, true);
       assert.equal(total(b.ledger.accounts, 'debits_minor'), outSelected ? 19 + (outDay.startsWith('2026-09') ? 12345 : 0) : 0);
       assert.equal(total(b.ledger.accounts, 'credits_minor'), inSelected ? 23 + (inDay.startsWith('2026-09') ? 12345 : 0) : 0);
       assert.equal(total(b.ledger.if_own_transfers.accounts, 'debits_minor'), outSelected ? 19 : 0);
@@ -126,7 +128,8 @@ test('N01 duplicate peer control never subtracts one row as two candidate pairs'
   const before = f.seen.length, b = await ask(f);
   assert.ok(f.seen.slice(before).some(sql => sql.includes('JOIN fin_transactions')));
   assert.equal(b.ledger.reason, 'money_out_destination_unconfirmed');
-  assert.equal(b.ledger.total_minor, null);
+  // Rule table row 1: competing peers cannot prove exclusions or erase the populated total.
+  assertCountedMovement(b, { debits: 12345, credits: 24690, amount: 12345 });
   assert.equal(b.evidence_gate.complete, false);
   const candidate = b.ledger.possible_payments.find(row => row.amount_minor === 12345);
   assert.ok(candidate, 'competing receiving credits reach the ownership hold');
@@ -142,26 +145,34 @@ test('N02 common explicit body/title disclosures refuse and template discussion 
   ]) {
     const b = await documentAnswer(t, input);
     assert.equal(b.results[0].lineage.kind, 'agent_derived');
-    assert.equal(b.answer, null); assert.equal(b.evidence_gate.supported, false);
+    assertDocumentAnswer(b, { provisional: true, exact: true }); assert.equal(b.evidence_gate.supported, false);
   }
 });
 
+// Short records are quoted whole (closed-world document boundary, R4), so
+// each answer also quotes the one sentence these pairs vary. That sentence is
+// masked identically in both; every other byte must still match.
+const sameExceptWording = (answer, wording) => String(answer).split(wording).join('<varied wording>');
 test('P01: a human payment action by an agent is not an AI authorship disclosure', async t => {
-  const control = await documentAnswer(t, { content: 'The payment was made by a bank employee at the branch. Card ending 4242 charged USD 120.00.' });
+  const human = 'The payment was made by a bank employee at the branch.';
+  const control = await documentAnswer(t, { content: `${human} Card ending 4242 charged USD 120.00.` });
   assert.equal(control.evidence_gate.supported, true);
-  const content = 'The payment was made by an agent at the bank branch. Card ending 4242 charged USD 120.00.';
+  const agent = 'The payment was made by an agent at the bank branch.';
+  const content = `${agent} Card ending 4242 charged USD 120.00.`;
   const b = await documentAnswer(t, { content });
   t.diagnostic(JSON.stringify({ lineage: b.results[0].lineage.kind, supported: b.evidence_gate.supported, answer: b.answer }));
-  assert.equal(b.answer, control.answer, 'a human bank agent making a payment does not author this email with AI');
+  assert.equal(sameExceptWording(b.answer, agent), sameExceptWording(control.answer, human), 'a human bank agent making a payment does not author this email with AI');
   assert.equal(b.evidence_gate.supported, true);
 });
 
 test('P01 variant: a human assistant creating the invoice is not explicit AI authorship', async t => {
-  const control = await documentAnswer(t, { content: 'The invoice was created by an employee in accounts payable. Card ending 4242 charged USD 120.00.' });
+  const employee = 'The invoice was created by an employee in accounts payable.';
+  const control = await documentAnswer(t, { content: `${employee} Card ending 4242 charged USD 120.00.` });
   assert.equal(control.evidence_gate.supported, true);
-  const content = 'The invoice was created by an assistant in accounts payable. Card ending 4242 charged USD 120.00.';
+  const assistant = 'The invoice was created by an assistant in accounts payable.';
+  const content = `${assistant} Card ending 4242 charged USD 120.00.`;
   const b = await documentAnswer(t, { content });
-  assert.equal(b.answer, control.answer);
+  assert.equal(sameExceptWording(b.answer, assistant), sameExceptWording(control.answer, employee));
 });
 
 test('P01 human role titles stay primary; explicitly AI-qualified roles still demote', async t => {
@@ -169,14 +180,14 @@ test('P01 human role titles stay primary; explicitly AI-qualified roles still de
   assert.equal(control.evidence_gate.supported, true);
   for (const title of ['Assistant notes', 'Agent summary', 'Assistant-written memo', 'Agent-written report']) {
     const b = await documentAnswer(t, { title });
-    assert.equal(b.answer, control.answer, title);
+    assertDocumentAnswer(b, { expected: 'Card ending 4242 charged USD 120.00 [1].', exact: true });
     assert.equal(b.evidence_gate.supported, true);
     assert.equal(b.results[0].lineage.status, 'unknown');
   }
   for (const title of ['AI assistant notes', 'AI agent summary', 'ChatGPT memo', 'Chatbot draft']) {
     const b = await documentAnswer(t, { title });
     assert.equal(b.results[0].lineage.kind, 'agent_derived', title);
-    assert.equal(b.answer, null); assert.equal(b.evidence_gate.supported, false);
+    assertDocumentAnswer(b, { provisional: true, exact: true }); assert.equal(b.evidence_gate.supported, false);
   }
 });
 
@@ -274,23 +285,36 @@ test('P02 real Think route: historical collisions cannot bypass the unresolved l
   f.env.VECTORIZE.query = async () => ({ matches: f.rows('SELECT chunk_uid AS id FROM chunks') });
   const read = () => f.post('/api/rag/think', { q: 'How much money came in September 2026?' }, { 'X-Admin-Key': f.env.ADMIN_KEY }).then(r => r.json());
   const ordinary = await read();
-  assert.equal(ordinary.answer, answer); assert.equal(ordinary.evidence_gate.supported, true);
+  assertDocumentAnswer(ordinary, { expected: answer, exact: true }); assert.equal(ordinary.evidence_gate.supported, true);
   assert.ok(ordinary.results.length); assert.equal(drafts, 1); assert.equal(verifiers, 1);
   drafts = 0; verifiers = 0;
   f.raw("INSERT INTO fin_entities (entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at) VALUES ('owner-company','Owner company','business','owned','owner_stated','confirmed',?)", NOW);
   account(f, { slug: 'manual-a', mode: 'manual' }); account(f, { slug: 'live-a' });
-  transaction(f, { slug: 'manual-a', uid: 'manual-copy' }); transaction(f, { slug: 'live-a', uid: 'live-copy' });
+  transaction(f, { slug: 'manual-a', uid: 'manual-copy', amount: 10000 });
+  transaction(f, { slug: 'live-a', uid: 'live-copy', amount: 20000 });
   const control = await read(); assert.equal(control.code, 'ledger_account_link_required');
+  assert.equal(control.ledger.accounts[0].credits_minor, 20000, 'bank control differs from the document figure');
   assert.equal(drafts, 0); assert.equal(verifiers, 0);
   account(f, { slug: 'manual-z', mode: 'manual', from: '2020-01-01', to: '2020-01-31' });
   account(f, { slug: 'live-z', from: '2020-01-01', to: '2020-01-31' });
   const before = f.seen.sql.length, b = await read();
   assert.ok(f.seen.sql.slice(before).some(sql => sql.includes('FROM fin_accounts')));
-  // The inventory read above proves the refusal decision was reached.
+  // The inventory read above proves the unresolved-link decision was reached.
   assert.equal(drafts, 0); assert.equal(verifiers, 0);
   t.diagnostic(JSON.stringify({ answer: b.answer, supported: b.evidence_gate.supported, gap: b.gaps[0]?.reason, drafts, verifiers }));
   assert.equal(b.code, 'ledger_account_link_required');
-  assert.equal(b.answer, null);
+  assert.equal(b.answer_contract.kind, 'ledger');
+  assert.equal(b.confidence.percent, 0, 'the unresolved account choice cannot acquire certainty');
+  assert.match(b.confidence_text, /Confidence: Low \(0%\).*Why:.*Missing:/s);
+  assert.match(b.answer, /Coverage:.*Missing or counted twice:.*Estimates:.*How to check:/s);
+  // Rule table row 1: answer from separate bank sources, without reading the document or linking accounts.
+  assert.deepEqual(b.ledger.source_readings.filter(row => Number.isSafeInteger(row.amount_minor))
+    .map(row => row.amount_minor).sort((a, b) => a - b), [10000, 20000]);
+  assert.match(b.answer, /^\$200\.00/);
+  assert.match(b.answer, /\$100\.00 may be counted twice/);
+  assert.equal(f.first('SELECT COUNT(*) AS n FROM fin_account_links').n, 0);
+  assert.doesNotMatch(b.answer, /withheld|cannot|can't/i);
+  assert.doesNotMatch(b.answer, /USD 1234\.50|\$1,234\.50/, 'an unread document cannot supply a bank figure');
 });
 
 test('Q01: a human virtual assistant is a role, not an AI authorship disclosure', async t => {
@@ -314,7 +338,7 @@ test('Q02: explicit "made with" AI disclosures still demote, a human payment mad
   ]) {
     const b = await documentAnswer(t, input);
     assert.equal(b.results[0].lineage.kind, 'agent_derived', JSON.stringify(input));
-    assert.equal(b.answer, null); assert.equal(b.evidence_gate.supported, false);
+    assertDocumentAnswer(b, { provisional: true, exact: true }); assert.equal(b.evidence_gate.supported, false);
   }
   const human = await documentAnswer(t, { content: 'The payment was made by an agent at the bank branch. Card ending 4242 charged USD 120.00.' });
   assert.equal(human.evidence_gate.supported, true);
@@ -329,7 +353,7 @@ test('S01: "made by <AI>" discloses document authorship unless a payment was the
   ]) {
     const b = await documentAnswer(t, input);
     assert.equal(b.results[0].lineage.kind, 'agent_derived', JSON.stringify(input));
-    assert.equal(b.answer, null); assert.equal(b.evidence_gate.supported, false);
+    assertDocumentAnswer(b, { provisional: true, exact: true }); assert.equal(b.evidence_gate.supported, false);
   }
   for (const content of [
     'The payment was made by AI. Card ending 4242 charged USD 120.00.',
@@ -350,7 +374,7 @@ test('T01: a document about payments made by AI is a disclosure; only a payment 
   ]) {
     const b = await documentAnswer(t, input);
     assert.equal(b.results[0].lineage.kind, 'agent_derived', JSON.stringify(input));
-    assert.equal(b.answer, null); assert.equal(b.evidence_gate.supported, false);
+    assertDocumentAnswer(b, { provisional: true, exact: true }); assert.equal(b.evidence_gate.supported, false);
   }
   for (const content of [
     'The payment was made by AI. Card ending 4242 charged USD 120.00.',

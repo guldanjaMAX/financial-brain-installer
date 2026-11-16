@@ -14,7 +14,7 @@ import { CONFIRMED, scan as scanCredentialShapes } from "../worker/src/lib/secre
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const GIT_HISTORY_TIMEOUT_MS = 120_000;
 export const GIT_HISTORY_TEXT_OUTPUT_LIMIT_BYTES = 512 * 1024 * 1024;
-const GIT_HISTORY_BATCH_OUTPUT_LIMIT_BYTES = 1024 * 1024 * 1024;
+const GIT_HISTORY_BATCH_OUTPUT_LIMIT_BYTES = 2 * 1024 * 1024 * 1024;
 
 export function createHistoryGitEnvironment(environment = process.env) {
   return {

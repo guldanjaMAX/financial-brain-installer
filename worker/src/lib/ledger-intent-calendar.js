@@ -1,30 +1,6 @@
 import { ledgerDay, shiftLedgerDay } from './ledger-question.js';
 import { refundBasisSpans } from './ledger-refund-basis.js';
 
-// Non-calendar request and financial words may remain around a consumed
-// operand. Calendar and restriction words must belong to a parsed span.
-// Admit financial idioms as complete phrases below; bare "end" can narrow dates.
-const financialRemainderWords = new Set(`a according account accounts accts across after against all also an and another any are arrival arrived
-at balance balances bank between biggest billed both bring business by came can card cards cash
-categories category change charge charges check checking cleared client come compared completed cost costs could count counting
-couple credit credits customer debt debit deposit deposits descending description did difference digits do does dollars during
-each else ending escrow every everything excluding expense expenses fees fetch few find for fresh freshness
-from get give grouped grouping groups has have highest hit how i in include including income
-incoming inflow inflows individual into investment is it items its landed largest latest less list loan loans
-materials me merchant merchants minus money more most moves much my need net newest not number
-of on ones only order other our out outflow outflows outgoing over own owner paid pay
-payee payees payer payers payment payments pending personal please plus posted pull receive received recent recently
-recorded refund refunds request retirement retrieve returned returning returns reversed review s savings say says separate
-separately show side single sort sorted spend spending spent split still subtotal such sum synced tally tell
-than that the their then ties to top total totaled totalled totals transaction transactions transfer transfers
-twice type types under updated us usd using versus vs was we went were what when
-whether which with within without would you your gone per
-acct add amount behind bills break breakdown candidate categorizable combined compare crept deposited down
-expensive goes grand group had if labelled labeled likely look lumped made many match matching mind monthly once
-ordinary outgoings paying payout payouts payoouts send spned point priciest purchase purchases rank ranking reached records recurring regular
-result rev revenue running see sent shelled stock summary take there together too took underneath up
-vendor vendors want where`.split(/\s+/));
-
 const months = 'january february march april may june july august september october november december'.split(' ');
 const monthWords = months.flatMap(month => month.length > 3 ? [month, month.slice(0, 3)] : [month]).join('|');
 const monthPattern = `(?:${monthWords})\\.?`;
@@ -161,10 +137,26 @@ export function combinedLedgerMonths(text) {
   return pair && ledgerMonthMatches(text).length === 2 ? [pair[1], pair[2]] : null;
 }
 
+// Lists are separate operands, never the interval between their endpoints.
+// Shared trailing years stay ambiguous, just as they do for a month pair.
+export function ledgerMonthList(text) {
+  const matches = ledgerMonthMatches(text);
+  if (matches.length < 3 || matches.length > 12) return null;
+  const labels = matches.map(match => match[0]);
+  if (!matches.slice(1).every((match, index) =>
+    /^\s*(?:,\s*(?:(?:and|plus)\s+)?|(?:and|plus)\s+)$/i.test(
+      text.slice(matches[index].index + labels[index].length, match.index)))) return null;
+  const years = labels.map(label => monthYearSuffix.test(label));
+  if (years.some(Boolean) && !years.every(Boolean)) return { invalid: true };
+  return { labels, span: [matches[0].index, matches.at(-1).index + labels.at(-1).length] };
+}
+
 // A calendar-looking token that no admitted date grammar can consume must
 // not disappear when the activity falls back to its default period.
 export function ledgerCalendarResidue(text) {
-  return new RegExp(`\\b(?:${monthWords}|sept)\\.?(?=\\d)`, 'i').test(text) ||
+  const malformedMonth = [...text.matchAll(/\b(?:in|during|for) ((?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]+) \d{4}\b/gi)]
+    .some(match => !months.includes(match[1].toLowerCase()) && !/^(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)$/i.test(match[1]));
+  return malformedMonth || new RegExp(`\\b(?:${monthWords}|sept)\\.?(?=\\d)`, 'i').test(text) ||
     /\b(?:in|during|for|year)\s+\d{4}[\p{L}\p{N}/_-]/u.test(text) ||
     [...text.matchAll(/\b\d+[\/]\d[^\s,;?!]*/g)].some(match =>
       !/^\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\.?$/.test(match[0]));
@@ -176,45 +168,26 @@ export function calendarConsumption(question, parsed) {
   const normalize = value => expandLedgerCalendarWords(value.toLowerCase()).replace(/\bon or after\b/g, 'since');
   const text = normalize(question);
   const spans = parsed?.consumed || [];
-  const tokens = new RegExp(`\\b(?:${datePattern}|(?<=\\b(?:${monthWords}|before|after|through|until|since|from|to|between)(?: \\d{4})?(?: the)? )(?:${dayOrdinalWords})|(?:(?:this|current|last|previous|prior|next) (?:calendar )?(?:month|week|weekend|quarter|year)|(?:month|week|year)[ -]to[ -]date|(?:last|past) \\d{1,4} days|today|yesterday)|\\d{1,2}(?:st|nd|rd|th)|\\d{4}|before|after|through|until|since|from|to|between|${calendarWeekdayWords}|${monthWords}|sept|q[1-4]|quarter|year)\\b|\\b\\d+(?=\\s+(?:${monthWords})\\b)|(?<=\\b(?:${monthWords})\\s+)\\d+`, 'gi');
+  // Operators need a calendar operand; ordinary payment/direction prose is
+  // not a date. Bare output counts are not calendar operands.
+  const calendarOperand = `(?:${datePattern}|${dayOrdinalWords}|${calendarWeekdayWords}|${monthWords}|sept|q[1-4]|\\d{4}|(?:(?:this|current|last|previous|prior|next) (?:calendar )?)?(?:day|week|weekend|month|quarter|year)|today|yesterday)`;
+  const calendarOperator = `(?:before|after|through|until|since|from|to|between)(?=\\s+(?:the\\s+)?${calendarOperand}\\b)`;
+  const tokens = new RegExp(`\\b(?:${datePattern}|(?<=\\b(?:${monthWords}|before|after|through|until|since|from|to|between)(?: \\d{4})?(?: the)? )(?:${dayOrdinalWords})|(?:(?:this|current|last|previous|prior|next) (?:calendar )?(?:month|week|weekend|quarter|year)|(?:month|week|year)[ -]to[ -]date|(?:last|past) \\d{1,4} days|today|yesterday)|\\d{1,2}(?:st|nd|rd|th)|\\d{4}|${calendarOperator}|${calendarWeekdayWords}|${monthWords}|sept|q[1-4]|quarter|year)\\b|\\b\\d+(?=\\s+(?:${monthWords})\\b)|(?<=\\b(?:${monthWords})\\s+)\\d+`, 'gi');
   // These words have independently supported non-date meanings (a modal,
   // payment direction, refund basis, transfer scope, or snapshot freshness).
   // Their spans cannot cover a following day, weekday, month, or year.
   const nonCalendar = /\b(?:may (?=i|we|you)|meant to be|come through|to (?=see|check|repeat|know|find|view|review|retrieve)|(?:add(?:ed)? up|amount(?:ed)?|sum(?:med)? up) to|through the bank|up to date|(?:payments?|paid|went|billed|money in) to|after fees|(?:moves|transfers) from my other accounts|(?:moves|transfers) between (?:the )?personal and business (?:accounts?|accts?))\b/gi;
   // Output counts cannot consume day numbers or recurring-day restrictions.
   const outputCount = /\b(?:one|two|three|four|five|six|seven|eight|nine|ten|\d{1,3})(?= (?:biggest|largest|highest|most expensive|newest|recent|outgoing|incoming|purchases?|expenses?|charges?|transactions?|payments?|deposits?|transfers?)\b)/gi;
-  const lexicalSpans = [...text.matchAll(nonCalendar), ...text.matchAll(outputCount)].map(m => [m.index,m.index+m[0].length]).concat(refundBasisSpans(text));
+  const presentation = /\b(?:so far|by this point|month[ -]by[ -]month|(?:by|per|each) month|(?:using |for |over )?(?:the )?same (?:number of days|length|period|days))\b/gi;
+  const lexicalSpans = [...text.matchAll(nonCalendar), ...text.matchAll(outputCount), ...text.matchAll(presentation)].map(m => [m.index,m.index+m[0].length]).concat(refundBasisSpans(text));
   const unread = [...text.matchAll(tokens)].filter(m => ![...spans,...lexicalSpans].some(([start,end]) => m.index >= start && m.index + m[0].length <= end));
-  // A consumed period licenses only admitted financial complements, wherever
-  // they occur; an unknown restriction must fail closed.
-  // This checks the complement as text, rather than guessing every possible
-  // spelling of half-periods, recurring days, or owner-defined cutoffs.
-  const lastEnd = spans.length ? Math.max(...spans.map(([,end]) => end)) : null;
-  if (lastEnd !== null) {
-    // Selectors are removed by the caller. Check every complement, including
-    // the prefix and bridges, so unknown subsets cannot become whole periods.
-    const complement = text.split('').map((ch, i) => [...spans, ...lexicalSpans]
-      .some(([a, b]) => i >= a && i < b) ? ' ' : ch).join('');
-    const admitted = complement.replace(/\b(?:end up (?=(?:paying|spending)\b)|so far|by this point|month[ -]by[ -]month|(?:by|per|each) month|second candidate match|newest first|highest first|(?:using |for |over )?(?:the )?same (?:number of days|length|period|days))\b/g, match => ' '.repeat(match.length));
-    for (const m of admitted.matchAll(/[\p{L}\p{N}]+/gu)) {
-      if (!financialRemainderWords.has(m[0])) unread.push(m);
-    }
-    const tail = text.slice(lastEnd).trim();
-    const tailStart = lastEnd + text.slice(lastEnd).indexOf(tail);
-    const financialTail = /^(?:[\s,;:.?!]|(?:after (?:fees|refunds?|returns|credits)|net of refunds|once refunds are netted out|less refunds|by payee|excluding (?:own )?transfers|including (?:own )?transfers|please)\b)*$/i;
-
-    const financialText = [...tail].map((ch,i) => lexicalSpans.some(([a,b]) => tailStart+i >= a && tailStart+i < b) ? ' ' : ch).join('');
-    const financialRemainder = financialText.replace(/\b(?:end up (?=(?:paying|spending)\b)|newest first|highest first|(?:using |for |over )?(?:the )?same (?:number of days|length|period|days))\b/g, '').match(/[\p{L}\p{N}]+/gu) || [];
-
-    if (!financialTail.test(tail) && !financialRemainder.every(word => financialRemainderWords.has(word))) {
-      if (!unread.some(m => m.index >= lastEnd)) unread.push({ 0: tail, index: tailStart });
-    }
-  }
-  // Restriction introducers before a date must not disappear into the subject.
-  // Their complete suffix is unresolved until an interval grammar consumes it.
-  const restriction = /\b(?:not (?:in|during)|limited|restricted|except|business days|weekends|half|fortnight|cutoff)\b/gi;
+  // Only closed temporal restrictions can add calendar residue. Unknown verbs,
+  // description prose and counts remain under the independent intent guards.
+  // Check prefixes and tails alike so a narrower period cannot become a total.
+  const restriction = new RegExp(`\\b(?:(?:not (?:in|during)|outside|except(?: in| during)?|limited to|restricted to|(?:immediately )?following|subsequent to|unrecognized_modifier|starting|ending|prior to|earlier than|later than)(?=\\s+(?:(?:the|its)\\s+)?${calendarOperand}\\b)|(?:early|late|mid)(?=[ -]+(?:the\\s+)?${calendarOperand}\\b)|(?:business |working )?days?|weeks?|months?|quarters?|years?|weekends?|weekdays?|holidays?|fortnights?|(?:first|second|latter|earlier|later|opening|closing) half|half of(?=\\s+(?:the\\s+)?${calendarOperand}\\b)|(?:custom|calendar|date|period) cutoff|(?:before|after|through|until|since) (?:\\d{1,2}:\\d{2}(?:\\s*[ap]m)?|noon|midnight|breakfast|lunch|dinner)|(?:at|near|toward|towards) (?:the |its )?(?:start|beginning|end)|end of(?=\\s+(?:the\\s+)?${calendarOperand}\\b))\\b`, 'gi');
   for (const m of text.matchAll(restriction)) {
-    if (!spans.some(([start,end]) => m.index >= start && m.index + m[0].length <= end)) unread.push(m);
+    if (![...spans,...lexicalSpans].some(([start,end]) => m.index >= start && m.index + m[0].length <= end)) unread.push(m);
   }
   unread.sort((a,b) => a.index - b.index);
   // Convert normalized offsets back to exact original character boundaries.
@@ -237,5 +210,10 @@ export function calendarConsumption(question, parsed) {
     else groups.push([start, end]);
   }
   const words = groups.map(([start,end]) => question.slice(start,end));
-  return words.length ? { ...parsed, invalid: true, consumed, unread: words } : parsed && { ...parsed, consumed };
+  // Retain the parser's unresolved decision for diagnostics. Only a valid,
+  // independently grounded window may become a disclosed broader reading;
+  // malformed, contradictory and future dates gain no execution authority.
+  return words.length ? { ...parsed, invalid: true, consumed, unread: words,
+    ...(parsed?.from && parsed?.to && !parsed.invalid && !words.some(word => new RegExp(`\\b(?:${monthWords}|sept|q[1-4]|\\d{4}|(?:this|current|last|previous|prior|next) (?:calendar )?(?:month|week|quarter|year)|tomorrow)\\b`, 'i').test(word)) ? { unusedCalendarLimits: words } : {}) }
+    : parsed && { ...parsed, consumed };
 }

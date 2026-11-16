@@ -37,20 +37,23 @@ async function ask(f, question, kind = 'expense_summary', extra = {}) {
 }
 const scopeForms = ['', ' for my business'];
 for (const scope of scopeForms) {
-  test(`G1 payment subject refuses ordinary expense substitution${scope}`, async t => {
+  test(`G1 payment subject gives a partial loan figure without ordinary expense substitution${scope}`, async t => {
     const f = book(t, { other: 'loan', rows: [{ description: 'Ordinary purchase', payee: 'Store Unit', cents: 123 }] });
     for (const subject of ['loan', 'mortgage', 'lender', 'line of credit']) {
       const b = await ask(f, `How much did I pay on my ${subject} last month${scope}?`, 'totals', { account_hint: subject, direction: 'outflow' });
-      assert.match(b.answer || b.gaps?.[0]?.detail || '', /can(?:not|'t) confirm loan payments/i);
-      assert.match(b.answer || b.gaps?.[0]?.detail || '', /loan account directly/i);
-      assert.ok(!b.ledger || b.ledger.complete === false, 'no certified expense or widened zero');
-      assert.doesNotMatch(b.answer || '', /You spent|Money out:|\$0\.00/);
+      assert.match(b.answer, /identifiable loan payments/i);
+      assert.match(b.answer, /unclassified payments may be missing/i);
+      assert.equal(b.ledger.total_minor, 0, 'ordinary purchase is not a loan payment');
+      assert.equal(b.ledger.complete, false);
+      assert.doesNotMatch(b.answer, /You spent|Money out:/);
     }
   });
-  test(`G1 unresolved loan selector refuses widened spending${scope}`, async t => {
+  test(`G1 unresolved loan selector returns qualified loan candidates without widening spending${scope}`, async t => {
     const f = book(t, { rows: [{ description: 'Ordinary purchase', payee: 'Store Unit', cents: 123 }] });
     const b = await ask(f, `What did my loan account spend last month${scope}?`, 'expense_summary', { account_hint: 'loan account' });
-    assert.match(b.answer || b.gaps?.[0]?.detail || '', /can(?:not|'t) confirm loan payments/i);
+    assert.match(b.answer, /\$0\.00 in identifiable loan.payment/i);
+    assert.match(b.answer, /requested loan account is unresolved/i);
+    assert.doesNotMatch(b.answer, /withheld|cannot|can't/i);
     assert.ok(!b.ledger || b.ledger.expense_total_minor == null, 'unresolved loan never widens');
   });
   test(`G2 uncertain own debit is excluded and disclosed in spending${scope}`, async t => {
@@ -84,15 +87,22 @@ for (const scope of scopeForms) {
   test(`G4 possible own credit is excluded from payer income and disclosed${scope}`, async t => {
     const f = book(t, { rows: [{ description: 'Transfer from my unconnected own account', payee: 'unconnected Unit', direction: 'inflow' },
       { description: 'Outside deposit', payee: 'Customer Unit', direction: 'inflow', cents: 123 }] });
-    const b = await ask(f, `who paid me last month${scope ? ' for my business accounts' : ''}?`, 'merchant', { direction: 'inflow', ...(scope ? { account_hint: 'business accounts' } : {}) });
-    if (scope && !b.ledger) {
-      // This compound wording already stops at calendar admission. Its parsed
-      // refusal must stay explicit and cannot certify the possible credit.
-      assert.equal(b.gaps?.[0]?.reason, 'period_contradiction');
-      assert.equal(b.evidence_gate.complete, false);
-      assert.doesNotMatch(b.answer || '', /\$[0-9]/);
-      return;
+    const green = await ask(f, 'who paid me last month?', 'merchant', { direction: 'inflow' });
+    assert.equal(green.ledger.total_minor, 123, 'the unscoped payer control excludes the own credit');
+    assert.equal(green.ledger.not_payments.total_minor, 1);
+    if (scope) {
+      f.raw(`INSERT INTO fin_entities(entity_slug,legal_name,kind,relationship,provenance,basis_state,recorded_at)
+        VALUES ('household','Synthetic household','household','owned','owner_stated','confirmed',?)`, NOW);
+      f.raw(`INSERT INTO fin_accounts(account_slug,entity_slug,account_kind,balance_role,mask,feed_mode,provenance,basis_state,recorded_at)
+        VALUES ('private','household','checking','asset','9012','manual','owner_stated','confirmed',?)`, NOW);
+      f.raw(`INSERT INTO fin_account_coverage(account_slug,coverage_status,covered_from,covered_to,computed_at,provenance,basis_state,recorded_at)
+        VALUES ('private','complete','2026-01-01','2026-10-31',?,'owner_stated','confirmed',?)`, NOW, NOW);
+      f.raw(`INSERT INTO fin_transactions(txn_uid,account_slug,posted_on,amount_minor,direction,description,payee,provenance,basis_state,recorded_at)
+        VALUES ('private-income','private','2026-09-15',777,'inflow','Outside deposit','Customer Unit','owner_stated','confirmed',?)`, NOW);
+      const wholeOwner = await ask(f, 'who paid me last month?', 'merchant', { direction: 'inflow' });
+      assert.equal(wholeOwner.ledger.total_minor, 900, 'the broader account scope has a distinct figure');
     }
+    const b = await ask(f, `who paid me last month${scope ? ' for my business accounts' : ''}?`, 'merchant', { direction: 'inflow', ...(scope ? { account_hint: 'business accounts' } : {}) });
     assert.ok(b.ledger, 'payer reader reached: ' + JSON.stringify(b));
     assert.equal(b.ledger.total_minor, 123, b.answer);
     assert.equal(b.ledger.not_payments.count, 1);
@@ -152,7 +162,9 @@ test('equal connected counterpart within three days withholds money out', async 
   const f = book(t, { rows: [{ description: 'Transfer to my unconnected own account' }, { account: 'other', description: 'Outside deposit', direction: 'inflow', date: '2026-09-18' }] });
   const b = await ask(f, 'How much money went out last month?', 'totals');
   assert.ok(b.ledger, 'nonempty movement decision reached');
-  assert.equal(b.ledger.expense_total_minor, null); assert.equal(b.ledger.complete, false);
+  assert.equal(b.ledger.expense_total_minor, 1); assert.equal(b.ledger.complete, false);
+  assert.match(b.answer, /up to \$0\.01 may be counted twice/);
+  assert.doesNotMatch(b.answer, /withheld|cannot|can't/i);
   assert.equal(b.ledger.reason, 'money_out_destination_unconfirmed');
 });
 
@@ -292,7 +304,9 @@ test('green accepted card expense conflict retains its ownership review hold', a
   f.raw("UPDATE fin_transactions SET description='payment to account 5678',payee='card payment'");
   const held = await ask(f, 'What did I spend last month?');
   assert.equal(held.ledger.reason, 'owned_movement_unconfirmed');
-  assert.equal(held.ledger.expense_total_minor, null);
+  assert.equal(held.ledger.expense_total_minor, 123, 'confirmed fee stays counted despite endpoint uncertainty');
+  assert.match(held.answer, /\$1\.23/);
+  assert.doesNotMatch(held.answer, /withheld|cannot|can't/i);
   assert.equal(held.ledger.complete, false);
 });
 
@@ -312,7 +326,8 @@ test('green reciprocal withdrawal proof preserves default and explicit inclusion
     f.raw("UPDATE fin_accounts SET account_kind='other' WHERE account_slug='other'");
     const untyped = await ask(f, 'What was my net income last month?', 'totals', { direction: 'both' });
     assert.equal(untyped.evidence_gate.complete, false, 'an unknown kind cannot license the new asset-pair exclusion');
-    assert.equal(untyped.ledger.total_minor, null);
+    assert.equal(untyped.ledger.net_minor, 345, 'eligible checking credit retained; unknown other account does not contribute to this measure');
+    assert.doesNotMatch(untyped.answer, /withheld|cannot|can't/i);
     assert.equal(untyped.ledger.reason, 'money_out_destination_unconfirmed');
     assert.ok(untyped.ledger.possible_payments.some(row => row.amount_minor === 345), 'unconfirmed kind reaches a populated movement decision');
   }

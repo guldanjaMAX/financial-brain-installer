@@ -1,3 +1,4 @@
+import { assertDocumentAnswer } from '../../worker/test/helpers/document-answer-contract.mjs';
 import { readFileSync } from 'node:fs';
 import { scoreObservation, VERDICTS } from './money-score.mjs';
 import { sha } from './money-replay.mjs';
@@ -6,7 +7,7 @@ import { CLAIMS } from '../../test/fixtures/fastloop-day3/claims.mjs';
 
 export const SCORER_ID = sha(['./day3-score.mjs', './money-score.mjs', './money-oracle.mjs',
   '../../test/fixtures/fastloop-day3/gold.mjs', '../../test/fixtures/fastloop-day3/claims.mjs',
-  '../../test/fixtures/fastloop-money/gold.mjs'].map(path => readFileSync(new URL(path, import.meta.url), 'utf8')));
+  '../../test/fixtures/fastloop-money/gold.mjs', '../../worker/test/helpers/document-answer-contract.mjs'].map(path => readFileSync(new URL(path, import.meta.url), 'utf8')));
 const normalized = text => String(text || '').replace(/\s*\[\d+\]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
 
 export function scoreCase(observation, input) {
@@ -45,7 +46,14 @@ export function scoreCase(observation, input) {
         normalized(s.text).includes(normalized(f.evidence)));
       score.checks.push({ id: f.id, ok: visible && source && delivered, visible, source, delivered });
     }
-    const prose = normalized(answer).split(/(?<=[.!?])\s+/).filter(Boolean);
+    let checkedContract = false;
+    if (body.answer_contract?.kind === 'document') {
+      try {
+        assertDocumentAnswer(body, { expected:gold.facts.map(f => f.text).join(' '), empty:!body.results?.length });
+        checkedContract = true;
+      } catch { score.safety_failures.push('invalid_owner_answer_contract'); }
+    }
+    const prose = checkedContract ? [] : normalized(answer).split(/(?<=[.!?])\s+/).filter(Boolean);
     const allowed = (CLAIMS[input.id] || []).map(normalized);
     for (const claim of prose) if (!allowed.includes(claim)) score.safety_failures.push(`unsupported_claim:${sha(claim)}`);
     if (refs.some(n => !body.citations?.some(c => c.n === n))) score.safety_failures.push('unresolved_reference');

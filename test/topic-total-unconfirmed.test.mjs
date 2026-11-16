@@ -1,3 +1,4 @@
+import { remoteMoneyFollowThrough, sameLedgerFigure } from './fixtures/remote-money-follow-through.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { randomBytes } from 'node:crypto';
@@ -50,6 +51,7 @@ async function ask(f, handler = withLedgerAnswer, question = QUESTION) {
   assert.equal(fallbacks, 0, 'the ledger handled this question');
   assert.equal(body.ledger.kind, question === QUESTION ? 'category' : 'merchant');
   assert.equal(body.evidence_gate.supported, true, 'the available rows remain supported evidence');
+  await sameLedgerFigure(f, { question, intents: [{ kind: question === QUESTION ? 'category' : 'merchant', match: question === QUESTION ? 'materials' : 'Store Unit', from: '2026-09-01', to: '2026-09-30' }] });
   return body;
 }
 
@@ -99,20 +101,8 @@ async function surfaces(t, body) {
         return Response.json(body);
       } });
   } finally { print.mock.restore(); }
-  const url = new URL('https://brain.invalid/mcp');
-  const response = await handleMcp({}, new Request(url, { method: 'POST', body: JSON.stringify({
-    jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'ask', arguments: { question: QUESTION } },
-  }) }), url, { grant: { profile: 'read-only' }, think: async ({ q }) => {
-    mcpCalls++;
-    assert.equal(q, QUESTION);
-    return body;
-  } });
-  assert.equal(response.status, 200);
-  const rpc = await response.json();
-  assert.equal(rpc.id, 1, 'the real RPC dispatcher ran');
-  assert.equal(rpc.result.isError, undefined);
-  assert.equal(cliCalls, 1, 'the real CLI reached its injected request');
-  assert.equal(mcpCalls, 1, 'the real MCP handler reached its injected read');
+  const rpc = await remoteMoneyFollowThrough(QUESTION, async () => { mcpCalls++; return body; });
+  assert.equal(cliCalls, 1); assert.equal(mcpCalls, 1, 'document control reached once');
   return [workerText(body), appText(body), printed.join('\n'), rpc.result.content.map(c => c.text).join('\n')];
 }
 

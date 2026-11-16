@@ -1,8 +1,9 @@
 import { createHash, createPublicKey, randomBytes, verify as verifySignature } from "node:crypto";
 
 export const PRIVATE_OFFER_SCHEMA = "fb-private-offer/1";
-// The release owner replaces this placeholder with the one founder public key.
-export const PRIVATE_OFFER_PUBLIC_KEY = null;
+// The one founder public key (Ed25519, SPKI SHA-256 2ad6025adc75a8181cef7bcdd29cccf3722d0995f2dc11de8be74c3cbf4d537d).
+// Created 2026-11-12; the private key lives only in the founder's Keychain.
+export const PRIVATE_OFFER_PUBLIC_KEY = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAuKjGqgF5imHqvOMyR/CNvZoNKdyuFWctRWdRxh/J9H8=\n-----END PUBLIC KEY-----\n";
 export const PRIVATE_OFFER_ORIGIN = "https://financialbrain.ai/update/offers/";
 export const PRIVATE_OFFER_MAX_BYTES = 16 * 1024;
 export const PRIVATE_PACKAGE_MAX_BYTES = 128 * 1024 * 1024;
@@ -30,6 +31,7 @@ const MESSAGES = Object.freeze({
   PRIVATE_OFFER_USAGE: "Use the private offer check or supply both a private package and an offer file.",
   PRIVATE_OFFER_INSTALL: "The verified private package could not be installed into this CLI location.",
   PRIVATE_OFFER_UPDATE: "The normal update did not complete and its saved checkpoint must be preserved.",
+  PRIVATE_OFFER_RECOVERY: "The private update needs recovery. Daily imports remain paused. Preserve the prior CLI and update checkpoint, then retry the normal update before replacing the package again.",
   PRIVATE_OFFER_SIGN: "The private offer could not be signed or saved with the supplied inputs.",
 });
 
@@ -41,6 +43,19 @@ export class PrivateOfferError extends Error {
   }
 }
 export function refusePrivateOffer(code) { throw new PrivateOfferError(code); }
+
+/** A release must carry the approved public trust anchor, never a private key. */
+export function assertPrivateOfferReleaseKey(publicKey = PRIVATE_OFFER_PUBLIC_KEY, { onCheck = () => {} } = {}) {
+  onCheck("release_key");
+  try {
+    if (typeof publicKey === "string") {
+      if (!publicKey.startsWith("-----BEGIN PUBLIC KEY-----\n")) throw new Error();
+      publicKey = createPublicKey(publicKey);
+    }
+    if (publicKey?.type !== "public" || publicKey.asymmetricKeyType !== "ed25519") throw new Error();
+    return publicKey;
+  } catch { refusePrivateOffer("PRIVATE_OFFER_KEY"); }
+}
 
 /** Sorted object keys and JSON primitive encoding define the signed bytes. */
 export function canonicalPrivateJson(value) {

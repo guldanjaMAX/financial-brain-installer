@@ -190,7 +190,7 @@ const find = (r, id) => (r.findings || []).find((f) => f.id === id);
   source(env._db, "documents");
   for (let i = 0; i < 10; i++) { doc(env._db, `paused-d${i}`); chunk(env._db, `paused-d${i}#0`, `paused-d${i}`); }
   env._db.prepare(
-    "INSERT INTO corpus_stats (source, documents, chunks) VALUES ('documents', 10, 10)",
+    "INSERT INTO corpus_stats (source, documents, chunks) VALUES ('documents', 10, 10) ON CONFLICT(source) DO UPDATE SET documents=excluded.documents, chunks=excluded.chunks",
   ).run();
 
   const finding = find(await diagnose(env), "store_agreement");

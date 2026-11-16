@@ -233,6 +233,7 @@ export async function planDailyRefresh({
         source_names: (entry?.legs || []).length
           ? entry.legs.map((leg) => String(leg.source || key))
           : [String(configured?.source || key)],
+        ...(key === "google_drive" ? { sync_mode: "incremental_add_update_only", automatic_removals: false } : {}),
       });
     });
   const daily = dailyConfiguration(m, localTimezone);

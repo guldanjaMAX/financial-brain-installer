@@ -1,3 +1,4 @@
+import { assertOwnerLedgerContract } from './helpers/ledger-answer-contract.mjs';
 import { absenceLintText } from './fixtures/plain-copy-expectations.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -959,6 +960,7 @@ for (const [id, q, bad, good] of [
   f.add('other', 'Other Unit', 'Other Unit', { date: '2026-09-12', cents: 67890, direction: 'outflow' });
   f.add('other-current', 'Other Unit', 'Other Unit', { date: '2026-10-08', cents: 2222, direction: 'outflow' });
   f.add('other-income', 'Store Unit', 'Store Unit', { date: '2026-09-13', cents: 8888 });
+  if (id === 'R1 shortened vendor') f.add('short-selector', 'Store', 'Store', { date: '2026-09-14', cents: 777, direction: 'outflow' });
   const greenQuestion = ['R2 named month', 'R2 future expenses', 'R3 dropped part', 'R4 translation', 'R4 instruction suffix',
     'R1 filtered transactions', 'R1 recurring deposits', 'R3 ambiguous shared period', 'R1 named institution'].includes(id) ? question : q;
   const control = await ask(f, greenQuestion, { intents: good });
@@ -966,19 +968,14 @@ for (const [id, q, bad, good] of [
   assert.equal(control.calls, 1);
   assert.ok(control.sql.length > 0);
   const r = await ask(f, q, { intents: bad });
-  if (['R1 missing vendor', 'R1 shortened vendor'].includes(id)) {
-    assert.equal(r.sql.length, 0); assert.equal(r.body.ledger, undefined);
-    assert.ok(r.body.gaps.some(g => g.scope === 'calendar'));
-    return;
-  }
   // Closed model readings are tentative. These review probes state the chosen
   // selector, direction, count and window before figures and always ask for clarity.
   const visible = {
     'R2 named month': 'Showing ordinary completed expenses across all accounts for September.',
     'R2 quarter lost': 'Showing ordinary completed expenses across all accounts for July through September.',
-    'R1 missing vendor': 'Showing ordinary completed expenses across all accounts for September.',
+    'R1 missing vendor': 'Showing ordinary completed expenses across all accounts for September. I did not narrow it by \'Store Unit\'.',
     'R1 wrong direction': 'Showing completed deposits matching the literal selector "Store Unit" across all accounts for September.',
-    'R1 shortened vendor': 'Showing completed expenses matching the literal selector "Store" across all accounts for September.',
+    'R1 shortened vendor': 'Showing ordinary completed expenses across all accounts for September. I did not narrow it by \'Store Unit\'.',
     'R3 swapped periods': 'Showing completed expenses matching the literal selector "Store Unit" across all accounts for September; Showing completed expenses matching the literal selector "Other Unit" across all accounts for October 1 to 12.',
     'R5 wrong count': 'Showing up to 100 of your largest completed expenses across all accounts for September.',
     'R1 filtered transactions': 'Showing up to 10 of your newest completed transactions across all accounts through October 12.',
@@ -1000,6 +997,13 @@ for (const [id, q, bad, good] of [
     assert.equal(r.body.evidence_gate.complete, false);
     assert.equal(r.body.evidence_gate.partial, true);
     if (id === 'R1 missing vendor') assert.equal(r.body.ledger.total_minor, 80235);
+    if (['R1 missing vendor', 'R1 shortened vendor'].includes(id)) {
+      assert.equal(control.body.ledger.total_minor, 12345, 'the full selector has a distinct numeric peer');
+      assert.deepEqual(r.body.ledger.unused_activity_limits, ['Store Unit']);
+      assert.ok(r.body.clarification.best_reading.includes("I did not narrow it by 'Store Unit'"));
+      assert.match(r.body.answer, id === 'R1 missing vendor' ? /\$802\.35/ : /\$810\.12/);
+    }
+    if (id === 'R1 shortened vendor') assert.equal(r.body.ledger.total_minor, 81012);
     if (id === 'R1 wrong direction') {
       assert.equal(r.body.ledger.attribution_incomplete, true);
       assert.ok(r.body.citations.some(c => c.amount_minor === 8888));
@@ -1010,6 +1014,7 @@ for (const [id, q, bad, good] of [
     }
     return;
   }
+  if (id === 'R2 future expenses') { assert.equal(r.body.ledger.projection, true); assert.match(r.body.answer, /Projection: about/); return; }
   assert.equal(r.fallback + (r.calendarRefused || 0), 1, 'semantic decision reached');
   assert.equal(r.sql.length, 0);
   assert.ok(r.calls <= 1);
@@ -1212,7 +1217,7 @@ test('restoring parser and timeout defects fail their positive wire contracts', 
 
 test('restoring ambiguity and future-activity guards fails the same safety contracts', async () => {
   const cases = [
-    [[["if (!intent.forecastRequested && /\\b(?:next (?:week|month|quarter|year)|tomorrow|future|forecast|predict)\\b/i.test(clause)) return fallbackDecision('capability');", '']], [],
+    [[['const next = text.match(', "if (/next month/.test(text)) return { invalid: true }; const next = text.match("]], [],
       'Could you total our expenses next month?',
       { intents: [recordedIntent('expense_summary', { direction: 'outflow' })] }],
     [[], [['clauses.length !== intents.length', 'false']],
@@ -1228,12 +1233,12 @@ test('restoring ambiguity and future-activity guards fails the same safety contr
   for (const [caseIndex, [edits, helperEdits, q, raw]] of cases.entries()) {
     const contract = validator => {
       assert.equal(validator(structuredClone(reply), question, context)?.[0].kind, 'largest', 'green control');
-      assert.equal(validator(structuredClone(raw), q, context), null, 'safety decision reached');
+      if (caseIndex === 0) assert.equal(validator(structuredClone(raw), q, context)?.[0].projection, true, 'future reading is an estimate');
+      else assert.equal(validator(structuredClone(raw), q, context), null, 'safety decision reached');
     };
     contract(validateLedgerIntents);
     const mutant = await intentMutant(edits, helperEdits);
-    if ([0, 2].includes(caseIndex)) assert.doesNotThrow(() => contract(mutant.validateLedgerIntents)); // residue independently contains future activity
-    else assert.throws(() => contract(mutant.validateLedgerIntents), assert.AssertionError);
+    assert.throws(() => contract(mutant.validateLedgerIntents), assert.AssertionError);
   }
 });
 
@@ -1752,14 +1757,15 @@ test('restoring validation mutants fail the same assertions with green controls'
     }],
   ];
   for (const [id, from, to, contract] of checks) {
-    assert.ok(source.includes(from), `${id} decision point exists`);
+    assert.equal(source.split(from).length - 1, 1, `${id} unique decision point exists`);
+    assert.equal(validateLedgerIntents(structuredClone(reply), question, context)?.[0].kind, 'largest', `${id} green control`);
     contract(validateLedgerIntents);
     // Each restoring mutant must fail the same independently grounded contract.
     const mutated = source.replace(from, to);
     assert.notEqual(mutated, source);
     const module = await import(`data:text/javascript;base64,${Buffer.from(mutated).toString('base64')}`);
-    if (['literal', 'amount-required', 'future'].includes(id)) contract(module.validateLedgerIntents); // complete complements contain the restored guard
-    else assert.throws(() => contract(module.validateLedgerIntents), assert.AssertionError, `${id} mutant must fail`);
+    assert.equal(module.validateLedgerIntents(structuredClone(reply), question, context)?.[0].kind, 'largest', `${id} mutant green control`);
+    assert.throws(() => contract(module.validateLedgerIntents), assert.AssertionError, `${id} mutant must fail`);
   }
 });
 
@@ -1899,7 +1905,9 @@ test('R4 clarification survives the real HTTP Think response with citations', as
   assert.ok(body.citations.length > 0);
   assert.deepEqual(body.ledger.rows.map(r => r.amount_minor), [12345]);
   assert.match(body.answer.split('\n')[0], /^Here's my best reading of your question:/);
-  assert.ok(body.answer.endsWith(readingQuestion));
+  assert.ok(body.answer.split('\n\nCoverage:')[0].endsWith(readingQuestion));
+  assertOwnerLedgerContract(body);
+  assert.match(body.confidence_text, /Confidence: Low \(0%\).*Why:.*Missing:/s);
   assert.equal(body.evidence_gate.complete, false);
 });
 
@@ -1945,6 +1953,7 @@ test('R4 clarification hard refusals survive uncertain segmentation', async t =>
     assert.ok(green.sql.length > 0);
     const r = await ask(f, `${base} and include charges at another payee?`, { ambiguous: false, intents: [intent] });
     assert.equal(r.calls, 1, 'closed-reply decision was reached');
+    if (id === 'future activity') { assert.equal(r.body.ledger.projection, true); assert.equal(r.body.evidence_gate.complete, false); assert.match(r.body.answer, /Projection: about/); return; }
     if (id === 'missing merchant selector') {
       assert.equal(r.fallback, 0); assert.ok(r.sql.length > 0);
       assert.equal(r.body.ledger.kind, 'expense_summary');
@@ -2035,6 +2044,19 @@ for (const [label, period, alternatives] of [
   assert.ok(green.body.ledger);
   const r = await ask(f, `${base} or the last 30 days?`, raw);
   assert.equal(r.calls, 1);
+  if (label === 'since day') {
+    assert.ok(r.sql.length > 0, 'the independently readable since window reaches facts');
+    assert.equal(r.body.ledger.total_minor, 17777);
+    assert.deepEqual([r.body.ledger.from, r.body.ledger.to], ['2026-09-01', '2026-10-12']);
+    assert.deepEqual(r.body.ledger.unused_calendar_limits, ['last 30 days']);
+    assert.match(r.body.answer, /September 1 to October 12.*I did not narrow it by 'last 30 days'/);
+    assert.ok(r.body.clarification.best_reading.includes("I did not narrow it by 'last 30 days'"));
+    assert.equal(r.body.evidence_gate.complete, false);
+    const peer = await ask(f, 'Could you retrieve posted expenses for the last 30 days?', raw);
+    assert.equal(peer.calls, 1); assert.ok(peer.sql.length > 0);
+    assert.equal(peer.body.ledger.total_minor, 5432, 'the unselected alternative has a different figure');
+    return;
+  }
   assert.equal(r.sql.length, 0);
   assert.equal(r.body.ledger, undefined);
   assert.ok(r.body.gaps.some(g => g.scope === 'calendar'));
@@ -2386,8 +2408,9 @@ test('R8 class 4 loose time and weekend periods override model guesses locally',
   }
   const future = await ask(f, 'Could you retrieve expenses this weekend?', { intents: [recordedIntent('expense_summary')] });
   assert.equal(future.calls, 1, 'future weekend decision reached');
-  assert.equal(future.fallback + (future.calendarRefused || 0), 1);
-  assert.equal(future.sql.length, 0);
+  assert.equal(future.body.ledger.projection, true);
+  assert.equal(future.body.evidence_gate.complete, false);
+  assert.ok(future.sql.length > 0);
 });
 
 test('R8 class 5 personal versus business uses confirmed roles for compound hints', async t => {
@@ -2485,7 +2508,7 @@ async function r8AnswerMutant(file, from, to) {
 const r8RestoringSites = [
   ['ledger-intent-contract.js', 'accts?|bal|txns?|rev|cc|landed|outgoings|went to|take in|did it hit|come through|', ''],
   ['ledger-intent.js', 'if (paymentWindow) {', 'if (false) {'],
-  ['ledger-intent.js', 'const modelAccountScope = accountScopeLiteral(value.vendor_text)', 'const modelAccountScope = false'],
+  ['ledger-intent.js', 'let modelAccountScope = accountScopeLiteral(value.vendor_text)', 'let modelAccountScope = false'],
   ['ledger-intent.js', 'if (recent)', 'if (false)'],
   ['ledger-answer.js', 'if (compound) return Response.json', 'if (false && compound) return Response.json'],
   ['ledger-intent.js', "if (typeof value.count === 'string' &&", 'if (false &&'],
@@ -3604,15 +3627,17 @@ test('R12 class 1 unsupported qualifiers, advice, tax filing and non-owner repli
     ['Could you advise how to spend money?',recordedIntent('not_money')],
     ['Could you file a tax return using these payments?',recordedIntent('not_money')],
     ["Could you retrieve someone else's account balance?",recordedIntent('not_money')],
-    ['Could you retrieve expenses next year?',recordedIntent('expense_summary')],
+
   ]) {
     const r = await ask(f,q,{ intents: [intent] });
     assert.equal(r.fallback + (r.calendarRefused || 0),1,'refusal decision continuation reached');
     assert.equal(r.sql.length,0);
   }
+  const projected = await ask(f,'Could you retrieve expenses next year?',{ intents: [recordedIntent('expense_summary')] });
+  assert.equal(projected.body.ledger.projection, true); assert.equal(projected.body.evidence_gate.complete, false);
   const posted = await ask(f,'Could you retrieve pending transactions this month?',{ intents: [recordedIntent('transactions')] });
   assert.equal(posted.calls,1); assert.equal(posted.fallback,0); assert.ok(posted.sql.length > 0);
-  assert.match(posted.body.answer,/This reading covers completed transactions only; pending activity is not included\./);
+  assert.match(posted.body.answer,/pending.*excluded from completed cash/s);
   const future = await ask(f,'Could you forecast our bank balance next month?',{ intents: [recordedIntent('forecast')] });
   assert.equal(future.calls,1); assert.ok(future.sql.length > 0,'snapshot control reached');
   assert.equal(future.body.ledger.forecast_supported,false);
@@ -4257,7 +4282,7 @@ const r16Details = [
   ['largest', 'Who received the most, and list the payment dates?', { direction: 'inflow', count: 1 }, null],
   ['deposits', 'Could you retrieve the newest payment we got, and which account did that payment land in?', { count: 1 }, 'which account did that payment land in'],
 ];
-const refundUnconfirmed = "I cannot confirm spending after refunds because the bank feed does not supply a refund or reversal type; the amounts below are before subtracting refunds.";
+const refundUnconfirmed = "The amounts are before subtracting refunds. The bank feed does not supply a refund or reversal type, so the net amount is unknown.";
 for (const [index, [kind, q, extra, tail]] of r16Details.entries()) test(`R16 class 1 detail ${index + 1} reaches a ready reader with a green control`, async t => {
   const api = await import('../src/lib/ledger-intent.js');
   const raw = { unanswered_part: tail, intents: [recordedIntent(kind, extra)] };
@@ -4931,7 +4956,11 @@ test('R19 undated expense selectors keep the round-16 default and dated controls
 
 async function r19PresentationContract(api) {
   const mixed = await r19Extract(api, 'Please retrieve expenses on 10/15 last year.', r19Raw('expense_summary'));
-  assert.equal(mixed.outcome, 'fallback'); assert.ok(mixed.unreadCalendar.length);
+  assert.equal(mixed.outcome, 'ready'); assert.equal(mixed.intents.length, 1, 'the broader year reading was compiled');
+  assert.deepEqual([mixed.intents[0].from, mixed.intents[0].to], ['2025-01-01', '2025-12-31']);
+  assert.deepEqual(mixed.intents[0].unusedCalendarLimits, ['10/15']);
+  assert.match(mixed.intents[0].interpretation, /I did not narrow it by '10\/15'/);
+  assert.equal(mixed.intents[0].dateAssumption, undefined, 'the unused day cannot claim current-year admission');
   const existing = await r19Extract(api, 'Please retrieve 10/15 Unit expenses last year.', r19Raw('merchant', {vendor_text:'10/15 Unit',direction:'outflow'}));
   assert.equal(existing.outcome, 'ready'); assert.ok(existing.intents.length > 0);
   assert.deepEqual([existing.intents[0].from, existing.intents[0].to], ['2025-01-01', '2025-12-31']);
@@ -4943,4 +4972,49 @@ async function r19PresentationContract(api) {
 }
 test('R19 date assumptions describe only an admitted literal window', async () => {
   await r19PresentationContract(await import('../src/lib/ledger-intent.js'));
+});
+
+test('R2 an unused short day keeps the year figure and its explicit reading', async t => {
+  const f = configured(t);
+  f.add('prior-year', 'Store Unit', 'Store Unit', { date: '2025-06-01', cents: 1567, direction: 'outflow' });
+  f.add('short-day', 'Store Unit', 'Store Unit', { date: '2026-10-15', cents: 333, direction: 'outflow' });
+  const raw = r19Raw('expense_summary');
+  const r = await ask(f, 'Please retrieve expenses on 10/15 last year.', raw, r19Context);
+  assert.equal(r.calls, 1); assert.ok(r.sql.length > 0, 'the year reader reached real evidence');
+  assert.equal(r.body.ledger.total_minor, 1567);
+  assert.deepEqual([r.body.ledger.from, r.body.ledger.to], ['2025-01-01', '2025-12-31']);
+  assert.deepEqual(r.body.ledger.unused_calendar_limits, ['10/15']);
+  assert.match(r.body.answer, /2025.*I did not narrow it by '10\/15'/);
+  assert.match(r.body.answer, /\$15\.67/);
+  assert.doesNotMatch(r.body.answer, /month\/day/);
+  assert.equal(r.body.evidence_gate.complete, false);
+  const peer = await ask(f, 'Please retrieve expenses on 10/15.', raw, r19Context);
+  assert.equal(peer.calls, 1); assert.ok(peer.sql.length > 0);
+  assert.equal(peer.body.ledger.total_minor, 333, 'the admitted short day has a different figure');
+  assert.match(peer.body.answer, /month\/day/);
+});
+
+for (const [label, file, before, after] of [
+  ['unused identity in prose', 'ledger-intent.js', 'if (unusedActivityLimits.length) intent.unusedActivityLimits = unusedActivityLimits;', ''],
+  ['unused identity in metadata', 'ledger-answer.js', 'if (intent.unusedActivityLimits?.length) {', 'if (false) {'],
+  ['short identity cannot replace the full identity', 'ledger-intent.js', "if (unusedActivityLimits.length && kind === 'merchant')", 'if (false)'],
+]) test(`R2 selector disclosure mutant killed: ${label}`, async t => {
+  const f = configured(t), q = 'Could you total Store Unit charges last month?';
+  f.add('other-store', 'Other Unit', 'Other Unit', { date: '2026-09-12', cents: 67890, direction: 'outflow' });
+  const raw = { intents: [merchantRecord('Store')] };
+  const contract = r => {
+    assert.equal(r.calls, 1); assert.ok(r.sql.length > 0, 'the chosen reader reached real evidence');
+    assert.equal(r.body.ledger.total_minor, 80235);
+    assert.deepEqual(r.body.ledger.unused_activity_limits, ['Store Unit']);
+    assert.match(r.body.answer.split('\n')[0], /ordinary completed expenses across all accounts.*I did not narrow it by 'Store Unit'/);
+    assert.equal(r.body.evidence_gate.complete, false);
+  };
+  contract(await ask(f, q, raw));
+  const mutant = await answerMutant(file, before, after);
+  const green = await ask(f, q, { intents: [merchantRecord('Store Unit')] }, {}, mutant);
+  assert.equal(green.calls, 1); assert.ok(green.sql.length > 0);
+  assert.equal(green.body.ledger.total_minor, 12345, 'full identity control stays green on the mutant');
+  const red = await ask(f, q, raw, {}, mutant);
+  assert.equal(red.calls, 1); assert.ok(red.sql.length > 0, 'the mutant reached the disclosure decision');
+  assert.throws(() => contract(red), assert.AssertionError);
 });

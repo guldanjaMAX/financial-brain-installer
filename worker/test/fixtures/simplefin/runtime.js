@@ -18,9 +18,11 @@ function database() {
       if (/SELECT COUNT\(\*\) n FROM simplefin_stage_transactions/.test(sql)) return { n: staged };
       if (/SELECT backfill_next FROM simplefin_connections/.test(sql)) return connection;
       if (/FROM simplefin_account_assignments/.test(sql)) return null;
+      if (/SELECT 1 AS ok FROM simplefin_sync_windows/.test(sql)) return null;
       throw new Error("native database unexpected read");
     },
     async all() {
+      if (/FROM bank_feed_items i LEFT JOIN bank_feed_health h/.test(sql)) return { results: item ? [item] : [] };
       if (/SELECT c\.\*,i\.access_ciphertext/.test(sql)) return { results: [{ ...connection, ...item }] };
       if (/SELECT item_ref,backfill_next,backfill_end/.test(sql)) return { results: [connection] };
       if (/FROM simplefin_sync_windows/.test(sql)) return { results: [] };
@@ -28,7 +30,7 @@ function database() {
     },
     async run() {
       if (/INSERT INTO bank_feed_items/.test(sql)) item = { item_ref: params[1],
-        access_ciphertext: params[2], access_iv: params[3], key_version: params[4], status: "connected" };
+        access_ciphertext: params[2], access_iv: params[3], key_version: params[4], connected_at: params[6], status: "connected" };
       if (/INSERT INTO simplefin_connections/.test(sql)) connection = { item_ref: params[1],
         backfill_start: params[2], backfill_next: params[3], backfill_end: params[4], next_pull_at: params[5] };
       if (/INSERT INTO simplefin_stage_transactions/.test(sql)) staged++;

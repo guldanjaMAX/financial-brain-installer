@@ -1,4 +1,7 @@
 import { backfillSourceFamilyIndex } from "./lib/source-family-index.js";
+import { retainedIngestFailureReceipt } from "./lib/retained-ingest.js";
+import { handleDriveFamily } from './lib/drive-family.js';
+import { handleIngestPartProof } from './lib/ingest-part-proof.js';
 import { synthesisIntent, SYNTHESIS_INSTRUCTION, verifySynthesis } from './lib/synthesis-answer.js';
 import { qualifyDatedStatus, datedStatusPrompt, datedStatusInstruction, datedStatusConflicts } from './lib/dated-status-answer.js';
 import { readIngestRemovalRequest, previewIngestRemovals, applyIngestRemovals, ingestRemovalFailure } from "./lib/ingest-removal-plan.js";
@@ -43,6 +46,7 @@ import {
 } from "./lib/core.js";
 import { resolvePrincipal, principalMay, scopeIsUnrestricted } from "./lib/grants.js";
 import { withLedgerAnswer } from "./lib/ledger-answer.js";
+import { documentPromptWindow, finalizeDocumentAnswer, finalizeOwnerLedgerAnswer, readDocumentEvidence } from "./lib/document-answer.js";
 import {
   filterThinkCandidates, SENSITIVE_DOCUMENTS_NOTICE, SENSITIVE_DOCUMENTS_WITHHELD,
 } from "./lib/think-candidate-policy.js";
@@ -81,6 +85,7 @@ import { installedSchemaVersion, acceleratedVectorBootstrap, drainOutbox, outbox
 import { embedText, embedTexts } from "./lib/supabase.js";
 import {
   currentEvidenceCandidates, hasExplicitCurrentIntent, newestCurrentEvidence,
+  recordObservation, reliableRecordObservationTime,
   parseCanonicalEvidenceDate, reliableDocumentTime, retrievalTimeWindow,
 } from "./lib/query-intent.js";
 import { computeAnswerConfidence, refusalConfidence } from "./lib/confidence.js";
@@ -132,6 +137,9 @@ import {
   handleOAuthMetadata, handleProtectedResourceMetadata, handleRegister,
   handleAuthorizePage, handleAuthorizeDecision, handleToken, validateConnectorToken,
 } from "./lib/oauth.js";
+import { handleMoneyQuery } from "./lib/money-query.js";
+import { handleMoneyOverview } from "./lib/money-overview.js";
+import { readOwnerDocumentPage } from "./lib/mcp-endpoint.js";
 import { handleMcp } from "./lib/mcp-endpoint.js";
 import {
   isSourceKindConflict, normalizeSourceFailureEvidence, normalizeSourceReceiptIssueCode, parseProviderWithheldReason,
@@ -192,7 +200,7 @@ function filtersFrom(url) {
 }
 
 const RAG_PARAMETER_KEYS = new Set([
-  "q", "limit", "rerank", "graph_boost", "rrf_k",
+  "q", "limit", "rerank", "graph_boost", "rrf_k", "read_plan",
   "weight_curated", "weight_drive", "weight_message",
   "source", "entity_slug", "client", "category", "from", "to", "top_folder", "platform",
 ]);
@@ -251,6 +259,9 @@ async function privateRagParameters(request, { allowWorkflow = false } = {}) {
       return invalidRagParameters("invalid_filter_value", key);
     }
     searchParams.set(key, String(value));
+  }
+  if (searchParams.has('read_plan') && !['standard','bounded_keyword'].includes(searchParams.get('read_plan'))) {
+    return invalidRagParameters('invalid_read_plan','read_plan');
   }
   const dateBound = (key) => {
     if (!searchParams.has(key)) return null;
@@ -342,12 +353,17 @@ function strongestEvidenceAuthority(results) {
 function citationCandidateForResult(result, index) {
   return {
     n: index + 1,
-    title: (result.title || "untitled").slice(0, 140),
+    title: result.title || "untitled",
+    // Storage labels can qualify a record's status. Preserve them for the
+    // closed-world provenance check; do not infer authority from their names.
+    uri: result.uri || null,
+    top_folder: result.top_folder || null,
     source: result.source || "?",
     source_kind: result.source_kind || null,
     write_provenance: result.write_provenance || null,
     client: result.client || null,
     ts: result.ts || null,
+    ...(result.record_observation ? { record_observation:result.record_observation } : {}),
     occurred_at: result.occurred_at || null,
     date_reliable: result.date_reliable === true,
     date_source: result.date_source || null,
@@ -360,7 +376,12 @@ function citationCandidateForResult(result, index) {
     ...(result.query_variant ? { query_variant: result.query_variant } : {}),
     _lineage_root_ids: evidenceLineageRootIds(result),
     ref: result.ref_key || result.drive_file_id || null,
-    snippet: (result.snippet || "").replace(/\s+/g, " ").slice(0, 900),
+    snippet: (result.snippet || "").replace(/\s+/g, " "),
+    ...(result.retrieval_excerpts ? { retrieval_excerpts:result.retrieval_excerpts } : {}),
+    read_complete: result.read_complete === true,
+    read_coverage: result.read_coverage || null,
+    selection: result.selection || null,
+    question_time: result.question_time,
   };
 }
 
@@ -370,6 +391,7 @@ function citationForDocument(document) {
     source_kind: document.source_kind,
     ...(document.write_provenance ? { write_provenance: document.write_provenance } : {}),
     ref: document.ref, ts: document.ts,
+    ...(document.record_observation ? { record_observation:document.record_observation } : {}),
     date_reliable: document.date_reliable, date_source: document.date_source,
     // A citation drawn from a scan must never look identical to one drawn from
     // a text layer. Preserve the exact public answer-path projection here so a
@@ -377,6 +399,8 @@ function citationForDocument(document) {
     text_source: document.text_source, text_reliable: document.text_reliable,
     ...(document.scanned === true ? { scanned: true } : {}),
     authority: document.authority,
+    read_coverage: document.read_coverage || null,
+    selection: document.selection || null,
     lineage: document.lineage,
     ...(document.query_variant ? { query_variant: document.query_variant } : {}),
   };
@@ -395,6 +419,7 @@ async function unifiedRetrieve(env, url, {
   // and temporary rollback only.
   const r = await measureQueryStage(timing, "retrieval", () => storeFor(env).search(env, {
     query: q,
+    readPlan: url.searchParams.get('read_plan') || 'standard',
     // Both public routes ask the store for the same ranking window. The D1
     // backend's modality pool is fixed separately; this depth only leaves room
     // for shared document/scaffolding handling before the public slice.
@@ -417,6 +442,7 @@ async function unifiedRetrieve(env, url, {
   return {
     matches,
     retrievalReceipt: r.retrieval_receipt,
+    retrievalCoverage: r.retrieval_coverage,
     meaningSearch: r.meaning_search,
     evidenceAuthority: strongestEvidenceAuthority(matches),
     degraded: r.degraded,
@@ -568,7 +594,7 @@ export function computeGaps(results) {
     // fresh. Recency statements use only dates the ingest contract marked as
     // reliable; everything else belongs in the undated denominator.
     .map((r) => ({
-      t: r.date_reliable === true && r.ts ? Date.parse(r.ts) : NaN,
+      t: recordObservation(r).date_reliable === true ? Date.parse(recordObservation(r).ts || '') : NaN,
       source: r.source,
     }))
     .filter((x) => Number.isFinite(x.t));
@@ -732,8 +758,9 @@ function hasMatchingAsOfDate(sentence, docs) {
   if (!/\b(?:as of|through)\b/i.test(sentence)) return false;
   const normalized = String(sentence).toLowerCase().replaceAll(",", "");
   return docs.some((doc) => {
-    if (!doc?.ts || !doc?.date_reliable) return false;
-    const date = new Date(doc.ts);
+    const observed=recordObservation(doc);
+    if (!observed.ts || !observed.date_reliable) return false;
+    const date = new Date(observed.ts);
     if (!Number.isFinite(date.getTime())) return false;
     const iso = date.toISOString().slice(0, 10);
     const long = new Intl.DateTimeFormat("en-US", {
@@ -758,7 +785,6 @@ function questionRetrievalWindow(env, url, question) {
   // Document-backed money has a stricter refuse-only contract that must see
   // outside-window and unreliably dated candidates in order to reject them.
   // Ledger questions have already had their chance to answer before this path.
-  if (isMoneyQuestion(question)) return null;
   const window = retrievalTimeWindow(question, {
     now: Date.now(),
     timeZone: env.BRAIN_TIMEZONE,
@@ -766,8 +792,7 @@ function questionRetrievalWindow(env, url, question) {
   if (!window) return null;
   const from = new Date(window.start).toISOString();
   const to = new Date(window.end - 1).toISOString();
-  url.searchParams.set("from", from);
-  url.searchParams.set("to", to);
+
   return {
     ...window,
     public: { from, to, time_zone: window.timeZone, basis: "question" },
@@ -776,14 +801,13 @@ function questionRetrievalWindow(env, url, question) {
 
 function applyQuestionRetrievalWindow(rows, window) {
   if (!window) return { rows, dropped: 0 };
-  let dropped = 0;
-  const filtered = rows.filter((row) => {
+  const labeled = rows.map(row => {
     const time = reliableDocumentTime(row);
-    const keep = time !== null && time >= window.start && time < window.end;
-    if (!keep) dropped++;
-    return keep;
+    return { ...row, question_time: time === null ? 'date unverified'
+      : time >= window.start && time < window.end ? 'inside requested period'
+      : `outside requested period by ${Math.max(1, Math.ceil((time < window.start ? window.start-time : time-window.end)/86400000))} days` };
   });
-  return { rows: filtered, dropped };
+  return { rows:labeled, dropped:0 };
 }
 
 function localWindowDay(instant, timeZone) {
@@ -812,7 +836,7 @@ function questionRetrievalWindowGap(window, resultCount, dropped) {
   return {
     type: "question_time_window",
     ...shared,
-    detail: "Only reliably dated records inside the question's time range were searched.",
+    detail: "Records were read before applying the question time label. Outside-period and date-unverified records remain visible; their statements do not prove an event occurred in the requested period.",
   };
 }
 
@@ -834,14 +858,16 @@ async function handleUnified(
   const limit = Math.min(parseInt(url.searchParams.get("limit")) || 10, 50);
   // Reranking is an explicit variant. Merely configuring a provider key must
   // not make /unified diverge from the deterministic order consumed by /think.
-  const doRerank = explicitlyEnabled(url.searchParams.get("rerank")) && !!env.ANTHROPIC_API_KEY;
+  let doRerank = explicitlyEnabled(url.searchParams.get("rerank")) && !!env.ANTHROPIC_API_KEY;
 
   const {
-    matches: retrieved, evidenceAuthority, degraded, degradedReason, retrievalScope, access: accessSummary, ignoredFilters,
+    matches: retrieved, retrievalCoverage, evidenceAuthority, degraded, degradedReason, retrievalScope, access: accessSummary, ignoredFilters,
   } = await unifiedRetrieve(env, url, { limit, access, scope: grantScope, scopePrincipalKind, timing });
+  if (retrievalCoverage) doRerank = false;
   const windowed = applyQuestionRetrievalWindow(Array.isArray(retrieved) ? retrieved : [], timeWindow);
   const accessStatus = {
     retrieval_scope: retrievalScope,
+    retrieval_coverage: retrievalCoverage,
     degraded_reason: degradedReason || undefined,
     access: accessSummary,
   };
@@ -889,12 +915,14 @@ async function handleUnified(
     return scanned ? { ...truth, gaps: [...(truth.gaps || []), scanned] } : truth;
   };
   const searchTruthWithTimeWindow = (rows) => {
-    const truth = searchTruth(rows);
-    if (!timeWindow) return truth;
-    return {
-      ...truth,
-      gaps: [...(truth.gaps || []), questionRetrievalWindowGap(timeWindow, rows.length, windowed.dropped)],
-    };
+    let truth = searchTruth(rows);
+    if (timeWindow) truth = {...truth,gaps:[...(truth.gaps || []),questionRetrievalWindowGap(timeWindow,rows.length,windowed.dropped)]};
+    const permitted = filterThinkCandidates(rows,{question:q,owner:env.BRAIN_OWNER,now:Date.now(),timeZone:env.BRAIN_TIMEZONE});
+    const prepared = finalizeDocumentAnswer({question:q,docs:permitted.rows.map(citationCandidateForResult),
+      gaps:truth.gaps || [],coverage,degraded,retrievedCount:rows.length,screenedCount:permitted.withheld?.count || 0,
+      searchComplete:!degraded && !truth.status});
+    return {...truth,answer:prepared.answer,confidence:prepared.confidence,confidence_text:prepared.confidence_text,
+      answer_contract:prepared.answer_contract};
   };
 
   if (degraded === "fts") {
@@ -936,7 +964,7 @@ async function coverageForRead(env, { access, scope, requestedSource = null }) {
       ? [requestedSource]
       : allowedSources.filter((source) => source === requestedSource);
   }
-  return coverageGapReport(env, { allowedSources });
+  return coverageGapReport(env, { allowedSources, includeSources:true });
 }
 
 const TAX_EVIDENCE_UNREADABLE_GAP = Object.freeze({
@@ -1057,7 +1085,106 @@ function financialMapStateFor(env, question, {
   return readOwnerFinancialMapState(env).catch(() => null);
 }
 
-async function handleThink(
+// The think route's one response post-condition. Every response for a
+// question leaves through here, whichever branch produced it: an early scope
+// or parameter refusal, a returned read failure, a thrown exception or a
+// normal reading. A response already carrying a non-empty answer, a
+// confidence object and the answer contract passes unchanged. Anything else
+// is finalized by finalizeDocumentAnswer with no document text, because no
+// screened reading exists at that point. Validation statuses stay (they are
+// request facts and access decisions); operational failures become an
+// incomplete reading. The search is never widened to work around a failure.
+// Responses built directly from a finalizer's output are complete by
+// construction (the finalizer throws rather than return an empty answer).
+// Marking them lets the post-condition skip re-reading large document bodies;
+// every unmarked response is read and checked.
+const finalizedThinkResponses = new WeakSet();
+function finalizedThink(response) {
+  finalizedThinkResponses.add(response);
+  return response;
+}
+
+function thinkResponseComplete(body) {
+  return Boolean(body && typeof body === "object" && typeof body.answer === "string" && body.answer.trim() &&
+    body.confidence && typeof body.confidence === "object" && Number.isInteger(body.confidence.percent) &&
+    body.answer_contract && typeof body.answer_contract.kind === "string");
+}
+
+const THINK_UNREAD_NOTICES = {
+  entity_scope_unavailable: "The requested business scope could not be checked right now, so no records were read for it. The search was not widened to work around that failure.",
+  invalid_entity_slug: "The requested business scope name is not valid, so no records were read for it.",
+  entity_not_found: "The requested business scope is not a recorded entity, so no records were read for it.",
+  entity_not_owned: "The requested business scope is not one of your owned entities, so no records were read for it.",
+  conflicting_business_scope: "The request named two different business scopes, so no records were read for it.",
+};
+
+function unreadThinkNotice(code, clientError) {
+  if (THINK_UNREAD_NOTICES[code]) return THINK_UNREAD_NOTICES[code];
+  if (clientError) {
+    return "The request's filters, dates or parameters could not be applied as asked, so no records were read. The search was not widened to ignore them.";
+  }
+  return "The question could not be completed, so no records were read after the failure. The search was not widened to work around it.";
+}
+
+async function finalizeThinkResponse(response, question) {
+  if (response && finalizedThinkResponses.has(response)) return response;
+  let body = null;
+  let raw = null;
+  if (response) {
+    try { raw = await response.text(); body = JSON.parse(raw); } catch { body = null; }
+  }
+  if (thinkResponseComplete(body)) return new Response(raw, { status: response.status, headers: response.headers });
+  const status = response?.status ?? 500;
+  const clientError = status >= 400 && status < 500;
+  // A reader answer that lacks the contract keeps its figures: it receives
+  // the compatibility contract and the missing-assessment score, never an
+  // unread notice in place of what it read.
+  if (body && body.mode === "think" && typeof body.answer === "string" && body.answer.trim() && !body.answer_contract) {
+    return jsonResponse(finalizeOwnerLedgerAnswer(body), clientError ? status : 200);
+  }
+  const code = typeof body?.code === "string" ? body.code : null;
+  const notice = unreadThinkNotice(code, clientError);
+  const gaps = [{ type: clientError ? "request_not_read" : "document_read_incomplete", detail: notice }];
+  const finalized = finalizeDocumentAnswer({
+    question, docs: [], gaps, searchComplete: false, notice,
+    checks: [{ supported: false, complete: false,
+      error: clientError ? "The request was refused before any record was read." : "The authenticated reading did not complete." }],
+  });
+  const kept = body && typeof body === "object" && !Array.isArray(body) ? body : {};
+  return jsonResponse({
+    // An operational failure is an incomplete reading, not an error reply;
+    // its stable code stays for diagnostics. Validation keeps its error.
+    ...kept, ...(code ? { code } : {}), ...(clientError ? {} : { error: undefined }), mode: "think", ...finalized, usedDocs: undefined,
+    answer_error: undefined, status: undefined, gaps, results: [], citations: [],
+    evidence_gate: { supported: false, complete: false, evidence: [], reason: notice },
+  }, clientError ? status : 200);
+}
+
+async function handleThink(env, request, ...rest) {
+  let question = "";
+  let workflow = false;
+  try {
+    const payload = await request.clone().json();
+    if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+      workflow = Object.hasOwn(payload, "workflow");
+      // The same scalar types the route itself accepts as q (it reads
+      // String(value)), so no accepted question can bypass the post-condition.
+      if (["string", "number", "boolean"].includes(typeof payload.q)) question = String(payload.q).trim();
+    }
+  } catch { /* the route itself reports an unreadable body */ }
+  // A body with no question, or a structured workflow action, owes no
+  // document answer; its own route contract applies unchanged.
+  if (!question || workflow) return handleThinkRoute(env, request, ...rest);
+  let response = null;
+  try {
+    response = await handleThinkRoute(env, request, ...rest);
+  } catch {
+    response = null;
+  }
+  return finalizeThinkResponse(response, question);
+}
+
+async function handleThinkRoute(
   env, request, access = null, grantScope = { all: true }, scopePrincipalKind = "owner", timing = null,
   cfoCapability = null, cfoReauthorize = async () => false,
 ) {
@@ -1066,6 +1193,8 @@ async function handleThink(
   if (url.parameter_error) return jsonResponse(url.parameter_error, 400);
   const q = (url.searchParams.get("q") || "").trim();
   if (!q && url.action === undefined) return jsonResponse({ error: "Missing q" }, 400);
+  let safeDocumentResults = [];
+  try {
   const scope = await measureQueryStage(timing, "scope", () => applyBusinessScope(env, url));
   if (!scope.ok) return scope.response;
   const entityScope = scope.entityScope;
@@ -1076,35 +1205,46 @@ async function handleThink(
     }, { tax: { env } }));
     return jsonResponse(cfo);
   }
+  // MCP callers perform their own assistant handoff. Human and scoped callers
+  // need the shipped reader here: routing instructions contain no owner figure.
   const taxQuestion = measureQueryStage(timing, "premise_temporal", () => taxQuestionScopeAssessment(q, {
     owner: env.BRAIN_OWNER, now: Date.now(), timeZone: env.BRAIN_TIMEZONE,
   }));
-  return withLedgerAnswer({ env, question: q, access, grantScope, scopePrincipalKind,
-    filters: filtersFrom(url), entityScope, ledgerEligible: !taxQuestion.applicable }, (ledgerGap) => handleDocumentThink(
-    env, url, q, entityScope, access, grantScope, scopePrincipalKind, timing, ledgerGap, taxQuestion));
+  let documentResponse = null;
+  const response = await withLedgerAnswer({ env, question: q, access, grantScope, scopePrincipalKind,
+    filters: filtersFrom(url), entityScope, ledgerEligible: !taxQuestion.applicable }, async (ledgerGap) => {
+      documentResponse = await handleDocumentThink(
+        env, url, q, entityScope, access, grantScope, scopePrincipalKind, timing, ledgerGap, taxQuestion,
+        results => { safeDocumentResults = results; });
+      return documentResponse;
+    });
+  // Compatibility readings do not carry the money tools' assessment. Keep
+  // their figures and diagnostics, add the missing-assessment score, and
+  // turn unresolved scope into an explicit reading rather than a null answer.
+  if (response !== documentResponse && response.ok) {
+    const body = await response.json();
+    if (body.mode === 'think' && !body.answer_contract) {
+      return finalizedThink(jsonResponse(finalizeOwnerLedgerAnswer(body)));
+    }
+    return new Response(JSON.stringify(body), {status:response.status,headers:response.headers});
+  }
+  return response;
+  } catch {
+    // Authenticated read failures still owe the owner an answer. Never retry
+    // around correction/access integrity, and never export the raw exception.
+    // Only rows that already passed the document screen may survive here.
+    const gaps = [{type:'document_read_incomplete',detail:'The source search or answer processing did not complete. Matching records and their current corrections remain unverified.'}];
+    const docs = safeDocumentResults.slice(0,12).map(citationCandidateForResult);
+    const finalized = finalizeDocumentAnswer({question:q,docs,gaps,searchComplete:false,
+      checks:[{supported:false,complete:false,error:'The authenticated reading did not complete.'}]});
+    return finalizedThink(jsonResponse({mode:'think',...finalized,usedDocs:undefined,gaps,
+      results:safeDocumentResults,citations:finalized.usedDocs.map(citationForDocument),
+      evidence_gate:{supported:false,complete:false,evidence:[],reason:'The authenticated reading did not complete.'}}));
+  }
 }
 
-async function handleDocumentThink(env, url, q, entityScope, access, grantScope, scopePrincipalKind, timing, ledgerGap, taxQuestion) {
+async function handleDocumentThink(env, url, q, entityScope, access, grantScope, scopePrincipalKind, timing, ledgerGap, taxQuestion, onSafeReading) {
   const unsupportedAnswer = "The documents do not answer the question.";
-  if (taxQuestion.applicable && !taxQuestion.resolved) {
-    return jsonResponse({
-      mode: "think",
-      entity_scope: entityScope,
-      status: COVERAGE_INCOMPLETE,
-      notice: taxQuestion.notice || "Name one exact entity, tax year, and form before using Brain records for this tax question. No nearby filing was treated as an answer.",
-      answer: null,
-      next_action: refusalNextAction({ status: COVERAGE_INCOMPLETE }),
-      citations: [],
-      results: [],
-      gaps: [TAX_QUESTION_SCOPE_UNRESOLVED_GAP],
-      evidence_gate: {
-        supported: false,
-        complete: false,
-        evidence: [],
-        reason: "tax question scope is unresolved",
-      },
-    });
-  }
   const timeWindow = questionRetrievalWindow(env, url, q);
   const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit")) || 8, 1), 20);
 
@@ -1113,12 +1253,14 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
   }));
 
   const {
-    retrievalReceipt, meaningSearch,
+    retrievalReceipt, retrievalCoverage, meaningSearch,
     matches, evidenceAuthority, degraded, degradedReason, retrievalScope, access: accessSummary, ignoredFilters,
   } = await unifiedRetrieve(env, url, { limit, access, scope: grantScope, scopePrincipalKind, timing });
   // Filter before deriving prompts, citations, gaps, or exported candidates.
   // Ledger admission misses some money phrasings, so no ledgerGap is required.
-  const candidatePolicy = filterThinkCandidates(Array.isArray(matches) ? matches : [], {
+  const candidatePolicy = filterThinkCandidates(await readDocumentEvidence(env, Array.isArray(matches) ? matches : [], {
+    access, scope:grantScope, filters:filtersFrom(url),
+  }), {
     question: q, taxQuestion, owner: env.BRAIN_OWNER, now: Date.now(), timeZone: env.BRAIN_TIMEZONE,
     // This route checks exact tax scope and readability after synthesis. A
     // solicited near neighbor must reach that guard, not become an absence or
@@ -1127,6 +1269,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
   });
   const windowed = applyQuestionRetrievalWindow(candidatePolicy.rows, timeWindow);
   const results = windowed.rows;
+  onSafeReading(results);
   const meaningSearchStatus = meaningSearch
     ? { ...meaningSearch, line: meaningSearchLine(meaningSearch) }
     : null;
@@ -1172,68 +1315,28 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
         ? sourceCoverageGaps
         : disclosure.gaps;
     if (documentTaxGap) gaps = [documentTaxGap, ...gaps];
+    if (taxQuestion.applicable && !taxQuestion.resolved) gaps.push({...TAX_QUESTION_SCOPE_UNRESOLVED_GAP, detail:"The tax entity, year or form is missing; no matching permitted statement was read in this search."});
     if (candidatePolicy.withheld) gaps = [SENSITIVE_DOCUMENTS_WITHHELD, ...gaps.filter(gap => gap.type !== "no_results")];
     if (timeWindow) gaps.push(questionRetrievalWindowGap(timeWindow, 0, windowed.dropped));
     const coverageIncomplete = disclosure.incomplete || (!disclosure.unavailable &&
       (sourceCoverageGaps.length > 0 || Boolean(documentTaxGap)));
-    return jsonResponse({
-      mode: "think",
-      entity_scope: entityScope,
-      ...(timeWindow ? { time_window: timeWindow.public } : {}),
-      degraded: degraded || undefined,
-      degraded_reason: degradedReason || undefined,
-      retrieval_scope: retrievalScope,
-      access: accessSummary,
-      withheld_documents: candidatePolicy.withheld,
-      status: candidatePolicy.withheld ? ANSWER_WITHHELD : disclosure.unavailable || disclosure.incomplete
-        ? disclosure.status
-        : coverageIncomplete
-          ? COVERAGE_INCOMPLETE
-          : undefined,
-      // The sentence a human sees in place of an answer. Present only when the
-      // search failed, so /app and the CLI cannot render the refusal wording by
-      // reaching for a field that is always there.
-      notice: candidatePolicy.withheld ? SENSITIVE_DOCUMENTS_NOTICE : disclosure.unavailable || disclosure.incomplete
-        ? disclosure.notice
-        : coverageIncomplete
-          ? taxDocumentCoverage.unreadable
-            ? TAX_EVIDENCE_UNREADABLE_NOTICE
-            : documentTaxGap
-              ? TAX_DOCUMENT_INVENTORY_NOTICE
-              : coverageIncompleteNotice(coverage.unavailable)
-          : undefined,
-      answer: null,
-      evidence_gate: candidatePolicy.withheld ? {
-        supported: false, complete: false, evidence: [], reason: "sensitive_documents_withheld",
-      } : undefined,
-      next_action: refusalNextAction({
-        status: candidatePolicy.withheld ? ANSWER_WITHHELD : disclosure.unavailable || disclosure.incomplete
-          ? disclosure.status
-          : coverageIncomplete ? COVERAGE_INCOMPLETE : undefined,
-      }),
-      retrieval_receipt: retrievalReceipt || undefined,
-      meaning_search: meaningSearchStatus || undefined,
-      citations: [],
-      results: [],
-      gaps,
-      // A refusal confidence answers "how sure are we that nothing is
-      // recorded". When the search did not complete that question has no
-      // answer, and putting a percentage on it would dress the failure up as a
-      // finding. The notice and the gap carry the truth instead.
-      confidence: candidatePolicy.withheld || disclosure.unavailable || coverageIncomplete
-        ? undefined
-        : refusalConfidence({ gaps, degraded, resultCount: 0 }),
-      evidence_authority: evidenceAuthority || undefined,
-      // Present only for an owner asking which of their own entities or
-      // accounts are open, on a map that is not established or has gone stale.
-      // JSON.stringify drops the key otherwise, so every other response is
-      // byte for byte what it was. Nothing was answered on this path, so the
-      // guidance takes its unsupported wording and its candidate list.
-      map_guidance: financialMapGuidance(await mapState) || undefined,
-    });
+    const finalized = finalizeDocumentAnswer({ question:q, gaps, degraded, coverage,
+      docs:[], retrievedCount:matches.length, screenedCount:candidatePolicy.withheld?.count || 0,
+      searchComplete:!disclosure.unavailable && !disclosure.incomplete,
+      checks:taxQuestion.applicable && !taxQuestion.resolved ? [{supported:false,complete:false,reason:'tax scope is assumed; entity, year or form is missing'}] : [] });
+    return finalizedThink(jsonResponse({mode:'think', entity_scope:entityScope, ...finalized, usedDocs:undefined,
+      status:undefined, gaps, results:[], citations:[], withheld_documents:candidatePolicy.withheld,
+      degraded:degraded || undefined, degraded_reason:degradedReason || undefined,
+      retrieval_scope:retrievalScope, access:accessSummary, evidence_authority:evidenceAuthority || undefined,
+      retrieval_receipt:retrievalReceipt, retrieval_coverage:retrievalCoverage, meaning_search:meaningSearchStatus,
+      ...(timeWindow ? {time_window:timeWindow.public} : {}),
+      evidence_gate:{supported:false,complete:false,evidence:[],reason:'bounded source reading'},
+      map_guidance:financialMapGuidance(await mapState) || undefined }));
   }
 
   const gaps = measureQueryStage(timing, "gaps", () => computeGaps(results));
+  if (retrievalCoverage) gaps.unshift(...emptyRetrievalDisclosure(degraded,degradedReason).gaps);
+  if (taxQuestion.applicable && !taxQuestion.resolved) gaps.unshift({...TAX_QUESTION_SCOPE_UNRESOLVED_GAP, detail:"The exact tax entity, year or form is missing. Statements below are attributed record readings, with that scope unconfirmed."});
   if (candidatePolicy.withheld) gaps.unshift(SENSITIVE_DOCUMENTS_WITHHELD);
   if (timeWindow) gaps.push(questionRetrievalWindowGap(timeWindow, results.length, windowed.dropped));
   if (ledgerGap) {
@@ -1297,11 +1400,24 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
   if (unreadableRequestedTaxEvidence) documentTaxGap = TAX_EVIDENCE_UNREADABLE_GAP;
   if (documentTaxGap) gaps.unshift(documentTaxGap);
 
+  // 0.4.28 reads whole stored records (up to 500 chunks each). The answer
+  // and verifier prompts carry a bounded window of a longer record (the
+  // excerpts stay whole). The finalizer still grounds every claim against the
+  // whole stored record, so record text the models did not see still keeps
+  // the answer below High.
+  const promptWindows = new Map();
+  const promptText = (d) => {
+    if (!promptWindows.has(d)) promptWindows.set(d, documentPromptWindow(d, q));
+    const window = promptWindows.get(d);
+    return window ? `(This is a window of a longer record; the rest of the record is not shown.)\n${window.text}` : d.snippet;
+  };
   const renderDocs = (items) => items
     .map((d) => {
-      const date = d.ts
-        ? `${String(d.ts).slice(0, 10)}${d.date_reliable ? " reliable date" : " unverified date"}`
-        : null;
+      const observed=recordObservation(d);
+      const date = observed.ts
+        ? `${String(observed.ts).slice(0, 10)}${observed.date_reliable ? " reliable date" : " unverified date"}${d.record_observation ? ' record last modified' : ''}`
+        : d.record_observation ? 'record modification date unverified' : null;
+      const scheduled=d.record_observation && d.ts ? `event scheduled ${d.occurred_at || String(d.ts).slice(0,10)}` : null;
       // The answering model is told when a passage was read off a picture, so
       // it can hedge a figure it was handed rather than repeat it as printed.
       const read = d.scanned === true
@@ -1309,8 +1425,10 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
         : d.text_source === "ocr" || d.text_source === "ocr_partial"
           ? "READ BY OCR FROM A SCAN, may be misread"
           : null;
+      const selection = d.selection?.newer_record
+        ? `NEWER RELATED RECORD EXISTS: ${d.selection.newer_record.id}, ${d.selection.newer_record.date}. Review it for this exact claim; membership alone does not prove replacement.` : '';
       const authority = d.authority
-        ? `authority ${d.authority.tier} ${d.authority.name}: ${d.authority.reason}`
+        ? `authority ${d.authority.tier} ${d.authority.name}: ${d.authority.reason}. ${selection}`
         : "authority unavailable";
       const lineage = d.lineage?.status === "known"
         ? `lineage ${d.lineage.kind}: ${d.lineage.reason}`
@@ -1318,15 +1436,16 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
       const operative = d.authority?.operative_section
         ? `OPERATIVE FOR THIS QUESTION: ${d.authority.operative_section.name} = ${d.authority.operative_section.value} as of ${d.authority.operative_section.as_of}. Values listed under Supersedes are historical, not current.`
         : null;
-      const meta = [d.source, d.client ? `client: ${d.client}` : null, date, read, authority, lineage, operative]
+      const meta = [d.source, d.question_time, d.client ? `client: ${d.client}` : null, date, scheduled, read, authority, lineage, operative]
         .filter(Boolean)
         .join(", ");
-      return `[${d.n}] (${meta}) ${d.title}\n${d.snippet}`;
+      return `[${d.n}] (${meta}) ${d.title}\n${promptText(d)}` + (d.retrieval_excerpts || []).map(span=>`\n\nAdditional retrieved source excerpt:\n${span}`).join('');
     })
     .join("\n\n");
 
   let approvedDocs = docs;
   let evidenceGate = null;
+  const checkVerdicts = [];
   const owner = env.BRAIN_OWNER || "the owner";
   const currentOptions = { filters: filtersFrom(url), owner: env.BRAIN_OWNER || null };
   const finishCurrentChecks = startQueryStage(timing, "premise_temporal");
@@ -1358,9 +1477,9 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
       detail: "Equally current owner-confirmed operative records disagree for this fact. The Brain will not choose between them.",
     });
   } else if (selectedOperativeEvidence) {
-    const operativeTime = Date.parse(selectedOperativeEvidence.ts || "");
+    const operativeTime = reliableRecordObservationTime(selectedOperativeEvidence);
     const newerNonoperative = allCurrentEvidence.filter((doc) =>
-      !doc.authority?.operative_section && Number.isFinite(operativeTime) && Date.parse(doc.ts || "") > operativeTime
+      !doc.authority?.operative_section && Number.isFinite(operativeTime) && reliableRecordObservationTime(doc) > operativeTime
     );
     newerAuthoritativeEvidence = newerNonoperative.filter((doc) =>
       doc.authority?.authoritative === true &&
@@ -1523,6 +1642,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
     approvedDocs = [];
   }
 
+  const candidateDraft = answer;
   let synthesis = null;
   let datedStatus = { answer, evidence: [] };
   if (answer && !answerError && !modelRefusedAnswer(answer) && !observedAnswer && !factAnswer && !moneyPolicy) {
@@ -1673,6 +1793,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
           if (evidenceGate.supported && evidenceGate.complete && allowed.size !== citedDocs.length) {
             evidenceGate.supported = false;
             evidenceGate.reason = "verifier did not approve every citation in the proposed answer";
+            checkVerdicts.push({supported:false,complete:false,reason:evidenceGate.reason});
           }
           const finishPremiseChecks = startQueryStage(timing, "premise_temporal");
           const allowedDocs = citedDocs.filter((doc) => allowed.has(doc.n));
@@ -1682,6 +1803,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
           if (evidenceGate.supported && mismatchedTaxEvidence) {
             evidenceGate.supported = false;
             evidenceGate.reason = "cited tax evidence does not match the requested entity, tax year, and form";
+            checkVerdicts.push({supported:false,complete:false,reason:evidenceGate.reason});
           }
           const unreadableTaxEvidence = allowedDocs.some((doc) =>
             doc.authority?.tax_scope?.matched === true &&
@@ -1690,6 +1812,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
           if (evidenceGate.supported && unreadableTaxEvidence) {
             evidenceGate.supported = false;
             evidenceGate.reason = "the matching tax filing was not read from a reliable native text layer";
+            checkVerdicts.push({supported:false,complete:false,reason:evidenceGate.reason});
           }
           const ownerTokens = String(owner).toLowerCase().match(/[a-z0-9]+/g)?.filter((token) =>
             !new Set(["the", "owner", "brain", "shadow", "company", "inc", "llc"]).has(token)
@@ -1717,6 +1840,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
           if (evidenceGate.supported && asksOwnerSpecificHighRiskFact && !hasExplicitOwnerLink) {
             evidenceGate.supported = false;
             evidenceGate.reason = "cited evidence has no explicit link to the configured brain owner";
+            checkVerdicts.push({supported:false,complete:false,reason:evidenceGate.reason});
           }
           const onlyNonFinalLegalSources = asksForBindingAgreement && allowedDocs.length > 0 && allowedDocs.every((doc) =>
             /\b(?:interview|decisions? so far|planning|proposal|template|draft)\b/i.test(`${doc.title || ""} ${doc.snippet || ""}`)
@@ -1724,6 +1848,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
           if (onlyNonFinalLegalSources) {
             evidenceGate.supported = false;
             evidenceGate.reason = "only non-final planning material was cited for a binding legal claim";
+            checkVerdicts.push({supported:false,complete:false,reason:evidenceGate.reason});
           }
           if (evidenceGate.supported && explicitCurrentIntent && !observedAnswer) {
             const allowedNumbers = new Set(allowedDocs.map((doc) => doc.n));
@@ -1764,34 +1889,41 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
             if (temporalFailure) {
               evidenceGate.supported = false;
               evidenceGate.reason = temporalFailure;
+              checkVerdicts.push({supported:false,complete:false,reason:evidenceGate.reason});
             }
           }
           if (evidenceGate.supported && explicitCurrentIntent && operativeConflict) {
             evidenceGate.supported = false;
             evidenceGate.reason = "equally current owner-confirmed operative records disagree";
+            checkVerdicts.push({supported:false,complete:false,reason:evidenceGate.reason});
           } else if (evidenceGate.supported && explicitCurrentIntent && newerAuthoritativeEvidence.length) {
             evidenceGate.supported = false;
             evidenceGate.reason = "newer authoritative evidence may supersede the older owner-confirmed operative value";
+            checkVerdicts.push({supported:false,complete:false,reason:evidenceGate.reason});
           } else if (evidenceGate.supported && explicitCurrentIntent && selectedOperativeEvidence) {
             const allowedNumbers = new Set(allowedDocs.map((doc) => doc.n));
             if (!allowedNumbers.has(selectedOperativeEvidence.n)) {
               evidenceGate.supported = false;
               evidenceGate.reason = "current answer did not cite the matching owner-confirmed operative value";
+              checkVerdicts.push({supported:false,complete:false,reason:evidenceGate.reason});
             } else if (!answerUsesOperativeValue(
               answer, selectedOperativeEvidence.authority?.operative_section,
             )) {
               evidenceGate.supported = false;
               evidenceGate.reason = "current answer did not use the matching owner-confirmed operative value";
+              checkVerdicts.push({supported:false,complete:false,reason:evidenceGate.reason});
             } else if (answerUsesSupersededValue(
               answer, selectedOperativeEvidence.authority?.operative_section,
             )) {
               evidenceGate.supported = false;
               evidenceGate.reason = "current answer repeated a superseded value as current";
+              checkVerdicts.push({supported:false,complete:false,reason:evidenceGate.reason});
             }
           }
           if ((conflicts === null && evidenceGate.supported) || conflicts?.length) {
             evidenceGate.supported = false;
             evidenceGate.reason = conflicts === null ? "newer conflict check unavailable" : "newer retrieved evidence conflicts with dated status";
+            checkVerdicts.push({supported:false,complete:false,reason:evidenceGate.reason});
             gaps.unshift({ type: conflicts === null ? "status_conflict_check_unavailable" : "status_conflict",
               evidence: (conflicts || []).map(doc => doc.n),
               detail: conflicts === null ? "Newer conflicting evidence could not be checked."
@@ -1807,6 +1939,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
               docs.some((doc) => doc.source_kind === "quickbooks" || doc.date_source === "quickbooks:balance_snapshot")) {
             evidenceGate.supported = false;
             evidenceGate.reason = "current QuickBooks balances require deterministic observed Account evidence";
+            checkVerdicts.push({supported:false,complete:false,reason:evidenceGate.reason});
           }
           // The money contract only vetoes; it never sets supported/complete.
           // Observed proposals use the same label boundary and must survive
@@ -1825,6 +1958,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
           if (moneyRefusal && evidenceGate.supported) {
             evidenceGate.supported = false;
             evidenceGate.reason = moneyRefusal;
+            checkVerdicts.push({supported:false,complete:false,reason:evidenceGate.reason});
           }
           finishPremiseChecks();
           if (!evidenceGate.supported || !allowed.size) {
@@ -1861,12 +1995,14 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
                 evidenceGate.evidence = [];
               }
               evidenceGate.reason = partialMoneyRefusal || evidenceGate.reason || "no sentence survived the citation check";
+              checkVerdicts.push({supported:false,complete:false,reason:evidenceGate.reason});
             } else {
               // A verifier explanation is also model prose. It must not append
               // new money after the QuickBooks draft has passed its veto.
               const missing = draftMoneyPolicy ? "one or more requested details"
                 : String(evidenceGate.reason || "one part of the question").replace(/\.$/, "");
               if (draftMoneyPolicy) evidenceGate.reason = missing;
+              checkVerdicts.push({supported:false,complete:false,reason:evidenceGate.reason});
               answer = `${factualBody}\n\nNot covered by the documents: ${missing}.${headsUp && !draftMoneyPolicy ? `\n\n${headsUp}` : ""}`;
               approvedDocs = citedDocs.filter((doc) => allowed.has(doc.n));
               evidenceGate.partial = true;
@@ -1942,133 +2078,28 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
   }
   finishEvidenceGate(Boolean(answerError));
 
-  // Trust metadata beside the answer, never inside it: the refusal sentence
-  // is a verbatim contract (worker tests and the eval refusal scorer both pin
-  // it), so the confidence rubric travels as its own field.
-  const categoricalRefusal = !answerError &&
-    (!answer || answer === unsupportedAnswer || !approvedDocs.length);
-  const sensitiveCandidatesBlockAbsence = categoricalRefusal && Boolean(candidatePolicy.withheld);
-  const refusalSearchDisclosure = categoricalRefusal && degraded
-    ? emptyRetrievalDisclosure(degraded, degradedReason, {
-        candidatesFound: results.length > 0,
-        meaningSearch: meaningSearchStatus,
-      })
-    : null;
-  if (refusalSearchDisclosure?.incomplete &&
-      !gaps.some((gap) => gap?.type === COVERAGE_INCOMPLETE)) {
-    // The retrieval step already added its keyword-only indexing gap; a
-    // second identical gap reads to a consumer as two separate problems.
-    const presentGapTypes = new Set(gaps.map((gap) => gap?.type));
-    gaps.unshift(...refusalSearchDisclosure.gaps.filter((gap) => !presentGapTypes.has(gap?.type)));
-  }
-  const sourceCoverageBlocksAbsence = categoricalRefusal && !refusalSearchDisclosure &&
-    sourceCoverageGaps.length > 0;
-  const taxDocumentCoverageBlocksAbsence = categoricalRefusal && !refusalSearchDisclosure &&
-    Boolean(documentTaxGap);
-  const incompleteCoverageBlocksAbsence = sourceCoverageBlocksAbsence || taxDocumentCoverageBlocksAbsence;
-  const evidenceConflictBlocksAbsence = operativeConflict || newerAuthoritativeEvidence.length > 0;
-  const answerValidationBlocksAbsence = categoricalRefusal &&
-    (!modelDeclaredNoEvidence || evidenceConflictBlocksAbsence);
-  const answerWithheld = categoricalRefusal && !answerError && results.length > 0 &&
-    answerValidationBlocksAbsence;
-  const refusalReason = String(evidenceGate?.reason || "");
-  const answerWithheldGate = refusalReason === "draft made claims without document citations"
-    ? "uncited_draft"
-    : evidenceGate?.unreadable === true
-      ? "unreadable_check_reply"
-      : gaps.some((gap) => ["money_veto", "money_recall"].includes(gap?.type)) ||
-          /\b(?:money|QuickBooks)\b/i.test(refusalReason)
-        ? "money_check"
-        : gaps.some((gap) => gap?.type === "temporal_conflict")
-          ? "date_check"
-          : evidenceConflictBlocksAbsence || gaps.some((gap) =>
-              ["status_conflict", "status_conflict_check_unavailable"].includes(gap?.type))
-            ? "conflicting_records"
-            : "unsupported";
-  const confidence = sensitiveCandidatesBlockAbsence || answerError || refusalSearchDisclosure || incompleteCoverageBlocksAbsence || answerValidationBlocksAbsence
-    ? undefined
-    : answer === unsupportedAnswer || !approvedDocs.length
-      ? refusalConfidence({
-          gaps,
-          degraded,
-          resultCount: results.length,
-          sources: [...new Set(results.map((r) => r.source).filter(Boolean))],
-        })
-      : computeAnswerConfidence({
-          approvedDocs,
-          gaps,
-          degraded: projectionPending(degraded, degradedReason) ? null : degraded,
-          partial: evidenceGate?.partial === true ? (evidenceGate.reason || "one part not covered") : null,
-        });
-  const refusalStatus = categoricalRefusal
-    ? sensitiveCandidatesBlockAbsence || (answerWithheld && !incompleteCoverageBlocksAbsence)
-      ? ANSWER_WITHHELD
-      : refusalSearchDisclosure?.status || (incompleteCoverageBlocksAbsence
-        ? COVERAGE_INCOMPLETE
-        : answerValidationBlocksAbsence
-          ? SEARCH_UNAVAILABLE
-          : undefined)
-    : undefined;
+  if (taxQuestion.applicable && !taxQuestion.resolved) checkVerdicts.push({supported:false,complete:false,
+    reason:'Tax scope is assumed; the exact entity, year or form is missing.'});
+  if (answerError) checkVerdicts.push({supported:false,complete:false,error:'Answer model or evidence check unavailable.'});
+  if (evidenceGate) checkVerdicts.push(evidenceGate);
+  const searchDisclosure = emptyRetrievalDisclosure(degraded, degradedReason, { candidatesFound:results.length>0, meaningSearch:meaningSearchStatus });
+  const finalized = finalizeDocumentAnswer({ question:q, draft:evidenceGate?.supported === true && evidenceGate?.complete === true && !checkVerdicts.some(c=>c.supported!==true || c.complete!==true) ? answer : candidateDraft,
+    deterministicDraft:observedAnswer && candidateDraft === observedAnswer.answer ? answer : null,
+    docs, approvedDocs, checks:checkVerdicts, gaps, coverage, degraded,
+    retrievedCount:matches.length, screenedCount:candidatePolicy.withheld?.count || 0,
+    searchComplete:!searchDisclosure.unavailable && !searchDisclosure.incomplete });
+  return finalizedThink(jsonResponse({ mode:'think', entity_scope:entityScope, ...finalized, usedDocs:undefined,
+    status:undefined, withheld_documents:candidatePolicy.withheld,
+    ...(timeWindow ? {time_window:timeWindow.public} : {}),
+    degraded:degraded || undefined, degraded_reason:degradedReason || undefined,
+    retrieval_scope:retrievalScope, access:accessSummary, retrieval_receipt:retrievalReceipt || undefined, retrieval_coverage:retrievalCoverage,
+    meaning_search:meaningSearchStatus || undefined, model:model || undefined,
+    evidence_gate:evidenceGate || undefined, gaps,
+    evidence_authority:strongestEvidenceAuthority(finalized.usedDocs) || undefined,
+    citations:finalized.usedDocs.map(citationForDocument),
+    map_guidance:financialMapGuidance(await mapState, {answerSupported:evidenceGate?.supported===true}) || undefined,
+    results:results.slice(0, Math.max(limit,docs.length)) }));
 
-  if (anthropicKeyMissing && !gaps.some((gap) => gap?.type === "anthropic_key_missing")) {
-    gaps.unshift({
-      type: "anthropic_key_missing",
-      detail: GAP_DETAIL,
-    });
-  }
-
-  return jsonResponse({
-    mode: "think",
-    entity_scope: entityScope,
-    withheld_documents: candidatePolicy.withheld,
-    ...(timeWindow ? { time_window: timeWindow.public } : {}),
-    degraded: degraded || undefined,
-    degraded_reason: degradedReason || undefined,
-    retrieval_scope: retrievalScope,
-    access: accessSummary,
-    status: refusalStatus,
-    notice: sensitiveCandidatesBlockAbsence ? SENSITIVE_DOCUMENTS_NOTICE : answerWithheld && !incompleteCoverageBlocksAbsence
-      ? answerWithheldNotice(answerWithheldGate)
-      : refusalSearchDisclosure?.notice || (taxDocumentCoverageBlocksAbsence &&
-          (unreadableRequestedTaxEvidence || scannedTaxEvidenceNotRelied)
-        ? TAX_EVIDENCE_UNREADABLE_NOTICE
-        : taxDocumentCoverageBlocksAbsence
-          ? TAX_DOCUMENT_INVENTORY_NOTICE
-        : sourceCoverageBlocksAbsence
-          ? coverageIncompleteNotice(coverage.unavailable, results.length > 0)
-          : answerValidationBlocksAbsence
-            ? ANSWER_VALIDATION_UNAVAILABLE_NOTICE
-            : undefined),
-    answer: sensitiveCandidatesBlockAbsence || refusalSearchDisclosure || incompleteCoverageBlocksAbsence || answerValidationBlocksAbsence ? null : answer,
-    answer_error: answerError || undefined,
-    answer_resumes_at: answerError === ANSWER_ERROR_MESSAGES.dailyLimit
-      ? nextUtcMidnight()
-      : undefined,
-    next_action: categoricalRefusal && !answerError
-      ? refusalNextAction({ status: refusalStatus, withheldGate: answerWithheldGate })
-      : undefined,
-    retrieval_receipt: retrievalReceipt || undefined,
-    meaning_search: meaningSearchStatus || undefined,
-    model: model || undefined,
-    evidence_gate: evidenceGate || undefined,
-    gaps,
-    confidence,
-    evidence_authority: approvedDocs.length ? strongestEvidenceAuthority(approvedDocs) || undefined : undefined,
-    citations: approvedDocs.map(citationForDocument),
-    // Present only for an owner asking which of their own entities or accounts
-    // are open, on a map that is not established or has gone stale. It never
-    // changes `answer`, `evidence_gate` or `confidence`: the refusal above is
-    // exactly as honest as it was, and this says why it cannot be answered yet.
-    // When the gate DID support an answer the wording understates instead of
-    // contradicting it, and no candidate list rides beside a cited answer.
-    map_guidance: financialMapGuidance(await mapState, {
-      answerSupported: evidenceGate?.supported === true,
-    }) || undefined,
-    // Every document numbered for the answer model stays in the response, so
-    // each citation and evidence receipt number resolves to a returned result
-    // even when the caller asked for fewer than the model was shown.
-    results: results.slice(0, Math.max(limit, docs.length)),
-  });
 }
 
 // Every generic document writer uses the registry as the custody authority.
@@ -2529,7 +2560,11 @@ async function handleIngestBatch(env, request, scope = { all: true }, {
       }
     } catch (e) {
       tally.failed++;
-      results[inputIndex] = { ...slot, status: "failed", error: String(e.message || e).slice(0, 300) };
+      const failure = retainedIngestFailureReceipt(e);
+      results[inputIndex] = { ...slot, status: "failed", ...failure,
+        // Other producers use the shipped transient-D1 message classifier.
+        // Drive persists the closed code's safe explanation, never this text.
+        ...(failure.retryable ? { error:String(e.message || e).slice(0,300) } : {}) };
     }
   }
 
@@ -2553,6 +2588,7 @@ async function handleIngestBatch(env, request, scope = { all: true }, {
         source_id: prior.source_id,
         source_type: prior.source_type,
         status: "failed",
+        ...retainedIngestFailureReceipt(null),
         error: outcome?.error || "ingest finalization failed; retry this document",
       };
     }
@@ -2748,7 +2784,8 @@ async function handleSourceReceipt(env, request) {
       env.DB.prepare(
         `UPDATE sync_runs
             SET finished_at=?3, error=COALESCE(error,'superseded by a later sync attempt')
-          WHERE source=?1 AND finished_at IS NULL AND run_id<>?2`
+          WHERE run_id IN (SELECT run_id FROM sync_runs INDEXED BY idx_sync_runs_open_source
+            WHERE source=?1 AND finished_at IS NULL AND run_id<>?2 ORDER BY run_id LIMIT 50)`
       ).bind(source, runId, startedMs),
       env.DB.prepare(
         `INSERT INTO sync_runs (run_id,source,lane,started_at)
@@ -2777,13 +2814,10 @@ async function handleSourceReceipt(env, request) {
   } catch (error) {
     return jsonResponse({ error: error.message }, 400);
   }
-  const countRow = await sourceFamilyCounts(env, { source });
-  // Split parts and declared export families can cross physical row namespaces
-  // while remaining one source family. The source registry and connector state
-  // count those logical families, so raw row-source counts produce permanent
-  // false drift for both large files and message exports.
-  const documents = Number(countRow?.logical_documents || 0);
-  const storedDocuments = Number(countRow?.stored_documents || 0);
+  // A receipt is a bounded write, not an inventory request. Counts remain
+  // unmeasured here; the explicit report owns bounded corpus reconciliation.
+  const documents = null;
+  const storedDocuments = null;
   const reviewRequired = issueCode === SOURCE_REVIEW_ISSUE_CODE;
   // Caller error, reason, and detail strings may contain account names, file
   // paths, remote URLs, or content. Only the closed server-owned issue code is
@@ -2830,10 +2864,10 @@ async function handleSourceReceipt(env, request) {
   if (status === "ready") {
     statements.push(env.DB.prepare(
       `INSERT INTO sources (name, kind, status, created_at, last_ingest_at, document_count, last_complete_sweep_at, stale_reason)
-       VALUES (?1,?2,'ready',?3,CASE WHEN ?6 = 1 THEN ?3 ELSE NULL END,?4,CASE WHEN ?5 = 1 THEN ?3 ELSE NULL END,?7)
+       VALUES (?1,?2,'ready',?3,CASE WHEN ?6 = 1 THEN ?3 ELSE NULL END,COALESCE(?4,0),CASE WHEN ?5 = 1 THEN ?3 ELSE NULL END,?7)
        ON CONFLICT(name) DO UPDATE SET
          status='ready', last_ingest_at=CASE WHEN ?6 = 1 THEN excluded.last_ingest_at ELSE sources.last_ingest_at END,
-         document_count=excluded.document_count, stale_reason=excluded.stale_reason,
+         document_count=COALESCE(?4,sources.document_count), stale_reason=excluded.stale_reason,
          last_complete_sweep_at=CASE WHEN ?5 = 1 THEN excluded.last_ingest_at ELSE sources.last_complete_sweep_at END
        WHERE sources.kind=excluded.kind`
     ).bind(source, kind, completedAt, documents, completeSweep ? 1 : 0,
@@ -2846,9 +2880,9 @@ async function handleSourceReceipt(env, request) {
     // next day and a half.
     statements.push(env.DB.prepare(
       `INSERT INTO sources (name,kind,status,created_at,document_count,stale_reason)
-       VALUES (?1,?2,'error',?3,?4,?5)
+       VALUES (?1,?2,'error',?3,COALESCE(?4,0),?5)
        ON CONFLICT(name) DO UPDATE SET
-         status='error', document_count=excluded.document_count,
+         status='error', document_count=COALESCE(?4,sources.document_count),
          stale_reason=excluded.stale_reason
        WHERE sources.kind=excluded.kind`
     ).bind(source, kind, completedAt, documents, errorReason));
@@ -2887,7 +2921,7 @@ async function handleSourceReceipt(env, request) {
       targetRange.from, targetRange.through,
       errorReason,
       failureEvidence ? JSON.stringify(failureEvidence) : null,
-      status === "ready" && (["calendar", "microsoft"].includes(kind) || withheldCheck) && walkComplete && body?.provider_check_complete === true ? 1 : 0,
+      status === "ready" && walkComplete && body?.provider_check_complete === true ? 1 : 0,
     ));
   }
   statements.push(env.DB.prepare(
@@ -2899,7 +2933,7 @@ async function handleSourceReceipt(env, request) {
 
   return jsonResponse({
     source, kind, status, documents, logical_documents: documents,
-    stored_documents: storedDocuments, completed_at: completedAt,
+    stored_documents: storedDocuments, counts_measured: false, completed_at: completedAt,
     ...(runId ? { run_id: runId } : {}),
     ...(errorReason ? { issue_code: errorReason } : {}),
     ...(failureEvidence ? { failure_evidence: failureEvidence } : {}),
@@ -3259,7 +3293,7 @@ async function handleSourceFamilies(env, request) {
     return respond({ error: "source-family request must be a JSON object" }, 400);
   }
   const extras = Object.keys(body).filter((field) =>
-    !["source", "cursor", "limit", "include_labels", "uids"].includes(field));
+    !["source", "cursor", "limit", "include_labels", "uids", "require_index"].includes(field));
   if (extras.length > 0) {
     return respond({
       error: "source-family request has unknown fields",
@@ -3280,6 +3314,8 @@ async function handleSourceFamilies(env, request) {
     return respond({ error: `limit must be an integer from 1 to ${SOURCE_FAMILY_MAX_LIMIT}` }, 400);
   }
 
+  const requireIndexed = body.require_index === undefined ? false : body.require_index;
+  if (typeof requireIndexed !== "boolean") return respond({ error: "require_index must be a boolean" }, 400);
   const includeLabels = body.include_labels === undefined ? false : body.include_labels;
   if (typeof includeLabels !== "boolean") {
     return respond({ error: "include_labels must be a boolean" }, 400);
@@ -3310,8 +3346,12 @@ async function handleSourceFamilies(env, request) {
   }
 
   try {
-    return respond(await listSourceFamilies(env, { source, cursor, limit, includeLabels, uids }));
+    return respond(await listSourceFamilies(env, { source, cursor, limit, includeLabels, uids, requireIndexed }));
   } catch (error) {
+    if (error?.code === 'source_family_index_not_ready') {
+      return respond({ error: 'Exact source-family inventory is awaiting its bounded index backfill', code: error.code }, 503);
+    }
+    if (error?.code === "family_index_not_ready") return respond({ error: "source-family projection is not ready", code: error.code }, 409);
     if (error?.code === "unpageable_family_identity") {
       return respond({
         error: "source-family inventory cannot emit a resumable page boundary",
@@ -3548,6 +3588,7 @@ export default {
           : {}),
         vector_writer_protocol: "lease-v1",
         vector_drain_mode: paused ? "paused-for-upgrade" : "active",
+        rollback_write_fence: paused && env.VECTOR_ROLLBACK_FENCE === "1",
         ts: new Date().toISOString(),
       });
     }
@@ -3816,6 +3857,23 @@ export default {
       });
     }
 
+    // Owner key or unscoped owner session. Remote OAuth connectors reach
+    // queryMoney through /mcp under the owner's connector approval, never
+    // through this route.
+    if (path === "/api/admin/brain/money-query" || path === "/api/admin/brain/money-overview") {
+      let owner = validateAdminKey(request, env);
+      if (!owner) {
+        try {
+          const principal = await ownerSessionPrincipal(request, env);
+          owner = principal?.kind === "owner" && principal.grantId === null;
+        } catch {
+          return privateNoStore(jsonResponse({ error: "Owner authentication is unavailable." }, 503));
+        }
+      }
+      if (!owner) return privateNoStore(jsonResponse({ error: "unauthorized" }, 401));
+      return path === "/api/admin/brain/money-overview" ? handleMoneyOverview(env, request) : handleMoneyQuery(env, request);
+    }
+
     const readRoute = path === "/api/rag/unified" || path === "/api/rag/think";
     const ownerKeyAuthorized = validateAdminKey(request, env);
     const keyAuthorized = readRoute ? validateReadKey(request, env) : ownerKeyAuthorized;
@@ -3917,6 +3975,15 @@ export default {
           error: "Private questions must be sent as a JSON POST body, never in the URL",
         }, 405));
       }
+      if (path === "/api/admin/brain/document-read" && request.method === "POST") {
+        if (!ownerKeyAuthorized) return privateNoStore(jsonResponse({error:"owner authorization required"},403));
+        const args = await request.json().catch(() => null);
+        if (!args) return privateNoStore(jsonResponse({error:"Expected a private JSON body"},400));
+        const result = await readOwnerDocumentPage(env,args,url.origin);
+        const body = llmText(result);
+        if (result.isError) return privateNoStore(jsonResponse({error:body},400));
+        return privateNoStore(jsonResponse(JSON.parse(body)));
+      }
       if (path === "/api/rag/unified" && request.method === "POST") {
         return privateNoStore(await handleUnified(env, request, readAccess, scope, scopePrincipalKind, timing));
       }
@@ -3973,6 +4040,13 @@ export default {
           principalKind: scopePrincipalKind,
         });
       }
+      if (path === "/api/admin/brain/ingest-capabilities" && request.method === "GET") {
+        if (!ownerKeyAuthorized) return jsonResponse({ error: "owner authorization required" }, 403);
+        const schema = await installedSchemaVersion(env);
+        return jsonResponse({ retained_revision_protocol: schema >= 65 ? 1 : 0,
+          bounded_source_receipts: true, schema_version: schema,
+          writes_paused: env.VECTOR_DRAIN_MODE === "paused-for-upgrade" });
+      }
       if (path === "/api/admin/brain/ingest/batch" && request.method === "POST") {
         return await handleIngestBatch(env, request, scope, {
           allowSourceOriginalReceipt: ownerKeyAuthorized,
@@ -4023,6 +4097,18 @@ export default {
             retryable: error?.retryable === true,
           }, status));
         }
+      }
+      if (path === '/api/admin/brain/ingest-part-proof') {
+        if (!ownerKeyAuthorized || backendOf(env) !== D1) return privateNoStore(jsonResponse({error:'Part readback needs the owner and D1 backend.'},403));
+        if (request.method !== 'POST') return privateNoStore(jsonResponse({error:'Use a private JSON POST body.'},405));
+        return await handleIngestPartProof(env,request);
+      }
+      if (path === '/api/admin/brain/drive-family') {
+        if (!ownerKeyAuthorized || backendOf(env) !== D1) {
+          return privateNoStore(jsonResponse({ error: 'Drive family readback needs the owner and D1 backend.' }, 403));
+        }
+        if (request.method !== 'POST') return privateNoStore(jsonResponse({ error: 'Use a private JSON POST body.' }, 405));
+        return await handleDriveFamily(env, request);
       }
       if (path === "/api/admin/brain/ingest-removal-plan" && request.method === "POST") {
         if (backendOf(env) !== D1 || !scopeIsUnrestricted(scope)) {
@@ -4296,6 +4382,7 @@ export default {
        * worker/test/reprojection-pause-order.test.mjs pins this one.
        */
       if (path === "/api/admin/brain/bootstrap" && request.method === "POST") {
+        if (env.VECTOR_ROLLBACK_FENCE === "1") return jsonResponse(pausedCorpusRefusal(), 503);
         if (backendOf(env) !== D1) {
           return jsonResponse({ error: "bootstrap applies to the d1 backend only" }, 400);
         }
@@ -4468,7 +4555,7 @@ export default {
         })
         : Promise.resolve(),
       env.BANK_FEED_PROVIDER === "simplefin" && bankFeedEnabled(env)
-        ? runSimpleFinMaintenance(env).then((result) => {
+        ? runSimpleFinMaintenance(env, { daily: true }).then((result) => {
           const ran = Number(result?.ran || 0);
           const partial = Array.isArray(result?.items)
             ? result.items.filter((item) => item?.partial || item?.ok === false).length

@@ -45,8 +45,10 @@ export function verifyExecutedSources(run, sources) {
 export function verifyHistoricalSources(run) {
   const bytes = readFileSync(new URL('../../test/fixtures/fastloop-day3/historical-shared-v1.json', import.meta.url), 'utf8');
   // The reviewed core change is behind the callLLM tape seam; both historical arms share the same core.
-  if (sha(bytes) !== '3339a99896ebce28a8e9909184a584d59b1e848d40d1d9b9e6022039e0fb3eff') throw Error('HISTORICAL_SHARED_INVALID');
+  if (sha(bytes) !== 'ad263a83b1869e918bba971b7a9932607ffd177bf299fc11a8c36847344e7a06') throw Error('HISTORICAL_SHARED_INVALID');
   const frozen = JSON.parse(bytes);
-  for (const [name, hash] of Object.entries(frozen.source_sha256))
+  // 0.4.28 account-kind review guards changed the shared helper; freeze its reviewed bytes separately.
+  const reviewed = { ...frozen.source_sha256, 'fin-account-kinds.js': '8d81efca9d3ffe81188137fc043b4d6522dcc80ab881ee3115bb9ea059ce5a37' };
+  for (const [name, hash] of Object.entries(reviewed))
     if (run.source_files?.[`worker/src/lib/${name}`] !== hash) throw Error(`HISTORICAL_SHARED_MISMATCH:${name}`);
 }

@@ -47,7 +47,7 @@ export function createQueryTiming({ route, now = () => performance.now() } = {})
     expose() { visible = true; },
     observeResult(body) {
       if (body?.error || body?.answer_error) observedOutcome = 'error';
-      else if (observedOutcome !== 'error' && body?.mode === 'think' &&
+      else if (observedOutcome !== 'error' && body?.mode === 'think' && !body?.answer_contract &&
           (body.answer === null || body.evidence_gate?.supported === false)) observedOutcome = 'refused';
     },
     get visible() { return visible; },
@@ -138,7 +138,7 @@ export async function queryTimingResponse(timing, response) {
   const rpc = body.jsonrpc === '2.0';
   const outcome = response.status >= 400 || body.error || body.answer_error || body.result?.isError
     ? 'error'
-    : body.mode === 'think' && (body.answer === null || body.evidence_gate?.supported === false)
+    : body.mode === 'think' && !body.answer_contract && (body.answer === null || body.evidence_gate?.supported === false)
       ? 'refused' : 'ok';
   const receipt = timing.finish(outcome);
   // MCP metadata is out of band: diagnostics do not enter the model's content

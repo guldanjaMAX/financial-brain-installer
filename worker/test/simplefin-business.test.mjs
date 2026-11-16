@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -522,7 +522,8 @@ for (const legacyId of ['["connection-b","account-b"]', 'ordinary-legacy', '["",
     await f.env.DB.batch(plan.statements.map(([sql, binds]) => f.env.DB.prepare(sql).bind(...binds)));
     f.raw("UPDATE fin_transactions SET source_provider='simplefin'");
     const legacy = f.first('SELECT * FROM simplefin_account_assignments');
-    for (const file of ['0060_simplefin_account_identity.sql', '0061_balance_position_evidence.sql'])
+    for (const file of readdirSync(new URL('../../migrations/d1/', import.meta.url))
+      .filter(file => file.endsWith('.sql') && Number.parseInt(file,10)>59).sort())
       for (const sql of f.splitStatements(readFileSync(new URL(`../../migrations/d1/${file}`, import.meta.url), 'utf8'))) f.raw(sql);
     const value = smallFeed();
     if (legacyId.includes('["",')) delete value.accounts[0].conn_id;
@@ -805,7 +806,8 @@ test('SF owner page: actual rendered handlers require preview and source compari
   const all=(node,tag)=>[...(node.tagName===tag?[node]:[]),...node.children.flatMap(n=>all(n,tag))];
   const button=(node,text)=>all(node,'BUTTON').find(n=>n.textContent===text);
   const headers=await f.ownerHeaders(),calls=[];
-  const context=vm.createContext({document:{getElementById:id=>nodes.get(id),createElement:tag=>new Element(tag)},
+  const context=vm.createContext({URLSearchParams,window:{location:{search:''}},
+    document:{getElementById:id=>nodes.get(id),createElement:tag=>new Element(tag)},
     crypto:{randomUUID:()=> 'ui-fixture-request-0001'},fetch:async(path,init={})=>{
       assert.ok(path.startsWith('/api/'));const request=new Request(`https://brain.invalid${path}`,{...init,headers:{...headers,...init.headers}});
       if(path.endsWith('/simplefin/review'))calls.push(JSON.parse(init.body));

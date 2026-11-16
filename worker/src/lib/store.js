@@ -1,3 +1,4 @@
+import { activeChunkSql, retainedIngestRequested, checkpointRetainedIngest, retainedActivationStatements, RetainedIngestAdmissionError } from "./retained-ingest.js";
 import { withContentFreshness } from './content-freshness.js';
 import { measureQueryStage } from "./query-timing.js";
 /**
@@ -176,6 +177,12 @@ async function prepareD1Envelope(env, submittedEnvelope, {
   const validationError = ingestEnvelopeValidationError(envelope);
   if (validationError) throw new TypeError(validationError);
   envelope = withContentFreshness(envelope);
+  // Only the writer can define the active range of retained physical chunks.
+  if (Object.hasOwn(envelope.metadata || {}, "brain_active_chunk_count")) {
+    const metadata = { ...envelope.metadata };
+    delete metadata.brain_active_chunk_count;
+    envelope = { ...envelope, metadata };
+  }
   const { source_type, source_id, content, title } = envelope;
   const docUid = `${source_type}:${source_id}`;
   const md = envelope.metadata || {};
@@ -544,18 +551,19 @@ async function sourceOriginalBindingChanged(env, prior, prepared) {
 async function d1RevisionUnchanged(env, prior, prepared) {
   if (!prior || prior.content_hash !== prepared.hash || d1MetadataChanged(prior, prepared)) return false;
   if (await sourceOriginalBindingChanged(env, prior, prepared)) return false;
+  // A committed document hash cannot prove readable chunks after recovery.
+  // Replaying a missing part must repair its active text, not return unchanged.
+  const effectiveTitle = d1PersistedState(prior, prepared).title;
+  const expectedChunks = chunkText(prepared.content, {
+    header: effectiveTitle ? `[${effectiveTitle}]` : "", ...prepared.geometry,
+  }).length;
+  if (Number(prior.stored_chunk_count) !== expectedChunks) return false;
   if (prepared.sourceOriginalIdentity) {
     // Schema 44 deliberately leaves already-bound schema-43 chunks unclaimed.
     // Force one authoritative reingest rather than letting the content no-op
     // strand NULL receipt columns forever. Counts also catch a missing or extra
     // chunk before the result-family gate is asked to seal it.
-    const effectiveTitle = d1PersistedState(prior, prepared).title;
-    const expectedChunks = chunkText(prepared.content, {
-      header: effectiveTitle ? `[${effectiveTitle}]` : "",
-      ...prepared.geometry,
-    }).length;
-    if (Number(prior.stored_chunk_count) !== expectedChunks ||
-        Number(prior.bound_chunk_receipt_count) !== expectedChunks) return false;
+    if (Number(prior.bound_chunk_receipt_count) !== expectedChunks) return false;
   }
   return true;
 }
@@ -709,7 +717,7 @@ function sourceStatsCommitStatement(env, source, revisions) {
      ), committing AS (
        SELECT candidates.ingested_at
        FROM candidates
-       JOIN documents
+       CROSS JOIN documents INDEXED BY sqlite_autoindex_documents_1
         ON documents.doc_uid = candidates.doc_uid
         AND documents.source = ?1
         AND documents.content_hash = candidates.pending_marker
@@ -717,23 +725,11 @@ function sourceStatsCommitStatement(env, source, revisions) {
         AND documents.provenance_receipt_digest = candidates.provenance_receipt_digest
         AND documents.source_original_binding_hash IS candidates.source_original_binding_hash
         AND documents.deleted_at IS NULL
-     ), source_counts AS (
-       SELECT COUNT(DISTINCT documents.doc_uid) AS documents,
-              COUNT(chunks.chunk_uid) AS chunks
-         FROM documents
-         LEFT JOIN chunks ON chunks.doc_uid=documents.doc_uid
-        WHERE documents.source=?1 AND documents.deleted_at IS NULL
      )
-     INSERT INTO corpus_stats (source, documents, chunks, last_ingest_at)
-     SELECT ?1,
-            MAX(source_counts.documents),
-            MAX(source_counts.chunks),
-            MAX(committing.ingested_at)
-     FROM committing CROSS JOIN source_counts
-     HAVING COUNT(*) > 0
+     INSERT INTO corpus_stats (source, last_ingest_at)
+     SELECT ?1, MAX(committing.ingested_at)
+     FROM committing HAVING COUNT(*) > 0
      ON CONFLICT(source) DO UPDATE SET
-       documents = excluded.documents,
-       chunks = excluded.chunks,
        last_ingest_at = MAX(COALESCE(corpus_stats.last_ingest_at, 0), excluded.last_ingest_at)
      RETURNING source`
   ).bind(source, candidates);
@@ -751,7 +747,7 @@ const d1Backend = {
 
   async search(env, {
     query, limit, filters = {}, weights = {}, rrfK = 60, access = null, scope = null,
-    projectionReadiness = null, supplementalFilters = [], timing = null,
+    projectionReadiness = null, supplementalFilters = [], timing = null, readPlan = "standard",
   }) {
     let embedding = null;
     if (access?.kind !== "grant" && scopeIsUnrestricted(scope)) {
@@ -759,7 +755,7 @@ const d1Backend = {
     }
     const r = await d1.search(env, {
       query, embedding, limit, filters, weights, rrfK, access, scope, projectionReadiness,
-      supplementalFilters, timing,
+      supplementalFilters, timing, readPlan,
     });
     return {
       results: measureQueryStage(timing, "authority_lineage", () => r.results.map((x) => {
@@ -781,6 +777,8 @@ const d1Backend = {
           source_kind: x.source_kind || null,
           title: x.title,
           snippet: x.text,
+          ...(x.source_excerpts ? { source_excerpts:x.source_excerpts } : {}),
+          ...(x.record_observation ? { record_observation:x.record_observation } : {}),
           uri: x.uri || null,
           entity_slug: x.entity_slug ?? null,
           client: x.client ?? null,
@@ -816,12 +814,17 @@ const d1Backend = {
           ...(x.write_provenance ? { write_provenance: x.write_provenance } : {}),
           lineage: x.lineage || evidenceLineageFor(x).lineage,
           score: x.rrf_score,
+          selection: x.selection || null,
+          evidence_revision: x.evidence_revision || null,
+          read_coverage: {document_id:x.doc_uid,revision:x.evidence_revision || null,
+            kind:'excerpt',stored_text_complete:false,source_complete:false,thread_complete:false},
         };
         return attachEvidenceLineage(publicRow, { root_ids: evidenceLineageRootIds(x) });
       })),
       degraded: r.degraded,
       degraded_reason: r.degraded_reason ?? null,
       retrieval_receipt: r.retrieval_receipt,
+      retrieval_coverage: r.retrieval_coverage,
       meaning_search: r.meaning_search,
       ignored_filters: r.ignored_filters,
       counts: r.counts,
@@ -861,15 +864,23 @@ const d1Backend = {
                 provenance_receipt_version, provenance_receipt_status,
                 provenance_receipt_reason, provenance_receipt_digest,
                 document_revision_id, source_original_binding_hash,
-                (SELECT COUNT(*) FROM chunks AS receipt_chunks
-                  WHERE receipt_chunks.doc_uid=documents.doc_uid) AS stored_chunk_count,
-                (SELECT COUNT(*) FROM chunks AS receipt_chunks
-                  WHERE receipt_chunks.doc_uid=documents.doc_uid
-                    AND receipt_chunks.bound_document_revision_id=documents.document_revision_id
-                    AND receipt_chunks.result_chunk_receipt_hash IS NOT NULL) AS bound_chunk_receipt_count,
+                (SELECT COUNT(*) FROM (SELECT doc_uid,chunk_ix FROM chunks
+                  WHERE doc_uid=documents.doc_uid ORDER BY chunk_ix LIMIT 513) receipt_page
+                  WHERE 1=1${activeChunkSql("receipt_page", "documents")}) AS stored_chunk_count,
+                (SELECT COUNT(*) FROM (
+                  SELECT bound_document_revision_id,result_chunk_receipt_hash FROM chunks
+                   WHERE doc_uid=documents.doc_uid ORDER BY chunk_ix LIMIT 513
+                ) receipt_page
+                  WHERE receipt_page.bound_document_revision_id=documents.document_revision_id
+                    AND receipt_page.result_chunk_receipt_hash IS NOT NULL) AS bound_chunk_receipt_count,
+                (SELECT COUNT(*) FROM (SELECT 1 FROM chunks
+                  WHERE doc_uid=documents.doc_uid ORDER BY chunk_ix LIMIT 513)) AS physical_chunk_count,
                 ${sourceOriginalBindingReadbackSql()} AS bound_binding_receipt
          FROM documents WHERE doc_uid = ?1`
       ).bind(docUid).first();
+    if (Number(prior?.physical_chunk_count ?? prior?.stored_chunk_count) > 512) {
+      throw new RetainedIngestAdmissionError('retained_prior_revision_limit');
+    }
     // Identical content AND filter identity is a no-op. Folder moves and title
     // changes still have to rewrite chunks because both the embedded header and
     // Vectorize metadata changed. Missing incoming metadata is not a request to
@@ -880,6 +891,11 @@ const d1Backend = {
 
     const now = Date.now();
     const persisted = d1PersistedState(prior, input);
+    const retained = retainedIngestRequested(input, prior);
+    const pieces = chunkText(content, { header: persisted.title ? `[${persisted.title}]` : "", ...geometry });
+    if (retained) {
+      persisted.writeMeta = { ...persisted.writeMeta, brain_retained_ingest: 1, brain_active_chunk_count: pieces.length };
+    }
 
     // `content_hash` is the commit marker for a complete document revision.
     // Move it to a value that can never equal a real SHA-256 before touching the
@@ -967,8 +983,6 @@ const d1Backend = {
     // Build the searchable bytes from that same effective value so a schema-43
     // adoption replay cannot leave the document and its chunk receipts split.
     const effectiveTitle = persisted.title;
-    const header = effectiveTitle ? `[${effectiveTitle}]` : "";
-    const pieces = chunkText(content, { header, ...geometry });
 
     // Only an identical-content revision can find its chunks already stored:
     // the hash covers the text and the chunk geometry. Measured 2026-09-23,
@@ -1000,6 +1014,28 @@ const d1Backend = {
       // receipt. The D1 writer recomputes the exact stored-text commitment.
       bound_document_revision_id: sourceOriginalBinding ? revisionId : null,
     }));
+
+    if (retained) {
+      const revision = { doc_uid: docUid, source: source_type, hash, pending_marker: pendingHash,
+        ingested_at: now, document_revision_id: revisionId,
+        provenance_receipt_digest: persisted.provenance_receipt_digest, source_original_binding: sourceOriginalBinding };
+      const stage = await checkpointRetainedIngest(env, { docUid, envelope, chunks: baseChunks, revision, prior, vectorIdFor: d1.vectorIdFor });
+      const statements = retainedActivationStatements(env, { stage, revision, documentStatement });
+      statements.push(sourceStatsCommitStatement(env, source_type, [revision]));
+      const cas = statements.length;
+      statements.push(revisionCommitStatement(env, revision));
+      const binding = sourceOriginalBindingInsertStatement(env, revision);
+      if (binding) statements.push(binding);
+      const outcome = await env.DB.batch(statements);
+      if (!revisionCommitReturned(outcome?.[cas], revision)) throw new Error("retained revision activation could not be verified; retry this document");
+      const row = await env.DB.prepare(`SELECT doc_uid,source,content_hash,provenance_receipt_digest,deleted_at,
+        document_revision_id,source_original_binding_hash,${sourceOriginalBindingReadbackSql()} AS bound_binding_receipt
+        FROM documents WHERE doc_uid=?1`).bind(docUid).first();
+      if (!revisionRowMatches(row, revision) || (binding && !await storedSourceOriginalBindingMatches(row, sourceOriginalBinding))) {
+        throw new Error("retained revision readback failed; retry this document");
+      }
+      return { doc_uid: docUid, action: prior ? "updated" : "created", chunks: baseChunks.length, queued: baseChunks.length };
+    }
 
     let chunks = baseChunks;
     let w;
@@ -1079,8 +1115,8 @@ const d1Backend = {
       };
     }
 
-    // Recompute derived counts and commit this exact revision in one D1
-    // transaction. The stats statement is marker-bound, so a superseded
+    // Record candidate-bound freshness and commit this exact revision in one D1
+    // transaction. Physical counters are row-maintained. The statement is marker-bound, so a superseded
     // request neither advances freshness nor changes counts. Stats runs first
     // while the marker exists; the following exact CAS is guaranteed to see
     // the same transaction snapshot or the whole batch rolls back.
@@ -1145,12 +1181,17 @@ const d1Backend = {
               provenance_receipt_version, provenance_receipt_status,
               provenance_receipt_reason, provenance_receipt_digest,
               document_revision_id, source_original_binding_hash,
-              (SELECT COUNT(*) FROM chunks AS receipt_chunks
-                WHERE receipt_chunks.doc_uid=documents.doc_uid) AS stored_chunk_count,
-              (SELECT COUNT(*) FROM chunks AS receipt_chunks
-                WHERE receipt_chunks.doc_uid=documents.doc_uid
-                  AND receipt_chunks.bound_document_revision_id=documents.document_revision_id
-                  AND receipt_chunks.result_chunk_receipt_hash IS NOT NULL) AS bound_chunk_receipt_count,
+              (SELECT COUNT(*) FROM (SELECT doc_uid,chunk_ix FROM chunks
+                  WHERE doc_uid=documents.doc_uid ORDER BY chunk_ix LIMIT 513) receipt_page
+                  WHERE 1=1${activeChunkSql("receipt_page", "documents")}) AS stored_chunk_count,
+              (SELECT COUNT(*) FROM (
+                  SELECT bound_document_revision_id,result_chunk_receipt_hash FROM chunks
+                   WHERE doc_uid=documents.doc_uid ORDER BY chunk_ix LIMIT 513
+                ) receipt_page
+                  WHERE receipt_page.bound_document_revision_id=documents.document_revision_id
+                    AND receipt_page.result_chunk_receipt_hash IS NOT NULL) AS bound_chunk_receipt_count,
+                (SELECT COUNT(*) FROM (SELECT 1 FROM chunks
+                  WHERE doc_uid=documents.doc_uid ORDER BY chunk_ix LIMIT 513)) AS physical_chunk_count,
               ${sourceOriginalBindingReadbackSql()} AS bound_binding_receipt
        FROM documents WHERE doc_uid = ?1`
     ).bind(input.docUid)));
@@ -1173,8 +1214,8 @@ const d1Backend = {
   },
 
   /**
-   * Finish changed documents from one HTTP batch with one corpus scan per
-   * touched source, rather than one full-source COUNT for every small message.
+   * Finish changed documents using only exact candidate identities. Source-wide
+   * counts belong to the bounded report, never to ingest finalization.
    *
    * Each source is finalized independently. D1 executes its statistics refresh
    * and revision-marker updates as one transaction. If it fails, those
@@ -1259,8 +1300,8 @@ const d1Backend = {
           // to 50 documents whose own commit is proved. What is left when the
           // proof fails is freshness bookkeeping, not document truth: stats()
           // counts documents and chunks from the live tables and reads only
-          // last_ingest_at from this cache, and the next ingest for the source
-          // recomputes both counts and MAX()es the timestamp forward.
+          // last_ingest_at from this cache. Counts belong to the bounded report;
+          // the next ingest only MAX()es the timestamp forward.
           for (let groupIndex = 0; groupIndex < transactionGroup.length; groupIndex++) {
             const revision = transactionGroup[groupIndex];
             const indexes = statementIndexes[groupIndex];

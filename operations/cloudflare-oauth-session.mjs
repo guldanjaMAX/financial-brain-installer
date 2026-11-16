@@ -18,6 +18,7 @@ import { accessSync, constants as fsConstants, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { REVIEWED_WRANGLER_SPEC } from "./wrangler-runtime-contract.mjs";
 import { cloudflareKeyringFailureMessage } from "./cloudflare-keyring-guidance.mjs";
+import { launchWindowsCloudflareSignIn, WINDOWS_SIGNIN_EXIT } from "./windows-update-signin.mjs";
 
 export const CLOUDFLARE_OAUTH_WRANGLER_PACKAGE = REVIEWED_WRANGLER_SPEC;
 export const CLOUDFLARE_OAUTH_CALLBACK_HOST = "localhost";
@@ -384,6 +385,27 @@ export function enableCloudflareOAuthKeyring(options = {}) {
 /** Run the owner-visible browser callback ceremony for the exact named profile. */
 export function createCloudflareOAuthProfile({ installIdentity = null, profile = null, ...options } = {}) {
   const exactProfile = requestedProfile({ profile, installIdentity });
+  if (options.windowsSignInWindow === true && (options.platformName ?? process.platform) === "win32" &&
+      !((options.input ?? process.stdin).isTTY && (options.output ?? process.stdout).isTTY)) {
+    const result = launchWindowsCloudflareSignIn({
+      profile: exactProfile,
+      workingDirectory: cloudflareOAuthWorkingDirectory(options),
+      environment: cloudflareOAuthChildEnvironment({ environment: options.environment }),
+      processRunner: options.processRunner,
+      // The console child uses the fixed two-minute keyring and ten-minute
+      // browser bounds; the launcher adds one minute for startup and cleanup.
+    });
+    const succeeded = processSucceeded(result);
+    wipeProcessOutput(result);
+    if (succeeded) return exactProfile;
+    const keyring = result?.status === WINDOWS_SIGNIN_EXIT.keyring;
+    const workdir = result?.status === WINDOWS_SIGNIN_EXIT.workdir;
+    const error = oauthError(keyring ? "CLOUDFLARE_KEYRING_UNAVAILABLE"
+      : workdir ? "CLOUDFLARE_OAUTH_WORKDIR_UNWRITABLE" : "CLOUDFLARE_OAUTH_REAUTH_REQUIRED",
+    keyring ? "keyring" : "authorize", "The separate Cloudflare sign-in window did not complete.");
+    error.platformName = "win32";
+    throw error;
+  }
   enableCloudflareOAuthKeyring(options);
   const result = runWrangler([
     CLOUDFLARE_OAUTH_WRANGLER_PACKAGE,

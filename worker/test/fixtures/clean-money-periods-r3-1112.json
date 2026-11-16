@@ -1,0 +1,2643 @@
+{
+  "lane": "CLAUDE-FINDER-CLEAN-PERIODS-R1-1112",
+  "base_commit": "82312ac665dc84855043572956ba6c9d03f9b038",
+  "summary": {
+    "cases": 65,
+    "pass": 37,
+    "fail": 28,
+    "wrong_figures": 2
+  },
+  "conventions": {
+    "money": "integer cents; figure = SUM(income_minor)/SUM(expense_minor) over txn unless stated",
+    "confidence": "High>=90 Medium>=70 Low<70 per money-query-quality.js:75",
+    "today": "2026-11-12",
+    "verdict_basis": "read at base, not executed"
+  },
+  "base_fixture": {
+    "entities": [
+      {
+        "entity_slug": "business",
+        "kind": "business",
+        "basis_state": "confirmed"
+      }
+    ],
+    "accounts": [
+      {
+        "slug": "biz-chk",
+        "mask": "1111",
+        "kind": "checking",
+        "feed_mode": "manual",
+        "entity": "business",
+        "basis_state": "confirmed"
+      },
+      {
+        "slug": "biz-sav",
+        "mask": "2222",
+        "kind": "savings",
+        "feed_mode": "manual",
+        "entity": "business",
+        "basis_state": "confirmed"
+      }
+    ],
+    "coverage": [
+      {
+        "account_slug": "biz-chk",
+        "coverage_status": "complete",
+        "basis_state": "confirmed",
+        "covered_from": "2026-01-01",
+        "covered_to": "2026-11-11"
+      },
+      {
+        "account_slug": "biz-sav",
+        "coverage_status": "complete",
+        "basis_state": "confirmed",
+        "covered_from": "2026-01-01",
+        "covered_to": "2026-11-11"
+      }
+    ],
+    "rows": [
+      {
+        "id": "r1",
+        "account": "biz-chk",
+        "posted_on": "2026-10-01",
+        "direction": "inflow",
+        "amount_minor": 50000,
+        "payee": "Customer Synthetic LLC",
+        "description": "ACH DEPOSIT"
+      },
+      {
+        "id": "r2",
+        "account": "biz-chk",
+        "posted_on": "2026-09-30",
+        "direction": "inflow",
+        "amount_minor": 20000,
+        "payee": "Customer Synthetic LLC",
+        "description": "ACH DEPOSIT"
+      },
+      {
+        "id": "r3",
+        "account": "biz-chk",
+        "posted_on": "2026-10-31",
+        "direction": "outflow",
+        "amount_minor": 12000,
+        "payee": "Paper Supply Synthetic",
+        "description": "POS DEBIT"
+      },
+      {
+        "id": "r4",
+        "account": "biz-chk",
+        "posted_on": "2026-11-01",
+        "direction": "outflow",
+        "amount_minor": 7000,
+        "payee": "Paper Supply Synthetic",
+        "description": "POS DEBIT"
+      }
+    ],
+    "Q_OCT": "SELECT SUM(income_minor) AS income_minor, SUM(expense_minor) AS expense_minor FROM txn WHERE posted_on BETWEEN '2026-10-01' AND '2026-10-31'",
+    "PROVED_LEG": {
+      "payee": "",
+      "description": "TRANSFER",
+      "category": "TRANSFER",
+      "category_basis_state": "confirmed"
+    },
+    "UNPROVED_LEG": {
+      "payee": "",
+      "description": "TRANSFER",
+      "category": null
+    }
+  },
+  "cases": [
+    {
+      "id": "P01",
+      "q": "October 2026 in and out",
+      "ledger": "base",
+      "req": {
+        "sql": "Q_OCT"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": "money-query-budget.js:91-93; money-query-quality.js:29-31",
+      "wrong_figure": false
+    },
+    {
+      "id": "P02",
+      "q": "August 2026 spending (no rows)",
+      "ledger": "base",
+      "req": {
+        "sql": "SELECT SUM(expense_minor) AS expense_minor FROM txn WHERE posted_on BETWEEN '2026-08-01' AND '2026-08-31'"
+      },
+      "exp": {
+        "figure": {
+          "expense_minor": 0
+        },
+        "rows": [],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": {
+          "expense_minor": null
+        },
+        "conf": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": "money-query-quality.js:35",
+      "wrong_figure": false
+    },
+    {
+      "id": "P03",
+      "q": "September 2026 income",
+      "ledger": "base",
+      "req": {
+        "sql": "SELECT SUM(income_minor) AS income_minor FROM txn WHERE posted_on BETWEEN '2026-09-01' AND '2026-09-30'"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 20000
+        },
+        "rows": [
+          "r2"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": "money-query-budget.js:91-93",
+      "wrong_figure": false
+    },
+    {
+      "id": "P04",
+      "q": "February 2026 in and out",
+      "ledger": {
+        "rows_replace": [
+          {
+            "id": "f1",
+            "account": "biz-chk",
+            "posted_on": "2026-02-28",
+            "direction": "outflow",
+            "amount_minor": 3000,
+            "payee": "Paper Supply Synthetic",
+            "description": "POS DEBIT"
+          },
+          {
+            "id": "f2",
+            "account": "biz-chk",
+            "posted_on": "2026-03-01",
+            "direction": "outflow",
+            "amount_minor": 4000,
+            "payee": "Paper Supply Synthetic",
+            "description": "POS DEBIT"
+          },
+          {
+            "id": "f3",
+            "account": "biz-chk",
+            "posted_on": "2026-02-01",
+            "direction": "inflow",
+            "amount_minor": 10000,
+            "payee": "Customer Synthetic LLC",
+            "description": "ACH DEPOSIT"
+          }
+        ]
+      },
+      "req": {
+        "sql": "SELECT SUM(income_minor) AS income_minor, SUM(expense_minor) AS expense_minor FROM txn WHERE posted_on BETWEEN '2026-02-01' AND '2026-02-28'"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 10000,
+          "expense_minor": 3000
+        },
+        "rows": [
+          "f3",
+          "f1"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": "money-query-budget.js:66-67,91-93",
+      "wrong_figure": false
+    },
+    {
+      "id": "P05",
+      "q": "February 2026 (SQL end 2026-02-29)",
+      "ledger": "P04",
+      "req": {
+        "sql": "SELECT SUM(income_minor) AS income_minor, SUM(expense_minor) AS expense_minor FROM txn WHERE posted_on BETWEEN '2026-02-01' AND '2026-02-29'"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 10000,
+          "expense_minor": 3000
+        },
+        "rows": [
+          "f3",
+          "f1"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "Medium",
+        "score": 85
+      },
+      "verdict": "FAIL",
+      "finding": "M1",
+      "rule": "money-query-budget.js:92",
+      "wrong_figure": false
+    },
+    {
+      "id": "P06",
+      "q": "February 2026 with to=2026-02-29",
+      "ledger": "P04",
+      "req": {
+        "sql": "SELECT SUM(expense_minor) AS expense_minor FROM txn WHERE posted_on BETWEEN '2026-02-01' AND '2026-02-28'",
+        "from": "2026-02-01",
+        "to": "2026-02-29"
+      },
+      "exp": {
+        "figure": {
+          "expense_minor": 3000
+        },
+        "rows": [
+          "f1"
+        ],
+        "conf": "High",
+        "score": 100,
+        "adjustment": "to 2026-02-29->2026-02-28"
+      },
+      "code": {
+        "error": "MONEY_QUERY_INVALID"
+      },
+      "verdict": "FAIL",
+      "finding": "M2",
+      "rule": "money-query-budget.js:70; money-query.js:159",
+      "wrong_figure": false
+    },
+    {
+      "id": "P07",
+      "q": "October 2026 half-open >= / <",
+      "ledger": "base",
+      "req": {
+        "sql": "SELECT SUM(income_minor) AS income_minor, SUM(expense_minor) AS expense_minor FROM txn WHERE posted_on >= '2026-10-01' AND posted_on < '2026-11-01'"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "Medium",
+        "score": 85
+      },
+      "verdict": "FAIL",
+      "finding": "M1",
+      "rule": "money-query-budget.js:91-95",
+      "wrong_figure": false
+    },
+    {
+      "id": "P08",
+      "q": "October 2026 via substr",
+      "ledger": "base",
+      "req": {
+        "sql": "SELECT SUM(income_minor) AS income_minor, SUM(expense_minor) AS expense_minor FROM txn WHERE substr(posted_on,1,7)='2026-10'"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "Medium",
+        "score": 85
+      },
+      "verdict": "FAIL",
+      "finding": "M1",
+      "rule": "money-query-budget.js:88-95",
+      "wrong_figure": false
+    },
+    {
+      "id": "P09",
+      "q": "October 2026 via strftime",
+      "ledger": "base",
+      "req": {
+        "sql": "SELECT SUM(income_minor) AS income_minor, SUM(expense_minor) AS expense_minor FROM txn WHERE strftime('%Y-%m',posted_on)='2026-10'"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "Medium",
+        "score": 85
+      },
+      "verdict": "FAIL",
+      "finding": "M1",
+      "rule": "money-query-budget.js:88-95",
+      "wrong_figure": false
+    },
+    {
+      "id": "P10",
+      "q": "October 2026, BETWEEN bounds reversed",
+      "ledger": "base",
+      "req": {
+        "sql": "SELECT SUM(income_minor) AS income_minor, SUM(expense_minor) AS expense_minor FROM txn WHERE posted_on BETWEEN '2026-10-31' AND '2026-10-01'"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": {
+          "income_minor": null,
+          "expense_minor": null
+        },
+        "conf": "Medium",
+        "score": 85
+      },
+      "verdict": "FAIL",
+      "finding": "M3",
+      "rule": "money-query-budget.js:92",
+      "wrong_figure": true
+    },
+    {
+      "id": "P11",
+      "q": "x1111 spending on 2026-10-31",
+      "ledger": "base",
+      "req": {
+        "sql": "SELECT SUM(expense_minor) AS expense_minor FROM txn WHERE account_slug='biz-chk' AND posted_on BETWEEN '2026-10-31' AND '2026-10-31'"
+      },
+      "exp": {
+        "figure": {
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r3"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": "money-query-budget.js:91-94; money-query-quality.js:13",
+      "wrong_figure": false
+    },
+    {
+      "id": "P12",
+      "q": "October 2026 x1111 by mask filter",
+      "ledger": "base",
+      "req": {
+        "sql": "SELECT SUM(expense_minor) AS expense_minor FROM txn WHERE account='1111' AND posted_on BETWEEN '2026-10-01' AND '2026-10-31'"
+      },
+      "exp": {
+        "figure": {
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r3"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "Medium",
+        "score": 85
+      },
+      "verdict": "FAIL",
+      "finding": "M1",
+      "rule": "money-query-budget.js:94-95",
+      "wrong_figure": false
+    },
+    {
+      "id": "P13",
+      "q": "Q3 2026 in and out",
+      "ledger": {
+        "rows_replace": [
+          {
+            "id": "q1",
+            "account": "biz-chk",
+            "posted_on": "2026-07-01",
+            "direction": "inflow",
+            "amount_minor": 30000,
+            "payee": "Customer Synthetic LLC",
+            "description": "ACH DEPOSIT"
+          },
+          {
+            "id": "q2",
+            "account": "biz-chk",
+            "posted_on": "2026-09-30",
+            "direction": "outflow",
+            "amount_minor": 4000,
+            "payee": "Paper Supply Synthetic",
+            "description": "POS DEBIT"
+          },
+          {
+            "id": "q3",
+            "account": "biz-chk",
+            "posted_on": "2026-06-30",
+            "direction": "inflow",
+            "amount_minor": 99999,
+            "payee": "Customer Synthetic LLC",
+            "description": "ACH DEPOSIT"
+          },
+          {
+            "id": "q4",
+            "account": "biz-chk",
+            "posted_on": "2026-10-01",
+            "direction": "outflow",
+            "amount_minor": 5555,
+            "payee": "Paper Supply Synthetic",
+            "description": "POS DEBIT"
+          }
+        ]
+      },
+      "req": {
+        "sql": "SELECT SUM(income_minor) AS income_minor, SUM(expense_minor) AS expense_minor FROM txn WHERE posted_on BETWEEN '2026-07-01' AND '2026-09-30'"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 30000,
+          "expense_minor": 4000
+        },
+        "rows": [
+          "q1",
+          "q2"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": "money-query-budget.js:91-93",
+      "wrong_figure": false
+    },
+    {
+      "id": "P14",
+      "q": "Q3 2026 by month",
+      "ledger": "P13",
+      "req": {
+        "sql": "SELECT substr(posted_on,1,7) AS month, SUM(income_minor) AS income_minor, SUM(expense_minor) AS expense_minor FROM txn WHERE posted_on BETWEEN '2026-07-01' AND '2026-09-30' GROUP BY month ORDER BY month"
+      },
+      "exp": {
+        "figure": [
+          {
+            "month": "2026-07",
+            "income_minor": 30000,
+            "expense_minor": 0
+          },
+          {
+            "month": "2026-09",
+            "income_minor": 0,
+            "expense_minor": 4000
+          }
+        ],
+        "rows": [
+          "q1",
+          "q2"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": "money-query-budget.js:96",
+      "wrong_figure": false
+    },
+    {
+      "id": "P15",
+      "q": "Q4 2026 to date (asked 2026-11-12)",
+      "ledger": "base",
+      "req": {
+        "sql": "SELECT SUM(income_minor) AS income_minor, SUM(expense_minor) AS expense_minor FROM txn WHERE posted_on BETWEEN '2026-10-01' AND '2026-11-12'"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 19000
+        },
+        "rows": [
+          "r1",
+          "r3",
+          "r4"
+        ],
+        "conf": "Low",
+        "score": 60
+      },
+      "code": {
+        "figure": "same",
+        "conf": "Low",
+        "score": 60
+      },
+      "verdict": "PASS",
+      "rule": "money-query-quality.js:29-38,68-71",
+      "wrong_figure": false
+    },
+    {
+      "id": "P16",
+      "q": "Q3 2026, statement ends 2026-09-29",
+      "ledger": {
+        "base_of": "P13",
+        "coverage_override": {
+          "biz-chk": {
+            "covered_to": "2026-09-29"
+          }
+        }
+      },
+      "req": {
+        "sql": "SELECT SUM(income_minor) AS income_minor, SUM(expense_minor) AS expense_minor FROM txn WHERE posted_on BETWEEN '2026-07-01' AND '2026-09-30'"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 30000,
+          "expense_minor": 4000
+        },
+        "rows": [
+          "q1",
+          "q2"
+        ],
+        "conf": "Low",
+        "score": 60
+      },
+      "code": {
+        "figure": "same",
+        "conf": "Low",
+        "score": 60
+      },
+      "verdict": "PASS",
+      "rule": "money-query-quality.js:29-30,37-38",
+      "wrong_figure": false
+    },
+    {
+      "id": "P17",
+      "q": "Q2 2026, statements start 2026-04-02",
+      "ledger": {
+        "coverage_override": {
+          "biz-chk": {
+            "covered_from": "2026-04-02"
+          }
+        },
+        "rows_add": [
+          {
+            "id": "q5",
+            "account": "biz-chk",
+            "posted_on": "2026-05-15",
+            "direction": "inflow",
+            "amount_minor": 8000,
+            "payee": "Customer Synthetic LLC",
+            "description": "ACH DEPOSIT"
+          }
+        ]
+      },
+      "req": {
+        "sql": "SELECT SUM(income_minor) AS income_minor FROM txn WHERE posted_on BETWEEN '2026-04-01' AND '2026-06-30'"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 8000
+        },
+        "rows": [
+          "q5"
+        ],
+        "conf": "Low",
+        "score": 60
+      },
+      "code": {
+        "figure": "same",
+        "conf": "Low",
+        "score": 60
+      },
+      "verdict": "PASS",
+      "rule": "money-query-quality.js:29-30",
+      "wrong_figure": false
+    },
+    {
+      "id": "P18",
+      "q": "Q3 2026 via from/to only",
+      "ledger": "P13",
+      "req": {
+        "sql": "SELECT SUM(income_minor) AS income_minor, SUM(expense_minor) AS expense_minor FROM txn",
+        "from": "2026-07-01",
+        "to": "2026-09-30"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 30000,
+          "expense_minor": 4000
+        },
+        "rows": [
+          "q1",
+          "q2"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "Medium",
+        "score": 85
+      },
+      "verdict": "FAIL",
+      "finding": "M1",
+      "rule": "money-query.js:204; money-query-quality.js:28-33",
+      "wrong_figure": false
+    },
+    {
+      "id": "P19",
+      "q": "Q3 2026 via from/to; pending 2026-10-03 out 2500",
+      "ledger": {
+        "base_of": "P13",
+        "pending_add": [
+          {
+            "id": "pq1",
+            "account": "biz-chk",
+            "posted_on": "2026-10-03",
+            "direction": "outflow",
+            "amount_minor": 2500
+          }
+        ]
+      },
+      "req": {
+        "sql": "SELECT SUM(income_minor) AS income_minor, SUM(expense_minor) AS expense_minor FROM txn",
+        "from": "2026-07-01",
+        "to": "2026-09-30"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 30000,
+          "expense_minor": 4000
+        },
+        "rows": [
+          "q1",
+          "q2"
+        ],
+        "conf": "High",
+        "score": 100,
+        "pending_minor": 0
+      },
+      "code": {
+        "figure": "same",
+        "conf": "Medium",
+        "score": 70,
+        "pending": {
+          "account": "1111",
+          "outflow_minor": 2500
+        }
+      },
+      "verdict": "FAIL",
+      "finding": "M4",
+      "rule": "money-query-quality.js:21; money-query-budget.js:50; clean-money.js:214-216",
+      "wrong_figure": false
+    },
+    {
+      "id": "P20",
+      "q": "Q3 2026 (SQL Q3, from/to July)",
+      "ledger": {
+        "rows_replace": [
+          {
+            "id": "j1",
+            "account": "biz-chk",
+            "posted_on": "2026-07-10",
+            "direction": "inflow",
+            "amount_minor": 30000,
+            "payee": "Customer Synthetic LLC",
+            "description": "ACH DEPOSIT"
+          },
+          {
+            "id": "a1",
+            "account": "biz-chk",
+            "posted_on": "2026-08-15",
+            "direction": "inflow",
+            "amount_minor": 40000,
+            "payee": "Customer Synthetic LLC",
+            "description": "ACH DEPOSIT"
+          },
+          {
+            "id": "s1",
+            "account": "biz-chk",
+            "posted_on": "2026-09-30",
+            "direction": "outflow",
+            "amount_minor": 4000,
+            "payee": "Paper Supply Synthetic",
+            "description": "POS DEBIT"
+          }
+        ]
+      },
+      "req": {
+        "sql": "SELECT SUM(income_minor) AS income_minor, SUM(expense_minor) AS expense_minor FROM txn WHERE posted_on BETWEEN '2026-07-01' AND '2026-09-30'",
+        "from": "2026-07-01",
+        "to": "2026-07-31"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 70000,
+          "expense_minor": 4000
+        },
+        "rows": [
+          "j1",
+          "a1",
+          "s1"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": {
+          "income_minor": 30000,
+          "expense_minor": 0
+        },
+        "conf": "High",
+        "score": 100
+      },
+      "verdict": "FAIL",
+      "finding": "B1",
+      "rule": "money-query.js:159,189-193; money-query-budget.js:50; money-query-quality.js:26-31",
+      "wrong_figure": true
+    },
+    {
+      "id": "P21",
+      "q": "July 2026 (from/to Q3)",
+      "ledger": "P20",
+      "req": {
+        "sql": "SELECT SUM(income_minor) AS income_minor FROM txn WHERE posted_on BETWEEN '2026-07-01' AND '2026-07-31'",
+        "from": "2026-07-01",
+        "to": "2026-09-30"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 30000
+        },
+        "rows": [
+          "j1"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": "money-query.js:193",
+      "wrong_figure": false
+    },
+    {
+      "id": "P22",
+      "q": "October 2026; pending 2026-10-30 out 2500",
+      "ledger": {
+        "pending_add": [
+          {
+            "id": "p1",
+            "account": "biz-chk",
+            "posted_on": "2026-10-30",
+            "direction": "outflow",
+            "amount_minor": 2500
+          }
+        ]
+      },
+      "req": {
+        "sql": "Q_OCT"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "Medium",
+        "score": 85,
+        "pending": {
+          "account": "1111",
+          "inflow_minor": 0,
+          "outflow_minor": 2500
+        }
+      },
+      "code": {
+        "figure": "same",
+        "conf": "Medium",
+        "score": 85
+      },
+      "verdict": "PASS",
+      "rule": "clean-money.js:95-102; money-query-quality.js:20-25,52-55",
+      "wrong_figure": false
+    },
+    {
+      "id": "P23",
+      "q": "October 2026; pending dated 2026-11-02",
+      "ledger": {
+        "pending_add": [
+          {
+            "id": "p1",
+            "account": "biz-chk",
+            "posted_on": "2026-11-02",
+            "direction": "outflow",
+            "amount_minor": 2500
+          }
+        ]
+      },
+      "req": {
+        "sql": "Q_OCT"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": "money-query-quality.js:22-23",
+      "wrong_figure": false
+    },
+    {
+      "id": "P24",
+      "q": "October 2026; undated pending out 1800",
+      "ledger": {
+        "pending_add": [
+          {
+            "id": "p1",
+            "account": "biz-chk",
+            "posted_on": null,
+            "direction": "outflow",
+            "amount_minor": 1800
+          }
+        ]
+      },
+      "req": {
+        "sql": "Q_OCT"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "Medium",
+        "score": 85
+      },
+      "code": {
+        "figure": "same",
+        "conf": "Medium",
+        "score": 85
+      },
+      "verdict": "PASS",
+      "rule": "money-query-quality.js:23",
+      "wrong_figure": false
+    },
+    {
+      "id": "P25",
+      "q": "October 2026; pending 10-29 posted 10-31 (live x4444)",
+      "ledger": {
+        "accounts_add": [
+          {
+            "slug": "biz-live",
+            "mask": "4444",
+            "kind": "checking",
+            "feed_mode": "live"
+          }
+        ],
+        "coverage_add": [
+          {
+            "account_slug": "biz-live",
+            "coverage_status": "complete",
+            "basis_state": "confirmed",
+            "covered_from": "2026-01-01",
+            "covered_to": "2026-11-11"
+          }
+        ],
+        "pending_add": [
+          {
+            "id": "p1",
+            "account": "biz-live",
+            "posted_on": "2026-10-29",
+            "direction": "outflow",
+            "amount_minor": 2500,
+            "external_id": "pend-1",
+            "source_provider": "plaid"
+          }
+        ],
+        "rows_add": [
+          {
+            "id": "r5",
+            "account": "biz-live",
+            "posted_on": "2026-10-31",
+            "direction": "outflow",
+            "amount_minor": 2500,
+            "payee": "Paper Supply Synthetic",
+            "description": "POS DEBIT",
+            "pending_transaction_id": "pend-1",
+            "source_provider": "plaid"
+          }
+        ]
+      },
+      "req": {
+        "sql": "Q_OCT"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 14500
+        },
+        "rows": [
+          "r1",
+          "r3",
+          "r5"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": "clean-money.js:100-102",
+      "wrong_figure": false
+    },
+    {
+      "id": "P26",
+      "q": "October 2026; pending 10-30 posted 11-02",
+      "ledger": {
+        "base_of": "P25",
+        "pending_override": {
+          "p1": {
+            "posted_on": "2026-10-30"
+          }
+        },
+        "rows_override": {
+          "r5": {
+            "posted_on": "2026-11-02"
+          }
+        }
+      },
+      "req": {
+        "sql": "Q_OCT"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "High",
+        "score": 100,
+        "caveat": "settled_after_period x4444 pending 2026-10-30 posted 2026-11-02 2500"
+      },
+      "code": {
+        "figure": "same",
+        "conf": "High",
+        "score": 100,
+        "caveat": "none"
+      },
+      "verdict": "FAIL",
+      "finding": "m1",
+      "rule": "clean-money.js:100-102; money-query-quality.js (no caveat)",
+      "wrong_figure": false
+    },
+    {
+      "id": "P27",
+      "q": "October 2026 via from/to; pending 10-30 posted 11-07",
+      "ledger": {
+        "base_of": "P26",
+        "rows_override": {
+          "r5": {
+            "posted_on": "2026-11-07"
+          }
+        }
+      },
+      "req": {
+        "sql": "Q_OCT",
+        "from": "2026-10-01",
+        "to": "2026-10-31"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "Medium",
+        "score": 85,
+        "pending": {
+          "account": "4444",
+          "outflow_minor": 2500
+        }
+      },
+      "verdict": "FAIL",
+      "finding": "M4",
+      "rule": "money-query-budget.js:50; clean-money.js:100",
+      "wrong_figure": false
+    },
+    {
+      "id": "P28",
+      "q": "October 2026; pending/posted twin with different providers",
+      "ledger": {
+        "base_of": "P25",
+        "pending_override": {
+          "p1": {
+            "source_provider": "simplefin"
+          }
+        }
+      },
+      "req": {
+        "sql": "Q_OCT"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 14500
+        },
+        "rows": [
+          "r1",
+          "r3",
+          "r5"
+        ],
+        "conf": "High",
+        "score": 100,
+        "caveat": "pending_likely_posted 2500"
+      },
+      "code": {
+        "figure": "same",
+        "conf": "Medium",
+        "score": 85
+      },
+      "verdict": "FAIL",
+      "finding": "m2",
+      "rule": "clean-money.js:101",
+      "wrong_figure": false
+    },
+    {
+      "id": "P29",
+      "q": "October 2026; imported pending, no external_id, same-day posted twin",
+      "ledger": {
+        "pending_add": [
+          {
+            "id": "p1",
+            "account": "biz-chk",
+            "posted_on": "2026-10-31",
+            "direction": "outflow",
+            "amount_minor": 12000,
+            "external_id": null
+          }
+        ]
+      },
+      "req": {
+        "sql": "Q_OCT"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "Medium",
+        "score": 85
+      },
+      "code": {
+        "figure": "same",
+        "conf": "Medium",
+        "score": 85
+      },
+      "verdict": "PASS",
+      "rule": "clean-money.js:101; money-query-quality.js:52-55",
+      "note": "after m2 lands expected becomes High 100 with pending_likely_posted",
+      "wrong_figure": false
+    },
+    {
+      "id": "P30",
+      "q": "October 2026; pending in 3000 and out 1000 on 10-31",
+      "ledger": {
+        "pending_add": [
+          {
+            "id": "p1",
+            "account": "biz-chk",
+            "posted_on": "2026-10-31",
+            "direction": "inflow",
+            "amount_minor": 3000
+          },
+          {
+            "id": "p2",
+            "account": "biz-chk",
+            "posted_on": "2026-10-31",
+            "direction": "outflow",
+            "amount_minor": 1000
+          }
+        ]
+      },
+      "req": {
+        "sql": "Q_OCT"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "Medium",
+        "score": 85,
+        "pending": {
+          "inflow_minor": 3000,
+          "outflow_minor": 1000
+        }
+      },
+      "code": {
+        "figure": "same",
+        "conf": "Medium",
+        "score": 85
+      },
+      "verdict": "PASS",
+      "rule": "money-query-quality.js:24-25",
+      "wrong_figure": false
+    },
+    {
+      "id": "P31",
+      "q": "October 2026 pending via contract coverage query",
+      "ledger": {
+        "pending_add": [
+          {
+            "id": "p1",
+            "account": "biz-chk",
+            "posted_on": "2026-06-15",
+            "direction": "outflow",
+            "amount_minor": 4000
+          }
+        ]
+      },
+      "req": {
+        "sql": "SELECT account, account_label, first_row, last_row, coverage_status, covered_from, covered_to, pending_rows, pending_in_minor, pending_out_minor, unreadable_rows, rows_outside_account_dates FROM coverage ORDER BY account"
+      },
+      "exp": {
+        "figure": {
+          "october_pending_out_minor": 0
+        },
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": {
+          "pending_rows": 1,
+          "pending_out_minor": 4000
+        },
+        "conf": "Medium",
+        "score": 70
+      },
+      "verdict": "FAIL",
+      "finding": "M4",
+      "rule": "clean-money.js:214-217; money-query-contract.js:35-37; money-query-quality.js:21",
+      "wrong_figure": false
+    },
+    {
+      "id": "P32",
+      "q": "October 2026; pending since 10-05 never posted",
+      "ledger": {
+        "pending_add": [
+          {
+            "id": "p1",
+            "account": "biz-chk",
+            "posted_on": "2026-10-05",
+            "direction": "outflow",
+            "amount_minor": 6000
+          }
+        ]
+      },
+      "req": {
+        "sql": "Q_OCT"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "Medium",
+        "score": 85
+      },
+      "code": {
+        "figure": "same",
+        "conf": "Medium",
+        "score": 85
+      },
+      "verdict": "PASS",
+      "rule": "money-query-quality.js:52-55; clean-money.js:217",
+      "wrong_figure": false
+    },
+    {
+      "id": "P33",
+      "q": "October 2026; pending with NULL amount",
+      "ledger": {
+        "pending_add": [
+          {
+            "id": "p1",
+            "account": "biz-chk",
+            "posted_on": "2026-10-30",
+            "direction": "outflow",
+            "amount_minor": null
+          }
+        ]
+      },
+      "req": {
+        "sql": "Q_OCT"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "Medium",
+        "score": 85,
+        "pending": {
+          "unknown_amount_rows": 1
+        }
+      },
+      "code": {
+        "figure": "same",
+        "conf": "Medium",
+        "score": 85,
+        "pending": {
+          "outflow_minor": 0
+        }
+      },
+      "verdict": "FAIL",
+      "finding": "m2",
+      "rule": "money-query-quality.js:8,55",
+      "wrong_figure": false
+    },
+    {
+      "id": "P34",
+      "q": "October 2026; row stored as 2026-10-31T23:30:00-07:00 out 9000",
+      "ledger": {
+        "rows_add": [
+          {
+            "id": "t1",
+            "account": "biz-chk",
+            "posted_on": "2026-10-31T23:30:00-07:00",
+            "direction": "outflow",
+            "amount_minor": 9000,
+            "payee": "Paper Supply Synthetic",
+            "description": "POS DEBIT"
+          }
+        ]
+      },
+      "req": {
+        "sql": "Q_OCT"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "Medium",
+        "score": 70,
+        "gap": {
+          "code": "unreadable",
+          "outflow_minor": 9000,
+          "account": "1111"
+        }
+      },
+      "code": {
+        "figure": "same",
+        "conf": "Medium",
+        "score": 70,
+        "gap": "no amounts"
+      },
+      "verdict": "FAIL",
+      "finding": "M5",
+      "rule": "clean-money.js:122,208-209; money-query-quality.js:56",
+      "wrong_figure": false
+    },
+    {
+      "id": "P35",
+      "q": "March 2026; feed row dated 2026-02-30 out 4500",
+      "ledger": {
+        "rows_replace": [
+          {
+            "id": "m1",
+            "account": "biz-chk",
+            "posted_on": "2026-03-10",
+            "direction": "outflow",
+            "amount_minor": 2000,
+            "payee": "Paper Supply Synthetic",
+            "description": "POS DEBIT"
+          },
+          {
+            "id": "m2",
+            "account": "biz-chk",
+            "posted_on": "2026-02-30",
+            "direction": "outflow",
+            "amount_minor": 4500,
+            "payee": "Paper Supply Synthetic",
+            "description": "POS DEBIT"
+          }
+        ]
+      },
+      "req": {
+        "sql": "SELECT SUM(expense_minor) AS expense_minor FROM txn WHERE posted_on BETWEEN '2026-03-01' AND '2026-03-31'"
+      },
+      "exp": {
+        "figure": {
+          "expense_minor": 2000
+        },
+        "rows": [
+          "m1"
+        ],
+        "conf": "Medium",
+        "score": 70,
+        "gap": {
+          "code": "unreadable",
+          "outflow_minor": 4500
+        }
+      },
+      "code": {
+        "figure": "same",
+        "conf": "Medium",
+        "score": 70,
+        "gap": "no amounts"
+      },
+      "verdict": "FAIL",
+      "finding": "M5",
+      "rule": "bank-feed.js:676; clean-money.js:122; money-query-quality.js:56",
+      "wrong_figure": false
+    },
+    {
+      "id": "P36",
+      "q": "October 2026; March row stored '2026-03-05 10:00:00'",
+      "ledger": {
+        "rows_add": [
+          {
+            "id": "t2",
+            "account": "biz-chk",
+            "posted_on": "2026-03-05 10:00:00",
+            "direction": "outflow",
+            "amount_minor": 4500,
+            "payee": "Paper Supply Synthetic",
+            "description": "POS DEBIT"
+          }
+        ]
+      },
+      "req": {
+        "sql": "Q_OCT"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "High",
+        "score": 100,
+        "caveat": "unreadable_outside_period 4500"
+      },
+      "code": {
+        "figure": "same",
+        "conf": "Medium",
+        "score": 70
+      },
+      "verdict": "FAIL",
+      "finding": "m4",
+      "rule": "money-query-quality.js:56",
+      "wrong_figure": false
+    },
+    {
+      "id": "P37",
+      "q": "October 2026 via from/to; bank-local 2026-10-31",
+      "ledger": "base",
+      "req": {
+        "sql": "Q_OCT",
+        "from": "2026-10-01",
+        "to": "2026-10-31"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": "money-query-budget.js:66-67; bank-feed.js:676",
+      "wrong_figure": false
+    },
+    {
+      "id": "P38",
+      "q": "November 2026 to 11-11; transfer out 11-01 in 11-03 (DST)",
+      "ledger": {
+        "rows_add": [
+          {
+            "id": "d1",
+            "account": "biz-chk",
+            "posted_on": "2026-11-01",
+            "direction": "outflow",
+            "amount_minor": 60000,
+            "leg": "PROVED_LEG"
+          },
+          {
+            "id": "d2",
+            "account": "biz-sav",
+            "posted_on": "2026-11-03",
+            "direction": "inflow",
+            "amount_minor": 60000,
+            "leg": "PROVED_LEG"
+          }
+        ]
+      },
+      "req": {
+        "sql": "SELECT SUM(income_minor) AS income_minor, SUM(expense_minor) AS expense_minor FROM txn WHERE posted_on BETWEEN '2026-11-01' AND '2026-11-11'"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 0,
+          "expense_minor": 7000
+        },
+        "rows": [
+          "r4"
+        ],
+        "own_transfer": [
+          "d1",
+          "d2"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": "clean-money.js:153-155,164; ledger-analysis.js:322-323",
+      "wrong_figure": false
+    },
+    {
+      "id": "P39",
+      "q": "'this month' asked 2026-10-31 17:30 America/Los_Angeles (UTC already Nov 1)",
+      "ledger": "base",
+      "req": {
+        "sql": "model-chosen; no local date given to money tools"
+      },
+      "exp": {
+        "figure": {
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r3"
+        ],
+        "period": "2026-10-01..2026-10-31",
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "7000 (r4) if the model uses a UTC date",
+        "conf": "High",
+        "score": 100
+      },
+      "verdict": "FAIL",
+      "finding": "m5",
+      "rule": "components/brain-mcp.mjs:602 (time_zone at :438 is search-only)",
+      "wrong_figure": false
+    },
+    {
+      "id": "P40",
+      "q": "October 2026; SQL end '2026-10-31T23:59:59'",
+      "ledger": "base",
+      "req": {
+        "sql": "SELECT SUM(income_minor) AS income_minor, SUM(expense_minor) AS expense_minor FROM txn WHERE posted_on BETWEEN '2026-10-01' AND '2026-10-31T23:59:59'"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "Medium",
+        "score": 85
+      },
+      "verdict": "FAIL",
+      "finding": "M1",
+      "rule": "money-query-budget.js:92",
+      "wrong_figure": false
+    },
+    {
+      "id": "P41",
+      "q": "October 2026; transfer out 10-31 in 11-02 (proved)",
+      "ledger": {
+        "rows_add": [
+          {
+            "id": "x1",
+            "account": "biz-chk",
+            "posted_on": "2026-10-31",
+            "direction": "outflow",
+            "amount_minor": 100000,
+            "leg": "PROVED_LEG"
+          },
+          {
+            "id": "x2",
+            "account": "biz-sav",
+            "posted_on": "2026-11-02",
+            "direction": "inflow",
+            "amount_minor": 100000,
+            "leg": "PROVED_LEG"
+          }
+        ]
+      },
+      "req": {
+        "sql": "Q_OCT"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "own_transfer": [
+          "x1"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": "clean-money.js:161-167,227-228",
+      "wrong_figure": false
+    },
+    {
+      "id": "P42",
+      "q": "P41 via from/to October",
+      "ledger": "P41",
+      "req": {
+        "sql": "Q_OCT",
+        "from": "2026-10-01",
+        "to": "2026-10-31"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": "money-query-budget.js:50; money-query.js:189-193",
+      "wrong_figure": false
+    },
+    {
+      "id": "P43",
+      "q": "October 2026; transfer out 10-31, deposit 11-04 (4 days)",
+      "ledger": {
+        "base_of": "P41",
+        "rows_override": {
+          "x2": {
+            "posted_on": "2026-11-04"
+          }
+        }
+      },
+      "req": {
+        "sql": "Q_OCT"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 112000
+        },
+        "rows": [
+          "r1",
+          "r3",
+          "x1"
+        ],
+        "estimated": {
+          "x1": "possible_own_transfer_counted"
+        },
+        "conf": "Medium",
+        "score": 78
+      },
+      "code": {
+        "figure": "same",
+        "conf": "Medium",
+        "score": 78
+      },
+      "verdict": "PASS",
+      "rule": "clean-money.js:164; ledger-analysis.js:502; money-query-quality.js:41-42",
+      "wrong_figure": false
+    },
+    {
+      "id": "P44",
+      "q": "October 2026; refund posted 11-05",
+      "ledger": {
+        "rows_add": [
+          {
+            "id": "f9",
+            "account": "biz-chk",
+            "posted_on": "2026-11-05",
+            "direction": "inflow",
+            "amount_minor": 3000,
+            "payee": "Paper Supply Synthetic",
+            "description": "REFUND PAPER SUPPLY"
+          }
+        ]
+      },
+      "req": {
+        "sql": "Q_OCT"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": "ledger-analysis.js:326,479-482",
+      "wrong_figure": false
+    },
+    {
+      "id": "P45",
+      "q": "October 2026; purchase posted 11-01 (r4)",
+      "ledger": "base",
+      "req": {
+        "sql": "Q_OCT"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "High",
+        "score": 100,
+        "caveat": "posted_after_period outflow 7000 x1111 2026-11-01"
+      },
+      "code": {
+        "figure": "same",
+        "conf": "High",
+        "score": 100,
+        "caveat": "none"
+      },
+      "verdict": "FAIL",
+      "finding": "m1",
+      "rule": "money-query-quality.js (no caveat); money-query-contract.js:25 generic only",
+      "wrong_figure": false
+    },
+    {
+      "id": "P46",
+      "q": "October 2026; unproved transfer out 10-31 in 11-01",
+      "ledger": {
+        "rows_add": [
+          {
+            "id": "u1",
+            "account": "biz-chk",
+            "posted_on": "2026-10-31",
+            "direction": "outflow",
+            "amount_minor": 30000,
+            "leg": "UNPROVED_LEG"
+          },
+          {
+            "id": "u2",
+            "account": "biz-sav",
+            "posted_on": "2026-11-01",
+            "direction": "inflow",
+            "amount_minor": 30000,
+            "leg": "UNPROVED_LEG"
+          }
+        ]
+      },
+      "req": {
+        "sql": "Q_OCT"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 42000
+        },
+        "rows": [
+          "r1",
+          "r3",
+          "u1"
+        ],
+        "estimated": {
+          "u1": "possible_own_transfer_counted"
+        },
+        "conf": "Medium",
+        "score": 88
+      },
+      "code": {
+        "figure": "same",
+        "conf": "Medium",
+        "score": 88
+      },
+      "verdict": "PASS",
+      "rule": "clean-money.js:146-160,166-167; ledger-analysis.js:502",
+      "wrong_figure": false
+    },
+    {
+      "id": "P47",
+      "q": "October 2026 via from/to; competing credit 11-03",
+      "ledger": {
+        "accounts_add": [
+          {
+            "slug": "biz-card",
+            "mask": "3333",
+            "kind": "card",
+            "feed_mode": "manual"
+          }
+        ],
+        "coverage_add": [
+          {
+            "account_slug": "biz-card",
+            "coverage_status": "complete",
+            "basis_state": "confirmed",
+            "covered_from": "2026-01-01",
+            "covered_to": "2026-11-11"
+          }
+        ],
+        "rows_add": [
+          {
+            "id": "c1",
+            "account": "biz-chk",
+            "posted_on": "2026-10-31",
+            "direction": "outflow",
+            "amount_minor": 30000,
+            "leg": "PROVED_LEG"
+          },
+          {
+            "id": "c2",
+            "account": "biz-sav",
+            "posted_on": "2026-11-02",
+            "direction": "inflow",
+            "amount_minor": 30000,
+            "leg": "PROVED_LEG"
+          },
+          {
+            "id": "c3",
+            "account": "biz-card",
+            "posted_on": "2026-11-03",
+            "direction": "inflow",
+            "amount_minor": 30000,
+            "leg": "PROVED_LEG"
+          }
+        ]
+      },
+      "req": {
+        "sql": "Q_OCT",
+        "from": "2026-10-01",
+        "to": "2026-10-31"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 42000
+        },
+        "rows": [
+          "r1",
+          "r3",
+          "c1"
+        ],
+        "conf": "Medium",
+        "score": 88
+      },
+      "code": {
+        "figure": "same",
+        "conf": "Medium",
+        "score": 88
+      },
+      "verdict": "PASS",
+      "rule": "clean-money.js:138,166-167; money-query.js:190-191",
+      "wrong_figure": false
+    },
+    {
+      "id": "P48",
+      "q": "October 2026 via from/to; in-leg 11-03 with competing debit 11-06",
+      "ledger": {
+        "base_of": "P47",
+        "rows_override": {
+          "c2": {
+            "posted_on": "2026-11-03"
+          },
+          "c3": {
+            "posted_on": "2026-11-06",
+            "direction": "outflow"
+          }
+        }
+      },
+      "req": {
+        "sql": "Q_OCT",
+        "from": "2026-10-01",
+        "to": "2026-10-31"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 42000
+        },
+        "rows": [
+          "r1",
+          "r3",
+          "c1"
+        ],
+        "conf": "Medium",
+        "score": 88
+      },
+      "code": {
+        "figure": "same",
+        "conf": "Medium",
+        "score": 88
+      },
+      "verdict": "PASS",
+      "rule": "money-query-budget.js:50; clean-money.js:138",
+      "wrong_figure": false
+    },
+    {
+      "id": "P49",
+      "q": "October 2026; transfer out 09-29 in 10-01 (proved)",
+      "ledger": {
+        "rows_add": [
+          {
+            "id": "y1",
+            "account": "biz-chk",
+            "posted_on": "2026-09-29",
+            "direction": "outflow",
+            "amount_minor": 25000,
+            "leg": "PROVED_LEG"
+          },
+          {
+            "id": "y2",
+            "account": "biz-sav",
+            "posted_on": "2026-10-01",
+            "direction": "inflow",
+            "amount_minor": 25000,
+            "leg": "PROVED_LEG"
+          }
+        ]
+      },
+      "req": {
+        "sql": "Q_OCT"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "own_transfer": [
+          "y2"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": "clean-money.js:161-167; ledger-analysis.js:322-323",
+      "wrong_figure": false
+    },
+    {
+      "id": "P50",
+      "q": "October 2026; 10-01 deposit for a September invoice",
+      "ledger": "base",
+      "req": {
+        "sql": "Q_OCT"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": "clean-money.js:185",
+      "wrong_figure": false
+    },
+    {
+      "id": "P51",
+      "q": "October 2026; from/to equals SQL",
+      "ledger": "base",
+      "req": {
+        "sql": "Q_OCT",
+        "from": "2026-10-01",
+        "to": "2026-10-31"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": "money-query.js:159,193",
+      "wrong_figure": false
+    },
+    {
+      "id": "P52",
+      "q": "October 2026 via from/to only; unproved transfer 09-28 in margin",
+      "ledger": {
+        "rows_add": [
+          {
+            "id": "w1",
+            "account": "biz-chk",
+            "posted_on": "2026-09-28",
+            "direction": "outflow",
+            "amount_minor": 30000,
+            "leg": "UNPROVED_LEG"
+          }
+        ]
+      },
+      "req": {
+        "sql": "SELECT SUM(expense_minor) AS expense_minor FROM txn",
+        "from": "2026-10-01",
+        "to": "2026-10-31"
+      },
+      "exp": {
+        "figure": {
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r3"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "Medium",
+        "score": 74
+      },
+      "verdict": "FAIL",
+      "finding": "M1",
+      "rule": "money-query.js:204; money-query-quality.js:26-27,39-50",
+      "wrong_figure": false
+    },
+    {
+      "id": "P53",
+      "q": "October 2026 coverage via from/to",
+      "ledger": "base",
+      "req": {
+        "sql": "SELECT account, first_row, last_row, row_count, covered_from, covered_to FROM coverage",
+        "from": "2026-10-01",
+        "to": "2026-10-31"
+      },
+      "exp": {
+        "figure": {
+          "1111": {
+            "first_row": "2026-10-01",
+            "last_row": "2026-10-31",
+            "row_count": 2
+          }
+        },
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": {
+          "1111": {
+            "first_row": "2026-09-30",
+            "last_row": "2026-11-01",
+            "row_count": 4
+          }
+        },
+        "conf": "Medium",
+        "score": 85
+      },
+      "verdict": "FAIL",
+      "finding": "m3",
+      "rule": "clean-money.js:198-200; money-query-budget.js:50,58",
+      "wrong_figure": false
+    },
+    {
+      "id": "P54",
+      "q": "October 2026; history > 10000 rows",
+      "ledger": "base + 10001 rows dated 2025",
+      "req": {
+        "sql": "Q_OCT"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": "money-query.js:171",
+      "wrong_figure": false
+    },
+    {
+      "id": "P55",
+      "q": "October 2026; October alone > 100000 rows",
+      "ledger": "100001 October rows",
+      "req": {
+        "sql": "Q_OCT"
+      },
+      "exp": {
+        "figure": "partial (first 100000 by id)",
+        "conf": "Low",
+        "score": 0
+      },
+      "code": {
+        "figure": "partial",
+        "conf": "Low",
+        "score": 0
+      },
+      "verdict": "PASS",
+      "rule": "money-query.js:173-176; money-query-quality.js:18-19",
+      "wrong_figure": false
+    },
+    {
+      "id": "P56",
+      "q": "October 2026; only from sent",
+      "ledger": "base",
+      "req": {
+        "sql": "Q_OCT",
+        "from": "2026-10-01"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "error": "MONEY_QUERY_INVALID"
+      },
+      "verdict": "FAIL",
+      "finding": "M2",
+      "rule": "money-query-budget.js:70; money-query.js:159",
+      "wrong_figure": false
+    },
+    {
+      "id": "P57",
+      "q": "October 2026; from/to reversed",
+      "ledger": "base",
+      "req": {
+        "sql": "Q_OCT",
+        "from": "2026-10-31",
+        "to": "2026-10-01"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "error": "MONEY_QUERY_INVALID"
+      },
+      "verdict": "FAIL",
+      "finding": "M2",
+      "rule": "money-query-budget.js:70",
+      "wrong_figure": false
+    },
+    {
+      "id": "P58",
+      "q": "October 2026; coverage exactly Oct 1-31",
+      "ledger": {
+        "coverage_override": {
+          "biz-chk": {
+            "covered_from": "2026-10-01",
+            "covered_to": "2026-10-31"
+          },
+          "biz-sav": {
+            "covered_from": "2026-10-01",
+            "covered_to": "2026-10-31"
+          }
+        }
+      },
+      "req": {
+        "sql": "Q_OCT"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": "money-query-quality.js:29-31",
+      "wrong_figure": false
+    },
+    {
+      "id": "P59",
+      "q": "October 2026; savings covered through 10-20",
+      "ledger": {
+        "coverage_override": {
+          "biz-sav": {
+            "covered_to": "2026-10-20"
+          }
+        }
+      },
+      "req": {
+        "sql": "Q_OCT"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "Low",
+        "score": 60
+      },
+      "code": {
+        "figure": "same",
+        "conf": "Low",
+        "score": 60
+      },
+      "verdict": "PASS",
+      "rule": "money-query-quality.js:29-38",
+      "wrong_figure": false
+    },
+    {
+      "id": "P60",
+      "q": "October 2026; account closed 10-15 shows row 10-20",
+      "ledger": {
+        "account_override": {
+          "biz-chk": {
+            "closed_on": "2026-10-15",
+            "status": "closed"
+          }
+        },
+        "rows_add": [
+          {
+            "id": "k1",
+            "account": "biz-chk",
+            "posted_on": "2026-10-20",
+            "direction": "outflow",
+            "amount_minor": 1500,
+            "payee": "Paper Supply Synthetic",
+            "description": "POS DEBIT"
+          }
+        ]
+      },
+      "req": {
+        "sql": "Q_OCT"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 13500
+        },
+        "rows": [
+          "r1",
+          "r3",
+          "k1"
+        ],
+        "conf": "High",
+        "score": 95
+      },
+      "code": {
+        "figure": "same",
+        "conf": "High",
+        "score": 95
+      },
+      "verdict": "PASS",
+      "rule": "clean-money.js:211-213; money-query-quality.js:60-62",
+      "wrong_figure": false
+    },
+    {
+      "id": "P61",
+      "q": "October 2026; savings opened 10-10, coverage from 10-10",
+      "ledger": {
+        "account_override": {
+          "biz-sav": {
+            "opened_on": "2026-10-10"
+          }
+        },
+        "coverage_override": {
+          "biz-sav": {
+            "covered_from": "2026-10-10"
+          }
+        }
+      },
+      "req": {
+        "sql": "Q_OCT"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "Low",
+        "score": 60
+      },
+      "verdict": "FAIL",
+      "finding": "M6",
+      "rule": "money-query-quality.js:29-30; clean-money.js:239",
+      "wrong_figure": false
+    },
+    {
+      "id": "P62",
+      "q": "October 2026; savings closed 10-15, coverage through 10-15",
+      "ledger": {
+        "account_override": {
+          "biz-sav": {
+            "closed_on": "2026-10-15",
+            "status": "closed"
+          }
+        },
+        "coverage_override": {
+          "biz-sav": {
+            "covered_to": "2026-10-15"
+          }
+        }
+      },
+      "req": {
+        "sql": "Q_OCT"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "Low",
+        "score": 60
+      },
+      "verdict": "FAIL",
+      "finding": "M6",
+      "rule": "money-query-quality.js:29-30",
+      "wrong_figure": false
+    },
+    {
+      "id": "P63",
+      "q": "Business October 2026; personal account partially covered",
+      "ledger": {
+        "entities_add": [
+          {
+            "entity_slug": "household",
+            "kind": "household",
+            "basis_state": "confirmed"
+          }
+        ],
+        "accounts_add": [
+          {
+            "slug": "home-chk",
+            "mask": "5555",
+            "kind": "checking",
+            "entity": "household",
+            "feed_mode": "manual"
+          }
+        ],
+        "coverage_add": [
+          {
+            "account_slug": "home-chk",
+            "coverage_status": "partial",
+            "basis_state": "confirmed",
+            "covered_from": "2026-10-10",
+            "covered_to": "2026-10-20"
+          }
+        ]
+      },
+      "req": {
+        "sql": "SELECT SUM(income_minor) AS income_minor, SUM(expense_minor) AS expense_minor FROM txn WHERE side='business' AND posted_on BETWEEN '2026-10-01' AND '2026-10-31'"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": "money-query-quality.js:13,20",
+      "wrong_figure": false
+    },
+    {
+      "id": "P64",
+      "q": "2026 year to date through 11-11",
+      "ledger": "base",
+      "req": {
+        "sql": "SELECT SUM(income_minor) AS income_minor, SUM(expense_minor) AS expense_minor FROM txn WHERE posted_on BETWEEN '2026-01-01' AND '2026-11-11'"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 70000,
+          "expense_minor": 19000
+        },
+        "rows": [
+          "r1",
+          "r2",
+          "r3",
+          "r4"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": "money-query-quality.js:29-31",
+      "wrong_figure": false
+    },
+    {
+      "id": "P65",
+      "q": "October 2026; same-day same-amount pair in February on two accounts",
+      "ledger": {
+        "rows_add": [
+          {
+            "id": "e1",
+            "account": "biz-chk",
+            "posted_on": "2026-02-10",
+            "direction": "outflow",
+            "amount_minor": 5000,
+            "payee": "Paper Supply Synthetic",
+            "description": "POS DEBIT"
+          },
+          {
+            "id": "e2",
+            "account": "biz-sav",
+            "posted_on": "2026-02-10",
+            "direction": "outflow",
+            "amount_minor": 5000,
+            "payee": "Paper Supply Synthetic",
+            "description": "POS DEBIT"
+          }
+        ]
+      },
+      "req": {
+        "sql": "Q_OCT"
+      },
+      "exp": {
+        "figure": {
+          "income_minor": 50000,
+          "expense_minor": 12000
+        },
+        "rows": [
+          "r1",
+          "r3"
+        ],
+        "conf": "High",
+        "score": 100
+      },
+      "code": {
+        "figure": "same",
+        "conf": "Medium",
+        "score": 85
+      },
+      "verdict": "FAIL",
+      "finding": "m4",
+      "rule": "clean-money.js:205-207; money-query-quality.js:58-59",
+      "wrong_figure": false
+    }
+  ]
+}

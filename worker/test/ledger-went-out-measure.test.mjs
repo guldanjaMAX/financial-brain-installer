@@ -73,6 +73,16 @@ function assertSpending(b, expected, question) {
   assert.ok(!b.answer.includes('included above'), question);
   assert.ok(!b.answer.includes('money out withheld'), question);
 }
+function assertObservedMoneyOut(b, expected, question) {
+  const l = b.ledger;
+  const figure = l.expense_total_minor ?? l.lead_accounts?.reduce((sum, a) => sum + a.debits_minor, 0);
+  assert.equal(figure, expected, question);
+  assert.equal(l.complete, false);
+  assert.ok(l.possible_payments.some(row => row.included_in_total && row.destination_unconfirmed));
+  assert.match(b.answer, /included in money out above/);
+  assert.match(b.answer, /may be counted twice/);
+  assert.doesNotMatch(b.answer, /withheld|cannot|can't/i);
+}
 function assertWithheld(b, question) {
   const l = b.ledger;
   assert.equal(l.expense_total_minor, null, `${question}\n${b.answer}`);
@@ -117,7 +127,7 @@ test('store Q4: went out counts the outside loan payment and discloses it; spend
     assert.equal(b.ledger.possible_payments.length, 1);
     assert.deepEqual([candidate.payment_kind, candidate.amount_minor, candidate.posted_on, candidate.included_in_total],
       ['loan', 12000, '2026-09-23', true]);
-    assert.ok(b.answer.includes(`included above, possibly a loan payment (counterpart not proved): $120.00 on September 23, bank text quoted: "Loan payment to outside lender" [${candidate.n}].`));
+    assert.ok(b.answer.includes(`included in money out above, possibly a loan payment (counterpart not proved): $120.00 on September 23, bank text quoted: "Loan payment to outside lender" [${candidate.n}].`));
     assert.equal(b.citations.filter(c => c.n === candidate.n && c.amount_minor === 12000).length, 1, 'one cited operand');
     assert.equal(b.ledger.own_account_payments.total_minor, 103000, 'named card payments stay out');
     assert.equal(b.ledger.excluded_own_transfer_minor, 50000, 'named own transfer stays out');
@@ -154,13 +164,12 @@ test('connected card: an unproven card payment is withheld from money out, never
       ['checking', '2026-09-20', -23000, text, payee, 'moved', category], ['card', '2026-09-20', 23000, receipt, null, 'moved']]);
     for (const question of WENT_OUT) {
       const b = await f.ask(question);
-      assertWithheld(b, `${text}: ${question}`);
-      assert.ok(b.answer.includes('not counted, money out withheld: possibly a card payment') &&
-        b.answer.includes('to a connected account (your account ending 4102): $230.00 on September 20'), b.answer);
+      assertObservedMoneyOut(b, 4520 + 23000 + 1999 + 23000, `${text}: ${question}`);
+      assert.match(b.answer, /ending 4102; up to \$230\.00 may be counted twice/);
       const record = b.ledger.possible_payments.find(row => row.amount_minor === 23000);
       assert.equal(record.destination_unconfirmed, true);
       assert.deepEqual(record.connected_counterpart_masks, ['4102']);
-      assert.equal(record.included_in_total, undefined);
+      assert.equal(record.included_in_total, true);
     }
     // 0.4.27 spending is unchanged: the payment stays out of spending.
     for (const question of SPENT) assertSpending(await f.ask(question), spending, `${text}: ${question}`);
@@ -178,7 +187,7 @@ test('unconnected card: the payment left the connected accounts, so it counts in
       assertMoneyOut(b, moneyOut, `${text}: ${question}`);
       const [record] = b.ledger.possible_payments;
       assert.deepEqual([record.payment_kind, record.amount_minor, record.included_in_total, record.basis], ['card', 23000, true, basis]);
-      assert.ok(b.answer.includes(`included above, possibly a card payment${basis === 'bank_code' ? ' (bank payment code)' : ''} (counterpart not proved): $230.00 on September 20, bank text quoted: "${text}" [${record.n}].`), b.answer);
+      assert.ok(b.answer.includes(`included in money out above, possibly a card payment${basis === 'bank_code' ? ' (bank payment code)' : ''} (counterpart not proved): $230.00 on September 20, bank text quoted: "${text}" [${record.n}].`), b.answer);
       assert.ok(b.citations.some(c => c.n === record.n && c.amount_minor === 23000));
     }
     for (const question of SPENT) assertSpending(await f.ask(question), 4520, `${text}: ${question}`);
@@ -198,7 +207,7 @@ test('a possible own-account transfer to an unconnected savings account counts i
     // names its destination role.
     const [record] = b.ledger.possible_payments;
     assert.deepEqual([record.payment_kind, record.destination, record.amount_minor, record.included_in_total], ['own_account', 'savings account', 50000, true]);
-    assert.ok(b.answer.includes(`included above, possibly a transfer to your own savings account (counterpart not proved): $500.00 on September 14, bank text quoted: "Online transfer to savings ending 9999" [${record.n}].`), b.answer);
+    assert.ok(b.answer.includes(`included in money out above, possibly a transfer to your own savings account (counterpart not proved): $500.00 on September 14, bank text quoted: "Online transfer to savings ending 9999" [${record.n}].`), b.answer);
   }
   // Spending excludes the possible own movement (own-movement guard); the
   // 0.4.27 oracle tag kept it, so the spending figure is the purchases alone.
@@ -206,14 +215,17 @@ test('a possible own-account transfer to an unconnected savings account counts i
   assert.equal(spending, moneyOut);
 });
 
-test('a transfer whose equal amount lands in a connected account within three days is withheld from money out', async t => {
+test('an unproved equal connected counterpart retains money out with a duplicate bound', async t => {
   const accounts = [...CHECKING_CARD, ['savings', 'savings', 'asset', '4101']];
   const { f, spending } = book(t, accounts, [...PURCHASES,
     ['checking', '2026-09-14', -50000, 'Online transfer to savings', 'Transfer', 'moved'],
     ['savings', '2026-09-15', 50000, 'Online transfer', 'Transfer', 'moved']]);
   for (const question of WENT_OUT) {
     const b = await f.ask(question);
-    assertWithheld(b, question);
+    assertMoneyOut(b, 29519 + 50000, question);
+    assert.equal(b.ledger.complete, false);
+    assert.match(b.answer, /ending 4101.*up to \$500\.00 may be counted twice/s);
+    assert.doesNotMatch(b.answer, /withheld|cannot|can't/i);
     // The text names the owner's savings account: a possible own movement,
     // judged exactly like a transfer's other leg.
     const [record] = b.ledger.possible_payments;
@@ -229,7 +241,7 @@ test('connected loan: an unproven loan payment is withheld; an outside lender wi
   const owned = [...CHECKING_CARD, ['mortgage', 'loan', 'liability', '4109']];
   const withheld = book(t, owned, [...PURCHASES, ['checking', '2026-09-23', -150000, 'Mortgage payment', 'Home Lender', 'moved'],
     ['mortgage', '2026-09-23', 150000, 'Payment received', null, 'moved']]);
-  assertWithheld(await withheld.f.ask(WENT_OUT[0]), 'owned mortgage');
+  assertObservedMoneyOut(await withheld.f.ask(WENT_OUT[0]), 29519 + 150000, 'owned mortgage');
   assertSpending(await withheld.f.ask(SPENT[0]), withheld.spending, 'owned mortgage spending control');
   for (const category of [null, 'Loan Payments']) {
     const outside = book(t, CHECKING_CARD, [...PURCHASES, ['checking', '2026-09-23', -12000, 'Loan payment to outside lender', 'Outside Lender', 'repay', category]]);
@@ -258,7 +270,7 @@ test('adversarial card shapes: split, other month, two cards, card refund', asyn
   const halfSplit = book(t, CHECKING_CARD, [...PURCHASES,
     ['checking', '2026-09-20', -10000, 'payment to account 4102', 'Card payment', 'moved'],
     ['checking', '2026-09-22', -13000, 'CARD AUTOPAY', null, 'moved']]);
-  assertWithheld(await halfSplit.f.ask(WENT_OUT[0]), 'half-proven split');
+  assertObservedMoneyOut(await halfSplit.f.ask(WENT_OUT[0]), 29519 + 23000, 'half-proven split');
   // The September purchases are paid in October: each month counts its own purchases once.
   const later = book(t, CHECKING_CARD, [...PURCHASES,
     ['checking', '2026-10-02', -24999, 'payment to account 4102', 'Card payment', 'moved'],
@@ -271,7 +283,7 @@ test('adversarial card shapes: split, other month, two cards, card refund', asyn
   // even when its text names a card that is not connected.
   for (const text of ['CARD AUTOPAY', 'payment to card 9999']) {
     const two = book(t, CHECKING_CARD, [...PURCHASES, ['checking', '2026-09-25', -5000, text, null, 'repay']]);
-    assertWithheld(await two.f.ask(WENT_OUT[0]), `two cards: ${text}`);
+    assertObservedMoneyOut(await two.f.ask(WENT_OUT[0]), 29519 + 5000, `two cards: ${text}`);
     assertSpending(await two.f.ask(SPENT[0]), two.spending, `two cards spending: ${text}`);
   }
   // A refund credited to the card is money in, never subtracted from money out.
@@ -334,11 +346,11 @@ test('business-scoped money out is withheld when a connected personal card could
   f.raw("UPDATE fin_entities SET kind='person' WHERE entity_slug='personal'");
   const b = await recorded(f, 'What went out of the business account last month?',
     [{ kind: 'totals', direction: 'outflow', account_hint: 'business account', period: { type: 'last_month' } }]);
-  assertWithheld(b, 'business scope, personal card connected');
+  assertObservedMoneyOut(b, 4520 + 1999 + 8000, 'business scope, personal card connected');
   assert.deepEqual(b.ledger.possible_payments[0].connected_counterpart_masks.sort(), ['4102', '4106']);
 });
 
-test('a went-out answer that states no figure never calls a posting included', async t => {
+test('bare and mixed repayments retain supported figures with explicit component qualifications', async t => {
   // A bare channel label refuses before reading; mixed loan components
   // withhold the whole answer. Neither may describe a posting as counted.
   for (const [text, payee, reason] of [['LOAN PAYMENT', null, 'payment_membership_unconfirmed'],
@@ -347,11 +359,19 @@ test('a went-out answer that states no figure never calls a posting included', a
       ['checking', '2026-09-23', -12000, text, payee, 'repay']]);
     for (const question of [WENT_OUT[0], SPENT[0]]) {
       const b = await f.ask(question), l = b.ledger;
-      assert.equal(l.reason, reason, question);
-      assert.equal(l.expense_total_minor, null, question);
-      assert.ok(l.possible_payments.every(row => row.included_in_total === undefined), question);
-      assert.ok(!b.answer.includes('included above'), question);
-      assert.match(b.answer, /possible loan payment, not counted/, question);
+      if (reason === 'payment_membership_unconfirmed') {
+        if (question === WENT_OUT[0]) assertMoneyOut(b, 4520 + 12000, question);
+        else assertSpending(b, 4520, question);
+        assert.doesNotMatch(b.answer, /withheld|cannot|can't/i);
+        assert.equal(l.possible_payments[0].included_in_total, question === WENT_OUT[0] ? true : undefined);
+        continue;
+      }
+      assert.equal(l.expense_total_minor, 4520 + 12000, question);
+      assert.equal(l.complete, false);
+      assert.ok(l.possible_payments.every(row => row.included_in_total === true), question);
+      assert.match(b.answer, /components (?:have )?not (?:been )?split/, question);
+      assert.match(b.answer, /\$120\.00/, question);
+      assert.doesNotMatch(b.answer, /withheld|cannot|can't/i);
     }
   }
 });
@@ -384,9 +404,8 @@ test('money in and out totals use the same money-out rule; money in is unchanged
     ['card', '2026-09-20', 23000, 'PAYMENT THANK YOU', null, 'moved']]);
   for (const question of TOTALS) {
     const b = await f.ask(question);
-    assert.equal(b.ledger.reason, 'money_out_destination_unconfirmed', question);
-    assert.equal(b.ledger.lead_accounts, undefined, question);
-    assert.doesNotMatch(b.answer, /money out \$|debits \$/, question);
+    assertObservedMoneyOut(b, 29519 + 23000, question);
+    assert.deepEqual(debits(b), { 4100: 4520 + 23000, 4102: 23000 + 1999 });
   }
   // Money in alone has no outgoing figure and is unchanged.
   const income = await f.ask('How much money came in last month?');
@@ -397,7 +416,8 @@ test('money in and out totals use the same money-out rule; money in is unchanged
   const monthly = await recorded(f, 'Could you retrieve money in and out month by month since August?',
     [{ kind: 'totals', direction: 'both', period: { type: 'since', date: '2026-08-01' } }]);
   const september = monthly.ledger.months.find(m => m.month === '2026-09');
-  assert.equal(september.available, false);
-  assert.equal(september.reason, 'money_out_destination_unconfirmed');
-  assert.equal(september.outflow_minor ?? september.outflow_subtotal_minor, undefined);
+  assert.equal(september.available, true);
+  assert.equal(september.complete, false);
+  assert.equal(september.outflow_minor ?? september.outflow_subtotal_minor, 4520 + 23000);
+  assert.match(monthly.answer, /may be counted twice/);
 });

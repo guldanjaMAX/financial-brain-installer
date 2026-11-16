@@ -19,6 +19,8 @@ import * as cli from "../brain.mjs";
 import { reviewedSkillContent } from "../operations/claude-skill.mjs";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
 import { MONEY_RULES_LINE } from "../operations/answer-setup-copy.mjs";
+import { sourceModuleHarness } from "./helpers/source-module-harness.mjs";
+const cliModule = await sourceModuleHarness(new URL("../brain.mjs",import.meta.url));
 
 const BEGIN = '<!-- BEGIN Financial Brain answer rules (written by Financial Brain setup and update; running either again replaces this section and keeps your "My accounts" lines) -->';
 const END = "<!-- END Financial Brain answer rules -->";
@@ -28,9 +30,9 @@ const ACCOUNTS = ["- ****0001 = business checking", "- ****0002 = personal card"
 const ACCOUNT_HEADING = "## My accounts (fill in once, after the owner confirms)";
 const SAVE_HEADING = "## Financial Brain: at the end of a working session";
 const hashes = {
-  "answer-contract-v1.md": "440a931d73efce5e226e7e44da5d84b52ca8497754f7fd40526c8736348f2451",
-  "money-rules-v3.md": "3d0e43cfd63fe86e7b9ed29c614e072c2de32590e31ec5a20248fb5fe52e65ae",
-  "money-rules-v3-windows.md": "d176a9a525d2777d397720898087d7a90e6f20f34f11d9a3727395c7a4486b70",
+  "answer-contract-v1.md": "65a3291a9867b2d246fe30a7664cf45688e900bd81e46f4868e8e3f03c5dea7d",
+  "money-rules-v3.md": "9bd9632dedb6a08f4626c967cb7335535b89d066094c6a994c89b60eb894042e",
+  "money-rules-v3-windows.md": "9bd9632dedb6a08f4626c967cb7335535b89d066094c6a994c89b60eb894042e",
 };
 // Repeated writer/race tests exercise real filesystem checks. Native reparse
 // detection has separate refusal/control and one bounded Windows smoke test;
@@ -119,7 +121,7 @@ test("a: verbatim inputs, platform control, assistant substitution and one sessi
     );
     assert.equal(text, `${BEGIN}\n${expectedContract}\n${inner}${END}\n`);
     assert.equal(text.includes("ls -d ~/.financial-brain-v0.4."), false);
-    assert.equal(text.includes("{{BRAIN_ASK_COMMAND}}"), platformName !== "win32");
+    assert.equal(text.includes("{{BRAIN_ASK_COMMAND}}"), false, "money uses MCP directly on every platform");
     const codex = workspace.renderOwnerRulesSection({ platformName, assistant: "codex" });
     assert.equal(codex, text.replace("in this CLAUDE.md", "in this AGENTS.md"));
     assert.equal(count(codex, "in this AGENTS.md"), 1);
@@ -135,7 +137,7 @@ test("a: verbatim inputs, platform control, assistant substitution and one sessi
     assert.match(text, /Never calculate or state a total from excerpts/);
     assert.match(text, /Say which sources and periods you did not search/);
     assert.match(text, /Single-document questions are unchanged/);
-    assert.match(text, /Bank-ledger money questions go to brain_think/);
+    assert.match(text, /For money questions, call brain_money_overview first, read brain_money_guide, then go straight to brain_money_query/);
     assert.doesNotMatch(text, /short single-fact lookup/i);
   }
   const skill = readFileSync(new URL("../skills/financial-brain-technician/SKILL.md", import.meta.url), "utf8");
@@ -159,7 +161,7 @@ test("answer pause rules render the exact manifest-bound connect and cap command
   assert.ok(text.includes(MONEY_RULES_LINE));
 });
 
-test("owner answer routing follows the selected model pair and keeps ledger templates during answer pauses", (t) => {
+test("owner answer routing follows the selected model pair and keeps direct money routing during document answer pauses", (t) => {
   const builtIn = workspace.renderOwnerRulesSection({
     answerSetup: "built-in",
     capCommand: "brain connect anthropic /fixture/brain.manifest.json --keep-key --daily-cap <usd>",
@@ -176,10 +178,9 @@ test("owner answer routing follows the selected model pair and keeps ledger temp
   assert.match(claude, /answer_error.*anthropic_key_missing.*brain_search/is);
   assert.notEqual(builtIn, claude, "both answer setups reached distinct owner routing decisions");
   for (const rendered of [builtIn, claude]) {
-    const fallback = rendered.split("## If brain_think gives no answer")[1].split("## Hard rules")[0];
-    assert.match(fallback, /skip only the CLI fallback for that question/i);
-    assert.match(fallback, /ledger templates keep working/i);
-    assert.doesNotMatch(fallback, /skip this fallback and the other templates/i);
+    assert.match(rendered, /brain_money_guide, then go straight to brain_money_query/);
+    assert.match(rendered, /Never add up search snippets/);
+    assert.doesNotMatch(rendered, /ledger templates keep working|CLI fallback/);
   }
 
   const installed = fixture(t);
@@ -495,7 +496,7 @@ function updateClosingBoundary({ platform = "win32", platformName, folder = "ord
     },
     safelyReportUpdateResult: (report, message) => report(message),
   };
-  new Function(...Object.keys(bindings), source.slice(start, end))(...Object.values(bindings));
+  cliModule(bindings, `(function(){${source.slice(start,end)}\n})()`);
   assert.equal(reports.length, 1, "the closing reporter was reached exactly once");
   return { closing: reports[0], renderCalls, guidance, renderOptions, target };
 }
@@ -623,29 +624,24 @@ for (const platform of ["win32", "darwin", "linux"]) for (const [assistant, file
     });
     const target = join(result.root, filename);
     assert.equal(result.finish.length, 1, "the real update reached its verified completion decision");
-    if (platform === "win32") {
-      assert.deepEqual(result.writes, [], "the update must stop before the guide writer");
-      assert.deepEqual(result.messages, [WINDOWS_GUIDE_NOTICE]);
-      assert.deepEqual(readFileSync(target), before);
-      assert.equal(statSync(target).mtimeMs, mtime);
-      assert.deepEqual(readdirSync(result.root).sort(), entries, "no lock, staging or recovery folder was created");
-    } else {
-      assert.deepEqual(result.writes.map(([agent]) => agent), [assistant], "the non-Windows control reaches the writer");
-      assert.notDeepEqual(readFileSync(target), before);
-      assert.notEqual(statSync(target).mtimeMs, mtime);
-      assert.ok(readFileSync(target, "utf8").includes(BEGIN));
-      assert.equal(result.messages.length, 1);
-      assert.match(result.messages[0], /refreshed with the answer rules/);
-    }
+    assert.deepEqual(result.writes.map(([agent]) => agent), [assistant], "verified update reaches the writer on every platform");
+    assert.notDeepEqual(readFileSync(target), before);
+    assert.notEqual(statSync(target).mtimeMs, mtime);
+    assert.ok(readFileSync(target, "utf8").includes(BEGIN));
+    assert.equal(result.messages.length, 1);
+    assert.match(result.messages[0], /refreshed with the answer rules/);
+    const retained = readdirSync(result.root).filter(name => name.startsWith(`${filename}.financial-brain-retained-`));
+    assert.ok(retained.some(name => readFileSync(join(result.root, name, "previous")).equals(before)), "old guide retained before replacement");
   });
 }
 
-test("WIN R4 dual-assistant update prints the Windows notice once", async t => {
+test("WIN R4 dual-assistant update refreshes both Windows guides once", async t => {
   const result = await update(t, { platform: "win32", wired: ["Claude Code", "Codex"], createGuide: true });
   assert.equal(result.finish.length, 1);
-  assert.deepEqual(result.writes, []);
-  assert.deepEqual(result.messages, [WINDOWS_GUIDE_NOTICE]);
-  assert.equal(readdirSync(result.root).filter(name => name.includes(".lock") || name.includes(".financial-brain-")).length, 0);
+  assert.deepEqual(result.writes.map(([assistant]) => assistant), ["claude", "codex"]);
+  assert.equal(result.messages.filter(message => /refreshed with the answer rules/.test(message)).length, 2);
+  assert.equal(readdirSync(result.root).filter(name => name.endsWith(".lock")).length, 0);
+  assert.equal(readdirSync(result.root).filter(name => name.includes(".financial-brain-retained-")).length, 2);
 });
 
 for (const [assistant, filename, , write] of writers) test(`WIN R4 setup failure releases its lock: ${assistant}`, t => {
@@ -698,7 +694,7 @@ test("i: skill insertion is exact, bounded and renders answer-setup commands on 
   const skill = readFileSync(skillPath, "utf8");
   assert.equal(count(skill, "## Answer from the Brain\n"), 1);
   const section = skill.slice(skill.indexOf("## Answer from the Brain\n"), skill.indexOf("## Credential boundary\n"));
-  assert.equal(sha(section), "5c9b64c1f19c6abeaa525250486350c45d458c15b947aa0a07f3d3ac21beab10");
+  assert.equal(sha(section), "ed12b02cc96402d9b565b58d4cbbaef0b2ba1cafd23b9cd05db22f752ef58f3b");
   assert.ok(Buffer.byteLength(skill) <= 72 * 1024);
   for (const platform of ["darwin", "win32"]) {
     const rendering = { platform, nodePath: "C:\\Runtime\\node.exe", scriptPath: "C:\\Brain\\brain.mjs", env: {}, existsSync: () => false };
@@ -947,20 +943,15 @@ for (const [assistant, filename, marker, write] of writers) test(`R7 short masks
   assert.equal(write(manifest, options).status, "verified");
 });
 
-test("R2/R5 installed money rules use the Brain lead and preserve the parser menu", () => {
-  const resolving = name => template(name).split("## Resolving account nicknames\n")[1].split("## Profit, net income, cash flow")[0];
-  assert.equal(resolving("money-rules-v3.md"), resolving("money-rules-v3-windows.md"), "shared account guidance is byte-aligned");
+test("R2/R5 installed money rules route directly and retain evidence limits", () => {
   for (const platformName of ["darwin", "win32"]) {
     const rules = workspace.renderOwnerRulesSection({ platformName });
-    assert.match(rules, /Financial Brain 0\.4\.27/);
-    assert.match(rules, /Never subtract.*already left out/);
-    assert.match(rules, /Note:/);
-    assert.match(rules, /What was my profit <period>\?/);
-    assert.match(rules, /including loan proceeds/);
-    assert.match(rules, /brain_search.*first.*email/i);
-    assert.match(rules, /stale.*broken.*paused/);
+    assert.match(rules, /read brain_money_guide, then go straight to brain_money_query/);
+    assert.match(rules, /Do not call brain_think first/);
+    assert.match(rules, /Never add up search snippets/);
+    assert.match(rules, /State the accounts and dates covered, what is missing, and what is an estimate/);
     assert.match(rules, /## My accounts/);
-    assert.match(rules, /Confidence: N%/);
+    assert.match(rules, /Never raise a returned score/);
   }
 });
 
@@ -988,21 +979,16 @@ test("R8 ordinary folders and home get the rules-loading nudge", async t => {
   assert.equal(workspace.classifySessionFolder("/owner/Financial Brain/sub", { home: "/owner", brainFolder: "/owner/Financial Brain" }), null);
 });
 
-for (const platformName of ["darwin", "win32"]) test(`m6/m11 workspace fallback follows the supported platform: ${platformName}`, t => {
+for (const platformName of ["darwin", "win32"]) test(`m6/m11 workspace uses direct money MCP on the supported platform: ${platformName}`, t => {
   const { root } = fixture(t);
   const folder = join(root, "custom-folder"); mkdirSync(folder);
   const manifest = join(folder, "custom.manifest.json");
   assert.equal(workspace.writeClaudeWorkspaceGuide(manifest, { ...options, platformName }).status, "written");
   const text = readFileSync(join(folder, "CLAUDE.md"), "utf8");
-  const fallback = text.split("## If brain_think gives no answer")[1].split("## Hard rules")[0];
   const runtime = renderCopyableCommand(options.nodePath, [options.brainCliPath], { platformName });
-  const invocation = renderCopyableCommand("brain", ["ask", manifest], { platformName });
   assert.ok(text.includes(runtime), "the exact executable contract remains visible");
-  if (platformName === "win32") {
-    assert.match(fallback, /skip the CLI fallback on Windows/);
-    assert.equal(fallback.includes(invocation), false, "Windows must not advertise the unsupported fallback");
-  } else assert.ok(fallback.includes(invocation));
-  assert.doesNotMatch(fallback, /ls -d|sort -V|\$HOME/);
+  assert.match(text, /brain_money_guide, then go straight to brain_money_query/);
+  assert.doesNotMatch(text, /CLI fallback|BRAIN_ASK_COMMAND|ls -d|sort -V/);
 });
 
 test("m10 legacy kit accounts survive adding the current managed section", t => {
@@ -1022,10 +1008,11 @@ test("m14 distributable Windows templates contain no internal kit header", () =>
   }
 });
 
-test("v3 menu expansions all reach the ledger parser", () => {
+test("legacy parser controls remain supported while v3 rules route directly to money SQL", () => {
   let checked = 0;
   for (const file of ["money-rules-v3.md", "money-rules-v3-windows.md"]) {
-    const menu = template(file).split("## Template menu")[1].split("## Periods")[0];
+    assert.match(template(file), /go straight to brain_money_query/);
+    const menu = ' (every one passes the 0.4.27 question parser)\n- Balances: `What are my account balances?` | `What are my <checking|savings|card|loan|investment> account balances?` | `What is my balance for account ending NNNN?`\n- In and out: `How much money came in and went out <period>?` | `How much money came in and went out of my <checking|savings|card|loan> account <period>?`\n- Measures: `What was my profit <period>?` | `What was my net income <period>?` (money in minus money out, not accounting profit or cash flow)\n- Lists: `What were my <N> largest expenses <period>?` (N optional, 1-100, default 10) | `What were my <N> largest deposits <period>?` | `What were my deposits <period>?` | `What were my top spending categories <period>?` | `What was my spending by category <period>?` | `How much did I spend by merchant <period>?` | `How much income by merchant <period>?`\n- Recurring: `What are my recurring charges?` | `What recurring charges am I paying for and how much per month?` (both look back about 120 days from today) | `What are my recurring charges in Q<n> <YYYY>?` (a finished quarter)\n- One name: `How much did I spend at <merchant> <period>?` | `How much did I spend on <category> <period>?` | `How much income came from <payer> <period>?`\n- Payments: `Did the payment from <payer> arrive?` | `Did the payment of $<amount> arrive?` (both take an optional <period>) | `Did the payment from <payer> arrive on <Month D, YYYY>?`\n- Own-account moves: `How much did I transfer between my own accounts <period>?`\n\n';
     for (const [, form] of menu.matchAll(/`([^`]+)`/g)) {
       const options = form.match(/<([^<>]*\|[^<>]*)>/);
       for (const kind of options ? options[1].split("|") : [null]) {
@@ -1050,17 +1037,22 @@ test("v3 menu expansions all reach the ledger parser", () => {
   }
 });
 
-test("current named-month guidance reaches current-to-date Think while finished named months stay fixed", async t => {
+test("local date guidance preserves legacy current-to-date and fixed-month controls", async t => {
   const guidance = [];
   for (const file of ["money-rules-v3.md", "money-rules-v3-windows.md"]) {
     const text = template(file);
-    assert.match(text, /owner names the current month.*use `this month`/i,
-      `${file}: current named-month translation decision reached`);
-    assert.match(text, /`in <Month YYYY>`.*complete calendar month/is,
-      `${file}: fixed named-month contract is present`);
-    assert.match(text, /may refuse until.*month.*fully covered/is,
-      `${file}: fixed current-month refusal is explicit`);
-    guidance.push(text.match(/owner names the current month[^\n]+/i)?.[0]);
+    assert.match(text, /today's date in the owner's time zone/i,
+      `${file}: local calendar date decision reached`);
+    // PRO-SQL-SAFETY R2 (M3) dropped "local" here on purpose: with the
+    // as_of.utc_date fallback the bounds are not always local, so the rule
+    // now requires naming the date and zone that were used instead.
+    assert.match(text, /relative periods into explicit calendar dates and pass those date literals into SQL/i,
+      `${file}: explicit SQL date bounds required`);
+    assert.match(text, /otherwise use as_of\.local_date, or as_of\.utc_date, say which date and zone were used/i,
+      `${file}: the date and zone behind the explicit bounds are disclosed`);
+    assert.match(text, /Never use the database's now \(UTC\)/i,
+      `${file}: database UTC clock cannot supply today`);
+    guidance.push(text.match(/Never use the database's now[^\n]+/i)?.[0]);
   }
   assert.equal(new Set(guidance).size, 1, "both platform guides use the same current-month rule");
 
@@ -1302,9 +1294,8 @@ test("F4 native attribute probe uses stdin, an allowlisted environment and exact
   assert.equal(workspace.windowsWorkspaceAttributesSafe(paths, { environment: {}, run: () => { throw new Error("must not run"); } }), false);
 });
 
-test("Windows native attributes accept a regular folder and refuse a junction", {
-  skip: process.platform !== "win32" ? "native PowerShell/reparse verification requires a Windows host" : false,
-}, t => {
+const nativeAttributeDependencies = {fixture,symlinkSync,join,workspace,spawnSync,assert};
+function nativeAttributesProbe(t, {fixture,symlinkSync,join,workspace,spawnSync,assert}=nativeAttributeDependencies) {
   const { root } = fixture(t), linked = join(root, "junction");
   symlinkSync(root, linked, "junction");
   let probes = 0;
@@ -1330,7 +1321,10 @@ test("Windows native attributes accept a regular folder and refuse a junction", 
   assert.equal(regular, true);
   assert.equal(junction, false);
   assert.equal(probes, 2, "both actual native attribute decisions were reached");
-});
+}
+test("Windows native attributes accept a regular folder and refuse a junction", {
+  skip: process.platform !== "win32" ? "native PowerShell/reparse verification requires a Windows host" : false,
+}, t => nativeAttributesProbe(t));
 
 test("Windows repeated refresh keeps native checks injectable without skipping filesystem decisions", t => {
   const { root, manifest } = fixture(t), target = join(root, "AGENTS.md");
@@ -1598,9 +1592,7 @@ for (const arm of ["duplicate", "before-accounts", "misplaced-only", "fenced", "
   }
 });
 
-for (const arm of ["none", "install", "after-return"]) test(`R4 original descriptor remains reachable: ${arm}`, {
-  skip: process.platform === "win32" ? "the 0.4.27 ordinary update path does not refresh an existing guide on Windows; see CHANGELOG known limitations" : false,
-}, t => {
+for (const arm of ["none", "install", "after-return"]) test(`R4 original descriptor remains reachable: ${arm}`, t => {
   const { root, manifest } = fixture(t), target = join(root, "AGENTS.md");
   const before = `${CODEX}\n# Older guide\n`, note = "\nRetain this concurrent owner annotation.\n";
   writeFileSync(target, before);
@@ -1616,7 +1608,9 @@ for (const arm of ["none", "install", "after-return"]) test(`R4 original descrip
     if (arm === "after-return") fs.writeSync(fd, note, Buffer.byteLength(before), "utf8");
   } finally { restore(); fs.closeSync(fd); }
   assert.equal(installed, 1, "real installation and open original descriptor reached");
-  if (arm === "install") {
+  // Windows cannot rename the retained directory while its original inode
+  // remains open. Keep the safe recovery result rather than claim success.
+  if (arm === "install" || process.platform === "win32") {
     assert.equal(result.status, "not_written");
     assert.ok(result.pendingPath, "refusal names its pending content");
     assert.ok(existsSync(result.pendingPath));
@@ -1734,17 +1728,17 @@ for (const [assistant, filename, marker, write] of writers) for (const fault of 
 
 const shellEnv = root => ({ HOME: root, PATH: "/usr/bin:/bin", BRAIN_NO_WRANGLER_LOGIN: "1", BRAIN_R5_ARGV_PROBE: "1" });
 for (const suffix of ["ordinary space", "$UNSET_FIXTURE", "$(printf SUBSTITUTED)", "owner's ; folder"]) for (const location of ["manifest", "executable", "runtime"]) {
-  test(`R5 literal fallback: ${location} ${suffix}`, { skip: process.platform === "win32" }, t => {
+  test(`R5 literal installed ask command: ${location} ${suffix}`, { skip: process.platform === "win32" }, t => {
     const { root } = fixture(t), folder = join(root, suffix); mkdirSync(folder);
     const manifest = join(location === "manifest" ? folder : root, "brain.manifest.json");
     const recorder = join(location !== "manifest" ? folder : root, "argument-recorder");
     writeFileSync(recorder, '#!/bin/sh\nprintf "%s\\n" "$@"\n', { mode: 0o700 });
     const opts = { brainCliPath: location === "runtime" ? join(root, "entry.mjs") : recorder, nodePath: location === "runtime" ? recorder : null, platformName: "darwin" };
-    const result = workspace.writeCodexWorkspaceGuide(manifest, opts);
+    const result = workspace.writeClaudeWorkspaceGuide(manifest, opts);
     assert.equal(result.status, "written");
     const guide = readFileSync(result.path, "utf8");
     const command = guide
-      .match(/## If brain_think gives no answer\n[\s\S]{0,700}?`([^`]+)`/)[1];
+      .match(/- Ask privately: `([^`]+)`/)[1];
     const runtimeContract = opts.nodePath
       ? guide.match(/Run this once in each new terminal[^\n]+: `([^`]+)`/)[1]
       : "";
@@ -1803,7 +1797,7 @@ test("R5 unknown kind remains a connected account in both owner templates", asyn
   assert.equal((await ask("What are my card account balances?")).gaps[0].reason, "no_accounts");
   f.raw("UPDATE fin_accounts SET account_kind='card', balance_role='liability'");
   assert.equal((await ask("What are my card account balances?")).ledger.accounts[0].current_minor, 48231, "classified card control");
-  const resolving = name => template(name).split("## Resolving account nicknames\n")[1].split("## Profit, net income, cash flow")[0];
+  const resolving = name => template(name).split("## Account annotations and answer shape\n")[1].split("## My accounts")[0];
   assert.equal(resolving("money-rules-v3.md"), resolving("money-rules-v3-windows.md"), "shared account guidance is byte-aligned");
   for (const platformName of ["darwin", "win32"]) {
     const rules = workspace.renderOwnerRulesSection({ platformName });
@@ -1840,7 +1834,8 @@ for (const storage of ["Downloads", "Library/CloudStorage", "Desktop"]) {
 
 test("S2 owner confidence preserves returned score, independent families and authority", () => {
   const text = workspace.renderOwnerRulesSection();
-  assert.ok(text.includes("Confidence: N%"), "the actual answer contract was rendered");
+  assert.ok(text.includes("Confidence: High (92%)"), "the word and percent answer contract was rendered");
+  assert.match(text, /Below 100%.*why.*missing evidence/);
   assert.doesNotMatch(text, /start at 100%/);
   assert.match(text, /returned confidence/i);
   assert.match(text, /independent evidence famil/i);
@@ -1900,8 +1895,8 @@ test("S2 two fresh copies remain one evidence family and owner confirmation stay
   assert.ok(score.basis.includes("independent corroboration is not established"));
   const text = workspace.renderOwnerRulesSection();
   assert.match(text, /two fresh copies from one family remain one family/);
-  assert.match(text, /With a yes, add one line per mask/);
-  assert.match(text, /Without a yes, use the answer for this session only/);
+  assert.match(text, /With the owner's approval, add one line per mask/);
+  assert.match(text, /Without approval, keep the annotation for this session only/);
 });
 
 test("S2 update warns when the Brain folder itself is temporary storage", async t => {
@@ -1964,11 +1959,9 @@ test("R2 Windows native launch counts stay at the pre-change baseline", t => {
 });
 
 test("R2 native smoke budget accepts slow startup and rejects either hung arm", () => {
-  const source = readFileSync(new URL(import.meta.url), "utf8")
-    .split('test("Windows native attributes accept a regular folder and refuse a junction"')[1]
-    .split('test("Windows repeated refresh')[0];
-  const register = new Function("test", "fixture", "symlinkSync", "join", "workspace", "spawnSync", "assert",
-    'test("Windows native attributes accept a regular folder and refuse a junction"' + source);
+  const register = (test,fixture,symlinkSync,join,workspace,spawnSync,assert) =>
+    test("Windows native attributes accept a regular folder and refuse a junction", {},
+      t => nativeAttributesProbe(t,{fixture,symlinkSync,join,workspace,spawnSync,assert}));
   for (const arm of ["regular", "junction"]) for (const milliseconds of [400, 22_000, 120_000]) {
     let body, calls = 0, links = 0;
     register((_name, _options, fn) => { body = fn; }, () => ({ root: "C:\\Users\\owner\\folder" }),
@@ -2085,19 +2078,15 @@ for (const platformName of ["win32", "darwin", "linux"]) for (const [assistant, 
       ...options, ...countedGuideWriters(calls), platformName, verifiedCodexWiring: true,
       reportInfo: message => notices.push(message), reportOk: () => {}, reportWarning: () => {},
     });
-    const kept = platformName === "win32" && existing;
-    assert.deepEqual(calls, kept ? [] : [assistant]);
-    assert.deepEqual(notices, kept ? [WINDOWS_GUIDE_NOTICE] : []);
-    if (kept) {
-      assert.equal(result.status, "kept_existing_windows_guide", "the preservation decision returned an explicit kept result");
-      assert.equal(result.changed, false);
-      assertGuideKept(before);
-    } else if (!existing && assistant === "claude") {
+    assert.deepEqual(calls, [assistant], "verified update reaches its managed-file writer");
+    assert.deepEqual(notices, []);
+    if (!existing && assistant === "claude") {
       assert.equal(result.status, "skipped_missing", "existing-only update policy is preserved");
       assert.equal(existsSync(join(root, filename)), false);
     } else {
       assert.equal(result.status, "written");
       assert.ok(readFileSync(join(root, filename), "utf8").includes(BEGIN));
+      if (existing) assert.deepEqual(readFileSync(result.recoveryPath), before.bytes);
     }
   });
 }
@@ -2179,9 +2168,9 @@ for (const platform of ["win32", "darwin", "linux"]) {
     for (const [, filename] of writers) assert.equal(existsSync(join(missing.root, filename)), false);
     const control = await update(t, { platform, wired: ["Claude Code", "Codex"], createGuide: "claude" });
     assert.equal(control.finish.length, 1);
-    assert.deepEqual(control.writes.map(([assistant]) => assistant), platform === "win32" ? ["codex"] : ["claude", "codex"]);
+    assert.deepEqual(control.writes.map(([assistant]) => assistant), ["claude", "codex"]);
     assert.ok(readFileSync(join(control.root, "AGENTS.md"), "utf8").includes(BEGIN), "verified Codex creation is the green control");
-    assert.equal(control.messages.filter(message => message === WINDOWS_GUIDE_NOTICE).length, platform === "win32" ? 1 : 0);
+    assert.equal(control.messages.filter(message => message === WINDOWS_GUIDE_NOTICE).length, 0);
   });
 }
 
@@ -2197,12 +2186,12 @@ for (const [assistant, filename, marker] of writers) for (const damaged of [fals
     const result = refresh(manifest, {
       ...options, ...countedGuideWriters(calls), platform: "win32", reportInfo: message => notices.push(message),
     });
-    assert.equal(result.status, "kept_existing_windows_guide", "the preservation decision is reached");
-    assert.deepEqual(calls, []);
-    assert.deepEqual(notices, [WINDOWS_GUIDE_NOTICE]);
+    assert.equal(result.status, damaged ? "preserved_damaged_section" : "preserved_unrelated_existing_file", "the writer preservation decision is reached");
+    assert.deepEqual(calls, [assistant]);
+    assert.deepEqual(notices, damaged ? [] : [`The existing ${filename} is not a safely managed Financial Brain guide, so update left it unchanged.`]);
     assertGuideKept(before);
     const control = refresh(manifest, { ...options, ...countedGuideWriters(calls), platform: "linux", reportInfo: () => {}, reportWarning: () => {} });
-    assert.deepEqual(calls, [assistant]);
+    assert.deepEqual(calls, [assistant, assistant]);
     assert.equal(control.status, damaged ? "preserved_damaged_section" : "preserved_unrelated_existing_file");
     assertGuideKept(before);
   });

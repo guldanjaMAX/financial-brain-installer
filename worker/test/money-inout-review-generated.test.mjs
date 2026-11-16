@@ -80,11 +80,14 @@ function assess(c, body) {
   if (c.shape === 'unpaired' && c.uncovered && c.direction === 'outflow') {
     const movement = c.rows.find(row => row.role === 'movement');
     assert.ok(movement, 'uncovered destination decision has a real outflow');
-    if (l?.reason !== 'money_out_destination_unconfirmed' || l.total_minor !== null || body.evidence_gate?.complete !== false)
+    if (l?.reason !== 'money_out_destination_unconfirmed' || (l.lead_accounts ? total(l.lead_accounts.map(a=>String(a.debits_minor))) : String(l.expense_total_minor)) !== oracle(c) || body.evidence_gate?.complete !== false)
       return { type: 'uncertified_destination', actual: l?.total_minor };
     const candidate = l.possible_payments?.find(row => row.amount_minor === movement.cents && row.destination_unconfirmed);
     if (!candidate || !body.citations?.some(row => row.n === candidate.n && row.amount_minor === movement.cents))
       return { type: 'missing_destination_disclosure' };
+    assert.equal(candidate.included_in_total, true);
+    assert.match(body.answer, /may be counted twice/);
+    assert.doesNotMatch(body.answer, /withheld|cannot|can't/i);
     return null;
   }
   if (!l) {

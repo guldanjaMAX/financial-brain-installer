@@ -1,3 +1,4 @@
+import { historicalAnswerTape } from './search-disclosure-tapes.mjs';
 // Explicit offline authoring only. Ordinary replay never captures a missing
 // call. Preserve historical tapes and bind each replacement to exact bytes.
 import assert from 'node:assert/strict';
@@ -101,7 +102,8 @@ export function tapeChanges(before, after, path = [], roles = new Map()) {
     return [{ path, before_sha256: sha(before), value: after }];
   // Author only the reviewed schema identity, inventory and balance query.
   // Model requests, figures and all other response fields stay exact.
-  assert.ok((path.at(-1) === 'schema_version' && before === 57 && [58, 59, 61].includes(after)) ||
+  assert.ok((path.length === 4 && path[0] === 'd1' && path[2] === 'output' &&
+      path.at(-1) === 'schema_version' && before === 57 && [58, 59, 61, 62, 63, 64].includes(after)) ||
     (typeof before === 'string' && sha(before) === '511315a8f707696def73f2bcdf1759704fa16b1f636dabc5c983a4fdc562f3a6' &&
       // Current admission additionally checks SimpleFIN proof versions.
       // Historical arms and every unrelated binding stay exact below.
@@ -150,9 +152,11 @@ function payerWindowEdits(before, after, input) {
 }
 
 export function buildRouterTapes({ disclosure = true } = {}) {
-  const previous = loadTapes({ router: false }).candidate;
+  const previous = loadTapes({ router: false, answer: false }).candidate;
+  const historical = loadTapes({ answer: false }).candidate;
   const sources = workingTreeSources();
   const run = replayRoute({ cases: CASES, capture: true, sourceOverrides: sources });
+  for (const id of Object.keys(run.tapes)) run.tapes[id] = historicalAnswerTape(run.tapes[id], historical[id]);
   assert.equal(run.observations.length, CASES.length);
   assert.ok(run.observations.every(o => o.execution_status === 'complete'));
   assert.equal(run.provider_calls, 0);

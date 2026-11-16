@@ -1,5 +1,8 @@
+import { activeChunkSql } from "./retained-ingest.js";
+import { documentEvidenceRevision } from './document-read-coverage.js';
+import { discoverDocumentSuccessors, discoverCorrectionSearchSeeds } from './document-successors.js';
 import { sourceFamilyIndexReady } from "./source-family-index.js";
-import { collapseTitleFamilies, domainExpansion, queryNames, containsName, metadataNameVariant } from './retrieval-expansion.js';
+import { collapseTitleFamilies, titleFamily, domainExpansion, queryNames, containsName, metadataNameVariant } from './retrieval-expansion.js';
 import { measureQueryStage, startQueryStage } from "./query-timing.js";
 /**
  * store-d1 — retrieval over Cloudflare alone: D1 for text and keywords,
@@ -35,7 +38,7 @@ import { measureQueryStage, startQueryStage } from "./query-timing.js";
  */
 
 import {
-  currentEvidenceCandidates, hasExplicitCurrentIntent, parseCanonicalEvidenceDate,
+  currentEvidenceCandidates, hasExplicitCurrentIntent, parseCanonicalEvidenceDate, recordObservation,
 } from "./query-intent.js";
 import {
   UNREADABLE_SOURCE_CHUNK, authorityFor, hasUnreadableMark,
@@ -57,7 +60,7 @@ import { parseProviderWithheldReason, parseStoredSourceFailureEvidence, provider
 import { sourceCoverageFromEvidence } from "./source-coverage.js";
 import { zoomSourceStatus } from "./zoom-deliveries.js";
 import { scopeIsUnrestricted } from "./grants.js";
-import { probeStalledVectorFence } from "./vector-fence-probe.js";
+import { probeStalledVectorFence, isUnconfirmedVectorProbe } from "./vector-fence-probe.js";
 import { publicOwnerNoteProvenance } from "./owner-note-contract.js";
 import {
   legacyNativeStoredAssessment,
@@ -95,11 +98,7 @@ const SOURCE_HINT_RRF_WEIGHT = 2;
 // in the historical pile. It gets its own bounded lane only after the ordinary
 // current-intent and subject-match guard has selected it.
 const OPERATIVE_CURRENT_RRF_WEIGHT = 2;
-// The answer route reads at most 900 characters from a retrieved snippet. Keep
-// both modalities inside that window when their best chunks differ, rather than
-// letting either a keyword-heavy header or a semantically similar preamble erase
-// the other chunk's evidence.
-const COMPOSED_EVIDENCE_PART_MAX_CHARS = 400;
+// Whole chunk evidence keeps trailing clauses and complete figures available.
 const HISTORICAL_SOURCE_LABELS = Object.freeze({
   drive: "Google Drive",
   gmail: "Gmail",
@@ -298,69 +297,16 @@ export function collapseRankedDocuments(items) {
   return out;
 }
 
-function exactTermPositions(text, term) {
-  const positions = [];
-  let cursor = 0;
-  while (cursor < text.length) {
-    const index = text.indexOf(term, cursor);
-    if (index < 0) break;
-    const before = index === 0 ? "" : text[index - 1];
-    const afterIndex = index + term.length;
-    const after = afterIndex >= text.length ? "" : text[afterIndex];
-    if (!/[a-z0-9]/i.test(before) && !/[a-z0-9]/i.test(after)) positions.push(index);
-    cursor = index + Math.max(1, term.length);
-  }
-  return positions;
-}
-
 function boundedEvidencePart(value, query) {
-  const text = String(value || "").replace(/\s+/g, " ").trim();
-  if (text.length <= COMPOSED_EVIDENCE_PART_MAX_CHARS) return text;
-
-  const lower = text.toLowerCase();
-  const terms = [...new Set(String(query || "").toLowerCase().match(/[a-z0-9]+/g) || [])]
-    .filter((term) => term.length >= 2 && !FTS_STOPWORDS.has(term))
-    .map((term, order) => ({ term, order, positions: exactTermPositions(lower, term) }))
-    .filter((entry) => entry.positions.length > 0)
-    .sort((a, b) =>
-      a.positions.length - b.positions.length || b.term.length - a.term.length || a.order - b.order
-    );
-
-  let anchor = 0;
-  if (terms.length) {
-    // Anchor on the rarest matching query term. For repeated occurrences, use
-    // the window containing the most other query terms. This keeps an exact
-    // fact near the end of a long chunk instead of returning only its preamble.
-    let bestCoverage = -1;
-    for (const position of terms[0].positions) {
-      const start = Math.max(0, Math.min(
-        text.length - COMPOSED_EVIDENCE_PART_MAX_CHARS,
-        position - Math.floor(COMPOSED_EVIDENCE_PART_MAX_CHARS / 2),
-      ));
-      const window = lower.slice(start, start + COMPOSED_EVIDENCE_PART_MAX_CHARS);
-      const coverage = terms.reduce((count, entry) => count + (window.includes(entry.term) ? 1 : 0), 0);
-      if (coverage > bestCoverage) {
-        bestCoverage = coverage;
-        anchor = position;
-      }
-    }
-  }
-
-  const start = Math.max(0, Math.min(
-    text.length - COMPOSED_EVIDENCE_PART_MAX_CHARS,
-    anchor - Math.floor(COMPOSED_EVIDENCE_PART_MAX_CHARS / 2),
-  ));
-  const end = start + COMPOSED_EVIDENCE_PART_MAX_CHARS;
-  let excerpt = text.slice(start, end);
-  if (start > 0) excerpt = `…${excerpt.slice(1)}`;
-  if (end < text.length) excerpt = `${excerpt.slice(0, -1).trimEnd()}…`;
-  return excerpt;
+  // Whole chunks preserve a trailing clause and never cut through a figure.
+  // The answer route reads remaining authorized chunks and reports partial reads.
+  return String(value || "").replace(/\s+/g, " ").trim();
 }
 
 /**
  * One document can match keywords in one chunk and semantics in another. RRF
  * ranks the document, so its public evidence must preserve both independent
- * reasons it ranked. The bounded composition fits in /think's prompt window and
+ * reasons it ranked. The composition preserves complete chunks and
  * remains deterministic; identical chunks are emitted only once.
  */
 function composeDocumentEvidence(vectorRow, keywordRow, query) {
@@ -368,12 +314,12 @@ function composeDocumentEvidence(vectorRow, keywordRow, query) {
   const openEntity = quickBooksOpenItemsRequest(query);
   if (openEntity && row?.source_kind === "quickbooks" && row.date_source === "quickbooks:balance_snapshot" &&
       String(row.source_id || "").startsWith(`${openEntity.toLowerCase()}:`) && row.authority_document_head) {
-    // Keyword/semantic overlap can center a 400-character excerpt inside the
+    // Keyword/semantic overlap can center an excerpt inside the
     // title and cut off the native opening. For this exact inventory request,
     // preserve the already-authorized same-document head, within the existing
     // answer budget. This supplies evidence only; the renderer still binds the
     // entire opening, reliable provenance and latest observation before use.
-    return { ...row, text: String(row.authority_document_head).replace(/\s+/g, " ").trim().slice(0, 900) };
+    return { ...row, text: String(row.authority_document_head).replace(/\s+/g, " ").trim() };
   }
   if (!keywordRow) return vectorRow;
   if (!vectorRow) return keywordRow;
@@ -395,6 +341,8 @@ function composeBoundedDocumentEvidence(vectorRow, keywordRow, query) {
   return {
     ...keywordRow,
     text: `Keyword-matched excerpt:\n${keywordText}\n\nSemantic excerpt from the same document:\n${vectorText}`,
+    // Presentation labels help search readers, but are never source prose.
+    source_excerpts: [keywordText, vectorText],
   };
 }
 
@@ -475,7 +423,7 @@ function validatedFilterDates(filters = {}) {
 
 export function filterSql(filters = {}, alias = "c", nextParam = 3) {
   const dates = validatedFilterDates(filters);
-  const parts = [];
+  const parts = alias === "c" ? [activeChunkSql(alias).slice(5)] : [];
   const params = [];
   const add = (frag, val) => { parts.push(frag.replace("?N", "?" + nextParam++)); params.push(val); };
   if (filters.source) add(`${alias}.source = ?N`, filters.source);
@@ -639,7 +587,7 @@ function keywordCandidateLimit(value) {
   return String(value);
 }
 
-export async function searchKeyword(env, query, { limit, filters = {}, access = null, scope = null } = {}) {
+export function keywordSearchTerms(query) {
   // FTS5 treats bare punctuation as syntax. A user question with an apostrophe
   // or a hyphen is not a query language expression, so it is quoted as a
   // phrase-free bag of terms rather than passed through raw.
@@ -667,7 +615,11 @@ export async function searchKeyword(env, query, { limit, filters = {}, access = 
   // A query made entirely of stopwords is still a query. Falling back to the
   // raw terms is slow but correct, and returning nothing would not be.
   const use = content.length ? content : raw;
-  const terms = use.map((t) => `"${t}"`).join(" OR ");
+  return use.map((t) => `"${t}"`).join(" OR ");
+}
+
+export async function searchKeyword(env, query, { limit, filters = {}, access = null, scope = null, readPlan = "standard" } = {}) {
+  const terms = keywordSearchTerms(query);
   if (!terms) return [];
 
   const f = filterSql(filters, "c", 3);
@@ -692,6 +644,20 @@ export async function searchKeyword(env, query, { limit, filters = {}, access = 
   const predicates = (memoryClause, withCurrentPointer) =>
     `${f.clause}${sc.clause}${a.clause}${customApiVisibilitySql("d", withCurrentPointer)}${memoryClause}`;
 
+  // Recovery deliberately omits global BM25 ranking. Both bounded stages and
+  // every authority predicate run in the same visibility snapshot. The extra
+  // candidate is internal only: scoped callers must not learn hidden counts.
+  const recoverySql = (memoryClause, withCurrentPointer) => `
+    WITH keyword_recovery_candidates AS MATERIALIZED (
+      SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ?1 LIMIT 401
+    ), keyword_recovery_page AS MATERIALIZED (
+      SELECT rowid FROM keyword_recovery_candidates LIMIT 400
+    )
+    ${projection("0")}
+    FROM keyword_recovery_page top${joins("top.rowid")}
+    WHERE d.deleted_at IS NULL${predicates(memoryClause, withCurrentPointer)}
+    ORDER BY top.rowid LIMIT ?2`;
+
   const sql = (memoryClause, withCurrentPointer, candidates = null) => candidates !== null ? `
     WITH keyword_candidates AS MATERIALIZED (
       SELECT rowid, bm25(chunks_fts) AS score
@@ -715,6 +681,9 @@ export async function searchKeyword(env, query, { limit, filters = {}, access = 
   const run = async (memoryClause) => {
     const execute = async (withCurrentPointer) => {
       const params = [terms, limit, ...f.params, ...sc.params, ...a.params];
+      if (readPlan === "bounded_keyword") {
+        return env.DB.prepare(recoverySql(memoryClause, withCurrentPointer)).bind(...params).all();
+      }
       // Materialization keeps all joins and authority predicates behind the
       // FTS-only bound, in the same statement snapshot. A full eligible page
       // is exact: no later candidate can precede it by (score, rowid).
@@ -1007,12 +976,15 @@ function warnSearchStageFailure(stage, error) {
  */
 export async function search(env, {
   query, embedding, limit = 10, filters = {}, weights = {}, rrfK = RRF_K, access = null, scope = null,
-  projectionReadiness = null, supplementalFilters = [], now = Date.now(), timing = null,
+  projectionReadiness = null, supplementalFilters = [], now = Date.now(), timing = null, readPlan = "standard",
 }) {
   // Refuse malformed or schema-skewed scope before the first D1 or Vectorize
   // call. If each modality caught this independently, the invalid scope could
   // be misreported as an ordinary provider outage instead of being rejected.
   validatedFilterDates(filters);
+  if (!["standard", "bounded_keyword"].includes(readPlan)) {
+    throw retrievalFilterError("invalid_read_plan", "retrieval read plan is invalid");
+  }
   if (!Array.isArray(supplementalFilters) || supplementalFilters.length > RETRIEVAL_HINT_MAX) {
     throw retrievalFilterError("invalid_supplemental_filters", "supplemental retrieval filters are invalid");
   }
@@ -1033,25 +1005,43 @@ export async function search(env, {
       return { attempted: true, results: [], error };
     },
   );
-  const keywordAttemptPromise = settleModality("keyword",
-    measureQueryStage(timing, "keyword", () => searchKeyword(env, query, { limit: pool, filters, access, scope })),
-  );
-  const hintKeywordPromises = supplementalFilters.map((hint) =>
-    settleModality("keyword", measureQueryStage(timing, "keyword", () =>
-      searchKeyword(env, query, { limit: pool, filters: hint, access, scope }))));
+  let recovery = readPlan === "bounded_keyword";
+  let retrievalCoverage;
+  const runKeyword = plan => settleModality("keyword",
+    measureQueryStage(timing, "keyword", () => searchKeyword(env, query, {
+      limit: pool, filters, access, scope, readPlan: plan,
+    })));
+  const keywordAttemptPromise = (async () => {
+    let attempt = await runKeyword(readPlan);
+    // Only classified overload/timeouts admit an alternate plan. Schema and
+    // correction-authority failures retain their existing protected behavior.
+    if (!recovery && !memorySupersessionIntegrityFailure(attempt.error) && ["d1_overloaded", "d1_timeout"].includes(searchFailureCategory(attempt.error).category)) {
+      recovery = true;
+      attempt = await runKeyword("bounded_keyword");
+    }
+    if (recovery) retrievalCoverage = {
+      plan: "bounded_keyword", attempted:readPlan==='bounded_keyword'?['bounded_keyword']:['standard','bounded_keyword'], state: attempt.error ? "failed" : "completed",
+      truncation: "unknown", relevant_coverage: "unknown",
+    };
+    return attempt;
+  })();
   const resolvedEmbedding = access?.kind !== "grant" && scopeIsUnrestricted(scope)
     ? await Promise.resolve(embedding).catch(() => null)
     : null;
   const vectorEligible = Boolean(resolvedEmbedding) && access?.kind !== "grant" && scopeIsUnrestricted(scope);
-  const hintAttemptsPromise = Promise.all(supplementalFilters.map(async (hint, index) => {
-    const [keyword, vector] = await Promise.all([
-      hintKeywordPromises[index],
-      vectorEligible
-        ? settleModality("vector", measureQueryStage(timing, "vector", () => searchVector(env, resolvedEmbedding, { limit: pool, filters: hint, scope, timing })))
-        : Promise.resolve({ attempted: false, results: [], error: null }),
-    ]);
-    return { keyword, vector };
-  }));
+  // Wait for the base decision before launching optional lanes. Once recovery
+  // is selected, no hints, spelling or synonym queries replay expensive work.
+  const hintAttemptsPromise = keywordAttemptPromise.then(base => recovery ? [] :
+    Promise.all(supplementalFilters.map(async hint => {
+      const [keyword, vector] = await Promise.all([
+        settleModality("keyword", measureQueryStage(timing, "keyword", () =>
+          searchKeyword(env, query, { limit: pool, filters: hint, access, scope }))),
+        vectorEligible
+          ? settleModality("vector", measureQueryStage(timing, "vector", () => searchVector(env, resolvedEmbedding, { limit: pool, filters: hint, scope, timing })))
+          : Promise.resolve({ attempted: false, results: [], error: null }),
+      ]);
+      return { keyword, vector };
+    })));
   const [keywordAttempt, vectorAttempt, projection, hintAttempts] = await Promise.all([
     keywordAttemptPromise,
     vectorEligible
@@ -1091,12 +1081,22 @@ export async function search(env, {
     if (attempt.error) expansionFailed = true;
     return attempt.results;
   };
+  // A corrected memory may no longer match the old label at all. Search only
+  // exact verified correction edges from a bounded, authorized historical seed
+  // page; never republish the suppressed predecessor as current evidence.
+  if (!recovery && !keywordAttempt.error && keywordAttempt.results.length===0) {
+    try { expansionRows.push(...await discoverCorrectionSearchSeeds(env,query,{filters,access,scope})); }
+    catch(error) {
+      if(memorySupersessionIntegrityFailure(error)) throw error;
+      expansionFailed=true;
+    }
+  }
   const synonyms = domainExpansion(query);
-  if (!keywordAttempt.error && synonyms.length) {
+  if (!recovery && !keywordAttempt.error && synonyms.length) {
     expansionRows.push(...await extraKeyword(synonyms.join(' ')));
   }
   let metadata = null;
-  for (const name of keywordAttempt.error ? [] : queryNames(query)) {
+  for (const name of recovery || keywordAttempt.error ? [] : queryNames(query)) {
     if ([...keywordAttempt.results, ...vectorAttempt.results].some(row => containsName(row, name))) continue;
     // A bag-of-words miss does not prove the name is absent. Try the exact
     // token separately before considering a spelling change.
@@ -1185,6 +1185,12 @@ export async function search(env, {
       filters.entity_slug && access?.kind !== "grant" && scopeIsUnrestricted(scope)) {
     degraded = "vector";
     degradedReason = "entity-vector-authority-unindexed";
+  }
+
+  if (recovery) {
+    degraded = "bounded-keyword";
+    degradedReason = retrievalCoverage.state === "completed"
+      ? "bounded-keyword-recovery" : "bounded-keyword-recovery-failed";
   }
 
   // Collapse BEFORE assigning rank positions. Otherwise ten chunks from one
@@ -1328,7 +1334,23 @@ export async function search(env, {
   const variantByDocument = new Map(expanded.filter(row => row.query_variant).map(row => [retrievalDocumentKey(row), row.query_variant]));
   fused = fused.map(row => variantByDocument.has(retrievalDocumentKey(row))
     ? { ...row, query_variant: variantByDocument.get(retrievalDocumentKey(row)) } : row);
-  fused = collapseTitleFamilies(fused, query);
+  // Discover before title collapse or either public ranking-window slice.
+  // A related candidate may be outside every relevance pool.
+  fused = recovery
+    ? fused.map(row => ({...row,selection:{state:'unknown',reason:'bounded_recovery',newer_record:null,
+        operative_record:null,checked_scope:'authorized_keyword_candidates',complete:false}}))
+    : (await discoverDocumentSuccessors(env, fused, { filters, access, scope, question:query, assess:assessStoredProvenance }));
+  // Title collapse sees every row (unchanged membership): the newest
+  // same-title file takes its family's best slot. Linked rows are never
+  // hoisted above better-ranked documents; a linked row that collapse removed
+  // stays, directly after the row that took its family slot.
+  const collapsed = collapseTitleFamilies(fused, query);
+  const kept = new Set(collapsed.map(row => row.doc_uid));
+  const removedLinked = fused.filter(row => row.selection?.state === 'unresolved' && !kept.has(row.doc_uid));
+  fused = removedLinked.length ? collapsed.flatMap(row => {
+    const key = titleFamily(row)?.key;
+    return [row, ...(key ? removedLinked.filter(other => titleFamily(other)?.key === key) : [])];
+  }) : collapsed;
   const documents = [];
   for (const row of fused) {
     // content_hash is an internal dedupe key, not part of the authenticated
@@ -1355,7 +1377,10 @@ export async function search(env, {
     );
     documents.push(attachEvidenceLineage({
       ...publicRow,
+      ...(/^calendar:(?:event_start|all_day_start)$/.test(row.date_source || '')
+        ? { record_observation:recordObservation(row) } : {}),
       source_id: publicSourceId,
+      evidence_revision: await documentEvidenceRevision(row.doc_uid, row.content_hash),
       ...(authority.scanned === true ? { scanned: true } : {}),
       authority,
       lineage: lineage.lineage,
@@ -1369,6 +1394,7 @@ export async function search(env, {
     results: documents.slice(0, limit),
     degraded,
     degraded_reason: degradedReason,
+    ...(retrievalCoverage ? { retrieval_coverage: retrievalCoverage } : {}),
     ...((degradedReason === "projection-catching-up" || degradedReason === "projection-incomplete")
       ? {
           retrieval_receipt: "keyword_only_indexing",
@@ -1956,8 +1982,8 @@ export const DRAIN_LEASE_TTL_MS = 20 * 60 * 1000;
 export const DRAIN_D1_QUERY_BUDGET = 900;
 const DRAIN_LEASE_ACQUIRE_QUERIES = 1;
 const DRAIN_LEASE_RELEASE_QUERIES = 1;
-// Fence read plus either exact-cut update, or probe renewal and receipt write.
-const DRAIN_PROJECTION_VERIFY_QUERIES = 3;
+// Fence read plus either exact-cut update, or probe renewal, intent and receipt.
+const DRAIN_PROJECTION_VERIFY_QUERIES = 4;
 const DRAIN_INITIAL_DEPTH_QUERIES = 1;
 const DRAIN_BATCH_SIZE_MAX = 100;
 export const DRAIN_IN_FLIGHT_BATCH_WINDOW = 3;
@@ -2292,6 +2318,7 @@ async function projectionFenceState(env) {
     return { mutationId: null, submittedAt: null };
   }
   const mutationId = String(state.mutation_id);
+  if (isUnconfirmedVectorProbe({ mutationId })) throw new Error("the vector ordering probe submission is unconfirmed; keep writes paused for supervised recovery");
   const submittedAt = Number(state.submitted_at);
   if (!mutationId || mutationId.length > VECTOR_MUTATION_ID_MAX_CHARS ||
       /[\u0000-\u001f\u007f]/.test(mutationId) || !Number.isSafeInteger(submittedAt) || submittedAt < 0) {
@@ -2326,6 +2353,7 @@ const VECTOR_FENCE_CLOCK_SKEW_MS = 5 * 60_000;
  * error for that case.
  */
 function fenceWatermarkCovers(fence, info) {
+  if (isUnconfirmedVectorProbe(fence)) return false;
   const processed = info?.processedUpToMutation;
   // A brand-new index legitimately reports no processed watermark while its
   // first accepted changeset is still pending. That is "not yet", not a
@@ -3048,8 +3076,8 @@ export async function drainOutbox(env, options = {}) {
   // Upgrade cutovers deploy this exact code in a paused mode before changing
   // the lease schema. Return before even acquiring D1 state so the paused
   // Worker is a provable zero-writer compatibility bridge for old installs.
-  if (env?.VECTOR_DRAIN_MODE === "paused-for-upgrade" &&
-      options.allowPausedBootstrap !== true) {
+  if (env?.VECTOR_ROLLBACK_FENCE === "1" || (env?.VECTOR_DRAIN_MODE === "paused-for-upgrade" &&
+      options.allowPausedBootstrap !== true)) {
     return {
       drained: 0, deleted: 0, upserted: 0, submitted: 0, waiting: 0, failed: 0,
       remaining: 0, errors: [], busy: false, paused: true,
@@ -4277,12 +4305,14 @@ async function coverageGapAssessment(env, { now = Date.now(), allowedSources = n
   }
   const activeCustomJobs = await activeCustomApiJobStarts(env, rows);
   const customApiReceipts = await currentCustomApiReceipts(env, rows);
-  return assessCoverageRows(rows, { now, allowedSources, activeCustomJobs, customApiReceipts });
+  return {...assessCoverageRows(rows, { now, allowedSources, activeCustomJobs, customApiReceipts }),
+    sources:rows.filter(row => allowedSources === null || allowedSources.includes(row.name))
+      .map(row => ({name:row.name,kind:row.kind,last_ingest_at:row.last_ingest_at,last_complete_sweep_at:row.last_complete_sweep_at}))};
 }
 
 export async function coverageGapReport(env, options = {}) {
   const report = await coverageGapAssessment(env, options);
-  return { gaps: report.gaps, unavailable: report.unavailable };
+  return { gaps: report.gaps, unavailable: report.unavailable, ...(options.includeSources ? {sources:report.sources || []} : {}) };
 }
 
 /** Aggregate-only freshness for the public health receipt. */
@@ -5448,7 +5478,9 @@ export async function sourceInventorySlice(env, {
             first_stored_ingest_at: inventoryTimestamp(row.first_stored_ingest_at),
             last_stored_ingest_at: inventoryTimestamp(row.last_stored_ingest_at),
             last_ingest_receipt_at: inventoryTimestamp(row.last_ingest_at),
-            last_successful_run_at: inventoryTimestamp(row.last_successful_run_at),
+            // Bank activity freshness is the slowest successful connection sync,
+            // independently fenced from derived document writes.
+            last_successful_run_at: inventoryTimestamp(kind === 'bank_activity' ? row.last_ingest_at : row.last_successful_run_at),
             last_check_at: providerNoChangeCheckAt(kind, latestRun) || withheldCheckAt || inventoryTimestamp(row.last_successful_run_at),
             ...(sourceId === "zoom" && kind === "zoom" && zoomStatus ? { zoom: zoomStatus } : {}),
             complete_history_through: inventoryTimestamp(row.last_complete_sweep_at),
@@ -7469,6 +7501,7 @@ async function closeResidueWalk(env, state, lease) {
 }
 
 export async function acceleratedVectorBootstrap(env, options = {}) {
+  if (env?.VECTOR_ROLLBACK_FENCE === "1") throw new Error("vector writers are fenced for rollback");
   if (env?.VECTOR_DRAIN_MODE !== "paused-for-upgrade") {
     throw new Error("the accelerated vector bootstrap requires the verified upgrade pause");
   }
@@ -8109,6 +8142,7 @@ export async function listSourceFamilies(env, {
   limit = 500,
   includeLabels = false,
   uids = null,
+  requireIndexed = false,
 } = {}) {
   if (uids !== null && (!Array.isArray(uids) || uids.length < 1 ||
       uids.length > SOURCE_FAMILY_UID_FILTER_MAX)) {
@@ -8152,13 +8186,21 @@ export async function listSourceFamilies(env, {
     ? ` AND family_doc_uid IN (${uids.map((_, index) => `?${index + 4}`).join(", ")})`
     : "";
   const indexed = await sourceFamilyIndexReady(env);
+  if (requireIndexed && !indexed) throw Object.assign(new Error("source-family index is not ready"), { code: "family_index_not_ready" });
+  // Exact identity requests are used for bounded verification. Until the
+  // projection is complete, a JSON fallback can visit the entire corpus even
+  // for one identity. Keep that boundary explicit instead of widening work.
+  if (uids !== null && !indexed) {
+    throw Object.assign(new Error('Exact source-family inventory requires the completed family index'),
+      { code: 'source_family_index_not_ready' });
+  }
   const statement = indexed
     ? env.DB.prepare(
       `SELECT family_doc_uid${labelProjection}
          FROM document_family_index
          ${includeLabels ? "JOIN documents USING (doc_uid)" : ""}
         WHERE live=1
-          ${source ? "AND family_doc_uid >= MAX(?1 || ':', ?2) AND family_doc_uid < ?1 || ';' AND family_doc_uid > ?2" : "AND family_doc_uid > ?1"}
+          ${source ? (uids ? "AND ?1 IS NOT NULL AND family_doc_uid > ?2" : "AND family_doc_uid >= MAX(?1 || ':', ?2) AND family_doc_uid < ?1 || ';' AND family_doc_uid > ?2") : "AND family_doc_uid > ?1"}
           ${source ? uidFilter : ""}
         ${grouping}
         ORDER BY family_doc_uid ASC
@@ -8241,6 +8283,7 @@ export async function listSourceFamilies(env, {
   }
   const page = pageRows.map((row) => String(row.family_doc_uid));
   return {
+    ...(requireIndexed ? { indexed: true } : {}),
     source,
     families: page,
     ...(includeLabels ? {

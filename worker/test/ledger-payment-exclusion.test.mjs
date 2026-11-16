@@ -104,9 +104,14 @@ function moneyOutDisposition(category, liabilityKind) {
 }
 function assertMoneyOutReading(body, amount, payment, disposition) {
   if (disposition === 'withheld') {
-    assert.equal(body.ledger.reason, 'money_out_destination_unconfirmed', 'inout: withheld, never double counted');
-    assert.equal(body.ledger.accounts.every(account => account.debits_minor === undefined), true);
-    assert.match(body.answer, /not counted, money out withheld: possibly a (?:card|loan) payment \(bank payment code\) to a connected account/);
+    assert.equal(body.ledger.accounts[0].debits_minor, amount + payment, 'observed money out counts the unproved payment');
+    const record = body.ledger.possible_payments.find(row => row.amount_minor === payment);
+    assert.ok(record.included_in_total && record.destination_unconfirmed);
+    assert.ok(record.connected_counterpart_masks.length > 0);
+    assert.equal(body.ledger.complete, false);
+    assert.match(body.answer, /included in money out above/);
+    assert.match(body.answer, /may be counted twice/);
+    assert.doesNotMatch(body.answer, /withheld|cannot|can't/i);
     return;
   }
   assert.equal(body.ledger.accounts[0].debits_minor, amount + payment, 'inout: the payment left the connected accounts');
@@ -182,7 +187,7 @@ async function mutatedAnswer(from, to, analysisMutation) {
     const moduleUrl = `data:text/javascript;base64,${Buffer.from(analysis).toString('base64')}`;
     source = source.replace('"./ledger-analysis.js"', JSON.stringify(moduleUrl));
   }
-  source = source.replace(/from "(\.\/[^"\n]+)"/g, (_, path) => `from ${JSON.stringify(new URL(path, answerUrl).href)}`);
+  source = source.replace(/from (["'])(\.\.?\/[^"'\n]+)\1/g, (_, quote, path) => `from ${JSON.stringify(new URL(path, answerUrl).href)}`);
   return (await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`)).withLedgerAnswer;
 }
 

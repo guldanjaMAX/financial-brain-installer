@@ -18,10 +18,10 @@ test('closed channel fields preserve known fees and exclude principal across the
     assert.equal((await ask()).ledger.expense_total_minor,12345,'ordinary confirmed-fee control');
     f.raw('UPDATE fin_transactions SET description=?,payee=?',description,payee);
     const fee=await ask(),b2=kind==='card'&&['payment to card','payment to credit card'].includes(base)&&payee==='card payment';
-    assert.equal(fee.ledger.expense_total_minor,b2?null:12345,JSON.stringify({kind,channel,payee,stage:'fee'}));
-    if(b2){assert.equal(fee.ledger.reason,'owned_movement_unconfirmed');holds++;}else fees++;
+    assert.equal(fee.ledger.expense_total_minor,12345,JSON.stringify({kind,channel,payee,stage:'fee'}));
+    if(b2){assert.equal(fee.ledger.reason,'owned_movement_unconfirmed');assert.equal(fee.ledger.complete,false);assert.doesNotMatch(fee.answer,/withheld|cannot|can't/i);holds++;}else fees++;
     f.raw('UPDATE fin_transactions SET category=NULL');
-    const paid=await ask();assert.ok(paid.ledger.expense_total_minor===0||paid.ledger.expense_total_minor===null,JSON.stringify({kind,channel,payee,stage:'principal',amount:paid.ledger.expense_total_minor}));
+    const paid=await ask();assert.equal(paid.ledger.expense_total_minor,0,JSON.stringify({kind,channel,payee,stage:'principal',amount:paid.ledger.expense_total_minor}));
     assert.ok(paid.ledger.possible_payments?.length||paid.ledger.payment_exclusions?.count||paid.ledger.possible_own_movement_count,'payment decision is nonempty');
     principal++;cases++;
    }

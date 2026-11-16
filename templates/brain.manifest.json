@@ -20,7 +20,7 @@
     "timezone": "America/Phoenix"
   },
   "brain": {
-    "version": "0.4.27",
+    "version": "0.4.28",
     "domain": "brain.acme.com",
     "worker_name": "acme-brain"
   },
@@ -94,6 +94,7 @@
   "corpora": {
     "_comment": "Which sources this install ingests. Each maps to a connector.",
     "google_drive": {
+      "_comment": "Incremental add/update-only. First use seeds a change token without a mirror walk. Existing documents stay; removal signals await owner review.",
       "enabled": false,
       "root_folder_ids": [],
       "include_my_drive_root_files": false,

@@ -206,7 +206,9 @@ function inspect(s,bodies) {
         const ref=b.citations.find(c=>c.ref===`ledger:transaction:${row.id}`);
         const entry=[...(l.possible_payments||[]),...(l.possible_transfers||[])].find(r=>r.n===ref?.n);
         equal(q,'possible-outflow-included',Boolean(entry&&entry.included_in_total&&String(entry.amount_minor)===row.cents),true);
-        equal(q,'possible-outflow-disclosed',Boolean(ref&&b.answer.split('\n').some(line=>line.startsWith('included above, possibly')&&line.includes(`[${ref.n}]`))),true);
+        // The owner reader names the measure in its current label. Both labels
+        // still require this posting's citation, inclusion flag and exact cents.
+        equal(q,'possible-outflow-disclosed',Boolean(ref&&b.answer.split('\n').some(line=>/^included (?:above|in money out above), possibly /.test(line)&&line.includes(`[${ref.n}]`))),true);
       }
     }
     if(q===4 && complete(b)) {
@@ -496,15 +498,25 @@ test('day-one mutants: balance display capped at five; multiple exact deposits r
   const mutants=[
     ['balance display capped at five','const cited = ordered;','const cited = ordered.slice(0, 5);',generate(14)],
     ['multiple exact deposits return found=null','found: ambiguous && !existenceLookup ? null : matched.length > 0,','found: ambiguous ? null : matched.length > 0,',generate(64)],
-    ['missing coverage answered no','else if (!periodCovered) return { reason: "period_outside_coverage" };','else if (!periodCovered) return { answer: "No matching deposit.", citations: [], ledger: { kind: "payment", found: false, complete: true } };',missing],
+    ['missing coverage answered no','else if (!periodCovered && !observedSpendingPeriod(intent, scope)) return { reason: "period_outside_coverage" };','else if (!periodCovered && !observedSpendingPeriod(intent, scope)) return { answer: "No matching deposit.", citations: [], ledger: { kind: "payment", found: false, complete: true } };',missing],
   ];
   try {
     for(const [name,before,after,input] of mutants) {
       await dayOneCheck(db,input);
       assert.ok(original.includes(before),'mutant anchor '+name);
       const source=original.replace(before,after).replace(/(['"])(\.\/[^'"]+)\1/g,(_,quote,path)=>quote+new URL(path,url).href+quote);
-      productAnswer=(await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'))).withLedgerAnswer;
+      const mutantAnswer=(await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'))).withLedgerAnswer;
+      let coverageDecisionReached=0;
+      productAnswer=async(...args)=>{
+        const response=await mutantAnswer(...args);
+        if(name==='missing coverage answered no') {
+          const body=await response.clone().json();
+          if(body.ledger?.kind==='payment'&&body.ledger.found===false)coverageDecisionReached++;
+        }
+        return response;
+      };
       await assert.rejects(()=>dayOneCheck(db,input),{code:'ERR_ASSERTION'},name);
+      if(name==='missing coverage answered no')assert.equal(coverageDecisionReached,1,'false absence decision reached');
       console.log('mutant killed: '+name);
       productAnswer=withLedgerAnswer;
       await dayOneCheck(db,input);
@@ -538,4 +550,32 @@ test('reciprocal card-to-loan event proof is independent of the payment subtype'
   const unary=s.rows.find(row=>row.event==='transfer'&&!row.peer);
   assert.ok(unary,'same ledger has a separate one-sided control');
   assert.equal(provenPeer(s,s.rows,unary),false);
+});
+
+test('owner money-out oracle accepts both inclusion labels and still rejects lost evidence', async () => {
+  const db=database(),s=generate(4);
+  try {
+    const bodies=await answers(db,s),body=bodies[3];
+    assert.equal(body.ledger.outflow_measure,'money_out','money-out decision reached');
+    assert.equal(complete(body),true,'complete control reaches every figure check');
+    assert.equal(String(body.ledger.expense_total_minor),'200000002');
+    const line=body.answer.split('\n').find(line=>/^included (?:above|in money out above), possibly /.test(line));
+    assert.ok(line,'real reader produced a cited possible-movement disclosure');
+    for(const label of ['included above, possibly ','included in money out above, possibly ']) {
+      const control=clone(bodies);
+      control[3].answer=body.answer.replace(line,line.replace(/^included (?:above|in money out above), possibly /,label));
+      assert.deepEqual(inspect(s,control),[],'both owner-reader labels describe the same counted posting');
+    }
+    for(const [name,property,mutate] of [
+      ['missing disclosure','possible-outflow-disclosed',b=>{b.answer=b.answer.replace(line,'');}],
+      ['wrong citation','possible-outflow-disclosed',b=>{b.answer=b.answer.replace(line,line.replace(/\[\d+\]/g,'[9999]'));}],
+      ['wrong disclosure dollars','complete-display',b=>{b.answer=b.answer.replace(line,line.replace('$2,000,000.02','$2,000,000.03'));}],
+      ['wrong total','expenses',b=>{b.ledger.expense_total_minor++;}],
+      ['lost inclusion flag','possible-outflow-included',b=>{[...(b.ledger.possible_payments||[]),...(b.ledger.possible_transfers||[])].forEach(row=>{row.included_in_total=false;});}],
+    ]) {
+      const mutant=clone(bodies);mutate(mutant[3]);
+      assert.ok(inspect(s,mutant).some(f=>f.q===3&&f.property===property),name+' must reach and fail its property');
+    }
+    assert.deepEqual(inspect(s,bodies),[],'restored reader control stays green');
+  } finally {db.close();}
 });

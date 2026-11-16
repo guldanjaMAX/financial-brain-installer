@@ -93,8 +93,20 @@ globalThis.fetch = async (input, options = {}) => {
     return json({ access_token: "fixture-access", expires_in: 3600 });
   }
 
+  if (url.pathname === "/api/admin/brain/ingest-capabilities") {
+    return json({ retained_revision_protocol: 1, bounded_source_receipts: true, schema_version: 65, writes_paused: false });
+  }
+
   if (url.hostname === "www.googleapis.com" && url.pathname === "/drive/v3/changes/startPageToken") {
     return json({ startPageToken: "fixture-next-cursor" });
+  }
+  if (url.hostname === "www.googleapis.com" && url.pathname === "/drive/v3/changes") {
+    if (url.searchParams.get("pageToken") !== "fixture-saved-cursor") throw new Error("unexpected fixture change token");
+    return json({ changes: [{ fileId: "fixture-file-one", file: {
+      id: "fixture-file-one", name: "fixture-note.txt", mimeType: "text/plain", size: "128",
+      createdTime: "2026-08-20T12:00:00.000Z", modifiedTime: "2026-08-20T12:00:00.000Z",
+      md5Checksum: "fixture-revision", trashed: false, parents: ["root-fixture"],
+    } }], newStartPageToken: "fixture-next-cursor" });
   }
 
   // The rooted walk proves each reviewed root is a live folder before it reads
@@ -129,6 +141,11 @@ globalThis.fetch = async (input, options = {}) => {
   }
 
   if (url.hostname === "www.googleapis.com" && url.pathname === "/drive/v3/files/fixture-file-one") {
+    if (url.searchParams.get("alt") !== "media") return json({
+      id: "fixture-file-one", name: "fixture-note.txt", mimeType: "text/plain", size: "128",
+      createdTime: "2026-08-20T12:00:00.000Z", modifiedTime: "2026-08-20T12:00:00.000Z",
+      md5Checksum: "fixture-revision", trashed: false, parents: ["root-fixture"],
+    });
     return new Response(
       "This fixture note has enough ordinary prose to pass extraction quality and reach the ingest receipt boundary safely.",
       { status: 200, headers: { "content-type": "text/plain" } },
@@ -137,6 +154,11 @@ globalThis.fetch = async (input, options = {}) => {
 
   if (url.hostname === "fixture.invalid" && url.pathname === "/api/admin/brain/ingest/batch") {
     const docs = JSON.parse(String(options.body || "{}")).docs || [];
+    if (scenario === 'drive-healthy') {
+      console.log('TEST_REMOTE_WRITE_ACCEPTED');
+      return json({ created:docs.length, updated:0, unchanged:0, refused:0, failed:0,
+        results:docs.map(doc=>({source_id:doc.source_id,status:'created'})) });
+    }
     const refused = scenario.endsWith("-refused");
     return json({
       created: 0,
@@ -148,6 +170,12 @@ globalThis.fetch = async (input, options = {}) => {
         ? { source_id: doc.source_id, status: "refused", labels: ["synthetic_test_label"] }
         : { source_id: doc.source_id, status: "failed", error: "synthetic store failure" }),
     });
+  }
+
+  if (url.hostname === 'fixture.invalid' && url.pathname === '/api/admin/brain/drive-family') {
+    const body = JSON.parse(String(options.body || '{}'));
+    return json({ source:body.source, file_id:body.file_id, base_doc_uid:`${body.source}:${body.file_id}`,
+      same_identity_single_part:true });
   }
 
   if (url.hostname === "fixture.invalid" && url.pathname === "/api/admin/brain/forget") {

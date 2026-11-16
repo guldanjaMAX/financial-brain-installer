@@ -38,7 +38,11 @@ test('kills unlisted abbreviation privilege', async () => {
   const from = "identity.startsWith(wanted + ' ')";
   assert.equal(source.split(from).length - 1, 1);
   const broken = source.replace(from, `(${from} || (wanted === 'copperhaven' && /^cphv /i.test(identity)))`);
-  const mutant = await import('data:text/javascript;base64,' + Buffer.from(broken.replace('./vendor-aliases.js', new URL('../src/lib/vendor-aliases.js', import.meta.url).href)).toString('base64'));
+  // Resolve every sibling import (both quote forms) against the original file;
+  // ledger-analysis.js also imports and re-exports money-platform.js.
+  const absolute = broken.replace(/from (["'])(\.\/[^"'\n]+)\1/g,
+    (_, quote, path) => `from ${JSON.stringify(new URL('../src/lib/' + path.slice(2), import.meta.url).href)}`);
+  const mutant = await import('data:text/javascript;base64,' + Buffer.from(absolute).toString('base64'));
   assert.throws(() => checkAbbreviations(mutant.selectVendorFamily), { name: 'AssertionError' });
 });
 

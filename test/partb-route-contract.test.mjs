@@ -1,3 +1,4 @@
+import { assertDocumentAnswer } from "../worker/test/helpers/document-answer-contract.mjs";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import fs, {
@@ -956,13 +957,13 @@ test("Part B control survives the real Worker evidence, premise, and money gates
     assert.equal(result.body.timing.stages.evidence_gate.errors, 0);
     assert.equal(result.body.timing.stages.premise_temporal.errors, 0);
   }
-  assert.equal(red.body.answer, null);
+  assertDocumentAnswer(red.body, { provisional: true, exact: true });
   assert.equal(red.body.evidence_gate.supported, false);
-  assert.equal(red.body.timing.outcome, "refused");
+  assert.equal(red.body.timing.outcome, "ok");
   assert.equal(red.body.gaps.find((gap) => gap.type === "money_veto")?.rule, "unreliable_date");
 
   assert.equal(PART_B_ROUTE_CONTROL.arguments.q, EXPECTED_PART_B_ROUTE_QUESTION);
-  assert.equal(green.body.answer, INSTALL_SMOKE_ANSWER);
+  assertDocumentAnswer(green.body, { expected: INSTALL_SMOKE_ANSWER, exact: true });
   assert.equal(green.body.evidence_gate.supported, true, green.body.evidence_gate.reason);
   assert.equal(green.body.timing.outcome, "ok");
   assert.equal(green.body.citations.length, 1);

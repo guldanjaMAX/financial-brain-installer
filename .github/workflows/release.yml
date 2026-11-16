@@ -87,6 +87,9 @@ jobs:
       - name: require reviewed incident closure before any release write
         run: node scripts/audit-updates.mjs --release
 
+      - name: require the approved private offer public key before any release write
+        run: node scripts/check-private-offer-release-key.mjs
+
       # GitHub exposes this repository setting through an administration-read
       # endpoint. GITHUB_TOKEN cannot receive that permission, so a separate
       # one-repository, read-only credential is required. Failing this check

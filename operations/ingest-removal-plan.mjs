@@ -29,12 +29,12 @@ const reviewFacts = plan => ({
   stored_documents_to_remove: plan.targets.length,
   source_removals: plan.sourceTargets.length,
   replacement_family_reviews: plan.families.length - plan.sourceTargets.length,
-  source_stored_documents: plan.sourcePlan?.stored ?? null,
+  source_stored_documents: plan.sourcePlan?.inventoryScope === "bounded-window" ? null : plan.sourcePlan?.stored ?? null,
   reasons: plan.sourcePlan ? { ...plan.sourcePlan.counts } : null,
   removal_causes: removalCauseCounts(plan.targets, plan.targetCauses),
   approval_fingerprint: plan.providerApproval || (plan.sourcePlan?.tooLarge || plan.requireSourceApproval
     ? plan.sourcePlan.fingerprint : null),
-  ...(plan.sourcePlan ? { source_cleanup_percentage: plan.sourcePlan.ratio * 100 } : {}),
+  ...(plan.sourcePlan && plan.sourcePlan.inventoryScope !== "bounded-window" ? { source_cleanup_percentage: plan.sourcePlan.ratio * 100 } : {}),
   fingerprint: plan.fingerprint,
 });
 
@@ -347,7 +347,13 @@ export function createIngestRemovalReview({
   };
   const pending = () => Object.values(state.ingest_pending_families || {}).filter(
     (entry) => state.done?.[entry.stateKey] === entry.hash && !state.skipped?.[entry.stateKey],
-  ).map((entry) => entry.family);
+  ).map((entry) => entry.family).slice(0, kind === "gmail" ? 1000 : Infinity);
+
+  const clearReviewedFamilies = families => {
+    if (kind !== "gmail") { delete state.ingest_pending_families; return; }
+    for (const family of families) delete state.ingest_pending_families?.[family.base_doc_uid];
+    if (!Object.keys(state.ingest_pending_families || {}).length) delete state.ingest_pending_families;
+  };
 
   const remember = (plans) => {
     state.ingest_pending_families ||= {};
@@ -406,7 +412,7 @@ export function createIngestRemovalReview({
     ];
     if (!families.length) {
       delete state.ingest_removal_plan;
-      delete state.ingest_pending_families;
+      clearReviewedFamilies(families);
       saveState();
       return;
     }
@@ -427,7 +433,7 @@ export function createIngestRemovalReview({
     }
     if (!observed.targets.length) {
       delete state.ingest_removal_plan;
-      delete state.ingest_pending_families;
+      clearReviewedFamilies(families);
       saveState();
       return;
     }
@@ -446,7 +452,9 @@ export function createIngestRemovalReview({
       (notice ? `${notice}\n` : "") +
       `Source ${source}: ${observed.targets.length} stored document(s) would be removed ` +
       `across ${sourceTargets.length} source removal(s) and ${families.length - sourceTargets.length} replacement family review(s).\n` +
-      (sourcePlan ? `Source cleanup would remove ${formatDriveRemovalPlan(sourcePlan)}\n` : "") +
+      (sourcePlan ? (sourcePlan.inventoryScope === "bounded-window"
+        ? `Source cleanup would remove ${sourcePlan.total} reviewed family(s) from this bounded window. The full source total was not measured.\n`
+        : `Source cleanup would remove ${formatDriveRemovalPlan(sourcePlan)}\n`) : "") +
       "Accepted additions and updates are saved. No removal was applied; the source cursor was kept.\n" +
       (extraApproval ? "The additional source removal safety review also requires approval.\n" : "") +
       `Review this plan, then run: brain ingest <manifest>${from ? ` --from ${from}` : ""} --source ${source} --apply-removals ${plan.fingerprint}` +
@@ -489,8 +497,9 @@ export function createIngestRemovalReview({
       delete state.done?.[uid];
       delete state.done?.[uid.slice(source.length + 1)];
       delete state.removed?.[uid];
+      delete state.gmail_owner_removals?.[uid];
     }
-    delete state.ingest_pending_families;
+    clearReviewedFamilies(plan.families);
     delete state.ingest_removal_plan;
     saveState();
     return { removed, cursor_advanced: false, readback: "passed" };

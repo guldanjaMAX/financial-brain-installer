@@ -37,7 +37,7 @@ in ADR 003; they are not claimed as current connector behavior.
 
 | Source | Status |
 |---|---|
-| Google Drive | **Built.** One real unbounded walk has partial real-data proof; the full add, edit, resume, delete, and scheduler lifecycle is not yet accepted |
+| Google Drive | **Built.** Bounded incremental add/update-only with local owner removal decisions; new runner has offline tests and awaits live lifecycle proof |
 | Direct upload and API push | **Built.** Live-service smoke proof exists with a synthetic corpus; no authorized real-document receipt is accepted yet |
 | A custom read-only business API | **Built, locally proven only.** The owner's Worker fetches declared HTTPS JSON endpoints, stages one durable full-snapshot job, and advances one bounded slice per cron tick. Its bearer secret must use the dedicated `CUSTOM_API_TOKEN_` namespace; deploy, connect, and runtime fetch refuse every other binding name. Compact rows keep exact hashes, historical missing rows are excluded from current totals, and readable documents include monthly cross-store plus per-store rollups. Missing revenue streams are named at the store-month boundary in both layouts rather than rendered as zero. Inventory and cost search contains only the current snapshot; stored rows keep prior values as effective-dated history, with no daily history documents. A partial refusal carries and visibly marks the last verified value without advancing its last-seen time, while source status says ready with warnings and reports the count. The identical-response shortcut proves current row chunks and every mapped live document; missing documents regenerate, and status counts exclude staged or superseded versions. Saved state is reported separately from source-specific empty-outbox meaning readiness. Windows defaults to clipboard key entry with clearing and secret-name-only verification; macOS supports the same mode explicitly and retains the hidden prompt by default. Masked Cloudflare dashboard entry remains the fallback. `brain load` states this server-managed source as a skip; preview or run it with `brain custom-api`. No provider endpoint or deployed Brain has crossed this build, and rows do not feed the financial ledger or map yet |
 | A watched folder on your own machine | **Built.** Name one folder in your manifest and it reloads itself: the existing faster per-source LaunchAgent owns it on macOS when installed, otherwise the per-Brain daily task can own it on macOS or Windows. New files load, edited files reload, and deleted files use the guarded removal plan. Linux remains manual. Real multi-tick sleep, wake, and deletion behavior is not yet field-proven |
@@ -83,6 +83,20 @@ meeting contract. Host gates and an approved real-export acceptance remain open.
 
 Connected with **read-only** access. It can look at documents. It cannot change, move, or delete anything, and that is enforced by the permission itself rather than by good behavior.
 
+Normal refresh uses the change feed, with at most 100 events per run and a
+60-second budget checked between files. With no saved token, the first run seeds
+one without walking or changing the existing index. Removed, trashed, and
+out-of-scope files become pending owner decisions and never pause additions.
+Use `brain ingest <manifest> --from drive --status` for local token-check time,
+file counts, pending decisions, and exact failure reasons. Too-large, unreadable,
+unsupported and bounded storage-admission failures become visible skipped items
+without holding later changes. A skipped update retains its old accepted text
+and leaves coverage incomplete. Transient failures resume the saved page.
+A token-expiry error needs reviewed
+recovery. Seeding does not backfill missed history, and folder changes need
+descendant review. `--full-walk-review --dry-run` selects read-only provider
+comparison; mutating full walks are refused before credentials or database work. No live proof is claimed for this new runner.
+
 **Which folders:** `corpora.google_drive.root_folder_ids` selects folder trees.
 In 0.4.14, `include_my_drive_root_files: true` also selects files sitting directly
 in My Drive without walking its folders. Use an empty root list to select only
@@ -121,9 +135,9 @@ requires the separate exact approval.
 | Anything you excluded at intake | Excluded at the source. It is never read, not read and filtered |
 | Files whose names suggest credentials | Anything looking like a key file, an environment file, or a certificate is refused by name before it is opened |
 
-**How it stays current:** scheduled refreshes are normally incremental. A complete Drive comparison runs at least weekly and whenever source policy or folder changes require it. Re-running is safe: a document that has not changed since last time is skipped rather than duplicated.
+**How it stays current:** scheduled refreshes use the bounded change feed. Re-running resumes its checkpoint; an unchanged accepted document is not submitted again. Historical backfill and descendants of changed folders need separate review. A full comparison is available only as a read-only preview.
 
-**When a file disappears from Drive**, the matching material is removed from your index. That removal is guarded: if the run could not see all of your Drive (a permissions blip or a network failure mid-walk), it cannot complete the comparison. If one cleanup plan is more than 100 documents or more than 10% of the stored Drive corpus, it stops before deleting anything or advancing its cursor. The owner sees aggregate reasons and an opaque plan fingerprint, never file names or IDs, and must approve that exact plan on the rerun. A stale document costs nothing. A wrongly emptied index costs everything.
+**When a file disappears from Drive**, its indexed material stays. Local status records a pending owner decision, and additions continue. No removal is applied by the incremental runner. Any later removal needs a separate preview and explicit owner approval.
 
 **One honest note about how this runs.** Drive is a standard, packaged connector inside the installer, not a private script. You connect your own Google account once and load it with the normal ingest command. The existing faster Drive LaunchAgent remains the owner when it is installed on macOS; otherwise the manifest-wide daily task can own Drive on macOS or Windows. The Google sign-in still requires the account owner. Linux remains manual.
 

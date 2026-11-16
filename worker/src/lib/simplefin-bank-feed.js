@@ -1,3 +1,4 @@
+import { bankAttemptStatement, bankSuccessStatement, bankErrorStatement, bankHealthMap, reconcileBankFeedHealth } from './bank-feed-health.js';
 import { accountKindReviewSql, applyAccountKindReview } from "./fin-account-kinds.js";
 import { balanceRoleFor, prepareBankExportImport } from "./fin-import.js";
 import { SIMPLEFIN_POSTED_HISTORY_REVISION } from "./bank-feed-profiles.js";
@@ -906,7 +907,11 @@ async function reserveRequest(env, tenantId, itemRef, stamp) {
   return result;
 }
 
-async function requestWindow(env, tenantId, connection, stamp) {
+async function requestWindow(env, tenantId, connection, stamp, currentFirst=false) {
+  if (currentFirst) {
+    const end=dayOf(stamp);
+    return {start:addDays(end,-2),end,backfill:false};
+  }
   // Repair the oldest unresolved interval, including pre-versioned receipts.
   // One failed daily pull therefore consumes one bounded retry on a later day;
   // it cannot be silently ignored as the rolling current window moves on.
@@ -959,13 +964,94 @@ async function readAccessUrl(env, item) {
   });
 }
 
+/** Revalidate saved access after the owner repairs sign-in at the provider.
+ * This never claims a second item or treats authentication as a money sync.
+ */
+export async function repairSimpleFinAccess(env, { itemRef, fetchImpl = fetch, now = null } = {}) {
+  if (typeof itemRef !== 'string' || !itemRef || itemRef.length > 512) {
+    throw new SimpleFinError('simplefin_repair_item_required', 400);
+  }
+  const { tenantId } = tenantReference(env);
+  const stamp = stampOf(now);
+  const item = await env.DB.prepare(
+    `SELECT i.item_ref,i.access_ciphertext,i.access_iv,i.key_version
+       FROM bank_feed_items i JOIN simplefin_connections c
+         ON c.tenant_id=i.tenant_id AND c.item_ref=i.item_ref
+      WHERE i.tenant_id=? AND i.item_ref=? AND i.removed_at IS NULL
+        AND i.status IN ('connected','error','reauth_required','permission_revoked')`,
+  ).bind(tenantId, itemRef).first();
+  if (!item) throw new SimpleFinError('simplefin_repair_item_not_found', 404);
+  const reservation = await reserveRequest(env, tenantId, itemRef, stamp);
+  let validated;
+  try {
+    const accessUrl = await readAccessUrl(env, item);
+    const endpoint = new URL(accessUrl);
+    endpoint.pathname = `${endpoint.pathname.replace(/\/+$/, '')}/accounts`;
+    endpoint.search = '';
+    endpoint.searchParams.set('version', '2');
+    // Access verification needs account identities, not another transaction read.
+    endpoint.searchParams.set('balances-only', '1');
+    const response = await fetchImpl(providerRequest(endpoint.href, 'GET', 'application/json', 'simplefin_pull_request_invalid'));
+    if ([401, 403].includes(response.status)) throw new SimpleFinError('simplefin_login_required', 502);
+    if (!response.ok || (response.status >= 300 && response.status < 400)) {
+      throw new SimpleFinError('simplefin_pull_refused', 502);
+    }
+    validated = validatePayload(JSON.parse(await boundedText(response, MAX_BODY_BYTES)), { accessUrl });
+  } catch (error) {
+    if (error instanceof SimpleFinError) throw error;
+    throw new SimpleFinError('simplefin_pull_unavailable', 502);
+  }
+  const saved = rowsOf(await env.DB.prepare(
+    `SELECT connection_id,source_account_id FROM simplefin_account_assignments WHERE tenant_id=? AND item_ref=?`,
+  ).bind(tenantId, itemRef).all());
+  const identities = new Set(validated.accounts.map(account => JSON.stringify([account.conn_id ?? '', account.id])));
+  if (validated.errlist.length || identities.size !== validated.accounts.length ||
+      saved.some(account => account.connection_id === null ||
+        !identities.has(JSON.stringify([account.connection_id, account.source_account_id])))) {
+    throw new SimpleFinError('simplefin_repair_identity_unverified', 409);
+  }
+  // A later read, credential replacement or disconnect wins over this request.
+  // Fence the entire reactivation batch with the atomic budget reservation.
+  const fence = `SELECT 1 FROM bank_feed_items i JOIN simplefin_connections c
+    ON c.tenant_id=i.tenant_id AND c.item_ref=i.item_ref
+    WHERE i.tenant_id=? AND i.item_ref=? AND i.removed_at IS NULL
+      AND i.access_ciphertext=? AND i.access_iv=? AND i.key_version=?
+      AND i.status IN ('connected','error','reauth_required','permission_revoked')
+      AND c.request_day=? AND c.requests_today=?`;
+  try {
+    await env.DB.batch([
+      env.DB.prepare(`SELECT CASE WHEN EXISTS (${fence}) THEN 1
+        ELSE json_extract('simplefin repair superseded','$') END AS repair_guard`)
+        .bind(tenantId, itemRef, item.access_ciphertext, item.access_iv, item.key_version,
+          reservation.request_day, reservation.requests_today),
+      env.DB.prepare(`UPDATE bank_feed_items SET status='connected',status_detail=NULL,last_error_at=NULL
+        WHERE tenant_id=? AND item_ref=?`).bind(tenantId, itemRef),
+      env.DB.prepare(`UPDATE simplefin_connections SET next_pull_at=?,updated_at=?
+        WHERE tenant_id=? AND item_ref=?`).bind(stamp, stamp, tenantId, itemRef),
+      // Keep the operational exception and old sync boundary until catch-up.
+      bankErrorStatement(env, tenantId, itemRef, stamp, 'BANK_SYNC_PARTIAL'),
+    ]);
+    const readback = await env.DB.prepare(`SELECT i.status,c.next_pull_at FROM bank_feed_items i
+      JOIN simplefin_connections c ON c.tenant_id=i.tenant_id AND c.item_ref=i.item_ref
+      WHERE i.tenant_id=? AND i.item_ref=? AND i.removed_at IS NULL
+        AND i.access_ciphertext=? AND c.request_day=? AND c.requests_today=?`)
+      .bind(tenantId, itemRef, item.access_ciphertext, reservation.request_day, reservation.requests_today).first();
+    if (readback?.status !== 'connected' || readback.next_pull_at !== stamp) throw new Error('readback');
+  } catch {
+    throw new SimpleFinError('simplefin_repair_not_verified', 409);
+  }
+  return { ok: true, provider: PROVIDER, item_ref: itemRef, health_verified: true, history_kept: true };
+}
+
 async function pullWindow(env, connection, item, {
   fetchImpl,
   stamp,
+  currentFirst=false,
 }) {
   const { tenantId } = tenantReference(env);
-  const window = await requestWindow(env, tenantId, connection, stamp);
+  const window = await requestWindow(env, tenantId, connection, stamp,currentFirst);
   const reservation = await reserveRequest(env, tenantId, item.item_ref, stamp);
+  await bankAttemptStatement(env,tenantId,item.item_ref,stamp).run();
   const revision = await beginWindowRevision(env, tenantId, item.item_ref, window, stamp, reservation);
   let payload;
   let accessUrl;
@@ -981,6 +1067,7 @@ async function pullWindow(env, connection, item, {
     endpoint.searchParams.set("end-date", String(Math.floor(Date.parse(`${addDays(window.end, 1)}T00:00:00Z`) / 1000)));
     const request = providerRequest(endpoint.href, "GET", "application/json", "simplefin_pull_request_invalid");
     const response = await fetchImpl(request);
+    if ([401,403].includes(response.status)) throw new SimpleFinError('simplefin_login_required',502);
     if ((response.status >= 300 && response.status < 400) || !response.ok) {
       throw new SimpleFinError("simplefin_pull_refused", 502);
     }
@@ -1016,33 +1103,70 @@ async function pullWindow(env, connection, item, {
     ),
   ]);
   await promoteSimpleFinWindows(env, { itemRef: item.item_ref, now: stamp });
+  // A provider read can succeed while its account listing or owner assignment
+  // still prevents promotion. Only the exact current revision proves a sync.
+  const proof={sql:`SELECT 1 AS ok FROM simplefin_sync_windows w
+    JOIN bank_feed_items i ON i.tenant_id=w.tenant_id AND i.item_ref=w.item_ref
+    WHERE w.tenant_id=? AND w.item_ref=? AND window_start=? AND window_end=?
+      AND revision=? AND staging_revision=? AND state='promoted' AND errlist_json='[]'
+      AND i.removed_at IS NULL AND i.status IN ('connected','error')
+      AND ${accountListingsCompleteSql()}`,binds:[tenantId,item.item_ref,window.start,window.end,revision,revision]};
+  const verified=await env.DB.prepare(proof.sql).bind(...proof.binds).first();
+  if (!partial && verified && window.end>=dayOf(stamp)) {
+    await bankSuccessStatement(env,tenantId,item.item_ref,stamp,window.end,proof).run();
+  } else if (partial || !verified) {
+    await bankErrorStatement(env,tenantId,item.item_ref,stamp,'BANK_SYNC_PARTIAL').run();
+  }
   return { ...window, ...staged, partial };
 }
 
-/** Run a bounded due slice. Three backfill windows or one current window. */
+/** Run a bounded history slice, plus at most one current pull on a daily wake. */
 export async function runSimpleFinMaintenance(env, {
   fetchImpl = fetch,
   now = null,
   maxItems = 3,
   maxRequestsPerItem = DEFAULT_REQUESTS_PER_RUN,
+  daily = false,
 } = {}) {
   const { tenantId } = tenantReference(env);
   const stamp = stampOf(now);
+  if (env.VECTOR_DRAIN_MODE==='paused-for-upgrade') return {provider:PROVIDER,ran:0,items:[],paused:true};
+  await reconcileBankFeedHealth(env,stamp);
   const connections = rowsOf(await env.DB.prepare(
-    `SELECT c.*,i.access_ciphertext,i.access_iv,i.key_version,i.status,i.last_synced_at
+    `SELECT c.*,i.access_ciphertext,i.access_iv,i.key_version,i.status,i.last_synced_at,h.last_successful_sync_at
        FROM simplefin_connections c
        JOIN bank_feed_items i ON i.tenant_id=c.tenant_id AND i.item_ref=c.item_ref
-      WHERE c.tenant_id=? AND c.next_pull_at<=? AND i.removed_at IS NULL
+      LEFT JOIN bank_feed_health h ON h.tenant_id=i.tenant_id AND h.item_ref=i.item_ref
+      WHERE c.tenant_id=?1 AND (c.next_pull_at<=?2 OR (?4 AND i.status='connected' AND h.last_error_code IS NULL
+        AND (h.last_attempt_at IS NULL OR h.last_attempt_at<=?5))) AND i.removed_at IS NULL
         AND i.status IN ('connected','error')
-      ORDER BY c.next_pull_at,c.item_ref LIMIT ?`,
-  ).bind(tenantId, stamp, Math.max(1, Math.min(Number(maxItems) || 1, 3))).all());
+      ORDER BY c.next_pull_at,c.item_ref LIMIT ?3`,
+  ).bind(tenantId, stamp, Math.max(1, Math.min(Number(maxItems) || 1, 3)),daily ? 1:0,
+    new Date(Date.parse(stamp)-15*60_000).toISOString()).all());
   const report = [];
   for (const connection of connections) {
     const pulls = [];
     const limit = Math.max(1, Math.min(Number(maxRequestsPerItem) || 1, DEFAULT_REQUESTS_PER_RUN));
     let current = { ...connection };
     try {
-      for (let request = 0; request < limit; request++) {
+      let currentPartial = false;
+      if (daily && connection.last_synced_at) {
+        const next = await requestWindow(env, tenantId, current, stamp);
+        // Daily and timer wakes reserve a separate current slot when this
+        // slice owes history. Ordinary recovery keeps its exact interval and
+        // request bound. Every slot still uses the durable daily reservation.
+        if (current.backfill_next <= current.backfill_end || next.end < dayOf(stamp)) {
+          const pulled = await pullWindow(env, current, connection, { fetchImpl, stamp, currentFirst: true });
+          pulls.push(pulled);
+          currentPartial = pulled.partial;
+          current.last_synced_at = stamp;
+          const persisted = await env.DB.prepare(
+            `SELECT backfill_next FROM simplefin_connections WHERE tenant_id=? AND item_ref=?`,
+          ).bind(tenantId, connection.item_ref).first();
+          if (persisted) current.backfill_next = persisted.backfill_next;
+        }
+      }
+      for (let request = 0; !currentPartial && request < limit; request++) {
         const pulled = await pullWindow(env, current, connection, { fetchImpl, stamp });
         pulls.push(pulled);
         if (pulled.partial || !pulled.backfill) break;
@@ -1060,10 +1184,11 @@ export async function runSimpleFinMaintenance(env, {
     } catch (error) {
       const code = error instanceof SimpleFinError ? error.code : "simplefin_pull_unavailable";
       await env.DB.batch([
+        bankErrorStatement(env,tenantId,connection.item_ref,stamp,code),
         env.DB.prepare(
-          `UPDATE bank_feed_items SET status='error',status_detail=?,last_error_at=?
+          `UPDATE bank_feed_items SET status=CASE WHEN ?='simplefin_login_required' THEN 'reauth_required' ELSE 'error' END,status_detail=?,last_error_at=?
             WHERE tenant_id=? AND item_ref=?`,
-        ).bind(code === "simplefin_pending_response_unsupported"
+        ).bind(code, code === "simplefin_login_required" ? "Your bank needs you to sign in again." : code === "simplefin_pending_response_unsupported"
           ? "SimpleFIN returned pending items in a posted-only response. This pull was refused; completed history will be retried."
           : "SimpleFIN could not be read on the last attempt.", stamp, tenantId, connection.item_ref),
         env.DB.prepare(
@@ -1073,7 +1198,8 @@ export async function runSimpleFinMaintenance(env, {
       report.push({ item_ref: connection.item_ref, ok: false, code });
     }
   }
-  return { provider: PROVIDER, ran: report.length, items: report };
+  const health=await reconcileBankFeedHealth(env,stamp);
+  return { provider: PROVIDER, ran: report.length, items: report, health_attention:health?.needs_attention || 0 };
 }
 
 export async function simpleFinOwnerAccountStatus(env) {
@@ -1163,7 +1289,8 @@ export async function assignSimpleFinAccountEntity(env, body, { now = null } = {
   return { status: response.changed ? 201 : 200, body: response };
 }
 
-export async function simpleFinFeedStatus(env) {
+export async function simpleFinFeedStatus(env, {now=null}={}) {
+  const health=await bankHealthMap(env,stampOf(now));
   const { tenantId } = tenantReference(env);
   const rows = rowsOf(await env.DB.prepare(
     `SELECT i.item_ref,i.institution_label,i.status,i.status_detail,i.connected_at,i.last_synced_at,
@@ -1189,6 +1316,8 @@ export async function simpleFinFeedStatus(env) {
       status_detail: row.status_detail,
       connected_at: row.connected_at,
       last_synced_at: row.last_synced_at,
+      health:health.get(row.item_ref),
+      status_line:health.get(row.item_ref)?.status_line,
       next_pull_at: row.next_pull_at,
       provider_errors: errors,
       accounts_needing_owner: Number(row.accounts_needing_owner || 0),
@@ -1209,7 +1338,7 @@ export async function simpleFinFeedStatus(env) {
     environment: "production",
     connections,
     needs_attention: connections.filter((row) =>
-      row.status !== "connected" || row.provider_errors.length > 0 || row.accounts_needing_owner > 0),
+      row.health?.state !== "healthy" || row.status !== "connected" || row.provider_errors.length > 0 || row.accounts_needing_owner > 0),
   };
 }
 
@@ -1248,10 +1377,13 @@ export function simpleFinConnectPageHtml(_config, { ownerEntityCount = null } = 
 <style>body{font:16px/1.5 -apple-system,system-ui,sans-serif;max-width:46rem;margin:3rem auto;padding:0 1.25rem;color:#202124}h1{font-size:1.55rem;margin-bottom:.4rem}h2{font-size:1.15rem}p{color:#444}.panel{margin:1.5rem 0;border:1px solid #d7dce1;border-radius:.8rem;padding:1rem}.note{font-size:.92rem;color:#62676d}.err{color:#9b1c1c}.ok{color:#285c35}.account{border-top:1px solid #eee;padding:1rem 0}.account:first-child{border-top:0}button,input,select{font:inherit;padding:.7rem;border-radius:.55rem;box-sizing:border-box}input{width:100%;border:1px solid #999}button{border:0;background:#1f2937;color:#fff;cursor:pointer}button:disabled{opacity:.55}.assign{display:flex;gap:.6rem;flex-wrap:wrap}.assign select{min-width:14rem}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}@media(max-width:36rem){body{margin:1.5rem auto}.assign>*{width:100%}}</style></head><body>
 <h1>Connect SimpleFIN Bridge</h1>
 <p>SimpleFIN reads account balances and transactions. It cannot move money. Financial Brain never receives your bank password or verification code.</p>
-<section class="panel"><h2>1. Claim this Brain's connection</h2>
+<section id="claim-panel" class="panel"><h2>1. Claim this Brain's connection</h2>
 <p class="note">In SimpleFIN Bridge, link the banks you want, then create a one-time Setup Token. Paste it here. It goes straight from this page to your own Brain and is not saved.</p>
 <form id="claim"><label for="token">One-time Setup Token</label><br><input id="token" type="password" autocomplete="off" required maxlength="8192">
 <p><button id="claim-button" type="submit">Claim connection</button></p></form><p id="claim-status" role="status" aria-live="polite"></p></section>
+<section id="repair-panel" class="panel" hidden><h2>Repair this saved connection</h2>
+<p>Sign in to SimpleFIN Bridge and correct the bank connection there. Then check it here. Your saved accounts, owner choices and history stay in place.</p>
+<button id="repair-button" type="button">Check repaired connection</button><p id="repair-status" role="status" aria-live="polite"></p></section>
 <section class="panel"><h2>2. Choose where each account belongs</h2>
 <p class="note">SimpleFIN does not reliably label account types, so new accounts are not counted as cash or debt until that information is separately reviewed.</p>
 <details id="entity-details"${open}><summary>Add a person, household, or business</summary>
@@ -1267,6 +1399,9 @@ export function simpleFinConnectPageHtml(_config, { ownerEntityCount = null } = 
 const byId=(id)=>document.getElementById(id);const headers={"Content-Type":"application/json","X-Brain-App":"1"};
 async function request(path,init){const response=await fetch(path,{credentials:"same-origin",...init,headers});const body=await response.json().catch(()=>({}));if(!response.ok){const error=new Error(body.code||"This step did not finish.");error.code=body.code;throw error}return body}
 const get=(path)=>request(path,{method:"GET"});const post=(path,body)=>request(path,{method:"POST",body:JSON.stringify(body||{})});
+const repairParams=new URLSearchParams(window.location.search),repairMode=repairParams.get("mode")==="reauthorise",repairItem=repairParams.get("item_ref");
+if(repairMode){byId("claim-panel").hidden=true;byId("repair-panel").hidden=false;byId("repair-button").disabled=!repairItem;document.querySelector("h1").textContent="Repair SimpleFIN connection";if(!repairItem)byId("repair-status").textContent="Choose Repair connection from the saved bank first."}
+byId("repair-button").onclick=async()=>{const button=byId("repair-button"),status=byId("repair-status");button.disabled=true;status.textContent="Checking saved access…";try{await post("/api/bank-feed/simplefin/repair",{item_ref:repairItem});status.textContent="Sign-in checked. The next sync will catch up your saved accounts. Your history stays in place.";status.className="ok";await loadConnections()}catch(error){status.textContent=error.code==="simplefin_login_required"?"Your bank still needs you to sign in. Correct the connection in SimpleFIN Bridge, then check again.":"Saved access could not be verified. Reference code: "+error.code;status.className="err"}finally{button.disabled=false}};
 function node(tag,text,kind){const value=document.createElement(tag);if(text!=null)value.textContent=String(text);if(kind)value.className=kind;return value}
 function providerMessage(value){return typeof value==="string"?value:value&&typeof value.text==="string"?value.text:"SimpleFIN reported an issue without readable details."}
 async function entities(){const data=await post("/api/fin/snapshot",{sections:["entities"]});return Array.isArray(data.entities)?data.entities.filter((entry)=>entry&&entry.status==="active"&&entry.relationship==="owned"):[]}

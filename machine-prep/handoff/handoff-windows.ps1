@@ -36,8 +36,8 @@ $claude = Join-Path $env:USERPROFILE ".local\bin\claude.exe"
 if (-not (Test-Path -LiteralPath $claude -PathType Leaf)) {
   throw "Claude Code is not ready. Send the installer log from LocalAppData\FinancialBrainMachinePrep\installer.log to support."
 }
-$escapedClaude = $claude.Replace("'", "''")
-$escapedPrompt = $PromptPath.Replace("'", "''")
+$escapedClaude = $claude -replace "['\u2018\u2019\u201a\u201b]", '$&$&'
+$escapedPrompt = $PromptPath -replace "['\u2018\u2019\u201a\u201b]", '$&$&'
 $command = "& '$escapedClaude' ([IO.File]::ReadAllText('$escapedPrompt'))"
 Start-Process "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList @(
   "-NoLogo", "-NoProfile", "-NoExit", "-Command", $command

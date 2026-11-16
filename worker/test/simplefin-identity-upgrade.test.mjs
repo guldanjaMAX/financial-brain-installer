@@ -127,7 +127,7 @@ async function legacyFixture(t, { withdraw = true, sf = currentFeed, amountMinor
   f.calls = { base: 0, current: 0 };
   f.windowCalls = [];
   f.pull = async (payload = f.payload, feed = sf, name = 'current', { filter = false } = {}) => {
-    f.raw("UPDATE simplefin_connections SET next_pull_at='2000-01-01'");
+    f.raw('UPDATE simplefin_connections SET next_pull_at=?', NOW);
     return feed.runSimpleFinMaintenance(f.env, { now: NOW, maxRequestsPerItem: 1,
       fetchImpl: async request => {
         f.calls[name]++;
@@ -168,7 +168,9 @@ async function legacyFixture(t, { withdraw = true, sf = currentFeed, amountMinor
   };
   f.upgrade = async () => {
     const before = f.first('SELECT * FROM fin_transactions');
-    for (const file of ['0060_simplefin_account_identity.sql', '0061_balance_position_evidence.sql'])
+    // Current code runs only after the complete schema upgrade. Keep the
+    // schema-59 oracle above, including its exact migration assertions.
+    for (const file of readdirSync(directory).filter(file => file.endsWith('.sql') && Number.parseInt(file, 10) > 59).sort())
       for (const sql of splitStatements(readFileSync(new URL(file, directory), 'utf8'))) f.sqlite.exec(sql);
     assert.deepEqual(f.first('SELECT * FROM fin_transactions'), before, 'real migrations preserve the complete withdrawn row');
     const body = { action: 'identity', account_ref: f.assignment.account_ref, connection_id: 'legacy-bank' };

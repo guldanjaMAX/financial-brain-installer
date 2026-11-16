@@ -7,7 +7,9 @@
  * Claude Desktop, and Codex on the owner's computer, where the MCP runtime
  * already resolves the owner's durable admin credential. It is deliberately
  * absent from the connector profile list: a 30-day remote bearer token is not
- * the owner, even when the owner approved the connection.
+ * the owner, even when the owner approved the connection. Remote connectors
+ * still receive the read-only money tools (founder decision 11-12); the
+ * consent screen discloses this.
  *
  * Deletion execution is intentionally absent. Break-glass may prepare a
  * bounded receipt, but only a fresh owner passkey ceremony may consume it.
@@ -16,11 +18,11 @@
 export const AGENT_PROFILES = Object.freeze({
   librarian: Object.freeze({
     label: "Librarian",
-    capabilities: Object.freeze(["corpus:read"]),
+    capabilities: Object.freeze(["corpus:read", "money:read"]),
   }),
   "structured-contributor": Object.freeze({
     label: "Structured contributor",
-    capabilities: Object.freeze(["corpus:read", "curated:write"]),
+    capabilities: Object.freeze(["corpus:read", "curated:write", "money:read"]),
   }),
   technician: Object.freeze({
     label: "Technician",
@@ -32,7 +34,7 @@ export const AGENT_PROFILES = Object.freeze({
   }),
   "owner-assistant": Object.freeze({
     label: "Owner assistant",
-    capabilities: Object.freeze(["corpus:read", "curated:write", "diagnostics:read"]),
+    capabilities: Object.freeze(["corpus:read", "curated:write", "diagnostics:read", "money:read"]),
   }),
 });
 

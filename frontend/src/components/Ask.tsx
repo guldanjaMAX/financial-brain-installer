@@ -4,7 +4,7 @@ import { ApiError, api, ownerError, type Answer, type Citation, type GrantPrinci
 // as an absence is a product rule, not a rendering detail, so both surfaces
 // derive it from one module instead of each writing their own.
 import {
-  SCANNED_CITATION_MARK, answerReasonText, answerText, citationIsScanned, confidenceText, scannedEvidenceNotice,
+  SCANNED_CITATION_MARK, answerReasonText, answerText, citationIsScanned, confidenceText, documentResponseConfidence, scannedEvidenceNotice,
   nextActionText, separateOffers, unavailableSearch,
 } from "../lib/answer-render.js";
 import { Attention, TruthNote } from "./ui";
@@ -115,7 +115,8 @@ export function evidenceGateNote(answer: Answer): string | null {
   if (!reason) return null;
   const punctuated = /[.!?]$/.test(reason) ? reason : `${reason}.`;
   if (answer.evidence_gate?.partial) return `What the records did not cover: ${punctuated}`;
-  if (answer.evidence_gate?.supported === false) return `Why no answer was shown: ${punctuated}`;
+  if (answer.evidence_gate?.supported === false) return answer.answer && !/^The documents do not answer/i.test(answer.answer)
+    ? `Why this answer is provisional: ${punctuated}` : `Why no answer was shown: ${punctuated}`;
   return `Why this answer was shown: ${punctuated}`;
 }
 
@@ -135,36 +136,27 @@ export function EvidenceGateReason({ answer }: { answer: Answer }) {
  *  a bare percentage is a number to argue with, a percentage with its reasons
  *  is something a person can actually judge. */
 export function Trust({ answer }: { answer: Answer }) {
-  const c = answer.confidence;
-  // A search that never completed has no rubric to report. Rendering a
-  // percentage here would put a number on an absence nobody measured.
-  if (unavailableSearch(answer)) {
-    return (
-      <p className="mt-5 pt-4 border-t border-line text-[13px] text-ink-soft">
-        {confidenceText(answer)}
-      </p>
-    );
-  }
-  if (!c) return null;
-  const refused = !answer.answer || /^The documents do not answer/i.test(answer.answer);
-  const tone = c.percent >= 80 ? "text-emerald-700 bg-emerald-50"
-    : c.percent >= 55 ? "text-amber-700 bg-amber-50"
+  const c = documentResponseConfidence(answer);
+  const band = c.percent >= 90 ? "High" : c.percent >= 70 ? "Medium" : "Low";
+  const tone = c.percent >= 90 ? "text-emerald-700 bg-emerald-50"
+    : c.percent >= 70 ? "text-amber-700 bg-amber-50"
       : "text-red-700 bg-red-50";
   return (
     <div className="mt-5 pt-4 border-t border-line">
       <div className="flex flex-wrap items-center gap-2">
         <span className={`text-[13px] font-semibold px-2 py-0.5 rounded-md ${tone}`}>
-          {c.percent}% {c.band}
+          Confidence: {band} ({c.percent}%)
         </span>
         <span className="text-[13px] text-ink-soft">
-          {refused ? "confidence in this search result" : "confidence"}
+          Why: the records read and checks below.
         </span>
       </div>
       <ul className="mt-2 space-y-1">
-        {c.basis.map((reason) => (
+        {(c.basis || c.reasons || ["No confidence assessment was returned."]).map((reason) => (
           <li key={reason} className="text-[13px] text-ink-soft leading-snug">· {reason}</li>
         ))}
       </ul>
+      {c.percent < 100 && <p className="mt-2 text-[13px] text-ink-soft">Missing: {(c.missing || ["Complete relevant source coverage and independent verification."]).join(" ")}</p>}
     </div>
   );
 }

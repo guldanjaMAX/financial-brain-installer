@@ -1,0 +1,3198 @@
+{
+  "meta": {
+    "lane": "CLAUDE-FINDER-CLEAN-PAYOUTS-R1-1112",
+    "base": "82312ac665dc84855043572956ba6c9d03f9b038",
+    "method": "Static trace by reading the code at the base. Nothing was executed.",
+    "all_data_synthetic": true,
+    "fixture": {
+      "pattern": "worker/test/clean-money-r1.test.mjs:9-53",
+      "row_defaults": {
+        "day": "2026-10-02",
+        "dir": "inflow",
+        "payee": null,
+        "cat": null,
+        "currency": "USD",
+        "pending": 0,
+        "category_basis_state": "confirmed",
+        "provenance": "owner_stated",
+        "basis_state": "confirmed"
+      },
+      "coverage_default": "every account: complete confirmed coverage 2026-01-01 through 2026-10-31, unless the case has a coverage key",
+      "account_label": "UPDATE fin_accounts.label to the label given in the preset"
+    },
+    "account_presets": {
+      "BANK": [
+        {
+          "slug": "bank",
+          "kind": "checking",
+          "mask": "1111",
+          "label": "bank"
+        }
+      ],
+      "BANK_STRIPE": [
+        {
+          "slug": "bank",
+          "kind": "checking",
+          "mask": "1111",
+          "label": "bank"
+        },
+        {
+          "slug": "proc",
+          "kind": "merchant",
+          "mask": "2222",
+          "label": "Stripe"
+        }
+      ],
+      "BANK_PROC": [
+        {
+          "slug": "bank",
+          "kind": "checking",
+          "mask": "1111",
+          "label": "bank"
+        },
+        {
+          "slug": "processor",
+          "kind": "merchant",
+          "mask": "3333",
+          "label": "processor"
+        }
+      ],
+      "BANK_POS": [
+        {
+          "slug": "bank",
+          "kind": "checking",
+          "mask": "1111",
+          "label": "bank"
+        },
+        {
+          "slug": "pos",
+          "kind": "point_of_sale",
+          "mask": "3333",
+          "label": "Square"
+        }
+      ]
+    },
+    "sql_templates": {
+      "INCOME": "SELECT SUM(income_minor) AS cents FROM txn WHERE posted_on BETWEEN '2026-10-01' AND '2026-10-31'",
+      "EXPENSE": "SELECT SUM(expense_minor) AS cents FROM txn WHERE posted_on BETWEEN '2026-10-01' AND '2026-10-31'",
+      "NET": "SELECT SUM(income_minor)-SUM(expense_minor) AS cents FROM txn WHERE posted_on BETWEEN '2026-10-01' AND '2026-10-31'",
+      "NETSALES": "SELECT SUM(income_minor)-SUM(amount_minor*(money_kind='refund')*(direction='outflow')) AS cents FROM txn WHERE posted_on BETWEEN '2026-10-01' AND '2026-10-31'",
+      "PAYOUT": "SELECT SUM(amount_minor) AS cents FROM txn WHERE posted_on BETWEEN '2026-10-01' AND '2026-10-31' GROUP BY money_kind HAVING money_kind='payout'",
+      "PROC:<name>": "SELECT SUM(amount_minor) AS cents FROM txn WHERE posted_on BETWEEN '2026-10-01' AND '2026-10-31' GROUP BY processor HAVING processor='<name>'",
+      "PAYER:<name>": "SELECT SUM(amount_minor) AS cents FROM txn WHERE posted_on BETWEEN '2026-10-01' AND '2026-10-31' GROUP BY payer_group HAVING payer_group='<name>'"
+    },
+    "figure": "rows[0].cents; null when no row is returned or SUM is NULL",
+    "confidence_oracle": "Round 1 arithmetic (money-query-quality.js:5-77) applied to the rows that are truly uncertain: any uncertain row costs min(35, max(11, ceil(35 * uncertain cents / all selected cents))); pending -15; coverage not proved -10, incomplete -25, freshness -5, date conflict -5. High >= 90, Medium >= 70, else Low.",
+    "counts": {
+      "cases": 67,
+      "pass": 36,
+      "fail": 31,
+      "wrong_figures": 20,
+      "wrong_figures_not_disclosed": 10,
+      "confidence_only_fails": 11
+    }
+  },
+  "cases": [
+    {
+      "id": "P01",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 185000,
+          "memo": "STRIPE PAYOUT"
+        }
+      ],
+      "question": "How much income came in during October?",
+      "sql": "INCOME",
+      "expected": {
+        "minor": 185000,
+        "rows": [
+          "+r1"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 185000,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": [
+        "la:507",
+        "cm:46",
+        "cm:182"
+      ]
+    },
+    {
+      "id": "P02",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 185000,
+          "memo": "STRIPE TRANSFER ST-A1B2C3"
+        }
+      ],
+      "question": "How much income came in during October?",
+      "sql": "INCOME",
+      "expected": {
+        "minor": 185000,
+        "rows": [
+          "+r1"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 185000,
+        "estimated": {
+          "r1": "possible_own_transfer_counted"
+        },
+        "confidence": "Low",
+        "score": 65
+      },
+      "verdict": "FAIL",
+      "fail_kind": "confidence",
+      "rule": [
+        "la:502"
+      ]
+    },
+    {
+      "id": "P03",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 185000,
+          "memo": "ACH CREDIT ST-9X8Y",
+          "payee": "Stripe"
+        }
+      ],
+      "question": "How much did Stripe deposit in October?",
+      "sql": "PROC:stripe",
+      "expected": {
+        "minor": 185000,
+        "rows": [
+          "+r1"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 185000,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": [
+        "cm:45",
+        "la:507"
+      ]
+    },
+    {
+      "id": "P04",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 185000,
+          "memo": "STRIPE PAYOUT-ST1234"
+        }
+      ],
+      "question": "How much did Stripe deposit in October?",
+      "sql": "PROC:stripe",
+      "expected": {
+        "minor": 185000,
+        "rows": [
+          "+r1"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": null,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "FAIL",
+      "fail_kind": "figure",
+      "disclosed": false,
+      "rule": [
+        "cm:46-49",
+        "la:353-358"
+      ]
+    },
+    {
+      "id": "P05",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 185000,
+          "memo": "ORIG CO NAME:STRIPE ORIG ID:0000000000 DESC DATE:261002 CO ENTRY DESCR:TRANSFER SEC:CCD"
+        }
+      ],
+      "question": "How much did Stripe deposit in October?",
+      "sql": "PROC:stripe",
+      "expected": {
+        "minor": 185000,
+        "rows": [
+          "+r1"
+        ],
+        "uncertain": [
+          "r1"
+        ],
+        "confidence": "Low",
+        "score": 65
+      },
+      "view": {
+        "minor": null,
+        "estimated": {
+          "r1": "possible_own_transfer_counted"
+        },
+        "confidence": "Low",
+        "score": 65
+      },
+      "verdict": "FAIL",
+      "fail_kind": "figure",
+      "disclosed": true,
+      "rule": [
+        "cm:44-50",
+        "la:353-358",
+        "la:502"
+      ]
+    },
+    {
+      "id": "P06",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 185000,
+          "memo": "SQUARE INC SQ261002 T3ABC"
+        }
+      ],
+      "question": "How much did Square deposit in October?",
+      "sql": "PROC:square",
+      "expected": {
+        "minor": 185000,
+        "rows": [
+          "+r1"
+        ],
+        "uncertain": [
+          "r1"
+        ],
+        "confidence": "Low",
+        "score": 65
+      },
+      "view": {
+        "minor": null,
+        "estimated": {
+          "r1": "unidentified_deposit_counted"
+        },
+        "confidence": "Low",
+        "score": 65
+      },
+      "verdict": "FAIL",
+      "fail_kind": "figure",
+      "disclosed": true,
+      "rule": [
+        "cm:44-50",
+        "la:353-358",
+        "la:508"
+      ]
+    },
+    {
+      "id": "P07",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 185000,
+          "memo": "SQ261002 T3ABC",
+          "payee": "Square Inc."
+        }
+      ],
+      "question": "How much did Square deposit in October?",
+      "sql": "PROC:square",
+      "expected": {
+        "minor": 185000,
+        "rows": [
+          "+r1"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 185000,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": [
+        "cm:45"
+      ]
+    },
+    {
+      "id": "P08",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 185000,
+          "memo": "PAYOUT",
+          "payee": "Stripe, Inc."
+        }
+      ],
+      "question": "How much came in as processor payouts in October?",
+      "sql": "PAYOUT",
+      "expected": {
+        "minor": 185000,
+        "rows": [
+          "+r1"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 185000,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": [
+        "cm:45",
+        "cm:182"
+      ]
+    },
+    {
+      "id": "P09",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 92000,
+          "day": "2026-10-14",
+          "memo": "SHOPIFY PAYOUT 10/14",
+          "payee": "Shopify Payments"
+        }
+      ],
+      "question": "How much did Shopify deposit in October?",
+      "sql": "PROC:shopify",
+      "expected": {
+        "minor": 92000,
+        "rows": [
+          "+r1"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 92000,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": [
+        "cm:45"
+      ]
+    },
+    {
+      "id": "P10",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 64000,
+          "memo": "PAYPAL TRANSFER",
+          "payee": "PayPal"
+        }
+      ],
+      "question": "How much income came in during October?",
+      "sql": "INCOME",
+      "expected": {
+        "minor": 64000,
+        "rows": [
+          "+r1"
+        ],
+        "uncertain": [
+          "r1"
+        ],
+        "confidence": "Low",
+        "score": 65,
+        "note": "a PayPal balance can hold the owner's own money"
+      },
+      "view": {
+        "minor": 64000,
+        "estimated": {
+          "r1": "possible_own_transfer_counted"
+        },
+        "confidence": "Low",
+        "score": 65
+      },
+      "verdict": "PASS",
+      "rule": [
+        "la:502"
+      ]
+    },
+    {
+      "id": "P11",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 120000,
+          "day": "2026-10-03",
+          "memo": "ACH CREDIT",
+          "payee": "Stripe"
+        },
+        {
+          "uid": "r2",
+          "acct": "bank",
+          "cents": 80000,
+          "day": "2026-10-10",
+          "memo": "ACH CREDIT",
+          "payee": "Stripe"
+        },
+        {
+          "uid": "r3",
+          "acct": "bank",
+          "cents": 45000,
+          "day": "2026-10-12",
+          "memo": "ACH CREDIT",
+          "payee": "Square Inc"
+        },
+        {
+          "uid": "r4",
+          "acct": "bank",
+          "cents": 30000,
+          "day": "2026-10-15",
+          "memo": "DEPOSIT",
+          "payee": "Sample Client LLC"
+        }
+      ],
+      "question": "How much came in as processor payouts in October?",
+      "sql": "PAYOUT",
+      "expected": {
+        "minor": 245000,
+        "rows": [
+          "+r1",
+          "+r2",
+          "+r3"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 245000,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": [
+        "cm:182"
+      ]
+    },
+    {
+      "id": "P12",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 12000,
+          "day": "2026-10-05",
+          "memo": "STRIPE TRANSFER PAYOUT 0101"
+        },
+        {
+          "uid": "r2",
+          "acct": "bank",
+          "cents": 14000,
+          "day": "2026-10-12",
+          "memo": "STRIPE TRANSFER PAYOUT 0202"
+        }
+      ],
+      "question": "How much did Stripe deposit in October?",
+      "sql": "PROC:stripe",
+      "expected": {
+        "minor": 26000,
+        "rows": [
+          "+r1",
+          "+r2"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 26000,
+        "estimated": {
+          "r1": "possible_own_transfer_counted",
+          "r2": "possible_own_transfer_counted"
+        },
+        "confidence": "Low",
+        "score": 65
+      },
+      "verdict": "FAIL",
+      "fail_kind": "confidence",
+      "rule": [
+        "la:502"
+      ]
+    },
+    {
+      "id": "P13",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 185000,
+          "memo": "Transfer from Stripe"
+        }
+      ],
+      "question": "How much income came in during October?",
+      "sql": "INCOME",
+      "expected": {
+        "minor": 185000,
+        "rows": [
+          "+r1"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 185000,
+        "estimated": {
+          "r1": "possible_own_transfer_counted"
+        },
+        "confidence": "Low",
+        "score": 65
+      },
+      "verdict": "FAIL",
+      "fail_kind": "confidence",
+      "rule": [
+        "la:502",
+        "cm:48"
+      ]
+    },
+    {
+      "id": "P14",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 40000,
+          "memo": "INVOICE 118 PAYMENT",
+          "payee": "Square One Design"
+        }
+      ],
+      "question": "How much came in as processor payouts in October?",
+      "sql": "PAYOUT",
+      "expected": {
+        "minor": null,
+        "rows": [],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": null,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": [
+        "cm:45"
+      ]
+    },
+    {
+      "id": "P15",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 92000,
+          "memo": "SHOPIFY PAYOUT",
+          "payee": "Shopify"
+        },
+        {
+          "uid": "r2",
+          "acct": "bank",
+          "cents": 3900,
+          "day": "2026-10-06",
+          "dir": "outflow",
+          "memo": "SHOPIFY* 104455",
+          "payee": "Shopify"
+        }
+      ],
+      "question": "How much did Shopify deposit in October?",
+      "sql": "PROC:shopify",
+      "expected": {
+        "minor": 92000,
+        "rows": [
+          "+r1"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 92000,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": [
+        "cm:178",
+        "la:506"
+      ]
+    },
+    {
+      "id": "P16",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 51000,
+          "memo": "ETSY INC DEPOSIT",
+          "payee": "Etsy"
+        }
+      ],
+      "question": "How much did Etsy deposit in October?",
+      "sql": "PAYER:etsy",
+      "expected": {
+        "minor": 51000,
+        "rows": [
+          "+r1"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 51000,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": [
+        "cm:184",
+        "la:507"
+      ]
+    },
+    {
+      "id": "P17",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 51000,
+          "memo": "ETSY INC DEPOSIT",
+          "payee": "Etsy"
+        }
+      ],
+      "question": "How much came in as marketplace or processor payouts in October?",
+      "sql": "PAYOUT",
+      "expected": {
+        "minor": 51000,
+        "rows": [
+          "+r1"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": null,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "FAIL",
+      "fail_kind": "figure",
+      "disclosed": false,
+      "rule": [
+        "cm:44"
+      ]
+    },
+    {
+      "id": "P18",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 230000,
+          "memo": "AMAZON PAYMENTS DISBURSEMENT"
+        }
+      ],
+      "question": "How much income came in during October?",
+      "sql": "INCOME",
+      "expected": {
+        "minor": 230000,
+        "rows": [
+          "+r1"
+        ],
+        "uncertain": [
+          "r1"
+        ],
+        "confidence": "Low",
+        "score": 65
+      },
+      "view": {
+        "minor": 230000,
+        "estimated": {
+          "r1": "unidentified_deposit_counted"
+        },
+        "confidence": "Low",
+        "score": 65
+      },
+      "verdict": "PASS",
+      "rule": [
+        "la:508"
+      ]
+    },
+    {
+      "id": "P19",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 78000,
+          "memo": "DOORDASH INC DES:PAYOUT",
+          "payee": "DoorDash"
+        }
+      ],
+      "question": "How much income came in during October?",
+      "sql": "INCOME",
+      "expected": {
+        "minor": 78000,
+        "rows": [
+          "+r1"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 78000,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": [
+        "la:507"
+      ]
+    },
+    {
+      "id": "P20",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 33000,
+          "memo": "EBAY PAYOUT TRANSFER",
+          "payee": "eBay"
+        }
+      ],
+      "question": "How much income came in during October?",
+      "sql": "INCOME",
+      "expected": {
+        "minor": 33000,
+        "rows": [
+          "+r1"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 33000,
+        "estimated": {
+          "r1": "possible_own_transfer_counted"
+        },
+        "confidence": "Low",
+        "score": 65
+      },
+      "verdict": "FAIL",
+      "fail_kind": "confidence",
+      "rule": [
+        "la:502"
+      ]
+    },
+    {
+      "id": "P21",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 51000,
+          "memo": "ETSY INC DEPOSIT",
+          "payee": "Etsy"
+        },
+        {
+          "uid": "r2",
+          "acct": "bank",
+          "cents": 2300,
+          "day": "2026-10-04",
+          "dir": "outflow",
+          "memo": "ETSY SELLER FEES",
+          "payee": "Etsy"
+        }
+      ],
+      "question": "What did I net in October?",
+      "sql": "NET",
+      "expected": {
+        "minor": 48700,
+        "rows": [
+          "+r1",
+          "-r2"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 48700,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": [
+        "la:423",
+        "la:450"
+      ]
+    },
+    {
+      "id": "P22",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 51000,
+          "memo": "ETSY INC DEPOSIT",
+          "payee": "Etsy"
+        }
+      ],
+      "question": "What were my gross Etsy sales in October?",
+      "sql": "PAYER:etsy",
+      "expected": {
+        "minor": 51000,
+        "rows": [
+          "+r1"
+        ],
+        "uncertain": [],
+        "confidence": "Medium",
+        "score": null,
+        "note": "best supported figure is the net deposit; gross is not in bank data, so the score must be below High and say what is missing"
+      },
+      "view": {
+        "minor": 51000,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "FAIL",
+      "fail_kind": "confidence",
+      "rule": [
+        "cm:44",
+        "q:39-51"
+      ]
+    },
+    {
+      "id": "P23",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 185000,
+          "memo": "ACH CREDIT",
+          "payee": "Stripe"
+        }
+      ],
+      "question": "What were my gross sales through Stripe in October?",
+      "sql": "PROC:stripe",
+      "expected": {
+        "minor": 185000,
+        "rows": [
+          "+r1"
+        ],
+        "uncertain": [],
+        "confidence": "Medium",
+        "score": null,
+        "note": "same as P22"
+      },
+      "view": {
+        "minor": 185000,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "FAIL",
+      "fail_kind": "confidence",
+      "rule": [
+        "q:39-51",
+        "c:26"
+      ]
+    },
+    {
+      "id": "P24",
+      "accounts": "BANK_PROC",
+      "rows": [
+        {
+          "uid": "sales",
+          "acct": "processor",
+          "cents": 10000,
+          "memo": "CUSTOMER SALES",
+          "cat": "GROSS_SALES"
+        },
+        {
+          "uid": "fee",
+          "acct": "processor",
+          "cents": 300,
+          "dir": "outflow",
+          "memo": "Stripe processing fees",
+          "cat": "PROCESSOR_FEES"
+        },
+        {
+          "uid": "out",
+          "acct": "processor",
+          "cents": 9700,
+          "dir": "outflow",
+          "memo": "Stripe payout to owner bank",
+          "payee": "Stripe",
+          "cat": "TRANSFER_OUT"
+        },
+        {
+          "uid": "in",
+          "acct": "bank",
+          "cents": 9700,
+          "memo": "Stripe payout from owner processor",
+          "payee": "Stripe",
+          "cat": "TRANSFER_IN"
+        }
+      ],
+      "question": "How much income came in during October?",
+      "sql": "INCOME",
+      "expected": {
+        "minor": 10000,
+        "rows": [
+          "+sales"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 10000,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": [
+        "cm:139-145",
+        "la:322-323"
+      ]
+    },
+    {
+      "id": "P25",
+      "accounts": "BANK_STRIPE",
+      "rows": [
+        {
+          "uid": "sales",
+          "acct": "proc",
+          "cents": 10000,
+          "memo": "CUSTOMER SALES",
+          "cat": "GROSS_SALES"
+        },
+        {
+          "uid": "fee",
+          "acct": "proc",
+          "cents": 300,
+          "dir": "outflow",
+          "memo": "Stripe processing fees",
+          "cat": "PROCESSOR_FEES"
+        },
+        {
+          "uid": "out",
+          "acct": "proc",
+          "cents": 9700,
+          "dir": "outflow",
+          "memo": "STRIPE PAYOUT"
+        },
+        {
+          "uid": "in",
+          "acct": "bank",
+          "cents": 9700,
+          "memo": "STRIPE PAYOUT"
+        }
+      ],
+      "question": "How much income came in during October?",
+      "sql": "INCOME",
+      "expected": {
+        "minor": 10000,
+        "rows": [
+          "+sales"
+        ],
+        "uncertain": [
+          "out",
+          "in"
+        ],
+        "confidence": "Medium",
+        "score": 77
+      },
+      "view": {
+        "minor": 19700,
+        "estimated": {
+          "out": "possible_own_transfer_counted",
+          "in": "possible_own_transfer_counted"
+        },
+        "confidence": "Medium",
+        "score": 77
+      },
+      "verdict": "FAIL",
+      "fail_kind": "figure",
+      "disclosed": true,
+      "rule": [
+        "cm:142",
+        "cm:166-167",
+        "la:502"
+      ]
+    },
+    {
+      "id": "P26",
+      "accounts": "BANK_STRIPE",
+      "rows": [
+        {
+          "uid": "in",
+          "acct": "bank",
+          "cents": 185000,
+          "memo": "Transfer from Stripe"
+        }
+      ],
+      "question": "How much income came in during October?",
+      "sql": "INCOME",
+      "expected": {
+        "minor": 185000,
+        "rows": [
+          "+in"
+        ],
+        "uncertain": [
+          "in"
+        ],
+        "confidence": "Low",
+        "score": 65
+      },
+      "view": {
+        "minor": 185000,
+        "estimated": {
+          "in": "processor_account_history_missing_counted"
+        },
+        "confidence": "Low",
+        "score": 65
+      },
+      "verdict": "PASS",
+      "rule": [
+        "la:457-458"
+      ]
+    },
+    {
+      "id": "P27",
+      "accounts": "BANK_STRIPE",
+      "rows": [
+        {
+          "uid": "sales",
+          "acct": "proc",
+          "cents": 190000,
+          "day": "2026-10-01",
+          "memo": "CUSTOMER SALES",
+          "cat": "GROSS_SALES"
+        },
+        {
+          "uid": "fee",
+          "acct": "proc",
+          "cents": 5000,
+          "day": "2026-10-01",
+          "dir": "outflow",
+          "memo": "Stripe processing fees",
+          "cat": "PROCESSOR_FEES"
+        },
+        {
+          "uid": "out",
+          "acct": "proc",
+          "cents": 185000,
+          "dir": "outflow",
+          "memo": "Transfer to 1111"
+        },
+        {
+          "uid": "in",
+          "acct": "bank",
+          "cents": 185000,
+          "memo": "Transfer from Stripe"
+        }
+      ],
+      "question": "How much income came in during October?",
+      "sql": "INCOME",
+      "expected": {
+        "minor": 190000,
+        "rows": [
+          "+sales"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 190000,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": [
+        "la:432-440",
+        "cm:288"
+      ]
+    },
+    {
+      "id": "P28",
+      "accounts": "BANK_STRIPE",
+      "rows": [
+        {
+          "uid": "sales",
+          "acct": "proc",
+          "cents": 20000,
+          "memo": "CUSTOMER SALES",
+          "cat": "GROSS_SALES"
+        },
+        {
+          "uid": "in",
+          "acct": "bank",
+          "cents": 185000,
+          "memo": "Transfer from Stripe"
+        }
+      ],
+      "question": "How much income came in during October?",
+      "sql": "INCOME",
+      "expected": {
+        "minor": 205000,
+        "rows": [
+          "+sales",
+          "+in"
+        ],
+        "uncertain": [
+          "in"
+        ],
+        "confidence": "Low",
+        "score": 68
+      },
+      "view": {
+        "minor": 20000,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100,
+        "note": "bank row is own_transfer, estimated=0"
+      },
+      "verdict": "FAIL",
+      "fail_kind": "figure",
+      "disclosed": false,
+      "rule": [
+        "la:329",
+        "la:457-458",
+        "la:485"
+      ]
+    },
+    {
+      "id": "P29",
+      "accounts": "BANK_STRIPE",
+      "rows": [
+        {
+          "uid": "sales",
+          "acct": "proc",
+          "cents": 10000,
+          "day": "2026-10-01",
+          "memo": "CUSTOMER SALES",
+          "cat": "GROSS_SALES"
+        },
+        {
+          "uid": "fee",
+          "acct": "proc",
+          "cents": 300,
+          "day": "2026-10-01",
+          "dir": "outflow",
+          "memo": "Stripe processing fees",
+          "cat": "PROCESSOR_FEES"
+        },
+        {
+          "uid": "out",
+          "acct": "proc",
+          "cents": 9700,
+          "day": "2026-10-02",
+          "dir": "outflow",
+          "memo": "STRIPE PAYOUT"
+        },
+        {
+          "uid": "in",
+          "acct": "bank",
+          "cents": 9700,
+          "day": "2026-10-07",
+          "memo": "STRIPE PAYOUT"
+        }
+      ],
+      "question": "How much income came in during October?",
+      "sql": "INCOME",
+      "expected": {
+        "minor": 10000,
+        "rows": [
+          "+sales"
+        ],
+        "uncertain": [
+          "out",
+          "in"
+        ],
+        "confidence": "Medium",
+        "score": 77
+      },
+      "view": {
+        "minor": 19700,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "FAIL",
+      "fail_kind": "figure",
+      "disclosed": false,
+      "rule": [
+        "cm:164",
+        "la:506",
+        "la:507"
+      ]
+    },
+    {
+      "id": "P30",
+      "accounts": "BANK_STRIPE",
+      "rows": [
+        {
+          "uid": "sales",
+          "acct": "proc",
+          "cents": 10000,
+          "day": "2026-10-01",
+          "memo": "CUSTOMER SALES",
+          "cat": "GROSS_SALES"
+        },
+        {
+          "uid": "fee",
+          "acct": "proc",
+          "cents": 300,
+          "day": "2026-10-01",
+          "dir": "outflow",
+          "memo": "Stripe processing fees",
+          "cat": "PROCESSOR_FEES"
+        },
+        {
+          "uid": "out",
+          "acct": "proc",
+          "cents": 9700,
+          "day": "2026-10-02",
+          "dir": "outflow",
+          "memo": "Stripe payout to owner bank",
+          "payee": "Stripe",
+          "cat": "TRANSFER_OUT"
+        },
+        {
+          "uid": "in",
+          "acct": "bank",
+          "cents": 9700,
+          "day": "2026-10-07",
+          "memo": "Stripe payout from owner processor",
+          "payee": "Stripe",
+          "cat": "TRANSFER_IN"
+        }
+      ],
+      "question": "How much income came in during October?",
+      "sql": "INCOME",
+      "expected": {
+        "minor": 10000,
+        "rows": [
+          "+sales"
+        ],
+        "uncertain": [
+          "out",
+          "in"
+        ],
+        "confidence": "Medium",
+        "score": 77
+      },
+      "view": {
+        "minor": 19700,
+        "estimated": {
+          "out": "possible_own_transfer_counted",
+          "in": "possible_own_transfer_counted"
+        },
+        "confidence": "Medium",
+        "score": 77
+      },
+      "verdict": "FAIL",
+      "fail_kind": "figure",
+      "disclosed": true,
+      "rule": [
+        "cm:164",
+        "la:502"
+      ]
+    },
+    {
+      "id": "P31",
+      "accounts": "BANK_STRIPE",
+      "rows": [
+        {
+          "uid": "sales",
+          "acct": "proc",
+          "cents": 10000,
+          "day": "2026-10-01",
+          "memo": "CUSTOMER SALES",
+          "cat": "GROSS_SALES"
+        },
+        {
+          "uid": "fee",
+          "acct": "proc",
+          "cents": 300,
+          "day": "2026-10-01",
+          "dir": "outflow",
+          "memo": "Stripe processing fees",
+          "cat": "PROCESSOR_FEES"
+        },
+        {
+          "uid": "out",
+          "acct": "proc",
+          "cents": 9700,
+          "day": "2026-10-02",
+          "dir": "outflow",
+          "memo": "STRIPE PAYOUT"
+        },
+        {
+          "uid": "in1",
+          "acct": "bank",
+          "cents": 5000,
+          "day": "2026-10-03",
+          "memo": "STRIPE PAYOUT"
+        },
+        {
+          "uid": "in2",
+          "acct": "bank",
+          "cents": 4700,
+          "day": "2026-10-03",
+          "memo": "STRIPE PAYOUT"
+        }
+      ],
+      "question": "How much income came in during October?",
+      "sql": "INCOME",
+      "expected": {
+        "minor": 10000,
+        "rows": [
+          "+sales"
+        ],
+        "uncertain": [
+          "out",
+          "in1",
+          "in2"
+        ],
+        "confidence": "Medium",
+        "score": 77
+      },
+      "view": {
+        "minor": 19700,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "FAIL",
+      "fail_kind": "figure",
+      "disclosed": false,
+      "rule": [
+        "cm:162",
+        "la:506",
+        "la:507"
+      ]
+    },
+    {
+      "id": "P32",
+      "accounts": "BANK_STRIPE",
+      "rows": [
+        {
+          "uid": "sales",
+          "acct": "proc",
+          "cents": 103000,
+          "day": "2026-10-01",
+          "memo": "CUSTOMER SALES",
+          "cat": "GROSS_SALES"
+        },
+        {
+          "uid": "fee",
+          "acct": "proc",
+          "cents": 3000,
+          "day": "2026-10-01",
+          "dir": "outflow",
+          "memo": "Stripe processing fees",
+          "cat": "PROCESSOR_FEES"
+        },
+        {
+          "uid": "out1",
+          "acct": "proc",
+          "cents": 50000,
+          "day": "2026-10-05",
+          "dir": "outflow",
+          "memo": "Stripe payout to owner bank",
+          "payee": "Stripe",
+          "cat": "TRANSFER_OUT"
+        },
+        {
+          "uid": "out2",
+          "acct": "proc",
+          "cents": 50000,
+          "day": "2026-10-06",
+          "dir": "outflow",
+          "memo": "Stripe payout to owner bank",
+          "payee": "Stripe",
+          "cat": "TRANSFER_OUT"
+        },
+        {
+          "uid": "in1",
+          "acct": "bank",
+          "cents": 50000,
+          "day": "2026-10-06",
+          "memo": "Stripe payout from owner processor",
+          "payee": "Stripe",
+          "cat": "TRANSFER_IN"
+        },
+        {
+          "uid": "in2",
+          "acct": "bank",
+          "cents": 50000,
+          "day": "2026-10-07",
+          "memo": "Stripe payout from owner processor",
+          "payee": "Stripe",
+          "cat": "TRANSFER_IN"
+        }
+      ],
+      "question": "How much income came in during October?",
+      "sql": "INCOME",
+      "expected": {
+        "minor": 103000,
+        "rows": [
+          "+sales"
+        ],
+        "uncertain": [
+          "out1",
+          "out2",
+          "in1",
+          "in2"
+        ],
+        "confidence": "Medium",
+        "score": 77
+      },
+      "view": {
+        "minor": 203000,
+        "estimated": {
+          "out1": "possible_own_transfer_counted",
+          "out2": "possible_own_transfer_counted",
+          "in1": "possible_own_transfer_counted",
+          "in2": "possible_own_transfer_counted"
+        },
+        "confidence": "Medium",
+        "score": 77
+      },
+      "verdict": "FAIL",
+      "fail_kind": "figure",
+      "disclosed": true,
+      "rule": [
+        "cm:138",
+        "cm:166-167"
+      ]
+    },
+    {
+      "id": "P33",
+      "accounts": "BANK_PROC",
+      "rows": [
+        {
+          "uid": "sales",
+          "acct": "processor",
+          "cents": 10000,
+          "day": "2026-09-29",
+          "memo": "CUSTOMER SALES",
+          "cat": "GROSS_SALES"
+        },
+        {
+          "uid": "fee",
+          "acct": "processor",
+          "cents": 300,
+          "day": "2026-09-29",
+          "dir": "outflow",
+          "memo": "Stripe processing fees",
+          "cat": "PROCESSOR_FEES"
+        },
+        {
+          "uid": "out",
+          "acct": "processor",
+          "cents": 9700,
+          "day": "2026-09-30",
+          "dir": "outflow",
+          "memo": "Stripe payout to owner bank",
+          "payee": "Stripe",
+          "cat": "TRANSFER_OUT"
+        },
+        {
+          "uid": "in",
+          "acct": "bank",
+          "cents": 9700,
+          "day": "2026-10-02",
+          "memo": "Stripe payout from owner processor",
+          "payee": "Stripe",
+          "cat": "TRANSFER_IN"
+        }
+      ],
+      "question": "How much income came in during October?",
+      "sql": "INCOME",
+      "expected": {
+        "minor": 0,
+        "rows": [],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 0,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": [
+        "cm:227-228",
+        "cm:139-145"
+      ]
+    },
+    {
+      "id": "P34",
+      "accounts": "BANK_POS",
+      "rows": [
+        {
+          "uid": "sales",
+          "acct": "pos",
+          "cents": 50000,
+          "memo": "SQUARE SALES",
+          "cat": "GROSS_SALES"
+        },
+        {
+          "uid": "fee",
+          "acct": "pos",
+          "cents": 1450,
+          "dir": "outflow",
+          "memo": "Square fees"
+        },
+        {
+          "uid": "out",
+          "acct": "pos",
+          "cents": 48550,
+          "dir": "outflow",
+          "memo": "Square transfer",
+          "payee": "Square",
+          "cat": "TRANSFER_OUT"
+        },
+        {
+          "uid": "in",
+          "acct": "bank",
+          "cents": 48550,
+          "day": "2026-10-03",
+          "memo": "Square transfer",
+          "payee": "Square",
+          "cat": "TRANSFER_IN"
+        }
+      ],
+      "question": "What did I net in October?",
+      "sql": "NET",
+      "expected": {
+        "minor": 48550,
+        "rows": [
+          "+sales",
+          "-fee"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 48550,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": [
+        "cm:139-145",
+        "la:423"
+      ]
+    },
+    {
+      "id": "P35",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "pay",
+          "acct": "bank",
+          "cents": 100000,
+          "memo": "ACH CREDIT",
+          "payee": "Stripe"
+        },
+        {
+          "uid": "ref",
+          "acct": "bank",
+          "cents": 5000,
+          "day": "2026-10-09",
+          "dir": "outflow",
+          "memo": "Customer refund",
+          "cat": "CUSTOMER_REFUND"
+        }
+      ],
+      "question": "What were my sales in October after refunds?",
+      "sql": "NETSALES",
+      "expected": {
+        "minor": 95000,
+        "rows": [
+          "+pay",
+          "-ref"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 95000,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": [
+        "la:392-396",
+        "la:482"
+      ]
+    },
+    {
+      "id": "P36",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "pay",
+          "acct": "bank",
+          "cents": 100000,
+          "memo": "ACH CREDIT",
+          "payee": "Stripe"
+        },
+        {
+          "uid": "ref",
+          "acct": "bank",
+          "cents": 5000,
+          "day": "2026-10-09",
+          "dir": "outflow",
+          "memo": "Refund to customer order 1182"
+        }
+      ],
+      "question": "What were my sales in October after refunds?",
+      "sql": "NETSALES",
+      "expected": {
+        "minor": 95000,
+        "rows": [
+          "+pay",
+          "-ref"
+        ],
+        "uncertain": [
+          "ref"
+        ],
+        "confidence": "Medium",
+        "score": 89
+      },
+      "view": {
+        "minor": 100000,
+        "estimated": {
+          "ref": "possible_refund_counted"
+        },
+        "confidence": "Medium",
+        "score": 89
+      },
+      "verdict": "FAIL",
+      "fail_kind": "figure",
+      "disclosed": true,
+      "rule": [
+        "la:481"
+      ]
+    },
+    {
+      "id": "P37",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "pay",
+          "acct": "bank",
+          "cents": 100000,
+          "memo": "ACH CREDIT",
+          "payee": "Stripe"
+        },
+        {
+          "uid": "back",
+          "acct": "bank",
+          "cents": 1200,
+          "day": "2026-10-11",
+          "memo": "REFUND",
+          "payee": "Supply Vendor"
+        }
+      ],
+      "question": "How much income came in during October?",
+      "sql": "INCOME",
+      "expected": {
+        "minor": 100000,
+        "rows": [
+          "+pay"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 100000,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": [
+        "la:326",
+        "la:482"
+      ]
+    },
+    {
+      "id": "P38",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 185000,
+          "memo": "STRIPE PAYOUT NET OF REFUNDS"
+        }
+      ],
+      "question": "How much income came in during October?",
+      "sql": "INCOME",
+      "expected": {
+        "minor": 185000,
+        "rows": [
+          "+r1"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 0,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100,
+        "note": "money_kind refund, processor NULL"
+      },
+      "verdict": "FAIL",
+      "fail_kind": "figure",
+      "disclosed": false,
+      "rule": [
+        "la:326",
+        "la:386-396",
+        "la:479-482"
+      ]
+    },
+    {
+      "id": "P39",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 74000,
+          "memo": "DEPOSIT LESS CHARGEBACK ADJ",
+          "payee": "Square Inc"
+        }
+      ],
+      "question": "How much did Square deposit in October?",
+      "sql": "PROC:square",
+      "expected": {
+        "minor": 74000,
+        "rows": [
+          "+r1"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": null,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100,
+        "note": "money_kind refund, processor NULL, income_minor 0"
+      },
+      "verdict": "FAIL",
+      "fail_kind": "figure",
+      "disclosed": false,
+      "rule": [
+        "la:341",
+        "la:392-396",
+        "la:479-482",
+        "cm:178"
+      ]
+    },
+    {
+      "id": "P40",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 185000,
+          "memo": "STRIPE PAYOUT SALES LESS REFUNDS",
+          "cat": "SALES"
+        }
+      ],
+      "question": "How much income came in during October?",
+      "sql": "INCOME",
+      "expected": {
+        "minor": 185000,
+        "rows": [
+          "+r1"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 185000,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": [
+        "la:386-389"
+      ]
+    },
+    {
+      "id": "P41",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "pay",
+          "acct": "bank",
+          "cents": 100000,
+          "memo": "ACH CREDIT",
+          "payee": "Stripe"
+        },
+        {
+          "uid": "rev",
+          "acct": "bank",
+          "cents": 7000,
+          "day": "2026-10-12",
+          "dir": "outflow",
+          "memo": "STRIPE TRANSFER",
+          "payee": "Stripe",
+          "cat": "PAYOUT_REVERSAL"
+        }
+      ],
+      "question": "How much income came in during October?",
+      "sql": "INCOME",
+      "expected": {
+        "minor": 93000,
+        "rows": [
+          "+pay",
+          "-rev"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 93000,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": [
+        "cm:186-187",
+        "la:481-482"
+      ]
+    },
+    {
+      "id": "P42",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "pay1",
+          "acct": "bank",
+          "cents": 50000,
+          "day": "2026-10-05",
+          "memo": "STRIPE PAYOUT"
+        },
+        {
+          "uid": "rev",
+          "acct": "bank",
+          "cents": 50000,
+          "day": "2026-10-06",
+          "dir": "outflow",
+          "memo": "STRIPE PAYOUT REVERSAL"
+        },
+        {
+          "uid": "pay2",
+          "acct": "bank",
+          "cents": 50000,
+          "day": "2026-10-08",
+          "memo": "STRIPE PAYOUT"
+        }
+      ],
+      "question": "How much income came in during October?",
+      "sql": "INCOME",
+      "expected": {
+        "minor": 50000,
+        "rows": [
+          "+pay1",
+          "-rev",
+          "+pay2"
+        ],
+        "uncertain": [
+          "rev"
+        ],
+        "confidence": "Medium",
+        "score": 88
+      },
+      "view": {
+        "minor": 100000,
+        "estimated": {
+          "rev": "possible_refund_counted"
+        },
+        "confidence": "Medium",
+        "score": 88
+      },
+      "verdict": "FAIL",
+      "fail_kind": "figure",
+      "disclosed": true,
+      "rule": [
+        "la:481",
+        "cm:186-187"
+      ]
+    },
+    {
+      "id": "P43",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "pay",
+          "acct": "bank",
+          "cents": 100000,
+          "memo": "ACH CREDIT",
+          "payee": "Stripe"
+        },
+        {
+          "uid": "ref",
+          "acct": "bank",
+          "cents": 5000,
+          "day": "2026-10-09",
+          "dir": "outflow",
+          "memo": "Customer refund",
+          "cat": "CUSTOMER_REFUND"
+        },
+        {
+          "uid": "rev",
+          "acct": "bank",
+          "cents": 7000,
+          "day": "2026-10-12",
+          "dir": "outflow",
+          "memo": "STRIPE TRANSFER",
+          "payee": "Stripe",
+          "cat": "PAYOUT_REVERSAL"
+        }
+      ],
+      "question": "What were my sales in October after refunds?",
+      "sql": "NETSALES",
+      "expected": {
+        "minor": 88000,
+        "rows": [
+          "+pay",
+          "-ref",
+          "-rev"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 81000,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100,
+        "note": "SUM(income_minor)=93000 already nets rev; outgoing refund rows total 12000"
+      },
+      "verdict": "FAIL",
+      "fail_kind": "figure",
+      "disclosed": false,
+      "rule": [
+        "cm:185-187",
+        "c:18",
+        "c:23"
+      ]
+    },
+    {
+      "id": "P44",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "pay",
+          "acct": "bank",
+          "cents": 100000,
+          "memo": "ACH CREDIT",
+          "payee": "Stripe"
+        },
+        {
+          "uid": "cb",
+          "acct": "bank",
+          "cents": 25000,
+          "day": "2026-10-05",
+          "dir": "outflow",
+          "memo": "STRIPE CHARGEBACK",
+          "payee": "Stripe",
+          "cat": "CHARGEBACK"
+        },
+        {
+          "uid": "cbfee",
+          "acct": "bank",
+          "cents": 1500,
+          "day": "2026-10-05",
+          "dir": "outflow",
+          "memo": "STRIPE CHARGEBACK FEE",
+          "payee": "Stripe"
+        }
+      ],
+      "question": "What were my sales in October after chargebacks?",
+      "sql": "NETSALES",
+      "expected": {
+        "minor": 75000,
+        "rows": [
+          "+pay",
+          "-cb"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 75000,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": [
+        "la:392-396",
+        "la:481-482",
+        "la:423"
+      ]
+    },
+    {
+      "id": "P45",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "pay",
+          "acct": "bank",
+          "cents": 100000,
+          "memo": "ACH CREDIT",
+          "payee": "Stripe"
+        },
+        {
+          "uid": "cb",
+          "acct": "bank",
+          "cents": 25000,
+          "day": "2026-10-05",
+          "dir": "outflow",
+          "memo": "STRIPE CHARGEBACK",
+          "payee": "Stripe",
+          "cat": "CHARGEBACKS"
+        },
+        {
+          "uid": "cbfee",
+          "acct": "bank",
+          "cents": 1500,
+          "day": "2026-10-05",
+          "dir": "outflow",
+          "memo": "STRIPE CHARGEBACK FEE",
+          "payee": "Stripe"
+        }
+      ],
+      "question": "How much did I spend in October?",
+      "sql": "EXPENSE",
+      "expected": {
+        "minor": 1500,
+        "rows": [
+          "+cbfee"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 26500,
+        "estimated": {
+          "cb": "possible_refund_counted"
+        },
+        "confidence": "Medium",
+        "score": 89
+      },
+      "verdict": "FAIL",
+      "fail_kind": "figure",
+      "disclosed": true,
+      "rule": [
+        "la:481"
+      ]
+    },
+    {
+      "id": "P46",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "pay",
+          "acct": "bank",
+          "cents": 100000,
+          "memo": "ACH CREDIT",
+          "payee": "Stripe"
+        },
+        {
+          "uid": "cb",
+          "acct": "bank",
+          "cents": 25000,
+          "day": "2026-10-05",
+          "dir": "outflow",
+          "memo": "STRIPE CHARGEBACK",
+          "payee": "Stripe"
+        },
+        {
+          "uid": "cbfee",
+          "acct": "bank",
+          "cents": 1500,
+          "day": "2026-10-05",
+          "dir": "outflow",
+          "memo": "STRIPE CHARGEBACK FEE",
+          "payee": "Stripe"
+        }
+      ],
+      "question": "What were my sales in October after chargebacks?",
+      "sql": "NETSALES",
+      "expected": {
+        "minor": 75000,
+        "rows": [
+          "+pay",
+          "-cb"
+        ],
+        "uncertain": [
+          "cb"
+        ],
+        "confidence": "Medium",
+        "score": 89
+      },
+      "view": {
+        "minor": 100000,
+        "estimated": {
+          "cb": "possible_refund_counted"
+        },
+        "confidence": "Medium",
+        "score": 89
+      },
+      "verdict": "FAIL",
+      "fail_kind": "figure",
+      "disclosed": true,
+      "rule": [
+        "la:481"
+      ]
+    },
+    {
+      "id": "P47",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "pay",
+          "acct": "bank",
+          "cents": 100000,
+          "memo": "ACH CREDIT",
+          "payee": "Stripe"
+        },
+        {
+          "uid": "dis",
+          "acct": "bank",
+          "cents": 25000,
+          "day": "2026-10-05",
+          "dir": "outflow",
+          "memo": "STRIPE DISPUTE",
+          "payee": "Stripe",
+          "cat": "DISPUTE"
+        }
+      ],
+      "question": "How much did I spend in October?",
+      "sql": "EXPENSE",
+      "expected": {
+        "minor": 0,
+        "rows": [],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 25000,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "FAIL",
+      "fail_kind": "figure",
+      "disclosed": false,
+      "rule": [
+        "la:394",
+        "la:506"
+      ]
+    },
+    {
+      "id": "P48",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "pay",
+          "acct": "bank",
+          "cents": 100000,
+          "memo": "ACH CREDIT",
+          "payee": "Stripe"
+        },
+        {
+          "uid": "cb",
+          "acct": "bank",
+          "cents": 25000,
+          "day": "2026-10-05",
+          "dir": "outflow",
+          "memo": "STRIPE CHARGEBACK",
+          "payee": "Stripe"
+        },
+        {
+          "uid": "won",
+          "acct": "bank",
+          "cents": 25000,
+          "day": "2026-10-20",
+          "memo": "STRIPE CHARGEBACK REVERSAL",
+          "payee": "Stripe"
+        }
+      ],
+      "question": "What did I net in October?",
+      "sql": "NET",
+      "expected": {
+        "minor": 100000,
+        "rows": [
+          "+pay",
+          "-cb",
+          "+won"
+        ],
+        "uncertain": [
+          "cb"
+        ],
+        "confidence": "Medium",
+        "score": 89
+      },
+      "view": {
+        "minor": 75000,
+        "estimated": {
+          "cb": "possible_refund_counted"
+        },
+        "confidence": "Medium",
+        "score": 89,
+        "note": "cb counted as spending; won is refund with income_minor 0"
+      },
+      "verdict": "FAIL",
+      "fail_kind": "figure",
+      "disclosed": true,
+      "rule": [
+        "la:481",
+        "la:482",
+        "la:326"
+      ]
+    },
+    {
+      "id": "P49",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "pay",
+          "acct": "bank",
+          "cents": 100000,
+          "memo": "ACH CREDIT",
+          "payee": "Stripe"
+        },
+        {
+          "uid": "cb",
+          "acct": "bank",
+          "cents": 25000,
+          "day": "2026-10-05",
+          "dir": "outflow",
+          "memo": "STRIPE CHARGEBACK",
+          "payee": "Stripe",
+          "cat": "CHARGEBACK"
+        },
+        {
+          "uid": "won",
+          "acct": "bank",
+          "cents": 25000,
+          "day": "2026-10-20",
+          "memo": "STRIPE CHARGEBACK REVERSAL",
+          "payee": "Stripe",
+          "cat": "CHARGEBACK_REVERSAL"
+        }
+      ],
+      "question": "What did I net in October?",
+      "sql": "NET",
+      "expected": {
+        "minor": 100000,
+        "rows": [
+          "+pay"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 100000,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": [
+        "la:481-482",
+        "la:326"
+      ]
+    },
+    {
+      "id": "P50",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "pay",
+          "acct": "bank",
+          "cents": 100000,
+          "memo": "ACH CREDIT",
+          "payee": "Stripe"
+        },
+        {
+          "uid": "cbfee",
+          "acct": "bank",
+          "cents": 1500,
+          "day": "2026-10-05",
+          "dir": "outflow",
+          "memo": "CHARGEBACK FEE"
+        }
+      ],
+      "question": "How much did I spend in October?",
+      "sql": "EXPENSE",
+      "expected": {
+        "minor": 1500,
+        "rows": [
+          "+cbfee"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 1500,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": [
+        "la:423",
+        "la:450"
+      ]
+    },
+    {
+      "id": "P51",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 240000,
+          "memo": "ACH DEPOSIT INV 118",
+          "payee": "Reversal Vendor LLC"
+        }
+      ],
+      "question": "How much income came in during October?",
+      "sql": "INCOME",
+      "expected": {
+        "minor": 240000,
+        "rows": [
+          "+r1"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 240000,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": [
+        "la:476-478"
+      ]
+    },
+    {
+      "id": "P52",
+      "accounts": "BANK_PROC",
+      "rows": [
+        {
+          "uid": "sales",
+          "acct": "processor",
+          "cents": 10000,
+          "memo": "CUSTOMER SALES",
+          "cat": "GROSS_SALES"
+        },
+        {
+          "uid": "cb",
+          "acct": "processor",
+          "cents": 2000,
+          "dir": "outflow",
+          "memo": "Chargeback",
+          "cat": "CHARGEBACK"
+        },
+        {
+          "uid": "cbfee",
+          "acct": "processor",
+          "cents": 1500,
+          "dir": "outflow",
+          "memo": "Dispute fee"
+        },
+        {
+          "uid": "out",
+          "acct": "processor",
+          "cents": 6500,
+          "day": "2026-10-03",
+          "dir": "outflow",
+          "memo": "Stripe payout to owner bank",
+          "payee": "Stripe",
+          "cat": "TRANSFER_OUT"
+        },
+        {
+          "uid": "in",
+          "acct": "bank",
+          "cents": 6500,
+          "day": "2026-10-04",
+          "memo": "Stripe payout from owner processor",
+          "payee": "Stripe",
+          "cat": "TRANSFER_IN"
+        }
+      ],
+      "question": "What were my sales in October after chargebacks?",
+      "sql": "NETSALES",
+      "expected": {
+        "minor": 8000,
+        "rows": [
+          "+sales",
+          "-cb"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 8000,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": [
+        "la:481-482",
+        "cm:139-145"
+      ]
+    },
+    {
+      "id": "P53",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "pay",
+          "acct": "bank",
+          "cents": 97100,
+          "memo": "ACH CREDIT",
+          "payee": "Stripe"
+        },
+        {
+          "uid": "fee",
+          "acct": "bank",
+          "cents": 2900,
+          "day": "2026-10-06",
+          "dir": "outflow",
+          "memo": "STRIPE FEES",
+          "payee": "Stripe"
+        }
+      ],
+      "question": "What did I net in October?",
+      "sql": "NET",
+      "expected": {
+        "minor": 94200,
+        "rows": [
+          "+pay",
+          "-fee"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 94200,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": [
+        "la:423",
+        "la:450"
+      ]
+    },
+    {
+      "id": "P54",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 2000000,
+          "memo": "SQ CAPITAL DEPOSIT",
+          "payee": "Square Inc"
+        }
+      ],
+      "question": "How much income came in during October?",
+      "sql": "INCOME",
+      "expected": {
+        "minor": 2000000,
+        "rows": [
+          "+r1"
+        ],
+        "uncertain": [
+          "r1"
+        ],
+        "confidence": "Low",
+        "score": 65,
+        "note": "counted, but likely borrowed money and must be flagged"
+      },
+      "view": {
+        "minor": 2000000,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100,
+        "note": "tagged payout"
+      },
+      "verdict": "FAIL",
+      "fail_kind": "confidence",
+      "rule": [
+        "la:417-418",
+        "la:507",
+        "cm:45"
+      ]
+    },
+    {
+      "id": "P55",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 2000000,
+          "memo": "SQ CAPITAL LOAN PROCEEDS",
+          "payee": "Square Inc"
+        }
+      ],
+      "question": "How much income came in during October?",
+      "sql": "INCOME",
+      "expected": {
+        "minor": 2000000,
+        "rows": [
+          "+r1"
+        ],
+        "uncertain": [
+          "r1"
+        ],
+        "confidence": "Low",
+        "score": 65
+      },
+      "view": {
+        "minor": 2000000,
+        "estimated": {
+          "r1": "possible_loan_proceeds_counted"
+        },
+        "confidence": "Low",
+        "score": 65
+      },
+      "verdict": "PASS",
+      "rule": [
+        "la:417-419",
+        "la:498"
+      ]
+    },
+    {
+      "id": "P56",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "pay",
+          "acct": "bank",
+          "cents": 100000,
+          "memo": "ACH CREDIT",
+          "payee": "Stripe"
+        },
+        {
+          "uid": "rel",
+          "acct": "bank",
+          "cents": 50000,
+          "day": "2026-10-15",
+          "memo": "STRIPE RESERVE RELEASE",
+          "payee": "Stripe"
+        }
+      ],
+      "question": "How much income came in during October?",
+      "sql": "INCOME",
+      "expected": {
+        "minor": 150000,
+        "rows": [
+          "+pay",
+          "+rel"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100,
+        "note": "held-back money was never counted before"
+      },
+      "view": {
+        "minor": 150000,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": [
+        "la:507"
+      ]
+    },
+    {
+      "id": "P57",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "pay",
+          "acct": "bank",
+          "cents": 100000,
+          "memo": "ACH CREDIT",
+          "payee": "Stripe"
+        },
+        {
+          "uid": "hold",
+          "acct": "bank",
+          "cents": 30000,
+          "day": "2026-10-15",
+          "dir": "outflow",
+          "memo": "STRIPE RESERVE HOLD",
+          "payee": "Stripe"
+        }
+      ],
+      "question": "How much did I spend in October?",
+      "sql": "EXPENSE",
+      "expected": {
+        "minor": 30000,
+        "rows": [
+          "+hold"
+        ],
+        "uncertain": [
+          "hold"
+        ],
+        "confidence": "Medium",
+        "score": 89,
+        "note": "counted, but likely the owner's own money held by the processor"
+      },
+      "view": {
+        "minor": 30000,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "FAIL",
+      "fail_kind": "confidence",
+      "rule": [
+        "la:506"
+      ]
+    },
+    {
+      "id": "P58",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "pay",
+          "acct": "bank",
+          "cents": 90000,
+          "memo": "ACH CREDIT",
+          "payee": "Stripe"
+        }
+      ],
+      "question": "How much is Stripe holding in reserve?",
+      "sql": "SELECT SUM(amount_minor) AS cents FROM txn WHERE description LIKE '%reserve%' AND posted_on BETWEEN '2026-10-01' AND '2026-10-31'",
+      "expected": {
+        "minor": null,
+        "rows": [],
+        "uncertain": [],
+        "confidence": "Low",
+        "score": null,
+        "note": "$0 visible in bank rows; a processor-held balance is in no connected account"
+      },
+      "view": {
+        "minor": null,
+        "estimated": {},
+        "confidence": "Medium",
+        "score": 85
+      },
+      "verdict": "FAIL",
+      "fail_kind": "confidence",
+      "rule": [
+        "q:35",
+        "c:26"
+      ]
+    },
+    {
+      "id": "P59",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 185000,
+          "memo": "ACH CREDIT",
+          "payee": "Stripe"
+        }
+      ],
+      "question": "How much came in as processor payouts in October?",
+      "sql": "SELECT SUM(amount_minor) AS cents FROM txn WHERE money_kind='payout' AND posted_on BETWEEN '2026-10-01' AND '2026-10-31'",
+      "expected": {
+        "minor": 185000,
+        "rows": [
+          "+r1"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 185000,
+        "estimated": {},
+        "confidence": "Medium",
+        "score": 85
+      },
+      "verdict": "FAIL",
+      "fail_kind": "confidence",
+      "rule": [
+        "b:94-95",
+        "q:28-33",
+        "q:68-71"
+      ]
+    },
+    {
+      "id": "P60",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 185000,
+          "memo": "ACH CREDIT",
+          "payee": "Stripe"
+        }
+      ],
+      "question": "How much income came in during October?",
+      "sql": "SELECT currency, direction, SUM(income_minor) AS cents, SUM(expense_minor) AS expense_minor, SUM(CASE WHEN estimate_reason LIKE '%_counted' THEN amount_minor ELSE 0 END) AS estimated_counted_minor, SUM(CASE WHEN estimated=1 AND estimate_reason NOT LIKE '%_counted' THEN amount_minor ELSE 0 END) AS estimated_left_out_minor FROM txn WHERE posted_on BETWEEN '2026-10-01' AND '2026-10-31' GROUP BY currency, direction",
+      "expected": {
+        "minor": 185000,
+        "rows": [
+          "+r1"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 185000,
+        "estimated": {},
+        "confidence": "Medium",
+        "score": 85
+      },
+      "verdict": "FAIL",
+      "fail_kind": "confidence",
+      "rule": [
+        "b:80",
+        "c:31-34"
+      ]
+    },
+    {
+      "id": "P61",
+      "accounts": "BANK",
+      "coverage": "none",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 185000,
+          "memo": "ACH CREDIT",
+          "payee": "Stripe"
+        }
+      ],
+      "question": "How much income came in during October?",
+      "sql": "INCOME",
+      "expected": {
+        "minor": 185000,
+        "rows": [
+          "+r1"
+        ],
+        "uncertain": [],
+        "confidence": "Low",
+        "score": 60
+      },
+      "view": {
+        "minor": 185000,
+        "estimated": {},
+        "confidence": "Low",
+        "score": 60
+      },
+      "verdict": "PASS",
+      "rule": [
+        "q:29-38",
+        "q:68-71"
+      ]
+    },
+    {
+      "id": "P62",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 100000,
+          "memo": "ACH CREDIT",
+          "payee": "Stripe"
+        },
+        {
+          "uid": "pend",
+          "acct": "bank",
+          "cents": 50000,
+          "day": "2026-10-30",
+          "memo": "ACH CREDIT",
+          "payee": "Stripe",
+          "pending": 1
+        }
+      ],
+      "question": "How much income came in during October?",
+      "sql": "INCOME",
+      "expected": {
+        "minor": 100000,
+        "rows": [
+          "+r1"
+        ],
+        "uncertain": [],
+        "confidence": "Medium",
+        "score": 85,
+        "note": "$500.00 pending stated separately"
+      },
+      "view": {
+        "minor": 100000,
+        "estimated": {},
+        "confidence": "Medium",
+        "score": 85
+      },
+      "verdict": "PASS",
+      "rule": [
+        "cm:96-102",
+        "q:52-55"
+      ]
+    },
+    {
+      "id": "P63",
+      "accounts": "BANK",
+      "coverage": {
+        "bank": [
+          "2026-01-01",
+          "2026-10-15"
+        ]
+      },
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 100000,
+          "memo": "ACH CREDIT",
+          "payee": "Stripe"
+        },
+        {
+          "uid": "r2",
+          "acct": "bank",
+          "cents": 80000,
+          "day": "2026-10-20",
+          "memo": "ACH CREDIT",
+          "payee": "Stripe"
+        }
+      ],
+      "question": "How much income came in during October?",
+      "sql": "INCOME",
+      "expected": {
+        "minor": 180000,
+        "rows": [
+          "+r1",
+          "+r2"
+        ],
+        "uncertain": [],
+        "confidence": "Low",
+        "score": 55
+      },
+      "view": {
+        "minor": 180000,
+        "estimated": {},
+        "confidence": "Low",
+        "score": 55
+      },
+      "verdict": "PASS",
+      "rule": [
+        "q:29-38",
+        "q:60-62",
+        "q:68-71"
+      ]
+    },
+    {
+      "id": "P64",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "in",
+          "acct": "bank",
+          "cents": 64000,
+          "memo": "PAYPAL TRANSFER",
+          "payee": "PayPal"
+        },
+        {
+          "uid": "buy",
+          "acct": "bank",
+          "cents": 4500,
+          "day": "2026-10-08",
+          "dir": "outflow",
+          "memo": "PAYPAL INST XFER",
+          "payee": "PayPal"
+        }
+      ],
+      "question": "How much did PayPal deposit in October?",
+      "sql": "PROC:paypal",
+      "expected": {
+        "minor": 64000,
+        "rows": [
+          "+in"
+        ],
+        "uncertain": [
+          "in",
+          "buy"
+        ],
+        "confidence": "Low",
+        "score": 65
+      },
+      "view": {
+        "minor": 64000,
+        "estimated": {
+          "in": "possible_own_transfer_counted",
+          "buy": "possible_own_transfer_counted"
+        },
+        "confidence": "Low",
+        "score": 65
+      },
+      "verdict": "PASS",
+      "rule": [
+        "cm:178",
+        "la:502"
+      ]
+    },
+    {
+      "id": "P65",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 22000,
+          "memo": "VENMO CASHOUT",
+          "payee": "Venmo"
+        }
+      ],
+      "question": "How much income came in during October?",
+      "sql": "INCOME",
+      "expected": {
+        "minor": 22000,
+        "rows": [
+          "+r1"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": 22000,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100
+      },
+      "verdict": "PASS",
+      "rule": [
+        "la:507"
+      ]
+    },
+    {
+      "id": "P66",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "pay",
+          "acct": "bank",
+          "cents": 100000,
+          "memo": "ACH CREDIT",
+          "payee": "Stripe"
+        },
+        {
+          "uid": "deb",
+          "acct": "bank",
+          "cents": 12000,
+          "day": "2026-10-18",
+          "dir": "outflow",
+          "memo": "STRIPE TRANSFER",
+          "payee": "Stripe"
+        }
+      ],
+      "question": "What did I net in October?",
+      "sql": "NET",
+      "expected": {
+        "minor": 88000,
+        "rows": [
+          "+pay",
+          "-deb"
+        ],
+        "uncertain": [
+          "deb"
+        ],
+        "confidence": "Medium",
+        "score": 89
+      },
+      "view": {
+        "minor": 88000,
+        "estimated": {
+          "deb": "possible_own_transfer_counted"
+        },
+        "confidence": "Medium",
+        "score": 89
+      },
+      "verdict": "PASS",
+      "rule": [
+        "la:502"
+      ]
+    },
+    {
+      "id": "P67",
+      "accounts": "BANK",
+      "rows": [
+        {
+          "uid": "r1",
+          "acct": "bank",
+          "cents": 185000,
+          "memo": "STRIPE  PAYOUT 1234"
+        }
+      ],
+      "question": "How much did Stripe deposit in October?",
+      "sql": "PROC:stripe",
+      "expected": {
+        "minor": 185000,
+        "rows": [
+          "+r1"
+        ],
+        "uncertain": [],
+        "confidence": "High",
+        "score": 100
+      },
+      "view": {
+        "minor": null,
+        "estimated": {},
+        "confidence": "High",
+        "score": 100,
+        "note": "two spaces between STRIPE and PAYOUT"
+      },
+      "verdict": "FAIL",
+      "fail_kind": "figure",
+      "disclosed": false,
+      "rule": [
+        "cm:46-49",
+        "la:353-358"
+      ]
+    }
+  ]
+}

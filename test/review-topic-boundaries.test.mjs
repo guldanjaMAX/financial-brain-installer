@@ -1,3 +1,4 @@
+import { remoteMoneyFollowThrough, sameLedgerFigure } from './fixtures/remote-money-follow-through.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { randomBytes } from 'node:crypto';
@@ -48,6 +49,7 @@ async function ask(t, f, question = QUESTION) {
     lead: body.ledger.lead_total_minor, conditional: body.ledger.if_own_transfers?.total_minor,
     found: body.ledger.found, unsorted: body.ledger.unsorted_minor, complete: body.evidence_gate?.complete,
     accounts: body.ledger.accounts?.length, answer: body.answer }));
+  await sameLedgerFigure(f, { question, intents: [{ kind: question.includes('at Store Unit') ? 'merchant' : 'category', match: /\b(?:at|on) (.+?) in September 2026/i.exec(question)?.[1] || 'materials', mask: /\bin account (\d{4})/i.exec(question)?.[1] || null, from: '2026-09-01', to: '2026-09-30' }] });
   return body;
 }
 
@@ -67,15 +69,8 @@ async function surfaces(t, body, question = QUESTION) {
       launchctl: () => assert.fail('host scheduler forbidden'),
       http: async () => { cliCalls++; return Response.json(body); } });
   } finally { print.mock.restore(); }
-  const url = new URL('https://brain.invalid/mcp');
-  const response = await handleMcp({}, new Request(url, { method: 'POST', body: JSON.stringify({
-    jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'ask', arguments: { question } },
-  }) }), url, { grant: { profile: 'read-only' }, think: async () => { mcpCalls++; return body; } });
-  const rpc = await response.json();
-  assert.equal(response.status, 200);
-  assert.equal(rpc.result.isError, undefined);
-  assert.equal(cliCalls, 1, 'actual CLI dispatched the injected transport');
-  assert.equal(mcpCalls, 1, 'actual MCP dispatched the injected reader');
+  const rpc = await remoteMoneyFollowThrough(question, async () => { mcpCalls++; return body; });
+  assert.equal(cliCalls, 1); assert.equal(mcpCalls, 1, 'document control reached once');
   const texts = { worker: workerText(body), app: appText(body), cli: printed.join('\n'),
     mcp: rpc.result.content.map(c => c.text).join('\n') };
   for (const [surface, text] of Object.entries(texts)) {

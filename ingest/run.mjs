@@ -2111,19 +2111,46 @@ export async function* prefetch(items, fn, { concurrency = 8 } = {}) {
   }
 }
 
-export function loadState(path) {
-  if (!existsSync(path)) return { version: 1, done: {}, skipped: {} };
+export function loadState(path, { strict = false } = {}) {
+  const empty = () => ({ version: 1, done: {}, skipped: {} });
+  const recoveryError = () => {
+    const error = new Error("Drive checkpoint is invalid or unreadable; preserve it and restore a verified checkpoint before retrying. Owner-reviewed recovery is required; no token was seeded.");
+    error.code = "drive_checkpoint_recovery_required";
+    error.supportCode = "INGEST_FAILED";
+    return error;
+  };
+  if (strict) {
+    try {
+      const artifact = lstatSync(path);
+      if (!artifact.isFile() || artifact.isSymbolicLink()) throw recoveryError();
+    } catch (error) {
+      // ENOENT at the artifact lookup alone proves genuine first use. A broken
+      // link or a disappearance after this point is a recovery condition.
+      if (error.code === "ENOENT") return empty();
+      throw recoveryError();
+    }
+  }
   try {
     const s = JSON.parse(readFileSync(path, "utf-8"));
-    return s && s.done ? s : { version: 1, done: {}, skipped: {} };
-  } catch {
-    // A corrupt state file must not abort a load. Starting over costs time;
-    // refusing to run costs the whole import.
-    return { version: 1, done: {}, skipped: {} };
+    const record = value => value && typeof value === "object" && !Array.isArray(value);
+    const token = s?.sync_token;
+    if (!record(s) || !record(s.done) || (strict && (
+      (token !== undefined && (typeof token !== "string" || !token || token.trim() !== token)) ||
+      (s.drive_change_page && !token) ||
+      ["skipped", "drive_failures", "drive_pending_removals"].some(key => s[key] !== undefined && !record(s[key]))
+    ))) {
+      if (strict) throw new Error("invalid checkpoint shape");
+      return empty();
+    }
+    return s;
+  } catch (error) {
+    if (!strict && error.code === "ENOENT") return empty();
+    if (strict) throw recoveryError();
+    return empty();
   }
 }
 
-export function saveState(path, state) {
+export function saveState(path, state, options = {}) {
   mkdirSync(dirname(path), { recursive: true });
   // The Drive state contains private file ids, names, folder paths and the
   // incremental cursor. Keep it owner-only, and replace it atomically so a
@@ -2132,7 +2159,18 @@ export function saveState(path, state) {
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
   try {
     writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
-    renameSync(tmp, path);
+    const rename = options.rename ?? renameSync;
+    const sleep = options.sleep ?? (ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms));
+    for (let attempt = 0; ; attempt++) {
+      try { rename(tmp, path); break; }
+      catch (error) {
+        // Windows scanners can briefly hold the destination without delete
+        // sharing. Retry the atomic replacement; never unlink the old cursor.
+        if ((options.platform ?? process.platform) !== "win32" || attempt >= 5 ||
+            !["EPERM", "EACCES", "EBUSY"].includes(error.code)) throw error;
+        sleep(10 * (2 ** attempt));
+      }
+    }
     // rename preserves the temp file's mode. chmod also repairs an older state
     // file that may have been created by the pre-hardening implementation.
     chmodSync(path, 0o600);

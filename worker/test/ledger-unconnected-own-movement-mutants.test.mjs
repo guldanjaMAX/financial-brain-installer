@@ -23,6 +23,7 @@ const mutations = [
     'const movementConflicts = moneyOut || totalsMoneyOut ? [] : nominatedMovements.filter(ownMovementConflict);', 'const movementConflicts = [];',
     'owner-confirmed expense category vetoes'],
   ['own line omitted', 'ledger-answer.js',
+    // 0.4.28 retained candidates add a ternary before the existing destination renderer.
     'possible transfer to your own ${candidate.destination}, not counted as spending:', 'possible transfer to your own ${candidate.destination}:',
     'own movement excluded'],
   ['own mixed withholding removed', 'ledger-analysis.js',

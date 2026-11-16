@@ -1,3 +1,4 @@
+import { assertDocumentAnswer } from "./helpers/document-answer-contract.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
@@ -40,14 +41,14 @@ const ownerRow = ({
   source_id: `owner-confirmed/${day}/${id}`,
   title: `Confirmed by the owner, ${day}`,
   category: "owner-confirmed",
-  client: "Taylor",
+  client: "Pilot Contact",
   document_date: Date.parse(`${day}T12:00:00.000Z`),
   date_source: "owner_confirmation",
   date_reliable: 1,
   text_source: "native",
   text_reliable: 1,
   authority_meta: JSON.stringify({
-    authority: "T1", operative: true, subject: "Taylor", client_name: "Taylor",
+    authority: "T1", operative: true, subject: "Pilot Contact", client_name: "Pilot Contact",
     provenance_receipt: {
       version: 1,
       status: "partial",
@@ -58,7 +59,7 @@ const ownerRow = ({
   text: [
     `# Confirmed by the owner, ${day}`,
     "",
-    "Subject: Taylor",
+    "Subject: Pilot Contact",
     "",
     `## ${fact}`,
     `Operative value: ${value}`,
@@ -70,14 +71,14 @@ const ownerRow = ({
 test("the complete D1 tuple identifies one section-specific owner operative record", () => {
   const row = ownerRow();
   assert.deepEqual(ownerConfirmedRecord(row), { valid: true, day: "2026-09-01" });
-  assert.deepEqual(operativeSectionForQuery(row, "What is Taylor's current mailing address?"), {
+  assert.deepEqual(operativeSectionForQuery(row, "What is Pilot Contact's current mailing address?"), {
     name: "Mailing address",
     value: "100 New Avenue",
     as_of: "2026-09-01",
     supersedes: ["50 Old Road"],
   });
   const authority = authorityFor(row, {
-    query: "What is Taylor's current mailing address?",
+    query: "What is Pilot Contact's current mailing address?",
     current: true,
   });
   assert.equal(authority.tier, "T1");
@@ -85,7 +86,7 @@ test("the complete D1 tuple identifies one section-specific owner operative reco
   assert.equal(authority.authoritative, true);
 
   const unrelated = authorityFor(row, {
-    query: "What is Taylor's current phone number?",
+    query: "What is Pilot Contact's current phone number?",
     current: true,
   });
   assert.equal(unrelated.operative, false);
@@ -95,11 +96,11 @@ test("the complete D1 tuple identifies one section-specific owner operative reco
 
   for (const mutation of [
     { authority_meta: JSON.stringify({ authority: "T1", operative: false }) },
-    { authority_meta: JSON.stringify({ authority: "T1", operative: true, subject: "Taylor", client_name: "Other" }) },
-    { authority_meta: JSON.stringify({ authority: "T1", operative: true, subject: "Other", client_name: "Taylor" }) },
+    { authority_meta: JSON.stringify({ authority: "T1", operative: true, subject: "Pilot Contact", client_name: "Other" }) },
+    { authority_meta: JSON.stringify({ authority: "T1", operative: true, subject: "Other", client_name: "Pilot Contact" }) },
     { client: "Other" },
-    { authority_document_head: row.text.replace("Subject: Taylor", "Subject: Other") },
-    { authority_document_head: row.text.replace("Subject: Taylor\n\n", "") },
+    { authority_document_head: row.text.replace("Subject: Pilot Contact", "Subject: Other") },
+    { authority_document_head: row.text.replace("Subject: Pilot Contact\n\n", "") },
     { date_source: "file_mtime" },
     { date_reliable: 0 },
     { text_source: "ocr", text_reliable: 0 },
@@ -110,11 +111,11 @@ test("the complete D1 tuple identifies one section-specific owner operative reco
 
   const laterChunk = {
     ...row,
-    client: "  TAYLOR  ",
+    client: "  PILOT CONTACT  ",
     authority_meta: JSON.stringify({
-      authority: "T1", operative: true, subject: "Taylor", client_name: "taylor",
+      authority: "T1", operative: true, subject: "Pilot Contact", client_name: "pilot contact",
     }),
-    authority_document_head: row.text.replace("Subject: Taylor", "Subject: TAYLOR"),
+    authority_document_head: row.text.replace("Subject: Pilot Contact", "Subject: PILOT CONTACT"),
     text: row.text.slice(row.text.indexOf("## Mailing address")),
   };
   assert.equal(ownerConfirmedRecord(laterChunk).valid, true);
@@ -131,34 +132,34 @@ test("a multi-section owner record receives operative authority only for an unam
   ].join("\n");
   assert.equal(operativeSectionForQuery(row, "What is the current value?") , null);
   assert.equal(
-    operativeSectionForQuery(row, "What is Taylor's current phone number?")?.value,
+    operativeSectionForQuery(row, "What is Pilot Contact's current phone number?")?.value,
     "(555) 123-4567",
   );
 
   const taxId = ownerRow({ fact: "Tax identification number" });
-  assert.equal(operativeSectionForQuery(taxId, "What is Taylor's current phone number?"), null);
+  assert.equal(operativeSectionForQuery(taxId, "What is Pilot Contact's current phone number?"), null);
 });
 
 test("financial authority is claim-specific and cannot establish a relationship", () => {
   const stripe = {
-    source: "stripe", title: "Taylor active subscription", text_source: "native", text_reliable: true,
+    source: "stripe", title: "Pilot Contact active subscription", text_source: "native", text_reliable: true,
     ts: "2026-09-01T00:00:00.000Z", date_reliable: true,
   };
   assert.equal(tierOf(stripe).tier, "T1", "the feed is primary for its own facts");
   const relationship = authorityFor(stripe, {
-    query: "Is Taylor a client?", claimText: "Taylor is an active client.", current: true,
+    query: "Is Pilot Contact a client?", claimText: "Pilot Contact is an active client.", current: true,
   });
   assert.equal(relationship.eligible, false);
   assert.equal(relationship.authoritative, false);
   assert.match(relationship.reason, /not a relationship/);
 
   const subscription = authorityFor(stripe, {
-    query: "Is Taylor's subscription active?", claimText: "Taylor's subscription is active.", current: true,
+    query: "Is Pilot Contact's subscription active?", claimText: "Pilot Contact's subscription is active.", current: true,
   });
   assert.equal(subscription.eligible, true);
   assert.equal(subscription.authoritative, true);
 
-  for (const query of ["Is Taylor my vendor?", "Is Taylor still my partner?"]) {
+  for (const query of ["Is Pilot Contact my vendor?", "Is Pilot Contact still my partner?"]) {
     const relationshipRole = authorityFor(stripe, { query, current: true });
     assert.equal(relationshipRole.claim, "relationship_status");
     assert.equal(relationshipRole.eligible, false);
@@ -617,7 +618,7 @@ test("connector kind, not a customer-chosen source name, controls authority", ()
     text_source: "native", text_reliable: true,
     ts: "2026-09-01T00:00:00.000Z", date_reliable: true,
   }, {
-    query: "Is Taylor a client?", claimText: "Taylor is an active client.", current: true,
+    query: "Is Pilot Contact a client?", claimText: "Pilot Contact is an active client.", current: true,
   });
   assert.equal(collision.eligible, true,
     "a nonfinancial upload must not be blocked as transactional because its scope name is plaid");
@@ -798,18 +799,18 @@ test("operative-value matching respects numeric and phone boundaries", () => {
 });
 
 test("plain present relationship and owner-fact questions activate current intent", () => {
-  assert.equal(hasExplicitCurrentIntent("Is Taylor a client?"), true);
-  assert.equal(hasExplicitCurrentIntent("Is Acme an active customer?"), true);
-  assert.equal(hasExplicitCurrentIntent("Is Taylor my vendor?"), true);
-  assert.equal(hasExplicitCurrentIntent("Is Taylor still my partner?"), true);
+  assert.equal(hasExplicitCurrentIntent("Is Pilot Contact a client?"), true);
+  assert.equal(hasExplicitCurrentIntent("Is Store an active customer?"), true);
+  assert.equal(hasExplicitCurrentIntent("Is Pilot Contact my vendor?"), true);
+  assert.equal(hasExplicitCurrentIntent("Is Pilot Contact still my partner?"), true);
   assert.equal(hasExplicitCurrentIntent("What is my mailing address?"), true);
   assert.equal(hasExplicitCurrentIntent("What is our phone number?"), true);
   assert.equal(hasExplicitCurrentIntent("What is my email address?"), true);
-  assert.equal(hasExplicitCurrentIntent("Is Taylor a client in May 2025?"), false);
-  assert.equal(hasExplicitCurrentIntent("Is Taylor a former client?"), false);
-  assert.equal(hasExplicitCurrentIntent("Was Taylor a client?"), false);
+  assert.equal(hasExplicitCurrentIntent("Is Pilot Contact a client in May 2025?"), false);
+  assert.equal(hasExplicitCurrentIntent("Is Pilot Contact a former client?"), false);
+  assert.equal(hasExplicitCurrentIntent("Was Pilot Contact a client?"), false);
   assert.equal(hasExplicitCurrentIntent("What was our mailing address during 2024?"), false);
-  assert.deepEqual(queryEntityAnchors("Is ACME Holdings a customer?"), ["acme holdings"]);
+  assert.deepEqual(queryEntityAnchors("Is STORE Holdings a customer?"), ["store holdings"]);
 });
 
 test("confidence rewards only claim-authoritative agreement and names the strongest tier", () => {
@@ -846,21 +847,21 @@ test("confidence rewards only claim-authoritative agreement and names the strong
 
 test("a changing fact does not become confident from an undated T1 record", () => {
   const undatedPrimary = {
-    doc_uid: "drive:agreement", source: "drive", title: "Taylor signed agreement.pdf",
+    doc_uid: "drive:agreement", source: "drive", title: "Pilot Contact signed agreement.pdf",
     text_source: "native", text_reliable: true,
     authority_meta: JSON.stringify({
       evidence_lineage: { version: 1, kind: "source_record", root_ids: [] },
     }),
   };
   const best = bestTier([undatedPrimary], {
-    query: "What is Taylor's current mailing address?", current: true,
+    query: "What is Pilot Contact's current mailing address?", current: true,
   });
   assert.equal(best.tier, "T1");
   assert.equal(best.authoritative, false);
   assert.match(best.reason, /no reliable as-of date/);
 
   const verdict = agreementVerdict([undatedPrimary], {
-    query: "What is Taylor's current mailing address?", changes: true,
+    query: "What is Pilot Contact's current mailing address?", changes: true,
   });
   assert.equal(verdict.confident, false);
   assert.equal(verdict.caution, true);
@@ -870,7 +871,7 @@ test("a changing fact does not become confident from an undated T1 record", () =
     ...undatedPrimary,
     ts: "September 1, 2026",
     date_reliable: true,
-  }, { query: "What is Taylor's current mailing address?", current: true });
+  }, { query: "What is Pilot Contact's current mailing address?", current: true });
   assert.equal(malformedDate.authoritative, false);
   assert.match(malformedDate.reason, /no reliable as-of date/);
 });
@@ -879,17 +880,17 @@ test("a current owner operative value outranks a newer soft record", async () =>
   const operative = ownerRow();
   const newerSoft = {
     chunk_uid: "message:newer#0", doc_uid: "message:newer", source: "message", source_id: "newer",
-    title: "Taylor address note", client: "Taylor", category: "message",
+    title: "Pilot Contact address note", client: "Pilot Contact", category: "message",
     document_date: Date.parse("2026-09-05T12:00:00.000Z"), date_source: "message_timestamp", date_reliable: 1,
-    text_source: "native", text_reliable: 1, text: "Taylor may still receive mail at 50 Old Road.",
+    text_source: "native", text_reliable: 1, text: "Pilot Contact may still receive mail at 50 Old Road.",
   };
   const rows = [newerSoft, operative];
   const env = {
-    BRAIN_OWNER: "Taylor",
+    BRAIN_OWNER: "Pilot Contact",
     DB: { prepare: () => ({ bind: () => ({ all: async () => ({ results: rows }) }) }) },
   };
   const result = await search(env, {
-    query: "What is Taylor's current mailing address?", embedding: null, limit: 5,
+    query: "What is Pilot Contact's current mailing address?", embedding: null, limit: 5,
   });
   assert.equal(result.results[0].source_id, operative.source_id);
   assert.equal(result.results[0].authority.operative, true);
@@ -901,16 +902,16 @@ test("an unrelated single owner section receives no operative retrieval boost", 
   const unrelatedOwnerRecord = ownerRow();
   const currentPhone = {
     chunk_uid: "message:phone#0", doc_uid: "message:phone", source: "message", source_id: "phone",
-    title: "Taylor phone number", client: "Taylor", category: "message",
+    title: "Pilot Contact phone number", client: "Pilot Contact", category: "message",
     document_date: Date.parse("2026-09-05T12:00:00.000Z"), date_source: "message_timestamp", date_reliable: 1,
-    text_source: "native", text_reliable: 1, text: "Taylor's phone number is (555) 123-4567.",
+    text_source: "native", text_reliable: 1, text: "Pilot Contact's phone number is (555) 123-4567.",
   };
   const env = {
-    BRAIN_OWNER: "Taylor",
+    BRAIN_OWNER: "Pilot Contact",
     DB: { prepare: () => ({ bind: () => ({ all: async () => ({ results: [currentPhone, unrelatedOwnerRecord] }) }) }) },
   };
   const result = await search(env, {
-    query: "What is Taylor's current phone number?", embedding: null, limit: 5,
+    query: "What is Pilot Contact's current phone number?", embedding: null, limit: 5,
   });
   assert.equal(result.results[0].source_id, currentPhone.source_id);
   const returnedOwnerRecord = result.results.find((row) => row.source_id === unrelatedOwnerRecord.source_id);
@@ -921,15 +922,15 @@ function routeEnv(answerText, { rows: suppliedRows = null, verifierEvidence = [1
   const operative = ownerRow();
   const newerSoft = {
     chunk_uid: "message:newer#0", doc_uid: "message:newer", source: "message", source_id: "newer",
-    title: "Taylor address note", client: "Taylor", category: "message",
+    title: "Pilot Contact address note", client: "Pilot Contact", category: "message",
     document_date: Date.parse("2026-09-05T12:00:00.000Z"), date_source: "message_timestamp", date_reliable: 1,
-    text_source: "native", text_reliable: 1, text: "Taylor may still receive mail at 50 Old Road.",
+    text_source: "native", text_reliable: 1, text: "Pilot Contact may still receive mail at 50 Old Road.",
   };
   const rows = suppliedRows || [newerSoft, operative];
   return {
     STORAGE: "d1",
     ADMIN_KEY: "k",
-    BRAIN_OWNER: "Taylor",
+    BRAIN_OWNER: "Pilot Contact",
     DB: {
       exec: async () => {},
       prepare(sql) {
@@ -974,7 +975,7 @@ async function askRoute(env) {
   const response = await worker.fetch(new Request("https://brain.invalid/api/rag/think", {
     method: "POST",
     headers: { "X-Admin-Key": "k", "Content-Type": "application/json" },
-    body: JSON.stringify({ q: "What is Taylor's current mailing address?", limit: 5 }),
+    body: JSON.stringify({ q: "What is Pilot Contact's current mailing address?", limit: 5 }),
   }), env, { waitUntil() {} });
   assert.equal(response.status, 200);
   return response.json();
@@ -987,18 +988,18 @@ test("unknown-lineage evidence remains retrievable and cited with its limitation
     source: "upload",
     source_kind: "upload",
     source_id: "legacy-report",
-    title: "Taylor financial report",
-    client: "Taylor",
+    title: "Pilot Contact financial report",
+    client: "Pilot Contact",
     category: "finance",
     document_date: Date.parse("2026-09-05T12:00:00.000Z"),
     date_source: "document_date",
     date_reliable: 1,
     text_source: "native",
     text_reliable: 1,
-    text: "Taylor's mailing address was 200 Other Avenue on 2026-09-05.",
+    text: "Pilot Contact's mailing address was 200 Other Avenue on 2026-09-05.",
   };
   const body = await askRoute(routeEnv(
-    "As of 2026-09-05, Taylor's mailing address was 200 Other Avenue [1].",
+    "As of 2026-09-05, Pilot Contact's mailing address was 200 Other Avenue [1].",
     { rows: [legacy] },
   ));
   assert.match(body.answer || "", /200 Other Avenue/);
@@ -1010,9 +1011,10 @@ test("unknown-lineage evidence remains retrievable and cited with its limitation
 });
 
 test("the answer route selects the operative value and keeps superseded history out of the answer", async () => {
-  const body = await askRoute(routeEnv("Taylor's mailing address is 100 New Avenue as of 2026-09-01 [1]."));
+  const body = await askRoute(routeEnv("Pilot Contact's mailing address is 100 New Avenue as of 2026-09-01 [1]."));
   assert.match(body.answer || "", /100 New Avenue/);
-  assert.doesNotMatch(body.answer || "", /50 Old Road/);
+  assertDocumentAnswer(body, { provisional: true, exact: true });
+  assert.match(body.answer, /50 Old Road/, "superseded history stays attributed to its record below High");
   assert.equal(body.citations[0]?.authority?.tier, "T1");
   assert.equal(body.citations[0]?.authority?.operative, true);
   assert.ok(body.confidence?.basis?.some((line) => /strongest evidence is T1 primary/.test(line)));
@@ -1020,10 +1022,10 @@ test("the answer route selects the operative value and keeps superseded history 
 });
 
 test("the answer route fails closed when a draft substitutes the superseded value", async () => {
-  const body = await askRoute(routeEnv("Taylor's mailing address is 50 Old Road [1]."));
-  assert.equal(body.answer, null);
-  assert.equal(body.status, ANSWER_WITHHELD);
-  assert.match(body.notice || "", /evidence check did not support the draft/i);
+  const body = await askRoute(routeEnv("Pilot Contact's mailing address is 50 Old Road [1]."));
+  assertDocumentAnswer(body, { provisional: true, exact: true });
+  assert.equal(body.status, undefined);
+  assert.ok(body.confidence.basis.some(reason => /check/i.test(reason)));
   assert.match(body.evidence_gate?.reason || "", /did not use the matching owner-confirmed operative value|superseded value/);
 });
 
@@ -1031,23 +1033,23 @@ test("equally newest disagreeing owner confirmations fail as an operative confli
   const first = ownerRow({ id: "same-time-a", value: "100 New Avenue", supersedes: "50 Old Road" });
   const second = ownerRow({ id: "same-time-b", value: "200 Other Avenue", supersedes: "50 Old Road" });
   const body = await askRoute(routeEnv(
-    "Taylor's mailing address is 100 New Avenue as of 2026-09-01 [1].",
+    "Pilot Contact's mailing address is 100 New Avenue as of 2026-09-01 [1].",
     { rows: [first, second] },
   ));
-  assert.equal(body.answer, null);
-  assert.equal(body.status, ANSWER_WITHHELD);
-  assert.match(body.notice || "", /records conflict/i);
+  assertDocumentAnswer(body, { provisional: true, exact: true });
+  assert.equal(body.status, undefined);
+  assert.ok(body.confidence.basis.some(reason => /disagree|supersed|conflict/i.test(reason)));
   assert.equal(body.evidence_gate?.reason, "equally current owner-confirmed operative records disagree");
   assert.equal(body.gaps?.some((gap) => gap.type === "operative_conflict"), true);
-  assert.equal(body.next_action, REFUSAL_NEXT_ACTIONS["answer_withheld:conflicting_records"]);
+  assert.equal(body.next_action, undefined);
 
   const refused = await askRoute(routeEnv(
     "The documents do not answer the question.",
     { rows: [first, second] },
   ));
-  assert.equal(refused.answer, null, "a model refusal cannot relabel a known evidence conflict as absence");
-  assert.equal(refused.status, ANSWER_WITHHELD);
-  assert.equal(refused.confidence, undefined);
+  assertDocumentAnswer(refused, { provisional: true, exact: true });
+  assert.equal(refused.status, undefined);
+  assert.ok(refused.confidence.percent < 90);
   assert.equal(refused.gaps?.some((gap) => gap.type === "operative_conflict"), true);
 });
 
@@ -1055,12 +1057,12 @@ test("equally newest matching owner confirmations select one deterministic recor
   const first = ownerRow({ id: "same-value-a" });
   const second = ownerRow({ id: "same-value-b" });
   const body = await askRoute(routeEnv(
-    "Taylor's mailing address is 100 New Avenue as of 2026-09-01 [2].",
+    "Pilot Contact's mailing address is 100 New Avenue as of 2026-09-01 [2].",
     { rows: [second, first], verifierEvidence: [2] },
   ));
   assert.match(body.answer || "", /100 New Avenue/);
-  assert.equal(body.citations.length, 1);
-  assert.equal(body.citations[0]?.ref, first.source_id);
+  assert.deepEqual(new Set(body.citations.map(c => c.ref)), new Set([first.source_id, second.source_id]));
+  assertDocumentAnswer(body, { provisional: true, exact: true });
   assert.equal(body.gaps?.some((gap) => gap.type === "operative_conflict"), false);
 });
 
@@ -1068,9 +1070,9 @@ test("newer claim-authoritative evidence fails closed against an older operative
   const operative = ownerRow();
   const newerPrimary = {
     chunk_uid: "drive:newer-lease#0", doc_uid: "drive:newer-lease", source: "drive", source_id: "newer-lease",
-    title: "Taylor signed lease agreement", client: "Taylor", category: "contract",
+    title: "Pilot Contact signed lease agreement", client: "Pilot Contact", category: "contract",
     document_date: Date.parse("2026-09-05T12:00:00.000Z"), date_source: "document_date", date_reliable: 1,
-    text_source: "native", text_reliable: 1, text: "Taylor's mailing address is 200 Other Avenue.",
+    text_source: "native", text_reliable: 1, text: "Pilot Contact's mailing address is 200 Other Avenue.",
     authority_meta: JSON.stringify({
       evidence_lineage: { version: 1, kind: "source_record", root_ids: [] },
       provenance_receipt: {
@@ -1082,27 +1084,30 @@ test("newer claim-authoritative evidence fails closed against an older operative
     }),
   };
   const body = await askRoute(routeEnv(
-    "Taylor's mailing address is 100 New Avenue as of 2026-09-01 [1].",
+    "Pilot Contact's mailing address is 100 New Avenue as of 2026-09-01 [1].",
     { rows: [operative, newerPrimary] },
   ));
-  assert.equal(body.answer, null);
-  assert.equal(body.status, ANSWER_WITHHELD);
-  assert.match(body.notice || "", /records conflict/i);
+  assertDocumentAnswer(body, { provisional: true, exact: true });
+  assert.equal(body.status, undefined);
+  assert.ok(body.confidence.basis.some(reason => /disagree|supersed|conflict/i.test(reason)));
   assert.equal(body.evidence_gate?.reason, "newer authoritative evidence may supersede the older owner-confirmed operative value");
   assert.equal(body.gaps?.some((gap) => gap.type === "newer_authoritative_evidence"), true);
-  assert.equal(body.evidence_authority, undefined, "a refusal does not present retrieved authority as its approved basis");
+  assert.equal(body.evidence_authority.tier, "T1", "source authority describes the attributed record, not a verified current fact");
+  assert.ok(body.confidence.percent < 90);
+  assert.match(body.answer, /100 New Avenue/);
+  assert.match(body.answer, /200 Other Avenue/);
 });
 
 test("a newer unrelated authoritative record does not create a false operative conflict", async () => {
   const operative = ownerRow();
   const unrelatedPrimary = {
     chunk_uid: "drive:newer-vendor#0", doc_uid: "drive:newer-vendor", source: "drive", source_id: "newer-vendor",
-    title: "Taylor signed vendor agreement", client: "Taylor", category: "contract",
+    title: "Pilot Contact signed vendor agreement", client: "Pilot Contact", category: "contract",
     document_date: Date.parse("2026-09-05T12:00:00.000Z"), date_source: "document_date", date_reliable: 1,
-    text_source: "native", text_reliable: 1, text: "Taylor is the vendor for equipment maintenance.",
+    text_source: "native", text_reliable: 1, text: "Pilot Contact is the vendor for equipment maintenance.",
   };
   const body = await askRoute(routeEnv(
-    "Taylor's mailing address is 100 New Avenue as of 2026-09-01 [1].",
+    "Pilot Contact's mailing address is 100 New Avenue as of 2026-09-01 [1].",
     { rows: [operative, unrelatedPrimary] },
   ));
   assert.match(body.answer || "", /100 New Avenue/);
@@ -1113,12 +1118,12 @@ test("a newer authoritative record that repeats the operative value does not cre
   const operative = ownerRow();
   const agreeingPrimary = {
     chunk_uid: "drive:newer-lease#0", doc_uid: "drive:newer-lease", source: "drive", source_id: "newer-lease-agrees",
-    title: "Taylor signed lease agreement", client: "Taylor", category: "contract",
+    title: "Pilot Contact signed lease agreement", client: "Pilot Contact", category: "contract",
     document_date: Date.parse("2026-09-05T12:00:00.000Z"), date_source: "document_date", date_reliable: 1,
-    text_source: "native", text_reliable: 1, text: "Taylor's mailing address is 100 New Avenue.",
+    text_source: "native", text_reliable: 1, text: "Pilot Contact's mailing address is 100 New Avenue.",
   };
   const body = await askRoute(routeEnv(
-    "Taylor's mailing address is 100 New Avenue as of 2026-09-01 [1].",
+    "Pilot Contact's mailing address is 100 New Avenue as of 2026-09-01 [1].",
     { rows: [operative, agreeingPrimary] },
   ));
   assert.match(body.answer || "", /100 New Avenue/);

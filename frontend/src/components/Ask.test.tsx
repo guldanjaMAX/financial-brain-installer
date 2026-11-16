@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { Answer } from "../lib/api";
+import { moneyQuestionHandoff } from "../../../worker/src/lib/money-handoff.js";
 import {
   ANSWER_ERROR_MESSAGES, answerText, confidenceText, nextActionText,
 } from "../lib/answer-render.js";
@@ -257,18 +258,20 @@ describe("explicit tax evidence action", () => {
 });
 
 
-describe("search-scoped refusal confidence", () => {
+describe("document reading confidence", () => {
   const confidence = { percent: 80, band: "high", basis: ["checked 2 nearest candidates; none supported the claim"] };
   it("preserves candidates without claiming corpus absence", () => {
     const answer: Answer = { answer: "The documents do not answer the question.", confidence,
       results: [{ title: "Synthetic record" }, { title: "Other record" }] } as Answer;
     const html = renderToStaticMarkup(<Trust answer={answer} />);
-    expect(html).toContain("80% high");
-    expect(html).toContain("confidence in this search result");
-    expect(html).toContain("checked 2 nearest candidates");
+    expect(html).toContain("Confidence: Low (30%)");
+    expect(html).toContain("Why: the records read and checks below.");
+    expect(html).toContain("A record that states the answer.");
+    expect(html).toContain("2 retrieved records");
     expect(html).not.toContain("nothing is recorded");
     expect(answerText(answer)).toContain("found 2 records in this search");
-    expect(confidenceText(answer)).toContain("Confidence in this search result");
+    expect(confidenceText(answer)).toMatch(/^Confidence: Low \(30%\).*Why:.*Missing:/s);
+    expect(confidenceText(answer)).toContain("No record read here answers the question");
   });
   it("distinguishes supported answers, empty searches and incomplete searches", () => {
     const supported: Answer = { answer: "The records support 42 [1].", confidence };
@@ -277,11 +280,51 @@ describe("search-scoped refusal confidence", () => {
     const empty: Answer = { answer: "The documents do not answer the question.", results: [], confidence };
     expect(answerText(empty)).toContain("matching record in this search");
     for (const status of ["search_unavailable", "coverage_incomplete"]) {
-      const incomplete = { ...empty, status } as Answer;
+      const incomplete = { ...empty, status, confidence: {percent:10,band:'Low',basis:['The search did not complete.'],missing:['A complete source search.']} } as Answer;
       const html = renderToStaticMarkup(<Trust answer={incomplete} />);
       expect(html).not.toContain("80%");
+      expect(html).toContain("Confidence: Low (10%)");
+      expect(html).toContain("A completed search over the requested sources and periods.");
       expect(html).not.toContain("nothing is recorded");
-      expect(confidenceText(incomplete)).toMatch(/incomplete/i);
+      expect(confidenceText(incomplete)).toMatch(/^Confidence: Low \(10%\).*Why:.*Missing:/s);
+      expect(confidenceText(incomplete)).toContain("0 source records read");
     }
   });
+});
+
+
+describe("Worker document confidence contract", () => {
+  it("renders the real handoff and tolerates legacy missing basis", () => {
+    const answer = moneyQuestionHandoff('How much did I spend last month?') as Answer;
+    expect(answer.confidence?.basis?.length).toBeGreaterThan(0);
+    for (const legacy of [false, true]) {
+      if (legacy && answer.confidence) delete answer.confidence.basis;
+      const html = renderToStaticMarkup(<Trust answer={answer} />);
+      expect(html).toContain('Confidence: Low (0%)');
+      expect(html).toContain('No bank rows have been read');
+      expect(html).toContain('Missing:');
+    }
+    expect(renderToStaticMarkup(<Trust answer={{answer:'The bank reading is incomplete.',confidence:{percent:0,band:'Low'}}} />)).toContain('No confidence assessment');
+  });
+  it("keeps the Worker score and missing evidence visible after a failed check", () => {
+    const answer: Answer = {
+      answer: 'As of November 10, the record says the review is November 13 [1].',
+      confidence: {percent:10,band:'Low',basis:['The search did not complete.'],missing:['A complete source search.']},
+      evidence_gate: {supported:false,complete:false,reason:'Owner link missing.'},
+    };
+    const html=renderToStaticMarkup(<Trust answer={answer} />);
+    expect(html).toContain('Confidence: Low (10%)');
+    expect(html).toContain('Missing: A complete source search.');
+    expect(evidenceGateNote(answer)).toBe('Why this answer is provisional: Owner link missing.');
+  });
+});
+
+it.each([undefined, 0, 99])('the real trust badge scores raw incomplete evidence (%s)', percent => {
+  const answer = { status: 'coverage_incomplete', answer: 'The documents do not answer the question.',
+    results: [{ title: 'Candidate' }], ...(percent === undefined ? {} : { confidence: { percent, band: 'High', basis: ['legacy'] } }) } as Answer;
+  const html = renderToStaticMarkup(<Trust answer={answer} />);
+  expect(html).toContain(`Confidence: Low (${percent === 0 ? 0 : 10}%)`);
+  expect(html).not.toContain('High');
+  expect(html).toContain('Why:');
+  expect(html).toContain('Missing:');
 });

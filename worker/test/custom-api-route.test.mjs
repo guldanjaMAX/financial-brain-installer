@@ -1,3 +1,4 @@
+import { assertDocumentAnswer } from "./helpers/document-answer-contract.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -282,7 +283,9 @@ test("a monthly answer document carries more than eight stores through the real 
   const body = await response.json();
 
   assert.equal(response.status, 200, JSON.stringify(body));
-  assert.match(body.answer || "", /all 12 stores/i);
+  assertDocumentAnswer(body, { provisional: true, exact: true });
+  assert.match(body.answer, /Grand total \| all \| 78/, "the exact cross-store total remains source evidence");
+  for (let index = 0; index < 12; index++) assert.match(body.answer, new RegExp(`Store ${index} \\| services \\| ${index + 1}`));
   assert.equal(body.citations?.[0]?.source_kind, "custom-api");
   for (let index = 0; index < 12; index++) {
     assert.match(answerPrompt, new RegExp(`Store ${index}(?:\\s|\\|)`), `answer prompt includes store ${index}`);
