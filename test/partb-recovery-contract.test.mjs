@@ -1067,9 +1067,19 @@ test("recovery classification proves intended-stage evidence for every manifest 
       state: "original",
       mutate({ fixture, intendedPath }) {
         const target = join(fixture.root, "unowned-intended-evidence");
-        writeFileSync(target, readFileSync(intendedPath), { mode: 0o600, flag: "wx" });
+        const exact = readFileSync(intendedPath);
+        // Standard Windows accounts can create junctions without symlink privilege.
+        // Keep a real reparse point and prove its unowned evidence stays readable.
+        if (process.platform === "win32") {
+          fs.mkdirSync(target);
+          writeFileSync(join(target, "evidence.json"), exact, { mode: 0o600, flag: "wx" });
+        } else writeFileSync(target, exact, { mode: 0o600, flag: "wx" });
         fs.unlinkSync(intendedPath);
-        fs.symlinkSync(target, intendedPath);
+        fs.symlinkSync(target, intendedPath, process.platform === "win32" ? "junction" : undefined);
+        assert.equal(lstatSync(intendedPath).isSymbolicLink(), true);
+        assert.equal(realpathSync.native(intendedPath), realpathSync.native(target));
+        assert.deepEqual(readFileSync(process.platform === "win32"
+          ? join(intendedPath, "evidence.json") : intendedPath), exact);
       },
     },
     {

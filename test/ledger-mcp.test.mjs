@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { writeAdminKeyFile } from "../operations/admin-key-file.mjs";
 import { createProductFixture, seedOwnedEntity } from "../worker/test/product-contract-fixture.mjs";
@@ -117,15 +118,13 @@ test("legacy ledger response formatting survives document requests through local
   // older server's ledger body, so the new routing cannot damage that fallback.
   const bodies = (await ledgerBodies(t)).map(entry => ({ ...entry,
     question: `What does the stored statement say about "${entry.question}"?` }));
-  const parent = resolve('.lane-scratch/money-handoff');
-  mkdirSync(parent, { recursive: true });
-  const root = realpathSync.native(mkdtempSync(join(parent, "home-ledger-mcp-")));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "home-ledger-mcp-")));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const home = join(root, "home-fixture");
   mkdirSync(home);
   const manifest = join(root, "brain.manifest.json");
   writeFileSync(manifest, JSON.stringify({ operations: { admin_key_secret: null } }));
-  // Windows protects the key with DPAPI through the system PowerShell, which
+  // Windows protects the key with DPAPI through the fixed Node bridge, which
   // needs the real system environment and account name, as in the MCP search
   // contract test.
   writeAdminKeyFile(join(root, ".brain-admin-key"), randomBytes(24).toString("hex"),
@@ -144,7 +143,12 @@ test("legacy ledger response formatting survives document requests through local
 import cp from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 const deny = () => { throw new Error('host child process forbidden'); };
+const spawnSync = cp.spawnSync;
+const bridge = ${JSON.stringify(fileURLToPath(new URL('../operations/windows-dpapi-bridge.mjs', import.meta.url)))};
 for (const name of ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync']) cp[name] = deny;
+// The real key reader may launch only the reviewed Node DPAPI bridge.
+cp.spawnSync = (command, args, options) => process.platform === 'win32' && command === process.execPath && args?.[0] === bridge
+  ? spawnSync(command, args, options) : deny();
 syncBuiltinESMExports();
 const replies = JSON.parse(readFileSync(new URL('./responses.json', import.meta.url), 'utf8'));
 globalThis.fetch = async (url, init) => {
@@ -153,9 +157,9 @@ globalThis.fetch = async (url, init) => {
   appendFileSync(new URL('./calls.txt', import.meta.url), body.q + '\\n');
   return new Response(JSON.stringify(replies[body.q].shift()), { headers: { 'Content-Type': 'application/json' } });
 };\n`);
-  const env = { HOME: home, TMPDIR: root, BRAIN_URL: "https://brain.invalid", BRAIN_NAME: "fixture",
+  const env = { HOME: home, BRAIN_URL: "https://brain.invalid", BRAIN_NAME: "fixture",
     BRAIN_MANIFEST: manifest, BRAIN_NO_WRANGLER_LOGIN: "1", BRAIN_TEST_LAUNCHCTL: launchctl };
-  for (const name of ["SystemRoot", "WINDIR", "ComSpec", "USERNAME", "USER", "LOGNAME", "PATH"])
+  for (const name of ["SystemRoot", "WINDIR", "ComSpec", "USERNAME", "USER", "LOGNAME", "PATH", "TMPDIR", "TEMP", "TMP"])
     if (process.env[name]) env[name] = process.env[name];
   const keys = [...bodies.map(({ question }) => question), "empty"];
   const input = keys.map((q, index) => JSON.stringify({ jsonrpc: "2.0", id: index + 1,

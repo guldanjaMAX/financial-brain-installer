@@ -46,7 +46,7 @@ import {
 } from "./lib/core.js";
 import { resolvePrincipal, principalMay, scopeIsUnrestricted } from "./lib/grants.js";
 import { withLedgerAnswer } from "./lib/ledger-answer.js";
-import { documentPromptWindow, finalizeDocumentAnswer, finalizeOwnerLedgerAnswer, readDocumentEvidence } from "./lib/document-answer.js";
+import { documentPromptWindow, documentResultTitle, finalizeDocumentAnswer, finalizeOwnerLedgerAnswer, readDocumentEvidence } from "./lib/document-answer.js";
 import {
   filterThinkCandidates, SENSITIVE_DOCUMENTS_NOTICE, SENSITIVE_DOCUMENTS_WITHHELD,
 } from "./lib/think-candidate-policy.js";
@@ -353,7 +353,8 @@ function strongestEvidenceAuthority(results) {
 function citationCandidateForResult(result, index) {
   return {
     n: index + 1,
-    title: result.title || "untitled",
+    // The whole stored title; acceptance rebuilds it with the same helper.
+    title: documentResultTitle(result.title),
     // Storage labels can qualify a record's status. Preserve them for the
     // closed-world provenance check; do not infer authority from their names.
     uri: result.uri || null,

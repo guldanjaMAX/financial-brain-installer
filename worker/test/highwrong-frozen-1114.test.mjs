@@ -1,5 +1,7 @@
+import { fileURLToPath } from 'node:url';
 import { assertUnprovedDocument } from './helpers/doc-high-provenance.mjs';
 import nodeTest from 'node:test';
+import { fileURLToPath } from 'node:url';
 // Known limit, 0.4.28 (2026-11-15): these 75 positive High controls expect 95 but now score lower after reviewed
 // confidence-lowering changes. Every figure still matches its oracle; no failure is wrong at High. Only these exact
 // names are skipped; all other tests in this file (the frozen wrong-at-High guards) keep running.
@@ -1625,7 +1627,7 @@ test('CERT PROPERTY interest-word coincidence is not a payment split',()=>{
 {
  const {DatabaseSync}=await import('node:sqlite');
  const {readFileSync,readdirSync}=await import('node:fs');
- const WT=new URL('../../',import.meta.url).pathname.replace(/\/$/,'');
+ const WT=fileURLToPath(new URL('../../',import.meta.url)).replace(/[\\/]$/,'');
 const NOW = Date.parse('2026-11-14T18:00:00Z');
 const TZ = 'America/Phoenix';
 const PERIOD = { period_from: '2026-10-01', period_to: '2026-10-31', time_zone: TZ };

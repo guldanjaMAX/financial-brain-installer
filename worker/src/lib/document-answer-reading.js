@@ -160,25 +160,30 @@ function namesClaim(doc, anchor, citedTitles) {
 function claimGrounding(sentence, docs, { question = '', claims = new Set(), claimText = '', verifiedClauses = new Set() } = {}) {
   const { body, interiorCitation } = claimBody(sentence);
   const anchor = { exact:exactClause(body), skeleton:skeleton(body), field:fieldTerms(body), doubt:DOUBT.test(body) };
-  const said = quoteOf(withoutCitations(sentence));
   const cited = docs.filter(d => citationNumbers(sentence).includes(d.n) && sourceText(d));
   const doubts = [];
   const disputed = [];
   const doubt = (kind, reason) => { if (!doubts.some(d => d.reason === reason)) doubts.push({ kind, reason }); };
+  // Reasons are explanation text: they name the draft claim and each record
+  // by citation number, never by quoting the draft, a source sentence or a
+  // title. Those are in the attributed quotes, where a figure is evidence;
+  // in a reason it would read as an unquoted money figure.
+  const claim = cited.length ? `The draft claim citing ${documentRecordReferences(cited.map(d => d.n))}` : 'A draft claim';
   let exact = !interiorCitation && cited.length > 0 && anchor.exact.length >= 8;
-  if (interiorCitation) doubt('paraphrase', `The claim "${said}" carries a citation marker inside it; only sentence-end citations are accepted.`);
-  if (anchor.exact.length < 8) doubt('paraphrase', `The claim "${said}" is too short to bind to a source clause.`);
-  if (!cited.length) doubt('paraphrase', `The claim "${said}" cites no readable record.`);
-  if (anchor.doubt && !verifiedClauses.has(anchor.exact)) doubt('qualified', `The claim "${said}" is itself qualified, so it is reported as what the record says.`);
+  if (interiorCitation) doubt('paraphrase', `${claim} carries a citation marker inside it; only sentence-end citations are accepted.`);
+  if (anchor.exact.length < 8) doubt('paraphrase', `${claim} is too short to bind to a source clause.`);
+  if (!cited.length) doubt('paraphrase', `${claim} cites no readable record.`);
+  if (anchor.doubt && !verifiedClauses.has(anchor.exact)) doubt('qualified', `${claim} is itself qualified, so it is reported as what the record says.`);
   const claimWords = tokens(claimText).map(stem);
   const questionWords = tokens(question).map(stem);
   for (const d of cited) {
     const record = recordFeatures(d);
+    const named = documentRecordReference(d.n);
     if (!record.exact.has(anchor.exact)) {
       exact = false;
       const changed = [...record.rows, ...record.bySentence].find(row => row.skeleton === anchor.skeleton);
-      if (changed) doubt('figure', `The draft changes a figure, unit or letter case that "${recordTitle(d)}" states as "${quoteOf(changed.text)}"; the source wording is used.`);
-      else doubt('paraphrase', `The record "${recordTitle(d)}" has no sentence identical to the claim, with the same figures, units and letter case.`);
+      if (changed) doubt('figure', `The draft changes a figure, unit or letter case that ${named} states; the source wording is used.`);
+      else doubt('paraphrase', `${sentenceStart(named)} has no sentence identical to the claim, with the same figures, units and letter case.`);
       continue;
     }
     // A question can name a rejected/example record while asking for an
@@ -188,12 +193,10 @@ function claimGrounding(sentence, docs, { question = '', claims = new Set(), cla
     const bodyWords = new Set(record.rows.flatMap(row => tokens(row.text).map(stem)));
     const allowed = new Set([...claimWords, ...questionWords.filter(word => bodyWords.has(word))]);
     const unchecked = uncheckedTitleWords(d, allowed);
-    if (unchecked.length) doubt('title', `The record title "${recordTitle(d)}" contains ${unchecked.map(w => `"${w}"`).join(', ')}, which was not checked against the claim.`);
+    if (unchecked.length) doubt('title', `The title of ${named} has ${unchecked.length === 1 ? 'a word' : 'words'} that ${unchecked.length === 1 ? 'was' : 'were'} not checked against the claim.`);
     const context = record.rows.filter(row => !claims.has(row.exact) && !row.heading);
     if (context.length) {
-      const shown = context.slice(0, QUOTED_CONTEXT).map(row => `"${quoteOf(row.text)}"`).join(', ');
-      const more = context.length > QUOTED_CONTEXT ? ` and ${context.length - QUOTED_CONTEXT} more sentence(s)` : '';
-      doubt('context', `The record "${recordTitle(d)}" also says ${shown}${more}, which ${context.length === 1 ? 'was' : 'were'} not checked against the claim and may qualify, retract or replace it.`);
+      doubt('context', `${sentenceStart(named)} has ${context.length === 1 ? 'another sentence that was' : `${context.length} other sentences that were`} not checked against the claim and may qualify, retract or replace it.`);
     }
   }
   // A cited record's title, figures included ("Specification 1"), names it.
@@ -202,8 +205,10 @@ function claimGrounding(sentence, docs, { question = '', claims = new Set(), cla
     const row = namesClaim(d, anchor, citedTitles);
     if (!row) continue;
     disputed.push(d);
-    const reason = `The record "${recordTitle(d)}" (${dateLabel(d)}) says "${quoteOf(row.text)}", which may dispute or supersede the claim.`;
-    if (!doubts.some(x => x.reason === reason)) doubts.push({ kind:'dispute', reason, doc:d });
+    // The finalizer quotes this record beside the answer (it is not provably
+    // older, or it names the claim), so its citation number names it.
+    const reason = `${sentenceStart(documentRecordReference(d.n))} (${dateLabel(d)}) has a sentence on the same subject that may dispute or supersede the claim.`;
+    if (!doubts.some(x => x.reason === reason && x.doc === d)) doubts.push({ kind:'dispute', reason, doc:d });
   }
   return { exact, grounded: exact && doubts.length === 0, doubts, disputed };
 }
@@ -224,12 +229,26 @@ function booksReading(doc) {
   const unsafe = quickBooksLabel(subject) === null;
   return { extract:unsafe ? head.slice(at + 2) : head, unsafe };
 }
-const recordTitle = doc => booksReading(doc)?.unsafe ? 'QuickBooks record (party label unverified)' : doc.title || 'Untitled record';
+// The one title a numbered result carries: the Worker's citation projection
+// (index.js citationCandidateForResult), the reading's attribution and
+// uncited-record lines, and acceptance's rebuild of them all use it. The
+// stored title is kept whole (no length cut: a qualifier past any cut must
+// still reach the provenance check), and a null or empty title is "untitled".
+export const documentResultTitle = title => title || 'untitled';
+const recordTitle = doc => booksReading(doc)?.unsafe ? 'QuickBooks record (party label unverified)' : documentResultTitle(doc.title);
 export { recordTitle as documentRecordTitle, dateLabel as documentDateLabel };
 // Explanation text names a record by the number it is cited with in the
 // answer ("cited record 3"): no bracket, so it cannot read as an [n] marker,
 // and no title, so a title's figures cannot read as a money figure.
 export const documentRecordReference = n => Number.isSafeInteger(n) ? `cited record ${n}` : 'a cited record';
+// Several records: "cited records 2 and 5", "cited records 1, 2 and 5".
+export function documentRecordReferences(numbers) {
+  const list = [...new Set(numbers)];
+  if (list.length <= 1) return documentRecordReference(list[0]);
+  if (!list.every(Number.isSafeInteger)) return 'several cited records';
+  return `cited records ${list.slice(0, -1).join(', ')} and ${list.at(-1)}`;
+}
+const sentenceStart = value => value.charAt(0).toUpperCase() + value.slice(1);
 
 // Model confidence is presentation metadata only when it is a standalone
 // label. A cited sentence reporting a source's percentage remains evidence.
@@ -468,7 +487,7 @@ const missingFor = (gap, docs) => {
   if (/money|ledger/.test(gap.type || '')) return 'Matching bank rows for the requested payer, account and period; document terms alone do not prove payment.';
   if (/tax/.test(gap.type || '')) return 'The exact entity, year, filing type and a readable copy of the requested filing.';
   if (/time|date/.test(gap.type || '')) return 'A verified event date and time zone for the requested period.';
-  if (/read|text|ocr|scanned/.test(gap.type || '')) return `A complete reliable reading of ${docs.map(d => d.title).join(', ') || 'the matching records'}.`;
+  if (/read|text|ocr|scanned/.test(gap.type || '')) return `A complete reliable reading of ${docs.length ? documentRecordReferences(docs.map(d => d.n)) : 'the matching records'}.`;
   return `Complete relevant coverage${source ? ` for ${source}` : ''}; resolve: ${gap.detail || gap.type || 'the reported gap'}`;
 };
 
@@ -559,8 +578,30 @@ export function finalizeDocumentAnswer({ question = '', draft = null, docs = [],
   }
 
   const deductions = [];
-  const add = (reason, missing, amount = 8) => {
-    if (!deductions.some(d => d.reason === reason)) deductions.push({ reason, missing, amount });
+  // A deduction counts once per key; the key is its reason unless stated.
+  const counted = new Set();
+  const add = (reason, missing, amount = 8, key = reason) => {
+    if (counted.has(key)) return;
+    counted.add(key);
+    deductions.push({ reason, missing, amount });
+  };
+  // Per-record deductions name records by citation number, but still count
+  // once per record identity as they did when the title named them (title,
+  // and date where the reason states one): the same deductions as before,
+  // so the wording change cannot move confidence. Records sharing that
+  // identity are named together.
+  const addPerRecord = (records, identity, reason, missing) => {
+    const groups = new Map();
+    for (const d of records) {
+      const key = identity(d);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(d);
+    }
+    for (const [key, group] of groups) {
+      const numbers = group.map(d => d.n);
+      const names = documentRecordReferences(numbers);
+      add(reason(names, new Set(numbers).size > 1, group[0]), missing(names, group[0]), 8, key);
+    }
   };
   for (const check of failures) {
     // Legacy ledger codes are diagnostics. Their paired owner explanation is
@@ -573,7 +614,11 @@ export function finalizeDocumentAnswer({ question = '', draft = null, docs = [],
   }
   for (const gap of gaps) add(gap.detail || `Coverage gap: ${gap.type}.`, missingFor(gap, used));
   const partlyRead = used.filter(d => d.read_complete !== true || d.text_source === 'ocr_partial' || d.text_reliable !== true);
-  for (const d of partlyRead) add(`The record "${recordTitle(d)}" was only partly read or its text is unverified.`, `The remaining readable text of "${recordTitle(d)}".`);
+  // The identity is the reason this deduction had, with its old fallback label.
+  const partlyReadTitle = d => booksReading(d)?.unsafe ? 'QuickBooks record (party label unverified)' : d.title || 'Untitled record';
+  addPerRecord(partlyRead, d => `The record "${partlyReadTitle(d)}" was only partly read or its text is unverified.`,
+    (names, many) => `${sentenceStart(names)} ${many ? 'were' : 'was'} only partly read or ${many ? 'their' : 'its'} text is unverified.`,
+    names => `The remaining readable text of ${names}.`);
   // A draft that is not grounded never states its figure at High. Each doubt
   // is named; paraphrase keeps its existing single deduction below.
   // A deterministic books reading binds each provider entity and its latest
@@ -622,11 +667,14 @@ export function finalizeDocumentAnswer({ question = '', draft = null, docs = [],
   if (others.length) {
     const additional = others.filter(d=>!used.includes(d));
     if (additional.length) answer = used.map(d=>quote(d)).join('\n');
-    const line = d => additional.includes(d) ? quote(d) : `"${markerSafe(d.title)}" (${dateLabel(d)}) [${d.n}]; its statement is included above.`;
+    const line = d => additional.includes(d) ? quote(d) : `"${markerSafe(documentResultTitle(d.title))}" (${dateLabel(d)}) [${d.n}]; its statement is included above.`;
     if (newer.length) answer += `\nNewer retrieved records were not cited in the draft:\n${newer.map(line).join('\n')}`;
     if (alongside.length) answer += `\nRetrieved records that are not provably older, or that name the same subject, were not cited in the draft:\n${alongside.map(line).join('\n')}`;
-    for (const d of newer) add(`Newer retrieved record "${d.title}" (${dateLabel(d)}) was not cited by the draft.`, `Reconcile the answer with "${d.title}" (${dateLabel(d)}).`);
-    for (const d of alongside) add(`Retrieved record "${d.title}" (${dateLabel(d)}) is not provably older than the cited records, or names the same subject, and was not cited by the draft.`, `Reconcile the answer with "${d.title}" (${dateLabel(d)}).`);
+    const reconcile = (names, d) => `Reconcile the answer with ${names} (${dateLabel(d)}).`;
+    addPerRecord(newer, d => `Newer retrieved record "${d.title}" (${dateLabel(d)}) was not cited by the draft.`,
+      (names, many, d) => `${sentenceStart(names)} (${dateLabel(d)}) ${many ? 'are' : 'is'} newer than the records the draft cited; the draft did not cite ${many ? 'them' : 'it'}.`, reconcile);
+    addPerRecord(alongside, d => `Retrieved record "${d.title}" (${dateLabel(d)}) is not provably older than the cited records, or names the same subject, and was not cited by the draft.`,
+      (names, many, d) => `${sentenceStart(names)} (${dateLabel(d)}) ${many ? 'are' : 'is'} not provably older than the records the draft cited, or ${many ? 'name' : 'names'} the same subject; the draft did not cite ${many ? 'them' : 'it'}.`, reconcile);
     used = [...new Set([...used,...others])];
   }
   // A long record quoted by selection is named: its unquoted sentences were

@@ -1,14 +1,14 @@
-import { fileURLToPath as auditRootPath, pathToFileURL as auditFileUrl } from "node:url";
+import { fileURLToPath as auditRootPath } from "node:url";
 // Fable audit harness: drives the REAL candidate answer routes with synthetic
 // documents, a fake answer model and a fake verifier. No network, no model.
 import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
 
 export const C = auditRootPath(new URL("../../../../../", import.meta.url)).replace(/\/$/, "");
-const HERE = dirname(fileURLToPath(import.meta.url));
 const imp = (p) => import(pathToFileURL(join(C, p)).href);
 const { createProductFixture } = await imp("worker/test/product-contract-fixture.mjs");
 const { handleMcp } = await imp("worker/src/lib/mcp-endpoint.js");
@@ -32,17 +32,20 @@ export const rec = (title, content, o = {}) => ({
 });
 
 function mcpRuntime(url) {
-  mkdirSync(join(HERE, ".tmp"), { recursive: true });
-  const root = realpathSync.native(mkdtempSync(join(HERE, ".tmp", "mcp-")));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "document-audit-mcp-")));
   const home = join(root, "home"); mkdirSync(home);
   const manifest = join(root, "brain.manifest.json");
   writeFileSync(manifest, JSON.stringify({ operations: { admin_key_secret: null } }));
-  writeAdminKeyFile(join(root, ".brain-admin-key"), randomBytes(24).toString("hex"), { environment: { HOME: home } });
+  // Native DPAPI needs the current account and the system executable locations.
+  writeAdminKeyFile(join(root, ".brain-admin-key"), randomBytes(24).toString("hex"), process.platform === "win32"
+    ? { environment: process.env, username: process.env.USERNAME || process.env.USER }
+    : { environment: { HOME: home } });
   const launchctl = join(root, "launchctl-fixture");
   writeFileSync(launchctl, "#!/bin/sh\nexit 99\n", { mode: 0o700 });
-  const env = { HOME: home, TMPDIR: root, BRAIN_URL: url, BRAIN_NAME: "fixture-brain", BRAIN_MANIFEST: manifest,
+  const env = { HOME: home, BRAIN_URL: url, BRAIN_NAME: "fixture-brain", BRAIN_MANIFEST: manifest,
     BRAIN_AGENT_PROFILE: "owner-assistant", BRAIN_NO_WRANGLER_LOGIN: "1", BRAIN_TEST_LAUNCHCTL: launchctl };
-  for (const name of ["USER", "LOGNAME", "PATH"]) if (process.env[name]) env[name] = process.env[name];
+  for (const name of ["SystemRoot", "WINDIR", "ComSpec", "USERNAME", "USER", "LOGNAME", "PATH", "TMPDIR", "TEMP", "TMP"])
+    if (process.env[name]) env[name] = process.env[name];
   return { env, close: () => rmSync(root, { recursive: true, force: true }) };
 }
 

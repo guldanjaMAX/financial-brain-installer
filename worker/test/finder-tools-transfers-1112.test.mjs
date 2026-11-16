@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { handleMoneyQuery } from '../src/lib/money-query.js';
 
 // Run only this file: node --test worker/test/finder-tools-transfers-1112.test.mjs
@@ -10,8 +13,7 @@ import { handleMoneyQuery } from '../src/lib/money-query.js';
 // The real POST handler performs validation, scan budgeting, clean snapshots,
 // shared movement classification and SQL execution. Only D1's transport is local.
 const STAMP = '2026-11-12T12:00:00Z';
-const REPORT = new URL('../../.lane-scratch/finder-tools-transfers-1112.md', import.meta.url);
-mkdirSync(new URL('.', REPORT), { recursive: true });
+const REPORT = pathToFileURL(join(mkdtempSync(join(tmpdir(), 'finder-tools-transfers-')), 'REPORT.md'));
 const FROM = '2026-09-01', TO = '2026-09-30';
 const migrations = readdirSync(new URL('../../migrations/d1/', import.meta.url))
   .filter(name => name.endsWith('.sql')).sort()

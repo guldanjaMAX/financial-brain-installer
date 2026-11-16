@@ -22,7 +22,7 @@ function fixture() {
   const first = join(root, "first");
   const second = join(root, "second");
   const watched = join(root, "watched");
-  for (const path of [home, first, second, watched]) mkdirSync(path, { mode: 0o700 });
+  for (const path of [home, first, second, watched, join(root, 'lifecycle-locks')]) mkdirSync(path, { mode: 0o700 });
   const manifestPath = join(root, "brain.manifest.json");
   const manifest = {
     client: { slug: "fixture-brain", timezone: "UTC" },
@@ -68,6 +68,7 @@ function remove(f, source = "first", options = {}, argv = ["remove", "--source",
   return capture(() => cmdFolder(f.manifestPath, argv, {
     platform: process.platform,
     home: f.home,
+    lifecycleLockOptions: { machineLockRoot: join(f.root, 'lifecycle-locks') },
     sourceIngestLockOptions: { home: f.home },
     schedulerOptions: { home: f.home, launchctl: () => { throw new Error("unexpected scheduler call"); } },
     now: () => new Date(FIXED_NOW),

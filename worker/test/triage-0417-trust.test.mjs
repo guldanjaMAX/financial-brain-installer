@@ -277,7 +277,7 @@ test('T08 control: local search and think carry document text under the existing
 test('T08 control: an ordinary fetched record reaches the real MCP fetch path', async () => {
   const fixture = fetchFixture('A synthetic record states the amount was 42.');
   const reply = await call('fetch', { id: 'fixture-mail:record-one' }, {}, fixture.env);
-  assert.ok(fixture.calls.some(sql => sql.includes('SELECT text FROM chunks')));
+  assert.ok(fixture.calls.some(sql => /FROM chunks c\b/.test(sql)));
   assert.match(JSON.parse(textOf(reply)).text, /amount was 42/);
 });
 test('T08 defect: default remote profile must declare retrieved instructions untrusted', async () => {
@@ -285,7 +285,7 @@ test('T08 defect: default remote profile must declare retrieved instructions unt
   assert.match(initialized.instructions, /librarian/);
   const fixture = fetchFixture(payload);
   const reply = await call('fetch', { id: 'fixture-mail:record-one' }, {}, fixture.env);
-  assert.ok(fixture.calls.some(sql => sql.includes('SELECT text FROM chunks')));
+  assert.ok(fixture.calls.some(sql => /FROM chunks c\b/.test(sql)));
   assert.equal(JSON.parse(textOf(reply)).text, payload, 'attack text reaches the consuming assistant intact');
   assert.match(initialized.instructions, /(?:retrieved|document|email).*(?:data.*not instructions|data, never instructions|untrusted)/i,
     'read-only forbids writes but does not prohibit instruction-led extra reads or answer contamination');
@@ -401,7 +401,7 @@ for (const stage of ['document', 'chunks', 'metadata']) {
     fixture.env.DB.prepare = sql => {
       const statement = prepare(sql);
       if (stage === 'document') statement.first = async () => { reached++; throw new Error(canary); };
-      if (stage === 'chunks' && sql.includes('SELECT text FROM chunks')) {
+      if (stage === 'chunks' && /FROM chunks c\b/.test(sql)) {
         statement.all = async () => { reached++; throw new Error(canary); };
       }
       if (stage === 'metadata' && sql.includes('FROM documents')) {

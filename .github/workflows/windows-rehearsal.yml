@@ -435,7 +435,7 @@ jobs:
           mkdir -p .packaged-preflight
           tar -xzf "$tarball" -C .packaged-preflight \
             package/tools/preflight.sh package/tools/preflight.ps1 \
-            package/operations/installed-manifest.mjs
+            package/operations/installed-manifest.mjs package/operations/rename-retry.mjs
           test -f .packaged-preflight/package/tools/preflight.sh
           test -f .packaged-preflight/package/tools/preflight.ps1
           test -f .packaged-preflight/package/operations/installed-manifest.mjs
@@ -794,7 +794,7 @@ jobs:
           mkdir -p .packaged-preflight
           tar -xzf "$tarball" -C .packaged-preflight \
             package/tools/preflight.sh package/tools/preflight.ps1 \
-            package/operations/installed-manifest.mjs
+            package/operations/installed-manifest.mjs package/operations/rename-retry.mjs
           test -f .packaged-preflight/package/tools/preflight.sh
           test -f .packaged-preflight/package/tools/preflight.ps1
           test -f .packaged-preflight/package/operations/installed-manifest.mjs

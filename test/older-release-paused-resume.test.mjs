@@ -82,7 +82,7 @@ async function scratchRelease(version) {
     if (directory === sourcePath || directory.startsWith(`${sourcePath}${sep}`)) continue;
     cpSync(sourcePath, join(directory, entry), { recursive: true });
   }
-  symlinkSync(join(ROOT, "node_modules"), join(directory, "node_modules"), "dir");
+  symlinkSync(join(ROOT, "node_modules"), join(directory, "node_modules"), process.platform === 'win32' ? 'junction' : 'dir');
   const packagePath = join(directory, "package.json");
   const packageJson = JSON.parse(readFileSync(packagePath, "utf8"));
   writeFileSync(packagePath, `${JSON.stringify({ ...packageJson, version }, null, 2)}\n`);
@@ -382,6 +382,7 @@ async function update(brain, release, { force = false, duringAcceptance = null }
     }
     : kit.upgradeOptions;
   const run = await quietly(() => release.cli.cmdUpdate(brain.manifestPath, {
+    lifecycleLockOptions: { machineLockRoot: join(brain.sandbox, 'machine-locks') },
     discoverInstalledManifest: () => ({ path: brain.manifestPath, source: "remembered" }),
     readUpdateBacklog: release.cli.readUpdateBacklog,
     updateBacklogOptions: upgradeOptions.updateBacklogOptions,
@@ -399,7 +400,7 @@ async function update(brain, release, { force = false, duringAcceptance = null }
       platform: "darwin", home: brain.sandbox, uid: 501, localTimezone: "UTC",
       existingSchedulerOwners: [], planLoad: async () => [],
       schedulerAdapter: { read: () => null },
-      schedulerOptions: { home: brain.sandbox },
+      schedulerOptions: { home: brain.sandbox, machineLockRoot: join(brain.sandbox, 'machine-locks') },
       legacySchedulerOptions: { home: brain.sandbox, uid: 501, launchctl: args => {
         schedulerReads.push(args[0]);
         // The empty synthetic home has no loaded jobs or disabled intent.
@@ -422,6 +423,7 @@ async function rollback(brain, release) {
   const { cmdDeploy, cmdHealth, upgradeOptions } = brain.kit(release);
   return quietly(() => release.cli.cmdRollback(brain.manifestPath, BOOKMARK, {
     confirmed: true,
+    lifecycleLockOptions: { machineLockRoot: join(brain.sandbox, 'machine-locks') },
     resolveAccount: upgradeOptions.resolveAccount,
     cf: brain.cf,
     d1Query: brain.d1Query,
@@ -434,6 +436,7 @@ async function rollback(brain, release) {
 async function doctorRepair(brain, release) {
   const { upgradeOptions } = brain.kit(release);
   return quietly(() => release.cli.cmdDoctorRepair(brain.manifestPath, {
+    lifecycleLockOptions: { machineLockRoot: join(brain.sandbox, 'machine-locks') },
     confirmed: true,
     diagnoseOptions: {
       http: brain.http,
@@ -626,6 +629,7 @@ test("the documented 0.4.8 active folder updates, retires, and refuses both lega
     let remoteExpectationCalls = 0;
     const retired = await quietly(() => checkedOutCli.cmdFolder(brain.manifestPath, ["off"], {
       platform: "darwin",
+      lifecycleLockOptions: { machineLockRoot: join(brain.sandbox, 'machine-locks') },
       now: () => new Date("2026-09-28T16:36:00.000Z"),
       schedulerOptions,
       probeSourceIngestLock: () => ({ busy: false }),

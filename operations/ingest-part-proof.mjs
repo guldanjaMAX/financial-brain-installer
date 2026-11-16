@@ -70,6 +70,13 @@ export async function revalidateIngestProgress({ state, source, proofs, checkpoi
   return finish(true);
 }
 
+// Waits between read-only retries when the database is briefly busy.
+export const PART_READBACK_RETRY_DELAYS_MS = Object.freeze([2000, 5000, 10000]);
+const TRANSIENT_D1_READBACK = /D1 DB is overloaded|exceeded its CPU time limit|Database reset because/i;
+let sleepMs = ms => new Promise(resolve => setTimeout(resolve, ms));
+/** Test seam: replace the wait between readback retries. */
+export function setPartReadbackSleepForTest(fn) { sleepMs = fn; }
+
 /** Every reuse reads current D1, even if a saved database marker still matches.
  * A backup imported into another database, time travel, and missing chunks all
  * invalidate the affected part without replaying an intact sibling.
@@ -86,11 +93,23 @@ export async function readCurrentIngestParts({ base, adminKey, source, envelopes
     if (now() >= deadlineAt) throw Object.assign(new Error('Part readback deadline reached.'), {reason:'requestDeadline'});
     assertOwned?.();
     const selected = ids.slice(offset,offset+50);
-    const response = await request(`${base}/api/admin/brain/ingest-part-proof`, {
-      method:'POST', redirect:'error', headers:{'Content-Type':'application/json','X-Admin-Key':adminKey},
-      body:JSON.stringify({source,source_ids:selected}), signal:AbortSignal.timeout(Math.max(1,Math.min(30000,Math.ceil(deadlineAt-now())))),
-    });
-    assertOwned?.();
+    let response;
+    for (let attempt = 0; ; attempt += 1) {
+      response = await request(`${base}/api/admin/brain/ingest-part-proof`, {
+        method:'POST', redirect:'error', headers:{'Content-Type':'application/json','X-Admin-Key':adminKey},
+        body:JSON.stringify({source,source_ids:selected}), signal:AbortSignal.timeout(Math.max(1,Math.min(30000,Math.ceil(deadlineAt-now())))),
+      });
+      assertOwned?.();
+      // This readback only reads. A large Brain's database can refuse it for a
+      // few seconds right after a write batch ("D1 DB is overloaded", or a CPU
+      // reset); wait and read again rather than failing the whole source.
+      if (response.ok || attempt >= PART_READBACK_RETRY_DELAYS_MS.length || ![429,500,503].includes(response.status)) break;
+      const detail = await response.clone().text().catch(() => '');
+      if (response.status !== 429 && !TRANSIENT_D1_READBACK.test(detail)) break;
+      const wait = PART_READBACK_RETRY_DELAYS_MS[attempt];
+      if (now() + wait >= deadlineAt) break;
+      await sleepMs(wait);
+    }
     if (!response.ok) throw Object.assign(new Error('Current database part readback failed; source work remains pending.'), {status:response.status});
     const body = await response.json();
     const g = body?.geometry;

@@ -71,6 +71,8 @@ function fixture(t, dual = false) {
     return { ok: true, status: 200, text: async () => JSON.stringify(result) };
   };
   const options = { mode: "sync", planDirectory: root, planPath: path, fetch,
+    home: join(root, 'home'),
+    lifecycleLockOptions: { machineLockRoot: join(root, 'lifecycle-locks') },
     runChild: () => { throw new Error("credential helper forbidden"); } };
   const common = { platform: "darwin", uid: process.getuid?.() ?? 501,
     home: join(root, "home"), localTimeZone: "UTC", now };

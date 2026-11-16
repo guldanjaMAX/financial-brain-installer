@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { answerSentences } from '../../src/lib/answer-sentences.js';
-import { documentRecordReference, markerSafe } from '../../src/lib/document-answer-reading.js';
+import { documentRecordReference, documentRecordReferences, markerSafe } from '../../src/lib/document-answer-reading.js';
 const flat = value => String(value).replace(/\s+/g, ' ').trim();
 const clause = value => flat(String(value).replace(/\[\d+\]/g,'')).replace(/[.\s]+$/,'');
 const recordDate = row => {
@@ -82,11 +82,13 @@ function assertContract(body, suffix) {
   const metadata = JSON.stringify([body.gaps, body.evidence_gate, body.withheld_documents, body.meaning_search, body.time_window,
     rows.map(row => [row.title, row.snippet, row.retrieval_excerpts, row.ts, row.record_observation, row.source])]).replace(/(\d),(?=\d{3}\b)/g, '$1');
   // The finalizer names a record in explanation text by its citation number
-  // (documentRecordReference), never by its title. Only this body's own
-  // numbered records are removed; any other number stays a figure.
+  // (documentRecordReference, or documentRecordReferences for several), never
+  // by its title. Only this body's own numbered records are removed; any
+  // other number stays a figure.
   const numbers = new Set([...(body.citations || []).map(c => c?.n), ...(body.results || []).map((_, i) => i + 1)]);
-  const reference = new RegExp(`${documentRecordReference(1).replace(/1$/, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\d+)(?!\\d)`, 'g');
-  const unreferenced = missing.replace(reference, (whole, n) => numbers.has(Number(n)) ? '' : whole);
+  const prefix = value => value.slice(0, value.search(/\d/)).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const reference = new RegExp(`(?:${prefix(documentRecordReferences([1, 2]))}|${prefix(documentRecordReference(1))})(\\d+(?:(?:, | and )\\d+)*)(?!\\d)`, 'g');
+  const unreferenced = missing.replace(reference, (whole, list) => list.split(/, | and /).every(n => numbers.has(Number(n))) ? '' : whole);
   for (const value of figureValues(unreferenced)) assert.ok(metadata.includes(value), `a figure in the missing line comes from this body's metadata: ${value} in ${missing}`);
   assert.ok(estimates.startsWith('Estimates: ') && ESTIMATES.has(estimates.slice(11)), `the estimates line is a fixed template: ${estimates}`);
   assert.ok(check.startsWith('How to check: ') && HOW_TO_CHECK.has(check.slice(14)), `the check line is a fixed template: ${check}`);
@@ -140,7 +142,9 @@ export function assertDocumentAnswer(body, { expected, provisional = false, empt
     const source = body.results?.[Number(attribution[3])-1];
     const title = JSON.parse(attribution[2]);
     assert.equal(attribution[1],recordDate(source),'the attribution date remains source metadata');
-    assert.ok(title === String(source.title || 'Untitled record').slice(0,140) ||
+    // The whole stored title, "untitled" when empty: the Worker's citation
+    // projection and the finalizer's fallback.
+    assert.ok(title === (source.title || 'untitled') ||
       source.source_kind === 'quickbooks' && title === 'QuickBooks record (party label unverified)',
       'the attribution title remains source metadata');
     residual = residual.replace(attribution[0],'');
@@ -159,7 +163,7 @@ export function assertDocumentAnswer(body, { expected, provisional = false, empt
   for (const detail of gapNotice) residual = residual.replace(detail,'');
   for (const [index,row] of (body.results || []).entries()) {
     // The finalizer writes a title's bracketed digits as \u005b (markerSafe).
-    residual = residual.replace(`"${markerSafe(row.title)}" (${recordDate(row)}) [${index+1}]; its statement is included above.`,'');
+    residual = residual.replace(`"${markerSafe(row.title || 'untitled')}" (${recordDate(row)}) [${index+1}]; its statement is included above.`,'');
   }
   // The finalizer's fixed section headers for uncited records.
   for (const header of UNCITED_HEADERS) residual = residual.split(header).join('');

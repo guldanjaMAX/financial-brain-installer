@@ -1156,6 +1156,7 @@ test("the public all-configured command installs on Windows and prints stable fr
   };
   const result = await cmdScheduleAllConfigured(manifestPath, "install", {
     platform: "win32",
+    lifecycleLockOptions: { machineLockRoot: join(directory, 'lifecycle-locks') },
     planDailyRefresh: async () => plan,
     schedulerAdapter: adapter,
     schedulerOptions: WINDOWS_DEFINITION_OPTIONS,
@@ -1288,6 +1289,7 @@ test("scheduled execution reuses the installed ownership plan before checking it
   const schedulerAdapter = memoryAdapter({ exists: true, owned: true, enabled: true, definition });
   const result = await runDailyRefreshCli(manifestPath, {
     home: directory,
+    machineLockRoot: join(directory, 'lifecycle-locks'),
     brainModule: {},
     buildPlan: async () => { planCalls += 1; if (leaseHeld) lockedPlanCalls++; return runnablePlan; },
     expectedDefinitionHash: definition.definition_hash,
@@ -1576,6 +1578,7 @@ test("daily on preserves verified installation when the freshness inventory is u
   };
   const result = await cmdScheduleAllConfigured(manifestPath, "install", {
     platform: "win32",
+    lifecycleLockOptions: { machineLockRoot: join(directory, 'lifecycle-locks') },
     planDailyRefresh: async () => plan,
     schedulerAdapter: adapter,
     schedulerOptions: WINDOWS_DEFINITION_OPTIONS,

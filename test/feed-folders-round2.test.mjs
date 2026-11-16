@@ -11,6 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, win32 as win32Path } from "node:path";
+import { tmpdir } from "node:os";
 
 import {
   cmdFolder,
@@ -23,7 +24,7 @@ import {
 import { prepareFeedAddition } from "../operations/feed-folders.mjs";
 import { batchStream, removedSinceLastRun, walk } from "../ingest/run.mjs";
 
-const ROOT = process.env.LFEED_ROUND2_TEST_ROOT || process.env.HOME;
+const ROOT = process.env.LFEED_ROUND2_TEST_ROOT || tmpdir();
 if (!ROOT) throw new Error("LFEED_ROUND2_TEST_ROOT or HOME is required");
 mkdirSync(ROOT, { recursive: true });
 // Feeds refuse linked ancestors; macOS tmpdir() sits under the /var -> /private/var link.
@@ -448,6 +449,7 @@ test("probe B: linked ancestors, link-dot spellings, and create-feeds aliases re
     await cmdFolder(manifestPath, ["create-feeds"], {
       platform: process.platform,
       home: alias,
+      lifecycleLockOptions: { machineLockRoot: join(root, 'lifecycle-locks') },
       onFeedDecision: (event) => createEvents.push(event),
       now: () => new Date("2026-10-06T20:00:00.000Z"),
     });

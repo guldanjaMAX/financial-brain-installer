@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
   existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
-  readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync,
+  readdirSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createProductFixture, seedOwnedEntity } from "../worker/test/product-contract-fixture.mjs";
@@ -286,11 +286,18 @@ for (const [assistant, filename, marker, write] of writers) {
       const bytes = kind === "unrelated" ? "owner instructions\r\n" : `${marker}\n# Old managed guide\n`;
       if (kind === "unrelated") writeFileSync(target, bytes);
       else {
-        if (kind !== "dangling-symlink") writeFileSync(source, bytes);
+        // Junctions exercise the same real link guard without Windows symlink
+        // privileges; read the unchanged body through that link as on POSIX.
+        const junction = process.platform === 'win32' && kind !== 'hard-link';
+        if (kind !== "dangling-symlink") {
+          if (junction) { mkdirSync(source); writeFileSync(join(source, 'body'), bytes); }
+          else writeFileSync(source, bytes);
+        }
         if (kind === "hard-link") linkSync(source, target);
-        else symlinkSync(source, target);
+        else symlinkSync(source, target, junction ? 'junction' : 'file');
       }
       const stat = lstatSync(target);
+      const linkTarget = stat.isSymbolicLink() ? readlinkSync(target) : null;
       assert.ok(kind === "unrelated" || stat.isSymbolicLink() || stat.nlink > 1, "unsafe-file decision receives the intended fixture");
       for (const existingOnly of [false, true]) {
         const result = write(manifest, { ...options, existingOnly });
@@ -298,8 +305,9 @@ for (const [assistant, filename, marker, write] of writers) {
         assert.equal(result.changed, false);
         assert.equal(result.workspace, root);
         assert.equal(lstatSync(target).ino, stat.ino);
+        if (linkTarget !== null) assert.equal(readlinkSync(target), linkTarget, 'refusal preserves the exact link target');
         if (kind === "dangling-symlink") assert.equal(existsSync(source), false);
-        else assert.equal(readFileSync(target, "utf8"), bytes);
+        else assert.equal(readFileSync(process.platform === 'win32' && kind === 'symlink' ? join(target, 'body') : target, "utf8"), bytes);
       }
       rmSync(target);
     }
@@ -1103,9 +1111,12 @@ test("local date guidance preserves legacy current-to-date and fixed-month contr
 test("Codex update requires a safe marker-owned sibling and current wiring proof", t => {
   const { root, manifest } = fixture(t);
   const sibling = join(root, "CLAUDE.md"), agents = join(root, "AGENTS.md"), source = join(root, "sibling-source");
+  const linkedDirectory = join(root, 'sibling-directory');
+  if (process.platform === 'win32') mkdirSync(linkedDirectory);
   writeFileSync(source, `${workspace.CLAUDE_WORKSPACE_MARKER}\n`);
   for (const arm of ["unrelated", "symlink", "hard-link", "unverified", "verified"]) {
-    if (arm === "symlink") symlinkSync(source, sibling);
+    if (arm === "symlink") symlinkSync(process.platform === 'win32' ? linkedDirectory : source, sibling,
+      process.platform === 'win32' ? 'junction' : 'file');
     else if (arm === "hard-link") linkSync(source, sibling);
     else writeFileSync(sibling, arm === "unrelated" ? "Owner instructions\n" : `${workspace.CLAUDE_WORKSPACE_MARKER}\n`);
     assert.ok(lstatSync(sibling), "sibling ownership decision has an input");

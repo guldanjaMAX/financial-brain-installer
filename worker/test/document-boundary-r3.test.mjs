@@ -64,7 +64,10 @@ for (const qualifier of qualifiers) test(`B1: a later qualification keeps the re
   assert.ok(prose(body).includes(qualifier),'the qualification is kept beside the figure');
   assert.ok(prose(body).includes('250 units'),'the figure itself is not dropped');
   assert.ok(body.confidence.percent<90,'never High');
-  assert.ok(body.confidence.basis.some(reason => reason.includes(qualifier)),'the reason names the doubt');
+  // The reason names the record by citation number; the qualification itself
+  // is in the quoted source text above (explanation text quotes no source).
+  assert.ok(body.confidence.basis.some(reason => /^Cited record [123] has (?:another sentence|\d+ other sentences) that (?:was|were) not checked against the claim/.test(reason)),'the reason names the doubt');
+  assert.ok(!body.confidence.basis.some(reason => reason.includes(qualifier)),'the reason does not quote the source');
 });
 test('B1: an uncited record disputing the same field keeps the answer below High', () => {
   for (const [label, text, ts] of [['older dispute','The capacity figure of 250 units is disputed by the vendor.','2026-11-01'],['newer figure','The capacity is 300 units.','2026-11-12']]) {
@@ -73,7 +76,8 @@ test('B1: an uncited record disputing the same field keeps the answer below High
     contract(body);
     assert.ok(body.confidence.percent<90,label);
     assert.ok(prose(body).includes(text),`${label}: the disputing record is shown`);
-    assert.ok(body.confidence.basis.some(reason => reason.includes('Vendor letter')),`${label}: the reason names the doubt`);
+    assert.ok(body.confidence.basis.some(reason => reason.startsWith(`Cited record 4 (${ts}) has a sentence on the same subject`)),`${label}: the reason names the doubt`);
+    assert.ok(!body.confidence.basis.some(reason => reason.includes('Vendor letter') || reason.includes(text)),`${label}: the reason quotes no title or source text`);
   }
 });
 test('B1: the real route keeps disproven, retracted and fictional context below High', async () => {

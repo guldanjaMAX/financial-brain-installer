@@ -150,6 +150,7 @@ const collect = async (it) => { const out = []; for await (const v of it) out.pu
       BRAIN_GMAIL_POLICY_MODE: "resume-progress",
       BRAIN_GMAIL_POLICY_EVIDENCE: evidencePath,
       BRAIN_GMAIL_POLICY_USER_ROOT: userRoot,
+      BRAIN_LIFECYCLE_LOCK_ROOT: join(directory, 'lifecycle-locks'),
     });
     const beforeState = readFileSync(statePath, "utf8");
     const result = spawnSync(process.execPath, [

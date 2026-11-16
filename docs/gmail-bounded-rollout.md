@@ -5,6 +5,13 @@ Use the exact integrated build and the existing protected credential wrapper.
 Do not paste credentials or private inventory into commands or receipts.
 `MANIFEST` below means the operator's existing private manifest path.
 
+New-message acceptance runs before the historical accepted-part audit. A
+settled history window can advance while that audit is deferred, but source
+status and complete-sweep evidence remain incomplete. The audit retains its
+database identity, restore-point binding and checkpoint; missing historical
+parts become durable logical-message retries. Freshly read-back messages are
+excluded from that run's historical audit. No removal authority changes.
+
 1. Stop the scheduled job first through the supported scheduler control,
    record/read back its disabled or absent state, and confirm the existing run
    has exited. Stop other unattended source writers too. A stopped schedule

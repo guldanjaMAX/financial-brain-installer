@@ -81,7 +81,10 @@ for (const qualifier of afterClaim) test(`B1: an unconsumed later sentence keeps
     assert.ok(prose(body).includes(qualifier),'the qualification is quoted beside the figure');
     assert.ok(prose(body).includes('250 units'),'the figure itself is not dropped');
     assert.ok(body.confidence.percent<90,'never High');
-    assert.ok(body.confidence.basis.some(reason => reason.includes(qualifier)),'the reason names the unchecked sentence');
+    // The reason names the record by citation number; the sentence itself is
+    // in the quoted source text (explanation text quotes no source).
+    assert.ok(body.confidence.basis.some(reason => /^Cited record [123] has (?:another sentence|\d+ other sentences) that (?:was|were) not checked against the claim/.test(reason)),'the reason names the unchecked sentence');
+    assert.ok(!body.confidence.basis.some(reason => reason.includes(qualifier)),'the reason does not quote the source');
   }
 });
 for (const qualifier of beforeClaim) test(`B1: an unconsumed earlier sentence keeps the record's context below High: ${qualifier}`, () => {
@@ -108,7 +111,9 @@ test('B1: a title that is not plain keeps the title attribution below High', () 
     assert.notEqual(prose(body),capacityDraft,title);
     assert.ok(prose(body).includes(`the record "${title} 1" says:`),`${title}: the title is shown`);
     assert.ok(body.confidence.percent<90,title);
-    assert.ok(body.confidence.basis.some(reason => reason.includes(title)),`${title}: the reason names the title`);
+    // The title is shown in the attribution above; the reason names its record.
+    assert.ok(body.confidence.basis.some(reason => /^The title of cited record [123] has (?:a word that was|words that were) not checked against the claim\.$/.test(reason)),`${title}: the reason names the title`);
+    assert.ok(!body.confidence.basis.some(reason => reason.includes(title)),`${title}: the reason does not quote the title`);
   }
   // Neutral record labels stay High. Question wording alone no longer
   // validates a non-neutral title, even when it explicitly names that record.
@@ -156,7 +161,8 @@ test('F2: uncited same-day, undated and older field-matching records are shown b
     contract(body);
     assert.ok(body.confidence.percent<90,label);
     assert.ok(prose(body).includes(record.snippet),`${label}: the uncited record is shown`);
-    assert.ok(body.confidence.basis.some(reason => reason.includes('Vendor notice')),`${label}: the reason names it`);
+    assert.ok(body.confidence.basis.some(reason => reason.startsWith('Cited record 4 (')),`${label}: the reason names it`);
+    assert.ok(!body.confidence.basis.some(reason => reason.includes('Vendor notice')),`${label}: the reason does not quote its title`);
   }
   // An older record sharing two and at least half of the claim's field words.
   const fee = 'The monthly storage fee is $1,240.';

@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { handleMoneyQuery } from '../src/lib/money-query.js';
 import { handleMcp } from '../src/lib/mcp-endpoint.js';
@@ -10,8 +13,7 @@ import { handleMcp } from '../src/lib/mcp-endpoint.js';
 // Product errors are observations; an incomplete run or a broken oracle fails
 // the test. No product classifier, SQL result, or clean-view helper supplies an
 // expected answer. Only the synthetic book's independently declared events do.
-const REPORT = new URL('../../.lane-scratch/finder-tools-payouts-refunds-1112.md', import.meta.url);
-mkdirSync(new URL('.', REPORT), { recursive: true });
+const REPORT = pathToFileURL(join(mkdtempSync(join(tmpdir(), 'finder-tools-payouts-refunds-')), 'REPORT.md'));
 const AT = '2026-11-01T12:00:00Z';
 const FROM = '2026-10-01', TO = '2026-10-31';
 const migrations = readdirSync(new URL('../../migrations/d1/', import.meta.url))

@@ -56,10 +56,13 @@ export function fixture({ approve = true, answerMs = 7000, verifierMs = 4000,
         const stmt = {
           bind() { return stmt; },
           async all() {
+            if (/verified-correction-search/.test(sql)) return { results: [] };
             if (/FROM sources s/.test(sql) && /source_inventory/.test(sql)) {
               counts.coverage++;
               return clock.operation('coverage', 500, { results: [] });
             }
+            // ef6a47b13: correction-seed lookup is separate from the measured keyword attempt.
+            if (/verified-correction-search/.test(sql)) return { results: [] };
             if (/chunks_fts MATCH/.test(sql)) {
               counts.keyword++;
               return clock.operation('keyword', 1200, { results: rows }, keywordFails);

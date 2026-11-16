@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
-  chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, statSync,
+  chmodSync, existsSync, mkdtempSync, realpathSync, readFileSync, readdirSync, statSync,
   renameSync, rmSync, writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -51,7 +51,7 @@ function readback(path) {
 }
 
 function fixture(t) {
-  const directory = mkdtempSync(join(tmpdir(), "brain-recovery-multipart-"));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-recovery-multipart-")));
   chmodSync(directory, 0o700);
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const artifacts = join(directory, "parts");

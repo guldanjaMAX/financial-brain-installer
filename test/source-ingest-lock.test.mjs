@@ -1259,6 +1259,9 @@ if (process.platform !== "win32") {
     environment.USERPROFILE = f.home;
     environment.NO_COLOR = "1";
     environment.BRAIN_GOOGLE_TOKEN_STORE = "file";
+    environment.BRAIN_LIFECYCLE_LOCK_ROOT = join(f.root, 'lifecycle-locks');
+    environment.BRAIN_NO_WRANGLER_LOGIN = "1";
+    environment.BRAIN_TEST_CHAIN = "1";
     const result = spawnSync(
       process.execPath,
       [CLI, "ingest", f.manifestPath, "--from", "gmail"],

@@ -37,7 +37,7 @@ import { fetchBrainWithAdminKey } from "./components/brain-http.mjs";
 import { answerSetupOf, resolvedAnswerModels } from "./operations/answer-setup.mjs";
 import { safeAnswerErrorText } from "./worker/src/lib/answer-render.js";
 import { ownerConfidenceLine } from "./worker/src/lib/confidence.js";
-import { documentAnswerHasRefusal, documentDateLabel, documentRecordTitle, markerSafe } from "./worker/src/lib/document-answer.js";
+import { documentAnswerHasRefusal, documentDateLabel, documentRecordTitle, documentResultTitle, markerSafe } from "./worker/src/lib/document-answer.js";
 
 const PASS = "pass";
 const FAIL = "fail";
@@ -175,13 +175,15 @@ function documentBoundaryDiagnostic(payload, cited = []) {
   const allowed = [
     "Newer retrieved records were not cited in the draft:",
     "Retrieved records that are not provably older, or that name the same subject, were not cited in the draft:",
-    ...docs.map((row, i) => `"${markerSafe(row.title)}" (${dateLabel(row)}) [${cited[i]}]; its statement is included above.`),
+    ...docs.map((row, i) => `"${markerSafe(documentResultTitle(row.title))}" (${dateLabel(row)}) [${cited[i]}]; its statement is included above.`),
   ];
   const flatText = value => String(value || "").replace(/\s+/g, " ").trim();
   for (const match of prose.matchAll(/says: ("(?:\\.|[^"\\])*") \[(\d+)\]/g)) {
     const n = Number(match[2]), row = payload.results[n - 1];
     if (!row || !cited.includes(n)) continue;
-    const attribution = `As of ${dateLabel(row)}, the record "${markerSafe(documentRecordTitle({ ...row, title: typeof row.title === "string" ? row.title.slice(0, 140) : row.title }))}" says: ${match[1]} [${n}].`;
+    // The Worker's own title rule (documentResultTitle inside
+    // documentRecordTitle): the whole stored title, "untitled" when empty.
+    const attribution = `As of ${dateLabel(row)}, the record "${markerSafe(documentRecordTitle(row))}" says: ${match[1]} [${n}].`;
     allowed.push(attribution, "Likely relevant: " + attribution);
     // A record read past its 500-chunk page keeps each out-of-page retrieval
     // hit as its own line; it is admitted only as one of that row's spans.
@@ -323,7 +325,7 @@ export function answerResponseContractDiagnostic(payload) {
     for (const citation of payload.citations) {
       const row = payload.results[citation?.n - 1];
       if (!row || !Number.isInteger(citation.n) || cited.has(citation.n) ||
-          citation.title !== String(row.title || "untitled").slice(0, 140) || citation.source !== String(row.source || "?")) {
+          citation.title !== documentResultTitle(row.title) || citation.source !== String(row.source || "?")) {
         return "the Worker's document citation did not identify its numbered result";
       }
       cited.add(citation.n);
@@ -380,7 +382,7 @@ export function answerResponseContractDiagnostic(payload) {
       return "the Worker's factual answer and citation evidence did not agree";
     }
     const result = payload.results[citation.n - 1];
-    const resultTitle = String(result.title || "untitled").slice(0, 140);
+    const resultTitle = documentResultTitle(result.title);
     const resultSource = String(result.source || "?");
     if (citation.title !== resultTitle || citation.source !== resultSource) {
       return "the Worker's citation did not identify its numbered candidate result";
@@ -422,7 +424,7 @@ function cleanConfiguredWithhold(payload, expectedModel) {
     !Object.hasOwn(payload, "answer_error") &&
     payload.status !== "search_unavailable" &&
     payload.results.length > 0 &&
-    !isRetrievalFailureDegradation(payload.degraded);
+    !isRetrievalFailureDegradation(payload.degraded, payload.degraded_reason);
 }
 
 // A deterministic bank reading is not a document/model probe. Continue to a
@@ -856,15 +858,16 @@ function retryNote(retries, outcome) {
  * detail text either way, so the reader can tell which one they have.
  *
  * `test/acceptance-verdict.test.mjs` pins these keys against the Worker source,
- * so a seventh token cannot silently become either a failure or a benign state.
+ * so another token cannot silently become either a failure or a benign state.
  */
 export const RETRIEVAL_FAILURE_DEGRADED = Object.freeze({
   vector: "the vector modality did not serve this request",
   retrieval: "both keyword and vector retrieval failed",
 });
 
-/** Degraded tokens that are expected states, not retrieval failures. */
+/** Expected states; bounded-keyword additionally requires its completion reason. */
 export const EXPECTED_DEGRADED = Object.freeze({
+  "bounded-keyword": "bounded keyword recovery completed with partial search coverage; its reason must prove completion",
   fts: "keyword search was unavailable; the semantic modality still ran",
   "scoped-vector": "a document or zone scope was applied, so the unscoped semantic index was deliberately not queried",
   "no-embedding": "the embedding model did not answer, so this request was keyword-only",
@@ -891,8 +894,11 @@ export function degradedToken(value) {
  * change, and the honest response to a Worker change is a failing pin test in
  * development, not a FAIL invented in front of a customer during an install.
  */
-export function isRetrievalFailureDegradation(value) {
+export function isRetrievalFailureDegradation(value, reason) {
   const token = degradedToken(value);
+  // This token covers both a completed partial reading and failed recovery.
+  // Without exact completion proof, acceptance must not certify retrieval.
+  if (token === "bounded-keyword") return reason !== "bounded-keyword-recovery";
   return token !== null && DEGRADED_CLASSIFICATION[token] === "failure";
 }
 
@@ -1235,11 +1241,11 @@ export class Acceptance {
         const n = r.json?.results?.length || 0;
         const degraded = degradedToken(r.json?.degraded);
         return {
-          failing: n === 0 || isRetrievalFailureDegradation(degraded),
+          failing: n === 0 || isRetrievalFailureDegradation(degraded, r.json?.degraded_reason),
           value: {
             n,
             degraded,
-            failure: isRetrievalFailureDegradation(degraded),
+            failure: isRetrievalFailureDegradation(degraded, r.json?.degraded_reason),
             why: workerDegradationDetail(r.json),
             status: workerStatusToken(r.json),
           },
@@ -1322,7 +1328,7 @@ export class Acceptance {
         const r = await this.post("/api/rag/think", { q, limit: 5 });
         // Preserve the existing transient-retrieval retry classification and
         // the shared tier budget for every saved answer probe.
-        return { failing: isRetrievalFailureDegradation(r.json?.degraded), value: r };
+        return { failing: isRetrievalFailureDegradation(r.json?.degraded, r.json?.degraded_reason), value: r };
       });
       const response = attempt.value;
       const diagnostic = response.ok ? answerUnavailableDiagnostic(response.json) : null;
@@ -1354,11 +1360,13 @@ export class Acceptance {
     thinkAttempt ??= ledgerAttempt;
     if (!thinkAttempt) return;
     const think = thinkAttempt.value;
-    if (isRetrievalFailureDegradation(think.json?.degraded)) {
+    if (isRetrievalFailureDegradation(think.json?.degraded, think.json?.degraded_reason)) {
       const why = workerDegradationDetail(think.json);
       // `retrieval` means NEITHER modality ran. Calling that "keyword-only"
       // would describe a fallback that did not happen.
-      const headline = degradedToken(think.json?.degraded) === "retrieval"
+      const headline = degradedToken(think.json?.degraded) === "bounded-keyword"
+        ? "the answer path did not complete bounded keyword recovery"
+        : degradedToken(think.json?.degraded) === "retrieval"
         ? "the answer path completed no retrieval at all"
         : "the answer path degraded to keyword-only retrieval";
       this.record(

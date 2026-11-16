@@ -162,13 +162,13 @@ test('R1B failed wake keeps the laptop overdue warning and failure receipt',asyn
 });
 
 test('R1B CLI dispatcher reads synthetic file-backed status without host credentials',async()=>{
-  const {mkdtempSync,mkdirSync,writeFileSync,readFileSync}=await import('node:fs');
+  const {mkdtempSync,realpathSync,mkdirSync,writeFileSync,readFileSync}=await import('node:fs');
   const {join,resolve}=await import('node:path');
   const {randomBytes}=await import('node:crypto');
   const {spawnSync}=await import('node:child_process');
   const {pathToFileURL}=await import('node:url');
   const {tmpdir}=await import('node:os');
-  const root=mkdtempSync(join(process.env.TMPDIR || tmpdir(),'bank-status-'));
+  const root=realpathSync.native(mkdtempSync(join(tmpdir(),'bank-status-')));
   mkdirSync(join(root,'bin'));
   const launchctl=join(root,'bin','launchctl');
   writeFileSync(launchctl,'#!/bin/sh\nexit 99\n',{mode:0o700});

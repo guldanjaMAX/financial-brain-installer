@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Test-only tooling. Live subcommands are for separately authorized MAIN work.
-import { readFileSync,writeFileSync,openSync,closeSync,fsyncSync,renameSync,unlinkSync,lstatSync,existsSync } from 'node:fs';
+import { readFileSync,writeFileSync,openSync,closeSync,fsyncSync,unlinkSync,lstatSync,existsSync } from 'node:fs';
 import { dirname,resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
@@ -12,6 +12,7 @@ import { buildCases,evaluate } from './evaluator.mjs';
 import { loadProviderCredentials,assertQuickBooksSourceBinding } from '../../connectors/provider-oauth.mjs';
 import { readAdminKeyFile } from '../../operations/admin-key-file.mjs';
 import { syncDirectory } from '../../migration/state-file.mjs';
+import { replaceFileWithRetrySync } from '../../operations/rename-retry.mjs';
 const check=(ok,code)=>{if(!ok)throw Error(`ORACLE_CLI_${code}`);};
 const fixture=JSON.parse(readFileSync(new URL('./fixtures/golden-company.json',import.meta.url)));
 const templates=JSON.parse(readFileSync(new URL('./fixtures/seed-requests.json',import.meta.url)));
@@ -35,7 +36,12 @@ export function privateJournal(path,{platform=process.platform}={}){
  writeJournal:async value=>{
   if(existsSync(path))privatePath(path,true);
   const temporary=`${path}.${randomBytes(8).toString('hex')}.tmp`;
-  writeReceipt(temporary,value);renameSync(temporary,path);
+  writeReceipt(temporary,value);
+  // A scanner may still hold a freshly flushed journal on Windows. Every
+  // retry retains the private-path checks and the final exact readback.
+  replaceFileWithRetrySync(temporary,path,{platform,revalidate:()=>{
+   privatePath(temporary,true);if(existsSync(path))privatePath(path,true);
+  }});
   syncDirectory(dirname(path),{platform});
   check(JSON.stringify(readJson(privatePath(path,true)))===JSON.stringify(value),'JOURNAL_READBACK');
  },close:()=>{closeSync(lock);unlinkSync(`${path}.lock`);}};

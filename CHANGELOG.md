@@ -6,6 +6,13 @@ the brain, not for whoever built it: what changed for them, and what to check.
 
 ## 0.4.28 (2026-11-15)
 
+- **New Gmail keeps arriving during a saved-progress check.** A deferred
+  restore check no longer holds a settled mail window. Source status stays
+  incomplete until that check finishes; check status and pending retries
+  before relying on full mailbox coverage.
+- Setup and update checks recognize a completed bounded search as partial
+  coverage and retry a failed recovery. Check the reported coverage gaps before
+  treating a partial search as complete.
 - **Drive and Gmail sync finish and resume safely.** Refreshes save confirmed
   progress and retry unfinished work after an interruption. Routine sync never
   deletes your stored records; removal decisions wait for a separate review.

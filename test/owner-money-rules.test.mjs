@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -13,7 +13,9 @@ const source = file => readFileSync(join(root, file), 'utf8');
 const workspace = await load('operations/claude-workspace.mjs');
 const cli = await load('brain.mjs');
 const money = await load('worker/src/lib/money-query-contract.js');
-const scratch = join(tmpdir(), 'brain-owner-rules-tests');
+// Match the ownership guard's canonical path even when TEMP uses an 8.3 alias.
+const temporaryProfile = realpathSync.native(tmpdir());
+const scratch = join(temporaryProfile, 'brain-owner-rules-tests');
 mkdirSync(scratch, { recursive: true });
 function fixture(t) {
   const folder = mkdtempSync(join(scratch, 'home-fixture-'));
@@ -90,7 +92,7 @@ for (const platformName of ['darwin', 'win32', 'linux']) for (const assistant of
       [assistant === 'codex' ? 'writeCodexWorkspaceGuide' : 'writeClaudeWorkspaceGuide']: (path, opts) => {
         decisions++;
         return workspace[assistant === 'codex' ? 'writeCodexWorkspaceGuide' : 'writeClaudeWorkspaceGuide'](path, {
-          ...opts, ownership: { platform: process.platform, profile: tmpdir(), windowsAttributesSafe: paths => { assert.ok(paths.length > 0, 'ownership boundary reached'); return true; } },
+          ...opts, ownership: { platform: process.platform, profile: temporaryProfile, windowsAttributesSafe: paths => { assert.ok(paths.length > 0, 'ownership boundary reached'); return true; } },
         });
       },
     };
@@ -123,7 +125,7 @@ test('Windows update preserves damaged and unrelated guides after reaching owner
       platformName: 'win32', reportInfo() {}, reportWarning() {},
       writeClaudeWorkspaceGuide: (path, opts) => {
         decisions++;
-        return workspace.writeClaudeWorkspaceGuide(path, { ...opts, ownership: { platform: process.platform, profile: tmpdir(), windowsAttributesSafe: paths => { assert.ok(paths.length > 0, 'ownership boundary reached'); return true; } } });
+        return workspace.writeClaudeWorkspaceGuide(path, { ...opts, ownership: { platform: process.platform, profile: temporaryProfile, windowsAttributesSafe: paths => { assert.ok(paths.length > 0, 'ownership boundary reached'); return true; } } });
       },
     });
     assert.equal(decisions, 1, 'real writer reached, no Windows short circuit');

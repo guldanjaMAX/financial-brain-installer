@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import worker from '../src/index.js';
 import { searchKeyword, searchVector } from '../src/lib/store-d1.js';
@@ -1017,7 +1018,7 @@ test(`R5 matrix DRIVE-R4: actual rollback ${quiet ? 'restores a matched disposab
   const { backup } = await import('node:sqlite');
   const ingest = await import('../../ingest/run.mjs');
   const f = fixture(); t.after(() => { t.diagnostic(workCounts(f)); f.db.close(); });
-  const directory = mkdtempSync(join(process.env.HOME, 'r5-rollback-'));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), 'r5-rollback-')));
   const manifestPath = join(directory,'manifest.json'), checkpoint = join(directory,'checkpoint.json');
   const snapshot = join(directory,'before.sqlite'), savedCheckpoint = join(directory,'before-checkpoint.json');
   const restoredPath = join(directory,'restored.sqlite');
@@ -1051,6 +1052,7 @@ test(`R5 matrix DRIVE-R4: actual rollback ${quiet ? 'restores a matched disposab
   let restored;
   const options = {
     confirmed:true, launchctl, resolveAccount:async()=>({id:'fixture-account'}),
+    lifecycleLockOptions:{machineLockRoot:join(directory,'lifecycle-locks')},
     cmdDeploy:async(_path,config)=>{ assert.equal(config.pauseVectorDrainForUpgrade,true); paused = true; },
     cmdHealth:async(_path,config)=>{ assert.equal(paused,true); assert.equal(config.expectDrainMode,'paused-for-upgrade'); },
     now:()=>clock, waitForVectorDrainQuiescence:async ms=>{clock+=ms;},

@@ -214,8 +214,15 @@ $mf = @()
 if (-not $nodeSupported) {
   Warn "the saved Brain location check was skipped for now. Install or select Node 22 or newer, then run this check again"
 } else {
-  $selectedManifest = @(& $nodeExecutable $pointerHelper --preflight-locator 2>$null)
-  $pointerStatus = $LASTEXITCODE
+  if (Test-Path -LiteralPath $pointerHelper -PathType Leaf) {
+    $selectedManifest = @(& $nodeExecutable $pointerHelper --preflight-locator 2>$null)
+    $pointerStatus = $LASTEXITCODE
+  } else {
+    # Run on its own (before the package is installed): no saved pointer can exist yet, so search like a first install.
+    $selectedManifest = @()
+    $pointerStatus = 2
+    Warn "running without the installed package, so the saved Brain location was not read; searched your home folder instead"
+  }
   if ($pointerStatus -eq 0 -and $selectedManifest.Count -eq 1) {
     $mf = @([pscustomobject]@{ FullName = $selectedManifest[0] })
     Ok "using the saved installed manifest: $($mf[0].FullName)"

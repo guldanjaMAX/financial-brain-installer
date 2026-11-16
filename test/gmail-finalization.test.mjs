@@ -7,6 +7,8 @@ import { cmdIngestRemote, cmdLoad, describeLoadResult, credentialScannerFingerpr
 import { gmailPolicyFingerprint } from "../connectors/gmail.mjs";
 import * as ingest from "../ingest/run.mjs";
 import { retryIngestFinalization } from "../operations/ingest-finalization-retry.mjs";
+import { createHash } from "node:crypto";
+import { chunkText } from "../worker/src/lib/store.js";
 
 const finalizationError = "ingest finalization failed; retry this document";
 const cpuError = "D1_ERROR: Database reset because it exceeded its CPU time limit";
@@ -45,13 +47,29 @@ async function fixture(run, source = "gmail") {
   const originalLog = console.log;
   const originalWarn = console.warn;
   const logs = [];
+  const remoteParts = new Map();
   console.log = console.warn = (...args) => logs.push(args.join(" "));
   globalThis.fetch = async (url, options) => {
     const path = new URL(url).pathname;
     if (path === "/api/admin/brain/ingest/batch") {
       const docs = JSON.parse(options.body).docs;
       f.calls.push(docs.map((doc) => doc.source_id));
-      return f.respond(docs);
+      const response = await f.respond(docs);
+      const { results } = await response.clone().json();
+      for (const result of results || []) if (["created", "updated", "unchanged"].includes(result.status)) {
+        const doc = docs.find(doc => doc.source_id === result.source_id);
+        if (doc) remoteParts.set(doc.source_id, doc);
+      }
+      return response;
+    }
+    if (path === "/api/admin/brain/ingest-part-proof") {
+      const { source, source_ids } = JSON.parse(options.body);
+      return json({ source, database: { instance: "1".repeat(32), nonce: "2".repeat(32), generation: remoteParts.size },
+        geometry: { size: 1500, overlap: 300 }, parts: source_ids.flatMap(source_id => {
+          const doc = remoteParts.get(source_id);
+          return doc ? [{ source_id, content_hash: createHash("sha256").update(`chunk-v1:1500:300\0${doc.content}`).digest("hex"),
+            chunk_count: chunkText(doc.content).length }] : [];
+        }) });
     }
     if (path === "/api/admin/brain/documents") return json({ vector_backlog: { pending: 1 } });
     f.forgotten++;
@@ -343,6 +361,11 @@ test("full sweeps deduplicate retried ids and require current policy before inge
 
 test("stored done markers cannot shortcut a held retry on a sweep or incremental pass", async () => {
   for (const sweep of [false, true]) await fixture(async (f) => {
+    // Earn the exact part receipt first: an invented done marker without one
+    // would be rejected by readback and mask a broken held-retry guard.
+    f.ids = ["stubborn"];
+    assert.equal((await f.once()).error, null);
+    f.calls.length = 0;
     const state = f.state();
     f.setState({ ...state, history_id: sweep ? undefined : state.history_id,
       done: { "gmail:stubborn": "revision" }, gmail_retry: { "gmail:stubborn": true } });
@@ -385,6 +408,15 @@ test("retry helper independently enforces its lease and non-transient error boun
     send: async () => { terminalCalls++; throw terminal; },
   }), (error) => error === terminal);
   assert.equal(terminalCalls, 1);
+});
+
+test("retry exhaustion reports failure before current-part readback can mask it", async () => {
+  const result = await retryIngestFinalization({
+    docs: [{ source_id: "synthetic-entry" }], sleep: async () => {},
+    validate: body => body.results,
+    send: async () => ({ res: { ok: false, status: 503 }, raw: "{}" }),
+  });
+  assert.equal(JSON.parse(result.raw).results[0].status, "failed");
 });
 
 test("retry helper validates every pending member before trusting a successful response", async () => {

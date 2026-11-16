@@ -76,7 +76,10 @@ async function runLoad(manifestPath, options) {
   let error = null;
   let result = null;
   try {
-    result = await cmdLoad(manifestPath, options);
+    result = await cmdLoad(manifestPath, {
+      lifecycleLockOptions: { machineLockRoot: join(sandbox, 'lifecycle-locks') },
+      ...options,
+    });
   } catch (e) {
     error = e;
   } finally {

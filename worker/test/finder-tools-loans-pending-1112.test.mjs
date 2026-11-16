@@ -1,15 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { handleMcp } from '../src/lib/mcp-endpoint.js';
 import { handleMoneyQuery } from '../src/lib/money-query.js';
 
 // This is a finder, not a golden set for current product behavior. A wrong
 // figure is recorded as data; only a broken/incomplete finder fails TAP.
 // No product classifier, clean-view SQL, or product date helper is an oracle.
-const REPORT = new URL('../../.lane-scratch/finder-tools-loans-pending-1112.md', import.meta.url);
-mkdirSync(new URL('.', REPORT), { recursive: true });
+const REPORT = pathToFileURL(join(mkdtempSync(join(tmpdir(), 'finder-tools-loans-pending-')), 'REPORT.md'));
 const STAMP = '2026-01-01T00:00:00Z';
 const migrations = readdirSync(new URL('../../migrations/d1/', import.meta.url))
   .filter(name => name.endsWith('.sql')).sort()

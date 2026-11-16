@@ -10,6 +10,8 @@ import os from "node:os";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { registerHooks, syncBuiltinESMExports } from "node:module";
+import { createHash } from "node:crypto";
+import { chunkText } from "../../worker/src/lib/store.js";
 
 const scenario = String(process.env.BRAIN_INGEST_EXIT_TEST || "");
 if (!scenario) throw new Error("BRAIN_INGEST_EXIT_TEST is required");
@@ -73,6 +75,7 @@ const json = (body, status = 200) => new Response(JSON.stringify(body), {
 const requestUrl = (input) => new URL(
   typeof input === "string" || input instanceof URL ? String(input) : input.url
 );
+const remoteParts = new Map();
 
 globalThis.fetch = async (input, options = {}) => {
   const url = requestUrl(input);
@@ -155,6 +158,7 @@ globalThis.fetch = async (input, options = {}) => {
   if (url.hostname === "fixture.invalid" && url.pathname === "/api/admin/brain/ingest/batch") {
     const docs = JSON.parse(String(options.body || "{}")).docs || [];
     if (scenario === 'drive-healthy') {
+      for (const doc of docs) remoteParts.set(doc.source_id, doc);
       console.log('TEST_REMOTE_WRITE_ACCEPTED');
       return json({ created:docs.length, updated:0, unchanged:0, refused:0, failed:0,
         results:docs.map(doc=>({source_id:doc.source_id,status:'created'})) });
@@ -170,6 +174,16 @@ globalThis.fetch = async (input, options = {}) => {
         ? { source_id: doc.source_id, status: "refused", labels: ["synthetic_test_label"] }
         : { source_id: doc.source_id, status: "failed", error: "synthetic store failure" }),
     });
+  }
+
+  if (url.hostname === 'fixture.invalid' && url.pathname === '/api/admin/brain/ingest-part-proof') {
+    const { source, source_ids } = JSON.parse(String(options.body || '{}'));
+    return json({ source, database: { instance: '1'.repeat(32), nonce: '2'.repeat(32), generation: remoteParts.size },
+      geometry: { size: 1500, overlap: 300 }, parts: source_ids.flatMap(id => {
+        const doc = remoteParts.get(id);
+        return doc ? [{ source_id: id, content_hash: createHash('sha256').update(`chunk-v1:1500:300\0${doc.content}`).digest('hex'),
+          chunk_count: chunkText(doc.content).length }] : [];
+      }) });
   }
 
   if (url.hostname === 'fixture.invalid' && url.pathname === '/api/admin/brain/drive-family') {

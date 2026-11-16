@@ -18,17 +18,22 @@ export function ingestPlanStore() {
       bind: (...values) => shape(values),
       all: async () => ({ results: db.prepare(sql).all(...params) }),
       first: async () => db.prepare(sql).get(...params) ?? null,
-      run: async () => ({ results: db.prepare(sql).all(...params), success: true }),
+      run: async () => {
+        if (/\bDELETE\b/i.test(sql)) calls.deletes++;
+        return { results: db.prepare(sql).all(...params), success: true };
+      },
       sql, params,
     });
     return shape();
   };
-  const calls = { preview: 0, apply: 0, batches: 0, inventory: 0 };
+  const calls = { preview: 0, apply: 0, batches: 0, deletes: 0, inventory: 0 };
   let beforeBatch = null;
   const env = { STORAGE: "d1", INGEST_VERSION: { id: "fixture-runtime-one" }, DB: {
     prepare,
     batch: async (statements) => {
       calls.batches++;
+      // Index-maintenance batches are not authorization to delete source rows.
+      calls.deletes += statements.filter(({ sql }) => /\bDELETE\b/i.test(sql)).length;
       beforeBatch?.();
       db.exec("BEGIN");
       try {
