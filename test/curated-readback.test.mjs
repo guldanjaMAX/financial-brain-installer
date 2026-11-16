@@ -84,6 +84,7 @@ function fixture(t, count = 3, rawDrive = false) {
   };
   const options = {
     mode: "sync", home, planPath: path, planDirectory: root, fetch,
+    lifecycleLockOptions: { machineLockRoot: join(root, 'lifecycle-locks') },
     resolveTarget: async () => ({ baseUrl: "https://fixture.invalid", backend: "cloudflare_d1",
       adminKey: readFileSync(join(root, ".brain-admin-key"), "utf8") }),
   };

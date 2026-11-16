@@ -653,6 +653,9 @@ test("real rollback leaves daily imports paused, reports recovery, and a healthy
     try {
       rollback = await cmdRollback(manifestPath, "fixture-bookmark", {
         confirmed: true,
+        // Preserve this scheduler-focused fixture's independent rollback lease
+        // domain, but never acquire it in the host's real ProgramData directory.
+        lifecycleLockOptions: { machineLockRoot: join(dirname(manifestPath), 'rollback-machine-locks') },
         resolveAccount: async () => ({ id: "1".repeat(32) }),
         cf: async (path) => path.endsWith("/info")
           ? { vectorCount: 0, processedUpToMutation: null } : { restored: true },

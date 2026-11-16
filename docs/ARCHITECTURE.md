@@ -436,8 +436,12 @@ feed. The shared bounded recheck binds its continuation to the current database
 instance, mutation generation, random nonce, policy and exact acceptance map.
 Marker or acceptance-set drift restarts from the earliest unconfirmed entry.
 An unfinished recheck keeps coverage incomplete; a missing part atomically
-invalidates acceptance and saves an exact retry identity before cursor work.
-Gmail re-enrolls affected saved-window entries in original order. Drive retains
+invalidates acceptance and saves an exact retry identity before cursor settlement.
+Gmail admits and accepts current-window mail before the historical recheck,
+excluding receipts freshly verified in that run. The recheck uses the remaining
+deadline without a 97-entry completion ceiling. Its durable coverage hold does
+not pin a settled history window; missing historical parts and unproved legacy
+acceptance survive as exact retries for later admission. Drive retains
 a separate recovery queue through page advancement and quiet later feeds.
 Legacy page prefixes without exact proof rewind to their first unconfirmed file.
 Legacy receipts without exact proof replay through the normal writer. Missing active chunks

@@ -288,6 +288,7 @@ async function quietly(run) {
 
 async function update(brain) {
   return quietly(() => cmdUpdate(brain.manifestPath, {
+    lifecycleLockOptions: { machineLockRoot: join(brain.sandbox, 'machine-locks') },
     discoverInstalledManifest: () => ({ path: brain.manifestPath, source: "remembered" }),
     readUpdateBacklog,
     updateBacklogOptions: brain.upgradeOptions.updateBacklogOptions,
@@ -304,6 +305,7 @@ async function update(brain) {
 async function rollback(brain) {
   return quietly(() => cmdRollback(brain.manifestPath, BOOKMARK, {
     confirmed: true,
+    lifecycleLockOptions: { machineLockRoot: join(brain.sandbox, 'machine-locks') },
     resolveAccount: brain.upgradeOptions.resolveAccount,
     cf: brain.cf,
     d1Query: brain.d1Query,
@@ -418,6 +420,7 @@ test("a same-version update that stopped inside its pause window resumes on the 
 
 async function doctorRepair(brain) {
   return quietly(() => cmdDoctorRepair(brain.manifestPath, {
+    lifecycleLockOptions: { machineLockRoot: join(brain.sandbox, 'machine-locks') },
     confirmed: true,
     diagnoseOptions: {
       http: brain.http,
@@ -486,6 +489,7 @@ test("a paused same-version queue without bootstrap-v2 proof reaches custody and
     brain.reads.backlog = 0;
     brain.events.length = 0;
     const forced = await quietly(() => cmdUpdate(brain.manifestPath, {
+      lifecycleLockOptions: { machineLockRoot: join(brain.sandbox, 'machine-locks') },
       discoverInstalledManifest: () => ({ path: brain.manifestPath, source: "remembered" }),
       readUpdateBacklog,
       updateBacklogOptions: brain.upgradeOptions.updateBacklogOptions,
@@ -523,6 +527,7 @@ test("a paused Worker newer than this CLI is not resumed, even when the manifest
       return new Response(JSON.stringify({ ...body, version: newer }), { status: 200 });
     };
     const run = await quietly(() => cmdUpdate(brain.manifestPath, {
+      lifecycleLockOptions: { machineLockRoot: join(brain.sandbox, 'machine-locks') },
       discoverInstalledManifest: () => ({ path: brain.manifestPath, source: "remembered" }),
       readUpdateBacklog,
       updateBacklogOptions: { ...brain.upgradeOptions.updateBacklogOptions, http: newerHttp },

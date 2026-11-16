@@ -11,6 +11,12 @@ const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const readText = (path) => readFileSync(path, "utf8").replace(/\r\n/g, "\n");
 const ci = readText(join(root, ".github/workflows/ci.yml"));
 const windowsRehearsal = readText(join(root, ".github/workflows/windows-rehearsal.yml"));
+for (const workflow of [ci, windowsRehearsal]) {
+  const extracts = [...workflow.matchAll(/tar -xzf "\$tarball" -C \.packaged-preflight[^\n]*\n(?:.*\\\n)*[^\n]*/g)];
+  assert.equal(extracts.length, 2, 'both packaged preflight extraction steps are covered');
+  for (const [extract] of extracts) assert.match(extract, /package\/operations\/rename-retry\.mjs/,
+    'the packaged manifest selector needs its rename-retry dependency');
+}
 const release = readText(join(root, ".github/workflows/release.yml"));
 const installMatrix = readText(join(root, ".github/workflows/install-matrix.yml"));
 const installRunner = readText(join(root, "scripts/install-from-public-contract.mjs"));

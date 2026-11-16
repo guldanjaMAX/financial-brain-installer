@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { randomBytes } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, symlinkSync, lstatSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, symlinkSync, lstatSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cmdIngestRemote, credentialScannerFingerprint, describeLoadResult } from "../brain.mjs";
 import { planDailyRefresh } from "../operations/daily-refresh-plan.mjs";
@@ -65,8 +66,7 @@ function harness({ state = {}, pages = {}, entries = [], fault = null } = {}) {
   };
   const manifest = { brain: { domain: "owner.invalid" }, corpora: { google_drive: { enabled: true, root_folder_ids: ["reviewed"] } },
     safety: { ocr: { enabled: false }, credential_scanner: { enabled: true } } };
-  mkdirSync(process.env.HOME, { recursive: true });
-  const manifestPath = join(mkdtempSync(join(process.env.HOME, "case-")), "manifest.json");
+  const manifestPath = join(realpathSync.native(mkdtempSync(join(tmpdir(), "drive-incremental-"))), "manifest.json");
   const fixtureKeyPath = join(manifestPath, "..", ".brain-admin-key");
   const launchctl = join(manifestPath, "..", "launchctl-fixture");
   writeFileSync(launchctl, "#!/bin/sh\nexit 99\n", { mode:0o700 });
@@ -480,7 +480,7 @@ test('an older or interrupted Worker update is rejected before checkpoint or sou
 test("DRIVE-R3: an existing broken checkpoint link is a recovery condition, never first use", async () => {
   const h = harness();
   const checkpoint = join(h.manifestPath, "..", ".brain-ingest-drive.json");
-  symlinkSync(join(h.manifestPath, "..", "absent-target"), checkpoint);
+  symlinkSync(join(h.manifestPath, "..", "absent-target"), checkpoint, process.platform === 'win32' ? 'junction' : 'file');
   let reads = 0;
   h.options.ingestLib = async () => ({ batchStream, splitOversized, prefetch,
     loadState: (path, options) => { reads++; return realLoadState(path, options); }, saveState: realSaveState });

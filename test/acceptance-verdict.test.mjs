@@ -23,6 +23,13 @@ const check = (n, c, d = "") => {
   if (!c) fail++;
 };
 
+check("completed bounded keyword recovery is an expected partial reading",
+  isRetrievalFailureDegradation("bounded-keyword", "bounded-keyword-recovery") === false);
+check("failed bounded keyword recovery is a retrieval failure",
+  isRetrievalFailureDegradation("bounded-keyword", "bounded-keyword-recovery-failed") === true);
+check("bounded keyword recovery without completion proof is a retrieval failure",
+  isRetrievalFailureDegradation("bounded-keyword") === true);
+
 /* ------------------------------------------------ 1. summary honesty */
 
 {
@@ -737,6 +744,25 @@ const keywordOnly = ok({
     JSON.stringify({ waits: stuck.waits, calls: stuck.calls }));
 }
 
+for (const failed of [false, true]) {
+  const reason = failed ? 'bounded-keyword-recovery-failed' : 'bounded-keyword-recovery';
+  const partial = ok({ mode: 'think', answer: 'The agreement ends in June [1].',
+    citations: [{ n: 1, title: 'Recorded agreement', source: 'drive' }],
+    results: [{ title: 'Recorded agreement', source: 'drive', chunk_uid: 'drive:agreement#0' }], gaps: [],
+    evidence_gate: { supported: true, complete: true, evidence: [1] },
+    status: 'coverage_incomplete', degraded: 'bounded-keyword', degraded_reason: reason });
+  for (const surface of ['unified', 'think']) {
+    const run = retrySuite({ unified: () => surface === 'unified' ? partial : healthyProbe, think: () => partial });
+    await run.suite.tierRetrieval(['What did we agree?']);
+    const name = surface === 'unified' ? 'semantic retrieval is active' : 'think uses semantic retrieval';
+    const result = run.suite.results.find(row => row.name === name);
+    check(`${surface} bounded recovery ${failed ? 'failure remains failed' : 'completion remains partial without retries'}`,
+      (failed ? result?.status === 'fail' : surface === 'think' ? result === undefined : result?.status === 'pass') &&
+        (failed ? run.waits.length > 0 : run.waits.length === 0),
+      JSON.stringify({ result, waits: run.waits }));
+  }
+}
+
 /* ---- (d) a healthy brain pays nothing, and its results are unchanged ---- */
 {
   const thinkHealthy = ok({
@@ -860,7 +886,7 @@ const keywordOnly = ok({
    Which degradations are failures, and which are ordinary states.
 
    The retry's first version treated EVERY non-null `degraded` as a failure to
-   be retried and then failed on. The Worker emits six distinct tokens and most
+   be retried and then failed on. The Worker emits seven distinct tokens and most
    of them are not faults: `scoped-vector` means an exact-document scope was
    applied on purpose, `fts` means the keyword side is down while the semantic
    side ran. Retrying those buys a minute of install time and fails a brain for
@@ -885,9 +911,9 @@ function workerDegradedTokens() {
   const emitted = workerDegradedTokens();
   const classified = new Set(Object.keys(DEGRADED_CLASSIFICATION));
 
-  check("the Worker source still emits the six tokens this table was built from",
+  check("the Worker source still emits the seven tokens this table was built from",
     [...emitted].sort().join(",") ===
-      "document-access-unavailable,fts,no-embedding,retrieval,scoped-vector,vector",
+      "bounded-keyword,document-access-unavailable,fts,no-embedding,retrieval,scoped-vector,vector",
     [...emitted].sort().join(","));
   const unclassified = [...emitted].filter((token) => !classified.has(token));
   check("every degraded token the Worker emits is classified",
@@ -902,9 +928,9 @@ function workerDegradedTokens() {
   check("the failure set is exactly vector (what a301bb4 counted) and retrieval",
     Object.keys(RETRIEVAL_FAILURE_DEGRADED).sort().join(",") === "retrieval,vector",
     Object.keys(RETRIEVAL_FAILURE_DEGRADED).join(","));
-  check("the expected states are the four the Worker reports as ordinary",
+  check("the expected states include reason-checked bounded keyword recovery",
     Object.keys(EXPECTED_DEGRADED).sort().join(",") ===
-      "document-access-unavailable,fts,no-embedding,scoped-vector",
+      "bounded-keyword,document-access-unavailable,fts,no-embedding,scoped-vector",
     Object.keys(EXPECTED_DEGRADED).join(","));
   for (const token of ["vector", "retrieval"]) {
     check(`${token} is counted as a retrieval failure`,

@@ -5,7 +5,8 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { once } from 'node:events';
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { sourceModuleHarness } from './helpers/source-module-harness.mjs';
@@ -379,8 +380,7 @@ test('review M1 and M2 hand off a nonempty connected-card ledger and recorded ta
 });
 
 test('real local brain_think replays money refusals before transport and preserves document controls', t => {
-  mkdirSync(resolve('.lane-scratch/money-handoff'), { recursive: true });
-  const root = mkdtempSync(resolve('.lane-scratch/money-handoff/home-mcp-'));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'money-handoff-mcp-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const launchctl = join(root, 'launchctl');
   writeFileSync(launchctl, '#!/bin/sh\nexit 99\n', { mode: 0o700 });
@@ -515,8 +515,7 @@ function local(t, profile, setup = 'built-in', overviewFailure = false, { bookRo
   if (hookReply) overviewFailure = false;
   const followQuestion = typeof overviewFailure === 'string' ? overviewFailure : null;
   if (followQuestion) overviewFailure = false;
-  mkdirSync(resolve('.lane-scratch/money-query'), { recursive: true });
-  const root = mkdtempSync(resolve('.lane-scratch/money-query/home-mcp-'));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'money-query-mcp-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, 'bin'));
   const launchctl = join(root, 'bin', 'launchctl');
@@ -530,6 +529,7 @@ function local(t, profile, setup = 'built-in', overviewFailure = false, { bookRo
   const hook = join(root, 'hook.mjs');
   const calls = join(root, 'calls.json');
   writeFileSync(calls, '0');
+  // The hook lives in system temp; resolve repository imports before emitting it.
   writeFileSync(hook, `import {readFileSync,writeFileSync} from 'node:fs';
 import * as cp from 'node:child_process';
 import {syncBuiltinESMExports} from 'node:module';
@@ -541,8 +541,8 @@ const stats={overflow_decisions:0,requests:[]};
 const save=()=>writeFileSync(new URL('./stats.json',import.meta.url),JSON.stringify(stats));
 let book,worker;
 if(${bookRows}>0){
- const {overviewFixture}=await import('../../../worker/test/helpers/money-overview-fixture.mjs');
- worker=(await import('../../../worker/src/index.js')).default;
+ const {overviewFixture}=await import(${JSON.stringify(new URL('../worker/test/helpers/money-overview-fixture.mjs', import.meta.url).href)});
+ worker=(await import(${JSON.stringify(new URL('../worker/src/index.js', import.meta.url).href)})).default;
  book=overviewFixture({after(){}});book.env.ADMIN_KEY=key;
  Date.now=()=>Date.parse('2026-01-01T02:00:00Z');
  book.account('present');book.row('readable','present','2025-06-01',83);
@@ -675,22 +675,77 @@ test('MO-1112-02 real local overview failure hides the body and continues with a
   assert.equal(JSON.parse(replies.find(r => r.id === 4).result.content[0].text).rows[0].value, 7, 'successful evidence control remains available');
 });
 
+// Every terminal path settles active and future exchanges. Never expose stderr,
+// which can contain private fixture or credential details.
+function orderedStdio(child, unexpected = [], transcript = []) {
+  const lines = createInterface({ input: child.stdout });
+  let pending, failure;
+  const fail = () => {
+    failure ??= new Error('ordered stdio child terminated or returned invalid JSON');
+    if (pending) { pending.reject(failure); pending = null; }
+  };
+  child.on('error', fail);
+  child.on('close', fail);
+  child.stdin.on('error', fail);
+  lines.on('line', line => {
+    let reply;
+    try { reply = JSON.parse(line); } catch { fail(); return; }
+    if (pending) { const active = pending; pending = null; active.resolve(reply); }
+    else unexpected.push(line);
+  });
+  return { lines, exchange: async (id, method, params = {}) => {
+    if (failure) throw failure;
+    const response = new Promise((resolve, reject) => { pending = { resolve, reject }; });
+    child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n', error => { if (error) fail(); });
+    const reply = await response;
+    assert.equal(reply.id, id, 'ordered real stdio response reached');
+    transcript.push(reply); return reply.result;
+  } };
+}
+
+// Fixed seed varies identities across terminal siblings; each has a real green control.
+let harnessSeed = 0x1115a17;
+for (const mode of ['exit-before', 'exit-during', 'exit-clean', 'killed', 'invalid-json', 'spawn-error']) {
+  harnessSeed = (Math.imul(harnessSeed, 1664525) + 1013904223) >>> 0;
+  const id = harnessSeed;
+  test(`ordered stdio terminal table ${mode} seed=0x1115a17`, { timeout: 5000 }, async t => {
+    const root = mkdtempSync(join(tmpdir(), 'ordered-stdio-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const start = (code, executable = process.execPath) => {
+      const child = spawn(executable, ['-e', code], { stdio: ['pipe', 'pipe', 'pipe'], env: {} });
+      t.after(() => child.kill());
+      return { child, ...orderedStdio(child) };
+    };
+    const control = start("process.stdin.once('data', b => { const r=JSON.parse(b); console.log(JSON.stringify({id:r.id,result:'reached'})); });");
+    assert.equal(await control.exchange(id, 'initialize'), 'reached', 'same exchange decision reached by green control');
+    control.child.stdin.end();
+    const mark = "process.stderr.write('terminal-decision');";
+    const code = mode === 'exit-before' ? mark + 'process.exit(7)' :
+      mode === 'exit-during' ? `process.stdin.once('data',()=>{${mark}process.exit(7);});` :
+      mode === 'exit-clean' ? `process.stdin.once('data',()=>{${mark}process.exit(0);});` :
+      mode === 'killed' ? `process.stdin.once('data',()=>{${mark}});process.stdin.resume();` :
+      `process.stdin.once('data',()=>{${mark}console.log('invalid');});`;
+    const failed = start(code, mode === 'spawn-error' ? join(root, 'missing.exe') : process.execPath);
+    let marker = '', spawnCode;
+    const reached = new Promise(resolve => failed.child.stderr.on('data', chunk => {
+      marker += chunk; resolve(); if (mode === 'killed') failed.child.kill();
+    }));
+    failed.child.on('error', error => { spawnCode = error.code; });
+    await assert.rejects(failed.exchange(id, 'initialize'), /ordered stdio child/);
+    if (mode === 'spawn-error') assert.equal(spawnCode, 'ENOENT', 'real spawn decision reached');
+    else { await reached; assert.equal(marker, 'terminal-decision', 'real child reached selected terminal branch'); }
+    await assert.rejects(failed.exchange(id + 1, 'initialize'), /ordered stdio child/, 'terminal state rejects later exchanges');
+  });
+}
 test('MO-1112-02 ordered real stdio reads complete a scoped five-part answer after ordinary overflow', async t => {
   for (const bookRows of [1, 10001]) await local(t, 'owner-assistant', 'built-in', false, { bookRows,
     drive: async ({ root, childArgs, environment }) => {
       const child = spawn(process.execPath, childArgs, { env: environment, stdio: ['pipe', 'pipe', 'pipe'] });
       const timer = setTimeout(() => child.kill(), 12000);
       t.after(() => { clearTimeout(timer); if (child.exitCode === null) child.kill(); });
-      const lines = createInterface({ input: child.stdout }); let next;
       const unexpected = [], transcript = []; let stderr = '';
       child.stderr.on('data', chunk => { stderr += chunk; });
-      lines.on('line', line => { if (next) { const resolve = next; next = null; resolve(JSON.parse(line)); } else unexpected.push(line); });
-      const exchange = async (id, method, params = {}) => {
-        const response = new Promise(resolve => { next = resolve; });
-        child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
-        const reply = await response; assert.equal(reply.id, id, 'ordered real stdio response reached');
-        transcript.push(reply); return reply.result;
-      };
+      const { exchange, lines } = orderedStdio(child, unexpected, transcript);
       const initialized = await exchange(1, 'initialize');
       const overview = JSON.parse((await exchange(2, 'tools/call', { name: 'brain_money_overview', arguments: {} })).content[0].text);
       const guide = (await exchange(3, 'tools/call', { name: 'brain_money_guide', arguments: {} })).content[0].text;
@@ -778,7 +833,7 @@ test('the owner descriptor verifies the exact money-tool inventory and refuses a
   const descriptor = { type: 'stdio', command: process.execPath, args: [resolve('components/brain-mcp.mjs')],
     env: { BRAIN_AGENT_PROFILE: 'owner-assistant', BRAIN_NAME: 'brain' } };
   let exchanges = 0;
-  const verify = messages => verifyMcpRuntime(descriptor, { environment: { HOME: resolve('.lane-scratch/money-query') },
+  const verify = messages => verifyMcpRuntime(descriptor, { environment: { HOME: tmpdir() },
     spawn(_command, _args, options) {
       exchanges++;
       assert.deepEqual(options.input.trim().split('\n').map(line => JSON.parse(line).method),

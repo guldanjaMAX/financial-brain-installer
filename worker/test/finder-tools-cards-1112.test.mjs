@@ -2,7 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import worker from '../src/index.js';
 
@@ -11,8 +14,7 @@ import worker from '../src/index.js';
 // No product classifier, reader, clean-view SQL or expected-result fixture is
 // imported into the oracle. `event` is the synthetic bookkeeper's ground truth;
 // it is deliberately NOT inserted into the database or exposed to the route.
-const REPORT = new URL('../../.lane-scratch/finder-tools-cards-1112.md', import.meta.url);
-mkdirSync(new URL('.', REPORT), { recursive: true });
+const REPORT = pathToFileURL(join(mkdtempSync(join(tmpdir(), 'finder-tools-cards-')), 'REPORT.md'));
 const NOW = '2026-11-12T12:00:00.000Z';
 const FROM = '2026-10-01', TO = '2026-10-31';
 const migrations = readdirSync(new URL('../../migrations/d1/', import.meta.url))

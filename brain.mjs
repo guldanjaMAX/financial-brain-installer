@@ -19071,17 +19071,8 @@ const cmdIngestRemoteRun = async (
         saveState(statePath, state);
       }
     }
-    const progressChecked = dry || await revalidateIngestProgress({
-      state, source:sourceName, proofs:state.gmail_accepted_parts, checkpointKey:"gmail_progress_recheck",
-      policyFingerprint, expired:() => Number.isFinite(options.ingestDeadlineAt) && gmailNow() >= options.ingestDeadlineAt,
-      read:args => gmailRead(opts => (options.readCurrentIngestParts ?? readCurrentIngestParts)({
-        base,adminKey,source:sourceName,request:http,assertOwned:assertLockOwned,...args,...opts,
-      })),
-      invalidate:key => {
-        delete state.done[key];
-        recordGmailRetry(state,{stateKey:key},sourceName);
-      }, save:() => saveState(statePath,state),
-    });
+    const priorGmailProofs = { ...state.gmail_accepted_parts };
+    let progressChecked = dry;
     if (window) {
       // Recovery is independent of provider history. Enroll restored entries
       // behind a saved inventory offset, keeping the earliest window order.
@@ -19089,8 +19080,14 @@ const cmdIngestRemoteRun = async (
       const remaining = new Set(window.remaining_ids);
       for (const id of window.ids) {
         const key = `${sourceName}:${id}`;
-        if (retry.has(id) || (!remaining.has(id) && !Object.hasOwn(state.skipped || {},key) &&
-            !state.gmail_accepted_parts?.[key])) remaining.add(id);
+        if (retry.has(id)) remaining.add(id);
+        else if (!remaining.has(id) && !Object.hasOwn(state.skipped || {},key) &&
+            !state.gmail_accepted_parts?.[key]) {
+          // Legacy acceptance without a part receipt is recovery debt, not
+          // authority to replay an unvisited identity in every saved window.
+          // Keep its old copy and owner decision until its retry is admitted.
+          recordGmailRetry(state, { stateKey: key }, sourceName);
+        }
       }
       window.remaining_ids = window.ids.filter(id => remaining.has(id));
       saveState(statePath,state);
@@ -19114,7 +19111,7 @@ const cmdIngestRemoteRun = async (
       if (outcome !== "retained") gmailRemovalCauses[uid] = outcome === "deleted"
         ? "explicit_deletion" : outcome === "policy" ? "scope_or_filter_change" : "blank_or_quality";
     }
-    gmailMoreHistory = gmailWindowPaused || !progressChecked || work.has_more === true;
+    gmailMoreHistory = gmailWindowPaused || work.has_more === true;
     nextHistory = work.to_history_id;
     gmailHistoryMarkerMissing = nextHistory ? 0 : 1;
     gmailDeletedUids.push(...work.deleted_ids.map(id => `${sourceName}:${id}`));
@@ -19430,6 +19427,35 @@ const cmdIngestRemoteRun = async (
 
     if (!dry && resolvedSinceSave) saveState(statePath, state);
 
+    // New mail gets the daily budget first. The whole-map restore audit is
+    // coverage evidence, not the provider window's fetch/acceptance boundary.
+    // Its checkpoint and exact invalidation retries survive cursor moves;
+    // an unfinished audit still withholds ready/complete-sweep receipts.
+    // Replaced receipts earned current readback during this run. Auditing the
+    // old revision could otherwise invalidate a freshly accepted replacement.
+    progressChecked = dry || await revalidateIngestProgress({
+      state, source:sourceName, proofs:Object.fromEntries(Object.entries(priorGmailProofs)
+        .filter(([key, proof]) => state.gmail_accepted_parts?.[key] === proof)), checkpointKey:"gmail_progress_recheck",
+      policyFingerprint, maxEntries: Infinity, expired:() => Number.isFinite(options.ingestDeadlineAt) && gmailNow() >= options.ingestDeadlineAt,
+      read:async args => {
+        if (Number.isFinite(options.ingestDeadlineAt) && gmailNow() >= options.ingestDeadlineAt) return null;
+        try { return await (options.readCurrentIngestParts ?? readCurrentIngestParts)({
+          base,adminKey,source:sourceName,request:http,assertOwned:assertLockOwned,...args,
+          deadlineAt:options.ingestDeadlineAt,now:gmailNow,
+        }); } catch (error) {
+          if (error?.reason !== "requestDeadline") throw error;
+          return null;
+        }
+      },
+      invalidate:key => {
+        delete state.done[key];
+        delete state.gmail_accepted_parts[key];
+        recordGmailRetry(state,{stateKey:key},sourceName);
+      }, save:() => saveState(statePath,state),
+    });
+    if (!progressChecked) gmailMoreHistory = true;
+    if (!progressChecked) info("Gmail saved-progress verification is deferred; full coverage remains unverified. The next run will continue.");
+
     const currentGmailRemovalUids = new Set([
       ...gmailPolicyUids,
       ...gmailDeletedUids,
@@ -19554,7 +19580,7 @@ const cmdIngestRemoteRun = async (
       }
     }
     intentionalRemovalUids.length = 0;
-    if (!dry && (window?.remaining_ids.length || !progressChecked)) { gmailMoreHistory = true; gmailWindowPaused = true; }
+    if (!dry && window?.remaining_ids.length) { gmailMoreHistory = true; gmailWindowPaused = true; }
     const recoveryPending = work.mode === "bootstrap" && !work.recovery?.complete;
     const sweepPending = work.mode === "bootstrap" || state.gmail_sweep_pending
       ? { blocked: state.gmail_sweep_pending?.blocked === true || localRefused + tally.refused > 0 } : null;
@@ -19971,6 +19997,8 @@ const cmdIngestRemoteRun = async (
     const reason = which === "gmail" &&
       (gmailLabelGaps || gmailHistoryMarkerMissing || gmailPendingRemovalGaps)
       ? `${gmailLabelGaps} message(s) lacked label evidence, ${gmailHistoryMarkerMissing} pre-sweep history marker(s) were unavailable, and ${gmailPendingRemovalGaps} active message(s) had unresolved pending removals`
+      : which === "gmail" && gmailWindowPaused
+        ? "the Gmail batch window still has deferred work"
       : which === "imap" && imapSnapshotGaps
         ? `${imapSnapshotGaps} IMAP source snapshot gap(s) remained unresolved`
         : retryableOcrSkips

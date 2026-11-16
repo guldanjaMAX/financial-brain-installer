@@ -193,6 +193,7 @@ function runCase(mode, { approval = null, apply = null, directory = null, reset 
   }
   Object.assign(environment, {
     HOME: userRoot,
+    BRAIN_LIFECYCLE_LOCK_ROOT: join(directory, "machine-locks"),
     NO_COLOR: "1",
     BRAIN_NO_WRANGLER_LOGIN: "1",
     BRAIN_GOOGLE_TOKEN_STORE: "file",

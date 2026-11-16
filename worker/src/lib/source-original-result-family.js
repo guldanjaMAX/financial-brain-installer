@@ -9,6 +9,7 @@
  * an accepted source-original observation.
  */
 
+import { documentResultTitle } from "./document-answer-reading.js";
 import { sourceOriginalChunkReceiptHash } from "./source-original-chunk.js";
 import {
   SOURCE_ORIGINAL_TENANT_ID,
@@ -480,7 +481,8 @@ async function retrievedIdentity(env, pair) {
     refuse("source_original_result_family_retrieval_invalid", "retrieval did not return an exact citable chunk", 409);
   }
   const expectedRef = result.ref_key || result.drive_file_id || null;
-  const expectedTitle = String(result.title || "untitled").slice(0, 140);
+  // The citation projection keeps the whole title (citationCandidateForResult).
+  const expectedTitle = documentResultTitle(result.title);
   if (citation.n !== 1 || citation.source !== result.source || citation.ref !== expectedRef ||
       citation.title !== expectedTitle || canonical(portable(citation.lineage ?? null)) !==
         canonical(portable(result.lineage ?? null))) {

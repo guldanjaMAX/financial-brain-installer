@@ -6765,12 +6765,17 @@ try {
   ];
   const cleanCliEnvironment = {
     HOME: sandbox,
+    USERPROFILE: sandbox,
     USER: "fixture",
     LOGNAME: "fixture",
     LANG: "C",
     LC_ALL: "C",
     PATH: process.env.PATH || "/usr/bin:/bin",
   };
+  // Native Windows helpers need the system paths and current account even
+  // though the CLI's home and every recovery artifact remain synthetic.
+  for (const name of ['SystemRoot', 'WINDIR', 'ComSpec', 'PATHEXT', 'USERNAME', 'TMPDIR', 'TEMP', 'TMP'])
+    if (process.env[name] !== undefined) cleanCliEnvironment[name] = process.env[name];
   const runCompletedCli = (args) => spawnSync(process.execPath, args, {
     cwd: process.cwd(),
     encoding: "utf8",

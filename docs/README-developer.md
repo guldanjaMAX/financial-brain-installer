@@ -1016,8 +1016,13 @@ audit of all accepted versions, including quiet-feed entries, with a durable
 continuation bound to the current database instance, generation, random nonce,
 policy and acceptance map. A mismatch restarts that audit. Missing parts save
 retry identities atomically with local invalidation; unfinished audits keep
-coverage incomplete. Gmail re-enrolls saved-window entries in their original
-order. Drive's private `drive_restore_pending` queue survives page promotion and
+coverage incomplete. Gmail processes new mail before auditing historical
+acceptance, using the remaining deadline rather than a 97-entry completion
+ceiling. Messages freshly verified during this run need no second audit.
+A deferred audit does not pin a settled history window; its checkpoint and
+exact invalidation retries survive cursor promotion. Unvisited legacy window
+acceptance without a part receipt becomes a durable retry while its old copy
+and pending owner decision stay intact. Drive's private `drive_restore_pending` queue survives page promotion and
 is retried independently of new provider events. Legacy page prefixes without
 exact proof rewind to the earliest unconfirmed file. These checks perform no
 automatic deletion and make no historical-backfill or semantic-index claim.
