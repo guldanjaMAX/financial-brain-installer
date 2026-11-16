@@ -1,3 +1,4 @@
+import { futureComparison } from './fixtures/c3-projection-contract.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {setup,ask,intent,raw} from './c3-calendar-scope-fixture.mjs';
@@ -85,7 +86,7 @@ test('C3 B1 unresolved literal scopes refuse both mixed-kind operands',async t=>
 
 test('C3 B2 explicit calendar residue has a scoped gap and a numeric peer',async t=>{
  const f=setup(t),reply=raw(intent(),intent());
- for(const suffix of ["'2025x",'\u20192025x',"'20255",'2025x','2025-foo',"'2025 '2024",'2025 in 2024',"'27",'\u201927']) {
+ for(const suffix of ["'2025x",'\u20192025x',"'20255",'2025x','2025-foo',"'2025 '2024",'2025 in 2024']) {
   const peer=await ask(f,'Compare expenses Oct 2025 versus Sep 2025',reply);
   assert.ok(peer.sql.some(s=>s.includes('CROSS JOIN fin_transactions')));
   assert.deepEqual(peer.body.ledger.parts.map(p=>p.expense_total_minor),[0,0]);
@@ -94,6 +95,14 @@ test('C3 B2 explicit calendar residue has a scoped gap and a numeric peer',async
   assert.equal(r.body.ledger,undefined,q);assert.ok(r.body.gaps.length>0,q);
   assert.equal(r.body.evidence_gate.complete,false,q);assert.equal(r.sql.length,0,q);
  }
+});
+
+test('C3 B2 valid future short years remain bounded projections beside malformed calendar peers',async t=>{
+ const f=setup(t),reply=raw(intent(),intent());
+ const green=await ask(f,'Compare expenses Oct 2025 versus Sep 2025',reply);
+ assert.ok(green.sql.some(s=>s.includes('CROSS JOIN fin_transactions')));
+ assert.deepEqual(green.body.ledger.parts.map(p=>p.expense_total_minor),[0,0]);
+ for(const quote of ["'",'\u2019']) futureComparison(await ask(f,`Compare expenses Oct ${quote}27 versus Sep 2025`,reply));
 });
 
 import {TEST_COMMANDS,POST_LAUNCHER_TEST_COMMANDS} from '../../scripts/run-test-chain.mjs';

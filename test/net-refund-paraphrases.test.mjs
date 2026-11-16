@@ -1,3 +1,4 @@
+import { remoteMoneyFollowThrough, sameLedgerFigure } from './fixtures/remote-money-follow-through.mjs';
 import { tmpdir } from 'node:os';
 import { grossCompatibility } from './fixtures/net-refund/comparison-compat.mjs';
 import { historicalCategoryBody } from './fixtures/net-refund/category-disclosure.mjs';
@@ -52,13 +53,8 @@ async function surfaces(t, o, c) {
       launchctl: () => assert.fail('scheduler forbidden'),
       http: async () => { cliCalls++; return Response.json(o.body); } });
   } finally { mock.mock.restore(); }
-  const url = new URL('https://brain.invalid/mcp');
-  const remote = await handleMcp({}, new Request(url, { method: 'POST', body: JSON.stringify({
-    jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'ask', arguments: { question: c.question } },
-  }) }), url, { think: async () => { remoteCalls++; return o.body; }, grant: { profile: 'read-only' } });
-  const rpc = await remote.json();
-  assert.equal(cliCalls, 1);
-  assert.equal(remoteCalls, 1);
+  const rpc = await remoteMoneyFollowThrough(c.question, async () => { remoteCalls++; return o.body; });
+  assert.equal(cliCalls, 1); assert.equal(remoteCalls, 1, 'document control reached once');
   const outputs = { worker: workerText(o.body), app: appText(o.body), cli: printed.join('\n'),
     remote: rpc.result.content.map(item => item.text).join('\n') };
   for (const text of Object.values(outputs)) {

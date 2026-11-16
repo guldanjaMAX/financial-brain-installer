@@ -82,7 +82,7 @@ async function scratchRelease(version) {
     if (directory === sourcePath || directory.startsWith(`${sourcePath}${sep}`)) continue;
     cpSync(sourcePath, join(directory, entry), { recursive: true });
   }
-  symlinkSync(join(ROOT, "node_modules"), join(directory, "node_modules"), "dir");
+  symlinkSync(join(ROOT, "node_modules"), join(directory, "node_modules"), process.platform === 'win32' ? 'junction' : 'dir');
   const packagePath = join(directory, "package.json");
   const packageJson = JSON.parse(readFileSync(packagePath, "utf8"));
   writeFileSync(packagePath, `${JSON.stringify({ ...packageJson, version }, null, 2)}\n`);
@@ -218,6 +218,9 @@ function installation(installed, { activeFolder = false } = {}) {
   const manifestPath = join(sandbox, "brain.manifest.json");
   writeFileSync(manifestPath, `${JSON.stringify(manifestFor(installed.version, { watchedPath }), null, 2)}\n`);
   const db = brainDatabase(installed.version);
+  // The fixture starts after a confirmed provider write, not just equal counts.
+  db.prepare("UPDATE install_state SET vector_projection_mutation_id=?, vector_projection_submitted_at=? WHERE id=1")
+    .run("fixture-settled-mutation", 1_750_000_000_000);
   const live = { release: installed, mode: "active", vectors: 1 };
   const events = [];
   const restore = { beforeFirstIngest: false };
@@ -227,7 +230,9 @@ function installation(installed, { activeFolder = false } = {}) {
     STORAGE: "d1",
     ADMIN_KEY,
     DB: workerD1(db),
-    VECTORIZE: { describe: async () => ({ vectorCount: live.vectors }) },
+    ...(live.rollbackFence ? { VECTOR_ROLLBACK_FENCE: "1" } : {}),
+    VECTORIZE: { describe: async () => ({ vectorCount: live.vectors,
+      processedUpToMutation: db.prepare("SELECT vector_projection_mutation_id AS id FROM install_state WHERE id=1").get().id }) },
     ...(live.mode === "paused-for-upgrade" ? { VECTOR_DRAIN_MODE: "paused-for-upgrade" } : {}),
   });
   // Every request reaches the real router of the release deployed right now.
@@ -248,6 +253,10 @@ function installation(installed, { activeFolder = false } = {}) {
     return { results: [], success: true, meta: { changes: Number(result.changes || 0) } };
   };
   const cf = async (path) => {
+    if (path.endsWith("/info")) {
+      events.push("provider-proof");
+      return { vectorCount: live.vectors, processedUpToMutation: "fixture-settled-mutation" };
+    }
     if (path.endsWith("/time_travel/bookmark")) return { bookmark: BOOKMARK };
     if (path.includes("/time_travel/restore")) {
       events.push("d1-restore");
@@ -267,7 +276,9 @@ function installation(installed, { activeFolder = false } = {}) {
     // A deploy uploads the Worker of the kit that runs it.
     const cmdDeploy = async (_path, options = {}) => {
       live.release = release;
-      live.mode = options.pauseVectorDrainForUpgrade === true ? "paused-for-upgrade" : "active";
+      // Reviewed sync rollback requires the deployed fence in the actual health reply.
+    live.rollbackFence = options.rollbackWriteFence === true;
+    live.mode = options.pauseVectorDrainForUpgrade === true ? "paused-for-upgrade" : "active";
       events.push(`deploy:${release.version}:${live.mode}`);
       return { ok: true };
     };
@@ -371,6 +382,7 @@ async function update(brain, release, { force = false, duringAcceptance = null }
     }
     : kit.upgradeOptions;
   const run = await quietly(() => release.cli.cmdUpdate(brain.manifestPath, {
+    lifecycleLockOptions: { machineLockRoot: join(brain.sandbox, 'machine-locks') },
     discoverInstalledManifest: () => ({ path: brain.manifestPath, source: "remembered" }),
     readUpdateBacklog: release.cli.readUpdateBacklog,
     updateBacklogOptions: upgradeOptions.updateBacklogOptions,
@@ -388,7 +400,7 @@ async function update(brain, release, { force = false, duringAcceptance = null }
       platform: "darwin", home: brain.sandbox, uid: 501, localTimezone: "UTC",
       existingSchedulerOwners: [], planLoad: async () => [],
       schedulerAdapter: { read: () => null },
-      schedulerOptions: { home: brain.sandbox },
+      schedulerOptions: { home: brain.sandbox, machineLockRoot: join(brain.sandbox, 'machine-locks') },
       legacySchedulerOptions: { home: brain.sandbox, uid: 501, launchctl: args => {
         schedulerReads.push(args[0]);
         // The empty synthetic home has no loaded jobs or disabled intent.
@@ -411,6 +423,7 @@ async function rollback(brain, release) {
   const { cmdDeploy, cmdHealth, upgradeOptions } = brain.kit(release);
   return quietly(() => release.cli.cmdRollback(brain.manifestPath, BOOKMARK, {
     confirmed: true,
+    lifecycleLockOptions: { machineLockRoot: join(brain.sandbox, 'machine-locks') },
     resolveAccount: upgradeOptions.resolveAccount,
     cf: brain.cf,
     d1Query: brain.d1Query,
@@ -423,6 +436,7 @@ async function rollback(brain, release) {
 async function doctorRepair(brain, release) {
   const { upgradeOptions } = brain.kit(release);
   return quietly(() => release.cli.cmdDoctorRepair(brain.manifestPath, {
+    lifecycleLockOptions: { machineLockRoot: join(brain.sandbox, 'machine-locks') },
     confirmed: true,
     diagnoseOptions: {
       http: brain.http,
@@ -615,6 +629,7 @@ test("the documented 0.4.8 active folder updates, retires, and refuses both lega
     let remoteExpectationCalls = 0;
     const retired = await quietly(() => checkedOutCli.cmdFolder(brain.manifestPath, ["off"], {
       platform: "darwin",
+      lifecycleLockOptions: { machineLockRoot: join(brain.sandbox, 'machine-locks') },
       now: () => new Date("2026-09-28T16:36:00.000Z"),
       schedulerOptions,
       probeSourceIngestLock: () => ({ busy: false }),

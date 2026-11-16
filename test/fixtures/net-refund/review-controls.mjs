@@ -2,7 +2,7 @@ import { historicalCategoryText } from './category-disclosure.mjs';
 import { historicalBytes } from './review-harness.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { evaluate, reached, surfaces, save, purchase, refund, reply, parts, digest, calendarRefusal } from './review-harness.mjs';
+import { evaluate, reached, surfaces, save, purchase, refund, reply, parts, digest, calendarFigure } from './review-harness.mjs';
 const controls = [
   ['net_worth', 'Could you retrieve my net worth?', { kind: 'balance', vendor_text: null, direction: null, period: { type: 'none' } }],
   ['investment_returns', 'Could you retrieve my investment returns this month?', { kind: 'totals', vendor_text: null, direction: 'inflow' }],
@@ -29,13 +29,14 @@ for (const [id, question, change] of controls) test(`ordinary control: ${id}`, a
   const current = await evaluate(c), baseline = await evaluate(c, true);
   assert.equal(current.trace.validation, 1);
   if (['after_investment_returns', 'after_store_credit', 'gross_after_store_credit', 'gross_refund_payee_after_purchase', 'refund_payee_after_purchase'].includes(id)) {
-    calendarRefusal(current);
+    const expected = c.rows.filter(row => row.direction === 'outflow' && row.date >= '2026-10-01' && row.date <= '2026-10-12').reduce((n, row) => n + row.cents, 0);
+    calendarFigure(current, expected);
     const gross = await evaluate({ ...c, question: 'Could you retrieve gross spending at ' + vendor + ' this month?',
       intents: [reply({ kind: 'merchant', vendor_text: vendor })] });
     reached(gross);
     assert.equal(gross.body.ledger.total_minor, 12000);
     const view = await surfaces(t, current, question);
-    for (const text of Object.values(view)) assert.doesNotMatch(text, /\$\d/);
+    for (const text of Object.values(view)) assert.match(text, /\$120\.00/);
     return;
   }
   if (current.body.ledger) { assert.ok(current.trace.inventory > 0); assert.ok(current.body.citations.length || current.body.ledger.accounts.length); }

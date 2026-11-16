@@ -158,10 +158,22 @@ test("item C explicit periods respect owner today and require a usable owner zon
     else f.env.BRAIN_TIMEZONE = timeZone;
     const before = transactionDecisions();
     const future = await (await f.ask('How much money came in October 2026?')).json();
-    assert.equal(future.ledger, undefined);
-    assert.equal(transactionDecisions(), before, 'future or ungrounded owner day refuses before facts');
-    if (timeZone === 'America/Phoenix') assert.match(future.answer, /period has not happened yet/i);
-    else assert.equal(future.gaps[0].reason, 'owner_timezone_unavailable');
+    if (timeZone === 'America/Phoenix') {
+      assert.equal(future.ledger?.projection, true);
+      assert.equal(future.ledger.complete, false);
+      assert.equal(future.evidence_gate.complete, false);
+      assert.deepEqual([future.ledger.from, future.ledger.to], ['2026-10-01', '2026-10-31']);
+      assert.equal(future.ledger.basis.to, '2026-09-30', 'future feed coverage cannot become forecast evidence');
+      assert.equal(future.ledger.total_minor, 0, 'the future deposit is not completed or repeating income');
+      assert.deepEqual(future.ledger.rows, []);
+      assert.match(future.answer, /Projection: about/i);
+      assert.match(future.answer, /pattern-only estimate/i);
+      assert.ok(transactionDecisions() > before, 'a grounded future request reads historical patterns');
+    } else {
+      assert.equal(future.ledger, undefined);
+      assert.equal(transactionDecisions(), before, 'an ungrounded owner day cannot supply calendar facts');
+      assert.equal(future.gaps[0].reason, 'owner_timezone_unavailable');
+    }
   }
   f.env.BRAIN_TIMEZONE = 'America/Phoenix';
   const historical = await (await f.ask('How much money came in September 2026?')).json();

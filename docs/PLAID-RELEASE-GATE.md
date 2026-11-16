@@ -39,11 +39,21 @@ while present: they may set `enabled` to `true` with `provider: "plaid"` and
 these steps, not permission to invite anyone else.
 
 Application credentials are entered by the owner through `brain connect bank`.
-The preceding setup or deploy lists the Worker's secret names read-only,
-generates `BANK_FEED_WRAPPING_KEY_V2` only when its name is absent, writes it
-through the Worker secret path, and lists the names again to verify it. Update
-uses that same deploy path. An existing wrapping key is never replaced because
-retained encrypted connection references depend on it. No value is printed,
+The preceding setup or deploy lists the Worker's secret names read-only both
+before and after its upload, generates `BANK_FEED_WRAPPING_KEY_V2` only when
+its name is absent from both complete lists, this computer holds no record of
+an earlier sighting on that account and Worker, and a read-only D1 count finds
+no `bank_feed_items` row at key version 2 or later (removed rows included) and
+no Plaid Link receipt still holding a sealed value, writes it through the
+Worker secret path, and lists the names again to verify it. Update, rollback and the Anthropic
+connect/disconnect redeploys use that same deploy path. An existing wrapping key
+is never replaced because retained encrypted connection references depend on
+it: a key listed before the upload, or earlier in the same run, that is missing
+from the list after it is re-read after about 2, 5 and 10 seconds, and the
+command stops without writing if it never reappears (2026-11-16: one
+false-absent list right after an upload replaced a live key). A paged list, or a
+404 whose structured error is not exactly code 10007, is a failed read, never
+an absence. No value is printed,
 returned, accepted from an environment variable or argument, or derived from
 the admin or session key. Before `brain connect bank` opens the browser, it
 lists names again and asks at the hidden prompt only for a missing Plaid client

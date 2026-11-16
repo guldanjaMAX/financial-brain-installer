@@ -376,6 +376,7 @@ try {
   }
   cliEnvironment.HOME = folder;
   cliEnvironment.USERPROFILE = folder;
+  cliEnvironment.BRAIN_LIFECYCLE_LOCK_ROOT = join(folder, "machine-locks");
   const routedProvider = spawnSync(
     process.execPath,
     [brainCli, "ingest", manifestPath, "--from", "slack"],

@@ -253,6 +253,7 @@ try {
       await cmdUpdate(threaded, {
         interactive: false,
         adoptConsent: consent,
+        lifecycleLockOptions: { machineLockRoot: join(sandbox, "machine-locks") },
         discoverInstalledManifest: () => ({ path: threaded, source: "explicit" }),
         adoptCloudflareAuthProfile: stopAfterAdoption,
       });

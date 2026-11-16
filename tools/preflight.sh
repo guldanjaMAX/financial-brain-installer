@@ -135,8 +135,15 @@ POINTER_STATUS=4; MF=""; MN=0
 if [ "$NODE_SUPPORTED" -ne 1 ]; then
   warn "the saved Brain location check was skipped for now. Install or select Node 22 or newer, then run this check again"
 else
-  SELECTED_MANIFEST=$("$NODE_EXECUTABLE" "$POINTER_HELPER" --preflight-locator 2>/dev/null)
-  POINTER_STATUS=$?
+  if [ -f "$POINTER_HELPER" ]; then
+    SELECTED_MANIFEST=$("$NODE_EXECUTABLE" "$POINTER_HELPER" --preflight-locator 2>/dev/null)
+    POINTER_STATUS=$?
+  else
+    # Run on its own (before the package is installed): no saved pointer can exist yet, so search like a first install.
+    SELECTED_MANIFEST=""
+    POINTER_STATUS=2
+    warn "running without the installed package, so the saved Brain location was not read; searched your home folder instead"
+  fi
   if [ "$POINTER_STATUS" -eq 0 ]; then
     MF=$SELECTED_MANIFEST
     MN=1

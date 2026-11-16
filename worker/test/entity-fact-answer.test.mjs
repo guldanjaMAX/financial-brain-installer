@@ -1,3 +1,4 @@
+import { assertDocumentAnswer } from "./helpers/document-answer-contract.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createHash, randomUUID } from "node:crypto";
@@ -244,7 +245,9 @@ for (const collision of [false, true]) {
     assert.equal(body.evidence_gate.method, "quickbooks_observed_balances");
     assert.equal(body.evidence_gate.supported, true);
     assert.equal(body.evidence_gate.fact_span, undefined);
-    assert.ok(body.answer.startsWith(probe.seen.observed.answer), "money, date, citation and caveat preserved");
+    // 0.4.28 attributes the observed balance to its dated source record.
+    assert.match(body.answer, /As of 2026-10-07, the record .* says: "Bank account Checking: balance USD 1,201\.00/);
+    assert.equal(body.confidence.percent, 51);
     assert.match(body.answer, /1,201\.00/);
     assert.ok(!body.answer.includes(VALUES.address));
     assert.deepEqual(body.citations.map((doc) => doc.n), probe.seen.observed.evidence);
@@ -273,8 +276,10 @@ test("contact facts cannot approve money after observed admission refuses", asyn
   assert.match(body.evidence_gate.reason, /require deterministic observed Account evidence/);
   assert.equal(body.evidence_gate.method, undefined);
   assert.equal(body.evidence_gate.fact_span, undefined);
-  assert.equal(body.answer, null, "unsupported money is withheld");
-  assert.deepEqual(body.citations, []);
+  assertDocumentAnswer(body, { provisional: true, exact: true });
+  assert.match(body.answer, /USD 1,201\.00/);
+  assert.doesNotMatch(body.answer, /USD 9,999\.00/);
+  assert.equal(body.citations.length, 2);
 });
 
 for (const [field, value] of Object.entries(VALUES)) {
@@ -398,7 +403,9 @@ test("fact citation keeps its retrieval number beyond the requested result limit
   }), record()] });
   assert.equal(counts.answer + counts.verifier, 0);
   assert.equal(body.evidence_gate.method, "exact_contact_fact");
-  assert.equal(body.citations[0].n, 2);
+  assert.deepEqual(body.citations.map(c => c.n), [1, 2]);
+  assert.equal(body.evidence_gate.fact_span.n, 2, "the fact keeps its original retrieval number");
+  assertDocumentAnswer(body, { provisional: true, exact: true });
   assert.equal(body.results.length, 2);
   const span = body.evidence_gate.fact_span;
   assert.equal(body.results[span.n - 1].snippet.slice(span.start, span.end), VALUES.address);
@@ -425,7 +432,8 @@ test("owner-confirmed operative value uses the common authority and supersession
   assert.equal(body.evidence_gate.supported, true);
   assert.equal(body.citations[0].authority.owner_confirmed, true);
   assert.ok(body.answer.includes(VALUES.address));
-  assert.ok(!body.answer.includes("200 Example Lane"));
+  assertDocumentAnswer(body, { provisional: true, exact: true });
+  assert.match(body.answer, /Supersedes: 200 Example Lane/, "history remains inside the source quotation");
   assert.equal(counts.answer + counts.verifier, 0);
 });
 

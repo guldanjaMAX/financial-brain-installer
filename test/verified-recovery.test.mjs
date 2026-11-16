@@ -47,6 +47,7 @@ import {
   V048_DISPOSABLE_CAMPAIGN_SOURCE_NAME,
   V048_DISPOSABLE_CAMPAIGN_TARGET_ADMIN_KEY_LOCATOR as campaignTargetAdminKeyLocator,
   V048_DISPOSABLE_CAMPAIGN_TARGET_NAME,
+  V048_DISPOSABLE_CAMPAIGN_VERSION,
 } from "../operations/v048-disposable-campaign-contract.mjs";
 import {
   BACKUP_RPO_HOURS,
@@ -124,7 +125,7 @@ const exactCampaignSourceManifest = {
     display_name: V048_DISPOSABLE_CAMPAIGN_DISPLAY_NAME,
   },
   brain: {
-    version: "0.4.27",
+    version: V048_DISPOSABLE_CAMPAIGN_VERSION,
     worker_name: V048_DISPOSABLE_CAMPAIGN_SOURCE_NAME,
     domain: `${V048_DISPOSABLE_CAMPAIGN_SOURCE_NAME}.fixture.workers.dev`,
   },
@@ -143,7 +144,7 @@ const exactCampaignSourceManifest = {
 const exactCampaignTargetManifest = {
   ...structuredClone(exactCampaignSourceManifest),
   brain: {
-    version: "0.4.27",
+    version: V048_DISPOSABLE_CAMPAIGN_VERSION,
     worker_name: V048_DISPOSABLE_CAMPAIGN_TARGET_NAME,
     domain: `${V048_DISPOSABLE_CAMPAIGN_TARGET_NAME}.fixture.workers.dev`,
   },

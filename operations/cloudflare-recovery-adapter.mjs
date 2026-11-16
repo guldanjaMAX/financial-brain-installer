@@ -43,6 +43,8 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { fileURLToPath } from "node:url";
 import { isProxy } from "node:util/types";
 import { gunzipSync } from "node:zlib";
+import { exportMultipartRecovery, inspectMultipartRecovery, restoreMultipartRecovery } from "./recovery-multipart.mjs";
+import { recoveryDataStatements, recoveryInsertCoverage, verifyRecoverySqlParts } from "./recovery-sql-parts.mjs";
 
 import { localToolEnvironment } from "../doctor.mjs";
 import { evaluateProfileCoverage } from "../eval/profile.mjs";
@@ -183,6 +185,9 @@ const MAX_SQLITE_OUTPUT_BYTES = 2 * 1024 * 1024;
 const MAX_IMPLEMENTATION_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_EXECUTION_SNAPSHOT_MANIFEST_BYTES = 4 * 1024 * 1024;
 const MAX_HTTP_BYTES = 2 * 1024 * 1024;
+// Local streamed export/readback budget; each encrypted provider import stays
+// below the separate 5 GiB ceiling. The frozen schema-48 campaign is unchanged.
+const MAX_DURABLE_EXPORT_BYTES = 64 * 1024 ** 3;
 const MAX_WRANGLER_TIMEOUT_MS = 30 * 60 * 1000;
 const MAX_EVAL_TIMEOUT_MS = 30 * 60 * 1000;
 const MAX_BOOTSTRAP_DURATION_MS = 6 * 60 * 60 * 1000;
@@ -241,6 +246,8 @@ const RECOVERY_EXECUTION_DEPENDENCY_NAMES = Object.freeze([
   "sleep",
   "now",
   "clock",
+  "recoveryPartBytes",
+  "onRecoveryPartVerified",
 ]);
 const RECOVERY_EXECUTION_DEPENDENCY_NAME_SET = new Set(
   RECOVERY_EXECUTION_DEPENDENCY_NAMES,
@@ -416,7 +423,7 @@ const RECOVERY_TEST_HUMAN_FIELD_GATES = Object.freeze([
 const RECOVERY_TEST_FIELD_IDENTITY = Object.freeze({
   clientSlug: "v048-field-proof",
   clientDisplayName: "Synthetic Field Gate v0.4.8",
-  productVersion: "0.4.27",
+  productVersion: "0.4.28",
   sourceResource: "brain-test-v048-field-source-recovery-gate-a48f1101",
   targetResource: "brain-test-v048-field-target-recovery-gate-a48f1102",
   sourceAdminKeySecret:
@@ -523,6 +530,8 @@ export const RECOVERY_DURABLE_TABLES = Object.freeze([
   "zoom_deliveries",
   "zoom_reconciliation",
   "plaid_link_operations",
+  // Schema 64 adds the independent provider retry floor to this existing
+  // durable table. Export every column so restore cannot admit an early retry.
   "plaid_reconciliation",
   "plaid_revocation_outbox",
   "plaid_sync_stage_accounts",
@@ -637,6 +646,16 @@ export const RECOVERY_DURABLE_TABLES = Object.freeze([
   // Derived family membership and its local walk receipt rebuild on restore.
   "document_family_index",
   "document_family_index_state",
+  // Owner-confirmed expectations cannot be reconstructed from extraction.
+  "fin_expectations",
+  // Schema 63: provider-neutral connection health (no access references or
+  // raw errors). It records which complete provider reads reached the ledger,
+  // so it travels with the ledger it describes. sources restores before
+  // bank_feed_items, so 0063's bank_activity triggers do not fire on restore.
+  "bank_feed_health",
+  // Accepted revision history and interrupted replacements are durable text.
+  "retained_ingest_stages",
+  "retained_ingest_activations",
 ]);
 
 /**
@@ -927,6 +946,9 @@ const SCHEMA_60_TABLES = Object.freeze([
   "simplefin_account_identity_bindings",
   "simplefin_coverage_reviews",
 ]);
+const SCHEMA_62_TABLES = Object.freeze(["fin_expectations"]);
+const SCHEMA_63_TABLES = Object.freeze(["bank_feed_health"]);
+const SCHEMA_65_TABLES = Object.freeze(["retained_ingest_stages", "retained_ingest_activations"]);
 
 const AGGREGATE_FIELDS = Object.freeze([
   ...RECOVERY_DURABLE_TABLES
@@ -953,7 +975,7 @@ const AGGREGATE_FIELDS = Object.freeze([
      ...SCHEMA_49_TABLES, ...SCHEMA_50_TABLES, ...SCHEMA_52_TABLES,
      ...SCHEMA_53_TABLES, ...SCHEMA_55_TABLES, ...SCHEMA_56_TABLES,
      ...SCHEMA_57_TABLES, ...SCHEMA_58_TABLES, ...SCHEMA_59_TABLES,
-     ...SCHEMA_60_TABLES].includes(table)
+     ...SCHEMA_60_TABLES, ...SCHEMA_62_TABLES, ...SCHEMA_63_TABLES, ...SCHEMA_65_TABLES].includes(table)
       ? "SELECT 0"
       : `SELECT COUNT(*) FROM ${quoteIdentifier(table)}`,
   ]),
@@ -1598,7 +1620,7 @@ function inspectNpmPackedExecutionInventory(raw, code) {
       }
     }
     if (!packageJson || typeof packageJson !== "object" || Array.isArray(packageJson) ||
-        packageJson.name !== "brain-installer" || packageJson.version !== "0.4.27") refuse(code);
+        packageJson.name !== "brain-installer" || packageJson.version !== "0.4.28") refuse(code);
     return Object.freeze({
       name: packageJson.name,
       version: packageJson.version,
@@ -1874,7 +1896,7 @@ function inspectTestBootstrapCandidateEvidence(request, plan, pins) {
   ], code);
   if (!/^[0-9a-f]{40}$/.test(String(source.head_sha || "")) ||
       !/^[0-9a-f]{40}$/.test(String(source.tree_sha || "")) ||
-      source.package_name !== "brain-installer" || source.package_version !== "0.4.27" ||
+      source.package_name !== "brain-installer" || source.package_version !== "0.4.28" ||
       !SHA256_RE.test(String(source.package_json_sha256 || "")) ||
       !SHA256_RE.test(String(source.package_lock_sha256 || "")) ||
       source.working_tree_clean !== true || source.shallow_repository !== false ||
@@ -3105,7 +3127,7 @@ function readCompletedTestBootstrapCheckpoint(pins, plan) {
         candidateEvidence.seedVectorCount !== candidateEvidence.seedChunkCount ||
         candidateEvidence.seedReplayUnchangedDocuments !==
           DISPOSABLE_RECOVERY_SEED_DOCUMENTS ||
-        candidateEvidence.packageFilename !== "brain-installer-0.4.27.tgz" ||
+        candidateEvidence.packageFilename !== "brain-installer-0.4.28.tgz" ||
         candidateEvidence.wranglerRuntimeDirectory !==
           LOCKED_WRANGLER_RUNTIME_DIRECTORY ||
         candidateEvidence.wranglerRuntimeEntrypoint !== LOCKED_WRANGLER_ENTRYPOINT ||
@@ -4477,7 +4499,10 @@ function expectedRecoveryTables(migrations) {
     (latest >= 57 || !SCHEMA_57_TABLES.includes(table)) &&
     (latest >= 58 || !SCHEMA_58_TABLES.includes(table)) &&
     (latest >= 59 || !SCHEMA_59_TABLES.includes(table)) &&
-    (latest >= 60 || !SCHEMA_60_TABLES.includes(table)));
+    (latest >= 60 || !SCHEMA_60_TABLES.includes(table)) &&
+    (latest >= 62 || !SCHEMA_62_TABLES.includes(table)) &&
+    (latest >= 63 || !SCHEMA_63_TABLES.includes(table)) &&
+    (latest >= 65 || !SCHEMA_65_TABLES.includes(table)));
 }
 
 // The v0.4.8 disposal proof is a frozen campaign contract. Later product
@@ -4566,7 +4591,7 @@ function fingerprintRecoveryD1DeletionState(input) {
   }
   if (!SHA256_RE.test(input.durableExportSha256) ||
       !Number.isSafeInteger(input.durableExportBytes) || input.durableExportBytes < 1 ||
-      input.durableExportBytes > V048_D1_DELETION_STATE_MAX_EXPORT_BYTES) {
+      input.durableExportBytes > MAX_DURABLE_EXPORT_BYTES) {
     refuse("RECOVERY_D1_DELETION_STATE_INVALID");
   }
   return sha256(canonical({
@@ -4686,7 +4711,26 @@ export async function verifyRecoverySqlArtifact(artifactPath, {
   sqlitePath = "/usr/bin/sqlite3",
   spawnProcess = spawn,
   timeoutMs = MAX_WRANGLER_TIMEOUT_MS,
+  consumeParts = null,
+  coverageTables = null,
+  temporaryDirectory = null,
 } = {}) {
+  if (consumeParts) return verifyRecoverySqlParts({ consumeParts, temporaryDirectory,
+    inspectDatabase(database) {
+      database.exec(FTS_INTEGRITY_SQL);
+      const quick = database.prepare(QUICK_CHECK_SQL).get();
+      const migrations = validateMigrationContract(database.prepare(MIGRATION_CONTRACT_SQL).all());
+      assertExpectedTables(database.prepare(TABLE_INVENTORY_SQL).all(), migrations);
+      const schemaRows = normalizeSchemaRows(database.prepare(LOGICAL_SCHEMA_SQL).all());
+      const aggregate = normalizeAggregate(database.prepare(AGGREGATE_SQL).get());
+      return Object.freeze({ ...snapshotEvidence({ quickCheck: String(quick?.quick_check ?? ""),
+        migrations, schemaRows, aggregate }),
+        tables: coverageTables.map((table) => {
+          if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(table)) refuse("RECOVERY_TABLE_INVENTORY_INVALID");
+          return { table, rows: Number(database.prepare(`SELECT COUNT(*) AS rows FROM ${quoteIdentifier(table)}`).get().rows) };
+        }) });
+    },
+  });
   const checked = assertArtifactFile(artifactPath, { maxBytes });
   let descriptor;
   let child;
@@ -5772,6 +5816,16 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
     ((ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms)));
   const now = normalizedDependencies.now ?? Date.now;
   const verifySqlArtifact = normalizedDependencies.verifySqlArtifact ?? verifyRecoverySqlArtifact;
+  const singleBytes = normalizedDependencies.recoveryPartBytes ?? plan.artifact.max_single_import_bytes;
+  const partBytes = Math.min(singleBytes, 256 * 1024 ** 2);
+  // Test injection may only lower the bound and must remain fully hermetic.
+  if (!Number.isSafeInteger(singleBytes) || singleBytes <= 52 || singleBytes > plan.artifact.max_single_import_bytes ||
+      ((normalizedDependencies.recoveryPartBytes !== undefined || normalizedDependencies.onRecoveryPartVerified !== undefined) &&
+        assertRecoveryExecutionAuthority(normalizedDependencies) !== "injected_offline_test")) {
+    refuse("RECOVERY_MULTIPART_TEST_DEPENDENCIES_INVALID");
+  }
+  const multipartPath = plan.artifact.multipart_relative_name
+    ? join(pins.artifacts.path, plan.artifact.multipart_relative_name) : null;
   const readAdminKey = normalizedDependencies.readAdminKey ?? ((locator) =>
     defaultReadAdminKey(locator, config.environment));
   const readRecoveryArtifactKey = normalizedDependencies.readRecoveryArtifactKey ?? ((locator) =>
@@ -6283,7 +6337,7 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
       outputDescriptor = undefined;
       const raw = hashStableArtifact(
         path,
-        V048_D1_DELETION_STATE_MAX_EXPORT_BYTES,
+        migrations.length === 48 ? V048_D1_DELETION_STATE_MAX_EXPORT_BYTES : MAX_DURABLE_EXPORT_BYTES,
         outputPin,
       );
       try {
@@ -7015,7 +7069,7 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
     return true;
   }
 
-  function artifactEvidence() {
+  async function artifactEvidence(expected = null) {
     for (const component of [
       RECOVERY_EXPORT_DATA_PARTIAL_NAME,
       RECOVERY_EXPORT_COMBINED_PARTIAL_NAME,
@@ -7030,6 +7084,18 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
     assertNoRecoveryArtifactResidue(pins.artifacts.path, {
       activeResidueDirectoryPath: activeExecutionSnapshotResidueDirectoryPath(),
     });
+    if (multipartPath && existsSync(multipartPath)) {
+      if (existsSync(pins.artifactPath)) refuse("RECOVERY_EXPORT_ARTIFACT_CHANGED");
+      const pin = expected?.artifact_sha256 ?? hashStableArtifact(join(multipartPath, "manifest.json.fbrenc"), 16 * 1024 ** 2).artifact_sha256;
+      const { manifest, manifest_bytes: manifestBytes } = await inspectMultipartRecovery({
+        directory: multipartPath, expectedManifestSha256: pin, withKey: withRecoveryArtifactKey,
+      });
+      return Object.freeze({ artifact_sha256: pin,
+        artifact_bytes: manifestBytes + manifest.parts.reduce((sum, part) => sum + part.bytes, 0),
+        multipart: { part_count: manifest.part_count, manifest_bytes: manifestBytes,
+          parts: manifest.parts.map(({ index, bytes, sha256 }) => ({ index, bytes, sha256 })) } });
+    }
+    if (expected?.multipart) refuse("RECOVERY_EXPORT_ARTIFACT_CHANGED");
     return hashStableArtifact(pins.artifactPath, plan.artifact.max_single_import_bytes);
   }
 
@@ -7047,7 +7113,7 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
       return await captureRecoveryD1ContentFingerprint({
         binding,
         exportPath: path,
-        maxBytes: plan.artifact.max_single_import_bytes,
+        maxBytes: MAX_DURABLE_EXPORT_BYTES,
         excludeBankItems,
         excludeLlmCallLog,
         cleanupOnFailure: true,
@@ -7150,6 +7216,55 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
     return context.completed?.find((entry) => entry.id === stage)?.evidence ?? null;
   }
 
+  async function coverageCounts(binding, tables) {
+    const rows = await d1Rows(binding, tables.map((table) =>
+      `SELECT '${table}' AS table_name,COUNT(*) AS row_count FROM ${quoteIdentifier(table)}`,
+    ).join(" UNION ALL "));
+    if (rows.length !== tables.length || rows.some((row, index) =>
+      row.table_name !== tables[index] || !Number.isSafeInteger(Number(row.row_count)) || Number(row.row_count) < 0)) {
+      refuse("RECOVERY_MULTIPART_COVERAGE_INVALID");
+    }
+    return rows.map(({ table_name, row_count }) => ({ table: table_name, rows: Number(row_count) }));
+  }
+
+  function multipartSnapshot(snapshot, tables, contentFingerprint) {
+    return { schema_fingerprint: snapshot.schema_fingerprint,
+      content_fingerprint: contentFingerprint, aggregate_fingerprint: snapshot.aggregate_fingerprint, tables };
+  }
+
+  async function exportMultipart(migrations, normalizedInstallState, dataPartial, dataFingerprint) {
+    const tables = ["install_state", ...recoveryExportTables(migrations)];
+    const source = await remoteDatabaseSnapshot(pins.binding.source);
+    const snapshot = multipartSnapshot(source, await coverageCounts(pins.binding.source, tables), dataFingerprint);
+    const familyHistory = Number(migrations.at(-1)?.version || 0) >= 44;
+    const markerOpen = `INSERT INTO "source_original_result_family_recovery_state" ("id","mode") VALUES (1,'verified_recovery_import');\n`;
+    const markerClose = `\nDELETE FROM "source_original_result_family_recovery_state" WHERE "id"=1 AND "mode"='verified_recovery_import';\n` +
+      `INSERT INTO "source_original_result_family_recovery_state" ("id","mode") SELECT 2,'verified_recovery_import' WHERE EXISTS (SELECT 1 FROM "source_original_result_family_recovery_state");\n`;
+    return exportMultipartRecovery({
+      directory: multipartPath, sourceResourceFingerprint: plan.source_resource_fingerprint,
+      snapshot, maxPartBytes: partBytes, withKey: withRecoveryArtifactKey,
+      onPartVerified: normalizedDependencies.onRecoveryPartVerified ?? (() => {}),
+      openUnits: async function* () {
+        for (const migration of migrations) yield { sql: Buffer.from(`${migration.sql.trim()}\n\n`), coverage: [] };
+        yield { sql: normalizedInstallState, coverage: [{ table: "install_state", first_row: 1, last_row: 1 }] };
+        if (familyHistory) yield { sql: Buffer.from(markerOpen), coverage: [] };
+        const counts = new Map();
+        for await (const sql of recoveryDataStatements(dataPartial, Math.min(partBytes - 52, 16 * 1024 ** 2))) {
+          yield { sql, coverage: recoveryInsertCoverage(sql, counts, tables.slice(1)) };
+        }
+        if (familyHistory) yield { sql: Buffer.from(markerClose), coverage: [] };
+      },
+      inspectExport: async (consumeParts) => {
+        const local = await verifySqlArtifact(null, { consumeParts, coverageTables: tables, temporaryDirectory: pins.artifacts.path });
+        assertSameStructuralSnapshot(local, source, "RECOVERY_EXPORT_SOURCE_MISMATCH");
+        return multipartSnapshot(local, local.tables, dataFingerprint);
+      },
+      inspectSource: async () => multipartSnapshot(await remoteDatabaseSnapshot(pins.binding.source),
+        await coverageCounts(pins.binding.source, tables),
+        await remoteDataFingerprint(pins.binding.source, { sessionGenerationMode: "increment" })),
+    });
+  }
+
   function combineExport(
     migrations,
     normalizedInstallState,
@@ -7189,7 +7304,7 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
         openFamilyHistoryImport.fill(0);
       }
       const checkedData = assertArtifactFile(dataPartial, {
-        maxBytes: plan.artifact.max_single_import_bytes,
+        maxBytes: MAX_DURABLE_EXPORT_BYTES,
         allowEmpty: true,
       });
       input = openSync(dataPartial, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0));
@@ -8164,6 +8279,12 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
   const adapters = {
     export_d1: async (context) => {
       assertContext(context, "export_d1");
+      if (multipartPath && existsSync(multipartPath)) {
+        if (!Number.isSafeInteger(context.attempt) || context.attempt <= 1 || existsSync(pins.artifactPath)) {
+          refuse("RECOVERY_EXPORT_ARTIFACT_APPEARED");
+        }
+        if (existsSync(join(multipartPath, "manifest.json.fbrenc"))) return artifactEvidence();
+      }
       const dataPartial = recoveryArtifactResiduePath(
         pins.artifacts.path,
         RECOVERY_EXPORT_DATA_PARTIAL_NAME,
@@ -8214,12 +8335,20 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
           ...recoveryExportTables(migrations).flatMap((table) => ["--table", table]),
         ]);
         if (process.platform !== "win32") chmodSync(dataPartial, 0o600);
-        assertArtifactFile(dataPartial, { maxBytes: plan.artifact.max_single_import_bytes, allowEmpty: true });
+        const dataFile = assertArtifactFile(dataPartial, { maxBytes: MAX_DURABLE_EXPORT_BYTES, allowEmpty: true });
         const dataFingerprint = hashNormalizedDataExport(
           normalizedInstallState,
           dataPartial,
-          plan.artifact.max_single_import_bytes,
+          MAX_DURABLE_EXPORT_BYTES,
         );
+        if (dataFile.info.size + normalizedInstallState.length + 52 > singleBytes ||
+            (multipartPath && existsSync(multipartPath))) {
+          if (!multipartPath) refuse("RECOVERY_EXPORT_ARTIFACT_TOO_LARGE");
+          await exportMultipart(migrations, normalizedInstallState, dataPartial, dataFingerprint);
+          unlinkSync(dataPartial);
+          syncDirectory(pins.artifacts.path);
+          return artifactEvidence();
+        }
         combineExport(
           migrations,
           normalizedInstallState,
@@ -8228,8 +8357,18 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
           dataFingerprint,
         );
         const combined = assertArtifactFile(combinedPartial, {
-          maxBytes: plan.artifact.max_single_import_bytes,
+          maxBytes: MAX_DURABLE_EXPORT_BYTES,
         });
+        if (combined.info.size + 52 > singleBytes || (multipartPath && existsSync(multipartPath))) {
+          if (!multipartPath) refuse("RECOVERY_EXPORT_ARTIFACT_TOO_LARGE");
+          // Multipart verification streams the independently executable units,
+          // not the aggregate assembly file. Keep only the data producer alive.
+          unlinkSync(combinedPartial);
+          await exportMultipart(migrations, normalizedInstallState, dataPartial, dataFingerprint);
+          unlinkSync(dataPartial);
+          syncDirectory(pins.artifacts.path);
+          return artifactEvidence();
+        }
         try {
           await withRecoveryArtifactKey((key) =>
             encryptRecoveryArtifact(combined.path, pins.artifactPath, key));
@@ -8253,7 +8392,7 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
     verify_export: async (context) => {
       assertContext(context, "verify_export");
       const exported = completedEvidence(context, "export_d1");
-      const artifact = artifactEvidence();
+      const artifact = await artifactEvidence(exported);
       if (artifact.artifact_sha256 !== exported?.artifact_sha256 ||
           artifact.artifact_bytes !== exported?.artifact_bytes) {
         refuse("RECOVERY_EXPORT_ARTIFACT_CHANGED");
@@ -8263,7 +8402,18 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
         "source",
       );
       await remoteMigrationContract(pins.binding.source);
-      const inspected = await withRecoveryArtifactKey((key) =>
+      const inspected = artifact.multipart ? await (async () => {
+        const checked = await inspectMultipartRecovery({ directory: multipartPath,
+          expectedManifestSha256: artifact.artifact_sha256, withKey: withRecoveryArtifactKey,
+          inspectExport: (consumeParts, tables) => verifySqlArtifact(null, {
+            consumeParts, coverageTables: tables.map(({ table }) => table), temporaryDirectory: pins.artifacts.path,
+          }),
+        });
+        const snapshot = multipartSnapshot(checked.local, checked.local.tables, checked.manifest.snapshot.content_fingerprint);
+        if (canonical(snapshot) !== canonical(checked.manifest.snapshot)) refuse("RECOVERY_EXPORT_SOURCE_MISMATCH");
+        const { tables, ...local } = checked.local;
+        return { local, contentFingerprint: snapshot.content_fingerprint };
+      })() : await withRecoveryArtifactKey((key) =>
         withDecryptedRecoveryArtifact(
           pins.artifactPath,
           pins.artifacts.path,
@@ -8353,8 +8503,8 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
 
     restore_d1: async (context) => {
       assertContext(context, "restore_d1");
-      const artifact = artifactEvidence();
       const exported = completedEvidence(context, "verify_export");
+      const artifact = await artifactEvidence(exported);
       if (artifact.artifact_sha256 !== exported?.artifact_sha256 ||
           artifact.artifact_bytes !== exported?.artifact_bytes) {
         refuse("RECOVERY_EXPORT_ARTIFACT_CHANGED");
@@ -8362,6 +8512,37 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
       const { target: resources } = await assertRecoverySecretReconciliation("paused");
       await targetHealth("paused-for-upgrade");
       const tables = await targetUserTableCount();
+      if (artifact.multipart) {
+        if (tables !== 0 || resources.vectorCount !== 0) refuse("RECOVERY_MULTIPART_TARGET_NOT_EMPTY");
+        const checked = await inspectMultipartRecovery({ directory: multipartPath,
+          expectedManifestSha256: artifact.artifact_sha256, withKey: withRecoveryArtifactKey });
+        let imported = 0;
+        const restored = await restoreMultipartRecovery({ directory: multipartPath,
+          expectedManifestSha256: artifact.artifact_sha256,
+          target: { name: pins.disposable.suffix, resource_fingerprint: plan.target_resource_fingerprint },
+          withKey: withRecoveryArtifactKey,
+          inspectTarget: async () => {
+            const actual = await assertExactCloudflareResources(pins.binding.target, "target", "paused");
+            await targetHealth("paused-for-upgrade");
+            if (actual.vectorCount !== 0) refuse("RECOVERY_TARGET_IMPORT_AMBIGUOUS");
+            return { name: pins.disposable.suffix, resource_fingerprint: plan.target_resource_fingerprint,
+              user_table_count: await targetUserTableCount(),
+              ...(imported === checked.manifest.part_count ? { snapshot: multipartSnapshot(
+                await targetDatabaseSnapshot(),
+                await coverageCounts(pins.binding.target, checked.manifest.snapshot.tables.map(({ table }) => table)),
+                await remoteDataFingerprint(pins.binding.target),
+              ) } : {}) };
+          },
+          importPart: async ({ path, index }) => {
+            if (index !== imported + 1) refuse("RECOVERY_MULTIPART_IMPORT_ORDER_INVALID");
+            await wrangler(pins.binding.target, ["d1", "execute", pins.binding.target.databaseName,
+              "--remote", "--file", path, "--yes"]);
+            imported++;
+          },
+        });
+        return Object.freeze({ artifact_sha256: artifact.artifact_sha256, import_completed: true,
+          imported_part_count: restored.part_count });
+      }
       if (tables > 0) {
         // A populated target is reconcilable only after this exact stage had an
         // ambiguous prior attempt. On attempt one it changed outside the gate.
@@ -8999,11 +9180,13 @@ function readStableImplementationFile(path) {
   }
 }
 
-function localImplementationSpecifiers(raw) {
+export function localImplementationSpecifiers(raw) {
   const source = raw.toString("utf8");
   const specifiers = new Set();
   for (const pattern of [
-    /\bfrom\s*["'](\.{1,2}\/[^"']+)["']/gu,
+    // Match module declarations, not generated recovery-entry source stored
+    // inside a string literal in the update implementation.
+    /^\s*(?:import|export)\s+(?:[^;]*?\s+from\s+)?["'](\.{1,2}\/[^"']+)["']/gmu,
     /^\s*import\s*["'](\.{1,2}\/[^"']+)["']/gmu,
     /\bimport\s*\(\s*["'](\.{1,2}\/[^"']+)["']\s*\)/gu,
   ]) {
@@ -9710,6 +9893,7 @@ export function previewCloudflareRecoveryFieldGate(configInput, dependencies = {
   const status = verifiedRecoveryStatus(plan, state);
   return Object.freeze({
     mode: "disposable_cloudflare_recovery_field_gate",
+    artifact_policy: plan.artifact,
     ready_for_explicit_approval: true,
     plan_fingerprint: plan.plan_fingerprint,
     target_approval_fingerprint: plan.target_resource_fingerprint,

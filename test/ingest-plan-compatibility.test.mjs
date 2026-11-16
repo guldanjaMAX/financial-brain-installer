@@ -21,6 +21,16 @@ const { cmdIngestLocal: previous, applyDriveRemovals: previousRemovals } =
   await import(`data:text/javascript;base64,${Buffer.from(historicalSource).toString('base64')}`);
 import worker from '../worker/src/index.js';
 import { ingestPlanStore } from './helpers/ingest-plan-store.mjs';
+
+test('delete instrumentation observes direct statements as well as batches', async () => {
+  const store = ingestPlanStore();
+  try {
+    await store.env.DB.prepare('DELETE FROM documents WHERE 0').run();
+    assert.equal(store.calls.deletes, 1, 'a direct delete cannot bypass the no-delete assertion');
+    await store.env.DB.batch([store.env.DB.prepare('DELETE FROM documents WHERE 0')]);
+    assert.equal(store.calls.deletes, 2, 'a batched delete is also observed');
+  } finally { store.db.close(); }
+});
 import { batchStream, splitOversized, prefetch, removedSinceLastRun } from '../ingest/run.mjs';
 Date.now = () => Date.parse('2026-10-07T00:00:00Z');
 
@@ -75,7 +85,7 @@ for (const [label,run] of [['current',current],['previous',previous]]) {
     assert.equal(legacyStatus,409,'upgraded Worker refuses unplanned legacy mutation');
     assert.equal(legacyBody.code,'INGEST_REMOVAL_PLAN_REQUIRED');
     assert.match(legacyBody.error,/update.*CLI/i);
-    assert.equal(store.calls.batches,0,'no delete transaction is authorized');
+    assert.equal(store.calls.deletes,0,'no delete transaction is authorized');
     assert.ok(state.done.item1,'accepted updates remain checkpointed');
     console.log(`R1 ordinary evidence: accepted=${accepted} legacy_requests=${legacyRequests} remaining=${store.uids().length} plan_requests=${store.calls.preview+store.calls.apply}`);
     assert.equal(store.uids().includes('upload:item0'),true,'upgraded Worker must refuse legacy ordinary-ingest deletion without exact apply');

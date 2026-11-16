@@ -1,7 +1,8 @@
 /** Semantic Task Scheduler readback. No DTDs, loose descendant lookups or XML execution. */
 import { join, resolve, win32 } from "node:path";
 import { randomBytes } from "node:crypto";
-import { chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { LOCAL_FILE_LOCKED, publishDirectoryWithRetrySync } from "./rename-retry.mjs";
 
 const NS = "http://schemas.microsoft.com/windows/2004/02/mit/task";
 const SID = /^S-1-\d+(?:-\d+)+$/u;
@@ -262,7 +263,7 @@ export function observedWindowsContract(serialized, { repetition = false, resolv
 
 
 /** Windows-only lock: publish owner metadata atomically, recover only a proven dead owner. */
-export function withWindowsTaskMutationLock(home, identity, task) {
+export function withWindowsTaskMutationLock(home, identity, task, { platform = process.platform } = {}) {
   if (!/^[a-z0-9-]{1,100}$/u.test(identity?.id || "")) throw new Error("invalid Windows task lock identity");
   const root = join(resolve(home), ".brain", "schedule-mutations");
   mkdirSync(root, { recursive: true, mode: 0o700 });
@@ -297,7 +298,9 @@ export function withWindowsTaskMutationLock(home, identity, task) {
       try { unlinkSync(previousPath); } catch (error) { if (error?.code !== "ENOENT") throw error; }
       try { rmdirSync(path); } catch (error) { if (error?.code !== "ENOENT") throw busy(); }
     } catch (error) { if (error?.code !== "ENOENT") throw error; }
-    try { renameSync(pending, path); } catch { throw busy(); }
+    // A scanner can briefly hold the new owner record; a taken name stays busy.
+    try { publishDirectoryWithRetrySync(pending, path, { platform }); }
+    catch (error) { throw error?.supportCode === LOCAL_FILE_LOCKED ? error : busy(); }
   } finally {
     try { unlinkSync(join(pending, owner)); } catch {}
     try { rmdirSync(pending); } catch {}

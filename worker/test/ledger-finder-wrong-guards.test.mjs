@@ -1,3 +1,5 @@
+// 0.4.28 owner confidence is attached after the legacy-reader seam used by this fixture.
+import { finalizeOwnerLedgerAnswer } from '../src/lib/document-answer.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fixture, ledgerFixture, NOW } from './ledger-review-fixture.mjs';
@@ -130,9 +132,10 @@ for (const side of ['business', 'personal']) for (const coded of [false, true]) 
   assert.ok(body.ledger, 'possible owned-movement decision reached');
   assert.equal(body.ledger.possible_own_movement_count, 1, 'nonempty unresolved movement decision');
   assert.equal(body.ledger.complete, false);
-  assert.equal(body.ledger.total_minor, null);
-  assert.equal(body.ledger.combined_inflow_minor ?? null, null);
-  assert.equal(body.ledger.expense_total_minor ?? null, null);
+  if (side === 'business') assert.equal(body.ledger.combined_inflow_minor, 80000, 'observed incoming leg remains');
+  else assert.equal(body.ledger.expense_total_minor, 80000, 'observed outgoing leg remains');
+  assert.match(body.answer, /\$800\.00/);
+  assert.doesNotMatch(body.answer, /withheld|cannot|can't/i);
   assert.match(body.answer, /possible.*own.*movement|possible.*own.*payment/i);
 });
 
@@ -156,10 +159,11 @@ for (const kind of ['CARD', 'LOAN']) test(`untyped ${kind} payment must withhold
   f.add('channel',kind+' PAYMENT',kind+' PAYMENT',{date:'2026-09-12',cents:80000,direction:'outflow'});
   const b=await f.ask('How much did I spend in September?');
   assert.ok(f.calls.some(sql=>/JOIN fin_transactions/.test(sql)),'nonempty membership decision reached');
-  assert.equal(b.ledger.expense_total_minor,null);
+  assert.equal(b.ledger.expense_total_minor,123);
   assert.equal(b.ledger.possible_payment_count,1,'nonempty untyped payment decision');
   assert.equal(b.ledger.complete,false);
-  assert.match(b.answer,/withheld.*payment|payment.*withheld/i);
+  assert.match(b.answer,/possible (?:card|loan) payment, not counted as spending: \$800\.00/i);
+  assert.doesNotMatch(b.answer,/withheld|cannot|can't/i);
 });
 
 test('a refused payment component still discloses its possible refund', async t => {
@@ -172,8 +176,10 @@ test('a refused payment component still discloses its possible refund', async t 
   assert.equal(green.ledger.possible_refunds.length,1,'refund nomination green control');
   f.add('channel','CARD PAYMENT','CARD PAYMENT',{date:'2026-09-12',cents:80000,direction:'outflow'});
   const body=await read();
-  assert.equal(body.ledger.reason,'payment_membership_unconfirmed','refusal decision reached');
-  assert.equal(body.ledger.total_minor,null);
+  assert.equal(body.ledger.possible_payment_count,1,'payment decision reached');
+  assert.equal(body.ledger.reason,undefined);
+  assert.equal(body.ledger.total_minor,123);
+  assert.doesNotMatch(body.answer,/withheld|cannot|can't/i);
   assert.equal(body.ledger.possible_refunds?.length,1);
   assert.equal(body.ledger.possible_refunds[0].amount_minor,50);
   assert.equal(body.ledger.candidate_disclosure_unavailable,undefined);
@@ -192,10 +198,21 @@ test('monthly payment refusal preserves its specific reason and refund citations
  assert.equal(green.ledger.months[1].possible_refunds.length,1,'monthly refund green control');
  f.add('channel','CARD PAYMENT','CARD PAYMENT',{date:'2026-09-12',cents:80000,direction:'outflow'});
  const b=await read();assert.equal(b.ledger.months[0].total_minor,123,'unaffected month remains exact');
- const month=b.ledger.months[1];assert.equal(month.available,false,'monthly refusal reached');assert.equal(month.total_minor,null);
- assert.equal(month.reason,'payment_membership_unconfirmed');
- assert.match(b.answer,/payment.*classification|payment.*code/i);
+ const month=b.ledger.months[1];assert.equal(month.available,true,'monthly payment decision reached');assert.equal(month.total_minor,456);
+ assert.equal(month.complete,false);
+ assert.equal(month.reason,null);
+ assert.match(b.answer,/possible card payment, not counted as spending: \$800\.00/i);
+ assert.doesNotMatch(b.answer,/withheld|cannot|can't/i);
  assert.equal(month.possible_refunds.length,1);
  assert.ok(b.citations.some(c=>c.n===month.possible_refunds[0].n&&c.amount_minor===50));
  assert.equal(b.ledger.candidate_disclosure_unavailable,undefined);
+ // 0.4.28 observed monthly amounts retain a causal reason instead of withholding the whole month.
+ f.raw("UPDATE fin_transactions SET description='ONLINE TRANSFER TO SAVINGS XXXX6789 FEE 2.00',payee=NULL WHERE txn_uid='channel'");
+ const mixed=await read(), observed=mixed.ledger.months[1];
+ assert.equal(observed.available,true,'mixed posting reaches the observed monthly decision');
+ assert.equal(observed.total_minor,80456);
+ assert.equal(observed.complete,false);
+ assert.equal(observed.reason,'own_movement_mixed_components');
+ assert.equal(finalizeOwnerLedgerAnswer(mixed).confidence.percent,0);
+ assert.match(mixed.answer,/fee, charge or second amount/);
 });

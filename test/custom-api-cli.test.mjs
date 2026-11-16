@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  WINDOWS_CLIPBOARD_CLEAR_SCRIPT,
   clearCustomApiClipboard,
   readCustomApiClipboard,
 } from "../operations/custom-api-clipboard.mjs";
@@ -357,7 +358,7 @@ test("native clipboard commands use captured no-shell processes and scrub the ch
     },
     {
       command: String.raw`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
-      args: ["-NoProfile", "-NonInteractive", "-Command", "Set-Clipboard -Value $null"],
+      args: ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_CLIPBOARD_CLEAR_SCRIPT],
     },
   ]);
   for (const { options } of windowsCalls) {

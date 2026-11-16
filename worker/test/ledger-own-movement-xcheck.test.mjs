@@ -92,7 +92,9 @@ for (const [text, account] of [['ACH DEBIT OWNER SAVINGS CONTRIB', { label: 'sav
     const paired = connect(book(t, text), account);
     deposit(paired, 'Transfer from account 1234');
     const pairedNet = await reached(paired, questions.net);
-    assert.equal(pairedNet.ledger.net_minor ?? null, null);
+    assert.equal(pairedNet.ledger.net_minor, CLIENT - STORE - (account.kind === 'investment' ? MOVE : 0), 'observed legs remain, only eligible account kinds contribute');
+    assert.match(pairedNet.answer, /up to \$123\.45 may be counted twice/);
+    assert.doesNotMatch(pairedNet.answer, /withheld|cannot|can't/i);
     assert.equal(pairedNet.ledger.reason, 'money_out_destination_unconfirmed');
     assert.equal((await reached(paired, questions.spent)).ledger.expense_total_minor, STORE);
   });
@@ -120,7 +122,8 @@ test('connected destination with an unproved matching deposit withholds net inco
     const f = connect(book(t, text), account);
     deposit(f, legText);
     const net = await reached(f, questions.net);
-    assert.equal(net.ledger.net_minor ?? null, null, `${text}: never one leg removed`);
+    assert.equal(net.ledger.net_minor, CLIENT - STORE, `${text}: neither unproved leg removed`);
+    assert.match(net.answer, /up to \$123\.45 may be counted twice/);
     assert.equal(net.ledger.complete, false);
     // Went-out v2 keeps the outgoing leg in money out, so the equal deposit is
     // a possible other leg in a connected account and money out is withheld.
@@ -183,9 +186,12 @@ test('mixed bare, liability and processor movements withhold without splitting',
     ['Transfer to credit card $10.00 PLUS $2.00', 'own_movement_mixed_components'],
     ['ACH DEBIT SYNTHETIC LENDER LOAN PAYMENT FEE 2.00', 'loan_payment_mixed_components']]) {
     for (const question of [questions.spent, questions.largest]) {
-      const l = (await reached(book(t, text), question)).ledger;
+      const b = await reached(book(t, text), question), l = b.ledger;
       assert.equal(l.complete, false, text);
-      assert.equal(l.expense_total_minor, null);
+      if (question === questions.spent) assert.equal(l.expense_total_minor, STORE + MOVE);
+      else assert.deepEqual(ranked(l), [MOVE, STORE]);
+      assert.match(b.answer, /components have not been split/);
+      assert.doesNotMatch(b.answer, /withheld|cannot|can't/i);
       assert.equal(l.reason, reason);
     }
   }

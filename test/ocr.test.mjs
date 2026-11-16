@@ -1,3 +1,4 @@
+import { currentPartsFixture, driveChangesFixture } from './helpers/current-sync-fixture.mjs';
 /**
  * OCR for scanned PDFs.
  *
@@ -134,6 +135,9 @@ async function probeDriveOcrHttpFailure({ status, label }) {
       { fetchImpl: async () => new Response(scanPdf()) },
     ),
   };
+  // Reviewed Drive R6 uses bounded changes, not the retired corpus walk.
+  const feed = driveChangesFixture(drive, [file]);
+  const parts = currentPartsFixture();
   const batchStream = async function* (items, prepare, { onSkip } = {}) {
     const group = [];
     for (const item of items) {
@@ -205,7 +209,10 @@ async function probeDriveOcrHttpFailure({ status, label }) {
       resolveBaseUrl: async () => "https://brain.example",
       resolveAdminKey: () => key,
       getAccessToken: async () => "synthetic-access",
-      drive,
+      drive: feed.drive,
+      driveNow: () => Date.parse("2026-11-01T00:00:00Z"),
+      verifyDriveIncrementalWorker: async () => {},
+      readDriveFamily: async () => true, readCurrentIngestParts: parts.read,
       ingestLib: async () => ({
         batchStream,
         splitOversized: (envelope) => [envelope],
@@ -226,6 +233,7 @@ async function probeDriveOcrHttpFailure({ status, label }) {
     sourceUid,
     stopped,
     sourceInventoryCalls,
+    metadataReads: feed.calls.metadata,
     replacementIngestCalls,
     removalCalls,
     finalState: savedStates.at(-1) || priorState,
@@ -1086,6 +1094,9 @@ function stubOcr({ reply = () => pageText, model = "@cf/meta/llama-4-scout-17b-1
     throw new Error(`unexpected synthetic request: ${new URL(target).pathname}`);
   };
 
+  // Reviewed Drive R6 uses bounded changes, not the retired corpus walk.
+  const feed = driveChangesFixture(drive, [file]);
+  const parts = currentPartsFixture();
   const batchStream = async function* (items, prepare, { onSkip } = {}) {
     const group = [];
     for (const item of items) {
@@ -1102,7 +1113,10 @@ function stubOcr({ reply = () => pageText, model = "@cf/meta/llama-4-scout-17b-1
       resolveBaseUrl: async () => "https://brain.example",
       resolveAdminKey: () => key,
       getAccessToken: async () => "synthetic-access",
-      drive,
+      drive: feed.drive,
+      driveNow: () => Date.parse("2026-11-01T00:00:00Z"),
+      verifyDriveIncrementalWorker: async () => {},
+      readDriveFamily: async () => true, readCurrentIngestParts: parts.read,
       ingestLib: async () => ({
         batchStream,
         splitOversized: (envelope) => [envelope],
@@ -1206,6 +1220,9 @@ function stubOcr({ reply = () => pageText, model = "@cf/meta/llama-4-scout-17b-1
       return googleDrive.toEnvelope(...args, { fetchImpl: async () => new Response(scanPdf()) });
     },
   };
+  // Reviewed Drive R6 uses bounded changes, not the retired corpus walk.
+  const feed = driveChangesFixture(drive, [file]);
+  const parts = currentPartsFixture();
   const batchStream = async function* (items, prepare, { onSkip } = {}) {
     const group = [];
     for (const item of items) {
@@ -1252,7 +1269,10 @@ function stubOcr({ reply = () => pageText, model = "@cf/meta/llama-4-scout-17b-1
       resolveBaseUrl: async () => "https://brain.example",
       resolveAdminKey: () => key,
       getAccessToken: async () => "synthetic-access",
-      drive,
+      drive: feed.drive,
+      driveNow: () => Date.parse("2026-11-01T00:00:00Z"),
+      verifyDriveIncrementalWorker: async () => {},
+      readDriveFamily: async () => true, readCurrentIngestParts: parts.read,
       ingestLib: async () => ({
         batchStream,
         splitOversized: (envelope) => [envelope],
@@ -1271,7 +1291,7 @@ function stubOcr({ reply = () => pageText, model = "@cf/meta/llama-4-scout-17b-1
 
   const finalState = savedStates.at(-1) || priorState;
   check("a provider 502 reaches the source decision point as typed system evidence",
-    fileFetches === 1 && modelCalls === 1 && sourceInventoryCalls >= 1 &&
+    fileFetches === 1 && modelCalls === 1 && sourceInventoryCalls === 0 && feed.calls.metadata === 1 &&
       stopped?.code === "OCR_SYSTEM_UNAVAILABLE" && stopped?.fatal === true && stopped?.retryable === true,
     JSON.stringify({ fileFetches, modelCalls, sourceInventoryCalls, code: stopped?.code,
       message: stopped?.message }));
@@ -1294,7 +1314,7 @@ for (const failure of [
 ]) {
   const observed = await probeDriveOcrHttpFailure(failure);
   check(`OCR HTTP ${failure.status} reaches the source decision point as system evidence`,
-    observed.sourceInventoryCalls >= 1 &&
+    observed.sourceInventoryCalls === 0 && observed.metadataReads === 1 &&
       observed.stopped?.code === "OCR_SYSTEM_UNAVAILABLE" &&
       observed.stopped?.fatal === true && observed.stopped?.retryable === true,
     JSON.stringify({
@@ -1496,6 +1516,9 @@ const ocrTimeout = () => Object.assign(
       return googleDrive.toEnvelope(...args, { fetchImpl: async () => new Response(scanPdf()) });
     },
   };
+  // Reviewed Drive R6 uses bounded changes, not the retired corpus walk.
+  const feed = driveChangesFixture(drive, [file]);
+  const parts = currentPartsFixture();
   const batchStream = async function* (items, prepare, { onSkip } = {}) {
     const group = [];
     for (const item of items) {
@@ -1539,6 +1562,7 @@ const ocrTimeout = () => Object.assign(
       replacementIngestCalls++;
       const requestBody = JSON.parse(opts.body);
       ingestedDocuments.push(...requestBody.docs);
+      for (const document of requestBody.docs) parts.accept(document);
       return new Response(JSON.stringify({
         results: requestBody.docs.map((document) => ({ source_id: document.source_id, status: "updated" })),
       }), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -1582,7 +1606,10 @@ const ocrTimeout = () => Object.assign(
       resolveBaseUrl: async () => "https://brain.example",
       resolveAdminKey: () => key,
       getAccessToken: async () => "synthetic-access",
-      drive,
+      drive: feed.drive,
+      driveNow: () => Date.parse("2026-11-01T00:00:00Z"),
+      verifyDriveIncrementalWorker: async () => {},
+      readDriveFamily: async () => true, readCurrentIngestParts: parts.read,
       ingestLib: async () => ({
         batchStream,
         splitOversized: (envelope) => [envelope],
@@ -1619,14 +1646,13 @@ const ocrTimeout = () => Object.assign(
       JSON.parse(storedOcrReceipt?.response_json || "{}").acknowledged_at === storedOcrReceipt?.acknowledged_at,
     JSON.stringify({ acknowledgementCalls, storedOcrReceipt }));
   check("the recovered source run reaches the safe terminal decisions without a removal plan",
-    removalCalls === 0 && legacyForgetCalls === 0 && removalPlanPreviews >= 1 &&
-      reviewedFamilies.some((family) => family.base_doc_uid === "drive:scan-fixture" &&
-        family.keep_doc_uids.includes("drive:scan-fixture")) &&
+    removalCalls === 0 && legacyForgetCalls === 0 && removalPlanPreviews === 0 &&
+      feed.calls.metadata === 1 &&
       removalPlanStore.uids().includes("drive:scan-fixture") &&
-      finalState.ingest_removal_plan === undefined && finalState.ingest_pending_families === undefined &&
+      finalState.ingest_removal_plan === undefined && Object.keys(finalState.ingest_pending_families || {}).length === 0 &&
       finalState.sync_token === "next-cursor" &&
       finalState.done["drive:scan-fixture"] !== "prior-accepted-revision" &&
-      sourceReceipts.some((receipt) => receipt.status === "ready" && receipt.complete_sweep === true) &&
+      sourceReceipts.some((receipt) => receipt.status === "ready" && receipt.provider_check_complete === true && receipt.complete_sweep === false) &&
       !sourceReceipts.some((receipt) => receipt.status === "error"),
     JSON.stringify({ removalCalls, legacyForgetCalls, removalPlanPreviews, reviewedFamilies, finalState, sourceReceipts }));
 }

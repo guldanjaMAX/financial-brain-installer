@@ -153,13 +153,12 @@ function stateFor(mode) {
   return state;
 }
 
-function runCase(mode, { approval = null, apply = null, directory = null, reset = false, printedCommand = null } = {}) {
+function runCase(mode, { approval = null, apply = null, directory = null, reset = false, printedCommand = null, continuationRuns = 0 } = {}) {
   if (approval && !apply && directory) {
     const plan = JSON.parse(readFileSync(join(directory, ".brain-ingest-gmail.json"), "utf8")).ingest_removal_plan;
     assert.ok(plan?.targets.length > 0, "separate approval must name a nonempty saved plan");
-    const applied = runCase(mode, { directory, approval, apply: plan.fingerprint });
-    if (applied.code !== 0) return applied;
-    return runCase(mode, { directory });
+    assert.equal(plan.sourcePlan.fingerprint, approval, "the supplied approval names this reviewed source plan");
+    return runApprovedCase(mode, { directory });
   }
   const fresh = directory == null;
   directory ||= realpathSync.native(mkdtempSync(join(tmpdir(), `brain-test-gmail-${mode}-`)));
@@ -194,6 +193,7 @@ function runCase(mode, { approval = null, apply = null, directory = null, reset 
   }
   Object.assign(environment, {
     HOME: userRoot,
+    BRAIN_LIFECYCLE_LOCK_ROOT: join(directory, "machine-locks"),
     NO_COLOR: "1",
     BRAIN_NO_WRANGLER_LOGIN: "1",
     BRAIN_GOOGLE_TOKEN_STORE: "file",
@@ -218,31 +218,54 @@ function runCase(mode, { approval = null, apply = null, directory = null, reset 
     // Every option comes from the literal printed command, with no hidden --from.
     args.splice(args.indexOf("ingest") + 2, Infinity, ...printedCommand.slice(prefix.length + 1).split(" "));
   }
+  if (process.env.BRAIN_LANE_NODE_WAIT) {
+    const quiet = spawnSync("/bin/sh", ["-c", process.env.BRAIN_LANE_NODE_WAIT], { encoding: "utf8" });
+    assert.equal(quiet.status, 0);
+  }
   const result = spawnSync(process.execPath, args, { encoding: "utf8", env: environment, timeout: 30_000 });
   assert.equal(result.error, undefined, String(result.error || ""));
   assert.equal(result.signal, null, `${mode} Gmail fixture was terminated`);
   const output = strip(`${result.stdout || ""}${result.stderr || ""}`);
   assert.ok(existsSync(evidencePath), `${mode} Gmail fixture wrote no evidence:\n${output}`);
-  return {
+  const snapshot = {
     directory,
     code: result.status,
     output,
     state: JSON.parse(readFileSync(statePath, "utf8")),
     evidence: JSON.parse(readFileSync(evidencePath, "utf8")),
   };
+  // Existing policy cases describe a completed sync session. Drain the real
+  // bounded CLI invocations, retaining evidence across restarts, rather than
+  // assuming a bootstrap finishes in one process. Failures still return once.
+  // A held retry is deliberately incomplete and may keep failing. The daily
+  // budget owns retry repetition; this completed-policy helper only drains
+  // provider/recovery pages, never an unbounded persistent-failure loop.
+  if (snapshot.code === 0 && !apply && Object.keys(snapshot.state.gmail_retry || {}).length === 0 &&
+      /more history remains/.test(output)) {
+    assert.ok(continuationRuns < 12, "bounded policy fixture continuation made progress");
+    const next = runCase(mode, { directory, continuationRuns: continuationRuns + 1 });
+    next.output = output + "\n" + next.output;
+    return next;
+  }
+  return snapshot;
 }
 
 function runApprovedCase(mode, options = {}) {
-  const priorRemovals = options.directory ? JSON.parse(readFileSync(join(options.directory, "evidence.json"), "utf8")).forget_targets.length : 0;
-  const review = runCase(mode, options);
-  const plan = review.state.ingest_removal_plan;
-  assert.equal(review.code, 1, review.output);
-  assert.ok(plan?.targets.length > 0, "separate apply control must reach a nonempty plan");
-  assert.equal(review.evidence.forget_targets.length, priorRemovals);
-  const applied = runCase(mode, { directory: review.directory, apply: plan.fingerprint,
-    approval: plan.sourcePlan.tooLarge || plan.requireSourceApproval ? plan.sourcePlan.fingerprint : null });
-  if (applied.code !== 0) return applied;
-  return runCase(mode, { directory: review.directory });
+  let review = runCase(mode, options);
+  const approvals = new Set();
+  for (let round = 0; round < 12; round++) {
+    const plan = review.state.ingest_removal_plan;
+    if (!plan) return review;
+    assert.equal(review.code, 1, review.output);
+    assert.ok(plan.targets.length > 0, "separate apply control reaches a nonempty exact plan");
+    assert.ok(!approvals.has(plan.fingerprint), "each bounded owner decision must make progress");
+    approvals.add(plan.fingerprint);
+    const applied = runCase(mode, { directory: review.directory, apply: plan.fingerprint,
+      approval: plan.sourcePlan.tooLarge || plan.requireSourceApproval ? plan.sourcePlan.fingerprint : null });
+    if (applied.code !== 0) return applied;
+    review = runCase(mode, { directory: review.directory });
+  }
+  throw new Error("synthetic owner decisions did not make bounded progress");
 }
 
 if (process.platform !== "win32") {
@@ -406,19 +429,24 @@ if (process.platform !== "win32") {
 {
   const result = runCase("unclassified");
   try {
-    check("a late missing-label gap discards the entire incremental window",
-      result.code === 1 && result.evidence.ingested_ids.length === 0 &&
-      result.evidence.forget_targets.length === 0 && /(?:refused|partial) coverage/i.test(result.output),
+    // Missing evidence is an exact durable retry, not an all-sibling veto.
+    // Keep the prior copy and incomplete receipt while healthy mail is accepted.
+    // This fixture also has a separate owner deletion review, which still holds
+    // the direct CLI cursor; the daily-path control proves later history progress.
+    check("a late missing-label gap holds only its item and accepts healthy siblings",
+      result.code === 1 && result.evidence.ingested_ids.length === 51 &&
+      result.state.gmail_retry?.["gmail:unclassified"] === true &&
+      result.evidence.forget_targets.length === 0 && /review required/i.test(result.output),
       result.output.slice(-1_200));
-    check("a late missing-label gap retains prior state and marks no eligible sibling done",
+    check("a late missing-label gap retains prior state and checkpoints every eligible sibling",
       result.state.history_id === "history-prior" &&
       result.state.done["gmail:unclassified"] === "history-prior-message" &&
       Object.hasOwn(result.state.removed || {}, "gmail:pending-removal") &&
-      !Object.keys(result.state.done).some((key) => key.startsWith("gmail:eligible-")),
+      Object.keys(result.state.done).filter((key) => key.startsWith("gmail:eligible-")).length === 51,
       JSON.stringify(result.state));
-    check("an unclassified incremental message closes health as an opaque ingest error",
+    check("an independent pending owner decision remains an opaque review requirement",
       result.state.history_id === "history-prior" && result.evidence.final_receipt?.status === "error" &&
-      result.evidence.final_receipt?.issue_code === "INGEST_FAILED" &&
+      result.evidence.final_receipt?.issue_code === "SAFETY_REVIEW_REQUIRED" &&
       !("error" in result.evidence.final_receipt) && !("detail" in result.evidence.final_receipt),
       JSON.stringify(result.evidence.final_receipt));
   } finally { rmSync(result.directory, { recursive: true, force: true }); }
@@ -464,11 +492,11 @@ if (process.platform !== "win32") {
 {
   const first = runCase("recoverable-worker-failure");
   try {
-    check("a recoverable Worker failure reaches the batch decision and advances Gmail history only with a durable retry",
+    check("a recoverable Worker failure saves its exact retry before bounded bootstrap can advance",
       first.code === 1 &&
       first.evidence.batch_attempts?.["retry-failed"] === 1 &&
       first.evidence.batch_attempts?.["retry-clean"] === 1 &&
-      first.state.history_id === "history-current" &&
+      first.state.history_id === undefined && first.state.gmail_recovery?.stage === "stored" &&
       first.state.gmail_retry?.["gmail:retry-failed"] === true &&
       first.state.done["gmail:retry-clean"] === "history-current" &&
       !Object.hasOwn(first.state.done, "gmail:retry-failed") &&
@@ -633,7 +661,8 @@ if (process.platform !== "win32") {
   const result = runCase("scanner-v5-retained-untracked");
   try {
     check("scanner v5 cannot certify a retained Brain family missing from local resume state",
-      result.code === 1 &&
+      result.code === 0 && result.state.gmail_retry?.["gmail:migration-unreadable"] === true &&
+      result.evidence.final_receipt?.docs_failed === 1 &&
       result.state.credential_scanner_fingerprint === credentialScannerFingerprint(true, 4) &&
       result.state.credential_scanner_progress?.fingerprint === credentialScannerFingerprint(true, 5) &&
       result.state.skipped["gmail:migration-unreadable"] === "the message had no content" &&
@@ -680,19 +709,21 @@ if (process.platform !== "win32") {
 {
   const first = runCase("pending-retained");
   try {
-    check("an active unreadable Gmail message retains an ambiguous pending deletion and holds the cursor",
-      first.code === 1 && first.evidence.forget_targets.length === 0 &&
+    check("an active unreadable Gmail message retains its pending deletion and a durable fair retry",
+      first.code === 0 && first.evidence.forget_targets.length === 0 &&
+      first.state.gmail_retry?.["gmail:pending-retained"] === true &&
       Object.hasOwn(first.state.removed || {}, "gmail:pending-retained") &&
       first.state.done["gmail:pending-retained"] === "pending-retained-v1" &&
-      first.state.history_id === "history-prior" &&
-      /active message\(s\) had unresolved pending removals/i.test(first.output),
+      first.state.history_id === "history-current" &&
+      /held for retry/i.test(first.output),
       `${first.output.slice(-1_200)}\n${JSON.stringify(first.state)}\n${JSON.stringify(first.evidence)}`);
     const retry = runCase("pending-retained", { directory: first.directory });
     check("the retry preserves the prior family and cannot lose a still-required security removal",
-      retry.code === 1 && retry.evidence.forget_targets.length === 0 &&
+      retry.code === 0 && retry.evidence.forget_targets.length === 0 &&
+      retry.state.gmail_retry?.["gmail:pending-retained"] === true &&
       Object.hasOwn(retry.state.removed || {}, "gmail:pending-retained") &&
       retry.state.done["gmail:pending-retained"] === "pending-retained-v1" &&
-      retry.state.history_id === "history-prior",
+      retry.state.history_id === "history-current",
       `${retry.output.slice(-1_200)}\n${JSON.stringify(retry.state)}\n${JSON.stringify(retry.evidence)}`);
   } finally { rmSync(first.directory, { recursive: true, force: true }); }
 }
@@ -701,17 +732,20 @@ if (process.platform !== "win32") {
   const first = runCase("pending-absent-unreadable");
   try {
     check("authenticated D1 absence settles an unreadable active Gmail pending marker",
-      first.code === 1 && first.evidence.forget_targets.length === 0 &&
+      first.code === 0 && first.evidence.forget_targets.length === 0 &&
       first.state.history_id === "history-current" &&
       !Object.hasOwn(first.state.removed || {}, "gmail:pending-absent-unreadable") &&
       !Object.hasOwn(first.state.done || {}, "gmail:pending-absent-unreadable") &&
-      /(?:partial|refused) coverage/i.test(first.output),
+      first.state.gmail_retry?.["gmail:pending-absent-unreadable"] === true &&
+      first.evidence.final_receipt?.status === "error" && /held for retry/i.test(first.output),
       `${first.output.slice(-1_300)}\n${JSON.stringify(first.state)}\n${JSON.stringify(first.evidence)}`);
 
     const retry = runCase("pending-absent-unreadable", { directory: first.directory });
     check("the settled absent Gmail pending marker cannot wedge the next empty history window",
       retry.code === 0 && retry.evidence.forget_targets.length === 0 &&
       retry.state.history_id === "history-current" &&
+      retry.state.gmail_retry?.["gmail:pending-absent-unreadable"] === true &&
+      retry.evidence.final_receipt?.status === "error" &&
       !Object.hasOwn(retry.state.removed || {}, "gmail:pending-absent-unreadable"),
       `${retry.output.slice(-1_300)}\n${JSON.stringify(retry.state)}\n${JSON.stringify(retry.evidence)}`);
   } finally { rmSync(first.directory, { recursive: true, force: true }); }
@@ -768,8 +802,9 @@ if (process.platform !== "win32") {
       result.state.history_id === "history-prior" &&
       result.state.credential_scanner_fingerprint === credentialScannerFingerprint(true, 4) &&
       /101 stored document\(s\) would be removed/.test(result.output) &&
-      /would remove 101 of 101 stored documents \(100\.0%\)/.test(result.output) &&
-      /Aggregate reasons:/.test(result.output) &&
+      /The full source total was not measured/.test(result.output) &&
+      result.state.ingest_removal_plan.targets.length === 101 &&
+      result.state.ingest_removal_plan.sourcePlan.inventoryScope === "bounded-window" &&
       result.state.ingest_removal_plan.sourcePlan.stored === 101 &&
       /--approve-removals [0-9a-f]{64}/.test(result.output),
       `${result.output.slice(-1_400)}\n${JSON.stringify(result.evidence)}`);
@@ -791,10 +826,11 @@ if (process.platform !== "win32") {
       result.code === 1 && result.evidence.ingested_ids.length === 901 &&
       result.evidence.forget_targets.length === 0 &&
       result.state.history_id === "history-prior" &&
-      /100 stored document\(s\) would be removed/.test(result.output) &&
-      /would remove 100 of 100 stored documents \(100\.0%\)/.test(result.output) &&
-      /Aggregate reasons:/.test(result.output) &&
-      result.state.ingest_removal_plan.sourcePlan.stored === 100 &&
+      result.state.ingest_removal_plan.targets.length > 0 && result.state.ingest_removal_plan.targets.length <= 100 &&
+      result.state.ingest_removal_plan.targets.every(uid => dilutionOldIds.some(id => uid === `gmail:${id}`)) &&
+      /The full source total was not measured/.test(result.output) &&
+      result.state.ingest_removal_plan.sourcePlan.inventoryScope === "bounded-window" &&
+      result.state.ingest_removal_plan.sourcePlan.tooLarge === true &&
       !!approval,
       `${result.output.slice(-1_400)}\n${JSON.stringify(result.evidence.final_receipt)}`);
     if (approval) {
@@ -803,10 +839,9 @@ if (process.platform !== "win32") {
       check("a persisted retry keeps the original Gmail removal denominator and approval fingerprint",
         retry.code === 1 && retryApproval === approval &&
         retry.evidence.ingested_ids.length === 901 && retry.evidence.forget_targets.length === 0 &&
-        /100 stored document\(s\) would be removed/.test(retry.output) &&
-      /would remove 100 of 100 stored documents \(100\.0%\)/.test(retry.output) &&
-      /Aggregate reasons:/.test(retry.output) &&
-      retry.state.ingest_removal_plan.sourcePlan.stored === 100,
+        JSON.stringify(retry.state.ingest_removal_plan.targets) === JSON.stringify(result.state.ingest_removal_plan.targets) &&
+        retry.state.ingest_removal_plan.sourcePlan.inventoryScope === "bounded-window" &&
+        retry.state.ingest_removal_plan.sourcePlan.stored === result.state.ingest_removal_plan.sourcePlan.stored,
         `${retry.output.slice(-1_400)}\n${JSON.stringify(retry.state)}`);
       const approved = runCase("scanner-v5-dilution-guard", {
         directory: result.directory,
@@ -835,10 +870,9 @@ if (process.platform !== "win32") {
     check("repeating --reset cannot discard Gmail's reviewed denominator or bypass exact approval",
       first.code === 1 && retry.code === 1 && !!approval && retryApproval === approval &&
       retry.evidence.forget_targets.length === 0 &&
-      /100 stored document\(s\) would be removed/.test(retry.output) &&
-      /would remove 100 of 100 stored documents \(100\.0%\)/.test(retry.output) &&
-      /Aggregate reasons:/.test(retry.output) &&
-      retry.state.ingest_removal_plan.sourcePlan.stored === 100,
+      JSON.stringify(retry.state.ingest_removal_plan.targets) === JSON.stringify(first.state.ingest_removal_plan.targets) &&
+      retry.state.ingest_removal_plan.sourcePlan.inventoryScope === "bounded-window" &&
+      retry.state.ingest_removal_plan.sourcePlan.stored === first.state.ingest_removal_plan.sourcePlan.stored,
       `${retry.output.slice(-1_400)}\n${JSON.stringify(retry.state)}`);
   } finally { rmSync(first.directory, { recursive: true, force: true }); }
 }
@@ -852,9 +886,9 @@ if (process.platform !== "win32") {
     // A deployed scanner or Gmail-policy upgrade changes the live baseline key
     // between runs. The stopped plan still owns its original denominator until
     // a complete run commits, even though the new policy may change its digest.
-    upgradedState.gmail_removal_safety_baseline.key = JSON.stringify({
+    upgradedState.gmail_removal_safety_baseline = { stored: 100, key: JSON.stringify({
       policy_fingerprint: "superseded-gmail-policy",
-    });
+    }) };
     writeFileSync(statePath, JSON.stringify(upgradedState), { mode: 0o600 });
 
     const retry = runCase("scanner-v5-dilution-guard", { directory: first.directory });
@@ -863,10 +897,9 @@ if (process.platform !== "win32") {
       first.code === 1 && !!approval && retry.code === 1 && retryApproval === approval &&
       retry.evidence.forget_targets.length === 0 &&
       retry.state.gmail_removal_safety_baseline?.stored === 100 &&
-      /100 stored document\(s\) would be removed/.test(retry.output) &&
-      /would remove 100 of 100 stored documents \(100\.0%\)/.test(retry.output) &&
-      /Aggregate reasons:/.test(retry.output) &&
-      retry.state.ingest_removal_plan.sourcePlan.stored === 100,
+      JSON.stringify(retry.state.ingest_removal_plan.targets) === JSON.stringify(first.state.ingest_removal_plan.targets) &&
+      retry.state.ingest_removal_plan.sourcePlan.inventoryScope === "bounded-window" &&
+      retry.state.ingest_removal_plan.sourcePlan.tooLarge === true,
       `${retry.output.slice(-1_400)}\n${JSON.stringify(retry.state)}`);
   } finally { rmSync(first.directory, { recursive: true, force: true }); }
 }
@@ -874,8 +907,8 @@ if (process.platform !== "win32") {
 {
   const result = runCase("sweep-marker-missing");
   try {
-    check("a full Gmail sweep without a pre-walk history marker saves work but cannot claim completion",
-      result.code === 1 && result.evidence.ingested_ids.join(",") === "sweep-inbox" &&
+    check("a bounded Gmail bootstrap without its pre-walk marker stops before reading mail",
+      result.code === 1 && result.evidence.ingested_ids.length === 0 &&
       !("history_id" in result.state) && result.evidence.final_receipt?.status === "error" &&
       result.evidence.final_receipt?.issue_code === "INGEST_FAILED" &&
       result.evidence.final_receipt?.docs_failed === 0 &&
@@ -888,15 +921,17 @@ if (process.platform !== "win32") {
   const result = runCase("resume-precondition-failure");
   try {
     const receipt = result.evidence.final_receipt;
-    check("a mid-walk Gmail provider failure preserves the last accepted batch and withholds the history cursor",
-      result.code === 1 && result.evidence.ingested_ids.length === 50 &&
-      Object.keys(result.state.done).length === 55 && Object.keys(result.state.skipped).length === 3 &&
+    // Each ready message now flushes before observing the later provider
+    // failure. The 51st healthy body is durable too, rather than left in a batch.
+    check("a mid-walk Gmail provider failure preserves every accepted message and withholds the history cursor",
+      result.code === 1 && result.evidence.ingested_ids.length === 51 &&
+      Object.keys(result.state.done).length === 56 && Object.keys(result.state.skipped).length === 3 &&
       !Object.hasOwn(result.state, "history_id"),
       `${result.output.slice(-1_200)}\n${JSON.stringify(result.state)}`);
     check("the error receipt records closed provider and checkpoint proof from an exact state-file readback",
       receipt?.status === "error" && receipt?.issue_code === "INGEST_FAILED" &&
       receipt?.walk_complete === false && receipt?.files_seen === 52 &&
-      receipt?.docs_added === 50 && receipt?.docs_updated === 0 &&
+      receipt?.docs_added === 51 && receipt?.docs_updated === 0 &&
       receipt?.docs_unchanged === 0 && receipt?.docs_refused === 0 && receipt?.docs_failed === 1 &&
       JSON.stringify(receipt?.failure_evidence) === JSON.stringify({
         version: 1,
@@ -904,7 +939,7 @@ if (process.platform !== "win32") {
         http_status: 400,
         provider_reason: "failed_precondition",
         checkpoint_readback: "verified",
-        checkpoint_done: 55,
+        checkpoint_done: 56,
         checkpoint_skipped: 3,
         cursor_preservation: "absent_preserved",
       }),

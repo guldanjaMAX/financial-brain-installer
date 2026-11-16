@@ -1,3 +1,4 @@
+import { assertDocumentAnswer } from "./helpers/document-answer-contract.mjs";
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
@@ -54,11 +55,11 @@ async function documentOfferPair(t) {
     assert.equal(body.clarification, undefined);
     assert.equal(body.evidence_gate.supported, true);
     assert.equal(body.citations.length, 1, 'the supported figure retains its citation');
-    assert.ok(body.answer.includes(claim));
+    assertDocumentAnswer(body, { expected: 'Card ending 4242 charged USD 120.00 [1].', exact: true });
     return body;
   };
   const green = await ask();
-  assert.equal(green.answer, claim);
+  assertDocumentAnswer(green, { expected: claim, exact: true });
   assert.equal(green.evidence_gate.complete, true);
   assert.equal(green.gaps.some(gap => gap.type === 'money_veto'), false);
   claim += ' Other payments are unconfirmed.';
@@ -72,33 +73,21 @@ async function documentOfferPair(t) {
   return { green, partial };
 }
 
-function documentOfferContract(body, render, expected) {
+function documentOfferContract(body, render) {
+  assertDocumentAnswer(body, { expected: 'Card ending 4242 charged USD 120.00 [1].', exact: true });
   const text = render(body);
-  assert.match(text, /Card ending 4242 charged USD 120\.00 \[1\]\./);
-  assert.ok(text.includes('This answer comes from your documents; I did not match it to your bank data.'));
-  assert.ok(text.includes('I want to make sure I get this right. I can show you balances, recent transactions, or what you spent in a set period.'));
-  if (!body.evidence_gate.complete) {
-    assert.ok(text.includes('Other payments are unconfirmed.'));
-    assert.ok(text.includes('some money details are still unconfirmed'));
-    assert.ok(text.includes('Some payment details are still unknown in the records checked.'));
-  }
-  assert.deepEqual(offers(text), [expected], 'one final document offer');
-  assert.ok(text.endsWith(expected), 'the invitation follows every fact and qualification');
+  assert.equal(text, body.answer, 'the complete finalized reading survives without appended repair prose');
   return text;
 }
 
-test('R3-01 partial document answers retain one final repair offer on both surfaces', async t => {
+test('R3-01 partial document readings retain source figures and the five-part contract on both surfaces', async t => {
   const { green, partial } = await documentOfferPair(t);
-  for (const [surface, render] of [['worker', answerText], ['app', appAnswerText]]) {
-    await t.test(surface, () => {
-      documentOfferContract(green, render, 'Which would help most?');
-      documentOfferContract(partial, render, 'Want to check the original record?');
-      documentOfferContract({ ...partial, answer: `Which would help most?\n${partial.answer}` },
-        render, 'Want to check the original record?');
-      documentOfferContract({ ...partial,
-        answer: `${partial.answer}\nWhich would help most?\nWant to check the original record?` },
-      render, 'Want to check the original record?');
-    });
+  assert.equal(green.evidence_gate.complete, true);
+  assert.equal(partial.evidence_gate.complete, false);
+  for (const render of [answerText, appAnswerText]) {
+    documentOfferContract(green, render);
+    documentOfferContract(partial, render);
+    assert.match(partial.confidence_text, /Why:.*unconfirmed.*Missing:/s);
   }
 });
 
@@ -109,27 +98,20 @@ test('R3-01 restoring document gap appending fails the same contract and keeps i
   for (const [index, url] of sources.entries()) {
     const render = [answerText, appAnswerText][index];
     const source = readFileSync(url, 'utf8');
-    const site = 'const composed = separateOffers(r.answer);';
-    assert.equal(source.split(site).length - 1, 1, 'one restoring document decision point');
-    const restored = source.replace(site, [
-      'if (!r.ledger && !r.clarification) {',
-      '  const extra = explanation.split("\\n").filter(line => line && !r.answer.includes(line)).join("\\n");',
-      '  return extra ? `${r.answer}\\n\\n${extra}` : r.answer;',
-      '}',
-      site,
-    ].join('\n')).replace(/from (["'])(\.\/.+?)\1/g,
-      (_, quote, path) => `from ${quote}${new URL(path, url).href}${quote}`);
+    const site = 'if (r.answer_contract && typeof r.answer === "string" && r.answer.trim()) return r.answer;';
+    assert.equal(source.split(site).length - 1, 1, 'one finalized-reading decision point');
+    const restored = source.replace(site, 'if (r.answer_contract) return r.answer + "\\n" + moneyExplanation(r);')
+      .replace(/from (["'])(\.\.?\/.+?)\1/g,
+        (_, quote, path) => `from ${quote}${new URL(path, url).href}${quote}`);
     assert.notEqual(restored, source, 'the restoring branch was inserted');
     const mutant = (await import(`data:text/javascript;base64,${Buffer.from(restored).toString('base64')}`)).answerText;
-    for (const control of [render, mutant]) documentOfferContract(green, control, 'Which would help most?');
-    documentOfferContract(partial, render, 'Want to check the original record?');
-    assert.deepEqual(offers(mutant(partial)), ['Which would help most?', 'Want to check the original record?'],
-      'the restored branch reached the duplicate-offer decision');
-    assert.throws(() => documentOfferContract(partial, mutant, 'Want to check the original record?'), error => {
-      assert.ok(error instanceof assert.AssertionError);
-      assert.equal(error.message.split('\n')[0], 'one final document offer');
-      return true;
-    });
+    const control = { answer: 'The notebook cover is blue.', gaps: [], citations: [] };
+    assert.equal(mutant(control), render(control), 'the unfinalized green control is unchanged');
+    for (const body of [green, partial]) {
+      documentOfferContract(body, render);
+      assert.notEqual(mutant(body), body.answer, 'the mutated finalized branch appended its nonempty gap');
+      assert.throws(() => documentOfferContract(body, mutant), assert.AssertionError);
+    }
   }
 });
 
@@ -313,7 +295,7 @@ test('RANGE-01 safe integer subtotals still require confirmed account roles befo
     [remainderQuestion, remainderIntents(), 'remainder', /all other recorded ordinary spending:/],
     ["Could you retrieve this month's spending after refunds?",
       [recordedIntent('merchant', { direction: 'outflow', vendor_text: 'refunds' })],
-      'net_expense_minor', /cannot confirm spending after refunds/],
+      'net_expense_minor', /before subtracting refunds.*net amount is unknown/s],
     ['Could you retrieve expenses for materials this month?',
       [recordedIntent('merchant', { direction: 'outflow', vendor_text: 'materials' })],
       null, /Category 'materials':/],
@@ -498,7 +480,7 @@ for (const [question, intent, fact, obsolete] of [
     'Store refunds are not split out in this view.', 'Here is the recorded spending;'],
   ['Could you retrieve Store Unit spending after refunds this month?',
     recordedIntent('merchant', { direction: 'outflow', vendor_text: 'Store Unit' }),
-    "I cannot confirm spending after refunds because the bank feed does not supply a refund or reversal type; the amounts below are before subtracting refunds.",
+    "The amounts are before subtracting refunds. The bank feed does not supply a refund or reversal type, so the net amount is unknown.",
     'Here is the recorded spending before refunds;'],
   ['Could you retrieve expenses this month by payee?', recordedIntent('expense_summary'),
     'A payee breakdown is not available in this view.', 'Here is the category summary;'],

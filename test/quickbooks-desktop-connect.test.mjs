@@ -169,8 +169,7 @@ test('Worker time ignores a PC two hours fast and refuses missing date after a r
 });
 
 test('binding is owner-only, exactly read back and rejects links without replacing them', async () => {
-  const root = join(process.env.HOME, 'binding-tests'); mkdirSync(root, { recursive: true, mode: 0o700 });
-  const home = realpathSync.native(mkdtempSync(join(root, 'case-')));
+  const home = realpathSync.native(mkdtempSync(join(tmpdir(), 'binding-tests-')));
   try {
     const aclCalls = [];
     const store = desktopBindingStore({ home, runAcl: (...args) => { aclCalls.push(args); return spawnSync(...args); } });
@@ -187,7 +186,11 @@ test('binding is owner-only, exactly read back and rejects links without replaci
       assert.equal(lstatSync(path).mode & 0o777, 0o600);
     }
     assert.equal(readFileSync(path, 'utf8').includes('Checking'), false);
-    store.remove(); const target = join(home, 'target'); writeFileSync(target, 'unchanged'); symlinkSync(target, path);
+    store.remove(); const target = join(home, 'target'); writeFileSync(target, 'unchanged');
+    // A directory junction exercises the same link refusal without requiring
+    // Windows symlink privileges. Keep the actual file-link probe on POSIX.
+    symlinkSync(process.platform === 'win32' ? home : target, path, process.platform === 'win32' ? 'junction' : 'file');
+    assert.equal(lstatSync(path).isSymbolicLink(), true, 'the refusal receives a real filesystem link');
     await assert.rejects(async () => store.write(value), { code: 'QB_BINDING_INVALID' });
     assert.equal(readFileSync(target, 'utf8'), 'unchanged');
   } finally { rmSync(home, { recursive: true }); }
@@ -227,7 +230,7 @@ test('configuration fingerprint binds Desktop company without changing other pro
   assert.equal(providerConfigurationFingerprint('slack', 'slack', { enabled: true }), providerConfigurationFingerprint('slack', 'slack', { enabled: true }, { qbo_company_fingerprint: 'a'.repeat(64) }));
 });
 
-test('public ingest and load legs forward the held lifecycle lease into Desktop', async () => {
+test('public ingest and load legs forward the held lifecycle lease into Desktop', async t => {
   const m = { client: { slug: 'owner' }, brain: { domain: 'brain.example.invalid' }, corpora: { quickbooks_desktop: { enabled: true } } };
   let reached = 0; let locks = 0;
   const options = { platform: 'win32', lifecycleLockHeld: true, assertOwned() {},
@@ -236,7 +239,9 @@ test('public ingest and load legs forward the held lifecycle lease into Desktop'
   const plan = await planLoad({ m, manifestPath, platform: 'win32', options, commands: { ingestQuickBooksDesktop: options.ingestQuickBooksDesktop } });
   assert.equal(plan[0].status, 'ready'); await plan[0].legs[0].run(); assert.equal(reached, 1);
   assert.equal(typeof brain.cmdIngest, 'function');
-  const path = join(process.env.HOME, 'nested-lock.manifest.json'); writeFileSync(path, JSON.stringify(m));
+  const home = realpathSync.native(mkdtempSync(join(tmpdir(), 'desktop-held-lease-')));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const path = join(home, 'nested-lock.manifest.json'); writeFileSync(path, JSON.stringify(m));
   const output = await brain.cmdIngest(path, { ...options, lifecycleLockHeld: false, flags: { from: 'quickbooks-desktop' } });
   assert.equal(output.code, 'fixture'); assert.equal(reached, 2); assert.equal(locks, 1);
 });

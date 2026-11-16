@@ -1,3 +1,5 @@
+// 0.4.28 owner confidence is attached after the legacy-reader seam used by this fixture.
+import { finalizeOwnerLedgerAnswer } from '../worker/src/lib/document-answer.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -474,6 +476,9 @@ test('private replay retains provider conflicts and the supported review peer', 
   const imported = bad.trace.sql.find(c => c.kind === 'inventory').rows.find(a => a.mask === '4242');
   assert.equal(imported.balance_role, 'liability');
   assert.equal(JSON.parse(imported.account_kind_review_json).kind, 'checking');
-  assert.equal(bad.body.answer, null);
-  assert.equal(bad.body.code, 'ledger_account_kind_review_required');
+  // 0.4.28 no-refusal boundary retains the conflict and names the provisional dollars.
+  assert.ok(bad.body.answer.length);
+  assert.equal(finalizeOwnerLedgerAnswer(bad.body).confidence.percent,0);
+  assert.equal(bad.body.evidence_gate.complete, false);
+  assert.equal(bad.body.gaps[0].reason, 'ledger_account_kind_review_required');
 });

@@ -157,12 +157,15 @@ try {
   };
   const processRunner = (command, argv) => {
     const args = argv.map((value) => String(value).replaceAll('"', ""));
-    const stage = args.includes("keyring") ? "keyring"
+    const window = command.endsWith("powershell.exe");
+    const stage = window ? "window" : args.includes("keyring") ? "keyring"
       : args.includes("create") ? "create"
       : args.includes("token") ? "token"
       : "unknown";
     // `auth keyring enable` names no profile; `auth create` and `auth token` do.
-    const profile = stage === "token" ? args[args.indexOf("--profile") + 1]
+    const profile = window
+      ? Buffer.from(argv.at(-1), "base64").toString("utf16le").match(/financial-brain-[a-f0-9]{24}/u)?.[0]
+      : stage === "token" ? args[args.indexOf("--profile") + 1]
       : stage === "create" ? args[args.indexOf("create") + 1]
       : null;
     wranglerCalls.push({ command, stage, profile, manifestProfileAtCall: manifestProfileNow() });
@@ -212,7 +215,7 @@ try {
     installedManifestOptions,
     loadStoredCloudflareToken: () => null,
     readCloudflareToken,
-    oauthOptions: { processRunner, fetchImpl, platformName: "win32" },
+    oauthOptions: { processRunner, fetchImpl, platformName: "win32", environment: { SystemRoot: "C:\\Windows", HOME: sandbox } },
     installTechnicianSkills: () => [],
     reportSkillRefreshOk: () => {},
     reportSkillRefreshWarning: () => {},
@@ -284,7 +287,7 @@ try {
   check(
     "2/3 the credential wrapper took the OAuth lane, never the token lane",
     tokenPromptCalls === promptCountBeforeB &&
-      stages === "keyring,create,token,keyring,token" &&
+      stages === "window,token,keyring,token" &&
       wranglerCalls.filter((call) => call.stage !== "keyring")
         .every((call) => call.profile === expectedProfile) &&
       wranglerCalls.filter((call) => call.stage === "keyring").every((call) => call.profile === null) &&
@@ -300,8 +303,8 @@ try {
     JSON.stringify(eventsB),
   );
 
-  const proofCall = wranglerCalls[2];
-  const controlCall = wranglerCalls[4];
+  const proofCall = wranglerCalls[1];
+  const controlCall = wranglerCalls[3];
   check(
     "the label is written only after the sign-in proves itself, never before",
     proofCall.stage === "token" && proofCall.manifestProfileAtCall === null,

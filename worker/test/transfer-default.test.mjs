@@ -101,7 +101,8 @@ function unchanged(body, scenario, question) {
   if (/^boundary-(?:far|uncovered)$/.test(scenario) && question === Q.totals) {
     if (scenario === 'boundary-uncovered') {
       assert.equal(body.ledger.reason, 'money_out_destination_unconfirmed');
-      assert.equal(body.ledger.total_minor, null);
+      assert.equal(account(body, '1111').debits_minor, 32363, '4710 ordinary plus 27653 unproved outflow');
+      assert.doesNotMatch(body.answer, /withheld|cannot|can't/i);
       assert.equal(body.evidence_gate.complete, false);
       const candidate = body.ledger.possible_payments.find(row => row.amount_minor === 27653);
       assert.ok(candidate?.destination_unconfirmed, 'receiving coverage decision is populated');
@@ -250,10 +251,12 @@ test("A-R8 bilateral counterexamples preserve unproved legs and exclude independ
       f.raw("UPDATE fin_transactions SET description='TRANSFER FROM X1111 TO X2222' WHERE txn_uid IN ('move-out','move-in')");
       mutate(f);
       const withheld = ["duplicated mask", "outside endpoint", "reversed endpoint"].includes(name);
-      const body = await ask(f, Q.totals, "totals", withheld || ["four-day gap", "unequal amount"].includes(name) ? 0 : 1);
+      const body = await ask(f, Q.totals, "totals", ["four-day gap", "unequal amount"].includes(name) ? 0 : 1);
       if (withheld) {
         assert.equal(body.ledger.reason, 'money_out_destination_unconfirmed');
-        assert.equal(body.ledger.total_minor, null);
+        assert.equal(account(body, '1111').debits_minor, 28327, '4710 ordinary plus 23617 unproved outflow');
+        assert.match(body.answer, /may be counted twice/);
+        assert.doesNotMatch(body.answer, /withheld|cannot|can't/i);
         assert.equal(body.ledger.complete, false);
         assert.equal(body.evidence_gate.complete, false);
         const candidate = body.ledger.possible_payments.find(row => row.amount_minor === 23617);
@@ -375,9 +378,11 @@ test("c: one directed leg withholds until reciprocal evidence excludes both", as
   const f = await fixture(t, "unrelated");
   unchanged(await ask(f, Q.totals, "totals", 0), "unrelated", Q.totals);
   f.raw("UPDATE fin_transactions SET description='TRANSFER TO account 2222' WHERE txn_uid='same-out'");
-  const advisory = await ask(f, Q.totals, 'totals', 0);
+  const advisory = await ask(f, Q.totals, 'totals', 1);
   assert.equal(advisory.ledger.reason, 'money_out_destination_unconfirmed');
-  assert.equal(advisory.ledger.total_minor, null);
+  assert.equal(account(advisory, '1111').debits_minor, 28327, '4710 ordinary plus 23617 unproved outflow');
+  assert.match(advisory.answer, /may be counted twice/);
+  assert.doesNotMatch(advisory.answer, /withheld|cannot|can't/i);
   assert.equal(advisory.evidence_gate.complete, false);
   const candidate = advisory.ledger.possible_payments.find(row => row.amount_minor === 23617);
   assert.ok(candidate?.destination_unconfirmed);
@@ -458,7 +463,7 @@ test("e: unconnected card stays money out until its counterpart is connected", a
 for (const [scenario, reason] of [["loan", "loan payment"], ["credit-line", "loan payment"], ["kept-other", "account kind"]]) {
   test(`f: ${scenario} follows payment membership independently of transfer eligibility`, async t => {
     const f = await fixture(t, scenario), payment = scenario !== 'kept-other';
-    const kept = await ask(f, Q.totals, 'totals', 0);
+    const kept = await ask(f, Q.totals, 'totals', scenario === 'kept-other' ? 1 : 0);
     if (payment) {
       assert.equal(f.rows("SELECT txn_uid FROM fin_transactions WHERE txn_uid IN ('loan-out','loan-in')").length, 2,
         'both stored postings reached the payment decision');
@@ -478,7 +483,9 @@ for (const [scenario, reason] of [["loan", "loan payment"], ["credit-line", "loa
       assert.equal(f.rows("SELECT txn_uid FROM fin_transactions WHERE txn_uid IN ('loan-out','loan-in')").length, 2,
         'both postings reach the unconfirmed-kind decision');
       assert.equal(kept.ledger.reason, 'money_out_destination_unconfirmed');
-      assert.equal(kept.ledger.total_minor, null);
+      assert.equal(account(kept, '1111').debits_minor, 22973, '4710 ordinary plus 18263 unproved outflow');
+      assert.match(kept.answer, /may be counted twice/);
+      assert.doesNotMatch(kept.answer, /withheld|cannot|can't/i);
       assert.equal(kept.evidence_gate.complete, false);
       const candidate = kept.ledger.possible_payments.find(row => row.amount_minor === 18263);
       assert.equal(candidate.payment_kind, 'own_account', 'no repayment subtype is inferred');
@@ -973,12 +980,14 @@ for (const kind of ["savings", "investment", "retirement"]) for (const arm of ["
     for (const question of [Q.profit, Q.profit.replace("profit", "net income"), Q.profit.replace("profit", "cash flow"), Q.deposits]) {
       const queryKind = question === Q.deposits ? "deposits" : "totals";
       const held = queryKind === 'totals' && unconfirmedDestination;
-      const body = await ask(f, question, queryKind, held ? 0 : 1);
-      const gross = await ask(f, flipQuestion(question, flip), queryKind, held ? 0 : 1);
+      const body = await ask(f, question, queryKind, 1);
+      const gross = await ask(f, flipQuestion(question, flip), queryKind, 1);
       if (held) {
         for (const result of [body, gross]) {
           assert.equal(result.ledger.reason, 'money_out_destination_unconfirmed');
-          assert.equal(result.ledger.total_minor, null);
+          assert.equal(result.ledger.net_minor, rawNet, 'neither unproved leg is removed');
+          assert.match(result.answer, /may be counted twice/);
+          assert.doesNotMatch(result.answer, /withheld|cannot|can't/i);
           assert.equal(result.evidence_gate.complete, false);
           const candidate = result.ledger.possible_payments.find(row => row.amount_minor === 62000);
           assert.ok(candidate?.destination_unconfirmed, 'equal connected counterpart decision reached');

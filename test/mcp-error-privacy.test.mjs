@@ -61,16 +61,16 @@ globalThis.fetch = async (url, init) => {
   return replies[0].result;
 }
 
-test("stdio initialization and tool inventory describe the cash-flow refusal honestly", t => {
+test("stdio initialization and tool inventory describe the money fallback and coverage", t => {
   const initialized = runFixture(t, {}, { method: "initialize" });
   const inventory = runFixture(t, {}, { method: "tools/list" });
   const think = inventory.tools.find(tool => tool.name === "brain_think");
   assert.ok(think && initialized.serverInfo, "both metadata decisions were reached");
   for (const text of [initialized.instructions, think.description]) {
-    assert.match(text, /profit, net income/);
-    assert.match(text, /Cash flow is unsupported/);
-    assert.match(text, /cash_flow_unsupported/);
-    assert.match(text, /no figure/);
+    assert.match(text, /money/);
+    assert.match(text, /go straight to brain_money_query/);
+    assert.match(text, /what is missing/);
+    assert.doesNotMatch(text, /cash_flow_unsupported|preserve the refusal/);
     assert.doesNotMatch(text, /profit, net income, cash flow/);
   }
 });
@@ -87,7 +87,17 @@ for (const profile of ["librarian", "owner-assistant"]) {
     assert.match(initialized.instructions, /sort "newest", read newest_record/);
     assert.match(initialized.instructions, /only the returned relevance window, not all matching records/);
     assert.match(initialized.instructions, /Excerpts are partial/);
-    assert.match(initialized.instructions, /Cash flow is unsupported: relay cash_flow_unsupported with no figure or model fallback/);
+    if (profile === "owner-assistant") {
+      assert.match(initialized.instructions, /go straight to brain_money_query/);
+      assert.match(initialized.instructions, /what is missing, and what is an estimate/);
+    } else {
+      assert.match(initialized.instructions, /This connection cannot read bank rows/);
+      assert.match(initialized.instructions, /still answer in five parts/);
+      assert.match(initialized.instructions, /Confidence: <High\|Medium\|Low> \(<n>%\)/);
+      assert.match(initialized.instructions, /below 100% says why and what is missing/);
+      for (const name of ['brain_money_query', 'brain_money_guide', 'brain_money_overview'])
+        assert.ok(!inventory.tools.some(tool => tool.name === name), 'Librarian keeps its actual bank-read boundary');
+    }
     assert.doesNotMatch(initialized.instructions, /profit, net income, cash flow/);
   });
 }

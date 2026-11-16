@@ -925,8 +925,10 @@ test("the technician tools contract cannot complete without the interactive Clau
   );
 });
 
-test("Windows connector steps stop before every secret prompt and child launch", async () => {
-  for (const step of ["google", "zoom", "imap"]) {
+// Google on Windows takes its client values from the clipboard instead; see
+// test/google-windows-clipboard-1116.test.mjs.
+test("Windows Zoom and IMAP steps stop before every secret prompt and child launch", async () => {
+  for (const step of ["zoom", "imap"]) {
     let promptCalls = 0;
     let childCalls = 0;
     await assert.rejects(

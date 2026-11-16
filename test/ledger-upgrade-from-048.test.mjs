@@ -229,7 +229,12 @@ test('populated schema 48 survives the candidate migration and approved money ma
   await t.test('unlinked twins and legacy coverage refuse until link approval and independent coverage review', async () => {
     const before = snapshot(f), start = f.seen.length;
     const refusal = await ask(monthQuestion);
-    assert.equal(refusal.code, 'ledger_account_link_required'); assert.equal(refusal.answer, null);
+    assert.equal(refusal.code, 'ledger_account_link_required');
+    assert.ok(refusal.ledger.source_readings.length === 2, 'separate source decisions reached');
+    assert.ok(refusal.ledger.source_readings.every(row => row.from === '2026-09-01' && row.to === '2026-09-30' && row.amount_minor === null), 'unreviewed legacy coverage supplies no certified source figure');
+    assert.match(refusal.answer, /September.*uncovered dates/s);
+    assert.equal(refusal.confidence.percent, 0);
+    assert.doesNotMatch(refusal.answer, /withheld|cannot|can't/i);
     assert.ok(f.seen.slice(start).some(sql => sql.includes('FROM fin_accounts')));
     const args = ['link-accounts', manifestPath, '--manual', 'manual-account', '--live', 'live-account'];
     const preview = await cmdLedger([...args, '--preview'], deps);

@@ -4,8 +4,11 @@
 // changing corpus vectors. Only a later processed-watermark observation opens
 // that receipt; the existing exact-generation/absence checks still own cleanup.
 export const VECTOR_FENCE_PROBE_AFTER_MS = 10 * 60_000;
+export const isUnconfirmedVectorProbe = fence =>
+  typeof fence?.mutationId === "string" && fence.mutationId.startsWith("brain-fence-unknown:");
 
 export async function probeStalledVectorFence(env, { fence, description, lease, renewLease }) {
+  if (isUnconfirmedVectorProbe(fence)) throw new Error("the vector ordering probe submission is unconfirmed; keep writes paused for supervised recovery");
   const now = lease.now();
   const processed = description?.processedUpToMutation;
   // Do not turn an unavailable/malformed provider into a write. A new index
@@ -19,6 +22,7 @@ export async function probeStalledVectorFence(env, { fence, description, lease, 
   // 48 ASCII bytes, below Vectorize's 64-byte limit. Never accept an ID from
   // a request, source document or caller, and never upsert a synthetic vector.
   const id = `brain-fence:${crypto.randomUUID()}`;
+  const intentId = id.replace("brain-fence:", "brain-fence-unknown:");
   const existing = await env.VECTORIZE.getByIds([id]);
   if (!Array.isArray(existing) || existing.length !== 0) {
     throw new Error("the vector ordering probe could not prove its ID absent");
@@ -28,15 +32,33 @@ export async function probeStalledVectorFence(env, { fence, description, lease, 
   if (!Number.isSafeInteger(submittedAt) || submittedAt < now) {
     throw new Error("the vector ordering probe clock changed before submission");
   }
+  // This writer has no outbox row. Persist its uncertainty BEFORE submission:
+  // even a lost provider receipt or failed global-fence write must invalidate
+  // an earlier verified state, otherwise rollback could call it quiet.
+  const intent = await env.DB.prepare(
+    `UPDATE install_state SET vector_projection_status = CASE
+        WHEN vector_projection_status='verified' THEN 'pending' ELSE vector_projection_status END,
+        vector_projection_mutation_id=?3,vector_projection_submitted_at=?4
+      WHERE id=1 AND schema_version>=12
+        AND vector_drain_lease_owner=?1 AND vector_drain_lease_expires_at>?2
+        AND vector_projection_mutation_id=?5 AND vector_projection_submitted_at=?6`
+  ).bind(lease.ownerToken, lease.now(), intentId, submittedAt, fence.mutationId, fence.submittedAt).run();
+  if (Number(intent?.meta?.changes ?? intent?.changes ?? 0) !== 1) {
+    throw new Error("the vector ordering probe intent lost its lease");
+  }
   const receipt = await env.VECTORIZE.deleteByIds([id]);
   const mutationId = receipt?.mutationId;
   if (typeof mutationId !== "string" || !mutationId || mutationId.length > 200 ||
       /[\u0000-\u001f\u007f]/.test(mutationId)) {
     throw new Error("the vector ordering probe returned an invalid mutation receipt");
   }
-  // Both the old fence and the unexpired writer must still be ours. A crash
-  // before this write leaves the old fence intact and retryable; a crash after
-  // it leaves the new receipt durable. No outbox row is acknowledged here.
+  const receiptAt = lease.now();
+  if (!Number.isSafeInteger(receiptAt) || receiptAt < submittedAt) {
+    throw new Error("the vector ordering probe receipt clock changed");
+  }
+  // Until the accepted receipt replaces this exact intent, uncertainty is
+  // durable. Neither an old watermark nor elapsed time can clear it. A crash
+  // here requires supervised recovery rather than an automatic recertification.
   const recorded = await env.DB.prepare(
     `UPDATE install_state
         SET vector_projection_mutation_id = ?1,
@@ -46,7 +68,7 @@ export async function probeStalledVectorFence(env, { fence, description, lease, 
         AND vector_projection_submitted_at = ?4
         AND vector_drain_lease_owner = ?5
         AND vector_drain_lease_expires_at > ?6`
-  ).bind(mutationId, submittedAt, fence.mutationId, fence.submittedAt,
+  ).bind(mutationId, receiptAt, intentId, submittedAt,
     lease.ownerToken, lease.now()).run();
   if (Number(recorded?.meta?.changes ?? recorded?.changes ?? 0) !== 1) {
     throw new Error("the vector ordering probe receipt lost its fence or lease");

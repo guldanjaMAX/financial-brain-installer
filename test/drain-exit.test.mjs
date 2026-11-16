@@ -368,7 +368,8 @@ console.log("drain bounded visibility wait: 7 assertions passed");
       if (index < 8) visible.set(uid, { id: uid });
       else fixture.raw("INSERT INTO vector_outbox (chunk_uid, vector_id, op, queued_at) VALUES (?, ?, 'upsert', ?)", uid, uid, clock + index);
     }
-    fixture.raw("INSERT INTO corpus_stats (source, documents, chunks) VALUES ('fixture', 318, 318)");
+    // Reviewed Drive schema 65 has already counted the inserted physical rows.
+    assert.equal(fixture.first("SELECT chunks FROM corpus_stats WHERE source='fixture'").chunks, 318);
     fixture.raw("UPDATE install_state SET vector_projection_bootstrap_base_count = 8 WHERE id = 1");
     fixture.env.VECTORIZE = {
       upsert: async (rows) => {

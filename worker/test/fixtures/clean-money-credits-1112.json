@@ -1,0 +1,3361 @@
+{
+  "lane": "CLAUDE-FINDER-CLEAN-CREDITS-1112",
+  "base": "4bbffce2cbc11dd1fb7629b78c3a1074e60192df",
+  "fixture_defaults": {
+    "tenant": "primary",
+    "entity": {
+      "entity_slug": "biz",
+      "kind": "business",
+      "relationship": "owned",
+      "basis_state": "confirmed"
+    },
+    "account": {
+      "feed_mode": "live",
+      "basis_state": "confirmed",
+      "status": "open",
+      "currency": "USD",
+      "balance_role": "asset for checking and savings, liability otherwise",
+      "kind_review": null,
+      "links": []
+    },
+    "account_labels": {
+      "chk": [
+        "Business Checking",
+        "First Bank"
+      ],
+      "card": [
+        "Business Card",
+        "Card Co"
+      ],
+      "card2": [
+        "Second Card",
+        "Other Card Co"
+      ],
+      "card_import": [
+        "Business Card Import",
+        "Card Co"
+      ],
+      "loan": [
+        "Equipment Loan",
+        "Lender Co"
+      ],
+      "loan2": [
+        "Refinance Loan",
+        "New Lender Co"
+      ],
+      "loc": [
+        "Credit Line",
+        "First Bank"
+      ]
+    },
+    "coverage": "one row per account: coverage_status complete, basis_state confirmed, covered_from/covered_to = case period, unless the case has a coverage override",
+    "row": {
+      "pending": 0,
+      "basis_state": "confirmed",
+      "provenance": "feed",
+      "category": null,
+      "category_basis_state": "proposed",
+      "payee": null,
+      "currency": "USD"
+    },
+    "period": [
+      "2026-03-01",
+      "2026-03-31"
+    ]
+  },
+  "queries": {
+    "spend": "SELECT COALESCE(SUM(expense_minor),0) FROM txn WHERE posted_on BETWEEN :from AND :to",
+    "net_spend": "SELECT COALESCE(SUM(expense_minor),0)-COALESCE(SUM(CASE WHEN money_kind='refund' AND direction='inflow' THEN amount_minor END),0) FROM txn WHERE posted_on BETWEEN :from AND :to",
+    "income": "SELECT COALESCE(SUM(income_minor),0) FROM txn WHERE posted_on BETWEEN :from AND :to",
+    "net_sales": "SELECT COALESCE(SUM(income_minor),0)-COALESCE(SUM(CASE WHEN money_kind='refund' AND direction='outflow' AND income_minor=0 THEN amount_minor END),0)+COALESCE(SUM(CASE WHEN money_kind='refund' AND direction='inflow' AND (lower(description) LIKE '%chargeback%' OR lower(description) LIKE '%dispute%') THEN amount_minor END),0) FROM txn WHERE posted_on BETWEEN :from AND :to",
+    "refunds_in": "SELECT COALESCE(SUM(amount_minor),0) FROM txn WHERE money_kind='refund' AND direction='inflow' AND posted_on BETWEEN :from AND :to",
+    "card_paid": "SELECT COALESCE(SUM(amount_minor),0) FROM txn WHERE money_kind='card_payment' AND posted_on BETWEEN :from AND :to",
+    "loan_paid": "SELECT COALESCE(SUM(amount_minor),0) FROM txn WHERE money_kind='loan_payment' AND posted_on BETWEEN :from AND :to",
+    "borrowed": "SELECT COALESCE(SUM(amount_minor),0) FROM txn WHERE money_kind='loan_proceeds' AND direction='inflow' AND posted_on BETWEEN :from AND :to",
+    "interest": "SELECT COALESCE(SUM(expense_minor),0) FROM txn WHERE lower(description) LIKE '%interest%' AND posted_on BETWEEN :from AND :to"
+  },
+  "account_presets": {
+    "chk": {
+      "slug": "chk",
+      "kind": "checking",
+      "last4": "1111"
+    },
+    "card": {
+      "slug": "card",
+      "kind": "card",
+      "last4": "4444"
+    },
+    "card2": {
+      "slug": "card2",
+      "kind": "card",
+      "last4": "5555"
+    },
+    "card2_same4": {
+      "slug": "card2",
+      "kind": "card",
+      "last4": "4444"
+    },
+    "card_import": {
+      "slug": "card_import",
+      "kind": "card",
+      "last4": "4444",
+      "feed_mode": "manual"
+    },
+    "loan": {
+      "slug": "loan",
+      "kind": "loan",
+      "last4": "7777"
+    },
+    "loan2": {
+      "slug": "loan2",
+      "kind": "loan",
+      "last4": "9999"
+    },
+    "loc": {
+      "slug": "loc",
+      "kind": "line_of_credit",
+      "last4": "8888"
+    }
+  },
+  "cases": [
+    {
+      "id": "C01",
+      "title": "Card purchase fully refunded in the same month",
+      "accounts": [
+        "card"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-05",
+          "account": "card",
+          "dir": "out",
+          "amount": 120.0,
+          "description": "OFFICE SUPPLY STORE",
+          "category": "GENERAL_MERCHANDISE_OFFICE_SUPPLIES"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-09",
+          "account": "card",
+          "dir": "in",
+          "amount": 120.0,
+          "description": "OFFICE SUPPLY STORE REFUND",
+          "category": "GENERAL_MERCHANDISE_OFFICE_SUPPLIES"
+        }
+      ],
+      "question": "What did I spend on the card in March, after refunds?",
+      "query": "net_spend",
+      "expected": [
+        0.0,
+        [
+          "r1",
+          "r2"
+        ],
+        "High"
+      ],
+      "code": [
+        0.0,
+        85,
+        "Medium"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C02",
+      "title": "Partial return worded RETURN CREDIT",
+      "accounts": [
+        "card"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-04",
+          "account": "card",
+          "dir": "out",
+          "amount": 200.0,
+          "description": "HARDWARE DEPOT",
+          "category": "GENERAL_MERCHANDISE_HARDWARE"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-11",
+          "account": "card",
+          "dir": "in",
+          "amount": 45.5,
+          "description": "RETURN CREDIT HARDWARE DEPOT"
+        }
+      ],
+      "question": "What did I spend on the card in March, after refunds?",
+      "query": "net_spend",
+      "expected": [
+        154.5,
+        [
+          "r1",
+          "r2"
+        ],
+        "High"
+      ],
+      "code": [
+        154.5,
+        85,
+        "Medium"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C03",
+      "title": "Merchant credit on a card with no refund word",
+      "accounts": [
+        "card"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-04",
+          "account": "card",
+          "dir": "out",
+          "amount": 200.0,
+          "description": "HARDWARE DEPOT",
+          "payee": "Hardware Depot",
+          "category": "GENERAL_MERCHANDISE_HARDWARE"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-11",
+          "account": "card",
+          "dir": "in",
+          "amount": 45.5,
+          "description": "HARDWARE DEPOT",
+          "payee": "Hardware Depot"
+        }
+      ],
+      "question": "How much came back to the card as refunds in March?",
+      "query": "refunds_in",
+      "expected": [
+        45.5,
+        [
+          "r2"
+        ],
+        "Medium"
+      ],
+      "code": [
+        0.0,
+        62,
+        "Low"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C04",
+      "title": "Merchant credit inflates the amount paid toward the card",
+      "accounts": [
+        "card"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-04",
+          "account": "card",
+          "dir": "out",
+          "amount": 200.0,
+          "description": "HARDWARE DEPOT",
+          "payee": "Hardware Depot",
+          "category": "GENERAL_MERCHANDISE_HARDWARE"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-11",
+          "account": "card",
+          "dir": "in",
+          "amount": 45.5,
+          "description": "HARDWARE DEPOT",
+          "payee": "Hardware Depot"
+        },
+        {
+          "id": "r3",
+          "date": "2026-03-20",
+          "account": "card",
+          "dir": "in",
+          "amount": 500.0,
+          "description": "PAYMENT THANK YOU"
+        }
+      ],
+      "question": "How much did I pay toward the card ending 4444 in March?",
+      "query": "card_paid",
+      "expected": [
+        500.0,
+        [
+          "r3"
+        ],
+        "Medium"
+      ],
+      "code": [
+        545.5,
+        66,
+        "Low"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C05",
+      "title": "Refund posts the month after the purchase",
+      "accounts": [
+        "card"
+      ],
+      "coverage": {
+        "card": {
+          "from": "2026-02-01",
+          "to": "2026-03-31"
+        }
+      },
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-02-20",
+          "account": "card",
+          "dir": "out",
+          "amount": 300.0,
+          "description": "EQUIPMENT RENTAL CO",
+          "category": "GENERAL_SERVICES_OTHER"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-03",
+          "account": "card",
+          "dir": "in",
+          "amount": 300.0,
+          "description": "EQUIPMENT RENTAL CO REFUND"
+        },
+        {
+          "id": "r3",
+          "date": "2026-03-10",
+          "account": "card",
+          "dir": "out",
+          "amount": 80.0,
+          "description": "FUEL STOP",
+          "category": "TRANSPORTATION_GAS"
+        }
+      ],
+      "question": "What did I spend on the card in March, after refunds?",
+      "query": "net_spend",
+      "expected": [
+        -220.0,
+        [
+          "r2",
+          "r3"
+        ],
+        "High"
+      ],
+      "code": [
+        -220.0,
+        85,
+        "Medium"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C06",
+      "title": "Card payment bounced: issuer reverses it on the card",
+      "accounts": [
+        "card"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-10",
+          "account": "card",
+          "dir": "in",
+          "amount": 500.0,
+          "description": "PAYMENT THANK YOU"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-13",
+          "account": "card",
+          "dir": "out",
+          "amount": 500.0,
+          "description": "RETURNED PAYMENT"
+        },
+        {
+          "id": "r3",
+          "date": "2026-03-15",
+          "account": "card",
+          "dir": "out",
+          "amount": 300.0,
+          "description": "RESTAURANT SUPPLY",
+          "category": "FOOD_AND_DRINK_OTHER"
+        }
+      ],
+      "question": "How much did I pay toward the card ending 4444 in March?",
+      "query": "card_paid",
+      "expected": [
+        0.0,
+        [
+          "r1",
+          "r2"
+        ],
+        "High"
+      ],
+      "code": [
+        500.0,
+        66,
+        "Low"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C07",
+      "title": "Bounced card payment counted as a purchase",
+      "accounts": [
+        "card"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-10",
+          "account": "card",
+          "dir": "in",
+          "amount": 500.0,
+          "description": "PAYMENT THANK YOU"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-13",
+          "account": "card",
+          "dir": "out",
+          "amount": 500.0,
+          "description": "RETURNED PAYMENT"
+        },
+        {
+          "id": "r3",
+          "date": "2026-03-15",
+          "account": "card",
+          "dir": "out",
+          "amount": 300.0,
+          "description": "RESTAURANT SUPPLY",
+          "category": "FOOD_AND_DRINK_OTHER"
+        }
+      ],
+      "question": "How much did I spend on the card in March?",
+      "query": "spend",
+      "expected": [
+        300.0,
+        [
+          "r3"
+        ],
+        "High"
+      ],
+      "code": [
+        800.0,
+        66,
+        "Low"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C08",
+      "title": "Bounced card payment comes back into checking and is counted as income",
+      "accounts": [
+        "chk"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-06",
+          "account": "chk",
+          "dir": "in",
+          "amount": 2000.0,
+          "description": "CLIENT PAYMENT ACME"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-10",
+          "account": "chk",
+          "dir": "out",
+          "amount": 500.0,
+          "description": "Payment to card 4444"
+        },
+        {
+          "id": "r3",
+          "date": "2026-03-13",
+          "account": "chk",
+          "dir": "in",
+          "amount": 500.0,
+          "description": "RETURNED PAYMENT CARD 4444"
+        }
+      ],
+      "question": "What was my income in March?",
+      "query": "income",
+      "expected": [
+        2000.0,
+        [
+          "r1"
+        ],
+        "Medium"
+      ],
+      "code": [
+        2500.0,
+        58,
+        "Low"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C09",
+      "title": "Provisional dispute credit on a card",
+      "accounts": [
+        "card"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-02",
+          "account": "card",
+          "dir": "out",
+          "amount": 650.0,
+          "description": "TOOL VENDOR",
+          "category": "GENERAL_MERCHANDISE_OTHER"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-12",
+          "account": "card",
+          "dir": "in",
+          "amount": 650.0,
+          "description": "PROVISIONAL CREDIT DISPUTE 0312"
+        }
+      ],
+      "question": "What did I spend on the card in March, after refunds?",
+      "query": "net_spend",
+      "expected": [
+        0.0,
+        [
+          "r1",
+          "r2"
+        ],
+        "Medium"
+      ],
+      "code": [
+        0.0,
+        85,
+        "Medium"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "PASS"
+    },
+    {
+      "id": "C10",
+      "title": "Provisional credit later reversed, net question",
+      "accounts": [
+        "card"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-02",
+          "account": "card",
+          "dir": "out",
+          "amount": 650.0,
+          "description": "TOOL VENDOR",
+          "category": "GENERAL_MERCHANDISE_OTHER"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-12",
+          "account": "card",
+          "dir": "in",
+          "amount": 650.0,
+          "description": "PROVISIONAL CREDIT DISPUTE 0312"
+        },
+        {
+          "id": "r3",
+          "date": "2026-03-28",
+          "account": "card",
+          "dir": "out",
+          "amount": 650.0,
+          "description": "PROVISIONAL CREDIT REVERSAL DISPUTE 0312"
+        }
+      ],
+      "question": "What did I spend on the card in March, after refunds?",
+      "query": "net_spend",
+      "expected": [
+        650.0,
+        [
+          "r1",
+          "r2",
+          "r3"
+        ],
+        "High"
+      ],
+      "code": [
+        650.0,
+        66,
+        "Low"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C11",
+      "title": "Provisional credit later reversed, plain spending question",
+      "accounts": [
+        "card"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-02",
+          "account": "card",
+          "dir": "out",
+          "amount": 650.0,
+          "description": "TOOL VENDOR",
+          "category": "GENERAL_MERCHANDISE_OTHER"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-12",
+          "account": "card",
+          "dir": "in",
+          "amount": 650.0,
+          "description": "PROVISIONAL CREDIT DISPUTE 0312"
+        },
+        {
+          "id": "r3",
+          "date": "2026-03-28",
+          "account": "card",
+          "dir": "out",
+          "amount": 650.0,
+          "description": "PROVISIONAL CREDIT REVERSAL DISPUTE 0312"
+        }
+      ],
+      "question": "How much did I spend on the card in March?",
+      "query": "spend",
+      "expected": [
+        650.0,
+        [
+          "r1"
+        ],
+        "High"
+      ],
+      "code": [
+        1300.0,
+        66,
+        "Low"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C12",
+      "title": "Duplicate charge reversed by the merchant",
+      "accounts": [
+        "card"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-07",
+          "account": "card",
+          "dir": "out",
+          "amount": 89.0,
+          "description": "COFFEE SUPPLY CO",
+          "category": "FOOD_AND_DRINK_COFFEE"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-07",
+          "account": "card",
+          "dir": "out",
+          "amount": 89.0,
+          "description": "COFFEE SUPPLY CO",
+          "category": "FOOD_AND_DRINK_COFFEE"
+        },
+        {
+          "id": "r3",
+          "date": "2026-03-09",
+          "account": "card",
+          "dir": "in",
+          "amount": 89.0,
+          "description": "REVERSAL DUPLICATE CHARGE COFFEE SUPPLY CO"
+        }
+      ],
+      "question": "What did I spend on the card in March, after refunds?",
+      "query": "net_spend",
+      "expected": [
+        89.0,
+        [
+          "r1",
+          "r2",
+          "r3"
+        ],
+        "High"
+      ],
+      "code": [
+        89.0,
+        85,
+        "Medium"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C13",
+      "title": "Card purchase refunded by check into checking is not income",
+      "accounts": [
+        "chk",
+        "card"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-02",
+          "account": "card",
+          "dir": "out",
+          "amount": 250.0,
+          "description": "SUPPLYCO",
+          "category": "GENERAL_MERCHANDISE_OTHER"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-20",
+          "account": "chk",
+          "dir": "in",
+          "amount": 250.0,
+          "description": "SUPPLYCO REFUND CHECK DEPOSIT"
+        },
+        {
+          "id": "r3",
+          "date": "2026-03-15",
+          "account": "chk",
+          "dir": "in",
+          "amount": 1000.0,
+          "description": "CUSTOMER PAYMENT INV 88"
+        }
+      ],
+      "question": "What was my income in March?",
+      "query": "income",
+      "expected": [
+        1000.0,
+        [
+          "r3"
+        ],
+        "High"
+      ],
+      "code": [
+        1000.0,
+        85,
+        "Medium"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C14",
+      "title": "Refund paid out to a customer is not spending",
+      "accounts": [
+        "chk"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-01",
+          "account": "chk",
+          "dir": "out",
+          "amount": 1200.0,
+          "description": "OFFICE RENT",
+          "category": "RENT_AND_UTILITIES_RENT"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-18",
+          "account": "chk",
+          "dir": "out",
+          "amount": 150.0,
+          "description": "REFUND TO CUSTOMER AN OWNER"
+        }
+      ],
+      "question": "How much did I spend in March?",
+      "query": "spend",
+      "expected": [
+        1200.0,
+        [
+          "r1"
+        ],
+        "High"
+      ],
+      "code": [
+        1200.0,
+        85,
+        "Medium"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C15",
+      "title": "Sales after a customer refund",
+      "accounts": [
+        "chk"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-05",
+          "account": "chk",
+          "dir": "in",
+          "amount": 5000.0,
+          "description": "CUSTOMER DEPOSITS"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-18",
+          "account": "chk",
+          "dir": "out",
+          "amount": 150.0,
+          "description": "CUSTOMER REFUND ORDER 77"
+        }
+      ],
+      "question": "What were my sales in March after refunds to customers?",
+      "query": "net_sales",
+      "expected": [
+        4850.0,
+        [
+          "r1",
+          "r2"
+        ],
+        "High"
+      ],
+      "code": [
+        4850.0,
+        85,
+        "Medium"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C16",
+      "title": "Customer refund sent by a person-to-person payment",
+      "accounts": [
+        "chk"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-05",
+          "account": "chk",
+          "dir": "in",
+          "amount": 5000.0,
+          "description": "CUSTOMER DEPOSITS"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-18",
+          "account": "chk",
+          "dir": "out",
+          "amount": 150.0,
+          "description": "ZELLE TO AN OWNER REFUND ORDER 77"
+        }
+      ],
+      "question": "What were my sales in March after refunds to customers?",
+      "query": "net_sales",
+      "expected": [
+        4850.0,
+        [
+          "r1",
+          "r2"
+        ],
+        "Medium"
+      ],
+      "code": [
+        5000.0,
+        62,
+        "Low"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C17",
+      "title": "Chargeback with a categorized fee",
+      "accounts": [
+        "chk"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-05",
+          "account": "chk",
+          "dir": "out",
+          "amount": 400.0,
+          "description": "CHARGEBACK VISA CASE 0312"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-05",
+          "account": "chk",
+          "dir": "out",
+          "amount": 15.0,
+          "description": "CHARGEBACK FEE",
+          "category": "BANK_FEES_OTHER_BANK_FEES"
+        }
+      ],
+      "question": "How much did I spend in March?",
+      "query": "spend",
+      "expected": [
+        15.0,
+        [
+          "r2"
+        ],
+        "High"
+      ],
+      "code": [
+        15.0,
+        85,
+        "Medium"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C18",
+      "title": "Chargeback fee with no bank category",
+      "accounts": [
+        "chk"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-05",
+          "account": "chk",
+          "dir": "out",
+          "amount": 400.0,
+          "description": "CHARGEBACK VISA CASE 0312"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-05",
+          "account": "chk",
+          "dir": "out",
+          "amount": 15.0,
+          "description": "CHARGEBACK FEE"
+        }
+      ],
+      "question": "How much did I spend in March?",
+      "query": "spend",
+      "expected": [
+        15.0,
+        [
+          "r2"
+        ],
+        "High"
+      ],
+      "code": [
+        0.0,
+        85,
+        "Medium"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C19",
+      "title": "Chargeback won back later in the month",
+      "accounts": [
+        "chk"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-03",
+          "account": "chk",
+          "dir": "in",
+          "amount": 3000.0,
+          "description": "CUSTOMER DEPOSITS"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-05",
+          "account": "chk",
+          "dir": "out",
+          "amount": 400.0,
+          "description": "CHARGEBACK VISA CASE 0312"
+        },
+        {
+          "id": "r3",
+          "date": "2026-03-25",
+          "account": "chk",
+          "dir": "in",
+          "amount": 400.0,
+          "description": "CHARGEBACK REVERSAL CASE 0312"
+        }
+      ],
+      "question": "What were my sales in March after refunds to customers?",
+      "query": "net_sales",
+      "expected": [
+        3000.0,
+        [
+          "r1",
+          "r2",
+          "r3"
+        ],
+        "High"
+      ],
+      "code": [
+        3000.0,
+        85,
+        "Medium"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C20",
+      "title": "Processor payout reversal with the bank code",
+      "accounts": [
+        "chk"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-04",
+          "account": "chk",
+          "dir": "in",
+          "amount": 1500.0,
+          "description": "STRIPE PAYOUT",
+          "payee": "Stripe"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-06",
+          "account": "chk",
+          "dir": "out",
+          "amount": 220.0,
+          "description": "STRIPE PAYOUT REVERSAL",
+          "payee": "Stripe",
+          "category": "PAYOUT_REVERSAL"
+        }
+      ],
+      "question": "What was my income in March?",
+      "query": "income",
+      "expected": [
+        1280.0,
+        [
+          "r1",
+          "r2"
+        ],
+        "High"
+      ],
+      "code": [
+        1280.0,
+        62,
+        "Low"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C21",
+      "title": "Processor payout reversal without the bank code",
+      "accounts": [
+        "chk"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-04",
+          "account": "chk",
+          "dir": "in",
+          "amount": 1500.0,
+          "description": "STRIPE PAYOUT",
+          "payee": "Stripe"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-06",
+          "account": "chk",
+          "dir": "out",
+          "amount": 220.0,
+          "description": "STRIPE PAYOUT REVERSAL",
+          "payee": "Stripe"
+        }
+      ],
+      "question": "What was my income in March?",
+      "query": "income",
+      "expected": [
+        1280.0,
+        [
+          "r1",
+          "r2"
+        ],
+        "High"
+      ],
+      "code": [
+        1500.0,
+        62,
+        "Low"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C22",
+      "title": "Card payment with both sides connected",
+      "accounts": [
+        "chk",
+        "card"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-10",
+          "account": "chk",
+          "dir": "out",
+          "amount": 500.0,
+          "description": "Payment to card 4444"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-11",
+          "account": "card",
+          "dir": "in",
+          "amount": 500.0,
+          "description": "PAYMENT THANK YOU"
+        },
+        {
+          "id": "r3",
+          "date": "2026-03-15",
+          "account": "card",
+          "dir": "out",
+          "amount": 300.0,
+          "description": "RESTAURANT SUPPLY",
+          "category": "FOOD_AND_DRINK_OTHER"
+        }
+      ],
+      "question": "How much did I spend in March?",
+      "query": "spend",
+      "expected": [
+        300.0,
+        [
+          "r3"
+        ],
+        "High"
+      ],
+      "code": [
+        300.0,
+        85,
+        "Medium"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C23",
+      "title": "One card payment seen on both sides is added twice",
+      "accounts": [
+        "chk",
+        "card"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-10",
+          "account": "chk",
+          "dir": "out",
+          "amount": 500.0,
+          "description": "Payment to card 4444"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-11",
+          "account": "card",
+          "dir": "in",
+          "amount": 500.0,
+          "description": "PAYMENT THANK YOU"
+        },
+        {
+          "id": "r3",
+          "date": "2026-03-15",
+          "account": "card",
+          "dir": "out",
+          "amount": 300.0,
+          "description": "RESTAURANT SUPPLY",
+          "category": "FOOD_AND_DRINK_OTHER"
+        }
+      ],
+      "question": "How much did I pay toward the card ending 4444 in March?",
+      "query": "card_paid",
+      "expected": [
+        500.0,
+        [
+          "r1",
+          "r2"
+        ],
+        "High"
+      ],
+      "code": [
+        1000.0,
+        85,
+        "Medium"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C24",
+      "title": "Card payment when only the card is connected",
+      "accounts": [
+        "card"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-11",
+          "account": "card",
+          "dir": "in",
+          "amount": 500.0,
+          "description": "PAYMENT THANK YOU"
+        }
+      ],
+      "question": "How much did I pay toward the card ending 4444 in March?",
+      "query": "card_paid",
+      "expected": [
+        500.0,
+        [
+          "r1"
+        ],
+        "High"
+      ],
+      "code": [
+        500.0,
+        85,
+        "Medium"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C25",
+      "title": "Card payment acknowledgement with different wording",
+      "accounts": [
+        "card"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-11",
+          "account": "card",
+          "dir": "in",
+          "amount": 500.0,
+          "description": "PAYMENT RECEIVED - THANK YOU"
+        }
+      ],
+      "question": "How much did I pay toward the card ending 4444 in March?",
+      "query": "card_paid",
+      "expected": [
+        500.0,
+        [
+          "r1"
+        ],
+        "High"
+      ],
+      "code": [
+        500.0,
+        50,
+        "Low"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C26",
+      "title": "Payment to a card that is not connected, with the bank payment code",
+      "accounts": [
+        "chk"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-01",
+          "account": "chk",
+          "dir": "out",
+          "amount": 1200.0,
+          "description": "OFFICE RENT",
+          "category": "RENT_AND_UTILITIES_RENT"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-12",
+          "account": "chk",
+          "dir": "out",
+          "amount": 800.0,
+          "description": "CARDCO EPAY 4444",
+          "category": "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT"
+        }
+      ],
+      "question": "How much did I spend in March?",
+      "query": "spend",
+      "expected": [
+        1200.0,
+        [
+          "r1"
+        ],
+        "Medium"
+      ],
+      "code": [
+        1200.0,
+        85,
+        "Medium"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "PASS"
+    },
+    {
+      "id": "C27",
+      "title": "Payment to a card that is not connected, issuer descriptor only",
+      "accounts": [
+        "chk"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-01",
+          "account": "chk",
+          "dir": "out",
+          "amount": 1200.0,
+          "description": "OFFICE RENT",
+          "category": "RENT_AND_UTILITIES_RENT"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-12",
+          "account": "chk",
+          "dir": "out",
+          "amount": 800.0,
+          "description": "CARDCO EPAY 4444"
+        }
+      ],
+      "question": "How much did I spend in March?",
+      "query": "spend",
+      "expected": [
+        1200.0,
+        [
+          "r1"
+        ],
+        "Low"
+      ],
+      "code": [
+        2000.0,
+        62,
+        "Low"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "PASS"
+    },
+    {
+      "id": "C28",
+      "title": "Card interest posted separately with a bank code",
+      "accounts": [
+        "card"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-08",
+          "account": "card",
+          "dir": "out",
+          "amount": 300.0,
+          "description": "RESTAURANT SUPPLY",
+          "category": "FOOD_AND_DRINK_OTHER"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-20",
+          "account": "card",
+          "dir": "out",
+          "amount": 23.45,
+          "description": "INTEREST CHARGE ON PURCHASES",
+          "category": "BANK_FEES_INTEREST_CHARGE"
+        },
+        {
+          "id": "r3",
+          "date": "2026-03-22",
+          "account": "card",
+          "dir": "in",
+          "amount": 500.0,
+          "description": "PAYMENT THANK YOU"
+        }
+      ],
+      "question": "How much did I spend on the card in March?",
+      "query": "spend",
+      "expected": [
+        323.45,
+        [
+          "r1",
+          "r2"
+        ],
+        "High"
+      ],
+      "code": [
+        323.45,
+        85,
+        "Medium"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C29",
+      "title": "Card interest posted separately with no bank code",
+      "accounts": [
+        "card"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-08",
+          "account": "card",
+          "dir": "out",
+          "amount": 300.0,
+          "description": "RESTAURANT SUPPLY",
+          "category": "FOOD_AND_DRINK_OTHER"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-20",
+          "account": "card",
+          "dir": "out",
+          "amount": 23.45,
+          "description": "INTEREST CHARGE ON PURCHASES"
+        },
+        {
+          "id": "r3",
+          "date": "2026-03-22",
+          "account": "card",
+          "dir": "in",
+          "amount": 500.0,
+          "description": "PAYMENT THANK YOU"
+        }
+      ],
+      "question": "How much did I spend on the card in March?",
+      "query": "spend",
+      "expected": [
+        323.45,
+        [
+          "r1",
+          "r2"
+        ],
+        "High"
+      ],
+      "code": [
+        323.45,
+        66,
+        "Low"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C30",
+      "title": "Late fee charged and then reversed",
+      "accounts": [
+        "card"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-08",
+          "account": "card",
+          "dir": "out",
+          "amount": 300.0,
+          "description": "RESTAURANT SUPPLY",
+          "category": "FOOD_AND_DRINK_OTHER"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-16",
+          "account": "card",
+          "dir": "out",
+          "amount": 39.0,
+          "description": "LATE FEE",
+          "category": "BANK_FEES_LATE_PAYMENT"
+        },
+        {
+          "id": "r3",
+          "date": "2026-03-19",
+          "account": "card",
+          "dir": "in",
+          "amount": 39.0,
+          "description": "LATE FEE REVERSAL"
+        }
+      ],
+      "question": "What did I spend on the card in March, after refunds?",
+      "query": "net_spend",
+      "expected": [
+        300.0,
+        [
+          "r1",
+          "r2",
+          "r3"
+        ],
+        "High"
+      ],
+      "code": [
+        300.0,
+        85,
+        "Medium"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C31",
+      "title": "Cashback credit on a card is not income",
+      "accounts": [
+        "chk",
+        "card"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-09",
+          "account": "chk",
+          "dir": "in",
+          "amount": 1000.0,
+          "description": "CUSTOMER PAYMENT INV 91"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-21",
+          "account": "card",
+          "dir": "in",
+          "amount": 25.0,
+          "description": "CASHBACK REWARD STATEMENT CREDIT"
+        }
+      ],
+      "question": "What was my income in March?",
+      "query": "income",
+      "expected": [
+        1000.0,
+        [
+          "r1"
+        ],
+        "High"
+      ],
+      "code": [
+        1000.0,
+        85,
+        "Medium"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C32",
+      "title": "Statement credit for a waived fee counted as a payment",
+      "accounts": [
+        "card"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-11",
+          "account": "card",
+          "dir": "in",
+          "amount": 500.0,
+          "description": "PAYMENT THANK YOU"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-14",
+          "account": "card",
+          "dir": "in",
+          "amount": 95.0,
+          "description": "STATEMENT CREDIT ANNUAL FEE WAIVED"
+        }
+      ],
+      "question": "How much did I pay toward the card ending 4444 in March?",
+      "query": "card_paid",
+      "expected": [
+        500.0,
+        [
+          "r1"
+        ],
+        "High"
+      ],
+      "code": [
+        595.0,
+        62,
+        "Low"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C33",
+      "title": "Balance transfer between two cards, no bank codes",
+      "accounts": [
+        "card",
+        "card2"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-06",
+          "account": "card2",
+          "dir": "out",
+          "amount": 2000.0,
+          "description": "BALANCE TRANSFER"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-07",
+          "account": "card",
+          "dir": "in",
+          "amount": 2000.0,
+          "description": "BALANCE TRANSFER CREDIT"
+        },
+        {
+          "id": "r3",
+          "date": "2026-03-06",
+          "account": "card2",
+          "dir": "out",
+          "amount": 60.0,
+          "description": "BALANCE TRANSFER FEE",
+          "category": "BANK_FEES_OTHER_BANK_FEES"
+        }
+      ],
+      "question": "How much did I spend in March?",
+      "query": "spend",
+      "expected": [
+        60.0,
+        [
+          "r3"
+        ],
+        "Medium"
+      ],
+      "code": [
+        2060.0,
+        58,
+        "Low"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C34",
+      "title": "Balance transfer between two cards with bank transfer codes",
+      "accounts": [
+        "card",
+        "card2"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-06",
+          "account": "card2",
+          "dir": "out",
+          "amount": 2000.0,
+          "description": "BALANCE TRANSFER",
+          "category": "TRANSFER_OUT_ACCOUNT_TRANSFER"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-07",
+          "account": "card",
+          "dir": "in",
+          "amount": 2000.0,
+          "description": "BALANCE TRANSFER CREDIT",
+          "category": "TRANSFER_IN_ACCOUNT_TRANSFER"
+        },
+        {
+          "id": "r3",
+          "date": "2026-03-06",
+          "account": "card2",
+          "dir": "out",
+          "amount": 60.0,
+          "description": "BALANCE TRANSFER FEE",
+          "category": "BANK_FEES_OTHER_BANK_FEES"
+        }
+      ],
+      "question": "How much did I spend in March?",
+      "query": "spend",
+      "expected": [
+        60.0,
+        [
+          "r3"
+        ],
+        "High"
+      ],
+      "code": [
+        60.0,
+        85,
+        "Medium"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C35",
+      "title": "Card cash advance deposited to checking, no bank code",
+      "accounts": [
+        "chk",
+        "card"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-09",
+          "account": "card",
+          "dir": "out",
+          "amount": 1000.0,
+          "description": "CASH ADVANCE"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-09",
+          "account": "chk",
+          "dir": "in",
+          "amount": 1000.0,
+          "description": "CASH ADVANCE DEPOSIT"
+        },
+        {
+          "id": "r3",
+          "date": "2026-03-09",
+          "account": "card",
+          "dir": "out",
+          "amount": 30.0,
+          "description": "CASH ADVANCE FEE",
+          "category": "BANK_FEES_OTHER_BANK_FEES"
+        }
+      ],
+      "question": "What was my income in March?",
+      "query": "income",
+      "expected": [
+        0.0,
+        [],
+        "Medium"
+      ],
+      "code": [
+        1000.0,
+        58,
+        "Low"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C36",
+      "title": "Card cash advance deposited to checking, with the bank code",
+      "accounts": [
+        "chk",
+        "card"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-09",
+          "account": "card",
+          "dir": "out",
+          "amount": 1000.0,
+          "description": "CASH ADVANCE"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-09",
+          "account": "chk",
+          "dir": "in",
+          "amount": 1000.0,
+          "description": "CASH ADVANCE DEPOSIT",
+          "category": "TRANSFER_IN_CASH_ADVANCES_AND_LOANS"
+        },
+        {
+          "id": "r3",
+          "date": "2026-03-09",
+          "account": "card",
+          "dir": "out",
+          "amount": 30.0,
+          "description": "CASH ADVANCE FEE",
+          "category": "BANK_FEES_OTHER_BANK_FEES"
+        }
+      ],
+      "question": "What was my income in March?",
+      "query": "income",
+      "expected": [
+        0.0,
+        [],
+        "High"
+      ],
+      "code": [
+        0.0,
+        58,
+        "Low"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C37",
+      "title": "Card cash advance counted as a purchase on the card side",
+      "accounts": [
+        "chk",
+        "card"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-09",
+          "account": "card",
+          "dir": "out",
+          "amount": 1000.0,
+          "description": "CASH ADVANCE"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-09",
+          "account": "chk",
+          "dir": "in",
+          "amount": 1000.0,
+          "description": "CASH ADVANCE DEPOSIT",
+          "category": "TRANSFER_IN_CASH_ADVANCES_AND_LOANS"
+        },
+        {
+          "id": "r3",
+          "date": "2026-03-09",
+          "account": "card",
+          "dir": "out",
+          "amount": 30.0,
+          "description": "CASH ADVANCE FEE",
+          "category": "BANK_FEES_OTHER_BANK_FEES"
+        }
+      ],
+      "question": "How much did I spend in March?",
+      "query": "spend",
+      "expected": [
+        30.0,
+        [
+          "r3"
+        ],
+        "High"
+      ],
+      "code": [
+        1030.0,
+        58,
+        "Low"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C38",
+      "title": "Loan money received with the bank disbursement code",
+      "accounts": [
+        "chk"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-03",
+          "account": "chk",
+          "dir": "in",
+          "amount": 25000.0,
+          "description": "LOAN DISBURSEMENT LENDER CO",
+          "category": "LOAN_DISBURSEMENTS_OTHER_DISBURSEMENT"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-12",
+          "account": "chk",
+          "dir": "in",
+          "amount": 4000.0,
+          "description": "CUSTOMER PAYMENT INV 12"
+        }
+      ],
+      "question": "What was my income in March?",
+      "query": "income",
+      "expected": [
+        4000.0,
+        [
+          "r2"
+        ],
+        "Medium"
+      ],
+      "code": [
+        4000.0,
+        62,
+        "Low"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C39",
+      "title": "Loan money received, wording only",
+      "accounts": [
+        "chk"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-03",
+          "account": "chk",
+          "dir": "in",
+          "amount": 25000.0,
+          "description": "SBA LOAN PROCEEDS"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-12",
+          "account": "chk",
+          "dir": "in",
+          "amount": 4000.0,
+          "description": "CUSTOMER PAYMENT INV 12"
+        }
+      ],
+      "question": "What was my income in March?",
+      "query": "income",
+      "expected": [
+        4000.0,
+        [
+          "r2"
+        ],
+        "Medium"
+      ],
+      "code": [
+        29000.0,
+        62,
+        "Low"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C40",
+      "title": "Credit line draw proved by the account-number memo",
+      "accounts": [
+        "chk",
+        "loc"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-04",
+          "account": "loc",
+          "dir": "out",
+          "amount": 5000.0,
+          "description": "ADVANCE TO CHECKING 1111"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-04",
+          "account": "chk",
+          "dir": "in",
+          "amount": 5000.0,
+          "description": "TRANSFER FROM 8888"
+        }
+      ],
+      "question": "How much did I borrow on the credit line in March?",
+      "query": "borrowed",
+      "expected": [
+        5000.0,
+        [
+          "r1",
+          "r2"
+        ],
+        "High"
+      ],
+      "code": [
+        5000.0,
+        85,
+        "Medium"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C41",
+      "title": "Credit line draw with generic memos",
+      "accounts": [
+        "chk",
+        "loc"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-04",
+          "account": "loc",
+          "dir": "out",
+          "amount": 5000.0,
+          "description": "ADVANCE"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-04",
+          "account": "chk",
+          "dir": "in",
+          "amount": 5000.0,
+          "description": "DEPOSIT"
+        },
+        {
+          "id": "r3",
+          "date": "2026-03-12",
+          "account": "chk",
+          "dir": "in",
+          "amount": 4000.0,
+          "description": "CUSTOMER PAYMENT INV 12"
+        }
+      ],
+      "question": "What was my income in March?",
+      "query": "income",
+      "expected": [
+        4000.0,
+        [
+          "r3"
+        ],
+        "Medium"
+      ],
+      "code": [
+        9000.0,
+        58,
+        "Low"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C42",
+      "title": "Loan payment with both sides connected",
+      "accounts": [
+        "chk",
+        "loan"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-15",
+          "account": "chk",
+          "dir": "out",
+          "amount": 1250.0,
+          "description": "Loan payment to 7777"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-16",
+          "account": "loan",
+          "dir": "in",
+          "amount": 1250.0,
+          "description": "PAYMENT RECEIVED"
+        },
+        {
+          "id": "r3",
+          "date": "2026-03-01",
+          "account": "chk",
+          "dir": "out",
+          "amount": 1200.0,
+          "description": "OFFICE RENT",
+          "category": "RENT_AND_UTILITIES_RENT"
+        }
+      ],
+      "question": "How much did I spend in March?",
+      "query": "spend",
+      "expected": [
+        1200.0,
+        [
+          "r3"
+        ],
+        "Medium"
+      ],
+      "code": [
+        1200.0,
+        66,
+        "Low"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C43",
+      "title": "One loan payment seen on both sides is added twice",
+      "accounts": [
+        "chk",
+        "loan"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-15",
+          "account": "chk",
+          "dir": "out",
+          "amount": 1250.0,
+          "description": "Loan payment to 7777"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-16",
+          "account": "loan",
+          "dir": "in",
+          "amount": 1250.0,
+          "description": "PAYMENT RECEIVED"
+        },
+        {
+          "id": "r3",
+          "date": "2026-03-01",
+          "account": "chk",
+          "dir": "out",
+          "amount": 1200.0,
+          "description": "OFFICE RENT",
+          "category": "RENT_AND_UTILITIES_RENT"
+        }
+      ],
+      "question": "How much did I pay on the loan ending 7777 in March?",
+      "query": "loan_paid",
+      "expected": [
+        1250.0,
+        [
+          "r1",
+          "r2"
+        ],
+        "Medium"
+      ],
+      "code": [
+        2500.0,
+        66,
+        "Low"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C44",
+      "title": "Loan statement shows the interest charge separately",
+      "accounts": [
+        "loan"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-16",
+          "account": "loan",
+          "dir": "in",
+          "amount": 1250.0,
+          "description": "PAYMENT"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-16",
+          "account": "loan",
+          "dir": "out",
+          "amount": 310.15,
+          "description": "INTEREST CHARGED",
+          "category": "BANK_FEES_INTEREST_CHARGE"
+        }
+      ],
+      "question": "How much loan interest was I charged in March?",
+      "query": "interest",
+      "expected": [
+        310.15,
+        [
+          "r2"
+        ],
+        "High"
+      ],
+      "code": [
+        310.15,
+        62,
+        "Low"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C45",
+      "title": "Loan payment memo states the principal and interest split",
+      "accounts": [
+        "chk"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-15",
+          "account": "chk",
+          "dir": "out",
+          "amount": 1250.0,
+          "description": "LOAN PAYMENT PRINCIPAL 939.85 INTEREST 310.15"
+        }
+      ],
+      "question": "How much loan interest did I pay in March?",
+      "query": "interest",
+      "expected": [
+        310.15,
+        [
+          "r1"
+        ],
+        "Medium"
+      ],
+      "code": [
+        0.0,
+        50,
+        "Low"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C46",
+      "title": "Loan payment to a lender that is not connected",
+      "accounts": [
+        "chk"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-01",
+          "account": "chk",
+          "dir": "out",
+          "amount": 1200.0,
+          "description": "OFFICE RENT",
+          "category": "RENT_AND_UTILITIES_RENT"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-15",
+          "account": "chk",
+          "dir": "out",
+          "amount": 1250.0,
+          "description": "LOAN PMT LENDER CO"
+        }
+      ],
+      "question": "How much did I spend in March?",
+      "query": "spend",
+      "expected": [
+        1200.0,
+        [
+          "r1"
+        ],
+        "Medium"
+      ],
+      "code": [
+        1200.0,
+        62,
+        "Low"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C47",
+      "title": "New loan pays off the old loan",
+      "accounts": [
+        "loan",
+        "loan2"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-10",
+          "account": "loan2",
+          "dir": "out",
+          "amount": 18000.0,
+          "description": "DISBURSEMENT TO PAYOFF"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-10",
+          "account": "loan",
+          "dir": "in",
+          "amount": 18000.0,
+          "description": "PAYOFF"
+        }
+      ],
+      "question": "How much did I spend in March?",
+      "query": "spend",
+      "expected": [
+        0.0,
+        [],
+        "Medium"
+      ],
+      "code": [
+        18000.0,
+        50,
+        "Low"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C48",
+      "title": "Credit line repayment proved by account-number memos",
+      "accounts": [
+        "chk",
+        "loc"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-18",
+          "account": "chk",
+          "dir": "out",
+          "amount": 2000.0,
+          "description": "TRANSFER TO 8888"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-18",
+          "account": "loc",
+          "dir": "in",
+          "amount": 2000.0,
+          "description": "TRANSFER FROM 1111"
+        },
+        {
+          "id": "r3",
+          "date": "2026-03-20",
+          "account": "chk",
+          "dir": "out",
+          "amount": 90.0,
+          "description": "SOFTWARE SUBSCRIPTION",
+          "category": "GENERAL_SERVICES_OTHER"
+        }
+      ],
+      "question": "How much did I spend in March?",
+      "query": "spend",
+      "expected": [
+        90.0,
+        [
+          "r3"
+        ],
+        "High"
+      ],
+      "code": [
+        90.0,
+        85,
+        "Medium"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C49",
+      "title": "Loan funded net of an origination fee",
+      "accounts": [
+        "chk",
+        "loan"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-02",
+          "account": "loan",
+          "dir": "out",
+          "amount": 25000.0,
+          "description": "LOAN ADVANCE"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-02",
+          "account": "chk",
+          "dir": "in",
+          "amount": 24500.0,
+          "description": "LOAN DISBURSEMENT",
+          "category": "LOAN_DISBURSEMENTS_OTHER_DISBURSEMENT"
+        }
+      ],
+      "question": "How much did I spend in March?",
+      "query": "spend",
+      "expected": [
+        500.0,
+        [
+          "r1",
+          "r2"
+        ],
+        "Medium"
+      ],
+      "code": [
+        25000.0,
+        50,
+        "Low"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C50",
+      "title": "Loan payment returned for insufficient funds",
+      "accounts": [
+        "chk"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-01",
+          "account": "chk",
+          "dir": "out",
+          "amount": 1250.0,
+          "description": "LOAN PMT LENDER CO"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-03",
+          "account": "chk",
+          "dir": "in",
+          "amount": 1250.0,
+          "description": "RETURNED ITEM LOAN PMT LENDER CO"
+        },
+        {
+          "id": "r3",
+          "date": "2026-03-03",
+          "account": "chk",
+          "dir": "out",
+          "amount": 35.0,
+          "description": "NSF FEE",
+          "category": "BANK_FEES_INSUFFICIENT_FUNDS"
+        }
+      ],
+      "question": "What was my income in March?",
+      "query": "income",
+      "expected": [
+        0.0,
+        [],
+        "High"
+      ],
+      "code": [
+        1250.0,
+        58,
+        "Low"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C51",
+      "title": "Interest refund on a loan is not a payment",
+      "accounts": [
+        "loan"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-16",
+          "account": "loan",
+          "dir": "in",
+          "amount": 1250.0,
+          "description": "PAYMENT"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-20",
+          "account": "loan",
+          "dir": "in",
+          "amount": 85.0,
+          "description": "INTEREST REFUND"
+        }
+      ],
+      "question": "How much did I pay on the loan ending 7777 in March?",
+      "query": "loan_paid",
+      "expected": [
+        1250.0,
+        [
+          "r1"
+        ],
+        "High"
+      ],
+      "code": [
+        1250.0,
+        62,
+        "Low"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C52",
+      "title": "Lender adjustment credit counted as a payment",
+      "accounts": [
+        "loan"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-16",
+          "account": "loan",
+          "dir": "in",
+          "amount": 1250.0,
+          "description": "PAYMENT"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-20",
+          "account": "loan",
+          "dir": "in",
+          "amount": 85.0,
+          "description": "PRINCIPAL ADJUSTMENT CREDIT"
+        }
+      ],
+      "question": "How much did I pay on the loan ending 7777 in March?",
+      "query": "loan_paid",
+      "expected": [
+        1250.0,
+        [
+          "r1"
+        ],
+        "Medium"
+      ],
+      "code": [
+        1335.0,
+        50,
+        "Low"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C53",
+      "title": "Separately posted loan interest and principal",
+      "accounts": [
+        "chk"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-15",
+          "account": "chk",
+          "dir": "out",
+          "amount": 85.0,
+          "description": "LOAN PAYMENT INTEREST"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-15",
+          "account": "chk",
+          "dir": "out",
+          "amount": 1000.0,
+          "description": "LOAN PAYMENT PRINCIPAL"
+        }
+      ],
+      "question": "How much did I spend in March?",
+      "query": "spend",
+      "expected": [
+        85.0,
+        [
+          "r1"
+        ],
+        "High"
+      ],
+      "code": [
+        85.0,
+        62,
+        "Low"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C54",
+      "title": "Customer whose name contains a refund word",
+      "accounts": [
+        "chk"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-09",
+          "account": "chk",
+          "dir": "in",
+          "amount": 900.0,
+          "description": "DEPOSIT",
+          "payee": "Reversal Records LLC"
+        }
+      ],
+      "question": "What was my income in March?",
+      "query": "income",
+      "expected": [
+        900.0,
+        [
+          "r1"
+        ],
+        "High"
+      ],
+      "code": [
+        0.0,
+        85,
+        "Medium"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C55",
+      "title": "Subscription whose name contains 'chargeback'",
+      "accounts": [
+        "chk"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-09",
+          "account": "chk",
+          "dir": "out",
+          "amount": 75.0,
+          "description": "CHARGEBACK PROTECTION SERVICE MONTHLY",
+          "payee": "Chargeback Shield"
+        }
+      ],
+      "question": "How much did I spend in March?",
+      "query": "spend",
+      "expected": [
+        75.0,
+        [
+          "r1"
+        ],
+        "High"
+      ],
+      "code": [
+        0.0,
+        85,
+        "Medium"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C56",
+      "title": "Vendor payment sent and returned by the bank",
+      "accounts": [
+        "chk"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-06",
+          "account": "chk",
+          "dir": "out",
+          "amount": 900.0,
+          "description": "ACH PAYMENT VENDOR X"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-09",
+          "account": "chk",
+          "dir": "in",
+          "amount": 900.0,
+          "description": "ACH RETURN VENDOR X"
+        }
+      ],
+      "question": "What did I spend in March, after refunds?",
+      "query": "net_spend",
+      "expected": [
+        0.0,
+        [
+          "r1",
+          "r2"
+        ],
+        "High"
+      ],
+      "code": [
+        900.0,
+        50,
+        "Low"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C57",
+      "title": "Issuer refunds a card credit balance by check",
+      "accounts": [
+        "chk",
+        "card"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-10",
+          "account": "card",
+          "dir": "out",
+          "amount": 150.0,
+          "description": "CREDIT BALANCE REFUND"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-12",
+          "account": "chk",
+          "dir": "in",
+          "amount": 150.0,
+          "description": "CARD CO CREDIT BALANCE REFUND"
+        }
+      ],
+      "question": "How much did I spend in March?",
+      "query": "spend",
+      "expected": [
+        0.0,
+        [],
+        "High"
+      ],
+      "code": [
+        150.0,
+        62,
+        "Low"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C58",
+      "title": "Debit card purchase refunded to checking",
+      "accounts": [
+        "chk"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-04",
+          "account": "chk",
+          "dir": "out",
+          "amount": 80.0,
+          "description": "DEBIT CARD PURCHASE HARDWARE DEPOT",
+          "category": "GENERAL_MERCHANDISE_HARDWARE"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-08",
+          "account": "chk",
+          "dir": "in",
+          "amount": 80.0,
+          "description": "DEBIT CARD REFUND HARDWARE DEPOT"
+        }
+      ],
+      "question": "What did I spend in March, after refunds?",
+      "query": "net_spend",
+      "expected": [
+        0.0,
+        [
+          "r1",
+          "r2"
+        ],
+        "High"
+      ],
+      "code": [
+        0.0,
+        85,
+        "Medium"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C59",
+      "title": "Debit card return worded POS RETURN",
+      "accounts": [
+        "chk"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-09",
+          "account": "chk",
+          "dir": "in",
+          "amount": 1000.0,
+          "description": "CUSTOMER PAYMENT INV 14"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-11",
+          "account": "chk",
+          "dir": "in",
+          "amount": 80.0,
+          "description": "POS RETURN HARDWARE DEPOT"
+        }
+      ],
+      "question": "What was my income in March?",
+      "query": "income",
+      "expected": [
+        1000.0,
+        [
+          "r1"
+        ],
+        "High"
+      ],
+      "code": [
+        1080.0,
+        62,
+        "Low"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C60",
+      "title": "Processor payout whose memo mentions refunds",
+      "accounts": [
+        "chk"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-04",
+          "account": "chk",
+          "dir": "in",
+          "amount": 1500.0,
+          "description": "STRIPE PAYOUT LESS REFUNDS",
+          "payee": "Stripe"
+        }
+      ],
+      "question": "What was my income in March?",
+      "query": "income",
+      "expected": [
+        1500.0,
+        [
+          "r1"
+        ],
+        "High"
+      ],
+      "code": [
+        0.0,
+        85,
+        "Medium"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C61",
+      "title": "Processor gross-sales payout with the sales code",
+      "accounts": [
+        "chk"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-04",
+          "account": "chk",
+          "dir": "in",
+          "amount": 1500.0,
+          "description": "STRIPE PAYOUT SALES LESS REFUNDS",
+          "payee": "Stripe",
+          "category": "SALES"
+        }
+      ],
+      "question": "What was my income in March?",
+      "query": "income",
+      "expected": [
+        1500.0,
+        [
+          "r1"
+        ],
+        "High"
+      ],
+      "code": [
+        1500.0,
+        85,
+        "Medium"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C62",
+      "title": "Reversal of a loan payment is subtracted from spending",
+      "accounts": [
+        "chk"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-01",
+          "account": "chk",
+          "dir": "out",
+          "amount": 1200.0,
+          "description": "OFFICE RENT",
+          "category": "RENT_AND_UTILITIES_RENT"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-05",
+          "account": "chk",
+          "dir": "out",
+          "amount": 1250.0,
+          "description": "LOAN PAYMENT LENDER CO"
+        },
+        {
+          "id": "r3",
+          "date": "2026-03-07",
+          "account": "chk",
+          "dir": "in",
+          "amount": 1250.0,
+          "description": "LOAN PAYMENT REVERSAL LENDER CO"
+        }
+      ],
+      "question": "What did I spend in March, after refunds?",
+      "query": "net_spend",
+      "expected": [
+        1200.0,
+        [
+          "r1"
+        ],
+        "High"
+      ],
+      "code": [
+        -50.0,
+        66,
+        "Low"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C63",
+      "title": "Refund from a merchant whose name contains 'bonus'",
+      "accounts": [
+        "card"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-04",
+          "account": "card",
+          "dir": "out",
+          "amount": 210.0,
+          "description": "BONUS BUILDING SUPPLY",
+          "category": "GENERAL_MERCHANDISE_HARDWARE"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-10",
+          "account": "card",
+          "dir": "in",
+          "amount": 210.0,
+          "description": "BONUS BUILDING SUPPLY REFUND"
+        }
+      ],
+      "question": "How much came back to the card as refunds in March?",
+      "query": "refunds_in",
+      "expected": [
+        210.0,
+        [
+          "r2"
+        ],
+        "High"
+      ],
+      "code": [
+        0.0,
+        85,
+        "Medium"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C64",
+      "title": "Rewards redemption is not a refund",
+      "accounts": [
+        "card"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-09",
+          "account": "card",
+          "dir": "in",
+          "amount": 120.0,
+          "description": "OFFICE SUPPLY STORE REFUND"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-21",
+          "account": "card",
+          "dir": "in",
+          "amount": 25.0,
+          "description": "REWARDS REDEMPTION CREDIT"
+        }
+      ],
+      "question": "How much came back to the card as refunds in March?",
+      "query": "refunds_in",
+      "expected": [
+        120.0,
+        [
+          "r1"
+        ],
+        "High"
+      ],
+      "code": [
+        120.0,
+        62,
+        "Low"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C65",
+      "title": "Two unrelated refunds of the same amount on the same day",
+      "accounts": [
+        "card",
+        "card2"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-12",
+          "account": "card",
+          "dir": "in",
+          "amount": 60.0,
+          "description": "REFUND PRINT SHOP"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-12",
+          "account": "card2",
+          "dir": "in",
+          "amount": 60.0,
+          "description": "REFUND PARTS HOUSE"
+        }
+      ],
+      "question": "How much came back to my cards as refunds in March?",
+      "query": "refunds_in",
+      "expected": [
+        120.0,
+        [
+          "r1",
+          "r2"
+        ],
+        "High"
+      ],
+      "code": [
+        120.0,
+        70,
+        "Medium"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C66",
+      "title": "Same card loaded twice (live feed and an unlinked import)",
+      "accounts": [
+        "card",
+        "card_import"
+      ],
+      "coverage": {
+        "card_import": {
+          "from": "2026-03-01",
+          "to": "2026-03-07"
+        }
+      },
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-05",
+          "account": "card",
+          "dir": "out",
+          "amount": 120.0,
+          "description": "OFFICE SUPPLY STORE",
+          "category": "GENERAL_MERCHANDISE_OFFICE_SUPPLIES"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-05",
+          "account": "card_import",
+          "dir": "out",
+          "amount": 120.0,
+          "description": "OFFICE SUPPLY STORE",
+          "category": "GENERAL_MERCHANDISE_OFFICE_SUPPLIES"
+        },
+        {
+          "id": "r3",
+          "date": "2026-03-20",
+          "account": "card",
+          "dir": "in",
+          "amount": 120.0,
+          "description": "OFFICE SUPPLY STORE REFUND"
+        }
+      ],
+      "question": "What did I spend on the card in March, after refunds?",
+      "query": "net_spend",
+      "expected": [
+        0.0,
+        [
+          "r1",
+          "r3"
+        ],
+        "Medium"
+      ],
+      "code": [
+        120.0,
+        70,
+        "Medium"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "PASS"
+    },
+    {
+      "id": "C67",
+      "title": "Refund still pending at month end",
+      "accounts": [
+        "card"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-05",
+          "account": "card",
+          "dir": "out",
+          "amount": 120.0,
+          "description": "OFFICE SUPPLY STORE",
+          "category": "GENERAL_MERCHANDISE_OFFICE_SUPPLIES"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-30",
+          "account": "card",
+          "dir": "in",
+          "amount": 120.0,
+          "description": "OFFICE SUPPLY STORE REFUND",
+          "pending": 1
+        }
+      ],
+      "question": "What did I spend on the card in March, after refunds?",
+      "query": "net_spend",
+      "expected": [
+        120.0,
+        [
+          "r1"
+        ],
+        "Medium"
+      ],
+      "code": [
+        120.0,
+        70,
+        "Medium"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "PASS"
+    },
+    {
+      "id": "C68",
+      "title": "Refund on one card equals a purchase on another the same day",
+      "accounts": [
+        "card",
+        "card2"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-12",
+          "account": "card2",
+          "dir": "out",
+          "amount": 250.0,
+          "description": "TOOL VENDOR",
+          "category": "GENERAL_MERCHANDISE_OTHER"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-12",
+          "account": "card",
+          "dir": "in",
+          "amount": 250.0,
+          "description": "SUPPLYCO REFUND"
+        }
+      ],
+      "question": "What did I spend on my cards in March, after refunds?",
+      "query": "net_spend",
+      "expected": [
+        0.0,
+        [
+          "r1",
+          "r2"
+        ],
+        "High"
+      ],
+      "code": [
+        0.0,
+        85,
+        "Medium"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C69",
+      "title": "Two cards share the same last 4",
+      "accounts": [
+        "chk",
+        "card",
+        "card2_same4"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-10",
+          "account": "chk",
+          "dir": "out",
+          "amount": 500.0,
+          "description": "Payment to card 4444"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-01",
+          "account": "chk",
+          "dir": "out",
+          "amount": 1200.0,
+          "description": "OFFICE RENT",
+          "category": "RENT_AND_UTILITIES_RENT"
+        }
+      ],
+      "question": "How much did I spend in March?",
+      "query": "spend",
+      "expected": [
+        1200.0,
+        [
+          "r2"
+        ],
+        "Medium"
+      ],
+      "code": [
+        1200.0,
+        62,
+        "Low"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C70",
+      "title": "Card payment leaves checking on March 31 and reaches the card on April 1",
+      "accounts": [
+        "chk",
+        "card"
+      ],
+      "period": [
+        "2026-04-01",
+        "2026-04-30"
+      ],
+      "coverage": {
+        "chk": {
+          "from": "2026-03-01",
+          "to": "2026-04-30"
+        },
+        "card": {
+          "from": "2026-03-01",
+          "to": "2026-04-30"
+        }
+      },
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-31",
+          "account": "chk",
+          "dir": "out",
+          "amount": 500.0,
+          "description": "Online Transfer to x4444"
+        },
+        {
+          "id": "r2",
+          "date": "2026-04-01",
+          "account": "card",
+          "dir": "in",
+          "amount": 500.0,
+          "description": "PAYMENT THANK YOU"
+        }
+      ],
+      "question": "How much did I pay toward the card ending 4444 in April?",
+      "query": "card_paid",
+      "expected": [
+        0.0,
+        [],
+        "High"
+      ],
+      "code": [
+        500.0,
+        85,
+        "Medium"
+      ],
+      "verdict": "FAIL",
+      "confidence_verdict": "FAIL"
+    },
+    {
+      "id": "C71",
+      "title": "Card history not confirmed complete",
+      "accounts": [
+        "card"
+      ],
+      "coverage": {
+        "card": {
+          "coverage_status": "partial"
+        }
+      },
+      "rows": [
+        {
+          "id": "r1",
+          "date": "2026-03-08",
+          "account": "card",
+          "dir": "out",
+          "amount": 300.0,
+          "description": "RESTAURANT SUPPLY",
+          "category": "FOOD_AND_DRINK_OTHER"
+        },
+        {
+          "id": "r2",
+          "date": "2026-03-12",
+          "account": "card",
+          "dir": "in",
+          "amount": 40.0,
+          "description": "RESTAURANT SUPPLY REFUND"
+        }
+      ],
+      "question": "What did I spend on the card in March, after refunds?",
+      "query": "net_spend",
+      "expected": [
+        260.0,
+        [
+          "r1",
+          "r2"
+        ],
+        "Low"
+      ],
+      "code": [
+        260.0,
+        60,
+        "Low"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "PASS"
+    },
+    {
+      "id": "C72",
+      "title": "Card connected but no rows at all",
+      "accounts": [
+        "card"
+      ],
+      "rows": [],
+      "question": "How much came back to the card as refunds in March?",
+      "query": "refunds_in",
+      "expected": [
+        0.0,
+        [],
+        "Low"
+      ],
+      "code": [
+        0.0,
+        25,
+        "Low"
+      ],
+      "verdict": "PASS",
+      "confidence_verdict": "PASS"
+    }
+  ],
+  "totals": {
+    "cases": 72,
+    "figure_pass": 39,
+    "figure_fail": 33,
+    "confidence_word_pass": 7,
+    "confidence_word_fail": 65
+  }
+}

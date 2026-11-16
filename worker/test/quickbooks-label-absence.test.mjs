@@ -1,3 +1,4 @@
+import { assertDocumentAnswer } from './helpers/document-answer-contract.mjs';
 // Lens qbo-ledger: does the widened ABSENCE word list in money-veto.js refuse
 // correct, fully cited QuickBooks answers whose provider label merely contains
 // an ordinary word ("Nothing", "Settled", "None", "Nope")? Every payer, amount,
@@ -103,7 +104,7 @@ for (const [entity, label] of CASES) {
     // Green control: same entity, same question, same harness, ordinary label.
     const control = await answerCase(t, { ...options, rows: [labelRow(entity, "Party One")], answer: labelClaim(entity, "Party One") });
     assert.equal(control.body.evidence_gate.supported, true, `control: ${control.body.evidence_gate.reason}`);
-    assert.equal(control.body.answer.split("\n")[0], labelClaim(entity, "Party One"));
+    assertDocumentAnswer(control.body, {expected:labelClaim(entity, "Party One")});
     assert.equal(control.body.citations.length, 1);
 
     const expected = labelClaim(entity, label);
@@ -124,7 +125,7 @@ for (const [entity, label] of CASES) {
       assert.equal(probe.body.citations.length, 0);
     } else {
       assert.equal(probe.body.evidence_gate.supported, true, probe.body.evidence_gate.reason);
-      assert.equal(probe.body.answer.split("\n")[0], expected);
+      assertDocumentAnswer(probe.body, {expected});
       assert.equal(probe.body.citations.length, 1);
     }
   });

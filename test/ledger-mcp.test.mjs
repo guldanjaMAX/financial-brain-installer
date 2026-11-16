@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { writeAdminKeyFile } from "../operations/admin-key-file.mjs";
 import { createProductFixture, seedOwnedEntity } from "../worker/test/product-contract-fixture.mjs";
@@ -12,7 +12,8 @@ import { withLedgerAnswer } from "../worker/src/lib/ledger-answer.js";
 import { handleMcp } from "../worker/src/lib/mcp-endpoint.js";
 
 const NOW = "2026-10-11T12:00:00Z";
-const PRESERVE = "Preserve the ledger answer's exact amounts, account masks, dates, and coverage bounds.";
+// 0.4.28 founder tools-path handoff requires recomputation before the five-part answer.
+const PRESERVE = "This reply contains a money figure from the Brain's older question engine. Read brain_money_guide, recompute with brain_money_query, and answer in five parts.";
 const NO_MATCH = 'No match in this search. Search again with different wording, or sort "newest" for status, before saying "I didn\'t find a matching record in these searches". Name both searches and the next place you would check (another source, a wider date window, or a distinctive name or number). Do not turn those searches into a claim that no such record exists. Say nothing is recorded only when a response explicitly establishes a complete search. Do not substitute inference.';
 const GLOBAL_ABSENCE = /brain has nothing|nothing recorded|Confidence nothing is recorded|documents do not answer|No (?:match|hits) in this search/i;
 
@@ -111,15 +112,19 @@ async function ledgerBodies(t) {
   return bodies;
 }
 
-test("every successful ledger kind survives local and remote MCP", async t => {
-  const bodies = await ledgerBodies(t);
-  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "ledger-mcp-")));
+test("legacy ledger response formatting survives document requests through local and remote MCP", async t => {
+  // Money questions now hand off before transport (money-query-mcp.test.mjs).
+  // Keep every formatting assertion here for a document request receiving an
+  // older server's ledger body, so the new routing cannot damage that fallback.
+  const bodies = (await ledgerBodies(t)).map(entry => ({ ...entry,
+    question: `What does the stored statement say about "${entry.question}"?` }));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "home-ledger-mcp-")));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const home = join(root, "home-fixture");
   mkdirSync(home);
   const manifest = join(root, "brain.manifest.json");
   writeFileSync(manifest, JSON.stringify({ operations: { admin_key_secret: null } }));
-  // Windows protects the key with DPAPI through the system PowerShell, which
+  // Windows protects the key with DPAPI through the fixed Node bridge, which
   // needs the real system environment and account name, as in the MCP search
   // contract test.
   writeAdminKeyFile(join(root, ".brain-admin-key"), randomBytes(24).toString("hex"),
@@ -135,6 +140,16 @@ test("every successful ledger kind survives local and remote MCP", async t => {
   // loading the CLI, so no socket, endpoint or host credential is reachable.
   const loader = join(root, "fetch-fixture.mjs");
   writeFileSync(loader, `import { readFileSync, appendFileSync } from 'node:fs';
+import cp from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+const deny = () => { throw new Error('host child process forbidden'); };
+const spawnSync = cp.spawnSync;
+const bridge = ${JSON.stringify(fileURLToPath(new URL('../operations/windows-dpapi-bridge.mjs', import.meta.url)))};
+for (const name of ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync']) cp[name] = deny;
+// The real key reader may launch only the reviewed Node DPAPI bridge.
+cp.spawnSync = (command, args, options) => process.platform === 'win32' && command === process.execPath && args?.[0] === bridge
+  ? spawnSync(command, args, options) : deny();
+syncBuiltinESMExports();
 const replies = JSON.parse(readFileSync(new URL('./responses.json', import.meta.url), 'utf8'));
 globalThis.fetch = async (url, init) => {
   if (String(url) !== 'https://brain.invalid/api/rag/think') throw new Error('unexpected fixture route');
@@ -142,9 +157,9 @@ globalThis.fetch = async (url, init) => {
   appendFileSync(new URL('./calls.txt', import.meta.url), body.q + '\\n');
   return new Response(JSON.stringify(replies[body.q].shift()), { headers: { 'Content-Type': 'application/json' } });
 };\n`);
-  const env = { HOME: home, TMPDIR: root, BRAIN_URL: "https://brain.invalid", BRAIN_NAME: "fixture",
+  const env = { HOME: home, BRAIN_URL: "https://brain.invalid", BRAIN_NAME: "fixture",
     BRAIN_MANIFEST: manifest, BRAIN_NO_WRANGLER_LOGIN: "1", BRAIN_TEST_LAUNCHCTL: launchctl };
-  for (const name of ["SystemRoot", "WINDIR", "ComSpec", "USERNAME", "USER", "LOGNAME", "PATH"])
+  for (const name of ["SystemRoot", "WINDIR", "ComSpec", "USERNAME", "USER", "LOGNAME", "PATH", "TMPDIR", "TEMP", "TMP"])
     if (process.env[name]) env[name] = process.env[name];
   const keys = [...bodies.map(({ question }) => question), "empty"];
   const input = keys.map((q, index) => JSON.stringify({ jsonrpc: "2.0", id: index + 1,

@@ -3,6 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { previewIngestRemovals, applyIngestRemovals } from "../../worker/src/lib/ingest-removal-plan.js";
+import { backfillSourceFamilyIndex } from "../../worker/src/lib/source-family-index.js";
 import { listSourceFamilies } from "../../worker/src/lib/store-d1.js";
 
 export function ingestPlanStore() {
@@ -17,17 +18,22 @@ export function ingestPlanStore() {
       bind: (...values) => shape(values),
       all: async () => ({ results: db.prepare(sql).all(...params) }),
       first: async () => db.prepare(sql).get(...params) ?? null,
-      run: async () => ({ results: db.prepare(sql).all(...params), success: true }),
+      run: async () => {
+        if (/\bDELETE\b/i.test(sql)) calls.deletes++;
+        return { results: db.prepare(sql).all(...params), success: true };
+      },
       sql, params,
     });
     return shape();
   };
-  const calls = { preview: 0, apply: 0, batches: 0, inventory: 0 };
+  const calls = { preview: 0, apply: 0, batches: 0, deletes: 0, inventory: 0 };
   let beforeBatch = null;
   const env = { STORAGE: "d1", INGEST_VERSION: { id: "fixture-runtime-one" }, DB: {
     prepare,
     batch: async (statements) => {
       calls.batches++;
+      // Index-maintenance batches are not authorization to delete source rows.
+      calls.deletes += statements.filter(({ sql }) => /\bDELETE\b/i.test(sql)).length;
       beforeBatch?.();
       db.exec("BEGIN");
       try {
@@ -55,10 +61,14 @@ export function ingestPlanStore() {
       calls[body.action]++;
       return body.action === "preview" ? previewIngestRemovals(env, body) : applyIngestRemovals(env, body);
     },
-    inventory: async ({ source, includeServerObservedAt }) => {
+    inventory: async ({ source, includeServerObservedAt, uids, cursor, limit = 1000, singlePage, includeLabels, requireIndexed }) => {
       calls.inventory++;
-      const result = await listSourceFamilies(env, { source, limit: 1000 });
+      // Reviewed bounded Gmail inventory requires the completed exact-identity index.
+      while (!(await backfillSourceFamilyIndex(env)).complete) {}
+      const result = await listSourceFamilies(env, { source, limit, uids: uids ?? null, cursor, includeLabels, requireIndexed });
       const families = new Set(result.families);
+      if (singlePage) return { families, nextCursor: result.next_cursor };
+      if (includeLabels) return { families, labels: new Map(result.family_details?.map(row => [row.family_doc_uid, row]) || []), labelsAvailable: true, uidFilterAvailable: true };
       return includeServerObservedAt ? { families, malformedIdentities: new Set(), serverObservedAt: "2026-10-01T00:00:00Z" } : families;
     },
   };

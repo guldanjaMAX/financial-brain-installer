@@ -735,7 +735,7 @@ async function statusFixture() {
       }, { now: NOW });
     }
   };
-  return { fixture, state, run, assignAll };
+  return { fixture, state, run, assignAll, now: () => new Date(clock).toISOString() };
 }
 
 test("a sync waiting on owner choices is visible in needs_attention with the count, and clears a stale error", async () => {
@@ -774,7 +774,7 @@ test("a sync waiting on owner choices is visible in needs_attention with the cou
 });
 
 test("history counters are written on the Plaid path from the promoted window, once, and stop when complete", async () => {
-  const { fixture, state, run, assignAll } = await statusFixture();
+  const { fixture, state, run, assignAll, now } = await statusFixture();
   try {
     assert.equal((await run()).status, "assignment_required");
     await assignAll();
@@ -784,16 +784,20 @@ test("history counters are written on the Plaid path from the promoted window, o
     // Two pages, three added and one modified, even though the first attempt
     // at page two was restarted by a provider mutation.
     assert.deepEqual(counters(), { pages_done: 2, transactions_seen: 4, unread_lines: 0, state: "running" });
-    let status = await plaidFeedStatus(fixture.env);
+    let status = await plaidFeedStatus(fixture.env, { now: now() });
     assert.equal(status.connections[0].history.pages_done, 2);
     assert.equal(status.connections[0].history.transactions_seen, 4);
     assert.equal(status.connections[0].history.staged_pages, 0);
     assert.equal(status.connections[0].accounts_needing_owner, 0);
-    assert.equal(status.needs_attention.length, 0);
+    assert.equal(status.needs_attention.length, 1, 'a resumed snapshot still needs a fresh current read');
+    assert.equal(status.connections[0].health.last_error_code, 'BANK_SYNC_PARTIAL');
+    assert.equal(status.connections[0].health.last_successful_sync_at, null);
 
     // The confirming fresh read completes the history load and is counted.
     await run();
     assert.deepEqual(counters(), { pages_done: 3, transactions_seen: 4, unread_lines: 0, state: "complete" });
+    status = await plaidFeedStatus(fixture.env, { now: now() });
+    assert.equal(status.needs_attention.length, 0, 'green control: fresh promotion clears health attention');
     // Routine refreshes after completion are not history progress.
     state.incremental = [{
       transaction_id: "status-later", account_id: "status-checking", amount: "5.00", iso_currency_code: "USD",
@@ -801,7 +805,7 @@ test("history counters are written on the Plaid path from the promoted window, o
     }];
     await run();
     assert.deepEqual(counters(), { pages_done: 3, transactions_seen: 4, unread_lines: 0, state: "complete" });
-    status = await plaidFeedStatus(fixture.env);
+    status = await plaidFeedStatus(fixture.env, { now: now() });
     assert.equal(status.connections[0].history.state, "complete");
   } finally { fixture.close(); }
 });

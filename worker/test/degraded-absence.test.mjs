@@ -14,14 +14,16 @@
  * worth anything:
  *
  *   (a) empty + degraded emits no absence instruction, and names the cause.
- *   (b) empty + healthy still emits the ordinary refusal, byte for byte. The
- *       honest "nothing recorded" answer is the product working, and a fix that
- *       softened it would have traded one dishonesty for another.
+ *   (b) empty + healthy answers within the completed search, with computed
+ *       confidence and missing evidence, never a global absence claim.
  *   (c) the MCP surface — the place the client actually asks — carries the
  *       signal through, proven against a real spawned server, not a stub.
  */
 
 import { spawn } from "node:child_process";
+import { randomBytes } from 'node:crypto';
+import { assertDocumentAnswer } from './helpers/document-answer-contract.mjs';
+import { finalizeDocumentAnswer } from '../src/lib/document-answer.js';
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -43,9 +45,23 @@ import {
 import { storeFor } from "../src/lib/store.js";
 import { looksLikeRefusal } from "../../eval/scorer.mjs";
 import { cmdAsk } from "../../brain.mjs";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 
+// The retrieval age rubric must not depend on the day this test runs.
+const suiteNow = Date.now;
+Date.now = () => Date.parse('2026-09-28T18:00:00.000Z');
+const isReading = (body, empty = body.answer_contract?.read_count === 0) => {
+  try { assertDocumentAnswer(body, { empty, provisional: true }); return true; }
+  catch { return false; }
+};
+// Current reader fixtures go through the same boundary as Worker answers.
+// Legacy skew fixtures remain explicit below.
+const reading = body => ({ ...body, ...finalizeDocumentAnswer({
+  draft: body.answer, docs: body.results || [], gaps: body.gaps || [],
+  checks: body.evidence_gate ? [body.evidence_gate] : [],
+  searchComplete: ![SEARCH_UNAVAILABLE, COVERAGE_INCOMPLETE].includes(body.status),
+}), status: undefined });
 let fail = 0, ran = 0;
 const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") + n + (c ? "" : "  " + d)); if (!c) fail++; };
 
@@ -358,7 +374,7 @@ const unified = async (env, q = "the") => {
   }));
   check("the route still answers 200", res.status === 200, String(res.status));
   check("projection-incomplete zero results are provisional coverage, not a failed search",
-    body.status === COVERAGE_INCOMPLETE, JSON.stringify(body.status));
+    isReading(body) && body.confidence.percent === 10, JSON.stringify(body.confidence));
   check("degraded is still on the wire", body.degraded === "vector", String(body.degraded));
 
   const gapTypes = (body.gaps || []).map((g) => g.type);
@@ -375,21 +391,22 @@ const unified = async (env, q = "the") => {
     gapText === "Meaning search covers 12,400 of 48,000 chunks; keyword search covers all. Cited answers rest on keyword evidence; a record worded differently may not be found yet, so a missing result is provisional.",
     gapText);
 
-  check("a human-readable notice rides along", typeof body.notice === "string" && body.notice.length > 40,
-    String(body.notice));
+  check("a human-readable notice rides along", isReading(body) && body.answer.length > 40,
+    body.answer);
   check("the notice does not assert an absence either",
-    !assertsAbsence(body.notice), String(body.notice));
+    !assertsAbsence(body.answer), body.answer);
   check("the notice does not read as a refusal to the eval scorer",
-    !looksLikeRefusal(body.notice), String(body.notice));
+    !looksLikeRefusal(body.answer), body.answer);
   check("the notice reports the completed zero-match and exact two-count state",
-    body.notice === "The search completed with zero matches. Meaning search covers 12,400 of 48,000 chunks; keyword search covers all, so treat this result as provisional.",
-    String(body.notice));
+    body.answer_contract.retrieved_count === 0 &&
+      body.meaning_search.visible === 12_400 && body.meaning_search.total === 48_000 &&
+      /search is incomplete/.test(body.answer), body.answer);
   check("projection-incomplete gives the exact coverage next action",
-    body.next_action === WORKER_NEXT_ACTIONS[1][2], String(body.next_action));
+    /How to check: Complete the source search and read the matching originals\./.test(body.answer), body.answer);
 
-  check("no refusal confidence is published for a search that never ran",
-    body.confidence === undefined, JSON.stringify(body.confidence));
-  check("no answer is fabricated", body.answer === null && (body.citations || []).length === 0,
+  check("the incomplete reading has Low (10%) with reasons and missing evidence",
+    isReading(body) && body.confidence.percent === 10, JSON.stringify(body.confidence));
+  check("no answer is fabricated", isReading(body) && body.answer_contract.read_count === 0 && (body.citations || []).length === 0,
     JSON.stringify({ a: body.answer, c: body.citations }));
 }
 
@@ -422,7 +439,7 @@ const unified = async (env, q = "the") => {
       recent.__retrievalCalls.keyword > 0 && recent.__retrievalCalls.vector > 0,
       JSON.stringify(recent.__retrievalCalls));
     check("a completed search during the observed small recent backlog is coverage-incomplete",
-      body.status === COVERAGE_INCOMPLETE && body.degraded_reason === "projection-catching-up",
+      isReading(body) && body.confidence.percent === 10 && body.degraded_reason === "projection-catching-up",
       JSON.stringify({ status: body.status, reason: body.degraded_reason }));
     check("the pending Think response carries its keyword-only receipt and exact search counts",
       body.retrieval_receipt === "keyword_only_indexing" &&
@@ -430,8 +447,8 @@ const unified = async (env, q = "the") => {
         body.meaning_search?.line ===
           "Meaning search covers 1,793,009 of 1,795,309 chunks; keyword search covers all",
       JSON.stringify({ receipt: body.retrieval_receipt, meaning_search: body.meaning_search }));
-    check("a provisional zero-result search still refuses an absence claim",
-      body.answer === null && body.confidence === undefined &&
+    check("a provisional zero-result search answers without an absence claim",
+      isReading(body) && body.confidence.percent === 10 &&
         !body.gaps?.some((gap) => gap.type === "no_results") && !assertsAbsence(proseOf(body)),
       JSON.stringify(body));
     const rawBody = (await unified(recent, "what do my records say")).body;
@@ -469,7 +486,7 @@ const unified = async (env, q = "the") => {
     const refusedWithCandidatesBody = (await think(refusedWithCandidates, "what does the synthetic record support")).body;
     const refusedGapTypes = (refusedWithCandidatesBody.gaps || []).map((gap) => gap.type);
     check("probe: a refusal with candidates during catch-up reached the refusal path",
-      refusedWithCandidatesBody.answer === null && refusedWithCandidatesBody.degraded_reason === "projection-catching-up",
+      isReading(refusedWithCandidatesBody, false) && refusedWithCandidatesBody.degraded_reason === "projection-catching-up",
       JSON.stringify({ answer: refusedWithCandidatesBody.answer, reason: refusedWithCandidatesBody.degraded_reason }));
     check("a refusal during catch-up carries exactly one keyword-only indexing gap",
       refusedGapTypes.filter((type) => type === "keyword_only_indexing").length === 1,
@@ -481,18 +498,20 @@ const unified = async (env, q = "the") => {
     const healthySupportedBody = (await think(
       healthySupported, "what does the synthetic record support",
     )).body;
-    check("an evidence-gated answer survives proportional projection catch-up",
+    check("attributed source evidence survives proportional projection catch-up",
       supported.__retrievalCalls.keyword > 0 && supported.__retrievalCalls.vector > 0 &&
-        supportedBody.answer === "The retrieved record supports the answer [1]." &&
+        isReading(supportedBody, false) && supportedBody.answer.includes(supportedRow.text) &&
         supportedBody.evidence_gate?.supported === true && supportedBody.evidence_gate?.complete === true &&
-        supportedBody.evidence_gate?.partial !== true && supportedBody.citations?.length === 1 &&
+        supportedBody.evidence_gate?.partial !== true &&
+        supportedBody.citations?.length === 1 &&
         supportedBody.status === undefined && supportedBody.degraded_reason === "projection-catching-up",
       JSON.stringify(supportedBody));
     check("a cited answer gets no refusal next action",
       supportedBody.next_action === undefined, String(supportedBody.next_action));
-    check("pending cited keyword evidence keeps the healthy confidence score",
-      supportedBody.confidence?.percent === healthySupportedBody.confidence?.percent &&
-        !supportedBody.confidence?.basis?.includes("vector index not fully query-ready"),
+    check("pending cited keyword evidence lowers confidence below its healthy control",
+      isReading(healthySupportedBody, false) && supportedBody.confidence.percent === 10 &&
+        supportedBody.confidence.percent < healthySupportedBody.confidence.percent &&
+        supportedBody.confidence.basis.some(reason => /Meaning search covers/.test(reason)),
       JSON.stringify({ pending: supportedBody.confidence, healthy: healthySupportedBody.confidence }));
     const pendingGap = supportedBody.gaps?.find((gap) => gap.type === "keyword_only_indexing");
     check("pending cited evidence gets the exact keyword-only indexing gap",
@@ -511,8 +530,7 @@ const unified = async (env, q = "the") => {
     const oldBody = (await think(old)).body;
     check("the same completed search with an old backlog remains provisional while indexing",
       old.__retrievalCalls.keyword > 0 && old.__retrievalCalls.vector > 0 &&
-        oldBody.status === COVERAGE_INCOMPLETE && oldBody.degraded_reason === "projection-incomplete" &&
-        absenceUnproven(oldBody) === true,
+        isReading(oldBody) && oldBody.confidence.percent === 10 && oldBody.degraded_reason === "projection-incomplete",
       JSON.stringify({ calls: old.__retrievalCalls, status: oldBody.status, reason: oldBody.degraded_reason }));
   } finally {
     Date.now = realNow;
@@ -580,20 +598,19 @@ const unified = async (env, q = "the") => {
 
   const { body } = await think(mkEnv({ projectionReady: false }));
   check("the live /think notice treats pending projection as provisional keyword coverage",
-    /search completed with zero matches/i.test(body.notice || "") &&
-      /keyword search covers all/i.test(body.notice || "") &&
-      !/brain drain|try again shortly/i.test(body.notice || ""),
-    String(body.notice));
+    isReading(body) && /search is incomplete/i.test(body.answer) &&
+      /keyword search covers all/i.test(body.confidence_text) &&
+      !/brain drain|try again shortly/i.test(body.answer), body.answer);
 }
 
 /* ---- the same protection when the embedder, not the index, is the fault ---- */
 {
   const { body } = await think(mkEnv({ embeds: false }));
   check("a dead embedder also produces an unavailable search, not an absence",
-    body.status === SEARCH_UNAVAILABLE && body.degraded === "no-embedding",
+    isReading(body) && body.confidence.percent === 10 && body.degraded === "no-embedding",
     JSON.stringify({ s: body.status, d: body.degraded }));
   check("a dead embedder gives the exact unavailable-search next action",
-    body.next_action === WORKER_NEXT_ACTIONS[2][2], String(body.next_action));
+    /How to check: Complete the source search and read the matching originals\./.test(body.answer), body.answer);
   check("its gap names ITS cause, not the vector index",
     /embedding model did not answer/i.test((body.gaps || []).map((g) => g.detail).join(" ")),
     JSON.stringify(body.gaps));
@@ -617,9 +634,10 @@ const unified = async (env, q = "the") => {
     rows: [row], vectorIds: [row.chunk_uid], vectorThrows: true, supportedAnswer: true,
   }), "what is the supported fixture fact")).body;
   const failureGap = failedBody.gaps?.find((gap) => gap.type === "vector_unavailable");
-  check("control: vector-query-failed keeps the 15-point confidence penalty",
-    healthyBody.confidence?.percent - failedBody.confidence?.percent === 15 &&
-      failedBody.confidence?.basis?.includes("vector index not fully query-ready"),
+  check("control: vector-query-failed has a data-derived Low (10%) ceiling",
+    isReading(healthyBody, false) && isReading(failedBody, false) &&
+      failedBody.confidence.percent === 10 && failedBody.confidence.percent < healthyBody.confidence.percent &&
+      failedBody.confidence.basis.some(reason => /Meaning-based search failed/.test(reason)),
     JSON.stringify({ healthy: healthyBody.confidence, failed: failedBody.confidence }));
   check("control: vector-query-failed keeps the failure gap and receives no indexing receipt",
     failedBody.degraded_reason === "vector-query-failed" &&
@@ -641,10 +659,10 @@ const unified = async (env, q = "the") => {
     body.status === undefined && body.notice === undefined,
     JSON.stringify({ s: body.status, n: body.notice }));
   check("degraded is absent", body.degraded === undefined, String(body.degraded));
-  check("and the refusal confidence is still published",
-    body.confidence && body.confidence.percent >= 80, JSON.stringify(body.confidence));
+  check("the bounded completed-search reading has Low (30%)",
+    isReading(body) && body.confidence.percent === 30, JSON.stringify(body.confidence));
   check("a healthy no-match gives the exact search-refinement action without adding status",
-    body.status === undefined && body.next_action === WORKER_NEXT_ACTIONS[0][2],
+    isReading(body) && body.status === undefined && /How to check:/.test(body.answer),
     JSON.stringify({ status: body.status, next_action: body.next_action }));
   check("the honest path is not treated as unavailable by clients",
     retrievalUnavailable(body) === false, JSON.stringify(body));
@@ -654,7 +672,7 @@ const unified = async (env, q = "the") => {
 {
   const { body } = await think(mkEnv({ coverageRows: [{
     name: "gmail", kind: "gmail", status: "ready", document_count: 66000,
-    last_ingest_at: new Date().toISOString(), expected_refresh_seconds: null,
+    last_ingest_at: "2026-09-28T18:00:00.000Z", expected_refresh_seconds: null,
     last_complete_sweep_at: null, indexing_started_at: null,
   }] }));
   const gapText = (body.gaps || []).map((gap) => gap.detail).join(" ");
@@ -663,8 +681,7 @@ const unified = async (env, q = "the") => {
   check("partial history replaces the categorical no-results claim",
     !body.gaps?.some((gap) => gap.type === "no_results") && !assertsAbsence(gapText), gapText);
   check("partial history has an explicit provisional response contract",
-    body.status === COVERAGE_INCOMPLETE && body.answer === null &&
-      body.confidence === undefined && /provisional/i.test(body.notice || ""),
+    isReading(body) && body.confidence.percent === 30 && body.confidence.missing.length > 0,
     JSON.stringify(body));
 }
 
@@ -680,8 +697,7 @@ const unified = async (env, q = "the") => {
   check("a healthy no-match names the missing source-registry authority",
     body.gaps?.some((gap) => gap.type === "source_unregistered"), JSON.stringify(body.gaps));
   check("an unregistered source replaces categorical absence and confidence",
-    body.status === COVERAGE_INCOMPLETE && body.answer === null &&
-      body.confidence === undefined && !body.gaps?.some((gap) => gap.type === "no_results") &&
+    isReading(body) && body.confidence.percent === 30 && !body.gaps?.some((gap) => gap.type === "no_results") &&
       !assertsAbsence(gapText), JSON.stringify(body));
 }
 
@@ -694,8 +710,7 @@ const unified = async (env, q = "the") => {
   check("unavailable coverage cannot survive as a no-results claim",
     !body.gaps?.some((gap) => gap.type === "no_results") && !assertsAbsence(gapText), gapText);
   check("an unavailable coverage read has the same fail-closed wire contract",
-    body.status === COVERAGE_INCOMPLETE && body.answer === null &&
-      body.confidence === undefined && /could not be checked/i.test(body.notice || ""),
+    isReading(body) && body.confidence.percent === 30 && /could not be checked/i.test(body.confidence_text),
     JSON.stringify(body));
 }
 
@@ -719,7 +734,7 @@ const unified = async (env, q = "the") => {
 {
   const { body } = await unified(mkEnv({ coverageRows: [{
     name: "gmail", kind: "gmail", status: "ready", document_count: 66000,
-    last_ingest_at: new Date().toISOString(), expected_refresh_seconds: null,
+    last_ingest_at: "2026-09-28T18:00:00.000Z", expected_refresh_seconds: null,
     last_complete_sweep_at: null, indexing_started_at: null,
   }] }));
   check("unified marks partial source history instead of reporting a completed no-match",
@@ -789,8 +804,11 @@ const unified = async (env, q = "the") => {
   const sandbox = mkdtempSync(join(tmpdir(), "brain-degraded-ask-"));
   try {
     const manifest = join(sandbox, "brain.manifest.json");
+    const keyPath = join(sandbox, "admin-key");
+    writeFileSync(keyPath, randomBytes(24).toString("hex"), {mode:0o600});
     writeFileSync(manifest, JSON.stringify({
       client: { slug: "fixture" },
+      operations: { admin_key_file: keyPath },
       brain: { domain: "fixture.example", worker_name: "fixture-brain" },
       infrastructure: { cloudflare: { account_id: "not-needed-with-a-domain" } },
     }));
@@ -799,9 +817,10 @@ const unified = async (env, q = "the") => {
     console.log = (...a) => printed.push(a.join(" "));
     try {
       await cmdAsk(manifest, {
+        launchctl: () => { throw new Error("host helper forbidden"); },
         ask: async () => "What do my records say?",
-        adminKey: `fixture-${"k".repeat(40)}`,
-        http: async () => new Response(JSON.stringify({
+        adminKey: readFileSync(keyPath, "utf8"),
+        http: async () => new Response(JSON.stringify(reading({
           mode: "think", degraded: "vector", status: SEARCH_UNAVAILABLE,
           notice: unavailableNotice("vector"),
           meaning_search: {
@@ -812,18 +831,18 @@ const unified = async (env, q = "the") => {
           next_action: WORKER_NEXT_ACTIONS[2][2],
           answer: null, citations: [], results: [],
           gaps: [{ type: SEARCH_UNAVAILABLE, detail: "x" }],
-        }), { status: 200, headers: { "content-type": "application/json" } }),
+        })), { status: 200, headers: { "content-type": "application/json" } }),
       });
     } finally { console.log = realLog; }
     const out = printed.join("\n");
     check("CLI: an unavailable search does not print the refusal sentence",
       !/The documents do not answer the question/.test(out), out);
-    check("CLI: it prints the notice instead", /could not be completed/i.test(out), out);
+    check("CLI: it prints the notice instead", /search is incomplete/i.test(out) && /Confidence: Low \(10%\)/.test(out), out);
     check("CLI: it prints exact meaning-search counts instead of the vector degradation token",
       /Meaning search covers 12,400 of 48,000 chunks; keyword search covers all/.test(out) &&
         !/search is degraded: vector/.test(out), out);
     check("CLI: Next follows the refusal explanation verbatim",
-      out.includes(WORKER_NEXT_ACTIONS[2][2]), out);
+      /How to check: Complete the source search/.test(out), out);
     check("CLI: it does not print a confidence-in-absence line",
       !/Confidence nothing is recorded/.test(out), out);
   } finally {
@@ -836,8 +855,11 @@ const unified = async (env, q = "the") => {
   const sandbox = mkdtempSync(join(tmpdir(), "brain-withheld-ask-"));
   try {
     const manifest = join(sandbox, "brain.manifest.json");
+    const keyPath = join(sandbox, "admin-key");
+    writeFileSync(keyPath, randomBytes(24).toString("hex"), {mode:0o600});
     writeFileSync(manifest, JSON.stringify({
       client: { slug: "fixture" },
+      operations: { admin_key_file: keyPath },
       brain: { domain: "fixture.example", worker_name: "fixture-brain" },
       infrastructure: { cloudflare: { account_id: "not-needed-with-a-domain" } },
     }));
@@ -846,25 +868,26 @@ const unified = async (env, q = "the") => {
     console.log = (...a) => printed.push(a.join(" "));
     try {
       await cmdAsk(manifest, {
-        ask: async () => "How much is the monthly payment?",
-        adminKey: `fixture-${"k".repeat(40)}`,
-        http: async () => new Response(JSON.stringify({
+        launchctl: () => { throw new Error("host helper forbidden"); },
+        ask: async () => "What does the payment record say?",
+        adminKey: readFileSync(keyPath, "utf8"),
+        http: async () => new Response(JSON.stringify(reading({
           mode: "think", status: ANSWER_WITHHELD,
           notice: answerWithheldNotice("money_check"),
           answer: null,
           confidence: { percent: 77, band: "moderate", basis: ["must not print"] },
           evidence_gate: { supported: false, reason: "amount did not match its cited span" },
           citations: [], results: [{ title: "Synthetic payment record" }], gaps: [],
-        }), { status: 200, headers: { "content-type": "application/json" } }),
+        })), { status: 200, headers: { "content-type": "application/json" } }),
       });
     } finally { console.log = realLog; }
     const out = printed.join("\n");
     check("CLI: answer_withheld prints the reviewed notice",
-      /money evidence check/i.test(out), out);
+      /available reading contains no readable matching statement/i.test(out), out);
     check("CLI: answer_withheld prints Why from evidence_gate",
       /Why.*amount did not match its cited span/is.test(out), out);
-    check("CLI: answer_withheld prints no confidence percentage",
-      !/77%/.test(out), out);
+    check("CLI: a rejected draft keeps a scored reading below the stale percentage",
+      /Confidence: Low \(30%\).*Why:.*Missing:/s.test(out) && !/77%/.test(out), out);
   } finally {
     rmSync(sandbox, { recursive: true, force: true });
   }
@@ -875,8 +898,11 @@ const unified = async (env, q = "the") => {
   const sandbox = mkdtempSync(join(tmpdir(), "brain-coverage-ask-"));
   try {
     const manifest = join(sandbox, "brain.manifest.json");
+    const keyPath = join(sandbox, "admin-key");
+    writeFileSync(keyPath, randomBytes(24).toString("hex"), {mode:0o600});
     writeFileSync(manifest, JSON.stringify({
       client: { slug: "fixture" },
+      operations: { admin_key_file: keyPath },
       brain: { domain: "fixture.example", worker_name: "fixture-brain" },
       infrastructure: { cloudflare: { account_id: "not-needed-with-a-domain" } },
     }));
@@ -885,8 +911,9 @@ const unified = async (env, q = "the") => {
     console.log = (...a) => printed.push(a.join(" "));
     try {
       await cmdAsk(manifest, {
+        launchctl: () => { throw new Error("host helper forbidden"); },
         ask: async () => "Do my records contain this?",
-        adminKey: `fixture-${"k".repeat(40)}`,
+        adminKey: readFileSync(keyPath, "utf8"),
         http: async () => new Response(JSON.stringify({
           mode: "think", status: COVERAGE_INCOMPLETE,
           notice: coverageIncompleteNotice(false, true),
@@ -900,16 +927,112 @@ const unified = async (env, q = "the") => {
     } finally { console.log = realLog; }
     const out = printed.join("\n");
     check("CLI: incomplete coverage prints the provisional notice before any categorical refusal",
-      /found candidate records/i.test(out) && /provisional/i.test(out) &&
+      /1 record\(s\) were returned; the search is incomplete and matching records may be missing/i.test(out) && /Confidence: Low/.test(out) &&
         !/The documents do not answer the question/.test(out), out);
     check("CLI: incomplete coverage suppresses confidence in absence",
-      !/Confidence nothing is recorded/.test(out) && !/99%/.test(out), out);
+      /Confidence: Low \(10%\).*Why:.*Missing:/s.test(out) && !/99%/.test(out), out);
     check("CLI: incomplete coverage still explains the evidence-gate refusal",
       /candidate did not support the claim/.test(out), out);
   } finally {
     rmSync(sandbox, { recursive: true, force: true });
   }
 }
+
+/* ---- the /app page renders the notice, not the refusal ---- */
+/* These call the REAL shipped functions, which is the point: an earlier
+   version grepped the source for a pattern and would have passed with the
+   branch disabled by `false &&`.
+
+   They used to be lifted out of the served HTML by sentinel comments, because
+   the page was hand-written JavaScript inside a template string. The app is now
+   a built bundle, so there is no page to lift them from; they live in
+   answer-render.js, which the Worker page and the React app both import. The
+   assertions below are unchanged, and the mechanism is stricter than before:
+   this imports the module the product actually runs rather than re-evaluating
+   a copy of it. */
+{
+  const render = await import("../src/lib/answer-render.js");
+  check("/app exposes its render contract to this test",
+    typeof render.answerText === "function" && typeof render.confidenceText === "function" &&
+      typeof render.unavailableSearch === "function",
+    "answer-render.js must export the three render functions");
+
+  const degradedBody = {
+    status: SEARCH_UNAVAILABLE, degraded: "vector", notice: unavailableNotice("vector"),
+    answer: null, citations: [], results: [],
+    // A current worker omits this. An older one sends it, and rendering it
+    // would put a percentage on an absence nobody measured, so the page has to
+    // suppress it rather than trust the field's presence.
+    confidence: { percent: 58, band: "moderate", basis: ["vector index not fully query-ready"] },
+  };
+  check("/app: a degraded empty result does NOT render the refusal sentence",
+    !/The documents do not answer the question/.test(render.answerText(degradedBody)),
+    render.answerText(degradedBody));
+  check("/app: it renders the notice instead",
+    /could not be completed/i.test(render.answerText(degradedBody)), render.answerText(degradedBody));
+  check("/app: and asserts no absence",
+    !assertsAbsence(render.answerText(degradedBody)), render.answerText(degradedBody));
+  check("/app: the confidence line does not claim confidence in an absence",
+    !/Confidence nothing is recorded/.test(render.confidenceText(degradedBody)),
+    render.confidenceText(degradedBody));
+
+  const coverageBody = {
+    status: COVERAGE_INCOMPLETE,
+    notice: coverageIncompleteNotice(false, true),
+    answer: "The documents do not answer the question.",
+    confidence: { percent: 99, band: "high", basis: ["fixture"] },
+    results: [{ title: "Candidate" }],
+  };
+  check("/app: incomplete coverage takes priority over a categorical answer",
+    /Coverage:.*Missing or counted twice:.*Estimates:.*How to check:/s.test(render.answerText(coverageBody)) &&
+      !/The documents do not answer the question/.test(render.answerText(coverageBody)),
+    render.answerText(coverageBody));
+  check("/app: incomplete coverage renders the computed score and missing evidence",
+    /Confidence: Low \(10%\).*Why:.*Missing:/s.test(render.confidenceText(coverageBody)) &&
+      !/99%/.test(render.confidenceText(coverageBody)),
+    render.confidenceText(coverageBody));
+
+  const rawProviderFailure = "Workers AI request failed with private upstream trace fixture-123";
+  check("/app: an older Worker's raw model error is replaced with reviewed copy",
+    render.answerText({ answer: null, answer_error: rawProviderFailure }) ===
+      render.ANSWER_ERROR_MESSAGES.unavailable.replace(" Want", "\nWant") &&
+      !render.answerText({ answer: null, answer_error: rawProviderFailure }).includes(rawProviderFailure),
+    render.answerText({ answer: null, answer_error: rawProviderFailure }));
+  check("/app: a reviewed model error keeps its specific recovery message",
+    render.answerText({ answer: null, answer_error: render.ANSWER_ERROR_MESSAGES.dailyLimit }) ===
+      render.ANSWER_ERROR_MESSAGES.dailyLimit.replace(" Want", "\nWant"),
+    render.answerText({ answer: null, answer_error: render.ANSWER_ERROR_MESSAGES.dailyLimit }));
+
+  // Version skew again: a page cached from a newer worker, talking to an older
+  // one that sends `degraded` but no status or notice.
+  const oldWorkerBody = { degraded: "vector", answer: null, citations: [], results: [] };
+  check("/app: an older worker's degraded empty body still avoids the refusal sentence",
+    !/The documents do not answer the question/.test(render.answerText(oldWorkerBody)),
+    render.answerText(oldWorkerBody));
+
+  const healthyEmpty = {
+    answer: null, citations: [], results: [],
+    confidence: { percent: 80, band: "high", basis: ["retrieval found no candidates at all"] },
+  };
+  check("REGRESSION GUARD at /app: a healthy empty result keeps its search scope",
+    render.answerText(healthyEmpty) === "I can try a more specific search, but I didn't find a matching record in this search.",
+    render.answerText(healthyEmpty));
+  // 0.4.28 empty search confidence is data-derived Low 20, never fixed Medium 80.
+  check("REGRESSION GUARD at /app: labels its confidence in this search result",
+    /^Confidence: Low \(20%\).*Why:.*Missing:/s.test(render.confidenceText(healthyEmpty)),
+    render.confidenceText(healthyEmpty));
+
+  const answered = {
+    answer: "The retainer was deferred [1].", citations: [{ n: 1 }], results: [{ title: "x" }],
+    confidence: { percent: 75, band: "moderate", basis: ["evidence gate approved 1 citation"] },
+  };
+  check("REGRESSION GUARD at /app: a real answer keeps its facts and one invitation",
+    render.answerText(answered) === `${answered.answer}\nWant to check the original record?` &&
+      /^Confidence: Medium \(75%\).*Why:.*Missing:/s.test(render.confidenceText(answered)),
+    render.confidenceText(answered));
+}
+
+console.log(`\npre-host document checks: ${ran - fail}/${ran}; failures=${fail}`);
 
 /* ------------------------------------------------------------------ */
 /* (c) the MCP surface — spawned for real, against a stub brain        */
@@ -930,7 +1053,9 @@ async function mcpCall(responder, toolCalls) {
 
   const child = spawn(process.execPath, [join(ROOT, "components", "brain-mcp.mjs")], {
     env: {
-      ...process.env,
+      ...Object.fromEntries(['PATH', 'HOME', 'TMPDIR', 'TEMP', 'TMP', 'SystemRoot',
+        'BRAIN_NO_WRANGLER_LOGIN', 'BRAIN_LAUNCHCTL', 'NODE_OPTIONS']
+        .filter(key => process.env[key]).map(key => [key, process.env[key]])),
       BRAIN_URL: `http://127.0.0.1:${port}`,
       BRAIN_KEY: `fixture-${"k".repeat(40)}`,
       BRAIN_NAME: "fixture",
@@ -1003,7 +1128,8 @@ const EMPTY_DEGRADED_THINK = {
   const thought = JSON.parse(lines.find((line) => line.id === 2).result.content[0].text);
   check("MCP: incomplete coverage nulls a categorical answer and its confidence",
     thought.search_status === COVERAGE_INCOMPLETE && thought.answer === null &&
-      thought.confidence === undefined, JSON.stringify(thought));
+      thought.confidence?.percent === 30 && thought.confidence?.band === 'Low' &&
+      thought.confidence.basis.length > 0 && thought.confidence.missing.length > 0, JSON.stringify(thought));
   check("MCP: candidate evidence survives while the note stays provisional",
     thought.results?.length === 1 && /found candidate records/i.test(thought.note || "") &&
       /provisional/i.test(thought.note || "") && !/zero-match/i.test(thought.note || ""),
@@ -1111,98 +1237,6 @@ const EMPTY_DEGRADED_THINK = {
     !assertsAbsence(proseOf(searched)), proseOf(searched));
 }
 
-/* ---- the /app page renders the notice, not the refusal ---- */
-/* These call the REAL shipped functions, which is the point: an earlier
-   version grepped the source for a pattern and would have passed with the
-   branch disabled by `false &&`.
-
-   They used to be lifted out of the served HTML by sentinel comments, because
-   the page was hand-written JavaScript inside a template string. The app is now
-   a built bundle, so there is no page to lift them from; they live in
-   answer-render.js, which the Worker page and the React app both import. The
-   assertions below are unchanged, and the mechanism is stricter than before:
-   this imports the module the product actually runs rather than re-evaluating
-   a copy of it. */
-{
-  const render = await import("../src/lib/answer-render.js");
-  check("/app exposes its render contract to this test",
-    typeof render.answerText === "function" && typeof render.confidenceText === "function" &&
-      typeof render.unavailableSearch === "function",
-    "answer-render.js must export the three render functions");
-
-  const degradedBody = {
-    status: SEARCH_UNAVAILABLE, degraded: "vector", notice: unavailableNotice("vector"),
-    answer: null, citations: [], results: [],
-    // A current worker omits this. An older one sends it, and rendering it
-    // would put a percentage on an absence nobody measured, so the page has to
-    // suppress it rather than trust the field's presence.
-    confidence: { percent: 58, band: "moderate", basis: ["vector index not fully query-ready"] },
-  };
-  check("/app: a degraded empty result does NOT render the refusal sentence",
-    !/The documents do not answer the question/.test(render.answerText(degradedBody)),
-    render.answerText(degradedBody));
-  check("/app: it renders the notice instead",
-    /could not be completed/i.test(render.answerText(degradedBody)), render.answerText(degradedBody));
-  check("/app: and asserts no absence",
-    !assertsAbsence(render.answerText(degradedBody)), render.answerText(degradedBody));
-  check("/app: the confidence line does not claim confidence in an absence",
-    !/Confidence nothing is recorded/.test(render.confidenceText(degradedBody)),
-    render.confidenceText(degradedBody));
-
-  const coverageBody = {
-    status: COVERAGE_INCOMPLETE,
-    notice: coverageIncompleteNotice(false, true),
-    answer: "The documents do not answer the question.",
-    confidence: { percent: 99, band: "high", basis: ["fixture"] },
-    results: [{ title: "Candidate" }],
-  };
-  check("/app: incomplete coverage takes priority over a categorical answer",
-    render.answerText(coverageBody) === coverageBody.notice &&
-      !/The documents do not answer the question/.test(render.answerText(coverageBody)),
-    render.answerText(coverageBody));
-  check("/app: incomplete coverage renders provisional trust instead of a percentage",
-    /provisional/i.test(render.confidenceText(coverageBody)) &&
-      !/99%/.test(render.confidenceText(coverageBody)),
-    render.confidenceText(coverageBody));
-
-  const rawProviderFailure = "Workers AI request failed with private upstream trace fixture-123";
-  check("/app: an older Worker's raw model error is replaced with reviewed copy",
-    render.answerText({ answer: null, answer_error: rawProviderFailure }) ===
-      render.ANSWER_ERROR_MESSAGES.unavailable.replace(" Want", "\nWant") &&
-      !render.answerText({ answer: null, answer_error: rawProviderFailure }).includes(rawProviderFailure),
-    render.answerText({ answer: null, answer_error: rawProviderFailure }));
-  check("/app: a reviewed model error keeps its specific recovery message",
-    render.answerText({ answer: null, answer_error: render.ANSWER_ERROR_MESSAGES.dailyLimit }) ===
-      render.ANSWER_ERROR_MESSAGES.dailyLimit.replace(" Want", "\nWant"),
-    render.answerText({ answer: null, answer_error: render.ANSWER_ERROR_MESSAGES.dailyLimit }));
-
-  // Version skew again: a page cached from a newer worker, talking to an older
-  // one that sends `degraded` but no status or notice.
-  const oldWorkerBody = { degraded: "vector", answer: null, citations: [], results: [] };
-  check("/app: an older worker's degraded empty body still avoids the refusal sentence",
-    !/The documents do not answer the question/.test(render.answerText(oldWorkerBody)),
-    render.answerText(oldWorkerBody));
-
-  const healthyEmpty = {
-    answer: null, citations: [], results: [],
-    confidence: { percent: 80, band: "high", basis: ["retrieval found no candidates at all"] },
-  };
-  check("REGRESSION GUARD at /app: a healthy empty result keeps its search scope",
-    render.answerText(healthyEmpty) === "I can try a more specific search, but I didn't find a matching record in this search.",
-    render.answerText(healthyEmpty));
-  check("REGRESSION GUARD at /app: labels its confidence in this search result",
-    /^Confidence in this search result: 80%/.test(render.confidenceText(healthyEmpty)),
-    render.confidenceText(healthyEmpty));
-
-  const answered = {
-    answer: "The retainer was deferred [1].", citations: [{ n: 1 }], results: [{ title: "x" }],
-    confidence: { percent: 75, band: "moderate", basis: ["evidence gate approved 1 citation"] },
-  };
-  check("REGRESSION GUARD at /app: a real answer keeps its facts and one invitation",
-    render.answerText(answered) === `${answered.answer}\nWant to check the original record?` &&
-      /^Confidence: 75%/.test(render.confidenceText(answered)),
-    render.confidenceText(answered));
-}
-
 console.log(`\ndegraded absence: ${ran - fail}/${ran} checks passed`);
+Date.now = suiteNow;
 if (fail) process.exit(1);

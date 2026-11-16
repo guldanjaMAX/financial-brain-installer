@@ -24,7 +24,7 @@ export const GOLD = {
   ]),
   Q11: docs('answer', [fact('call-detail', 'zoom:invoice-call', 'invoice needs a revised description')]),
   Q12: docs('partial', [
-    fact('mail-waiter', 'gmail:reply-request', 'partner is waiting for the outline as of 2026-10-30', 'The partner asked the owner for the outline on 2026-10-30. No later reply is recorded.'),
+    fact('mail-waiter', 'gmail:reply-request', 'The partner asked the owner for the outline on 2026-10-30. No later reply is recorded.', 'The partner asked the owner for the outline on 2026-10-30. No later reply is recorded.'),
     fact('call-waiter', 'zoom:reply-call', 'store owner', 'The store owner asked the owner to confirm a review time. No later confirmation is recorded.')
   ]),
   Q13: docs('answer', [

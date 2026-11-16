@@ -3,7 +3,7 @@
  * are the authorized retrieval results, including those the draft ignored.
  */
 import { answerSentences } from "./answer-sentences.js";
-import { hasExplicitCurrentIntent, parseCanonicalEvidenceDate, queryEntityAnchors, reliableDocumentTime } from "./query-intent.js";
+import { hasExplicitCurrentIntent, parseCanonicalEvidenceDate, queryEntityAnchors, reliableDocumentTime, reliableRecordObservationTime } from "./query-intent.js";
 import { isMoneyQuestion } from "./money-veto.js";
 
 const FUTURE = /\b(?:next|upcoming|coming up)\b|\bwhen (?:do|will) (?:i|we) see\b|\bwhen is (?:my|our|the)\b[^?\n]*\b(?:appointment|meeting|call|visit|session|event)\b/i;
@@ -216,12 +216,12 @@ export function applyTemporalVeto({ question, answer, evidenceGate, docs = [], c
       const ownerWords = new Set(tokens(owner));
       const subjects = clauses(sentence).flatMap(itemWords).filter(word => !ownerWords.has(word));
       for (const old of cited) {
-        const oldTime = reliableDocumentTime(old);
+        const oldTime = reliableRecordObservationTime(old);
         if (oldTime === null) continue;
         const shared = subjects.filter(word => clauses(old.snippet).some(clause => itemWords(clause).includes(word)));
         if (!shared.length) continue;
-        const newer = candidates.filter(doc => eligible(doc) && reliableDocumentTime(doc) !== null &&
-          reliableDocumentTime(doc) <= now && reliableDocumentTime(doc) > oldTime &&
+        const newer = candidates.filter(doc => eligible(doc) && reliableRecordObservationTime(doc) !== null &&
+          reliableRecordObservationTime(doc) <= now && reliableRecordObservationTime(doc) > oldTime &&
           clauses(doc.snippet).some(span => shared.some(word => itemWords(span).includes(word))));
         if (!newer.length) continue;
         // Co-citing a newer stopped record cannot rescue a positive claim
@@ -231,11 +231,11 @@ export function applyTemporalVeto({ question, answer, evidenceGate, docs = [], c
           if (stoppedSubject(sentence, subject)) return false;
           const stops = newer.filter(doc => stoppedSubject(doc.snippet, subject));
           if (!stops.length) return false;
-          const latestStop = Math.max(...stops.map(reliableDocumentTime));
+          const latestStop = Math.max(...stops.map(reliableRecordObservationTime));
           // Only an explicit, later, cited restart for this item resolves the
           // stop. A mention, unrelated restart or future record cannot do so.
-          return !cited.some(doc => eligible(doc) && reliableDocumentTime(doc) > latestStop &&
-            reliableDocumentTime(doc) <= now && restartedSubject(doc.snippet, subject));
+          return !cited.some(doc => eligible(doc) && reliableRecordObservationTime(doc) > latestStop &&
+            reliableRecordObservationTime(doc) <= now && restartedSubject(doc.snippet, subject));
         });
         if (stopped) return veto("I found a newer record saying this item stopped, was discontinued or ended, so older evidence does not confirm current use. Want to review the newer record?");
         // Preserve the existing owner-confirmed operative-value contract when

@@ -1,3 +1,5 @@
+// 0.4.28 owner confidence is attached after this fixture's legacy-reader seam.
+import { finalizeOwnerLedgerAnswer } from '../src/lib/document-answer.js';
 import test, { mock } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
@@ -91,7 +93,11 @@ for (const [question, kind, seed] of [
     const outside = await f.ask(question);
     assert.equal(outside.gaps[0]?.reason, "period_outside_coverage");
     assert.ok(f.seen.sql.slice(readCount).some(sql => /FROM fin_accounts/.test(sql)), "coverage decision reached");
-    assert.equal(outside.ledger, undefined);
+    // 0.4.28 category coverage fallback retains its observed reading, below High.
+    if(kind==='category' && question.includes('spend on')) {
+      assert.equal(outside.ledger.kind,kind); assert.equal(outside.ledger.complete,false);
+      assert.equal(finalizeOwnerLedgerAnswer(outside).confidence.percent,0); assert.ok(outside.answer.length);
+    } else assert.equal(outside.ledger, undefined);
   });
 }
 
@@ -163,7 +169,10 @@ test("directed transfers leave the lead; advisory pairs and near misses stay exp
   const advisory = await f.ask("How much money came in and went out in September 2026?");
   assert.equal(advisory.ledger.reason, 'money_out_destination_unconfirmed');
   assert.equal(advisory.ledger.complete, false);
-  assert.equal(advisory.ledger.expense_total_minor, null);
+  // 0.4.28 observed in/out retains account amounts while the destination stays unconfirmed.
+  assert.equal(advisory.ledger.expense_total_minor, undefined);
+  assert.equal(sumAccounts(advisory, 'debits_minor'), 60080);
+  assert.equal(finalizeOwnerLedgerAnswer(advisory).confidence.percent,0);
   assert.ok(advisory.ledger.possible_payments.some(row => row.amount_minor === 10001 && row.connected_counterpart_masks.length), 'advisory counterpart decision reached');
   f.raw("UPDATE fin_transactions SET description='TRANSFER FROM account 1111' WHERE txn_uid='in'");
   const changes = f.sqlite.prepare("SELECT total_changes() n").get().n;
@@ -292,11 +301,13 @@ async function mutantAnswer(from, to, target = "analysis") {
   assert.equal(analysis.split(from).length - 1, 1, "exactly one mutation site");
   // Mutant modules use data URLs, so resolve reviewed sibling dependencies
   // against the original file rather than the data URL's absent directory.
-  const altered = analysis.replace(from, to).replace(/from "(\.\/.+?)"/g,
-    (_, path) => `from ${JSON.stringify(new URL(path, targetUrl).href)}`);
+  // Both quote forms occur in reviewed modules; an unresolved sibling would
+  // stop before the real SQL mutation decision.
+  const altered = analysis.replace(from, to).replace(/from (['"])(\.\/[^'"]+)\1/g,
+    (_, quote, path) => `from ${JSON.stringify(new URL(path, targetUrl).href)}`);
   const analysisModule = `data:text/javascript;base64,${Buffer.from(altered).toString("base64")}`;
   const answerUrl = new URL("../src/lib/ledger-answer.js", import.meta.url);
-  const answer = (target === "analysis" ? readFileSync(answerUrl, "utf8") : altered).replace(/from "(\.\/.+?)"/g, (_, path) =>
+  const answer = (target === "analysis" ? readFileSync(answerUrl, "utf8") : altered).replace(/from (['"])(\.\/[^'"]+)\1/g, (_, quote, path) =>
     `from ${JSON.stringify(target === "analysis" && path === "./ledger-analysis.js" ? analysisModule : new URL(path, answerUrl).href)}`);
   return (await import(`data:text/javascript;base64,${Buffer.from(answer).toString("base64")}`)).withLedgerAnswer;
 }
@@ -429,7 +440,9 @@ test("transfer uniqueness inspects competitors beyond a window-edge counterpart"
   const before = transactionReads(f);
   const ambiguous = await f.ask("How much money went out in September 2026 for account 1111?");
   assert.ok(transactionReads(f) > before);
-  assert.equal(ambiguous.ledger.total_minor, null);
+  // 0.4.28 keeps observed money out instead of withholding an unproved destination.
+  assert.equal(ambiguous.ledger.total_minor, 12345);
+  assert.equal(finalizeOwnerLedgerAnswer(ambiguous).confidence.percent,0);
   assert.equal(ambiguous.ledger.complete, false);
   assert.equal(ambiguous.ledger.reason, 'money_out_destination_unconfirmed');
   const candidate = ambiguous.ledger.possible_payments.find(row => row.amount_minor === 12345);

@@ -256,7 +256,8 @@ test("a staged empty historical page stays partial when owner assignment later p
   } finally { f.close(); }
 });
 
-test("identical invalid pages back off to a daily cap, remain visible, and reset after success", async () => {
+test("identical invalid pages back off to a daily cap, remain visible, and reset after success", async t => {
+  t.mock.method(Date, 'now', () => Date.parse(NOW));
   const { f, state, queue, run } = await syncFixture(PLAID_HISTORY_STATE.HISTORICAL);
   try {
     state.page.next_cursor = null;

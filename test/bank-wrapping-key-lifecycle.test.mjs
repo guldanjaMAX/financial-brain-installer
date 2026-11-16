@@ -62,8 +62,13 @@ function manifest({ bankFeed = true, provider = "plaid", version = "0.4.0" } = {
   };
 }
 
-function cloudflareHarness({ initial = [], rejectPut = false, landRejectedPut = false } = {}) {
+let harnessCount = 0;
+function cloudflareHarness({ initial = [], rejectPut = false, landRejectedPut = false, sealed = 0 } = {}) {
   const secretNames = new Set(initial);
+  // Each harness is its own Worker as far as this computer's sighting record
+  // is concerned, so one test's sighting never decides another test's create.
+  const sightingDirectory = join(sandbox, "sightings", String(harnessCount++));
+  let sealedReads = 0;
   const calls = [];
   const writtenValues = [];
   let workerUploads = 0;
@@ -111,6 +116,11 @@ function cloudflareHarness({ initial = [], rejectPut = false, landRejectedPut = 
       calls.push("schedule-list");
       return apiResponse([{ cron: "* * * * *" }]);
     }
+    if (path.endsWith("/d1/database/fixture-database/query") && method === "POST") {
+      sealedReads++;
+      calls.push("sealed-count");
+      return apiResponse([{ results: [{ sealed }], success: true }]);
+    }
     throw new Error(`offline fixture has no response for ${method} ${path}`);
   };
   return {
@@ -119,6 +129,8 @@ function cloudflareHarness({ initial = [], rejectPut = false, landRejectedPut = 
     writtenValues,
     uploadedMetadata,
     secretNames,
+    sightingDirectory,
+    get sealedReads() { return sealedReads; },
     get workerUploads() { return workerUploads; },
     get secretLists() { return secretLists; },
     get secretPuts() { return secretPuts; },
@@ -190,18 +202,22 @@ test("deploy creates a missing wrapping key once and verifies it by name", async
   const path = writeManifest("deploy-absent.json", manifest());
   const run = await isolatedRuntime(harness.fetchImpl, () => cmdDeploy(path, {
     nextSteps: false,
+    bankWrappingKeySightingDirectory: harness.sightingDirectory,
     generateBankWrappingKey: () => SENTINEL,
   }));
 
   assert.equal(harness.workerUploads, 1, "the real deploy decision point must be reached");
-  assert.equal(harness.secretLists, 2, "absence and post-write presence must both be read");
+  assert.equal(harness.secretLists, 3, "absence before and after the upload, and post-write presence, must all be read");
   assert.equal(harness.secretPuts, 1);
-  assert.deepEqual(harness.calls.slice(0, 4), [
+  assert.deepEqual(harness.calls.slice(0, 7), [
+    "secret-list",
     "worker-upload",
     "secret-list",
+    "sealed-count",
+    "sealed-count",
     `secret-put:${WRAPPING_NAME}`,
     "secret-list",
-  ]);
+  ], "the database proves nothing is sealed before the only write");
   assert.equal(harness.secretNames.has(WRAPPING_NAME), true);
   assert.equal(harness.writtenValues[0], SENTINEL);
   assert.doesNotMatch(run.output, new RegExp(SENTINEL.replaceAll(".", "\\.")));
@@ -213,11 +229,12 @@ test("deploy leaves an existing wrapping key untouched", async () => {
   const path = writeManifest("deploy-present.json", manifest());
   await isolatedRuntime(harness.fetchImpl, () => cmdDeploy(path, {
     nextSteps: false,
+    bankWrappingKeySightingDirectory: harness.sightingDirectory,
     generateBankWrappingKey: () => { throw new Error("generation must not be reached"); },
   }));
 
   assert.equal(harness.workerUploads, 1, "the real deploy decision point must be reached");
-  assert.equal(harness.secretLists, 1);
+  assert.equal(harness.secretLists, 2, "the key must be read before and after the upload");
   assert.equal(harness.secretPuts, 0);
 });
 
@@ -227,6 +244,7 @@ test("deploy creates and verifies the same independent key for SimpleFIN", async
   const providerChecks = [];
   await isolatedRuntime(harness.fetchImpl, () => cmdDeploy(path, {
     nextSteps: false,
+    bankWrappingKeySightingDirectory: harness.sightingDirectory,
     generateBankWrappingKey: () => SENTINEL,
     readWorkerBankProvider: async ({ phase }) => {
       providerChecks.push(`runtime:${phase}`);
@@ -249,14 +267,17 @@ test("deploy creates and verifies the same independent key for SimpleFIN", async
     "runtime:after_upload",
     "complete:simplefin:simplefin",
   ], "the provider transition boundary must be reached on both sides of the upload");
-  assert.equal(harness.secretLists, 2, "the missing key and its readback must both be observed");
+  assert.equal(harness.secretLists, 3, "the key's absence before and after the upload and its readback must all be observed");
   assert.equal(harness.secretPuts, 1);
-  assert.deepEqual(harness.calls.slice(0, 4), [
+  assert.deepEqual(harness.calls.slice(0, 7), [
+    "secret-list",
     "worker-upload",
     "secret-list",
+    "sealed-count",
+    "sealed-count",
     `secret-put:${WRAPPING_NAME}`,
     "secret-list",
-  ]);
+  ], "the database proves nothing is sealed before the only write");
 });
 
 for (const [label, failure] of [
@@ -272,6 +293,7 @@ for (const [label, failure] of [
     try {
       await isolatedRuntime(harness.fetchImpl, () => cmdDeploy(path, {
         nextSteps: false,
+        bankWrappingKeySightingDirectory: harness.sightingDirectory,
         listWorkerSecretNames: async () => {
           lists += 1;
           throw failure;
@@ -284,7 +306,7 @@ for (const [label, failure] of [
     }
 
     assert.equal(harness.workerUploads, 1, "the real deploy decision point must be reached");
-    assert.equal(lists, 1, "the inventory decision point must be reached");
+    assert.equal(lists, 2, "the inventory must be tried before and after the upload");
     assert.equal(puts, 0, "an unreadable inventory must not trigger a put");
     assert.match(error?.message || "", /secret names could not be checked/i);
     assert.doesNotMatch(error?.message || "", SENTINEL_PATTERN);
@@ -299,6 +321,7 @@ test("a wrapping-key write failure reports uncertainty and never leaks the gener
   try {
     await isolatedRuntime(harness.fetchImpl, () => cmdDeploy(path, {
       nextSteps: false,
+      bankWrappingKeySightingDirectory: harness.sightingDirectory,
       generateBankWrappingKey: () => SENTINEL,
     }));
   } catch (caught) {
@@ -306,7 +329,7 @@ test("a wrapping-key write failure reports uncertainty and never leaks the gener
   }
 
   assert.equal(harness.workerUploads, 1, "the real deploy decision point must be reached");
-  assert.equal(harness.secretLists, 1);
+  assert.equal(harness.secretLists, 2);
   assert.equal(harness.secretPuts, 1);
   assert.match(error?.message || "", /independent bank wrapping key could not be created/i);
   assert.match(error?.message || "", /result is unknown|result could not be confirmed/i);
@@ -323,6 +346,7 @@ test("a landed wrapping-key write is adopted on retry and stays absent from ever
   try {
     await isolatedRuntime(harness.fetchImpl, () => cmdDeploy(path, {
       nextSteps: false,
+      bankWrappingKeySightingDirectory: harness.sightingDirectory,
       generateBankWrappingKey: () => SENTINEL,
     }));
   } catch (caught) {
@@ -330,16 +354,17 @@ test("a landed wrapping-key write is adopted on retry and stays absent from ever
   }
 
   assert.equal(harness.workerUploads, 1, "the first real deploy decision point must be reached");
-  assert.equal(harness.secretLists, 1, "the first inventory decision must be reached");
+  assert.equal(harness.secretLists, 2, "the first inventory decisions (before and after the upload) must be reached");
   assert.equal(harness.secretPuts, 1, "the uncertain write must be attempted once");
   assert.equal(harness.secretNames.has(WRAPPING_NAME), true, "the failure fixture must land the write");
 
   const retry = await isolatedRuntime(harness.fetchImpl, () => cmdDeploy(path, {
     nextSteps: false,
+    bankWrappingKeySightingDirectory: harness.sightingDirectory,
     generateBankWrappingKey: () => { throw new Error("retry must not generate a replacement"); },
   }));
   assert.equal(harness.workerUploads, 2, "the retry must reach the real deploy path");
-  assert.equal(harness.secretLists, 2, "the retry must recheck the inventory");
+  assert.equal(harness.secretLists, 4, "the retry must recheck the inventory before and after its upload");
   assert.equal(harness.secretPuts, 1, "the landed key must not be replaced");
 
   const issueCode = supportErrorCode(error, { command: "deploy" });
@@ -443,6 +468,7 @@ test("brain update reaches the real deploy and creates the wrapping key before v
         return cmdDeploy(deployPath, {
           ...deployOptions,
           nextSteps: false,
+          bankWrappingKeySightingDirectory: harness.sightingDirectory,
           generateBankWrappingKey: () => SENTINEL,
         });
       },
@@ -463,7 +489,7 @@ test("brain update reaches the real deploy and creates the wrapping key before v
   assert.equal(upgradeDeployments, 2, "the D1 update must reach paused and active deployment stages");
   bookmarkWriter.assertCalled();
   assert.equal(harness.workerUploads, 2, "both stages must use the real deploy function");
-  assert.equal(harness.secretLists, 3, "the second deploy must observe the first deploy's verified key");
+  assert.equal(harness.secretLists, 5, "the second deploy must observe the first deploy's verified key before and after its upload");
   assert.equal(harness.secretPuts, 1);
   assert.equal(harness.secretNames.has(WRAPPING_NAME), true);
   assert.doesNotMatch(run.output, new RegExp(SENTINEL.replaceAll(".", "\\.")));

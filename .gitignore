@@ -116,3 +116,13 @@ machine-prep/installers/windows/handoff-windows.url
 
 # Disposable offline test HOME; fixture manifests and keys must stay local.
 /home-test/
+
+# Offline lane receipts and synthetic credential homes are never product source.
+/lane-evidence/
+/home-docs-boundary/
+
+# Offline bank-feed lane copies, synthetic custody, caches and receipts.
+/.bankfeed-r3-evidence/
+
+# Disposable offline phase-1 probes, pinned input copies and receipts.
+/.newest-p1/

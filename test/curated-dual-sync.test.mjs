@@ -117,6 +117,8 @@ function plan(overrides = {}) {
 // is a separate authenticated read. Its adversarial storage cases live in
 // curated-cloudflare-only.test.mjs and do not alter these write counters.
 function runCuratedDualSync(input, options) {
+  options = { home: sandbox, lifecycleLockOptions: { machineLockRoot: join(sandbox, 'lifecycle-locks') },
+    ...options };
   if (!options?.fetch) return runCuratedSync(input, options);
   return runCuratedSync(input, { ...options, fetch: (url, args) => {
     if (new URL(url).pathname === "/api/admin/brain/curated-verify") {

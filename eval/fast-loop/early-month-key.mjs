@@ -68,6 +68,21 @@ export function reviewEarlyMonth(o, c, { wording = 'current' } = {}) {
     assert.deepEqual(l.own_account_payments, { total_minor: 0, count: 0, card_minor: 0, loan_minor: 0 });
     const previous = l.previous_month;
     assert.ok(previous, 'the previous-period classification decision remains visible');
+    if (wording === 'current') {
+      assert.deepEqual([previous.from, previous.to], ['2026-09-01', '2026-09-30']);
+      assert.equal(previous.expense_total_minor, null);
+      assert.equal(previous.retained_outflow_minor, 99134);
+      assert.equal(previous.classification_complete, false);
+      assert.equal(previous.complete, false);
+      assert.equal(previous.observed_spending_lower_bound_minor, 59134);
+      assert.equal(previous.classification_uncertain_minor, 40000);
+      assert.match(b.answer, /at least \$591\.34; \$400\.00 more may be a card payment \(unconfirmed\)/i);
+      assert.match(b.answer, /account types.*have not been confirmed/);
+      assert.doesNotMatch(b.answer, /withheld|cannot|can't/i);
+      assert.equal(b.evidence_gate.complete, false);
+      return { wrong_figures: 0, unsupported_claims: 0, missing_previous: 0 };
+    }
+
     assert.deepEqual([previous.from, previous.to], ['2026-09-01', '2026-09-30']);
     assert.equal(previous.reason, 'ledger_account_kind_review_required');
     assert.equal(previous.complete, false);

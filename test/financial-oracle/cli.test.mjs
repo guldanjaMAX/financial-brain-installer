@@ -85,6 +85,24 @@ test('apply reads an explicit synthetic file through the real product credential
  assert.equal(existsSync(join(dir,'.brain')),false);
 });
 
+test('journal retries a Windows sharing refusal and exactly reads back the replacement', async t => {
+ const fs = (await import('node:fs')).default;
+ const { syncBuiltinESMExports } = await import('node:module');
+ const original = fs.renameSync; let calls = 0;
+ t.mock.method(fs, 'renameSync', (...args) => {
+  if (++calls === 1) throw Object.assign(Error('synthetic sharing refusal'), { code: 'EPERM' });
+  return original(...args);
+ });
+ syncBuiltinESMExports();
+ const store = privateJournal(join(area(), 'sharing.json'), { platform: 'win32' });
+ try {
+  await store.writeJournal({ first: true });
+  await store.writeJournal({ replacement: true });
+  assert.equal(calls, 3);
+  assert.deepEqual(await store.readJournal(), { replacement: true });
+ } finally { store.close(); t.mock.restoreAll(); syncBuiltinESMExports(); }
+});
+
 // Model the native filesystem refusal on every host; POSIX failures must still
 // stop the writer, and Windows must still flush the file before its readback.
 test('journal preserves file durability when Windows cannot sync a directory', async t => {

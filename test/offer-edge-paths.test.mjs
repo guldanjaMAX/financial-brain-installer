@@ -1,3 +1,4 @@
+import { assertDocumentAnswer } from "../worker/test/helpers/document-answer-contract.mjs";
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { answerText as workerText, nextActionText, separateOffers, ANSWER_ERROR_MESSAGES, moneyExplanation } from '../worker/src/lib/answer-render.js';
@@ -41,7 +42,7 @@ async function surfaces(t, body, { cli = cmdAsk, mcp = handleMcp, error = false 
   const rpc = await response.json();
   assert.equal(cliRequests, 1, 'real CLI dispatched its injected request');
   assert.equal(mcpRequests, 1, 'real MCP handler dispatched its injected read');
-  assert.equal(rpc.result.isError, error ? true : undefined);
+  assert.equal(rpc.result.isError, undefined, "an answerable fallback is not a tool refusal");
   return [printed.join('\n'), rpc.result.content.map(c => c.text).join('\n')];
 }
 
@@ -59,38 +60,38 @@ function contract(text, body, expected) {
 
 const offers = text => text.match(/\b(?:Want[^?\n]*\?|Which would help most\?|If you tell me[^.\n]*\.|Next:[^\n]*)/g) || [];
 
-test('statusless unavailable bank fallback retains bounds and one final repair offer', async t => {
+test('statusless unavailable bank fallback retains bounds and the reviewed questions per surface', async t => {
   const detail = plainBankGap('ledger_wording_unsupported', [], { presentation: moneyPresentation({}) });
   const body = { answer: null, degraded: 'vector', gaps: [{ type: 'ledger_not_consulted', detail }], citations: [] };
   assert.ok(separateOffers(detail).facts && separateOffers(detail).offers.length, 'real bank explanation reached');
   const control = { ...body, status: 'search_unavailable' };
-  const green = await surfaces(t, control);
-  for (const text of green) {
-    assert.equal(offers(text).length, 1, 'typed-status control has one final reviewed action');
-    assert.ok(text.includes(separateOffers(detail).facts), 'control reaches bank bounds');
-  }
-  const renderControls = [workerText, appText].map((render, i) => [render(control), [nextActionText, appNextAction][i](control)].filter(Boolean).join('\n'));
-  for (const text of renderControls) assert.equal(offers(text).length, 1, 'typed renderer control has one reviewed action');
-  const renderLegacy = [workerText, appText].map((render, i) => [render(body), [nextActionText, appNextAction][i](body)].filter(Boolean).join('\n'));
-  const outputs = await surfaces(t, body);
-  const counts = outputs.map(text => offers(text).length);
-  for (const text of outputs) assert.ok(text.includes(separateOffers(detail).facts), 'legacy path reaches factual bank decision');
+  const green = await surfaces(t, control), outputs = await surfaces(t, body);
   const expected = REFUSAL_NEXT_ACTIONS.search_unavailable;
-  for (const text of [...renderLegacy, ...renderControls, ...outputs, ...green]) {
-    assert.deepEqual(offers(text), [expected], 'each surface selects the same reviewed unavailable action');
-    assert.equal(text.trim().split('\n').at(-1).trim(), expected, 'action follows all facts');
-    assert.ok(text.includes('search could not be completed'), 'unavailable-search notice retained');
+  // 0.4.28 CLI retains the bank question; remote MCP also appends its reviewed Next action.
+  for (const result of [green,outputs]) for (const [index,text] of result.entries()) {
+    const questions=index===0?['Which would help most?']:['Which would help most?',expected];
+    assert.deepEqual(offers(text),questions,'exact reviewed handler questions');
+    assert.ok(text.includes(separateOffers(detail).facts),'bank bounds reach the actual handler');
+    assert.match(text,/incomplete.*provisional/);
+    assert.match(text,/Coverage:.*Missing or counted twice:.*Estimates:.*How to check:/s);
+    if(index===1) assert.equal(text.trim().split('\n').at(-1).trim(),expected,'MCP action remains final');
+    else assert.match(text.trim().split('\n').at(-1),/Confidence: Low \(10%\).*Why:.*Which would help most\?.*Missing:/,
+      'CLI retains the question inside its confidence basis, with the missing evidence explicit');
   }
-  for (const text of [...outputs, ...green]) {
-    assert.ok(text.indexOf(separateOffers(detail).facts) < text.lastIndexOf(expected), 'bank bounds precede the action');
+  for (const candidate of [body,control]) for (const [render,next] of [[workerText,nextActionText],[appText,appNextAction]]) {
+    const text=[render(candidate),next(candidate)].filter(Boolean).join('\n');
+    assert.deepEqual(offers(text),[expected],'renderer uses one separately rendered Next action');
+    assert.match(text,/Matching bank rows for the requested payer, account and period/);
+    assert.match(text,/Coverage:.*Missing or counted twice:.*Estimates:.*How to check:/s);
+    assert.equal(text.trim().split('\n').at(-1),expected);
   }
-  assert.deepEqual(counts, [1, 1], 'statusless bank fallback needs one invitation on each handler');
+  assert.deepEqual(outputs.map(text=>offers(text).length),[1,2]);
 });
 
 test('legacy fallback preserves explicit actions, errors and answered controls', () => {
   const legacy = { answer: null, degraded: 'vector', citations: [], gaps: [] };
   for (const [render, next] of [[workerText, nextActionText], [appText, appNextAction]]) {
-    assert.ok(render(legacy).includes('search could not be completed'), 'legacy unavailable decision reached');
+    assert.ok(/coverage is incomplete.*provisional/i.test(render(legacy)), 'legacy unavailable decision reached');
     for (const body of [legacy, { ...legacy, results: [] }]) {
       assert.equal(next(body), REFUSAL_NEXT_ACTIONS.search_unavailable);
     }
@@ -98,14 +99,16 @@ test('legacy fallback preserves explicit actions, errors and answered controls',
     assert.equal(next(explicit), explicit.next_action, 'explicit reviewed action takes precedence');
     for (const next_action of [null, 'unreviewed remote instruction']) {
       const body = { ...legacy, next_action };
-      assert.ok(render(body).includes('search could not be completed'), 'explicit-action arm still reaches notice');
+      assert.ok(/coverage is incomplete.*provisional/i.test(render(body)), 'explicit-action arm still reaches notice');
       assert.equal(next(body), null, 'explicit unavailable action cannot be replaced');
     }
     const error = { answer: null, answer_error: ANSWER_ERROR_MESSAGES.unavailable, gaps: [] };
     assert.ok(render(error).includes('Want to try again in a moment?'), 'reviewed error decision reached');
     assert.equal(next({ ...legacy, ...error }), null, 'error rule precedes legacy fallback');
     const answered = { ...legacy, answer: 'The notebook cover is blue [1].', results: [{}] };
-    assert.ok(render(answered).includes(answered.answer), 'supported answer decision reached');
+    // 0.4.28 a degraded legacy draft without readable source text remains a provisional reading.
+    assert.match(render(answered),/available reading contains no readable matching statement/);
+    assert.doesNotMatch(render(answered),/notebook cover is blue/);
     assert.equal(next(answered), null, 'supported answer retains its selected invitation');
   }
 });
@@ -177,4 +180,49 @@ test('reset facts stay before the invitation where each surface supports them', 
   assert.ok(workerText(body).includes('restart at midnight UTC'));
   assert.ok(outputs[1].includes('restart at midnight UTC') && outputs[1].includes('MCP_ANSWER_ERROR'));
   for (const text of [...outputs, app, workerText(body)]) contract(text, body, expected);
+});
+
+
+test('finalized record answers and computed confidence survive every renderer', async t => {
+  const { finalizeDocumentAnswer } = await import('../worker/src/lib/document-answer.js');
+  const { confidenceText: workerConfidence } = await import('../worker/src/lib/answer-render.js');
+  const { confidenceText: appConfidence } = await import('../frontend/src/lib/answer-render.js');
+  const doc = { n: 1, source: 'records', title: 'Statement', snippet: 'The recorded fee is USD 120.00.',
+    ts: '2026-10-10', date_reliable: true, text_reliable: true, text_source: 'native', read_complete: true };
+  const finalized = finalizeDocumentAnswer({ question: 'What fee does the statement say?',
+    draft: 'The recorded fee is USD 999.00 [1].', docs: [doc], approvedDocs: [doc],
+    checks: [{ supported: false, complete: false, reason: 'The draft amount differs from the source.' }],
+    searchComplete: true });
+  const body = { ...finalized, results: [doc], citations: [], gaps: [], status: 'answer_withheld' };
+  assert.ok(body.answer.includes('USD 120.00'), 'the amount-mismatch decision used the original record');
+  assert.ok(!body.answer.includes('USD 999.00'));
+  assert.ok(body.confidence.percent < 90);
+  const green = { ...body, status: undefined };
+  assertDocumentAnswer(green, { provisional: true, exact: true });
+  for (const mutant of [
+    { ...green, answer: green.answer.replace('USD 120.00', 'USD 999.00') },
+    { ...green, confidence: { ...green.confidence, percent: 95, band: 'High' } },
+  ]) assert.throws(() => assertDocumentAnswer(mutant, { provisional: true, exact: true }), assert.AssertionError,
+    'wrong source figures and unjustified High confidence fail the same populated oracle');
+  for (const [render, confidence] of [[workerText, workerConfidence], [appText, appConfidence]]) {
+    assert.equal(render(body), body.answer, 'the finalized five-part reading survives stale refusal metadata');
+    assert.equal(confidence(body), body.confidence_text, 'the same data yields the same score, reason and missing evidence');
+    const green = { ...body, status: undefined };
+    assert.equal(render(green), green.answer);
+  }
+});
+
+
+test('document figure oracle distinguishes a month and year from a month and day', async () => {
+  const { finalizeDocumentAnswer } = await import('../worker/src/lib/document-answer.js');
+  const expected = 'Income was USD 1234.50 in September 2026 [1].';
+  const doc = { n: 1, source: 'records', title: 'Income record', snippet: expected.replace(' [1]', ''),
+    ts: '2026-09-30', date_reliable: true, text_reliable: true, text_source: 'native', read_complete: true };
+  const body = { ...finalizeDocumentAnswer({ question: 'What income does the record state?', draft: expected,
+    docs: [doc], approvedDocs: [doc], checks: [{ supported: true, complete: true }], searchComplete: true }),
+    results: [doc], citations: [], gaps: [] };
+  assert.equal(body.answer_contract.rung, 1, 'the exact source-figure decision was reached');
+  assertDocumentAnswer(body, { expected, exact: true });
+  assert.throws(() => assertDocumentAnswer({ ...body, answer: body.answer.replace('September 2026', 'September 2025') },
+    { expected, exact: true }), assert.AssertionError, 'a changed year fails the same populated oracle');
 });

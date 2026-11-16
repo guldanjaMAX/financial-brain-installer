@@ -233,34 +233,47 @@ async function runCommand(t, { enabled, omitLoose = false, preview = false, root
   let result, error;
   const log = console.log;
   console.log = () => {};
-  try { result = await cmdIngestRemote(manifest, manifestPath, { from: "drive", ...(preview ? { "dry-run": true, json: true } : {}) }, options); }
+  // These cases exercise the opt-in full comparison, not the default feed.
+  try { result = await cmdIngestRemote(manifest, manifestPath, { from: "drive", "full-walk-review": true, ...(preview ? { "dry-run": true, json: true } : {}) }, options); }
   catch (caught) { error = caught; }
   finally { console.log = log; }
   return { result, error, state, inventoryReads, sent, calls: f.calls, store, credentialReads };
 }
 
-for (const enabled of [true, false]) test(`real ingest removal plan ${enabled ? "keeps" : "removes"} loose files with flag ${enabled}`, async (t) => {
+// The mutating comparison was removed intentionally: full-walk review is now
+// provider-only. Keep scope/absence proof at the connector decision below.
+for (const enabled of [true, false]) test(`full-walk writes stop before credentials with root files ${enabled}`, async (t) => {
   const result = await runCommand(t, { enabled });
-  assert.ok(result.inventoryReads > 0);
-  assert.equal(result.error?.code, "SAFETY_REVIEW_REQUIRED", result.error?.message);
-  assert.deepEqual(result.state.ingest_removal_plan.targets, enabled ? ["drive:outside"] : ["drive:loose", "drive:outside"]);
+  assert.equal(result.error?.supportCode, "CONFIG_INVALID", "read-only full-walk decision reached");
+  assert.match(result.error.message, /full-walk review is read-only/);
+  assert.equal(result.credentialReads, 0);
+  assert.equal(result.inventoryReads, 0);
+  assert.equal(result.sent.length, 0);
   assert.equal(result.store.calls.apply, 0);
-  assert.ok(result.sent.some((entry) => entry.source_id === "rooted"), "the green control was ingested");
-  if (enabled) assert.equal(result.sent.find((entry) => entry.source_id === "loose").metadata.top_folder, null);
-  else assert.equal(result.calls.some((call) => call.query?.startsWith("'root' in parents")), false);
+  const control = await runCommand(t, { enabled, preview: true });
+  assert.equal(control.error, undefined);
+  assert.ok(control.result.counts.would_send > 0, "read-only provider control reaches selected files");
 });
 
-test("an omitted visible root file is protected by current parent scope", async (t) => {
-  const result = await runCommand(t, { enabled: true, omitLoose: true });
-  assert.ok(result.calls.some((call) => call.id === "loose" && !call.media), "absence metadata decision was reached");
-  assert.deepEqual(result.state.ingest_removal_plan.targets, ["drive:outside"]);
-  assert.equal(result.store.calls.apply, 0);
+test("an omitted visible root file is protected by current parent scope", async () => {
+  const f = fixture({ omitLoose: true });
+  const files = await collect(drive.listRootedFiles(token, { rootFolderIds:["reviewed"], includeMyDriveRootFiles:true, opts:f.opts }));
+  const scopedFolderIds = new Set(Object.keys(drive.updateFolderIndex(files)));
+  const inside = await drive.classifyScopedAbsence(token, "loose", { scopedFolderIds, opts:f.opts });
+  assert.ok(f.calls.some(call => call.id === "loose" && !call.media), "absence metadata decision reached");
+  assert.equal(inside.kind, "present_in_scope");
+  const outside = await drive.classifyScopedAbsence(token, "outside", { scopedFolderIds, opts:f.opts });
+  assert.equal(outside.kind, "left_scope", "out-of-scope control reaches the other decision");
 });
 
-test("an explicit exclusion still plans removal of a stored loose file", async (t) => {
-  const result = await runCommand(t, { enabled: true, excludeLoose: true });
-  assert.ok(result.calls.some((call) => call.query?.startsWith("'root' in parents")));
-  assert.deepEqual(result.state.ingest_removal_plan.targets, ["drive:loose", "drive:outside"]);
+test("an explicit exclusion stays visible in provider review without planning removal", async (t) => {
+  const control = await runCommand(t, { enabled:true, preview:true });
+  const result = await runCommand(t, { enabled:true, excludeLoose:true, preview:true });
+  assert.equal(result.error, undefined);
+  assert.ok(result.calls.some(call => call.query?.startsWith("'root' in parents")), "root listing reached");
+  assert.equal(result.result.counts.would_send, control.result.counts.would_send - 1);
+  assert.equal(result.inventoryReads, 0);
+  assert.equal(result.state.ingest_removal_plan, undefined);
   assert.equal(result.store.calls.apply, 0);
 });
 
@@ -300,10 +313,16 @@ test("mutation controls catch missing root listing, folder scope leakage, and lo
   const leakFolder = await loadMutant('if (shallow && file.mimeType === FOLDER_MIME) continue;', '/* mutation: admit unselected folders */');
   await assert.rejects(() => assertListing(leakFolder), /unselected folder leaked into scope/);
   const assertProtection = async (connector) => {
-    const result = await runCommand(t, { enabled: true, omitLoose: true, connector });
-    assert.ok(result.calls.some((call) => call.id === "loose" && !call.media));
-    assert.ok(result.state.ingest_removal_plan.targets.includes("drive:outside"), "nonempty removal control");
-    assert.equal(result.state.ingest_removal_plan.targets.includes("drive:loose"), false, "lost root absence protection");
+    const f = fixture({ omitLoose:true });
+    const files = await collect(connector.listRootedFiles(token, {
+      rootFolderIds:["reviewed"], includeMyDriveRootFiles:true, opts:f.opts,
+    }));
+    const scopedFolderIds = new Set(Object.keys(connector.updateFolderIndex(files)));
+    const outside = await connector.classifyScopedAbsence(token, "outside", { scopedFolderIds, opts:f.opts });
+    assert.equal(outside.kind, "left_scope", "nonempty outside-scope control");
+    const loose = await connector.classifyScopedAbsence(token, "loose", { scopedFolderIds, opts:f.opts });
+    assert.ok(f.calls.some(call => call.id === "loose" && !call.media));
+    assert.equal(loose.kind, "present_in_scope", "lost root absence protection");
   };
   await assertProtection(drive);
   const noRootIndex = await loadMutant('if (file?.mimeType !== FOLDER_MIME || !file.id) continue;',

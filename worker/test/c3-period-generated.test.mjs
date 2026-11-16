@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { unusedReading } from './date-word-review-fixture.mjs';
 import assert from 'node:assert/strict';
 import {setup,ask,intent,raw} from './c3-calendar-scope-fixture.mjs';
 
@@ -43,11 +44,18 @@ for(let start=0;start<cases.length;start+=30) test(`C3 generated seed 0x0427c3 c
   }
   accepted++;
   assert.equal(r.documents,0,c.q);assert.ok(r.sql.some(s=>s.includes('CROSS JOIN fin_transactions')),c.q);
-  assert.ok(!/oops|2025x|2027|'27/.test(c.suffix),`invalid/future accepted: ${c.q}`);
+  assert.ok(!/oops|2025x/.test(c.suffix),`invalid date accepted: ${c.q}`);
   assert.notEqual(c.form,'range',`range must be fully consumed or refused: ${c.q}`);
-  const year=c.suffix?'2025':'2026';
+  const year=/2027|'27/.test(c.suffix)?'2027':c.suffix?'2025':'2026';
   const expected=[[`${year}-${c.form==='quarter'?'07':'09'}-01`,`${year}-09-30`],[`${year}-10-01`,`${year}-10-31`]];
   assert.deepEqual(parts.map(p=>[p.from,p.to]),expected,c.q);
+  if (year === '2027') {
+   assert.ok(parts.every(p => p.projection && p.estimate && !p.complete), c.q);
+   assert.deepEqual(parts.map(p => p.total_minor), [0, 0], c.q);
+   assert.deepEqual(parts.map(p => p.accounts.map(a => a.account_mask)), [['1111'], [c.scope === 'distinct-hints' ? '3333' : '1111']], c.q);
+   assert.match(r.body.answer, /Projection: about/);
+   continue;
+  }
   assert.deepEqual(parts.map(p=>p.expense_total_minor),year==='2025'?[0,0]:[700,c.scope==='distinct-hints'?300:1200],c.q);
   assert.deepEqual(parts.map(p=>p.accounts.map(a=>a.account_mask)),[['1111'],[c.scope==='distinct-hints'?'3333':'1111']],c.q);
   assert.ok(parts.every(p=>p.complete),c.q);
@@ -56,7 +64,7 @@ for(let start=0;start<cases.length;start+=30) test(`C3 generated seed 0x0427c3 c
 });
 
 // 360 additional residue cases. Each has a real SQLite numeric peer whose
-// bounded amount cannot accidentally equal the widened October total.
+// bounds distinguish narrow peers from the explicitly disclosed full month.
 const residueCases=[];
 for(const month of ['Oct','Oct.','OCT','October','october','oct'])
  for(const [tail,from,to,cents] of [
@@ -66,21 +74,32 @@ for(const month of ['Oct','Oct.','OCT','October','october','oct'])
   ['between the 1st and the 9th','2026-10-01','2026-10-09',0],['since Monday','2026-11-02','2026-11-03',0],
   ['until Friday','2026-10-01','2026-10-30',1700],['after Tuesday','2026-10-28','2026-10-31',0]])
   for(const mixed of ['', ' before the 20th',' through the 21st',' since Wednesday',' until Thursday',' in 2025'])
-   residueCases.push({q:`Show expenses ${month} 2026 ${tail}${mixed}`,from,to,cents});
+   residueCases.push({q:`Show expenses ${month} 2026 ${tail}${mixed}`,from,to,cents,
+    readableMonth: !/^(?:since|from|between)\b/.test(tail) && ![' since Wednesday',' in 2025'].includes(mixed)});
 assert.equal(residueCases.length,360);
+assert.equal(residueCases.filter(c=>c.readableMonth).length,144);
 for(let start=0;start<residueCases.length;start+=30) test(`C3 D generated residue ${start+1}-${start+30}`,async t=>{
  const f=setup(t);
- for(const {q,from,to,cents} of residueCases.slice(start,start+30)) {
+ let accepted=0,refused=0;
+ for(const {q,from,to,cents,readableMonth} of residueCases.slice(start,start+30)) {
   const peer=await ask(f,`Show expenses from ${from} to ${to}`,raw(intent()));
   assert.equal(peer.extraction,1);assert.equal(peer.body.ledger.total_minor,cents);
   assert.deepEqual([peer.body.ledger.from,peer.body.ledger.to],[from,to]);
   assert.ok(peer.sql.some(s=>s.includes('CROSS JOIN fin_transactions')));
   const r=await ask(f,q,raw(intent()));
   assert.equal(r.extraction,1,q);assert.equal(r.documents,0,q);
-  assert.equal(r.body.ledger,undefined,q);assert.equal(r.body.evidence_gate.complete,false,q);
-  assert.ok(r.body.gaps.some(g=>g.scope==='calendar'),q);
-  assert.match(r.body.answer,/Unread calendar words:/,q);
-  assert.equal(r.sql.length,0,q);
+  if(readableMonth){
+   accepted++;unusedReading(r,1700);
+   assert.deepEqual([r.body.ledger.from,r.body.ledger.to],['2026-10-01','2026-10-31'],q);
+  }else{
+   refused++;
+   assert.equal(r.body.ledger,undefined,q);assert.equal(r.body.evidence_gate.complete,false,q);
+   assert.ok(r.body.gaps.some(g=>g.scope==='calendar'),q);
+   assert.match(r.body.answer,/Unread calendar words:/,q);
+   assert.equal(r.sql.length,0,q);
+  }
  }
- t.diagnostic('generated=30 refused=30 wrong=0');
+ assert.equal(accepted,residueCases.slice(start,start+30).filter(c=>c.readableMonth).length);
+ assert.equal(accepted+refused,30);
+ t.diagnostic(`generated=30 accepted=${accepted} refused=${refused} wrong=0`);
 });

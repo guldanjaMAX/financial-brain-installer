@@ -4,6 +4,9 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import * as bankProvider from "../operations/bank-provider-command.mjs";
 import { forgetFamilies } from "../worker/src/lib/store-d1.js";
+import { classifiedMoneyCtes, CLEAN_MONEY_SNAPSHOT_SQL } from "../worker/src/lib/clean-money.js";
+import { queryMoney } from "../worker/src/lib/money-query.js";
+import { createProductFixture, seedOwnedEntity } from "../worker/test/product-contract-fixture.mjs";
 
 import {
   splitStatements,
@@ -471,7 +474,7 @@ function packageSources() {
 test("package source compound-operator joins have a bounded execution probe", async () => {
   const builders = packageSources().filter(([, source]) =>
     /\.join\(\s*["'`][^"'`]*\b(?:UNION|INTERSECT|EXCEPT)\b/iu.test(source)).map(([path]) => path);
-  assert.deepEqual(builders, ["worker/src/lib/store-d1.js"],
+  assert.deepEqual(builders, ["worker/src/lib/clean-money.js", "worker/src/lib/store-d1.js"],
     "a new compound join requires a real-path maximum-size probe");
   const queries = [];
   const env = { DB: { prepare(sql) {
@@ -486,4 +489,42 @@ test("package source compound-operator joins have a bounded execution probe", as
   assert.match(queries[0], /^SELECT cursor, complete FROM document_family_index_state/);
   assert.equal(compoundTerms(queries[1]), 2, "both structural and declared arms were built");
   assert.equal(receipt.dry_run, true);
+});
+
+test('frozen money transport executes at both bind ceilings without a compound chain', () => {
+  const database = new DatabaseSync(':memory:');
+  try {
+    const snapshot = {rows:Array.from({length:10},(_,id) => ({id:id+1,tenant_id:'primary',
+      description:'x'.repeat(450001)})),accounts:[],pairs:[],coverage:[]};
+    for(const maxBinds of [90,95]) {
+      const binds = Array(maxBinds-10).fill('[]');
+      const sql = classifiedMoneyCtes(snapshot,binds,null,[],{maxBinds});
+      assert.equal(binds.length,maxBinds,'maximum-size transport decision reached');
+      assert.match(sql,/mq_frozen AS MATERIALIZED/,'packed fallback reached');
+      assertD1CompoundLimit(sql);
+      assert.ok(binds.every(value => Buffer.byteLength(value)<=900000));
+      const result = database.prepare(`WITH ${sql} SELECT count(*) AS n,sum(id) AS total FROM mq_rows`).get(...binds);
+      assert.deepEqual({...result},{n:10,total:55},'every transported record survives exactly once');
+      assert.throws(() => classifiedMoneyCtes(snapshot,Array(maxBinds-9).fill('[]'),null,[],{maxBinds}),
+        {code:'MONEY_QUERY_SCAN_LIMIT'},'one chunk beyond the proven ceiling remains bounded');
+    }
+  } finally { database.close(); }
+});
+
+test('the complete money snapshot inventory executes within the compound bound', async () => {
+  const f = await createProductFixture();
+  try {
+    seedOwnedEntity(f,'owner-business','Owner business');
+    f.raw(`INSERT INTO fin_accounts(account_slug,entity_slug,label,account_kind,balance_role,feed_mode,provenance,basis_state,recorded_at)
+      VALUES ('synthetic-account','owner-business','Checking','checking','asset','manual','owner_stated','confirmed',?)`,STARTED_AT);
+    f.raw(`INSERT INTO fin_transactions(txn_uid,account_slug,posted_on,amount_minor,direction,provenance,basis_state,recorded_at)
+      VALUES ('synthetic-event','synthetic-account','2026-10-28',123,'outflow','owner_stated','confirmed',?)`,STARTED_AT);
+    assertD1CompoundLimit(CLEAN_MONEY_SNAPSHOT_SQL);
+    const prepare = f.env.DB.prepare.bind(f.env.DB);
+    f.env.DB.prepare = sql => { assertD1CompoundLimit(sql); return prepare(sql); };
+    const result = await queryMoney(f.env,{sql:'SELECT SUM(expense_minor) AS total FROM txn'},
+      {now:() => Date.parse(STARTED_AT)});
+    assert.ok(f.seen.sql.some(sql => sql.includes('snapshot_kind')),'complete snapshot execution reached');
+    assert.equal(result.rows[0].total,123,'nonempty source amount survives the complete snapshot exactly');
+  } finally { f.close(); }
 });

@@ -89,7 +89,9 @@ async function brainIsReachable({ base, httpImpl, assertOwned }) {
     });
     return response?.ok === true;
   } catch (error) {
-    if (error?.code === "source_ingest_lock_lost") throw error;
+    // PDF extraction catches ordinary page errors. Ownership loss must cross
+    // that boundary unchanged as a run-wide stop, even if a later check passes.
+    if (error?.code === "source_ingest_lock_lost") throw Object.assign(error, { fatal:true });
     return false;
   }
 }
@@ -206,7 +208,7 @@ export function createOcrCallback({
             body,
           }, { timeoutMs: remainingMs, what: "the OCR request" });
         } catch (error) {
-          if (error?.code === "source_ingest_lock_lost") throw error;
+          if (error?.code === "source_ingest_lock_lost") throw Object.assign(error, { fatal:true });
           if (!isOcrTimeout(error)) {
             throw systemUnavailableError(page, error);
           }

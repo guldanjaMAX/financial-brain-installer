@@ -63,7 +63,9 @@ test('R1-B1 paired suffix retains money-out hold', async t => {
   const o = await reached(f, 'paired suffix out', moneyOut, 4);
   const p = await reached(f, 'paired suffix payer', 'Who paid me this month?', 4);
   assert.equal(o.ledger.complete, false, 'R1-B1 visible unproved counterpart must withhold money out');
-  assert.equal(o.ledger.expense_total_minor, null);
+  assert.equal(o.ledger.expense_total_minor, 12912, '567 ordinary plus 12345 observed movement');
+  assert.match(o.answer, /up to \$123\.45 may be counted twice/);
+  assert.doesNotMatch(o.answer, /withheld|cannot|can't/i);
   assert.ok(s.ledger.complete === false || s.ledger.expense_total_minor === 567);
   assert.equal(p.ledger.total_minor, 100000, 'own credit excluded from payer income');
   assert.equal(p.ledger.not_payments.total_minor, 12345);
@@ -85,7 +87,8 @@ test('R1-B2 retirement remittance account suffix is not certified spending', asy
   await green(t, 'ACH DEBIT 401K REMITTANCE ACCOUNT ****5678', 'Plan Unit');
   const mixed = await reached(book(t, 'ACH DEBIT 401K REMITTANCE ACCOUNT ****5678 FEE 2.00'), 'retirement mixed');
   assert.equal(mixed.ledger.complete, false);
-  assert.equal(mixed.ledger.expense_total_minor, null, 'component amounts never inferred');
+  assert.equal(mixed.ledger.expense_total_minor, 12912, 'full observed amount retained; component amounts never inferred');
+  assert.match(mixed.answer, /components have not been split/);
   assert.equal(mixed.ledger.reason, 'own_movement_mixed_components');
 });
 

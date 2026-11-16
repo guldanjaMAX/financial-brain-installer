@@ -1542,12 +1542,19 @@ export function createTokenProvider({
   // it is a burst of identical round trips for one answer, and any caller that
   // arrives mid-refresh should simply share the result.
   let inflight = null;
-  const refresh = async () => {
+  const refresh = async ({ deadlineAt = Infinity, now = Date.now } = {}) => {
+    const remaining = deadlineAt - now();
+    if (remaining <= 0) {
+      const error = new Error("Google read deadline reached before token refresh");
+      error.reason = "requestDeadline";
+      throw error;
+    }
+    const timeout = Math.max(1, Math.min(Number(requestTimeoutMs) || 30_000, remaining));
     const body = new URLSearchParams({ client_id: clientId, refresh_token: refreshToken, grant_type: "refresh_token" });
     if (clientSecret) body.set("client_secret", clientSecret);
-    const signal = Number(requestTimeoutMs) > 0 &&
+    const signal = Number(timeout) > 0 &&
       typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
-      ? AbortSignal.timeout(Number(requestTimeoutMs))
+      ? AbortSignal.timeout(timeout)
       : undefined;
     let res;
     try {
@@ -1564,7 +1571,7 @@ export function createTokenProvider({
       const timedOut = error?.name === "TimeoutError" || error?.name === "AbortError";
       const e = new Error(
         timedOut
-          ? `the Google token refresh did not answer within ${Math.round(Number(requestTimeoutMs) / 1000)}s. ` +
+          ? `the Google token refresh did not answer within ${Math.ceil(Number(timeout) / 1000)}s. ` +
             "This is usually a transient network fault; re-running the command is safe."
           : `the Google token refresh could not be sent: ${error?.message || error}`
       );
@@ -1590,9 +1597,9 @@ export function createTokenProvider({
     expiresAt = Date.now() + (json.expires_in || 3600) * 1000;
     return cached;
   };
-  return async function getAccessToken({ force = false } = {}) {
+  return async function getAccessToken({ force = false, deadlineAt = Infinity, now = Date.now } = {}) {
     if (!force && cached && Date.now() < expiresAt - skewMs) return cached;
-    if (!inflight) inflight = refresh().finally(() => { inflight = null; });
+    if (!inflight) inflight = refresh({ deadlineAt, now }).finally(() => { inflight = null; });
     return inflight;
   };
 }

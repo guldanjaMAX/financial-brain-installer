@@ -60,6 +60,7 @@ function folderOptions(f, extra = {}) {
   return {
     platform: process.platform,
     home: f.home,
+    lifecycleLockOptions: { machineLockRoot: join(f.root, 'lifecycle-locks') },
     now: () => new Date(FIXED_NOW),
     ...extra,
   };

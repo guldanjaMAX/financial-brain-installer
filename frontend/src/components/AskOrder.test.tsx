@@ -34,6 +34,33 @@ function article(body: any, scoped: boolean) {
     .replace(/&quot;/g, '"').replace(/&#x27;|&#39;/g, "'").replace(/&amp;/g, '&');
 }
 for (const scoped of [false, true]) {
+  for (const status of ['coverage_incomplete', 'search_unavailable']) {
+    it(`${scoped ? 'shared' : 'owner'} displays a completed contract despite ${status} metadata`, () => {
+      const answer = [
+        '$120.00 spent in October 2026 [1].',
+        'Covers account ending 4321, October 1 through October 31, 2026.',
+        'Possible missing or double-counted amount: $20.00 may be an own-account payment.',
+        'Likely spending, because the payment has not been independently matched.',
+        'How to check: compare the original statement and the receiving account.',
+      ].join('\n');
+      const body = { ...supported, answer, status, next_action: null,
+        notice: 'Legacy status notice.', answer_contract: { version: 1, kind: 'ledger' },
+        confidence: { percent: 69, band: 'High', basis: ['$20.00 payment remains unmatched.'],
+          missing: ['Receiving account statement and independent payment match.'] } };
+      const control = article({ ...body, status: 'ok' }, scoped);
+      expect(control).toContain('$120.00 spent in October 2026 [1].');
+      expect(control).toContain('Confidence: Low (69%)');
+      const text = article(body, scoped);
+      for (const line of answer.split('\n')) expect(text).toContain(line);
+      expect(text).toContain('Confidence: Low (69%)');
+      expect(text).toContain('Why:');
+      expect(text).toContain('$20.00 payment remains unmatched.');
+      expect(text).toContain('Missing: Receiving account statement and independent payment match.');
+      expect(text).toContain('Fixture source');
+      expect(text).not.toContain('Legacy status notice.');
+    });
+  }
+
   it(`${scoped ? 'shared' : 'owner'} answer keeps its one invitation after all source facts`, () => {
     const control = article({ ...supported, citations: [] }, scoped);
     expect(control.endsWith(offer), 'source-free control ends with its selected offer').toBe(true);
@@ -49,7 +76,7 @@ for (const scoped of [false, true]) {
       scanned: true, text_source: 'ocr_partial', ts: '2026-10-10', date_reliable: true,
     };
     const body = {
-      ...supported, citations: [source], gaps: [{ type: 'scanned_evidence' }],
+      ...supported, answer: `${supported.answer}\n\nCoverage: One fixture record.\nMissing or counted twice: Independent verification.\nEstimates: Record evidence only.\nHow to check: Open the original.\n${offer}`, answer_contract: { version: 1, kind: 'document' }, citations: [source], gaps: [{ type: 'scanned_evidence' }],
       evidence_gate: { supported: true, complete: true, reason: 'fixture evidence decision' },
       confidence: { percent: 80, band: 'high', basis: ['checked fixture records'] },
     };

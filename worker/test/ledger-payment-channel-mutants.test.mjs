@@ -10,7 +10,8 @@ const root = fileURLToPath(new URL('../../', import.meta.url));
 const mutations = [
   ['recognizer drops channel prefixes', 'ledger-analysis.js', '(?:(?:automatic|internet|mobile|online) )?', '', 'channel ownership online card payment case=0 side=card'],
   ['unresolved guard drifts to plain card', 'ledger-answer.js', 'isOwnedMovementChannel(row.payee)', "/^(?:credit card|card) payment$/.test(normalizeLedgerText(row.payee))", 'channel ownership online card payment case=0 side=card'],
-  ['bare guard drifts to plain card', 'ledger-answer.js', 'isOwnedMovementChannel(row.description, { liabilityOnly: true })', "/^(?:credit card|card|loan) payment$/.test(normalizeLedgerText(row.description))", 'bare channel online card payment case=0'],
+  ['bare guard drifts to plain card', 'ledger-answer.js', // 0.4.28 has three channel checks; mutate the scoped untyped-payment decision only.
+    'const untypedPayments = identityRows.filter(row =>\n    isOwnedMovementChannel(row.description, { liabilityOnly: true }) &&', "const untypedPayments = identityRows.filter(row =>\n    /^(?:credit card|card|loan) payment$/.test(normalizeLedgerText(row.description)) &&", 'bare channel online card payment case=0'],
   ['uncertain inventory ignored', 'ledger-answer.js', '? await readUncertainScopeAccounts(env) : [];', '? [] : [];', 'channel ownership online payment case=0 side=card'],
   ['uncertain endpoint precision lost', 'ledger-analysis.js', 'return resolvesExactAccount(endpoint.locator, candidate, new Map([[candidate.account_slug, candidate]]), true);', 'return true;', 'channel text alone cannot establish uncertain ownership: online payment'],
   ['recognizer admits sibling prefix', 'ledger-analysis.js', '(?:(?:automatic|internet|mobile|online) )?', '(?:[a-z]+ )?', 'channel grammar accepts exactly'],

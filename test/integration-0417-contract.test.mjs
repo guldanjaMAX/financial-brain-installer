@@ -7,6 +7,8 @@ import * as app from "../frontend/src/lib/answer-render.js";
 import { unavailableNotice as workerNotice } from "../worker/src/lib/retrieval-status.js";
 import { unavailableNotice as appNotice } from "../frontend/src/lib/retrieval-status.js";
 import { renderOwnerRulesSection } from "../operations/claude-workspace.mjs";
+import { ownerConfidenceLine } from "../worker/src/lib/confidence.js";
+import { legacyDocumentResponse } from "../worker/src/lib/document-answer-reading.js";
 
 test("legacy import coverage display requires independent proof and preserves stored rows", async t => {
   const f = fixture();
@@ -63,12 +65,13 @@ for (const [label, response] of Object.entries({
   answered: { answer: "The amount is 42.", confidence },
   error: { answer: null, answer_error: "Synthetic private error" },
 })) test(`Worker and app retain the same answer and confidence scope: ${label}`, () => {
-  // Each surface retains its existing recovery steps for unavailable search.
-  if (label === "unavailable") {
-    assert.equal(worker.answerText(response), workerNotice("unknown"));
-    assert.equal(app.answerText(response), appNotice("unknown"));
-  } else assert.equal(worker.answerText(response), app.answerText(response));
-  assert.equal(worker.confidenceText(response), app.confidenceText(response));
+  // 0.4.28 rebuilds incomplete legacy replies from their returned records.
+  assert.equal(worker.answerText(response), app.answerText(response));
+  const expected = { candidate:30, multiple:30, empty:20, missing:20, unavailable:10, partial:10, withheld:10, answered:80 };
+  if (response.confidence) {
+    assert.match(worker.confidenceText(response), new RegExp(`^Confidence: ${expected[label]>=70?'Medium':'Low'} \\(${expected[label]}%\\)\\. Why: .+\\. Missing: .+\\.$`));
+    assert.ok(expected[label] <= response.confidence.percent, 'the returned score can only be lowered');
+  } else assert.equal(worker.confidenceText(response), app.confidenceText(response));
   assert.ok(worker.answerText(response).length > 0, "presentation decision reached");
   assert.doesNotMatch(worker.confidenceText(response), /nothing is recorded/);
   if (label === "answered") assert.equal(worker.answerText(response), `${response.answer}\nWant to check the original record?`);
@@ -76,28 +79,49 @@ for (const [label, response] of Object.entries({
   if (label === "multiple") assert.match(worker.answerText(response), /I found 2 records in this search/);
   if (label === "missing") assert.equal(worker.answerText(response), "I can help narrow the search, but the records checked did not support an answer.\nWant to try a more specific detail?");
   if (label === "withheld") {
-    assert.equal(worker.answerText(response), response.notice);
-    assert.doesNotMatch(worker.confidenceText(response), /\d+%/);
+    assert.match(worker.answerText(response), /Coverage: Read 0 of 1.*Missing or counted twice:.*Estimates:.*How to check:/s);
+    assert.doesNotMatch(worker.answerText(response), /answer was withheld/);
+    assert.match(worker.answerText(response), /evidence check is incomplete/i);
+    assert.match(worker.confidenceText(response), /evidence check did not verify the answer/i);
   }
 });
 
 for (const platformName of ["darwin", "win32"]) {
   test(`owner contract preserves integrated ledger refusals and supported controls: ${platformName}`, () => {
     const text = renderOwnerRulesSection({ platformName });
-    assert.match(text, /What was my profit <period>\?/);
-    assert.match(text, /What was my net income <period>\?/);
-    assert.match(text, /Money in minus money out, not accounting profit or cash flow/);
-    assert.match(text, /cash_flow_unsupported/);
-    assert.doesNotMatch(text, /`What was my cash flow <period>\?`/);
-    assert.match(text, /does not currently calculate cash flow/);
-    assert.match(text, /coverage_review_required/);
-    assert.match(text, /bank_export_overlap_review_required/);
-    assert.match(text, /merchant_selector_unsupported/);
-    assert.match(text, /merchant_selector_ambiguous/);
-    assert.match(text, /literal `and` and `&`/);
+    assert.match(text, /brain_money_guide, then go straight to brain_money_query/);
+    assert.match(text, /Money in minus money out is not automatically accounting profit or cash flow/);
+    assert.doesNotMatch(text, /cash_flow_unsupported|Template menu/);
+    assert.match(text, /Never add up search snippets/);
+    assert.match(text, /zero bank rows, say so first/);
+    assert.match(text, /source and date/);
+    assert.match(text, /coverage for account and date limits/);
+    assert.match(text, /Card and loan payments need separate treatment/);
+    assert.match(text, /Unknown mappings stay unassigned/);
+    assert.match(text, /Bank categories are hints, not rules/);
     assert.match(text, /Never raise a returned score/);
     assert.match(text, /confidence is unmeasured/);
     assert.doesNotMatch(text, /at (?:no more than|most) \d+% confidence/);
-    assert.match(text, /kind-filter miss alone cannot establish that an account is disconnected/);
+    assert.match(text, /Do not infer business ownership or an account kind from a memo/);
   });
 }
+
+
+test("a legacy veto preserves the readable figure and can only lower upstream confidence", () => {
+  for (const percent of [5, 25, 80]) {
+    const response = { status: "answer_withheld", answer: null,
+      notice: "The answer was withheld because it did not pass the money evidence check.",
+      confidence: { percent }, evidence_gate: { complete: false, supported: false },
+      results: [{ n: 1, title: "Synthetic record", snippet: "The recorded fee is $42.",
+        read_complete: true, text_reliable: true, text_source: "native" }] };
+    const body = legacyDocumentResponse(response);
+    assert.match(body.answer, /\$42/, "the returned readable record reached the final reading");
+    assert.doesNotMatch(body.answer, /withheld|I cannot|I can't/i);
+    assert.doesNotMatch(body.notice, /withheld/i);
+    assert.ok(body.confidence.percent <= percent && body.confidence.percent < 90);
+    assert.ok(body.confidence.reasons.some(reason => /evidence check/.test(reason)));
+    assert.ok(body.confidence.missing.length);
+    assert.equal(body.answer_contract.kind, "document");
+    assert.match(body.answer, /Coverage:.*Missing or counted twice:.*Estimates:.*How to check:/s);
+  }
+});

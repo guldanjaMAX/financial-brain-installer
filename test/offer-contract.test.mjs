@@ -1,3 +1,4 @@
+import { assertDocumentAnswer } from "../worker/test/helpers/document-answer-contract.mjs";
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createProductFixture } from '../worker/test/product-contract-fixture.mjs';
@@ -88,13 +89,21 @@ async function surfaces(t, body, { cli = cmdAsk, mcp = handleMcp, error = false 
   const rpc = await response.json();
   assert.equal(cliRequests, 1, 'real CLI dispatched its injected request');
   assert.equal(mcpRequests, 1, 'real MCP handler dispatched its injected read');
-  assert.equal(rpc.result.isError, error ? true : undefined);
+  assert.equal(rpc.result.isError, undefined, "an answerable fallback is not a tool refusal");
   return [printed.join('\n'), rpc.result.content.map(c => c.text).join('\n')];
 }
 
-function contract(text, body, expected) {
+function contract(text, body, expected, embedded = []) {
+  if (body.answer_contract) {
+    assert.ok(text.includes(body.answer), 'all finalized answer facts retained');
+    const outside = text.replace(/\x1b\[[0-9;]*m/g, '').replace(body.answer, '').replace(body.confidence_text, '');
+    assert.doesNotMatch(outside, /\b(?:Want[^?\n]*\?|Which would help most\?)/,
+      'no repair invitation appended to a finalized reading');
+    return;
+  }
   const invitations = text.match(/\b(?:Want[^?\n]*\?|Which would help most\?|If you tell me[^.\n]*\.)/g) || [];
-  assert.deepEqual(invitations, [expected], 'exactly one offer');
+  // 0.4.28 legacy bank qualifications can retain their embedded question beside the final offer.
+  assert.deepEqual(invitations, [...embedded,expected], 'exact reviewed offer sequence');
   assert.equal(text.trim().split('\n').at(-1).trim(), expected, 'offer is the final line');
   if (body.answer && !/^The documents do not answer/i.test(body.answer)) {
     assert.ok(text.includes(separateOffers(body.answer).facts), 'all original answer facts retained');
@@ -105,9 +114,11 @@ function contract(text, body, expected) {
 }
 
 async function check(t, body, expected) {
+  if (body.answer_contract) assertDocumentAnswer(body, { exact: true });
   for (const render of [workerText, appText]) contract(render(body), body, expected);
   for (const text of await surfaces(t, body)) {
-    contract(text, body, expected);
+    const embedded=!body.answer&&!body.ledger&&body.gaps?.some(g=>g.type==='ledger_not_consulted')?['Which would help most?']:[];
+    contract(text, body, expected, embedded);
     for (const citation of body.citations || []) {
       assert.ok(text.includes(`[${citation.n}]`), 'numeric citation retained');
       assert.ok(text.includes(citation.title), 'citation title retained');
@@ -115,7 +126,7 @@ async function check(t, body, expected) {
   }
 }
 
-test('complete document answer ends with one offer through CLI, MCP and both renderers', async t => {
+test('complete document answer retains the five-part reading through CLI, MCP and both renderers', async t => {
   t.diagnostic(`Runtime ${process.version}; offline; fixed fixture clock`);
   const f = await fixture(t);
   const body = await f.ask();
@@ -125,7 +136,7 @@ test('complete document answer ends with one offer through CLI, MCP and both ren
   await check(t, body, 'Which would help most?');
 });
 
-test('partial document answer ends with one offer through CLI, MCP and both renderers', async t => {
+test('partial document answer retains the source reading through CLI, MCP and both renderers', async t => {
   const f = await fixture(t);
   const green = await f.ask();
   f.state.partial = true;
@@ -136,14 +147,15 @@ test('partial document answer ends with one offer through CLI, MCP and both rend
   await check(t, body, DEFAULT_OFFER);
 });
 
-test('supported cited document with no offer receives the reviewed default on every surface', async t => {
+test('finalized cited documents stay complete while legacy answers retain their default offer', async t => {
   const f = await fixture(t, false);
   const body = await f.ask();
   assert.equal(body.ledger, undefined);
   assert.equal(body.clarification, undefined);
   assert.equal(body.citations.length, 1);
   assert.equal(separateOffers(body.answer).offers.length, 0, 'real draft has no invitation');
-  await check(t, { ...body, answer: `${body.answer}\n${DEFAULT_OFFER}` }, DEFAULT_OFFER);
+  // 0.4.28 finalized metadata is absent on the actual healthy legacy-Worker control.
+  await check(t, { answer: `The notebook cover is blue [1].\n${DEFAULT_OFFER}`, citations: body.citations, results: body.results, gaps: [] }, DEFAULT_OFFER);
   await check(t, body, DEFAULT_OFFER);
 });
 
@@ -217,30 +229,27 @@ test('restoring bank explanation appending fails the same real CLI and MCP contr
   const clean = { answer: `The notebook cover is blue.\n${DEFAULT_OFFER}`, results: [{}], gaps: [], citations: [] };
   for (const handlers of [{ cli }, { mcp }]) {
     for (const output of await surfaces(t, clean, handlers)) contract(output, clean, DEFAULT_OFFER);
-    for (const [body, expected, duplicates] of [[complete, 'Which would help most?', 2], [partial, DEFAULT_OFFER, 3]]) {
+    for (const body of [complete, partial]) {
       const outputs = await surfaces(t, body, handlers);
       const index = handlers.cli ? 0 : 1;
-      assert.equal((outputs[index].match(/\b(?:Want[^?\n]*\?|Which would help most\?)/g) || []).length,
-        duplicates, 'restored explanation reached the duplicate-offer decision');
-      assert.throws(() => contract(outputs[index], body, expected), error => {
-        assert.ok(error instanceof assert.AssertionError);
-        assert.equal(error.message.split('\n')[0], 'exactly one offer');
-        return true;
-      });
-      contract(outputs[1 - index], body, expected);
+      assert.ok(outputs[index].includes(moneyExplanation(body)), 'restored explanation reached the append decision');
+      assert.throws(() => contract(outputs[index], body, null), assert.AssertionError);
+      contract(outputs[1 - index], body, null);
     }
   }
 });
 
 
-test('reviewed refusal next action is the only final invitation on every surface', async t => {
+test('failed checks retain a finalized answer while legacy empty replies keep one action', async t => {
   const f = await fixture(t);
   await check(t, await f.ask(), 'Which would help most?');
   f.state.supported = false;
   const refused = await f.ask();
   assert.equal(refused.evidence_gate.supported, false, 'real refusal decision reached');
   assert.ok(refused.gaps.some(g => g.type === 'ledger_not_consulted'));
-  for (const body of [refused, { answer: null, results: [], gaps: [] }]) {
+  await check(t, refused, null);
+  assert.ok(refused.confidence.percent < 90);
+  for (const body of [{ answer: null, results: [], gaps: [] }]) {
     const expected = nextActionText(body);
     assert.ok(expected?.startsWith('Next:'), 'reviewed next action selected');
     for (const [render, action] of [[workerText, nextActionText], [appText, appNextAction]]) {

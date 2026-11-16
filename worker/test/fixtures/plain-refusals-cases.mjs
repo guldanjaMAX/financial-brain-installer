@@ -61,7 +61,7 @@ export const cases = [
   { id: 'vendor-mixed', question: spend,
     setup: f => f.add('possible', 'Store One charge', null, { direction: 'outflow', cents: 1200 }),
     expected: `Here is a partial view for "Store One": the bank names it on charges totaling $25.00 [1]; another $12.00 [2] only mentions it in the transaction text. These amounts stay separate, with no complete store total confirmed.\n${balance}` },
-  { id: 'expense-unknown', contextExpected: 'Money out I could check: $25.00 in October 1 to 12.\nPeriod: October 1 to 12.', question: 'What were my expenses in October 2026?',
+  { id: 'expense-unknown', contextExpected: 'Spending in October 1 to 12: at least $25.00; $0.00 more may be a card payment (unconfirmed).\nPeriod: October 1 to 12.', question: 'What were my expenses in October 2026?',
     setup: f => f.raw("UPDATE fin_accounts SET account_kind='other',balance_role='neither'"),
     expected: `Here is the money out I could check, with spending still unconfirmed. The account types for your account ending 1234 have not been confirmed, so some payments may be between your own accounts.\n${balance}` },
   { id: 'payment-payer', question: 'Did the payment from Payer Missing arrive in October 2026?',

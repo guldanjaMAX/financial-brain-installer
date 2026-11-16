@@ -578,9 +578,10 @@ test('role vocabulary in a document task retains its document response', async t
 // Pin the integrated reader, including the closed-world payment and category
 // guards. Existing behavioral and mutation controls still exercise its decisions.
 test('ordinary reader retains the reviewed integrated implementation', () => {
+  // 0.4.28 integrated no-refusal reader and date compiler; behavioral controls stay strict.
   const pinned = {
-  "ledger-answer.js": "415e001fb9be481c7f7bb89081586d4bd908b105db1aeb978a40143793bca99b",
-  "ledger-intent.js": "6852050469c4160c64d477def3893417c005a811a7d7ff37c4f753d34588e85a",
+  "ledger-answer.js": "0f823cb84407ba6304d84d8f2320071ef89e886661f05d89bfe43d0aa42caf1c",
+  "ledger-intent.js": "2438262ce3d598dc0c0b0d1556d48ec37e55b442c5c7db401dde54c17ccde502",
   "ledger-intent-scope.js": "daffc71b55dc59c77b53c8c378ee899a0307bcecedcf015c6f3b4a23e81a7d42"
 };
   for (const [name, hash] of Object.entries(pinned)) {

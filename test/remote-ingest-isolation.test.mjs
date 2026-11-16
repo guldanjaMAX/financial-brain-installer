@@ -1,3 +1,5 @@
+import { currentPartsFixture, driveChangesFixture } from './helpers/current-sync-fixture.mjs';
+import { gmailPolicyFingerprint } from '../connectors/gmail.mjs';
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -35,6 +37,7 @@ async function runRemoteCase(source, {
   resultChunks = 1,
   resumedGmailIds = [],
   proveResumedScanner = true,
+  ordinaryErrorClass = Error,
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), `brain-${source}-isolation-`));
   const manifestPath = join(root, "brain.manifest.json");
@@ -67,6 +70,13 @@ async function runRemoteCase(source, {
       : {}),
     ...priorCursor,
   };
+  const parts = currentPartsFixture();
+  for (const id of resumedGmailIds) parts.accept(goodEnvelope("gmail", id));
+  if (proveResumedScanner) for (const id of resumedGmailIds) {
+    state.gmail_accepted_parts ||= {};
+    state.gmail_accepted_parts[`gmail:${id}`] = { ...await parts.read({ source: "gmail", envelopes: [goodEnvelope("gmail", id)] }),
+      revision: `version-${id}`, policy_fingerprint: gmailPolicyFingerprint({ credentialScannerFingerprint: brain.credentialScannerFingerprint(true), since: null }) };
+  }
   const savedStates = [];
   const receipts = [];
   const sent = [];
@@ -79,12 +89,12 @@ async function runRemoteCase(source, {
   const systemicError = Object.assign(
     new Error(`synthetic ${source} systemic failure`),
     source === "drive"
-      ? { name: "DriveError", providerStatus: 503, retryable: true }
+      ? { name: "DriveError", status: 503, providerStatus: 503, retryable: true }
       : source === "gmail"
         ? { operationClass: "gmail_message_read", providerStatus: 503, retryable: true }
         : { name: "ImapError" },
   );
-  const ordinaryError = new Error(`synthetic ${source} per-item failure`);
+  const ordinaryError = new ordinaryErrorClass(`synthetic ${source} per-item failure`);
   const selectedError = systemic ? systemicError : ordinaryError;
 
   const drive = {
@@ -112,6 +122,8 @@ async function runRemoteCase(source, {
   const gmail = {
     currentHistoryId: async () => "next-gmail-cursor",
     listMessages: () => ids,
+    listMessagePage: async () => ({ ids, nextPageToken: null }),
+    messagePolicy: async () => ({ allowed: true }),
     toEnvelope: async (_token, id) => {
       prepared.push(id);
       if (prepareGmailItem) {
@@ -162,10 +174,15 @@ async function runRemoteCase(source, {
         serverObservedAt: "2026-09-24T00:00:00.000Z",
       };
     }
-    return families;
+    if (source === "gmail" && _request.singlePage) return { families, nextCursor: null };
+    return _request?.uids ? new Set([...families].filter(uid => _request.uids.includes(uid))) : families;
   };
 
+  const feed = driveChangesFixture(drive, ids.map(id => ({ id, name: `${id}.txt`,
+    mimeType: "text/plain", parents: ["fixture-root"] })), { token: "prior-drive-cursor", next: "next-drive-cursor" });
   const options = {
+    verifyDriveIncrementalWorker: async () => {}, readDriveFamily: async () => true,
+    readCurrentIngestParts: parts.read, driveNow: () => Date.parse("2026-11-01T00:00:00Z"),
     withSourceIngestLock: async (_lock, run) => run({ assertOwned: () => true }),
     resolveBaseUrl: async () => "https://brain.example.invalid",
     resolveAdminKey: () => "fixture-owner-proof",
@@ -177,7 +194,7 @@ async function runRemoteCase(source, {
       saveState: (_path, value) => savedStates.push(structuredClone(value)),
       prefetch: prefetchImpl,
     }),
-    drive,
+    drive: dryRun ? drive : feed.drive,
     gmail,
     imap,
     listStoredSourceFamilies,
@@ -194,6 +211,7 @@ async function runRemoteCase(source, {
       const items = groups.flat();
       for (const item of items) {
         sent.push(item.envelope.source_id);
+        parts.accept(item.envelope);
         onResult?.(item, {
           source_id: item.envelope.source_id,
           status: "created",
@@ -232,7 +250,11 @@ async function runRemoteCase(source, {
     if (expectSuccess) {
       await run;
     } else if (systemic) {
-      await assert.rejects(run, (error) => error === systemicError);
+      await assert.rejects(run, (error) => source === "drive"
+        ? error.supportCode === "INGEST_FAILED" && error.status === 503 : error === systemicError);
+    } else if (source === "drive" && !dryRun) {
+      const result = await run;
+      assert.equal(result.retryable_failures, 1, "the incremental entry failure was measured");
     } else {
       await assert.rejects(run, /1 stored part failed, so this ingest is incomplete/);
     }
@@ -264,11 +286,10 @@ test("Gmail pacing waits for accepted chunks and the unpaced control does not", 
     resultChunks: 3,
   });
   assert.deepEqual(paced.sent, ["good-before", "good-after"]);
-  assert.ok(
-    paced.reviewed.length > 0 && paced.reviewed.every((family) => family.family_kind === "structural"),
-    "the paced Gmail batch must reach the indexed structural cleanup path",
-  );
-  assert.deepEqual(paced.paceSleeps, [9_000]);
+  // Single-part mail is now settled at acceptance without sibling cleanup.
+  // Actual accepted ids above and the measured pacing below prove this path.
+  assert.deepEqual(paced.reviewed, [], "single-part pacing does not query sibling cleanup");
+  assert.deepEqual(paced.paceSleeps, [4_500, 4_500], "each accepted message checkpoints before its pace wait");
 
   const control = await runRemoteCase("gmail", {
     ids: ["good-before", "good-after"],
@@ -308,9 +329,15 @@ for (const source of ["drive", "gmail", "imap"]) {
     assert.equal(result.receipts.at(-1)?.docs_failed, 1);
     assert.equal(result.receipts.at(-1)?.complete_sweep, false);
     assert.equal(result.removals.includes(result.priorFamily), false);
-    assert.match(result.state.skipped[source === "imap" ? "imap:INBOX#2" : `${source}:bad`], /prior family was retained/);
+    if (source === "drive") {
+      // Reviewed R6 retains a durable entry gap while the healthy suffix advances.
+      assert.equal(result.state.drive_failures["drive:bad"].retryable, true);
+      assert.doesNotMatch(JSON.stringify(result.state.drive_failures), /synthetic .* per-item failure/,
+        "the reached preparation failure cannot persist its raw exception text");
+      assert.equal(result.state.done["drive:bad"], "prior-version");
+    } else assert.match(result.state.skipped[source === "imap" ? "imap:INBOX#2" : `${source}:bad`], /prior family was retained/);
     assert.doesNotMatch(JSON.stringify(result.state.skipped), /synthetic .* per-item failure/);
-    if (source === "drive") assert.equal(result.state.sync_token, "prior-drive-cursor");
+    if (source === "drive") assert.equal(result.state.sync_token, "next-drive-cursor");
     if (source === "gmail") assert.equal(result.state.history_id, "prior-gmail-cursor");
     if (source === "imap") assert.equal(Object.hasOwn(result.state, "imap_folders"), false);
   });
@@ -332,7 +359,8 @@ for (const source of ["drive", "imap"]) {
   test(`${source} rethrows a systemic preparation failure before later sends or cleanup`, async () => {
     const result = await runRemoteCase(source, { systemic: true });
     assert.deepEqual(result.prepared, ["good-before", "bad"]);
-    assert.deepEqual(result.sent, []);
+    assert.deepEqual(result.sent, source === "drive" ? ["good-before"] : [],
+      "reviewed incremental writes preserve the accepted prefix before a global stop");
     assert.deepEqual(result.reviewed, []);
     assert.deepEqual(result.removals, []);
     assert.equal(result.receipts.length, 2);
@@ -386,8 +414,20 @@ test("gmail systemic refusal stops new prefetch work after the concurrent consum
   // fetch/preparation work can start before the consumer reaches the earlier
   // refusal. Once it does, the source iterator closes and no new item starts.
   assert.deepEqual(result.prepared, ids.slice(0, 10));
-  assert.deepEqual(result.sent, []);
+  assert.deepEqual(result.sent, ["good-before"], "accepted prefix is durable before the later global failure");
   assert.deepEqual(result.reviewed, []);
   assert.deepEqual(result.removals, []);
   assert.equal(result.receipts.at(-1)?.walk_complete, false);
+});
+
+// Unexpected exception subclasses have the same privacy boundary as Error.
+test("Drive redacts an untyped extractor exception subclass while its healthy neighbors finish", async () => {
+  const result = await runRemoteCase("drive", { ordinaryErrorClass: TypeError });
+  assert.deepEqual(result.prepared, ["good-before", "bad", "good-after"], "the subclass failure was reached");
+  assert.deepEqual(result.sent, ["good-before", "good-after"], "populated healthy controls completed");
+  assert.doesNotMatch(JSON.stringify([result.state.skipped, result.state.drive_failures]), /synthetic .* per-item failure/);
+  assert.equal(result.state.drive_failures["drive:bad"].retryable, true);
+  assert.equal(result.state.done["drive:bad"], "prior-version");
+  assert.equal(result.receipts.at(-1).complete_sweep, false);
+  assert.deepEqual(result.removals, []);
 });

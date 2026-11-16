@@ -9,7 +9,7 @@ const source = readFileSync(url, 'utf8').replace('async function withParsedLedge
  .replace(/from (["'])(\.\.?\/[^"']+)\1/g, (_, q, p) => `from ${q}${new URL(p, url).href}${q}`);
 const { withParsedLedgerAnswer } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 async function parsed(f, extra = {}) {
- return (await withParsedLedgerAnswer({env:f.env, now:Date.parse('2026-10-12T12:00:00Z'), grantScope:{all:true}, scopePrincipalKind:'owner'}, async()=>Response.json({}),
+ return (await withParsedLedgerAnswer({env:f.env, question:'Find recorded payer activity in September 2026.', now:Date.parse('2026-10-12T12:00:00Z'), grantScope:{all:true}, scopePrincipalKind:'owner'}, async()=>Response.json({}),
  {broad:true,kind:'payment',direction:'inflow',timeZone:'UTC',mask:null,accountKind:null,from:'2026-09-08',to:'2026-09-22',amountMinor:null,counterpartyWords:['cedar'],...extra})).json();
 }
 test('payer description positives quote an assumption in payment and income readers', async t => {
@@ -124,7 +124,7 @@ test('isolated product mutations are killed by payer regressions', async t => {
  const rewriteCopy = copy => copy
   .replace(/from (["'])(\.\.?\/[^"']+)\1/g,(_,q,p)=>`from ${q}${new URL(p,import.meta.url).href}${q}`)
   .replaceAll('import.meta.url',JSON.stringify(import.meta.url));
- const env=Object.fromEntries(['SystemRoot','TEMP','TMP','PATH'].filter(k=>process.env[k]).map(k=>[k,process.env[k]]));
+ const env=Object.fromEntries(['SystemRoot','TEMP','TMP','PATH','HOME','TMPDIR','BRAIN_NO_WRANGLER_LOGIN','NODE_OPTIONS','BRAIN_LAUNCHCTL'].filter(k=>process.env[k]).map(k=>[k,process.env[k]]));
  const controlPath=join(dir,'control.mjs'); writeFileSync(controlPath,rewriteCopy(original));
  const control=spawnSync(process.execPath,['--test',controlPath],{env,encoding:'utf8',timeout:60000});
  assert.equal(control.status,0,'unmodified copied harness must pass: '+control.stdout+control.stderr);

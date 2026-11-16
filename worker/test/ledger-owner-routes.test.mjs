@@ -235,3 +235,15 @@ for(const prefix of ['Unit','Business','Personal'])for(const [index,kind] of equ
   assert.equal(b.ledger.selector_ambiguous,true);assert.deepEqual(b.ledger.accounts,control.ledger.accounts);
  });
 }
+
+test('payment-rule witness: literal buisness account keeps its numeric account control', async t => {
+  const { f } = makeLedger(427, t);
+  f.raw("UPDATE fin_accounts SET label='buisness' WHERE account_slug='personal'");
+  const control = await ask(f, 'What is my account ending 2222 balance?');
+  assert.equal(control.ledger.accounts[0].current_minor, 170427);
+  const body = await askBalanceInventory(f, "What's in my buisness account?");
+  assert.ok(f.calls.some(sql => /FROM fin_accounts/.test(sql)), 'literal inventory decision reached');
+  assert.deepEqual(body.ledger.accounts, control.ledger.accounts);
+  assert.match(body.answer, /1,704\.27/);
+  assert.doesNotMatch(body.answer, /5,004\.27/);
+});

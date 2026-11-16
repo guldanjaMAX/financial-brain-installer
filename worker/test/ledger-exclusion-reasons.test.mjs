@@ -226,7 +226,7 @@ test('restoring the wrong label and unmatched appendix is caught by the payment 
     assert.equal(source.split(before).length - 1, 1, 'restoring mutant reached exactly one changed site');
     source = source.replace(before, after);
   }
-  source = source.replace(/from "(\.\/[^"\n]+)"/g, (_, path) => `from ${JSON.stringify(new URL(path, sourceUrl).href)}`);
+  source = source.replace(/from (["'])(\.\.?\/[^"'\n]+)\1/g, (_, quote, path) => `from ${JSON.stringify(new URL(path, sourceUrl).href)}`);
   const mutant = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
   const f = setup(t);
   const wrong = await f.askWith(QUESTIONS[0], mutant.withLedgerAnswer);

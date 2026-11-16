@@ -1,3 +1,4 @@
+import { remoteMoneyFollowThrough, sameLedgerFigure } from './fixtures/remote-money-follow-through.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { randomBytes } from 'node:crypto';
@@ -47,6 +48,7 @@ async function ask(f, q = question, intent = null) {
   assert.equal(models, intent ? 1 : 0, 'intended extraction decision reached');
   assert.equal(fallbacks, 0);
   assert.ok(f.calls.slice(start).some(sql => /JOIN fin_transactions/.test(sql)), 'real scoped transaction read reached');
+  await sameLedgerFigure(f, { question: q, intents: [{ kind: intent?.kind || 'category', match: intent?.vendor_text || /\b(?:uncategorized|uncategorised|unsorted)\b/i.exec(q)?.[0] || 'materials', matchType: /largest expense in /.test(q) ? 'category' : 'merchant', mask: intent?.account_hint === '1234' ? '1234' : null, direction: 'outflow', limit: intent?.count || 1, from: '2026-09-01', to: '2026-09-30' }] });
   return body;
 }
 
@@ -78,20 +80,8 @@ async function surfaces(t, body, q) {
         return Response.json(body);
       } });
   } finally { print.mock.restore(); }
-  const url = new URL('https://brain.invalid/mcp');
-  const response = await handleMcp({}, new Request(url, { method: 'POST', body: JSON.stringify({
-    jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'ask', arguments: { question: q } },
-  }) }), url, { grant: { profile: 'read-only' }, think: async ({ q: actual }) => {
-    mcpCalls++;
-    assert.equal(actual, q);
-    return body;
-  } });
-  const rpc = await response.json();
-  assert.equal(response.status, 200);
-  assert.equal(rpc.id, 1);
-  assert.equal(rpc.result.isError, undefined);
-  assert.equal(cliCalls, 1, 'real CLI reached its injected request');
-  assert.equal(mcpCalls, 1, 'real MCP reached its injected reader');
+  const rpc = await remoteMoneyFollowThrough(q, async () => { mcpCalls++; return body; });
+  assert.equal(cliCalls, 1); assert.equal(mcpCalls, 1, 'document control reached once');
   return [body.answer, workerText(body), appText(body), printed.join('\n'), rpc.result.content.map(c => c.text).join('\n')];
 }
 

@@ -281,6 +281,11 @@ function ingestExitCli(scenario) {
   const args = scenario.startsWith("drive")
     ? ["ingest", manifest, "--from", "drive"]
     : ["ingest", manifest, "--path", source];
+  // Default Drive now seeds on first use. This failure probe starts with an
+  // existing token so it reaches a real changed-file write rather than a walk.
+  if (scenario.startsWith("drive")) writeFileSync(join(dir, ".brain-ingest-drive.json"), JSON.stringify({
+    version: 1, done: {}, skipped: {}, sync_token: "fixture-saved-cursor",
+  }), { mode: 0o600 });
   env.BRAIN_TEST_USER_ROOT = userRoot;
   const result = spawnSync(process.execPath, ["--import", SIDE_EFFECT_TRIPWIRE, "--import", SUPPORT_ACL, "--import", INGEST_EXIT_FETCH, CLI, ...args], {
     encoding: "utf-8", env, cwd: userRoot, timeout: 30_000,
@@ -465,15 +470,22 @@ for (const platform of new Set([process.platform, "win32", "darwin", "linux"])) 
   const r = ingestExitCli("drive-failed");
   const state = JSON.parse(readFileSync(r.statePath, "utf-8"));
   const receiptAt = r.out.indexOf("TEST_REMOTE_ERROR_RECEIPT_RECORDED");
-  const failureAt = r.out.indexOf("1 stored part failed, so this ingest is incomplete");
+  // R6 settles the feed independently from the durable item retry. The public
+  // CLI still signals incomplete work only after saving state and its receipt.
+  const failureAt = r.out.indexOf("1 Drive file failed, so this ingest is incomplete");
   check("a Drive document failure exits non-zero for launchd", r.code === 1, r.out.slice(-600));
-  check("Drive resume state stays retryable and withholds its cursor",
-    !("sync_token" in state) && Object.keys(state.done || {}).length === 0 &&
-      /part status was failed/.test(state.skipped?.["drive:fixture-file-one"] || ""), JSON.stringify(state));
+  check("Drive settles the feed while preserving its durable document retry",
+    state.sync_token === "fixture-next-cursor" && state.drive_change_page === undefined &&
+      state.drive_incremental_last_run?.retryable_failures === 1 &&
+      Object.keys(state.done || {}).length === 0 &&
+      /document write failed/.test(state.skipped?.["drive:fixture-file-one"] || "") &&
+      state.drive_failures?.["drive:fixture-file-one"]?.code === "ingest_write_failed" &&
+      state.drive_failures?.["drive:fixture-file-one"]?.retryable === true, JSON.stringify(state));
   check("Drive posts its error receipt before the CLI fails",
     receiptAt !== -1 && failureAt > receiptAt, r.out.slice(-800));
-  check("Drive explains that the cursor was not advanced",
-    /source cursor was NOT advanced/.test(r.out), r.out.slice(-700));
+  check("Drive explains feed catch-up and the incomplete retry separately",
+    /change feed caught up/.test(r.out) && /ingest is incomplete/.test(r.out) &&
+      /retry only what did not finish/.test(r.out), r.out.slice(-700));
   check("a known Drive document failure is not dressed up as an installer crash",
     !/unexpected error|This is a bug in the installer/.test(r.out), r.out.slice(-400));
   check("a failed Drive ingest creates one typed note without a Drive id",
@@ -482,6 +494,16 @@ for (const platform of new Set([process.platform, "win32", "darwin", "linux"])) 
       journalEvents(r.journal)[0]?.source === "drive" &&
       !r.journal.includes("fixture-file-one"), r.journal);
   rmSync(r.dir, { recursive: true, force: true });
+}
+{
+  const r = ingestExitCli('drive-healthy');
+  const state = JSON.parse(readFileSync(r.statePath,'utf8'));
+  check('healthy Drive control reaches the real sender and exits zero',
+    r.code === 0 && r.out.includes('TEST_REMOTE_WRITE_ACCEPTED'), r.out.slice(-600));
+  check('healthy Drive control settles the exact document and token without an issue note',
+    Boolean(state.done['drive:fixture-file-one']) && state.sync_token === 'fixture-next-cursor' &&
+      state.drive_incremental_last_run?.retryable_failures === 0 && r.journal === '', r.journal);
+  rmSync(r.dir, { recursive:true,force:true });
 }
 {
   const r = ingestExitCli("local-refused");

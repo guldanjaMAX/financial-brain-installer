@@ -123,7 +123,11 @@ const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-bank-feed-
 const apiResponse = (result) => new Response(JSON.stringify({ success: true, result, errors: [] }), {
   status: 200, headers: { "content-type": "application/json" },
 });
+let harnessCount = 0;
 function cloudflareHarness() {
+  // Each harness is a separate Worker for this computer's bank-key sighting
+  // record, kept inside the sandbox instead of the real home folder.
+  const sightingDirectory = join(sandbox, "sightings", String(harnessCount++));
   const metadata = [];
   const secretNames = new Set();
   let workerPuts = 0;
@@ -152,9 +156,12 @@ function cloudflareHarness() {
     if (path.endsWith("/workers/scripts/x-brain/schedules") && method === "GET") {
       return apiResponse([{ cron: "* * * * *" }]);
     }
+    if (path.endsWith("/d1/database/db-1/query") && method === "POST") {
+      return apiResponse([{ results: [{ sealed: 0 }], success: true }]);
+    }
     throw new Error(`offline fixture has no response for ${method} ${path}`);
   };
-  return { fetchImpl, metadata, get workerPuts() { return workerPuts; } };
+  return { fetchImpl, metadata, sightingDirectory, get workerPuts() { return workerPuts; } };
 }
 
 async function withFixtureRuntime(fetchImpl, operation) {
@@ -183,7 +190,10 @@ try {
   const manifestPath = join(sandbox, "brain.manifest.json");
   writeFileSync(manifestPath, JSON.stringify(deployManifest));
   const harness = cloudflareHarness();
-  await withFixtureRuntime(harness.fetchImpl, () => cmdDeploy(manifestPath, { nextSteps: false }));
+  await withFixtureRuntime(harness.fetchImpl, () => cmdDeploy(manifestPath, {
+    nextSteps: false,
+    bankWrappingKeySightingDirectory: harness.sightingDirectory,
+  }));
   assert.equal(harness.workerPuts, 1);
   const deployed = harness.metadata[0].bindings;
   assert.equal(valueOf(deployed, "BANK_FEED_PROVIDER"), "plaid");
@@ -200,6 +210,7 @@ try {
   const simpleFinHarness = cloudflareHarness();
   await withFixtureRuntime(simpleFinHarness.fetchImpl, () => cmdDeploy(manifestPath, {
     nextSteps: false,
+    bankWrappingKeySightingDirectory: simpleFinHarness.sightingDirectory,
     async readWorkerBankProvider({ phase }) {
       transitionCalls.push(`runtime:${phase}`);
       return phase === "before_upload" ? "plaid" : "simplefin";
@@ -227,7 +238,10 @@ try {
     corpora: { bank_feed: { enabled: true, provider: "plaid", api_base: "https://override.invalid" } },
   }));
   await assert.rejects(
-    withFixtureRuntime(invalidHarness.fetchImpl, () => cmdDeploy(manifestPath, { nextSteps: false })),
+    withFixtureRuntime(invalidHarness.fetchImpl, () => cmdDeploy(manifestPath, {
+      nextSteps: false,
+      bankWrappingKeySightingDirectory: invalidHarness.sightingDirectory,
+    })),
     /Plaid.*override/i,
   );
   assert.equal(invalidHarness.workerPuts, 0, "an invalid named profile must never upload a Worker");

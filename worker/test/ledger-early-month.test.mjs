@@ -1,3 +1,5 @@
+import { finalizeOwnerLedgerAnswer } from '../src/lib/document-answer.js';
+import { assertOwnerLedgerContract } from './helpers/ledger-answer-contract.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -34,11 +36,16 @@ const previousContract = (o, c) => {
     assert.equal(l.retained_outflow_minor, 0);
     assert.equal(l.classification_complete, false);
     assert.equal(l.coverage.complete, true);
-    assert.equal(previous.reason, 'ledger_account_kind_review_required');
-    assert.equal(previous.expense_total_minor, undefined);
+    assert.equal(previous.reason, undefined);
+    assert.equal(previous.expense_total_minor, null);
+    assert.equal(previous.retained_outflow_minor, 99134, 'the independently observed prior-month outflows remain visible');
     assert.equal(previous.complete, false);
     assert.equal(b.evidence_gate.complete, false);
-    assert.match(b.answer, /Before I count this as spending, I need to know which accounts are cards or loans/);
+    assert.equal(previous.observed_spending_lower_bound_minor,59134);
+    assert.equal(previous.classification_uncertain_minor,40000);
+    assert.match(b.answer, /at least \$591\.34; \$400\.00 more may be a card payment \(unconfirmed\)/i);
+    assert.match(b.answer, /account types.*have not been confirmed/);
+    assert.doesNotMatch(b.answer, /withheld|cannot|can't/i);
     assert.match(b.answer, /Bank history: all 3 accounts include October 1 to 2\./);
     assert.equal(reviewEarlyMonth(o, c).missing_previous, 0);
     return;
@@ -257,9 +264,15 @@ test('restoring a UTC calendar is contained by the owner-day reader guard', () =
   const broken = replay({ cases: [c], snapshotFor,
     sourceOverrides: { 'ledger-question.js': source.replace(site, 'const today = ledgerDay(now);') } }).observations[0];
   assert.equal(broken.execution_status, 'complete');
-  assert.equal(broken.trace.dependencies.includes('transactions'), false);
+  assert.ok(broken.trace.dependencies.includes('transactions'), 'projection reaches its historical evidence');
   assert.equal(broken.body.evidence_gate.complete, false);
-  assert.match(broken.body.answer, /period has not happened yet/i);
+  assert.equal(broken.body.ledger.projection, true);
+  assert.equal(broken.body.ledger.estimate, true);
+  assert.deepEqual([broken.body.ledger.from, broken.body.ledger.to], ['2026-11-01', '2026-11-01']);
+  assert.deepEqual(broken.body.ledger.basis.patterns, []);
+  assert.equal(broken.body.ledger.total_minor, 0, 'no repeating pattern is an estimate, never proof of no activity');
+  assert.match(broken.body.answer, /pattern-only estimate, not a prediction of no activity/);
+  assertOwnerLedgerContract(finalizeOwnerLedgerAnswer(broken.body));
   assert.throws(() => previousContract(broken, c), { name: 'AssertionError' });
 });
 

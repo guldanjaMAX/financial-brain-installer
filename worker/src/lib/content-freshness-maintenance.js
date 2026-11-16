@@ -1,3 +1,4 @@
+import { activeChunkSql } from "./retained-ingest.js";
 import { contentFreshness } from './content-freshness.js';
 import { jsonResponse } from './core.js';
 import { backendOf } from './store.js';
@@ -71,8 +72,8 @@ export async function refreshContentDates(env, {
   if (!Array.isArray(page)) refuse('content_dates_unavailable');
   const inventory = [];
   for (const doc of page.slice(0, readLimit)) {
-    const chunks = (await env.DB.prepare(`SELECT text,document_date FROM chunks WHERE doc_uid=?1
-      ORDER BY chunk_ix LIMIT 501`).bind(doc.doc_uid).all()).results;
+    const chunks = (await env.DB.prepare(`SELECT c.text,c.document_date FROM chunks c WHERE c.doc_uid=?1${activeChunkSql("c")}
+      ORDER BY c.chunk_ix LIMIT 501`).bind(doc.doc_uid).all()).results;
     if (!Array.isArray(chunks)) refuse('content_dates_unavailable');
     const blocked = chunks.length > 500;
     const fresh = blocked ? null : contentFreshness({ title: doc.title, content: chunks.map(c => c.text).join('\n'),

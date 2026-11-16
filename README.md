@@ -13,7 +13,7 @@ whichever supported clients are present without placing a key in their config.
 
 ## Install it
 
-This package identifies itself as brain-installer 0.4.27. Its version alone does
+This package identifies itself as brain-installer 0.4.28. Its version alone does
 not establish whether it is approved for installation. Before installing or
 updating, use the current guided page at https://financialbrain.ai/install and
 match the exact approved package version, byte count and SHA-256. If the page
@@ -177,8 +177,11 @@ reviewed step at a time with `--run tools`, `cloudflare`, `smoke`, `google`, `zo
 `imap`, `passkey`, or `verify`. The owner still handles login, 2FA, OAuth consent,
 and the physical passkey gesture. For the supported Google, Zoom, and IMAP
 steps, tokens and app secrets go only into hidden terminal prompts or provider
-pages. The 0.4.27 candidate Windows path refuses those three credential ceremonies until
-its secure secret-entry bridge is physically proven. Its first owner source is
+pages. On Windows the Google step reads the Client ID and Client secret from
+the clipboard inside the installer instead of a typed prompt, never prints
+them, and clears the clipboard before Google's consent page opens. The Windows
+path refuses the Zoom and IMAP credential ceremonies until its secure
+secret-entry bridge is physically proven. Its first owner source is
 one explicitly approved local folder, previewed first and loaded manually.
 
 **Bank connections are not part of ordinary onboarding yet.** They are still
@@ -1146,9 +1149,20 @@ claiming the original enumeration as the removal count.
   is split into its individual messages, each keeping its own subject, sender
   and date. (Before this version half that sentence was false — there was no
   `.mbox` reader and the archive was silently skipped.)
-- **Google Drive OAuth and resumable partial real-account ingest are verified.**
-  A complete no-limit first sweep and the live add, edit, refuse, recover,
-  trash, and incremental-refresh cycle remain field gates. Gmail is covered by
+- **Google Drive defaults to bounded additions and updates.** With no saved
+  change token, its first run seeds one and retains the existing index. Later
+  runs use the change feed with page checkpoints; removal signals become owner
+  decisions and cannot pause additions. `brain ingest <manifest> --from drive
+  --status` reads local token-check time, file counts, pending decisions, and
+  exact failures without network. Too-large, unreadable, unsupported and bounded
+  storage-admission skips remain visible with their reasons while later changes
+  proceed. A skipped update retains the older accepted text; coverage stays
+  incomplete until the gap is resolved. Historical
+  backfill, changed-folder descendants, and the new runner's live lifecycle
+  remain field gates. The paired schema-65 writer retains interrupted and
+  superseded revisions; an invalid saved checkpoint stops for recovery. See the
+  [backup-first apply procedure](docs/drive-incremental-recovery.md). Use `--full-walk-review --dry-run` only for an explicitly reviewed
+  provider comparison. The legacy mutating full walk is disabled. Gmail is covered by
   the same OAuth and cursor-safety test harness, including typed deletion,
   relabeling, guarded cleanup, and exact D1 readback. Promotions, Social, and
   Forums are excluded by default; Updates remains searchable. Gmail has not yet

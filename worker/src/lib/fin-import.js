@@ -414,28 +414,48 @@ function statementRow(tenantId, account, source, envelope, stamp) {
 }
 
 function balanceSnapshot(tenantId, account, source, envelope, stamp) {
-  const hasPosition = Object.hasOwn(account, "providerPositionMinor");
-  if (hasPosition && account.providerPositionMinor !== null && !Number.isSafeInteger(account.providerPositionMinor))
+  const fileLiability = source.provenance === 'extracted' && balanceRoleFor(account.accountKind) === 'liability';
+  const provedSign = ['position','owed_positive'].includes(account.balanceSignBasis);
+  const inferredPosition = fileLiability && provedSign ?
+    (account.balanceSignBasis === 'position' ? account.ledgerBalanceMinor : -account.ledgerBalanceMinor) : null;
+  const position = fileLiability ? inferredPosition : account.providerPositionMinor;
+  const hasPosition = fileLiability || Object.hasOwn(account, "providerPositionMinor");
+  const unproved = account.balanceOrderUnproved ? 'Running-balance order on the latest posting date is unproved.' :
+    fileLiability && !provedSign ? 'Liability balance sign is unproved: does the statement show signed position or positive amount owed?' : null;
+  const cell=account.balanceSource;
+  let locator=locatorFor(envelope, "balance");
+  // Older clients can still send readable figures, but cannot inherit proof
+  // from a parser they did not run. Persist the exact cell only when it agrees
+  // with this envelope's amount and date; legacy #balance stays distinguishable.
+  if (source.provenance==='extracted' && cell?.minor===account.ledgerBalanceMinor && cell?.date===account.balanceAsOf) {
+    if (cell.format==='ofx') locator+='/LEDGERBAL/BALAMT';
+    if (cell.format==='csv' && Number.isSafeInteger(cell.row) && cell.row>=2 &&
+        Number.isSafeInteger(cell.column) && cell.column>=1 &&
+        account.transactions.map(t=>t.postedOn).filter(Boolean).sort().at(-1)===cell.date)
+      locator+=`/csv/row-${cell.row}/column-${cell.column}`;
+  }
+  if (hasPosition && position !== null && !Number.isSafeInteger(position))
     throw new Error("provider balance position must use exact minor units");
   return [
     `INSERT INTO fin_balance_snapshots
        (tenant_id, account_slug, as_of_date, current_minor, available_minor, currency,
-        provenance, source_doc_uid, source_locator, source_feed, basis_state, recorded_at${hasPosition ? ', provider_position_minor' : ''})
-     VALUES (?,?,?,?,?,?,?,?,?,?,'confirmed',?${hasPosition ? ',?' : ''})
+        provenance, source_doc_uid, source_locator, source_feed, basis_state, recorded_at, unparsed_reason${hasPosition ? ', provider_position_minor' : ''})
+     VALUES (?,?,?,?,?,?,?,?,?,?,?, ?,?${hasPosition ? ',?' : ''})
      ON CONFLICT (tenant_id, account_slug, as_of_date, provenance) DO UPDATE SET
        current_minor = excluded.current_minor,
        available_minor = excluded.available_minor,
        source_doc_uid = excluded.source_doc_uid,
        source_locator = excluded.source_locator,
-       recorded_at = excluded.recorded_at${hasPosition ? ', provider_position_minor = excluded.provider_position_minor' : ''}`,
+       recorded_at = excluded.recorded_at, basis_state = excluded.basis_state,
+       unparsed_reason = excluded.unparsed_reason${hasPosition ? ', provider_position_minor = excluded.provider_position_minor' : ''}`,
     [
       tenantId, account.accountKey, account.balanceAsOf,
-      account.ledgerBalanceMinor,
+      fileLiability && provedSign ? -position : account.ledgerBalanceMinor,
       account.availableBalanceMinor ?? null,
       account.currency || "USD",
-      source.provenance, source.sourceDocUid, locatorFor(envelope, "balance"),
-      source.sourceFeed, stamp,
-      ...(hasPosition ? [account.providerPositionMinor] : []),
+      source.provenance, source.sourceDocUid, locator,
+      source.sourceFeed, unproved ? 'proposed' : 'confirmed', stamp, unproved,
+      ...(hasPosition ? [position] : []),
     ],
   ];
 }

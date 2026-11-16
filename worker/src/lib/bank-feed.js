@@ -1239,14 +1239,14 @@ export function classifyItemError(code) {
  * Returns a progress report rather than a checkmark, because the operator has
  * to be able to tell the client where the load has got to.
  */
-export async function runFeedSlice(env, { maxItems = 3, maxPages = MAX_PAGES_PER_SLICE, fetchImpl = fetch, now = null } = {}) {
+export async function runFeedSlice(env, { maxItems = 3, maxPages = MAX_PAGES_PER_SLICE, fetchImpl = fetch, now = null, daily = false } = {}) {
   if (bankFeedConfig(env).provider === "plaid") {
     const { runPlaidFeedSlice } = await import("./plaid-bank-feed.js");
-    return runPlaidFeedSlice(env, { maxItems, fetchImpl, now });
+    return runPlaidFeedSlice(env, { maxItems, fetchImpl, now, daily });
   }
   if (bankFeedConfig(env).provider === "simplefin") {
     const { runSimpleFinMaintenance } = await import("./simplefin-bank-feed.js");
-    return runSimpleFinMaintenance(env, { maxItems, maxRequestsPerItem: maxPages, fetchImpl, now });
+    return runSimpleFinMaintenance(env, { maxItems, maxRequestsPerItem: maxPages, fetchImpl, now, daily });
   }
   const { tenantId } = tenantReference(env);
   const stamp = now || new Date().toISOString();
@@ -1323,20 +1323,28 @@ export async function refreshBankActivityAfterAccountAssignment(env, {
  * which need attention, and how far the history load has got. No reference, no
  * ciphertext, no provider payload.
  */
-export async function feedStatus(env) {
+export async function feedStatus(env, options = {}) {
   if (env.BANK_FEED_PROVIDER === "plaid") {
     const { plaidFeedStatus } = await import("./plaid-bank-feed.js");
-    return plaidFeedStatus(env);
+    return plaidFeedStatus(env, options);
   }
   if (env.BANK_FEED_PROVIDER === "simplefin") {
     const { simpleFinFeedStatus } = await import("./simplefin-bank-feed.js");
-    return simpleFinFeedStatus(env);
+    return simpleFinFeedStatus(env, options);
   }
   const { tenantId } = tenantReference(env);
+  // Read stored receipts even when a missing provider variable prevents a
+  // scheduled pass. Do not infer a provider or attempt a provider request here.
+  const {bankHealthMap}=await import('./bank-feed-health.js');
+  const health=await bankHealthMap(env,options.now || new Date().toISOString());
   const items = (await env.DB.prepare(
     `SELECT i.item_ref, i.institution_label, i.environment, i.status, i.status_detail, i.key_version,
             i.connected_at, i.last_synced_at,
-            b.state AS history_state, b.pages_done, b.transactions_seen, b.unread_lines, b.last_error
+            b.state AS history_state, b.pages_done, b.transactions_seen, b.unread_lines, b.last_error,
+            ((SELECT COUNT(*) FROM plaid_account_entity_assignments a
+              WHERE a.tenant_id=i.tenant_id AND a.item_ref=i.item_ref AND a.entity_slug IS NULL)
+            +(SELECT COUNT(*) FROM simplefin_account_assignments a
+              WHERE a.tenant_id=i.tenant_id AND a.item_ref=i.item_ref AND a.entity_slug IS NULL)) AS accounts_needing_owner
        FROM bank_feed_items i
        LEFT JOIN bank_feed_backfill b ON b.tenant_id = i.tenant_id AND b.item_ref = i.item_ref
       WHERE i.tenant_id = ? AND i.removed_at IS NULL
@@ -1356,6 +1364,9 @@ export async function feedStatus(env) {
       access_reference_state: accessReferenceState(row, env),
       connected_at: row.connected_at,
       last_synced_at: row.last_synced_at,
+      health:health.get(row.item_ref),
+      status_line:health.get(row.item_ref)?.status_line,
+      accounts_needing_owner:Number(row.accounts_needing_owner || 0),
       history: {
         state: row.history_state || "none",
         pages_done: row.pages_done ?? 0,
@@ -1368,7 +1379,7 @@ export async function feedStatus(env) {
     // whatever has happened at that bank since it broke. Surfacing it here is
     // the difference between a stale answer and a stale answer that says so.
     needs_attention: items
-      .filter((row) => row.status !== "connected")
+      .filter((row) => row.status !== "connected" || health.get(row.item_ref)?.state !== 'healthy' || row.accounts_needing_owner>0)
       .map((row) => ({ item_ref: row.item_ref, status: row.status, detail: row.status_detail })),
   };
 }
@@ -2196,6 +2207,21 @@ export async function handleBankFeed(env, request, url, path, ctx) {
       }
     }
 
+    if (path === "/api/bank-feed/simplefin/repair" && request.method === "POST") {
+      const access = await ownerAccess();
+      if (!access.authorised) return privateNoStore(ownerRefusal(access));
+      if (bankFeedConfig(env).provider !== "simplefin") {
+        return ownerJson({ code: "simplefin_provider_not_selected" }, 404);
+      }
+      const body = await readJson(request);
+      const { repairSimpleFinAccess } = await import("./simplefin-bank-feed.js");
+      return ownerJson(await repairSimpleFinAccess(env, {
+        itemRef: body.item_ref,
+        fetchImpl: ctx?.bankFeedFetchImpl || fetch,
+        now: ctx?.bankFeedNow || null,
+      }));
+    }
+
     if (path === "/api/bank-feed/simplefin/claim" && request.method === "POST") {
       const access = await ownerAccess();
       if (!access.authorised) return privateNoStore(ownerRefusal(access));
@@ -2265,7 +2291,7 @@ export async function handleBankFeed(env, request, url, path, ctx) {
     if (path === "/api/bank-feed/status" && request.method === "GET") {
       const access = await ownerAccess();
       if (!access.authorised && !operatorAuthorised()) return ownerRefusal(access);
-      return jsonResponse(await feedStatus(env));
+      return jsonResponse(await feedStatus(env, {now:ctx?.bankFeedNow || null}));
     }
 
     if (path === "/api/bank-feed/accounts" && request.method === "GET") {
@@ -2355,7 +2381,17 @@ export async function handleBankFeed(env, request, url, path, ctx) {
     if (path === "/api/bank-feed/sync" && request.method === "POST") {
       if (!operatorAuthorised()) return jsonResponse({ error: "unauthorized" }, 401);
       const body = await readJson(request);
+      if (body.daily === true && (['plaid','simplefin'].includes(env.BANK_FEED_PROVIDER) ||
+          (!env.BANK_FEED_PROVIDER && !env.BANK_FEED_API_BASE))) {
+        // Health debt is durable even when missing provider settings make the
+        // next step fail. This never chooses a provider or bypasses the pause.
+        const {reconcileBankFeedHealth}=await import('./bank-feed-health.js');
+        await reconcileBankFeedHealth(env,ctx?.bankFeedNow || new Date().toISOString());
+      }
       return jsonResponse(await runFeedSlice(env, {
+        daily: body.daily === true,
+        fetchImpl: ctx?.bankFeedFetchImpl || fetch,
+        now: ctx?.bankFeedNow || null,
         maxItems: Math.min(Number(body.max_items) || 3, 10),
         maxPages: Math.min(Number(body.max_pages) || MAX_PAGES_PER_SLICE, 20),
       }));

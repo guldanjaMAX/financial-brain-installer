@@ -1,3 +1,4 @@
+import { assertDocumentAnswer } from './helpers/document-answer-contract.mjs';
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createProductFixture } from "./product-contract-fixture.mjs";
@@ -65,7 +66,7 @@ async function run(t, {
 
 test("money: a dated primary record passes unchanged", async (t) => {
   const body = await run(t);
-  assert.equal(body.answer, ANSWER);
+  assertDocumentAnswer(body, { expected: ANSWER, exact: true });
   assert.equal(body.evidence_gate.supported, true);
   assert.equal(body.evidence_gate.complete, true);
 });
@@ -88,7 +89,7 @@ test("money topic: native call transcript answers a desire-statements question",
   });
   assert.equal(body.results[0].authority.tier, "T4", "the native transcript reaches its real authority decision");
   assert.equal(body.results[0].text_source, "native");
-  assert.equal(body.answer, answer, body.evidence_gate.reason);
+  assertDocumentAnswer(body, { expected: answer, exact: true });
   assert.equal(body.evidence_gate.supported, true);
   assert.equal(body.gaps.some(gap => gap.type === "money_veto"), false);
 });
@@ -103,8 +104,8 @@ test("money topic: desire-statements questions retain ordinary retrieval windows
   assert.equal(body.time_window?.from, "2026-10-09T00:00:00.000Z");
   assert.equal(body.evidence_gate.supported, true);
   const money = await run(t, { question: "What did I pay in the last 2 days?" });
-  assert.equal(money.answer, ANSWER);
-  assert.equal(money.time_window, undefined, "real money keeps its verifier-only window contract");
+  assertDocumentAnswer(money, { expected: ANSWER, exact: true });
+  assert.equal(money.time_window.from, "2026-10-09T00:00:00.000Z", "the inferred period labels the attributed record without filtering it");
 });
 
 // The short spend question now belongs to the deterministic ledger route.
@@ -125,9 +126,9 @@ for (const question of [
 ]) {
   test(`money topic: unsupported financial question stays guarded: ${question}`, async (t) => {
     const control = await run(t, { question });
-    assert.equal(control.answer, ANSWER, control.evidence_gate.reason);
+    assertDocumentAnswer(control, { expected: ANSWER, exact: true });
     const body = await run(t, { question, answer: ANSWER.replace("120.00", "121.00") });
-    assert.equal(body.answer, null);
+    assertDocumentAnswer(body, { provisional: true, empty: !body.results?.length });
     assert.equal(body.gaps.find(gap => gap.type === "money_veto")?.rule, "span_mismatch");
   });
 }
@@ -194,7 +195,7 @@ for (const kind of ["gmail", "imessage", "upload", "calendar", "gdrive"]) {
     const body = await run(t, { lineage: null, kind });
     assert.equal(body.results[0].lineage.status, "unknown", "stored legacy lineage remains unknown");
     assert.equal(body.results[0].lineage.kind, "unclassified");
-    assert.equal(body.answer, ANSWER);
+    assertDocumentAnswer(body, { expected: ANSWER, exact: true });
     assert.equal(body.evidence_gate.supported, true);
     assert.equal(body.evidence_gate.complete, true);
     assert.equal(body.citations[0].lineage.status, "unknown", "acceptance grants no corroboration credit");
@@ -214,7 +215,7 @@ for (const [label, mutation, reason] of [
   test(`money: legacy support still refuses ${label}`, async (t) => {
     const body = await run(t, { lineage: null, kind: "gmail", ...mutation });
     assert.equal(body.results[0].lineage.status, "unknown", "the legacy evidence was actually retrieved");
-    assert.equal(body.answer, null);
+    assertDocumentAnswer(body, { provisional: true, empty: !body.results?.length });
     assert.equal(body.evidence_gate.supported, false);
     assert.equal(body.evidence_gate.complete, false);
     assert.match(body.evidence_gate.reason, reason);
@@ -249,7 +250,7 @@ for (const [label, mutation, reason] of [
 ]) {
   test(`money veto: ${label} despite model approval`, async (t) => {
     const body = await run(t, mutation);
-    assert.equal(body.answer, null);
+    assertDocumentAnswer(body, { provisional: true, empty: !body.results?.length });
     assert.equal(body.evidence_gate.supported, false);
     assert.equal(body.evidence_gate.complete, false);
     assert.match(body.evidence_gate.reason, reason);
@@ -260,7 +261,7 @@ for (const [label, mutation, reason] of [
 test("money: explicit unconfirmed core remains partial despite complete model verdict", async (t) => {
   const answer = `${ANSWER} The documents do not confirm whether all statements are present.`;
   const body = await run(t, { question: "What was charged and do I have all statements?", answer });
-  assert.equal(body.answer, answer);
+  assertDocumentAnswer(body, { expected: answer, exact: true });
   assert.equal(body.evidence_gate.supported, true);
   assert.equal(body.evidence_gate.complete, false);
   assert.equal(body.evidence_gate.partial, true);
@@ -269,21 +270,21 @@ test("money: explicit unconfirmed core remains partial despite complete model ve
 test("money: a subject-first uncertainty sentence stays partial", async (t) => {
   const answer = `${ANSWER} Payment status is unconfirmed.`;
   const body = await run(t, { answer });
-  assert.equal(body.answer, answer);
+  assertDocumentAnswer(body, { expected: answer, exact: true });
   assert.equal(body.evidence_gate.complete, false);
   assert.equal(body.evidence_gate.partial, true);
 });
 
 test("money: a rejected verifier can never be promoted", async (t) => {
   const body = await run(t, { verdict: { supported: false, complete: false } });
-  assert.equal(body.answer, null);
+  assertDocumentAnswer(body, { provisional: true, empty: !body.results?.length });
   assert.equal(body.evidence_gate.supported, false);
 });
 
 test("non-money: response prose and verdict remain byte-identical", async (t) => {
   const answer = "The workshop has 12 chairs [1].";
   const body = await run(t, { question: "How many chairs are in the workshop?", answer, content: answer, reliable: false, lineage: "agent_derived" });
-  assert.equal(body.answer, answer);
+  assertDocumentAnswer(body, { expected: answer, exact: true });
   assert.equal(JSON.stringify(body.evidence_gate), JSON.stringify({ supported: true, complete: true, evidence: [1], reason: "injected approval" }));
 });
 
@@ -327,7 +328,8 @@ for (const [label, claim, span] of equivalences) {
   test(`calibration Think control: ${label}`, async t => {
     const answer = `${claim} [1].`;
     const body = await run(t, { question: "What does the money record say?", answer, content: span });
-    assert.equal(body.answer, answer, body.evidence_gate.reason);
+    assert.equal(applyMoneyVeto(calibrationInput(answer, [span])).answer, answer, "the original money normalization remains exact");
+    assertDocumentAnswer(body, { expected: span, exact: true });
     assert.equal(body.evidence_gate.supported, true);
     assert.equal(body.gaps.some(gap => gap.type === "money_veto"), false);
   });
@@ -349,7 +351,7 @@ for (const [label, claim, span] of [
 ]) {
   test(`calibration Think refusal: ${label}`, async t => {
     const body = await run(t, { question: "What does the money record say?", answer: `${claim} [1].`, content: span });
-    assert.equal(body.answer, null);
+    assertDocumentAnswer(body, { provisional: true, empty: !body.results?.length });
     assert.equal(body.evidence_gate.supported, false);
     const diagnostic = body.gaps.filter(gap => gap.type === "money_veto");
     assert.deepEqual(diagnostic, [{ type: "money_veto", rule: "span_mismatch", count: 1,
@@ -360,7 +362,7 @@ for (const [label, claim, span] of [
 for (const dateText of ["2026-10-10", "October 10, 2026"]) {
   test(`calibration Think explicit span date: ${dateText}`, async t => {
     const body = await run(t, { reliable: false, content: `Card ending 4242 charged USD 120.00 on ${dateText}.` });
-    assert.equal(body.answer, ANSWER, body.evidence_gate.reason);
+    assertDocumentAnswer(body, { expected: ANSWER, exact: true });
     assert.equal(body.citations[0].date_reliable, false, "metadata is not promoted by a claim-specific date");
   });
 }
@@ -373,14 +375,14 @@ for (const [label, content, rule] of [
 ]) {
   test(`calibration Think date refusal: ${label}`, async t => {
     const body = await run(t, { reliable: false, content });
-    assert.equal(body.answer, null);
+    assertDocumentAnswer(body, { provisional: true, empty: !body.results?.length });
     assert.equal(body.gaps.find(gap => gap.type === "money_veto")?.rule, rule);
   });
 }
 
 test("calibration model refusal has no veto diagnostic", async t => {
   const body = await run(t, { verdict: { supported: false, complete: false } });
-  assert.equal(body.answer, null);
+  assertDocumentAnswer(body, { provisional: true, empty: !body.results?.length });
   assert.equal(body.gaps.some(gap => gap.type === "money_veto"), false);
 });
 
@@ -449,7 +451,8 @@ for (const [label, claim, span, supported] of [
 ]) {
   test(`calibration compact answer: ${label}`, async t => {
     const body = await run(t, { question: "What does the money record say?", answer: claim, content: span });
-    assert.equal(body.answer, supported ? claim : null);
+    assert.equal(applyMoneyVeto(calibrationInput(claim, [span])).answer, supported ? claim : null);
+    assertDocumentAnswer(body, { expected: span, provisional: !supported, exact: true });
   });
 }
 
@@ -497,7 +500,9 @@ test("a money veto and a later scanned-tax gap both survive the real think route
       },
     }],
   });
-  assert.equal(body.answer, null, "the mismatched money figure was refused");
+  assertDocumentAnswer(body, { provisional: true });
+  assert.match(body.answer, /USD 120\.00/);
+  assert.doesNotMatch(body.answer, /USD 121\.00/);
   assert.ok(body.gaps.some((gap) => gap.type === "money_veto"),
     `the money-veto decision remains visible: ${JSON.stringify(body)}`);
   assert.ok(body.gaps.some((gap) => gap.type === "tax_evidence_unreadable"), "the scanned-tax gap remains visible");

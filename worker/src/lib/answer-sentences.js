@@ -14,12 +14,8 @@
  * this. Splitting on every "." turned a supported "$1,234.73 [1]" into
  * "73 [1]" and a "[1] ... $1,234.73." into a clean, wrong "$1,234.".
  *
- * Known limitation, deferred past 0.4.9: an abbreviation followed by a space
- * still ends a sentence, so "Example Co. recorded ... [1]." splits after
- * "Co.", and the partial-answer path then drops the uncited "Example Co."
- * fragment. worker/test/routes.test.mjs records that output as a known
- * limitation, not a pass. Changing this rule needs its own failing-first case
- * and control.
+ * Common company and personal-title abbreviations retain their whole clause,
+ * so a partial answer cannot detach the cited figure from its subject.
  */
 export function answerSentences(text) {
   const value = String(text || "");
@@ -36,6 +32,8 @@ export function answerSentences(text) {
     if (next >= value.length) return true;
     if (mark === "." && /\s/u.test(value[next])) {
       const following = skipWhitespace(next);
+      const abbreviation = /\b(?:Co|Inc|Ltd|Corp|Dr|Mr|Mrs|Ms|St|vs|etc)\.$/i.test(value.slice(0,index+1));
+      if (abbreviation) return false;
       const compactInitialism = /(?:^|[^A-Za-z])(?:[A-Z]\.){2,}$/u.test(value.slice(0, index + 1));
       if (compactInitialism && /[a-z]/u.test(value[following] || "")) return false;
     }

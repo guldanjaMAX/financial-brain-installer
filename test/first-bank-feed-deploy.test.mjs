@@ -72,6 +72,7 @@ async function fixture(t, { bindings = [], priorEnabled = false, apply = true } 
   }
   return { db, directory, manifestPath, inspectBankState, commandOptions, get puts() { return puts; },
     preview: () => cmdBankProvider(argv, cliOptions), deploy: () => cmdDeploy(manifestPath, { nextSteps: false,
+    bankWrappingKeySightingDirectory: join(directory, 'bank-key-sightings'),
     d1Query: async (_a, _d, sql, params = []) => ({ results: db.prepare(sql).all(...params) }),
   }) };
 }

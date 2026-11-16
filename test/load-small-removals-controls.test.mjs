@@ -3,15 +3,14 @@ import test from "node:test";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+// Automatic apply is deliberately unreachable. Its old never-apply, omit-receipt
+// and ignore-failure controls cannot discriminate; always-apply still must fail.
 const root = fileURLToPath(new URL("../", import.meta.url));
 for (const [control, pattern, failures] of [
-  ["good", "1 of 1269|stays held|receipt, owner|Drive .*approval line", 0],
-  ["never-apply", "1 of 1269", 2],
+  ["good", "1 of 1269|stays held|receipt, owner|Drive .*approval line|Folder CLI held review|Drive incremental ingest", 0],
   ["always-apply", "stays held", 11],
-  ["omit-receipt", "receipt, owner", 1],
-  ["ignore-failure", "receipt, owner", 2],
-  ["immediate-exit", "Drive CLI held review", 1],
-  ["startup-refusal", "Drive CLI held review", 1],
+  ["immediate-exit", "Folder CLI held review", 1],
+  ["startup-refusal", "Folder CLI held review", 1],
   ["omit-approval", "Drive held review", 3],
 ]) {
   test(`real load discrimination: ${control}`, () => {

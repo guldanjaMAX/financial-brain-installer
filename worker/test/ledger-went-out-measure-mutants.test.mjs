@@ -10,12 +10,13 @@ import { fileURLToPath } from 'node:url';
 // Each mutant removes one money-out decision. The named behavior test must go
 // red with an assertion (never a crash), and the source must be restored.
 const root = fileURLToPath(new URL('../../', import.meta.url));
+// 0.4.28 retains mixed/category-conflict postings and discloses observed counterpart uncertainty.
 const mutations = [
   ['connected card payment counted on top of its purchases', 'ledger-answer.js',
     '      : others.filter(account => couldReceiveRepayment(account, kind));', '      : [];', 'an unproven card payment is withheld'],
   ['possible loan payment dropped from money out', 'ledger-answer.js',
-    'const possiblePaymentIdsInScope = new Set(moneyOut || totalsMoneyOut ? [] : possiblePayments.map(({ row }) => row.id));',
-    'const possiblePaymentIdsInScope = new Set(possiblePayments.map(({ row }) => row.id));', 'store Q4'],
+    'const possiblePaymentIdsInScope = new Set(moneyOut || totalsMoneyOut ? [] : possiblePayments.filter(({ candidate }) => !candidate.mixed && !candidate.categoryConflict).map(({ row }) => row.id));',
+    'const possiblePaymentIdsInScope = new Set(possiblePayments.filter(({ candidate }) => !candidate.mixed && !candidate.categoryConflict).map(({ row }) => row.id));', 'store Q4'],
   ['totals money out keeps the 0.4.27 exclusion', 'ledger-answer.js',
     "const totalsMoneyOut = intent.kind === 'totals' && !intent.inflowOnly;", 'const totalsMoneyOut = false;', 'money in and out totals'],
   ['spending measure changed', 'ledger-answer.js',
@@ -29,13 +30,15 @@ const mutations = [
   ['unproven transfer leg counted', 'ledger-answer.js',
     "const counterparts = kind === 'transfer' || kind === 'own_account' || destination ? others.filter(",
     "const counterparts = kind === 'transfer' || kind === 'own_account' || destination ? [].filter(",
-    'equal amount lands'],
+    'unproved equal connected counterpart'],
   ['model-read measure dropped', 'ledger-intent.js', ')) intent.outflowMeasure = true;', ')) intent.outflowMeasureDropped = true;',
     'model-read money out'],
-  ['included claimed without a stated figure', 'ledger-answer.js',
-    'const included = operands.has(`ledger:transaction:${row.id}`) && !counterparts.length;', 'const included = !counterparts.length;',
-    'states no figure'],
-  ['refused month read as figures', 'ledger-monthly.js', 'readable && both && Array.isArray(ledger.lead_accounts) ? {', 'readable && both ? {',
+  // 0.4.28 observed counterparts are included with a duplicate bound; losing that inclusion must fail.
+  ['observed counterpart inclusion lost', 'ledger-answer.js',
+    'const included = operands.has(`ledger:transaction:${row.id}`) && (!counterparts.length || observedPaymentReading);', 'const included = !counterparts.length;',
+    'an unproven card payment is withheld'],
+  // 0.4.28 observed monthly in/out values must survive composition as two separate figures.
+  ['observed monthly in/out figures lost', 'ledger-monthly.js', 'readable && both && Array.isArray(ledger.lead_accounts) ? {', 'false ? {',
     'money in and out totals'],
   ['monthly operand lost', 'ledger-monthly.js', '!uncountedRepaymentNumbers.has(n)', '!possibleRepaymentNumbers.has(n)',
     'model-read money out'],

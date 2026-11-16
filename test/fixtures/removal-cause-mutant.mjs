@@ -11,7 +11,16 @@ registerHooks({ load(url, context, nextLoad) {
     writeSync(2, `REMOVAL_CAUSE_MUTANT_REACHED:${mode}\n`);
   };
   if (mode === "f1" && url.endsWith("/operations/load-removal-review.mjs")) {
-    replace('checkedRemovalCauseCounts(review.removal_causes, total)?.explicit_deletion === total', 'true');
+    // Reviewed shared gate is now closed for every automatic source removal.
+    // Preserve the true-deletion hold control, then reintroduce unsafe policy apply.
+    const first = source.indexOf('export function canAutoApplyRemoval(');
+    const last = source.indexOf('\n}', first);
+    if (first < 0 || last < first) throw new Error("The restoring mutation missed its gate.");
+    replace(source.slice(first, last + 2),
+      'export function canAutoApplyRemoval(review, kind, source) {\n' +
+      '  const unsafe = review?.removal_causes?.scope_or_filter_change > 0;\n' +
+      '  if (unsafe) process.stderr.write("REMOVAL_CAUSE_MUTANT_DECISION\\n");\n' +
+      '  return unsafe;\n}');
   }
   if (mode === "f1" && url.endsWith("/operations/ingest-removal-plan.mjs")) {
     replace('automatic && !canAutoApplyRemoval(reviewFacts(plan), kind, source)', 'false');

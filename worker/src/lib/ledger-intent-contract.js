@@ -6,7 +6,7 @@ const outerTask = /\b(?:translate|translation|rewrite|rephrase|proofread|explain
 // Admission vocabulary is deliberately broader than the operation grammar.
 // Inflection and account/activity nouns must not decide the eventual reader.
 export const ledgerShorthandDecoy = /\b(?:accts? manager|rev of (?:the )?doc|cc (?:me|them|the team))\b/i;
-export const ledgerMoneyCue = /\b(?:accts?|bal|txns?|rev|cc|landed|outgoings|went to|take in|did it hit|come through|money|cash|bank|accounts?|balances?|deposit(?:s|ed|ing)?|expenses?|charges?|purchases?|costs?|bills?|subscriptions?|payments?|pay|paying|paid|spend|spent|spending|income|incoming|outgoing|revenue|transactions?|transfers?|inflows?|outflows?|funds|credits?|debits?|checking|savings|receipts?|renewals?|received|arrived|came in|went out|shelled out)\b|\$\s*\d/i;
+export const ledgerMoneyCue = /\b(?:vendors?|loans?|accts?|bal|txns?|rev|cc|landed|outgoings|went to|take in|did it hit|come through|money|cash|bank|accounts?|balances?|deposit(?:s|ed|ing)?|expenses?|charges?|purchases?|costs?|bills?|subscriptions?|payments?|pay|paying|paid|spend|spent|spending|income|incoming|outgoing|revenue|transactions?|transfers?|inflows?|outflows?|funds|credits?|debits?|checking|savings|receipts?|renewals?|received|arrived|came in|went out|shelled out)\b|\$\s*\d/i;
 
 const cardAccount = String.raw`(?:(?:my|our|the) (?:(?:business|personal|credit|debit) ){0,2}cards?|(?:credit|debit) cards?)`;
 const moneyPeriod = String.raw`(?:today|yesterday|this (?:week|month|quarter|year|yr)|last (?:week|month|quarter|year)|year[ -]to[ -]date|month by month|monthly)`;
@@ -52,10 +52,21 @@ export function loanPaymentSubject(question, intent = null) {
   }
   const debt = '(?:loans?|mortgages?|lenders?|lines? of credit)';
   const owner = '(?:(?:my|our|the|a|an) )?(?:(?:business|personal|home) )?';
-  return new RegExp(`\\b(?:pay|paid|paying|repay|repaid|repaying|payments?|repayments?)(?: (?:on|to|toward|towards|for|off))? ${owner}${debt}\\b`, 'i').test(text) ||
+  return new RegExp(`\\b(?:put|pay|paid|paying|repay|repaid|repaying|payments?|repayments?)(?: (?:on|to|toward|towards|for|off))? ${owner}${debt}\\b`, 'i').test(text) ||
     new RegExp(`\\b${debt} (?:payments?|repayments?|payoffs?)\\b`, 'i').test(text);
 }
 export const loanAccountSelector = value => /^(?:(?:my|our|the|business|personal|home) )*(?:loans?|mortgages?|lenders?|lines? of credit)(?: accounts?)?$/i.test(value || '');
+
+// This closed charge-total frame nominates a restriction for disclosure only.
+// It grants no selector authority: a missing or shortened model literal still
+// uses its admitted reading, with the full unapplied identity made explicit.
+export function unusedChargeSelector(clause, selected = []) {
+  const frame = /\b(?:total|sum|add up) ([\p{L}\p{N}][\p{L}\p{N} .&/'*-]{0,159}?) (?:bank )?(?:charges|purchases)\b/iu.exec(clause);
+  if (!frame) return [];
+  const literal = frame[1];
+  if (/^(?:(?:all|my|our|the|recorded|completed|posted|bank|ordinary) ?)+$/i.test(literal)) return [];
+  return selected.some(value => typeof value === 'string' && value.toLowerCase() === literal.toLowerCase()) ? [] : [literal];
+}
 
 
 // These question-only cues grant extraction, never a reader or a figure.
@@ -96,7 +107,9 @@ export function ledgerClauseIsPeriodOperand(text) {
 }
 export function ledgerClauseIsOwnerOperand(text, intent) {
   let remainder = text;
-  for (const literal of [intent.match, intent.counterpartyText]) {
+  // Only compiler-diagnosed date limits lose scope meaning. Account/payee
+  // restrictions still need their own grounded identity and inventory plan.
+  for (const literal of [intent.match, intent.counterpartyText, ...(intent.unusedCalendarLimits || [])]) {
     if (typeof literal !== 'string' || !literal) continue;
     remainder = remainder.split(new RegExp(literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')).join(' ');
   }

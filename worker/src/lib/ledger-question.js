@@ -96,7 +96,7 @@ function questionPeriod(q, today, { allowPastMonth = false, allowVendorWindow = 
   const monthPeriods = allowPastMonth ? "last|previous|this|past" : "last|previous|this";
   const vendorWindow = allowVendorWindow ? "|\\b(?:last|past)\\s+\\d+\\s+months\\b|\\bpast\\s+\\d+\\s+days\\b" : "";
   const aliases = /\b(?:money (?:came |comes )?in|income|deposits?)\b/.test(q) ? String.raw`\bsince (?:\d{4}-\d{2}-\d{2}|january|jan)\b|\bmonth to date\b|` : '';
-  const pattern = new RegExp(`${aliases}\\b(?:${MONTHS.join("|")})(?:\\s+\\d{4})?\\b|\\bq[1-4](?:\\s+\\d{4})?\\b|\\blast\\s+\\d+\\s+days\\b${vendorWindow}|\\b(?:${monthPeriods}) month\\b|\\bthis week\\b|\\b(?:today|yesterday)\\b|\\bso far this year\\b|\\b\\d{4} so far\\b|\\brecent\\b`, "g");
+  const pattern = new RegExp(`${aliases}\\b(?:${MONTHS.join("|")})(?:\\s+\\d{4})?\\b|\\bq[1-4](?:\\s+\\d{4})?\\b|\\blast\\s+\\d+\\s+days\\b${vendorWindow}|\\b(?:${monthPeriods}) month\\b|\\bthis week\\b|\\b(?:today|yesterday)\\b|\\b(?:so far )?this year\\b|\\b\\d{4} so far\\b|\\brecent\\b`, "g");
   const matches = [...q.matchAll(pattern)];
   // "Recent deposits in September" has one explicit period; recent is a
   // listing modifier there. It supplies the 14-day default only on its own.
@@ -142,8 +142,8 @@ function questionPeriod(q, today, { allowPastMonth = false, allowVendorWindow = 
       const weekday = new Date(`${today}T00:00:00Z`).getUTCDay();
       from = shiftLedgerDay(today, -((weekday + 6) % 7)); to = today;
       derived = true;
-    } else if (period === "so far this year" || /^\d{4} so far$/.test(period)) {
-      const selectedYear = period === "so far this year" ? today.slice(0, 4) : parts[0];
+    } else if (period === "this year" || period === "so far this year" || /^\d{4} so far$/.test(period)) {
+      const selectedYear = period.endsWith("this year") ? today.slice(0, 4) : parts[0];
       if (selectedYear !== today.slice(0, 4)) return { invalid: true };
       from = `${selectedYear}-01-01`; to = today;
       derived = true;
@@ -245,7 +245,7 @@ function phaseTwoQuestion(q, intent, today) {
   let { from, to, residual } = period;
   // Account clauses are explicit and literal. A named bank or entity cannot
   // be consumed as filler, nor can a merchant named "card" select card accounts.
-  const selected = residual.match(/\b(?:in|for|of|into)\s+(?:(?:my|the)\s+)?(?:(checking|savings|card|loan|investment|retirement|escrow)\s+)?account\s+(?:ending(?:\s+in)?\s+)?(\d{1,4})\b/);
+  const selected = residual.match(/\b(?:in|on|for|of|into)\s+(?:(?:my|the)\s+)?(?:(checking|savings|card|loan|investment|retirement|escrow)\s+)?account\s+(?:ending(?:\s+in)?\s+)?(\d{1,4})\b/);
   if (selected) residual = residual.replace(selected[0], "");
   residual = residual.replace(/,/g, "").replace(/\s+/g, " ").trim();
   // Newly admitted rolling periods apply only to exact-vendor arithmetic.
@@ -312,7 +312,7 @@ function phaseTwoQuestion(q, intent, today) {
     implicitSpend = true;
     residual = `show spending ${/^(?:software|saas|software\/saas)$/.test(name) ? "on" : "at"} ${name}`;
   }
-  const spending = residual.match(/^(?:how much did (?:i|we) spend|(?:show(?: me)? |what is (?:my |the )?)spend(?:ing)?)(?: (at|on|by) (.+))$/);
+  const spending = residual.match(/^(?:(?:how much|what) did (?:i|we) spend|(?:show(?: me)? |what is (?:my |the )?)spend(?:ing)?)(?: (at|on|by) (.+))$/);
   const paid = residual.match(/^how much did (?:i|we) pay (to) (.+)$/);
   const income = residual.match(/^(?:how much income(?: came)?|how much did (?:i|we) receive|(?:show(?: me)? |what is (?:my |the )?)income) (from|by|in category) (.+)$/);
   const filter = spending || paid || income;
@@ -324,7 +324,8 @@ function phaseTwoQuestion(q, intent, today) {
     if (mode === "by") return ["merchant", "category"].includes(value) ? { ...result, kind: value, direction, match: null } : null;
     if (!/[\p{L}\p{N}]/u.test(value)) return null;
     return { ...result, kind: ["at", "from", "to"].includes(mode) ? "merchant" : "category",
-      direction, match: value, merchantPreposition: implicitSpend ? null : mode };
+      direction, match: value, merchantPreposition: implicitSpend ? null : mode,
+      ...(spending && /^what did (?:i|we) spend at /.test(residual) ? { observedSpending: true } : {}) };
   }
   return null;
 }
@@ -432,6 +433,7 @@ function paymentSpans(text, today) {
 // that the owner asked for a money fact. Policy and document frames stay on
 // ordinary retrieval, while an owner/account frame, a quantified request, or
 // a concrete payment event can still receive unsupported-wording guidance.
+const ledgerRequestFrame = q => /^(?:how (?:much|many)|what|which|did|has|have|was|were|show|list|tell)\b/.test(q);
 function hasPositiveLedgerIntent(q, { everydayPayment, everydayTotals } = {}) {
   if (everydayPayment || everydayTotals) return true;
   if (/^money (?:in|out) last month[?!.]*$/.test(q.trim())) return true;
@@ -440,12 +442,22 @@ function hasPositiveLedgerIntent(q, { everydayPayment, everydayTotals } = {}) {
   const financialSubject = /\b(?:money|cash|profit|bank|accounts?|balances?|deposits?|expenses?|charges?|subscriptions?|payments?|pay|paid|spend|spent|spending|income|revenue|credits?|debits?|transactions?|transfers?|checking|savings|loans?|debt|tax|payroll|invoices?|receivables?|payables?|came in|went out)\b|\$\s*\d/.test(q);
   if (!financialSubject) return false;
   return /\b(?:my|our|i|we|me)\b/.test(q) ||
-    /^(?:how (?:much|many)|what|which|did|has|have|was|were|show|list|tell)\b/.test(q) ||
+    ledgerRequestFrame(q) ||
     /\b(?:payment|deposit|invoice)\b.*\b(?:paid|arrive|arrived|received|posted|cleared)\b/.test(q) ||
     /\b(?:came in|went out)\b|\$\s*\d/.test(q);
 }
 
-export function classifyLedgerQuestion(question, { now = Date.now(), timeZone = "UTC", storeAlias = true } = {}) {
+const shorthandLabel = value => String(value || '').normalize('NFKC').replace(/[’]/g, "'")
+  .toLowerCase().replace(/\s+/g, ' ').trim().replace(/[?!.]+$/, '').trim();
+
+// This is a lookup candidate, never money intent. Only an exact recorded
+// payee can fill the label slot; a suffix cannot classify surrounding prose.
+export function companyShorthandCandidate(question) {
+  const match = shorthandLabel(question).match(/^([\p{L}\p{N}][\p{L}\p{N} &/.,'-]{0,75}\b(?:llc|ltd|inc|corp))(?: (this year|this month|last month))?$/u);
+  return match ? { label: match[1], period: match[2] === 'this year' ? 'so far this year' : match[2] || 'this month' } : null;
+}
+
+export function classifyLedgerQuestion(question, { now = Date.now(), timeZone = "UTC", storeAlias = true, payeeLabels = [] } = {}) {
   const storeShape = storeAlias && storeQuestionShape(question);
   if (storeShape) {
     const alias = storeShape === 'recurring' ? 'Show recurring charges' : storeShape === 'transfers'
@@ -472,6 +484,29 @@ export function classifyLedgerQuestion(question, { now = Date.now(), timeZone = 
     amountMinor: null, counterpartyWords: ledgerWords(alias.payer), invoiceArrivalOnly: alias.invoice,
     from: shiftLedgerDay(today, -59), to: today }, ownerTime, true);
   const clean = q.trim().replace(/[?!.]+$/, "").trim();
+  // Whole shorthand frames only. Reuse the shipped selectors and calendar
+  // guards, so a document task or an unconsumed qualifier cannot become a sum.
+  let shorthand = null, shorthandInterpretation = null;
+  const categoryShort = clean.match(/^(rent|payroll)(?: (?:in |for )?(q[1-4](?: \d{4})?|this month|last month|this year))?$/);
+  if (categoryShort) {
+    const period = categoryShort[2] === 'this year' ? 'so far this year' : categoryShort[2] || 'this month';
+    shorthand = `Show spending on ${categoryShort[1]} ${period}`;
+    shorthandInterpretation = `Read as recorded spending in the exact bank category '${categoryShort[1]}', ${period}; this is not a contractual obligation or a payroll report.`;
+  }
+  const vendorShort = companyShorthandCandidate(clean);
+  // Closed allowlist: consume the entire recorded label and one closed
+  // period slot. Substrings, document nouns and request verbs grant nothing.
+  if (vendorShort && payeeLabels.some(label => shorthandLabel(label) === vendorShort.label)) {
+    shorthand = `How much did I pay to ${vendorShort.label} ${vendorShort.period}`;
+    shorthandInterpretation = `Read as recorded spending for that exact payee, ${vendorShort.period}; obligations and amounts owed are not inferred.`;
+  }
+  if (clean === 'card owed') {
+    shorthand = 'What are my card balances';
+    shorthandInterpretation = 'Read as recorded card balances, with the observation date for each card; this is not a live payoff or minimum-payment figure.';
+  }
+  if (clean === 'deposits this week') shorthand = 'Show deposits this week';
+  if (shorthand) return { ...classifyLedgerQuestion(shorthand, { now, timeZone }),
+    ...(shorthandInterpretation ? { shorthandInterpretation } : {}) };
   // These whole-question aliases cannot consume a named bank, historical
   // qualifier, policy question or future amount as a current observation.
   const balanceAlias = /^(?:how much (?:money |cash )?do i have(?: in (?:the|my) bank)?(?: right now| now)?|how much money is in my bank(?: right now| now)?|(?:show(?: me)?|what is|what's) my cash(?: right now| now)?|(?:what is|how much is) in each account(?: right now| now)?)$/.test(clean);

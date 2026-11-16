@@ -467,7 +467,8 @@ const fixture = () => {
       },
       ...["drive", "gmail"].map((sourceName) => ({
         name: sourceName,
-        expected: [`source:${sourceName}`, "shared:provider:google", "credential:google"],
+        // Reviewed strict cursor loading now precedes every credential lookup.
+        expected: [`source:${sourceName}`, "shared:provider:google"],
         invoke: (options) => cmdIngestRemote(
           manifest,
           f.manifestPath,
@@ -529,6 +530,22 @@ const fixture = () => {
       check(`${item.name} uses the fixed source-then-shared lock order exactly once`,
         JSON.stringify(order) === JSON.stringify(item.expected),
         JSON.stringify(order));
+    }
+    // Valid-state green controls still reach the injected credential boundary,
+    // with both leases held, instead of passing because all work stopped early.
+    for (const source of ["drive", "gmail"]) {
+      const order = [];
+      await assert.rejects(cmdIngestRemote(manifest, f.manifestPath, { from: source }, {
+        withSourceIngestLock: async (input, run) => {
+          order.push(input.sharedRecord ? `shared:${input.sharedRecord}` : `source:${input.sourceName}`);
+          return run({ assertOwned() {} });
+        },
+        ingestLib: async () => ({ loadState: () => ({ version: 1, done: {}, skipped: {} }) }),
+        resolveBaseUrl: async () => "https://fixture.invalid", resolveAdminKey: () => "fixture-admin-key",
+        loadGoogleTokens: () => { order.push("credential:google"); throw sentinel; },
+      }), error => error === sentinel);
+      assert.deepEqual(order, [`source:${source}`, "shared:provider:google", "credential:google"]);
+      check(`${source} valid-state control reaches credentials under both locks`, true);
     }
   } finally {
     rmSync(f.root, { recursive: true, force: true });
@@ -1242,6 +1259,9 @@ if (process.platform !== "win32") {
     environment.USERPROFILE = f.home;
     environment.NO_COLOR = "1";
     environment.BRAIN_GOOGLE_TOKEN_STORE = "file";
+    environment.BRAIN_LIFECYCLE_LOCK_ROOT = join(f.root, 'lifecycle-locks');
+    environment.BRAIN_NO_WRANGLER_LOGIN = "1";
+    environment.BRAIN_TEST_CHAIN = "1";
     const result = spawnSync(
       process.execPath,
       [CLI, "ingest", f.manifestPath, "--from", "gmail"],

@@ -442,66 +442,76 @@ const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") +
       /LEFT JOIN sources src ON src\.name = d\.source/.test(currentKeywordSql),
     currentKeywordSql);
 
+  const calendarQuery = 'What is the latest status for the crew?';
   const morning = {
     ...current,
+    client:'crew',
     chunk_uid: "calendar-morning#0", doc_uid: "calendar-morning", source_id: "calendar-morning",
-    source: "calendar_event", title: "Taylor morning meeting",
-    text: "Taylor morning meeting at 9:00 AM.",
+    source: "calendar_event", title: "Client morning meeting",
+    text: "Client morning meeting at 9:00 AM.",
     document_date: day("2026-08-19"), occurred_at: "2026-08-19T09:00:00-07:00",
     date_source: "calendar:event_start",
+    authority_meta: JSON.stringify({ updated:"2026-08-18T09:00:00Z" }),
   };
   const afternoon = {
     ...morning,
     chunk_uid: "calendar-afternoon#0", doc_uid: "calendar-afternoon", source_id: "calendar-afternoon",
-    title: "Taylor afternoon meeting", text: "Taylor afternoon meeting at 3:00 PM.",
+    title: "Client afternoon meeting", text: "Client afternoon meeting at 3:00 PM.",
     occurred_at: "2026-08-19T15:00:00-07:00",
+    authority_meta: JSON.stringify({ updated:"2026-08-18T15:00:00Z" }),
   };
-  const sameDay = currentEvidenceCandidates(currentQuery, [morning, afternoon]);
-  check("precise Calendar starts order reliable evidence within one local citation day",
+  const sameDay = currentEvidenceCandidates(calendarQuery, [morning, afternoon]);
+  check("precise Calendar modification times order revisions within one observation day",
     sameDay.map((row) => row.doc_uid).join(",") === "calendar-afternoon,calendar-morning",
     JSON.stringify(sameDay));
   const allDay = {
     ...morning,
     chunk_uid: "calendar-all-day#0", doc_uid: "calendar-all-day",
-    title: "Taylor all-day reminder", text: "Taylor all-day reminder.",
+    title: "Client all-day reminder", text: "Client all-day reminder.",
     occurred_at: "2026-08-19", date_source: "calendar:all_day_start",
+    authority_meta: JSON.stringify({ updated:"2026-08-18T18:00:00Z" }),
   };
   const plusFourteen = {
     ...morning,
     chunk_uid: "calendar-plus-fourteen#0", doc_uid: "calendar-plus-fourteen",
-    title: "Taylor timed event +14", occurred_at: "2026-08-19T00:30:00+14:00",
+    title: "Client timed event +14", occurred_at: "2026-08-19T00:30:00+14:00",
   };
   const minusTwelve = {
     ...morning,
     chunk_uid: "calendar-minus-twelve#0", doc_uid: "calendar-minus-twelve",
-    title: "Taylor timed event -12", occurred_at: "2026-08-19T23:30:00-12:00",
+    title: "Client timed event -12", occurred_at: "2026-08-19T23:30:00-12:00",
+    authority_meta: JSON.stringify({ updated:"2026-08-18T12:00:00Z" }),
   };
-  const mixedPrecision = currentEvidenceCandidates(currentQuery, [allDay, plusFourteen, minusTwelve]);
-  check("timed Calendar evidence outranks an all-day event across extreme positive and negative offsets",
+  const mixedPrecision = currentEvidenceCandidates(calendarQuery, [allDay, plusFourteen, minusTwelve]);
+  check("a later-modified all-day record outranks timed records regardless of event offset",
     mixedPrecision.map((row) => row.doc_uid).join(",") ===
-      "calendar-minus-twelve,calendar-plus-fourteen,calendar-all-day",
+      "calendar-all-day,calendar-minus-twelve,calendar-plus-fourteen",
     JSON.stringify(mixedPrecision));
   const inconsistent = { ...morning, occurred_at: "2099-01-01T09:00:00Z" };
-  const boundedExact = currentEvidenceCandidates(currentQuery, [inconsistent, afternoon]);
-  check("a precise metadata timestamp cannot move evidence outside its stored citation day",
+  const boundedExact = currentEvidenceCandidates(calendarQuery, [inconsistent, afternoon]);
+  check("a changed event start cannot override modification chronology",
     boundedExact[0]?.doc_uid === "calendar-afternoon", JSON.stringify(boundedExact));
 
-  // These absolute instants run in the opposite order: Aug 19 at UTC-12 is
-  // later in UTC than Aug 20 at UTC+14. The user's local citation day remains
-  // the primary fact, so Aug 20 must still rank first.
+  // Scheduled local days and absolute event instants disagree here. Neither
+  // can turn an earlier revision into a newer observation.
   const previousLocalDay = {
     ...morning,
     chunk_uid: "calendar-previous-local-day#0", doc_uid: "calendar-previous-local-day",
     document_date: day("2026-08-19"), occurred_at: "2026-08-19T23:30:00-12:00",
+    authority_meta: JSON.stringify({ updated:"2026-08-18T23:30:00Z" }),
   };
   const nextLocalDay = {
     ...morning,
     chunk_uid: "calendar-next-local-day#0", doc_uid: "calendar-next-local-day",
     document_date: day("2026-08-20"), occurred_at: "2026-08-20T00:30:00+14:00",
+    authority_meta: JSON.stringify({ updated:"2026-08-18T00:30:00Z" }),
   };
-  const adjacentDays = currentEvidenceCandidates(currentQuery, [previousLocalDay, nextLocalDay]);
-  check("a later local Calendar day outranks an earlier day across opposing UTC offsets",
-    adjacentDays[0]?.doc_uid === "calendar-next-local-day", JSON.stringify(adjacentDays));
+  const adjacentDays = currentEvidenceCandidates(calendarQuery, [previousLocalDay, nextLocalDay]);
+  check("a later modification outranks a later scheduled day across opposing UTC offsets",
+    adjacentDays.map(row=>row.doc_uid).join(',') === "calendar-previous-local-day,calendar-next-local-day", JSON.stringify(adjacentDays));
+  const unknownModification=currentEvidenceCandidates(calendarQuery,[{...morning,authority_meta:'{}'},afternoon]);
+  check("an unknown modification cannot borrow currentness from a scheduled day",
+    unknownModification.length===1 && unknownModification[0]===afternoon,JSON.stringify(unknownModification));
 
   const filenameMorning = {
     ...morning,
@@ -513,7 +523,7 @@ const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") +
     chunk_uid: "drive-filename-afternoon#0", doc_uid: "drive-filename-afternoon",
     occurred_at: "2026-08-19T15:00:00-07:00",
   };
-  const filenameOrder = currentEvidenceCandidates(currentQuery, [filenameMorning, filenameAfternoon]);
+  const filenameOrder = currentEvidenceCandidates(calendarQuery, [filenameMorning, filenameAfternoon]);
   check("a valid metadata.start cannot add recency precision to filename-dated Drive evidence",
     filenameOrder.map((row) => row.doc_uid).join(",") === "drive-filename-morning,drive-filename-afternoon",
     JSON.stringify(filenameOrder));
@@ -529,7 +539,7 @@ const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") +
     chunk_uid: "message-afternoon#0", doc_uid: "message-afternoon",
     document_date: Date.parse("2026-08-19T15:00:00Z"),
   };
-  const messageOrder = currentEvidenceCandidates(currentQuery, [messageMorning, messageAfternoon]);
+  const messageOrder = currentEvidenceCandidates(calendarQuery, [messageMorning, messageAfternoon]);
   check("ordinary reliable timestamps retain same-day precision without Calendar metadata",
     messageOrder.map((row) => row.doc_uid).join(",") === "message-afternoon,message-morning",
     JSON.stringify(messageOrder));

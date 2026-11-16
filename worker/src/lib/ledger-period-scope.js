@@ -1,5 +1,6 @@
 import { effectivePeriodCovered } from './ledger-reader.js';
 import { moneyAccount } from './money-format.js';
+import { ledgerDay, shiftLedgerDay } from './ledger-question.js';
 
 // A current-through date cannot supply a missing start. Keep the original
 // denominator beside the certified subset; unknown accounts are never empty.
@@ -60,5 +61,49 @@ export function labelPartialPeriodAnswer(result, scope, intent) {
     : `${partialPeriodScopeLine(scope, intent)}\n${result.answer}`;
   if (intent.kind === 'largest') result.answer += '\nOmitted accounts may contain larger charges; this ranking is limited to the covered accounts.';
   if (intent.kind === 'recurring') result.answer += '\nThese repeated completed charges describe only the covered accounts; they do not establish all subscriptions or future obligations.';
+  return result;
+}
+
+// Partition only at stored coverage boundaries, then ask the authoritative
+// reader about each interval. MIN/MAX bounds alone would hide holes or twins.
+export function labelObservedSpendingAnswer(result, scope, intent, money, topic) {
+  const ledger = result.ledger;
+  if (!ledger) return result;
+  const missing = [], covered = [];
+  const validDay = day => /^\d{4}-\d{2}-\d{2}$/.test(day || '') &&
+    Number.isFinite(Date.parse(day)) && ledgerDay(day) === day;
+  for (const account of scope.requested) {
+    const after = shiftLedgerDay(intent.to, 1);
+    const boundaries = [...new Set([intent.from, after, account.empty_provider_from,
+      ...account.members.flatMap(member => [member.covered_from,
+        validDay(member.covered_to) ? shiftLedgerDay(member.covered_to, 1) : null])]
+      .filter(day => validDay(day) && day >= intent.from && day <= after))].sort();
+    for (let i = 0; i < boundaries.length - 1; i++) {
+      const from = boundaries[i], to = shiftLedgerDay(boundaries[i + 1], -1);
+      const periods = effectivePeriodCovered(account, from, to) ? covered : missing;
+      const previous = periods.at(-1);
+      if (previous?.account === account && shiftLedgerDay(previous.to, 1) === from) previous.to = to;
+      else periods.push({ account, from, to });
+    }
+  }
+  const span = p => `${intent.presentation.date(p.from)} through ${intent.presentation.date(p.to)}`;
+  const required = missing.map(p => `Original statements for ${moneyAccount(p.account)} covering ${span(p)}.`);
+  // The shipped merchant renderer already moves its incomplete amount out of
+  // total_minor. Preserve that exact subtotal without combining possible payees.
+  const subtotal = ledger.total_minor ?? ledger.partial_subtotal_minor ?? ledger.confirmed_category_subtotal_minor;
+  Object.assign(ledger, { observed_subtotal_minor: subtotal ?? null, total_minor: null, lead_total_minor: null,
+    complete_total_minor: null, complete: false, partial_reason: 'ledger_partial_coverage', amount_basis: 'observed_lower_bound',
+    coverage: { complete: false, status: 'partial',
+      missing_periods: missing.map(p => ({ account_mask: /^\d{1,4}$/.test(p.account.mask || '') ? p.account.mask : null, from: p.from, to: p.to })),
+      required_statements: required } });
+  if (ledger.if_own_transfers) ledger.if_own_transfers.complete = false;
+  const detail = `Missing dates: ${missing.map(p => `${moneyAccount(p.account)}, ${span(p)}`).join('; ')}. ` +
+    'The additional dollar amount is unknown; a full-period total or zero is not established. ' + required.join(' ');
+  const heading = Number.isSafeInteger(subtotal)
+    ? `${money(subtotal)} observed subtotal (incomplete lower bound) for ${topic}, ${intent.presentation.period(intent.from, intent.to)}.`
+    : `Observed spending for ${topic}, ${intent.presentation.period(intent.from, intent.to)}, remains incomplete; the readable spending details follow.`;
+  result.answer = `${heading}\nRecorded coverage: ${covered.map(p => `${moneyAccount(p.account)}, ${span(p)}`).join('; ') || 'no dates certified complete'}.\n${detail}\n` +
+    result.answer.replace(/Total money out/g, 'Observed money out');
+  result.gaps = [...(result.gaps || []), { type: 'ledger_partial_coverage', reason: 'period_outside_coverage', detail }];
   return result;
 }

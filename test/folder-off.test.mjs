@@ -61,6 +61,7 @@ function fixture({ mode = 0o600, createFolder = true, local = {}, upload = true 
   const watched = join(base, "Watched Files");
   const manifestPath = join(base, "Brain Settings", "brain.manifest.json");
   mkdirSync(home, { recursive: true });
+  mkdirSync(join(home, 'lifecycle-locks'));
   if (createFolder) mkdirSync(watched, { recursive: true });
   mkdirSync(dirname(manifestPath), { recursive: true });
   const manifest = {
@@ -137,6 +138,7 @@ function schedulerOptions(f, launchctl, extra = {}) {
 function folderOptions(f, harness, extra = {}) {
   return {
     platform: "darwin",
+    lifecycleLockOptions: { machineLockRoot: join(f.home, 'lifecycle-locks') },
     now: () => new Date(FIXED_NOW),
     schedulerOptions: schedulerOptions(f, harness.launchctl, {
       probeSchedulerLock: () => false,

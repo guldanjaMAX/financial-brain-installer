@@ -182,7 +182,7 @@ test('C3 controls preserve full dates, owner-year boundaries and literal selecto
 test('C3 unsafe dates and dropped operands refuse at the calendar decision', async t => {
   const f = setup(t);
   for (const q of ['Compare expenses ju versus oct','Compare expenses Dec versus Oct','Compare expenses Feb 30 versus Oct',
-    'Could you retrieve spending Sep and Oct and Nov', 'Could you compare expenses Q5 versus Q2']) {
+    'Could you retrieve spending Sep and Oct and Nov next year', 'Could you compare expenses Q5 versus Q2']) {
     const reply = raw(intent(),intent());
     const d = validateLedgerIntentDecision(reply,q,context);
     assert.notEqual(d.outcome,'ready',q); assert.equal(d.intents.length,0);
@@ -303,10 +303,10 @@ async function mutantModule(label, file, replacements, links = {}) {
     assert.ok(source.includes(before),`mutant decision exists: ${label}`);
     source = source.replace(before,after);
   }
-  source = source.replace(/from (["'])(\.\/[^"']+)\1/g,(_,quote,path)=>`from ${quote}${links[path] || new URL(`../src/lib/${path.slice(2)}`,import.meta.url).href}${quote}`);
+  source = source.replace(/from (["'])(\.\/[^"']+)\1/g,(_,quote,path)=>`from ${quote}${links[path] || `../../../worker/src/lib/${path.slice(2)}`}${quote}`);
   const target = new URL(`${label}.mjs`,dir);
   writeFileSync(target,source);
-  return { api: await import(target.href), href: target.href };
+  return { api: await import(target.href), href: `./${label}.mjs` };
 }
 test('C3 restoring calendar, scope, transfer and fallback defects breaks green contracts', async t => {
   const f = setup(t);
@@ -356,7 +356,7 @@ test('C3 a restoring measure guard mutant cannot subtract different directions',
   assert.equal(r.body.ledger.comparison,undefined);
   assert.equal(r.body.ledger.comparison_unavailable.reason,'measure_mismatch');
   const mutant = await mutantModule('measure','ledger-answer.js',[
-    ['if (compatible && figures.every(Number.isSafeInteger))','if (figures.every(Number.isSafeInteger))'],
+    ['if (aligned && compatible && figures.every(Number.isSafeInteger))','if (aligned && figures.every(Number.isSafeInteger))'],
   ]);
   const bad = await ask(f,q,reply,mutant.api.withLedgerAnswer);
   assert.ok(bad.sql.length > 0); assert.ok(bad.body.ledger.comparison,'restored mismatch produces prohibited arithmetic');
@@ -518,8 +518,9 @@ for (const [index,scope] of ['Store Unit','Supply Unit'].entries()) test(`C3 R2 
   const green = await ask(f,q,raw(intent('expense_summary',{account_hint:scope}),intent('expense_summary',{account_hint:scope})));
   assert.equal(green.body.ledger.parts.length,2); assert.ok(green.sql.length > 0);
   const r = await ask(f,q,raw(intent(),intent()));
-  assert.equal(r.extraction,1); assert.equal(r.sql.length,0);
-  assert.equal(r.body.ledger,undefined); assert.ok(r.body.gaps.some(g => g.scope === 'calendar'));
+  assert.equal(r.extraction,1); assert.ok(r.sql.some(sql=>sql.includes('FROM fin_accounts')),'scope inventory decision reached');
+  assert.equal(r.body.ledger.kind,'scope_refused'); assert.equal(r.body.ledger.reason,'scope_unresolved');
+  assert.equal(r.body.ledger.total_minor,undefined); assert.equal(r.body.ledger.comparison,undefined);
   assert.equal(r.sql.some(sql=>sql.includes('CROSS JOIN fin_transactions')),false);
 });
 test('C3 R2 explicit whole-owner operands retain complete inventory', async t => {
@@ -550,18 +551,26 @@ test('C3 R2 restoring nullable inventory authority breaks the scoped green contr
   assert.deepEqual(bad.body.ledger.parts.map(p=>p.expense_total_minor),[700,1700]);
   assert.equal(bad.body.ledger.comparison.difference_minor,-1000);
 });
-test('C3 R2 restoring pattern-based activation is contained by complete calendar complements', async t => {
+test('C3 R2 restoring pattern-based activation breaks the independent scope refusal', async t => {
   const f = setup(t), q = 'Compare Store Unit expenses Sept versus Oct', reply = raw(intent(),intent());
-  const green = await ask(f,q,reply);
-  assert.equal(green.body.ledger,undefined); assert.equal(green.sql.length,0); assert.ok(green.body.gaps.some(g => g.scope === 'calendar'));
+  const peer = await ask(f,q,raw(intent('expense_summary',{account_hint:'Store Unit'}),intent('expense_summary',{account_hint:'Store Unit'})));
+  assert.deepEqual(peer.body.ledger.parts.map(p=>p.expense_total_minor),[700,1200]);
+  const oracle = result => {
+    assert.equal(result.body.ledger.kind,'scope_refused');
+    assert.equal(result.body.ledger.total_minor,undefined);
+    assert.equal(result.sql.some(sql=>sql.includes('CROSS JOIN fin_transactions')),false);
+  };
+  const green = await ask(f,q,reply); assert.equal(green.extraction,1); oracle(green);
+  assert.ok(green.sql.some(sql=>sql.includes('FROM fin_accounts')),'scope decision reached');
   const compiler = await mutantModule('r2-pattern-activation','ledger-intent.js',[
     ['(comparison || result.some(intent => intent.modelAccountScope))',
      'result.some(intent => intent.modelAccountScope)'],
   ]);
   const reader = await mutantModule('r2-pattern-answer','ledger-answer.js',[["(decision?.scopePlan || decision?.operandClauses)", 'decision?.scopePlan']],{'./ledger-intent.js':compiler.href});
   const bad = await ask(f,q,reply,reader.api.withLedgerAnswer);
-  assert.equal(bad.extraction,1); assert.equal(bad.sql.length,0);
-  assert.equal(bad.body.ledger,undefined); assert.ok(bad.body.gaps.some(g => g.scope === 'calendar'));
+  assert.equal(bad.extraction,1); assert.ok(bad.sql.some(sql=>sql.includes('CROSS JOIN fin_transactions')));
+  assert.deepEqual(bad.body.ledger.parts.map(p=>p.expense_total_minor),[700,1700]);
+  assert.throws(()=>oracle(bad),assert.AssertionError);
 });
 test('C3 R2 explicit plan clause bypass is contained by calendar residue', async t => {
   const f = setup(t), q = mixedScopeRequests[0][0]+mixedScopeRequests[0][1], reply = raw(intent('transfers',{period:{type:'last_month'}}));

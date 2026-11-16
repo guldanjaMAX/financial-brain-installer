@@ -1,10 +1,12 @@
+import { gmailPolicyFingerprint } from '../connectors/gmail.mjs';
+import { currentPartsFixture, driveChangesFixture } from './helpers/current-sync-fixture.mjs';
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { mkdtempSync, realpathSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { cmdIngestLocal, cmdIngestProvider, cmdIngestRemote, cmdIngestCalendar, cmdApplyIngestRemovals, credentialScannerFingerprint } from "../brain.mjs";
+import { cmdIngestLocal, cmdIngestProvider, cmdIngestRemote, cmdIngestCalendar, credentialScannerFingerprint } from "../brain.mjs";
 import { ingestPlanStore } from "./helpers/ingest-plan-store.mjs";
 import { batchStream, splitOversized, prefetch, removedSinceLastRun } from "../ingest/run.mjs";
 
@@ -12,7 +14,7 @@ import { batchStream, splitOversized, prefetch, removedSinceLastRun } from "../i
 // are in-process doubles; an unexpected fetch must never leave this process.
 globalThis.fetch = async () => { throw new Error("unexpected network attempt"); };
 
-test("ordinary Drive ingest preserves additions and stops before a small removal", async () => {
+test("ordinary Drive changes preserve additions and retain a small removal decision", async () => {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "ingest-plan-")));
   const manifestPath = join(root, "manifest.json");
   const manifest = {
@@ -25,13 +27,16 @@ test("ordinary Drive ingest preserves additions and stops before a small removal
   const store = ingestPlanStore();
   const stored = new Set(ids.map((id) => `drive:${id}`));
   for (const uid of stored) store.put(uid);
-  const state = { version: 1, done: {}, skipped: {},
+  const state = { version: 1, done: {}, skipped: {}, sync_token: "prior-cursor",
     credential_scanner_fingerprint: credentialScannerFingerprint(true) };
   let inventoryReads = 0;
   const sent = [];
   const forgotten = [];
   const key = randomBytes(32).toString("hex");
+  const parts = currentPartsFixture();
   const options = {
+    verifyDriveIncrementalWorker: async () => {}, readDriveFamily: async () => true,
+    readCurrentIngestParts: parts.read, driveNow: () => Date.parse("2026-11-01T00:00:00Z"),
     removalPlanRequest: store.request,
     removalPlanRuntime: () => "fixture-runtime",
     withSourceIngestLock: async (_input, run) => run({ assertOwned() {} }),
@@ -66,6 +71,7 @@ test("ordinary Drive ingest preserves additions and stops before a small removal
         stored.add(`drive:${item.envelope.source_id}`);
         store.put(`drive:${item.envelope.source_id}`);
         onResult(item, { status: "created" });
+        parts.accept(item.envelope);
       }
       return { created: groups.flat().length };
     },
@@ -76,27 +82,26 @@ test("ordinary Drive ingest preserves additions and stops before a small removal
     },
     postSourceReceipt: async () => ({}),
   };
+  // Reviewed Drive R6 replaces mirror inventory/removal planning with changes.
+  const feed = driveChangesFixture(options.drive, ["item0", "added"].map(id => ({ id,
+    name: `${id}.txt`, mimeType: "text/plain", parents: ["fixture-root"] })));
+  options.drive = feed.drive;
   try {
-    let error;
-    try { await cmdIngestRemote(manifest, manifestPath, { from: "drive" }, options); }
-    catch (caught) { error = caught; }
-    assert.ok(inventoryReads > 0, "authenticated inventory decision was reached");
-    assert.ok(sent.includes("added"), "accepted addition landed before the review boundary");
-    assert.equal(stored.size + forgotten.length, 21, "the nonempty one-of-twenty plan was exercised");
-    assert.deepEqual(forgotten, [], "ordinary ingest must not apply an under-threshold removal");
-    assert.equal(error?.code, "SAFETY_REVIEW_REQUIRED");
+    const result = await cmdIngestRemote(manifest, manifestPath, { from: "drive" }, options);
+    assert.equal(feed.calls.pages, 1, "nonempty changes page reached the decision");
+    assert.equal(feed.calls.metadata, 2);
+    assert.deepEqual(sent, ["added"], "healthy addition landed beside the held decision");
+    assert.equal(stored.size, 21);
+    assert.deepEqual(forgotten, [], "incremental ingest never applies a removal");
+    assert.equal(inventoryReads, 0, "bounded changes cannot widen to a corpus inventory");
+    assert.equal(store.calls.preview, 0);
     assert.equal(store.calls.apply, 0);
-    assert.deepEqual(state.ingest_removal_plan.targets, ["drive:item0"]);
+    assert.equal(state.ingest_removal_plan, undefined);
+    assert.equal(state.drive_pending_removals["drive:item0"].reason, "source_policy");
+    assert.ok(stored.has("drive:item0"), "old source text remains available");
     assert.ok(state.done["drive:added"]);
-    const result = await cmdApplyIngestRemovals(manifest, manifestPath, {
-      source: "drive", "apply-removals": state.ingest_removal_plan.fingerprint,
-    }, options);
-    assert.equal(result.removed, 1);
-    assert.equal(store.calls.apply, 1);
-    assert.equal(store.uids().length, 20);
-    assert.equal(store.uids().includes("drive:item0"), false);
-    assert.equal(store.uids().includes("drive:added"), true);
-    assert.equal(state.sync_token, undefined);
+    assert.equal(state.sync_token, "next-cursor");
+    assert.equal(result.complete, false, "pending review cannot certify complete coverage");
     store.db.close();
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -118,14 +123,21 @@ for (const source of ["upload", "gmail", "microsoft"]) {
     let state = { version: 1, done: Object.fromEntries(ids.map((id) => [
       source === "upload" ? id : `${source}:${id}`, "old-version",
     ])), skipped: {}, credential_scanner_fingerprint: credentialScannerFingerprint(true) };
+    if (source === "gmail") {
+      // Reviewed bounded windows require explicit provider deletion evidence.
+      state.history_id = "prior-history";
+      state.gmail_policy_fingerprint = gmailPolicyFingerprint({ credentialScannerFingerprint: credentialScannerFingerprint(true) });
+    }
     let providerCursorWrites = 0;
     let providerCheckpoint = "prior-provider-cursor";
     let accepted = 0;
+    const parts = currentPartsFixture();
     const key = randomBytes(32).toString("hex");
     const envelope = (id) => ({ source_type: source, source_id: id, title: "Synthetic document",
       content: "Readable source content for this synthetic ingest." });
     const active = ids.slice(1).concat("added");
     const options = {
+      readCurrentIngestParts: parts.read,
       withSourceIngestLock: async (_input, run) => run({ assertOwned() {} }),
       resolveBaseUrl: async () => "https://fixture.invalid", resolveAdminKey: () => key,
       getAccessToken: async () => key,
@@ -141,10 +153,14 @@ for (const source of ["upload", "gmail", "microsoft"]) {
           store.put(`${source}:${item.envelope.source_id}`, item.envelope.metadata);
           accepted++;
           onResult(item, { status: "updated" });
+          parts.accept(item.envelope);
         }
         return { updated: groups.flat().length };
       },
       gmail: { currentHistoryId: async () => "next-cursor", listMessages: () => active,
+        listMessagePage: async () => ({ ids: active, nextPageToken: null }),
+        messagePolicy: async () => ({ allowed: true }),
+        listHistory: async () => ({ ids: active, deletedIds: ["item0"], historyId: "next-history" }),
         toEnvelope: async (_token, id) => ({ version: "new-version", envelope: envelope(id) }) },
       oauth: {
         loadProviderSyncState: () => ({ cursor: providerCheckpoint }),
@@ -165,17 +181,18 @@ for (const source of ["upload", "gmail", "microsoft"]) {
     };
     try {
       const run = source === "upload" ? cmdIngestLocal : source === "microsoft" ? cmdIngestProvider : cmdIngestRemote;
-      const flags = source === "upload" ? { source, path: root } : { from: source, source, ...(source === "gmail" ? { reset: true } : {}) };
+      const flags = source === "upload" ? { source, path: root } : { from: source, source };
       await assert.rejects(run(manifest, manifestPath, flags, options), { code: "SAFETY_REVIEW_REQUIRED" });
       assert.ok(accepted > 0);
       assert.ok(store.calls.inventory > 0 && store.calls.preview > 0);
       assert.equal(store.calls.apply, 0);
       const targets = state.ingest_removal_plan.targets;
-      assert.deepEqual(targets, source === "microsoft" ? ["microsoft:item0"]
+      assert.deepEqual(targets, ["microsoft", "gmail"].includes(source) ? [`${source}:item0`]
         : [`${source}:item0`, `${source}:item1#part1of2`]);
       assert.ok(store.uids().includes(`${source}:added`));
       const applyFlags = { source, ...(source === "microsoft" ? { from: source } : {}),
-        "apply-removals": state.ingest_removal_plan.fingerprint };
+        "apply-removals": state.ingest_removal_plan.fingerprint,
+        ...(source === "gmail" ? { "approve-removals": state.ingest_removal_plan.sourcePlan.fingerprint } : {}) };
       await assert.rejects(run(manifest, manifestPath, { ...applyFlags, "apply-removals": "f".repeat(64) }, options));
       assert.equal(store.calls.apply, 0);
       if (source === "microsoft") {
@@ -189,6 +206,8 @@ for (const source of ["upload", "gmail", "microsoft"]) {
       assert.equal(store.calls.apply, 1);
       assert.ok(store.uids().includes(`${source}:added`));
       assert.ok(store.uids().includes(`${source}:item1`));
+      if (source === "gmail") assert.ok(store.uids().includes("gmail:item1#part1of2"),
+        "reviewed single-part settlement retains an obsolete sibling for separate owner review");
       for (const uid of targets) assert.equal(store.uids().includes(uid), false);
       assert.equal(providerCursorWrites, 0);
     } finally { store.db.close(); rmSync(root, { recursive: true, force: true }); }
@@ -317,11 +336,13 @@ for (const source of ["upload", "drive"]) {
       const credential = ["sk", "a".repeat(32)].join("-");
       let prepared = 0;
       let accepted = 0;
+      let repaired = false;
+      const parts = currentPartsFixture();
       const previews = [];
       const envelope = (rel) => {
         prepared++;
         return { source_type: source, source_id: rel, title: "Synthetic document",
-          content: rel === "secret.txt" ? `Synthetic scanner fixture ${credential}` : "Readable synthetic fixture content." };
+          content: rel === "secret.txt" && !repaired ? `Synthetic scanner fixture ${credential}` : "Readable synthetic fixture content." };
       };
       const options = {
         withSourceIngestLock: async (_input, run) => run({ assertOwned() {} }),
@@ -356,6 +377,7 @@ for (const source of ["upload", "drive"]) {
             accepted++;
             store.put(`${source}:${item.envelope.source_id}`, item.envelope.metadata, "v2");
             onResult(item, { status: "updated" });
+            parts.accept(item.envelope);
           }
           return { updated: groups.flat().length };
         },
@@ -363,35 +385,62 @@ for (const source of ["upload", "drive"]) {
         reconcileDocumentFamilies: async () => { throw new Error("unreviewed reconciliation reached"); },
         postSourceReceipt: async () => ({}), reportBacklog: async () => ({}),
       };
-      const run = () => source === "upload"
+      if (source === "drive") {
+        const feed = driveChangesFixture(options.drive, files.map(id => ({ id, name: id,
+          mimeType: "text/plain", parents: ["fixture-root"] })));
+        Object.assign(options, { drive: feed.drive, verifyDriveIncrementalWorker: async () => {},
+          readDriveFamily: async () => true, readCurrentIngestParts: parts.read,
+          driveNow: () => Date.parse("2026-11-01T00:00:00Z") });
+      }
+      const run = (flags = {}) => source === "upload"
         ? cmdIngestLocal(manifest, manifestPath, { source, path: root }, options)
-        : cmdIngestRemote(manifest, manifestPath, { from: "drive" }, options);
+        : cmdIngestRemote(manifest, manifestPath, { from: "drive", ...flags }, options);
       try {
         let error;
         try { await run(); } catch (caught) { error = caught; }
         assert.equal(prepared, files.length, "scanner reached every synthetic source document");
         assert.equal(accepted, files.length - 1, "non-refused updates were saved before the decision");
-        assert.ok(store.calls.inventory > 0);
-        assert.ok(previews.some(({ families, result }) =>
-          families.some((family) => family.base_doc_uid === refusedUid && !family.keep_doc_uids.length) &&
-          (unverified ? result.excluded_documents === 1 : result.targets.includes(refusedUid))),
-        "the refused stored source target reached the Worker decision");
-        assert.equal(error?.code, "SAFETY_REVIEW_REQUIRED");
-        assert.equal(state.credential_scanner_fingerprint, PRE);
-        assert.equal(state.sync_token, "prior-cursor");
-        assert.ok(store.uids().includes(refusedUid));
-        assert.equal(store.calls.apply, 0);
-        assert.ok(state.skipped[source === "upload" ? "secret.txt" : refusedUid]);
-        if (unverified) assert.equal(state.ingest_removal_plan, undefined);
-        else assert.deepEqual(state.ingest_removal_plan.targets, [refusedUid]);
-        // Model the stored refusal being resolved outside ingestion. A fresh
-        // scan with no remaining stored target must be allowed to commit.
-        store.db.prepare("DELETE FROM documents WHERE doc_uid=?").run(refusedUid);
-        await run();
-        assert.equal(state.credential_scanner_fingerprint, CURRENT);
-        assert.equal(state.sync_token, source === "drive" ? "next-cursor" : "prior-cursor");
-        assert.equal(state.ingest_removal_plan, undefined);
-        assert.equal(store.calls.apply, 0);
+        if (source === "drive") {
+          // Reviewed R6 keeps source-policy refusals visible without removal authority.
+          assert.equal(error, undefined);
+          assert.equal(store.calls.inventory, 0);
+          assert.equal(store.calls.preview, 0);
+          assert.equal(state.drive_failures[refusedUid].code, "credential_refused");
+          assert.equal(state.drive_incremental_last_run.complete, false);
+          assert.equal(state.credential_scanner_fingerprint, PRE);
+          assert.equal(state.sync_token, "next-cursor");
+          assert.ok(store.uids().includes(refusedUid));
+          assert.equal(store.calls.apply, 0);
+          repaired = true;
+          await run({ reset: true });
+          assert.equal(state.drive_failures[refusedUid], undefined);
+          assert.equal(state.drive_incremental_last_run.complete, true);
+          assert.ok(state.drive_scanned_versions[refusedUid], "repaired green control earned scanner proof");
+          assert.equal(store.calls.apply, 0);
+          assert.equal(state.ingest_removal_plan, undefined);
+        } else {
+          assert.ok(store.calls.inventory > 0);
+          assert.ok(previews.some(({ families, result }) =>
+            families.some((family) => family.base_doc_uid === refusedUid && !family.keep_doc_uids.length) &&
+            (unverified ? result.excluded_documents === 1 : result.targets.includes(refusedUid))),
+          "the refused stored source target reached the Worker decision");
+          assert.equal(error?.code, "SAFETY_REVIEW_REQUIRED");
+          assert.equal(state.credential_scanner_fingerprint, PRE);
+          assert.equal(state.sync_token, "prior-cursor");
+          assert.ok(store.uids().includes(refusedUid));
+          assert.equal(store.calls.apply, 0);
+          assert.ok(state.skipped["secret.txt"]);
+          if (unverified) assert.equal(state.ingest_removal_plan, undefined);
+          else assert.deepEqual(state.ingest_removal_plan.targets, [refusedUid]);
+          // Model the stored refusal being resolved outside ingestion. A fresh
+          // scan with no remaining stored target must be allowed to commit.
+          store.db.prepare("DELETE FROM documents WHERE doc_uid=?").run(refusedUid);
+          await run();
+          assert.equal(state.credential_scanner_fingerprint, CURRENT);
+          assert.equal(state.sync_token, source === "drive" ? "next-cursor" : "prior-cursor");
+          assert.equal(state.ingest_removal_plan, undefined);
+          assert.equal(store.calls.apply, 0);
+        }
       } finally { store.db.close(); rmSync(root, { recursive: true, force: true }); }
     });
   }

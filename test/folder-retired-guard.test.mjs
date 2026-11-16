@@ -268,6 +268,7 @@ try {
     const counters = { walk: 0, prepare: 0 };
     const lines = [];
     const loadError = await cmdLoad(f.manifestPath, {
+      lifecycleLockOptions: { machineLockRoot: join(f.base, 'lifecycle-locks') },
       flags: { "dry-run": true },
       commands: {
         ingestLocal: async (m, path, flags) => {
@@ -293,6 +294,7 @@ try {
     disabled.corpora.upload.enabled = false;
     writeFileSync(f.manifestPath, manifestBytes(disabled));
     const skipped = await cmdLoad(f.manifestPath, {
+      lifecycleLockOptions: { machineLockRoot: join(f.base, 'lifecycle-locks') },
       flags: { "dry-run": true },
       commands: {
         ingestLocal: () => { throw new Error("disabled upload must not run"); },

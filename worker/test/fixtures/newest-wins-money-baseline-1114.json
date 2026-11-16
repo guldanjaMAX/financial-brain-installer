@@ -1,0 +1,1728 @@
+{
+  "pin": "62a55b76c254b05e1370918b3271651da44ecc7d",
+  "answers": [
+    {
+      "id": "manual/complete",
+      "rows": [
+        {
+          "n": 24000
+        }
+      ],
+      "confidence": {
+        "level": "Medium",
+        "percent": 89,
+        "reasons": [
+          "The complete expected-account inventory is not independently verified.",
+          "USD $240.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained."
+        ],
+        "missing": [
+          "Owner-confirmed expected accounts and verified statement coverage for the requested dates.",
+          "Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement."
+        ],
+        "period_end": "2026-10-31",
+        "may_only_lower": true,
+        "line": "Confidence: Medium (89%)",
+        "band": "Medium",
+        "score": 89,
+        "label": "Medium",
+        "evidence_percent": 95,
+        "display": "Confidence: Medium (89%)",
+        "basis": "selected_account_dates",
+        "selection_score": 100,
+        "caveats": [
+          {
+            "code": "account_inventory_boundary",
+            "why": "Coverage describes the recorded account inventory; accounts never declared by the owner cannot be inferred."
+          },
+          {
+            "code": "freshness_unavailable",
+            "why": "An exact completed feed sync time is unavailable; assignment observations are not sync receipts. Confirmed statements cover the requested historical period."
+          }
+        ],
+        "selection_gaps": [],
+        "gaps": [
+          {
+            "code": "evidence_score",
+            "why": "The complete expected-account inventory is not independently verified. USD $240.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained.",
+            "missing": "Owner-confirmed expected accounts and verified statement coverage for the requested dates. Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement."
+          }
+        ]
+      },
+      "confidence_text": "Confidence: Medium (89%)\nReasons: The complete expected-account inventory is not independently verified. USD $240.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained.\nMissing: Owner-confirmed expected accounts and verified statement coverage for the requested dates. Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement.",
+      "evidence": {
+        "as_of": {
+          "date": "2026-11-12",
+          "time_zone": "UTC",
+          "configured": true
+        },
+        "period": {
+          "from": "2026-10-01",
+          "to": "2026-10-31"
+        },
+        "accounts": [
+          {
+            "tenant_id": "primary",
+            "account_slug": "operating",
+            "last4": "1111",
+            "label": "operating",
+            "bank": null,
+            "side": "personal",
+            "currency": "USD",
+            "open_in_period": true,
+            "status": "open",
+            "opened_on": null,
+            "closed_on": null,
+            "period_days": 31,
+            "verified_days": 31,
+            "observed_through": "2026-10-09",
+            "unverified_dates": [],
+            "coverage_verified": true,
+            "stated_from": "2026-10-01",
+            "stated_through": "2026-10-31",
+            "rows_in_period": 1,
+            "period_verified": true,
+            "uncertain": {
+              "inflow_minor": 0,
+              "outflow_minor": 0,
+              "first_row": null,
+              "last_row": null
+            },
+            "pending": {
+              "rows": 0,
+              "inflow_minor": 0,
+              "outflow_minor": 0,
+              "oldest_on": null,
+              "collection": "recorded",
+              "amount_known": true,
+              "stale": {
+                "rows": 0,
+                "inflow_minor": 0,
+                "outflow_minor": 0,
+                "oldest_on": null
+              }
+            },
+            "excluded": [],
+            "lifecycle_conflicts": [],
+            "possible_duplicate_minor": 0,
+            "same_account_repeat_minor": 0,
+            "identity_basis": "separate_account",
+            "history_holes": [],
+            "unreadable_rows": 0,
+            "unreadable": [],
+            "unconfirmed_rows": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "manual/partial",
+      "rows": [
+        {
+          "n": 24000
+        }
+      ],
+      "confidence": {
+        "level": "Low",
+        "percent": 60,
+        "reasons": [
+          "The complete expected-account inventory is not independently verified.",
+          "Account 1111: 2026-10-16 through 2026-10-31 unverified; $0 quantified; amount unknown; rows seen 2026-10-01 through 2026-10-15.",
+          "USD $240.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained.",
+          "The requested accounts and from-through dates are not independently covered by complete confirmed history.",
+          "Some selected account date ranges are not confirmed complete.",
+          "An exact completed feed sync time is unavailable; assignment observations are not sync receipts."
+        ],
+        "missing": [
+          "Owner-confirmed expected accounts and verified statement coverage for the requested dates.",
+          "Account 1111: a complete dated statement or verified feed coverage for 2026-10-16 through 2026-10-31.",
+          "Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement.",
+          "A literal account/date selection and complete confirmed statement coverage for that period.",
+          "Complete statements or synced history for the listed accounts and dates.",
+          "A completed sync receipt or complete confirmed statements through the requested period."
+        ],
+        "period_end": "2026-10-31",
+        "may_only_lower": true,
+        "line": "Confidence: Low (60%)",
+        "band": "Low",
+        "score": 60,
+        "label": "Low",
+        "evidence_percent": 60,
+        "display": "Confidence: Low (60%)",
+        "basis": "selected_account_dates",
+        "selection_score": 60,
+        "caveats": [
+          {
+            "code": "account_inventory_boundary",
+            "why": "Coverage describes the recorded account inventory; accounts never declared by the owner cannot be inferred."
+          }
+        ],
+        "selection_gaps": [
+          {
+            "code": "selection_coverage_unverified",
+            "why": "The requested accounts and from-through dates are not independently covered by complete confirmed history.",
+            "missing": "A literal account/date selection and complete confirmed statement coverage for that period.",
+            "accounts": [
+              {
+                "account": "1111",
+                "account_slug": "operating",
+                "from": "2026-01-01",
+                "to": "2026-10-15"
+              }
+            ]
+          },
+          {
+            "code": "incomplete_coverage",
+            "why": "Some selected account date ranges are not confirmed complete.",
+            "missing": "Complete statements or synced history for the listed accounts and dates.",
+            "accounts": [
+              {
+                "account": "1111",
+                "account_slug": "operating",
+                "from": "2026-01-01",
+                "to": "2026-10-15"
+              }
+            ],
+            "from": "2026-10-01",
+            "to": "2026-10-31"
+          },
+          {
+            "code": "freshness_unavailable",
+            "why": "An exact completed feed sync time is unavailable; assignment observations are not sync receipts.",
+            "missing": "A completed sync receipt or complete confirmed statements through the requested period."
+          }
+        ],
+        "gaps": [
+          {
+            "code": "selection_coverage_unverified",
+            "why": "The requested accounts and from-through dates are not independently covered by complete confirmed history.",
+            "missing": "A literal account/date selection and complete confirmed statement coverage for that period.",
+            "accounts": [
+              {
+                "account": "1111",
+                "account_slug": "operating",
+                "from": "2026-01-01",
+                "to": "2026-10-15"
+              }
+            ]
+          },
+          {
+            "code": "incomplete_coverage",
+            "why": "Some selected account date ranges are not confirmed complete.",
+            "missing": "Complete statements or synced history for the listed accounts and dates.",
+            "accounts": [
+              {
+                "account": "1111",
+                "account_slug": "operating",
+                "from": "2026-01-01",
+                "to": "2026-10-15"
+              }
+            ],
+            "from": "2026-10-01",
+            "to": "2026-10-31"
+          },
+          {
+            "code": "freshness_unavailable",
+            "why": "An exact completed feed sync time is unavailable; assignment observations are not sync receipts.",
+            "missing": "A completed sync receipt or complete confirmed statements through the requested period."
+          },
+          {
+            "code": "evidence_score",
+            "why": "The complete expected-account inventory is not independently verified. Account 1111: 2026-10-16 through 2026-10-31 unverified; $0 quantified; amount unknown; rows seen 2026-10-01 through 2026-10-15. USD $240.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained.",
+            "missing": "Owner-confirmed expected accounts and verified statement coverage for the requested dates. Account 1111: a complete dated statement or verified feed coverage for 2026-10-16 through 2026-10-31. Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement."
+          }
+        ]
+      },
+      "confidence_text": "Confidence: Low (60%)\nReasons: The complete expected-account inventory is not independently verified. Account 1111: 2026-10-16 through 2026-10-31 unverified; $0 quantified; amount unknown; rows seen 2026-10-01 through 2026-10-15. USD $240.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained. The requested accounts and from-through dates are not independently covered by complete confirmed history. Some selected account date ranges are not confirmed complete. An exact completed feed sync time is unavailable; assignment observations are not sync receipts.\nMissing: Owner-confirmed expected accounts and verified statement coverage for the requested dates. Account 1111: a complete dated statement or verified feed coverage for 2026-10-16 through 2026-10-31. Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement. A literal account/date selection and complete confirmed statement coverage for that period. Complete statements or synced history for the listed accounts and dates. A completed sync receipt or complete confirmed statements through the requested period.",
+      "evidence": {
+        "as_of": {
+          "date": "2026-11-12",
+          "time_zone": "UTC",
+          "configured": true
+        },
+        "period": {
+          "from": "2026-10-01",
+          "to": "2026-10-31"
+        },
+        "accounts": [
+          {
+            "tenant_id": "primary",
+            "account_slug": "operating",
+            "last4": "1111",
+            "label": "operating",
+            "bank": null,
+            "side": "personal",
+            "currency": "USD",
+            "open_in_period": true,
+            "status": "open",
+            "opened_on": null,
+            "closed_on": null,
+            "period_days": 31,
+            "verified_days": 15,
+            "observed_through": "2026-10-09",
+            "unverified_dates": [
+              {
+                "from": "2026-10-16",
+                "to": "2026-10-31"
+              }
+            ],
+            "coverage_verified": true,
+            "stated_from": "2026-10-01",
+            "stated_through": "2026-10-15",
+            "rows_in_period": 1,
+            "period_verified": false,
+            "uncertain": {
+              "inflow_minor": 0,
+              "outflow_minor": 0,
+              "first_row": null,
+              "last_row": null
+            },
+            "pending": {
+              "rows": 0,
+              "inflow_minor": 0,
+              "outflow_minor": 0,
+              "oldest_on": null,
+              "collection": "recorded",
+              "amount_known": true,
+              "stale": {
+                "rows": 0,
+                "inflow_minor": 0,
+                "outflow_minor": 0,
+                "oldest_on": null
+              }
+            },
+            "excluded": [],
+            "lifecycle_conflicts": [],
+            "possible_duplicate_minor": 0,
+            "same_account_repeat_minor": 0,
+            "identity_basis": "separate_account",
+            "history_holes": [],
+            "unreadable_rows": 0,
+            "unreadable": [],
+            "unconfirmed_rows": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "manual/ambiguous",
+      "rows": [
+        {
+          "n": 144000
+        }
+      ],
+      "confidence": {
+        "level": "Medium",
+        "percent": 70,
+        "reasons": [
+          "The complete expected-account inventory is not independently verified.",
+          "Account 1111: $1,200.00 of outflow for 2026-10-01 through 2026-10-31 (postings 2026-10-10 through 2026-10-10) have unproved income, expense or payment membership.",
+          "Some counted or excluded postings have unproved money membership.",
+          "USD $240.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained.",
+          "USD $1,200.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups; read history or type evidence is contrary or unproved. The provisional figure is retained.",
+          "Some postings have unresolved movement membership; counted amounts may repeat other activity, and left-out amounts may be missing.",
+          "$1,200.00 paid rests on an earlier unresolved money-type estimate. These estimated dollars keep their current treatment in the figure. Confirm these rows."
+        ],
+        "missing": [
+          "Owner-confirmed expected accounts and verified statement coverage for the requested dates.",
+          "Account 1111: deposit source, category or payment records proving those rows' membership.",
+          "Prove each flagged posting with source statements and owned counterpart or classification evidence.",
+          "Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement.",
+          "Counterpart statements, bank transaction codes or an owner review of the listed postings.",
+          "The source and counterpart statements, original purchase/payment and owner category confirmation resolving the earlier estimate."
+        ],
+        "period_end": "2026-10-31",
+        "may_only_lower": true,
+        "line": "Confidence: Medium (70%)",
+        "band": "Medium",
+        "score": 70,
+        "label": "Medium",
+        "evidence_percent": 75,
+        "display": "Confidence: Medium (70%)",
+        "basis": "selected_account_dates",
+        "selection_score": 70,
+        "caveats": [
+          {
+            "code": "account_inventory_boundary",
+            "why": "Coverage describes the recorded account inventory; accounts never declared by the owner cannot be inferred."
+          },
+          {
+            "code": "freshness_unavailable",
+            "why": "An exact completed feed sync time is unavailable; assignment observations are not sync receipts. Confirmed statements cover the requested historical period."
+          }
+        ],
+        "selection_gaps": [
+          {
+            "code": "estimated_membership",
+            "why": "Some postings have unresolved movement membership; counted amounts may repeat other activity, and left-out amounts may be missing.",
+            "missing": "Counterpart statements, bank transaction codes or an owner review of the listed postings.",
+            "amounts": [
+              {
+                "currency": "USD",
+                "inflow_minor": 0,
+                "outflow_minor": 120000
+              }
+            ],
+            "reasons": [
+              {
+                "reason": "possible_own_transfer_counted",
+                "treatment": "counted",
+                "rows": 1,
+                "currency": "USD",
+                "inflow_minor": 0,
+                "outflow_minor": 120000,
+                "accounts": [
+                  {
+                    "account": "1111",
+                    "account_slug": "operating",
+                    "from": "2026-01-01",
+                    "to": "2026-11-12"
+                  }
+                ],
+                "from": "2026-10-10",
+                "to": "2026-10-10"
+              }
+            ]
+          },
+          {
+            "code": "prior_estimate",
+            "why": "$1,200.00 paid rests on an earlier unresolved money-type estimate. These estimated dollars keep their current treatment in the figure. Confirm these rows.",
+            "missing": "The source and counterpart statements, original purchase/payment and owner category confirmation resolving the earlier estimate.",
+            "amounts": [
+              {
+                "currency": "USD",
+                "inflow_minor": 0,
+                "outflow_minor": 120000
+              }
+            ],
+            "accounts": [
+              {
+                "account": "1111",
+                "account_slug": "operating",
+                "from": "2026-01-01",
+                "to": "2026-11-12"
+              }
+            ]
+          }
+        ],
+        "gaps": [
+          {
+            "code": "estimated_membership",
+            "why": "Some postings have unresolved movement membership; counted amounts may repeat other activity, and left-out amounts may be missing.",
+            "missing": "Counterpart statements, bank transaction codes or an owner review of the listed postings.",
+            "amounts": [
+              {
+                "currency": "USD",
+                "inflow_minor": 0,
+                "outflow_minor": 120000
+              }
+            ],
+            "reasons": [
+              {
+                "reason": "possible_own_transfer_counted",
+                "treatment": "counted",
+                "rows": 1,
+                "currency": "USD",
+                "inflow_minor": 0,
+                "outflow_minor": 120000,
+                "accounts": [
+                  {
+                    "account": "1111",
+                    "account_slug": "operating",
+                    "from": "2026-01-01",
+                    "to": "2026-11-12"
+                  }
+                ],
+                "from": "2026-10-10",
+                "to": "2026-10-10"
+              }
+            ]
+          },
+          {
+            "code": "prior_estimate",
+            "why": "$1,200.00 paid rests on an earlier unresolved money-type estimate. These estimated dollars keep their current treatment in the figure. Confirm these rows.",
+            "missing": "The source and counterpart statements, original purchase/payment and owner category confirmation resolving the earlier estimate.",
+            "amounts": [
+              {
+                "currency": "USD",
+                "inflow_minor": 0,
+                "outflow_minor": 120000
+              }
+            ],
+            "accounts": [
+              {
+                "account": "1111",
+                "account_slug": "operating",
+                "from": "2026-01-01",
+                "to": "2026-11-12"
+              }
+            ]
+          },
+          {
+            "code": "evidence_score",
+            "why": "The complete expected-account inventory is not independently verified. Account 1111: $1,200.00 of outflow for 2026-10-01 through 2026-10-31 (postings 2026-10-10 through 2026-10-10) have unproved income, expense or payment membership. Some counted or excluded postings have unproved money membership. USD $240.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained. USD $1,200.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups; read history or type evidence is contrary or unproved. The provisional figure is retained.",
+            "missing": "Owner-confirmed expected accounts and verified statement coverage for the requested dates. Account 1111: deposit source, category or payment records proving those rows' membership. Prove each flagged posting with source statements and owned counterpart or classification evidence. Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement. Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement."
+          }
+        ]
+      },
+      "confidence_text": "Confidence: Medium (70%)\nReasons: The complete expected-account inventory is not independently verified. Account 1111: $1,200.00 of outflow for 2026-10-01 through 2026-10-31 (postings 2026-10-10 through 2026-10-10) have unproved income, expense or payment membership. Some counted or excluded postings have unproved money membership. USD $240.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained. USD $1,200.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups; read history or type evidence is contrary or unproved. The provisional figure is retained. Some postings have unresolved movement membership; counted amounts may repeat other activity, and left-out amounts may be missing. $1,200.00 paid rests on an earlier unresolved money-type estimate. These estimated dollars keep their current treatment in the figure. Confirm these rows.\nMissing: Owner-confirmed expected accounts and verified statement coverage for the requested dates. Account 1111: deposit source, category or payment records proving those rows' membership. Prove each flagged posting with source statements and owned counterpart or classification evidence. Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement. Counterpart statements, bank transaction codes or an owner review of the listed postings. The source and counterpart statements, original purchase/payment and owner category confirmation resolving the earlier estimate.",
+      "evidence": {
+        "as_of": {
+          "date": "2026-11-12",
+          "time_zone": "UTC",
+          "configured": true
+        },
+        "period": {
+          "from": "2026-10-01",
+          "to": "2026-10-31"
+        },
+        "accounts": [
+          {
+            "tenant_id": "primary",
+            "account_slug": "operating",
+            "last4": "1111",
+            "label": "operating",
+            "bank": null,
+            "side": "personal",
+            "currency": "USD",
+            "open_in_period": true,
+            "status": "open",
+            "opened_on": null,
+            "closed_on": null,
+            "period_days": 31,
+            "verified_days": 31,
+            "observed_through": "2026-10-10",
+            "unverified_dates": [],
+            "coverage_verified": true,
+            "stated_from": "2026-10-01",
+            "stated_through": "2026-10-31",
+            "rows_in_period": 2,
+            "period_verified": true,
+            "uncertain": {
+              "inflow_minor": 0,
+              "outflow_minor": 120000,
+              "first_row": "2026-10-10",
+              "last_row": "2026-10-10"
+            },
+            "pending": {
+              "rows": 0,
+              "inflow_minor": 0,
+              "outflow_minor": 0,
+              "oldest_on": null,
+              "collection": "recorded",
+              "amount_known": true,
+              "stale": {
+                "rows": 0,
+                "inflow_minor": 0,
+                "outflow_minor": 0,
+                "oldest_on": null
+              }
+            },
+            "excluded": [],
+            "lifecycle_conflicts": [],
+            "possible_duplicate_minor": 0,
+            "same_account_repeat_minor": 0,
+            "identity_basis": "separate_account",
+            "history_holes": [],
+            "unreadable_rows": 0,
+            "unreadable": [],
+            "unconfirmed_rows": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "manual/currency",
+      "rows": [
+        {
+          "n": 54000
+        }
+      ],
+      "confidence": {
+        "level": "Medium",
+        "percent": 89,
+        "reasons": [
+          "The complete expected-account inventory is not independently verified.",
+          "The read contains multiple currencies without proved separate currency output: CAD 300.00; USD $240.00. A bare or literal currency label does not separate a sum.",
+          "CAD 300.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained.",
+          "USD $240.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained."
+        ],
+        "missing": [
+          "Owner-confirmed expected accounts and verified statement coverage for the requested dates.",
+          "Filter to one currency, or GROUP BY currency and return the actual currency column for every amount.",
+          "Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement."
+        ],
+        "period_end": "2026-10-31",
+        "may_only_lower": true,
+        "line": "Confidence: Medium (89%)",
+        "band": "Medium",
+        "score": 89,
+        "label": "Medium",
+        "evidence_percent": 95,
+        "display": "Confidence: Medium (89%)",
+        "basis": "selected_account_dates",
+        "selection_score": 100,
+        "caveats": [
+          {
+            "code": "account_inventory_boundary",
+            "why": "Coverage describes the recorded account inventory; accounts never declared by the owner cannot be inferred."
+          },
+          {
+            "code": "freshness_unavailable",
+            "why": "An exact completed feed sync time is unavailable; assignment observations are not sync receipts. Confirmed statements cover the requested historical period."
+          }
+        ],
+        "selection_gaps": [],
+        "gaps": [
+          {
+            "code": "evidence_score",
+            "why": "The complete expected-account inventory is not independently verified. The read contains multiple currencies without proved separate currency output: CAD 300.00; USD $240.00. A bare or literal currency label does not separate a sum. CAD 300.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained. USD $240.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained.",
+            "missing": "Owner-confirmed expected accounts and verified statement coverage for the requested dates. Filter to one currency, or GROUP BY currency and return the actual currency column for every amount. Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement. Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement."
+          }
+        ]
+      },
+      "confidence_text": "Confidence: Medium (89%)\nReasons: The complete expected-account inventory is not independently verified. The read contains multiple currencies without proved separate currency output: CAD 300.00; USD $240.00. A bare or literal currency label does not separate a sum. CAD 300.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained. USD $240.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained.\nMissing: Owner-confirmed expected accounts and verified statement coverage for the requested dates. Filter to one currency, or GROUP BY currency and return the actual currency column for every amount. Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement.",
+      "evidence": {
+        "as_of": {
+          "date": "2026-11-12",
+          "time_zone": "UTC",
+          "configured": true
+        },
+        "period": {
+          "from": "2026-10-01",
+          "to": "2026-10-31"
+        },
+        "accounts": [
+          {
+            "tenant_id": "primary",
+            "account_slug": "foreign",
+            "last4": "1234",
+            "label": "foreign",
+            "bank": null,
+            "side": "personal",
+            "currency": "CAD",
+            "open_in_period": true,
+            "status": "open",
+            "opened_on": null,
+            "closed_on": null,
+            "period_days": 31,
+            "verified_days": 31,
+            "observed_through": "2026-10-05",
+            "unverified_dates": [],
+            "coverage_verified": true,
+            "stated_from": "2026-10-01",
+            "stated_through": "2026-10-31",
+            "rows_in_period": 1,
+            "period_verified": true,
+            "uncertain": {
+              "inflow_minor": 0,
+              "outflow_minor": 0,
+              "first_row": null,
+              "last_row": null
+            },
+            "pending": {
+              "rows": 0,
+              "inflow_minor": 0,
+              "outflow_minor": 0,
+              "oldest_on": null,
+              "collection": "recorded",
+              "amount_known": true,
+              "stale": {
+                "rows": 0,
+                "inflow_minor": 0,
+                "outflow_minor": 0,
+                "oldest_on": null
+              }
+            },
+            "excluded": [],
+            "lifecycle_conflicts": [],
+            "possible_duplicate_minor": 0,
+            "same_account_repeat_minor": 0,
+            "identity_basis": "separate_account",
+            "history_holes": [],
+            "unreadable_rows": 0,
+            "unreadable": [],
+            "unconfirmed_rows": 0
+          },
+          {
+            "tenant_id": "primary",
+            "account_slug": "operating",
+            "last4": "1111",
+            "label": "operating",
+            "bank": null,
+            "side": "personal",
+            "currency": "USD",
+            "open_in_period": true,
+            "status": "open",
+            "opened_on": null,
+            "closed_on": null,
+            "period_days": 31,
+            "verified_days": 31,
+            "observed_through": "2026-10-09",
+            "unverified_dates": [],
+            "coverage_verified": true,
+            "stated_from": "2026-10-01",
+            "stated_through": "2026-10-31",
+            "rows_in_period": 1,
+            "period_verified": true,
+            "uncertain": {
+              "inflow_minor": 0,
+              "outflow_minor": 0,
+              "first_row": null,
+              "last_row": null
+            },
+            "pending": {
+              "rows": 0,
+              "inflow_minor": 0,
+              "outflow_minor": 0,
+              "oldest_on": null,
+              "collection": "recorded",
+              "amount_known": true,
+              "stale": {
+                "rows": 0,
+                "inflow_minor": 0,
+                "outflow_minor": 0,
+                "oldest_on": null
+              }
+            },
+            "excluded": [],
+            "lifecycle_conflicts": [],
+            "possible_duplicate_minor": 0,
+            "same_account_repeat_minor": 0,
+            "identity_basis": "separate_account",
+            "history_holes": [],
+            "unreadable_rows": 0,
+            "unreadable": [],
+            "unconfirmed_rows": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "manual/date-mismatch",
+      "rows": [
+        {
+          "n": 61000
+        }
+      ],
+      "confidence": {
+        "level": "Medium",
+        "percent": 89,
+        "reasons": [
+          "The complete expected-account inventory is not independently verified.",
+          "The declared period 2026-10-01 through 2026-10-31 differs from SQL dates 2026-09-01 through 2026-09-30; the figure follows SQL and the read covers 2026-09-01 through 2026-10-31.",
+          "USD $610.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained.",
+          "USD $240.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained."
+        ],
+        "missing": [
+          "Owner-confirmed expected accounts and verified statement coverage for the requested dates.",
+          "Match the declared period with all SQL dates, including comparison periods, and verify coverage for those dates.",
+          "Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement."
+        ],
+        "period_end": "2026-10-31",
+        "may_only_lower": true,
+        "line": "Confidence: Medium (89%)",
+        "band": "Medium",
+        "score": 89,
+        "label": "Medium",
+        "evidence_percent": 95,
+        "display": "Confidence: Medium (89%)",
+        "basis": "selected_account_dates",
+        "selection_score": 100,
+        "caveats": [
+          {
+            "code": "account_inventory_boundary",
+            "why": "Coverage describes the recorded account inventory; accounts never declared by the owner cannot be inferred."
+          },
+          {
+            "code": "freshness_unavailable",
+            "why": "An exact completed feed sync time is unavailable; assignment observations are not sync receipts. Confirmed statements cover the requested historical period."
+          },
+          {
+            "code": "declared_period_differs",
+            "why": "Declared 2026-10-01 through 2026-10-31; SQL 2026-09-01 through 2026-09-30. The figure follows SQL; read 2026-09-01 through 2026-10-31."
+          }
+        ],
+        "selection_gaps": [],
+        "gaps": [
+          {
+            "code": "evidence_score",
+            "why": "The complete expected-account inventory is not independently verified. The declared period 2026-10-01 through 2026-10-31 differs from SQL dates 2026-09-01 through 2026-09-30; the figure follows SQL and the read covers 2026-09-01 through 2026-10-31. USD $610.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained. USD $240.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained.",
+            "missing": "Owner-confirmed expected accounts and verified statement coverage for the requested dates. Match the declared period with all SQL dates, including comparison periods, and verify coverage for those dates. Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement. Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement."
+          }
+        ]
+      },
+      "confidence_text": "Confidence: Medium (89%)\nReasons: The complete expected-account inventory is not independently verified. The declared period 2026-10-01 through 2026-10-31 differs from SQL dates 2026-09-01 through 2026-09-30; the figure follows SQL and the read covers 2026-09-01 through 2026-10-31. USD $610.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained. USD $240.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained.\nMissing: Owner-confirmed expected accounts and verified statement coverage for the requested dates. Match the declared period with all SQL dates, including comparison periods, and verify coverage for those dates. Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement.",
+      "evidence": {
+        "as_of": {
+          "date": "2026-11-12",
+          "time_zone": "UTC",
+          "configured": true
+        },
+        "period": {
+          "from": "2026-09-01",
+          "to": "2026-10-31"
+        },
+        "accounts": [
+          {
+            "tenant_id": "primary",
+            "account_slug": "operating",
+            "last4": "1111",
+            "label": "operating",
+            "bank": null,
+            "side": "personal",
+            "currency": "USD",
+            "open_in_period": true,
+            "status": "open",
+            "opened_on": null,
+            "closed_on": null,
+            "period_days": 61,
+            "verified_days": 61,
+            "observed_through": "2026-10-09",
+            "unverified_dates": [],
+            "coverage_verified": true,
+            "stated_from": "2026-09-01",
+            "stated_through": "2026-10-31",
+            "rows_in_period": 2,
+            "period_verified": true,
+            "uncertain": {
+              "inflow_minor": 0,
+              "outflow_minor": 0,
+              "first_row": null,
+              "last_row": null
+            },
+            "pending": {
+              "rows": 0,
+              "inflow_minor": 0,
+              "outflow_minor": 0,
+              "oldest_on": null,
+              "collection": "recorded",
+              "amount_known": true,
+              "stale": {
+                "rows": 0,
+                "inflow_minor": 0,
+                "outflow_minor": 0,
+                "oldest_on": null
+              }
+            },
+            "excluded": [],
+            "lifecycle_conflicts": [],
+            "possible_duplicate_minor": 0,
+            "same_account_repeat_minor": 0,
+            "identity_basis": "separate_account",
+            "history_holes": [],
+            "unreadable_rows": 0,
+            "unreadable": [],
+            "unconfirmed_rows": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "live/complete",
+      "rows": [
+        {
+          "n": 24000
+        }
+      ],
+      "confidence": {
+        "level": "Medium",
+        "percent": 89,
+        "reasons": [
+          "The complete expected-account inventory is not independently verified.",
+          "USD $240.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained."
+        ],
+        "missing": [
+          "Owner-confirmed expected accounts and verified statement coverage for the requested dates.",
+          "Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement."
+        ],
+        "period_end": "2026-10-31",
+        "may_only_lower": true,
+        "line": "Confidence: Medium (89%)",
+        "band": "Medium",
+        "score": 89,
+        "label": "Medium",
+        "evidence_percent": 95,
+        "display": "Confidence: Medium (89%)",
+        "basis": "selected_account_dates",
+        "selection_score": 100,
+        "caveats": [
+          {
+            "code": "account_inventory_boundary",
+            "why": "Coverage describes the recorded account inventory; accounts never declared by the owner cannot be inferred."
+          }
+        ],
+        "selection_gaps": [],
+        "gaps": [
+          {
+            "code": "evidence_score",
+            "why": "The complete expected-account inventory is not independently verified. USD $240.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained.",
+            "missing": "Owner-confirmed expected accounts and verified statement coverage for the requested dates. Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement."
+          }
+        ]
+      },
+      "confidence_text": "Confidence: Medium (89%)\nReasons: The complete expected-account inventory is not independently verified. USD $240.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained.\nMissing: Owner-confirmed expected accounts and verified statement coverage for the requested dates. Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement.",
+      "evidence": {
+        "as_of": {
+          "date": "2026-11-12",
+          "time_zone": "UTC",
+          "configured": true
+        },
+        "period": {
+          "from": "2026-10-01",
+          "to": "2026-10-31"
+        },
+        "accounts": [
+          {
+            "tenant_id": "primary",
+            "account_slug": "operating",
+            "last4": "1111",
+            "label": "operating",
+            "bank": null,
+            "side": "personal",
+            "currency": "USD",
+            "open_in_period": true,
+            "status": "open",
+            "opened_on": null,
+            "closed_on": null,
+            "period_days": 31,
+            "verified_days": 31,
+            "observed_through": "2026-10-09",
+            "unverified_dates": [],
+            "coverage_verified": true,
+            "stated_from": "2026-10-01",
+            "stated_through": "2026-10-31",
+            "rows_in_period": 1,
+            "period_verified": true,
+            "uncertain": {
+              "inflow_minor": 0,
+              "outflow_minor": 0,
+              "first_row": null,
+              "last_row": null
+            },
+            "pending": {
+              "rows": 0,
+              "inflow_minor": 0,
+              "outflow_minor": 0,
+              "oldest_on": null,
+              "collection": "recorded",
+              "amount_known": true,
+              "stale": {
+                "rows": 0,
+                "inflow_minor": 0,
+                "outflow_minor": 0,
+                "oldest_on": null
+              }
+            },
+            "excluded": [],
+            "lifecycle_conflicts": [],
+            "possible_duplicate_minor": 0,
+            "same_account_repeat_minor": 0,
+            "identity_basis": "separate_account",
+            "history_holes": [],
+            "unreadable_rows": 0,
+            "unreadable": [],
+            "unconfirmed_rows": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "live/partial",
+      "rows": [
+        {
+          "n": 24000
+        }
+      ],
+      "confidence": {
+        "level": "Low",
+        "percent": 60,
+        "reasons": [
+          "Account ending 1111 has 16 days without confirmed complete coverage: 2026-10-16 through 2026-10-31; missing dollar impact is unknown.",
+          "The complete expected-account inventory is not independently verified.",
+          "Account 1111: 2026-10-16 through 2026-10-31 unverified; $0 quantified; amount unknown; rows seen 2026-10-01 through 2026-10-15.",
+          "USD $240.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained.",
+          "The requested accounts and from-through dates are not independently covered by complete confirmed history.",
+          "Some selected account date ranges are not confirmed complete."
+        ],
+        "missing": [
+          "Account ending 1111: 2026-10-16 through 2026-10-31 (16 days). Supply complete statements or successfully synced history and confirm these coverage dates.",
+          "Owner-confirmed expected accounts and verified statement coverage for the requested dates.",
+          "Account 1111: a complete dated statement or verified feed coverage for 2026-10-16 through 2026-10-31.",
+          "Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement.",
+          "A literal account/date selection and complete confirmed statement coverage for that period.",
+          "Complete statements or synced history for the listed accounts and dates."
+        ],
+        "period_end": "2026-10-31",
+        "may_only_lower": true,
+        "line": "Confidence: Low (60%)",
+        "band": "Low",
+        "score": 60,
+        "label": "Low",
+        "evidence_percent": 60,
+        "display": "Confidence: Low (60%)",
+        "basis": "selected_account_dates",
+        "selection_score": 65,
+        "caveats": [
+          {
+            "code": "account_inventory_boundary",
+            "why": "Coverage describes the recorded account inventory; accounts never declared by the owner cannot be inferred."
+          }
+        ],
+        "selection_gaps": [
+          {
+            "code": "selection_coverage_unverified",
+            "why": "The requested accounts and from-through dates are not independently covered by complete confirmed history.",
+            "missing": "A literal account/date selection and complete confirmed statement coverage for that period.",
+            "accounts": [
+              {
+                "account": "1111",
+                "account_slug": "operating",
+                "from": "2026-01-01",
+                "to": "2026-10-15"
+              }
+            ]
+          },
+          {
+            "code": "incomplete_coverage",
+            "why": "Some selected account date ranges are not confirmed complete.",
+            "missing": "Complete statements or synced history for the listed accounts and dates.",
+            "accounts": [
+              {
+                "account": "1111",
+                "account_slug": "operating",
+                "from": "2026-01-01",
+                "to": "2026-10-15"
+              }
+            ],
+            "from": "2026-10-01",
+            "to": "2026-10-31"
+          }
+        ],
+        "gaps": [
+          {
+            "code": "selection_coverage_unverified",
+            "why": "The requested accounts and from-through dates are not independently covered by complete confirmed history.",
+            "missing": "A literal account/date selection and complete confirmed statement coverage for that period.",
+            "accounts": [
+              {
+                "account": "1111",
+                "account_slug": "operating",
+                "from": "2026-01-01",
+                "to": "2026-10-15"
+              }
+            ]
+          },
+          {
+            "code": "incomplete_coverage",
+            "why": "Some selected account date ranges are not confirmed complete.",
+            "missing": "Complete statements or synced history for the listed accounts and dates.",
+            "accounts": [
+              {
+                "account": "1111",
+                "account_slug": "operating",
+                "from": "2026-01-01",
+                "to": "2026-10-15"
+              }
+            ],
+            "from": "2026-10-01",
+            "to": "2026-10-31"
+          },
+          {
+            "code": "evidence_score",
+            "why": "Account ending 1111 has 16 days without confirmed complete coverage: 2026-10-16 through 2026-10-31; missing dollar impact is unknown. The complete expected-account inventory is not independently verified. Account 1111: 2026-10-16 through 2026-10-31 unverified; $0 quantified; amount unknown; rows seen 2026-10-01 through 2026-10-15. USD $240.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained.",
+            "missing": "Account ending 1111: 2026-10-16 through 2026-10-31 (16 days). Supply complete statements or successfully synced history and confirm these coverage dates. Owner-confirmed expected accounts and verified statement coverage for the requested dates. Account 1111: a complete dated statement or verified feed coverage for 2026-10-16 through 2026-10-31. Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement."
+          }
+        ]
+      },
+      "confidence_text": "Confidence: Low (60%)\nReasons: Account ending 1111 has 16 days without confirmed complete coverage: 2026-10-16 through 2026-10-31; missing dollar impact is unknown. The complete expected-account inventory is not independently verified. Account 1111: 2026-10-16 through 2026-10-31 unverified; $0 quantified; amount unknown; rows seen 2026-10-01 through 2026-10-15. USD $240.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained. The requested accounts and from-through dates are not independently covered by complete confirmed history. Some selected account date ranges are not confirmed complete.\nMissing: Account ending 1111: 2026-10-16 through 2026-10-31 (16 days). Supply complete statements or successfully synced history and confirm these coverage dates. Owner-confirmed expected accounts and verified statement coverage for the requested dates. Account 1111: a complete dated statement or verified feed coverage for 2026-10-16 through 2026-10-31. Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement. A literal account/date selection and complete confirmed statement coverage for that period. Complete statements or synced history for the listed accounts and dates.",
+      "evidence": {
+        "as_of": {
+          "date": "2026-11-12",
+          "time_zone": "UTC",
+          "configured": true
+        },
+        "period": {
+          "from": "2026-10-01",
+          "to": "2026-10-31"
+        },
+        "accounts": [
+          {
+            "tenant_id": "primary",
+            "account_slug": "operating",
+            "last4": "1111",
+            "label": "operating",
+            "bank": null,
+            "side": "personal",
+            "currency": "USD",
+            "open_in_period": true,
+            "status": "open",
+            "opened_on": null,
+            "closed_on": null,
+            "period_days": 31,
+            "verified_days": 15,
+            "observed_through": "2026-10-09",
+            "unverified_dates": [
+              {
+                "from": "2026-10-16",
+                "to": "2026-10-31"
+              }
+            ],
+            "coverage_verified": true,
+            "stated_from": "2026-10-01",
+            "stated_through": "2026-10-15",
+            "rows_in_period": 1,
+            "period_verified": false,
+            "uncertain": {
+              "inflow_minor": 0,
+              "outflow_minor": 0,
+              "first_row": null,
+              "last_row": null
+            },
+            "pending": {
+              "rows": 0,
+              "inflow_minor": 0,
+              "outflow_minor": 0,
+              "oldest_on": null,
+              "collection": "recorded",
+              "amount_known": true,
+              "stale": {
+                "rows": 0,
+                "inflow_minor": 0,
+                "outflow_minor": 0,
+                "oldest_on": null
+              }
+            },
+            "excluded": [],
+            "lifecycle_conflicts": [],
+            "possible_duplicate_minor": 0,
+            "same_account_repeat_minor": 0,
+            "identity_basis": "separate_account",
+            "history_holes": [],
+            "unreadable_rows": 0,
+            "unreadable": [],
+            "unconfirmed_rows": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "live/ambiguous",
+      "rows": [
+        {
+          "n": 144000
+        }
+      ],
+      "confidence": {
+        "level": "Low",
+        "percent": 62,
+        "reasons": [
+          "Account ending 1111 has guessed classification: USD $1,200.00 (outflow), 2026-10-10 through 2026-10-10.",
+          "The complete expected-account inventory is not independently verified.",
+          "Some counted or excluded postings have unproved money membership.",
+          "Account 1111: $1,200.00 of outflow for 2026-10-01 through 2026-10-31 (postings 2026-10-10 through 2026-10-10) have unproved income, expense or payment membership.",
+          "USD $240.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained.",
+          "USD $1,200.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups; read history or type evidence is contrary or unproved. The provisional figure is retained.",
+          "Some postings have unresolved movement membership; counted amounts may repeat other activity, and left-out amounts may be missing.",
+          "$1,200.00 paid rests on an earlier unresolved money-type estimate. These estimated dollars keep their current treatment in the figure. Confirm these rows."
+        ],
+        "missing": [
+          "Account ending 1111: resolve guessed classification: USD $1,200.00 (outflow), 2026-10-10 through 2026-10-10 with posted statement rows, a proved owned counterpart for transfers/payments, or confirmed classification evidence.",
+          "Owner-confirmed expected accounts and verified statement coverage for the requested dates.",
+          "Prove each flagged posting with source statements and owned counterpart or classification evidence.",
+          "Account 1111: deposit source, category or payment records proving those rows' membership.",
+          "Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement.",
+          "Counterpart statements, bank transaction codes or an owner review of the listed postings.",
+          "The source and counterpart statements, original purchase/payment and owner category confirmation resolving the earlier estimate."
+        ],
+        "period_end": "2026-10-31",
+        "may_only_lower": true,
+        "line": "Confidence: Low (62%)",
+        "band": "Low",
+        "score": 62,
+        "label": "Low",
+        "evidence_percent": 75,
+        "display": "Confidence: Low (62%)",
+        "basis": "selected_account_dates",
+        "selection_score": 70,
+        "caveats": [
+          {
+            "code": "account_inventory_boundary",
+            "why": "Coverage describes the recorded account inventory; accounts never declared by the owner cannot be inferred."
+          }
+        ],
+        "selection_gaps": [
+          {
+            "code": "estimated_membership",
+            "why": "Some postings have unresolved movement membership; counted amounts may repeat other activity, and left-out amounts may be missing.",
+            "missing": "Counterpart statements, bank transaction codes or an owner review of the listed postings.",
+            "amounts": [
+              {
+                "currency": "USD",
+                "inflow_minor": 0,
+                "outflow_minor": 120000
+              }
+            ],
+            "reasons": [
+              {
+                "reason": "possible_own_transfer_counted",
+                "treatment": "counted",
+                "rows": 1,
+                "currency": "USD",
+                "inflow_minor": 0,
+                "outflow_minor": 120000,
+                "accounts": [
+                  {
+                    "account": "1111",
+                    "account_slug": "operating",
+                    "from": "2026-01-01",
+                    "to": "2026-11-12"
+                  }
+                ],
+                "from": "2026-10-10",
+                "to": "2026-10-10"
+              }
+            ]
+          },
+          {
+            "code": "prior_estimate",
+            "why": "$1,200.00 paid rests on an earlier unresolved money-type estimate. These estimated dollars keep their current treatment in the figure. Confirm these rows.",
+            "missing": "The source and counterpart statements, original purchase/payment and owner category confirmation resolving the earlier estimate.",
+            "amounts": [
+              {
+                "currency": "USD",
+                "inflow_minor": 0,
+                "outflow_minor": 120000
+              }
+            ],
+            "accounts": [
+              {
+                "account": "1111",
+                "account_slug": "operating",
+                "from": "2026-01-01",
+                "to": "2026-11-12"
+              }
+            ]
+          }
+        ],
+        "gaps": [
+          {
+            "code": "estimated_membership",
+            "why": "Some postings have unresolved movement membership; counted amounts may repeat other activity, and left-out amounts may be missing.",
+            "missing": "Counterpart statements, bank transaction codes or an owner review of the listed postings.",
+            "amounts": [
+              {
+                "currency": "USD",
+                "inflow_minor": 0,
+                "outflow_minor": 120000
+              }
+            ],
+            "reasons": [
+              {
+                "reason": "possible_own_transfer_counted",
+                "treatment": "counted",
+                "rows": 1,
+                "currency": "USD",
+                "inflow_minor": 0,
+                "outflow_minor": 120000,
+                "accounts": [
+                  {
+                    "account": "1111",
+                    "account_slug": "operating",
+                    "from": "2026-01-01",
+                    "to": "2026-11-12"
+                  }
+                ],
+                "from": "2026-10-10",
+                "to": "2026-10-10"
+              }
+            ]
+          },
+          {
+            "code": "prior_estimate",
+            "why": "$1,200.00 paid rests on an earlier unresolved money-type estimate. These estimated dollars keep their current treatment in the figure. Confirm these rows.",
+            "missing": "The source and counterpart statements, original purchase/payment and owner category confirmation resolving the earlier estimate.",
+            "amounts": [
+              {
+                "currency": "USD",
+                "inflow_minor": 0,
+                "outflow_minor": 120000
+              }
+            ],
+            "accounts": [
+              {
+                "account": "1111",
+                "account_slug": "operating",
+                "from": "2026-01-01",
+                "to": "2026-11-12"
+              }
+            ]
+          },
+          {
+            "code": "evidence_score",
+            "why": "Account ending 1111 has guessed classification: USD $1,200.00 (outflow), 2026-10-10 through 2026-10-10. The complete expected-account inventory is not independently verified. Some counted or excluded postings have unproved money membership. Account 1111: $1,200.00 of outflow for 2026-10-01 through 2026-10-31 (postings 2026-10-10 through 2026-10-10) have unproved income, expense or payment membership. USD $240.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained. USD $1,200.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups; read history or type evidence is contrary or unproved. The provisional figure is retained.",
+            "missing": "Account ending 1111: resolve guessed classification: USD $1,200.00 (outflow), 2026-10-10 through 2026-10-10 with posted statement rows, a proved owned counterpart for transfers/payments, or confirmed classification evidence. Owner-confirmed expected accounts and verified statement coverage for the requested dates. Prove each flagged posting with source statements and owned counterpart or classification evidence. Account 1111: deposit source, category or payment records proving those rows' membership. Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement. Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement."
+          }
+        ]
+      },
+      "confidence_text": "Confidence: Low (62%)\nReasons: Account ending 1111 has guessed classification: USD $1,200.00 (outflow), 2026-10-10 through 2026-10-10. The complete expected-account inventory is not independently verified. Some counted or excluded postings have unproved money membership. Account 1111: $1,200.00 of outflow for 2026-10-01 through 2026-10-31 (postings 2026-10-10 through 2026-10-10) have unproved income, expense or payment membership. USD $240.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained. USD $1,200.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups; read history or type evidence is contrary or unproved. The provisional figure is retained. Some postings have unresolved movement membership; counted amounts may repeat other activity, and left-out amounts may be missing. $1,200.00 paid rests on an earlier unresolved money-type estimate. These estimated dollars keep their current treatment in the figure. Confirm these rows.\nMissing: Account ending 1111: resolve guessed classification: USD $1,200.00 (outflow), 2026-10-10 through 2026-10-10 with posted statement rows, a proved owned counterpart for transfers/payments, or confirmed classification evidence. Owner-confirmed expected accounts and verified statement coverage for the requested dates. Prove each flagged posting with source statements and owned counterpart or classification evidence. Account 1111: deposit source, category or payment records proving those rows' membership. Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement. Counterpart statements, bank transaction codes or an owner review of the listed postings. The source and counterpart statements, original purchase/payment and owner category confirmation resolving the earlier estimate.",
+      "evidence": {
+        "as_of": {
+          "date": "2026-11-12",
+          "time_zone": "UTC",
+          "configured": true
+        },
+        "period": {
+          "from": "2026-10-01",
+          "to": "2026-10-31"
+        },
+        "accounts": [
+          {
+            "tenant_id": "primary",
+            "account_slug": "operating",
+            "last4": "1111",
+            "label": "operating",
+            "bank": null,
+            "side": "personal",
+            "currency": "USD",
+            "open_in_period": true,
+            "status": "open",
+            "opened_on": null,
+            "closed_on": null,
+            "period_days": 31,
+            "verified_days": 31,
+            "observed_through": "2026-10-10",
+            "unverified_dates": [],
+            "coverage_verified": true,
+            "stated_from": "2026-10-01",
+            "stated_through": "2026-10-31",
+            "rows_in_period": 2,
+            "period_verified": true,
+            "uncertain": {
+              "inflow_minor": 0,
+              "outflow_minor": 120000,
+              "first_row": "2026-10-10",
+              "last_row": "2026-10-10"
+            },
+            "pending": {
+              "rows": 0,
+              "inflow_minor": 0,
+              "outflow_minor": 0,
+              "oldest_on": null,
+              "collection": "recorded",
+              "amount_known": true,
+              "stale": {
+                "rows": 0,
+                "inflow_minor": 0,
+                "outflow_minor": 0,
+                "oldest_on": null
+              }
+            },
+            "excluded": [],
+            "lifecycle_conflicts": [],
+            "possible_duplicate_minor": 0,
+            "same_account_repeat_minor": 0,
+            "identity_basis": "separate_account",
+            "history_holes": [],
+            "unreadable_rows": 0,
+            "unreadable": [],
+            "unconfirmed_rows": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "live/currency",
+      "rows": [
+        {
+          "n": 54000
+        }
+      ],
+      "confidence": {
+        "level": "Low",
+        "percent": 69,
+        "reasons": [
+          "Account ending 1234 is not connected for the needed period 2026-10-01 through 2026-10-31; missing dollar impact is unknown.",
+          "Account ending 1234 has no verified successful sync time at this evidence instant.",
+          "The result has multiple currencies (CAD, USD) without proved separate currency output.",
+          "The complete expected-account inventory is not independently verified.",
+          "The read contains multiple currencies without proved separate currency output: CAD 300.00; USD $240.00. A bare or literal currency label does not separate a sum.",
+          "CAD 300.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained.",
+          "USD $240.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained."
+        ],
+        "missing": [
+          "Account ending 1234: connect the account and supply complete statements or confirmed feed history for 2026-10-01 through 2026-10-31.",
+          "Account ending 1234: record a successful feed sync with a valid completed timestamp; assignment observations are insufficient.",
+          "Group and return currency separately, or filter to one currency. Do not interpret a mixed-currency sum as one money figure.",
+          "Owner-confirmed expected accounts and verified statement coverage for the requested dates.",
+          "Filter to one currency, or GROUP BY currency and return the actual currency column for every amount.",
+          "Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement."
+        ],
+        "period_end": "2026-10-31",
+        "may_only_lower": true,
+        "line": "Confidence: Low (69%)",
+        "band": "Low",
+        "score": 69,
+        "label": "Low",
+        "evidence_percent": 95,
+        "display": "Confidence: Low (69%)",
+        "basis": "selected_account_dates",
+        "selection_score": 100,
+        "caveats": [
+          {
+            "code": "account_inventory_boundary",
+            "why": "Coverage describes the recorded account inventory; accounts never declared by the owner cannot be inferred."
+          },
+          {
+            "code": "freshness_unavailable",
+            "why": "An exact completed feed sync time is unavailable; assignment observations are not sync receipts. Confirmed statements cover the requested historical period."
+          }
+        ],
+        "selection_gaps": [],
+        "gaps": [
+          {
+            "code": "evidence_score",
+            "why": "Account ending 1234 is not connected for the needed period 2026-10-01 through 2026-10-31; missing dollar impact is unknown. Account ending 1234 has no verified successful sync time at this evidence instant. The result has multiple currencies (CAD, USD) without proved separate currency output. The complete expected-account inventory is not independently verified. The read contains multiple currencies without proved separate currency output: CAD 300.00; USD $240.00. A bare or literal currency label does not separate a sum. CAD 300.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained. USD $240.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained.",
+            "missing": "Account ending 1234: connect the account and supply complete statements or confirmed feed history for 2026-10-01 through 2026-10-31. Account ending 1234: record a successful feed sync with a valid completed timestamp; assignment observations are insufficient. Group and return currency separately, or filter to one currency. Do not interpret a mixed-currency sum as one money figure. Owner-confirmed expected accounts and verified statement coverage for the requested dates. Filter to one currency, or GROUP BY currency and return the actual currency column for every amount. Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement. Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement."
+          }
+        ]
+      },
+      "confidence_text": "Confidence: Low (69%)\nReasons: Account ending 1234 is not connected for the needed period 2026-10-01 through 2026-10-31; missing dollar impact is unknown. Account ending 1234 has no verified successful sync time at this evidence instant. The result has multiple currencies (CAD, USD) without proved separate currency output. The complete expected-account inventory is not independently verified. The read contains multiple currencies without proved separate currency output: CAD 300.00; USD $240.00. A bare or literal currency label does not separate a sum. CAD 300.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained. USD $240.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained.\nMissing: Account ending 1234: connect the account and supply complete statements or confirmed feed history for 2026-10-01 through 2026-10-31. Account ending 1234: record a successful feed sync with a valid completed timestamp; assignment observations are insufficient. Group and return currency separately, or filter to one currency. Do not interpret a mixed-currency sum as one money figure. Owner-confirmed expected accounts and verified statement coverage for the requested dates. Filter to one currency, or GROUP BY currency and return the actual currency column for every amount. Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement.",
+      "evidence": {
+        "as_of": {
+          "date": "2026-11-12",
+          "time_zone": "UTC",
+          "configured": true
+        },
+        "period": {
+          "from": "2026-10-01",
+          "to": "2026-10-31"
+        },
+        "accounts": [
+          {
+            "tenant_id": "primary",
+            "account_slug": "foreign",
+            "last4": "1234",
+            "label": "foreign",
+            "bank": null,
+            "side": "personal",
+            "currency": "CAD",
+            "open_in_period": true,
+            "status": "open",
+            "opened_on": null,
+            "closed_on": null,
+            "period_days": 31,
+            "verified_days": 31,
+            "observed_through": "2026-10-05",
+            "unverified_dates": [],
+            "coverage_verified": true,
+            "stated_from": "2026-10-01",
+            "stated_through": "2026-10-31",
+            "rows_in_period": 1,
+            "period_verified": true,
+            "uncertain": {
+              "inflow_minor": 0,
+              "outflow_minor": 0,
+              "first_row": null,
+              "last_row": null
+            },
+            "pending": {
+              "rows": 0,
+              "inflow_minor": 0,
+              "outflow_minor": 0,
+              "oldest_on": null,
+              "collection": "recorded",
+              "amount_known": true,
+              "stale": {
+                "rows": 0,
+                "inflow_minor": 0,
+                "outflow_minor": 0,
+                "oldest_on": null
+              }
+            },
+            "excluded": [],
+            "lifecycle_conflicts": [],
+            "possible_duplicate_minor": 0,
+            "same_account_repeat_minor": 0,
+            "identity_basis": "separate_account",
+            "history_holes": [],
+            "unreadable_rows": 0,
+            "unreadable": [],
+            "unconfirmed_rows": 0
+          },
+          {
+            "tenant_id": "primary",
+            "account_slug": "operating",
+            "last4": "1111",
+            "label": "operating",
+            "bank": null,
+            "side": "personal",
+            "currency": "USD",
+            "open_in_period": true,
+            "status": "open",
+            "opened_on": null,
+            "closed_on": null,
+            "period_days": 31,
+            "verified_days": 31,
+            "observed_through": "2026-10-09",
+            "unverified_dates": [],
+            "coverage_verified": true,
+            "stated_from": "2026-10-01",
+            "stated_through": "2026-10-31",
+            "rows_in_period": 1,
+            "period_verified": true,
+            "uncertain": {
+              "inflow_minor": 0,
+              "outflow_minor": 0,
+              "first_row": null,
+              "last_row": null
+            },
+            "pending": {
+              "rows": 0,
+              "inflow_minor": 0,
+              "outflow_minor": 0,
+              "oldest_on": null,
+              "collection": "recorded",
+              "amount_known": true,
+              "stale": {
+                "rows": 0,
+                "inflow_minor": 0,
+                "outflow_minor": 0,
+                "oldest_on": null
+              }
+            },
+            "excluded": [],
+            "lifecycle_conflicts": [],
+            "possible_duplicate_minor": 0,
+            "same_account_repeat_minor": 0,
+            "identity_basis": "separate_account",
+            "history_holes": [],
+            "unreadable_rows": 0,
+            "unreadable": [],
+            "unconfirmed_rows": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "live/date-mismatch",
+      "rows": [
+        {
+          "n": 61000
+        }
+      ],
+      "confidence": {
+        "level": "Medium",
+        "percent": 89,
+        "reasons": [
+          "The complete expected-account inventory is not independently verified.",
+          "The declared period 2026-10-01 through 2026-10-31 differs from SQL dates 2026-09-01 through 2026-09-30; the figure follows SQL and the read covers 2026-09-01 through 2026-10-31.",
+          "USD $610.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained.",
+          "USD $240.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained."
+        ],
+        "missing": [
+          "Owner-confirmed expected accounts and verified statement coverage for the requested dates.",
+          "Match the declared period with all SQL dates, including comparison periods, and verify coverage for those dates.",
+          "Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement."
+        ],
+        "period_end": "2026-10-31",
+        "may_only_lower": true,
+        "line": "Confidence: Medium (89%)",
+        "band": "Medium",
+        "score": 89,
+        "label": "Medium",
+        "evidence_percent": 95,
+        "display": "Confidence: Medium (89%)",
+        "basis": "selected_account_dates",
+        "selection_score": 100,
+        "caveats": [
+          {
+            "code": "account_inventory_boundary",
+            "why": "Coverage describes the recorded account inventory; accounts never declared by the owner cannot be inferred."
+          },
+          {
+            "code": "declared_period_differs",
+            "why": "Declared 2026-10-01 through 2026-10-31; SQL 2026-09-01 through 2026-09-30. The figure follows SQL; read 2026-09-01 through 2026-10-31."
+          }
+        ],
+        "selection_gaps": [],
+        "gaps": [
+          {
+            "code": "evidence_score",
+            "why": "The complete expected-account inventory is not independently verified. The declared period 2026-10-01 through 2026-10-31 differs from SQL dates 2026-09-01 through 2026-09-30; the figure follows SQL and the read covers 2026-09-01 through 2026-10-31. USD $610.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained. USD $240.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained.",
+            "missing": "Owner-confirmed expected accounts and verified statement coverage for the requested dates. Match the declared period with all SQL dates, including comparison periods, and verify coverage for those dates. Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement. Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement."
+          }
+        ]
+      },
+      "confidence_text": "Confidence: Medium (89%)\nReasons: The complete expected-account inventory is not independently verified. The declared period 2026-10-01 through 2026-10-31 differs from SQL dates 2026-09-01 through 2026-09-30; the figure follows SQL and the read covers 2026-09-01 through 2026-10-31. USD $610.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained. USD $240.00 for an unresolved party contributing to the figure has no complete party type certificate: party identity is unresolved or maps to several groups. The provisional figure is retained.\nMissing: Owner-confirmed expected accounts and verified statement coverage for the requested dates. Match the declared period with all SQL dates, including comparison periods, and verify coverage for those dates. Resolve every contributing payer/vendor to one group, bind displayed dimensions to GROUP BY, and read the full history without from/through. Reconcile each contrary posting, including beneficial ownership, principal, asset/expense allocation, earned period and any earlier purchase or return, with its source statement.",
+      "evidence": {
+        "as_of": {
+          "date": "2026-11-12",
+          "time_zone": "UTC",
+          "configured": true
+        },
+        "period": {
+          "from": "2026-09-01",
+          "to": "2026-10-31"
+        },
+        "accounts": [
+          {
+            "tenant_id": "primary",
+            "account_slug": "operating",
+            "last4": "1111",
+            "label": "operating",
+            "bank": null,
+            "side": "personal",
+            "currency": "USD",
+            "open_in_period": true,
+            "status": "open",
+            "opened_on": null,
+            "closed_on": null,
+            "period_days": 61,
+            "verified_days": 61,
+            "observed_through": "2026-10-09",
+            "unverified_dates": [],
+            "coverage_verified": true,
+            "stated_from": "2026-09-01",
+            "stated_through": "2026-10-31",
+            "rows_in_period": 2,
+            "period_verified": true,
+            "uncertain": {
+              "inflow_minor": 0,
+              "outflow_minor": 0,
+              "first_row": null,
+              "last_row": null
+            },
+            "pending": {
+              "rows": 0,
+              "inflow_minor": 0,
+              "outflow_minor": 0,
+              "oldest_on": null,
+              "collection": "recorded",
+              "amount_known": true,
+              "stale": {
+                "rows": 0,
+                "inflow_minor": 0,
+                "outflow_minor": 0,
+                "oldest_on": null
+              }
+            },
+            "excluded": [],
+            "lifecycle_conflicts": [],
+            "possible_duplicate_minor": 0,
+            "same_account_repeat_minor": 0,
+            "identity_basis": "separate_account",
+            "history_holes": [],
+            "unreadable_rows": 0,
+            "unreadable": [],
+            "unconfirmed_rows": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "compatibility/125000",
+      "answer": {
+        "answer": "Observed USD 125000 minor units.\n\nCoverage: Accounts: ending 1111. Dates: 2026-10-01 through 2026-10-31.\nMissing or counted twice: The money-tool assessment of connected accounts, synced dates, missing periods and uncertain movements. Missing or duplicate dollar impact is unknown.\nEstimates: Recorded amounts retain the ledger reader's classifications; unproved movements and present completeness remain unverified.\nHow to check: Compare the named accounts and period with original statements and complete the money-tool evidence assessment.",
+        "ledger": {
+          "amount_minor": 125000,
+          "from": "2026-10-01",
+          "to": "2026-10-31",
+          "accounts": [
+            {
+              "account_mask": "1111"
+            }
+          ]
+        },
+        "confidence": {
+          "level": "Low",
+          "percent": 0,
+          "reasons": [
+            "The recorded ledger reading has no connection, freshness and ambiguity confidence assessment."
+          ],
+          "missing": [
+            "The money-tool assessment of connected accounts, synced dates, missing periods and uncertain movements."
+          ],
+          "band": "Low",
+          "basis": [
+            "The recorded ledger reading has no connection, freshness and ambiguity confidence assessment."
+          ]
+        },
+        "confidence_text": "Confidence: Low (0%). Why: The recorded ledger reading has no connection, freshness and ambiguity confidence assessment. Missing: The money-tool assessment of connected accounts, synced dates, missing periods and uncertain movements.",
+        "answer_contract": {
+          "version": 1,
+          "kind": "ledger"
+        }
+      }
+    },
+    {
+      "id": "compatibility/-100",
+      "answer": {
+        "answer": "Observed USD -100 minor units.\n\nCoverage: Accounts: ending 1111. Dates: 2026-10-01 through 2026-10-31.\nMissing or counted twice: The money-tool assessment of connected accounts, synced dates, missing periods and uncertain movements. Missing or duplicate dollar impact is unknown.\nEstimates: Recorded amounts retain the ledger reader's classifications; unproved movements and present completeness remain unverified.\nHow to check: Compare the named accounts and period with original statements and complete the money-tool evidence assessment.",
+        "ledger": {
+          "amount_minor": -100,
+          "from": "2026-10-01",
+          "to": "2026-10-31",
+          "accounts": [
+            {
+              "account_mask": "1111"
+            }
+          ]
+        },
+        "confidence": {
+          "level": "Low",
+          "percent": 0,
+          "reasons": [
+            "The recorded ledger reading has no connection, freshness and ambiguity confidence assessment."
+          ],
+          "missing": [
+            "The money-tool assessment of connected accounts, synced dates, missing periods and uncertain movements."
+          ],
+          "band": "Low",
+          "basis": [
+            "The recorded ledger reading has no connection, freshness and ambiguity confidence assessment."
+          ]
+        },
+        "confidence_text": "Confidence: Low (0%). Why: The recorded ledger reading has no connection, freshness and ambiguity confidence assessment. Missing: The money-tool assessment of connected accounts, synced dates, missing periods and uncertain movements.",
+        "answer_contract": {
+          "version": 1,
+          "kind": "ledger"
+        }
+      }
+    },
+    {
+      "id": "compatibility/0",
+      "answer": {
+        "answer": "Observed USD 0 minor units.\n\nCoverage: Accounts: ending 1111. Dates: 2026-10-01 through 2026-10-31.\nMissing or counted twice: The money-tool assessment of connected accounts, synced dates, missing periods and uncertain movements. Missing or duplicate dollar impact is unknown.\nEstimates: Recorded amounts retain the ledger reader's classifications; unproved movements and present completeness remain unverified.\nHow to check: Compare the named accounts and period with original statements and complete the money-tool evidence assessment.",
+        "ledger": {
+          "amount_minor": 0,
+          "from": "2026-10-01",
+          "to": "2026-10-31",
+          "accounts": [
+            {
+              "account_mask": "1111"
+            }
+          ]
+        },
+        "confidence": {
+          "level": "Low",
+          "percent": 0,
+          "reasons": [
+            "The recorded ledger reading has no connection, freshness and ambiguity confidence assessment."
+          ],
+          "missing": [
+            "The money-tool assessment of connected accounts, synced dates, missing periods and uncertain movements."
+          ],
+          "band": "Low",
+          "basis": [
+            "The recorded ledger reading has no connection, freshness and ambiguity confidence assessment."
+          ]
+        },
+        "confidence_text": "Confidence: Low (0%). Why: The recorded ledger reading has no connection, freshness and ambiguity confidence assessment. Missing: The money-tool assessment of connected accounts, synced dates, missing periods and uncertain movements.",
+        "answer_contract": {
+          "version": 1,
+          "kind": "ledger"
+        }
+      }
+    }
+  ]
+}

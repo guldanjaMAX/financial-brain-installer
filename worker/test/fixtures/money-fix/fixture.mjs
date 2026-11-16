@@ -17,6 +17,10 @@ export function fixture() {
   for (const file of readdirSync(migrations).filter(x => x.endsWith('.sql')).sort()) {
     sqlite.exec(readFileSync(new URL(file, migrations), 'utf8'));
   }
+  sqlite.prepare(`INSERT INTO install_state
+    (id,client_slug,product_version,schema_version,gate_version,installed_at,ring)
+    VALUES (1,'fixture','0.0.0-test',?,0,?,'test')`).run(
+    Math.max(...readdirSync(migrations).filter(file => file.endsWith('.sql')).map(file => Number.parseInt(file, 10))), NOW);
   const seen = [], queries = [];
   const execute = (sql, binds, mode) => {
     seen.push(sql);

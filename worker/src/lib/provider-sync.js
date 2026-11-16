@@ -43,6 +43,7 @@ export class ProviderSyncError extends Error {
     status = null,
     code = null,
     retryAfterSeconds = null,
+    retryNotBeforeMs = null,
     attempts = 1,
     cause,
   } = {}) {
@@ -52,6 +53,7 @@ export class ProviderSyncError extends Error {
     this.status = status;
     this.code = code;
     this.retry_after_seconds = retryAfterSeconds;
+    this.retry_not_before_ms = retryNotBeforeMs ?? cause?.retry_not_before_ms ?? null;
     this.attempts = attempts;
     this.outcome = ingestionOutcome(kind, { reason: message });
   }
@@ -211,6 +213,11 @@ function responseFailure(provider, response, raw, attempts, nowMs, maxRetryAfter
     nowMs,
     maxMs: maxRetryAfterMs,
   });
+  // The sleep budget may be capped, but a durable queue must retain the full
+  // provider cooldown, including when a deadline wraps this failure.
+  const fullRetryAfterMs = parseRetryAfter(response.headers?.get?.("retry-after"), {
+    nowMs, maxMs: Math.max(0, 8_640_000_000_000_000 - nowMs),
+  });
   if (retryableStatus(response.status)) {
     return new ProviderSyncError(provider,
       response.status === 429 ? "the provider rate limit was reached" : "the provider is temporarily unavailable", {
@@ -218,6 +225,7 @@ function responseFailure(provider, response, raw, attempts, nowMs, maxRetryAfter
         status: response.status,
         code,
         retryAfterSeconds: retryAfterMs === null ? null : retryAfterMs / 1000,
+        retryNotBeforeMs: fullRetryAfterMs === null ? null : nowMs + fullRetryAfterMs,
         attempts,
       });
   }
@@ -335,7 +343,9 @@ export async function providerRequest(provider, url, {
       if (!lastError || lastError.attempts !== attempt) {
         lastError = responseFailure(provider, response, raw, attempt, nowImpl(), maxRetryAfterMs);
       }
-      retryAfterMs = lastError.retry_after_seconds === null ? null : lastError.retry_after_seconds * 1000;
+      retryAfterMs = lastError.retry_not_before_ms === null ?
+        (lastError.retry_after_seconds === null ? null : lastError.retry_after_seconds * 1000)
+        : Math.max(0, lastError.retry_not_before_ms - nowImpl());
       if (lastError.outcome.kind !== "retryable" || attempt >= attemptsLimit) throw lastError;
     }
 

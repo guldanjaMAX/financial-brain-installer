@@ -437,12 +437,15 @@ function runIngest({ label, files, env: extraEnv = {}, dbPath = null, dir = null
     corpora: {},
   }));
 
-  const env = { ...process.env };
-  delete env.CLOUDFLARE_API_TOKEN;
-  delete env.BRAIN_DEBUG;
+  const env = Object.fromEntries(["PATH", "SystemRoot", "WINDIR", "ComSpec", "PATHEXT", "USERNAME", "TMPDIR", "TEMP", "TMP"]
+    .filter(name => process.env[name] !== undefined).map(name => [name, process.env[name]]));
   Object.assign(env, {
     NO_COLOR: "1",
     ADMIN_KEY: "fixture-admin",
+    HOME: userRoot,
+    USERPROFILE: userRoot,
+    BRAIN_NO_WRANGLER_LOGIN: "1",
+    BRAIN_LIFECYCLE_LOCK_ROOT: join(root, 'lifecycle-locks'),
     BRAIN_FAMILY_REPRO_USER_ROOT: userRoot,
     BRAIN_FAMILY_REPRO_EVIDENCE: evidencePath,
     ...(dbPath ? { BRAIN_FAMILY_REPRO_DB: dbPath } : {}),

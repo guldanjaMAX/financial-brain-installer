@@ -1,3 +1,4 @@
+import { futureComparison } from './fixtures/c3-projection-contract.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setup, ask, intent, raw, context } from './c3-calendar-scope-fixture.mjs';
@@ -59,14 +60,18 @@ for (const [index,[template,kind,expected,windows]] of matrix.entries()) test(`C
   assert.deepEqual(control.body.ledger.parts.map(p=>p.expense_total_minor),expected);
 });
 
-for(const quote of ["'",'\u2019']) test(`C3 final future abbreviated year ${quote.codePointAt(0)} refuses after calendar decision`,async t=>{
+for(const quote of ["'",'\u2019']) test(`C3 final future abbreviated year ${quote.codePointAt(0)} projects with explicit evidence limits`,async t=>{
   const f=setup(t), reply=raw(intent(),intent());
   const green=await ask(f,`Compare expenses Oct ${quote}25 versus Sep ${quote}25`,reply); reached(green);
   assert.equal(green.body.ledger.comparison.difference_minor,0);
   const q=`Compare expenses Oct ${quote}27 versus Sep ${quote}25`;
   const d=validateLedgerIntentDecision(reply,q,context);
-  assert.equal(d.outcome,'fallback'); assert.equal(d.reason,'period_contradiction');
-  const r=await ask(f,q,reply); assert.equal(r.extraction,1); assert.equal(r.sql.length,0); assert.equal(r.body.ledger,undefined);
+  assert.equal(d.outcome,'ready');
+  assert.deepEqual(d.intents.map(i=>[i.from,i.to]),[['2027-10-01','2027-10-31'],['2025-09-01','2025-09-30']]);
+  futureComparison(await ask(f,q,reply));
+  for (const date of ['2026-08-07','2026-09-07','2026-10-07'])
+    f.add('main',date,3000,'outflow','Recurring subscription','Repeat Vendor');
+  futureComparison(await ask(f,q,reply),Math.round(3000*31/30.4375));
 });
 
 async function mutant(t,label,file,replacements,links={}) {
