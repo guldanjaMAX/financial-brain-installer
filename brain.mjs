@@ -177,8 +177,10 @@ import {
   SETUP_RECOMMENDED,
 } from "./operations/answer-setup-copy.mjs";
 import {
+  countSealedBankAccessReferences,
   ensureBankFeedWrappingKey,
   ensureBankFeedWorkerSecrets,
+  readBankWrappingKeyBeforeUpload,
   validatePlaidApplicationKeys,
 } from "./operations/bank-feed-owner-secrets.mjs";
 import {
@@ -1810,6 +1812,9 @@ async function cfOnce(path, {
   raw,
   timeoutMs = HTTP_TIMEOUT_MS,
   what = "the request",
+  // true returns { result, result_info } so a list caller can tell a complete
+  // inventory from one page of it. Every other caller keeps the bare result.
+  envelope = false,
 } = {}) {
   const res = await http(API + path, {
     method,
@@ -1832,8 +1837,15 @@ async function cfOnce(path, {
     const errs = (json.errors || []).map((e) => `${e.code}: ${e.message}`).join("; ");
     const error = new Error(`${method} ${path} failed (${res.status}): ${errs || text.slice(0, 200)}`);
     error.status = res.status;
+    // Cloudflare's own error codes, kept apart from the formatted message.
+    // The message also carries the request path (account and script names),
+    // so a code must never be read back out of it.
+    error.cloudflareErrorCodes = Object.freeze(
+      (Array.isArray(json.errors) ? json.errors : []).map((entry) => entry?.code),
+    );
     throw error;
   }
+  if (envelope === true) return { result: json.result, result_info: json.result_info };
   return json.result;
 }
 
@@ -3158,6 +3170,114 @@ export function workerBindings(m, cfg, options = {}) {
   ];
 }
 
+/**
+ * Cloudflare's answer for a script that does not exist yet (a fresh install):
+ * HTTP 404 with exactly one error, code 10007 "This Worker does not exist on
+ * your account". Only that exact answer lets the pre-upload bank-key read say
+ * "absent"; every other failure stays "unknown", which can never create a key.
+ * The code comes from Cloudflare's structured error list, never from the
+ * formatted message, which also carries the script name (a Worker named
+ * "x-10007-brain" must not turn any 404 into "absent").
+ */
+export function isWorkerScriptMissingError(error) {
+  const codes = error?.cloudflareErrorCodes;
+  return Number(error?.status) === 404 &&
+    Array.isArray(codes) && codes.length === 1 && codes[0] === 10007;
+}
+
+/**
+ * Read a Worker's secret NAMES (never values) as one complete inventory.
+ *
+ * Cloudflare's list carries `result_info` when it is paged. A page that is not
+ * the whole list would read as "the key is absent", so any sign that more
+ * names exist than were returned is a failed read ("unknown"), never a list.
+ */
+export async function readWorkerSecretNameInventory(path, { request = cf } = {}) {
+  const listed = await request(path, { envelope: true });
+  const inventory = listed?.result;
+  if (!Array.isArray(inventory) || inventory.some((binding) =>
+    !binding || typeof binding !== "object" || typeof binding.name !== "string")) {
+    throw new TypeError("Cloudflare returned an invalid Worker secret inventory");
+  }
+  const info = listed?.result_info;
+  if (info !== undefined && info !== null) {
+    const total = info.total_count;
+    const pages = info.total_pages;
+    const partial =
+      (total !== undefined && total !== null && !(Number.isSafeInteger(total) && total <= inventory.length)) ||
+      (pages !== undefined && pages !== null && !(Number.isSafeInteger(pages) && pages <= 1));
+    if (partial) {
+      throw new Error("Cloudflare returned only part of the Worker secret names, so the inventory is not proof of absence");
+    }
+  }
+  return inventory.map((binding) => binding.name);
+}
+
+/**
+ * This computer's content-free record that a Worker had the bank wrapping key.
+ *
+ * Run memory protects only later uploads in the same process. A rerun, a
+ * standalone deploy, a rollback or the first upload of the next update starts
+ * empty, and if Cloudflare's name list leaves the key out both before and
+ * after that upload, nothing else in the process remembers it existed. One
+ * file per account and Worker script, named by a digest of that pair, holds
+ * only that digest: never the key, its value, or anything derived from it.
+ *
+ * `has()` is true when anything at all sits at the record's path (a torn or
+ * unreadable record still means "seen"), false only when it is provably
+ * missing, and throws when that cannot be decided. `record()` is idempotent.
+ */
+export function bankWrappingKeySightingStore({
+  accountId,
+  scriptName,
+  directory = join(homedir(), ".brain", "bank-wrapping-key-sightings"),
+} = {}) {
+  for (const value of [accountId, scriptName]) {
+    if (typeof value !== "string" || !value.length || value !== value.trim() || /[\x00-\x1f\x7f]/.test(value)) {
+      throw new Error("a bank wrapping-key sighting needs an exact account and Worker name");
+    }
+  }
+  const identity = createHash("sha256")
+    .update(JSON.stringify(["bank-wrapping-key-v2-sighting", accountId, scriptName]))
+    .digest("hex");
+  const path = join(directory, `${identity}.json`);
+  const bytes = `${JSON.stringify({ version: 1, identity })}\n`;
+  const syncDirectory = (target) => {
+    // Node cannot fsync a directory on Windows; the record file itself is flushed.
+    if (process.platform === "win32") return;
+    const fd = openSync(target, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0));
+    try { fsyncSync(fd); } finally { closeSync(fd); }
+  };
+  return Object.freeze({
+    path,
+    has() {
+      try {
+        lstatSync(path);
+        return true;
+      } catch (error) {
+        if (error?.code === "ENOENT") return false;
+        throw new Error("this computer's bank wrapping-key record could not be read");
+      }
+    },
+    record() {
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+      let fd;
+      try {
+        fd = openSync(path, "wx", 0o600);
+      } catch (error) {
+        if (error?.code === "EEXIST") return false;
+        throw error;
+      }
+      try {
+        writeFileSync(fd, bytes);
+        fsyncSync(fd);
+      } finally { closeSync(fd); }
+      syncDirectory(directory);
+      return true;
+    },
+  });
+}
+
 async function readWorkerBankProvider({ accountId, scriptName }) {
   const settings = await cf(`/accounts/${accountId}/workers/scripts/${scriptName}/settings`);
   const bindings = settings?.bindings;
@@ -3250,6 +3370,86 @@ async function cmdDeployWithPrompts(manifestPath, options = {}) {
     );
   }
 
+  // A Worker cannot create its own secret binding, so every lifecycle path that
+  // uploads an enabled bank Worker (setup, update's paused and active uploads,
+  // rollback, deploy, connect/disconnect anthropic) owns the independent bank
+  // wrapping key here. The existing value is never read or replaced.
+  //
+  // The name inventory is read BEFORE the upload as well as after it. On
+  // 2026-11-16 an owner Brain's update read the inventory once, right after
+  // its active upload; Cloudflare left out a key the same run had listed
+  // minutes earlier, and the PUT that followed replaced the key sealing the
+  // stored Plaid access reference, disconnecting the bank. A key is now
+  // created only when it was absent before the upload AND after it; a key seen
+  // before (or earlier in this run) is never written, only re-read.
+  //
+  // Two name lists can both be wrong in a process that has no memory of the
+  // key (a rerun after a stop, a standalone deploy, a rollback, the paused
+  // upload of the next update). So a key is also never created when this
+  // computer recorded it on this Worker in an earlier run, or when the Brain's
+  // own database holds any bank connection or Plaid Link receipt sealed with
+  // it (checked just before the write, inside the custody step).
+  const bankFeedEnabled = m.corpora?.bank_feed?.enabled === true;
+  const secretPath = `/accounts/${acct.id}/workers/scripts/${scriptName}/secrets`;
+  const listSecretNames = options.listWorkerSecretNames ??
+    (() => readWorkerSecretNameInventory(secretPath));
+  const bankKeyMemory = options.bankWrappingKeyMemory instanceof Set ? options.bankWrappingKeyMemory : null;
+  const bankKeyMemoryId = `${acct.id}/${scriptName}`;
+  let bankKeySightings;
+  const sightingStore = () => {
+    bankKeySightings ??= bankWrappingKeySightingStore({
+      accountId: acct.id,
+      scriptName,
+      ...(options.bankWrappingKeySightingDirectory ? { directory: options.bankWrappingKeySightingDirectory } : {}),
+    });
+    return bankKeySightings;
+  };
+  const recordBankKeySighting = () => {
+    bankKeyMemory?.add(bankKeyMemoryId);
+    try {
+      sightingStore().record();
+    } catch {
+      warn(
+        "this computer could not save its note that the bank wrapping key exists on this Worker. " +
+          "Nothing on the Worker changed; the Brain's database check still stops a replacement key.",
+      );
+    }
+  };
+  let bankKeyBeforeUpload = "unknown";
+  if (bankFeedEnabled) {
+    let workerMissing = false;
+    const listedBefore = await readBankWrappingKeyBeforeUpload({
+      listSecretNames,
+      isWorkerMissing: (error) => (workerMissing = isWorkerScriptMissingError(error)),
+    });
+    bankKeyBeforeUpload = listedBefore;
+    if (listedBefore === "present") {
+      recordBankKeySighting();
+    } else if (bankKeyMemory?.has(bankKeyMemoryId)) {
+      bankKeyBeforeUpload = "present";
+    } else if (!(listedBefore === "absent" && workerMissing)) {
+      // A Worker that does not exist has no secrets at all, so an earlier
+      // record can only describe a deleted Worker; a fresh install there still
+      // gets its key once the database check below proves nothing is sealed.
+      // Otherwise this computer's record of an earlier sighting wins over an
+      // absent or unreadable list.
+      let recorded;
+      try {
+        recorded = sightingStore().has();
+      } catch {
+        recorded = true;
+        warn(
+          "this computer's record of earlier bank wrapping-key checks could not be read, " +
+            "so it is treated as a sighting: no new key will be created in this run.",
+        );
+      }
+      if (recorded === true) bankKeyBeforeUpload = "recorded";
+    }
+    if (bankKeyBeforeUpload === "unknown") {
+      info("the Worker's secret names could not be read before this upload; the bank wrapping key is checked after it and is never created on an unproven absence");
+    }
+  }
+
   info(`uploading ${files.length} module(s) as "${scriptName}"`);
   // Preparation cannot change the deployed models. Dispatch can, even when
   // the upload's reply is lost, so notify the update before sending the PUT.
@@ -3261,21 +3461,7 @@ async function cmdDeployWithPrompts(manifestPath, options = {}) {
   });
   ok(`deployed "${scriptName}"`);
 
-  // A Worker cannot create its own secret binding. Put the independent bank
-  // wrapping key on every lifecycle path that uploads an enabled bank Worker:
-  // fresh setup, update's paused and active deployments, and standalone deploy.
-  // Name-only inventory makes this idempotent; the existing value is never read
-  // or replaced, so rotation remains outside this path.
-  if (m.corpora?.bank_feed?.enabled === true) {
-    const secretPath = `/accounts/${acct.id}/workers/scripts/${scriptName}/secrets`;
-    const listSecretNames = options.listWorkerSecretNames ?? (async () => {
-      const inventory = await cf(secretPath);
-      if (!Array.isArray(inventory) || inventory.some((binding) =>
-        !binding || typeof binding !== "object" || typeof binding.name !== "string")) {
-        throw new TypeError("Cloudflare returned an invalid Worker secret inventory");
-      }
-      return inventory.map((binding) => binding.name);
-    });
+  if (bankFeedEnabled) {
     const putSecret = options.putWorkerSecret ?? ((name, text) => cf(secretPath, {
       method: "PUT",
       body: { name, text, type: "secret_text" },
@@ -3287,11 +3473,22 @@ async function cmdDeployWithPrompts(manifestPath, options = {}) {
         listSecretNames,
         putSecret,
         generateWrappingKey: options.generateBankWrappingKey,
+        beforeUpload: bankKeyBeforeUpload,
+        countSealedReferences: () => (options.countSealedBankAccessReferences ?? countSealedBankAccessReferences)({
+          query: (sql) => (options.d1Query ?? d1Query)(acct.id, cfg.d1_database_id, sql),
+        }),
+        ...(options.bankWrappingKeyConfirmDelaysMs ? { confirmDelaysMs: options.bankWrappingKeyConfirmDelaysMs } : {}),
+        ...(options.bankWrappingKeySleep ? { sleep: options.bankWrappingKeySleep } : {}),
+        onConfirmRetry: ({ delayMs }) => info(
+          `Cloudflare does not list the bank wrapping key yet; reading the secret names again in ${Math.round(delayMs / 1000)}s ` +
+            "(the key is never replaced here)",
+        ),
       });
     } catch (error) {
       if (error instanceof Fatal) throw error;
       die(String(error?.message || error));
     }
+    recordBankKeySighting();
     if (custody.created) {
       ok(`created and verified ${custody.name} on ${scriptName}`);
     } else {
@@ -7224,8 +7421,12 @@ export async function cmdUpgrade(manifestPath, options = {}) {
     let activeWriterModeVerified = false;
     let switchedModelsMayBeDeployed = false;
     let switchedModelsCommitted = false;
+    // One update uploads the Worker twice (paused, then active). A bank
+    // wrapping key seen by either upload must never be created by a later one.
+    const bankWrappingKeyMemory = new Set();
     const deployWithModels = (deployOptions) => deploy(executionPin.target, {
       ...deployOptions,
+      bankWrappingKeyMemory,
       onWorkerUploadDispatch: () => {
         // Keep an earlier upload's uncertainty through later preparation and
         // acceptance failures until the saved model fields pass readback.
@@ -23248,7 +23449,13 @@ export async function cmdSetup(manifestPath, options = {}) {
   await (options.cmdVerify ?? cmdVerify)(target);
   await (options.cmdProvision ?? cmdProvision)(target, { nextSteps: false });
   const migrateSetup = options.cmdMigrate ?? cmdMigrate;
-  const deploySetup = options.cmdDeploy ?? cmdDeploy;
+  // A resumed setup can upload the same Worker more than once. A bank wrapping
+  // key seen by one upload must never be created by a later one in this run.
+  const setupBankWrappingKeyMemory = new Set();
+  const deploySetup = (deployPath, deployOptions = {}) => (options.cmdDeploy ?? cmdDeploy)(deployPath, {
+    ...deployOptions,
+    bankWrappingKeyMemory: setupBankWrappingKeyMemory,
+  });
   const healthSetup = options.cmdHealth ?? cmdHealth;
   const drainSetup = options.cmdDrain ?? cmdDrain;
   const detectExistingWorker = options.setupWorkerScriptExists ?? setupWorkerScriptExists;
@@ -29798,8 +30005,20 @@ export async function cmdTechnician(manifestPath, flags = {}, options = {}) {
     const writeBriefing = options.writeBriefing || ((text) => console.log(renderCliCommands(text)));
     writeBriefing(renderTechnicianStepBriefing(
       plan.steps.find((candidate) => candidate.id === step) || step,
+      { platformName },
     ));
   }
+
+  // Windows Google entry reads the clipboard inside this process through the
+  // same reviewed no-shell reader as `connect anthropic --from-clipboard`.
+  // Other platforms never call it; they keep the hidden prompt.
+  const googleClipboard = {
+    readClipboard: options.readClipboard ?? (() => readCustomApiClipboard({ platform: platformName })),
+    clearClipboard: options.clearClipboard ?? (() => clearCustomApiClipboard({ platform: platformName })),
+    say: options.say ?? ((line) => console.log(line)),
+    ...(options.sleep ? { sleep: options.sleep } : {}),
+    ...(options.now ? { now: options.now } : {}),
+  };
 
   const readHidden = options.readHidden || (({ prompt, noun, optional }) => readHiddenInput({
     prompt,
@@ -29818,11 +30037,14 @@ export async function cmdTechnician(manifestPath, flags = {}, options = {}) {
       flags,
       scriptPath,
       readHidden,
+      googleClipboard,
       baseEnv: options.baseEnv || process.env,
       spawn: options.spawn || spawnSync,
       nodePath,
       manifestDeps: options.manifestDeps || {},
       platformName,
+      // Undefined keeps the step's own Windows console flush (Google only).
+      flushConsoleInput: options.flushConsoleInput,
       runInstallSmoke: options.runInstallSmoke || (({ manifestPath: smokeManifestPath }) =>
         runPublicInstallSmoke(smokeManifestPath)),
     });

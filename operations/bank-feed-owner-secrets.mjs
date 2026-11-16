@@ -38,6 +38,148 @@ export const BANK_FEED_OWNER_SECRET_NAMES = Object.freeze([
 ]);
 
 /**
+ * Waits before each re-read when a key that existed before the upload is not
+ * listed right after it. Field evidence (an owner Brain, 2026-11-16): one
+ * name-only read taken seconds after an active upload left out a key that
+ * the same run had listed minutes earlier, and the old code replaced it.
+ */
+export const BANK_WRAPPING_KEY_CONFIRM_DELAYS_MS = Object.freeze([2_000, 5_000, 10_000]);
+
+const defaultSleep = (milliseconds) => new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds));
+
+/**
+ * Read, BEFORE a Worker upload, whether the bank wrapping key already exists.
+ *
+ * Returns "present", "absent" (listed without it, or the Worker itself does
+ * not exist yet: a fresh install), or "unknown" (the read failed or was
+ * ambiguous). Never throws: an unknown answer only forbids creating a key
+ * later; it never blocks the upload by itself.
+ */
+export async function readBankWrappingKeyBeforeUpload({
+  listSecretNames,
+  isWorkerMissing = () => false,
+} = {}) {
+  if (typeof listSecretNames !== "function") return "unknown";
+  try {
+    return namesFromInventory(await listSecretNames()).has(BANK_ACCESS_WRAPPING_KEY_SECRET)
+      ? "present"
+      : "absent";
+  } catch (error) {
+    try {
+      if (isWorkerMissing(error) === true) return "absent";
+    } catch {
+      // An unreadable failure is never proof that the Worker is missing.
+    }
+    return "unknown";
+  }
+}
+
+// Only what this command can prove: it wrote nothing. Whether an earlier
+// command already damaged a connection is not knowable from a name list.
+const NOTHING_WRITTEN =
+  "No new key was created and nothing was replaced, so this command did not change your bank connections. ";
+
+function keyNotConfirmedError(beforeUpload) {
+  const opening = beforeUpload === "present"
+    ? "Cloudflare did not list the bank wrapping key (BANK_FEED_WRAPPING_KEY_V2) after this upload, " +
+      "although it was there just before it. "
+    : beforeUpload === "recorded"
+      ? "Cloudflare does not list the bank wrapping key (BANK_FEED_WRAPPING_KEY_V2) on this Worker, " +
+        "although an earlier run on this computer saw it there. "
+      : "the Worker's secret names could not be read before this upload, and Cloudflare does not list the " +
+        "bank wrapping key (BANK_FEED_WRAPPING_KEY_V2) after it. ";
+  return new Error(
+    opening +
+      NOTHING_WRITTEN +
+      "This is usually a short Cloudflare delay: wait a few minutes, then rerun the same command. " +
+      (beforeUpload === "recorded"
+        ? "If it stops here again, do not reconnect a bank; ask for help, because a new key could never open " +
+          "a connection sealed with the old one. "
+        : "") +
+      "No wrapping-key value was saved locally.",
+  );
+}
+
+/**
+ * The D1 rows that can only be opened with BANK_FEED_WRAPPING_KEY_V2: every
+ * stored bank access reference at key version 2 or later (removed ones too,
+ * since disconnect keeps unresolved history evidence), and every Plaid Link
+ * receipt still holding a sealed value. Version-1 rows use the legacy derived
+ * key and are rewrapped only once a V2 key exists, so they do not count.
+ */
+export const BANK_SEALED_REFERENCE_CHECKS = Object.freeze([
+  Object.freeze({
+    table: "bank_feed_items",
+    sql: "SELECT COUNT(*) AS sealed FROM bank_feed_items WHERE key_version >= 2",
+  }),
+  Object.freeze({
+    table: "plaid_link_operations",
+    sql: "SELECT COUNT(*) AS sealed FROM plaid_link_operations " +
+      "WHERE link_key_version IS NOT NULL OR link_ciphertext IS NOT NULL",
+  }),
+]);
+
+function isMissingTable(error, table) {
+  return new RegExp(`no such table:\\s*(?:main\\.)?${table}\\b`, "i").test(String(error?.message || ""));
+}
+
+/**
+ * Count the Brain's stored values sealed with the bank wrapping key.
+ *
+ * `query(sql)` runs one read-only statement on the Brain's D1 and resolves to
+ * `{ results: [...] }`. A table that does not exist yet (a database migrated
+ * before the bank feed) holds nothing; every other failure, and any answer
+ * that is not one non-negative whole number, throws, so no key is created on
+ * an unproven zero.
+ */
+export async function countSealedBankAccessReferences({ query } = {}) {
+  if (typeof query !== "function") {
+    throw new TypeError("the sealed bank reference check needs a database query operation");
+  }
+  let total = 0;
+  for (const check of BANK_SEALED_REFERENCE_CHECKS) {
+    let result;
+    try {
+      result = await query(check.sql);
+    } catch (error) {
+      if (isMissingTable(error, check.table)) continue;
+      throw new Error(`the Brain's database could not be checked for values sealed with the bank wrapping key (${check.table})`);
+    }
+    const rows = result?.results;
+    const value = Array.isArray(rows) && rows.length === 1 ? rows[0]?.sealed : undefined;
+    const count = typeof value === "number" ? value
+      : typeof value === "bigint" ? Number(value)
+        : typeof value === "string" && /^\d{1,15}$/.test(value) ? Number(value)
+          : Number.NaN;
+    if (!Number.isSafeInteger(count) || count < 0) {
+      throw new Error(`the Brain's database returned an unreadable count for ${check.table}`);
+    }
+    total += count;
+  }
+  return total;
+}
+
+function sealedReferencesPresentError(count) {
+  return new Error(
+    "Cloudflare does not list the bank wrapping key (BANK_FEED_WRAPPING_KEY_V2) on this Worker, but this " +
+      `Brain's database holds ${count} bank connection record${count === 1 ? "" : "s"} sealed with that key. ` +
+      NOTHING_WRITTEN +
+      "A short Cloudflare delay can hide the key: wait a few minutes, then rerun the same command. " +
+      "If it stops here again, do not reconnect a bank; ask for help, because a new key could never open " +
+      "those records. No wrapping-key value was saved locally.",
+  );
+}
+
+function sealedReferencesUnknownError() {
+  return new Error(
+    "Cloudflare does not list the bank wrapping key (BANK_FEED_WRAPPING_KEY_V2) on this Worker, and this " +
+      "Brain's database could not be checked for bank connections sealed with it. " +
+      NOTHING_WRITTEN +
+      "Wait a few minutes, then rerun the same command. No wrapping-key value was saved locally.",
+  );
+}
+
+/**
  * Establish only the independent bank wrapping key during a Worker lifecycle.
  *
  * Provider credentials still belong to their owner-present setup path. This
@@ -46,12 +188,30 @@ export const BANK_FEED_OWNER_SECRET_NAMES = Object.freeze([
  * An existing key is never read, replaced, validated, or derived from another
  * credential. Rotation therefore remains impossible from install, update, and
  * deploy.
+ *
+ * `beforeUpload` is what the caller knew before the upload this call follows:
+ * "present" (listed before it, or earlier in this run), "recorded" (this
+ * computer saw it on this Worker in an earlier run), "absent", or anything
+ * else, which is "unknown". A key is created ONLY when it was "absent" before
+ * the upload AND is absent after it AND `countSealedReferences()` proves the
+ * Brain's database holds nothing sealed with a wrapping key. In every other
+ * case a missing name after the upload is treated as a read that has not
+ * caught up: the inventory is re-read after short waits, and if the name
+ * never comes back the call stops WITHOUT writing. A PUT replaces an existing
+ * value, so writing on a false-absent read would orphan every stored bank
+ * access reference; two false-absent reads in a row are why the database
+ * check exists.
  */
 export async function ensureBankFeedWrappingKey({
   enabled = false,
   listSecretNames,
   putSecret,
   generateWrappingKey = generateBankAccessWrappingKey,
+  beforeUpload = "unknown",
+  countSealedReferences,
+  confirmDelaysMs = BANK_WRAPPING_KEY_CONFIRM_DELAYS_MS,
+  sleep = defaultSleep,
+  onConfirmRetry = () => {},
 } = {}) {
   if (enabled !== true) {
     return Object.freeze({ created: false, name: BANK_ACCESS_WRAPPING_KEY_SECRET });
@@ -59,6 +219,7 @@ export async function ensureBankFeedWrappingKey({
   if (typeof listSecretNames !== "function" || typeof putSecret !== "function") {
     throw new TypeError("bank wrapping-key custody needs Worker secret-list and secret-put operations");
   }
+  const before = ["present", "recorded", "absent"].includes(beforeUpload) ? beforeUpload : "unknown";
 
   let present;
   try {
@@ -70,8 +231,43 @@ export async function ensureBankFeedWrappingKey({
     );
   }
   if (present.has(BANK_ACCESS_WRAPPING_KEY_SECRET)) {
-    return Object.freeze({ created: false, name: BANK_ACCESS_WRAPPING_KEY_SECRET });
+    return Object.freeze({ created: false, name: BANK_ACCESS_WRAPPING_KEY_SECRET, before, confirmRetries: 0 });
   }
+
+  if (before !== "absent") {
+    // Never write here. Only re-read, and stop if the name stays missing.
+    const delays = Array.isArray(confirmDelaysMs) ? confirmDelaysMs : BANK_WRAPPING_KEY_CONFIRM_DELAYS_MS;
+    let retries = 0;
+    for (const delay of delays) {
+      retries += 1;
+      try { onConfirmRetry({ attempt: retries, delayMs: delay, before }); } catch {}
+      await sleep(delay);
+      let names;
+      try {
+        names = namesFromInventory(await listSecretNames());
+      } catch {
+        continue;
+      }
+      if (names.has(BANK_ACCESS_WRAPPING_KEY_SECRET)) {
+        return Object.freeze({ created: false, name: BANK_ACCESS_WRAPPING_KEY_SECRET, before, confirmRetries: retries });
+      }
+    }
+    throw keyNotConfirmedError(before);
+  }
+
+  // Absent before the upload and after it. The last proof before a write that
+  // would replace any key Cloudflare left out of both lists: nothing in the
+  // Brain's database may depend on a wrapping key. A fresh setup migrates
+  // before it deploys, so it reads zero here and gets its key.
+  if (typeof countSealedReferences !== "function") throw sealedReferencesUnknownError();
+  let sealed;
+  try {
+    sealed = await countSealedReferences();
+  } catch {
+    throw sealedReferencesUnknownError();
+  }
+  if (!Number.isSafeInteger(sealed) || sealed < 0) throw sealedReferencesUnknownError();
+  if (sealed > 0) throw sealedReferencesPresentError(sealed);
 
   const generated = generateWrappingKey();
   try {
@@ -100,7 +296,7 @@ export async function ensureBankFeedWrappingKey({
         "Rerun the same setup, update, or deploy command before opening bank setup.",
     );
   }
-  return Object.freeze({ created: true, name: BANK_ACCESS_WRAPPING_KEY_SECRET });
+  return Object.freeze({ created: true, name: BANK_ACCESS_WRAPPING_KEY_SECRET, before, confirmRetries: 0 });
 }
 
 const PROMPT_LABELS = Object.freeze({

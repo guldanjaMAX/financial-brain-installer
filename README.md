@@ -177,8 +177,11 @@ reviewed step at a time with `--run tools`, `cloudflare`, `smoke`, `google`, `zo
 `imap`, `passkey`, or `verify`. The owner still handles login, 2FA, OAuth consent,
 and the physical passkey gesture. For the supported Google, Zoom, and IMAP
 steps, tokens and app secrets go only into hidden terminal prompts or provider
-pages. The 0.4.27 candidate Windows path refuses those three credential ceremonies until
-its secure secret-entry bridge is physically proven. Its first owner source is
+pages. On Windows the Google step reads the Client ID and Client secret from
+the clipboard inside the installer instead of a typed prompt, never prints
+them, and clears the clipboard before Google's consent page opens. The Windows
+path refuses the Zoom and IMAP credential ceremonies until its secure
+secret-entry bridge is physically proven. Its first owner source is
 one explicitly approved local folder, previewed first and loaded manually.
 
 **Bank connections are not part of ordinary onboarding yet.** They are still

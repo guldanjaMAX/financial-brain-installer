@@ -139,8 +139,19 @@ The JSON contains workflow state, dashboard links, proof boundaries, and the
 next reviewed command. It contains no credentials. An agent may guide the
 browser and explain each page. On macOS and Linux, for supported Google, Zoom,
 and IMAP steps, the owner enters every token or secret into the provider page
-or hidden terminal prompt. This candidate deliberately refuses those three
-steps on Windows because its secure secret-entry bridge has not been physically
+or hidden terminal prompt. On Windows the Google step takes no typed entry: in
+the visible PowerShell window that runs `--run google`, the owner copies the
+Client ID and then the Client secret on Google's page, and the installer reads
+each one from the clipboard inside its own process. It accepts only the exact
+Desktop client shapes, never prints or saves either value, clears the
+clipboard, and proves by readback that the secret is gone before the consent
+page opens. The owner types and pastes nothing into the window. When the step
+ends, the installer throws away anything typed or pasted into the window
+anyway, so it cannot reach the PowerShell prompt; in a window script, also put
+`try { $Host.UI.RawUI.FlushInputBuffer() } catch { }` on the line after the
+command. This candidate
+deliberately refuses the Zoom and IMAP steps on Windows because they still need
+typed private entry and its secure secret-entry bridge has not been physically
 proven there. Do not route around that refusal with a visible prompt, command
 flag, environment variable, or chat message.
 

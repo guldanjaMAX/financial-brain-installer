@@ -55,6 +55,8 @@ test("an ambiguous put result reports uncertainty and retry does not replace the
   try {
     await ensureBankFeedWrappingKey({
       enabled: true,
+      beforeUpload: "absent",
+      countSealedReferences: async () => 0,
       listSecretNames: async () => [...names],
       putSecret: async (name) => {
         puts += 1;

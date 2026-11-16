@@ -657,11 +657,14 @@ available from this release because the ordinary hidden prompt cannot prove
 that echo is disabled. Use browser sign-in. Do not place a customer token in a
 command or persistent environment variable.
 
-The Claude technician's Google, Zoom, and IMAP connector steps also stop before
-private credential entry on Windows. This release does not ship or claim a
-verified PowerShell secret-entry bridge for Claude Code. Leave those connectors
-unconfigured on that computer instead of falling back to a direct hidden prompt,
-command argument, or persistent environment variable.
+The Claude technician's Zoom and IMAP steps stop before private credential
+entry on Windows: no verified PowerShell secret-entry bridge ships. Leave them
+unconfigured there instead of a hidden prompt, command argument, or persistent
+environment variable. Google works on Windows: start its `--run google` step in
+a visible PowerShell window, with this on the line after it:
+`try { $Host.UI.RawUI.FlushInputBuffer() } catch { }`. The owner copies the
+Client ID, then the secret, on Google's page and types nothing. The installer
+reads, never shows, and clears both. Never handle either value yourself.
 
 The Anthropic answer step is the exception on Windows: it uses the reviewed clipboard route (--from-clipboard, cleared afterwards) or the masked Cloudflare dashboard field (--key-set-in-dashboard), never a hidden prompt.
 

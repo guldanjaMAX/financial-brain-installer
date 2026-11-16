@@ -6,6 +6,18 @@ the brain, not for whoever built it: what changed for them, and what to check.
 
 ## 0.4.28 (2026-11-15)
 
+- **Updates never replace the key that protects your bank connections.**
+  Setup, update, deploy and rollback now check for that key both before and
+  after they upload your Brain, and never write a new key over one that was
+  already there. If Cloudflare is slow to list it, the command waits and checks
+  again (after about 2, 5 and 10 seconds); if it is still not listed, the
+  command stops, says it did not change your bank connections, and asks you to
+  rerun it a few minutes later. A new key is made only when Cloudflare lists
+  none before and after the upload, this computer has never seen one on that
+  Brain, and the Brain's database holds no bank connection sealed with one.
+  Before this fix, one slow listing could replace the key and disconnect the
+  bank feed. This release does not repair a bank feed that already shows "the
+  bank access reference cannot be opened"; ask for help reconnecting that bank.
 - **New Gmail keeps arriving during a saved-progress check.** A deferred
   restore check no longer holds a settled mail window. Source status stays
   incomplete until that check finishes; check status and pending retries
@@ -64,6 +76,15 @@ the brain, not for whoever built it: what changed for them, and what to check.
 - Windows self-update fixes help the installed copy finish replacing its files
   and resume correctly. After an approved update, check the installed version
   and bank health screen.
+- **Connect Google on Windows.** The guided Google step now works on Windows:
+  copy the Client ID, then the Client secret, on Google's page, and the
+  installer window picks each one up from the clipboard by itself. Nothing is
+  typed or pasted into the window, neither value is shown, and the clipboard is
+  cleared before Google's consent page opens. Clipboard clearing after a
+  Claude key now works on Windows PowerShell 5.1 too. Anything typed into
+  that window while it waits is thrown away when the step ends, so it never
+  reaches the PowerShell prompt. Check that the window names the Google
+  account you meant. Zoom and IMAP stay off on Windows.
 - Asking about a document by name finds it again, even when a long email
   thread mentions the same words. Long documents are quoted in readable,
   bounded parts that never start in the middle of a number.

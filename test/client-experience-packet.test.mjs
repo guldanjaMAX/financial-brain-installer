@@ -312,13 +312,16 @@ test("source guidance requires same-item proof and keeps run failures bounded", 
 
 test("the Windows pilot names one safe first source and does not offer unsupported credential ceremonies", () => {
   const setupGuide = readFileSync(join(ROOT, "onboarding", "09-technician-setup-and-rehearsal.md"), "utf8");
-  assert.match(setupGuide, /deliberately refuses those three\s+steps on Windows/i);
+  assert.match(setupGuide, /deliberately refuses the Zoom and IMAP steps on Windows/i);
+  assert.match(setupGuide, /On Windows the Google step takes no typed entry/i);
+  assert.match(setupGuide, /proves by readback that the secret is gone before the consent\s+page opens/i);
   assert.match(setupGuide, /Monday Windows x64 first-source lane/i);
   assert.match(setupGuide, /one owner-approved, low-sensitivity, text-readable test\s+document/i);
   assert.match(setupGuide, /preview sends nothing/i);
   assert.match(setupGuide, /--apply --approve <64hex>[\s\S]*Received, Saved, Search ready, and\s+Answer\s+checked/i);
   assert.match(setupGuide, /No subdirectory, link, junction, second file, or broader source tree is\s+allowed/i);
-  assert.match(topLevelReadme, /Windows path refuses those three credential ceremonies/i);
+  assert.match(topLevelReadme, /Windows\s+path refuses the Zoom and IMAP credential ceremonies/i);
+  assert.match(topLevelReadme, /On Windows the Google step reads the Client ID and Client secret from\s+the clipboard/i);
 });
 
 test("handoff treats original-file R2 storage as optional", () => {

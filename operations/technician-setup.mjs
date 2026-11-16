@@ -21,6 +21,7 @@ import {
 import { renderCopyableCommand } from "./command-display.mjs";
 import { manifestHasProvisionedResourceBindings } from "./machine-continuity.mjs";
 import { answerSetupOf } from "./answer-setup.mjs";
+import { flushWindowsConsoleInput } from "./custom-api-clipboard.mjs";
 import {
   ANTHROPIC_CONSOLE_URL,
   RULE_LINE,
@@ -201,6 +202,22 @@ export const TECHNICIAN_STEPS = Object.freeze([
     }),
   }),
 ]);
+
+// On Windows the Google client values come from the clipboard, never a typed
+// prompt (see collectGoogleClientFromClipboard). Only the owner's part and the
+// privacy line differ; every other platform keeps the hidden-prompt guidance.
+const GOOGLE_STEP = TECHNICIAN_STEPS.find((step) => step.id === "google");
+export const WINDOWS_GOOGLE_OWNER_GUIDANCE = ownerGuidance({
+  ...GOOGLE_STEP.owner_guidance,
+  owner_only: "The owner signs in, completes 2FA, confirms the Google account, and approves OAuth consent. On Windows the owner copies the Client ID and then the Client secret on Google's page; the installer window picks each one up from the clipboard by itself. Nothing is typed or pasted into the window.",
+  privacy: "The assistant must stop for every credential reveal or consent screen and must not read, copy, screenshot, transcribe, or store the value. The installer reads the clipboard only inside its own process, keeps nothing that is not a Google client value, never prints or saves either value, and clears the clipboard before the consent page opens.",
+});
+
+function ownerGuidanceFor(step, platformName) {
+  return step?.id === "google" && platformName === "win32"
+    ? WINDOWS_GOOGLE_OWNER_GUIDANCE
+    : step?.owner_guidance;
+}
 
 export const TECHNICIAN_RUN_STEPS = Object.freeze(TECHNICIAN_STEPS.map((step) => step.id));
 export const TECHNICIAN_SETUP_INTENTS = BOOTSTRAP_SETUP_INTENTS;
@@ -686,6 +703,7 @@ export function technicianPlan(manifestPath, deps = {}) {
       return {
         order: index + 1,
         ...routedStep,
+        ...(step.id === "google" ? { owner_guidance: ownerGuidanceFor(step, platformName) } : {}),
         command: DEFERRED_PUBLIC_CONNECTOR_STEPS.includes(step.id) || ownerOnly || step.id === "cloudflare"
           ? null
           : technicianDisplayCommand(step.id, manifest.path, cli, platformName, routing.intent),
@@ -813,12 +831,12 @@ export function renderTechnicianPlan(plan) {
   return lines.join("\n");
 }
 
-export function renderTechnicianStepBriefing(stepOrId) {
+export function renderTechnicianStepBriefing(stepOrId, { platformName = process.platform } = {}) {
   const step = typeof stepOrId === "string"
     ? TECHNICIAN_STEPS.find((candidate) => candidate.id === stepOrId)
     : stepOrId;
   if (!step?.owner_guidance) throw new Error("the technician step has no owner briefing");
-  const guidance = step.owner_guidance;
+  const guidance = ownerGuidanceFor(step, platformName);
   return [
     "",
     `Before we start: ${step.title}`,
@@ -963,24 +981,178 @@ function runOne(spawn, nodePath, args, env) {
   }
 }
 
+// Windows Google entry: the clipboard, read inside this process.
+//
+// A Windows console can keep echoing after raw mode is accepted (the
+// 2026-09-08 Cloudflare token incident), so the hidden prompt is not offered
+// there. Google's Desktop OAuth client is instead taken from the clipboard by
+// the installer's own no-shell clipboard reader: the value travels only
+// through that reader's stdout pipe into this process, is never printed,
+// written to a file, or placed in argv, and reaches only the same connector
+// child the macOS prompt feeds. The owner types and pastes nothing into the
+// window, so there is no keystroke that could echo.
+//
+// The window waits by itself and accepts a value only when it has the exact
+// shape of a Desktop client ID or a GOCSPX client secret. Anything else the
+// owner copies meanwhile is ignored and kept nowhere. The clipboard is cleared
+// after each capture and must be proven free of both values before the
+// connector (and its browser consent page) starts.
+const GOOGLE_CLIENT_ID_SHAPE = /^[0-9]{1,30}-[0-9a-z]{8,80}\.apps\.googleusercontent\.com$/;
+const GOOGLE_CLIENT_SECRET_SHAPE = /^GOCSPX-[A-Za-z0-9_-]{10,100}$/;
+export const WINDOWS_GOOGLE_CLIPBOARD_TIMEOUT_MS = 30 * 60_000;
+const WINDOWS_GOOGLE_CLIPBOARD_POLL_MS = 3_000;
+const WINDOWS_GOOGLE_CLIPBOARD_CLEAR_WAIT_MS = 2 * 60_000;
+// Consecutive failed reads before stopping. A single failure is normal (another
+// app briefly holds the clipboard, or a very large copy overflows the reader).
+const WINDOWS_GOOGLE_CLIPBOARD_READ_FAILURES = 10;
+
+/** Classify one clipboard text as a Google Desktop client ID, client secret, or neither. */
+export function googleClipboardValueKind(text) {
+  const value = typeof text === "string" ? text.trim() : "";
+  if (!value || value.length > 256) return null;
+  if (GOOGLE_CLIENT_ID_SHAPE.test(value)) return "client_id";
+  if (GOOGLE_CLIENT_SECRET_SHAPE.test(value)) return "client_secret";
+  return null;
+}
+
+/**
+ * Wait for the owner to copy the Google client ID and client secret, in either
+ * order, then prove the clipboard no longer holds either one.
+ *
+ * Returns two Buffers the caller must zero. Every failure zeroes them first,
+ * clears the clipboard, and names no value.
+ */
+export async function collectGoogleClientFromClipboard({
+  readClipboard,
+  clearClipboard,
+  say = () => {},
+  sleep = (milliseconds) => new Promise((resolveWait) => setTimeout(resolveWait, milliseconds)),
+  now = () => Date.now(),
+  timeoutMs = WINDOWS_GOOGLE_CLIPBOARD_TIMEOUT_MS,
+  pollMs = WINDOWS_GOOGLE_CLIPBOARD_POLL_MS,
+  clearWaitMs = WINDOWS_GOOGLE_CLIPBOARD_CLEAR_WAIT_MS,
+} = {}) {
+  if (typeof readClipboard !== "function" || typeof clearClipboard !== "function") {
+    throw codedError(
+      "the Google step on Windows needs the installer's clipboard reader. Nothing was read or saved.",
+      "windows_clipboard_unavailable",
+    );
+  }
+  let clientId = null;
+  let clientSecret = null;
+  const readQuietly = async () => {
+    try {
+      const text = await readClipboard();
+      return { ok: true, text: typeof text === "string" ? text : "" };
+    } catch {
+      // The reader's own error never carries clipboard text, but it is not
+      // relayed either: a failed read is only counted.
+      return { ok: false, text: "" };
+    }
+  };
+  const clearQuietly = async () => {
+    try { await clearClipboard(); return true; } catch { return false; }
+  };
+  const holdsCredential = (text) => {
+    if (!text) return false;
+    const seen = Buffer.from(text, "utf8");
+    try {
+      return Boolean((clientId && seen.includes(clientId)) || (clientSecret && seen.includes(clientSecret)));
+    } finally {
+      seen.fill(0);
+    }
+  };
+  try {
+    say("Copy the Client ID from Google's page. This window picks it up by itself; there is nothing to type or paste here.");
+    const deadline = now() + timeoutMs;
+    let failedReads = 0;
+    for (;;) {
+      const read = await readQuietly();
+      if (!read.ok) {
+        failedReads++;
+        if (failedReads >= WINDOWS_GOOGLE_CLIPBOARD_READ_FAILURES) {
+          throw codedError(
+            "Windows did not let the installer read the clipboard. Nothing was saved. Run this step again.",
+            "google_clipboard_unavailable",
+          );
+        }
+      } else {
+        failedReads = 0;
+        const kind = googleClipboardValueKind(read.text);
+        if (kind === "client_id" && !clientId) {
+          clientId = Buffer.from(read.text.trim(), "utf8");
+          await clearQuietly();
+          say(clientSecret ? "Client ID received." : "Client ID received. Now copy the Client secret.");
+        } else if (kind === "client_secret" && !clientSecret) {
+          clientSecret = Buffer.from(read.text.trim(), "utf8");
+          await clearQuietly();
+          say(clientId ? "Client secret received." : "Client secret received. Now copy the Client ID.");
+        }
+      }
+      if (clientId && clientSecret) break;
+      if (now() >= deadline) {
+        throw codedError(
+          "The Google Client ID and Client secret did not both reach the clipboard in time. Nothing was saved. " +
+            "Copy them again from Google's page and run this step again.",
+          "google_clipboard_timeout",
+        );
+      }
+      await sleep(pollMs);
+    }
+    // The browser consent page opens next. The secret must be off the
+    // clipboard first, proven by reading it back, not by a clear that
+    // returned (Windows PowerShell 5.1 has thrown and cleared nothing).
+    await clearQuietly();
+    let check = await readQuietly();
+    if (!check.ok || holdsCredential(check.text)) {
+      say("Please copy any ordinary word in your browser now, so the secret leaves the clipboard.");
+      const clearDeadline = now() + clearWaitMs;
+      for (;;) {
+        await sleep(pollMs);
+        await clearQuietly();
+        check = await readQuietly();
+        if (check.ok && !holdsCredential(check.text)) break;
+        if (now() >= clearDeadline) {
+          throw codedError(
+            "The clipboard still holds the Google secret, so the installer stopped before connecting. Nothing was saved. " +
+              "Copy any ordinary word, then run this step again.",
+            "google_clipboard_not_cleared",
+          );
+        }
+      }
+    }
+    say("Client ID and Client secret received and cleared from the clipboard.");
+    return { clientId, clientSecret };
+  } catch (error) {
+    clientId?.fill(0);
+    clientSecret?.fill(0);
+    await clearQuietly();
+    throw error;
+  }
+}
+
 export async function runTechnicianStep({
   step,
   manifestPath,
   flags = {},
   scriptPath,
   readHidden,
+  googleClipboard = null,
   baseEnv = process.env,
   spawn = spawnSync,
   nodePath = process.execPath,
   manifestDeps = {},
   runInstallSmoke = null,
   platformName = process.platform,
+  flushConsoleInput = () => flushWindowsConsoleInput({ platform: platformName, environment: baseEnv }),
 } = {}) {
   if (!TECHNICIAN_RUN_STEPS.includes(step)) {
     throw new Error(`--run accepts one of: ${TECHNICIAN_RUN_STEPS.join(", ")}`);
   }
   if (!manifestPath || !scriptPath) throw new Error("the technician step needs a manifest and installer path");
-  if (platformName === "win32" && ["google", "zoom", "imap"].includes(step)) {
+  // Google has a Windows route (the clipboard, above). Zoom and IMAP still
+  // need typed private entry, which Windows cannot hide provably.
+  if (platformName === "win32" && ["zoom", "imap"].includes(step)) {
     throw codedError(
       "this connector needs private credential entry, and this release does not include a verified Windows secret-entry bridge for Claude Code. " +
         "The generic terminal prompt can echo secrets, so the technician stops before asking for one or launching the connector. " +
@@ -1025,7 +1197,12 @@ export async function runTechnicianStep({
   const explicitEnv = {};
   let childEnv = null;
   try {
-    if (step === "google") {
+    if (step === "google" && platformName === "win32") {
+      const { clientId, clientSecret } = await collectGoogleClientFromClipboard(googleClipboard || {});
+      secretBuffers.push(clientId, clientSecret);
+      explicitEnv.GOOGLE_CLIENT_ID = bufferText(clientId);
+      explicitEnv.GOOGLE_CLIENT_SECRET = bufferText(clientSecret);
+    } else if (step === "google") {
       if (typeof readHidden !== "function") throw new Error("the Google step needs a secure interactive terminal");
       const clientId = await hiddenValue(readHidden, "  Google OAuth client ID (hidden): ", "Google OAuth client ID");
       const clientSecret = await hiddenValue(readHidden, "  Google OAuth client secret, if issued (hidden; Enter for none): ", "Google OAuth client secret", { optional: true });
@@ -1081,6 +1258,14 @@ export async function runTechnicianStep({
     for (const key of Object.keys(explicitEnv)) {
       explicitEnv[key] = "";
       if (childEnv) childEnv[key] = "";
+    }
+    if (step === "google" && platformName === "win32") {
+      // The window never read the keyboard while it waited. Anything typed or
+      // pasted into it meanwhile (a secret pasted out of habit) would reach
+      // the PowerShell prompt when this exits, shown, run and saved to its
+      // history, so it is thrown away on every ending. Best effort only: a
+      // failed flush never replaces this step's own result.
+      try { flushConsoleInput?.(); } catch { /* best effort */ }
     }
   }
 }
