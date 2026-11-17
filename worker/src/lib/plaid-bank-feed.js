@@ -139,7 +139,7 @@ function supportedCurrency(value) {
  * expands exponent notation), an unsupported currency, and a magnitude beyond
  * JavaScript's safe integers. Those are invalid input, not precision.
  */
-function providerMinorUnits(value, currency) {
+export function providerMinorUnits(value, currency) {
   const exponent = CURRENCY_EXPONENTS[supportedCurrency(currency)];
   if (value === null || value === undefined) return { minor: null, rounded: false, sign: 0 };
   const raw = String(value).trim();
@@ -169,7 +169,7 @@ function providerMinorUnits(value, currency) {
 }
 
 /** The feed convention applied to an exact amount that may have rounded to zero. */
-function stagedDirection(money) {
+export function stagedDirection(money) {
   return directionFor(money.minor !== 0 ? money.minor : money.sign);
 }
 
@@ -180,7 +180,7 @@ function stagedDirection(money) {
  * minorRoundedFields in fin-d1.js is the one reader. The exact decimal stays in
  * fin_transactions.source_amount_decimal and in the staged rows.
  */
-function balanceRoundingQualifier(current, available) {
+export function balanceRoundingQualifier(current, available) {
   const fields = [current.rounded && "current", available.rounded && "available"].filter(Boolean);
   return fields.length ? `${MINOR_ROUNDED_QUALIFIER}=${fields.join(",")}` : "";
 }
@@ -1333,6 +1333,19 @@ export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = nul
     ...(status === "paused" ? { paused: true } : {}),
   });
   if (env.VECTOR_DRAIN_MODE === "paused-for-upgrade") return custodyResult("PLAID_SYNC_PAUSED", "paused");
+  const replacement = await env.DB.prepare(`SELECT operation_ref,old_item_ref,new_item_ref,state FROM plaid_item_replacements
+    WHERE tenant_id=? AND ((old_item_ref=? AND state NOT IN ('cancelled','rolled_back')) OR (new_item_ref=? AND state<>'cancelled'))
+    ORDER BY CASE WHEN old_item_ref=? THEN 0 ELSE 1 END LIMIT 1`)
+    .bind(tenantId,itemRef,itemRef,itemRef).first();
+  if (replacement) {
+    if (replacement.old_item_ref===itemRef || replacement.state==='rolled_back') return custodyResult('PLAID_REPLACEMENT_HISTORY_RETAINED','busy');
+    const {stageReplacement}=await import('./plaid-item-replacement.js');
+    try {
+      const result=await stageReplacement(env,{operationRef:replacement.operation_ref,fetchImpl,autoAdmit:true,now:stamp});
+      const promoted=result.sync_completion.state==='complete';
+      return {item_ref:itemRef,ok:promoted,partial:!promoted,promoted,history_kept:true,replacement:result,cursor_advanced:promoted && result.sync_completion.cursor_advanced};
+    } catch {return custodyResult('PLAID_REPLACEMENT_REVIEW_PENDING');}
+  }
   const item = await itemRow(env, tenantId, itemRef);
   if (!item) return { item_ref: itemRef, ok: false, reason: "that connection is not on this brain" };
   if (item.removed_at || !["connected", "error"].includes(item.status)) {
@@ -1616,6 +1629,7 @@ export async function runPlaidFeedSlice(env, {
         AND (r.item_ref IS NULL OR (r.state IN ('pending','retryable') AND r.due_at<=?2)
           OR (COALESCE(h.last_attempt_at,i.last_synced_at,i.connected_at)<=?4
             AND (r.state='complete' OR r.due_at<=?2)))
+        AND NOT EXISTS (SELECT 1 FROM plaid_item_replacements x WHERE x.tenant_id=i.tenant_id AND x.old_item_ref=i.item_ref AND x.state NOT IN ('cancelled','rolled_back'))
         AND NOT EXISTS (SELECT 1 FROM plaid_sync_leases l
           WHERE l.tenant_id=i.tenant_id AND l.item_ref=i.item_ref AND l.expires_at>unixepoch('now'))
         AND NOT EXISTS (SELECT 1 FROM plaid_revocation_outbox o
@@ -1738,6 +1752,9 @@ export async function handlePlaidWebhook(env, request, { fetchImpl = fetch, now 
     lastIssuedAt: Number.isInteger(latest?.issued_at) ? latest.issued_at : null,
     payload,
   });
+  const replacing = payload.item_id ? await env.DB.prepare(`SELECT operation_ref FROM plaid_item_replacements
+    WHERE tenant_id=? AND ((old_item_ref=? AND state NOT IN ('cancelled','rolled_back')) OR (new_item_ref=? AND state<>'cancelled')) LIMIT 1`)
+    .bind(tenantId,String(payload.item_id),String(payload.item_id)).first() : null;
   const statements = [
     env.DB.prepare(
       `INSERT INTO plaid_webhook_events
@@ -1748,11 +1765,11 @@ export async function handlePlaidWebhook(env, request, { fetchImpl = fetch, now 
       payload.webhook_code || null, verified.kid, verified.issuedAt, verified.bodyHash,
       disposition.state, stamp),
   ];
-  if (payload.item_id) statements.push(env.DB.prepare(`INSERT INTO bank_feed_health (tenant_id,item_ref,last_webhook_at)
+  if (payload.item_id && !replacing) statements.push(env.DB.prepare(`INSERT INTO bank_feed_health (tenant_id,item_ref,last_webhook_at)
     SELECT tenant_id,item_ref,? FROM bank_feed_items WHERE tenant_id=? AND item_ref=? AND removed_at IS NULL
     ON CONFLICT(tenant_id,item_ref) DO UPDATE SET last_webhook_at=excluded.last_webhook_at`)
     .bind(stamp,tenantId,String(payload.item_id)));
-  if (disposition.scheduleReconciliation && disposition.itemId) {
+  if (!replacing && disposition.scheduleReconciliation && disposition.itemId) {
     const reason = disposition.state === "out_of_order"
       ? "out_of_order_webhook"
       : disposition.state === "replay"
@@ -1935,7 +1952,9 @@ export async function plaidFeedStatus(env, {now=null}={}) {
   // exact guard that holds promotion, so status and sync can never disagree.
   const rows = (await env.DB.prepare(
     `SELECT i.item_ref,i.institution_label,i.environment,i.status,i.status_detail,i.connected_at,
-            i.last_synced_at,b.state AS history_state,b.provider_history_state,
+            i.last_synced_at,(SELECT x.operation_ref FROM plaid_item_replacements x WHERE x.tenant_id=i.tenant_id AND (x.old_item_ref=i.item_ref OR x.new_item_ref=i.item_ref) AND x.state<>'cancelled' ORDER BY x.updated_at DESC LIMIT 1) AS replacement_ref,
+            (SELECT x.state FROM plaid_item_replacements x WHERE x.tenant_id=i.tenant_id AND (x.old_item_ref=i.item_ref OR x.new_item_ref=i.item_ref) AND x.state<>'cancelled' ORDER BY x.updated_at DESC LIMIT 1) AS replacement_state,
+            b.state AS history_state,b.provider_history_state,
             b.pages_done,b.transactions_seen,b.unread_lines,
             r.state AS reconciliation_state,r.reason AS reconciliation_reason,
             MAX(COALESCE(r.due_at,''),COALESCE(r.provider_retry_not_before,'')) AS due_at,o.state AS revocation_state,
@@ -1957,7 +1976,7 @@ export async function plaidFeedStatus(env, {now=null}={}) {
        LEFT JOIN plaid_reconciliation r ON r.tenant_id=i.tenant_id AND r.item_ref=i.item_ref
        LEFT JOIN plaid_revocation_outbox o ON o.tenant_id=i.tenant_id AND o.item_ref=i.item_ref
        LEFT JOIN plaid_sync_windows w ON w.tenant_id=i.tenant_id AND w.item_ref=i.item_ref
-      WHERE i.tenant_id=? AND (i.removed_at IS NULL OR o.state<>'confirmed') ORDER BY i.connected_at`,
+      WHERE i.tenant_id=? AND (i.removed_at IS NULL OR o.state<>'confirmed' OR EXISTS(SELECT 1 FROM plaid_item_replacements x WHERE x.tenant_id=i.tenant_id AND x.old_item_ref=i.item_ref AND x.state='active')) ORDER BY i.connected_at`,
   ).bind(tenantId).all())?.results || [];
   const accountsNeedingOwner = (row) => Number(row.accounts_needing_owner || 0);
   // A healthy connection held only for owner choices says so in its own detail,
@@ -2025,10 +2044,12 @@ export async function plaidFeedStatus(env, {now=null}={}) {
       environment: row.environment,
       status: row.status,
       status_detail: statusDetail(row),
+      replacement_ref: row.replacement_ref || null,
+      replacement_state: row.replacement_state || null,
       connected_at: row.connected_at,
       last_synced_at: row.last_synced_at,
       health: health.get(row.item_ref),
-      status_line: health.get(row.item_ref)?.status_line,
+      status_line: row.replacement_state==='history_review' ? 'New bank activity is saved for review. Continue recovery; saved figures remain available.' : health.get(row.item_ref)?.status_line,
       history: {
         state: row.history_state || "none",
         provider_history_state: row.provider_history_state || PLAID_HISTORY_STATE.UNKNOWN,

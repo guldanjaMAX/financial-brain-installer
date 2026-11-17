@@ -241,7 +241,7 @@ function parseCursor(value) {
 }
 
 async function plaidLedgerMarker(env, tenantId) {
-  const [plaidResult, accountResult, linkResult] = await env.DB.batch([
+  const [plaidResult, accountResult, linkResult, replacementResult] = await env.DB.batch([
     env.DB.prepare(
     `SELECT i.item_ref,i.cursor,i.cursor_updated_at,i.last_synced_at,i.institution_label,
             a.id AS account_id,a.account_slug,a.entity_slug,a.label AS account_label,
@@ -285,6 +285,7 @@ async function plaidLedgerMarker(env, tenantId) {
         WHERE tenant_id=?1 AND unlinked_at IS NULL
         ORDER BY manual_account_slug,live_account_slug,id`,
     ).bind(tenantId),
+    env.DB.prepare(`SELECT operation_ref,state,revision,published_revision,updated_at FROM plaid_item_replacements WHERE tenant_id=? ORDER BY operation_ref`).bind(tenantId),
   ]);
   const rows = plaidResult?.results || [];
   const inventory = accountResult?.results || [];
@@ -292,7 +293,7 @@ async function plaidLedgerMarker(env, tenantId) {
   // The marker and transfer resolver must observe the same authority. Plaid
   // rows alone miss manual accounts and committed account-link state, either
   // of which can change endpoint uniqueness during a bounded traversal.
-  const bytes = new TextEncoder().encode(JSON.stringify({ plaid: rows, inventory, links }));
+  const bytes = new TextEncoder().encode(JSON.stringify({ plaid: rows, inventory, links, replacements:replacementResult?.results || [] }));
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
 }

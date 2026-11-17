@@ -1474,7 +1474,7 @@ password or security codes. This connection reads your accounts and transactions
 <p id="status" role="status" aria-live="polite"></p>
 <section class="panel" aria-labelledby="connections-heading">
   <h2 id="connections-heading">Your saved connections</h2>
-  <p class="note">If a bank is already here, use Repair connection to sign in again. Use Connect a bank for a different bank or separate accounts.</p>
+  <p class="note">For saved banks, follow the action shown for that connection. Unreadable saved access needs replacement review. Use Connect a bank for a different bank or separate accounts.</p>
   <div id="connections" aria-live="polite">Checking saved connections…</div>
 </section>
 <section class="panel" aria-labelledby="accounts-heading">
@@ -2003,7 +2003,12 @@ async function loadConnections() {
           : " accounts need an owner below before history can load.")
         : "Connection saved. Account history may still be loading.";
       row.append(make("p", connection.status === "connected" ? connectedLine : "This connection needs attention."));
-      if (connection.status !== "removed") {
+      if (connection.health?.needs_reconnect || connection.replacement_ref) {
+        row.append(make('p','Needs reconnect. Saved history is kept.'));
+        const recover=make('a',connection.replacement_ref ? 'Continue recovery' : 'Replace unreadable connection');
+        recover.href='/app/connect/bank?mode=replace&item_ref='+encodeURIComponent(connection.item_ref)+(connection.replacement_ref ? '&operation_ref='+encodeURIComponent(connection.replacement_ref) : '');
+        row.append(recover);
+      } else if (connection.status !== "removed") {
         const repair = make("a", "Repair connection");
         repair.href = "/app/connect/bank?mode=reauthorise&item_ref=" + encodeURIComponent(connection.item_ref);
         row.append(repair);
@@ -2011,6 +2016,15 @@ async function loadConnections() {
       root.append(row);
     }
   } catch (error) { root.replaceChildren(make("p", error.message, "err")); }
+}
+// OAuth returns to the registered shared path. Restore only the operation
+// identity; all replacement authority is rechecked by the owner-only routes.
+if (new URLSearchParams(location.search).has('oauth_state_id')) {
+  let replacement=null; try {replacement=JSON.parse(sessionStorage.getItem('bank-replacement-current'));} catch {}
+  if(replacement?.item && replacement?.op) {
+    const continuation=new URL(location.href); continuation.searchParams.set('mode','replace'); continuation.searchParams.set('item_ref',replacement.item);
+    location.replace(continuation.href);
+  }
 }
 let linkBusy = false;
 function finishLink() { linkBusy = false; el("start").disabled = false; }
@@ -2146,6 +2160,10 @@ export async function handleBankFeed(env, request, url, path, ctx) {
             "X-Content-Type-Options": "nosniff",
           },
         });
+      }
+      if (url.searchParams.get('mode')==='replace') {
+        const { replacementPage } = await import('./bank-replacement-page.js');
+        return replacementPage();
       }
       // Only the count is read, and an unreadable count leaves the section in
       // its default state; the page script corrects it once the list loads.
@@ -2286,6 +2304,54 @@ export async function handleBankFeed(env, request, url, path, ctx) {
         }).catch(() => {}));
       }
       return jsonResponse(result);
+    }
+
+    if (path.startsWith('/api/bank-feed/replacement/')) {
+      const access = await ownerAccess();
+      if (!access.authorised) return privateNoStore(ownerRefusal(access));
+      const recovery = await import('./plaid-item-replacement.js');
+      const action = path.slice('/api/bank-feed/replacement/'.length);
+      try {
+        if (action==='status' && request.method==='GET') return ownerJson(await recovery.replacementStatus(env,{operationRef:url.searchParams.get('operation_ref')}));
+        if (request.method!=='POST') return ownerJson({code:'replacement_method_required'},405);
+        const body=await readJson(request);
+        const options={operationRef:body.operation_ref,itemRef:body.item_ref,now:ctx?.bankFeedNow || null};
+        let receipt;
+        if(action==='preview') receipt=await recovery.replacementPreview(env,options);
+        else if(action==='approve') receipt=await recovery.approveReplacement(env,{...options,approve:body.approve,expiresAt:body.expires_at,confirmUnrecoverable:body.confirm_unrecoverable===true});
+        else if(action==='link') receipt=await recovery.replacementLink(env,{...options,url:url.href,fetchImpl:ctx?.bankFeedFetchImpl || fetch});
+        else if(action==='complete') receipt=await recovery.completeReplacementLink(env,{...options,publicToken:body.public_token,fetchImpl:ctx?.bankFeedFetchImpl || fetch});
+        else if(action==='stage') receipt=await recovery.stageReplacement(env,{...options,fetchImpl:ctx?.bankFeedFetchImpl || fetch});
+        else if(action==='review' || action==='activate') {
+          const review={...options,mappings:body.mappings,choices:body.choices,intervals:body.intervals,expiresAt:body.expires_at};
+          receipt=action==='review' ? await recovery.reviewReplacement(env,review) : await recovery.activateReplacement(env,{...review,approve:body.approve});
+        } else if(action==='rollback') receipt=await recovery.rollbackReplacement(env,{...options,approve:body.approve ?? null});
+        else if(action==='resume') receipt=await recovery.resumeReplacement(env,{...options,approve:body.approve ?? null});
+        else if(action==='cancel') receipt=await recovery.cancelReplacement(env,options);
+        else return ownerJson({code:'replacement_action_unknown'},404);
+        // Private SQL snapshots never leave the Worker, even on owner routes.
+        const {_snapshot,_accounts,...publicReceipt}=receipt;
+        return ownerJson(publicReceipt);
+      } catch(error) {
+        const guidance={
+          replacement_review_expired:'This review expired. Refresh your choices and confirm again. Saved history is kept.',
+          replacement_resume_required:'Accounts still point to the old connection. Review and confirm resuming this recovery before a separate handover.',
+          replacement_review_stale_or_unresolved:'Some choices or saved records need another review. Check the current account and occurrence choices. Saved history is kept.',
+          replacement_exchange_outcome_unknown:'The bank sign-in result is uncertain. Continue this same recovery with the installer; do not start another sign-in.',
+          replacement_institution_mismatch:'The provider returned a different bank. Review this sign-in with the installer. Saved history is kept.',
+          replacement_atomic_batch_too_large:'This recovery needs a larger reviewed handover. Keep the staged history and ask the installer to review it.',
+          replacement_cancel_needs_custody_review:'Bank sign-in has started. Keep this recovery and review its saved outcome with the installer before cancellation.'
+        };
+        return ownerJson({code:/^replacement_[a-z_]+$/.test(error?.code || '') ? error.code : 'replacement_review_required',
+          history_kept:true,detail:guidance[error?.code] || 'Saved history is kept. Continue the same recovery after reviewing this result.'},409);
+      }
+    }
+
+    if (path === "/api/bank-feed/custody" && request.method === "GET") {
+      const access = await ownerAccess();
+      if (!access.authorised && !operatorAuthorised()) return ownerRefusal(access);
+      const { bankCustodyReport } = await import('./bank-custody.js');
+      return ownerJson(await bankCustodyReport(env));
     }
 
     if (path === "/api/bank-feed/status" && request.method === "GET") {

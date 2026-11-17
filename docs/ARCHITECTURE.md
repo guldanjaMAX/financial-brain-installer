@@ -3002,3 +3002,111 @@ because estimated becomes 1. Earlier estimates retain the previous behavior;
 all flagged rows remain in txn and account/date confidence still names their
 dollars, including excluded rows. The predicate uses the frozen doubt list so
 there is no second independent list of money-type reasons.
+
+### Replacement lineage for unreadable bank access (offline schema-66 candidate)
+
+A bank replacement preserves the logical account and its historical facts while
+changing the provider binding. Diagnosis is read-only and distinct from repair.
+The owner approves the exact unreadable custody snapshot; current deployment,
+wrapping-key fingerprint, account ownership and row evidence are rechecked before
+claim and publication. Link remains connect mode. Provider-returned institution
+and account inventory establish candidate identity after exchange.
+
+The candidate is quarantined. Its own cursor advances only with durable page
+evidence, while the visible ledger cursor changes at reviewed activation. Every
+incoming occurrence is admitted, aliased to one proved canonical row, corrected
+with retained original evidence, or kept for review. Equal date/amount/text alone
+never proves duplication. Complete coverage is a union of independently proved
+intervals, preserving holes. A pending replacement that could affect the asked
+period caps computed money confidence at 69 without withholding the saved figure.
+
+The publication boundary is one D1 transaction across rows, account bindings,
+current approvals, balance observations, the successor cursor, retirement and
+an append-only audit event. Database triggers also fence already-running older
+writers. Old ciphertext, cursor, staging and historical rows remain saved.
+Local retirement never claims provider revocation. Previewed rollback changes
+the connection pointer while preserving proved financial facts and audit.
+Recovery exports include all schema-66 authority and evidence after the ledger;
+older schema inventories are unchanged. These are candidate semantics, not
+release or live-account evidence.
+
+Unresolved replacement evidence follows canonical aliases and retained provider
+identity across account and posting-date corrections, including ID-only withdrawals.
+Both saved and incoming dates, currencies, directions and dollars reach confidence;
+possible changed-ID overlaps also retain their saved candidates. Unknown lineage
+stays conservative. Affected periods and replacement coverage holes cap the score
+at 69 while the saved figure remains available. Unrelated proved periods retain
+their existing score. Tombstones and pending aliases block automatic new-money
+admission even after the coverage cutoff.
+
+Rollback retains this review debt in answers and in the owner page. The owner can
+review it, preview and confirm resuming quarantine, then separately confirm a new
+handover. Resuming alone changes neither the account pointer nor financial facts.
+
+Schema 67 makes the retained provider events and owner decisions an append-only
+occurrence journal. Five derived views expose connection ancestry, correction
+edges, transitive current heads, provider identities and typed occurrence events.
+Identity is the provider connection plus transaction ID; confirmed duplicate and
+correction decisions bridge identities across connections and pending IDs. Account
+and posting date are observations, not identity keys. Every old identity follows
+the correction edges to its current head, including tombstones. Mutable aliases
+remain compatibility projections and cannot hide that head. Existing schema-66
+publication history reconstructs through the same views without rewriting rows.
+
+A confirmed redelivery that remains withdrawn appends a `remove` decision, exposed
+as a withdrawal event. Its exact head and owner statement evidence are required;
+the existing tombstone is unchanged. A newer modified provider record can reinstate
+it only through an explicit correction. Unrelated equal-money rows cannot override
+known identity. The confidence snapshot includes every saved lineage observation
+and incoming effect, keeping all affected account periods at 69 or below until
+reconciliation. Supported figures remain available throughout.
+
+Later replacements inherit the proved connection family, including published
+facts kept by rolled-back branches. Their atomic batch opens and restores that
+family's existing writer fences; an older
+operation cannot stage, activate, resume or roll back after a successor claims the
+connection. Recovery continues to export the underlying durable journal tables
+in ledger-first order. The new views reconstruct after restore, so schema-66 table
+inventories and frozen earlier recovery inventories do not change.
+
+Schema 68 separates sync completion from occurrence reconciliation. A retained
+provider event without a final immutable decision is an open review item, even
+after its sync revision completes. Status and the owner page expose its known
+dollars. Confidence reads unresolved events across completed revisions, retaining
+the 69 cap and exact missing reconciliation for every affected account-period.
+Later distinct activity can publish under retained account authority; an uncertain
+occurrence cannot prevent the next provider fetch. Initial account handover still
+requires explicit owner mapping approval.
+
+Choices identify both the source revision and event index. A later statement
+review appends final decisions for those original events without replaying later
+money, balance observations or successful-sync times. The existing exclusive
+head-consumption index remains intact. The nullable pending-observation pointer
+records a no-money `pending_retired` disposition separately from economic head
+consumption. A paired or delayed pending removal preserves its posted successor;
+both observations and their evidence remain append-only. An identity also observed
+as posted remains an economic identity, so its later removal withdraws money.
+Current and pending
+identity heads are resolved before account filtering, so a posting can select its
+proved pending predecessor across mapped accounts. Unrelated corrections still
+cannot consume one saved head together.
+
+Replacement poll completion uses one explicit state machine: `unpolled`,
+`polling`, `awaiting_accounts`, `ready`, `complete`, or `paused`. Each validated
+provider page appends a versioned receipt in the existing immutable audit table,
+atomically with its events, inventory and staged cursor. The receipt dates the
+observation and records the account inventory and cursor digests. Every expected
+account needs a terminal window observation and approved mapping. Its state is
+then `polled` or `open_item`; occurrence review never vetoes completion. Partial
+pages leave every account `unpolled`. Initial mapping approval remains required.
+
+A terminal cursor may equal the request cursor, including an empty event window.
+Continuing without cursor progress and cycles to a different earlier cursor are
+rejected. Completion and cursor advancement are reported separately. A retained
+terminal page resumes publication without fetching again, and replaying its
+approval changes nothing. Successful poll times come from the retained provider
+observation, including in connection health; settling older review items cannot
+refresh them. Quiet polls never invent transactions or additional covered dates.
+Older in-flight windows retain every event and restart from the successor's
+published cursor to establish fresh receipts. Their retained prefix is never
+silently certified, discarded or reused as proof of a terminal poll.

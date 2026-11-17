@@ -123,6 +123,9 @@ machine-prep/installers/windows/handoff-windows.url
 
 # Offline bank-feed lane copies, synthetic custody, caches and receipts.
 /.bankfeed-r3-evidence/
+/.bank-replacement-r3-lab/
+/.bank-replacement-r4-lab/
+/.bank-replacement-r5-lab/
 
 # Disposable offline phase-1 probes, pinned input copies and receipts.
 /.newest-p1/

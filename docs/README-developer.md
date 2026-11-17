@@ -36,7 +36,7 @@ store. Pinned Wrangler 4.131.1 cannot request Vectorize permission for that
 profile, so the read-only preflight routes that exact refusal to an explicit,
 account-scoped recovery API-token choice before any mutation.
 
-**Package identity: brain-installer 0.4.28, schema61.** Publication, supported
+**Package identity: brain-installer 0.4.29, schema68.** Publication, supported
 platforms and field acceptance are established by the reviewed evidence for
 the exact package bytes, not by this README or its version number. Before an
 install or update, match the package to the current approved guide and release
@@ -50,7 +50,7 @@ until reviewed evidence closes it; a deferred capability remains unproven.
 Earlier candidate identities and their planning records remain historical and
 must not be reused as proof for changed bytes.
 
-The 41-row release audit has 37 unresolved incidents, zero 0.4.28 deferrals, and four
+The 41-row release audit has 37 unresolved incidents, zero 0.4.29 deferrals, and four
 rows closed on reviewed evidence.
 
 Engineering changes follow [the code, test, documentation, and tracking
@@ -4759,3 +4759,120 @@ rollback requires two observed quiet writer readings before restore and retains
 the pause without restoring when that evidence is missing.
 See [the backup-first procedure](drive-incremental-recovery.md) before applying
 the paired runtime. No lane receipt establishes live or release readiness.
+
+### Unreadable bank custody and replacement candidate (schema 66)
+
+`brain bank custody <manifest> [--json]` reads `/api/bank-feed/custody` using the
+existing durable data-plane credential. The diagnostic opens each active saved
+reference without provider calls or writes. Dedicated wrapping-key equality is
+reported as a fingerprint; legacy authentication-key fingerprints are unavailable.
+Raw custody, plaintext and provider cursors do not leave the diagnostic.
+
+Owner-only `/api/bank-feed/replacement/*` routes own preview, expiring approval,
+fresh connect Link, one-shot exchange, quarantined history pages, account and
+occurrence review, atomic activation, cancellation before exchange, status and
+previewed rollback. The provider must confirm the same institution and inventory.
+An uncertain exchange retains its claim. Only the exact approved predecessor and
+candidate are exempt from duplicate review; unrelated bank history stays guarded.
+The successor uses its own cursor and stable existing logical accounts.
+Published successor rows keep the provider merchant as `payee` and the provider
+category as a proposed `category`, exactly as ordinary sync stores them.
+Replacement events pass the ordinary sync's own transaction validation and
+normalisation (`normalisePlaidTransaction`): the description is the merchant
+name when sent (else the trimmed bank text, never cut), and non-text names or a
+half category refuse the page. An owner-reviewed `replace` keeps the old row's
+owner-confirmed category and basis, as ordinary sync keeps them on update.
+
+`0066_plaid_item_replacement.sql` retains operations, bindings, page events,
+occurrence decisions, aliases, proved coverage intervals, old balance/debt
+observations and append-only audit. Database triggers fence old-runtime ledger,
+staging and lease writes. Activation uses one bounded D1 batch for every SQL
+reader. An oversized plan remains quarantined. Overlap is never fuzzy-deduped;
+uncertain events remain visible for owner review, including later backdated rows.
+Current exact account-kind and statement/live-link reviews receive successor
+snapshots; revoked or stale approvals gain no authority.
+
+The dedicated candidate page is `/app/connect/bank?mode=replace&item_ref=...`.
+The owner guide is [bank-connection-recovery.md](bank-connection-recovery.md).
+Do not infer live readiness from these offline paths. The generated app assets,
+full host gates, actual owner statement comparisons and provider consent behavior
+still require the separately reviewed integration and publish decision.
+
+Historical confidence uses canonical saved observations as well as incoming events.
+An ID-only removal, date/account change or possible changed-ID overlap keeps every
+affected period at 69 or below, with its known directional dollars and dates. Unknown
+lineage remains conservative; clean unrelated periods keep their existing score.
+Automatic and explicit new-money admission share the provider-identity, tombstone
+and pending-alias conflict checks.
+
+Rollback keeps known review dollars visible. Owner-only `review` can inspect retained
+debt after rollback. `resume` previews and confirms reopening quarantine; it changes
+no account pointer or ledger amount. A separate fresh `activate` review and approval
+are required to use the replacement connection again. Debt-free rollback has no
+resume action. Offline counterexamples and controls are in
+`worker/test/bank-replace-unreadable-1114.test.mjs`.
+
+Schema 67 adds derived occurrence-lineage views over the retained page/decision
+journal and makes both journal tables append-only. The identity key excludes the
+logical account; transitive correction edges resolve each provider ID to its
+current head across account moves, pending-to-posted changes and confirmed
+connection replacements. Compatibility aliases update both row and account, but
+the journal remains authoritative even if an older alias is stale. Previously
+published schema-66 moves reconstruct without rewriting their source evidence.
+
+The owner `remove` decision also settles an exact tombstone redelivery as a new
+withdrawal event. It preserves the row multiset, excludes that occurrence from
+totals and advances the reviewed revision so the next provider fetch can proceed.
+An unrelated row cannot settle a known identity. Reinstatement requires a newer
+modified provider record and explicit correction evidence. Unresolved confidence
+includes saved historical lineage observations as well as the current head and
+incoming effect. All affected dates/accounts stay at 69 or below with known dollars
+named; unrelated supported periods retain their score.
+
+The offline property test uses a fixed random seed set, an independent provider
+state model and the real stage/review/activation routes. It checks account and
+direction totals, one transitive head, retained tombstones and non-resurrection
+after every action, including repeated connection replacements. These checks are
+review evidence only; the full host gate and owner acceptance remain separate.
+
+Schema 68 separates sync completion from occurrence reconciliation. A retained
+provider event without a final immutable decision is an open review item, even
+after its sync revision completes. Status and the owner page expose its known
+dollars. Confidence reads unresolved events across completed revisions, retaining
+the 69 cap and exact missing reconciliation for every affected account-period.
+Later distinct activity can publish under retained account authority; an uncertain
+occurrence cannot prevent the next provider fetch. Initial account handover still
+requires explicit owner mapping approval.
+
+Choices identify both the source revision and event index. A later statement
+review appends final decisions for those original events without replaying later
+money, balance observations or successful-sync times. The existing exclusive
+head-consumption index remains intact. The nullable pending-observation pointer
+records a no-money `pending_retired` disposition separately from economic head
+consumption. A paired or delayed pending removal preserves its posted successor;
+both observations and their evidence remain append-only. An identity also observed
+as posted remains an economic identity, so its later removal withdraws money.
+Current and pending
+identity heads are resolved before account filtering, so a posting can select its
+proved pending predecessor across mapped accounts. Unrelated corrections still
+cannot consume one saved head together.
+
+Replacement poll completion uses one explicit state machine: `unpolled`,
+`polling`, `awaiting_accounts`, `ready`, `complete`, or `paused`. Each validated
+provider page appends a versioned receipt in the existing immutable audit table,
+atomically with its events, inventory and staged cursor. The receipt dates the
+observation and records the account inventory and cursor digests. Every expected
+account needs a terminal window observation and approved mapping. Its state is
+then `polled` or `open_item`; occurrence review never vetoes completion. Partial
+pages leave every account `unpolled`. Initial mapping approval remains required.
+
+A terminal cursor may equal the request cursor, including an empty event window.
+Continuing without cursor progress and cycles to a different earlier cursor are
+rejected. Completion and cursor advancement are reported separately. A retained
+terminal page resumes publication without fetching again, and replaying its
+approval changes nothing. Successful poll times come from the retained provider
+observation, including in connection health; settling older review items cannot
+refresh them. Quiet polls never invent transactions or additional covered dates.
+Older in-flight windows retain every event and restart from the successor's
+published cursor to establish fresh receipts. Their retained prefix is never
+silently certified, discarded or reused as proof of a terminal poll.

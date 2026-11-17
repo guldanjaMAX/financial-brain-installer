@@ -11,7 +11,7 @@ import { CONTRIBUTION_FIELDS } from './clean-money-contributions.js';
 import { MONEY_TABLES, MONEY_TABLE_COLUMNS, unavailableMoneyQuery, localDateFor } from './money-query-contract.js';
 import { cleanMoneyCtes, CLEAN_MONEY_VIEWS, CLEAN_MONEY_SNAPSHOT_SQL, classifiedMoneyCtes, moneyMembershipDecisions, MoneySnapshotLimitError } from './clean-money.js';
 export { CLEAN_MONEY_CTES, CLEAN_MONEY_VIEWS } from './clean-money.js';
-import { MONEY_CONFIDENCE_SNAPSHOT_SQL, moneyConfidenceScope, confidenceAmountsSql,
+import { moneyConfidenceSnapshotSql, moneyConfidenceScope, confidenceAmountsSql,
   scoreMoneyConfidence, unknownMoneyConfidence, confidenceText, paymentEvidenceConfidence, limitMoneyConfidence } from './money-confidence.js';
 import { moneySqlConfidence, moneySqlUsesClock } from './money-confidence.js';
 import { moneyQueryConfidence, moneyQueryEvidence, readsRepaymentMeasure, repaymentUncertainty } from './money-query-confidence.js';
@@ -213,7 +213,8 @@ export async function validateMoneySql(sql, read) {
     if (virtual.has(name) || documentViews.has(name)) references.add(name);
   }
   const callerCtes = callerCteNames(tokens);
-  return { sql: query, references, prefixEnd, tokens, loopPlan:qp, aliases:sourceAliases(tokens,callerCtes), callerCtes };
+  return { replacementTables:catalogue.some(r=>r.name==='plaid_item_replacements') && catalogue.some(r=>r.name==='bank_account_coverage_intervals'),
+    occurrenceTables:catalogue.some(r=>r.name==='plaid_occurrence_heads'), sql: query, references, prefixEnd, tokens, loopPlan:qp, aliases:sourceAliases(tokens,callerCtes), callerCtes };
 }
 
 const busyDatabases = new WeakMap();
@@ -570,7 +571,7 @@ SELECT mq_result.* FROM mq_budget CROSS JOIN (SELECT * FROM (\n${sql}\n) LIMIT -
       };
       if (snapshot && scope) {
         if (!confidenceScope && scope.currenciesSeparated && !rows.every(row => typeof row.currency === 'string' && /^[A-Z]{3}$/.test(row.currency))) scope.currenciesSeparated = false;
-        const evidence = snapshotOf(await read(`${baseSnapshotSql} UNION ALL ${MONEY_CONFIDENCE_SNAPSHOT_SQL}`));
+        const evidence = snapshotOf(await read(`${baseSnapshotSql} UNION ALL ${moneyConfidenceSnapshotSql(checked.replacementTables,checked.occurrenceTables)}`));
         evidence.partial=partial;evidence.readFrom=window?.scanFrom ?? null;moneyMembershipDecisions(evidence);
         if (!sameFinancialSnapshot(snapshot, evidence)) confidence = unknownMoneyConfidence(
           'The financial snapshot changed between the amount and confidence reads; the original coherent amount is retained.',

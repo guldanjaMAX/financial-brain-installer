@@ -150,8 +150,8 @@ import {
 async function verifyRecoveryMigrationPrefixes(directory, { currentFingerprint } = {}) {
   const files = readdirSync(join(process.cwd(), "migrations", "d1"))
     .filter((name) => /^\d+_.*\.sql$/.test(name)).sort();
-  assert.equal(files.length, 65, "the current migration contract is explicitly pinned");
-  assert.equal(files.at(-1), "0065_retained_ingest_stages.sql");
+  assert.equal(files.length, 69, "the current migration contract is explicitly pinned");
+  assert.equal(files.at(-1), "0069_fin_transactions_uid_index.sql");
   const migrations = files.map((file, index) => {
     assert.equal(Number(file.split("_")[0]), index + 1, "migration files are contiguous");
     const sql = readFileSync(join(process.cwd(), "migrations", "d1", file), "utf8");
@@ -221,9 +221,11 @@ async function verifyRecoveryMigrationPrefixes(directory, { currentFingerprint }
     assert.ok(tables.length > 0, "the real inventory comparison received tables");
     return { result, tables };
   }
+  const replacementTables=['plaid_item_replacements','plaid_replacement_bindings','plaid_replacement_events','plaid_replacement_decisions',
+    'plaid_replacement_aliases','bank_account_coverage_intervals','plaid_replacement_audit','plaid_replacement_balance_evidence'];
   // Schema 10, 12 and 33 retain their original verifier behavior; testing every
   // prefix also covers both sides of each later table-introduction boundary.
-  for (let version = 10; version <= 65; version++) {
+  for (let version = 10; version <= 68; version++) {
     const checked = await verify(version);
     evidence.set(version, checked);
     for (const table of derivedTables) {
@@ -238,13 +240,21 @@ async function verifyRecoveryMigrationPrefixes(directory, { currentFingerprint }
       assert.equal(RECOVERY_EXPORT_TABLES.includes(table), true, table);
       assert.equal(V048_RECOVERY_DURABLE_TABLES.includes(table), false, table);
     }
+    for(const table of replacementTables) {
+      assert.equal(checked.tables.includes(table),version>=66,table);
+      assert.equal(recoveryExportTables(migrations.slice(0,version)).includes(table),version>=66,table);
+      assert.equal(V048_RECOVERY_DURABLE_TABLES.includes(table),false,table);
+    }
     assert.equal(checked.tables.includes('fin_expectations'), version >= 62);
     assert.equal(recoveryExportTables(migrations.slice(0, version)).includes('fin_expectations'), version >= 62);
     assert.equal(checked.tables.includes('bank_feed_health'), version >= 63);
     assert.equal(recoveryExportTables(migrations.slice(0, version)).includes('bank_feed_health'), version >= 63);
   }
   assert.notEqual(evidence.get(33).result.schema_fingerprint, evidence.get(61).result.schema_fingerprint);
-  if (currentFingerprint) assert.equal(evidence.get(65).result.schema_fingerprint, currentFingerprint);
+  assert.notEqual(evidence.get(65).result.schema_fingerprint,evidence.get(66).result.schema_fingerprint);
+  assert.notEqual(evidence.get(66).result.schema_fingerprint,evidence.get(67).result.schema_fingerprint);
+  assert.notEqual(evidence.get(67).result.schema_fingerprint,evidence.get(68).result.schema_fingerprint);
+  if (currentFingerprint) assert.equal(evidence.get(68).result.schema_fingerprint, currentFingerprint);
   assert.deepEqual([...V048_RECOVERY_DURABLE_TABLES].sort(), evidence.get(48).tables,
     "the frozen inventory exactly matches a real schema-48 artifact");
   await verify(58, null, true);
@@ -256,7 +266,12 @@ async function verifyRecoveryMigrationPrefixes(directory, { currentFingerprint }
     assert.deepEqual(refused.tables, control.tables.filter(name => name !== table),
       "the refused table is the only inventory difference from its green control");
   }
-  console.log("PASS  56 historical SQL prefixes, 11 paired missing-table checks, frozen inventory and schema-65 durable exports");
+  for(const table of replacementTables) {
+    const control=await verify(66,null,true), refused=await verify(66,table,true);
+    assert.ok(control.tables.includes(table));
+    assert.deepEqual(refused.tables,control.tables.filter(name=>name!==table));
+  }
+  console.log("PASS  59 historical SQL prefixes, 19 paired missing-table checks, frozen inventory, schema-65 durable exports and schema-67/68 lineage reconstruction");
 }
 
 if (process.env.BRAIN_RECOVERY_SQL_ARTIFACT_TEST_ONLY === "1") {
@@ -395,7 +410,7 @@ const wrapperPath = join(sandbox, "wrangler-owner-wrapper");
 const goldenPath = join(sandbox, "brain.golden.json");
 const fieldPreparationDirectory = join(sandbox, "private-v048-field-preparation");
 const fieldReceiptPath = join(fieldPreparationDirectory, "field-prepare-receipt.json");
-const fieldPackagePath = join(fieldPreparationDirectory, "brain-installer-0.4.28.tgz");
+const fieldPackagePath = join(fieldPreparationDirectory, "brain-installer-0.4.29.tgz");
 const fieldSourcePreflightReceiptPath = join(
   fieldPreparationDirectory,
   DISPOSABLE_RECOVERY_SOURCE_PREFLIGHT_RECEIPT_NAME,
@@ -508,7 +523,7 @@ const syntheticFieldSourceManifest = {
   ...structuredClone(sourceManifest),
   client: { slug: "v048-field-proof", display_name: "Synthetic Field Gate v0.4.8" },
   brain: {
-    version: "0.4.28",
+    version: "0.4.29",
     worker_name: syntheticFieldSourceResource,
     domain: `${syntheticFieldSourceResource}.fixture.workers.dev`,
   },
@@ -583,7 +598,7 @@ function npmPackageFixture(destination) {
   assert.equal(packed.status, 0, "focused recovery test must build its exact local npm package");
   const metadata = JSON.parse(packed.stdout);
   assert.equal(metadata.length, 1);
-  assert.equal(metadata[0].filename, "brain-installer-0.4.28.tgz");
+  assert.equal(metadata[0].filename, "brain-installer-0.4.29.tgz");
   assert.equal(metadata[0].entryCount, metadata[0].files.length);
   return Object.freeze({
     bytes: readFileSync(join(destination, metadata[0].filename)),
@@ -740,13 +755,13 @@ function fullFieldPreparationReceipt(candidateSha, packageBytes, packageFileCoun
       head_sha: candidateSha,
       tree_sha: "b".repeat(40),
       package_name: "brain-installer",
-      package_version: "0.4.28",
+      package_version: "0.4.29",
       package_alignment: {
         aligned: true,
         package_lock_name: "brain-installer",
-        package_lock_version: "0.4.28",
+        package_lock_version: "0.4.29",
         package_lock_root_name: "brain-installer",
-        package_lock_root_version: "0.4.28",
+        package_lock_root_version: "0.4.29",
       },
       package_json_sha256: hash(readFileSync(join(process.cwd(), "package.json"))),
       package_lock_sha256: hash(readFileSync(join(process.cwd(), "package-lock.json"))),
@@ -757,7 +772,7 @@ function fullFieldPreparationReceipt(candidateSha, packageBytes, packageFileCoun
       end_clean: true,
     },
     package: {
-      filename: "brain-installer-0.4.28.tgz",
+      filename: "brain-installer-0.4.29.tgz",
       bytes: packageBytes.length,
       sha256: hash(packageBytes),
       identity_scheme: UPDATE_RUNTIME_IDENTITY_SCHEME,
@@ -1440,7 +1455,7 @@ function fullDisposableSeedReceipt(binding, {
       independently_verified_empty: true,
     },
     d1: {
-      worker_version: "0.4.28",
+      worker_version: "0.4.29",
       documents: DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
       chunks,
       fts: chunks,
@@ -5232,7 +5247,7 @@ try {
   );
   const mismatchedRuntimePackagePath = join(
     mismatchedRuntimeDirectory,
-    "brain-installer-0.4.28.tgz",
+    "brain-installer-0.4.29.tgz",
   );
   mkdirSync(mismatchedRuntimeDirectory, { mode: 0o700 });
   if (process.platform !== "win32") chmodSync(mismatchedRuntimeDirectory, 0o700);
@@ -5276,7 +5291,7 @@ try {
   );
   const omittedRuntimePackagePath = join(
     omittedRuntimeDirectory,
-    "brain-installer-0.4.28.tgz",
+    "brain-installer-0.4.29.tgz",
   );
   mkdirSync(omittedRuntimeDirectory, { mode: 0o700 });
   if (process.platform !== "win32") chmodSync(omittedRuntimeDirectory, 0o700);
@@ -5347,7 +5362,7 @@ try {
   // field-preparation receipt. A copied approval cannot authorize a later run.
   const replayReceiptDirectory = join(sandbox, "private-v048-field-preparation-replay");
   const replayReceiptPath = join(replayReceiptDirectory, "field-prepare-receipt.json");
-  const replayPackagePath = join(replayReceiptDirectory, "brain-installer-0.4.28.tgz");
+  const replayPackagePath = join(replayReceiptDirectory, "brain-installer-0.4.29.tgz");
   const replaySourcePreflightReceiptPath = join(
     replayReceiptDirectory,
     DISPOSABLE_RECOVERY_SOURCE_PREFLIGHT_RECEIPT_NAME,

@@ -103,8 +103,8 @@ const SHIPPED = shippedMigrations();
 const PENDING = newMigrations();
 // Keep an independent current-schema pin: directory-derived expectations alone
 // would let a missing newest migration make the whole rehearsal agree on less.
-const CURRENT_SCHEMA_VERSION = 65;
-const CURRENT_MIGRATION_NAME = "0065_retained_ingest_stages";
+const CURRENT_SCHEMA_VERSION = 69;
+const CURRENT_MIGRATION_NAME = "0069_fin_transactions_uid_index";
 
 /* ---------------------------------------------------------------- applier */
 
@@ -276,7 +276,7 @@ const snapshot = (db) => ({
 console.log("\n--- baseline: a shipped v0.2.0 brain builds and is at schema 22 ---");
 const db = await buildShippedBrain();
 check("v0.2.0 ships exactly 22 migrations", SHIPPED.length === 22, `got ${SHIPPED.length}`);
-check("today's tree has 0023..0065 pending", PENDING.length === CURRENT_SCHEMA_VERSION - 22 &&
+check("today's tree has 0023..0069 pending", PENDING.length === CURRENT_SCHEMA_VERSION - 22 &&
   PENDING.at(-1).version === CURRENT_SCHEMA_VERSION && PENDING.at(-1).name === CURRENT_MIGRATION_NAME,
   `${PENDING.length} pending, last ${PENDING.at(-1)?.version}`);
 check("baseline schema_migrations is contiguous 1..22",
@@ -528,7 +528,7 @@ if (errors.length === 0) {
   }, "threw");
   check("cmdMigrate's install_state upsert runs against the upgraded schema", upsertError === null, String(upsertError));
   const state = probe(() => db.prepare("SELECT * FROM install_state WHERE id=1").get(), {});
-  check("migrate records schema_version 65", state?.schema_version === CURRENT_SCHEMA_VERSION, JSON.stringify(state?.schema_version));
+  check("migrate records schema_version 69", state?.schema_version === CURRENT_SCHEMA_VERSION, JSON.stringify(state?.schema_version));
   check("migrate does NOT advance product_version (only a verified upgrade does)",
     state?.product_version === "0.2.0", JSON.stringify(state?.product_version));
   check("migrate does NOT clobber an in-progress vector projection bootstrap",

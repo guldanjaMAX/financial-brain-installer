@@ -32,6 +32,54 @@ const HOT_SUMMARY_SQL = `
     LEFT JOIN corpus_stats stats USING (source)
    ORDER BY names.source`;
 
+// A Brain whose schema predates 0034 (every pre-0.4.0 install; 0.3.5 is schema
+// 22) has no document_source_inventory. `brain update` deploys this Worker
+// PAUSED and proves its authenticated documents receipt BEFORE any migration
+// runs, so this hot read must serve the old schema too, or the update can only
+// stop with the Brain paused. The fallback names the sources corpus_stats
+// records and asks the live-document index (idx_documents_live, 0006) one
+// bounded seek per source, so it stays source-sized and never walks documents.
+const PRE_INVENTORY_HOT_SUMMARY_SQL = `
+  SELECT stats.source AS source_type,
+         EXISTS (
+           SELECT 1 FROM documents live
+            WHERE live.source = stats.source AND live.deleted_at IS NULL
+         ) AS has_documents,
+         stats.last_ingest_at
+    FROM corpus_stats stats
+   ORDER BY stats.source`;
+
+const REPORT_SOURCE_NAMES_SQL = `
+  SELECT names.source AS source_type, stats.last_ingest_at
+    FROM (
+      SELECT source FROM corpus_stats
+      UNION
+      SELECT source FROM document_source_inventory
+    ) names
+    LEFT JOIN corpus_stats stats USING (source)
+   ORDER BY names.source`;
+
+// The exact report walks every document afterwards, so a source missing from
+// corpus_stats on a pre-0034 schema is still added by that walk.
+const PRE_INVENTORY_REPORT_SOURCE_NAMES_SQL = `
+  SELECT source AS source_type, last_ingest_at
+    FROM corpus_stats
+   ORDER BY source`;
+
+/** True only for the one table a pre-0034 schema lacks on these reads. */
+export function documentSourceInventoryMissing(error) {
+  return /no such table:\s*(?:main\.)?document_source_inventory\b/i.test(String(error?.message || error));
+}
+
+async function allWithPreInventoryFallback(env, sql, preInventorySql) {
+  try {
+    return await env.DB.prepare(sql).all();
+  } catch (error) {
+    if (!documentSourceInventoryMissing(error)) throw error;
+    return env.DB.prepare(preInventorySql).all();
+  }
+}
+
 const SOURCE_DOCUMENT_COUNT_SQL = `
   SELECT COUNT(*) AS documents,
          COALESCE(MAX(rowid), 0) AS document_high_water,
@@ -172,7 +220,7 @@ const publicReportRow = (row, pendingVectorCountsExact) => ({
 
 /** Source-sized informational rows for health, status, MCP, and readiness. */
 export async function readDocumentSummary(env) {
-  const { results } = await env.DB.prepare(HOT_SUMMARY_SQL).all();
+  const { results } = await allWithPreInventoryFallback(env, HOT_SUMMARY_SQL, PRE_INVENTORY_HOT_SUMMARY_SQL);
   const rows = (results || []).map((row) => ({
     source_type: row.source_type,
     has_documents: Number(row.has_documents) === 1,
@@ -251,16 +299,9 @@ export async function readExactDocumentReport(env, {
 
   const opening = normalizedMarker(await env.DB.prepare(REPORT_MARKER_SQL).first());
   const sourceRows = new Map();
-  const sourceReceipts = await env.DB.prepare(
-    `SELECT names.source AS source_type, stats.last_ingest_at
-       FROM (
-         SELECT source FROM corpus_stats
-         UNION
-         SELECT source FROM document_source_inventory
-       ) names
-       LEFT JOIN corpus_stats stats USING (source)
-      ORDER BY names.source`,
-  ).all();
+  const sourceReceipts = await allWithPreInventoryFallback(
+    env, REPORT_SOURCE_NAMES_SQL, PRE_INVENTORY_REPORT_SOURCE_NAMES_SQL,
+  );
   for (const source of sourceReceipts.results || []) {
     const row = emptyReportRow(String(source.source_type));
     row.last_ingested = source.last_ingest_at
@@ -361,6 +402,9 @@ export async function readExactDocumentReport(env, {
 
 export const documentsSummarySqlForTest = Object.freeze({
   hot: HOT_SUMMARY_SQL,
+  preInventoryHot: PRE_INVENTORY_HOT_SUMMARY_SQL,
+  reportSourceNames: REPORT_SOURCE_NAMES_SQL,
+  preInventoryReportSourceNames: PRE_INVENTORY_REPORT_SOURCE_NAMES_SQL,
   sourceCount: SOURCE_DOCUMENT_COUNT_SQL,
   marker: REPORT_MARKER_SQL,
   documentPage: DOCUMENT_PAGE_SQL,

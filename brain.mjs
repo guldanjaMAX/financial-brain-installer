@@ -7470,6 +7470,9 @@ export async function cmdUpgrade(manifestPath, options = {}) {
                   const scriptName = manifest.brain?.worker_name || `${manifest.client?.slug || "client"}-brain`;
                   return `${scriptName}.${sub.subdomain}.workers.dev`;
                 },
+                // Used only when an earlier update's paused Worker cannot
+                // read this schema; see readPreInventoryPausedBacklog.
+                readDatabaseQueue: () => readUpdateQueueFromDatabase(queryDatabase, accountId, dbId),
                 ...(options.updateBacklogOptions || {}),
               });
               if (!immediateBacklog || typeof immediateBacklog !== "object" ||
@@ -7479,7 +7482,10 @@ export async function cmdUpgrade(manifestPath, options = {}) {
                 throw new TypeError("the immediate pre-pause backlog receipt is invalid");
               }
             } catch (error) {
-              dieWithSupportCode(updateBacklogUnreadableMessage(error, "pre-pause"), "UPDATE_BRAIN_BUSY");
+              dieWithSupportCode(
+                updateBacklogUnreadableMessage(error, "pre-pause"),
+                error?.preInventoryWorker === true ? "UPGRADE_FAILED" : "UPDATE_BRAIN_BUSY",
+              );
             }
             if (updateBacklogHasQueuedWork(immediateBacklog) &&
                 !(pausedQueueCanEnterCustodyChecks(immediateBacklog) && Number(before?.schema_version) >= 13)) {
@@ -26117,6 +26123,12 @@ async function backlogCount(manifestPath) {
 export const UPDATE_BACKLOG_READ_TIMEOUT_MS = 90_000;
 export const UPDATE_BACKLOG_RETRY_DELAYS_MS = Object.freeze([10_000, 30_000]);
 const D1_CPU_RESET_PATTERN = /CPU time limit|\bwas reset\b/iu;
+// The paused Worker that releases from 0.4.8 (bc00c9ed3) through 0.4.28 rc4
+// upload before migrating reads document_source_inventory (migration 0034) on
+// this route. Over a pre-0034
+// schema (every pre-0.4.0 Brain; 0.3.5 is schema 22) it answers this 500 on
+// every read, so it is an answer, not a busy database, and retrying cannot help.
+const PRE_INVENTORY_DOCUMENTS_ERROR_PATTERN = /\bno such table:\s*(?:main\.)?document_source_inventory\b/iu;
 
 function updateBacklogReadFailure(attempts, detail = {}) {
   return Object.assign(new Error("authenticated documents backlog read failed"), { attempts, ...detail });
@@ -26301,13 +26313,101 @@ async function readLegacyUpdateDrainMode(documentsUrl, { request, readAggregate,
 }
 
 /**
+ * Read the queue of a Brain left paused by an earlier update whose Worker
+ * cannot read this Brain's pre-0034 schema. That Worker answers every
+ * authenticated documents read with the same 500, so a rerun of update could
+ * never get past its own backlog gates and the Brain would stay paused.
+ *
+ * Only the pre-pause gate passes `readDatabaseQueue`, because only it holds
+ * proven Cloudflare access to this manifest's D1. The queue is then read from
+ * D1 itself, which is safe because a paused Worker drains nothing. The public
+ * health receipt must prove a paused Worker of a generation this manifest can
+ * resume: newer than the recorded release and no newer than this CLI. Anything
+ * else stays an ordinary read failure. The receipt is marked so queued work
+ * refuses instead of entering the paused custody checks, which need the
+ * Worker's own aggregate.
+ */
+async function readPreInventoryPausedBacklog({
+  attempts,
+  documentsUrl,
+  recordedVersion,
+  request,
+  readAggregate,
+  readDatabaseQueue,
+  revalidate,
+}) {
+  // Anything short of a proven paused, resumable Worker stays the ordinary
+  // read failure: this path never decides about an active Worker.
+  const ordinaryFailure = () => updateBacklogReadFailure(attempts);
+  let health;
+  try {
+    const response = await request(new URL("/health", documentsUrl).href, {}, {
+      timeoutMs: UPDATE_BACKLOG_READ_TIMEOUT_MS,
+      what: "the update drain-mode check",
+    });
+    if (!response || response.ok !== true || response.status !== 200) throw new TypeError("health was not readable");
+    health = await readAggregate(response);
+    revalidate("update backlog drain-mode receipt");
+  } catch {
+    throw ordinaryFailure();
+  }
+  const workerVersion = updateBacklogSemver(health?.version);
+  const paused = health?.vector_drain_mode === "paused-for-upgrade" &&
+    health?.status === "paused-for-upgrade" && health?.accepting_documents === false &&
+    health?.rollback_write_fence !== true;
+  const resumable = Boolean(workerVersion) && paused &&
+    (recordedVersion === null || compareSemver(recordedVersion, workerVersion) < 0) &&
+    compareSemver(workerVersion, PRODUCT_VERSION) <= 0;
+  if (!resumable) throw ordinaryFailure();
+  const stuck = (detail = {}) => updateBacklogReadFailure(attempts, { preInventoryWorker: true, ...detail });
+  if (typeof readDatabaseQueue !== "function") throw stuck({ deferred: true });
+  let queue;
+  try {
+    queue = await readDatabaseQueue();
+    revalidate("update backlog database receipt");
+  } catch {
+    throw stuck();
+  }
+  const pending = queue?.pending;
+  if (!queue || typeof queue !== "object" || Array.isArray(queue) ||
+      !Number.isSafeInteger(pending) || pending < 0 ||
+      (queue.pending_is_capped !== undefined && typeof queue.pending_is_capped !== "boolean")) {
+    throw stuck();
+  }
+  return Object.freeze({
+    pending,
+    ...(queue.pending_is_capped === true ? { pending_is_capped: true } : {}),
+    paused_for_upgrade: true,
+    queue_read_from_database: true,
+  });
+}
+
+/** The pre-pause gate's direct D1 queue read; bounded like the Worker's own receipt. */
+async function readUpdateQueueFromDatabase(queryDatabase, accountId, databaseId) {
+  const result = await queryDatabase(
+    accountId,
+    databaseId,
+    "SELECT COUNT(*) AS pending FROM (SELECT 1 FROM vector_outbox LIMIT 10001)",
+  );
+  const rows = result?.results;
+  if (!Array.isArray(rows) || rows.length !== 1) throw new TypeError("the database queue receipt is invalid");
+  const counted = Number(rows[0]?.pending);
+  if (!Number.isSafeInteger(counted) || counted < 0 || counted > 10_001) {
+    throw new TypeError("the database queue count is invalid");
+  }
+  return counted > 10_000 ? { pending: counted, pending_is_capped: true } : { pending: counted };
+}
+
+/**
  * Read update's fail-closed queue gate from the authenticated aggregate used
  * by health and post-ingest reporting. Public /health does not carry backlog
  * depth, and a missing or malformed private receipt must never become zero.
  *
  * Only a 5xx, a D1 CPU-reset body, or a transport failure is retried. 401, 403
  * and 404 are answers, not busy moments, and every other refusal (a partial
- * receipt, a non-200 2xx, an oversized body) stays a single-read refusal. The
+ * receipt, a non-200 2xx, an oversized body) stays a single-read refusal. A 500
+ * naming the missing document_source_inventory table is also an answer: it goes
+ * to readPreInventoryPausedBacklog after one read. The
  * thrown error carries the number of reads tried and, for a well-formed receipt
  * from a generation this manifest cannot resume, the validated version strings
  * and writer mode. It never carries a body, URL, key, or transport detail.
@@ -26379,6 +26479,7 @@ export async function readUpdateBacklog(manifestPath, options = {}) {
       let body;
       let responseFailed = false;
       let transient = false;
+      let preInventoryWorker = false;
       try {
         // A replacement during credential lookup or a backoff must stop before
         // the durable key can reach a destination derived from different bytes.
@@ -26400,7 +26501,18 @@ export async function readUpdateBacklog(manifestPath, options = {}) {
       if (!responseFailed && (!response || response.ok !== true || response.status !== 200)) {
         responseFailed = true;
         const status = Number(response?.status);
-        if (status >= 500) {
+        if (status === 500) {
+          transient = true;
+          // Only the error text is inspected, and it never leaves here. An
+          // unreadable 500 keeps its transient retry.
+          try {
+            const refused = await readAggregate(response);
+            if (typeof refused?.error === "string" && PRE_INVENTORY_DOCUMENTS_ERROR_PATTERN.test(refused.error)) {
+              transient = false;
+              preInventoryWorker = true;
+            }
+          } catch { /* not evidence of anything but a failed read */ }
+        } else if (status >= 500) {
           transient = true;
         } else if (![401, 403, 404].includes(status)) {
           // Only the D1 error text is inspected, and it never leaves here.
@@ -26415,6 +26527,23 @@ export async function readUpdateBacklog(manifestPath, options = {}) {
         } catch {
           responseFailed = true;
         }
+      }
+
+      if (preInventoryWorker) {
+        try {
+          revalidateManifest(pin, "update backlog live receipt");
+        } catch {
+          throw updateBacklogReadFailure(attempts);
+        }
+        return await readPreInventoryPausedBacklog({
+          attempts,
+          documentsUrl,
+          recordedVersion,
+          request,
+          readAggregate,
+          readDatabaseQueue: options.readDatabaseQueue,
+          revalidate: (stage) => revalidateManifest(pin, stage),
+        });
       }
 
       try {
@@ -26478,7 +26607,8 @@ function updateBacklogPendingLabel(backlog) {
 
 function pausedQueueCanEnterCustodyChecks(backlog) {
   return backlog?.paused_for_upgrade === true && !backlog.legacy_worker_version &&
-    !backlog.drain_mode_unknown && !backlog.projection_recovery;
+    !backlog.drain_mode_unknown && !backlog.projection_recovery &&
+    backlog.queue_read_from_database !== true;
 }
 
 function updateBacklogHasQueuedWork(backlog) {
@@ -26636,6 +26766,14 @@ function updateBacklogUnreadableMessage(error, gate = "initial") {
       "The immediate pre-pause documents backlog read could not be sent: this computer's admin key or Brain " +
         "address could not be loaded, so no read was sent. The paused deployment was not started. " +
         "Fix that, then run `brain update` again."
+    );
+  }
+  if (error?.preInventoryWorker === true) {
+    return renderCliCommands(
+      "This Brain is still paused by an earlier update whose Worker cannot read this Brain's older database " +
+        `layout, and its queued search updates could not be read from the database either. ${consequence} ` +
+        "Waiting will not change this. Do not run `brain drain` or `brain rollback`, and do not clear " +
+        "VECTOR_DRAIN_MODE by hand. Run `brain health` and keep its output for support."
     );
   }
   const reads = Number.isSafeInteger(error?.attempts) && error.attempts > 0 ? error.attempts : 1;
@@ -32409,9 +32547,21 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
           "This manifest records no Brain address, so no queued-update read was sent yet. The same read runs once " +
             "Cloudflare access is confirmed, immediately before the paused deployment."
         ));
+      } else if (error?.preInventoryWorker === true && error.deferred === true) {
+        // An earlier update left a paused Worker that cannot read this older
+        // schema. Its queue can be read only from D1, which needs the
+        // Cloudflare access the pre-pause gate proves; it refuses there if not.
+        info(renderCliCommands(
+          "This Brain is still paused by an earlier update whose Worker cannot read this Brain's older database " +
+            "layout, so its queued search updates were not read yet. They are read from the database itself once " +
+            "Cloudflare access is confirmed, immediately before the paused deployment."
+        ));
       } else {
         if (!forceQueuedUpdate) {
-          dieWithSupportCode(updateBacklogUnreadableMessage(error, "initial"), "UPDATE_BRAIN_BUSY");
+          dieWithSupportCode(
+            updateBacklogUnreadableMessage(error, "initial"),
+            error?.preInventoryWorker === true ? "UPGRADE_FAILED" : "UPDATE_BRAIN_BUSY",
+          );
         }
         warn(renderCliCommands(
           "The first queued search update check could not read an empty queue. `--force` continues past this " +
@@ -34504,15 +34654,18 @@ export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
 
 /** Read-only bank status uses the existing durable data-plane credential. */
 export async function cmdBankStatus(argv, options = {}) {
-  if (!Array.isArray(argv) || argv[0] !== 'status' || !argv[1] || argv[1].startsWith('--') ||
+  if (!Array.isArray(argv) || !['status','custody'].includes(argv[0]) || !argv[1] || argv[1].startsWith('--') ||
       argv.slice(2).some(arg=>arg !== '--json') || argv.length>3) {
-    die('usage: brain bank status <manifest> [--json]');
+    die('usage: brain bank status <manifest> [--json]\n       brain bank custody <manifest> [--json]');
   }
-  const {runBankStatusCommand}=await import('./operations/bank-feed-status.mjs');
-  return runBankStatusCommand({manifestPath:argv[1],json:argv[2]==='--json'}, {
+  const command=argv[0]==='custody'
+    ? (await import('./operations/bank-custody-command.mjs')).runBankCustodyCommand
+    : (await import('./operations/bank-feed-status.mjs')).runBankStatusCommand;
+  const result=await command({manifestPath:argv[1],json:argv[2]==='--json'}, {
     loadManifest:options.loadManifest ?? loadManifest,resolveAdminKey:options.resolveAdminKey ?? resolveAdminKey,
     request:options.request ?? http,write:options.write ?? console.log,now:options.now ?? Date.now,
   });
+  return result;
 }
 
 /**
@@ -34961,7 +35114,7 @@ const commands = {
   "custom-api": cmdCustomApi,
   load: cmdLoad,
   "bank-provider": () => cmdBankProvider(process.argv.slice(3)),
-  bank: () => cmdBankStatus(process.argv.slice(3)),
+  bank: async () => { const result=await cmdBankStatus(process.argv.slice(3)); if(process.argv[3]==='custody') process.exitCode=result.exit_code; return result; },
   connect: cmdConnect,
   disconnect: cmdDisconnect,
   status: (path) => withManifestCloudflareControl(path, () => cmdStatus(path)),
@@ -35161,6 +35314,7 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain connect imap     <manifest>      any IMAP mailbox (Yahoo, Fastmail, iCloud, a host): app
                                            password entered hidden, proven by a real read first
     brain bank status      <manifest>      read-only bank health and Worker /health; --json prints safe fields
+    brain bank custody     <manifest>      read-only saved-access and key-identity check; --json; exit 0, 2 or 3
     brain connect bank     <manifest>      owner-present Plaid pilot: hidden prompt for missing Plaid keys, checked
                                            with Plaid before they are saved, then owner-only Plaid Link and masked
                                            account assignment. --replace-keys re-enters both keys

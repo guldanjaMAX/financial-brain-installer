@@ -1,6 +1,6 @@
 {
   "name": "brain-installer",
-  "version": "0.4.28",
+  "version": "0.4.29",
   "private": true,
   "description": "Provision and manage a client-owned retrieval brain inside their own Cloudflare account",
   "type": "module",
@@ -59,6 +59,7 @@
     "docs/MAINTAINER.md",
     "docs/OWNER-WORKSPACE-API.md",
     "docs/README-developer.md",
+    "docs/bank-connection-recovery.md",
     "docs/RECOVERY.md",
     "docs/decisions/000-template.md",
     "docs/decisions/001-cloudflare-native-standard.md",

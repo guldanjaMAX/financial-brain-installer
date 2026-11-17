@@ -8,6 +8,7 @@ const LOGIN = new Set(['ITEM_LOGIN_REQUIRED','PENDING_EXPIRATION','USER_PERMISSI
   'ITEM_NOT_FOUND','ACCESS_NOT_GRANTED','INVALID_ACCESS_TOKEN','simplefin_login_required']);
 export const bankOwnerRecoveryRequired = code => LOGIN.has(code);
 export function bankSyncError(code) {
+  if(code==='BANK_ACCESS_REFERENCE_UNREADABLE') return {code,meaning:'Needs reconnect. Saved bank access cannot be opened; history is kept.',action:'Use Replace unreadable connection in Access > Banks.'};
   if (bankOwnerRecoveryRequired(code)) return {code, meaning:'Your bank needs you to sign in again.', action:'Sign in again to restore the bank connection.'};
   if (['RATE_LIMIT_EXCEEDED','simplefin_daily_request_limit'].includes(code)) return {code, meaning:'The bank provider request limit was reached.', action:'Wait for the next sync after the provider limit resets.'};
   if (code === 'BANK_SYNC_PARTIAL') return {code, meaning:'The bank returned incomplete activity; current coverage is not yet verified.', action:'Wait for the next sync; review the connection if the issue continues.'};
@@ -40,7 +41,8 @@ export async function bankHealthRows(env, {read=null,includeRetained=false}={}) 
   const sql=`SELECT i.item_ref,i.status,i.connected_at,i.removed_at,h.item_ref AS health_item_ref,h.last_attempt_at,h.last_successful_sync_at,
     h.data_through,COALESCE(h.last_webhook_at,(SELECT MAX(w.received_at) FROM plaid_webhook_events w
       WHERE w.tenant_id=i.tenant_id AND w.item_ref=i.item_ref)) AS last_webhook_at,
-    h.last_error_code,h.last_error_meaning,r.state AS reconciliation_state,
+    CASE WHEN r.last_error_code='BANK_ACCESS_REFERENCE_UNREADABLE' THEN r.last_error_code ELSE h.last_error_code END AS last_error_code,
+    h.last_error_meaning,r.state AS reconciliation_state,
     COALESCE(c.next_pull_at,NULLIF(MAX(COALESCE(r.due_at,''),COALESCE(r.provider_retry_not_before,'')),'')) AS next_due_at,
     CASE WHEN c.item_ref IS NOT NULL THEN 'pending' ELSE r.state END AS pending_state
     FROM bank_feed_items i LEFT JOIN bank_feed_health h ON h.tenant_id=i.tenant_id AND h.item_ref=i.item_ref
@@ -64,14 +66,15 @@ export function bankConnectionHealth(row, now) {
     Number.isFinite(due) && stamp-due>BANK_PENDING_OVERDUE_SECONDS*1000;
   const overdue=successOverdue || pendingOverdue;
   const login = ['reauth_required','permission_revoked'].includes(row.status) || bankOwnerRecoveryRequired(row.last_error_code);
-  const action=login ? 'Sign in again, then use Repair connection in Access > Banks.' : 'Wait for the next sync; review the connection if the issue continues.';
-  const state=login ? 'login_required' : overdue ? 'overdue' : row.last_error_code ? 'error' : !row.last_successful_sync_at ? 'waiting' : 'healthy';
-  const line=[login ? 'Your bank needs you to sign in again.' : successOverdue ? 'No successful bank sync for more than 48 hours.'
+  const unreadable=row.last_error_code==='BANK_ACCESS_REFERENCE_UNREADABLE';
+  const action=unreadable ? 'Use Replace unreadable connection in Access > Banks. Saved history is kept.' : login ? 'Sign in again, then use Repair connection in Access > Banks.' : 'Wait for the next sync; review the connection if the issue continues.';
+  const state=unreadable ? 'needs_reconnect' : login ? 'login_required' : overdue ? 'overdue' : row.last_error_code ? 'error' : !row.last_successful_sync_at ? 'waiting' : 'healthy';
+  const line=[unreadable ? 'Needs reconnect. Saved bank access cannot be opened; history is kept.' : login ? 'Your bank needs you to sign in again.' : successOverdue ? 'No successful bank sync for more than 48 hours.'
     : pendingOverdue ? `The bank sync due at ${row.next_due_at} is more than 12 hours late.`
     : row.last_error_meaning || (!row.last_successful_sync_at ? 'Waiting for the first complete bank sync.' : 'Bank connection is up to date.'),
     row.last_successful_sync_at ? `Last successful sync: ${row.last_successful_sync_at}.` : 'No successful sync recorded.',
     ...(state==='healthy' ? [] : [action])].join(' ');
-  return {state,overdue,pending_overdue:pendingOverdue,needs_sign_in:login,next_due_at:row.next_due_at||null,
+  return {state,overdue,pending_overdue:pendingOverdue,needs_sign_in:!unreadable && login,needs_reconnect:unreadable,next_due_at:row.next_due_at||null,
     pending_state:row.pending_state||row.reconciliation_state||null,last_attempt_at:row.last_attempt_at||null,last_successful_sync_at:row.last_successful_sync_at||null,
     data_through:row.data_through||null,last_webhook_at:row.last_webhook_at||null,
     last_error_code:row.last_error_code||null,last_error_meaning:row.last_error_meaning||null,action,status_line:line};
@@ -90,7 +93,7 @@ export async function reconcileBankFeedHealth(env, now) {
   for (const row of rows) {
     const health=bankConnectionHealth(row,now);
     const uid=`bank-feed-health:${row.item_ref}`;
-    if (health.overdue || ['login_required','error'].includes(health.state)) {
+    if (health.overdue || ['needs_reconnect','login_required','error'].includes(health.state)) {
       await env.DB.prepare(`INSERT INTO fin_exceptions
         (tenant_id,exception_uid,kind,issue,detail,first_seen,waiting_on,provenance,source_feed,basis_state,recorded_at)
         VALUES (?,?,'other',?,?,?,?,'derived',?,'confirmed',?)
@@ -108,7 +111,7 @@ export async function reconcileBankFeedHealth(env, now) {
   const allSuccessful=rows.every(row=>row.last_successful_sync_at);
   const last=allSuccessful ? rows.map(row=>row.last_successful_sync_at).sort()[0] : null;
   const health=rows.map(row=>bankConnectionHealth(row,now));
-  const problem=health.find(row=>row.state==='login_required') || health.find(row=>row.overdue) || health.find(row=>row.state==='error');
+  const problem=health.find(row=>row.state==='needs_reconnect') || health.find(row=>row.state==='login_required') || health.find(row=>row.overdue) || health.find(row=>row.state==='error');
   await env.DB.prepare(`INSERT INTO sources (name,kind,status,created_at,last_ingest_at,expected_refresh_seconds,stale_reason)
     VALUES ('bank_activity','bank_activity','ready',?,?,?,?)
     ON CONFLICT(name) DO UPDATE SET expected_refresh_seconds=excluded.expected_refresh_seconds,
