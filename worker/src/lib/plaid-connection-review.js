@@ -48,15 +48,25 @@ export function plaidStagingCleanupStatements(env, tenantId, itemRef) {
  * Caller holds the tenant's new-connection exchange claim. This closes the
  * gap where two sessions both inspect an empty inventory and then exchange.
  */
-export async function assertPlaidConnectionDistinct(env, { tenantId, institutionRef, accounts }) {
-  const items = (await env.DB.prepare(
+export async function assertPlaidConnectionDistinct(env, { tenantId, institutionRef, accounts, replacementRef = null }) {
+  // A replacement capability is resolved from the durable owner-approved claim,
+  // never from a browser force flag. All unrelated history remains guarded.
+  const replacement = replacementRef ? await env.DB.prepare(`SELECT old_item_ref,new_item_ref FROM plaid_item_replacements
+    WHERE tenant_id=? AND operation_ref=? AND state IN ('candidate_staged','history_review','active')`)
+    .bind(tenantId,replacementRef).first() : null;
+  if (replacementRef && !replacement) review();
+  const inventory = (await env.DB.prepare(
     `SELECT item_ref,institution_ref,removed_at FROM bank_feed_items WHERE tenant_id=? LIMIT 251`,
   ).bind(tenantId).all())?.results;
-  if (!Array.isArray(items) || items.length > 250) review();
+  if (!Array.isArray(inventory) || inventory.length > 250) review();
+  const lineage=replacement ? (await env.DB.prepare(`SELECT item_ref FROM plaid_replacement_item_lineage WHERE tenant_id=? AND operation_ref=?`)
+    .bind(tenantId,replacementRef).all()).results.map(r=>r.item_ref) : [];
+  const items=inventory.filter(item=>!lineage.includes(item.item_ref));
   if (items.length === 0) return;
   if (typeof institutionRef !== "string" || !institutionRef || institutionRef.length > 200 ||
       items.some((item) => !item.institution_ref)) review();
-  const relevant = items.filter((item) => item.institution_ref === institutionRef);
+  const relevant = items.filter((item) => item.institution_ref === institutionRef &&
+    item.item_ref !== replacement?.old_item_ref && item.item_ref !== replacement?.new_item_ref);
   if (!relevant.length) return;
   const active = relevant.filter((item) => item.removed_at === null);
   if (active.length) {

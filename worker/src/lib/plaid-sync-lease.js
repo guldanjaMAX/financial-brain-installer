@@ -20,6 +20,8 @@ const ACTIVE_ITEM = `EXISTS (
   SELECT 1 FROM bank_feed_items i
    WHERE i.tenant_id=plaid_sync_leases.tenant_id AND i.item_ref=plaid_sync_leases.item_ref
      AND i.removed_at IS NULL AND i.status IN ('connected','error')
+     AND NOT EXISTS (SELECT 1 FROM plaid_item_replacements x WHERE x.tenant_id=i.tenant_id AND
+       ((x.old_item_ref=i.item_ref AND x.state NOT IN ('cancelled','rolled_back')) OR (x.new_item_ref=i.item_ref AND x.state<>'cancelled')))
      AND NOT EXISTS (SELECT 1 FROM plaid_revocation_outbox r
        WHERE r.tenant_id=i.tenant_id AND r.item_ref=i.item_ref)
 )`;
@@ -61,6 +63,8 @@ export async function claimPlaidSyncLease(env, { tenantId, itemRef, hardDeadline
        WHERE (? IS NULL OR unixepoch('now')<?) AND EXISTS (
          SELECT 1 FROM bank_feed_items i WHERE i.tenant_id=? AND i.item_ref=?
           AND i.removed_at IS NULL AND i.status IN ('connected','error')
+     AND NOT EXISTS (SELECT 1 FROM plaid_item_replacements x WHERE x.tenant_id=i.tenant_id AND
+       ((x.old_item_ref=i.item_ref AND x.state NOT IN ('cancelled','rolled_back')) OR (x.new_item_ref=i.item_ref AND x.state<>'cancelled')))
           AND NOT EXISTS (SELECT 1 FROM plaid_revocation_outbox r
             WHERE r.tenant_id=i.tenant_id AND r.item_ref=i.item_ref)
        )

@@ -240,6 +240,8 @@ export type BankConnection = {
   institution_label: string | null;
   status: string;
   status_detail?: string | null;
+  replacement_ref?: string | null;
+  replacement_state?: string | null;
   connected_at?: string | null;
   last_synced_at?: string | null;
   status_line?: string;
@@ -248,6 +250,8 @@ export type BankConnection = {
     overdue?: boolean;
     pending_overdue?: boolean;
     needs_sign_in?: boolean;
+    needs_reconnect?: boolean;
+    last_error_code?: string | null;
     last_successful_sync_at?: string | null;
     next_due_at?: string | null;
   };

@@ -1,7 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import { assertUnprovedDocument } from './helpers/doc-high-provenance.mjs';
 import nodeTest from 'node:test';
-import { fileURLToPath } from 'node:url';
 // Known limit, 0.4.28 (2026-11-15): these 75 positive High controls expect 95 but now score lower after reviewed
 // confidence-lowering changes. Every figure still matches its oracle; no failure is wrong at High. Only these exact
 // names are skipped; all other tests in this file (the frozen wrong-at-High guards) keep running.

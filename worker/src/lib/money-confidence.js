@@ -1,3 +1,4 @@
+import { bankCoverageGaps } from './bank-coverage-intervals.js';
 import { moneyMinorText } from './money-format.js';
 import { moneyOverlapGroups } from './money-query-overlap.js';
 import { openingRowSql, historyCoverageStartSql, historyHoles } from './money-history.js';
@@ -59,6 +60,106 @@ FROM fin_transactions t WHERE pending=1 AND removed_at IS NULL AND superseded_by
     AND p.pending=0 AND p.removed_at IS NULL AND p.superseded_by_id IS NULL AND p.source_provider IS t.source_provider
     AND t.external_id IS NOT NULL AND p.pending_transaction_id=t.external_id)
 GROUP BY tenant_id,account_slug,posted_on,currency,direction`;
+
+// Resolve the retained canonical observation before choosing affected periods.
+// An ID-only withdrawal has no incoming date/account/amount. Unknown lineage
+// therefore affects every associated account/period until it is reconciled.
+// This projection shares the amount snapshot; it exposes no provider IDs.
+const pendingReplacementEventsSql = `WITH pending_events AS MATERIALIZED (
+  SELECT v.*,x.old_item_ref,x.new_item_ref FROM plaid_replacement_events v JOIN plaid_item_replacements x
+    ON x.tenant_id=v.tenant_id AND x.operation_ref=v.operation_ref
+  WHERE x.tenant_id=a.tenant_id AND x.state<>'cancelled' AND (v.revision>x.published_revision OR NOT EXISTS(SELECT 1 FROM plaid_replacement_decisions d WHERE d.tenant_id=v.tenant_id AND d.operation_ref=v.operation_ref AND d.revision=v.revision AND d.event_index=v.event_index))
+    AND (a.source_feed='bank-feed:'||x.old_item_ref OR EXISTS(SELECT 1 FROM plaid_replacement_bindings b
+      WHERE b.tenant_id=x.tenant_id AND b.operation_ref=x.operation_ref AND b.account_slug=a.account_slug))
+)`;
+const legacyReplacementLineageSql = `, lineage AS (
+  SELECT v.operation_ref,v.revision,v.event_index,t.account_slug,t.posted_on,t.currency,t.direction,t.amount_minor
+  FROM pending_events v JOIN main.fin_transactions t ON t.tenant_id=v.tenant_id AND (
+    EXISTS(SELECT 1 FROM plaid_replacement_aliases l WHERE l.tenant_id=v.tenant_id AND l.operation_ref=v.operation_ref
+      AND l.provider_id IN (v.provider_id,json_extract(v.payload_json,'$.pending_id')) AND l.canonical_row_id=t.id)
+    OR (NOT EXISTS(SELECT 1 FROM plaid_replacement_aliases l WHERE l.tenant_id=v.tenant_id AND l.operation_ref=v.operation_ref
+        AND l.provider_id IN (v.provider_id,json_extract(v.payload_json,'$.pending_id')))
+      AND (t.external_id IN (v.provider_id,json_extract(v.payload_json,'$.pending_id'))
+        OR (json_extract(v.payload_json,'$.operation')='added' AND t.removed_at IS NULL AND t.superseded_by_id IS NULL
+          AND t.amount_minor=json_extract(v.payload_json,'$.amount') AND t.currency=json_extract(v.payload_json,'$.currency')
+          AND t.direction=json_extract(v.payload_json,'$.direction') AND (
+            EXISTS(SELECT 1 FROM plaid_replacement_bindings b WHERE b.tenant_id=v.tenant_id AND b.operation_ref=v.operation_ref
+              AND b.account_slug=t.account_slug AND b.new_provider_id=v.provider_account_id)
+            OR NOT EXISTS(SELECT 1 FROM plaid_replacement_bindings b WHERE b.tenant_id=v.tenant_id AND b.operation_ref=v.operation_ref))))
+      AND (t.source_feed IN ('bank-feed:'||v.old_item_ref,'bank-feed:'||v.new_item_ref) OR EXISTS(
+        SELECT 1 FROM plaid_replacement_bindings b WHERE b.tenant_id=v.tenant_id AND b.operation_ref=v.operation_ref AND b.account_slug=t.account_slug))))
+)`;
+const replacementEffectsSql = `, effects AS (
+  SELECT 'saved' AS phase,posted_on AS date,currency,direction,amount_minor AS amount
+  FROM lineage WHERE account_slug=a.account_slug
+  UNION ALL SELECT 'incoming',json_extract(v.payload_json,'$.date'),json_extract(v.payload_json,'$.currency'),
+    json_extract(v.payload_json,'$.direction'),json_extract(v.payload_json,'$.amount') FROM pending_events v
+  WHERE json_extract(v.payload_json,'$.operation')<>'removed' AND (
+    EXISTS(SELECT 1 FROM plaid_replacement_bindings b WHERE b.tenant_id=v.tenant_id AND b.operation_ref=v.operation_ref
+      AND b.account_slug=a.account_slug AND b.new_provider_id=v.provider_account_id)
+    OR NOT EXISTS(SELECT 1 FROM plaid_replacement_bindings b WHERE b.tenant_id=v.tenant_id AND b.operation_ref=v.operation_ref))
+  UNION ALL SELECT 'unknown',NULL,NULL,NULL,NULL FROM pending_events v
+  WHERE (json_extract(v.payload_json,'$.operation') IN ('modified','removed') OR json_extract(v.payload_json,'$.pending_id') IS NOT NULL
+    OR EXISTS(SELECT 1 FROM plaid_replacement_aliases l WHERE l.tenant_id=v.tenant_id AND l.operation_ref=v.operation_ref AND l.provider_id=v.provider_id))
+    AND NOT EXISTS(SELECT 1 FROM lineage l WHERE l.operation_ref=v.operation_ref AND l.revision=v.revision AND l.event_index=v.event_index)
+) SELECT json_group_array(json_object('phase',phase,'date',date,'currency',currency,'direction',direction,'amount',amount)) FROM effects`;
+const legacyReplacementReviewValuesSql = pendingReplacementEventsSql+legacyReplacementLineageSql+replacementEffectsSql;
+
+// Resolve all retained identities through the immutable correction edges.
+// Conflicting branches expose every candidate, rather than allowing one stale
+// account-bound alias to suppress the current head's affected dollars.
+// Materialize the journal projections once per account snapshot. Re-expanding
+// recursive identity/head views for each held event grows rapidly after moves
+// and repeated connection replacements, despite the small number of rows.
+const occurrenceReviewValuesSql = pendingReplacementEventsSql+`,
+retained_identities AS MATERIALIZED (SELECT * FROM plaid_occurrence_identities WHERE tenant_id=a.tenant_id),
+retained_links AS MATERIALIZED (SELECT origin_row_id,successor_row_id FROM plaid_occurrence_links WHERE tenant_id=a.tenant_id),
+retained_items AS MATERIALIZED (SELECT * FROM plaid_replacement_item_lineage WHERE tenant_id=a.tenant_id),
+roots AS MATERIALIZED (
+  SELECT v.operation_ref,v.revision,v.event_index,i.origin_row_id FROM pending_events v
+  JOIN retained_identities i ON i.tenant_id=v.tenant_id AND i.item_ref IN
+    (SELECT item_ref FROM retained_items WHERE tenant_id=v.tenant_id AND operation_ref=v.operation_ref)
+    AND i.provider_id IN (v.provider_id,json_extract(v.payload_json,'$.pending_id'))
+  UNION SELECT v.operation_ref,v.revision,v.event_index,l.canonical_row_id FROM pending_events v
+    JOIN plaid_replacement_aliases l ON l.tenant_id=v.tenant_id AND l.operation_ref=v.operation_ref
+      AND l.provider_id IN (v.provider_id,json_extract(v.payload_json,'$.pending_id'))
+  UNION SELECT v.operation_ref,v.revision,v.event_index,t.id FROM pending_events v JOIN main.fin_transactions t
+    ON t.tenant_id=v.tenant_id AND json_extract(v.payload_json,'$.operation')='added'
+    AND t.removed_at IS NULL AND t.superseded_by_id IS NULL AND t.amount_minor=json_extract(v.payload_json,'$.amount')
+    AND t.currency=json_extract(v.payload_json,'$.currency') AND t.direction=json_extract(v.payload_json,'$.direction')
+    AND (t.source_feed IN ('bank-feed:'||v.old_item_ref,'bank-feed:'||v.new_item_ref) OR EXISTS(
+      SELECT 1 FROM plaid_replacement_bindings b WHERE b.tenant_id=v.tenant_id AND b.operation_ref=v.operation_ref AND b.account_slug=t.account_slug))
+    AND NOT EXISTS(SELECT 1 FROM retained_identities i WHERE i.tenant_id=v.tenant_id
+      AND i.item_ref IN (SELECT item_ref FROM retained_items WHERE tenant_id=v.tenant_id AND operation_ref=v.operation_ref)
+      AND i.provider_id IN (v.provider_id,json_extract(v.payload_json,'$.pending_id')))
+), forward AS (
+  SELECT DISTINCT origin_row_id,origin_row_id AS head_row_id FROM roots
+  UNION SELECT w.origin_row_id,l.successor_row_id FROM forward w JOIN retained_links l ON l.origin_row_id=w.head_row_id
+), root_heads AS MATERIALIZED (
+  SELECT w.origin_row_id,w.head_row_id FROM forward w
+  WHERE NOT EXISTS(SELECT 1 FROM retained_links l WHERE l.origin_row_id=w.head_row_id)
+), history AS (
+  SELECT DISTINCT head_row_id,head_row_id AS row_id FROM root_heads
+  UNION SELECT b.head_row_id,l.origin_row_id FROM history b JOIN retained_links l ON l.successor_row_id=b.row_id
+), lineage AS MATERIALIZED (
+  SELECT DISTINCT r.operation_ref,r.revision,r.event_index,t.account_slug,t.posted_on,t.currency,t.direction,t.amount_minor
+  FROM roots r JOIN root_heads h ON h.origin_row_id=r.origin_row_id
+  JOIN history ON history.head_row_id=h.head_row_id
+  JOIN main.fin_transactions t ON t.tenant_id=a.tenant_id AND t.id=history.row_id
+)`+replacementEffectsSql;
+
+export function moneyConfidenceSnapshotSql(replacementTables=false,occurrenceTables=replacementTables) {
+  return replacementTables ? MONEY_CONFIDENCE_SNAPSHOT_SQL.replace("  'connected',",`  'replacement_intervals',json((SELECT json_group_array(json_object('from',i.covered_from,'to',i.covered_to))
+    FROM bank_account_coverage_intervals i WHERE i.tenant_id=a.tenant_id AND i.account_slug=a.account_slug)),
+  'replacement_review_values',json((${occurrenceTables ? occurrenceReviewValuesSql : legacyReplacementReviewValuesSql})),
+  'replacement_review_from',(SELECT MIN(CASE WHEN x.operation_ref IS NOT NULL THEN COALESCE(date(c.covered_to,'+1 day'),'0001-01-01') END)
+    FROM plaid_item_replacements x WHERE x.tenant_id=a.tenant_id AND x.state NOT IN ('cancelled','active')
+      AND (x.state<>'rolled_back' OR EXISTS(SELECT 1 FROM plaid_replacement_events v
+        WHERE v.tenant_id=x.tenant_id AND v.operation_ref=x.operation_ref AND (v.revision>x.published_revision OR NOT EXISTS(SELECT 1 FROM plaid_replacement_decisions d WHERE d.tenant_id=v.tenant_id AND d.operation_ref=v.operation_ref AND d.revision=v.revision AND d.event_index=v.event_index))))
+      AND (a.source_feed='bank-feed:'||x.old_item_ref OR EXISTS(SELECT 1 FROM plaid_replacement_bindings b
+        WHERE b.tenant_id=x.tenant_id AND b.operation_ref=x.operation_ref AND b.account_slug=a.account_slug))),
+  'connected',`) : MONEY_CONFIDENCE_SNAPSHOT_SQL;
+}
 
 const DAY = 86400000;
 const dateValue = day => typeof day === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(day) &&
@@ -519,6 +620,14 @@ export function scoreMoneyConfidence({ accounts, coverage, amounts, pending, una
   const today = `${parts.year}-${parts.month}-${parts.day}`;
   for (const a of selected) {
     const label = identity(a);
+    const affected=(a.replacement_review_values || []).filter(row=>!dateValue(row.date) || row.date>=scope.from && row.date<=scope.to);
+    if(affected.length || a.replacement_review_from && a.replacement_review_from<=scope.to) {
+      const values=affected.map(row=>Number.isSafeInteger(row.amount) && row.amount>=0 && /^[A-Z]{3}$/.test(row.currency) && ['inflow','outflow'].includes(row.direction)
+        ? `${row.phase==='saved'?'Saved':'Incoming'} occurrence: ${money(row.currency,row.amount)} ${row.direction} on ${dateValue(row.date)?row.date:'an unknown date'}.`
+        : 'A correction has unknown affected dates or dollars.');
+      lower(69,`${label} has replacement activity awaiting review. ${[...new Set(values)].join(' ')} Saved and incoming values are alternatives pending reconciliation, not amounts to add together. Missing or possibly duplicated dollar impact remains unresolved.`,
+        `${label}: reconcile the saved and incoming occurrences, withdrawals, account mapping and complete statement coverage for ${scope.from} through ${scope.to}; unknown dates or dollars need the original statement.`);
+    }
     const accountStart = moneyAccountStart(a);
     const from = accountStart && accountStart > scope.from ? accountStart : scope.from;
     const to = dateValue(a.closed_on) && a.closed_on < scope.to ? a.closed_on : scope.to;
@@ -530,16 +639,15 @@ export function scoreMoneyConfidence({ accounts, coverage, amounts, pending, una
       lower(69, `${label} is not connected for the needed period ${from} through ${to}; missing dollar impact is unknown.`,
         `${label}: connect the account and supply complete statements or confirmed feed history for ${from} through ${to}.`);
     }
-    const gaps = [], coveredTo = a.covered_to > today ? today : a.covered_to;
-    if (!a.coverage_confirmed || !dateValue(a.covered_from) || !dateValue(a.covered_to) || a.covered_from > coveredTo || coveredTo < from || a.covered_from > to) gaps.push([from, to]);
-    else {
-      if (from < a.covered_from) gaps.push([from, shift(a.covered_from, -1)]);
-      if (coveredTo < to) gaps.push([shift(coveredTo, 1), to]);
-    }
+    const coveredTo = a.covered_to > today ? today : a.covered_to;
+    const intervals=Array.isArray(a.replacement_intervals) ? a.replacement_intervals.map(i=>({...i,to:i.to>today?today:i.to})) : [];
+    if(a.coverage_confirmed && dateValue(a.covered_from) && dateValue(coveredTo) && a.covered_from<=coveredTo)
+      intervals.push({from:a.covered_from,to:coveredTo});
+    const gaps=bankCoverageGaps(from,to,intervals);
     for (const [start, end] of gaps) {
       const n = days(start, end); missingDays += n;
       const lateStart = a.coverage_confirmed && dateValue(a.covered_from) && from < a.covered_from && start === from;
-      lower(89, `${label}${lateStart ? `: bank history only starts ${a.covered_from}; it` : ''} has ${n} days without confirmed complete coverage: ${start} through ${end}; missing dollar impact is unknown.`,
+      lower(a.replacement_intervals?.length ? 69 : 89, `${label}${lateStart ? `: bank history only starts ${a.covered_from}; it` : ''} has ${n} days without confirmed complete coverage: ${start} through ${end}; missing dollar impact is unknown.`,
         `${label}: ${start} through ${end} (${n} days). Supply complete statements or successfully synced history and confirm these coverage dates.`);
     }
     const sync = typeof a.last_sync === 'string' && /T.*(?:Z|[+-]\d{2}:\d{2})$/.test(a.last_sync) ? Date.parse(a.last_sync) : NaN;

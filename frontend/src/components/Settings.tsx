@@ -49,7 +49,7 @@ export function BankConnectionsSection({ readState, banks, busy, rehearsal = fal
   for (const bank of bankRows) {
     if ((bank.health && bank.health.state !== 'healthy') || bank.health?.overdue ||
         bank.health?.needs_sign_in || ['reauth_required','permission_revoked'].includes(bank.status) ||
-        (bank.accounts_needing_owner || 0) > 0) attention.add(bank.item_ref);
+        (bank.accounts_needing_owner || 0) > 0 || bank.replacement_state==='history_review') attention.add(bank.item_ref);
   }
   return (
     <Section
@@ -101,7 +101,9 @@ export function BankConnectionsSection({ readState, banks, busy, rehearsal = fal
                   {bank.last_synced_at ? `Last checked ${agoISO(bank.last_synced_at)}` : "Not checked yet"}
                   {(bank.status_line || bank.health?.needs_sign_in || ['reauth_required','permission_revoked'].includes(bank.status)) && (
                     <span className={`block mt-0.5 break-words ${attention.has(bank.item_ref) ? 'text-amber-800' : ''}`}>
-                      {bank.health?.needs_sign_in || ['reauth_required','permission_revoked'].includes(bank.status)
+                      {bank.health?.needs_reconnect
+                        ? 'Needs reconnect. Saved history is kept. Use Replace unreadable connection to continue.'
+                        : bank.health?.needs_sign_in || ['reauth_required','permission_revoked'].includes(bank.status)
                         ? 'Your bank needs you to sign in again. Use Repair connection to continue.'
                         : bank.status_line}
                     </span>
@@ -122,7 +124,11 @@ export function BankConnectionsSection({ readState, banks, busy, rehearsal = fal
                 </span>
               </span>
               <span className="flex items-center gap-3 flex-wrap">
-                {bank.status !== "removed" && (
+                {(bank.health?.needs_reconnect || bank.replacement_ref) && !rehearsal ? (
+                  <a className="text-sm underline underline-offset-4" href={`/app/connect/bank?mode=replace&item_ref=${encodeURIComponent(bank.item_ref)}${bank.replacement_ref ? '&operation_ref='+encodeURIComponent(bank.replacement_ref) : ''}`}>
+                    {bank.replacement_ref ? 'Continue recovery' : 'Replace unreadable connection'}
+                  </a>
+                ) : bank.status !== "removed" && (
                   rehearsal ? (
                     <span className="text-sm text-ink-soft" aria-disabled="true">
                       Repair unavailable in rehearsal
@@ -133,7 +139,7 @@ export function BankConnectionsSection({ readState, banks, busy, rehearsal = fal
                     </a>
                   )
                 )}
-                {!attention.has(bank.item_ref) && <Confirm
+                {!bank.replacement_ref && !bank.health?.needs_reconnect && !attention.has(bank.item_ref) && <Confirm
                   label="Disconnect"
                   question={DISCONNECT_BANK_QUESTION}
                   disabled={busy}

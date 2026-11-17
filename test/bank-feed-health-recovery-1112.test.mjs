@@ -61,7 +61,7 @@ const bankSource = db => ({ ...db.prepare(
   "SELECT last_ingest_at,expected_refresh_seconds FROM sources WHERE name='bank_activity'").get() });
 
 test('schema 63 inventory carries bank_feed_health without widening older inventories', () => {
-  assert.equal(MIGRATIONS.at(-1).version, 65);
+  assert.equal(MIGRATIONS.at(-1).version, 69);
   assert.equal(RECOVERY_DURABLE_TABLES.includes('bank_feed_health'), true);
   assert.equal(recoveryExportTables(MIGRATIONS).includes('bank_feed_health'), true);
   assert.equal(recoveryExportTables(MIGRATIONS.slice(0, 62)).includes('bank_feed_health'), false);

@@ -4,6 +4,71 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.29 (2026-11-16)
+
+This update includes every 0.4.28 change listed below. If you are coming from
+an earlier version, run `brain whatsnew --all` to read those notes too.
+
+- **Replace a bank connection whose saved access can no longer be read,
+  without losing your history.** When the saved access for a bank connection
+  can no longer be opened, Access > Banks offers **Replace unreadable
+  connection**. You sign in to your bank again on the provider's own screen.
+  The new connection's history waits in a holding area until you confirm which
+  accounts match (name, last four, type, currency and owner) and review any
+  activity that overlaps what is already saved. Until you confirm the handover,
+  your accounts, older months and answers stay exactly as they were; the
+  handover itself happens in one step. Nothing uncertain is guessed or counted
+  twice: unclear activity stays listed with its dollars for you to compare with
+  your statement, and answers that depend on it stay below High.
+- You can roll back a handover from the recovery page. Saved history and any
+  activity already proved are kept either way. Replacing a connection does not
+  revoke the old connection's permission at your bank.
+- Your installer can run `brain bank custody <manifest>` for a read-only check
+  of which saved bank connections still open. It changes nothing and contacts
+  nothing at the bank.
+- To check: after a handover, compare one complete earlier month and the
+  missing-access period with your bank statement, per account, before relying
+  on totals for those dates.
+- **Ask more money questions in your own words.** After a handover, questions
+  about a merchant or a spending category include the recovered activity, the
+  same way ordinary bank sync records it. Periods that still have unresolved
+  recovery activity stay below High and name the dollars and dates involved.
+  Check those stated gaps before relying on a figure for those dates.
+- The update adds three database steps for the recovery records. They apply
+  automatically, in order, after the 0.4.28 step.
+- **Brains installed before 0.4.0 can update in one step.** An update first
+  pauses new documents, checks the paused Brain, and only then changes its
+  database. On a Brain from 0.3.x that check failed every time ("documents
+  endpoint 500") and left the Brain paused, because the paused check read a
+  table that only the later database change creates. It now reads the older
+  layout too. A Brain an earlier attempt left paused this way finishes when you
+  run `brain update` again; if it has queued search updates, the update stops
+  before changing anything and says so.
+
+**Known limit:** if you roll back a handover while a later history fetch is
+only partly done and has brought in no new activity yet, the recovery page
+cannot offer Resume for that recovery. Your accounts stay on the old connection
+and all saved history is kept. Ask your installer before starting another
+replacement. This entry supplies no release approval or new field evidence.
+
+**Known limit:** when you review a replaced bank history and choose to replace a
+transaction, the new row stands in for the old one. Only the confirmed category
+carries over; other notes you added to the old row, and anything keyed to the old
+row, stay on the old row, which is marked removed. Ordinary sync updates the same
+row, so it keeps them.
+
+### This release does NOT cover
+
+- Replacing a connection does not revoke the old connection's permission at
+  your bank, and it does not prove complete history for the missing-access
+  period until you compare that period with your statement.
+- Some answers say Medium or Low more often than ideal. Read the stated gaps
+  and check the cited records before relying on a figure.
+- QuickBooks direct connection is pending Intuit approval.
+- Windows x64 is the only supported Windows runtime in this release. Windows
+  ARM64 ships unproven.
+- Bank breadth ships unproven. Bank invitations stay closed.
+
 ## 0.4.28 (2026-11-15)
 
 - **Updates never replace the key that protects your bank connections.**
