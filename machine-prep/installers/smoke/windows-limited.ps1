@@ -307,9 +307,18 @@ try {
   $adminMembership = @(Get-LocalGroupMember -Group $administrators | Where-Object { $_.SID.Value -ceq $state.sid }).Count
   $userMembership = @(Get-LocalGroupMember -Group $users | Where-Object { $_.SID.Value -ceq $state.sid }).Count
   $distinct = $state.sid -cne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  # A batch-logon token has no INTERACTIVE group, and the signed MSI install as this
+  # user failed with Windows Installer error 1601 even with the service running.
+  # Distributed COM Users is a non-administrator group in the default COM launch
+  # and access permissions; it stands in for the INTERACTIVE group that a real
+  # owner's desktop session carries. It grants no administrator rights.
+  $dcomUsers = Get-LocalGroup -SID 'S-1-5-32-562'
+  Add-LocalGroupMember -Group $dcomUsers -Member $user
+  $dcomMembership = @(Get-LocalGroupMember -Group $dcomUsers | Where-Object { $_.SID.Value -ceq $state.sid }).Count
   @('ACCOUNT_DECISION_REACHED=1', "ADMIN_GROUP_MEMBERSHIPS=$adminMembership", "USERS_GROUP_MEMBERSHIPS=$userMembership",
-    "DISTINCT_USER_SID=$([int]$distinct)") | Set-Content -LiteralPath (Join-Path $control 'account.log')
+    "DCOM_USERS_GROUP_MEMBERSHIPS=$dcomMembership", "DISTINCT_USER_SID=$([int]$distinct)") | Set-Content -LiteralPath (Join-Path $control 'account.log')
   if ($adminMembership -ne 0 -or $userMembership -ne 1 -or -not $distinct) { throw 'Local standard-user membership readback failed' }
+  if ($dcomMembership -ne 1) { throw 'Local COM-user membership readback failed' }
   $phase = 'stage'
   # Stage readable inputs outside the runner profile. Only disposable output
   # directories receive Modify rights; no runner credentials are inherited.
