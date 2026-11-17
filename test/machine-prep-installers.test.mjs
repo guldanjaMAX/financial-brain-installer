@@ -15,9 +15,9 @@ const ROOT = resolve(import.meta.dirname, "..");
 const HANDOFF = join(ROOT, "machine-prep", "handoff");
 const MAC_INSTALLER = join(ROOT, "machine-prep", "installers", "macos");
 const WINDOWS_INSTALLER = join(ROOT, "machine-prep", "installers", "windows");
-const KIT_URL = "https://financialbrain.ai/kit/brain-installer-0.4.10-55824b383909c57b.tgz";
-const KIT_SHA256 = "55824b383909c57b37f4db6179562bf603f670eaae3c7d315135dd290b0afdfe";
-const KIT_SIZE = "6828366";
+const KIT_URL = "https://financialbrain.ai/kit/brain-installer-0.4.29-b522d5fb0ee6e6f7.tgz";
+const KIT_SHA256 = "b522d5fb0ee6e6f71bb4081bfceff19f7a55e69b1a110568ace4f494ba0f0107";
+const KIT_SIZE = "8084882";
 const WINDOWS_POWERSHELL_PROCESS_TIMEOUT_MS = 120_000;
 const BASH_BEHAVIOR_ON_WINDOWS_SKIP_REASON =
   "requires Unix shell semantics and remains active on the macOS and Linux CI lanes";
@@ -254,7 +254,7 @@ test("pinned-kit proof reaches every refusal and cleans after preparation with a
   const control = await run();
   assert.equal(control.error, undefined);
   assert.deepEqual(control.calls, phases);
-  assert.match(control.events.at(-1), /PINNED_KIT_BOOTSTRAP_VERIFIED=1 version=0\.4\.10/);
+  assert.match(control.events.at(-1), /PINNED_KIT_BOOTSTRAP_VERIFIED=1 version=0\.4\.29/);
   for (const phase of phases) {
     const refused = await run(phase);
     assert.ok(refused.error);
@@ -294,12 +294,12 @@ test("pinned-kit provenance compares actual installed bytes instead of trusting 
   const expected = join(root, "witness"), installed = join(root, "installed");
   for (const directory of [expected, installed]) {
     mkdirSync(directory);
-    writeFileSync(join(directory, "package.json"), JSON.stringify({ name: "brain-installer", version: "0.4.10", bin: { brain: "./brain.mjs" } }));
-    writeFileSync(join(directory, "brain.mjs"), "console.log('0.4.10');\n");
+    writeFileSync(join(directory, "package.json"), JSON.stringify({ name: "brain-installer", version: "0.4.29", bin: { brain: "./brain.mjs" } }));
+    writeFileSync(join(directory, "brain.mjs"), "console.log('0.4.29');\n");
   }
   try {
     assert.equal(verifyPackageTree(expected, installed), 2, "green installed identity and bytes reached");
-    writeFileSync(join(installed, "brain.mjs"), "console.log('0.4.10'); // changed bytes\n");
+    writeFileSync(join(installed, "brain.mjs"), "console.log('0.4.29'); // changed bytes\n");
     assert.throws(() => verifyPackageTree(expected, installed), /bytes differ/);
     writeFileSync(join(installed, "brain.mjs"), readFileSync(join(expected, "brain.mjs")));
     writeFileSync(join(installed, "extra.mjs"), "synthetic\n");
@@ -314,8 +314,8 @@ test("pinned-kit source inventory permits only npm shims named by authenticated 
   try {
     for (const directory of [expected, installed]) {
       mkdirSync(join(directory, "node_modules", "synthetic-tool"), { recursive: true });
-      writeFileSync(join(directory, "package.json"), JSON.stringify({ name: "brain-installer", version: "0.4.10", bin: { brain: "./brain.mjs" } }));
-      writeFileSync(join(directory, "brain.mjs"), "console.log('0.4.10');\n");
+      writeFileSync(join(directory, "package.json"), JSON.stringify({ name: "brain-installer", version: "0.4.29", bin: { brain: "./brain.mjs" } }));
+      writeFileSync(join(directory, "brain.mjs"), "console.log('0.4.29');\n");
       writeFileSync(join(directory, "node_modules", "synthetic-tool", "package.json"), JSON.stringify({ name: "synthetic-tool", bin: { "synthetic-tool": "run.js" } }));
       writeFileSync(join(directory, "node_modules", "synthetic-tool", "run.js"), "// synthetic dependency\n");
     }
@@ -384,9 +384,9 @@ for (const fixtureKind of ["physical directory", "directory alias", "URL-reserve
           env: { HOME: directory, USERPROFILE: directory, BRAIN_NO_WRANGLER_LOGIN: "1" },
         });
       };
-      const control = execute("console.log('VERSION_DECISION_REACHED=1'); console.log('0.4.10');\n");
+      const control = execute("console.log('VERSION_DECISION_REACHED=1'); console.log('0.4.29');\n");
       assert.equal(control.status, 0, control.stderr);
-      assert.match(control.stdout, /VERSION_DECISION_REACHED=1\n0\.4\.10/);
+      assert.match(control.stdout, /VERSION_DECISION_REACHED=1\n0\.4\.29/);
       const network = execute("console.log('VERSION_DECISION_REACHED=1'); await fetch('https://example.invalid');\n");
       assert.notEqual(network.status, 0);
       assert.match(network.stdout, /VERSION_DECISION_REACHED=1/);
@@ -464,6 +464,10 @@ test("Windows cleanup reports bounded reasons and drains only the exact disposab
   assert.ok(stop > 0 && profile > stop, "task stop and profile removal decisions reached");
   const drain = cleanup.indexOf("Wait-BootstrapProcesses $State.sid");
   assert.ok(drain > stop && drain < profile, "owned processes drain before profile removal");
+  const installerService = cleanup.indexOf("try { Stop-BootstrapInstallerService }");
+  const unloadWait = cleanup.indexOf("$deadline = (& $Now).AddSeconds(60)");
+  assert.ok(installerService > drain && unloadWait > installerService, "msiserver stops after the drain and before the unload wait");
+  assert.match(cleanup, /STANDARD_MSISERVER_STOPPED=\$\(\[int\]\$installerServiceStopped\)/);
   assert.match(cleanup, /if \(-not \$taskCleanupComplete\)/);
   for (const resource of ["TASK", "PROFILE", "USER"]) {
     assert.ok(cleanup.includes(`STANDARD_${resource}_CLEANUP_ERROR=`), `${resource} catch retains a reason`);
@@ -990,6 +994,10 @@ function Wait-BootstrapProcesses($Sid) {
   if ($Sid -cne $targetSid -or -not $script:taskGone) { throw 'process cleanup outside stopped task' }
   if ($case.name -ceq 'process-error') { throw 'synthetic private exception detail' }
 }
+function Stop-BootstrapInstallerService {
+  if ($script:processCalls -ne 1 -or $script:profileReads -ne 0) { throw 'installer service stop out of order' }
+  $script:serviceStops++
+}
 function Get-CimInstance($ClassName, $Filter) {
   $script:profileReads++
   if ($ClassName -cne 'Win32_UserProfile' -or $Filter -cne "SID='$targetSid'" -or $script:processCalls -ne 1) { throw 'wrong profile query order or identity' }
@@ -1018,7 +1026,7 @@ ${JSON.stringify(cases)}
 '@ | ConvertFrom-Json
 foreach ($case in $cases) {
   $script:taskReads = 0; $script:userReads = 0; $script:stops = 0; $script:processCalls = 0
-  $script:profileReads = 0; $script:profileRemovals = 0; $script:userRemovals = 0
+  $script:profileReads = 0; $script:profileRemovals = 0; $script:userRemovals = 0; $script:serviceStops = 0
   $script:taskGone = $case.name -ceq 'already-absent'; $script:userGone = $script:taskGone; $script:profileGone = $script:taskGone
   $script:clock = [DateTime]'2026-01-01T00:00:00Z'
   $state = @{ taskName = 'fixture-task'; userName = 'fixture-user'; sid = $targetSid; profilePath = '' }
@@ -1030,6 +1038,7 @@ foreach ($case in $cases) {
   if ($script:processCalls -ne $case.processes -or $script:profileRemovals -ne $case.removals -or $script:userRemovals -ne $case.users) { throw ('cleanup boundary not reached: ' + $case.name) }
   if ($case.name -ceq 'profile-loaded' -and ($script:profileReads -ne 31 -or $script:clock -ne [DateTime]'2026-01-01T00:01:00Z')) { throw 'profile unload deadline changed' }
   $receipt = @(Get-Content -LiteralPath (Join-Path $control 'cleanup.log'))
+  if ($case.name -ceq 'green' -and ($script:serviceStops -ne 1 -or $receipt -notcontains 'STANDARD_MSISERVER_STOPPED=1')) { throw 'installer service stop not reached' }
   $actualErrors = @($receipt | Where-Object { $_ -match '^STANDARD_(TASK|PROFILE|USER)_CLEANUP_ERROR=' })
   $expectedErrors = @($case.errors | ForEach-Object { $parts = $_ -split ':'; 'STANDARD_' + $parts[0] + '_CLEANUP_ERROR=' + $parts[1] })
   if (($actualErrors -join ',') -cne ($expectedErrors -join ',')) { throw ('wrong reason codes: ' + $case.name) }
@@ -1232,7 +1241,7 @@ test("Claude handoff messages are local notes with no remote instructions", () =
   }
 });
 
-test("both prep scripts pin, verify, and locally install the published 0.4.10 kit", () => {
+test("both prep scripts pin, verify, and locally install the published 0.4.29 kit", () => {
   for (const source of [read("machine-prep/prep-mac.sh"), read("machine-prep/prep-windows.ps1")]) {
     assert.match(source, new RegExp(KIT_URL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     assert.match(source, new RegExp(KIT_SHA256));
@@ -2090,8 +2099,8 @@ test("Mac launcher shows only plain lines on screen and keeps every status marke
   const control = runMacWrapper({
     prepExit: 0, openExit: 0, handoffExit: 0,
     prepBody: [
-      "printf 'Machine Prep for macOS\\nMODE real\\nPREREQUISITE_DECISION_REACHED=1\\nCodex CLI (optional): found, version 9.0.0.\\nDOWNLOAD_STARTED=1 kit_version=0.4.10\\nVERIFIED checksum\\n'",
-      "printf 'added 1 package in 1s\\nBRAIN_INSTALL_VERIFIED=1 version=0.4.10\\nFinancial Brain CLI preparation completed\\n'",
+      "printf 'Machine Prep for macOS\\nMODE real\\nPREREQUISITE_DECISION_REACHED=1\\nCodex CLI (optional): found, version 9.0.0.\\nDOWNLOAD_STARTED=1 kit_version=0.4.29\\nVERIFIED checksum\\n'",
+      "printf 'added 1 package in 1s\\nBRAIN_INSTALL_VERIFIED=1 version=0.4.29\\nFinancial Brain CLI preparation completed\\n'",
       "printf 'npm warn example\\n' >&2",
     ].join("\n"),
     handoffBody: "printf 'HANDOFF_DECISION_REACHED=1\\nHANDOFF_DESKTOP_OPENED=1\\n'",

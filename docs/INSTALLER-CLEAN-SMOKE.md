@@ -5,7 +5,7 @@
 The signed artifacts currently contain only the machine-preparation shell,
 version 0.2.0. The Mac payload has eight files and the Windows payload has seven
 files plus a Start Menu shortcut. Neither bundles Node or the Brain CLI. The
-preparation scripts later download a separately pinned 0.4.10 kit. Running a
+preparation scripts later download a separately pinned 0.4.29 kit. Running a
 checkout's CLI, using runner Node, or mocking preparation would not prove a
 bundled CLI. The shell jobs keep that distinction explicit. Separate bootstrap jobs prove the installed CLI from the pinned kit when they pass; they do not turn it into a bundled CLI.
 
@@ -166,16 +166,21 @@ runtime have no declared 32-bit dependency. Both the signed MSI table and the
 installed shortcut must match the 64-bit target exactly. A newly signed MSI is
 required; the old artifact cannot satisfy the corrected contract.
 
-## Re-pin after the 0.4.10 seal
+## Re-pin to the published 0.4.29 package
 
-The preparation scripts and bootstrap witness now pin the sealed **0.4.10**
-kit from source commit `ffb9c80e`:
+The preparation scripts and bootstrap witness now pin the published **0.4.29**
+package from source commit `553e0b572` (release asset `brain-installer-0.4.29.tgz`):
 
-- URL: `https://financialbrain.ai/kit/brain-installer-0.4.10-55824b383909c57b.tgz`
-- Size: **6,828,366 bytes**
-- SHA-256: `55824b383909c57b37f4db6179562bf603f670eaae3c7d315135dd290b0afdfe`
-- Runtime payload SHA-256: `d2df2e53b9a5e1a7ae66a23b599c557751d958fdcd885747a564ffd21bd506b9`
-- Package file count: **627**
+- URL: `https://financialbrain.ai/kit/brain-installer-0.4.29-b522d5fb0ee6e6f7.tgz`
+- Size: **8,084,882 bytes**
+- SHA-256: `b522d5fb0ee6e6f71bb4081bfceff19f7a55e69b1a110568ace4f494ba0f0107`
+- Runtime payload SHA-256: `d9d3d8692b656ed7087f542844452a79f97ea5af6056ac1c2b61fbfa6da9e7f0`
+- Package file count: **833**
+
+The preparation scripts refuse redirects, so the GitHub release download URL
+(a 302) cannot be pinned. These exact bytes must be served at the
+content-addressed URL above with a direct HTTPS 200 before a signing run can
+prove this kit.
 
 The coordinated re-pin covers:
 
@@ -187,10 +192,10 @@ The coordinated re-pin covers:
   `KIT.size`, `KIT.sha256`.
 - `test/machine-prep-installers.test.mjs`: `KIT_URL`, `KIT_SIZE`, `KIT_SHA256`
   and the version expectations/synthetic package fixtures. Update the matching
-  0.4.10 fixtures/snapshots in `test/machine-prep.test.mjs` and
+  0.4.29 fixtures/snapshots in `test/machine-prep.test.mjs` and
   `test/fixtures/machine-prep/` as part of the same reviewed version change.
 
-Prior 0.4.9 bootstrap receipts do not prove this kit. Rebuild, sign and rerun
+Prior 0.4.10 bootstrap receipts do not prove this kit. Rebuild, sign and rerun
 both platforms against the pins above. Future re-pins must use a new seal's
 actual length, digest and content-addressed URL. Installer-shell version 0.2.0 and the
 Node/assistant/Wrangler prerequisite selections are separate constants; changing

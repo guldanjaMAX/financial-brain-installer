@@ -89,6 +89,22 @@ function Wait-BootstrapProcesses([string]$Sid) {
   if (@(Get-BootstrapProcesses $Sid).Count -ne 0) { throw 'Owned processes remain' }
 }
 
+function Stop-BootstrapInstallerService {
+  # The admin parent starts msiserver for the per-user MSI. That SYSTEM service
+  # can keep the disposable account's registry hive open after the task ends,
+  # which leaves the profile reported as loaded. Stop it only after the task and
+  # the account's processes are gone; the profile readback stays the success fence.
+  $service = Get-Service -Name msiserver
+  try {
+    if ($service.Status -ne 'Stopped') {
+      Stop-Service -Name msiserver -Force
+      $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
+    }
+    $service.Refresh()
+    if ($service.Status -ne 'Stopped') { throw 'Windows Installer service is still running' }
+  } finally { $service.Dispose() }
+}
+
 function Remove-BootstrapAccount($State, [scriptblock]$Now = { [DateTime]::UtcNow }) {
   $failures = 0
   $taskCleanupComplete = $false
@@ -128,6 +144,11 @@ function Remove-BootstrapAccount($State, [scriptblock]$Now = { [DateTime]::UtcNo
     }
     if ($State.sid) {
       Wait-BootstrapProcesses $State.sid
+      # A failed stop is recorded, not fatal: only the unload readback below
+      # decides whether the profile can be removed.
+      $installerServiceStopped = $true
+      try { Stop-BootstrapInstallerService } catch { $installerServiceStopped = $false }
+      "STANDARD_MSISERVER_STOPPED=$([int]$installerServiceStopped)" | Add-Content -LiteralPath (Join-Path $control 'cleanup.log')
       $deadline = (& $Now).AddSeconds(60)
       do {
         $profiles = @(Get-CimInstance Win32_UserProfile -Filter "SID='$($State.sid)'")
