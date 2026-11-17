@@ -398,7 +398,7 @@ jobs:
       - name: state the proof boundary
         if: always()
         shell: pwsh
-        run: Add-Content $env:GITHUB_STEP_SUMMARY 'Installer-shell smoke only. The signed MSI does not bundle Node or the Brain CLI. CLI version, SmartScreen, and interactive first-open remain unproven; inspect the job result and logs.'
+        run: Add-Content $env:GITHUB_STEP_SUMMARY 'Installer-shell smoke only. The signed MSI carries its own pinned Node runtime and the Brain CLI packed from the dispatched commit; this job checks the installed shell and payload files, not a running CLI. SmartScreen and interactive first-open remain unproven; the standard-user payload job covers the CLI run. Inspect the job result and logs.'
 
   macos-bootstrap:
     name: signed macOS shell and pinned kit CLI on a fresh runner
@@ -483,6 +483,18 @@ jobs:
         run: |
           & machine-prep/installers/smoke/windows-limited.ps1 -Cleanup -LogDirectory "$env:RUNNER_TEMP/installer-bootstrap-logs"
           if ($LASTEXITCODE -ne 0) { throw 'Standard-user cleanup failed' }
+      - name: print fixed-schema bootstrap status markers
+        if: always()
+        shell: pwsh
+        run: |
+          # Uploaded receipts expire after 14 days; these status-only markers
+          # stay readable in the job log. The child bootstrap log is not printed.
+          $control = "$env:RUNNER_TEMP/installer-bootstrap-logs-control"
+          foreach ($name in @('account.log', 'logon-right.log', 'task-principal.log', 'task-registration.log', 'msiserver.log',
+              'session.log', 'failure.log', 'task-result.log', 'task.log', 'parent-failure.log', 'cleanup.log', 'admin-control.log', 'exit-code.txt')) {
+            $path = Join-Path $control $name
+            if (Test-Path -LiteralPath $path) { "== $name"; Get-Content -LiteralPath $path }
+          }
       - name: retain bootstrap receipts even after refusal
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
