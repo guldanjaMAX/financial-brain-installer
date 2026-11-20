@@ -199,7 +199,7 @@ test("installed mcp-config defaults use an empty process snapshot and the real d
   });
   assert.equal(
     result.output.filter((line) =>
-      line === `${successMark(false)}    Claude answer route ready: route_receipt_accepted`).length,
+      line === `  ${successMark(false)}    Claude answer route ready: route_receipt_accepted`).length,
     1,
   );
   t.diagnostic("apply=1 process_queries=1 child_spawns=1 route_events=5 strict_receipts=1");

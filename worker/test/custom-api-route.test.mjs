@@ -233,6 +233,7 @@ test("a monthly answer document carries more than eight stores through the real 
           async all() {
             if (/FROM sources s/.test(sql)) return { results: [sourceRow] };
             if (/unchunked-tax-document-candidates/.test(sql)) return { results: [] };
+            if (/AS total_chunks/.test(sql)) return { results: [{...row,total_chunks:1}] };
             return { results: [row] };
           },
           async first() {

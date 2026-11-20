@@ -12,6 +12,7 @@
  * runtime string can ever exist.
  */
 
+import { ensureWorkersDevSubdomain, maskedSubdomainMessage } from "./workers-subdomain.mjs";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { accessSync, constants as fsConstants, statSync } from "node:fs";
@@ -26,7 +27,11 @@ export const CLOUDFLARE_OAUTH_CALLBACK_PORT = 8976;
 
 // These are the narrow Wrangler 4.131.1 OAuth scope keys available to
 // `wrangler auth create`: enumerate memberships, deploy/configure Workers,
-// manage D1, and configure Workers AI. Wrangler's browser client exposes no
+// manage D1, and configure Workers AI. T1a (2026-11-17, test-account
+// browser Allow) proved workers_scripts:write lets the sign-in read the
+// workers.dev address with HTTP 200. Registration (T1b) remains unproven;
+// a failed PUT must still stop with its registration issue and help link.
+// Wrangler's browser client exposes no
 // Vectorize key. The exact Vectorize read below therefore remains in preflight
 // as the fail-closed decision point that routes an owner to explicitly selected
 // recovery-token access before any mutation. Never add `vectorize:write` here:
@@ -35,6 +40,7 @@ export const CLOUDFLARE_OAUTH_SCOPES = Object.freeze([
   "account:read",
   "user:read",
   "workers:write",
+  "workers_scripts:write",
   "d1:write",
   "ai:write",
 ]);
@@ -78,8 +84,6 @@ const PREFLIGHT_PATHS = Object.freeze([
   Object.freeze({ name: "vectorize", suffix: "/vectorize/v2/indexes" }),
   Object.freeze({ name: "workers_ai", suffix: "/ai/models/search?per_page=1" }),
 ]);
-
-const WORKERS_SUBDOMAIN_UNREGISTERED_API_CODE = 10007;
 
 export class CloudflareOAuthSessionError extends Error {
   constructor(code, phase, message) {
@@ -410,7 +414,7 @@ export function createCloudflareOAuthProfile({ installIdentity = null, profile =
   const result = runWrangler([
     CLOUDFLARE_OAUTH_WRANGLER_PACKAGE,
     "auth", "create", exactProfile,
-    "--scopes", ...CLOUDFLARE_OAUTH_SCOPES,
+    "--scopes", ...(options.scopes ?? CLOUDFLARE_OAUTH_SCOPES),
     "--browser",
     "--callback-host", CLOUDFLARE_OAUTH_CALLBACK_HOST,
     "--callback-port", String(CLOUDFLARE_OAUTH_CALLBACK_PORT),
@@ -592,7 +596,7 @@ function assertTokenBuffer(token) {
   }
 }
 
-async function readBoundedResponse(response) {
+async function readBoundedResponse(response, token, subdomainRequest = false) {
   if (!response || typeof response.status !== "number" ||
       typeof response.arrayBuffer !== "function") {
     throw oauthError(
@@ -629,19 +633,28 @@ async function readBoundedResponse(response) {
         "Cloudflare returned invalid JSON",
       );
     }
+    const refusal = (error) => {
+      if (!subdomainRequest) return error;
+      error.status = response.status;
+      error.cloudflareErrorCodes = Object.freeze(Array.isArray(body?.errors)
+        ? body.errors.map(entry => entry?.code).filter(Number.isInteger) : []);
+      error.providerMessage = maskedSubdomainMessage(Array.isArray(body?.errors)
+        ? body.errors.map(entry => entry?.message || "").join("; ") : "Cloudflare returned no message", [token]);
+      return error;
+    };
     if (response.status === 401) {
-      throw oauthError(
+      throw refusal(oauthError(
         "CLOUDFLARE_OAUTH_REAUTH_REQUIRED",
         "request",
         "this install's Cloudflare OAuth profile must be authorized again",
-      );
+      ));
     }
     if (response.status === 403) {
-      throw oauthError(
+      throw refusal(oauthError(
         "CLOUDFLARE_OAUTH_SCOPE_MISSING",
         "request",
         "the Cloudflare OAuth approval is missing a required install permission",
-      );
+      ));
     }
     if (response.status < 200 || response.status >= 300 ||
         body?.success !== true || !Array.isArray(body.errors) || body.errors.length !== 0 ||
@@ -651,12 +664,12 @@ async function readBoundedResponse(response) {
         "request",
         "Cloudflare refused the read-only OAuth preflight request",
       );
-      // Only Cloudflare's numeric error codes are kept, never its message
-      // text, so a caller can recognise one exact documented refusal.
+      // Other surfaces retain numeric codes only. The subdomain boundary
+      // additionally carries a masked message in memory for reservation help.
       refused.cloudflareErrorCodes = Object.freeze(Array.isArray(body?.errors)
         ? body.errors.map((entry) => entry?.code).filter(Number.isInteger)
         : []);
-      throw refused;
+      throw refusal(refused);
     }
     return body;
   } finally {
@@ -667,6 +680,8 @@ async function readBoundedResponse(response) {
 async function cloudflareGet(path, token, {
   fetchImpl = globalThis.fetch,
   requestTimeoutMs = 30_000,
+  method = "GET",
+  body,
 } = {}) {
   assertTokenBuffer(token);
   if (typeof fetchImpl !== "function") {
@@ -695,16 +710,18 @@ async function cloudflareGet(path, token, {
   const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
   try {
     const response = await fetchImpl(url, {
-      method: "GET",
+      method,
+      body: body === undefined ? undefined : JSON.stringify(body),
       redirect: "manual",
       cache: "no-store",
       headers: {
         Accept: "application/json",
+        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
         Authorization: `Bearer ${token.toString("utf8")}`,
       },
       signal: controller.signal,
     });
-    return await readBoundedResponse(response);
+    return await readBoundedResponse(response, token, path.endsWith("/workers/subdomain"));
   } catch (error) {
     if (error instanceof CloudflareOAuthSessionError) throw error;
     if (controller.signal.aborted) {
@@ -755,9 +772,9 @@ function normalizeAccount(value) {
 
 function annotateScopeRefusal(error, accountId, requiredSurface) {
   if (error instanceof CloudflareOAuthSessionError &&
-      error.code === "CLOUDFLARE_OAUTH_SCOPE_MISSING") {
+      ["CLOUDFLARE_OAUTH_SCOPE_MISSING", "CLOUDFLARE_OAUTH_REAUTH_REQUIRED"].includes(error.code)) {
     // The account id and failed product surface are non-secret decision data.
-    // Carry no provider message or response body into the recovery layer.
+    // Subdomain failures may carry masked provider detail, never a raw body.
     error.selectedAccountId = accountId;
     error.requiredSurface = requiredSurface;
   }
@@ -909,7 +926,7 @@ export async function selectCloudflareOAuthAccount(accounts, {
   return chosen;
 }
 
-/** Read-only proof that every current control-plane service reaches one account. */
+/** Prove exact-account access; only explicit setup may reserve a missing address. */
 export async function preflightCloudflareOAuthAccount(token, account, options = {}) {
   const selected = normalizeAccount(account);
   let accountBody;
@@ -928,51 +945,33 @@ export async function preflightCloudflareOAuthAccount(token, account, options = 
   }
   const checks = ["account"];
   let workersSubdomain = null;
-  let workersSubdomainUnregistered = false;
-  let workersSubdomainUnreadable = false;
-  // A Brain on its own custom domain never serves from workers.dev, so for it
-  // an unregistered subdomain is reported rather than refused. Anything else,
-  // including an unknown caller, keeps the fail-closed default.
   const workersSubdomainRequired = options.workersSubdomainRequired !== false;
   for (const check of PREFLIGHT_PATHS) {
-    let body;
-    try {
-      body = await cloudflareGet(`/accounts/${selected.id}${check.suffix}`, token, options);
-    } catch (error) {
-      annotateScopeRefusal(error, selected.id, check.name);
-      // A custom-domain Brain never consumes this account setting. Keep the
-      // refusal visible in the receipt and continue proving every surface it
-      // does use. A workers.dev Brain still fails closed on the same response.
-      if (check.name === "workers_subdomain" &&
-          error?.code === "CLOUDFLARE_OAUTH_SCOPE_MISSING" &&
-          !workersSubdomainRequired) {
-        // This exception keys on the 403 scope classification and exact surface, not a provider error code.
-        workersSubdomainUnreadable = true;
-        continue;
-      }
-      // Cloudflare error 10007 on exactly this read means the account never
-      // registered a workers.dev subdomain (the pinned Wrangler special-cases
-      // the same code). That is an account setting the owner can fix, not a
-      // network failure, and no other credential would read it differently.
-      if (check.name === "workers_subdomain" &&
-          error?.code === "CLOUDFLARE_OAUTH_REQUEST_FAILED" &&
-          error.cloudflareErrorCodes?.includes(WORKERS_SUBDOMAIN_UNREGISTERED_API_CODE)) {
-        if (!workersSubdomainRequired) {
-          workersSubdomainUnregistered = true;
-          continue;
+    if (check.name === "workers_subdomain") {
+      // A saved address or custom domain needs no account address lookup.
+      if (!workersSubdomainRequired) continue;
+      try {
+        workersSubdomain = await ensureWorkersDevSubdomain({
+          accountId: selected.id,
+          request: async (path, requestOptions = {}) => (await cloudflareGet(path, token, { ...options, ...requestOptions })).result,
+          registrationContext: options.registrationContext,
+          generateLabel: options.generateSubdomainLabel,
+          writeLine: options.writeLine,
+          secrets: [token],
+        });
+      } catch (error) {
+        if (["CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED", "CLOUDFLARE_OAUTH_RESPONSE_INVALID"].includes(error?.code)) {
+          const missing = oauthError(error.code, "preflight", error.message);
+          throw missing;
         }
-        throw oauthError(
-          "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED",
-          "preflight",
-          "the selected Cloudflare account has no registered workers.dev subdomain",
-        );
+        throw annotateScopeRefusal(error, selected.id, check.name);
       }
-      throw error;
-    }
-    if (check.name === "workers_subdomain" && typeof body?.result?.subdomain === "string") {
-      // Preserve the authenticated response exactly. The deploy path validates
-      // the label before deriving a hostname and never substitutes account.name.
-      workersSubdomain = body.result.subdomain;
+    } else {
+      try {
+        await cloudflareGet(`/accounts/${selected.id}${check.suffix}`, token, options);
+      } catch (error) {
+        throw annotateScopeRefusal(error, selected.id, check.name);
+      }
     }
     checks.push(check.name);
   }
@@ -981,9 +980,24 @@ export async function preflightCloudflareOAuthAccount(token, account, options = 
     account: reached,
     checks: Object.freeze(checks),
     ...(workersSubdomain !== null ? { workersSubdomain } : {}),
-    ...(workersSubdomainUnregistered ? { workersSubdomainUnregistered: true } : {}),
-    ...(workersSubdomainUnreadable ? { workersSubdomainUnreadable: true } : {}),
+    ...(!workersSubdomainRequired ? { workersSubdomainSkipped: true } : {}),
   });
+}
+
+/** Inspect grants through pinned Wrangler, never by reading its credential files. */
+export function readCloudflareOAuthGrantedScopes({ profile, ...options } = {}) {
+  const result = runWrangler([
+    CLOUDFLARE_OAUTH_WRANGLER_PACKAGE, "whoami", "--json", "--profile", cleanProfileName(profile),
+  ], { ...options, stdio: ["ignore", "pipe", "pipe"], maxBuffer: MAX_TOKEN_JSON_BYTES,
+    timeoutMs: options.tokenTimeoutMs ?? 120_000 });
+  try {
+    if (!processSucceeded(result) || !Buffer.isBuffer(result.stdout) || result.stdout.length > MAX_TOKEN_JSON_BYTES) return null;
+    const info = JSON.parse(result.stdout.toString("utf8"));
+    if (info.loggedIn !== true || info.authType !== "OAuth Token" ||
+        !Array.isArray(info.tokenPermissions) || info.tokenPermissions.length > 100 ||
+        info.tokenPermissions.some(scope => typeof scope !== "string" || !/^[a-z0-9_]+(?::[a-z]+)?$/.test(scope))) return null;
+    return Object.freeze([...info.tokenPermissions]);
+  } catch { return null; } finally { wipeProcessOutput(result); }
 }
 
 /**
@@ -1020,7 +1034,20 @@ export async function withCloudflareOAuthSession({
       expectedAccountId: boundAccountId,
       prompt,
     });
-    const preflight = await preflightCloudflareOAuthAccount(token, account, options);
+    let preflight;
+    try {
+      preflight = await preflightCloudflareOAuthAccount(token, account, options);
+    } catch (error) {
+      // Re-Allow helps only when the current shipped list can request the
+      // missing grant. Old profiles keep their grant until one fresh Allow.
+      if (!reauthorize && error?.requiredSurface === "workers_subdomain" &&
+          [401, 403].includes(error.status) &&
+          (options.scopes ?? CLOUDFLARE_OAUTH_SCOPES).includes("workers_scripts:write")) {
+        const grants = readCloudflareOAuthGrantedScopes({ ...options, profile });
+        if (grants !== null) error.grantedScopes = grants;
+      }
+      throw error;
+    }
     const safeSession = Object.freeze({ profile, account: preflight.account, preflight });
     if (typeof action !== "function") return safeSession;
     return await action({ ...safeSession, token });

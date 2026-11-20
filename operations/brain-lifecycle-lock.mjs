@@ -18,7 +18,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve, win32 as pathWin32 } from "node:path";
+import { dirname, join, resolve, win32 as pathWin32 } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { restrictWindowsDirectoryToCurrentUser } from "./current-user-file.mjs";
@@ -32,17 +32,13 @@ const MIN_STALE_MS = 60_000;
 const DEFAULT_STALE_MS = 30 * 60_000;
 export const BRAIN_LIFECYCLE_PARENT_ENV = "BRAIN_LIFECYCLE_PARENT";
 
-export class BrainLifecycleLockError extends Error {
-  constructor(code, message, { retryable = false } = {}) {
-    super(message);
-    this.name = "BrainLifecycleLockError";
-    this.code = code;
-    this.retryable = retryable;
-  }
-}
+import { BrainLifecycleLockError, resolveBrainLockRoot, resolveBrainAccountLockRoot, brainLockRootCandidates, brainLockRootsReadOnly,
+  resolveLegacyBrainLockRoot, legacyBrainLockUnavailable, announcePrivateBrainLock } from "./brain-lock-root.mjs";
+export { BrainLifecycleLockError } from "./brain-lock-root.mjs";
 
 function failure(code, message, options) {
-  return new BrainLifecycleLockError(code, message, options);
+  return new BrainLifecycleLockError(code, code === "brain_lifecycle_busy"
+    ? `${message} UPDATE_BRAIN_BUSY: https://financialbrain.ai/help/UPDATE_BRAIN_BUSY` : message, options);
 }
 
 function boundedEnvironment(environment, names) {
@@ -159,45 +155,12 @@ function brainIdentityFromManifest(manifestPath) {
   return createHash("sha256").update(JSON.stringify(identity)).digest("hex").slice(0, 32);
 }
 
-function defaultMachineLockRoot(platform) {
-  const injected = process.env.BRAIN_LIFECYCLE_LOCK_ROOT;
-  if (injected && isAbsolute(injected)) return resolve(injected);
-  if (platform === "win32") {
-    const programData = process.env.ProgramData;
-    if (programData && isAbsolute(programData)) return join(resolve(programData), "FinancialBrain", "locks");
-  }
-  return "/tmp/financial-brain-lifecycle-v1";
-}
-
-export function brainLifecycleCoordinates({ manifestPath, platform = process.platform, machineLockRoot } = {}) {
+export function brainLifecycleCoordinates({ manifestPath, platform = process.platform, machineLockRoot,
+  home, operation, lockRootOptions = {},
+} = {}) {
   const identity = brainIdentityFromManifest(manifestPath);
-  const root = resolve(machineLockRoot || defaultMachineLockRoot(platform));
-  mkdirSync(root, { recursive: true, mode: platform === "win32" ? 0o700 : 0o1777 });
-  assertSharedRoot(root, platform);
-  return Object.freeze({ identity, root: realpathSync(root) });
-}
-
-function assertSharedRoot(path, platform) {
-  const state = lstatSync(path);
-  if (!state.isDirectory() || state.isSymbolicLink()) {
-    throw failure("brain_lifecycle_unsafe", "the machine Brain lock root must be one real directory");
-  }
-  if (platform !== "win32" && ((state.mode & 0o002) === 0 || (state.mode & 0o1000) === 0)) {
-    chmodSync(path, 0o1777);
-    if ((lstatSync(path).mode & 0o002) === 0) {
-      throw failure("brain_lifecycle_unsafe", "the machine Brain lock root is not shared safely");
-    }
-  }
-}
-
-function lockDirectory({ manifestPath, platform, machineLockRoot }) {
-  const { identity, root } = brainLifecycleCoordinates({ manifestPath, platform, machineLockRoot });
-  return join(root, `brain-lifecycle-${identity}.lock`);
-}
-
-function recoveryFencePath(options) {
-  const { identity, root } = brainLifecycleCoordinates(options);
-  return join(root, `brain-update-recovery-${identity}.json`);
+  const selected = resolveBrainLockRoot({ ...lockRootOptions, platform, machineLockRoot, home, operation });
+  return Object.freeze({ identity, ...selected });
 }
 
 function readRecoveryFenceAtPath(path) {
@@ -218,35 +181,24 @@ function readRecoveryFenceAtPath(path) {
   return Object.freeze({ ...value, path });
 }
 
-export function readBrainRecoveryFence({ manifestPath, platform = process.platform, machineLockRoot } = {}) {
-  const path = recoveryFencePath({ manifestPath, platform, machineLockRoot });
-  return readRecoveryFenceAtPath(path);
+export function readBrainRecoveryFence(options = {}) {
+  const coordinates = brainLifecycleCoordinates(options);
+  const selected = readRecoveryFenceAtPath(join(coordinates.root, `brain-update-recovery-${coordinates.identity}.json`));
+  // Permission repair can make the shared root usable again on a later run.
+  // Never hide this user's unfinished recovery merely by switching roots.
+  return selected || ((options.platform ?? process.platform) === "win32" ? readBrainRecoveryFenceReadOnly(options) : null);
 }
 
-/**
- * Preview-only recovery lookup. A missing machine root means no fence; an
- * existing root is validated but never created or permission-repaired.
- */
-export function readBrainRecoveryFenceReadOnly({
-  manifestPath,
-  platform = process.platform,
-  machineLockRoot,
+/** Missing roots stay missing; preview never probes, repairs or journals. */
+export function readBrainRecoveryFenceReadOnly({ manifestPath, platform = process.platform, machineLockRoot,
+  lockRootOptions = {},
 } = {}) {
   const identity = brainIdentityFromManifest(manifestPath);
-  const lexicalRoot = resolve(machineLockRoot || defaultMachineLockRoot(platform));
-  if (!existsSync(lexicalRoot)) return null;
-  const state = lstatSync(lexicalRoot);
-  if (!state.isDirectory() || state.isSymbolicLink()) {
-    throw failure("brain_lifecycle_unsafe", "the machine Brain lock root must be one real directory");
+  for (const root of brainLockRootsReadOnly({ ...lockRootOptions, platform, machineLockRoot })) {
+    const fence = readRecoveryFenceAtPath(join(root, `brain-update-recovery-${identity}.json`));
+    if (fence) return fence;
   }
-  if (platform !== "win32" && ((state.mode & 0o002) === 0 || (state.mode & 0o1000) === 0)) {
-    throw failure(
-      "brain_lifecycle_unsafe",
-      "the machine Brain lock root does not have the required shared permissions",
-    );
-  }
-  const root = realpathSync(lexicalRoot);
-  return readRecoveryFenceAtPath(join(root, `brain-update-recovery-${identity}.json`));
+  return null;
 }
 
 export function writeBrainRecoveryFence({
@@ -254,13 +206,14 @@ export function writeBrainRecoveryFence({
   transactionId,
   platform = process.platform,
   machineLockRoot,
+  home, lockRootOptions = {},
 } = {}) {
   if (!/^[a-f0-9]{32}$/u.test(String(transactionId || ""))) {
     throw new TypeError("a valid Brain update transaction id is required");
   }
-  const coordinates = brainLifecycleCoordinates({ manifestPath, platform, machineLockRoot });
+  const coordinates = brainLifecycleCoordinates({ manifestPath, platform, machineLockRoot, home, lockRootOptions });
   const path = join(coordinates.root, `brain-update-recovery-${coordinates.identity}.json`);
-  const existing = readBrainRecoveryFence({ manifestPath, platform, machineLockRoot });
+  const existing = readBrainRecoveryFence({ manifestPath, platform, machineLockRoot, home, lockRootOptions });
   if (existing) {
     if (existing.transaction_id !== transactionId) {
       throw failure("brain_lifecycle_recovery_required", "this Brain already has an unresolved update recovery fence");
@@ -277,7 +230,7 @@ export function writeBrainRecoveryFence({
     writeFileSync(path, `${JSON.stringify(value)}\n`, { encoding: "utf8", flag: "wx", mode: 0o644 });
   } catch (error) {
     if (error?.code !== "EEXIST") throw error;
-    const collision = readBrainRecoveryFence({ manifestPath, platform, machineLockRoot });
+    const collision = readBrainRecoveryFence({ manifestPath, platform, machineLockRoot, home, lockRootOptions });
     if (collision?.transaction_id !== transactionId) {
       throw failure("brain_lifecycle_recovery_required", "this Brain already has an unresolved update recovery fence");
     }
@@ -290,8 +243,9 @@ export function clearBrainRecoveryFence({
   transactionId,
   platform = process.platform,
   machineLockRoot,
+  home, lockRootOptions = {},
 } = {}) {
-  const existing = readBrainRecoveryFence({ manifestPath, platform, machineLockRoot });
+  const existing = readBrainRecoveryFence({ manifestPath, platform, machineLockRoot, home, lockRootOptions });
   if (!existing) return false;
   if (existing.transaction_id !== transactionId) {
     throw failure("brain_lifecycle_recovery_required", "the Brain update recovery fence belongs to another transaction");
@@ -379,13 +333,15 @@ function releaseOwner(path, token, platform, { removeDirectory, waitSync }) {
   return true;
 }
 
-export function acquireBrainLifecycleLock({
+function acquireLifecycleSlot({
+  coordinates,
   manifestPath,
   operation,
   retryCommand,
   home = homedir(),
   platform = process.platform,
   machineLockRoot,
+  lockRootOptions = {},
   staleMs = DEFAULT_STALE_MS,
   isOwnerAlive = ownerAlive,
   now = () => new Date(),
@@ -401,8 +357,7 @@ export function acquireBrainLifecycleLock({
   if (!operation || !/^[a-z][a-z0-9-]{1,31}$/u.test(String(operation))) {
     throw new TypeError("a bounded lifecycle operation name is required");
   }
-  void home;
-  const path = lockDirectory({ manifestPath, platform, machineLockRoot });
+  const path = join(coordinates.root, `brain-lifecycle-${coordinates.identity}.lock`);
   const staleAfter = Math.max(MIN_STALE_MS, Number(staleMs) || 0);
   const currentTime = () => {
     const value = now();
@@ -439,7 +394,13 @@ export function acquireBrainLifecycleLock({
       // Identity checks reject replacement directories; the fixed exclusive
       // slot closes the check-to-write race without adding a second owner.
       assertSameDirectory(path, acquiredDirectory);
-      publishOwner(join(path, OWNER_FILE), publication, { encoding: "utf8", flag: "wx", mode: 0o600 });
+      try { publishOwner(join(path, OWNER_FILE), publication, { encoding: "utf8", flag: "wx", mode: 0o600 }); }
+      catch (error) {
+        // A denied shared-slot write may continue privately. Remove only our
+        // unchanged, empty directory so it cannot strand a phantom contender.
+        try { assertSameDirectory(path, acquiredDirectory); if (readdirSync(path).length === 0) rmdirSync(path); } catch {}
+        throw error;
+      }
       try {
         assertSameDirectory(path, acquiredDirectory);
         const published = readOwner(path, platform);
@@ -550,21 +511,79 @@ export function acquireBrainLifecycleLock({
     }
   }
 
-  if (operation !== "update") {
-    const fence = readBrainRecoveryFence({ manifestPath, platform, machineLockRoot });
-    if (fence) {
-      try { releaseOwner(path, token, platform, { removeDirectory, waitSync }); }
-      catch { log("The Brain lifecycle lock could not be released; retry after its recovery grace period."); }
-      throw failure(
-        "brain_lifecycle_recovery_required",
-        `a prior Brain update requires verified recovery before ${operation} can write`,
-      );
-    }
-  }
-  return ownedLifecycleLock({ path, token, operation, platform, staleAfter, removeDirectory, waitSync, log });
+  return ownedLifecycleLock({ path, token, operation, platform, staleAfter, removeDirectory, waitSync, log, ...coordinates });
 }
 
-function ownedLifecycleLock({ path, token, operation, platform, staleAfter, removeDirectory, waitSync, log }) {
+function together(data, account, legacy) {
+  const slots = [...new Set([data, legacy, account].filter(Boolean))];
+  if (slots.length === 1 && !account && !legacy) return data;
+  return Object.freeze({ ...data, ...(account ? { accountPath: account.path } : {}), ...(legacy ? { legacyPath: legacy.path } : {}),
+    assertOwned() { for (const slot of slots) slot.assertOwned(); return true; },
+    release() { return slots.map(slot => slot.release()).every(Boolean); },
+    childDelegation() { return { ...data.childDelegation(),
+      ...(account && account !== data ? { account: account.childDelegation() } : {}),
+      ...(legacy && legacy !== data && legacy !== account ? { legacy: legacy.childDelegation() } : {}) }; },
+  });
+}
+
+export function acquireBrainLifecycleLock(options = {}) {
+  const { manifestPath, platform = process.platform, machineLockRoot, home, operation, lockRootOptions = {} } = options;
+  if (!operation || !/^[a-z][a-z0-9-]{1,31}$/u.test(String(operation))) {
+    throw new TypeError("a bounded lifecycle operation name is required");
+  }
+  const coordinates = brainLifecycleCoordinates(options);
+  // Every Windows writer, including an explicit override, takes the same
+  // account-and-Brain slot before publishing any selected-root owner. A scan
+  // cannot establish exclusion when the other token cannot read a shared root.
+  const accountCoordinates = resolveBrainAccountLockRoot({ ...lockRootOptions, platform, home,
+    restrictWindowsDirectory: lockRootOptions.restrictWindowsDirectory ?? options.restrictWindowsDirectory });
+  let account, legacy, data;
+  try {
+    if (accountCoordinates) account = acquireLifecycleSlot({ ...options,
+      coordinates: accountCoordinates.root === coordinates.root ? coordinates : { ...accountCoordinates, identity: coordinates.identity } });
+    const legacyCoordinates = resolveLegacyBrainLockRoot({ ...lockRootOptions, platform });
+    if (legacyCoordinates) {
+      try { legacy = account?.root === legacyCoordinates.root ? account : acquireLifecycleSlot({ ...options,
+        coordinates: legacyCoordinates.root === coordinates.root ? coordinates : { ...legacyCoordinates, identity: coordinates.identity } }); }
+      catch (error) { if (!legacyBrainLockUnavailable(error)) throw error; }
+    }
+    if (platform === "win32" && !legacy) announcePrivateBrainLock({ ...lockRootOptions,
+      root: coordinates.root, home, operation, platform });
+    // Fixed order: account, released shared slot, then an optional explicit or
+    // private data root. Never release the shared slot while returning a lease.
+    data = account?.root === coordinates.root ? account : legacy?.root === coordinates.root ? legacy :
+      platform === "win32" && !legacy && coordinates.root === legacyCoordinates?.root ? account :
+        acquireLifecycleSlot({ ...options, coordinates });
+    // Alternate roots exist only on Windows. Re-running the stricter POSIX
+    // preview check here changed the released mutating permission contract.
+    const roots = platform === "win32" ? brainLockRootsReadOnly({ ...lockRootOptions, platform, machineLockRoot }) : [];
+    for (const root of roots) {
+      if (root === coordinates.root || root === legacy?.root || root === account?.root) continue;
+      let other;
+      try { other = lstatSync(join(root, `brain-lifecycle-${coordinates.identity}.lock`)); }
+      catch (error) { if (error?.code === "ENOENT") continue; throw error; }
+      if (!other.isDirectory() || other.isSymbolicLink()) {
+        throw failure("brain_lifecycle_unsafe", "the alternate Brain lifecycle lock must be one real directory");
+      }
+      // Recover an abandoned alternate slot only through the same proven-dead
+      // rule as the chosen slot; the account lease serializes same-user reapers.
+      const alternate = acquireLifecycleSlot({ ...options, coordinates: { ...coordinates, root } });
+      alternate.release();
+    }
+    if (operation !== "update") {
+      const fence = readRecoveryFenceAtPath(join(coordinates.root, `brain-update-recovery-${coordinates.identity}.json`)) ||
+        (legacy && readRecoveryFenceAtPath(join(legacy.root, `brain-update-recovery-${coordinates.identity}.json`))) ||
+        (platform === "win32" && readBrainRecoveryFenceReadOnly({ manifestPath, platform, machineLockRoot, lockRootOptions }));
+      if (fence) throw failure("brain_lifecycle_recovery_required", `a prior Brain update requires verified recovery before ${operation} can write`);
+    }
+    return together(data, account, legacy);
+  } catch (error) {
+    for (const slot of new Set([data, legacy, account].filter(Boolean))) slot.release();
+    throw error;
+  }
+}
+
+function ownedLifecycleLock({ path, token, operation, platform, staleAfter, removeDirectory, waitSync, log, root = dirname(path), rootKind, identity }) {
   const ownerPath = join(path, OWNER_FILE);
   const assertOwned = () => {
     const owner = readOwner(path, platform);
@@ -593,20 +612,21 @@ function ownedLifecycleLock({ path, token, operation, platform, staleAfter, remo
   const childDelegation = () => {
     assertOwned();
     if (operation !== "update") throw failure("brain_lifecycle_unsafe", "only an update lease can pass to its child");
-    return { schema_version: 1, pid: process.pid, token, process_instance: CURRENT_PROCESS_INSTANCE };
+    return { schema_version: 1, pid: process.pid, token, process_instance: CURRENT_PROCESS_INSTANCE,
+      coordinates: { root, rootKind, identity } };
   };
-  return Object.freeze({ path, operation: String(operation), assertOwned, release, childDelegation });
+  return Object.freeze({ path, root, rootKind, identity, operation: String(operation), assertOwned, release, childDelegation });
 }
 
 /** Transfer the occupied slot without ever releasing the writer boundary. The
  * child gets a fresh token, so parent exit cleanup cannot release its lease. */
-export function adoptParentBrainLifecycleLock({ manifestPath, delegation, platform = process.platform,
-  machineLockRoot, parentPid = process.ppid, isOwnerAlive = ownerAlive,
+function adoptLifecycleSlot({ coordinates, manifestPath, delegation, platform = process.platform,
+  machineLockRoot, lockRootOptions = {}, home, parentPid = process.ppid, isOwnerAlive = ownerAlive,
   log = message => console.error(message),
   restrictWindowsDirectory = (path, options) => (process.platform === "win32"
     ? restrictWindowsDirectoryToCurrentUser(path, options) : undefined),
 } = {}) {
-  const path = lockDirectory({ manifestPath, platform, machineLockRoot });
+  const path = join(coordinates.root, `brain-lifecycle-${coordinates.identity}.lock`);
   try { assertPrivateDirectory(path, "Brain lifecycle lock", platform); }
   catch { throw failure("brain_lifecycle_lost", "the parent update lease could not be verified"); }
   const directory = lstatSync(path, { bigint: true });
@@ -643,7 +663,7 @@ export function adoptParentBrainLifecycleLock({ manifestPath, delegation, platfo
       }
     } });
     written = false;
-    const lock = ownedLifecycleLock({ path, token, operation: "update", platform,
+    const lock = ownedLifecycleLock({ path, token, operation: "update", platform, ...coordinates,
       staleAfter: DEFAULT_STALE_MS, removeDirectory: rmdirSync,
       waitSync: ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms), log });
     try { lock.assertOwned(); } catch (error) { lock.release(); throw error; }
@@ -654,6 +674,71 @@ export function adoptParentBrainLifecycleLock({ manifestPath, delegation, platfo
       rmdirSync(staging);
     } catch { log("The temporary update lease handoff could not be removed."); }
   }
+}
+
+export function adoptParentBrainLifecycleLock(options = {}) {
+  const { manifestPath, delegation, platform = process.platform, machineLockRoot, lockRootOptions = {}, home } = options;
+  const identity = brainIdentityFromManifest(manifestPath);
+  const accountCoordinates = resolveBrainAccountLockRoot({ ...lockRootOptions, platform, home,
+    restrictWindowsDirectory: lockRootOptions.restrictWindowsDirectory ?? options.restrictWindowsDirectory });
+  let account, legacy, data;
+  try {
+    let bound = delegation?.coordinates;
+    if (!bound) {
+      // The previous package delegated only its owner token. Acquire the new
+      // account boundary before adopting that exact legacy slot, so a package
+      // transition does not silently drop same-account exclusion.
+      if (accountCoordinates) account = acquireLifecycleSlot({ ...options, operation: "update",
+        coordinates: { ...accountCoordinates, identity } });
+      const roots = brainLockRootsReadOnly({ ...lockRootOptions, platform, machineLockRoot });
+      for (const root of roots) {
+        const owner = readOwner(join(root, `brain-lifecycle-${identity}.lock`), platform);
+        if (owner?.token !== delegation?.token || owner?.pid !== delegation?.pid) continue;
+        if (bound) throw failure("brain_lifecycle_lost", "the parent update lease is ambiguous");
+        const candidate = brainLockRootCandidates({ ...lockRootOptions, platform, machineLockRoot })
+          .find(candidate => { try { return candidate.path && realpathSync(candidate.path) === root; } catch { return false; } });
+        bound = { root, rootKind: candidate.kind, identity };
+      }
+    }
+    const candidates = [...brainLockRootCandidates({ ...lockRootOptions, platform, machineLockRoot }),
+      ...(accountCoordinates ? [{ path: accountCoordinates.root, kind: "account" }] : [])];
+    if (!bound || bound.identity !== identity || !candidates.some(candidate => candidate.path &&
+        candidate.kind === bound.rootKind && (() => {
+          try { return realpathSync(candidate.path) === bound.root; } catch { return false; }
+        })())) {
+      throw failure("brain_lifecycle_lost", "the parent update lease coordinates could not be verified");
+    }
+    const sameRoot = accountCoordinates?.root === bound.root;
+    if (accountCoordinates && !sameRoot && !account && (delegation.account?.coordinates?.root !== accountCoordinates.root ||
+        delegation.account?.coordinates?.identity !== identity)) {
+      throw failure("brain_lifecycle_lost", "the parent account lease could not be verified");
+    }
+    const legacyCoordinates = resolveLegacyBrainLockRoot({ ...lockRootOptions, platform });
+    const legacyBound = delegation?.legacy?.coordinates;
+    if (delegation?.legacy && (!legacyCoordinates || legacyBound?.root !== legacyCoordinates.root ||
+        legacyBound?.rootKind !== "shared" || legacyBound?.identity !== identity)) {
+      throw failure("brain_lifecycle_lost", "the parent legacy lease could not be verified");
+    }
+    if (legacyCoordinates && legacyCoordinates.root !== bound.root && !delegation?.legacy) {
+      // Older parents did not delegate this extra slot. Acquire it before
+      // transfer; an occupied released slot is still busy, never a fallback.
+      try { legacy = account?.root === legacyCoordinates.root ? account : acquireLifecycleSlot({ ...options,
+        operation: "update", coordinates: { ...legacyCoordinates, identity } }); }
+      catch (error) { if (!legacyBrainLockUnavailable(error)) throw error; }
+    }
+    // Transfer the selected slot first. The parent retains the common boundary
+    // until the second transfer completes, including a crash between transfers.
+    data = adoptLifecycleSlot({ ...options, coordinates: bound });
+    if (sameRoot) account = data;
+    if (legacyCoordinates?.root === bound.root) legacy = data;
+    else if (delegation?.legacy) legacy = adoptLifecycleSlot({ ...options,
+      delegation: delegation.legacy, coordinates: { ...legacyCoordinates, identity } });
+    if (accountCoordinates && !sameRoot && !account) account = adoptLifecycleSlot({ ...options,
+      delegation: delegation.account, coordinates: { ...accountCoordinates, identity } });
+    if (platform === "win32" && !legacy) announcePrivateBrainLock({ ...lockRootOptions,
+      root: bound.root, home, operation: "update", platform });
+    return together(data, account, legacy);
+  } catch (error) { for (const slot of new Set([data, legacy, account].filter(Boolean))) slot.release(); throw error; }
 }
 
 export async function withBrainLifecycleLock(options, task) {

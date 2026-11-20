@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { validateBankProviderManifest } from "../operations/bank-provider-command.mjs";
+const manifestSchema = JSON.parse(readFileSync(new URL("../manifest.schema.json", import.meta.url), "utf8"));
 import { DatabaseSync } from "node:sqlite";
 import {
   mkdtempSync,
@@ -78,6 +80,7 @@ try {
   assert.equal(JSON.parse(readFileSync(domainManifest, "utf8")).brain.domain, domain);
 
   const target = join(sandbox, "Financial Brain", "brain.manifest.json");
+  const setupDomain = "clean-brain-brain.owner-subdomain.workers.dev";
   const installedManifestOptions = {
     home: sandbox,
     stateDirectory: join(sandbox, "installed-state"),
@@ -111,7 +114,7 @@ try {
     cmdProvision: async (path) => {
       events.push("provision");
       const value = JSON.parse(readFileSync(path, "utf8"));
-      value.infrastructure.cloudflare.d1_database_id = "fixture-d1";
+      value.infrastructure.cloudflare.d1_database_id = "11111111-2222-4333-8444-555555555555";
       writeFileSync(path, JSON.stringify(value));
     },
     cmdMigrate: async (_path, options) => {
@@ -127,10 +130,16 @@ try {
         .find((binding) => binding.name === "OCR_ENABLED");
       assert.equal(ocrEnabled?.text, "1",
         "initial deployment must render the enabled setting without a later brain update");
-      value.brain.domain = "clean-brain.owner-subdomain.workers.dev";
-      writeFileSync(path, JSON.stringify(value));
+      // Deploy proves the upload; setup owns the separate domain save.
+      assert.equal(Object.hasOwn(value.brain, "domain"), false);
+    },
+    domainSaveOptions: {
+      readSubdomain: async () => { events.push("domain-read"); return { subdomain: "owner-subdomain" }; },
+      verifyWorkersDevCandidate: async () => { events.push("domain-probe"); return { ok: true }; },
     },
     cmdSecrets: async (_path, options) => {
+      assert.equal(JSON.parse(readFileSync(target, "utf8")).brain.domain,
+        setupDomain, "setup saves the verified address before keys and smoke");
       events.push("secrets");
       assert.equal(options.explicitAdminKey, key);
     },
@@ -145,8 +154,8 @@ try {
     },
     wireAgents: async (manifest) => {
       events.push("wire");
-      assert.equal(manifest.infrastructure.cloudflare.d1_database_id, "fixture-d1");
-      assert.equal(manifest.brain.domain, "clean-brain.owner-subdomain.workers.dev");
+      assert.equal(manifest.infrastructure.cloudflare.d1_database_id, "11111111-2222-4333-8444-555555555555");
+      assert.equal(manifest.brain.domain, setupDomain);
       return { wired: ["Claude Code"], failures: [], skipped: [] };
     },
     writeClaudeWorkspaceGuide: (path, options) => {
@@ -159,13 +168,14 @@ try {
     backlogCount: async () => 0,
     installedManifestOptions,
   });
-  assert.deepEqual(events, ["verify", "provision", "migrate", "deploy", "secrets", "drain", "health", "wire", "claude-guide"]);
+  assert.deepEqual(events, ["verify", "provision", "migrate", "deploy", "domain-read", "domain-probe", "secrets", "drain", "health", "wire", "claude-guide"]);
   assert.equal(ocrConsentPrompts, 1, "fresh setup asks for OCR consent exactly once");
   const saved = JSON.parse(readFileSync(target, "utf8"));
   assert.equal(Object.hasOwn(saved.client, "primary_contact"), false,
     "fresh setup omits an unknown optional contact");
   assert.equal(saved.infrastructure.cloudflare.account_id, oneAccount.id);
-  assert.equal(saved.brain.domain, "clean-brain.owner-subdomain.workers.dev");
+  assert.equal(saved.brain.domain, setupDomain);
+  validateBankProviderManifest(saved, manifestSchema);
   assert.equal(readInstalledManifest(installedManifestOptions), realpathSync.native(target));
 
   const resumedEvents = [];
@@ -569,6 +579,54 @@ try {
     assert.equal(mode & 0o777, 0o600);
     assert.equal(lstatSync(installedManifestPointerPath(installedManifestOptions)).mode & 0o777, 0o600);
     assert.equal(lstatSync(installedManifestOptions.stateDirectory).mode & 0o777, 0o700);
+  }
+  // The actual setup orchestration, with external boundaries injected, reaches
+  // the domain decision before keys on every arm. A denied read stays optional.
+  for (const arm of ["missing", "existing", "custom", "denied"]) {
+    const path = join(sandbox, `domain-${arm}.json`);
+    const value = structuredClone(saved);
+    if (arm === "missing" || arm === "denied") delete value.brain.domain;
+    if (arm === "custom") value.brain.domain = "brain.example.invalid";
+    const raw = JSON.stringify(value);
+    writeFileSync(path, raw);
+    const stages = [], lines = [];
+    let reads = 0, probes = 0;
+    await cmdSetup(path, {
+      flags: {}, ask: prompt, doctorRunAll: async () => [],
+      configureStandardAdminKeyStorage: () => ({ changed: false }),
+      prepareSetupAdminKey: async () => ({ source: "durable", value: key, plan: { backend: "file" } }),
+      setupWorkerScriptExists: async () => false,
+      cmdVerify: async () => {}, cmdProvision: async () => {}, cmdMigrate: async () => {},
+      cmdDeploy: async (_target, options) => { assert.equal(options.persistDomain, false); stages.push("deploy"); },
+      domainSaveOptions: {
+        readSubdomain: async () => {
+          reads++; stages.push("address");
+          if (arm === "denied") throw new Error("GET failed (403): 10000");
+          return { subdomain: "owner-subdomain" };
+        },
+        verifyWorkersDevCandidate: async () => { probes++; return { ok: true }; },
+        report: line => lines.push(line),
+      },
+      cmdSecrets: async () => {
+        stages.push("keys");
+        const current = JSON.parse(readFileSync(path, "utf8"));
+        if (arm === "missing") assert.equal(current.brain.domain, saved.brain.domain);
+      },
+      cmdDrain: async () => {}, cmdHealth: async () => { stages.push("health"); },
+      wireAgents: async () => ({ wired: [], failures: [], skipped: [] }), backlogCount: async () => 0,
+      installedManifestOptions,
+    });
+    assert.equal(stages[0], "deploy");
+    assert.equal(stages.at(-1), "health");
+    assert.equal(reads, ["missing", "denied"].includes(arm) ? 1 : 0);
+    assert.equal(probes, arm === "missing" ? 1 : 0);
+    validateBankProviderManifest(JSON.parse(readFileSync(path, "utf8")), manifestSchema);
+    if (arm !== "missing") assert.equal(readFileSync(path, "utf8"), raw);
+    if (arm === "denied") {
+      assert.equal(lines.length, 1); assert.match(lines[0], /BRAIN_DOMAIN_NOT_SAVED/);
+      assert.doesNotMatch(lines[0], /token|paste|recovery|sign in/i);
+      assert.deepEqual(stages, ["deploy", "address", "keys", "health"]);
+    }
   }
   console.log("clean setup path: all focused tests passed");
 } finally {

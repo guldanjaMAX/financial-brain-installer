@@ -9,7 +9,8 @@ function fixture() {
   const root = mkdtempSync(join(tmpdir(), "lock-release-"));
   const manifestPath = join(root, "brain.manifest.json");
   writeFileSync(manifestPath, "{}");
-  return { manifestPath, machineLockRoot: join(root, "locks"), operation: "update", platform: "win32", restrictWindowsDirectory() {} };
+  return { manifestPath, machineLockRoot: join(root, "AppData", "Local", "FinancialBrain", "account-locks"), home: root,
+    lockRootOptions: { windowsAccountHome: root, restrictWindowsDirectory() {} }, operation: "update", platform: "win32", restrictWindowsDirectory() {} };
 }
 
 // Fixed seed 0x427b1 varies writer operations across the complete suspension/
@@ -79,6 +80,7 @@ for (const phase of ["acl", "publication"]) test(`paused acquirer cannot publish
     import { writeFileSync, existsSync } from 'node:fs';
     import { dirname } from 'node:path';
     const options = JSON.parse(process.argv[1]);
+    options.lockRootOptions.restrictWindowsDirectory = () => {};
     try {
       const pause = path => {
         writeFileSync(options.manifestPath + '.paused', path);

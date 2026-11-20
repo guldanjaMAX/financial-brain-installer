@@ -1,4 +1,6 @@
-import { ownerConfidenceLine, documentResponseConfidence } from "../src/lib/confidence.js";
+import { assertOwnerEvidence } from '../../test/helpers/owner-evidence-contract.mjs';
+import { ownerEvidenceNote } from '../src/lib/owner-evidence.js';
+import { documentResponseConfidence } from "../src/lib/confidence.js";
 import { assertDocumentAnswer } from "./helpers/document-answer-contract.mjs";
 /**
  * "Which of my entities are still open and which are closed?"
@@ -728,10 +730,11 @@ test("the remote MCP renders the guidance above the refusal and leaves the incom
   const refusalBlock = [
     "I can try a more specific search, but I didn't find a matching record in this search.",
     "Why: answer model found no direct support",
-    "", ownerConfidenceLine(documentResponseConfidence(refused)),
+    "", ownerEvidenceNote(documentResponseConfidence(refused)),
     "Next: ask again with a name, date or exact phrase the record would contain.",
   ].join("\n");
-  assert.ok(rendered.includes(refusalBlock), "the healthy refusal keeps its reviewed Why and Next lines");
+  assertOwnerEvidence(rendered);
+  assert.ok(rendered.includes(refusalBlock), "the healthy refusal keeps its reviewed Why, evidence and Next lines");
   assert.ok(
     rendered.indexOf(COPY.not_established.unsupported) < rendered.indexOf(refusalBlock),
     "the guidance goes above the search-scoped refusal",
@@ -756,7 +759,7 @@ test("the remote MCP renders the guidance above the refusal and leaves the incom
   const noticeBlock = [
     answerText(incomplete),
     "",
-    ownerConfidenceLine(documentResponseConfidence(incomplete)),
+    ownerEvidenceNote(documentResponseConfidence(incomplete), answerText(incomplete)),
     'Next: ask again in a minute; if it fails twice, say "check my Brain".',
   ].join("\n");
 

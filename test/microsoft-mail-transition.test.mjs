@@ -107,7 +107,7 @@ test("cutover retains historical citations through real delivery, tombstones, an
     },
     removeDocuments: async () => { deletions++; return { applied: 1, pending: 0 }; },
   });
-  assert.equal(sent, 3, "new mail actually reached the writer");
+  assert.equal(sent, 4, "new mail and retained status actually reached the writer");
   assert.equal(deletions, 0);
   assert.deepEqual([...stored].slice(0, 2), before);
   assert.equal(stored.get(original.uid).citation, original.citation);
@@ -115,7 +115,8 @@ test("cutover retains historical citations through real delivery, tombstones, an
   assert.equal(run.mail_transition.retained_tombstones, 1);
   const control = await collect({ start: null, value: [{ id: "missing", "@removed": {} }] });
   assert.equal(control.reads.length, 1);
-  assert.equal(control.result.deletions.length, 1, "ordinary unbounded connector retains its deletion behavior");
+  assert.equal(control.result.deletions.length, 0, "unbounded Microsoft sync also retains history");
+  assert.ok(control.result.documents.some(doc => doc.metadata.retained_source_id === "outlook:message:missing"));
 });
 
 test("missing or malformed message dates stop before delivery or cursor promotion", async () => {

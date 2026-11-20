@@ -1,7 +1,8 @@
+import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  GRANT_VIEWS, GrantWorkspace, OWNER_VIEWS, OwnerHeader, OwnerWorkspace,
+  App, GRANT_VIEWS, GrantWorkspace, OWNER_VIEWS, OwnerHeader, OwnerWorkspace,
   SIGNED_OUT_NOTICE,
   enrollmentInviteFromHash, initialOwnerView, ownerViewRequiresEntity, ownerViewScopeGate,
   scopeGateRequiresEntity, visibleView,
@@ -40,7 +41,83 @@ const ownerMe: Me = {
   connections: [],
 };
 
-afterEach(() => vi.unstubAllGlobals());
+vi.mock("react", async (importOriginal) => {
+  const original = await importOriginal<typeof import("react")>();
+  return { ...original, useState: vi.fn(original.useState), useEffect: vi.fn(original.useEffect), useRef: vi.fn(original.useRef), useCallback: vi.fn(original.useCallback) };
+});
+
+afterEach(async () => {
+  const original = await vi.importActual<typeof import("react")>("react");
+  vi.mocked(React.useState).mockImplementation(original.useState);
+  vi.mocked(React.useEffect).mockImplementation(original.useEffect);
+  vi.mocked(React.useRef).mockImplementation(original.useRef);
+  vi.mocked(React.useCallback).mockImplementation(original.useCallback);
+  vi.unstubAllGlobals();
+});
+
+function appHarness() {
+  const states: unknown[] = [];
+  let cursor = 0;
+  const effects: React.EffectCallback[] = [];
+  vi.mocked(React.useState).mockImplementation(((initial: unknown) => {
+    const slot = cursor++;
+    if (!(slot in states)) states[slot] = typeof initial === "function" ? initial() : initial;
+    return [states[slot], (next: unknown) => { states[slot] = typeof next === "function" ? next(states[slot]) : next; }];
+  }) as typeof React.useState);
+  vi.mocked(React.useCallback).mockImplementation((callback) => callback);
+  vi.mocked(React.useRef).mockImplementation(((value: unknown) => ({ current: value })) as typeof React.useRef);
+  vi.mocked(React.useEffect).mockImplementation((effect) => { effects.push(effect); });
+  vi.stubGlobal("location", { search: "", hash: "", hostname: "brain.invalid" });
+  return { render: () => { cursor = 0; return App(); }, effects };
+}
+
+describe("opening and first Home", () => {
+  it("shows a centred opening mark while the real session read is pending, without flashing sign-in", async () => {
+    const harness = appHarness();
+    let resolve!: (value: Response) => void;
+    const fetch = vi.fn(() => new Promise<Response>((done) => { resolve = done; }));
+    vi.stubGlobal("fetch", fetch);
+    const pending = renderToStaticMarkup(harness.render());
+    harness.effects[0]();
+    expect(fetch).toHaveBeenCalledWith("/api/app/me", expect.anything());
+    expect(pending).toContain("Opening your Brain…");
+    expect(pending).toContain("FB");
+    expect(pending).toContain('role="status"');
+    expect(pending).not.toContain("Welcome back");
+    resolve(Response.json({ signed_in: false }));
+    await vi.waitFor(() => expect(harness.render()?.type).toBe(Gate));
+  });
+
+  it("shows the enrollment notice on the first Home only, and never again after leaving", async () => {
+    const harness = appHarness();
+    const fetch = vi.fn().mockResolvedValueOnce(Response.json({ signed_in: false })).mockResolvedValueOnce(Response.json(ownerMe));
+    vi.stubGlobal("fetch", fetch);
+    harness.render();
+    harness.effects[0]();
+    await vi.waitFor(() => expect(harness.render()?.type).toBe(Gate));
+    const gate = harness.render() as React.ReactElement<React.ComponentProps<typeof Gate>>;
+    await gate.props.onIn("✓ Passkey saved. Sign in with Touch ID from now on.");
+    await vi.waitFor(() => expect(harness.render()?.type).toBe(FinanceScopeProvider));
+    expect(fetch).toHaveBeenCalledTimes(2);
+    const workspace = () => (harness.render() as React.ReactElement<{ children: React.ReactElement<React.ComponentProps<typeof OwnerWorkspace>> }>).props.children;
+    expect(workspace().props.notice).toBe("✓ Passkey saved. Sign in with Touch ID from now on.");
+    expect(workspace().props.view).toBe("home");
+    workspace().props.setView("access");
+    expect(workspace().props.notice).toBeNull();
+    workspace().props.setView("home");
+    expect(workspace().props.notice).toBeNull();
+  });
+
+  it("renders the success notice as a calm status on Home only", () => {
+    const props = { owner: "Fixture Owner", me: ownerMe, setView: () => undefined, refresh: async () => undefined, notice: "✓ Passkey saved. Sign in with Touch ID from now on." };
+    const home = renderToStaticMarkup(<FinanceScopeProvider><OwnerWorkspace {...props} view="home" /></FinanceScopeProvider>);
+    expect(home).toContain(props.notice);
+    expect(home).toMatch(/role="status"[^>]*bg-good-bg/);
+    const access = renderToStaticMarkup(<FinanceScopeProvider><OwnerWorkspace {...props} view="access" /></FinanceScopeProvider>);
+    expect(access).toContain("Your passkeys");
+    expect(access).not.toContain(props.notice);
+  });
+});
 
 describe("principal workspace routing", () => {
   it("explains a mid-session sign-out without losing the owner's place", () => {
@@ -66,7 +143,7 @@ describe("principal workspace routing", () => {
 
   it("uses a visible mobile menu and keeps Access and passkeys directly findable", () => {
     const html = renderToStaticMarkup(
-      <OwnerHeader owner="Morgan Example" now="home" go={() => undefined} />,
+      <OwnerHeader owner="Fixture Owner" now="home" go={() => undefined} />,
     );
 
     expect(html).toContain("Access &amp; passkeys");
@@ -92,7 +169,7 @@ describe("principal workspace routing", () => {
     const html = renderToStaticMarkup(
       <FinanceScopeProvider>
         <OwnerWorkspace
-          owner="Morgan Example"
+          owner="Fixture Owner"
           me={ownerMe}
           view="review"
           setView={() => undefined}
@@ -100,14 +177,16 @@ describe("principal workspace routing", () => {
         />
       </FinanceScopeProvider>,
     );
-    expect(html).toContain("Choose one financial entity");
-    expect(html).toContain("Select one person, household, business, trust, property, or investment");
+    expect(html).toContain('id="scope-required-title"');
+    expect(html).toContain("Add &amp; Review</h1>");
+    expect(html.match(/<h1\b/g)).toHaveLength(1);
+    expect(html).not.toContain("Choose one financial entity");
     expect(html).not.toContain("Intake and decisions");
 
     const access = renderToStaticMarkup(
       <FinanceScopeProvider>
         <OwnerWorkspace
-          owner="Morgan Example"
+          owner="Fixture Owner"
           me={ownerMe}
           view="access"
           setView={() => undefined}
@@ -138,7 +217,7 @@ describe("principal workspace routing", () => {
     const waiting = renderToStaticMarkup(
       <FinanceScopeProvider>
         <OwnerWorkspace
-          owner="Morgan Example"
+          owner="Fixture Owner"
           me={ownerMe}
           view="home"
           setView={() => undefined}
@@ -147,6 +226,7 @@ describe("principal workspace routing", () => {
       </FinanceScopeProvider>,
     );
     expect(waiting).toContain("Checking your financial list");
+    expect(waiting.match(/Checking your financial list/g)).toHaveLength(1);
     expect(waiting).not.toContain("What deserves your attention");
 
     vi.stubGlobal("sessionStorage", {
@@ -157,7 +237,7 @@ describe("principal workspace routing", () => {
     const savedAllStillChecking = renderToStaticMarkup(
       <FinanceScopeProvider>
         <OwnerWorkspace
-          owner="Morgan Example"
+          owner="Fixture Owner"
           me={ownerMe}
           view="home"
           setView={() => undefined}
@@ -201,8 +281,9 @@ describe("passkey enrollment welcome", () => {
   });
 
   it("explains the secure device window and privacy boundary before offering enrollment", () => {
+    vi.stubGlobal("window", { PublicKeyCredential: class {} });
     const html = renderToStaticMarkup(
-      <Gate owner="Morgan Example" inviteCode="synthetic-invite" enrollmentKind="owner" onIn={() => undefined} />,
+      <Gate owner="Fixture Owner" inviteCode="synthetic-invite" enrollmentKind="owner" onIn={() => undefined} />,
     );
     expect(html).toContain("Here is what happens next");
     expect(html).toContain("secure passkey window");

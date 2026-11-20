@@ -1,3 +1,4 @@
+import { assertOwnerEvidence } from '../../test/helpers/owner-evidence-contract.mjs';
 /**
  * Zero results plus a degraded index must never instruct anyone to state an
  * absence.
@@ -168,9 +169,14 @@ function mkEnv({
     ADMIN_KEY: "k",
     DB: {
       prepare(sql) {
+        let docUid;
         return {
-          bind() { return this; },
+          bind(first) { docUid = first; return this; },
           all: async () => {
+            if (/AS total_chunks/.test(sql)) {
+              const chunks = rows.filter(row => row.doc_uid === docUid);
+              return {results:chunks.map(row => ({...row,total_chunks:chunks.length}))};
+            }
             if (/FROM sources s/.test(sql)) {
               if (coverageUnavailable) throw new Error("coverage read unavailable");
               return { results: coverageRows };
@@ -813,10 +819,11 @@ const unified = async (env, q = "the") => {
       infrastructure: { cloudflare: { account_id: "not-needed-with-a-domain" } },
     }));
     const printed = [];
+    let renderedBody;
     const realLog = console.log;
     console.log = (...a) => printed.push(a.join(" "));
     try {
-      await cmdAsk(manifest, {
+      renderedBody = await cmdAsk(manifest, {
         launchctl: () => { throw new Error("host helper forbidden"); },
         ask: async () => "What do my records say?",
         adminKey: readFileSync(keyPath, "utf8"),
@@ -835,9 +842,10 @@ const unified = async (env, q = "the") => {
       });
     } finally { console.log = realLog; }
     const out = printed.join("\n");
+    assertOwnerEvidence(out, renderedBody.confidence);
     check("CLI: an unavailable search does not print the refusal sentence",
       !/The documents do not answer the question/.test(out), out);
-    check("CLI: it prints the notice instead", /search is incomplete/i.test(out) && /Confidence: Low \(10%\)/.test(out), out);
+    check("CLI: it prints the notice instead", /search is incomplete/i.test(out) && /Missing or counted twice:/.test(out) && !/Confidence:/.test(out), out);
     check("CLI: it prints exact meaning-search counts instead of the vector degradation token",
       /Meaning search covers 12,400 of 48,000 chunks; keyword search covers all/.test(out) &&
         !/search is degraded: vector/.test(out), out);
@@ -864,10 +872,11 @@ const unified = async (env, q = "the") => {
       infrastructure: { cloudflare: { account_id: "not-needed-with-a-domain" } },
     }));
     const printed = [];
+    let renderedBody;
     const realLog = console.log;
     console.log = (...a) => printed.push(a.join(" "));
     try {
-      await cmdAsk(manifest, {
+      renderedBody = await cmdAsk(manifest, {
         launchctl: () => { throw new Error("host helper forbidden"); },
         ask: async () => "What does the payment record say?",
         adminKey: readFileSync(keyPath, "utf8"),
@@ -882,12 +891,13 @@ const unified = async (env, q = "the") => {
       });
     } finally { console.log = realLog; }
     const out = printed.join("\n");
+    assertOwnerEvidence(out, renderedBody.confidence);
     check("CLI: answer_withheld prints the reviewed notice",
       /available reading contains no readable matching statement/i.test(out), out);
     check("CLI: answer_withheld prints Why from evidence_gate",
       /Why.*amount did not match its cited span/is.test(out), out);
-    check("CLI: a rejected draft keeps a scored reading below the stale percentage",
-      /Confidence: Low \(30%\).*Why:.*Missing:/s.test(out) && !/77%/.test(out), out);
+    check("CLI: a rejected draft keeps its evidence limits without a visible score",
+      /Missing or counted twice:/.test(out) && !/Confidence:|77%/.test(out), out);
   } finally {
     rmSync(sandbox, { recursive: true, force: true });
   }
@@ -907,10 +917,11 @@ const unified = async (env, q = "the") => {
       infrastructure: { cloudflare: { account_id: "not-needed-with-a-domain" } },
     }));
     const printed = [];
+    let renderedBody;
     const realLog = console.log;
     console.log = (...a) => printed.push(a.join(" "));
     try {
-      await cmdAsk(manifest, {
+      renderedBody = await cmdAsk(manifest, {
         launchctl: () => { throw new Error("host helper forbidden"); },
         ask: async () => "Do my records contain this?",
         adminKey: readFileSync(keyPath, "utf8"),
@@ -926,11 +937,12 @@ const unified = async (env, q = "the") => {
       });
     } finally { console.log = realLog; }
     const out = printed.join("\n");
+    assertOwnerEvidence(out, renderedBody.confidence);
     check("CLI: incomplete coverage prints the provisional notice before any categorical refusal",
-      /1 record\(s\) were returned; the search is incomplete and matching records may be missing/i.test(out) && /Confidence: Low/.test(out) &&
+      /1 record\(s\) were returned; the search is incomplete and matching records may be missing/i.test(out) && /Missing or counted twice:/.test(out) &&
         !/The documents do not answer the question/.test(out), out);
     check("CLI: incomplete coverage suppresses confidence in absence",
-      /Confidence: Low \(10%\).*Why:.*Missing:/s.test(out) && !/99%/.test(out), out);
+      /Missing or counted twice:/.test(out) && !/Confidence:|99%/.test(out), out);
     check("CLI: incomplete coverage still explains the evidence-gate refusal",
       /candidate did not support the claim/.test(out), out);
   } finally {

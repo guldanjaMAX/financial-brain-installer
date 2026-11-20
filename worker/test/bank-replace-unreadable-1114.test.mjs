@@ -1,7 +1,9 @@
+import { bankRowHarness } from './bank-row-harness.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createProductFixture, seedOwnedEntity } from './product-contract-fixture.mjs';
 import { handleBankFeed, encryptAccessReference, decryptAccessReference } from '../src/lib/bank-feed.js';
+import { bankSelfcheckRows, captureUpdateSelfcheck, compareUpdateSelfcheck } from '../../operations/update-selfcheck.mjs';
 
 const ambientFetch=globalThis.fetch;let forbiddenFetches=0;
 test.before(()=>{globalThis.fetch=async()=>{forbiddenFetches++;throw Error('Ambient endpoint contact forbidden.');};});
@@ -20,11 +22,116 @@ async function fixture() {
   f.raw("UPDATE bank_feed_items SET institution_ref='institution-healthy',status='connected',status_detail=NULL WHERE item_ref='healthy'");
   return {...f, sealed, healthy};
 }
-async function route(f, path, body, {operator=false}={}) {
+async function route(f, path, body, {operator=false, parsedUrl=true}={}) {
   const headers = operator ? {'X-Admin-Key':f.env.ADMIN_KEY} : await f.ownerHeaders();
   const request = new Request('https://brain.invalid'+path,{method:body===undefined?'GET':'POST',headers:{...headers,'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})});
-  return handleBankFeed(f.env,request,new URL(request.url),path,{bankFeedNow:NOW,bankFeedFetchImpl:f.fetchImpl});
+  const url = new URL(request.url);
+  return handleBankFeed(f.env,request,parsedUrl ? url : null,url.pathname,{bankFeedNow:NOW,bankFeedFetchImpl:f.fetchImpl});
 }
+test('JSON bank page read proves saved access and detects a wrong key without a provider call', async () => {
+  const f = await fixture();
+  try {
+    let providerCalls = 0;
+    f.fetchImpl = async () => { providerCalls++; throw new Error('unexpected bank provider request'); };
+    const sqlStart = f.seen.sql.length;
+    const original = f.env.BANK_FEED_WRAPPING_KEY_V2;
+    const read = async () => {
+      const response = await route(f, '/api/bank-feed/status?update_selfcheck=1', undefined, {operator:true});
+      assert.equal(response.status, 200);
+      assert.match(response.headers.get('cache-control'), /no-store/i);
+      return response.json();
+    };
+    const initial = await read();
+    assert.deepEqual(initial.update_selfcheck.find(row => row.connection_ref === 'healthy'),
+      {connection_ref:'healthy', opens:true, code:'BANK_ACCESS_READABLE', state:'connected'});
+    f.raw("UPDATE bank_feed_items SET status='reauth_required', status_detail='Fixture reauthorization' WHERE item_ref='healthy'");
+    assert.deepEqual((await read()).update_selfcheck.find(row => row.connection_ref === 'healthy'),
+      {connection_ref:'healthy', opens:true, code:'BANK_ACCESS_READABLE', state:'reauth_required'});
+    f.raw("UPDATE bank_feed_items SET status='connected' WHERE item_ref='healthy'");
+    f.env.BANK_FEED_WRAPPING_KEY_V2 = randomKey();
+    const broken = await read();
+    assert.deepEqual(broken.update_selfcheck.find(row => row.connection_ref === 'healthy'),
+      {connection_ref:'healthy', opens:false, code:'BANK_ACCESS_REFERENCE_UNREADABLE', state:'connected'});
+    assert.equal(initial.update_selfcheck.length, broken.update_selfcheck.length);
+    const proof = JSON.stringify([initial, broken]);
+    for (const hidden of [original, f.env.ADMIN_KEY, f.sealed.ciphertext, f.sealed.iv, 'old-cursor']) {
+      assert.equal(proof.includes(hidden), false);
+    }
+    assert.equal(providerCalls, 0);
+    assert.ok(f.seen.sql.slice(sqlStart).every(sql => !/^\s*(?:INSERT|UPDATE|DELETE)/i.test(sql)));
+  } finally { f.close(); }
+});
+
+test('bank page and custody detect each connection transition through the JSON route', async t => {
+  const f = await fixture();
+  try {
+    const snapshot = (body, legacy) => captureUpdateSelfcheck({
+      bank: () => bankSelfcheckRows(body, { legacy }), secrets: () => [], sources: () => [],
+      daily: () => ({ present: false }), claude: () => ({ present: false }),
+    });
+    const read = async (legacy = false, parsedUrl = true) => {
+      const suffix = legacy ? '' : '?update_selfcheck=1';
+      const response = await route(f, '/api/bank-feed/status' + suffix, undefined, { operator: true, parsedUrl });
+      assert.equal(response.status, 200);
+      return response.json();
+    };
+    const healthy = await read();
+    const before = await snapshot(healthy, false);
+    const legacy = await snapshot(await read(true, false), true);
+    const custodyResponse = await route(f, '/api/bank-feed/custody', undefined, { operator: true });
+    assert.equal(custodyResponse.status, 200);
+    const custodyBody = await custodyResponse.json();
+    const custody = await snapshot(custodyBody, true);
+    assert.ok(custody.bank.value.some(row => row.ok), 'legacy opening reached local decryption');
+    const combined = await snapshot({ ...custodyBody, ...healthy }, false);
+    assert.equal(combined.bank.value.length, before.bank.value.length, 'matching legacy and current proofs collapse');
+    assert.equal(compareUpdateSelfcheck(before, combined).status, 'passed');
+    const originalKey = f.env.BANK_FEED_WRAPPING_KEY_V2;
+    const changes = [
+      ...['reauth_required', 'permission_revoked', 'error'].map(state => ({
+        label: state, state, apply: () => f.raw('UPDATE bank_feed_items SET status=?, status_detail=? WHERE item_ref=?', state, 'Fixture transition', 'healthy'),
+      })),
+      { label: 'removed', apply: () => f.raw("UPDATE bank_feed_items SET status='removed',status_detail='Fixture removed',removed_at=? WHERE item_ref='healthy'", NOW) },
+      { label: 'missing page row with custody retained', state: null, apply: () => { f.env.BANK_FEED_PROVIDER = 'simplefin'; } },
+      { label: 'unreadable saved access while the page still says connected', state: 'connected', opens: false,
+        apply: () => { f.env.BANK_FEED_WRAPPING_KEY_V2 = randomKey(); } },
+    ];
+    const reset = () => {
+      f.env.BANK_FEED_PROVIDER = 'plaid';
+      f.env.BANK_FEED_WRAPPING_KEY_V2 = originalKey;
+      f.raw("UPDATE bank_feed_items SET status='connected',status_detail=NULL,removed_at=NULL WHERE item_ref='healthy'");
+    };
+    let seed = 0x6a30b117;
+    while (changes.length) {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      const [{ label, state, opens = state === undefined ? undefined : state !== null, apply }] = changes.splice(seed % changes.length, 1);
+      await t.test(label, async () => {
+        reset();
+        const clean = await snapshot(await read(false, seed % 2 === 0), false);
+        assert.equal(compareUpdateSelfcheck(before, clean).status, 'passed');
+        assert.equal(compareUpdateSelfcheck(legacy, clean).status, 'not_checked');
+        assert.equal(compareUpdateSelfcheck(custody, clean).status, 'not_checked');
+        apply();
+        const start = f.seen.sql.length;
+        const broken = await read();
+        assert.ok(f.seen.sql.slice(start).some(sql => sql.includes('access_ciphertext')), 'live custody SELECT reached');
+        assert.ok(f.seen.sql.slice(start).every(sql => !/^\s*(?:INSERT|UPDATE|DELETE)/i.test(sql)));
+        const link = broken.update_selfcheck.find(row => row.connection_ref === 'healthy');
+        assert.equal(link?.state, state);
+        assert.equal(link?.opens, opens);
+        const after = await snapshot(broken, false);
+        for (const baseline of [before, legacy]) {
+          const result = compareUpdateSelfcheck(baseline, after);
+          assert.equal(result.checks[0].code, 'UPDATE_SELFCHECK_BANK_CHANGED');
+          assert.doesNotMatch(JSON.stringify(result), /\bhealthy\b|\bold\b/);
+        }
+        if (opens === false) {
+          assert.equal(compareUpdateSelfcheck(custody, after).checks[0].code, 'UPDATE_SELFCHECK_BANK_CHANGED');
+        }
+      });
+    }
+  } finally { f.close(); }
+});
 test('read-only custody reaches real opening, separates unreadable and healthy, returns no secret',async()=>{
   const f=await fixture();
   try {
@@ -339,7 +446,10 @@ test('Banks has one reconnect action for unreadable custody and a working repair
   const source=readFileSync(new URL('../../frontend/src/components/Settings.tsx',import.meta.url),'utf8');
   const a=source.indexOf('export function BankConnectionsSection('),b=source.indexOf('\nexport function ',a+1);
   const compiled=transformSync(source.slice(a,b),{loader:'tsx',format:'cjs',jsx:'transform'}).code;
-  const module={exports:{}};runInNewContext(compiled,{module,exports:module.exports,React:{createElement:(tag,props,...children)=>({tag,props,children}),Fragment:'fragment'},Section:'section',Note:'note',Attention:'attention',Empty:'empty',Row:'row',Chip:'chip',Confirm:'confirm',agoISO:x=>x,DISCONNECT_BANK_QUESTION:'Confirm disconnect?'});
+  const outcomeSource=readFileSync(new URL('../../frontend/src/lib/bank-outcome.ts',import.meta.url),'utf8');
+  const outcome={exports:{}};
+  runInNewContext(transformSync(outcomeSource,{loader:'ts',format:'cjs'}).code,{module:outcome,exports:outcome.exports});
+  const module={exports:{}};runInNewContext(compiled,{module,exports:module.exports,bankRowOutcome:outcome.exports.bankRowOutcome,Date:class extends Date {static now(){return Date.parse('2026-11-14T12:00:00Z');}},...bankRowHarness({Date:class extends Date {static now(){return Date.parse('2026-11-14T12:00:00Z');}}}),Section:'section',Note:'note',Attention:'attention',Empty:'empty',Row:'row',Chip:'chip',Confirm:'confirm',agoISO:x=>x,DISCONNECT_BANK_QUESTION:'Confirm disconnect?'});
   for(const unreadable of [true,false]){
     const rendered=JSON.stringify(module.exports.BankConnectionsSection({readState:'ready',busy:false,onDisconnect:()=>{},banks:{configured:true,connections:[{item_ref:'fixture',institution_label:'Fixture bank',status:'reauth_required',health:{state:unreadable?'needs_reconnect':'login_required',needs_reconnect:unreadable,needs_sign_in:!unreadable}}]}}));
     assert.match(rendered,/Fixture bank/);
@@ -808,9 +918,9 @@ test('R2 rolled-back page exposes retained-debt review and a separate resume con
   for(const debt of [false,true]) {
     const elements=new Map(),calls=[];
     const element=tag=>({tag,children:[],textContent:'',append(...children){this.children.push(...children);},replaceChildren(){this.children=[];}});
-    for(const id of ['content','message','resume','cancel'])elements.set(id,element(id));
     let state={state:'rolled_back',staged_events:debt?1:0,published_revision:1,can_resume_review:debt,detail:'Saved facts and retained activity are kept.'};
     const html=await (replacementPage()).text(),script=html.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/)[1];
+    for(const match of html.matchAll(/\bid="([^"]+)"/g))elements.set(match[1],element(match[1]));
     const sandbox={URLSearchParams,location:{search:'?operation_ref=fixture-operation'},sessionStorage:{getItem:()=>null,setItem:()=>{}},
       document:{getElementById:id=>elements.get(id),createElement:element,querySelectorAll:()=>[],createTextNode:text=>({textContent:text})},
       fetch:async(url,options)=>{
@@ -1387,9 +1497,9 @@ test('R4 active owner page keeps two open revision choices distinct',async()=>{
   const {runInNewContext}=await import('node:vm'),{replacementPage}=await import('../src/lib/bank-replacement-page.js');
   const elements=new Map(),created=[],calls=[];
   const element=tag=>{const e={tag,children:[],textContent:'',value:'',append(...c){this.children.push(...c);},replaceChildren(){this.children=[];}};created.push(e);return e;};
-  for(const id of ['content','message','resume','cancel'])elements.set(id,element(id));
   const decisions=[4,5].map((event_revision,i)=>({event_revision,event_index:0,provider_id:'posted-'+i,action:'review',date:'2026-10-30',amount_text:'USD 25.00',evidence:'Compare the pending and posted observations.',saved_occurrences:[{id:i+11,date:'2026-10-29',amount_text:'USD 25.00',pending:true}]}));
   const html=await replacementPage().text(),script=html.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/)[1];
+  for(const match of html.matchAll(/\bid="([^"]+)"/g))elements.set(match[1],element(match[1]));
   await runInNewContext(script,{URLSearchParams,location:{search:'?operation_ref=fixture-operation'},sessionStorage:{getItem:()=>null,setItem:()=>{}},
     document:{getElementById:id=>elements.get(id),createElement:element,querySelectorAll:()=>[],createTextNode:text=>({textContent:text})},
     fetch:async(url,options)=>{

@@ -60,6 +60,14 @@ It gives the same five answers for every problem: what happened, what stayed
 protected, whether retrying is safe, what to try next, and when a technician
 can help. The longer entries below add the provider-specific detail.
 
+An `UPDATE_SELFCHECK_*_CHANGED` code means the update detected a regression in
+bank access, secret names, source runs, the daily job, or Claude Code. Keep the
+private comparison receipt in the upgrade-bookmarks folder for your installer.
+`UPDATE_SELFCHECK_NOT_CHECKED` names a read the update could not verify. A retry
+can stay incomplete until it can reverify the original baseline.
+`UPDATE_SELFCHECK_RECEIPT_FAILED` means the private checkpoint or comparison
+receipt could not be verified. An earlier D1 restore receipt is retained.
+
 For `PROVENANCE_TARGET_REPAIR_INCOMPLETE`, the one-file repair could not verify
 its complete result. Nothing was lost. Accepted progress is saved and the
 original file is unchanged. Run a new read-only preview before retrying. If
@@ -253,23 +261,37 @@ caught the mismatch rather than resolve which account is intended.
 
 ### 3b. `Issue: CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED`
 
-**You see:** Cloudflare sign-in worked, but the account has no workers.dev
-subdomain registered yet, and this Brain has no custom domain, so its address
-lives on that subdomain. Nothing was created.
+**You see:** Cloudflare reports that the account has no registered workers.dev
+address. A routine check leaves this account setting unchanged.
 
-**Why:** a Cloudflare account that has never opened Workers & Pages has no
-workers.dev subdomain. This is an account setting. Waiting, a different network,
-or a different token reads the same account and gets the same answer, so the
-installer offers none of them.
+**Why:** this Brain needs an address on workers.dev, and Cloudflare returned
+404 with code 10007. Setup can reserve a neutral address automatically. A routine
+check cannot change the account's address.
 
-**Fix:** in the Cloudflare dashboard open Workers & Pages and register a
-workers.dev subdomain, then rerun the command the message names, usually
-`brain setup <manifest>` or `brain update <manifest>`.
+**Fix:** ask your installer to resume address setup for this Brain in the same
+Cloudflare account. When a Cloudflare page opens, check the account and click
+Allow. The installer reads the address again and reserves one only if it is
+still missing. A Brain with a saved custom domain skips this lookup.
 
-A Brain on its own custom domain is not stopped by this. Deploy only warns that
-the optional workers.dev route could not be enabled.
+**Who:** your installer, with you approving Cloudflare if asked.
 
-**Who:** you.
+### 3b.1. `Issue: CLOUDFLARE_WORKERS_SUBDOMAIN_REGISTER_FAILED`
+
+**You see:** the web address could not be reserved or confirmed, Cloudflare's
+masked message, and the help link:
+https://financialbrain.ai/help/CLOUDFLARE_WORKERS_SUBDOMAIN_REGISTER_FAILED
+
+**Why:** Cloudflare refused the reservation, all five neutral names conflicted,
+or the exact address did not read back after the reservation. A reservation
+may already have reached Cloudflare even when its confirmation failed.
+
+**Fix:** open Cloudflare, select the account for this Brain and check Workers &
+Pages for its workers.dev address. Ask your installer to resume the same setup.
+The installer reads the saved setting first and leaves an existing address
+unchanged. Only an exact readback produces “Web address reserved”.
+
+**Who:** your installer if the address is visible but cannot be confirmed, or
+Cloudflare refuses the reservation again.
 
 ### 3c. `Issue: BRAIN_DOMAIN_MISSING`
 
@@ -287,6 +309,40 @@ verify the workers.dev hostname it finds, and save that exact hostname. Then
 rerun the refused command. Do not guess the address.
 
 **Who:** you.
+
+---
+
+### Source inventory is unavailable
+
+`source_inventory_unavailable` means the Brain could not finish its read-only
+source report. Large inventories are read in bounded pages. Temporary busy
+responses retry the same page without replaying source writes. Daily imports
+still attempt eligible sources, but an unreadable receipt stays unknown rather
+than claiming the source is fresh.
+
+Wait for other work to settle, then rerun `brain sources <manifest> --json`.
+If the same code returns, retain the code for installer review. A complete
+inventory can still show a source as broken or its stored records as unreadable;
+those are separate gaps that need source-specific review.
+### 3d. Windows lock-folder codes
+
+`BRAIN_LOCK_FOLDER_PER_USER` is a warning: Windows could not use
+`%ProgramData%\FinancialBrain\locks`, so the command continues with a private
+Windows account lock. Another Windows account
+on this PC cannot see the lock or its recovery fence. Keep running Brain commands
+from this Windows account and avoid simultaneous Brain work in another account.
+Do not run an older Brain tool at the same time: private-only locking cannot
+exclude a released CLI that can still use the shared folder.
+See https://financialbrain.ai/help/BRAIN_LOCK_FOLDER_PER_USER.
+
+`BRAIN_LOCK_FOLDER_UNUSABLE` stops the command before it acquires a writer lock.
+Ask the installer to check access to both folders, or the explicit
+`BRAIN_LIFECYCLE_LOCK_ROOT` override, as the current Windows user. Keep existing
+locks and recovery records. Retry the same command after access is fixed.
+See https://financialbrain.ai/help/BRAIN_LOCK_FOLDER_UNUSABLE.
+An unsafe explicit selected folder or account folder stops without selecting
+another folder. An unsafe default shared boundary instead permits private-only
+acquisition with the warning above; existing entries are preserved.
 
 ---
 
@@ -909,3 +965,76 @@ The command reports that recovery. A live PID, an uncertain process check,
 foreign host/user, older lock without identity, malformed record, or ownerless
 directory stays protected. Age alone never authorizes removal. A technician
 must review ambiguous legacy residue; do not delete a lock just to bypass it.
+
+
+## BRAIN_DOMAIN_NOT_SAVED: the optional address save could not finish
+
+Setup and update save a missing `brain.domain` only after the exact deployed
+Brain and package version verify. An existing address, including a custom
+domain, stays unchanged. The save inserts only the new field and verifies its
+atomic write without reformatting the other settings.
+
+An older browser profile can be denied the account subdomain read (403/10000).
+This optional step leaves the address missing, prints one line and continues;
+it requests no additional credential or browser sign-in. A failed identity
+probe or a concurrent manifest edit also leaves the address unsaved. The line
+is not proof that all later checks succeeded. A later check may still need the
+saved address.
+
+Keep the manifest and any update recovery records. Ask the installer to verify
+the exact deployed hostname and finish saving it through the reviewed setup or
+update path. The address must come from the authenticated account subdomain and
+the exact deployed Brain's health response, rather than a display name. Read
+`brain support --explain BRAIN_DOMAIN_NOT_SAVED` or
+<https://financialbrain.ai/help/BRAIN_DOMAIN_NOT_SAVED> for the next step.
+### Microsoft account and file coverage codes
+
+`MICROSOFT_ACCOUNT_NOT_SUPPORTED`: Microsoft did not accept this kind of account.
+Use your work or school Microsoft 365 account, the one with your Outlook mail.
+Run the same command again and pick that account. Outlook.com personal accounts
+are not supported yet. Nothing was indexed and an existing connection is kept.
+Help: https://financialbrain.ai/help/MICROSOFT_ACCOUNT_NOT_SUPPORTED
+
+`MICROSOFT_DRIVE_UNAVAILABLE`: Microsoft returned HTTP 404 for optional OneDrive.
+Mail and calendar continue; prior file text and its cursor stay protected. Check
+whether the plan includes OneDrive and open it once. The run does not establish
+that files were checked.
+Help: https://financialbrain.ai/help/MICROSOFT_DRIVE_UNAVAILABLE
+
+`MICROSOFT_FILE_SKIPPED`: files over 8 MiB, unsupported files or files without
+complete readable text are counted by closed reason. Other files continue and
+the terminal cursor can save, while coverage stays partial. Provide a supported
+readable export under the limit, then request a fresh file check.
+Help: https://financialbrain.ai/help/MICROSOFT_FILE_SKIPPED
+
+A renewal failure before send retains retryable custody. After the network
+returns, retry the same source. A timed-out request permits one guarded recovery
+on the next run. Exhausted or unverified outcomes keep the reconnect fence.
+Neither case authorizes disconnecting or deleting history.
+Help: https://financialbrain.ai/help/NETWORK_UNREACHABLE
+## Calendar cancellation marking
+
+Normal Google Calendar refresh keeps cancelled meetings and marks them cancelled.
+It does not remove their stored text or ask for removal approval. The marker is
+shown in search, document readings and answers so an old invite is not presented
+as an upcoming meeting.
+
+`INGEST_FAILED` during cancellation marking means the Brain could not confirm
+that marker. Stored records and the sync position are kept. Retry the same
+refresh; accepted additions and cancellation markers are safe to replay. If it
+fails again, run `brain support --explain INGEST_FAILED` and ask your installer
+to check that the CLI and Worker both include cancellation marking. Do not apply
+removals to get past a marking failure.
+### `GMAIL_MESSAGES_REFUSED`: some emails were skipped safely
+
+Gmail kept updating, but the credential safety check skipped emails that looked
+like they held a password or sign-in link. The run summary counts them as refused;
+refused content is never copied into the receipt. A refusal alone does not mean
+Gmail stopped updating. Other unfinished reads or writes remain visible separately.
+Stored emails awaiting removal review stay in the Brain until the owner asks to
+apply an exact reviewed removal plan. No removal happens automatically.
+
+Read [the help page](https://financialbrain.ai/help/GMAIL_MESSAGES_REFUSED).
+The next scheduled refresh continues; repeating the same ingest command is safe.
+If other mail still cannot finish, give the support contact the code and the safe
+summary, never an email body, password, key or sign-in link.

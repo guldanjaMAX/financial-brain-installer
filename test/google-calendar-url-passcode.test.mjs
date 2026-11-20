@@ -365,7 +365,7 @@ test("Microsoft Graph: a passcode in the subject, body and location is removed b
   const env = result.documents[0];
   assertGatePasses(env);
   assertNoPasscode(env);
-  assert.ok(env.title.startsWith(`Vendor Alpha LLC renewal ${ZOOM_PATH} — `), env.title);
+  assert.ok(env.title.startsWith(`Vendor Alpha LLC renewal ${ZOOM_PATH} - `), env.title);
   assert.ok(env.content.includes(`Room code  then dial in.\nJoin: ${ZOOM_PATH}`), env.content);
   assert.equal(env.metadata.location, "Owner Holdings LLC office ");
 });

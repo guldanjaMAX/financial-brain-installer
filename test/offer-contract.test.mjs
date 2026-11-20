@@ -1,3 +1,4 @@
+import { assertOwnerEvidence } from './helpers/owner-evidence-contract.mjs';
 import { assertDocumentAnswer } from "../worker/test/helpers/document-answer-contract.mjs";
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -93,7 +94,8 @@ async function surfaces(t, body, { cli = cmdAsk, mcp = handleMcp, error = false 
   return [printed.join('\n'), rpc.result.content.map(c => c.text).join('\n')];
 }
 
-function contract(text, body, expected, embedded = []) {
+function contract(text, body, expected) {
+  assertOwnerEvidence(text);
   if (body.answer_contract) {
     assert.ok(text.includes(body.answer), 'all finalized answer facts retained');
     const outside = text.replace(/\x1b\[[0-9;]*m/g, '').replace(body.answer, '').replace(body.confidence_text, '');
@@ -102,8 +104,8 @@ function contract(text, body, expected, embedded = []) {
     return;
   }
   const invitations = text.match(/\b(?:Want[^?\n]*\?|Which would help most\?|If you tell me[^.\n]*\.)/g) || [];
-  // 0.4.28 legacy bank qualifications can retain their embedded question beside the final offer.
-  assert.deepEqual(invitations, [...embedded,expected], 'exact reviewed offer sequence');
+  // Keep the selected invitation after every factual qualification.
+  assert.deepEqual(invitations, [expected], 'exact reviewed offer sequence');
   assert.equal(text.trim().split('\n').at(-1).trim(), expected, 'offer is the final line');
   if (body.answer && !/^The documents do not answer/i.test(body.answer)) {
     assert.ok(text.includes(separateOffers(body.answer).facts), 'all original answer facts retained');
@@ -117,8 +119,7 @@ async function check(t, body, expected) {
   if (body.answer_contract) assertDocumentAnswer(body, { exact: true });
   for (const render of [workerText, appText]) contract(render(body), body, expected);
   for (const text of await surfaces(t, body)) {
-    const embedded=!body.answer&&!body.ledger&&body.gaps?.some(g=>g.type==='ledger_not_consulted')?['Which would help most?']:[];
-    contract(text, body, expected, embedded);
+    contract(text, body, expected);
     for (const citation of body.citations || []) {
       assert.ok(text.includes(`[${citation.n}]`), 'numeric citation retained');
       assert.ok(text.includes(citation.title), 'citation title retained');

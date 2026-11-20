@@ -540,10 +540,10 @@ test('M6: documented columns compile through the real allowlist, even when regis
   for (const [,table,columns] of tables) await routeQuery(f,`SELECT ${columns} FROM ${table} LIMIT 1`);
 });
 
-test('M7 and confidence: every answer has the founder line, named gaps and a supported route', async () => {
+test('M7 and confidence: owner answers hide the score, keep named gaps and a supported route', async () => {
   const { MONEY_GUIDE, MONEY_ANSWER_INSTRUCTIONS } = await guideModule();
-  assert.match(MONEY_ANSWER_INSTRUCTIONS,/Confidence: <High\|Medium\|Low> \(<n>%\)/);
-  assert.match(MONEY_ANSWER_INSTRUCTIONS,/only lower/i); assert.match(MONEY_ANSWER_INSTRUCTIONS,/below 100%.*why.*missing/i);
+  assert.match(MONEY_ANSWER_INSTRUCTIONS,/Keep confidence labels and percentages internal/);
+  assert.match(MONEY_ANSWER_INSTRUCTIONS,/only lower/i); assert.match(MONEY_ANSWER_INSTRUCTIONS,/Preserve why and what is missing in the five answer parts/);
   for (const phrase of ['Cash flow:','Categories:','Monthly:','can I afford','runway','Who owes me','tax set-aside']) assert.ok(MONEY_GUIDE.includes(phrase),phrase);
   assert.match(MONEY_GUIDE,/MONEY_QUERY_INVALID.*retry once/); assert.match(MONEY_GUIDE,/MONEY_QUERY_TIMEOUT/);
   assert.match(MONEY_GUIDE,/Loan principal is excluded; use interest_expense_minor for interest not already inside a counted economic payment/i);

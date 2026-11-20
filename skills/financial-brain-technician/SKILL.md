@@ -9,91 +9,87 @@ description: Guide a Financial Brain install, update, Optimize check, checkup, c
 
 ## QuickBooks edition routing and Desktop field boundary
 
-For an explicitly approved QuickBooks connection, use `brain connect quickbooks
-<manifest>`. It probes the local edition without COM or network. Same-PC Windows
-Desktop routes to the attended helper; Mac Desktop and hosted Desktop offer the
-existing report-upload door. If no local Desktop is detected, the command uses
-the Online flow available in the installed release. Never call that fallback
-production-ready unless the production callback packet has been integrated.
+For an explicitly approved connection, `brain connect quickbooks <manifest>`
+probes the local edition without COM or network: same-PC Windows Desktop uses
+an attended helper; Mac or hosted Desktop offers report upload. Without detected
+Desktop, use the installed release's Online flow. Do not call that fallback
+production-ready before the production callback packet is integrated.
 
-Desktop is held for signed-helper and real-file acceptance. Its production
-account sign set is empty and open-file freshness is unverified. Non-money
-records are searchable; Desktop money answers remain unavailable. No owner
-flag or manifest field enables the synthetic-test proof seam. US single-currency
-fallback is off. Card and liability balances require their own field proof.
+Desktop awaits signed-helper and real-file acceptance: its production account
+sign set is empty and open-file freshness unverified. Non-money records remain
+searchable; Desktop money answers remain unavailable. No owner flag or manifest
+field enables the synthetic-test seam. US single-currency fallback is off;
+card and liability balances need separate field proof.
 
 The typical attended connection has four owner actions:
 
-1. Approve the disclosed connect run. It checks the edition and helper, then
-   registers a 15-minute task outside the packaged Code tab.
+1. Approve connect: it checks edition/helper and registers a 15-minute task
+   outside the packaged Code tab.
 2. In QuickBooks, choose **Yes, whenever this company file is open**.
 3. Choose **Continue**.
-4. Confirm the permission screen.
+4. Confirm permissions.
 
-If needed, first open the company file as QuickBooks' Admin user. This does not
-mean Windows **Run as administrator**. A clerk sign-in, blocked Integrated
-Applications setting, or extra confirmation adds actions. Never ask for a
-QuickBooks password in chat. Reads occur only while the bound file is open on
-this PC. Answers age after a day without QuickBooks open. Use a Windows login
-only the owner signs into. The exact click count, grant fields and helper
-signature still need the Windows field receipt.
+If needed, open the file as QuickBooks' Admin user, never Windows **Run as
+administrator**. Clerk sign-in, blocked Integrated Applications or extra
+confirmation adds actions. Never request a QuickBooks password in chat.
+Reads require the bound file open on this PC; answers age after a day without
+QuickBooks open. Use an owner-only Windows login. Exact clicks, grant fields
+and helper signature still require the Windows field receipt.
 
-Connect writes a verified private binding before enabling the corpus. Both
-connect and disconnect re-register the daily and QuickBooks schedules through
-the shared hook and require exact readback. Gmail and Drive stay in the daily
-plan. A pending task is not a completed connection.
+Connect writes and verifies a private binding before enabling the corpus. Connect and
+disconnect re-register daily and QuickBooks schedules through the shared hook
+with exact readback, retaining Gmail and Drive in the daily plan. Pending is
+not connected.
 
-For disconnect or a company switch, run `brain disconnect quickbooks-desktop
-<manifest>` to obtain the exact company-bound removal preview. Obtain explicit
-approval of that scope, then repeat with its `--approve-removals` fingerprint.
-After confirmed removal and schedule readback, remove the app grant at
-**Edit > Preferences > Integrated Applications > Company Preferences**. Complete
-this disconnect before connecting a different company. Never bypass a company
-mismatch or delete the binding by hand.
+For disconnect or company switch, preview with `brain disconnect
+quickbooks-desktop <manifest>`. Get explicit approval of its company-bound
+scope, then repeat with its `--approve-removals` fingerprint. After confirmed
+removal and schedule readback, remove the app grant at **Edit > Preferences >
+Integrated Applications > Company Preferences**. Disconnect before connecting
+another company; never bypass a mismatch or hand-delete the binding.
 
-Large daily deletion plans retain their private company fingerprint and exact
-family scope for review while live records continue to arrive. Review
-`QB_REMOVALS_PENDING` on the next attended session; do not approve by count
-alone or describe the source as fully refreshed while that code remains.
+Large daily deletion plans retain the private company fingerprint and exact
+family scope while live records arrive. Review `QB_REMOVALS_PENDING` next
+attended session, never approve by count alone or call the source fully
+refreshed while it remains.
 
-| Support code | One-line owner message |
+| Support code | Owner message |
 | --- | --- |
-| `QB_CONNECT_STARTED` | The separate connection window is starting; connection is still pending. |
-| `QB_NOT_INSTALLED` | Use QuickBooks Desktop on this Windows PC, or upload exported reports. |
-| `QB_NOT_OPEN` | Open QuickBooks with the company file on this PC. |
-| `QB_NOT_CONNECTED` | Finish the attended Desktop connection on this PC. |
+| `QB_CONNECT_STARTED` | Connection window starting; still pending. |
+| `QB_NOT_INSTALLED` | Use Desktop on this Windows PC or upload reports. |
+| `QB_NOT_OPEN` | Open QuickBooks and the company file on this PC. |
+| `QB_NOT_CONNECTED` | Finish attended Desktop connection on this PC. |
 | `QB_NOT_AUTHORIZED` | Approve the attended Financial Brain request in QuickBooks. |
-| `QB_ADMIN_SIGNIN_DUE` | Sign in as the QuickBooks Admin user for the permission step. |
-| `QB_ELEVATED` | Untick Run as administrator in the QuickBooks shortcut's Properties, then reopen it normally. |
-| `QB_GRANT_TOO_BROAD` | In Integrated Applications, remove the always-access grant and reconnect with access only while the company file is open. |
-| `QB_GRANT_PROMPTS` | In Integrated Applications, replace prompt-each-time access with access while the company file is open. |
-| `QB_HELPER_UNAVAILABLE` | The reviewed signed helper is unavailable; stop for package repair. |
-| `QB_PROCESSOR_UNTRUSTED` | The local QuickBooks component did not pass its trust check; stop for repair. |
-| `QB_WRONG_COMPANY` | Open the connected company file; switching requires the reviewed removal first. |
-| `QB_SAMPLE_COMPANY` | A sample company cannot be connected. |
-| `QB_NON_US` | Records can be searched, but money answers are US-only in this version. |
-| `QB_READ_ONLY_SUBSCRIPTION` | The subscription is read-only; renew it or use report uploads. |
-| `QB_UNSUPPORTED_EDITION` | This Desktop edition is unsupported; use report uploads. |
-| `QB_FILE_VERSION` | The company-file version needs review before the helper can read it. |
-| `QB_FRESHNESS_UNVERIFIED` | File freshness is not yet proven, so Desktop money answers are unavailable. |
-| `QB_FILE_DORMANT` | Confirm that this is the live company file before relying on its balances. |
-| `QB_STALE_COPY` | This file looks older than the previous read; review it before continuing. |
-| `QB_PARTIAL_VIEW` | The read did not prove complete access; retry with the correct company permissions. |
-| `QB_BUSY` | Close any QuickBooks dialog and retry while the company file stays open. |
-| `QB_FRESH` | The last complete snapshot is still fresh; no new read is needed yet. |
-| `QB_CLOCK_UNVERIFIED` | The Brain's observation time could not be verified; retry after restoring access. |
-| `QB_REMOVALS_PENDING` | New records were delivered; the proposed removals still need review. |
-| `QB_REMOVAL_APPROVAL_REQUIRED` | Review and approve the exact removal preview before disconnecting. |
-| `QB_SCHEDULE_UNVERIFIED`, `SCHEDULE_INSTALL_FAILED` | The refresh schedules need attention before this connection is complete. |
-| `QB_CONNECT_TASK_FAILED` | The separate connection task did not pass its checks; stop for local repair. |
-| `QB_BINDING_INVALID`, `QB_SOURCE_INVALID` | The local connection record needs review; do not edit it by hand. |
-| `QB_BINDING_RECOVERY_REQUIRED` | The local binding is missing while stored books remain; review their company identity before reconnecting. |
+| `QB_ADMIN_SIGNIN_DUE` | Use QuickBooks Admin for permissions. |
+| `QB_ELEVATED` | Untick Run as administrator in shortcut Properties; reopen normally. |
+| `QB_GRANT_TOO_BROAD` | In Integrated Applications, remove always-access and reconnect with access only while the file is open. |
+| `QB_GRANT_PROMPTS` | In Integrated Applications, replace prompt-each-time with access while the file is open. |
+| `QB_HELPER_UNAVAILABLE` | Reviewed signed helper unavailable; stop for package repair. |
+| `QB_PROCESSOR_UNTRUSTED` | Local component failed trust check; stop for repair. |
+| `QB_WRONG_COMPANY` | Open the connected file; switching needs reviewed removal first. |
+| `QB_SAMPLE_COMPANY` | Sample companies cannot connect. |
+| `QB_NON_US` | Records searchable; money answers US-only in this version. |
+| `QB_READ_ONLY_SUBSCRIPTION` | Read-only subscription; renew or upload reports. |
+| `QB_UNSUPPORTED_EDITION` | Unsupported Desktop edition; upload reports. |
+| `QB_FILE_VERSION` | Review company-file version before helper reads. |
+| `QB_FRESHNESS_UNVERIFIED` | Freshness unproved; Desktop money answers unavailable. |
+| `QB_FILE_DORMANT` | Confirm the live company file before trusting balances. |
+| `QB_STALE_COPY` | File appears older than last read; review first. |
+| `QB_PARTIAL_VIEW` | Complete access unproved; retry with correct company permissions. |
+| `QB_BUSY` | Close QuickBooks dialogs; retry with file open. |
+| `QB_FRESH` | Last complete snapshot fresh; no read needed yet. |
+| `QB_CLOCK_UNVERIFIED` | Brain observation time unverified; restore access and retry. |
+| `QB_REMOVALS_PENDING` | New records delivered; removals need review. |
+| `QB_REMOVAL_APPROVAL_REQUIRED` | Approve the exact removal preview before disconnecting. |
+| `QB_SCHEDULE_UNVERIFIED`, `SCHEDULE_INSTALL_FAILED` | Fix refresh schedules before calling connection complete. |
+| `QB_CONNECT_TASK_FAILED` | Separate task failed checks; stop for local repair. |
+| `QB_BINDING_INVALID`, `QB_SOURCE_INVALID` | Review local connection record; never hand-edit. |
+| `QB_BINDING_RECOVERY_REQUIRED` | Binding missing but books retained; review company identity before reconnecting. |
 
-Help the owner complete one reviewed step at a time. Begin with a read-only
-plan. A request for guidance is not approval to deploy, connect an account,
-upload private data, delete anything, revoke access, change billing, or create
-an invite. An explicit request to update authorizes the ordinary supported
-update steps once the public release feed says the exact package is stable.
+Begin with a read-only plan; guide one reviewed step at a time. Guidance never
+authorizes deployment, connections, private uploads, deletion, revocation,
+billing changes or invites. An explicit update request authorizes ordinary
+supported steps once the public feed marks the exact package stable.
 
 In Claude Code, invoke this guide as `/financial-brain-technician`. In Codex,
 use `$financial-brain-technician` or ask in plain language, such as "update my
@@ -422,69 +418,59 @@ repair as incomplete instead of calling it fixed.
 
 ## Offer one exact provenance repair only after Optimize
 
-Finish and show the read-only Optimize report first. A provenance gap in that
-report is not approval to repair it. Confirm that the exact installed stable
-release advertises the one-target provenance lane before naming or running it.
+Finish and show the read-only Optimize report first. A gap never authorizes
+repair. Before naming/running this lane, require the exact installed stable release
+advertise one-target provenance repair.
 A held or field-test candidate is not a customer release and must not be used on a
 customer Brain; only a release the public release feed marks stable and available
 qualifies.
 
-When a supported release is available, offer this lane only for one exact file
-the owner chooses from the manifest's enabled local folder source:
+Offer only for one owner-chosen exact file in the manifest's enabled local folder source:
 
 ```bash
 brain provenance-repair "/absolute/path/to/brain.manifest.json" --source <name> --target <source-relative-file>
 ```
 
-Never infer or guess the target from a gap, filename, search result, entity, or
-document content. The source must be registered as an upload source. The file
-must resolve to one complete `native_readable` record with reliable extraction.
-OCR stays off. Stop on a scan, partial or failed extraction, password-protected
-file, unsupported format, empty result, multi-record export, or ambiguous
-target.
+Never infer or guess the target from gaps, filenames, results, entities or
+content. Require a registered upload source and one complete `native_readable` record
+with reliable extraction. OCR stays off. Stop on scans, partial/failed extraction,
+password protection, unsupported format, empty/multi-record results or ambiguity.
 
-The preview obtains the source lease before reading the private manifest,
-source file, saved credential, or Brain state. It checks the complete source
-inventory and observation history, the exact local bytes and extraction, and
-the current schema and vector state. Explain that preview leaves no lasting
-Brain or configuration change and that its public output hides the local root,
-file locator, private query, hashes, document IDs, and sealed internal receipts.
+Preview takes the source lease before reading the private manifest, file,
+credential or Brain state. It checks complete source inventory and observation history,
+exact bytes/extraction, schema and vector state. Explain: no lasting Brain/config
+change; public output hides roots, locators, private queries, hashes, document IDs
+and sealed internal receipts.
 
-Before asking for approval, read the preview's workflow and explain its effects
-in ordinary language. For `exact_original_repair`:
+Read the preview workflow; explain its effects plainly before requesting approval:
 
-- one exact native-readable file will be reingested with OCR off;
-- stale siblings may be removed only from that file's exact result family;
-- the shared vector drain may also process unrelated work already queued;
-- reingest and drain may create embeddings; and
-- the four proof operations run eight private retrieval probes in total and
-  may create ordinary aggregate usage records.
+- `exact_original_repair`: reingest one exact native-readable file, OCR off;
+  remove stale siblings only in its result family; shared drain may process
+  unrelated queued work; ingest/drain may create embeddings; four proof
+  operations run eight private retrieval probes in total and may create ordinary
+  aggregate usage records.
+- `accepted_resolution_reverification`: the accepted observation exists; repeat
+  only schema-44 record/verify and schema-45 record/verify. Eight private retrieval
+  probes may create aggregate usage records, but this does not record
+  a discovery gap, reingest the file, remove family members, or drain the shared
+  vector queue. Use fresh approval after lost response, stale activation or
+  verified recovery. Never reuse the earlier approval hash.
 
-For `accepted_resolution_reverification`, explain instead that the exact
-accepted observation already exists. The run repeats only schema-44 record and
-verify plus schema-45 record and verify. It still runs eight private retrieval
-probes and may create ordinary aggregate usage records, but it does not record
-a discovery gap, reingest the file, remove family members, or drain the shared
-vector queue. Use this fresh approval after a lost response, stale activation,
-or verified recovery. Never reuse the earlier approval hash.
+Neither workflow advances source receipts/cursors, removes source-wide data,
+claims source completeness, changes zones/access, inspects devices, starts a
+passkey ceremony, alters providers or changes Cloudflare deployment state.
+Explain these exclusions too.
 
-Also say what it will not do: it will not advance a source-wide receipt or
-cursor, perform source-wide removal, claim that the source is complete, change
-zones or access, inspect devices, start a passkey ceremony, alter providers, or
-change Cloudflare deployment state.
-
-Ask for separate explicit approval of the exact preview hash. A generic request
-to fix provenance is not that approval. Apply must reacquire the lease and
-recheck all private state. For `exact_original_repair`, its order is exact-target
-ingest, exact-family reconcile, global vector drain, schema-44 `result_family`
-record, schema-44 verify, schema-45 `accepted_resolution` record, and schema-45
-verify. For `accepted_resolution_reverification`, only the final four proof
-operations run. Do not skip the schema-44 record or verification even if old
-evidence exists. Stop on
-lease loss, stale history, changed bytes, an unexpected response, a mismatched
-receipt, recovery without fresh local activation, or any failed verification.
-Never report success unless the final schema-45 verify says the one exact
-resolution is current and still states `whole_source_complete: false`.
+Require separate explicit approval of the exact preview hash, never a generic
+repair request. Apply reacquires the lease and rechecks all private state.
+`exact_original_repair` orders exact-target ingest, exact-family reconcile,
+global drain, schema-44 `result_family` record, schema-44 verify, schema-45 `accepted_resolution` record, and schema-45
+verify. `accepted_resolution_reverification` runs only those final four proofs.
+Never skip schema-44 record/verify because old evidence exists. Stop on lease
+loss, stale history, changed bytes, unexpected response, mismatched receipt,
+recovery without fresh local activation or failed verification. Success requires
+final schema-45 verify confirming the exact resolution current and
+`whole_source_complete: false`.
 
 ## Route an update request first
 
@@ -719,41 +705,35 @@ sign-out and sign-in check before calling the passkey proven.
 
 ## Optimize and repair a new computer
 
-Optimize is a read-only audit. It may check the installed CLI, this technician
-skill, the Claude Code MCP entry, and the Codex MCP entry, but it must not
-install or rewrite any of them during the audit. Leave passkeys and enrolled
-device review out of Optimize.
+Optimize may inspect CLI, technician skill, Claude Code MCP and Codex MCP,
+never install/rewrite them. Exclude passkeys/device review.
 
-After the report, first require the independent public release target to be
-stable, available, and to advertise the exact Owner assistant profile, five
-tools, and every selected local repair scope. A missing or older CLI is a
-separate executable replacement and never belongs in the local assistant
-bundle below.
+After the report, require the independent public target stable, available and
+advertising the exact Owner assistant profile, five tools and selected repair
+scopes. Missing/older CLI replacement stays separate from this assistant bundle.
 
-For any owner-selected combination of `technician-skill`, `claude-code-mcp`,
-and `codex-mcp`, use the exact released CLI to preview one bundle:
+Preview any owner-selected combination of `technician-skill`, `claude-code-mcp`
+and `codex-mcp` with the exact released CLI:
 
 ```bash
 brain assistant-repair "/absolute/path/to/brain.manifest.json" --only technician-skill,claude-code-mcp,codex-mcp
 ```
 
-The preview is read-only. Show the owner its exact write set, preserved custom
-or disabled entries, per-item rollback and verification, excluded scopes, and
-the state-bound plan ID. Remove any item whose release scope is not advertised.
-One explicit owner approval may cover the complete remaining bundle. After
-that approval, run the preview's exact apply command once, including its plan
-ID. A stale plan stops before writing. Do not substitute `brain tools`, generic
-`brain mcp-config --apply`, setup, or onboarding.
+Show its read-only preview: exact write set, preserved custom/disabled entries,
+per-item rollback/verification, exclusions and state-bound plan ID. Remove
+unadvertised scopes. One explicit approval may cover the remaining bundle.
+Then run its exact apply command once with plan ID; stale plans stop before
+writes. Never substitute `brain tools`, generic `brain mcp-config --apply`,
+setup or onboarding.
 
-After apply, require exact file or setting readback. Each repaired MCP entry
+Require exact file/setting readback. Each repaired MCP entry
 must initialize as `owner-assistant` and expose exactly `brain_money_query`, `brain_money_overview`, `brain_money_guide`, `brain_think`,
 `brain_search`, `brain_fetch`, `brain_remember`, `brain_health`, and `brain_financial_map`. A custom or disabled entry
-is preserved. The CLI snapshots the complete selected write set before the
-first write; any failed item restores every destination in reverse order to its
-previewed bytes or absence. A failed verification is a blocker, not permission
-to keep rewriting it. This repair never changes Brain records, sources,
-providers, access, zones, passkeys, devices, cloud resources, or the CLI
-executable.
+stays preserved. The CLI snapshots the complete selected write set before writing;
+any failed item restores all destinations in reverse order to previewed bytes
+or absence. Failed verification blocks further rewriting. Repair never changes
+Brain records, sources, providers, access, zones, passkeys, devices, cloud
+resources or CLI executable.
 
 ## Route a sealed synthetic Windows rehearsal first
 
@@ -815,57 +795,48 @@ own contract. Never infer an install-kit contract from the filename
 
 ## Start here
 
-For a fresh install, checkup, connector, passkey, or handoff request, continue
-below. The update route above replaces this setup-oriented sequence.
+Use this sequence for fresh installs, checkups, connectors, passkeys and
+handoffs; updates use the earlier update route.
 
-Before running `brain tools` or the technician plan, ask one routing question:
-"Which best describes today: this is your first Brain, this Brain already works
-on this computer, you are reconnecting an existing Brain on a new computer, a
-setup on this computer was interrupted, or you are not sure?" Map the answer to
-exactly one CLI value:
+Before `brain tools` or the plan, ask: "Which best describes today: this is your
+first Brain, it already works on this computer, you are reconnecting on a new
+computer, setup here was interrupted, or you are not sure?" Map to one intent:
 
-- `first_brain`: the owner confirms they have no existing Brain.
-- `existing_this_computer`: the intended Brain already works on this computer.
-- `existing_new_computer`: the owner is reconnecting an existing Brain on a
-  replacement or additional computer.
-- `resume_interrupted`: setup for this exact Brain stopped on this computer.
-- `unsure`: the owner cannot yet identify which case applies.
+- `first_brain`: owner confirms no existing Brain.
+- `existing_this_computer`: intended Brain works here.
+- `existing_new_computer`: reconnecting on a replacement/additional computer.
+- `resume_interrupted`: this exact Brain's setup stopped here.
+- `unsure`: case unidentified; read-only stop, never provisioning permission.
 
-Do not infer `first_brain` from a missing local file. Keep the selected value in
-every `brain tools` and `brain technician` command during this route. `unsure`
-is a read-only stop, not permission to provision. A missing manifest for an
-existing or new-computer route requires recovery of the exact owner-custody
-install record, never Cloudflare name matching or credential copying.
+Missing files never imply `first_brain`. Retain the selected intent in every
+`brain tools` and `brain technician` command on this route. Missing manifests
+on existing/new-computer routes require the exact owner-custody install record,
+never Cloudflare name matching or credential copying.
 
-For a fresh install, front-load these prerequisites before any Cloudflare
+For fresh installs, prove prerequisites before any Cloudflare
 resource is created:
 
-- After explaining and receiving approval for its local writes, run `brain
-  tools "/absolute/path/to/brain.manifest.json" --intent <selected-intent>` and
-  the packaged read-only preflight. They must prove
-  Node.js 22 or newer, at least 2 GiB free on the actual per-user install drive,
-  and a normal current-user terminal without `sudo`, root, or Run as
-  administrator. On Windows the space check must target `LOCALAPPDATA`, not a
-  guessed home or system drive.
-- Confirm the owner has chosen a Cloudflare account for this Brain. Before
-  provisioning, complete the named sign-in so the installer first verifies the
-  exact account. Then let it open that account's **Workers & Pages > Plans** page
-  and have the owner confirm that it says **Paid**. The narrow browser session
-  can verify the account and product access, but it cannot read billing status.
-  Never turn Vectorize access into a claim that the plan is Paid.
-- Browser control may handle the approved non-secret navigation. Stop for
-  Cloudflare sign-in, 2FA, account choice, any plan change, payment, billing
-  approval, and consent. Ask only for the one current action.
+- Explain/obtain approval for local writes, then run `brain tools
+  "/absolute/path/to/brain.manifest.json" --intent <selected-intent>` and packaged
+  read-only preflight. Prove Node.js 22 or newer, at least 2 GiB free on the
+  actual per-user install drive (Windows: `LOCALAPPDATA`, never a guessed home
+  or system drive), and a normal terminal without `sudo`, root, or Run as
+  administrator.
+- Confirm the owner's chosen Cloudflare account. Named sign-in first verifies the
+  exact account; then open its **Workers & Pages > Plans** page and have the
+  owner confirm **Paid**. The narrow session proves account/product access,
+  never billing status; Vectorize access does not prove Paid.
+- Approved browser control handles non-secret navigation. Stop for sign-in,
+  2FA, account choice, plan/payment/billing changes and consent. Ask one action.
 
-If a machine prerequisite fails, explain the one fix it names and stop. Do not
-start an account ceremony, write a manifest, or create a resource while it is
-unresolved.
+A failed machine prerequisite stops account ceremonies, manifest writes and
+resource creation until fixed; explain its one named fix.
 
-These prerequisites apply again when setup resumes from a locally prepared or
-older manifest, uses the explicit token recovery lane, or runs through approved
-automation. A recovery credential is not proof of Workers Paid. Non-interactive
-setup must carry the exact release's non-secret, account-bound Paid confirmation
-for the manifest account; a generic yes, a different account ID, or no proof
+Reapply these prerequisites for a locally prepared or
+older manifest, token recovery lane, or approved
+automation. Recovery credentials never prove Paid. Non-interactive setup needs
+the release's non-secret account-bound Paid confirmation for the manifest
+account; a generic yes, a different account ID, or no proof
 must stop before resource creation.
 
 1. Ask which of those jobs the owner wants. Quietly inspect the reviewed default
@@ -923,8 +894,11 @@ between the "BEGIN Financial Brain answer rules" and "END Financial Brain
 answer rules" markers in the CLAUDE.md (Claude Code) or AGENTS.md (Codex)
 beside the Brain manifest, normally in `~/Financial Brain`. If that section is
 not already in this conversation, read it before the first money question. In
-short: answer first; then `Confidence: N%` with a reason and one asterisk per
-assumption. For non-money, use brain_search first, read excerpts, and give
+short: answer first; keep confidence labels and percentages internal. When
+evidence is thin or missing, add one plain sentence explaining the limit without
+a number or scale word; otherwise add nothing. Preserve the five answer parts,
+evidence guards and internal scores. Never raise a tool score. Use one asterisk
+per assumption. For non-money, use brain_search first, read excerpts, and give
 each fact's source title and date. Search again with other wording, or sort
 "newest" for status, before saying no match. Put "as of <record
 date>" on every status. Never say "nothing recorded" from ordinary ranked
@@ -955,135 +929,120 @@ folder, say so once and suggest that folder for next time.
 Anthropic API keys: entered only through brain connect anthropic (clipboard or the masked Cloudflare field). Never in chat, an environment variable, a command argument or a file.
 
 - Normal fresh Cloudflare setup uses the owner's official browser sign-in and
-  the Brain's named protected local profile. Do not send a fresh owner to the
-  API Tokens page or ask them to create, reveal, copy, or paste a token.
-  Describe the hidden token path only if the released CLI says browser sign-in
-  is unavailable and the owner explicitly selects that recovery path.
+  named protected local profile. Do not send a fresh owner to the
+  API Tokens page or request token creation, reveal, copy, or paste. Explain
+  hidden token entry only when the released CLI says browser sign-in is
+  unavailable and the owner explicitly selects that recovery path.
 - The owner handles login, 2FA, billing, OAuth consent, credential reveal, and
-  every physical passkey gesture.
-- Keep Cloudflare tokens, Brain keys, OAuth secrets, app passwords,
-  authentication codes, passkey identifiers, and invite links out of chat,
-  commands, logs, screenshots, and files.
-- When the CLI displays a hidden prompt, hand control to the owner. Do not ask
-  the owner to paste the value into Claude.
-- Prefer browser-based `wrangler login` or `gh auth login` for optional local
-  developer access. Do not create or print a broad Cloudflare or GitHub token.
-- Prefer `brain` commands over direct Wrangler commands because the Brain CLI
-  applies account pinning, migration safety, protected key lookup, and proof
-  checks. The package-pinned browser login in the update route is the supported
-  exception and needs no generic second approval; the owner still chooses and
-  authenticates the account in the browser. Use Wrangler directly for any
-  other purpose only when the owner approves that named diagnostic.
+  physical passkey gestures. Hand hidden prompts to them, never ask for a
+  value in Claude. Keep Cloudflare tokens, Brain keys, OAuth secrets, app
+  passwords, authentication codes, passkey identifiers and invite links out
+  of chat, commands, logs, screenshots and files.
+- For optional developer access, prefer browser `wrangler login` or `gh auth
+  login`, never a broad Cloudflare or GitHub token.
+- Prefer `brain` over direct Wrangler for account pinning, migration safety,
+  protected key lookup and proof checks. The update route's
+  package-pinned browser login needs no generic second approval; the owner still selects and
+  authenticates the account. Other direct Wrangler use requires approval
+  of that named diagnostic.
 
 ## Source and file boundary
 
-- Search only a folder or external-drive root the owner names. Use
-  `claude --add-dir <approved-folder>` for that exact root.
-- Preview scope with the connector's dry run before the first ingest. Finding a
-  file is not permission to upload it.
-- Turn off a watched folder with `brain folder <manifest> off`; it keeps every
+- Search only owner-named folders/external-drive roots; use `claude --add-dir
+  <approved-folder>` for the exact root. Preview the connector dry run before
+  first ingest; discovery never authorizes upload.
+- Stop a watched folder with `brain folder <manifest> off`; it keeps every
   document and removes nothing.
-- Stop one landing feed with `brain folder <manifest> remove --source <name>`.
-  Stored documents and local files stay. If daily refresh is on, run
-  `brain daily on <manifest>` to rebuild the approved job.
+  `brain folder <manifest> remove --source <name>` stops one landing
+  feed, retaining stored documents and local files. If daily refresh is on,
+  rebuild the approved job with `brain daily on <manifest>`.
 - Never run `ingest --path` on a folder the Brain retired. Never run `schedule
   --install --folder`, `--reset`, `--approve-removals`, or `forget` on that
   retired folder's source.
-- Run one connector at a time and record automated, synthetic-field,
-  real-source, and production proof separately.
-- Ordinary onboarding must leave the bank feed disabled and must not run `brain
-  connect bank`. Bank application-credential setup remains held. `brain setup`,
-  `brain secrets`, and the generic technician workflow must never ask for,
-  accept, or write `BANK_FEED_CLIENT_ID`, `BANK_FEED_SECRET`, or
-  `BANK_FEED_WRAPPING_KEY_V2`. Do not improvise an entry path through chat,
-  browser control, environment variables, command arguments, or a hidden
-  prompt. An approved enabled pilot may preserve a complete existing
-  three-binding set. If any binding is missing, stop without changing a local
-  or Worker secret or rotating the core keys, and explain that a separately
-  reviewed owner-custody process is required.
-- Only inside a separately approved bank field plan, read
-  [the Plaid release gate](../../docs/PLAID-RELEASE-GATE.md), then use the owner
-  bank page to add any missing person or business and assign each whole account.
-  Ask only about unresolved account ownership; do not request bank credentials
-  or statements in chat. A configured developer account or passing local test
-  does not establish a working deployed connection. Follow the gate's
-  owner-present journey in order:
-  - Bank feeds are set up with the owner and installer on a call. First finish
-    `brain setup`, then enroll and verify the owner passkey, and only then run
-    `brain connect bank <manifest>`. Only that command writes the Plaid keys.
-  - The owner types both keys at its hidden prompt, and the command checks them
-    with Plaid before saving. If a key was wrong, the owner reruns it with
-    `--replace-keys`. Never ask for, paste, or relay a Plaid key yourself.
-  - Plaid's phone-verification pane takes `123456` in sandbox, and no text
-    arrives. In production a real code goes to the owner's phone, and only the
-    owner enters it.
-  - Plaid may reuse a phone number's saved connection. Choose "Add new account"
-    or the specific bank; check its label before assigning. For a wrong bank
-    with no ledger history, use Access > Banks > Disconnect, wait for confirmed
-    removal, then reconnect. Staging is cleared; saved history stays.
-    `plaid_reconnect_support_required` needs support review of retained history
-    or sync progress. Automatic reattachment is unavailable, including for
-    legacy items. Use Repair connection only for a listed bank needing sign-in.
-    In sandbox use a fresh test phone number (415-555-0011, or 415-555-0131 through
-    415-555-0138) with code `123456`.
-  - Setting `corpora.bank_feed.enabled` to `false` and then running
-    `brain secrets` or `brain setup` DELETES the Plaid client ID and secret
-    from the Worker. Re-enabling needs `brain connect bank` again.
-  - Disconnect is in the owner app at Access > Banks > Disconnect. It is not
-    on the connect page.
-- A partial, unavailable, stale, refused, or interrupted source is not
-  complete. A healthy empty result and an unavailable result must remain visibly
-  different.
-- Preview every deletion or forget plan and wait for exact approval before the
-  command that mutates data.
+- Run connectors singly; distinguish automated, synthetic-field, real-source
+  and production proof.
+- Ordinary onboarding leaves bank feed disabled and never runs `brain connect
+  bank`. Bank application-credential setup is held. `brain setup`, `brain
+  secrets` and generic technician workflows must never ask for, accept or write
+  `BANK_FEED_CLIENT_ID`, `BANK_FEED_SECRET`, or `BANK_FEED_WRAPPING_KEY_V2`,
+  including through chat, browser control, environment, argv or hidden prompts.
+  An approved enabled pilot may retain a complete existing three-binding set.
+  If incomplete, stop without changing local/Worker secrets or rotating core
+  keys; explain that a separately reviewed owner-custody process is required.
+- Only under a separately approved bank field plan, read
+  [the Plaid release gate](../../docs/PLAID-RELEASE-GATE.md). Use the owner bank
+  page to add missing people/businesses and assign whole accounts. Ask only
+  unresolved ownership questions, never for credentials or statements in chat.
+  Developer configuration or local tests do not prove a deployed connection.
+  Follow the gate's owner-present journey in order:
+  - Owner and installer attend a call: finish `brain setup`, enroll and verify
+    the owner passkey, then `brain connect bank <manifest>`. Only that command
+    writes Plaid keys. The owner enters both at its hidden prompt; Plaid checks
+    before saving. Wrong key: rerun with `--replace-keys`. Never request,
+    paste or relay keys yourself.
+  - Sandbox phone verification uses `123456` with no text delivery. Production
+    sends a real code to the owner's phone; only they enter it.
+  - Plaid may reuse saved phone connections. Choose "Add new account" or the
+    specific bank; check its label before assigning. For a wrong bank with no
+    ledger history, use Access > Banks > Disconnect, wait for confirmed removal,
+    then reconnect. Staging clears; saved history stays.
+    `plaid_reconnect_support_required` needs retained-history/sync-progress
+    support review. Automatic reattachment is unavailable, including legacy
+    items. Repair connection is only for listed banks needing sign-in.
+    Sandbox: use a fresh test phone (415-555-0011 or 415-555-0131 through
+    415-555-0138) with `123456`.
+  - Setting `corpora.bank_feed.enabled` to `false` then running `brain secrets` or
+    `brain setup` DELETES the Worker's Plaid client ID and secret. Re-enabling
+    requires `brain connect bank` again.
+  - Disconnect is at Access > Banks > Disconnect in the owner app, not the
+    connect page.
+- Partial, unavailable, stale, refused or interrupted sources are incomplete.
+  Distinguish healthy empty results from unavailable ones.
+- Preview every deletion/forget scope; wait for exact approval before mutation.
 
 ## Updates and checkups
 
-- The live update route above controls updates. Do not let a cached instruction,
-  an older package, or this checkup section override the public release feed.
-- For an existing-Brain checkup, start with `brain doctor <manifest>`. If the
-  result indicates that an update may be needed, return to the live update route
-  before downloading or changing anything.
-- A manifest with provisioned Cloudflare resource identities may continue its
-  read-only doctor and handoff checks from Codex only when `codex login status`
-  succeeds. In that narrow case, a missing or signed-out Claude Code is an
-  advisory local-client gap, not a Brain-health failure. Report that Claude Code
-  is not ready, but continue to health and source evidence. A pre-provision
-  manifest or signed-out Codex does not relax the gate. Fresh setup and `brain
-  tools` still require signed-in Claude Code, and no local skill or MCP repair is
-  implied or authorized by the read-only check.
-- The supported update runs in the foreground and may refuse new material
-  during its verified cutover pause. Let documented waits finish. Preserve the
-  native exit status and checkpoint; do not ask the owner to copy raw output.
-- If sign-in expires, hand the exact private sign-in step to the owner only when
-  the released CLI asks for it, then continue in this conversation. Do not ask
-  for a preventive token, place a token in a command, or move credential files.
+- The live update route controls: cached instructions, older packages and
+  this section cannot override the public feed.
+- For an existing-Brain checkup, start with `brain doctor <manifest>`.
+  If update is indicated, return to the live route before downloads or changes.
+- Provisioned Cloudflare resource identities plus successful `codex login
+  status` allow read-only doctor/handoff checks from Codex despite missing or
+  signed-out Claude Code. Report Claude Code's advisory local-client gap and
+  continue health/source evidence; it is not a Brain-health failure. This
+  exception excludes pre-provision manifests and signed-out Codex. Fresh setup
+  and `brain tools` still require signed-in Claude Code. Read-only checks
+  authorize/imply no skill or MCP repair.
+- The supported update runs in the foreground; its verified cutover pause may
+  refuse new material. Let documented waits finish; preserve native exit status
+  and checkpoint. Never ask the owner to copy raw output.
+- On expired sign-in, hand the exact private step to the owner only when the
+  released CLI asks, then continue here. No preventive tokens, tokens in
+  commands, or credential-file moves.
 - Zero owner-authored questions are required for setup, adaptive acceptance, or
-  handoff. Before calling a Brain proven, use the source receipts and prove the
-  same approved low-sensitivity item as accepted, stored with source and
-  extraction provenance, projected with its exact generation confirmed, and
-  query-visible with the expected citation and provenance. Stop at the first
-  unproven state. `testing.probe_questions` remains an optional private
-  regression list that may be added later; it never replaces that evidence gate.
-- For a loading or scoring call, start read-only: two `brain health`
-  readings two minutes apart, then `brain sources`. Pending falling means the
-  index is making progress. Inspect the reported pause state, drain lease, and
-  provider visibility before diagnosing a wait. Unchanged counts alone are
-  inconclusive and do not prove a pause, a stall, or a released fix.
+  handoff. Before calling the Brain proven, source receipts must prove the same
+  approved low-sensitivity item accepted, stored with source/extraction provenance,
+  projected at its exact generation, and query-visible with expected citation
+  and provenance. Stop at the first unproven state. Optional private
+  `testing.probe_questions` regressions may be added later, never replace this
+  evidence gate.
+- Loading/scoring starts read-only: two `brain health` readings two minutes
+  apart, then `brain sources`. Falling pending counts show index progress.
+  Inspect pause state, drain lease and provider visibility before diagnosis.
+  Unchanged counts alone are inconclusive: they prove neither pause, stall nor
+  released fix.
 
 ## Recovery and completion
 
-- A failed technician step is ready to retry after its named prerequisite is
-  fixed. Rerun the same step rather than improvising a replacement workflow.
-- Explain a stable issue code with:
+- Fix a failed step's named prerequisite, then retry that same step.
+- Explain stable issue codes with:
 
   ```bash
   brain support --explain <ISSUE_CODE>
   ```
 
-- For an update, use the exact stable release's final verification from the
-  live playbook. Do not make the owner complete a separate preflight call or
-  results template.
+- Updates use the exact stable release's live final verification, never a
+  separate owner preflight call or results template.
 - For every non-update route, finish with the preflight script and results
   template supplied in the test kit when one was supplied. Otherwise rerun the
   packaged preflight directly:
@@ -1100,6 +1059,5 @@ Anthropic API keys: entered only through brain connect anthropic (clipboard or t
 
   Record counts, timestamps, proof level, and sanitized evidence. Keep
   credentials and raw private source content out of that record.
-- Report anything that still requires Cloudflare, provider, operating-system,
-  physical-device, or real-export proof. Fixture success does not close a live
-  connector gate.
+- Report pending Cloudflare, provider, OS, physical-device and real-export
+  proof. Fixtures never close live connector gates.

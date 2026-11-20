@@ -103,8 +103,8 @@ const SHIPPED = shippedMigrations();
 const PENDING = newMigrations();
 // Keep an independent current-schema pin: directory-derived expectations alone
 // would let a missing newest migration make the whole rehearsal agree on less.
-const CURRENT_SCHEMA_VERSION = 69;
-const CURRENT_MIGRATION_NAME = "0069_fin_transactions_uid_index";
+const CURRENT_SCHEMA_VERSION = 70;
+const CURRENT_MIGRATION_NAME = "0070_owner_removals";
 
 /* ---------------------------------------------------------------- applier */
 
@@ -528,7 +528,7 @@ if (errors.length === 0) {
   }, "threw");
   check("cmdMigrate's install_state upsert runs against the upgraded schema", upsertError === null, String(upsertError));
   const state = probe(() => db.prepare("SELECT * FROM install_state WHERE id=1").get(), {});
-  check("migrate records schema_version 69", state?.schema_version === CURRENT_SCHEMA_VERSION, JSON.stringify(state?.schema_version));
+  check("migrate records schema_version 70", state?.schema_version === CURRENT_SCHEMA_VERSION, JSON.stringify(state?.schema_version));
   check("migrate does NOT advance product_version (only a verified upgrade does)",
     state?.product_version === "0.2.0", JSON.stringify(state?.product_version));
   check("migrate does NOT clobber an in-progress vector projection bootstrap",

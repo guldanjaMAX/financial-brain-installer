@@ -1,3 +1,4 @@
+import { assertOwnerEvidence } from './helpers/owner-evidence-contract.mjs';
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ledgerAccounts } from "../worker/src/lib/fin-d1.js";
@@ -100,7 +101,8 @@ for (const platformName of ["darwin", "win32"]) {
     assert.match(text, /Unknown mappings stay unassigned/);
     assert.match(text, /Bank categories are hints, not rules/);
     assert.match(text, /Never raise a returned score/);
-    assert.match(text, /confidence is unmeasured/);
+    assert.match(text, /keep the internal zero ceiling and explain the missing evidence assessment in plain words/);
+    assert.match(text, /Never add confidence labels or percentages to owner answers/);
     assert.doesNotMatch(text, /at (?:no more than|most) \d+% confidence/);
     assert.match(text, /Do not infer business ownership or an account kind from a memo/);
   });
@@ -123,5 +125,16 @@ test("a legacy veto preserves the readable figure and can only lower upstream co
     assert.ok(body.confidence.missing.length);
     assert.equal(body.answer_contract.kind, "document");
     assert.match(body.answer, /Coverage:.*Missing or counted twice:.*Estimates:.*How to check:/s);
+  }
+});
+
+
+test('owner evidence oracle rejects exposed scores and lost gaps beside a populated control', () => {
+  const confidence = { percent: 69, basis: ['Recorded account ends in 1234.'], missing: ['The October statement.'] };
+  const control = 'USD 12.00 in October 2026. Recorded account ends in 1234; Still needed: The October statement; this answer may be incomplete.';
+  assertOwnerEvidence(control, confidence);
+  for (const mutant of [control + '\nConfidence: Low (69%)', control.replace('The October statement', ''), control.replace('Recorded account ends in 1234', '')]) {
+    assert.throws(() => assertOwnerEvidence(mutant, confidence), assert.AssertionError,
+      'the same populated oracle catches a score or any lost evidence detail');
   }
 });

@@ -1,3 +1,4 @@
+import { assertOwnerEvidence } from '../../test/helpers/owner-evidence-contract.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ledgerFixture } from './ledger-review-fixture.mjs';
@@ -192,16 +193,16 @@ test('CLI and MCP preserve the bank explanation without printing decision codes'
     method: 'tools/call', params: { name: 'ask', arguments: { question: 'What are my account balances?' } } }) }), url,
     { think: async () => { reads++; return body; }, grant: { profile: 'read-only' } });
   const handoffText = (await handoff.json()).result.content.map(c => c.text).join('\n');
-  assert.match(handoffText, /Confidence: Low \(0%\).*(?:Why|Reasons):.*Missing:/s);
+  assertOwnerEvidence(handoffText);
+  assert.match(handoffText, /No bank rows have been read.*Still needed:/s);
   assert.match(handoffText, /brain_money_overview.*brain_money_guide.*brain_money_query/s);
   assert.equal(reads, 2, 'CLI and document MCP read; the bank handoff never borrows document evidence');
   for (const text of [printed.join('\n'), rpc.result.content.map(c => c.text).join('\n')]) {
-    // The new confidence explanation has its own contract. Keep the frozen
-    // bank-copy jargon oracle on the original explanation and next action.
-    const score = text.match(/Confidence: (?:High|Medium|Low) \(\d+%\)[\s\S]*?Missing:[^\n]*(?:\n(?![^\n]*(?:Coverage:|Next:|How to check:))[^\n]*)*/)?.[0];
-    assert.ok(score, 'each surface includes a computed confidence line');
-    assert.match(score, /Why:.*Missing:/s);
-    const facts = text.replace(score, '');
+    assertOwnerEvidence(text);
+    assert.match(text, /Still needed:/, 'each surface retains the missing evidence');
+    // Keep the frozen jargon oracle on the original bank bounds and next action.
+    // The added evidence note is checked separately above and in the handoff.
+    const facts = text.split('\n').filter(line => !line.includes('Still needed:')).join('\n');
     ownerMessages.push(facts);
     assert.ok(text.includes(detail.split('\n')[0]), 'every factual bank qualification retained');
     assert.equal(text.trim().split('\n').at(-1), 'Next: ask again with a name, date or exact phrase the record would contain.');

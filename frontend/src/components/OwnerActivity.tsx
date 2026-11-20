@@ -48,7 +48,7 @@ export function OwnerActivity() {
     <Section title="What changed" blurb={`Durable owner actions and decisions for ${activeLabel}${windowDays ? ` from the last ${windowDays} days` : ""}, newest first.`}>
       {busy && <Note>Reading the saved change history.</Note>}
       {!busy && unavailable && (
-        <Attention>The saved change history is unavailable. That is not the same as nothing changing.</Attention>
+        <Attention inset>The saved change history is unavailable. That is not the same as nothing changing.</Attention>
       )}
       {!busy && events?.length === 0 && (
         <Note>No owner action has been recorded for this scope yet.</Note>

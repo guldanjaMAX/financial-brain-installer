@@ -11,6 +11,18 @@ function absentLaunchctl(args) {
   return { status: 113, stdout: "", stderr: "not loaded" };
 }
 
+// An override moves the selected data root, while Windows also owns account
+// and legacy slots. Give all three an explicit disposable namespace.
+export function isolatedLifecycleOptions(home, options = {}) {
+  return { home, machineLockRoot: join(home, "lifecycle-locks"), ...options,
+    lockRootOptions: {
+      environment: { HOME: home, USERPROFILE: home,
+        LOCALAPPDATA: join(home, "AppData", "Local"), ProgramData: join(home, "ProgramData") },
+      ...options.lockRootOptions,
+    },
+  };
+}
+
 export function isolatedUpdateSchedulerOptions(home, options = {}) {
   const schedulerHome = options.schedulerOptions?.home ?? options.legacySchedulerOptions?.home ?? home;
   mkdirSync(join(schedulerHome, "Library", "LaunchAgents"), { recursive: true, mode: 0o700 });
@@ -39,7 +51,7 @@ export function isolateUpdateSchedulers(update) {
       return await update(manifestPath, {
         ...options,
         dailyRefreshOptions: isolatedUpdateSchedulerOptions(home, options.dailyRefreshOptions),
-        lifecycleLockOptions: { machineLockRoot: join(home, "lifecycle-locks"), ...options.lifecycleLockOptions },
+        lifecycleLockOptions: isolatedLifecycleOptions(home, options.lifecycleLockOptions),
       });
     } finally {
       guard.restore();

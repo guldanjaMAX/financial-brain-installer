@@ -21,6 +21,9 @@ export const SOURCE_RECEIPT_ISSUE_CODES = Object.freeze([
   "INPUT_REFUSED",
   "INTERNAL_ERROR",
   "MIGRATION_FAILED",
+  "MICROSOFT_ACCOUNT_NOT_SUPPORTED",
+  "MICROSOFT_DRIVE_UNAVAILABLE",
+  "MICROSOFT_FILE_SKIPPED",
   "NETWORK_UNREACHABLE",
   "PDF_PROCESS_FAILED",
   "PDF_PROCESS_TIMEOUT",
@@ -54,7 +57,10 @@ export function providerNoChangeCheckAt(kind, run) {
   // Local walks can read rows held in an open conversation without delivering
   // a document. Their saved watermark still proves they reached the current end.
   if (!Number.isSafeInteger(run.files_seen) || run.files_seen < 0) return null;
-  if (!["imessage", "whatsapp"].includes(kind) && run.files_seen !== 0) return null;
+  // Gmail can finish a label/deletion-only window without accepting a body.
+  // Nonempty policy-only checks need the explicit saved cursor boundary.
+  if (!["imessage", "whatsapp"].includes(kind) && run.files_seen !== 0 &&
+      !(kind === "gmail" && run.provider_check_complete === true)) return null;
   if (!["docs_added", "docs_updated", "docs_unchanged", "docs_refused", "docs_failed"]
     .every(field => run[field] === 0)) return null;
   const started = typeof run.started_at === "string" ? Date.parse(run.started_at) : NaN;
@@ -66,10 +72,16 @@ export function providerNoChangeCheckAt(kind, run) {
 // Reuse the existing durable refusal_reason column with a versioned, closed
 // aggregate. It carries no document identities or arbitrary provider strings.
 const PROVIDER_WITHHELD_PREFIX = "provider_withheld_v1:";
-const PROVIDER_KINDS = new Set(["microsoft", "slack", "notion", "dropbox", "hubspot", "quickbooks"]);
+const PROVIDER_KINDS = new Set(["gmail", "microsoft", "slack", "notion", "dropbox", "hubspot", "quickbooks"]);
 export const PROVIDER_WITHHELD_REASON_CODES = Object.freeze([
   "calendar_event_incomplete",
   "credential_detected",
+  "microsoft_file_file_too_large",
+  "microsoft_file_unsupported_file_type",
+  "microsoft_file_unreadable_file",
+  "microsoft_file_incomplete_extraction",
+  "microsoft_file_low_quality_text",
+  "microsoft_file_extracted_text_too_large",
 ]);
 const PROVIDER_WITHHELD_REASONS = new Set(PROVIDER_WITHHELD_REASON_CODES);
 
@@ -115,6 +127,9 @@ export function providerSetAsideOwnerCopy(run) {
   const credentials = aggregate.reasons.credential_detected;
   if (calendar) causes.push(`${calendar} incomplete calendar ${calendar === 1 ? "item" : "items"} queued for retry`);
   if (credentials) causes.push(`${credentials} ${credentials === 1 ? "item" : "items"} held by the credential safety check for review`);
+  for (const [code, count] of Object.entries(aggregate.reasons)) {
+    if (code.startsWith("microsoft_file_")) causes.push(`${count} Microsoft ${count === 1 ? "file" : "files"} skipped: ${code.slice(15).replaceAll("_", " ")}`);
+  }
   return `${aggregate.count} ${aggregate.count === 1 ? "item" : "items"} set aside (${causes.join("; ")})`;
 }
 
@@ -130,7 +145,7 @@ export function parseProviderWithheldReason(value, kind, refused) {
     const aggregate = normalizeProviderWithheldReasons(reasons);
     if (!aggregate || providerWithheldReason(aggregate.reasons) !== value ||
         !Number.isSafeInteger(refused) || aggregate.count !== refused ||
-        (aggregate.reasons.calendar_event_incomplete && kind !== "microsoft")) return null;
+        (Object.keys(aggregate.reasons).some(code => code === "calendar_event_incomplete" || code.startsWith("microsoft_file_")) && kind !== "microsoft")) return null;
     return aggregate;
   } catch { return null; }
 }
@@ -142,7 +157,7 @@ export function providerWithheldCheckAt(kind, run) {
       run.provider_check_complete !== true || run.metrics_version !== 1 || run.docs_failed !== 0 ||
       !Number.isSafeInteger(run.docs_withheld) || run.docs_withheld <= 0 || run.docs_withheld !== run.docs_refused ||
       !aggregate || aggregate.count !== run.docs_withheld ||
-      (aggregate.reasons.calendar_event_incomplete && kind !== "microsoft") || run.error) return null;
+      (Object.keys(aggregate.reasons).some(code => code === "calendar_event_incomplete" || code.startsWith("microsoft_file_")) && kind !== "microsoft") || run.error) return null;
   if (!["files_seen", "docs_added", "docs_updated", "docs_unchanged"]
       .every(field => Number.isSafeInteger(run[field]) && run[field] >= 0) || run.files_seen <= 0) return null;
   const started = typeof run.started_at === "string" ? Date.parse(run.started_at) : NaN;
@@ -335,7 +350,7 @@ export function normalizeSourceReceiptIssueCode(value) {
  * that do not yet expose a typed code.
  */
 export function sourceReceiptIssueCode(error, fallback = DEFAULT_SOURCE_RECEIPT_ISSUE_CODE) {
-  const typed = [error?.code, error?.payload?.error_code, error?.payload?.issue_code]
+  const typed = [error?.supportCode, error?.code, error?.payload?.error_code, error?.payload?.issue_code]
     .filter((value) => typeof value === "string")
     .map((value) => value.trim().toUpperCase());
   const safetySignals = [error, error?.payload]

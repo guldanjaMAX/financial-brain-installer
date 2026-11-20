@@ -97,7 +97,7 @@ export function phraseFor(phase: BrainPhase, s: SystemStatus | null): string {
     case "indexing":
       return "Your brain is still adding meaning search. Keyword search covers everything it has read, but differently worded records may not appear until indexing finishes.";
     case "problems":
-      return "Your brain is working, and there is something your installer should look at.";
+      return "One source needs a look. See Brain status below.";
     case "backfilling":
       return "Starter context is available. Some source history or live updates are still loading, unproven, or unscheduled, so missing results remain provisional.";
     case "ready":

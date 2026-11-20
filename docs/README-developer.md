@@ -36,7 +36,7 @@ store. Pinned Wrangler 4.131.1 cannot request Vectorize permission for that
 profile, so the read-only preflight routes that exact refusal to an explicit,
 account-scoped recovery API-token choice before any mutation.
 
-**Package identity: brain-installer 0.4.29, schema68.** Publication, supported
+**Package identity: brain-installer 0.4.31, schema70.** Publication, supported
 platforms and field acceptance are established by the reviewed evidence for
 the exact package bytes, not by this README or its version number. Before an
 install or update, match the package to the current approved guide and release
@@ -50,7 +50,7 @@ until reviewed evidence closes it; a deferred capability remains unproven.
 Earlier candidate identities and their planning records remain historical and
 must not be reused as proof for changed bytes.
 
-The 41-row release audit has 37 unresolved incidents, zero 0.4.29 deferrals, and four
+The 41-row release audit has 37 unresolved incidents, zero 0.4.31 deferrals, and four
 rows closed on reviewed evidence.
 
 Engineering changes follow [the code, test, documentation, and tracking
@@ -123,8 +123,14 @@ node brain.mjs setup                         # owner browser sign-in, then one-c
 ```
 
 `setup` runs everything below in the only order that works, generates the admin
-key, and registers the brain with Claude Code and Codex. The steps are also
-available individually:
+key, and registers the brain with Claude Code and Codex. After deployment it
+saves a missing `brain.domain` from the verified workers.dev address, before
+keys, health and smoke. A verified update also fills a missing address. Existing
+and custom addresses stay unchanged. The save preserves all other manifest
+bytes and uses atomic replacement with exact readback. An optional save failure
+prints `BRAIN_DOMAIN_NOT_SAVED` and continues without requesting credentials;
+later checks may still require the saved address. Update preview writes nothing.
+The steps are also available individually:
 
 ```bash
 cp templates/brain.manifest.json ./acme.manifest.json   # then edit it
@@ -304,6 +310,22 @@ its recovery fence. Daily restoration or source-expectation failure returns an
 incomplete, non-success update with its local recovery receipt location. Native
 scheduler inspection must be readable before remote dispatch. Windows task and
 bridge subprocesses have finite deadlines; timeout means unknown outcome.
+
+`brain update --dry-run` lists the self-check reads without running the update.
+The owner update observes bank page inventory, connection state and saved-access
+readability, Worker secret names, source identity and last run, owned daily
+schedules, and the Claude Code registration. It reads once before pausing
+schedules and again after health and local reconciliation. The authenticated
+JSON bank status route supplies both the owner page and local opening proof
+without bank provider calls. Older Workers supply page evidence in that same
+request. Their opening proof is reported as not checked. If the new Worker
+proves that a link the earlier page listed as connected is unreadable, updates
+stop and report that the start of the failure could not be established.
+A regression prevents the final success message. Retries reuse the original
+baseline from the private `~/.brain/update-selfcheck/` checkpoint until
+reverification. The checkpoint contains per-update salted commitments to
+inventory identities. The comparison receipt contains only safe observations
+and differences, with bank and source entries shown by number.
 A required Worker cron is read back after writing, and adding it preserves all
 observed unrelated crons. Native scheduled execution remains a separate receipt.
 An interrupted process cannot erase the receipt, and a retry never overwrites an
@@ -569,7 +591,7 @@ retry loop.
 
 ## Loading material
 
-Ordinary folder, Gmail, IMAP, Calendar, and provider ingest saves accepted additions
+Ordinary folder, Gmail, IMAP, and provider ingest saves accepted additions
 and updates, then stops if authenticated storage contains any planned removal.
 This includes obsolete split parts and declared message-export family members.
 Follow the one printed `brain ingest <manifest> --source <source>
@@ -578,7 +600,9 @@ additional `--approve-removals` argument in that command. Then rerun normal inge
 to finish the source cursor. A dry run cannot authorize removal.
 
 `brain load`, including daily refresh, keeps every removal behind an owner
-decision, including explicit Calendar and Gmail provider deletions. No source
+decision, including explicit Gmail provider deletions. Google Calendar cancellation
+observations instead keep stored text and mark the event cancelled without a removal
+review. No source
 applies removals automatically. Drive's default feed saves owner decisions
 without blocking additions. The separately approved apply uses the exact saved
 fingerprint and existing apply/readback checks; normal ingest then settles the
@@ -640,11 +664,13 @@ each message separately, through the same `parseEmailMessage` the `.eml` path
 uses, so one archive becomes many citable documents with their own subjects and
 Date headers. The registry also holds a single-document `.mbox` reader for
 callers that cannot express one-file-many-documents (Drive), rendering every
-message through that same reader: coarser, never different.
+message through that same reader: coarser, never different. IMAP, local mail
+and the Worker upload extractor use PostalMime 4 with a 256 KiB header budget.
+Over-budget messages surface an extraction failure.
 
 Four dependencies carry the binary formats: `unpdf`, `fflate`, `@e965/xlsx` and
-`postal-mime`. 11 MB total, pure JavaScript, no node-gyp, no postinstall scripts,
-zero advisories. That matters because this installs on the client's own machine
+`postal-mime`. About 12 MB total, pure JavaScript, with no node-gyp or
+postinstall scripts. That matters because this installs on the client's own machine
 during a live session, and a native build failing on their Windows box is not a
 problem you want to debug in front of them. Install with `npm ci --ignore-scripts`.
 
@@ -903,6 +929,12 @@ recovery; it never silently triggers a walk. Seeding and bounded partial runs
 remain partial in load/daily reporting. Historical backfill and semantic-index
 readiness require separate evidence. Folder changes are owner decisions because
 the feed does not emit changes for every descendant of a moved folder.
+An empty terminal change page with a persisted token is a successful current
+check, including when legacy owner-review decisions remain. The CLI reports
+`up to date, N decisions waiting`; the decisions and indexed text are retained.
+Daily verification records `no_change` without advancing accepted-work freshness
+or historical coverage. File failures, current family/scope holds, recovery gaps,
+and incomplete checks still prevent a complete receipt.
 The full-walk and absence-review details below apply only to the explicit
 `--full-walk-review --dry-run` provider path. Mutating full walks are refused;
 default incremental work never runs legacy removal planning.
@@ -1048,7 +1080,8 @@ saved suffix to the next scheduled daily run. No full mirror is restarted. No so
 automatically applied: daily queues owner decisions and continues additions.
 A direct ingest previews exact targets for separate owner approval. Single-part
 messages issue no reconciliation; split parts remain protected. Unread history,
-held retries and pending decisions retain incomplete source receipts. Backup
+held retries retain incomplete source receipts. Kept Gmail removal decisions
+remain visible but do not veto the completed source check or daily run. Backup
 and rollback instructions are in `docs/gmail-bounded-rollout.md`.
 
 A per-document Worker `failed` result and an item-specific read/preparation or
@@ -1078,9 +1111,18 @@ durably retained failed-part count, and malformed retry state fails closed.
 A credential refusal is a measured Gmail policy outcome rather than an
 operational failure. Local scanner refusals and Worker content-scanner
 refusals are removed from Gmail's skip-derived coverage gap and do not set
-`INPUT_REFUSED`; the ready receipt keeps `docs_refused`, appends
-`withheld_for_secrets` to its detail, and leaves `complete_sweep` false. A
-failed part, retry backlog, retryable extraction skip, missing history marker,
+`INPUT_REFUSED`. The private `gmail_refusals` map stores each message identity,
+`credential_detected` reason and policy fingerprint without content or titles.
+The ready receipt keeps `docs_refused`, appends `withheld_for_secrets` to its
+detail, and uses the existing closed `provider_withheld_v1` aggregate with
+`provider_check_complete` after cursor settlement. A refusal-only check proves
+freshness without claiming accepted work or complete history. Daily finishes
+successfully and retains the refused count. The owner sees one plain summary,
+`GMAIL_MESSAGES_REFUSED` and its help link. Stored copies awaiting removal review
+are kept, never automatically removed, and cannot freeze the history cursor or
+daily. A final-state-bound exact preview keeps `--apply-removals` available for
+an owner's separate request.
+A failed part, retry backlog, retryable extraction skip, missing history marker,
 label gap, or other non-policy skip still produces `INGEST_FAILED`. Drive,
 IMAP, and other source receipts keep their existing refusal behavior except
 for the shared provider runner. Microsoft, Slack, Notion, Dropbox, HubSpot and
@@ -1387,11 +1429,23 @@ again plans only the obsolete representation after every replacement part is
 accepted. Removing that representation requires the separate exact apply. A document-level failure leaves the Drive cursor unadvanced so the
 same change is retried instead of being acknowledged and lost.
 
-Calendar uses the same completion boundary. Its new sync token is saved only
-after every event receipt and cancellation removal is accepted. A failed or
-refused event, or a pending cancellation cleanup, closes the source receipt as
-incomplete and leaves the prior token in place so the same Google window is
-retried idempotently.
+Google Calendar uses an add-only completion boundary. Its new sync token is saved
+only after every event receipt and exact cancellation-marker readback is accepted.
+The owner-only D1 `POST /api/admin/brain/calendar-cancellation` route updates only
+`documents.meta.status`; text, chunks, dates and vectors stay unchanged. Search,
+full document readings, MCP fetch and citation projections carry `calendar_status`
+and a cancelled title label. The temporal guard rejects an affirmative upcoming
+claim from that field even when a model verifier approves it. A failed/refused
+event or unconfirmed marker keeps the old Google window for idempotent retry.
+`INGEST_FAILED` uses the existing support taxonomy and links to the Calendar
+cancellation marking section in the troubleshooting runbook.
+
+A fingerprint-valid saved Calendar removal plan is consumed by normal ingest as
+retained observations. Explicit-deletion targets are marked cancelled; other
+causes remain kept. A confirmed update in the current window supersedes an old
+cancellation observation. No preview/apply call is made during conversion, and
+no cursor advances on an unverified marker. The separate exact `--apply-removals`
+executor remains available for a previously reviewed plan before conversion.
 Its dry run returns the same common preview receipt as every other source. If
 any declared calendar cannot be read, the preview reports what it did see and
 then exits nonzero with the reconsent or provider fix instead of presenting a
@@ -1689,9 +1743,48 @@ it. Status and the runner report a missing or non-executable registered Node
 binary plainly, and `brain daily on` repairs the owned definition. Each
 scheduled run takes the
 manifest-wide lifecycle lease before any source lease. That lease is keyed by canonical
-Brain resource identity in the machine-shared lock root, so another manifest
-path or operating-system user cannot open a second writer lane for the same
-Brain. It verifies its definition and source
+Brain resource identity in the machine-shared lock root. On Windows, a
+permission failure in `%ProgramData%\FinancialBrain\locks` selects the
+current-user ACL-protected `%LOCALAPPDATA%\FinancialBrain\locks` root and prints
+`BRAIN_LOCK_FOLDER_PER_USER` once per process and root, with a local metadata-only
+support event and https://financialbrain.ai/help/BRAIN_LOCK_FOLDER_PER_USER.
+Another Windows account cannot see that fallback lock or its recovery fence;
+run commands for the same Brain from one Windows account. A working shared root
+still wins. An unsafe default shared boundary also permits private-only acquisition, with the warning below. An explicit
+`BRAIN_LIFECYCLE_LOCK_ROOT` remains authoritative.
+Every Windows acquisition first holds an additional private account-and-Brain
+slot under `<Windows user profile>\AppData\Local\FinancialBrain\account-locks`.
+The profile is the declared `home`, then HOME or USERPROFILE from the resolver's
+environment, then the platform home. An isolated run never consults the OS
+account record instead. LOCALAPPDATA and selected-root overrides cannot move
+this slot within the same home. Shared and fallback leases, including explicit
+root overrides, retain this slot for their full lifetime. A second writer from
+the same account stops with `UPDATE_BRAIN_BUSY` and its help link.
+After the account slot, acquisition retains the exact legacy ProgramData slot
+(identity, basename, owner.json and schema 2) that released CLIs honor, then any
+distinct selected root. An override cannot bypass this legacy boundary. Every
+retained slot participates in ownership checks, release, stale-window recovery
+and child handoff. The child parser accepts a bounded 8192-character envelope
+for these coordinates, including long Windows profile paths.
+If the legacy root or slot is permission-denied or unsafe, acquisition continues
+with private leases and emits the existing `BRAIN_LOCK_FOLDER_PER_USER` code and
+help link: do not run an older Brain tool at the same time. A valid occupied
+legacy slot stays busy. Private-only acquisition cannot exclude an older CLI
+that can still access ProgramData, even within the same account. No cross-version
+exclusion is claimed in that case. Explicit selected roots and account roots
+still fail closed when unsafe. Child handoff binds the original selected root;
+older token-only parent delegations are verified and acquire the account slot
+before transfer. Shared-root cross-account exclusion and the documented private
+fallback cross-account limitation remain unchanged.
+If no selected folder is usable, `BRAIN_LOCK_FOLDER_UNUSABLE` names folder placeholders and links to
+https://financialbrain.ai/help/BRAIN_LOCK_FOLDER_UNUSABLE. macOS and Linux keep
+their existing root behavior. `operations/brain-lock-root.mjs` is the common
+resolver for lifecycle leases and recovery fences; source-ingest and provider
+OAuth leases use their existing per-user roots. `brainLifecycleCoordinates` and
+acquired leases expose `root` and `rootKind`. Offline callers can inject resolver
+dependencies through `lockRootOptions` (environment, filesystem, ACL, log,
+journal and synthetic `windowsAccountHome`); previews inspect possible fences without creating or repairing roots.
+Manifest aliases still share one identity and the same lock and fence names. It verifies its definition and source
 plan hashes, runs ready daily-owned legs sequentially, and records `deferred`
 without writing when load or update already owns the lease. `brain update`
 holds that same lease, pauses the owned definition after custody verification,
@@ -1703,8 +1796,9 @@ update writes a private durable transaction containing the verified prior
 definition, enabled state, and every owned legacy scheduler snapshot. It also
 creates a content-free recovery fence beside the canonical Brain lifecycle
 lock. The private snapshot remains per user, while the fence is visible to
-every local user so no manifest alias or second user can resume writes during
-recovery. macOS uses launchd's persistent disable state, and every writer
+every local user when the shared root is usable; under the Windows fallback
+it is private to this Windows account. Manifest aliases in that account still
+check the same recovery fence. macOS uses launchd's persistent disable state, and every writer
 checks the fence only after acquiring the lifecycle lease. A retry reuses the
 saved authorization even when the updated manifest fingerprint changed, and
 cannot restore or clear recovery until fresh active, query-ready, queue-zero
@@ -2476,13 +2570,43 @@ Read this before scoping an engagement.
   screen. Token refresh cannot add a scope. Under the shared provider-record
   lease, re-consent resolves both protected grants through Graph and carries
   prior source cursors forward only when their one-way account fingerprints
-  match; a different or unprovable account cannot replace the protected grant
-  or move its sync states. The calendar adapter then maintains its
-  own rolling 30-day-past and 90-day-future `/me/calendarView/delta` cursor
-  without changing the mail or drive cursor members. Calendar requests require
-  immutable event IDs. A cursor from the earlier mutable-ID shape takes one new
-  baseline and reconciles its old event families through the guarded removal
-  path before the immutable cursor is committed.
+  match; a different known account cannot replace the protected grant or move
+  its sync states. When a legacy connection has no account binding and identity
+  cannot be proved, only a fresh authorization-code sign-in with verified Graph
+  identity can start a separate binding. The old binding is marked replaced with
+  a pointer to the new binding and its exact cursors retained without duplicating
+  credentials. New cursors start empty. Binding-scoped document and status IDs
+  preserve earlier items even when Graph IDs collide. Re-consent and refresh of
+  the new account preserve that namespace. The unknown refresh fence still
+  blocks reuse of the old grant; it is never cleared before fresh sign-in.
+  The calendar adapter maintains a rolling 30-day-past and
+  90-day-future `/me/calendarView/delta` cursor without changing the mail or drive
+  cursor members. Calendar requests require immutable event IDs. Microsoft
+  provider removals and window exits retain history without a removal plan.
+  Sparse deletion or cancellation observations use separate retained-item status
+  documents. Authenticated family inventory identifies statuses that a live
+  update must supersede, including after reset. Exact owner-requested removals
+  remain separate, with all existing approvals and readback guards.
+  Timed events use the configured mailbox zone in `client.timezone`, then a
+  supported original zone or the machine local zone, with the zone named.
+  All-day recovery keeps the original civil date. Mail uses the owner zone.
+  Document dates use the rendered local civil date. Unsupported custom zone
+  labels fall back without being sent to Graph. No scope is added.
+  Files over 8 MiB are checked before download; the streaming byte cap remains.
+  Unsupported or unreadable files produce counted closed skip reasons while
+  readable deliveries and terminal cursors continue. Coverage stays partial.
+  Optional OneDrive HTTP 404 preserves Outlook progress without certifying a
+  complete provider check. Known calendar deferrals retain their exact retry
+  identities despite an independent, counted file gap.
+  Refresh DNS, route and refused-connect failures before send preserve retryable
+  custody. A timed-out renewal has one fingerprint-bound recovery attempt under
+  the credential lease; permission is consumed durably before sending. Lost
+  bodies, exhausted retries and unverified persistence retain their fence.
+  Personal accounts are not supported yet. Optional `corpora.microsoft.account`
+  or `--account` supports the pre-browser check. Returned consumer tenant claims
+  are rejected before credential admission; decoding never proves identity.
+  D1-D4 are settled. Offline fixture evidence grants
+  no Microsoft real-account acceptance or release authority.
 - **The custom business API source is locally proven only.** Its declarative
   Worker path, strict HTTPS boundary, dedicated `CUSTOM_API_TOKEN_` secret
   namespace, durable checkpointed job, exact-row-and-document verified
@@ -3440,11 +3564,21 @@ The CLI requests `mode: "bounded"` work pages. A materialized rowid range reads
 at most 5,000 physical rows, including tombstones, before any metadata parsing.
 Chunk reads seek `idx_chunks_doc`; a 50,001-entry probe halves a dense page
 until it fits the 50,000-chunk bound, or refuses a single oversized document.
+An indexed rowid-range byte probe also halves a page above 8 MiB of stored
+metadata before any JSON aggregation. A single record above that bound leaves
+inventory unavailable (`source_inventory_metadata_limit` internally); it is
+never silently dropped. Continuations
+keep the smaller document limit instead of reproving the same oversized range.
 No migration or index build is needed. Raw rowids stay inside private cursors.
 Family HMACs allow exact deduplication across pages and are removed before the
 CLI emits its existing v3 source receipt. Progress goes to stderr. One command,
 including readiness retries, stops after 1,000 requests or ten minutes; a
 partial scan never becomes a complete inventory.
+Temporary continuation failures (408, 425, 429 and 5xx, or a classified retryable
+transport interruption) retry the same private cursor at most four times, with
+1, 3 and 10 second waits. Accepted pages are not replayed. Auth, malformed data
+and snapshot changes never enter that page retry. Waits count against the time
+bound; every actual request counts against the command's request bound.
 
 The existing schema-45 document/chunk generation, current source/run heads,
 append-only event high-water mark, and current custom-job state fence each page.
@@ -3473,8 +3607,10 @@ historical SQL remains a regression comparison, not the modern runtime query.
 
 Daily on/run use `mode: "freshness"` to read registered-source receipts without
 visiting document rows. Large receipt histories use the same private work
-cursors. The final response omits storage and document coverage fields. An old
-Worker that lacks freshness mode reports unavailable. If the read is unavailable,
+cursors. The final response omits storage and document coverage fields. A
+temporary first-page outage receives the same bounded read retry.
+Inventory failures include a stable code and a link to the installed runbook.
+An old Worker that lacks freshness mode reports unavailable. If the read is unavailable,
 the approved native schedule and eligible ingest legs still proceed. Their
 receipt records unknown freshness with `source_inventory_unavailable`; it never
 advances proof of freshness. Lifecycle recovery, source ownership, held sources
@@ -4234,21 +4370,21 @@ zone returns an explicitly marked UTC date. Balance observations keep liabilitie
 separate from cash and preserve missing accounts as unknown. When clean history
 exceeds the budget, the guide enumerates accounts and uses bounded raw slices,
 reporting gross, likely figures with the unremoved movements named.
-Every answer prints `Confidence: <High|Medium|Low> (<n>%)` using the tool's score.
-The assistant may only lower it; below 100 it names why and what is missing.
-Money answers retain the five ordered contract lines before that confidence
-line. Empty data and failed attempts still produce the best supported figure,
+Owner answers hide confidence labels and percentages. Scores remain internal;
+the assistant may only lower them and never raise them. Thin or missing evidence
+gets one plain sentence without a number or scale word; strong evidence gets
+no extra line. Money answers retain the five ordered contract lines. Empty data and failed attempts still produce the best supported figure,
 with unknown dollars distinguished from an observed zero.
 Money questions call `brain_money_overview` first, read `brain_money_guide`, then go straight to
 `brain_money_query`; `brain_think`/`ask` and search/fetch are for documents and
 context, one call at a time. Local money tools require `owner-assistant`, and
 update verifies the exact nine-tool set before refreshing managed owner rules.
 Both money tools return a deterministic `confidence` object with `level`,
-`percent`, `reasons` and `missing`, plus ready-to-print `confidence_text`.
-Every answer prints `Confidence: <level> (<n>%)`: High is 90-100, Medium is
-70-89, Low is below 70. The assistant may only lower the tool score, explaining
-why. Below 100%, include its reasons and missing evidence with account last
-four, exact dates, measured amounts by currency and the next useful check.
+`percent`, `reasons` and `missing`, plus internal `confidence_text` for scoring
+and receipts. These fields and all evidence gates remain unchanged. The assistant
+may only lower the tool score, recording why. Preserve reasons and missing
+evidence in the five answer parts with account last four, exact dates, measured
+amounts by currency and the next useful check. Do not show owners the score.
 Keep the five-part answer contract and answer from available evidence at every
 score. Unknown dollar impact remains unknown, never zero.
 
@@ -4876,3 +5012,82 @@ refresh them. Quiet polls never invent transactions or additional covered dates.
 Older in-flight windows retain every event and restart from the successor's
 published cursor to establish fresh receipts. Their retained prefix is never
 silently certified, discarded or reused as proof of a terminal poll.
+
+## Clean my Brain: removal speed, removal memory, support codes
+
+`brain clean <manifest> --list <ids-file>` samples three batches by default.
+`--preview-all` saves a private plan with the exact targets, missing roots and
+fence for each batch. `--apply --plan-sha256 <digest>` requires the reviewed
+bytes and verifies the Worker route, live DB binding and D1 marker against
+Cloudflare before taking the target's bookmark. The plan, bookmark and
+progress identify the same Worker URL and D1 database. After each batch, its
+verified post-transaction marker becomes the fence for the next batch. A
+separate inventory write invalidates that chain.
+
+**Why a removal used to take about 35 s.** `forget()` rebuilt the whole
+source's `corpus_stats` row inside the delete transaction (a join over every
+document and chunk). Schema 65 already keeps those counters exact with triggers,
+so `forget()` now skips the rebuild whenever the six `corpus_counter_*`
+triggers exist and no recovery is in progress (`countersMaintainedByTriggers`),
+and keeps it everywhere else. `POST /api/admin/brain/corpus-stats/verify`
+`{source, repair?}` compares the counters with index-only counts (chunks of
+soft-deleted documents subtracted) in ONE read statement, and repairs only on
+request in ONE `INSERT ... SELECT COUNT` statement, so a concurrent Gmail or
+Drive ingest can neither skew the comparison nor make the repair write stale
+numbers. `brain clean` calls it once per source at the end (`--skip-check`
+leaves it out). The Brain size for the 20% limit and the before/after report
+comes from `owner-removals` `{action: "size"}` (per-source `corpus_stats` rows
+plus the Worker's capped queue depth), never from `/api/admin/brain/documents`,
+which reports `documents: null` on a large Brain.
+
+**Removal memory (schema 70, `owner_removals`).** The apply request may carry
+`remember_removal: true, run_id, batch_no, reason`. `forget()` then inserts one
+ledger row per removed item in the same D1 batch, before its deletes. The key is
+the item's OWN base id: each document's `doc_uid` with any `#part...` suffix
+removed (`gmail:<messageId>`, `drive:<fileId>`), computed from the row inside the
+INSERT, never from the family index (not yet filled on an older Brain) and never
+from a shared file family (one export file holds many independent documents, and
+removing one must not block its kept siblings). Only `gmail` and `drive` items
+are remembered; any other source in the batch is refused before a write
+(`OWNER_REMOVAL_SOURCE_UNSUPPORTED`). Ingest checks an incoming item by its own
+base id plus the item it declares itself part of (`family_of`, `part_of`). Only that request writes the ledger; removals
+ingest plans for itself never do. A `BEFORE INSERT` trigger on
+`document_family_index` raises `OWNER_REMOVED` for a live insert into a removed
+family, as a backstop for any writer that skips the checks. Routes, all owner
+only: `POST /api/admin/brain/owner-removals` with `check` (at most 97 ids),
+`remember` (backfill families that are already gone), `restore` (sets
+`restored_at`, keeps the row) and `proof` (exact read-back of one batch).
+Ingest refuses an owner-removed family with `status: "refused", labels:
+["owner_removed"]` (batch) or HTTP 422 (single). `/ingest-capabilities`
+advertises `owner_removal_ledger: 1` from schema 70 when the table exists. The table is a durable
+recovery table, restored after `document_family_index`.
+
+**Clients.** Gmail asks the ledger only about window ids missing from D1 and
+settles an owner-removed message as a policy skip (never fetched, no retry
+hold, no cursor block). Drive's only write path is the incremental change feed
+(`runDriveIncremental`, `isOwnerRemoved`); the rooted full comparison is
+read-only review. A Worker without the ledger answers 404; every client
+function then treats it as "none known".
+
+**A 5xx after commit.** The removal route's 503 now carries `stage`
+(`delete_batch`, `readback`, `marker`), `committed` (`true`, `false`,
+`"unknown"`), a `d1_class` token and a masked `provider_message`, and the Worker
+logs the same fields. Before sending apply, `brain clean` saves the exact targets
+and a receipt nonce as pending. A lost response or restarted process checks
+that every target is gone, the ledger contains the exact family set for the
+same run and batch, and the inventory carries the nonce written by that
+transaction. Only this proof advances the fence (`CLEAN_LATE_RECEIPT`).
+Intact targets with no batch ledger rows permit a retry against the same
+fence. Partial or unreadable evidence stops with `CLEAN_BATCH_UNVERIFIED`.
+A later corpus write requires a fresh review of the remaining targets.
+
+**Codes and help.** `operations/clean-brain-codes.mjs` is the one registry. Each
+code has a summary, a next step and a help line; `docs/help/clean-my-brain.md`
+carries the same line per code, and `test/clean-brain-codes.test.mjs` fails the
+build if a code and its page drift apart. Provider messages are first line only
+with quoted values, addresses, tokens and long digit or hex runs masked.
+
+Tests: `test/clean-brain-worker.test.mjs`, `test/clean-brain-cli.test.mjs`,
+`test/clean-brain-reread.test.mjs`, `test/clean-brain-codes.test.mjs`. The
+original slow-removal reproduction is `test/bench/bench-forget-recount.mjs`
+(local fixture only).

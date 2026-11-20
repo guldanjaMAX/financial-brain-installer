@@ -9,7 +9,7 @@ import { batchStream } from '../ingest/run.mjs';
 // separately expands the three delegated boundaries (scope, prepare, send).
 export const ENTRY_FAULT_POINTS = [
   'metadata', 'metadata-validation', 'scope', 'scope-version', 'folder-path',
-  'exclusion', 'version', 'prepare', 'missing-outcome', 'skip-version',
+  'exclusion', 'owner-removal-read', 'version', 'prepare', 'missing-outcome', 'skip-version',
   'sanitize', 'admission', 'split', 'batch-next', 'send', 'part-result',
   'writer-outcome', 'acknowledge', 'remember-family', 'remember-accepted',
   'family-read', 'cached-family-read', 'current-proof-read', 'cached-proof-read', 'proof-validation',
@@ -60,6 +60,7 @@ function harness(point, { globalFailure = false, enabled = true } = {}) {
     startPageToken:async()=>{ throw new Error('Reseed forbidden'); },
   };
   const args = {
+    isOwnerRemoved:async()=>{ hit('owner-removal-read'); return false; },
     drive,getToken:async()=>undefined,state,sourceName:'drive',policy:{},policyFingerprint:'policy',
     scannerOn:true,scannerFingerprint:'scanner',now:()=>stamp,flags:{},write:()=>{},display:String,
     save:()=>{ hit('checkpoint'); saved=structuredClone(state); },
@@ -123,7 +124,7 @@ for (const point of ENTRY_FAULT_POINTS) test(`R6 fault sweep: ${point} stays loc
     checkpoints:h.calls.filter(([,s])=>s==='checkpoint').length }));
 });
 
-for(const point of ['metadata','scope','prepare','send','acknowledge','family-read','cached-family-read','current-proof-read','cached-proof-read','family-request','family-json','family-http'])
+for(const point of ['metadata','scope','owner-removal-read','prepare','send','acknowledge','family-read','cached-family-read','current-proof-read','cached-proof-read','family-request','family-json','family-http'])
 test(`R6 fault sweep global control: ${point} auth failure stops before the suffix`,async()=>{
   const h=harness(point,{globalFailure:true});
   await assert.rejects(h.run()); assert.equal(h.reached(),1,'global decision reached');
@@ -179,6 +180,7 @@ test('R6 fault sweep census covers every direct entry await and throw',()=>{
     ['metadata','file = await drive.getFileMetadata(getToken, id);'],
     ['metadata-validation','throw new Error("Drive current file metadata is incomplete or mismatched");'],
     ['scope','const scope = await drive.changeScope(getToken, file, { ...policy, metadata });'],
+    ['owner-removal','if (await isOwnerRemoved(uid)) {'],
     ['prepare','const outcome = await processFile({ ...file, scope_root_ids: scope.rootIds }, folder, tally => {'],
     ['ownership/checkpoint',"if (error.checkpointFailure || error.code === 'source_ingest_lock_lost') throw error;"],
     ['global controls','if (!permanent && runWideFailure(error, recovery)) throw error;'],
@@ -201,7 +203,7 @@ test('R6 fault sweep census covers every direct entry await and throw',()=>{
     ['family-json','const body = await response.json();'],
   ];
   assert.deepEqual(actual,expected.map(([,line])=>line));
-  assert.equal(actual.length,23);
+  assert.equal(actual.length,24);
 });
 
 test('R6 metadata gap: a new failed identity explicitly records unavailable source version',async()=>{

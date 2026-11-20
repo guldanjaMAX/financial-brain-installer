@@ -7,9 +7,10 @@ import { registerHooks, syncBuiltinESMExports } from "node:module";
 // Keep subprocess probes offline even if a future dispatch change reaches a
 // credential or scheduler path. Only another Node process is permitted here.
 const lifecycle = new URL("../../operations/brain-lifecycle-lock.mjs", import.meta.url).href;
+const lockRoot = new URL("../../operations/brain-lock-root.mjs", import.meta.url).href;
 registerHooks({
   resolve(specifier, context, nextResolve) {
-    if (context.parentURL === lifecycle && specifier === "./current-user-file.mjs") {
+    if ([lifecycle, lockRoot].includes(context.parentURL) && specifier === "./current-user-file.mjs") {
       return { url: new URL("./lifecycle-lock-acl.mjs", import.meta.url).href, shortCircuit: true };
     }
     return nextResolve(specifier, context);

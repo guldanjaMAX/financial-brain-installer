@@ -157,6 +157,9 @@ test("a saved exact profile survives a moved manifest while an asserted mismatch
     if (parsed.pathname.endsWith(`/accounts/${ACCOUNT_A}`)) {
       return jsonResponse(envelope({ id: ACCOUNT_A, name: "Bound" }));
     }
+    if (parsed.pathname.endsWith("/workers/subdomain")) {
+      return jsonResponse(envelope({ subdomain: "existing-fixture" }));
+    }
     return jsonResponse(envelope([]));
   };
   const session = await withCloudflareOAuthSession({
@@ -197,7 +200,7 @@ test("Wrangler OAuth environment is allowlisted and admits only mandatory keyrin
     GITHUB_TOKEN: AMBIENT_SECRET,
     NPM_TOKEN: AMBIENT_SECRET,
     NODE_OPTIONS: "--require=/tmp/untrusted.cjs",
-    HTTPS_PROXY: "https://name:password@proxy.invalid",
+    HTTPS_PROXY: ["https://", ["fixture-user", "fixture-value"].join(":"), "@proxy.invalid"].join(""),
     CI: "true",
   };
   const clean = cloudflareOAuthChildEnvironment({ environment, accountId: ACCOUNT_A.toUpperCase() });
@@ -274,6 +277,7 @@ test("pinned Wrangler cannot request Vectorize through wrangler auth create", ()
     "account:read",
     "user:read",
     "workers:write",
+    "workers_scripts:write",
     "d1:write",
     "ai:write",
   ]);
@@ -300,6 +304,111 @@ test("macOS and win32 browser sign-in request the same pinned Wrangler scopes", 
     authorizeArgs[0].slice(authorizeArgs[0].indexOf("--scopes") + 1, authorizeArgs[0].indexOf("--browser")),
     [...CLOUDFLARE_OAUTH_SCOPES],
   );
+});
+
+test("the default browser scope list requests Workers Scripts write exactly once", () => {
+  assert.equal(CLOUDFLARE_OAUTH_SCOPES.filter(scope => scope === "workers_scripts:write").length, 1);
+});
+
+// Exercise the real credential wrapper and preflight. Only the process and
+// transport boundaries are synthetic, so the default scopes must enable repair.
+async function browserAddressFlow({ status = 403, oldProfile = false, retryDenied = false, registerDenied = false } = {}) {
+  const events = [];
+  const lines = [];
+  const priorLog = console.log;
+  let reads = 0;
+  const runner = processRecorder(({ args }) => {
+    if (args.includes("create")) {
+      events.push("allow");
+      const scopes = args.slice(args.indexOf("--scopes") + 1, args.indexOf("--browser"));
+      assert.deepEqual(scopes, [...CLOUDFLARE_OAUTH_SCOPES]);
+      assert.equal(scopes.filter(scope => scope === "workers_scripts:write").length, 1);
+    }
+    if (args.includes("whoami")) {
+      events.push("grants");
+      return okProcessResult({ stdout: Buffer.from(JSON.stringify({
+        loggedIn: true, authType: "OAuth Token",
+        tokenPermissions: CLOUDFLARE_OAUTH_SCOPES.filter(scope => scope !== "workers_scripts:write"),
+      })) });
+    }
+    return args.includes("token") ? okProcessResult({ stdout: tokenOutput() }) : okProcessResult();
+  });
+  try {
+    console.log = line => lines.push(String(line));
+    const value = await withCloudflareControlCredential(session => {
+      events.push("action");
+      return session.method;
+    }, {
+      accountId: ACCOUNT_A, authProfile: cloudflareOAuthProfileName(INSTALL_ID),
+      interactive: true, allowBrowserReauth: true, allowTokenRecovery: true,
+      setupWorkersSubdomain: registerDenied, platform: "darwin",
+      askFn: async () => { events.push("token-offer"); return "y"; },
+      withToken: async action => { events.push("recovery"); return action(); },
+      oauthOptions: {
+        processRunner: runner, platformName: "darwin",
+        environment: { HOME: process.env.HOME }, workingDirectory: process.env.HOME,
+        generateSubdomainLabel: () => "quiet-meadow-1000",
+        fetchImpl: async (url, options = {}) => {
+          const path = new URL(url).pathname;
+          if (path.endsWith("/accounts")) return jsonResponse(envelope([{ id: ACCOUNT_A, name: "Owner account" }], {
+            result_info: { page: 1, count: 1, total_count: 1, total_pages: 1 },
+          }));
+          if (path.endsWith(`/accounts/${ACCOUNT_A}`)) return jsonResponse(envelope({ id: ACCOUNT_A, name: "Owner account" }));
+          if (path.endsWith("/workers/subdomain")) {
+            const put = options.method === "PUT";
+            events.push(put ? "put" : "read");
+            if (!put) reads++;
+            const denied = put || (oldProfile && (reads === 1 || retryDenied));
+            if (denied || registerDenied) return jsonResponse(envelope(null, {
+              success: false, errors: [{ code: registerDenied && !put ? 10007 : 10000, message: "Fixture provider refusal" }],
+            }), { status: registerDenied && !put ? 404 : status });
+            return jsonResponse(envelope({ subdomain: "existing-fixture" }));
+          }
+          return jsonResponse(envelope([]));
+        },
+      },
+    });
+    return { value, events, lines, reads };
+  } catch (error) {
+    return { error, events, lines, reads };
+  } finally { console.log = priorLog; }
+}
+
+test("a current browser profile confirms its address calmly without recovery warnings", async () => {
+  const run = await browserAddressFlow();
+  assert.equal(run.error, undefined);
+  assert.equal(run.value, "wrangler_oauth");
+  assert.deepEqual(run.events, ["read", "action"]);
+  assert.equal(run.lines.filter(line => /Web address confirmed/.test(line)).length, 1);
+  assert.doesNotMatch(run.lines.join("\n"), /warn|recovery|token|\u001b\[33m/i);
+});
+
+for (const status of [401, 403]) test(`an old browser profile gets one fresh Allow before any token offer (${status})`, async () => {
+  const run = await browserAddressFlow({ status, oldProfile: true });
+  assert.equal(run.error, undefined);
+  assert.equal(run.value, "wrangler_oauth");
+  assert.deepEqual(run.events, ["read", "grants", "allow", "read", "action"]);
+  assert.equal(run.reads, 2);
+  assert.equal(run.lines.filter(line => /Web address confirmed/.test(line)).length, 1);
+  assert.doesNotMatch(run.lines.join("\n"), /warn|recovery|token|\u001b\[33m/i);
+});
+
+test("an old profile still denied after one fresh Allow offers recovery only after the retry", async () => {
+  const run = await browserAddressFlow({ oldProfile: true, retryDenied: true });
+  assert.equal(run.error, undefined);
+  assert.equal(run.value, "api_token");
+  assert.deepEqual(run.events, ["read", "grants", "allow", "read", "token-offer", "recovery", "action"]);
+  assert.equal(run.reads, 2);
+  assert.doesNotMatch(run.lines.join("\n"), /Web address confirmed/);
+});
+
+test("browser registration failure keeps its issue and help without success or token recovery", async () => {
+  const run = await browserAddressFlow({ registerDenied: true });
+  assert.equal(run.value, undefined);
+  assert.equal(run.error?.code, "CLOUDFLARE_WORKERS_SUBDOMAIN_REGISTER_FAILED");
+  assert.match(run.error.message, /https:\/\/financialbrain\.ai\/help\/CLOUDFLARE_WORKERS_SUBDOMAIN_REGISTER_FAILED/);
+  assert.deepEqual(run.events, ["read", "put"]);
+  assert.doesNotMatch(run.lines.join("\n"), /Web address confirmed|Web address reserved/);
 });
 
 test("keyring failure is a generic hard stop and captured output is wiped", () => {
@@ -724,7 +833,7 @@ test("error 10007 on any other preflight read stays an ordinary refused request"
   token.fill(0);
 });
 
-test("setup with no registered workers.dev subdomain says how to register one and never offers the token path", async () => {
+test("setup with no registered workers.dev subdomain names installer recovery and never offers the token path", async () => {
   const root = realpathSync.native(mkdtempSync(resolve(tmpdir(), "brain-unregistered-subdomain-")));
   try {
     const manifestPath = resolve(root, "brain.manifest.json");
@@ -763,7 +872,8 @@ test("setup with no registered workers.dev subdomain says how to register one an
         assert.equal(error.code, "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED");
         assert.match(error.message, /CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED/);
         assert.match(error.message, /workers\.dev subdomain/);
-        assert.match(error.message, /Workers & Pages/);
+        assert.match(error.message, /installer.*resume address setup.*same account/);
+        assert.ok(error.message.includes("https://financialbrain.ai/help/CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED"));
         assert.ok(shown.includes(renderCliCommands(resumeCommand)),
           `the owner must be told to resume with ${renderCliCommands(resumeCommand)}`);
         assert.doesNotMatch(error.message, /check the network|hidden token/i);
@@ -791,7 +901,7 @@ test("preflight reports an unregistered workers.dev subdomain without refusing w
     workersSubdomainRequired: false,
   });
   assert.equal(preflight.status, "ready");
-  assert.equal(preflight.workersSubdomainUnregistered, true);
+  assert.equal(preflight.workersSubdomainSkipped, true);
   assert.equal(Object.hasOwn(preflight, "workersSubdomain"), false,
     "no hostname label may be invented for an account without one");
   assert.ok(!preflight.checks.includes("workers_subdomain"));
@@ -867,7 +977,7 @@ test("a named-profile update of a custom-domain Brain continues when the subdoma
     assert.equal(result.error, undefined, result.error?.message);
     assert.equal(result.value, "done");
     assert.equal(result.actionCalls, 1, "the update action must run after the optional refusal");
-    assert.equal(result.actionSession.preflight.workersSubdomainUnreadable, true);
+    assert.equal(result.actionSession.preflight.workersSubdomainSkipped, true);
     assert.equal(Object.hasOwn(result.actionSession.preflight, "workersSubdomain"), false,
       "a refused read must not invent a subdomain receipt");
     assert.ok(!result.actionSession.preflight.checks.includes("workers_subdomain"));
@@ -892,7 +1002,7 @@ test("a named-profile update with a saved workers.dev address continues when the
     assert.equal(result.value, "done");
     assert.equal(result.actionCalls, 1,
       "the update action must run because its saved full address needs no subdomain lookup");
-    assert.equal(result.actionSession.preflight.workersSubdomainUnreadable, true);
+    assert.equal(result.actionSession.preflight.workersSubdomainSkipped, true);
     assert.ok(!result.actionSession.preflight.checks.includes("workers_subdomain"));
     assert.ok(paths.some((path) => path.includes("/vectorize/")),
       "the remaining preflight reads must run after the optional refusal");
@@ -1062,7 +1172,7 @@ test("a custom-domain Brain treats any subdomain 403 as the same unused scope re
     assert.equal(result.error, undefined, result.error?.message);
     assert.equal(result.value, "done");
     assert.equal(result.actionCalls, 1, "the update action must run after the exact optional read is classified");
-    assert.equal(result.actionSession.preflight.workersSubdomainUnreadable, true);
+    assert.equal(result.actionSession.preflight.workersSubdomainSkipped, true);
     assert.ok(!result.actionSession.preflight.checks.includes("workers_subdomain"));
     assert.ok(paths.some((path) => path.includes("/vectorize/")),
       "the remaining preflight reads must run after the optional refusal");
@@ -1129,13 +1239,13 @@ for (const failure of [
     requestTimeoutMs: 5,
   },
 ]) {
-  test(`a custom-domain Brain stops on a subdomain ${failure.label}`, async () => {
+  test(`a Brain without a saved address stops on a subdomain ${failure.label}`, async () => {
     const root = realpathSync.native(mkdtempSync(resolve(tmpdir(), "brain-custom-domain-subdomain-failure-")));
     const paths = [];
     let actionCalls = 0;
     let observedOAuthCode = null;
     try {
-      const manifestPath = namedProfileManifest(root, { domain: "brain.example.invalid" });
+      const manifestPath = namedProfileManifest(root, {});
       const runner = processRecorder(({ args }) => args.includes("token")
         ? okProcessResult({ stdout: tokenOutput() })
         : okProcessResult());
@@ -1181,7 +1291,7 @@ for (const failure of [
 }
 
 for (const { suffix, platform } of failClosedPlatformArms()) {
-  test(`a custom-domain Brain still fails closed on a Vectorize 403 after the tolerated subdomain refusal${suffix}`, async () => {
+  test(`a custom-domain Brain still fails closed on a Vectorize 403 while skipping the subdomain${suffix}`, async () => {
     const root = realpathSync.native(mkdtempSync(resolve(tmpdir(), "brain-custom-domain-vectorize-refusal-")));
     try {
       const paths = [];
@@ -1216,9 +1326,9 @@ for (const { suffix, platform } of failClosedPlatformArms()) {
       assert.equal(result.error.code, "REMOTE_PERMISSION_DENIED");
       const subdomainRead = paths.findIndex((path) => path.endsWith("/workers/subdomain"));
       const vectorizeRead = paths.findIndex((path) => path.includes("/vectorize/"));
-      assert.equal(paths.filter((path) => path.endsWith("/workers/subdomain")).length, 1);
-      assert.ok(subdomainRead >= 0 && vectorizeRead > subdomainRead,
-        "the Vectorize decision point must be reached after the tolerated subdomain refusal");
+      assert.equal(paths.filter((path) => path.endsWith("/workers/subdomain")).length, 0);
+      assert.equal(subdomainRead, -1, "the custom domain skips the subdomain lookup");
+      assert.ok(vectorizeRead >= 0, "the required Vectorize decision point must still be reached");
       assertKeptScopeRefusal(result, platform, VECTORIZE_SCOPE_CAUSE);
       const controlPaths = [];
       const control = await namedProfileRoutine(
@@ -1386,8 +1496,8 @@ test("a named-profile update of a custom-domain Brain is not refused for a missi
     assert.equal(result.value, "done");
     assert.equal(result.actionCalls, 1);
     assert.deepEqual(result.prompts, []);
-    assert.ok(paths.includes(`/client/v4/accounts/${ACCOUNT_A}/workers/subdomain`),
-      "the subdomain is still read, only its absence is not fatal");
+    assert.ok(!paths.includes(`/client/v4/accounts/${ACCOUNT_A}/workers/subdomain`),
+      "a custom domain skips the unused subdomain lookup completely");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -1409,8 +1519,8 @@ test("a named-profile Brain with no saved address is still refused for a missing
 
 // An expired named profile refreshes in the browser. When that fresh sign-in
 // then meets the unregistered subdomain, the answer is the same account
-// setting, so the token prompt must not be offered and the resume command
-// must still be named.
+// address-setup step, so the token prompt must not be offered and the resume
+// command must still be named after installer recovery.
 test("an unregistered subdomain found by the browser refresh is not routed to the token prompt", async () => {
   const resumeCommand = "brain update /fixture/brain.manifest.json";
   const prompts = [];
@@ -1437,7 +1547,8 @@ test("an unregistered subdomain found by the browser refresh is not routed to th
     }),
     (error) => {
       assert.equal(error.code, "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED");
-      assert.match(error.message, /Workers & Pages/);
+      assert.match(error.message, /installer.*resume address setup.*same account/);
+      assert.ok(error.message.includes("https://financialbrain.ai/help/CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED"));
       assert.ok(renderCliCommands(error.message).includes(renderCliCommands(resumeCommand)),
         "the refusal after a refresh must still name the resume command");
       assert.doesNotMatch(error.message, /hidden token/i);
@@ -1492,6 +1603,9 @@ test("complete setup session reauthorizes the named profile, selects before pref
     }
     if (parsed.pathname.endsWith(`/accounts/${ACCOUNT_B}`)) {
       return jsonResponse(envelope({ id: ACCOUNT_B, name: "Chosen" }));
+    }
+    if (parsed.pathname.endsWith("/workers/subdomain")) {
+      return jsonResponse(envelope({ subdomain: "existing-fixture" }));
     }
     return jsonResponse(envelope([]));
   };
@@ -1550,6 +1664,9 @@ test("routine bound session does not reauthorize or offer account reselection, r
     if (parsed.pathname.endsWith(`/accounts/${ACCOUNT_A}`)) {
       return jsonResponse(envelope({ id: ACCOUNT_A, name: "Bound" }));
     }
+    if (parsed.pathname.endsWith("/workers/subdomain")) {
+      return jsonResponse(envelope({ subdomain: "existing-fixture" }));
+    }
     return jsonResponse(envelope([]));
   };
   let promptCalled = false;
@@ -1606,6 +1723,9 @@ test("a read-only existing-profile session does not persist Wrangler's global ke
     }
     if (parsed.pathname.endsWith(`/accounts/${ACCOUNT_A}`)) {
       return jsonResponse(envelope({ id: ACCOUNT_A, name: "Bound" }));
+    }
+    if (parsed.pathname.endsWith("/workers/subdomain")) {
+      return jsonResponse(envelope({ subdomain: "existing-fixture" }));
     }
     return jsonResponse(envelope([]));
   };

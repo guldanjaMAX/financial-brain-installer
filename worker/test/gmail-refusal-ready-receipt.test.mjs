@@ -74,7 +74,7 @@ async function closeReady(fixture, runId, completedAt = COMPLETED_AT, accepted =
   }), docs_added: accepted, files_seen: 2 + accepted });
 }
 
-test("an all-refused Gmail receipt needs review until accepted work proves recovery", async (t) => {
+test("a completed all-refused Gmail check proves freshness without inventing accepted work", async (t) => {
   const control = await createProductFixture();
   t.after(() => control.close());
   await expectGmail(control);
@@ -95,8 +95,11 @@ test("an all-refused Gmail receipt needs review until accepted work proves recov
   const readyReport = await reportFor(ready);
   const readyTypes = readyReport.gaps.map((gap) => gap.type);
   assert.equal(readyTypes.includes("sync_broken"), false, JSON.stringify(readyReport.gaps));
-  assert.equal(readyTypes.includes("never_synced"), true, JSON.stringify(readyReport.gaps));
-  assert.equal(readyTypes.includes("sync_review"), true, JSON.stringify(readyReport.gaps));
+  assert.equal(readyTypes.includes("never_synced"), false, JSON.stringify(readyReport.gaps));
+  assert.equal(readyTypes.includes("sync_review"), false, JSON.stringify(readyReport.gaps));
+  const source = ready.first("SELECT last_ingest_at,last_complete_sweep_at FROM sources WHERE name=?", "gmail");
+  assert.equal(source.last_ingest_at, COMPLETED_AT, "completed provider check records freshness");
+  assert.equal(source.last_complete_sweep_at, null, "refused content never earns complete history");
   const readyRun = ready.first("SELECT docs_refused,docs_failed FROM sync_runs WHERE run_id=?",
     "run_gmail_refusal_ready");
   assert.deepEqual({ ...readyRun }, { docs_refused: 2, docs_failed: 0 });
@@ -112,3 +115,23 @@ test("an all-refused Gmail receipt needs review until accepted work proves recov
     "run_gmail_refusal_recovery");
   assert.deepEqual({ ...recoveryRun }, { docs_refused: 2, docs_failed: 0 });
 });
+
+for (const control of ["missing_boundary", "failed_read", "unknown_reason"]) {
+  test(`a Gmail refusal cannot hide ${control}`, async t => {
+    const fixture = await createProductFixture();
+    t.after(() => fixture.close());
+    await expectGmail(fixture);
+    const runId = `run_control_${control}`;
+    await openRun(fixture, runId);
+    const receipt = gmailRefusalReadyReceipt({ runId, startedAt: STARTED_AT, completedAt: COMPLETED_AT });
+    if (control === "missing_boundary") delete receipt.provider_check_complete;
+    if (control === "failed_read") receipt.docs_failed = 1;
+    if (control === "unknown_reason") receipt.refusal_reason = "unrecognized";
+    await post(fixture, "/api/admin/brain/source-receipt", receipt);
+    const saved = fixture.first("SELECT docs_refused,docs_failed FROM sync_runs WHERE run_id=?", runId);
+    assert.equal(saved.docs_refused, 2, "measured refusal decision reached");
+    const source = fixture.first("SELECT last_ingest_at,last_complete_sweep_at FROM sources WHERE name=?", "gmail");
+    assert.equal(source.last_ingest_at, null, "uncertified or failed reads never become fresh");
+    assert.equal(source.last_complete_sweep_at, null);
+  });
+}

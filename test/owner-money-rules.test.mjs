@@ -243,6 +243,7 @@ test('R2 B2 M3 shipped and rendered owner rules use tool confidence and continue
     assert.match(text, /as_of\.local_date.*as_of\.utc_date.*say which date and zone were used, and continue/);
     assert.match(text, /confidence\.line/);
     assert.match(text, /never raise/i);
-    assert.match(text, /Below 100%.*reasons.*missing/);
+    assert.match(text, /Preserve (?:reasons and missing evidence|why and what is missing) in the five answer parts/);
+    assert.match(text, /(?:Never show owners confidence labels or percentages|(?:Keep|hide) confidence labels and percentages (?:internal|from owners))/i);
   }
 });

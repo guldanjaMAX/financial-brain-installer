@@ -22,24 +22,32 @@ export function agoISO(iso: string | null | undefined): string | null {
   return Number.isFinite(ms) ? ago(ms) : null;
 }
 
-export function Section({ title, blurb, children, action }: {
-  title: string; blurb?: string; children: ReactNode; action?: ReactNode;
+export function Section({ title, blurb, children, action, headerInCard = false }: {
+  title: string; blurb?: string; children: ReactNode; action?: ReactNode; headerInCard?: boolean;
 }) {
+  const heading = <>
+    <div className={headerInCard
+      ? "flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center"
+      : "flex items-baseline justify-between gap-4 flex-wrap"}>
+      <h2 className="text-[17px] font-semibold tracking-tight">{title}</h2>
+      {action}
+    </div>
+    {blurb && <p className="mt-1 max-w-[42rem] text-[14px] text-ink-soft leading-relaxed">{blurb}</p>}
+  </>;
   return (
     <section className="mt-8 first:mt-0">
-      <div className="flex items-baseline justify-between gap-4">
-        <h2 className="text-[15px] font-semibold tracking-tight">{title}</h2>
-        {action}
+      {!headerInCard && heading}
+      <div className="mt-3 bg-card border border-line rounded-2xl overflow-hidden">
+        {headerInCard && <header className="border-b border-line p-4 sm:p-5">{heading}</header>}
+        {children}
       </div>
-      {blurb && <p className="mt-1.5 text-[14px] text-ink-soft leading-relaxed">{blurb}</p>}
-      <div className="mt-3 bg-card border border-line rounded-2xl overflow-hidden">{children}</div>
     </section>
   );
 }
 
 export function Row({ children }: { children: ReactNode }) {
   return (
-    <div className="px-4 py-3.5 border-b border-line last:border-b-0 flex items-center justify-between gap-3 flex-wrap">
+    <div className="px-4 py-3.5 border-b border-line last:border-b-0 flex items-start justify-between gap-3 flex-wrap [&>:first-child]:min-w-[min(100%,16rem)] [&>:first-child]:flex-1">
       {children}
     </div>
   );
@@ -62,11 +70,12 @@ export function Badge({ tone, children }: {
 }) {
   const styles = {
     accent: "bg-accent-soft text-accent",
-    muted: "bg-paper text-ink-soft border border-line",
-    warn: "bg-amber-50 text-amber-800 border border-amber-200",
+    muted: "bg-neutral-bg text-ink-soft border border-line",
+    warn: "bg-act-bg text-act border border-act-line",
   }[tone];
   return (
-    <span className={`text-[11.5px] font-medium px-2 py-0.5 rounded-full whitespace-nowrap ${styles}`}>
+    <span className={`text-[12.5px] font-medium px-2 py-0.5 rounded-full whitespace-nowrap inline-flex items-center gap-1 ${styles}`}>
+      <span aria-hidden="true">{tone === "warn" ? "△" : "·"}</span>
       {children}
     </span>
   );
@@ -84,15 +93,15 @@ export function Badge({ tone, children }: {
 export function Chip({ state }: { state: string }) {
   const o = outcomeFor(state);
   const styles: Record<string, string> = {
-    good: "bg-emerald-50 text-emerald-800 border-emerald-200",
-    done: "bg-paper text-ink-soft border-line",
-    wait: "bg-sky-50 text-sky-800 border-sky-200",
-    act: "bg-amber-50 text-amber-900 border-amber-200",
-    bad: "bg-red-50 text-red-800 border-red-200",
+    good: "bg-good-bg text-good border-good-line",
+    done: "bg-neutral-bg text-ink-soft border-line",
+    wait: "bg-wait-bg text-wait border-wait-line",
+    act: "bg-act-bg text-act border-act-line",
+    bad: "bg-bad-bg text-bad border-bad-line",
   };
   return (
     <span
-      className={`text-[11.5px] font-medium px-2 py-0.5 rounded-full whitespace-nowrap border inline-flex items-center gap-1 ${styles[o.tone]}`}
+      className={`text-[12.5px] font-medium px-2 py-0.5 rounded-full whitespace-nowrap border inline-flex items-center gap-1 ${styles[o.tone]}`}
     >
       <span aria-hidden="true">{o.glyph}</span>
       {o.label}
@@ -114,20 +123,20 @@ export function NextStep({ owner, children }: { owner?: MoveOwner; children: Rea
 /** The severity ladder, three rungs, graded by CONSEQUENCE not by machine
  *  state. Critical is the heaviest object on any screen and sits outside every
  *  action cap; nothing else may compete with it visually. */
-export function Critical({ children }: { children: ReactNode }) {
+export function Critical({ children, inset = false }: { children: ReactNode; inset?: boolean }) {
   return (
-    <div role="alert" className="flex gap-3 border-[1.5px] border-red-300 bg-red-50 rounded-2xl px-4 py-3.5 mb-4">
-      <span aria-hidden="true" className="text-red-700 font-semibold">!</span>
-      <div className="text-[14.5px] text-red-900 leading-relaxed min-w-0">{children}</div>
+    <div role="alert" className={`flex gap-3 border-[1.5px] border-bad-line bg-bad-bg px-4 py-3.5 ${inset ? "m-4 rounded-xl" : "rounded-2xl mb-4"}`}>
+      <span aria-hidden="true" className="text-bad font-semibold">!</span>
+      <div className="text-[14.5px] text-bad leading-relaxed min-w-0">{children}</div>
     </div>
   );
 }
 
-export function Attention({ children }: { children: ReactNode }) {
+export function Attention({ children, inset = false }: { children: ReactNode; inset?: boolean }) {
   return (
-    <div role="status" className="flex gap-3 border border-amber-200 bg-amber-50 rounded-2xl px-4 py-3.5 mb-4">
-      <span aria-hidden="true" className="text-amber-800">!</span>
-      <div className="text-[14.5px] text-amber-900 leading-relaxed min-w-0">{children}</div>
+    <div role="status" className={`flex gap-3 border border-act-line bg-act-bg px-4 py-3.5 ${inset ? "m-4 rounded-xl" : "rounded-2xl mb-4"}`}>
+      <span aria-hidden="true" className="text-act">!</span>
+      <div className="text-[14.5px] text-act leading-relaxed min-w-0">{children}</div>
     </div>
   );
 }
@@ -156,32 +165,32 @@ export function Confirm({ label, question, onConfirm, disabled, tone = "danger" 
   tone?: "danger" | "quiet";
 }) {
   const [asking, setAsking] = useState(false);
-  const color = tone === "danger" ? "text-red-700" : "text-ink-soft";
+  const color = tone === "danger" ? "text-bad" : "text-ink-soft";
 
   if (!asking) {
     return (
       <button
         disabled={disabled}
         onClick={() => setAsking(true)}
-        className={`text-[13px] ${color} px-2 py-1 rounded-lg hover:bg-paper disabled:opacity-50 shrink-0`}
+        className={`text-[15px] font-semibold min-h-11 ${color} -mx-2 px-2 py-1 rounded-lg hover:bg-paper disabled:opacity-50 shrink-0`}
       >
         {label}
       </button>
     );
   }
   return (
-    <span className="flex items-center gap-1.5 flex-wrap justify-end">
+    <span className="flex items-center gap-3 flex-wrap justify-start">
       <span className="text-[13px] text-ink-soft">{question}</span>
       <button
         disabled={disabled}
         onClick={() => { setAsking(false); onConfirm(); }}
-        className="text-[13px] font-medium text-red-700 px-2 py-1 rounded-lg hover:bg-red-50 disabled:opacity-50"
+        className="text-[15px] font-semibold min-h-11 text-bad px-2 py-1 rounded-lg hover:bg-bad-bg disabled:opacity-50"
       >
         Yes
       </button>
       <button
         onClick={() => setAsking(false)}
-        className="text-[13px] text-ink-soft px-2 py-1 rounded-lg hover:bg-paper"
+        className="text-[15px] font-semibold min-h-11 text-ink-soft px-2 py-1 rounded-lg hover:bg-paper"
       >
         Cancel
       </button>
@@ -202,7 +211,7 @@ export function EditableName({ value, placeholder, onSave, disabled }: {
       <button
         disabled={disabled}
         onClick={() => { setDraft(value); setEditing(true); }}
-        className="text-[14.5px] text-left hover:text-accent disabled:opacity-50"
+        className="text-[15px] font-semibold min-h-11 text-left hover:text-accent disabled:opacity-50"
         title="Rename"
       >
         {value || <span className="text-ink-soft italic">{placeholder}</span>}
@@ -220,7 +229,7 @@ export function EditableName({ value, placeholder, onSave, disabled }: {
         if (e.key === "Enter") commit();
         if (e.key === "Escape") setEditing(false);
       }}
-      className="text-[14.5px] px-2 py-1 -mx-2 -my-1 rounded-lg border border-accent bg-card outline-none min-w-0 w-44"
+      className="text-[16px] min-h-11 px-2 py-1 -mx-2 -my-1 rounded-lg border border-accent bg-card outline-none min-w-0 w-44"
       placeholder={placeholder}
     />
   );

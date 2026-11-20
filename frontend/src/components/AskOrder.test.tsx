@@ -1,6 +1,6 @@
 import { vi, it, expect, beforeEach, afterEach } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { ANSWER_ERROR_MESSAGES } from '../lib/answer-render.js';
+import { ANSWER_ERROR_MESSAGES, documentResponseConfidence } from '../lib/answer-render.js';
 import { REFUSAL_NEXT_ACTIONS } from '../lib/retrieval-status.js';
 const state = vi.hoisted(() => ({ body: null as any, index: 0, position: 2 }));
 vi.mock('react', async importOriginal => {
@@ -34,6 +34,26 @@ function article(body: any, scoped: boolean) {
     .replace(/&quot;/g, '"').replace(/&#x27;|&#39;/g, "'").replace(/&amp;/g, '&');
 }
 for (const scoped of [false, true]) {
+  it(`${scoped ? 'shared' : 'owner'} renders metadata-only evidence gaps and removes Markdown score badges`, () => {
+    const body = { ...supported, answer_contract: { version: 1, kind: 'document' },
+      confidence: { percent: 10, band: 'Low', basis: ['The source search did not complete.'],
+        missing: ['A complete search of the requested sources.'] } };
+    const control = article({ ...body, confidence: { percent: 100, band: 'High', basis: [], missing: [] } }, scoped);
+    expect(control).toContain(supported.answer);
+    expect(control).not.toContain('this answer may be incomplete');
+    for (const prefix of ['', '- ', '> ']) {
+      const text = article({ ...body, answer: `${body.answer}\n${prefix}Confidence: Low (10%)` }, scoped);
+      expect(text).toContain(supported.answer);
+      expect(text).toContain('The source search did not complete');
+      expect(text).toContain('A complete search of the requested sources');
+      expect(text).not.toMatch(/Confidence:|\b(?:High|Medium|Low)\s*\(?\d+%/);
+      expect(text).toContain('Fixture source');
+    }
+    const qualified = article({ ...body, answer: `${body.answer}\nThe source search did not complete.\nA complete search of the requested sources.` }, scoped);
+    expect(qualified.match(/A complete search of the requested sources/g)).toHaveLength(1);
+    expect(body.confidence.percent).toBe(10);
+  });
+
   for (const status of ['coverage_incomplete', 'search_unavailable']) {
     it(`${scoped ? 'shared' : 'owner'} displays a completed contract despite ${status} metadata`, () => {
       const answer = [
@@ -49,13 +69,16 @@ for (const scoped of [false, true]) {
           missing: ['Receiving account statement and independent payment match.'] } };
       const control = article({ ...body, status: 'ok' }, scoped);
       expect(control).toContain('$120.00 spent in October 2026 [1].');
-      expect(control).toContain('Confidence: Low (69%)');
+      expect(control).not.toMatch(/Confidence:|\b(?:High|Medium|Low)\s*\(?\d+%/);
       const text = article(body, scoped);
       for (const line of answer.split('\n')) expect(text).toContain(line);
-      expect(text).toContain('Confidence: Low (69%)');
-      expect(text).toContain('Why:');
-      expect(text).toContain('$20.00 payment remains unmatched.');
-      expect(text).toContain('Missing: Receiving account statement and independent payment match.');
+      expect(text).not.toMatch(/Confidence:|\b(?:High|Medium|Low)\s*\(?\d+%/);
+      expect(body.confidence.percent).toBe(69);
+      expect(text).toContain('this answer may be incomplete.');
+      expect(text).toContain('$20.00 payment remains unmatched');
+      expect(text).toContain('Receiving account statement and independent payment match');
+      expect(body.confidence.basis).toContain('$20.00 payment remains unmatched.');
+      expect(body.confidence.missing).toContain('Receiving account statement and independent payment match.');
       expect(text).toContain('Fixture source');
       expect(text).not.toContain('Legacy status notice.');
     });
@@ -112,6 +135,21 @@ for (const scoped of [false, true]) {
           : { ...supported, answer: `${supported.answer} ${expected}` };
       for (const citations of [[], supported.citations]) {
         const text = article({ ...body, citations }, scoped);
+        if (!scoped && kind === 'reviewed') {
+          // Incomplete owner results lead with the repair action instead of a
+          // provisional wall. Completed contracts still use the order above.
+          expect(text).toContain('Try again');
+          expect(text).toContain('Code: coverage_incomplete');
+          expect(text.split(expected)).toHaveLength(2);
+          // CONF-HIDE-1117: no score for the owner; the plain note follows the
+          // action and the internal score stays Low.
+          expect(text).not.toMatch(/Confidence\s*:|\b(?:High|Medium|Low)\s*\(?\d+%/i);
+          expect(text.indexOf(expected)).toBeLessThan(text.indexOf('this answer may be incomplete.'));
+          expect(documentResponseConfidence({ ...body, citations }).percent).toBeLessThan(70);
+          if (citations.length) expect(text).toContain('Fixture source');
+          expect(text).not.toContain(offer);
+          continue;
+        }
         expect(text).toContain(kind === 'selected' ? supported.answer
           : kind === 'error' ? 'answers are unavailable right now.' : 'provisional');
         if (citations.length) expect(text).toContain('Fixture source');

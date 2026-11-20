@@ -3,7 +3,7 @@
   "derivation": "package-lock direct bundle integrity archives",
   "root_package": {
     "name": "brain-installer",
-    "version": "0.4.29"
+    "version": "0.4.31"
   },
   "bundles": [
     {
@@ -28,13 +28,13 @@
     },
     {
       "name": "postal-mime",
-      "version": "3.0.0",
-      "integrity": "sha512-Z4a9ar2Bv3YpK3IXag+Yda30k7bMZfpRuUGyqtHnZ2pjHG8Bl62EhZIk4n1dzv00gfzP9g+94e9kd8+XmjVWLA==",
-      "file_count": 26,
-      "total_bytes": 324889,
-      "path_inventory_sha256": "ee17d725ab2acc584a378ced2714ccce2aa7d737afaabb22610e10e50dff54a4",
-      "metadata_inventory_sha256": "7a4a8ebb3280e9f180acf450bfe97abacae7f6d55631ae9dafdc5fad2526ec58",
-      "content_inventory_sha256": "f1c112289200e8d19049b853e5667eca28f23c0631d489e1dda8006a00395638"
+      "version": "4.2.1",
+      "integrity": "sha512-uFQnu6TPJe5IGzj3ZIjzAYCk7qnVYM3KFvo0JpRFftJKtxJcUSMgTaWsIXDakTKfN71fUULhjNNVbNonim5f0Q==",
+      "file_count": 141,
+      "total_bytes": 1313363,
+      "path_inventory_sha256": "85624faf18fe4750fa0b97489dd56c11a298a68eef4de49d378dd3061ccb47e3",
+      "metadata_inventory_sha256": "af19390a945b5836ed0e2453abab0b61b9c88cdb2557a283721f0849ce35eee4",
+      "content_inventory_sha256": "7d67a6d79649bbc04edfe8e20cff083ce2f4aec448ccbd66751da4d6e0cf1565"
     },
     {
       "name": "unpdf",
@@ -47,5 +47,5 @@
       "content_inventory_sha256": "175207799152e09d7c96010bd6ae80414de26e549c31843073c4cf1460fbb829"
     }
   ],
-  "inventory_sha256": "0e86bf795f93b456e16b9000efc10a5579ee2ea9c606411f9d50de3e5ecfc08e"
+  "inventory_sha256": "8529920733a96acaf2138d564c34089d1b0c60774dedbe3fc6e5d58afdad591e"
 }

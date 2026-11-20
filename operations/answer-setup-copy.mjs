@@ -58,9 +58,9 @@ export const DISCONNECT_LINE = "Your Brain now answers with the built-in Cloudfl
 
 export function DONE_LINES({ cap, reset, clipboard = false }) {
   return [
-    "Done. Claude Opus now writes your answers and Claude Sonnet checks them, on your own Anthropic account.",
-    `Daily limit: $${cap}, resetting at ${reset} each day. Your Brain keeps the key only as a secret inside your Brain.`,
-    ...(clipboard ? ["Your clipboard was cleared (a clipboard history app may still keep a copy). You can close the key window now."] : []),
+    "✓ Claude Opus now writes your answers and Claude Sonnet checks them, on your own Anthropic account.",
+    `✓ Daily limit: $${cap}, resets every day at ${reset}. Your Brain keeps the key only as a secret inside your Brain.`,
+    ...(clipboard ? ["✓ Your clipboard was cleared (a clipboard history app may still keep a copy). You can close the key window now."] : []),
   ];
 }
 

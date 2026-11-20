@@ -11,6 +11,7 @@ import { DriveRemovalReviewRequired } from "./drive-removal-plan.mjs";
 import { removalReviewFacts, removalOwnerSentence } from "./load-removal-review.mjs";
 import { SUPPORT_ERROR_CODES } from "../support-journal.mjs";
 import { renderCliCommands } from "./cli-guidance.mjs";
+import { SOURCE_INVENTORY_HELP_URL } from "./source-inventory-pages.mjs";
 import { quotePosixArgument, quotePowerShellArgument } from "./command-display.mjs";
 import {
   mergeProviderWithheldReasons,
@@ -403,14 +404,8 @@ export async function runDailyRefresh({
           await writeReceipt(receipt);
           continue;
         }
-        if (source.key === "gmail" && runResult?.pending_removals > 0) {
-          const receipt = Object.freeze({ schema_version: 1, kind: "daily_refresh_source",
-            identity: plan.identity.id, source: source.source_names?.[0] || source.key,
-            status: "waiting_for_owner", started_at: sourceStartedAt, completed_at: timestamp(now),
-            freshness_advanced: false, pending_removals: runResult.pending_removals,
-            reason_code: "removal_review", reason: "Gmail additions are saved. Removals await an owner decision; run Gmail ingestion to preview exact targets." });
-          sourceResults.push(receipt); await writeReceipt(receipt); continue;
-        }
+        // Gmail removal reviews retain copies. They do not veto a completed
+        // source check; the measured Worker receipt below remains mandatory.
         lock.assertOwned();
         const afterObservation = await observeFreshness(source);
         const afterInventory = afterObservation.inventory;
@@ -473,7 +468,11 @@ export async function runDailyRefresh({
             !unverifiedBySource[index];
         });
         const docsExcluded = Number.isSafeInteger(runResult?.excluded) ? runResult.excluded : null;
-        if (checkVerified && (latestRuns.some((run) => run?.outcome === "partial") ||
+        // A certified Gmail credential omission is a successful daily check.
+        // Keep its refused count, while read/storage gaps still fail below.
+        const gmailPolicyCheck = source.key === "gmail" && withheldBySource.length > 0 &&
+          withheldBySource.every(Boolean);
+        if (checkVerified && !gmailPolicyCheck && (latestRuns.some((run) => run?.outcome === "partial") ||
             runResult?.partial > 0 || docsExcluded > 0)) outcome = "partial";
         if (!checkVerified) {
           outcome = "failed";
@@ -508,6 +507,7 @@ export async function runDailyRefresh({
           ...(freshnessUnknown ? {
             freshness_state: "unknown",
             reason_code: "source_inventory_unavailable",
+            help: SOURCE_INVENTORY_HELP_URL,
           } : {}),
           check_verified: checkVerified,
           no_change: checkVerified && noChangeBySource.every(Boolean),
@@ -516,6 +516,8 @@ export async function runDailyRefresh({
           last_check_at_after: checkVerified ? Object.keys(afterBySource).map((name, index) =>
             noChangeBySource[index] ? afterInventory[name].latest_run.finished_at : withheldBySource[index] || afterBySource[name]).sort().at(-1) : null,
           docs_refused: docsRefused,
+          ...(source.key === "gmail" && runResult?.pending_removals > 0
+            ? { pending_removals: runResult.pending_removals } : {}),
           docs_withheld: docsWithheld,
           ...(withheldAggregate?.reasons ? { withheld_reasons: Object.freeze(withheldAggregate.reasons) } : {}),
           docs_excluded: docsExcluded,
@@ -746,7 +748,9 @@ async function executeDailyRefreshCli(path, m, options, observationStarted) {
         (runCause ? ` | ${runCause}` : ""));
       for (const source of result.sources) {
         const withheldCopy = providerSetAsideOwnerCopy(source);
-        const sourceCause = source.issue_code === "NETWORK_UNREACHABLE"
+        const sourceCause = source.reason_code === "source_inventory_unavailable"
+          ? `source_inventory_unavailable: source freshness could not be read. Help: ${SOURCE_INVENTORY_HELP_URL}`
+          : source.issue_code === "NETWORK_UNREACHABLE"
           ? "NETWORK_UNREACHABLE: network unavailable; check the connection, then retry this source."
           : null;
         log(`${source.source} | ${source.status} | ${source.last_successful_run_at_after || "never"}` +

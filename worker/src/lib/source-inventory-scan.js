@@ -4,6 +4,7 @@ import { customApiPointerTablesPresent } from "./custom-api-visibility.js";
 
 export const INVENTORY_DOCUMENT_PAGE_SIZE = 5000;
 export const INVENTORY_MAX_PAGES = 1000;
+const METADATA_PAGE_BYTES = 8 * 1024 * 1024;
 const RECEIPT_PAGE_SIZE = 5000;
 const SOURCE_LIMIT = 10000;
 const fail = (code) => { throw Object.assign(new Error(code), { code }); };
@@ -75,6 +76,20 @@ export async function sourceInventoryScanPage(env, { after = 0, limit = INVENTOR
   if (!page || !Number.isSafeInteger(page.scanned) || page.scanned < 0 || page.scanned > limit ||
       !Number.isSafeInteger(page.through_id) || (page.scanned ? page.through_id <= after : page.through_id !== after)) {
     fail("source_inventory_invalid_page");
+  }
+  if (!freshnessOnly) {
+    // A row limit alone does not bound JSON work: a few thousand wide
+    // metadata records can exhaust D1 before the page can return a cursor.
+    // Inspect bytes only inside the rowid range, before parsing any JSON.
+    const metadata = await env.DB.prepare(`SELECT COALESCE(SUM(length(CAST(meta AS BLOB))),0) AS bytes
+      FROM (SELECT meta FROM documents WHERE rowid > ?1 ORDER BY rowid LIMIT ?2)`)
+      .bind(after, limit).first();
+    if (!metadata || !Number.isSafeInteger(metadata.bytes) || metadata.bytes < 0) fail("source_inventory_invalid_page");
+    if (metadata.bytes > METADATA_PAGE_BYTES) {
+      if (limit === 1) fail("source_inventory_metadata_limit");
+      return sourceInventoryScanPage(env, { after, limit: Math.floor(limit / 2), now, snapshot: before,
+        eventsAfter, runsAfter, freshnessOnly });
+    }
   }
   // A pathological document cannot turn a bounded document page into an
   // unbounded chunk scan. The covering chunk index stops this proof at 50,001.

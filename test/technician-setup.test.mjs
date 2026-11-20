@@ -568,8 +568,7 @@ test("the plan is read-only, ordered, honest about proof, and agent-readable", (
   assert.match(plan.coverage.bank_connections.owner_message, /You did nothing wrong/i);
   assert.match(plan.coverage.bank_connections.owner_message, /no bank password.*verification code.*Plaid setup key/i);
   assert.match(plan.coverage.bank_connections.owner_message, /Bank feeds are set up with your installer on a call\./i);
-  assert.match(renderTechnicianPlan(plan), /Bank connections are not part of ordinary onboarding yet/i);
-  assert.match(renderTechnicianPlan(plan), /live proof arrives/i);
+  assert.doesNotMatch(renderTechnicianPlan(plan), /Bank connections are not part of ordinary onboarding yet|live proof arrives/i);
   assert.match(plan.rules.join("\n"), /offer browser help once/i);
   assert.match(plan.rules.join("\n"), /token creation as recovery only/i);
   assert.ok(plan.rules.includes(RULE_LINE));
@@ -590,7 +589,7 @@ test("the plan is read-only, ordered, honest about proof, and agent-readable", (
     "--cloudflare-account-id", "--workers-paid-confirmed",
   ]) assert.match(cloudflareArgs, new RegExp(flag));
   assert.doesNotMatch(cloudflareArgs, /cloudflare-token/i);
-  assert.match(renderTechnicianPlan(plan), /Claude runs after your approval/i);
+  assert.doesNotMatch(renderTechnicianPlan(plan), /Claude runs after your approval/i);
   const passkey = plan.steps.find((step) => step.id === "passkey");
   assert.equal(passkey.owner_only_command.execution_boundary, "owner_direct_terminal");
   assert.equal(passkey.owner_only_command.reveals_one_time_link, true);
@@ -599,6 +598,149 @@ test("the plan is read-only, ordered, honest about proof, and agent-readable", (
   assert.equal(passkey.owner_only_command.browser_prompt_requires_owner_click, true);
   assert.match(plan.rules.join("\n"), /never runs or captures brain invite/i);
   assert.doesNotMatch(JSON.stringify(plan), /client_secret|app_password|api_token/i);
+});
+
+test("the owner plan numbers only today's steps and keeps the complete agent plan", () => {
+  let inspected = 0;
+  const plan = technicianPlan(join(sandbox, "owner-plan.json"), {
+    intent: "first_brain",
+    existsSync: () => { inspected++; return false; },
+    cli: { command: fixtureNodePath, args: [fixtureScriptPath] },
+  });
+  assert.ok(inspected > 0, "the real plan builder inspected the synthetic install record");
+  const before = JSON.stringify(plan);
+  const active = plan.steps.filter((step) => !["google", "zoom", "imap"].includes(step.id));
+  assert.equal(active.length, 6);
+  const text = renderTechnicianPlan(plan);
+  assert.match(text, /^\nSetting up your Brain · 6 steps · about 33 minutes\n/);
+  for (const [index, step] of active.entries()) {
+    assert.ok(Number.isInteger(step.minutes) && step.minutes > 0);
+    assert.match(text, new RegExp(`STEP ${index + 1} of 6 · .+ · about ${step.minutes} min`));
+  }
+  assert.equal(active.reduce((sum, step) => sum + step.minutes, 0), 33);
+  assert.equal((text.match(/^STEP /gm) || []).length, 6);
+  assert.equal((text.match(/^Later, with your installer: Google, Zoom, email\.$/gm) || []).length, 1);
+  assert.doesNotMatch(text, /STEP .*Connect (?:Google|Zoom|an IMAP)/);
+  assert.doesNotMatch(text, /human_boundary|Before approval|State:|Manifest:|Owner route:|Routing result:|Final hostname:|Run:|Dashboard:|deferred from public first install|--no-connect|bank connections/i);
+  assert.doesNotMatch(text, /brain\.mjs|\bnode\b|GiB|LOCALAPPDATA|smoke document/i);
+  for (const path of [plan.manifest.path, fixtureScriptPath, fixtureNodePath]) assert.ok(!text.includes(path));
+  assert.equal(JSON.stringify(plan), before, "owner rendering never mutates the structured plan");
+  // Positive controls: the removed owner text still belongs to the agent plan.
+  assert.match(plan.steps[0].command, /'--run' 'tools'/);
+  assert.match(plan.steps[0].human_boundary, /Before approval/);
+  assert.equal(plan.steps.find((step) => step.id === "google").state, "deferred_from_public_first_install");
+  assert.equal(plan.steps.find((step) => step.id === "passkey").order, 8);
+});
+
+test("briefings show one explanation and second-person actions, with optional details", () => {
+  const plan = technicianPlan(join(sandbox, "briefing-plan.json"), { intent: "first_brain" });
+  const active = plan.steps.filter((step) => !["google", "zoom", "imap"].includes(step.id));
+  for (const [index, step] of active.entries()) {
+    const text = renderTechnicianStepBriefing(step);
+    assert.match(text, new RegExp(`STEP ${index + 1} of 6 · .+ · about ${step.minutes} min`));
+    assert.equal((text.match(/^What happens: /gm) || []).length, 1);
+    assert.match(text, /\*\*\*\*ACTION NEEDED\*\*\*\*\nStep 1 - /);
+    assert.doesNotMatch(text, /The owner|A Zoom admin|Why this helps:|Smallest access:|Browser help:|Privacy:|^-{4}|✅/im);
+    const details = renderTechnicianStepBriefing(step, { details: true });
+    for (const field of ["why", "minimum_access", "browser_help", "privacy"]) {
+      assert.ok(details.includes(step.owner_guidance[field]), `details preserve ${field} for ${step.id}`);
+      assert.ok(!text.includes(step.owner_guidance[field]), `default hides ${field} for ${step.id}`);
+    }
+  }
+  const cloudflare = renderTechnicianStepBriefing("cloudflare");
+  assert.match(cloudflare, /You sign in.*2FA/);
+  assert.match(cloudflare, /Paid.*\$5.*before.*created/);
+  assert.match(renderTechnicianStepBriefing("tools"), /2 GB/);
+  const later = renderTechnicianStepBriefing("google");
+  assert.match(later, /Later, with your installer: Google · about 32 min/);
+  assert.doesNotMatch(later, /STEP \d+ of/);
+});
+
+test("a blocked owner route keeps its reason and code without promising fresh creation", () => {
+  let reads = 0;
+  const plan = technicianPlan(join(sandbox, "unproven-plan.json"), {
+    intent: "existing_this_computer", existsSync: () => true,
+    readFileSync: () => { reads++; return JSON.stringify({ brain: { domain: "brain.owner.invalid" } }); },
+  });
+  assert.equal(reads, 1);
+  assert.equal(plan.routing.read_only_stop, true);
+  const text = renderTechnicianPlan(plan);
+  assert.ok(text.includes(plan.routing.owner_message));
+  assert.match(text, /Code: INSTALL_RECORD_UNPROVEN/);
+  assert.match(text, /STEP 2 of 6 · Review your Brain setup/);
+  const step = plan.steps.find((candidate) => candidate.id === "cloudflare");
+  const briefing = renderTechnicianStepBriefing(step);
+  assert.match(briefing, /review.*with your installer/i);
+  assert.doesNotMatch(briefing, /will be created|You sign in to Cloudflare/);
+  const fresh = technicianPlan(join(sandbox, "fresh-control.json"), { intent: "first_brain", existsSync: () => false });
+  assert.match(renderTechnicianPlan(fresh), /STEP 2 of 6 · Create your Brain on Cloudflare/);
+});
+
+test("the details flag reaches the real CLI briefing before an injected child", async () => {
+  const events = [];
+  await cmdTechnician(join(sandbox, "details-plan.json"), {
+    intent: "first_brain", run: "tools", details: true,
+  }, {
+    scriptPath: fixtureScriptPath, nodePath: fixtureNodePath, baseEnv: { PATH: "/safe/bin" },
+    writeBriefing: (text) => events.push({ kind: "briefing", text }),
+    spawn: () => { events.push({ kind: "child" }); return { status: 0 }; },
+  });
+  assert.deepEqual(events.map((event) => event.kind), ["briefing", "child"]);
+  assert.match(events[0].text, /Why this helps:/);
+});
+
+test("the CLI keeps JSON complete even with details selected", async () => {
+  const lines = [];
+  let reads = 0;
+  const originalLog = console.log;
+  let plan;
+  try {
+    console.log = (line) => lines.push(line);
+    plan = await cmdTechnician(join(sandbox, "json-plan.json"), {
+      intent: "first_brain", json: true, details: true,
+    }, {
+      scriptPath: fixtureScriptPath, nodePath: fixtureNodePath,
+      manifestDeps: { existsSync: () => { reads++; return false; } },
+      spawn: () => assert.fail("a JSON plan must not start a child"),
+    });
+  } finally { console.log = originalLog; }
+  assert.ok(reads > 0);
+  assert.equal(lines.length, 1);
+  assert.deepEqual(JSON.parse(lines[0]), plan);
+  assert.match(plan.steps[0].command, /'--run' 'tools'/);
+  assert.match(plan.steps[0].human_boundary, /Before approval/);
+});
+
+test("the transcript collapses a successful step before the next briefing, never a failed step", async () => {
+  const lines = [];
+  const originalLog = console.log;
+  let calls = 0;
+  const options = {
+    scriptPath: fixtureScriptPath, nodePath: fixtureNodePath, baseEnv: { PATH: "/safe/bin" },
+    writeBriefing: (text) => lines.push(text),
+    spawn: () => { calls++; return { status: 0 }; },
+  };
+  const path = join(sandbox, "transcript-plan.json");
+  try {
+    console.log = (line) => lines.push(line);
+    await cmdTechnician(path, { intent: "first_brain", run: "tools" }, options);
+    await cmdTechnician(path, {
+      intent: "first_brain", run: "cloudflare", "browser-sign-in": true,
+      name: "Owner", slug: "owner-brain", "cloudflare-account": "existing",
+      "cloudflare-account-id": "a".repeat(32), "workers-paid-confirmed": true,
+    }, options);
+    assert.equal(calls, 2, "both successful decision points were reached");
+    const transcript = lines.join("\n");
+    assert.match(transcript, /✅ STEP 1 of 6 done: Check this computer\n\nSTEP 2 of 6/);
+    assert.match(transcript, /✅ STEP 2 of 6 done: Create your Brain on Cloudflare/);
+    lines.length = 0;
+    await assert.rejects(cmdTechnician(path, { intent: "first_brain", run: "tools" }, {
+      ...options, spawn: () => { calls++; return { status: 1 }; },
+    }));
+    assert.equal(calls, 3, "the failing child was reached");
+    assert.match(lines.join("\n"), /STEP 1 of 6/);
+    assert.doesNotMatch(lines.join("\n"), /✅|done:/);
+  } finally { console.log = originalLog; }
 });
 
 test("the retired Plaid technician entrypoint stops kindly before any access or mutation", async () => {
@@ -638,10 +780,11 @@ test("the retired Plaid technician entrypoint stops kindly before any access or 
 test("the normal Cloudflare briefing uses owner browser sign-in and cannot assign token homework", () => {
   const plan = technicianPlan(join(sandbox, "not-created.json"), { intent: "first_brain" });
   const cloudflare = plan.steps.find((step) => step.id === "cloudflare");
-  const text = renderTechnicianStepBriefing(cloudflare);
+  const text = renderTechnicianStepBriefing(cloudflare, { details: true });
   assert.equal(cloudflare.dashboard_url, "https://dash.cloudflare.com/");
   assert.match(text, /official sign-in page/i);
-  assert.match(text, /owner signs in, completes 2FA, selects the exact account.*approves consent.*confirms that account's plan page says Paid/i);
+  assert.match(text, /You sign in to Cloudflare, complete 2FA, and choose the account/);
+  assert.match(text, /You approve Cloudflare's consent page/);
   assert.match(text, /Workers & Pages > Plans page.*confirms it says Paid/is);
   assert.match(text, /narrow sign-in does not verify billing/i);
   assert.match(text, /Normal fresh setup creates, reveals, and copies no API token/i);
@@ -649,12 +792,12 @@ test("the normal Cloudflare briefing uses owner browser sign-in and cannot assig
 });
 
 test("the passkey briefing explains the next secure window before enrollment", () => {
-  const text = renderTechnicianStepBriefing("passkey");
+  const text = renderTechnicianStepBriefing("passkey", { details: true });
   assert.match(text, /Choosing Create my owner passkey then opens the device's secure passkey window/i);
   assert.match(text, /confirms that this is the owner and protects the private owner area/i);
   assert.match(text, /Face ID, fingerprint, device PIN, or screen lock/i);
   assert.match(text, /cannot see or store the owner's passkey, Face ID, fingerprint, or device PIN/i);
-  assert.match(text, /Cancel if the hostname or prompt is unexpected/i);
+  assert.match(text, /You cancel if the address or prompt is unexpected/i);
 });
 
 test("the CLI prints a provider briefing before the selected child command starts", async () => {
@@ -667,7 +810,7 @@ test("the CLI prints a provider briefing before the selected child command start
     spawn: () => { order.push({ kind: "child" }); return { status: 0 }; },
   });
   assert.deepEqual(order.map((event) => event.kind), ["briefing", "child"]);
-  assert.match(order[0].text, /Before we start: Check this computer and install the owner tools/i);
+  assert.match(order[0].text, /STEP 1 of 6 · Check this computer · about 1 min/);
 });
 
 test("the Anthropic technician step passes reviewed modes and caps without printing a duplicate briefing", async () => {
@@ -1261,6 +1404,13 @@ test("the technician skill defaults to Claude and includes Codex only when alrea
   assert.equal(mixed[0].status, "verified", "a later failure must not undo an earlier success");
   assert.equal(mixed[1].status, "failed");
   assert.ok(mixed[1].error, "a failure must carry its reason");
+});
+
+test('the packaged technician skill leaves headroom under the CRLF source bound', () => {
+  const source = readFileSync(new URL('../skills/financial-brain-technician/SKILL.md', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  assert.ok(source.includes(CLAUDE_TECHNICIAN_SKILL_MARKER), 'measure the actual reviewed skill');
+  assert.ok(Buffer.byteLength(source.replace(/\n/g, '\r\n')) <= 70_000,
+    'the Windows checkout must leave margin below the unchanged 72 KiB identity bound');
 });
 
 for (const ending of ['\n', '\r\n']) test(`Windows rendered skill survives install and readback with ${JSON.stringify(ending)} source`, () => {

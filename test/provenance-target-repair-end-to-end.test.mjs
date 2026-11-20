@@ -619,8 +619,8 @@ test("lease-first target repair crosses native prepare, Worker schema 44/45, rep
   // Both sides must actually apply the candidate schema before recovery runs.
   // A filename alone cannot prove that its column and index were created.
   for (const fixture of [sourceBrain, recoveredBrain]) {
-    assert.equal(fixture.migrationFiles.at(-1), "0069_fin_transactions_uid_index.sql");
-    assert.equal(fixture.migrationFiles.length, 69);
+    assert.equal(fixture.migrationFiles.at(-1), "0070_owner_removals.sql");
+    assert.equal(fixture.migrationFiles.length, 70);
     assert.ok(fixture.migrationFiles.every((file, index) => Number(file.split("_")[0]) === index + 1),
       "both recovery fixtures must contain the complete independently pinned migration prefix");
     assert.deepEqual(

@@ -176,6 +176,7 @@ try {
   };
 
   const authorizations = [];
+  let subdomainReads = 0;
   const jsonResponse = (body) => {
     const bytes = Buffer.from(JSON.stringify(body), "utf8");
     return {
@@ -199,6 +200,11 @@ try {
     }
     if (target === `/client/v4/accounts/${ACCOUNT_ID}`) {
       return jsonResponse({ success: true, errors: [], messages: [], result: account });
+    }
+    if (target === `/client/v4/accounts/${ACCOUNT_ID}/workers/subdomain`) {
+      if (init?.method !== "GET") throw new Error("legacy update must only read its existing account address");
+      subdomainReads++;
+      return jsonResponse({ success: true, errors: [], messages: [], result: { subdomain: "fixture-account" } });
     }
     if (target.startsWith(`/client/v4/accounts/${ACCOUNT_ID}/`)) {
       return jsonResponse({ success: true, errors: [], messages: [], result: [] });
@@ -298,6 +304,7 @@ try {
   check(
     "the update itself ran and returned its own result",
     resultB === sentinel &&
+      subdomainReads === 2 &&
       eventsB.map((event) => event.stage).join(",") === "verify,upgrade" &&
       eventsB.every((event) => event.path === manifestPath),
     JSON.stringify(eventsB),
@@ -333,6 +340,7 @@ try {
   check(
     "the once-broken non-interactive update now runs on the saved profile",
     resultC === sentinel && eventsC.join(",") === "verify,upgrade" &&
+      subdomainReads === 3 &&
       tokenPromptCalls === promptCountBeforeC &&
       wranglerCalls.slice(callsBeforeC).map((call) => call.stage).join(",") === "keyring,token",
     JSON.stringify({ eventsC, tokenPromptCalls, added: wranglerCalls.slice(callsBeforeC) }),

@@ -1,3 +1,4 @@
+import { isolatedLifecycleOptions } from "./fixtures/isolated-update-schedulers.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
@@ -449,7 +450,7 @@ test("probe B: linked ancestors, link-dot spellings, and create-feeds aliases re
     await cmdFolder(manifestPath, ["create-feeds"], {
       platform: process.platform,
       home: alias,
-      lifecycleLockOptions: { machineLockRoot: join(root, 'lifecycle-locks') },
+      lifecycleLockOptions: isolatedLifecycleOptions(root),
       onFeedDecision: (event) => createEvents.push(event),
       now: () => new Date("2026-10-06T20:00:00.000Z"),
     });

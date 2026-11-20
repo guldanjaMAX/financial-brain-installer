@@ -3,10 +3,10 @@
  *
  * Tokens stay on the owner's machine in the same hardened storage boundary as
  * Google, but each provider gets its own Keychain account, file, and backend
- * selector. Token endpoints are deliberately not retried: an authorization
- * code or rotating refresh token may have been consumed even when its response
- * was lost, so a blind retry can turn an uncertain exchange into a false
- * success claim.
+ * selector. Token endpoints are never retried inside the request. A code or
+ * refresh token may have been consumed even when its response was lost.
+ * Microsoft alone permits one later, fingerprint-bound timeout recovery under
+ * the renewal lease; all other ambiguous outcomes retain their durable fence.
  */
 
 import { createServer } from "node:http";
@@ -32,6 +32,14 @@ import {
   normalizeQuickBooksRealmId,
   quickBooksCompanyFingerprint,
 } from "./quickbooks-online.mjs";
+
+import { assertMicrosoftAccountSupported, microsoftTokenTenant, microsoftTimeoutRetryAllowed,
+  microsoftRefreshFailedBeforeSend } from "./microsoft-week1-rules.mjs";
+
+const microsoftRefreshFingerprint = connection => createHash("sha256")
+  .update(`microsoft-refresh-v1:${connection?.refresh_token}`).digest("hex");
+const canRecoverMicrosoftTimeout = (provider, connection) => microsoftTimeoutRetryAllowed(provider, connection,
+  microsoftRefreshFingerprint(connection));
 
 const b64url = (bytes) => Buffer.from(bytes).toString("base64url");
 const clean = (value) => String(value ?? "").trim();
@@ -366,9 +374,32 @@ export function bindMicrosoftConnection({ prior = null, candidate } = {}) {
   return {
     ...candidate,
     sync_states: structuredClone(prior?.sync_states || {}),
+    ...(prior?.microsoft_binding ? { microsoft_binding: structuredClone(prior.microsoft_binding) } : {}),
     provider_metadata: {
       ...(candidate?.provider_metadata || {}),
       microsoft_account_fingerprint: candidateFingerprint,
+    },
+  };
+}
+
+// Only fresh authorization may retire an unbound legacy connection. Never move
+// its cursors or duplicate its rotating credentials into the new mailbox binding.
+function replaceUnboundMicrosoftConnection(prior, candidate) {
+  if (prior.microsoft_binding) {
+    throw new ProviderOAuthError("microsoft", "binding", "the stored Microsoft binding is incomplete", {
+      code: "account_identity_corrupt",
+    });
+  }
+  const bindingId = randomBytes(16).toString("hex");
+  return {
+    ...bindMicrosoftConnection({ candidate }),
+    microsoft_binding: {
+      schema_version: 1,
+      active_binding_id: bindingId,
+      bindings: {
+        legacy: { state: "replaced", replaced_by: bindingId, sync_states: structuredClone(prior.sync_states || {}) },
+        [bindingId]: { state: "active", account_fingerprint: candidate.provider_metadata.microsoft_account_fingerprint },
+      },
     },
   };
 }
@@ -415,6 +446,7 @@ async function resolveMicrosoftConnectionIdentity(connection, fetchImpl) {
     provider_metadata: {
       ...metadata,
       microsoft_account_fingerprint: fingerprint,
+      microsoft_mailbox: safeDetail(data.mail || data.userPrincipalName, "").slice(0, 254),
     },
   };
 }
@@ -426,7 +458,10 @@ async function prepareMicrosoftPriorConnection(connection, { fetchImpl, now, sto
   try {
     identified = await resolveMicrosoftConnectionIdentity(connection, fetchImpl);
   } catch (error) {
-    if (error?.code !== "account_identity_unproven" || !clean(connection.refresh_token)) throw error;
+    if (error?.code !== "account_identity_unproven") throw error;
+    // An unknown refresh outcome still forbids using that token. A new owner
+    // sign-in can create a separate binding instead, after fresh /me proof.
+    if (connection.oauth_refresh_fence || !clean(connection.refresh_token)) return connection;
     // Legacy Microsoft records predate the account binding. If their short-lived
     // access grant expired, refresh and persist it before the browser ceremony,
     // then resolve /me. This keeps a replacement refresh token durable even if
@@ -1131,8 +1166,9 @@ async function exchangeToken(provider, fields, credentials, {
   const request = tokenRequest(config, fields, credentials);
   let response;
   let data = {};
+  let responseReceived = false;
   try {
-    if (config.provider === "quickbooks") {
+    if (["quickbooks", "microsoft"].includes(config.provider)) {
       const controller = new AbortController();
       const timeout = Math.max(1_000, Math.min(60_000, Number(tokenRequestTimeoutMs) || 30_000));
       let timer;
@@ -1151,6 +1187,7 @@ async function exchangeToken(provider, fields, credentials, {
         ({ response, data } = await Promise.race([
           Promise.resolve(fetchImpl(config.tokenUrl, { method: "POST", ...request, signal: controller.signal }))
             .then(async (received) => {
+              responseReceived = true;
               let parsed;
               try {
                 parsed = await received.json();
@@ -1168,11 +1205,26 @@ async function exchangeToken(provider, fields, credentials, {
         clearTimeout(timer);
       }
     } else {
-      // Preserve every released non-QBO request byte and timing behavior.
+      // Preserve the other providers' released request bytes and timing behavior.
       response = await fetchImpl(config.tokenUrl, { method: "POST", ...request });
       try { data = await response.json(); } catch { /* classified below without response text */ }
     }
   } catch (error) {
+    if (config.provider === "microsoft" && phase === "refresh") {
+      const beforeSend = microsoftRefreshFailedBeforeSend(error, responseReceived);
+      const timeout = error?.name === "AbortError";
+      const failure = new ProviderOAuthError(config.provider, phase,
+        beforeSend ? "the network was unavailable before renewal was sent. Retry when the network returns. https://financialbrain.ai/help/NETWORK_UNREACHABLE"
+          : timeout ? "the renewal response timed out. The next run can make one guarded recovery attempt. https://financialbrain.ai/help/NETWORK_UNREACHABLE"
+          : "the renewal response could not be verified. Reconnect Microsoft 365 before using this connection. https://financialbrain.ai/help/AUTH_EXPIRED", {
+        code: timeout ? "timeout" : error?.name === "TokenResponseError" ? "invalid_response" : "transport_error",
+        uncertain: !beforeSend,
+      });
+      failure.microsoft_before_send = beforeSend;
+      failure.microsoft_timeout = timeout;
+      failure.supportCode = beforeSend || timeout ? "NETWORK_UNREACHABLE" : "AUTH_EXPIRED";
+      throw failure;
+    }
     throw new ProviderOAuthError(config.provider, phase, "the token response was not received; reconnect before assuming access is valid", {
       code: error?.name === "AbortError"
         ? "timeout"
@@ -1189,6 +1241,10 @@ async function exchangeToken(provider, fields, credentials, {
       status: response.status,
       code: clean(payload.error || data?.code || `http_${response.status}`).slice(0, 80),
     });
+  }
+  if (config.provider === "microsoft") {
+    assertMicrosoftAccountSupported({ tenantId: microsoftTokenTenant(payload.id_token) });
+    assertMicrosoftAccountSupported({ tenantId: microsoftTokenTenant(payload.access_token) });
   }
   const seconds = Number(payload.expires_in);
   const refreshSeconds = Number(
@@ -1545,13 +1601,14 @@ async function refreshProviderCredentialsOnce(provider, connection, {
       });
     }
     if (quickbooks && quickBooksBinding) assertQuickBooksSourceBinding(latestBefore, quickBooksBinding);
-    if (latestBefore.quickbooks_refresh_fence || latestBefore.oauth_refresh_fence) {
+    if ((latestBefore.quickbooks_refresh_fence || latestBefore.oauth_refresh_fence) &&
+        !canRecoverMicrosoftTimeout(config.provider, latestBefore)) {
       throw new ProviderOAuthError(config.provider, "refresh", "the last refresh outcome is unknown; reconnect before trying again", {
         code: "refresh_outcome_unknown",
       });
     }
-    if (latestBefore?.refresh_token && (latestBefore.refresh_token !== connection.refresh_token ||
-        latestBefore.access_token !== connection.access_token)) {
+    if (!latestBefore.oauth_refresh_fence && latestBefore?.refresh_token &&
+        (latestBefore.refresh_token !== connection.refresh_token || latestBefore.access_token !== connection.access_token)) {
       return latestBefore;
     }
     connection = latestBefore;
@@ -1585,15 +1642,42 @@ async function refreshProviderCredentialsOnce(provider, connection, {
         state: "outcome_unknown",
         attempted_at: new Date(now).toISOString(),
         token_fingerprint: tokenFingerprint,
+        ...(canRecoverMicrosoftTimeout(config.provider, latestBefore)
+          ? { microsoft_timeout_retry_spent: true } : {}),
       },
     }, storage);
   }
-  const token = await exchangeToken(config.provider, {
-    grant_type: "refresh_token",
-    refresh_token: connection.refresh_token,
-  }, { clientId: connection.client_id, clientSecret: connection.client_secret }, {
-    fetchImpl, phase: "refresh", now, tokenRequestTimeoutMs,
-  });
+  let token;
+  try {
+    token = await exchangeToken(config.provider, {
+      grant_type: "refresh_token",
+      refresh_token: connection.refresh_token,
+    }, { clientId: connection.client_id, clientSecret: connection.client_secret }, {
+      fetchImpl, phase: "refresh", now, tokenRequestTimeoutMs,
+    });
+  } catch (error) {
+    if (config.provider === "microsoft" && (error.microsoft_before_send || error.microsoft_timeout)) {
+      credentialLock?.assertOwned?.();
+      const latest = loadProviderCredentials(config.provider, storage);
+      if (latest?.refresh_token !== connection.refresh_token || latest?.access_token !== connection.access_token ||
+          JSON.stringify(latest?.oauth_refresh_fence) !== JSON.stringify(connection.oauth_refresh_fence)) throw error;
+      const { oauth_refresh_fence: fence, ...withoutFence } = connection;
+      if (error.microsoft_before_send) {
+        // A failed DNS/route/connect attempt did not spend the one permitted
+        // recovery send. Preserve that permission if this was a recovery run.
+        const { microsoft_timeout_retry_spent: spent, ...pendingFence } = fence;
+        saveProviderCredentialsUnlocked(config.provider, spent ? { ...connection,
+          oauth_refresh_fence: { ...pendingFence, microsoft_timeout_retry: 1 } } : withoutFence, storage);
+      } else if (error.microsoft_timeout && fence.microsoft_timeout_retry_spent) {
+        error.message = "Microsoft 365: renewal timed out again after the one guarded recovery attempt. Reconnect Microsoft 365. https://financialbrain.ai/help/AUTH_EXPIRED";
+        error.supportCode = "AUTH_EXPIRED";
+      } else if (error.microsoft_timeout) {
+        saveProviderCredentialsUnlocked(config.provider, { ...connection,
+          oauth_refresh_fence: { ...fence, microsoft_timeout_retry: 1 } }, storage);
+      }
+    }
+    throw error;
+  }
   const currentMetadata = connection.provider_metadata || {};
   const returnedMetadata = token.provider_metadata || {};
   if (config.provider === "quickbooks" && returnedMetadata.realm_id) {
@@ -1620,6 +1704,7 @@ async function refreshProviderCredentialsOnce(provider, connection, {
     : {
         ...connectionWithoutFence,
         ...token,
+        ...(config.provider === "microsoft" ? { provider_metadata: { ...currentMetadata, ...returnedMetadata } } : {}),
         refresh_token: token.refresh_token || connection.refresh_token,
         refreshed_at: new Date(now).toISOString(),
       };
@@ -1719,7 +1804,10 @@ export async function providerAccessToken(provider, {
   const config = providerOAuthConfig(provider);
   const quickbooks = config.provider === "quickbooks";
   const validateAccess = (current) => {
-    if (current.quickbooks_refresh_fence || current.oauth_refresh_fence) {
+    if (config.provider === "microsoft") assertMicrosoftAccountSupported({
+      tenantId: microsoftTokenTenant(current.access_token) || current.provider_metadata?.microsoft_tenant_id });
+    if ((current.quickbooks_refresh_fence || current.oauth_refresh_fence) &&
+        !canRecoverMicrosoftTimeout(config.provider, current)) {
       throw new ProviderOAuthError(provider, "load", "this connection requires reconnect; sign in again before using it", {
         code: "refresh_outcome_unknown",
       });
@@ -1737,7 +1825,7 @@ export async function providerAccessToken(provider, {
     assertSourceOwned?.();
     validateAccess(connection);
     const expiresAt = Number(connection.expires_at);
-    if (rejectedAccessToken === null && clean(connection.access_token) &&
+    if (!connection.oauth_refresh_fence && rejectedAccessToken === null && clean(connection.access_token) &&
         (!Number.isFinite(expiresAt) || expiresAt - now > refreshSkewMs)) {
       return { accessToken: connection.access_token, connection, refreshed: false };
     }
@@ -1761,7 +1849,7 @@ export async function providerAccessToken(provider, {
     }
     const expiresAt = Number(current.expires_at);
     const rejected = rejectedAccessToken !== null && rejectedAccessToken === current.access_token;
-    if (!rejected && clean(current.access_token) && (!Number.isFinite(expiresAt) || expiresAt - now > refreshSkewMs)) {
+    if (!current.oauth_refresh_fence && !rejected && clean(current.access_token) && (!Number.isFinite(expiresAt) || expiresAt - now > refreshSkewMs)) {
       return { accessToken: current.access_token, connection: current, refreshed: false };
     }
     const refreshed = await refreshProviderCredentialsOnce(provider, current, {
@@ -1853,7 +1941,7 @@ const html = (title, body) =>
   `<body style="font:16px/1.6 system-ui;margin:12vh auto;max-width:34rem;padding:0 1.5rem;color:#1a1a1a">` +
   `<h1 style="font-size:1.4rem">${title}</h1><p>${body}</p></body>`;
 
-function loopbackCode({ provider, url, state, port, redirectUri, timeoutMs, open, openImpl, log }) {
+function loopbackCode({ provider, url, state, port, redirectUri, timeoutMs, open, openImpl, log, createServerImpl }) {
   const config = providerOAuthConfig(provider);
   const expectedHost = new URL(redirectUri).host;
   return new Promise((resolve, reject) => {
@@ -1866,7 +1954,7 @@ function loopbackCode({ provider, url, state, port, redirectUri, timeoutMs, open
       server.close();
       callback(value);
     };
-    const server = createServer((request, response) => {
+    const server = createServerImpl((request, response) => {
       if (String(request.headers.host || "").toLowerCase() !== expectedHost.toLowerCase()) {
         response.writeHead(400, { "content-type": "text/html; charset=utf-8" })
           .end(html("Not connected", "The response did not match this local callback."));
@@ -1939,6 +2027,7 @@ export async function authorizeProvider(provider, {
   now = Date.now(),
   storage = {},
   prepareConnection = null,
+  createServerImpl = createServer,
   refreshLockWaitMs = 45_000,
   refreshLockPollMs = 50,
   refreshLockStaleMs = 120_000,
@@ -1991,6 +2080,7 @@ export async function authorizeProvider(provider, {
     open,
     openImpl,
     log,
+    createServerImpl,
   });
   assertCredentialOwned?.();
   for (const field of config.callbackMetadataRequired || []) {
@@ -2025,12 +2115,20 @@ export async function authorizeProvider(provider, {
         { code: "credential_changed_during_authorization", uncertain: true },
       );
     }
-    const bound = bindMicrosoftConnection({ prior: identifiedPrior, candidate: identifiedCandidate });
+    const replacedLegacy = identifiedPrior && !clean(identifiedPrior.provider_metadata?.microsoft_account_fingerprint);
+    const bound = replacedLegacy
+      ? replaceUnboundMicrosoftConnection(identifiedPrior, identifiedCandidate)
+      : bindMicrosoftConnection({ prior: identifiedPrior, candidate: identifiedCandidate });
     const prepared = typeof prepareConnection === "function"
       ? await prepareConnection(bound, { prior: identifiedPrior })
       : bound;
     assertCredentialOwned?.();
-    return saveProviderCredentialsUnlocked(config.provider, prepared, storage);
+    const saved = saveProviderCredentialsUnlocked(config.provider, prepared, storage);
+    if (replacedLegacy) {
+      const mailbox = saved.provider_metadata.microsoft_mailbox || "Microsoft 365";
+      log(`The mailbox ${mailbox} is now connected. Items from your earlier Microsoft connection stay in the Brain.`);
+    }
+    return saved;
   }
   if (config.provider !== "quickbooks") {
     const prepared = typeof prepareConnection === "function"

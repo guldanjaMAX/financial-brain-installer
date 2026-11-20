@@ -55,7 +55,7 @@
         },
         "domain": {
           "type": "string",
-          "description": "NOT YET WIRED as provisioning. Nothing creates this route; health and test will PROBE it if set, so leave it out until the DNS and route exist or every command will fail against a hostname that does not resolve."
+          "description": "Verified bare Brain hostname. Setup, deploy and update fill this field when missing after proving the exact workers.dev hostname and package version. Existing values, including custom domains, are preserved. Setting a custom domain does not create its DNS or Worker route."
         }
       }
     },
@@ -448,7 +448,7 @@
         },
         "microsoft": {
           "type": "object",
-          "description": "Read-only Microsoft 365 Outlook mail and calendar, OneDrive, and selected SharePoint drives using independent Graph delta links. Calendar events use immutable IDs and a rolling 30-day-past and 90-day-future view; only tombstones scoped to the saved event inventory receive calendar deletion authority. Supported file bodies are downloaded to the owner machine for the common extraction path before terminal delta links may advance.",
+          "description": "Read-only work or school Microsoft 365 Outlook mail, primary calendar and selected file drives. Microsoft sync is add-only: provider removals and window aging retain history. Times use the event original zone or client.timezone. Files over 8 MiB or unreadable files are counted skips with incomplete coverage; terminal cursors can advance after readable delivery. Personal Microsoft accounts are not supported yet.",
           "properties": {
             "enabled": {
               "type": "boolean",
@@ -459,6 +459,12 @@
               "pattern": "^[a-z0-9][a-z0-9_-]*$",
               "maxLength": 64,
               "default": "microsoft"
+            },
+            "account": {
+              "type": ["string", "null"],
+              "default": null,
+              "maxLength": 254,
+              "description": "Optional account email for the pre-browser supported-account check. Does not establish account identity or replace the protected Graph binding. Personal outlook.com, hotmail.com, live.com and msn.com accounts are not supported yet."
             },
             "mail_folder_ids": {
               "type": "array",
@@ -475,7 +481,7 @@
               "type": ["string", "null"],
               "default": null,
               "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
-              "description": "Optional inclusive UTC start of unexported mail after verified digest coverage (YYYY-MM-DDTHH:mm:ss.sssZ). Applies on first load, delta sync and reset. Earlier exports and citations stay in their original source. With this setting, mail tombstones and absence-based snapshot removals are not applied; deletion is a separate owner-approved operation. Null preserves ordinary full-mail sync. Never infer this from an export filename or file modification time."
+              "description": "Optional inclusive UTC start of unexported mail after verified digest coverage (YYYY-MM-DDTHH:mm:ss.sssZ). Applies on first load, delta sync and reset. Earlier exports and citations stay in their original source. With this setting, mail tombstones and absence-based snapshot removals are not applied; deletion is a separate owner-approved operation. Null preserves ordinary full-mail enumeration. Provider tombstones and absence never remove indexed Microsoft history. Never infer this from an export filename or file modification time."
             },
             "drive_ids": {
               "type": "array",

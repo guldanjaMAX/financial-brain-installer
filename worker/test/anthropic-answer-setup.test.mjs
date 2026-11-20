@@ -10,10 +10,10 @@ import { ANSWER_ERROR_MESSAGES as FRONTEND_MESSAGES } from "../../frontend/src/l
 import { callLLM } from "../src/lib/core.js";
 import { handleAnswerCheck } from "../src/index.js";
 
-const db = () => ({
+const db = (loggedStatuses = []) => ({
   exec: async () => {},
   prepare: () => ({
-    bind: () => ({ run: async () => {}, first: async () => ({ m: 0 }) }),
+    bind: (...args) => ({ run: async () => { loggedStatuses.push(args[4]); }, first: async () => ({ m: 0 }) }),
     run: async () => {},
     first: async () => ({ m: 0 }),
   }),
@@ -185,11 +185,28 @@ test("answer-check closes every provider and spend outcome to a typed status", a
       assert.equal(JSON.stringify(body).includes("detail"), false);
     }
 
+    for (const respond of [
+      async () => { throw new TypeError("synthetic transport failure"); },
+      async () => new Response("synthetic invalid JSON", { status: 200 }),
+    ]) {
+      globalThis.fetch = respond;
+      const loggedStatuses = [];
+      const body = await (await handleAnswerCheck({
+        ANSWER_MODEL: "claude-opus-5-5",
+        GATE_MODEL: "claude-opus-5-5",
+        ANTHROPIC_API_KEY: "fixture",
+        DB: db(loggedStatuses),
+      })).json();
+      assert.equal(body.answer.status, "error");
+      assert.deepEqual(loggedStatuses, ["error"]);
+    }
+
     for (const providerBody of [
       { content: [], model: "claude-opus-5-5", usage: {}, stop_reason: "end_turn" },
       { content: [{ type: "text", text: "OK" }], model: "claude-opus-5-5", usage: {}, stop_reason: "max_tokens" },
       { content: [{ type: "text", text: "I cannot complete that." }], model: "claude-opus-5-5", usage: {}, stop_reason: "refusal" },
     ]) {
+      const loggedStatuses = [];
       globalThis.fetch = async () => new Response(JSON.stringify(providerBody), {
         status: 200, headers: { "content-type": "application/json" },
       });
@@ -197,10 +214,11 @@ test("answer-check closes every provider and spend outcome to a typed status", a
         ANSWER_MODEL: "claude-opus-5-5",
         GATE_MODEL: "claude-opus-5-5",
         ANTHROPIC_API_KEY: "fixture",
-        DB: db(),
+        DB: db(loggedStatuses),
       })).json();
       assert.equal(checkProblem.answer.status, "check_problem");
       assert.equal(checkProblem.check.status, "check_problem");
+      assert.deepEqual(loggedStatuses, ["error"]);
     }
 
     globalThis.fetch = async () => new Response(JSON.stringify({

@@ -276,11 +276,11 @@ test('unconfirmed expense membership cannot hide a possible category refund', as
 });
 test('schema 62 adds expectations without a provider-type migration', t => {
   const f = setup(t);
-  // Schema 65 retains document revisions and schemas 66 through 69 retain
-  // unreadable-bank replacement evidence; schemas 62 through 69 add no provider type.
-  assert.equal(f.first('SELECT schema_version FROM install_state').schema_version, 69);
+  // Schema 65 retains document revisions and schemas 66 through 70 retain
+  // unreadable-bank replacement evidence; schemas 62 through 70 add no provider type.
+  assert.equal(f.first('SELECT schema_version FROM install_state').schema_version, 70);
   const files = readdirSync(new URL('../../migrations/d1/', import.meta.url)).filter(f => f.endsWith('.sql'));
-  assert.equal(Math.max(...files.map(f => Number(f.slice(0, 4)))), 69);
+  assert.equal(Math.max(...files.map(f => Number(f.slice(0, 4)))), 70);
   assert.ok(!f.rows('PRAGMA table_info(fin_transactions)').some(column => column.name === 'source_transaction_type'));
 });
 test('description-only merchant refusal retains the closed-world refund candidate disclosure', async t => {

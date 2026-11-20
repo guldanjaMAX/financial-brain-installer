@@ -42,7 +42,7 @@ export async function fixture(run, source = "gmail") {
       for (const doc of docs) f.stored.add(`${source}:${doc.source_id.split("#part")[0]}`);
       return json({ results: docs.map((doc) => ({ source_id: doc.source_id, status: "created", chunks: 1 })) });
     },
-    manifest, setSince: value => { manifest.corpora.gmail.since = value; writeFileSync(manifestPath, JSON.stringify(manifest)); },
+    manifest, manifestPath, setSince: value => { manifest.corpora.gmail.since = value; writeFileSync(manifestPath, JSON.stringify(manifest)); },
     state: () => JSON.parse(readFileSync(statePath, "utf8")),
     setState: (state) => ingest.saveState(statePath, state),
   };
@@ -89,6 +89,9 @@ export async function fixture(run, source = "gmail") {
       const dependencies = {
         launchctl,
         paceSleep: async ms => { (f.paceSleeps ||= []).push(ms); },
+        // Clean my Brain: no owner removals unless a test sets some. Without this
+        // default the real client would hit the strict fixture route table.
+        listOwnerRemovedFamilies: async () => new Set(),
         ...f.options,
         withSourceIngestLock: async (_options, task) => task({ assertOwned: () => {
           f.leases++;

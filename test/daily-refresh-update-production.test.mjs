@@ -7,11 +7,13 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { DatabaseSync } from "node:sqlite";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
 import { injectRenameFaults, injectUnlinkFaults, isDailyUpdateReceipt, isRecoveryFence, refusedThenRemoved,
   refusedThenReplaced } from "./helpers/rename-faults.mjs";
 import { cmdDrain, cmdHealth, cmdRollback, cmdUpdate } from "../brain.mjs";
 import * as brainCli from "../brain.mjs";
+import { previewSupportJournal, recordSupportEvent } from "../support-journal.mjs";
 import {
   buildDailyRefreshDefinition,
   dailyRefreshUpdateTransactionPath,
@@ -702,8 +704,15 @@ test("real rollback leaves daily imports paused, reports recovery, and a healthy
     }), "rollback retained the update transaction instead of silently enabling imports");
 
     failedStage = null;
+    harness.options.selfcheckReaders = {
+      bank: async () => [], secrets: async () => [], sources: async () => [],
+      claude: async () => ({ present: false }),
+    };
     await cmdUpdate(manifestPath, harness.options);
     assert.equal(harness.state().enabled, true, "the next healthy update is the restore control");
+    const daily = harness.bookmarkWriter.receipts.at(-1).selfcheck.checks.find(check => check.category === "daily");
+    assert.equal(daily.before.enabled, true, "the saved pre-pause schedule is the update baseline");
+    assert.deepEqual(daily.before, daily.after);
     assert.equal(readDailyRefreshUpdateTransaction(harness.plan.identity, {
       home: dirname(manifestPath), manifestPath, machineLockRoot: harness.machineLockRoot,
     }), null);
@@ -933,7 +942,7 @@ function bridgeNativeHarness({ manifestPath = "C:\\Fixture\\brain.manifest.json"
       const row = rows.get(name);
       if (args[0] === "/Query") {
         if (!row) return { status: 1, stdout: "" };
-        let xml = `<Task><Principals><Principal id="Owner"><UserId>${row.sid}</UserId></Principal></Principals><Settings>${!row.enabled || explicitEnabled ? `<Enabled>${row.enabled}</Enabled>` : ""}${row.extraSettings || ""}</Settings><Actions><Exec><Command>powershell.exe</Command><Arguments>-EncodedCommand ${Buffer.from(row.action, "utf16le").toString("base64")}</Arguments></Exec></Actions></Task>`;
+        let xml = `<Task><Principals><Principal id="Owner"><UserId>${row.sid}</UserId></Principal></Principals>${row.triggers || ""}<Settings>${!row.enabled || explicitEnabled ? `<Enabled>${row.enabled}</Enabled>` : ""}${row.extraSettings || ""}</Settings><Actions><Exec><Command>powershell.exe</Command><Arguments>-EncodedCommand ${Buffer.from(row.action, "utf16le").toString("base64")}</Arguments></Exec></Actions></Task>`;
         if (fieldShape) {
           xml = xml.replace("<Task>", `<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><RegistrationInfo><URI>${name}</URI></RegistrationInfo>`)
             .replace("<Settings>", "<Settings><StartWhenAvailable>true</StartWhenAvailable>")
@@ -972,7 +981,8 @@ function attachBridge(harness, manifestPath, fixture = {}) {
     onDelete: () => {
       assert.equal(harness.state().enabled, true, "permanent task is enabled before bridge deletion");
       assert.ok(harness.events.includes("health:active-final"), "final health precedes bridge deletion");
-      assert.ok(harness.events.includes("schedule:true"), "permanent schedule readback precedes deletion");
+      assert.ok(harness.events.includes(fixture.newPermanentTask ? "schedule:install" : "schedule:true"),
+        "permanent schedule readback precedes deletion");
     },
     onDisable: () => {
       const receipt = readDailyRefreshUpdateTransaction(harness.plan.identity, {
@@ -1126,6 +1136,128 @@ test("Windows older manifest without a permanent task keeps the paused bridge an
       ));
     }
   });
+});
+
+test("update self-check stops when a bridge-only schedule is left disabled", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const manifest = manifestFixture();
+    delete manifest.operations;
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    const harness = productionHarness(manifestPath);
+    harness.adapter.read = () => null;
+    const native = attachBridge(harness, manifestPath, { tasks: [{}] });
+    harness.options.selfcheckReaders = {
+      bank: () => [], secrets: () => [], sources: () => [], claude: () => ({ present: false }),
+    };
+    harness.options.selfcheckCheckpointOptions = {
+      directory: join(dirname(manifestPath), "selfcheck"), windowsAcl() {}, macAcl() {},
+    };
+    const db = new DatabaseSync(":memory:");
+    try {
+      db.exec("CREATE TABLE fixture_records (id INTEGER PRIMARY KEY, payload TEXT); INSERT INTO fixture_records VALUES (1, 'retained synthetic record')");
+      const rows = () => db.prepare("SELECT id, payload FROM fixture_records").all();
+      const before = rows();
+      const query = harness.options.upgradeOptions.d1Query;
+      harness.options.upgradeOptions.d1Query = async (...args) => {
+        const result = await query(...args);
+        if (args[2].startsWith("ALTER TABLE fixture_records")) db.exec(args[2]);
+        return result;
+      };
+      const code = "UPDATE_SELFCHECK_DAILY_CHANGED";
+      const lines = [];
+      await assert.rejects(cmdUpdate(manifestPath, harness.options), error => {
+        assert.equal(error.supportCode, code);
+        assert.equal(brainCli.reportAnticipatedCliFailure(error, {
+          write: line => lines.push(line),
+          support: { command: "update", record: input => recordSupportEvent(input, { root: dirname(manifestPath) }) },
+        }), true);
+        return true;
+      });
+      assert.match(lines.join("\n"), /https:\/\/financialbrain\.ai\/help\/UPDATE_SELFCHECK_DAILY_CHANGED/u);
+      assert.ok(previewSupportJournal({ root: dirname(manifestPath) }).includes(code));
+      assert.ok(db.prepare("PRAGMA table_info(fixture_records)").all().some(row => row.name === "migrated"));
+      assert.deepEqual(rows(), before);
+    } finally { db.close(); }
+    assert.equal(native.rows.get(BRIDGE_NAME).enabled, false);
+    assert.ok(harness.events.includes("health:active-final"));
+    assert.deepEqual(harness.finish, []);
+  });
+});
+
+test("update self-check retains the original inventory across an interrupted deployment", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    let stopStage = "deploy:paused";
+    let links = [{ ref: "fixture-original-link", ok: true }];
+    let bankReads = 0;
+    const harness = productionHarness(manifestPath, { failStage: () => stopStage });
+    harness.options.selfcheckReaders = {
+      bank: () => { bankReads++; return links; }, secrets: () => [], sources: () => [], claude: () => ({ present: false }),
+    };
+    harness.options.selfcheckCheckpointOptions = {
+      directory: join(dirname(manifestPath), "selfcheck"), windowsAcl() {}, macAcl() {},
+    };
+    await assert.rejects(cmdUpdate(manifestPath, harness.options), /fixture paused deployment failure/);
+    assert.ok(harness.events.includes("deploy:paused"));
+    assert.equal(harness.events.includes("health:active-final"), false);
+    assert.equal(bankReads, 1, "the interrupted update saved its baseline before deployment");
+    stopStage = null;
+    links = [{ ref: "fixture-other-link", ok: true }];
+    await assert.rejects(cmdUpdate(manifestPath, harness.options), { supportCode: "UPDATE_SELFCHECK_BANK_CHANGED" });
+    assert.ok(harness.events.includes("health:active-final"));
+    assert.equal(bankReads, 2, "the retry only observes after state");
+    assert.deepEqual(harness.finish, []);
+    links = [{ ref: "fixture-original-link", ok: true }];
+    await cmdUpdate(manifestPath, harness.options);
+    assert.equal(bankReads, 3, "recovery only observes after state");
+    assert.match(harness.finish[0], /Done.*passed its checks/);
+  });
+});
+
+test("update self-check permits only equivalent Windows bridge retirement", async t => {
+  const cases = [
+    ["time", { time: "09:30:00" }],
+    ["nonzero fractional trigger", { time: "09:00:00.125" }],
+    ["interval", { interval: 2 }],
+    ["future activation", { date: "2099-10-07" }],
+    ["trigger disabled", { trigger: false }],
+    ["source coverage", { selector: "microsoft365" }],
+    ["unknown trigger", { omit: true }],
+  ];
+  const run = (patch, changed) => withFixture(async ({ manifestPath }) => {
+    const harness = productionHarness(manifestPath, { activeDailyTransaction: false });
+    const { date = "2000-10-07", time = "09:00:00", interval = 1, trigger = true, selector = "google_drive", omit = false } = patch;
+    const native = attachBridge(harness, manifestPath, { newPermanentTask: true, tasks: [{
+      action: `brain load '${manifestPath.replaceAll("'", "''")}' --only ${selector}`,
+      triggers: omit ? "" : `<Triggers><CalendarTrigger><StartBoundary>${date}T${time}</StartBoundary><Enabled>${trigger}</Enabled><ScheduleByDay><DaysInterval>${interval}</DaysInterval></ScheduleByDay></CalendarTrigger></Triggers>`,
+    }] });
+    harness.options.selfcheckReaders = {
+      bank: () => [], secrets: () => [], sources: () => [], claude: () => ({ present: false }),
+    };
+    harness.options.selfcheckCheckpointOptions = {
+      directory: join(dirname(manifestPath), "selfcheck"), windowsAcl() {}, macAcl() {},
+    };
+    if (changed) {
+      await assert.rejects(cmdUpdate(manifestPath, harness.options), { supportCode: "UPDATE_SELFCHECK_DAILY_CHANGED" });
+      assert.equal(native.rows.get(BRIDGE_NAME)?.enabled, false);
+      assert.equal(harness.finish.length, 0);
+    } else {
+      await cmdUpdate(manifestPath, harness.options);
+      assert.equal(native.rows.has(BRIDGE_NAME), false);
+      assert.match(harness.finish[0], /Done.*passed its checks/);
+    }
+    assert.ok(harness.events.includes("health:active-final"));
+    assert.ok(harness.events.includes("schedule:install"), "permanent task verification reached");
+    assert.equal(harness.state().enabled, true);
+  });
+  let seed = 0xf06d1117;
+  while (cases.length) {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    const [[label, patch]] = cases.splice(seed % cases.length, 1);
+    await t.test(label, async () => {
+      await run({ time: "09:00:00.000" }, false);
+      await run(patch, true);
+    });
+  }
 });
 
 test("Windows pre-disabled bridge is never enabled or deleted, with an enabled control", async () => {

@@ -92,7 +92,12 @@ function mkEnv(rows, {
               if (/zone NOT IN/.test(sql)) scoped = scoped.filter((row) => !bound.includes(row.zone));
               return { results: scoped.map((row) => ({ name: row.name })) };
             }
-            return { results: rowsForQuery ? rowsForQuery({ sql, bound, rows }) : rows };
+            const matches = rowsForQuery ? rowsForQuery({ sql, bound, rows }) : rows;
+            if (/AS total_chunks/.test(sql)) {
+              const chunks = matches.filter(row => row.doc_uid === bound[0]);
+              return {results:chunks.map(row => ({...row,total_chunks:chunks.length}))};
+            }
+            return { results: matches };
           },
           first: async () => {
             if (/ON CONFLICT\(name\) DO NOTHING[\s\S]*RETURNING name, lower\(trim\(kind\)\) AS kind/.test(sql)) {

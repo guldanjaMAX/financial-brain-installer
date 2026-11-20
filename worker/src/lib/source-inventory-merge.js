@@ -195,3 +195,16 @@ export function createInventoryAccumulator() {
     },
   };
 }
+export function projectSourceFreshness(rows) {
+  return rows.map(row => {
+    const { coverage: _coverage, ...freshness } = row.freshness;
+    return {
+      name: row.name, kind: row.kind, source_id: row.source_id, registered: row.registered,
+      connector: row.connector, freshness, receipt: {
+        registered_at: row.receipt?.registered_at ?? null,
+        last_successful_run_at: row.receipt?.last_successful_run_at ?? null,
+        latest_run: row.receipt?.latest_run ?? null,
+      },
+    };
+  });
+}

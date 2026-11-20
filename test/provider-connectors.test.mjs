@@ -210,8 +210,8 @@ const json = (value, status = 200, headers = {}) => new Response(JSON.stringify(
     immutableIdHeader && result.proposed_cursor.mail.inbox === mailDelta && result.proposed_cursor.drives.D1 === driveDelta);
   check("OneDrive and SharePoint file bodies use common extraction without forwarding the bearer to the preauthenticated URL",
     result.documents.some((item) => item.source_id === "drive:item:D1:f1" && /reviewed Microsoft plan/.test(item.content)) && !downloadUsedBearer);
-  check("a full Graph baseline is authoritative and cursor-safe",
-    result.authoritative_snapshot === true && result.snapshot_source_ids.length === 2 && result.cursor_can_advance === true);
+  check("a full Graph baseline is add-only and cursor-safe",
+    result.authoritative_snapshot === false && result.snapshot_source_ids.length === 2 && result.cursor_can_advance === true);
 }
 
 {

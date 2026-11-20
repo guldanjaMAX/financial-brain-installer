@@ -214,7 +214,10 @@ async function route(t,c) {
     assert.equal(!!remote.result.isError,false);
     const remoteText = remote.result.content.map(c=>c.text||'').join('\n');
     assert.ok(remoteText.includes(prose(body)),'remote ask carries the actual Worker answer');
-    assert.match(remoteText,new RegExp(`Confidence: ${body.confidence.band} \\(${body.confidence.percent}%\\)`));
+    assert.deepEqual([body.confidence.band,body.confidence.percent],['Medium',89],
+      'the internal level and percent formerly printed for these five fixtures stay unchanged');
+    assert.doesNotMatch(remoteText,/\bConfidence\b|\b(?:High|Medium|Low)\b|\d+(?:\.\d+)?\s*%/i,
+      'owner prose contains no confidence label, scale word or percentage');
     return body;
   } finally { f.close(); }
 }

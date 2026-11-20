@@ -4,7 +4,7 @@ import { ApiError, api, ownerError, type Answer, type Citation, type GrantPrinci
 // as an absence is a product rule, not a rendering detail, so both surfaces
 // derive it from one module instead of each writing their own.
 import {
-  SCANNED_CITATION_MARK, answerReasonText, answerText, citationIsScanned, confidenceText, documentResponseConfidence, scannedEvidenceNotice,
+  SCANNED_CITATION_MARK, answerReasonText, answerText, citationIsScanned, evidenceNoteText, scannedEvidenceNotice,
   nextActionText, separateOffers, unavailableSearch,
 } from "../lib/answer-render.js";
 import { Attention, TruthNote } from "./ui";
@@ -12,6 +12,7 @@ import { FinanceScopeBar, useFinanceScope } from "./FinanceScope";
 import { scopedAnswerLabel } from "../lib/owner";
 import { scopedRetrievalConfirmed } from "../lib/security";
 import { sourceLabel } from "../lib/words";
+import { legacyDocumentResponse } from "../../../worker/src/lib/document-answer-reading.js";
 
 export const SCOPED_SEARCH_UNAVAILABLE =
   "Search is temporarily unavailable. This does not mean the shared documents have no matches. Nothing was changed. Try again, and if it keeps happening, ask the owner who shared this access to contact their Financial Brain installer.";
@@ -49,11 +50,11 @@ function citationDateLabel(ts: string | null | undefined, reliable?: boolean): s
 }
 
 const CITATION_AUTHORITY = Object.freeze({
-  T1: { name: "primary", rank: 1 },
-  T2: { name: "derived", rank: 2 },
-  T3: { name: "correspondence", rank: 3 },
-  T4: { name: "recollection", rank: 4 },
-  T5: { name: "verbal only", rank: 5 },
+  T1: { name: "primary", rank: 1, label: "Original record" },
+  T2: { name: "derived", rank: 2, label: "Summary of another record" },
+  T3: { name: "correspondence", rank: 3, label: "Written correspondence" },
+  T4: { name: "recollection", rank: 4, label: "Recollection" },
+  T5: { name: "verbal only", rank: 5, label: "Verbal account only" },
 });
 
 /** Keep the evidence quality beside the citation it qualifies. Older Workers
@@ -68,7 +69,7 @@ export function citationMeta(citation: Citation): string {
   if (authority && authorityDefinition?.name === authority.name &&
       authorityDefinition.rank === authority.rank &&
       typeof authority.reason === "string" && authority.reason.trim()) {
-    parts.push(`${authority.tier} ${authority.name}`);
+    parts.push(authorityDefinition.label);
   }
   const date = citationDateLabel(citation.ts, citation.date_reliable);
   if (date) parts.push(date);
@@ -132,46 +133,57 @@ export function EvidenceGateReason({ answer }: { answer: Answer }) {
   return <div className="mt-4"><TruthNote>{note}</TruthNote></div>;
 }
 
-/** How sure the brain is, and why. The basis is shown rather than summarised:
- *  a bare percentage is a number to argue with, a percentage with its reasons
- *  is something a person can actually judge. */
-export function Trust({ answer }: { answer: Answer }) {
-  const c = documentResponseConfidence(answer);
-  const band = c.percent >= 90 ? "High" : c.percent >= 70 ? "Medium" : "Low";
-  const tone = c.percent >= 90 ? "text-emerald-700 bg-emerald-50"
-    : c.percent >= 70 ? "text-amber-700 bg-amber-50"
-      : "text-red-700 bg-red-50";
+function hasCompletedAnswer(answer: Answer): boolean {
+  // Completed contracts carry the actual answer even with older status metadata.
+  // An incomplete-search notice must never replace their figures or qualifiers.
+  return Boolean("answer_contract" in answer && answer.answer_contract && answer.answer?.trim());
+}
+
+/** Scores remain internal; incomplete evidence gets one plain caution. The
+ *  answer's coverage block stays one click away in a closed explanation, so
+ *  presentation never removes a qualification or changes the evidence score. */
+export function Trust({ answer, coverage, unavailableCode }: {
+  answer: Answer; coverage?: string; unavailableCode?: string;
+}) {
+  const note = evidenceNoteText(answer);
+  // Legacy gaps sometimes embed wire codes in their sentences. Keep the code
+  // on its own muted line while preserving the meaning of those qualifications.
+  const reasonText = (text: string) => unavailableCode ? text
+    .replaceAll("search_unavailable", "the incomplete search")
+    .replaceAll("coverage_incomplete", "incomplete source coverage")
+    .replaceAll("answer_withheld", "the incomplete evidence check") : text;
+  if (!note && !coverage) return null;
   return (
-    <div className="mt-5 pt-4 border-t border-line">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className={`text-[13px] font-semibold px-2 py-0.5 rounded-md ${tone}`}>
-          Confidence: {band} ({c.percent}%)
-        </span>
-        <span className="text-[13px] text-ink-soft">
-          Why: the records read and checks below.
-        </span>
-      </div>
-      <ul className="mt-2 space-y-1">
-        {(c.basis || c.reasons || ["No confidence assessment was returned."]).map((reason) => (
-          <li key={reason} className="text-[13px] text-ink-soft leading-snug">· {reason}</li>
-        ))}
-      </ul>
-      {c.percent < 100 && <p className="mt-2 text-[13px] text-ink-soft">Missing: {(c.missing || ["Complete relevant source coverage and independent verification."]).join(" ")}</p>}
-    </div>
+    <>
+      {note && <div className="mt-4"><TruthNote>{reasonText(note)}</TruthNote></div>}
+      {coverage && (
+        <details className="mt-3">
+          <summary className="min-h-11 content-center cursor-pointer text-[14px] font-semibold text-ink-soft">Coverage and how to check</summary>
+          <p className="mt-2 whitespace-pre-wrap text-[14px] text-ink-soft leading-relaxed">{reasonText(coverage)}</p>
+        </details>
+      )}
+    </>
   );
 }
 
-function AnswerContent({ answer }: { answer: Answer }) {
+function AnswerContent({ answer, unavailableCode }: { answer: Answer; unavailableCode?: string }) {
   // Parse only answer prose. Source titles and metadata remain factual text,
   // even when a title contains wording that resembles an invitation.
-  const composed = separateOffers(answerText(answer));
-  const selectedOffer = nextActionText(answer) || composed.offers.at(-1);
+  const reading = legacyDocumentResponse(answer);
+  const composed = separateOffers(answerText(reading));
+  const selectedOffer = unavailableCode ? null : nextActionText(answer) || composed.offers.at(-1);
+  const coverageStart = composed.facts.search(/^Coverage:/m);
+  // Recovery controls must not replace readable legacy evidence. Only a
+  // reading with no readable records folds its diagnostic prose as well.
+  const collapseReading = unavailableCode && reading.answer_contract?.read_count === 0;
+  const facts = collapseReading ? "" : coverageStart < 0 ? composed.facts : composed.facts.slice(0, coverageStart).trimEnd();
+  const coverage = collapseReading ? composed.facts : coverageStart < 0 ? undefined : composed.facts.slice(coverageStart);
   return (
     <>
-      <p className="whitespace-pre-wrap leading-relaxed">{composed.facts}</p>
+      {facts && <p className={`${unavailableCode ? "mt-4 " : ""}whitespace-pre-wrap leading-relaxed`}>{facts}</p>}
       <ScannedEvidenceNote answer={answer} />
       <EvidenceGateReason answer={answer} />
-      <Trust answer={answer} />
+      <Trust answer={answer} coverage={coverage} unavailableCode={unavailableCode} />
       {!!answer.citations?.length && <CitationSources citations={answer.citations} />}
       {selectedOffer && (
         <p className="mt-3 text-[14px] text-ink-soft">{selectedOffer}</p>
@@ -191,9 +203,9 @@ export function TaxEvidenceControl({ owner, scope, year, busy, onYear, onCheck }
   owner: boolean; scope: string | null; year: string; busy: boolean;
   onYear: (year: string) => void; onCheck: () => void;
 }) {
-  if (!owner) return null;
+  if (!owner || !scope) return null;
   return (
-    <div className="mt-4 rounded-xl border border-line p-3">
+    <div className="mt-4 rounded-xl border border-line p-4 sm:p-5">
       <div className="flex flex-wrap items-end gap-3">
         <label className="text-[13px] text-ink-soft">
           Tax year
@@ -223,6 +235,12 @@ export function Ask({ owner = false }: { owner?: boolean }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [answerLabel, setAnswerLabel] = useState<string | null>(null);
+  const [lastRequest, setLastRequest] = useState<{
+    body: Record<string, unknown>; scope: string | null; label: string;
+  } | null>(null);
+  const isMac = typeof navigator !== "undefined" && /Mac/.test(navigator.platform);
+  const incompleteCode = answer?.status === "coverage_incomplete" || answer?.status === "answer_withheld"
+    ? answer.status : "search_unavailable";
 
   async function ask() {
     const q = question.trim();
@@ -236,16 +254,17 @@ export function Ask({ owner = false }: { owner?: boolean }) {
     await submit(action);
   }
 
-  async function submit(body: Record<string, unknown>) {
+  async function submit(body: Record<string, unknown>, requestScope = scope, requestLabel = activeLabel) {
+    setLastRequest({ body, scope: requestScope, label: requestLabel });
     setBusy(true);
     setError(null);
     setAnswer(null);
     setAnswerLabel(null);
     try {
       const next = await api<Answer>("/api/rag/think", body);
-      const label = scopedAnswerLabel(scope, next.entity_scope, activeLabel, next.filter_not_applied);
+      const label = scopedAnswerLabel(requestScope, next.entity_scope, requestLabel, next.filter_not_applied);
       if (!label) {
-        setError(`The Brain could not prove that this answer was narrowed to ${activeLabel}. No whole-Brain answer is being shown as narrowed to that selection.`);
+        setError(`The Brain could not prove that this answer was narrowed to ${requestLabel}. No whole-Brain answer is being shown as narrowed to that selection.`);
         return;
       }
       setAnswerLabel(label);
@@ -290,8 +309,9 @@ export function Ask({ owner = false }: { owner?: boolean }) {
         >
           {busy ? "Thinking…" : "Ask"}
         </button>
-        <span className="text-[13px] text-ink-soft">⌘ + Enter</span>
+        {isMac && <span className="hidden sm:inline text-[13px] text-ink-soft">⌘ + Enter</span>}
       </div>
+      {busy && <p role="status" className="mt-2 text-[14px] text-ink-soft">Reading your records. This usually takes under a minute.</p>}
 
       <TaxEvidenceControl owner={owner} scope={scope} year={taxYear} busy={busy}
         onYear={setTaxYear} onCheck={() => void checkTaxEvidence()} />
@@ -299,7 +319,7 @@ export function Ask({ owner = false }: { owner?: boolean }) {
       {error && <div className="mt-4"><Attention>{error}</Attention></div>}
 
       {answer && (
-        <article className="mt-6 bg-card border border-line rounded-2xl p-6">
+        <article className="mt-6 bg-card border border-line rounded-2xl p-4 sm:p-5 break-words">
           <p className="text-[12px] uppercase tracking-wider text-ink-soft font-semibold mb-3">
             {answerLabel}
           </p>
@@ -310,7 +330,18 @@ export function Ask({ owner = false }: { owner?: boolean }) {
               </Attention>
             </div>
           )}
-          <AnswerContent answer={answer} />
+          {unavailableSearch(answer) && !hasCompletedAnswer(answer) ? (
+            <>
+              <Attention>{nextActionText(answer) || 'Next: ask again in a minute; if it fails twice, say "check my Brain".'}</Attention>
+              <p className="mt-2 text-[12.5px] text-ink-soft">Code: {incompleteCode}</p>
+              <button type="button" disabled={busy || !lastRequest}
+                onClick={async () => { if (!busy && lastRequest) await submit(lastRequest.body, lastRequest.scope, lastRequest.label); }}
+                className="mt-3 min-h-11 rounded-xl border border-line-strong bg-card px-4 py-2 text-[15px] font-semibold disabled:opacity-45">
+                Try again
+              </button>
+              <AnswerContent answer={answer} unavailableCode={incompleteCode} />
+            </>
+          ) : <AnswerContent answer={answer} />}
         </article>
       )}
       </div>

@@ -106,7 +106,7 @@ const SCENARIOS = Object.freeze([
       });
       expect(result.documents.some((item) => item.content.includes("Invented drive body")), "microsoft_drive_body");
       expect(result.documents.some((item) => item.source_id === "outlook:event:e1"), "microsoft_calendar_identity");
-      expect(result.authoritative_snapshot && result.cursor_can_advance, "microsoft_cursor_truth");
+      expect(result.authoritative_snapshot === false && result.cursor_can_advance, "microsoft_cursor_truth");
     },
   }),
   Object.freeze({

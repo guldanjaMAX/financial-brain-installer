@@ -1,3 +1,4 @@
+import { assertOwnerEvidence } from '../../test/helpers/owner-evidence-contract.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
@@ -140,12 +141,12 @@ test('brain ask renders the shipped figure from the real Worker with fixture-onl
   const keyPath = join(root, '.brain-admin-key'), manifest = join(root, 'brain.manifest.json');
   writeFileSync(keyPath, f.env.ADMIN_KEY, { mode: 0o600 });
   writeFileSync(manifest, JSON.stringify({ client: { slug: 'fixture' }, brain: { domain: 'fixture.invalid' } }));
-  let requests = 0;
+  let requests = 0, renderedBody;
   const invoke = async () => {
     const lines = [], original = console.log;
     try {
       console.log = (...parts) => lines.push(parts.join(' '));
-      await cmdAsk(manifest, {
+      renderedBody = await cmdAsk(manifest, {
         ask: async () => 'How much did I spend in October 2026?',
         adminKey: readFileSync(keyPath, 'utf8'),
         launchctl: () => assert.fail('scheduler forbidden'),
@@ -164,7 +165,8 @@ test('brain ask renders the shipped figure from the real Worker with fixture-onl
   assert.equal(requests, 2, 'both CLI requests reached the actual authenticated Worker');
   assert.match(text, /1,643\.31/);
   assert.doesNotMatch(text, /1,668\.31/);
-  assert.match(text, /Confidence: Low \(0%\).*Why:.*Missing:/s);
+  assert.equal(renderedBody.confidence.percent, 0, 'the CLI retains the internal compatibility ceiling');
+  assertOwnerEvidence(text, renderedBody.confidence);
   assert.match(text, /Coverage:.*Missing or counted twice:.*Estimates:.*How to check:/s);
 });
 

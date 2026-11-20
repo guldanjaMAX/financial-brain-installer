@@ -1,3 +1,4 @@
+import { calendarCancellationPresentation } from './calendar-cancellation.js';
 import { activeChunkSql } from "./retained-ingest.js";
 import { documentEvidenceRevision, storedReadCoverage } from './document-read-coverage.js';
 import { finalizeDocumentAnswer } from "./document-answer.js";
@@ -23,7 +24,7 @@ import { startQueryStage } from "./query-timing.js";
  *   brain_money_query — bounded read-only money and document-metadata SQL.
  *   brain_money_overview — accounts, coverage, monthly amounts and owner today.
  *   brain_money_guide — clean views, coverage and money interpretation rules.
- *   ask    — the full cited answer with its confidence line, exactly what
+ *   ask    — the full cited answer with its evidence limits, exactly what
  *            `brain ask` prints. The tool most conversations want.
  *   search — ranked document references. Named and shaped for ChatGPT's
  *            deep-research contract (search returns {results:[{id,title,url}]}).
@@ -35,11 +36,12 @@ import { startQueryStage } from "./query-timing.js";
  */
 
 import { documentConfidence, unansweredDocumentConfidence, ownerConfidenceLine, documentResponseConfidence } from "./confidence.js";
+import { ownerEvidenceNote } from './owner-evidence.js';
 // The same rule the owner's app obeys: a search that did not complete must
 // never be reported as an absence. retrieval-status.js names an MCP server as
 // a consumer that has to defend itself, and this is the remote one.
 import {
-  SCANNED_CITATION_MARK, answerReasonText, answerText, finalAnswerText, moneyExplanation, separateOffers, citationIsScanned, confidenceText,
+  SCANNED_CITATION_MARK, answerReasonText, answerText, finalAnswerText, moneyExplanation, separateOffers, citationIsScanned,
   nextActionText, safeAnswerErrorText, scannedEvidenceNotice, unavailableSearch,
 } from "./answer-render.js";
 import { COVERAGE_INCOMPLETE } from "./retrieval-status.js";
@@ -291,7 +293,7 @@ async function runAsk(deps, args, profile) {
       .filter(gap => ["ledger_out_of_coverage", "ledger_not_consulted"].includes(gap.type));
     return withGuidance([answerText(thought), ...(thought.ledger ? ["This reply contains a money figure from the Brain's older question engine. Read brain_money_guide, recompute with brain_money_query, and answer in five parts."] : []), ...ledgerGaps.filter(gap => gap.detail).map(gap => separateOffers(gap.detail).facts),
       ...refusalExplanation(),
-      "", ownerConfidenceLine(documentResponseConfidence(thought))]);
+      "", ownerEvidenceNote(documentResponseConfidence(thought), answerText(thought))]);
   }
   const lines = guidance.length ? [...guidance, ""] : [];
   if (thought.ledger) lines.push("This reply contains a money figure from the Brain's older question engine. Read brain_money_guide, recompute with brain_money_query, and answer in five parts.", "");
@@ -317,7 +319,7 @@ async function runAsk(deps, args, profile) {
   if (refused) lines.push(...refusalExplanation());
   const scanned = scannedEvidenceNotice(thought);
   if (scanned) lines.push("", scanned);
-  const trust = ownerConfidenceLine(documentResponseConfidence(thought));
+  const trust = ownerEvidenceNote(documentResponseConfidence(thought), lines.join('\n'));
   if (trust) lines.push("", trust);
   const citations = Array.isArray(thought.citations) ? thought.citations : [];
   if (citations.length) {
@@ -364,6 +366,7 @@ async function runSearch(deps, args, origin) {
     ...(r.write_provenance ? { write_provenance: r.write_provenance } : {}),
     date: r.ts || null,
     date_source: r.date_source || null,
+    ...(r.calendar_status ? { calendar_status: r.calendar_status } : {}),
     ...(r.record_observation ? { record_observation:r.record_observation } : {}),
     date_reliable: typeof r.date_reliable === "boolean" ? r.date_reliable : null,
     text_source: r.text_source || "unknown",
@@ -442,6 +445,7 @@ export async function readOwnerDocumentPage(env, args, origin) {
     return toolError("The document could not be read. Try the read again; if it still fails, contact your installer. (Support code: MCP_FETCH_UNAVAILABLE)");
   }
   if (!doc) return toolError("no document with that id");
+  doc = { ...doc, ...calendarCancellationPresentation(doc) };
   try {
     // Retained tails are recovery material. Exclude them before both reading
     // the text and counting the active revision for its whole-record receipt.
@@ -514,6 +518,7 @@ export async function readOwnerDocumentPage(env, args, origin) {
     id,
     confidence: documentConfidence({rows:[{ts:date,date_reliable:doc.date_reliable,text_source:storedProvenance.text_source,text_reliable:storedProvenance.text_reliable}],partial:!readCoverage.stored_text_complete}),
     title: doc?.title || "untitled",
+    ...(doc.calendar_status ? { calendar_status: doc.calendar_status } : {}),
     text: renderedText,
     url: doc?.uri || `${origin}/app`,
     read_coverage: readCoverage,
@@ -746,7 +751,7 @@ async function handleMcpImpl(env, request, url, deps) {
       capabilities: { tools: {} },
       serverInfo: { name: env.BRAIN_NAME || "brain", version: env.BRAIN_VERSION || "0.0.0" },
       instructions:
-        "This is the owner's private brain. " + moneyInstructionsFor(profileHas(profile.name,"money:read")) + " For questions that are not about money: ask returns cited answers with a confidence percentage; " +
+        "This is the owner's private brain. " + moneyInstructionsFor(profileHas(profile.name,"money:read")) + " For questions that are not about money: ask returns cited answers with plain evidence limits; " +
         `search and fetch read the underlying documents. This connection is the ${profile.name} profile. ` +
         (usesClaudeAnswerPair(env)
           ? "For non-money questions, use ask first: Claude Opus writes the Brain answer and Claude Sonnet checks it. If ask returns answer_error or anthropic_key_missing, use search, then fetch, and write the fallback answer from the records. "

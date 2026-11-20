@@ -43,6 +43,8 @@
 
 import { jsonResponse, privateNoStore, validateAdminKey } from "./core.js";
 import { FAVICON } from "./app-page.js";
+import { OWNER_PAGE_CSS } from "./owner-page-style.js";
+import { acceptsOwnerHtml, ownerMessageResponse } from "./owner-message-response.js";
 import { ownerNavigationPrincipal, ownerSessionPrincipal } from "./owner-auth.js";
 import { importBankExport, balanceRoleFor } from "./fin-import.js";
 import { bankFeedProfile } from "./bank-feed-profiles.js";
@@ -174,7 +176,7 @@ export function bankFeedConfig(env) {
   if (missing.length) {
     throw new FeedConfigError(
       `the bank feed is not configured on this brain (${missing.join(", ")} not set). ` +
-      "Run `brain deploy` and then `brain secrets`, in that order.",
+      "Run `brain connect bank <manifest>` to finish bank connection setup.",
     );
   }
   let base;
@@ -1463,22 +1465,94 @@ export function connectPageHtml(config, { ownerEntityCount = null } = {}) {
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Connect a bank</title>
 <link rel="icon" href="${FAVICON}">
 <link rel="apple-touch-icon" href="${FAVICON}">
-<style>body{font:16px/1.5 -apple-system,system-ui,sans-serif;max-width:44rem;margin:3rem auto;padding:0 1.25rem;color:#202124}
-h1{font-size:1.5rem;margin-bottom:.5rem}h2{font-size:1.15rem;margin:0 0 .4rem}p{color:#444}button,select{font:inherit;padding:.7rem 1rem;border-radius:.55rem}button{border:0;background:#1f2937;color:#fff;cursor:pointer}button.secondary{background:#e8eaed;color:#202124}button:disabled{opacity:.55;cursor:wait}
-.note{font-size:.9rem;color:#666}.err{color:#9b1c1c;white-space:pre-wrap}.ok{color:#285c35;white-space:pre-wrap}.panel{margin-top:2rem;border:1px solid #dadce0;border-radius:.8rem;padding:1rem}.bank-group{border-top:2px solid #dadce0;padding-top:1rem;margin-top:1rem}.bank-group:first-child{border-top:0;margin-top:0}.account{border-top:1px solid #eee;padding:1rem}.account.waiting{background:#fff8e6;border-left:4px solid #d69e2e}.account:first-child{border-top:0}.account h3{font-size:1rem;margin:0}.account p{margin:.3rem 0}.assign{display:flex;gap:.6rem;align-items:center;flex-wrap:wrap;margin-top:.7rem}.assign select{min-width:15rem;border:1px solid #aaa;background:#fff}.actions{display:flex;gap:.7rem;align-items:center;flex-wrap:wrap}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}</style></head><body>
-<h1>Connect a bank account</h1>
-<p>Sign in through ${config.provider === "plaid" ? "Plaid" : "your bank connection provider"} or your bank's secure screen. Financial Brain does not receive your bank
+<style>${OWNER_PAGE_CSS}
+/* The step script owns visibility and completion; these rules only present it. */
+[hidden] { display: none !important; }
+.back { display: inline-flex; align-items: center; min-height: var(--control-h); }
+.panel { margin-top: var(--space-8); }
+h2, #accounts-heading { font-size: var(--text-lg); font-weight: var(--weight-semibold); line-height: var(--leading-body); }
+#connections-heading { font-size: var(--text-md); }
+#connect-heading, #accounts-heading, #sync-heading { margin-bottom: var(--space-3); }
+#connect-heading::before, #accounts-heading::before, #sync-heading::before {
+  content: ""; display: inline-block; width: 10px; height: 10px; margin-right: var(--space-2);
+  border-radius: 50%; background: var(--color-accent); vertical-align: middle;
+}
+#connect-heading.ok, #accounts-heading.ok, #sync-heading.ok { font-size: var(--text-base); font-weight: var(--weight-medium); margin-bottom: 0; }
+#connect-heading.ok::before, #accounts-heading.ok::before, #sync-heading.ok::before { display: none; }
+summary { cursor: pointer; min-height: var(--control-h); padding-block: var(--space-2); }
+summary.ok { list-style: none; }
+summary.ok::-webkit-details-marker { display: none; }
+#connect-body > p { color: var(--color-ink-soft); font-size: var(--text-sm); line-height: var(--leading-prose); margin-bottom: var(--space-4); }
+#account-step > p, #entity-details, #entity-create p { margin-top: var(--space-3); }
+#entity-details > summary { font-size: var(--text-sm); font-weight: var(--weight-medium); }
+#entity-details > .note { margin-block: var(--space-2); }
+#entity-create label { font-size: var(--text-sm); }
+#entity-name { border-radius: var(--radius-control); }
+button { min-height: var(--control-h); max-width: 100%; padding: var(--space-3) var(--control-pad-x);
+  border: var(--border) solid transparent; border-radius: var(--radius-control);
+  background: var(--color-accent); color: var(--color-accent-ink);
+  font: var(--weight-semibold) 0.9375rem/var(--leading-tight) var(--font-sans); cursor: pointer; }
+button.secondary { background: var(--color-card); color: var(--color-ink); border-color: var(--color-line-strong); }
+button.quiet { background: transparent; color: var(--color-accent); border-color: transparent;
+  padding-inline: var(--space-2); margin-inline: calc(-1 * var(--space-2)); font-weight: var(--weight-medium); }
+button:disabled { opacity: .5; cursor: default; }
+.note { font-size: var(--text-sm); color: var(--color-ink-soft); }
+.err { color: var(--color-bad); white-space: pre-wrap; }
+.ok { color: var(--color-good); white-space: pre-wrap; }
+#status:not(:empty), #arrival-status:not(:empty) { margin-top: var(--space-4); }
+#status.err, #account-status.err, #arrival-status.err, #sync-status.err { padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-bad-line); border-radius: var(--radius-control); background: var(--color-bad-bg); font-size: var(--text-sm); }
+#arrival-status.note { background: var(--color-wait-bg); color: var(--color-wait); border: 1px solid var(--color-wait-line);
+  padding: var(--space-3) var(--space-4); border-radius: var(--radius-control); }
+#sync-status.note { background: var(--color-wait-bg); color: var(--color-wait); border: 1px solid var(--color-wait-line);
+  padding: var(--space-3) var(--space-4); border-radius: var(--radius-control); }
+#account-status:empty, #entity-status:empty, #status:empty { display: none; }
+.bank-group { border-top: 1px solid var(--color-line); padding-top: var(--space-4); margin-top: var(--space-5); }
+.bank-group > h3 { font-size: var(--text-base); font-weight: var(--weight-semibold); margin-bottom: var(--space-1); }
+.bank-group > .ok { margin-top: var(--space-2); }
+.bank-group fieldset { min-width: 0; padding: 0; margin: var(--space-4) 0; border: 0; }
+.bank-group legend { font-size: var(--text-sm); font-weight: var(--weight-semibold); margin-bottom: var(--space-2); }
+.owner-choice { min-height: var(--control-h); padding: var(--space-3); border: 1px solid var(--color-line-strong);
+  border-radius: var(--radius-control); background: var(--color-card); cursor: pointer; }
+.owner-choice:has(input:checked) { border-color: var(--color-accent); background: var(--color-accent-soft); }
+.owner-choice input { width: 18px; height: 18px; margin: 0; flex: none; accent-color: var(--color-accent); }
+.account { background: var(--color-card); border-top: 1px solid var(--color-line); padding: var(--space-3) var(--space-4); }
+.account:first-child { border-top: 0; }
+.account h3 { font-size: var(--text-sm); font-weight: var(--weight-semibold); }
+.account p { margin-top: var(--space-1); font-size: var(--text-sm); }
+.assign { display: flex; gap: var(--control-gap); align-items: center; flex-wrap: wrap; margin-top: var(--space-2); }
+.assign select, .assign input:not([type=radio]) { flex: 1 1 11rem; min-width: 0; }
+.bank-owner-review:not(:empty) { margin-block: var(--space-4); font-size: var(--text-sm); }
+.bank-owner-review ul { margin-block: var(--space-2); padding-inline-start: var(--space-5); }
+.bank-save { margin-block: var(--space-4); }
+.bank-results:not(:empty) { margin-block: var(--space-3); font-size: var(--text-sm); }
+.bank-results > p + p { margin-top: var(--space-2); }
+.connection-row { border-top: 1px solid var(--color-line); padding: var(--space-4) 0; }
+.connection-row:first-child { border-top: 0; padding-top: 0; }
+.connection-row:last-child { padding-bottom: 0; }
+.connection-row h3 { font-size: var(--text-base); font-weight: var(--weight-medium); }
+.connection-row p { margin-top: var(--space-1); }
+.connection-row a, footer a { display: inline-flex; align-items: center; min-height: var(--control-h); }
+footer { border-top: 1px solid var(--color-line); margin-top: var(--space-8); padding-top: var(--space-4); }
+footer p + p { margin-top: var(--space-2); }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+  clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+</style></head><body>
+<main class="task">
+<a class="back" href="/app">← Back to your Brain</a>
+<h1 class="h1">Connect your bank</h1>
+<section class="panel card" aria-labelledby="connect-heading">
+  <h2 id="connect-heading">STEP 1 of 3 · Connect your bank</h2>
+  <div id="connect-body">
+    <p>⏱ About 2 minutes. Sign in through ${config.provider === "plaid" ? "Plaid" : "your bank connection provider"} or your bank's secure screen. Financial Brain does not receive your bank
 password or security codes. This connection reads your accounts and transactions. It cannot move money.</p>
-<p class="note">Environment: ${config.environment}. To disconnect a bank later, open your Brain and go to Access &gt; Banks &gt; Disconnect. Disconnecting is not done on this page, and your saved history stays.</p>
-<div class="actions"><button id="start">Connect a bank</button><a href="/app">Back to your Brain</a></div>
-<p id="status" role="status" aria-live="polite"></p>
-<section class="panel" aria-labelledby="connections-heading">
-  <h2 id="connections-heading">Your saved connections</h2>
-  <p class="note">For saved banks, follow the action shown for that connection. Unreadable saved access needs replacement review. Use Connect a bank for a different bank or separate accounts.</p>
-  <div id="connections" aria-live="polite">Checking saved connections…</div>
+    <button id="start" class="primary">Connect my bank</button>
+  </div>
 </section>
-<section class="panel" aria-labelledby="accounts-heading">
-  <h2 id="accounts-heading">Choose where each account belongs</h2>
+<p id="status" role="status" aria-live="polite"></p>
+<p id="arrival-status" role="status" aria-live="polite" hidden></p>
+<details class="panel card" id="account-step" aria-labelledby="accounts-heading" hidden>
+  <summary id="accounts-heading">STEP 2 of 3 · Whose accounts are these?</summary>
   <p class="note">Your bank may return personal and business accounts together. Choose the person, household, or business that owns each account. Transactions stay waiting until every account has a choice.</p>
   <p class="note">Each account belongs to one choice. If you use one account for both personal and business spending, those transactions are not automatically split between them.</p>
   <details id="entity-details"${addOwnerOpen}>
@@ -1497,8 +1571,22 @@ password or security codes. This connection reads your accounts and transactions
   </details>
   <p id="account-status" role="status" aria-live="polite">Looking for connected accounts…</p>
   <div id="accounts"></div>
-  <button id="refresh" class="secondary" type="button">Check again</button>
+</details>
+<section class="panel card" id="sync-step" aria-labelledby="sync-heading" hidden>
+  <h2 id="sync-heading">STEP 3 of 3 · Loading your transactions</h2>
+  <p id="sync-status" role="status" aria-live="polite"></p>
+  <button id="another" class="secondary" type="button" hidden>Connect another bank</button>
 </section>
+<section class="panel card" id="saved-connections" aria-labelledby="connections-heading" hidden>
+  <h2 id="connections-heading">Your saved connections</h2>
+  <div id="connections" aria-live="polite"></div>
+</section>
+<footer class="note">
+  <p>${config.environment === "sandbox" ? "Test mode: practice banks, no real money." : "Environment: " + config.environment + "."}</p>
+  <p>To disconnect a bank later, open your Brain and go to Access &gt; Banks &gt; Disconnect. Disconnecting is not done on this page, and your saved history stays.</p>
+  <div class="actions"><button id="refresh" class="secondary" type="button">Check again</button><a href="/app">Back to your Brain</a></div>
+</footer>
+</main>
 ${sdk ? `<script src="${sdk}"></script>` : ""}
 <script>
 const el = (id) => document.getElementById(id);
@@ -1588,9 +1676,13 @@ async function ownedEntities() {
 }
 const pendingAccountChoices = new Map();
 const assignmentStates = new Map();
+const assignmentPromises = new Map();
 const assignmentQueue = [];
 const bankAssignmentStates = new Map();
 const bankAssignmentResults = new Map();
+const bankOwnerPicks = new Map();
+const bankPickBusy = new Set();
+const accountAssignmentResults = new Map();
 let assignmentQueueBusy = false;
 let accountRenderVersion = 0;
 async function saveAccountAssignment(account, entitySlug) {
@@ -1604,14 +1696,17 @@ async function saveAccountAssignment(account, entitySlug) {
     });
     try { sessionStorage.removeItem(retry.key); } catch (e) {}
     pendingAccountChoices.delete(account.account_ref);
+    accountAssignmentResults.delete(account.account_ref);
     const message = result.changed === false
       ? "That account was already assigned there. Nothing else changed."
       : "Saved. Loading can continue once every account has a choice.";
     accountSay(message);
     return { saved: true, message };
   } catch (error) {
-    accountSay(error.message, true);
-    return { saved: false, message: error.message };
+    const message = error.message + (/code:/i.test(error.message) ? "" : " Code: " + (error.code || "BANK_FEED_REQUEST_FAILED") + ".");
+    accountAssignmentResults.set(account.account_ref, message);
+    accountSay(message, true);
+    return { saved: false, message };
   }
 }
 async function drainAssignmentQueue() {
@@ -1623,6 +1718,7 @@ async function drainAssignmentQueue() {
     if (job.button) job.button.textContent = "Saving…";
     const result = await saveAccountAssignment(job.account, job.entitySlug);
     assignmentStates.delete(job.account.account_ref);
+    assignmentPromises.delete(job.account.account_ref);
     if (!result.saved && job.button) {
       job.button.disabled = false;
       job.button.textContent = "Assign account";
@@ -1637,6 +1733,7 @@ function enqueueAccountAssignment(account, entitySlug, { button = null, reload =
   pendingAccountChoices.set(account.account_ref, entitySlug);
   assignmentStates.set(account.account_ref, assignmentQueueBusy ? "queued" : "saving");
   const result = new Promise((resolve) => assignmentQueue.push({ account, entitySlug, button, reload, resolve }));
+  assignmentPromises.set(account.account_ref, result);
   if (button) {
     button.disabled = true;
     button.textContent = assignmentQueueBusy ? "Queued…" : "Saving…";
@@ -1649,14 +1746,14 @@ function queueAccountAssignment(account, entitySlug, button) {
     accountSay("That account already has a choice waiting to save.", true);
   }
 }
-async function assignBankAccounts(bankKey, accounts, entitySlug, button, resultsRoot) {
+async function assignBankAccounts(bankKey, accounts, entitySlug, button, resultsRoot, { reload = true } = {}) {
   if (bankAssignmentStates.has(bankKey)) return;
   // A whole-bank choice must never overwrite a more specific choice that the
   // owner already queued on one account. Both paths use the same queue, and
   // the bank path leaves every account already represented there alone.
   const pending = accounts.filter((account) =>
     (!account.assignment || account.assignment.state !== "assigned") &&
-    !assignmentStates.has(account.account_ref));
+    !assignmentStates.has(account.account_ref) && !pendingAccountChoices.has(account.account_ref));
   if (pending.length === 0) return;
   bankAssignmentStates.set(bankKey, "saving");
   bankAssignmentResults.set(bankKey, []);
@@ -1677,7 +1774,7 @@ async function assignBankAccounts(bankKey, accounts, entitySlug, button, results
   });
   const results = await Promise.all(jobs);
   bankAssignmentStates.delete(bankKey);
-  await loadAccounts({ quiet: true });
+  if (reload) await loadAccounts({ quiet: true });
   const failures = results.filter((result) => !result.saved);
   if (failures.length > 0) accountSay(failures[failures.length - 1].message, true);
 }
@@ -1692,10 +1789,10 @@ function appendReassignmentControl(card, account, entities) {
   if (alternatives.length === 0) return;
   const start = make("button", "Move to another owner");
   start.type = "button";
-  start.className = "secondary";
+  start.className = "secondary quiet";
   start.onclick = () => {
     start.disabled = true;
-    const panel = make("div", null, "assign");
+    const panel = make("div", null, "assign control-row");
     const label = make("label", "Move this account to");
     const select = make("select");
     label.htmlFor = select.id = "reassign-entity-" + accountRef;
@@ -1853,21 +1950,23 @@ function appendReassignmentControl(card, account, entities) {
   };
   card.append(start);
 }
-function renderAccountCard(account, entities) {
+function renderAccountCard(account, entities, { editable = true, onChoice = null } = {}) {
     const waiting = !account.assignment || account.assignment.state !== "assigned";
     const card = make("article", null, waiting ? "account waiting" : "account");
     card.append(make("h3", account.masked_identifier || "Bank account"));
-    const institution = account.institution_label ? account.institution_label + ". " : "";
+    const institution = "";
     if (account.assignment && account.assignment.state === "assigned") {
       card.append(make("p", institution + "Assigned to " + (account.assignment.entity_label || "the selected owner") + "."));
       appendReassignmentControl(card, account, entities);
+    } else if (!editable) {
+      card.append(make("p", "Waiting for your bank choice.", "note"));
     } else if (entities.length === 0) {
       // An empty list with a disabled button is a dead end. Point to the one
       // thing that unblocks every account instead.
       card.append(make("p", institution + NO_OWNER_LINE, "note"));
     } else {
       card.append(make("p", institution + "Choose who owns this account."));
-      const row = make("div", null, "assign");
+      const row = make("div", null, "assign control-row");
       const label = make("label", "Account owner", "sr-only");
       const select = make("select");
       label.htmlFor = select.id = "entity-" + account.account_ref;
@@ -1883,6 +1982,7 @@ function renderAccountCard(account, entities) {
       select.onchange = () => {
         if (select.value) pendingAccountChoices.set(account.account_ref, select.value);
         else pendingAccountChoices.delete(account.account_ref);
+        if (onChoice) onChoice();
       };
       const assignmentState = assignmentStates.get(account.account_ref);
       const button = make("button", assignmentState === "saving" ? "Saving…" : assignmentState === "queued" ? "Queued…" : "Assign account");
@@ -1895,12 +1995,201 @@ function renderAccountCard(account, entities) {
       row.append(label, select, button);
       card.append(row);
     }
+    const failure = accountAssignmentResults.get(account.account_ref);
+    if (waiting && failure) card.append(make("p", "Not saved. " + failure, "err"));
     return card;
+}
+function entityLabel(entity) {
+  return entity.label || entity.legal_name || entity.entity_slug;
+}
+function bankOwnerChoices(entities, mode) {
+  if (mode === "mixed") return entities;
+  return entities.filter((entity) => mode === "person"
+    ? entity.kind === "person" || entity.kind === "household"
+    : entity.kind === "business");
+}
+function singleOwnerPickPolicy(entities) {
+  // Founder Q1 is open. Keep this decision in one branch; changing it still
+  // leaves the account-name question and individual-choice fences in place.
+  const REQUIRE_SINGLE_OWNER_PICK = true;
+  return { owner: entities.length === 1 ? entities[0] : null, requirePick: REQUIRE_SINGLE_OWNER_PICK };
+}
+function bankOwnerPickLabel(mode, entities) {
+  const policy = singleOwnerPickPolicy(entities);
+  if (policy.requirePick && policy.owner && mode !== "mixed" && bankOwnerChoices(entities, mode).length === 1) {
+    return "All " + entityLabel(entities[0]) + "'s";
+  }
+  return mode === "person" ? "All mine" : mode === "business" ? "All my business" : "Some of each";
+}
+function bankOwnerNeedsQuestion(account, owner) {
+  // Provider words can only ask a question. They never establish ownership.
+  const name = account.masked_identifier || "";
+  // maskedIdentifier caps the label at 80 before adding an optional mask.
+  // A distinguishing owner word may be beyond that cap. Hold long display
+  // strings for an individual choice, including the ambiguous exact boundary;
+  // absent words in a shortened label are never proof of the bulk owner.
+  if (name.length >= 80) return true;
+  if (owner.kind === "person" || owner.kind === "household") return /\\b(business|llc|inc|corp|company)\\b/i.test(name);
+  return owner.kind === "business" && /\\bpersonal\\b/i.test(name);
+}
+function appendBankOwnerPick(group, bankKey, accounts, entities) {
+  const version = accountRenderVersion;
+  const pick = bankOwnerPicks.get(bankKey) || { mode: "", entitySlug: "", name: "" };
+  const policy = singleOwnerPickPolicy(entities);
+  const automatic = policy.owner && !policy.requirePick && !pick.mode;
+  if (automatic) { pick.mode = "mixed"; pick.entitySlug = policy.owner.entity_slug; }
+  bankOwnerPicks.set(bankKey, pick);
+  const waiting = (account) => account.assignment?.state !== "assigned";
+  const fieldset = make("fieldset");
+  fieldset.append(make("legend", "Whose accounts are these?"));
+  const body = make("div");
+  const radios = [];
+  for (const mode of ["person", "business", "mixed"]) {
+    const label = make("label", null, "assign owner-choice");
+    const radio = make("input");
+    radio.type = "radio";
+    radio.name = "bank-owner-" + accounts[0].account_ref;
+    radio.value = mode;
+    radio.checked = pick.mode === mode;
+    radio.disabled = bankPickBusy.has(bankKey);
+    radio.onchange = () => {
+      if (bankPickBusy.has(bankKey) || version !== accountRenderVersion) return;
+      pick.mode = mode; pick.entitySlug = ""; pick.name = "";
+      for (const other of radios) other.checked = other === radio;
+      draw();
+    };
+    radios.push(radio);
+    label.append(radio, make("span", bankOwnerPickLabel(mode, entities)));
+    fieldset.append(label);
+  }
+  group.append(fieldset, body);
+  function draw() {
+    body.replaceChildren();
+    if (entities.length === 0) {
+      const needsOwnerForm = [...bankOwnerPicks.values()].some((choice) => choice.mode === "mixed");
+      el("entity-details").hidden = !needsOwnerForm;
+      el("entity-details").open = needsOwnerForm;
+    }
+    if (!pick.mode) {
+      for (const account of accounts) body.append(renderAccountCard(account, entities, { editable: false }));
+      return;
+    }
+    const choices = bankOwnerChoices(entities, pick.mode);
+    const creating = pick.mode !== "mixed" && choices.length === 0;
+    const owner = () => creating ? { kind: pick.mode, label: pick.name.trim() || "this owner" }
+      : choices.find((entity) => entity.entity_slug === pick.entitySlug);
+    if (creating) {
+      const label = make("label", "Name · " + (pick.mode === "person" ? "Person" : "Business"), "assign");
+      const input = make("input", null, "bank-owner-name");
+      input.type = "text"; input.maxLength = 120; input.autocomplete = "off";
+      input.style = "font:inherit;padding:.6rem;max-width:100%;box-sizing:border-box";
+      input.value = pick.name;
+      input.oninput = () => { pick.name = input.value; renderCards(); preview(); };
+      label.append(input); body.append(label);
+    } else {
+      const label = make("label", pick.mode === "mixed" ? "Most of these →" : "Account owner", "assign");
+      const select = make("select", null, "bank-owner-select");
+      const blank = make("option", "Choose…"); blank.value = ""; select.append(blank);
+      for (const entity of choices) {
+        const option = make("option", entityLabel(entity)); option.value = entity.entity_slug; select.append(option);
+      }
+      select.value = choices.some((entity) => entity.entity_slug === pick.entitySlug) ? pick.entitySlug : "";
+      pick.entitySlug = select.value;
+      select.onchange = () => { pick.entitySlug = select.value; draw(); };
+      label.append(select); body.append(label);
+      if (!choices.length) body.append(make("p", "Add an owner above, then choose who owns most of these accounts.", "note"));
+    }
+    const review = make("div", null, "bank-owner-review");
+    const cards = make("div");
+    const results = make("div", null, "bank-results");
+    const save = make("button", "Save accounts", "bank-save"); save.type = "button";
+    body.append(review, cards, save, results);
+    const renderCards = () => {
+      cards.replaceChildren();
+      for (const account of accounts) {
+        const selected = owner();
+        const held = waiting(account) && selected && bankOwnerNeedsQuestion(account, selected);
+        const card = renderAccountCard(account, entities, { editable: pick.mode === "mixed" || held, onChoice: preview });
+        if (held) card.append(make("p", "Is this one " + entityLabel(selected) + "'s too? Choose its owner separately.", "note"));
+        cards.append(card);
+      }
+    };
+    function preview() {
+      review.replaceChildren();
+      const selected = owner();
+      save.disabled = bankPickBusy.has(bankKey) || !selected || (creating && !pick.name.trim());
+      if (!selected) return;
+      review.append(make("p", "Review the accounts before saving:"));
+      const list = make("ul");
+      for (const account of accounts.filter(waiting)) {
+        const exception = pendingAccountChoices.get(account.account_ref);
+        const explicit = entities.find((entity) => entity.entity_slug === exception);
+        const held = !exception && bankOwnerNeedsQuestion(account, selected);
+        list.append(make("li", (account.masked_identifier || "Bank account") + " → " +
+          (explicit ? entityLabel(explicit) : held ? "Choose separately" : entityLabel(selected))));
+      }
+      review.append(list);
+    }
+    renderCards(); preview();
+    if (bankPickBusy.has(bankKey)) {
+      for (const node of [...body.querySelectorAll("input"), ...body.querySelectorAll("select"), ...body.querySelectorAll("button")]) node.disabled = true;
+    }
+    save.onclick = async () => {
+      if (save.disabled || bankPickBusy.has(bankKey)) return;
+      if (version !== accountRenderVersion) { accountSay("The account list changed. Review it again. Code: bank_account_status_unavailable.", true); return; }
+      const selected = owner();
+      if (!selected) return;
+      // Capture all individual choices before posting any bulk work. A failed
+      // exception stays waiting, and cannot fall back to the majority owner.
+      const exceptions = accounts.filter((account) => waiting(account) && pendingAccountChoices.has(account.account_ref));
+      const exceptionRefs = new Set(exceptions.map((account) => account.account_ref));
+      const bulk = accounts.filter((account) => waiting(account) && !exceptionRefs.has(account.account_ref) && !bankOwnerNeedsQuestion(account, selected));
+      const exceptionJobs = exceptions.map((account) => ({ account, slug: pendingAccountChoices.get(account.account_ref),
+        saving: assignmentPromises.get(account.account_ref) }));
+      bankPickBusy.add(bankKey);
+      for (const node of [...group.querySelectorAll("input"), ...group.querySelectorAll("select"), ...group.querySelectorAll("button")]) node.disabled = true;
+      let failure = null;
+      try {
+        let slug = pick.entitySlug;
+        if (creating) {
+          const retry = entityCreateRequest(pick.name.trim(), pick.mode);
+          await post("/api/owner/entities/create", retry.body);
+          const readback = await ownedEntities();
+          const created = readback.find((entity) => entity.entity_slug === retry.body.entity_slug && entity.kind === pick.mode);
+          if (!created) throw new Error("The new owner could not be confirmed. Check again. Code: bank_account_status_unavailable.");
+          slug = created.entity_slug; pick.entitySlug = slug;
+          try { sessionStorage.removeItem(retry.key); } catch (e) {}
+        }
+        const outcomes = await Promise.all(exceptionJobs.map((job) => job.saving ||
+          enqueueAccountAssignment(job.account, job.slug) || Promise.resolve({ saved: false })));
+        if (outcomes.some((outcome) => !outcome.saved)) {
+          failure = outcomes.find((outcome) => !outcome.saved).message || "An account is still waiting. Review its message before saving the rest. Code: bank_account_assignment_unavailable.";
+          return;
+        }
+        // No bulk call can include an exception, even after its queue state
+        // has cleared. The account list is an older snapshot until readback.
+        await assignBankAccounts(bankKey, bulk, slug, save, results, { reload: false });
+        failure = bankAssignmentResults.get(bankKey)?.find((result) => !result.saved)?.message || null;
+      } catch (error) {
+        failure = error.message + (/code:/i.test(error.message) ? "" : " Code: bank_account_assignment_unavailable.");
+      } finally {
+        bankPickBusy.delete(bankKey);
+        await loadAccounts({ quiet: true });
+        if (failure) accountSay(failure, true);
+      }
+    };
+  }
+  draw();
+  if (automatic) {
+    const save = [...body.querySelectorAll("button")].find((node) => node.textContent === "Save accounts");
+    if (save && !save.disabled) save.onclick();
+  }
 }
 function renderAccounts(accounts, entities) {
   accountRenderVersion += 1;
   const root = el("accounts");
   root.replaceChildren();
+  el("entity-details").hidden = entities.length === 0;
   const groups = new Map();
   for (const account of accounts) {
     const bankKey = account.institution_label || "Saved bank connection";
@@ -1914,28 +2203,22 @@ function renderAccounts(accounts, entities) {
     group.append(make("p", pending.length + " of " + bankAccounts.length + " " +
       (bankAccounts.length === 1 ? "account" : "accounts") + " still " +
       (pending.length === 1 ? "needs" : "need") + " an owner.", "note bank-progress"));
-    if (pending.length > 0 && entities.length > 0) {
-      const controls = make("div", null, "assign bank-assign");
-      const label = make("label", "Assign every account of this bank to");
-      const select = make("select", null, "bank-owner-select");
-      select.append(make("option", "Choose an account owner"));
-      select.options[0].value = "";
-      for (const entity of entities) {
-        const option = make("option", entity.label || entity.legal_name || entity.entity_slug);
-        option.value = entity.entity_slug;
-        select.append(option);
-      }
-      const bankState = bankAssignmentStates.get(bankKey);
-      const button = make("button", bankState ? "Assigning…" : "Assign this bank");
-      button.type = "button";
-      button.disabled = Boolean(bankState);
-      const resultsRoot = make("div", null, "bank-results");
-      button.onclick = () => {
-        if (!select.value) { accountSay("Choose who owns this bank's unassigned accounts first.", true); return; }
-        assignBankAccounts(bankKey, bankAccounts, select.value, button, resultsRoot);
-      };
-      controls.append(label, select, button);
-      group.append(controls, resultsRoot);
+    const filed = new Map();
+    for (const account of bankAccounts) {
+      if (account.assignment?.state !== "assigned") continue;
+      const slug = account.assignment.entity_scope?.entity_slug;
+      if (!slug) continue;
+      const saved = filed.get(slug) || { count: 0, label: account.assignment.entity_label || "the selected owner" };
+      saved.count++; filed.set(slug, saved);
+    }
+    for (const saved of filed.values()) group.append(make("p", "✅ " + saved.count +
+      (saved.count === 1 ? " account filed under " : " accounts filed under ") + saved.label + ".", "ok"));
+    if (pending.length > 0) appendBankOwnerPick(group, bankKey, bankAccounts, entities);
+    else {
+      const change = make("button", "Change one"); change.type = "button"; change.className = "secondary";
+      const cards = make("div");
+      change.onclick = () => { cards.replaceChildren(); for (const account of bankAccounts) cards.append(renderAccountCard(account, entities)); };
+      group.append(change, cards);
     }
     const savedResults = bankAssignmentResults.get(bankKey);
     if (savedResults && savedResults.length > 0) {
@@ -1945,7 +2228,6 @@ function renderAccounts(accounts, entities) {
       }
       group.append(results);
     }
-    for (const account of bankAccounts) group.append(renderAccountCard(account, entities));
     root.append(group);
   }
 }
@@ -1966,7 +2248,7 @@ async function loadAccounts(options) {
       accountSay(pending + " of " + data.accounts.length + " " +
         (data.accounts.length === 1 ? "account" : "accounts") + " still " +
         (pending === 1 ? "needs" : "need") + " an owner." +
-        (entities.length === 0 ? " " + NO_OWNER_LINE : ""));
+        (entities.length === 0 ? " Choose once for this bank, then review any exceptions." : ""));
     } else if (data.state === "current") {
       accountSay("Every account is assigned and current.");
     } else {
@@ -1986,37 +2268,147 @@ async function waitForAccounts() {
   }
   accountSay("The connection is saved, but the account list is still loading. You can leave this page open or check again in a few minutes.");
 }
+// Page-only copy of the Access bank outcome mapping. This never changes the
+// stored health, exceptions, or the confidence used by money answers.
+function bankRowOutcome(bank, now) {
+  const pending = Number(bank.accounts_needing_owner);
+  if (Number.isSafeInteger(pending) && pending > 0) return {
+    kind: "needs_you", line: "△ Needs you · " + pending + (pending === 1 ? " account needs an owner." : " accounts need an owner."),
+  };
+  const health = bank.health || {};
+  const code = health.last_error_code;
+  const connected = Date.parse(bank.connected_at);
+  const age = now - connected;
+  const loading = bank.status === "connected" && !health.last_successful_sync_at &&
+    Number.isFinite(age) && age >= 0 && age <= 48 * 60 * 60 * 1000 &&
+    !health.overdue && !health.pending_overdue && !health.needs_sign_in && !health.needs_reconnect &&
+    !bank.replacement_ref && bank.access_reference_state !== "unreadable" &&
+    (!code || code === "BANK_SYNC_PARTIAL");
+  if (loading) return { kind: "working", line: "○ Working on it · Loading your transactions." };
+  const successAge = now - Date.parse(health.last_successful_sync_at);
+  if (bank.status === "connected" && health.state === "healthy" && Number.isFinite(successAge) && successAge >= 0 && successAge <= 48 * 60 * 60 * 1000 &&
+      !health.overdue && !health.pending_overdue && !health.needs_sign_in && !health.needs_reconnect &&
+      !bank.replacement_ref && bank.access_reference_state !== "unreadable" && !code) return {
+    kind: "current", line: "● Current · Last checked " + health.last_successful_sync_at,
+  };
+  return { kind: "problem", line: "✕ Problem · " + (bank.status_line || health.status_line || "This connection needs attention.") };
+}
+let stepConnections = [];
+let stepAccounts = null;
+let stepOwnersDone = false;
+let addingBank = false;
+let addingBankCount = 0;
+let connectionLoadBusy = false;
+let progressTimer = null;
+const progressStartedAt = Date.now();
+const repairParams = new URLSearchParams(location.search);
+let repairRequested = repairParams.get("mode") === "reauthorise";
+let repairSyncAt;
+let repairSignInFinished = false;
+let repairFinished = false;
+function renderBankSteps() {
+  const accounts = stepAccounts;
+  const connected = !addingBank && !(repairRequested && !repairSignInFinished && !repairFinished) && (stepConnections.length > 0 || (accounts && accounts.length > 0));
+  // Owner choices can unblock the sync itself, including on a reopened repair.
+  // Never hide existing accounts behind proof that their transactions loaded.
+  const hasAccounts = !addingBank && accounts && accounts.length > 0;
+  // A successful connection is not proof of an account owner or a completed
+  // download. Require both readbacks before collapsing the later steps.
+  const ownersDone = connected && hasAccounts && accounts.every((account) => account.assignment?.state === "assigned") &&
+    stepConnections.length > 0 && stepConnections.every((bank) => Number(bank.accounts_needing_owner) === 0);
+  const outcomes = stepConnections.map((bank) => bankRowOutcome(bank, Date.now()));
+  const current = ownersDone && (!repairRequested || repairFinished) && outcomes.every((outcome) => outcome.kind === "current");
+  el("connect-heading").textContent = connected ? "✓ STEP 1 of 3 · Bank connected" : "STEP 1 of 3 · Connect your bank";
+  el("connect-heading").className = connected ? "ok" : "";
+  el("connect-body").hidden = connected;
+  el("account-step").hidden = !hasAccounts;
+  if (Boolean(ownersDone) !== stepOwnersDone || !ownersDone) el("account-step").open = Boolean(hasAccounts && !ownersDone);
+  stepOwnersDone = Boolean(ownersDone);
+  el("accounts-heading").textContent = ownersDone ? "✓ STEP 2 of 3 · Every account has an owner" : "STEP 2 of 3 · Whose accounts are these?";
+  el("accounts-heading").className = ownersDone ? "ok" : "";
+  if (hasAccounts && location.hash === "#accounts") el("account-step").open = true;
+  el("arrival-status").hidden = !connected || Boolean(hasAccounts);
+  const problem = outcomes.find((outcome) => outcome.kind === "problem");
+  el("arrival-status").textContent = problem ? problem.line : "○ Working on it · Plaid is sending your accounts. Usually under a minute. We check for up to 30 minutes; then use Check again.";
+  el("arrival-status").className = problem ? "err" : "note";
+  el("sync-step").hidden = !ownersDone;
+  el("sync-heading").textContent = current ? "STEP 3 of 3 · Done ✓" : "STEP 3 of 3 · Loading your transactions";
+  el("sync-heading").className = current ? "ok" : "";
+  el("sync-status").textContent = current ? "Transactions are in." : problem ? problem.line :
+    "○ Working on it · Loading your transactions. ⏱ The last 30 days usually come first; older history keeps loading in the background. You can close this page. We check for up to 30 minutes; then use Check again.";
+  el("sync-status").className = problem && !current ? "err" : "note";
+  el("another").hidden = !current;
+}
+function scheduleBankProgress() {
+  if (progressTimer !== null || document.visibilityState !== "visible" || Date.now() - progressStartedAt >= 30 * 60 * 1000) return;
+  progressTimer = setTimeout(() => { progressTimer = null; loadConnections(); }, 5000);
+}
 async function loadConnections() {
+  if (connectionLoadBusy) return;
+  connectionLoadBusy = true;
   const root = el("connections");
   try {
     const data = await get("/api/bank-feed/status");
     if (!Array.isArray(data.connections)) throw new Error("The saved connection list is unavailable. Please check again before adding a bank.");
+    stepConnections = data.connections;
+    if (addingBank && stepConnections.length > addingBankCount) addingBank = false;
+    if (repairRequested) {
+      const target = stepConnections.find((bank) => bank.item_ref === repairParams.get("item_ref"));
+      const successAt = target?.health?.last_successful_sync_at || null;
+      if (repairSyncAt === undefined) repairSyncAt = successAt;
+      // Keep Link reachable on a repair URL, including a healthy-bank repair.
+      // A fresh sync can finish a restored repair; a sign-in receipt alone
+      // never proves transactions loaded or makes STEP 3 Done.
+      else if (successAt !== repairSyncAt && target && bankRowOutcome(target, Date.now()).kind === "current") repairFinished = true;
+    }
+    el("saved-connections").hidden = data.connections.length === 0;
     root.replaceChildren();
-    if (data.connections.length === 0) root.append(make("p", "No bank is connected yet."));
     for (const connection of data.connections) {
-      const row = make("div", null, "account");
+      const row = make("div", null, "connection-row");
       row.append(make("h3", connection.institution_label || "Saved bank connection"));
-      const pending = Number(connection.accounts_needing_owner);
-      const connectedLine = Number.isSafeInteger(pending) && pending > 0
-        ? "Connected. " + pending + (pending === 1
-          ? " account needs an owner below before history can load."
-          : " accounts need an owner below before history can load.")
-        : "Connection saved. Account history may still be loading.";
-      row.append(make("p", connection.status === "connected" ? connectedLine : "This connection needs attention."));
+      const outcome = bankRowOutcome(connection, Date.now());
+      row.append(make("p", outcome.line, outcome.kind === "problem" ? "err" : "note"));
       if (connection.health?.needs_reconnect || connection.replacement_ref) {
         row.append(make('p','Needs reconnect. Saved history is kept.'));
         const recover=make('a',connection.replacement_ref ? 'Continue recovery' : 'Replace unreadable connection');
         recover.href='/app/connect/bank?mode=replace&item_ref='+encodeURIComponent(connection.item_ref)+(connection.replacement_ref ? '&operation_ref='+encodeURIComponent(connection.replacement_ref) : '');
         row.append(recover);
-      } else if (connection.status !== "removed") {
+      } else if (connection.health?.needs_sign_in || connection.status === "reauth_required" || connection.status === "permission_revoked") {
         const repair = make("a", "Repair connection");
         repair.href = "/app/connect/bank?mode=reauthorise&item_ref=" + encodeURIComponent(connection.item_ref);
         row.append(repair);
       }
       root.append(row);
     }
-  } catch (error) { root.replaceChildren(make("p", error.message, "err")); }
+    const progress = await get("/api/bank-feed/accounts");
+    if (!Array.isArray(progress.accounts)) throw new Error("The account list is unavailable. Nothing is being shown as empty.");
+    stepAccounts = progress.accounts;
+    // Only reload the existing owner UI when the account inventory changes.
+    // Status polling must not reset an owner's unsaved per-account choices.
+    if (el("accounts").querySelectorAll("article").length !== stepAccounts.length) await loadAccounts({ quiet: true });
+    renderBankSteps();
+  } catch (error) {
+    stepAccounts = null;
+    renderBankSteps();
+    el("saved-connections").hidden = false;
+    root.replaceChildren(make("p", error.message, "err"));
+  } finally { connectionLoadBusy = false; scheduleBankProgress(); }
 }
+el("another").onclick = () => {
+  // start() reads the URL for its fenced request identity. Leave the repaired
+  // Item behind before showing the action for an independent new connection.
+  window.history.replaceState(null, "", "/app/connect/bank");
+  repairRequested = false;
+  repairSignInFinished = false;
+  repairFinished = false;
+  repairSyncAt = undefined;
+  el("start").textContent = "Connect my bank";
+  addingBank = true;
+  addingBankCount = stepConnections.length;
+  renderBankSteps();
+};
+window.onhashchange = () => { if (location.hash === "#accounts" && !el("account-step").hidden) el("account-step").open = true; };
+window.onfocus = () => loadConnections();
 // OAuth returns to the registered shared path. Restore only the operation
 // identity; all replacement authority is rechecked by the owner-only routes.
 if (new URLSearchParams(location.search).has('oauth_state_id')) {
@@ -2069,6 +2461,8 @@ async function start(existing) {
           sessionStorage.removeItem("bank_link_session");
           sessionStorage.removeItem(retry.key);
         } catch (e) {}
+        if (requestedMode === "reauthorise" && done.updated === true && done.health_verified === true &&
+            done.item_ref === params.get("item_ref")) repairSignInFinished = true;
         say(requestedMode === "reauthorise"
           ? "Your bank sign-in is repaired. We’re checking for updates. Your saved history stays in place."
           : "Connected. We’re finding your accounts now. Choose who owns each one before its transactions are added.");
@@ -2149,15 +2543,41 @@ export async function handleBankFeed(env, request, url, path, ctx) {
         scoped: Boolean(principal),
       };
       if (!access.authorised) {
-        if (access.scoped) return new Response("Only the owner can connect a bank.", { status: 403 });
+        if (access.scoped) {
+          if (acceptsOwnerHtml(request)) {
+            return ownerMessageResponse({
+              title: "Only the owner can connect a bank",
+              line: "Open your Brain to return to your documents.",
+              code: "OWNER_REQUIRED",
+              action: { label: "Back to your documents", href: "/app" },
+            }, 403);
+          }
+          return new Response("Only the owner can connect a bank.", { status: 403 });
+        }
+        return ownerMessageResponse({
+          title: "Sign in to connect your bank",
+          line: "STEP 1 of 3",
+          code: "SIGN_IN_REQUIRED",
+          action: { label: "Sign in with a passkey", href: "/app?then=connect-bank" },
+        }, 401);
+      }
+      if (!bankFeedEnabled(env)) {
         return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in to connect a bank</title></head>
-<body><main><h1>Sign in first</h1><p>Sign in first at /app using <a href="/app">Sign in to your Brain</a>, then open the Connect a bank page again.</p></main></body></html>`, {
-          status: 401,
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="10"><title>Getting your bank page ready</title>
+<style>body{font:16px/1.5 system-ui,sans-serif;max-width:38rem;margin:3rem auto;padding:0 1.25rem;color:#202124}h1{font-size:1.5rem}p{color:#444}</style></head>
+<body><main><h1>STEP 1 of 3 · Getting your bank page ready</h1>
+<p>○ Almost ready. Your Brain is getting its bank keys. This page refreshes by itself; it usually takes under a minute. If it isn't ready in 10 minutes, tell your installer.</p>
+<p>Code: BANK_KEYS_NOT_SET</p></main></body></html>`, {
+          status: 503,
           headers: {
             "Content-Type": "text/html; charset=utf-8",
+            "Content-Security-Policy": "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+            "X-Frame-Options": "DENY",
+            "Referrer-Policy": "no-referrer",
             "Cache-Control": "private, no-store",
             "X-Content-Type-Options": "nosniff",
+            "Retry-After": "10",
           },
         });
       }
@@ -2357,7 +2777,10 @@ export async function handleBankFeed(env, request, url, path, ctx) {
     if (path === "/api/bank-feed/status" && request.method === "GET") {
       const access = await ownerAccess();
       if (!access.authorised && !operatorAuthorised()) return ownerRefusal(access);
-      return jsonResponse(await feedStatus(env, {now:ctx?.bankFeedNow || null}));
+      const status = await feedStatus(env, {now:ctx?.bankFeedNow || null});
+      if ((url ?? new URL(request.url)).searchParams.get("update_selfcheck") !== "1") return jsonResponse(status);
+      const { bankReadabilityForStatus } = await import("./bank-custody.js");
+      return ownerJson({ update_selfcheck: await bankReadabilityForStatus(env, status) });
     }
 
     if (path === "/api/bank-feed/accounts" && request.method === "GET") {
@@ -2504,6 +2927,31 @@ export async function handleBankFeed(env, request, url, path, ctx) {
 
     return jsonResponse({ error: "not found" }, 404);
   } catch (error) {
+    // Every failure uses fixed text or the existing safe error projection, so
+    // no path out of this module can carry a provider payload or a credential
+    // into a response. In particular, HTML never interpolates an error's code.
+    if (path === "/app/connect/bank" || path.startsWith("/app/connect/bank/")) {
+      const outcomeUnknown = error?.outcome_unknown === true;
+      const code = outcomeUnknown ? "BANK_OUTCOME_UNKNOWN" : "BANK_FEED_REQUEST_FAILED";
+      const message = outcomeUnknown
+        ? "We couldn't confirm the last step. Don't try again yet; your installer will check."
+        : "Your bank page could not be opened. Tell your installer.";
+      return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Getting your bank page ready</title>
+<style>body{font:16px/1.5 system-ui,sans-serif;max-width:38rem;margin:3rem auto;padding:0 1.25rem;color:#202124}h1{font-size:1.5rem}p{color:#444}</style></head>
+<body><main><h1>STEP 1 of 3 · Getting your bank page ready</h1><p>${message}</p>
+<p>Code: ${code}</p></main></body></html>`, {
+        status: error instanceof FeedConfigError || outcomeUnknown ? 503 : 502,
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Content-Security-Policy": "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+          "X-Frame-Options": "DENY",
+          "Referrer-Policy": "no-referrer",
+          "Cache-Control": "private, no-store",
+          "X-Content-Type-Options": "nosniff",
+        },
+      });
+    }
     if (error?.provider === "simplefin" && typeof error?.code === "string") {
       const status = Number.isInteger(error.status) ? error.status : 502;
       return privateNoStore(jsonResponse({
@@ -2528,15 +2976,15 @@ export async function handleBankFeed(env, request, url, path, ctx) {
         ...(error.status === 503 ? { unavailable: true } : {}),
       }, error.status));
     }
-    // One exit for every failure, so no path out of this module can carry a
-    // provider payload or a credential into a response.
     const outcomeUnknown = error?.outcome_unknown === true;
     const reason = bankFeedRefusalReason(error);
     let environment = null;
     try { environment = bankFeedConfig(env).environment; } catch { environment = null; }
     const body = {
       error: safeFeedError(error),
-      ...(error?.code ? { code: String(error.code).slice(0, 80) } : {}),
+      ...(error instanceof FeedConfigError
+        ? { code: "BANK_KEYS_NOT_SET" }
+        : error?.code ? { code: String(error.code).slice(0, 80) } : {}),
       // The page names the exact fix. The redirect URI is the one this Brain
       // sends with every Link request, never text copied from the provider.
       ...(reason ? { reason } : {}),

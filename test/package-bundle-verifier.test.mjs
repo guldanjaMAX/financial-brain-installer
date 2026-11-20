@@ -46,7 +46,7 @@ const CACHE_CONTENT_ROOT = resolveNpmCacheContentRoot(process.env);
 const BUNDLE_COUNTS = Object.freeze({
   "@e965/xlsx": 26,
   fflate: 17,
-  "postal-mime": 26,
+  "postal-mime": 141,
   unpdf: 157,
 });
 const WINDOWS_LOCAL_ARCHIVE_SKIP = process.platform === "win32"
@@ -257,9 +257,9 @@ test("the exact packed archive contains all four reviewed lock-derived bundles",
     inventory_sha256: proof.inventory_sha256,
   }, {
     bundle_count: 4,
-    bundle_file_count: 226,
-    bundle_bytes: 11_340_570,
-    inventory_sha256: "0e86bf795f93b456e16b9000efc10a5579ee2ea9c606411f9d50de3e5ecfc08e",
+    bundle_file_count: 341,
+    bundle_bytes: 12_329_044,
+    inventory_sha256: "8529920733a96acaf2138d564c34089d1b0c60774dedbe3fc6e5d58afdad591e",
   });
   for (const [name, count] of Object.entries(BUNDLE_COUNTS)) {
     assert.equal(
@@ -775,7 +775,7 @@ test("the private cache receives only four verified archives and rejects changed
     assert.deepEqual(proof, {
       cache_content_root: destination,
       bundle_count: 4,
-      inventory_sha256: "0e86bf795f93b456e16b9000efc10a5579ee2ea9c606411f9d50de3e5ecfc08e",
+      inventory_sha256: "8529920733a96acaf2138d564c34089d1b0c60774dedbe3fc6e5d58afdad591e",
     });
     const privateFiles = filesBelow(destination);
     assert.equal(privateFiles.length, 4);

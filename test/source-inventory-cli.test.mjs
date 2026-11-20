@@ -703,6 +703,7 @@ test("daily receipt reader requests freshness only and rejects unavailable or ma
       let reads = 0;
       const run = () => readSourceFreshness(manifest, {
         resolveAdminKey: () => OWNER_PROOF,
+        sourceInventorySleep: async () => {},
         fetchImpl: async (_url, init) => {
           reads++;
           assert.deepEqual(JSON.parse(init.body), { mode: "freshness" });
@@ -713,8 +714,68 @@ test("daily receipt reader requests freshness only and rejects unavailable or ma
       });
       if (arm === "control") { assert.equal((await run()).sources.length, 1); outcomes.push("observed"); }
       else { await assert.rejects(run); outcomes.push("unknown"); }
-      assert.equal(reads, 1, "every arm reached the authenticated receipt reader");
+      assert.equal(reads, arm === "unavailable" ? 4 : 1, "every arm reached the authenticated receipt reader and only outages retry");
     }
     assert.deepEqual(outcomes, ["observed", "unknown", "unknown"]);
+  });
+});
+
+test("daily freshness survives a temporary inventory overload without certifying a permanent outage", async () => {
+  const { readSourceFreshness } = await import("../brain.mjs");
+  await withManifest(async manifest => {
+    const outcomes = [];
+    for (const arm of ["control", "busy", "unreadable"]) {
+      let reads = 0;
+      const waits = [];
+      const run = () => readSourceFreshness(manifest, {
+        resolveAdminKey: () => OWNER_PROOF,
+        sourceInventorySleep: async ms => waits.push(ms),
+        sourceInventoryNow: () => 0,
+        fetchImpl: async (_url, init) => {
+          assert.deepEqual(JSON.parse(init.body), { mode: "freshness" });
+          reads++;
+          if (arm === "unreadable" || (arm === "busy" && reads === 1)) {
+            return Response.json({ code: "source_inventory_unavailable" }, { status: 503 });
+          }
+          return Response.json({ contract_version: 3, kind: "source_freshness", sources: [
+            { name: "meeting_feed", receipt: { last_successful_run_at: AS_OF }, freshness: { state: "ok" } },
+          ] });
+        },
+      });
+      if (arm === "unreadable") {
+        await assert.rejects(run, error => error.code === "source_inventory_unavailable");
+        outcomes.push("unknown");
+      } else {
+        assert.equal((await run()).sources[0].receipt.last_successful_run_at, AS_OF);
+        outcomes.push("observed");
+      }
+      assert.equal(reads, arm === "control" ? 1 : arm === "busy" ? 2 : 4, "the authenticated read decision was reached");
+      assert.equal(waits.length, reads - 1);
+    }
+    assert.deepEqual(outcomes, ["observed", "observed", "unknown"]);
+  });
+});
+
+test("a persistent inventory failure exposes a stable code and shipped help link", async () => {
+  await withManifest(async manifest => {
+    for (const json of [false, true]) {
+      let reads = 0;
+      await assert.rejects(() => cmdSources(manifest, {
+        flags: json ? { json: true } : {}, silent: true,
+        resolveAdminKey: () => OWNER_PROOF,
+        sourceInventorySleep: async () => {},
+        fetchImpl: async () => { reads++; return Response.json({ code: "source_inventory_unavailable" }, { status: 503 }); },
+      }), error => {
+        if (json) {
+          assert.equal(error.payload.error.code, "source_inventory_unavailable");
+          assert.match(error.payload.error.help, /06-runbook-top-ten-failures\.md#source-inventory-is-unavailable$/);
+        } else {
+          assert.match(error.message, /source_inventory_unavailable.*Help: file:\/\//);
+          assert.equal(error.message.split("\n").length, 1);
+        }
+        return true;
+      });
+      assert.equal(reads, 4, "the real read exhausted its bounded attempts");
+    }
   });
 });

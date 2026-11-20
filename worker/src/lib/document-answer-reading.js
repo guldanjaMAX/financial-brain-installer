@@ -728,7 +728,11 @@ export function finalizeDocumentAnswer({ question = '', draft = null, docs = [],
   percent = Math.max(0, Math.min(percent, cleaned.ceiling));
   base.basis[0] = `${used.length} source record${used.length===1?'':'s'} read; ${rung===1 ? 'the draft passed citation checks' : 'the answer uses attributed record text without approving the original draft'}`;
   const basis = [...base.basis, ...deductions.map(d => d.reason), `Read ${used.length} of ${retrievedCount} retrieved records; the relevant corpus may contain additional records.`];
-  const missing = [...new Set([...deductions.map(d => d.missing), 'Independent verification and a complete search of the relevant source periods.'])];
+  const omitted = used.filter(d => d.read_coverage?.omitted_stored_chunks > 0);
+  const partialReading = omitted.length
+    ? `${sentenceStart(documentRecordReferences(omitted.map(d => d.n)))} ${omitted.length === 1 ? 'was' : 'were'} only partly read.`
+    : '';
+  const missing = [...new Set([...(base.missing || []), ...deductions.map(d => d.missing), ...[partialReading].filter(Boolean), 'Independent verification and a complete search of the relevant source periods.'])];
   const confidence = { ...ownerConfidence({percent}), basis, reasons: basis, missing, deductions };
   const dates = used.map(dateLabel);
   const coverageText = `Read ${used.length} of ${retrievedCount} retrieved records from ${[...new Set(used.map(d => d.source))].join(', ') || 'sources unverified'}, dated ${[...new Set(dates)].join(', ') || 'dates unverified'}.`;

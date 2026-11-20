@@ -292,11 +292,17 @@ export function nextUtcResetIso(now = new Date()) {
 
 export function displayResetTime(iso, timezone = "UTC") {
   try {
-    return `${new Intl.DateTimeFormat(undefined, {
-      dateStyle: "medium",
-      timeStyle: "short",
+    const time = new Intl.DateTimeFormat("en-US", {
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
       timeZone: timezone,
-    }).format(new Date(iso))} (${timezone})`;
+    }).format(new Date(iso));
+    const zone = timezone === "America/Phoenix" ? "Arizona time"
+      : timezone === "UTC" ? "UTC"
+        : new Intl.DateTimeFormat("en-US", { timeZone: timezone, timeZoneName: "long" })
+          .formatToParts(new Date(iso)).find((part) => part.type === "timeZoneName").value;
+    return `${time} ${zone}`;
   } catch {
     return iso;
   }

@@ -153,6 +153,10 @@ function installSmokeThinkEnvironment() {
           all: async () => {
             if (/unchunked-tax-document-candidates/u.test(sql) ||
                 /SELECT name FROM sources/u.test(sql)) return { results: [] };
+            // The bounded record read reports how many authorized chunks the
+            // record has. Without that count the read cannot clear the
+            // sensitive-record screen, so answer the one-chunk record as D1 does.
+            if (/AS total_chunks/u.test(sql)) return { results: [{ ...row, total_chunks: 1 }] };
             return { results: [row] };
           },
           first: async () => {
@@ -715,7 +719,7 @@ test("mcp-config Part B route status is one exact success line or a fatal closed
     "receipt_conflicting",
     "claude_apply_required",
   ];
-  const readyLine = `${successMark(false)}    Claude answer route ready: route_receipt_accepted`;
+  const readyLine = `  ${successMark(false)}    Claude answer route ready: route_receipt_accepted`;
 
   for (const reason of refusals) {
     await t.test(`${reason} has a paired ready control`, async (t) => {
@@ -1100,7 +1104,7 @@ test("mcp-config non-Part-B apply keeps its prior exact output and successful re
   assert.equal(counters.stops, 0);
   assert.equal(
     applied.output,
-    `${successMark(false)}    connected with Owner assistant access: Claude Code\n` +
+    `  ${successMark(false)}    connected with Owner assistant access: Claude Code\n` +
       "      It can read, add or correct information, check the connection, and review a financial map. It cannot activate that map, delete records, or change access.",
   );
   assert.doesNotMatch(applied.output, /Claude answer route (?:ready|not ready):/);
@@ -1587,18 +1591,18 @@ async function runInstalledRouteArm(t, label, { duplicateActualContent = false }
   }));
   const setupResult = connected.value;
   const plainConnectLines = connected.output.split("\n").map((line) =>
-    line.replace(/\x1b\[[0-9;]*m/gu, "").replace(/^·\s+/, ""));
+    line.replace(/\x1b\[[0-9;]*m/gu, "").replace(/^\s*·\s+/, ""));
   const renderedApplyCommand = renderCliCommands(
     `brain mcp-config ${JSON.stringify(state.manifest)} --apply`,
   );
   const routeGuidance = plainConnectLines.filter((line) =>
-    line.startsWith("Close Claude completely") || line === "With Claude closed, run:" ||
-    line === renderedApplyCommand || line === "Then start Claude Code again.");
+    line === "****ACTION NEEDED****" || line.startsWith("Step ") || line === renderedApplyCommand);
   assert.deepEqual(routeGuidance, [
-    "Close Claude completely, including Claude Code, the Claude desktop app, and any tray or background process.",
-    "With Claude closed, run:",
+    "****ACTION NEEDED****",
+    "Step 1 - Quit Claude, including Claude Code (close Claude from the tray).",
+    "Step 2 - Open Terminal and paste this line:",
     renderedApplyCommand,
-    "Then start Claude Code again.",
+    "Step 3 - Open Claude Code in your Financial Brain folder and say continue",
   ]);
   assert.doesNotMatch(connected.output, /Then relaunch it and run/);
   assert.equal(counters.connectControls, 1, "the installed connect route reached credential control");
@@ -1730,7 +1734,7 @@ test("NAMED GAP R2-02/PB-04: installed route accepts one actual receipt from the
     "the installed caller returns the receipt from the actual fresh tool result");
   assert.equal(
     arm.applied.output.split("\n").filter((line) =>
-      line === `${successMark(false)}    Claude answer route ready: route_receipt_accepted`).length,
+      line === `  ${successMark(false)}    Claude answer route ready: route_receipt_accepted`).length,
     1,
   );
 });

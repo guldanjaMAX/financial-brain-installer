@@ -1,3 +1,4 @@
+import { assertOwnerEvidence } from './helpers/owner-evidence-contract.mjs';
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -81,7 +82,7 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
 import { cmdAsk } from "../brain.mjs";
-import { refusalConfidence } from "../worker/src/lib/confidence.js";
+import { refusalConfidence, documentResponseConfidence } from "../worker/src/lib/confidence.js";
 for (const arm of ["candidates", "no-candidates", "missing-results", "incomplete", "answer"]) {
   test(`S2 CLI refusal scope: ${arm}`, async t => {
     const home = realpathSync.native(mkdtempSync(join(tmpdir(), "scope-answer-")));
@@ -97,10 +98,10 @@ for (const arm of ["candidates", "no-candidates", "missing-results", "incomplete
       ...(arm === "incomplete" ? { status: "search_unavailable", degraded: "fts" } : {}) };
     if (arm === "missing-results") delete body.results;
     const printed = [], oldLog = console.log;
-    let requests = 0;
+    let requests = 0, renderedBody;
     console.log = (...parts) => printed.push(parts.join(" "));
     try {
-      await cmdAsk(manifest, { adminKey: readFileSync(keyPath, "utf8"), ask: async () => "Does the fixture support the claim?", http: async (_url, request) => {
+      renderedBody = await cmdAsk(manifest, { adminKey: readFileSync(keyPath, "utf8"), ask: async () => "Does the fixture support the claim?", http: async (_url, request) => {
         requests++;
         assert.ok(JSON.parse(request.body).q.length > 0, "the real nonempty private query reached dispatch");
         return new Response(JSON.stringify(body), { status: 200 });
@@ -112,15 +113,21 @@ for (const arm of ["candidates", "no-candidates", "missing-results", "incomplete
     // 0.4.28 record reading answers provisionally at Low 10 instead of refusing at Low 30.
     if (arm === "incomplete") {
       assert.match(text, /Source coverage is incomplete.*provisional/i);
-      assert.match(text, /Confidence: Low \(10%\).*Why:.*Missing:/i);
+      const score = documentResponseConfidence(renderedBody);
+      assert.equal(score.percent, 10, 'the internal record-reading ceiling is unchanged');
+      assertOwnerEvidence(text, score);
     } else if (arm === "candidates") {
       assert.match(text, /I found 2 records in this search, but none supported an answer/);
-      assert.match(text, /Confidence: Low \(10%\).*Why:.*Missing:/i);
+      const score = documentResponseConfidence(renderedBody);
+      assert.equal(score.percent, 10, 'the internal record-reading ceiling is unchanged');
+      assertOwnerEvidence(text, score);
       assert.match(text, /Fixture evidence limit/);
       assert.match(text, /Next: ask about one record at a time/);
     } else if (arm === "no-candidates") {
       assert.match(text, /I didn't find a matching record in this search/);
-      assert.match(text, /Confidence: Low \(10%\).*Why:.*Missing:/i);
+      const score = documentResponseConfidence(renderedBody);
+      assert.equal(score.percent, 10, 'the internal record-reading ceiling is unchanged');
+      assertOwnerEvidence(text, score);
       assert.match(text, /Fixture evidence limit/);
       assert.match(text, /Next: ask again with a name, date or exact phrase/);
     } else if (arm === "missing-results") {

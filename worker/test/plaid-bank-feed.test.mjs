@@ -467,7 +467,7 @@ test("bank connect navigation accepts the owner cookie while every API still req
     assert.match(page.headers.get("content-security-policy"), /frame-ancestors 'none'/);
     const html = await page.text();
     assert.match(html, /X-Brain-App/);
-    assert.match(html, /Choose where each account belongs/);
+    assert.match(html, /STEP 2 of 3 · Whose accounts are these\?/);
 
     const accountsUrl = new URL("https://brain.invalid/api/bank-feed/accounts");
     const cookieOnlyApi = await handleBankFeed(fixture.env, new Request(accountsUrl, {

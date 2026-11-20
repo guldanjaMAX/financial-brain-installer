@@ -1,3 +1,4 @@
+import { assertOwnerEvidence } from './helpers/owner-evidence-contract.mjs';
 // A brain that found the right documents and failed to write an answer must
 // never report itself as a brain with nothing on file. Those two outcomes are
 // indistinguishable to the consuming model, and only one of them is honest.
@@ -812,14 +813,15 @@ await test("remote incomplete coverage retains newest metadata and unavailable s
 await test("remote refused ask scopes its line and confidence beside an unchanged cited control", async () => {
   const confidence = { percent: 80, band: "high", basis: ["fixture evidence"] };
   const refused = await remoteCall({ answer: "The documents do not answer the question.", confidence, results: [], citations: [], gaps: [] }, "ask");
-  assert.equal(refused, `${REFUSAL.split(" Want")[0]}\n\nConfidence: Low (20%). Why: No record read here answers the question; 0 retrieved records; retrieval alone does not verify an answer. Missing: A record that states the answer; The complete relevant document set and independent verification of the answer; A matching readable source record.\n${NEXT_NO_MATCH}`);
+  assert.equal(refused, `${REFUSAL.split(" Want")[0]}\n\nNo record read here answers the question; 0 retrieved records; retrieval alone does not verify an answer; Still needed: A record that states the answer; The complete relevant document set and independent verification of the answer; A matching readable source record; this answer may be incomplete.\n${NEXT_NO_MATCH}`);
   assert.doesNotMatch(refused, /Confidence nothing is recorded|The documents do not answer/);
   const cited = await remoteCall({ answer: "Fixture answer [1].", confidence,
     citations: [{ n: 1, title: "Fixture record", source: "fixture", lineage: { status: "known" } }], results: [], gaps: [] }, "ask");
-  assert.equal(cited, "Fixture answer [1].\n\nConfidence: Medium (80%). Why: fixture evidence. Missing: Independent verification and complete relevant source coverage.\n\nSources:\n[1] Fixture record · fixture\nWant to check the original record?");
+  assert.equal(cited, "Fixture answer [1].\n\nfixture evidence; Still needed: Independent verification and complete relevant source coverage; this answer may be incomplete.\n\nSources:\n[1] Fixture record · fixture\nWant to check the original record?");
   const unavailable = await remoteCall({ status: "search_unavailable", answer: "The documents do not answer the question.", confidence, results: [], citations: [], gaps: [] }, "ask");
   assert.match(unavailable, /coverage is incomplete.*provisional/i);
-  assert.match(unavailable, /Confidence: Low \(10%\).*Why:.*Missing:/);
+  assertOwnerEvidence(unavailable);
+  assert.match(unavailable, /Missing or counted twice: A completed search over the requested sources and periods/);
   assert.doesNotMatch(unavailable, /Confidence nothing is recorded|I didn't find a matching record|fixture evidence/);
 });
 
@@ -913,7 +915,7 @@ await test("R4 remote refusal preserves ledger and source coverage limits", asyn
     const empty = await remoteCall({ answer: null, results: [], citations: [], gaps: [{ type, detail }] }, "ask");
     assert.ok(empty.includes(detail), "empty synthesis still carries the real reason");
   }
-  assert.equal(await remoteCall({ answer: "Fixture supported answer.", results: [], citations: [], gaps: [] }, "ask"), "Fixture supported answer.\n\nConfidence: Low (20%). Why: 0 retrieved records; retrieval alone does not verify an answer. Missing: The complete relevant document set and independent verification of the answer; A matching readable source record.\nWant to check the original record?");
+  assert.equal(await remoteCall({ answer: "Fixture supported answer.", results: [], citations: [], gaps: [] }, "ask"), "Fixture supported answer.\n\n0 retrieved records; retrieval alone does not verify an answer; Still needed: The complete relevant document set and independent verification of the answer; A matching readable source record; this answer may be incomplete.\nWant to check the original record?");
 });
 
 for (const status of ["coverage_incomplete", "search_unavailable"]) for (const type of ["ledger_out_of_coverage", "ledger_not_consulted"]) await test(`F5 ${status} retains authorized ${type} without candidate records`, async () => {
@@ -932,7 +934,8 @@ for (const status of ["coverage_incomplete", "search_unavailable"]) for (const t
   assert.equal((out.match(/\bWant[^?]*\?/g) || []).length, 0, "no extra bank invitation beside Next");
   assert.doesNotMatch(out, /Candidate citation|I found 1 record/);
   // 0.4.28 the completed partial search reads one candidate (30); unavailable search remains 10.
-  assert.match(out, new RegExp(`Confidence: Low \\(${status==='coverage_incomplete'?30:10}%\\).*Why:.*Missing:`, 's'));
+  assertOwnerEvidence(out);
+  assert.match(out, /Missing or counted twice:.*(?:completed search|matching bank rows)/is);
   const control = await remoteCall({ ...payload, status: undefined, notice: undefined, results: [], citations: [] }, "ask");
   assert.ok(control.includes(detail));
 });

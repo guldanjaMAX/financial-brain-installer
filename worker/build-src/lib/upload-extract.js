@@ -178,7 +178,7 @@ function workbook(bytes, mediaType) {
 
 async function email(bytes) {
   let mail;
-  try { mail = await new PostalMime().parse(bytes); }
+  try { mail = await new PostalMime({ maxHeadersSize: 256 * 1024 }).parse(bytes); }
   catch { throw extractionError("the email file could not be opened", "unreadable_upload"); }
   const headers = [
     mail.from ? `From: ${mail.from.name || ""} <${mail.from.address || ""}>`.trim() : null,

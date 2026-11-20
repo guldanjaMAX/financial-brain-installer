@@ -69,9 +69,13 @@ const plan = technicianPlan("C:\\Users\\client\\Financial Brain\\brain.manifest.
   intent: "first_brain",
 });
 const technicianText = renderCliCommands(renderTechnicianPlan(plan), windows);
-assert.match(technicianText, /'--run' 'tools'/);
-assert.match(technicianText, /'--intent' 'first_brain'/);
-assert.equal(technicianText, renderTechnicianPlan(plan), 'existing structured technician commands remain byte-stable');
+assert.match(technicianText, /Setting up your Brain · 6 steps · about 33 minutes/);
+assert.match(technicianText, /STEP 1 of 6 · Check this computer · about 1 min/);
+assert.doesNotMatch(technicianText, /--run|--intent|human_boundary|deferred from public first install|brain\.mjs|synthetic|C:\\Users/);
+assert.equal((technicianText.match(/Later, with your installer: Google, Zoom, email\./g) || []).length, 1);
+assert.equal(technicianText, renderTechnicianPlan(plan), 'the owner plan needs no platform-specific commands');
+assert.match(plan.steps[0].command, /'--run' 'tools'/);
+assert.match(plan.steps[0].human_boundary, /Before approval/);
 assert.doesNotMatch(technicianText, bareCommand);
 
 const output = [];
@@ -163,7 +167,7 @@ assert.doesNotMatch(gapOutput.join("\n"), /Nothing here makes an answer wrong/);
 // .gitattributes also pins this file to LF; this is the belt to that brace.
 const source = readFileSync(new URL("../brain.mjs", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 assert.match(source, /: renderCliCommands\(renderSupportRecovery\(recovery\)\)\)/);
-assert.match(source, /else console\.log\(renderCliCommands\(renderTechnicianPlan\(plan\)\)\)/);
+assert.match(source, /else console\.log\(renderCliCommands\(renderTechnicianPlan\(plan, \{ details: flags\.details === true \}\)\)\)/);
 assert.match(source, /if \(flags\.json\) console\.log\(JSON\.stringify\(plan, null, 2\)\)/);
 assert.ok(!/node brain\.mjs forget/.test(source), "forget guidance cannot depend on a checkout working directory");
 assert.ok(!/\$\{(?:x|item)\.fix\.split\("\\n"\)/.test(source), "doctor fixes must render Windows executable guidance");

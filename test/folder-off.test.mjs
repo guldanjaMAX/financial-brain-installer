@@ -1,3 +1,4 @@
+import { isolatedLifecycleOptions } from "./fixtures/isolated-update-schedulers.mjs";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -138,7 +139,7 @@ function schedulerOptions(f, launchctl, extra = {}) {
 function folderOptions(f, harness, extra = {}) {
   return {
     platform: "darwin",
-    lifecycleLockOptions: { machineLockRoot: join(f.home, 'lifecycle-locks') },
+    lifecycleLockOptions: isolatedLifecycleOptions(f.home),
     now: () => new Date(FIXED_NOW),
     schedulerOptions: schedulerOptions(f, harness.launchctl, {
       probeSchedulerLock: () => false,

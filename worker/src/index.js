@@ -1,3 +1,4 @@
+import { handleCalendarCancellation } from './lib/calendar-cancellation.js';
 import { backfillSourceFamilyIndex } from "./lib/source-family-index.js";
 import { retainedIngestFailureReceipt } from "./lib/retained-ingest.js";
 import { handleDriveFamily } from './lib/drive-family.js';
@@ -6,6 +7,7 @@ import { synthesisIntent, SYNTHESIS_INSTRUCTION, verifySynthesis } from './lib/s
 import { qualifyDatedStatus, datedStatusPrompt, datedStatusInstruction, datedStatusConflicts } from './lib/dated-status-answer.js';
 import { readIngestRemovalRequest, previewIngestRemovals, applyIngestRemovals, ingestRemovalFailure } from "./lib/ingest-removal-plan.js";
 import { createQueryTiming, queryTimingResponse, measureQueryStage, startQueryStage } from "./lib/query-timing.js";
+import { answerCheckModels, publicHealthFlags, recordAnswerCheck } from "./lib/public-health-flags.js";
 /**
  * brain worker — the client-installable retrieval brain.
  *
@@ -34,6 +36,7 @@ import { createQueryTiming, queryTimingResponse, measureQueryStage, startQuerySt
 
 import { handleCuratedVerify } from "./lib/curated-verify.js";
 import { WORKER_VERSION } from "./lib/version.js";
+import { acceptsOwnerHtml, ownerMessageResponse } from "./lib/owner-message-response.js";
 import {
   AnthropicEmptyResponseError,
   AnthropicIncompleteResponseError,
@@ -46,7 +49,7 @@ import {
 } from "./lib/core.js";
 import { resolvePrincipal, principalMay, scopeIsUnrestricted } from "./lib/grants.js";
 import { withLedgerAnswer } from "./lib/ledger-answer.js";
-import { documentPromptWindow, documentResultTitle, finalizeDocumentAnswer, finalizeOwnerLedgerAnswer, readDocumentEvidence } from "./lib/document-answer.js";
+import { documentPromptWindow, documentResultTitle, finalizeDocumentAnswer, finalizeOwnerLedgerAnswer, readDocumentEvidence, SENSITIVE_SCREENING_INCOMPLETE } from "./lib/document-answer.js";
 import {
   filterThinkCandidates, SENSITIVE_DOCUMENTS_NOTICE, SENSITIVE_DOCUMENTS_WITHHELD,
 } from "./lib/think-candidate-policy.js";
@@ -81,6 +84,7 @@ import {
 import {
   storeFor, backendOf, D1, expectedD1ContentHash, ProvenanceTransitionError,
 } from "./lib/store.js";
+import { OWNER_REMOVED_LABEL, OWNER_REMOVAL_LEDGER_SCHEMA, envelopeOwnerRemovalKeys, envelopeIsOwnerRemoved, ownerRemovalLedgerPresent, ownerRemovedAmong, readOwnerRemovalRequest, handleOwnerRemovals, ownerRemovalFailure, verifyCorpusStats, OwnerRemovalError } from "./lib/owner-removals.js";
 import { installedSchemaVersion, acceleratedVectorBootstrap, drainOutbox, outboxDepth, vectorReadiness, retryQuarantinedVectorOps, forget, forgetFamilies, listSourceFamilies, SOURCE_FAMILY_CURSOR_MAX_BYTES, SOURCE_FAMILY_UID_FILTER_MAX, sourceFamilyCounts, sourceRetirementState, reindex, coverageGapReport, freshnessReport, sourceFreshnessCounts, diagnose } from "./lib/store-d1.js";
 import { embedText, embedTexts } from "./lib/supabase.js";
 import {
@@ -88,6 +92,7 @@ import {
   recordObservation, reliableRecordObservationTime,
   parseCanonicalEvidenceDate, reliableDocumentTime, retrievalTimeWindow,
 } from "./lib/query-intent.js";
+import { microsoftStatusNotice } from "./lib/microsoft-retained-status.js";
 import { computeAnswerConfidence, refusalConfidence } from "./lib/confidence.js";
 import { answerSentences } from "./lib/answer-sentences.js";
 import { quickBooksMoneyPolicy } from "./lib/quickbooks-money.js";
@@ -173,9 +178,6 @@ import { supplementalRetrievalFilters } from "./lib/retrieval-routing.js";
 import { dispatchCfoWorkflow } from "./lib/cfo-workflow.js";
 import { entityFactAnswer } from "./lib/entity-fact-answer.js";
 
-// Packaged deploys set this binding explicitly. The same built-in default here
-// keeps direct and unbound invocations on the public no-key path.
-const DIRECT_INVOCATION_ANSWER_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 const ANTHROPIC_ANSWER_MAX_TOKENS = 4000;
 const ANTHROPIC_EVIDENCE_GATE_MAX_TOKENS = 4000;
 const ANTHROPIC_SYNTHESIS_GATE_MAX_TOKENS = 8000;
@@ -361,9 +363,11 @@ function citationCandidateForResult(result, index) {
     top_folder: result.top_folder || null,
     source: result.source || "?",
     source_kind: result.source_kind || null,
+    ...(result.microsoft_provider_status ? { microsoft_provider_status: result.microsoft_provider_status } : {}),
     write_provenance: result.write_provenance || null,
     client: result.client || null,
     ts: result.ts || null,
+    ...(result.calendar_status ? { calendar_status: result.calendar_status } : {}),
     ...(result.record_observation ? { record_observation:result.record_observation } : {}),
     occurred_at: result.occurred_at || null,
     date_reliable: result.date_reliable === true,
@@ -392,6 +396,7 @@ function citationForDocument(document) {
     source_kind: document.source_kind,
     ...(document.write_provenance ? { write_provenance: document.write_provenance } : {}),
     ref: document.ref, ts: document.ts,
+    ...(document.calendar_status ? { calendar_status: document.calendar_status } : {}),
     ...(document.record_observation ? { record_observation:document.record_observation } : {}),
     date_reliable: document.date_reliable, date_source: document.date_source,
     // A citation drawn from a scan must never look identical to one drawn from
@@ -409,7 +414,7 @@ function citationForDocument(document) {
 
 async function unifiedRetrieve(env, url, {
   limit, access = null, scope = { all: true }, scopePrincipalKind = "owner",
-  projectionReadiness = null, timing = null,
+  projectionReadiness = null, timing = null, boundThinkText = false,
 }) {
   const q = url.searchParams.get("q");
   const rrfK = Math.min(Math.max(parseInt(url.searchParams.get("rrf_k")) || 60, 1), 1e3);
@@ -420,6 +425,7 @@ async function unifiedRetrieve(env, url, {
   // and temporary rollback only.
   const r = await measureQueryStage(timing, "retrieval", () => storeFor(env).search(env, {
     query: q,
+    boundThinkText,
     readPlan: url.searchParams.get('read_plan') || 'standard',
     // Both public routes ask the store for the same ranking window. The D1
     // backend's modality pool is fixed separately; this depth only leaves room
@@ -443,6 +449,7 @@ async function unifiedRetrieve(env, url, {
   return {
     matches,
     retrievalReceipt: r.retrieval_receipt,
+    retrievalProjectionIncomplete: r.retrieval_projection_incomplete,
     retrievalCoverage: r.retrieval_coverage,
     meaningSearch: r.meaning_search,
     evidenceAuthority: strongestEvidenceAuthority(matches),
@@ -535,9 +542,6 @@ async function rerank(env, q, results, limit, timing = null) {
   }
 }
 
-const answerModelFor = (env) => env.ANSWER_MODEL || DIRECT_INVOCATION_ANSWER_MODEL;
-const gateModelFor = (env) => env.GATE_MODEL || answerModelFor(env);
-
 function nextUtcMidnight() {
   const now = new Date();
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)).toISOString();
@@ -572,12 +576,18 @@ async function checkAnswerModel(env, model) {
 }
 
 export async function handleAnswerCheck(env) {
-  const answerModel = answerModelFor(env);
-  const gateModel = gateModelFor(env);
+  const [answerModel, gateModel] = answerCheckModels(env);
   const answer = await checkAnswerModel(env, answerModel);
   const check = gateModel === answerModel
     ? { ...answer }
     : await checkAnswerModel(env, gateModel);
+  if (backendOf(env) === D1 && env.VECTOR_DRAIN_MODE !== "paused-for-upgrade") {
+    try {
+      await recordAnswerCheck(env.DB, answer, check);
+    } catch {
+      return jsonResponse({ error: "Answer check results could not be saved.", answer, check }, 503);
+    }
+  }
   return jsonResponse({ answer, check });
 }
 
@@ -1254,20 +1264,19 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
   }));
 
   const {
-    retrievalReceipt, retrievalCoverage, meaningSearch,
+    retrievalReceipt, retrievalCoverage, meaningSearch, retrievalProjectionIncomplete,
     matches, evidenceAuthority, degraded, degradedReason, retrievalScope, access: accessSummary, ignoredFilters,
-  } = await unifiedRetrieve(env, url, { limit, access, scope: grantScope, scopePrincipalKind, timing });
+  } = await unifiedRetrieve(env, url, { limit, access, scope: grantScope, scopePrincipalKind, timing, boundThinkText:true });
   // Filter before deriving prompts, citations, gaps, or exported candidates.
   // Ledger admission misses some money phrasings, so no ledgerGap is required.
-  const candidatePolicy = filterThinkCandidates(await readDocumentEvidence(env, Array.isArray(matches) ? matches : [], {
-    access, scope:grantScope, filters:filtersFrom(url),
-  }), {
-    question: q, taxQuestion, owner: env.BRAIN_OWNER, now: Date.now(), timeZone: env.BRAIN_TIMEZONE,
-    // This route checks exact tax scope and readability after synthesis. A
-    // solicited near neighbor must reach that guard, not become an absence or
-    // an unsolicited-record refusal before the evidence decision can run.
-    deferTaxScope: taxQuestion.applicable && taxQuestion.resolved,
+  const candidatePolicy = await readDocumentEvidence(env, Array.isArray(matches) ? matches : [], {
+    access, scope:grantScope, filters:filtersFrom(url), screening: {
+      question: q, taxQuestion, owner: env.BRAIN_OWNER, now: Date.now(), timeZone: env.BRAIN_TIMEZONE,
+      // Related, solicited tax evidence still reaches the exact-scope guard.
+      deferTaxScope: taxQuestion.applicable && taxQuestion.resolved,
+    },
   });
+  const screeningIncomplete = candidatePolicy.incomplete || retrievalProjectionIncomplete;
   const windowed = applyQuestionRetrievalWindow(candidatePolicy.rows, timeWindow);
   const results = windowed.rows;
   onSafeReading(results);
@@ -1318,12 +1327,13 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
     if (documentTaxGap) gaps = [documentTaxGap, ...gaps];
     if (taxQuestion.applicable && !taxQuestion.resolved) gaps.push({...TAX_QUESTION_SCOPE_UNRESOLVED_GAP, detail:"The tax entity, year or form is missing; no matching permitted statement was read in this search."});
     if (candidatePolicy.withheld) gaps = [SENSITIVE_DOCUMENTS_WITHHELD, ...gaps.filter(gap => gap.type !== "no_results")];
+    if (screeningIncomplete) gaps = [SENSITIVE_SCREENING_INCOMPLETE, ...gaps.filter(gap => gap.type !== 'no_results')];
     if (timeWindow) gaps.push(questionRetrievalWindowGap(timeWindow, 0, windowed.dropped));
     const coverageIncomplete = disclosure.incomplete || (!disclosure.unavailable &&
       (sourceCoverageGaps.length > 0 || Boolean(documentTaxGap)));
     const finalized = finalizeDocumentAnswer({ question:q, gaps, degraded, coverage,
       docs:[], retrievedCount:matches.length, screenedCount:candidatePolicy.withheld?.count || 0,
-      searchComplete:!disclosure.unavailable && !disclosure.incomplete,
+      searchComplete:!disclosure.unavailable && !disclosure.incomplete && !screeningIncomplete,
       checks:taxQuestion.applicable && !taxQuestion.resolved ? [{supported:false,complete:false,reason:'tax scope is assumed; entity, year or form is missing'}] : [] });
     return finalizedThink(jsonResponse({mode:'think', entity_scope:entityScope, ...finalized, usedDocs:undefined,
       status:undefined, gaps, results:[], citations:[], withheld_documents:candidatePolicy.withheld,
@@ -1339,6 +1349,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
   if (retrievalCoverage) gaps.unshift(...emptyRetrievalDisclosure(degraded,degradedReason).gaps);
   if (taxQuestion.applicable && !taxQuestion.resolved) gaps.unshift({...TAX_QUESTION_SCOPE_UNRESOLVED_GAP, detail:"The exact tax entity, year or form is missing. Statements below are attributed record readings, with that scope unconfirmed."});
   if (candidatePolicy.withheld) gaps.unshift(SENSITIVE_DOCUMENTS_WITHHELD);
+  if (screeningIncomplete) gaps.unshift(SENSITIVE_SCREENING_INCOMPLETE);
   if (timeWindow) gaps.push(questionRetrievalWindowGap(timeWindow, results.length, windowed.dropped));
   if (ledgerGap) {
     for (const gap of gaps) if (gap.type === "stale") {
@@ -1401,16 +1412,14 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
   if (unreadableRequestedTaxEvidence) documentTaxGap = TAX_EVIDENCE_UNREADABLE_GAP;
   if (documentTaxGap) gaps.unshift(documentTaxGap);
 
-  // 0.4.28 reads whole stored records (up to 500 chunks each). The answer
-  // and verifier prompts carry a bounded window of a longer record (the
-  // excerpts stay whole). The finalizer still grounds every claim against the
-  // whole stored record, so record text the models did not see still keeps
-  // the answer below High.
+  // Models see query-relevant windows. The finalizer checks the entire
+  // bounded reading, including any separately retained retrieval excerpts.
   const promptWindows = new Map();
   const promptText = (d) => {
     if (!promptWindows.has(d)) promptWindows.set(d, documentPromptWindow(d, q));
     const window = promptWindows.get(d);
-    return window ? `(This is a window of a longer record; the rest of the record is not shown.)\n${window.text}` : d.snippet;
+    return window ? [microsoftStatusNotice(d.microsoft_provider_status),
+      `(This is a window of a longer record; the rest of the record is not shown.)\n${window.text}`].filter(Boolean).join("\n") : d.snippet;
   };
   const renderDocs = (items) => items
     .map((d) => {
@@ -1576,8 +1585,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
   let answerError = null;
   let model = null;
   let modelDeclaredNoEvidence = false;
-  const answerModel = answerModelFor(env);
-  const gateModel = gateModelFor(env);
+  const [answerModel, gateModel] = answerCheckModels(env);
   let anthropicKeyMissing = false;
   try {
     let repairInstruction = "";
@@ -2088,7 +2096,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
     deterministicDraft:observedAnswer && candidateDraft === observedAnswer.answer ? answer : null,
     docs, approvedDocs, checks:checkVerdicts, gaps, coverage, degraded,
     retrievedCount:matches.length, screenedCount:candidatePolicy.withheld?.count || 0,
-    searchComplete:!searchDisclosure.unavailable && !searchDisclosure.incomplete });
+    searchComplete:!searchDisclosure.unavailable && !searchDisclosure.incomplete && !screeningIncomplete });
   return finalizedThink(jsonResponse({ mode:'think', entity_scope:entityScope, ...finalized, usedDocs:undefined,
     status:undefined, withheld_documents:candidatePolicy.withheld,
     ...(timeWindow ? {time_window:timeWindow.public} : {}),
@@ -2242,6 +2250,17 @@ async function handleIngest(env, request, scope = { all: true }, {
         422
       );
     }
+  }
+
+  // An item the owner removed with "Clean my Brain" stays out of a full re-read.
+  // Refused with a label, never an error: the client treats it as settled.
+  if ((await ownerRemovedAmong(env, envelopeOwnerRemovalKeys(envelope))).size > 0) {
+    return jsonResponse({
+      error: "refused: you removed this item with Clean my Brain",
+      labels: [OWNER_REMOVED_LABEL],
+      code: "OWNER_REMOVED",
+      detail: "Run brain clean --restore to bring it back. Nothing was written.",
+    }, 422);
   }
 
   // `owner-notes` is a reserved lifecycle, not a convenient label a generic
@@ -2513,6 +2532,23 @@ async function handleIngestBatch(env, request, scope = { all: true }, {
         max_statements: budget.max_statements,
         detail: "Send fewer or smaller documents in each call. Nothing was written.",
       }, 413);
+    }
+  }
+
+  // Families the owner removed with "Clean my Brain" are refused, never written.
+  // One indexed read for the whole request, and only for documents that passed
+  // every check above, so an invalid or over-budget request still costs no D1.
+  if (eligible.length) {
+    const ownerRemoved = await ownerRemovedAmong(env, eligible.flatMap((item) => envelopeOwnerRemovalKeys(item.envelope)));
+    if (ownerRemoved.size) {
+      for (let index = eligible.length - 1; index >= 0; index--) {
+        const { inputIndex, envelope, slot, docUid } = eligible[index];
+        if (!envelopeIsOwnerRemoved(envelope, ownerRemoved)) continue;
+        tally.refused++;
+        results[inputIndex] = { ...slot, status: "refused", labels: [OWNER_REMOVED_LABEL] };
+        eligible.splice(index, 1);
+        if (canOptimizeD1) identityCounts.set(docUid, (identityCounts.get(docUid) || 1) - 1);
+      }
     }
   }
 
@@ -3463,6 +3499,7 @@ async function finalizeForgottenSource(env, source, documents) {
 // silently lost by restore. Read-only retrieval and source-family inventory
 // remain available while setup/update waits out every older invocation.
 const PAUSED_CORPUS_MUTATION_PATHS = new Set([
+  "/api/admin/brain/calendar-cancellation",
   "/api/admin/brain/ingest",
   "/api/admin/brain/ingest/batch",
   OWNER_NOTES_ROUTE,
@@ -3528,6 +3565,10 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
+    if ((path === "/" || path === "/app/") && acceptsOwnerHtml(request)) {
+      return new Response(null, { status: 302, headers: { Location: "/app", "Cache-Control": "private, no-store", Vary: "Accept" } });
+    }
+
     if (path === "/health") {
       // ok reports whether this brain can do its job, not whether the Worker
       // is running. A paused install returns 503 on eight write paths
@@ -3555,6 +3596,7 @@ export default {
           Number.isSafeInteger(value) && value >= 0) &&
         sourceCounts.stale + sourceCounts.unscheduled <= sourceCounts.total);
       const storageAvailable = !activeD1 || (schemaVersion !== null && sourceCountsAvailable);
+      const flags = await publicHealthFlags(env, activeD1);
       return jsonResponse({
         ok: !paused && storageAvailable,
         status: paused ? "paused-for-upgrade" : storageAvailable ? "ok" : "storage-unavailable",
@@ -3590,6 +3632,7 @@ export default {
         vector_writer_protocol: "lease-v1",
         vector_drain_mode: paused ? "paused-for-upgrade" : "active",
         rollback_write_fence: paused && env.VECTOR_ROLLBACK_FENCE === "1",
+        ...flags,
         ts: new Date().toISOString(),
       });
     }
@@ -3798,7 +3841,7 @@ export default {
     if (path === "/oauth/authorize" && request.method === "GET") {
       const guarded = await guardPublicRequest(env, request, url, path);
       if (guarded.response) return guarded.response;
-      return handleAuthorizePage(env, url);
+      return handleAuthorizePage(env, url, guarded.request);
     }
     if (path === "/oauth/authorize/decision" && request.method === "POST") {
       const guarded = await guardPublicRequest(env, request, url, path);
@@ -3813,6 +3856,16 @@ export default {
     if (path === "/mcp") {
       const grant = await validateConnectorToken(request, env);
       if (!grant) {
+        if (acceptsOwnerHtml(request)) {
+          return ownerMessageResponse({
+            title: "This is your Claude connector address",
+            line: "Paste this address in Claude, under Settings, then Connectors. Open your Brain below to use it in your browser.",
+            code: "CONNECTOR_ADDRESS",
+            action: { label: "Open your Brain", href: "/app" },
+          }, 401, {
+            "WWW-Authenticate": `Bearer resource_metadata="${url.origin}/.well-known/oauth-protected-resource"`,
+          });
+        }
         return new Response(JSON.stringify({ error: "unauthorized" }), {
           status: 401,
           headers: {
@@ -4010,7 +4063,7 @@ export default {
         return handleZones(env, request);
       }
       if (path === "/api/admin/brain/answer-check" && request.method === "POST") {
-        return handleAnswerCheck(env);
+        return await handleAnswerCheck(env);
       }
       // A bank export the owner downloaded, landing as ledger rows rather than
       // as prose. Operator-only and INSIDE the key gate, unlike the hosted
@@ -4029,6 +4082,12 @@ export default {
       if (path === OCR_PATH && request.method === "POST") {
         return await handleOcr(env, request);
       }
+      if (path === "/api/admin/brain/calendar-cancellation" && request.method === "POST") {
+        if (!ownerKeyAuthorized || !scopeIsUnrestricted(scope) || backendOf(env) !== D1) {
+          return privateNoStore(jsonResponse({ error: "Calendar cancellation marking requires the owner and D1 backend." }, 403));
+        }
+        return await handleCalendarCancellation(env, request);
+      }
       if (path === "/api/admin/brain/ingest" && request.method === "POST") {
         return await handleIngest(env, request, scope, {
           allowSourceOriginalReceipt: ownerKeyAuthorized,
@@ -4045,6 +4104,7 @@ export default {
         if (!ownerKeyAuthorized) return jsonResponse({ error: "owner authorization required" }, 403);
         const schema = await installedSchemaVersion(env);
         return jsonResponse({ retained_revision_protocol: schema >= 65 ? 1 : 0,
+          owner_removal_ledger: schema >= OWNER_REMOVAL_LEDGER_SCHEMA && await ownerRemovalLedgerPresent(env) ? 1 : 0,
           bounded_source_receipts: true, schema_version: schema,
           writes_paused: env.VECTOR_DRAIN_MODE === "paused-for-upgrade" });
       }
@@ -4127,12 +4187,60 @@ export default {
           return privateNoStore(jsonResponse(result));
         } catch (error) {
           const failure = ingestRemovalFailure(error);
+          // The database's own failure goes to the Worker log in a safe form
+          // (no ids, no quoted values), so a 503 is never a mystery again.
+          if (failure.status >= 500) {
+            console.error("ingest-removal-failure", JSON.stringify({
+              code: failure.code, stage: failure.stage, committed: failure.committed,
+              d1_class: failure.d1_class, provider_message: failure.provider_message,
+            }));
+          }
           return privateNoStore(jsonResponse({
             code: failure.code,
             error: failure.code === "INGEST_REMOVAL_CHANGED"
               ? "Stored inventory or runtime changed; run ingestion again."
               : "Removal request could not be verified. The source cursor was not advanced.",
+            ...(failure.status >= 500 ? {
+              stage: failure.stage, committed: failure.committed,
+              d1_class: failure.d1_class, provider_message: failure.provider_message,
+            } : {}),
           }, failure.status));
+        }
+      }
+      if (path === "/api/admin/brain/owner-removals" && request.method === "POST") {
+        if (backendOf(env) !== D1 || !scopeIsUnrestricted(scope) || !ownerKeyAuthorized) {
+          return privateNoStore(jsonResponse({ error: "The removal ledger needs the owner and the D1 backend." }, 403));
+        }
+        try {
+          const body = await readOwnerRemovalRequest(request);
+          if (["remember", "restore"].includes(body.action) && upgradePauseHolds(env)) {
+            return privateNoStore(jsonResponse(pausedCorpusRefusal(), 503));
+          }
+          return privateNoStore(jsonResponse(await handleOwnerRemovals(env, body)));
+        } catch (error) {
+          const failure = ownerRemovalFailure(error);
+          if (failure.status >= 500) console.error("owner-removals-failure", failure.code);
+          return privateNoStore(jsonResponse({ code: failure.code, error: failure.error }, failure.status));
+        }
+      }
+      if (path === "/api/admin/brain/corpus-stats/verify" && request.method === "POST") {
+        if (backendOf(env) !== D1 || !scopeIsUnrestricted(scope) || !ownerKeyAuthorized) {
+          return privateNoStore(jsonResponse({ error: "The counter check needs the owner and the D1 backend." }, 403));
+        }
+        try {
+          let body;
+          try { body = JSON.parse(await request.text() || "{}"); }
+          catch { throw new OwnerRemovalError("Request must be a JSON object."); }
+          if (!body || typeof body !== "object" || Array.isArray(body) ||
+              Object.keys(body).some((key) => !["source", "repair", "instance"].includes(key)) ||
+              (body.repair !== undefined && typeof body.repair !== "boolean")) {
+            throw new OwnerRemovalError("Give a source and optionally repair: true.");
+          }
+          return privateNoStore(jsonResponse(await verifyCorpusStats(env, body)));
+        } catch (error) {
+          const failure = ownerRemovalFailure(error);
+          if (failure.status >= 500) console.error("corpus-stats-verify-failure", failure.code);
+          return privateNoStore(jsonResponse({ code: failure.code, error: failure.error }, failure.status));
         }
       }
       if (path === "/api/admin/brain/curated-verify") {
@@ -4448,6 +4556,14 @@ export default {
           expected_vectors: readiness.expected_vectors,
           actual_vectors: readiness.actual_vectors,
         });
+      }
+      if (acceptsOwnerHtml(request)) {
+        return ownerMessageResponse({
+          title: "This page could not be found",
+          line: "Check the address, or open your Brain to continue.",
+          code: "PAGE_NOT_FOUND",
+          action: { label: "Go to your Brain", href: "/app" },
+        }, 404);
       }
       return jsonResponse({ error: "not found" }, 404);
     } catch (e) {

@@ -173,7 +173,7 @@ export function DocumentAccess() {
   return (
     <Section
       title="Shared document access"
-      blurb="Create and revoke access to exact documents. A financial-entity selection narrows discovery, but it never grants the whole entity."
+      blurb="Share only the documents you choose, and end access at any time. Choosing a person or business only helps you find documents. It does not share everything they own."
     >
       <div className="p-4 border-b border-line"><FinanceScopeBar requireEntity /></div>
       <ScopedGrantEditor
@@ -196,7 +196,7 @@ export function DocumentAccess() {
           </span>
         </div>
       )}
-      {statusError && <Attention>{statusError}</Attention>}
+      {statusError && <Attention inset>{statusError}</Attention>}
       {!status && !statusError && <Empty>Reading document access status.</Empty>}
       {status && activeGrants.length === 0 && <Empty>No document access has been created.</Empty>}
       {activeGrants.map((grant) => (
@@ -377,14 +377,14 @@ function ScopedGrantEditor({
 
   return (
     <div className="p-4 border-b border-line">
-      <TruthNote>Documents are owner-only by default. Every grant is an immutable exact-document allowlist enforced by the brain.</TruthNote>
+      <TruthNote>Only you can open your documents unless you share them. Each access link is limited to the documents you choose, and that list cannot be changed.</TruthNote>
       {!scope && <Attention>Select one part of your finances before finding documents to share.</Attention>}
       <label className="block text-[12.5px] text-ink-soft">Who is this for?
         <input className="field mt-1" value={subject} maxLength={120} onChange={(event) => updateSubject(event.target.value)} placeholder="Accountant, attorney, reviewer" />
       </label>
-      <div className="mt-3 flex gap-2">
+      <div className="mt-3 flex flex-wrap gap-2">
         <input
-          className="field flex-1"
+          className="field min-w-0 flex-1"
           value={query}
           onChange={(event) => setQuery(event.target.value)}
           onKeyDown={(event) => event.key === "Enter" && void search()}

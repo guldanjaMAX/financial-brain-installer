@@ -36,6 +36,7 @@ class FakeNode {
   }
   append(...nodes) { this.children.push(...nodes); }
   replaceChildren(...nodes) { this.children = [...nodes]; }
+  querySelectorAll(tag) { return this.children.flatMap((child) => findAll(child, tag.toUpperCase())); }
   get options() { return this.children.filter((node) => node.tagName === "OPTION"); }
 }
 const textOf = (node) => [node.textContent, ...node.children.map(textOf)].filter(Boolean).join(" ");
@@ -68,9 +69,10 @@ async function tickUntil(check, message) {
   assert.fail(message);
 }
 async function page({ onReassign = null, onAccountRead = null } = {}) {
-  const ids = ["start", "status", "connections", "accounts", "account-status", "entity-create",
-    "entity-name", "entity-kind", "entity-save", "entity-status", "refresh", "entity-details"];
-  const nodes = new Map(ids.map((id) => [id, new FakeNode(id === "entity-details" ? "details" : "div", id)]));
+  // Derive the fixture DOM from the generated page, including its step controls.
+  const nodes = new Map([...html.matchAll(/<([a-z][\w-]*)\b[^>]*\bid="([^"]+)"[^>]*>/gi)]
+    .map((match) => [match[2], new FakeNode(match[1], match[2])]));
+  assert.ok(nodes.has("another"), "the generated page contains the connect-another control");
   const account = {
     account_ref: "acct_00000000000000000000000000000001",
     masked_identifier: "Synthetic checking ending 0001",
@@ -116,6 +118,9 @@ async function page({ onReassign = null, onAccountRead = null } = {}) {
   });
   context.window = context;
   vm.runInContext(scripts[0], context, { timeout: 1000 });
+  await tickUntil(() => button(nodes.get("accounts"), "Change one") &&
+    !vm.runInContext("connectionLoadBusy", context), "the saved-owner summary finished loading");
+  button(nodes.get("accounts"), "Change one").onclick();
   await tickUntil(() => findAll(nodes.get("accounts"), "ARTICLE").length === 1, "the actual page rendered an assigned account");
   const card = findAll(nodes.get("accounts"), "ARTICLE")[0];
   button(card, "Move to another owner").onclick();

@@ -45,7 +45,8 @@ for (const percent of [null, 99]) test(`remote document renderer scores a raw co
   const rpc = await response.json();
   assert.equal(rpc.result.isError, undefined);
   const text = rpc.result.content.map(item => item.text).join('\n');
-  assert.match(text, /Confidence: Low \(10%\).*Why:.*Missing:/s);
+  assert.doesNotMatch(text, /Confidence:|\b(?:High|Medium|Low)\s*\(?\d+%/);
+  assert.match(text, /may be incomplete/);
   assert.match(text, /Coverage:.*Missing or counted twice:.*Estimates:.*How to check:/s);
   assert.doesNotMatch(text, /High|The documents do not answer/);
 });

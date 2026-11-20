@@ -26,6 +26,7 @@
  */
 
 import { jsonResponse } from "./core.js";
+import { acceptsOwnerHtml, ownerMessageResponse } from "./owner-message-response.js";
 import { FAVICON } from "./app-page.js";
 import { randomToken, sessionGeneration } from "./auth-store.js";
 import { ownerSessionPrincipal } from "./owner-auth.js";
@@ -196,10 +197,18 @@ function authorizeParams(url) {
  * HERE and never redirects (an open redirect is the classic OAuth wound);
  * every later error returns to the validated redirect_uri per spec.
  */
-export async function handleAuthorizePage(env, url) {
+export async function handleAuthorizePage(env, url, request) {
   const params = authorizeParams(url);
   const client = await loadClient(env, params.client_id);
   if (!client || !client.redirect_uris.includes(params.redirect_uri)) {
+    if (acceptsOwnerHtml(request)) {
+      return ownerMessageResponse({
+        title: "This link is out of date",
+        line: "Go back to Claude and choose Connect again to get a new approval link.",
+        code: "APPROVAL_LINK_OUT_OF_DATE",
+        action: { label: "Open your Brain", href: "/app" },
+      }, 400);
+    }
     return jsonResponse({ error: "unknown client or redirect_uri" }, 400);
   }
   const back = (error) => Response.redirect(

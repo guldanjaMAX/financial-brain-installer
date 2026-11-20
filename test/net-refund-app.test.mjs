@@ -8,6 +8,8 @@ import { renderToStaticMarkup } from '../frontend/node_modules/react-dom/server.
 import { transformSync } from '../frontend/node_modules/rolldown/dist/utils-index.mjs';
 import * as rendering from '../frontend/src/lib/answer-render.js';
 import { sourceLabel } from '../frontend/src/lib/words.ts';
+// Ask.tsx imports this reader directly (UX-4); the VM context mirrors that import.
+import { legacyDocumentResponse } from '../worker/src/lib/document-answer-reading.js';
 
 import { execute } from './fixtures/net-refund/execute.mjs';
 import { phraseCases, grossPeer } from './fixtures/net-refund/review-cases.mjs';
@@ -25,7 +27,7 @@ for (const c of phraseCases) test(`${c.id}: actual app answer article preserves 
   assert.ok(o.trace.transactions > 0 && o.grossTrace.transactions > 0, 'probe and green control read real rows');
   let state = 0, textCalls = 0, selectedBody = o.grossBody;
   const empty = () => null;
-  const context = { React, Date, ...rendering, sourceLabel,
+  const context = { React, Date, ...rendering, sourceLabel, legacyDocumentResponse,
     useState: () => [[o.question, '', selectedBody, false, null, 'All accounts'][state++], () => {}],
     useFinanceScope: () => ({ activeLabel: 'All accounts', scope: null }), readAskDraft: () => '',
     FinanceScopeBar: empty, Attention: empty, TruthNote: ({ children }) => React.createElement('div', null, children),

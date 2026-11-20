@@ -12,11 +12,26 @@
   --color-ink: #1a1a1a;
   --color-ink-soft: #5c6472;
   --color-line: #e6e2da;
+  --color-line-strong: #cfc9bd;
   --color-accent: #3b5bdb;
+  --color-accent-ink: #ffffff;
   --color-accent-soft: #eef1fd;
+  --color-good: #166534;
+  --color-good-bg: #ecfdf3;
+  --color-good-line: #bbe5c8;
+  --color-wait: #1e4f7a;
+  --color-wait-bg: #eff6fc;
+  --color-wait-line: #c7def2;
+  --color-act: #8a4b08;
+  --color-act-bg: #fff8eb;
+  --color-act-line: #f3d9a6;
+  --color-bad: #a1251b;
+  --color-bad-bg: #fdf1f0;
+  --color-bad-line: #f1c2bd;
+  --color-neutral-bg: #f4f2ee;
   --font-display: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
-html { -webkit-text-size-adjust: 100%; }
+html { color-scheme: light; -webkit-text-size-adjust: 100%; }
 body {
   background:
     radial-gradient(circle at 80% -10%, rgba(59, 91, 219, 0.07), transparent 28rem),
@@ -25,19 +40,24 @@ body {
   min-width: 320px;
   text-rendering: optimizeLegibility;
 }
-button, input, textarea, select { font: inherit; }
-button, select { cursor: pointer; }
-button:disabled, select:disabled { cursor: default; }
+@layer base {
+  button, input, textarea, select { font: inherit; }
+  button { font-size: 0.9375rem; font-weight: 600; min-height: 44px; }
+  input, textarea, select { font-size: 1rem; }
+  input:not([type=checkbox]):not([type=radio]), select { min-height: 44px; }
+  button, select { cursor: pointer; }
+  button:disabled, select:disabled { cursor: default; }
+}
 :focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
 .field {
   display: block;
   width: 100%;
-  border: 1px solid var(--color-line);
+  border: 1px solid var(--color-line-strong);
   border-radius: 0.65rem;
   background: var(--color-card);
   color: var(--color-ink);
   padding: 0.65rem 0.75rem;
-  font-size: 0.875rem;
+  font-size: 1rem;
   outline: none;
 }
 .field:focus { border-color: var(--color-accent); }

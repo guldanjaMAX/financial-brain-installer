@@ -19,6 +19,8 @@ export function gmailRefusalReadyReceipt({
     completed_at: completedAt,
     complete_sweep: false,
     walk_complete: true,
+    provider_check_complete: true,
+    refusal_reason: `provider_withheld_v1:${JSON.stringify({ credential_detected: refused })}`,
     files_seen: filesSeen,
     docs_added: 0,
     docs_updated: 0,

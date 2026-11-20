@@ -336,7 +336,7 @@ const lock = JSON.parse(readFileSync(resolve(ROOT, "package-lock.json"), "utf8")
 const reviewedBundles = new Map([
   ["@e965/xlsx", "0.20.3"],
   ["fflate", "0.8.3"],
-  ["postal-mime", "3.0.0"],
+  ["postal-mime", "4.2.1"],
   ["unpdf", "1.8.1"],
 ]);
 const packed = SCAN_ONLY ? { status: 0, stdout: "[]" } : spawnSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], {
@@ -422,11 +422,20 @@ const expected = [
   "ingest/tax-pdf.mjs",
   "components/brain-mcp-timing.mjs",
   "connectors/gmail.mjs",
+  // Classifies a refused Gmail message so one refusal never freezes the
+  // cursor; no credential, network or message-content output.
+  // Listed at 0.4.30 integration.
+  "operations/gmail-refusal.mjs",
   "connectors/imap.mjs",
   "connectors/imessage.mjs",
   "connectors/iphone-backup.mjs",
   "connectors/google-auth.mjs",
   "connectors/google-calendar.mjs",
+  // Calendar cancellations are a metadata overlay that keeps the stored record;
+  // the CLI side calls the owner's own Brain with the admin key it already
+  // uses for ingest. Listed at 0.4.30 integration.
+  "operations/calendar-cancellations.mjs",
+  "worker/src/lib/calendar-cancellation.js",
   "connectors/google-drive.mjs",
   "connectors/keychain-write.exp",
   "connectors/zoom.mjs",
@@ -444,6 +453,7 @@ const expected = [
   "docs/LEGACY-SUPABASE-EXIT.md",
   "docs/README-developer.md",
   "docs/bank-connection-recovery.md",
+  "docs/help/clean-my-brain.md",
   "docs/decisions/000-template.md",
   "docs/decisions/001-cloudflare-native-standard.md",
   "docs/decisions/002-paused-bootstrap-acceleration.md",
@@ -544,6 +554,14 @@ const expected = [
   "operations/answer-setup.mjs",
   "operations/update-key-preflight.mjs",
   "operations/brain-lifecycle-lock.mjs",
+  // Per-user lock-folder fallback for shared Windows machines; reads only
+  // the local account's own folders, no credential or network input.
+  // Listed at 0.4.30 integration.
+  "operations/brain-lock-root.mjs",
+  // Workers.dev address reservation helper: the caller supplies the
+  // credential-bound transport and its output passes the secret scanner.
+  // Listed at 0.4.30 integration.
+  "operations/workers-subdomain.mjs",
   "operations/daily-refresh-observation.mjs",
   // Content-free durable dispatch intent is required by the migration runner.
   "operations/migration-statement-intent.mjs",
@@ -555,6 +573,8 @@ const expected = [
   "operations/bank-feed-daily.mjs",
   "operations/bank-feed-status.mjs",
   "operations/bank-custody-command.mjs",
+  "operations/clean-brain.mjs",
+  "operations/clean-brain-codes.mjs",
   "operations/daily-refresh-scheduler.mjs",
   "operations/windows-task-contract.mjs",
   "operations/windows-update-bridge.mjs",
@@ -764,6 +784,12 @@ const expected = [
   "connectors/hubspot.mjs",
   "connectors/microsoft-graph.mjs",
   "connectors/microsoft-mail-transition.mjs",
+  // Microsoft civil-time rendering and the settled add-only rules, plus the
+  // retained-status overlay; constants and pure functions, no credential or
+  // network input. Listed at 0.4.30 integration.
+  "connectors/microsoft-time.mjs",
+  "connectors/microsoft-week1-rules.mjs",
+  "worker/src/lib/microsoft-retained-status.js",
   "connectors/notion.mjs",
   "connectors/offline-rehearsal.mjs",
   "connectors/provider-file.mjs",
@@ -841,6 +867,7 @@ const expected = [
   "migrations/d1/0067_plaid_occurrence_lineage.sql",
   "migrations/d1/0068_plaid_pending_observation_retirement.sql",
   "migrations/d1/0069_fin_transactions_uid_index.sql",
+  "migrations/d1/0070_owner_removals.sql",
   "operations/bank-access-wrapping-key.mjs",
   // Generic owner-present bank secret custody. Reviewed 2026-09-17: takes only
   // injected list, write, and hidden-prompt callbacks; refuses ambient values
@@ -856,6 +883,13 @@ const expected = [
   "operations/cloudflare-account-bootstrap.mjs",
   "operations/cloudflare-keyring-guidance.mjs",
   "operations/cloudflare-oauth-session.mjs",
+  // Saves the Brain address next to the install record (atomic write, mode 0600);
+  // reads no credential and calls no network. Listed at 0.4.30 integration.
+  "operations/brain-domain-save.mjs",
+  // Owner text for a failed Gmail refresh: fixed product copy only, never the
+  // exception text; no filesystem, credential or network calls.
+  // Listed at 0.4.30 integration.
+  "operations/gmail-failure.mjs",
   "operations/command-display.mjs",
   "operations/zone-assignment-retry.mjs",
   // Bounded retry for one inventory page. Takes only an injected request,
@@ -879,6 +913,9 @@ const expected = [
   "scripts/build-worker-bank-export.mjs",
   "scripts/build-worker-upload-extract.mjs",
   "scripts/field-prepare.mjs",
+  // Parallel runner for the ordered test chain (test tool; reads the chain
+  // list and runs local node processes only). Listed at 0.4.30 integration.
+  "scripts/run-test-chain-parallel.mjs",
   "scripts/lib/readback-secret-scan.mjs",
   "scripts/operational-fault-lab.mjs",
   "scripts/privacy-identity.mjs",
@@ -949,6 +986,7 @@ const expected = [
   "operations/drive-removal-plan.mjs",
   "operations/drive-scheduler.mjs",
   "operations/update-scheduler-inventory.mjs",
+  "operations/update-selfcheck.mjs",
   "operations/folder-retirement.mjs",
   "operations/folder-scheduler.mjs",
   "operations/imessage-scheduler.mjs",
@@ -989,6 +1027,7 @@ const expected = [
   "worker/src/lib/auth-store.js",
   "worker/src/lib/bank-feed.js",
   "worker/src/lib/bank-feed-health.js",
+  "worker/src/lib/public-health-flags.js",
   "worker/src/lib/bank-custody.js",
   "worker/src/lib/plaid-item-replacement.js",
   "worker/src/lib/bank-replacement-page.js",
@@ -998,6 +1037,18 @@ const expected = [
   "worker/src/lib/simplefin-coverage-review.js",
   "worker/src/lib/simplefin-reconciliation.js",
   "worker/src/lib/confidence.js",
+  // Owner-facing evidence note that replaces the visible confidence word and
+  // score; pure formatting of the internal assessment, no I/O or secrets.
+  // Listed at 0.4.30 integration.
+  "worker/src/lib/owner-evidence.js",
+  // Shared light styles and an escaped message-page helper for owner task
+  // pages (UX-1-1117); static CSS and string formatting only, no I/O,
+  // scripts, external assets or secrets. Listed at the UX integration.
+  "worker/src/lib/owner-page-style.js",
+  // UX-10-1117: plain owner message page for browser requests that land on a bank or sign-in
+  // error; escaped fixed text and the shared owner page style only, no I/O, scripts or secrets.
+  // Listed at the bank UX integration (11-19).
+  "worker/src/lib/owner-message-response.js",
   "worker/src/lib/connections.js",
   "worker/src/lib/core.js",
   "worker/src/lib/custom-api-visibility.js",
@@ -1010,6 +1061,7 @@ const expected = [
   "worker/src/lib/ingest-envelope.js",
   // Authenticated exact-target preview and transaction-fenced deletion.
   "worker/src/lib/ingest-removal-plan.js",
+  "worker/src/lib/owner-removals.js",
   "worker/src/lib/provenance-receipt.js",
   "worker/src/lib/source-original-binding.js",
   "worker/src/lib/source-original-chunk.js",

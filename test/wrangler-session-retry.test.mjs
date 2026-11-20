@@ -93,6 +93,13 @@ function namedProfileHarness({ renewal = B, rejectRenewed = false, deniedBody = 
         headers: { "content-type": "application/json" },
       });
     }
+    if (path.endsWith("/workers/subdomain")) {
+      assert.equal(init.method, "GET", "renewal must only read the existing account address");
+      return new Response(JSON.stringify(oauthEnvelope({ subdomain: "fixture-account" })), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
     if (path.endsWith("/workers/scripts/renewal-probe") && init.method === "POST") {
       mutationCalls += 1;
       if (!rejectRenewed && init.headers?.Authorization === `Bearer ${B}`) {

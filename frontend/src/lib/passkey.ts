@@ -66,8 +66,9 @@ export async function enroll(code?: string, kind: EnrollmentKind = "owner"): Pro
     throw explainCeremonyFailure(error, options.rp.id, "enroll", kind);
   }
   if (!credential) {
-    throw new Error(
+    throw new PasskeyPromptError(
       `No passkey was created. Nothing was enrolled. You can choose ${action} and try again while this private link is valid.`,
+      "PASSKEY_CANCELLED",
     );
   }
   const response = credential.response as AuthenticatorAttestationResponse;
@@ -80,14 +81,15 @@ export async function enroll(code?: string, kind: EnrollmentKind = "owner"): Pro
   });
 }
 
-/** Turn a WebAuthn DOMException into something a person can act on.
- *
- *  The browser's own text for a failed sign-in is "The operation either timed
- *  out or was not allowed", followed by a link to the W3C spec. That is written
- *  for a browser vendor, not for someone locked out of their own brain, and it
- *  collapses three genuinely different failures into one sentence. Naming the
- *  exception matters too: which one it is decides where the bug lives, and
- *  without it every report is unfalsifiable. */
+// Keep support identity separate from owner copy. Callers can offer recovery
+// without parsing a translated sentence or exposing browser exception names.
+export class PasskeyPromptError extends Error {
+  constructor(message: string, readonly code: string, readonly details?: string) {
+    super(message);
+  }
+}
+
+/** Turn a WebAuthn failure into owner guidance with a stable support code. */
 export function explainCeremonyFailure(
   error: unknown,
   rpId: string,
@@ -95,15 +97,15 @@ export function explainCeremonyFailure(
   enrollmentKind: EnrollmentKind = "owner",
 ): Error {
   const name = (error as { name?: string })?.name || "Error";
-  const suffix = ` (${name})`;
   const enrollmentAction = enrollmentKind === "document"
     ? "Create my passkey for shared access"
     : "Create my owner passkey";
   if (name === "NotAllowedError") {
     if (purpose === "enroll") {
-      return new Error(
+      return new PasskeyPromptError(
         `No passkey was created for ${rpId}. The secure window may have been canceled or timed out. ` +
         `Nothing was enrolled. You can choose ${enrollmentAction} and try again while this private link is valid.`,
+        "PASSKEY_CANCELLED",
       );
     }
     if (purpose === "confirm_map") {
@@ -111,32 +113,34 @@ export function explainCeremonyFailure(
         "The secure passkey window was canceled or timed out. Nothing was confirmed or changed. You can review the map and try again when you are ready.",
       );
     }
-    return new Error(
-      `No passkey was offered for ${rpId}. Either this device has none saved ` +
-      `for that exact address, or the prompt was dismissed before it finished. ` +
-      `A passkey saved under a different address for this brain will not work here.`,
+    return new PasskeyPromptError(
+      "Sign-in was cancelled or no passkey was found on this device. Tap Continue with a passkey to try again.",
+      "PASSKEY_CANCELLED",
+      `Use a passkey saved for ${rpId}. A passkey saved under a different address for this Brain will not work here.`,
     );
   }
   if (name === "SecurityError") {
-    return new Error(
+    return new PasskeyPromptError(
       `This page's address does not match the one your passkey was saved under ` +
-      `(${rpId}). Open the brain at its normal address and try again.` + suffix,
+      `(${rpId}). Open the Brain at its normal address and try again.`,
+      "PASSKEY_ADDRESS_MISMATCH",
     );
   }
   if (name === "InvalidStateError") {
-    return new Error(purpose === "enroll"
+    return new PasskeyPromptError(purpose === "enroll"
       ? enrollmentKind === "document"
-        ? `This device could not create another shared-access passkey for ${rpId}. Open the Brain at its normal address and sign in with an existing passkey, or ask the Brain owner for a fresh link.` + suffix
-        : `This device already has an owner passkey for ${rpId}. Open the Brain at its normal address and sign in with it.` + suffix
-      : `This device already has a passkey for ${rpId}.` + suffix);
+        ? `This device could not create another shared-access passkey for ${rpId}. Open the Brain at its normal address and sign in with an existing passkey, or ask the Brain owner for a fresh link.`
+        : `This device already has an owner passkey for ${rpId}. Open the Brain at its normal address and sign in with it.`
+      : `This device already has a passkey for ${rpId}.`, "PASSKEY_ALREADY_SAVED");
   }
   if (name === "NotSupportedError" || name === "AbortError") {
-    return new Error(
-      `This browser could not run the passkey prompt. Try opening the brain in ` +
-      `Safari or Chrome directly rather than inside another app.` + suffix,
+    return new PasskeyPromptError(
+      "This browser could not run the passkey prompt. Try opening the Brain in " +
+      "Safari or Chrome directly rather than inside another app.",
+      name === "AbortError" ? "PASSKEY_INTERRUPTED" : "PASSKEY_BROWSER_UNSUPPORTED",
     );
   }
-  return new Error(String((error as { message?: string })?.message || error) + suffix);
+  return new PasskeyPromptError(String((error as { message?: string })?.message || error), "PASSKEY_PROMPT_FAILED");
 }
 
 /**
@@ -169,7 +173,11 @@ export async function requestPasskeyAssertion(
     if (purpose === "confirm_map") {
       throw new PasskeyCeremonyCancelledError("No passkey was offered. Nothing was confirmed or changed.");
     }
-    throw new Error("No passkey was offered.");
+    throw new PasskeyPromptError(
+      "Sign-in was cancelled or no passkey was found on this device. Tap Continue with a passkey to try again.",
+      "PASSKEY_CANCELLED",
+      `Use a passkey saved for ${options.rp_id}. A passkey saved under a different address for this Brain will not work here.`,
+    );
   }
   const response = assertion.response as AuthenticatorAssertionResponse;
   return {

@@ -1,3 +1,4 @@
+import { isolatedLifecycleOptions } from "./fixtures/isolated-update-schedulers.mjs";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -117,7 +118,7 @@ async function dailyCase(t, { mutate = x => x, inventoryMutation = x => x, runMu
       f.seen.runs++;
       if (skip) return { status: "skipped" };
       return runMutation(await cmdLoad(path, { ...options, commands, probes, log() {},
-        lifecycleLockOptions: { machineLockRoot: join(f.root, "lifecycle-locks") } }));
+        lifecycleLockOptions: isolatedLifecycleOptions(f.root) }));
     },
   };
   // Keep synthetic fixture values and connector chatter out of test output.
@@ -873,7 +874,7 @@ test("permanent provider refusals remain visible through Worker receipts, source
     readFreshness: async () => Object.fromEntries((await sourceInventory(f.env, { now: Date.parse(NOW) })).rows
       .map(row => [row.name, { kind: row.kind, ...row.receipt }])),
     runSource: async () => cmdLoad(manifestPath, { only: "microsoft", allowPartialRefresh: true,
-      lifecycleLockOptions: { machineLockRoot: join(f.root, "lifecycle-locks") },
+      lifecycleLockOptions: isolatedLifecycleOptions(f.root),
       commands, probes: { microsoft: async () => ({ connected: true }) }, log: line => logs.push(String(line)) }),
   });
   assert.equal(sends, 1, "the daily run reached real provider delivery");

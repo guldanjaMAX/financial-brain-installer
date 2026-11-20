@@ -216,7 +216,14 @@ have bounded retries only while the source remains and the destination is absent
 Deploy must happen before Worker secrets because Cloudflare attaches secrets to
 an existing script. Health after deploy must observe the expected package
 version, not merely any HTTP 200, because the previous Worker can remain visible
-briefly during propagation.
+briefly during propagation. Setup saves a missing `brain.domain` after its last
+deploy check and before keys and health. Upgrade keeps its execution copies
+immutable and saves the address to the owner manifest after all verified stages.
+Both use the existing subdomain/health identity proof and an atomic insertion
+that preserves all other bytes. Existing domain fields are preserved. A denied
+optional read uses already-held access without renewal and prints
+`BRAIN_DOMAIN_NOT_SAVED`; it cannot escape to credential recovery. This warning
+is not proof that subsequent address-dependent checks succeeded.
 
 An update first establishes control-plane access through approved adoption or
 sign-in repair. Authentication can refresh stored credentials, but manifest
@@ -457,10 +464,11 @@ durable-state failures stop the run. Policy-read prefixes and resolved skips
 checkpoint; a deadline flushes any buffered resolved outcomes. Failed
 retry identities rotate behind unvisited work. Deferred work
 resumes on the next scheduled daily run. No automatic removal is authorized
-by load or daily. Daily records removals as durable owner decisions while
-continuing additions; exact preview and separately approved apply remain
-available. Pending decisions, retries and unread history keep source coverage
-incomplete. Single-part replacements issue no reconciliation. Split families
+by load or daily. Gmail records removals as durable owner decisions while
+continuing additions and advancing completed windows; exact preview and separately
+approved apply remain available. Kept decisions cannot stop the daily run.
+Retries and unread history keep source coverage incomplete; pending decisions
+still prevent a complete-history or new scanner certification. Single-part replacements issue no reconciliation. Split families
 retain protected current parts and bounded owner reviews. See
 `docs/gmail-bounded-rollout.md` for backup, readback and rollback ordering.
 
@@ -608,7 +616,11 @@ clears the entry; malformed retry state stops cursor settlement.
 Gmail credential refusals remain measured in `docs_refused` but do not make a
 run fail when they are its only non-accepted outcome. The ready receipt records
 the count in its detail and keeps `complete_sweep` false, because the Worker
-does not credit a complete history sweep with refused documents. Failed parts,
+does not credit a complete history sweep with refused documents. Its explicit
+completed-check flag and closed credential-refusal aggregate do certify current
+source freshness, including refusal-only runs. The identity-only private refusal
+map prevents repeated body downloads under the same policy. Owner output uses
+`GMAIL_MESSAGES_REFUSED` with its help link. Failed parts,
 durable retry backlog, missing history or label proof, and other non-policy
 skips remain receipt gaps.
 The shared provider runner (Microsoft, Slack, Notion, Dropbox, HubSpot and
@@ -708,7 +720,7 @@ Repeated identities in one request deliberately use the
 original sequential path because revision order is part of their correctness
 contract.
 
-Folder, Drive, Gmail, IMAP, Calendar, and generic provider ingestion separate accepted
+Folder, Drive, Gmail, IMAP, and generic provider ingestion separate accepted
 writes from removals. Completed replacement families remain in resumable state
 until the authenticated removal preview proves that they have no obsolete members
 or a separately approved plan removes those exact members. Source deletions and
@@ -716,7 +728,17 @@ replacement cleanup enter the same boundary. A nonempty plan always stops before
 removal and cursor advancement; accepted additions and updates remain durable.
 
 The shared load orchestrator keeps automatic removal disabled for every source,
-including explicit Calendar and Gmail provider deletions. Removal evidence creates
+including explicit Gmail provider deletions. Google Calendar is add-only: provider
+cancellations retain stored text and update only the event status after exact D1
+readback. Search, full readings, MCP fetch and citations expose the cancelled state,
+and the temporal answer guard reads it before allowing an upcoming event claim.
+Calendar's sync token advances after accepted event writes and cancellation markers.
+Unconfirmed marking keeps the prior token and reports `INGEST_FAILED` with help.
+Saved Calendar plans become kept observations on normal refresh; only explicit
+deletion evidence marks cancellation, while other causes stay kept. A confirmed
+current-window upsert supersedes an older cancellation observation. The separate
+exact apply executor remains available for a previously reviewed plan.
+For other sources, removal evidence creates
 an owner decision; it does not authorize apply. The separately approved exact-
 fingerprint executor requires the removed count and successful readback before
 a source replay can settle its removal checkpoint. A failed apply/readback retains
@@ -730,8 +752,9 @@ Each adapter supplies a per-item removal cause from a closed set:
 cover these causes. Authenticated previews bind each physical family member to
 its cause; approved apply rechecks the saved causes at every mutation boundary.
 Missing or legacy evidence stays held. Gmail filtered-list absence is unknown,
-including after history expiry. Microsoft window exits and blank events retain
-their distinct causes and remain outside automatic apply. Owner review text
+including after history expiry. Microsoft blank-quality events retain
+their cause and remain outside automatic apply. Provider tombstones,
+cancellations and window exits do not become Microsoft removal candidates. Owner review text
 describes the cause without claiming who deleted an item.
 
 QuickBooks Desktop also persists its exact pending tombstones and binds the
@@ -885,7 +908,7 @@ procedure is [Drive incremental recovery](drive-incremental-recovery.md).
 | Local folders, including an Obsidian vault | Built through `--path`; Obsidian is file ingest, not a separate connector |
 | Google Drive | Built, bounded incremental add/update-only, owner removal decisions, schedulable on macOS; new runner awaits field proof |
 | Gmail | Built with cursor safety; full real-account production validation remains a field gate |
-| Google Calendar | Built and wired through `brain ingest --from calendar`; row and receipt namespaces match, and event failure, refusal, or pending cancellation cleanup withholds the Google sync token; real-account validation remains a field gate |
+| Google Calendar | Built and wired through `brain ingest --from calendar`; row and receipt namespaces match; cancellations keep text and mark status without removal review, and event failure, refusal, or an unconfirmed marker withholds the Google sync token; real-account validation remains a field gate |
 | Local watched folder | Built through the ordinary resumable folder ingest path and schedulable on macOS; multi-cycle field proof remains open |
 | iMessage | Built for incremental local capture on macOS; real-user database and long-lived scheduler proof remain field gates |
 | WhatsApp | Safe per-chat export ingest is built. Unofficial paired-device live capture is opt-in, violates WhatsApp's Terms of Service, and is not real-account proven. Meta's official WhatsApp Business Platform connector is not built. |
@@ -896,12 +919,47 @@ procedure is [Drive incremental recovery](drive-incremental-recovery.md).
 | Bank exports and hosted feed | Built into the shared financial ledger; real-statement and real-feed reconciliation remain field gates |
 | OCR for scanned PDFs | Built, optional, and provenance-marked; aggregate local preflight is read-only and synthetic-tested, while private real scans remain a field gate |
 | Slack and Notion | Built behind field gates with scripted provider-I/O proof; no real workspace has completed acceptance |
-| Microsoft 365 and Dropbox | Built behind field gates. Microsoft covers mail, a rolling 30-day-past and 90-day-future Outlook calendar view, and files with independent cursor resume. Calendar state uses immutable event IDs, account-bound scope renewal, event-inventory-scoped tombstones, and a workload-specific removal review; Dropbox covers files. No real tenant or account has completed acceptance |
+| Microsoft 365 and Dropbox | Built behind field gates. Microsoft covers mail, a rolling 30-day-past and 90-day-future Outlook calendar view, and files with independent cursor resume. Calendar state uses immutable event IDs and account-bound scope renewal. Provider removals and calendar aging retain history; exact owner-requested removal remains separate; Dropbox covers files. No real tenant or account has completed acceptance |
 | QuickBooks Online and HubSpot CRM | Built behind field gates with owner connection, incremental read, retry, and disconnect paths; no provider sandbox or real account has completed acceptance |
 | Plaid | Native owner connection, incremental read, signed webhook, scheduled reconciliation, retry, repair, and disconnect paths are built, but general bank invitations are held. For every enabled bank provider, setup, update, and deploy list Worker secret names before and after the upload, create the independent random wrapping key only when absent from both lists (never when it was listed before the upload, earlier in the run, or by an earlier run recorded on this computer, and never while the Brain's D1 holds a bank connection or Plaid Link receipt sealed with a version-2 key), and verify its name without printing, returning, deriving, or replacing its value. The owner enters Plaid application credentials only through `brain connect bank`, at a hidden prompt, when the Worker lacks them or with `--replace-keys` to correct them; the pair is checked with one harmless Plaid read in the manifest's environment before anything is written. Customer invitations wait for the full release-gate journey and a production pilot |
 | SimpleFIN Bridge | A second bank-feed profile reuses encrypted `bank_feed_items` custody and the provider-neutral ledger. The owner submits the one-time Setup Token only to the owner-authenticated Worker page. A durable operation row prevents automatic re-claim after an ambiguous POST; the Access URL is immediately wrapped with `BANK_FEED_WRAPPING_KEY_V2`. Native requests use explicit Basic authorization with URL credentials removed, manual redirects and explicit redirect refusal. Scheduled pulls stage at most three 90-day windows per connection per day and enforce a durable 24-request ceiling. Each replacement response publishes a new revision only after all staging chunks are verified. A pending exact-interval account receipt precedes its staging row, including replacements of complete receipts, so interrupted publication cannot lose retry work when a later response omits the account. Ledger batches and promotion receipts are fenced to that revision; history advances only after verified promotion with no `errlist`, every account assigned and every account listing complete. Incomplete listings preserve source rows and balances but remain staged for an exact-interval retry. An omitted account retains its incomplete exact-interval receipt across parent revisions until that account supplies a complete replacement. Owner disconnect stops pulls and retains unresolved history evidence. Retry selection, verified history and backfill completion also reject already-promoted incomplete account receipts, allowing automatic repair without cursor edits. An explicit empty transaction array permits progress; completeness approval still belongs to the owner. General bank invitations remain held pending live owner review. |
 | Custom business API | A declarative `corpora.custom_api` manifest block becomes a plain Worker binding containing only endpoint rules and a bearer-token secret name matching `CUSTOM_API_TOKEN_[A-Z0-9_]{1,40}`. Runtime, deploy, and connect validation reject every other binding name before credential inventory or provider fetch. On Windows the owner uses the CLI's clipboard entry by default; masked Cloudflare dashboard entry is the explicit fallback. macOS keeps the hidden prompt. Clipboard mode is selected before secret inventory and clears once across inventory, existing-name, validation, write, and readback exits. Dashboard replacement requires an owner confirmation after the new value is pasted; an existing name is not replacement proof. Each pull fetches and validates the complete snapshot before staging a durable D1 job, then advances at most one compact row or document slice per Worker request under a 600-statement budget. Known identity fields are validated before they can authorize presence or absence: sales requires a trimmed store, a real `YYYY-MM-01` month, and a configured revenue stream; inventory and costs allow a null store but otherwise require a trimmed store and breed. Every fully stamped document passes the shared storage-envelope validator before a job exists. A later-invalid staged document fails that job and permits a fresh provider pull. Rows and searchable documents are job-versioned; readers resolve the per-source current-job pointer through that job's exact logical-document version map. The identical-response shortcut first proves every current row chunk and mapped live document. Staging carries an unchanged document version only after exact live-document readback and regenerates a missing one; terminal mismatch durably fails the active job. A refused known key carries its last verified row and last-seen time forward with explicit not-refreshed state and cannot authorize absence. A missing sales stream affects only prior labeled rows for that exact store-month; both sales layouts name the store and month instead of inventing zero. A malformed identity with no safe scope fails absence decisions closed by carrying unmatched prior keys. A partial refusal promotes usable changes but keeps the source in ready-with-warnings freshness with a durable refused count; every readable document containing a carried value begins with the fixed dated warning even when its template has no row table. An all-refused pull leaves the pointer unchanged and keeps its current refused count in the source receipt. Scheduled failures likewise retain a closed issue code and render reviewed owner guidance only at the reader boundary. The pointer flips atomically with the terminal fetch receipt after every staged row, promoted document, and carried-forward document version reads back exactly. Owner-facing counts apply that same current-map boundary and exclude staged or superseded physical versions. Obsolete physical document versions are then handed to the normal guarded delete path in job-tracked bounded slices, which queues vector deletes; the shared drain processes deletes before upserts. Prior row chunks are collected afterward in bounded slices. Only a terminally verified job can use the whole-body fast path or mark the saved snapshot ready. A durable active job supplies the custom source's indexing start receipt. Packed rows retain per-row hashes, presence, last-seen state, and any refused refresh marker. Inventory and cost rows close their active value interval when a key disappears and open a new interval when it returns, so structured history preserves absence gaps. Search contains only the current inventory and cost snapshot, one document per store; it does not create daily history documents. Sales prose remains one cross-store document per month and one history per store. Saved state and empty-outbox meaning readiness are separate receipts. No custom API row is wired into the financial ledger or map. |
 | Box and Airtable | No native API connector. Box can use a reviewed export or locally synced watched folder. Airtable requires an approved export until a native connector is built. |
+
+Microsoft add-only sync disables absence reconciliation even on a fresh
+baseline. Sparse provider status has its own stable identity and references the
+retained source; it cannot overwrite source text. Subject retrieval attaches
+that exact status to the retained record and full-document reads preserve it.
+An unavailable status read keeps the text answerable with an explicit unknown
+status and confidence ceiling. Scoped reads disclose no ungranted sibling state. Authenticated family inventory
+identifies existing status documents that a live update must supersede, even
+after reset. Full cancelled events retain their content with an explicit
+cancellation marker. Provider tombstones never establish confirmed deletion.
+Blank-quality review and owner-requested removals keep their exact-plan guards.
+
+Microsoft file skips carry closed aggregate reasons through the provider runner
+and receipt parser. A completed walk can save its cursor with partial indexed
+coverage. Optional OneDrive 404s preserve Outlook progress but withhold complete
+provider-check proof. A scoped calendar check can keep a known pending event
+queued despite that independent file gap.
+
+Microsoft renewal keeps the durable pre-request fence. Verified pre-send DNS,
+route or connect failures do not spend an attempt. A timeout permits one later
+recovery tied to the exact refresh-token fingerprint under the same lease. Its
+permission is consumed before sending. Lost bodies, failed replacement readback,
+unknown legacy fences and mismatches cannot use that exception. Consumer tenant
+claims can reject an account but never authorize replacing an identity.
+A fresh authorization-code sign-in may replace an unbound legacy connection
+whose continuity cannot be proved. It creates a new random binding namespace,
+starts empty cursors, and marks the old binding replaced with a pointer to the
+new one and its exact sync state retained. No old credentials are duplicated.
+Same-account re-consent and refresh preserve the namespace and retained binding.
+Mail, event, file, status, snapshot and review identities share that namespace;
+raw provider IDs and delta URLs remain unchanged inside the cursor. Earlier
+Brain documents cannot be overwritten by a coincident new-mailbox provider ID.
+Timed calendar display prefers the configured mailbox zone in `client.timezone`
+over the organizer's original event zone and names the zone. All-day recovery
+still preserves its civil date. No mailbox-settings scope is requested.
 
 An optional Microsoft `mail_start_at` manifest boundary supports verified
 exported-digest handovers without changing stored history or citation keys.
@@ -930,7 +988,43 @@ native product scheduler.
 Updates, whole-manifest loads, direct source ingest, and scheduled daily runs
 share an exclusive lifecycle lease keyed by canonical Brain resource identity
 in a machine-shared lock root. Manifest aliases and operating-system users
-therefore reach the same writer boundary. Lock order is lifecycle lease first,
+therefore reach the same writer boundary when the shared root is usable. Windows
+permission failures select the current-user ACL-protected LOCALAPPDATA lock root
+and print and journal `BRAIN_LOCK_FOLDER_PER_USER`; another Windows account cannot
+see that lock or fence. Use one Windows account for Brain commands. The shared
+root wins whenever usable, an explicit root override wins over either default,
+and an unsafe explicit selected root or account root still stops without fallback.
+Every Windows acquisition first holds an additional private account-and-Brain
+slot under `<Windows user profile>\AppData\Local\FinancialBrain\account-locks`.
+The profile is the declared `home`, then HOME or USERPROFILE from the resolver's
+environment, then the platform home. An isolated run never consults the OS
+account record instead. LOCALAPPDATA and selected-root overrides cannot move
+this slot within the same home. Shared and fallback leases, including explicit
+root overrides, retain this slot for their full lifetime. A second writer from
+the same account stops with `UPDATE_BRAIN_BUSY` and its help link.
+After the account slot, acquisition retains the exact legacy ProgramData slot
+(identity, basename, owner.json and schema 2) that released CLIs honor, then any
+distinct selected root. An override cannot bypass this legacy boundary. Every
+retained slot participates in ownership checks, release, stale-window recovery
+and child handoff. The child parser accepts a bounded 8192-character envelope
+for these coordinates, including long Windows profile paths.
+If the legacy root or slot is permission-denied or unsafe, acquisition continues
+with private leases and emits the existing `BRAIN_LOCK_FOLDER_PER_USER` code and
+help link: do not run an older Brain tool at the same time. A valid occupied
+legacy slot stays busy. Private-only acquisition cannot exclude an older CLI
+that can still access ProgramData, even within the same account. No cross-version
+exclusion is claimed in that case. Explicit selected roots and account roots
+still fail closed when unsafe. Child handoff binds the original selected root;
+older token-only parent delegations are verified and acquire the account slot
+before transfer. Shared-root cross-account exclusion and the documented private
+fallback cross-account limitation remain unchanged.
+`BRAIN_LOCK_FOLDER_UNUSABLE` stops a command that cannot use its selected folder;
+its message names placeholders rather than private paths. The common resolver
+is `operations/brain-lock-root.mjs`; identity-derived file names are unchanged.
+Recovery previews inspect both default Windows roots without writes, and a
+repaired shared root cannot hide a retained per-user fence. Source-ingest and
+OAuth recovery locks already use separate per-user roots and are unchanged.
+Lock order is lifecycle lease first,
 then the source lease, then any shared provider credential-record lease. A
 curated sync follows that same order for every target and checks the recovery
 fence before credential resolution. Update retains each curated ledger lease
@@ -946,8 +1040,9 @@ disabling it, and reconciles from the updated manifest only after version
 agreement, active query-ready health, queue zero, and exact schedule readback.
 The per-user transaction retains daily and legacy scheduler snapshots. A
 content-free fence keyed by canonical Brain identity is stored beside the
-machine-wide lifecycle boundary, so every local user and manifest alias fails
-closed while recovery is unresolved. Writers inspect that fence after taking
+selected lifecycle boundary, so every manifest alias fails closed while recovery
+is unresolved. Cross-user visibility requires the shared root; the Windows
+fallback warning explicitly names that limitation. Writers inspect that fence after taking
 the lease. Dispatch tracking restores verified prior schedules after every proven
 pre-mutation failure. Possible dispatch retains the fence across retries. A
 failed daily restore or required acceptance check is an incomplete update and
@@ -1875,6 +1970,15 @@ cursor-preservation category. Raw provider messages, IDs, paths, cursor values,
 content, and secrets never cross this boundary. `/zones` keeps its existing
 aggregate semantics and authorization boundary.
 
+Modern inventory reads use rowid work pages capped at 5,000 documents and
+50,000 chunks. An 8 MiB metadata byte probe narrows wide pages before JSON
+parsing, with the same mutation fence retained during narrowing. The client
+keeps that narrowed limit on continuations. Transient read failures retry only
+the failed cursor, within the existing whole-command request and time budgets.
+Daily freshness reads visit no document rows and retry temporary receipt-read
+failures. Exhausted reads remain unknown, with a stable code and installed
+runbook link; they cannot certify freshness or approve a removal.
+
 The required row key makes this source-inventory contract v3, including both
 inventory and recovery cursors. Version mismatch is a refusal, not a partial
 parse. A schema-39 database receives one narrowly matched compatibility query
@@ -2716,9 +2820,10 @@ carry a reason and missing evidence. Failed checks and partial readings cap at
 89, source extracts at 69, empty completed searches at 30, and incomplete
 searches at 10. Agreement requires the cited records to support the same claim.
 Standalone model confidence labels are removed and may only lower the score.
-The CLI, app and MCP answer renderers preserve that score and use
-`Confidence: High|Medium|Low (<n>%)`, with reasons and missing evidence below
-100%. Every finalized answer retains coverage, missing or possibly duplicate
+The CLI, app and MCP answer renderers keep that score internal and hide
+confidence labels and percentages from owners. Thin or missing evidence gets
+one plain sentence without a number or scale word; strong evidence gets no
+extra line. Scoring fields, reasons and missing evidence remain in JSON. Every finalized answer retains coverage, missing or possibly duplicate
 amounts, estimate qualifications and a check step. These offline checks are
 not release or live-account evidence.
 

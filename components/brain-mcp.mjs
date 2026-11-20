@@ -30,6 +30,7 @@
 
 import { MONEY_TOOLS, moneyGuideFor, MONEY_ANSWER_INSTRUCTIONS, moneyInstructionsFor, MONEY_QUERY_ERROR_TEXT, unavailableMoneyOverview, unavailableMoneyQuery, moneyQueryErrorText, withMoneyConfidence, MONEY_CAPABILITY_TRANSITION } from "../worker/src/lib/money-query-contract.js";
 import { documentConfidence, unansweredDocumentConfidence, ownerConfidence, documentResponseConfidence, ownerConfidenceLine } from "../worker/src/lib/confidence.js";
+import { ownerOutputText } from '../worker/src/lib/owner-evidence.js';
 import { moneyQuestionHandoff } from '../worker/src/lib/money-handoff.js';
 import { recordObservation } from '../worker/src/lib/query-intent.js';
 import { createMcpQueryTiming, partBRouteReceiptFromTiming } from "./brain-mcp-timing.mjs";
@@ -161,7 +162,7 @@ const REVIEWED_CREDENTIAL_ERRORS = new Set([
 ]);
 
 function safeMcpError(error) {
-  if (error instanceof McpToolError) return error.message;
+  if (error instanceof McpToolError) return ownerOutputText(error.message);
   // Exact reviewed sentences from the credential resolver, never substrings or
   // properties supplied by an HTTP error. Keep their supported recovery path.
   if (REVIEWED_CREDENTIAL_ERRORS.has(error?.message)) {
@@ -703,7 +704,7 @@ async function runTool(name, args = {}, queryTiming = null) {
       const { degraded, degradedReason } = publicDegradation(d);
       const refused = !d.answer || /^The documents do not answer/i.test(d.answer);
       const out = {
-        answer: d.answer ?? null,
+        answer: ownerOutputText(d.answer) ?? null,
         answer_error: d.answer_error ? safeAnswerErrorText(d.answer_error) : undefined,
         answer_resumes_at: answerResumeAt(d.answer_resumes_at),
         next_action: nextActionText(d) || undefined,
@@ -826,6 +827,7 @@ async function runTool(name, args = {}, queryTiming = null) {
       }
       if (out.ledger) out.note = "This reply contains a money figure from the Brain's older question engine. Read brain_money_guide, recompute with brain_money_query, and answer in five parts.";
       out.confidence_text = ownerConfidenceLine(out.confidence);
+      for (const field of ["answer", "note", "answer_error"]) if (typeof out[field] === "string") out[field] = ownerOutputText(out[field]);
       return out;
     }
     case "brain_search": {

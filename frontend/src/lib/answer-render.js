@@ -23,6 +23,7 @@ import { legacyDocumentResponse } from '../../../worker/src/lib/document-answer-
  */
 
 import { documentResponseConfidence, ownerConfidenceLine } from "../../../worker/src/lib/confidence.js";
+import { ownerEvidenceNote, ownerOutputText } from '../../../worker/src/lib/owner-evidence.js';
 import {
   absenceUnproven, ANSWER_WITHHELD, COVERAGE_INCOMPLETE, coverageIncompleteNotice,
   REFUSAL_NEXT_ACTIONS, refusalNextAction, SEARCH_UNAVAILABLE, unavailableNotice,
@@ -52,8 +53,8 @@ const REVIEWED_ANSWER_ERRORS = new Set(Object.values(ANSWER_ERROR_MESSAGES));
 export function safeAnswerErrorText(error) {
   const candidate = typeof error === "string" ? error.trim() : "";
   return REVIEWED_ANSWER_ERRORS.has(candidate)
-    ? candidate
-    : ANSWER_ERROR_MESSAGES.unavailable;
+    ? ownerOutputText(candidate)
+    : ownerOutputText(ANSWER_ERROR_MESSAGES.unavailable);
 }
 
 /**
@@ -73,12 +74,12 @@ export function moneyExplanation(r) {
   return (Array.isArray(r?.gaps) ? r.gaps : []).filter(gap =>
     /^ledger_/.test(String(gap?.type || "")) || ["money_veto", "money_recall"].includes(gap?.type))
     .map(gap => typeof gap.detail === "string" && gap.detail ? gap.detail
-      : "I can help check the bank connection, but the bank records needed for this answer are unavailable.\nWant help connecting or refreshing the bank account?").join("\n");
+      : "I can help check the bank connection, but the bank records needed for this answer are unavailable.\nWant help connecting or refreshing the bank account?").map(ownerOutputText).join("\n");
 }
 export function answerReasonText(r) {
   if (r?.ledger || moneyExplanation(r)) return null;
   return typeof r?.evidence_gate?.reason === "string"
-    ? r.evidence_gate.reason.replace(/\s+/g, " ").trim().slice(0, 240) || null : null;
+    ? ownerOutputText(r.evidence_gate.reason).replace(/\s+/g, " ").trim().slice(0, 240) || null : null;
 }
 
 // Invitations are presentation choices, separate from factual qualifications.
@@ -93,12 +94,12 @@ export function separateOffers(text = "") {
 // Full CLI and MCP responses add sources and trust notes after answerText.
 // Finalize once after those facts, retaining only the chosen invitation.
 export function finalAnswerText(facts, selectedOffer) {
-  return [facts.trim(), selectedOffer].filter(Boolean).join("\n");
+  return ownerOutputText([facts.trim(), selectedOffer].filter(Boolean).join("\n"));
 }
 
 export function answerText(r) {
   r = legacyDocumentResponse(r);
-  const text = answerBodyText(r);
+  const text = ownerOutputText(answerBodyText(r));
   // The surface renders the reviewed Next action separately. It is already
   // the repair invitation, so another question here would duplicate it.
   if (nextActionText(r)) return separateOffers(text).facts;
@@ -198,6 +199,10 @@ export function scannedEvidenceNotice(r) {
 
 export function confidenceText(r) {
   return ownerConfidenceLine(documentResponseConfidence(r));
+}
+
+export function evidenceNoteText(r) {
+  return ownerEvidenceNote(documentResponseConfidence(r), answerText(r));
 }
 
 /** Render only locally reviewed actions; older Workers fall back by status. */

@@ -108,6 +108,7 @@ async function fixture(run, source = "gmail") {
             } };
           },
         },
+        listOwnerRemovedFamilies: async () => new Set(), // Clean my Brain: none removed in this fixture
         listStoredSourceFamilies: async ({ uids, singlePage }) => singlePage ? { families: f.stored, nextCursor: null } : new Set([...f.stored].filter(uid => !uids || uids.includes(uid))),
         postSourceReceipt: async (_base, _key, receipt) => { f.receipts.push(receipt); return receipt; },
         removalPlanRequest: async ({ body }) => {
@@ -309,7 +310,12 @@ test("an interruption after family settlement cannot lose the held retry", async
     status: doc.source_id === "stubborn" ? "failed" : "created" })) });
   const result = await f.once({ "pace-vectors-per-minute": "40" });
   assert.deepEqual(f.calls, [["stubborn"], ["clean"]]);
-  assert.match(result.error?.message || "", /chunk count/, "post-settlement pacing refusal reached");
+  // FIX-P1-REMOVAL-CAUSE-1117: the owner sees only the reviewed Gmail failure
+  // copy, so the refusal is proved by both sends above and the pinned cursor
+  // and durable held retry below, not by its internal wording.
+  assert.match(result.error?.message || "", /Gmail refresh did not finish/, "post-settlement refusal reached");
+  assert.equal(result.error?.supportCode, "INGEST_FAILED");
+  assert.match(result.error?.message || "", /Help: https:\/\/financialbrain\.ai\/help\/INGEST_FAILED/);
   assert.equal(result.state.history_id, "prior");
   assert.deepEqual(result.state.gmail_retry, { "gmail:stubborn": true });
 }));

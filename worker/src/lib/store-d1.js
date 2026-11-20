@@ -1,3 +1,5 @@
+import { attachMicrosoftRetainedStatus } from "./microsoft-retained-status.js";
+import { calendarCancellationPresentation } from './calendar-cancellation.js';
 import { activeChunkSql } from "./retained-ingest.js";
 import { documentEvidenceRevision } from './document-read-coverage.js';
 import { discoverDocumentSuccessors, discoverCorrectionSearchSeeds } from './document-successors.js';
@@ -311,8 +313,9 @@ function boundedEvidencePart(value, query) {
  */
 function composeDocumentEvidence(vectorRow, keywordRow, query) {
   const row = keywordRow || vectorRow;
+  const incomplete = vectorRow?.retrieval_projection_incomplete || keywordRow?.retrieval_projection_incomplete;
   const openEntity = quickBooksOpenItemsRequest(query);
-  if (openEntity && row?.source_kind === "quickbooks" && row.date_source === "quickbooks:balance_snapshot" &&
+  if (openEntity && !incomplete && row?.source_kind === "quickbooks" && row.date_source === "quickbooks:balance_snapshot" &&
       String(row.source_id || "").startsWith(`${openEntity.toLowerCase()}:`) && row.authority_document_head) {
     // Keyword/semantic overlap can center an excerpt inside the
     // title and cut off the native opening. For this exact inventory request,
@@ -325,6 +328,7 @@ function composeDocumentEvidence(vectorRow, keywordRow, query) {
   if (!vectorRow) return keywordRow;
 
   const composed = composeBoundedDocumentEvidence(vectorRow, keywordRow, query);
+  if (incomplete) composed.retrieval_projection_incomplete = 1;
   return hasUnreadableMark(keywordRow.text) || hasUnreadableMark(vectorRow.text)
     ? { ...composed, [UNREADABLE_SOURCE_CHUNK]: true }
     : composed;
@@ -618,7 +622,69 @@ export function keywordSearchTerms(query) {
   return use.map((t) => `"${t}"`).join(" OR ");
 }
 
-export async function searchKeyword(env, query, { limit, filters = {}, access = null, scope = null, readPlan = "standard" } = {}) {
+// Omit an oversized field before it crosses the binding. A partial projection
+// cannot establish authority or clear the admission screen.
+const RETRIEVAL_EVIDENCE_FIELDS = new Set(['text', 'title', 'authority_meta', 'authority_document_head']);
+const retrievalOversized = (alias, value) =>
+  `length(CAST((${value}) AS BLOB)) > ${RETRIEVAL_EVIDENCE_FIELDS.has(alias) ? 24000 : 4096}`;
+// Calendar connectors keep every invitee's address in metadata
+// (attendee_emails, attendee_domains), so a meeting with a few hundred
+// invitees exceeds the bound. A Granola export keeps one speaker/source/start
+// entry per transcript segment and a copy of the attendee list under granola
+// (granola.segments, granola.attendees), so a meeting of about half an hour
+// exceeds it too. No reader of projected metadata uses any of these lists:
+// authority, lineage, provenance, tax scope, calendar status and name matching
+// read other keys (name matching reads the top-level attendees, which stays),
+// and the sensitive-record screen sees only the row derived from those keys
+// plus the read text. Oversized metadata therefore crosses without the four
+// lists, under the same bound, and derives the same row. Metadata still over
+// the bound without them is omitted as before. The cheap length test comes
+// first, so metadata under the bound is not parsed for this projection.
+const retrievalMetadata = value => `CASE WHEN ${retrievalOversized('authority_meta', value)} AND json_valid(${value})
+  THEN json_remove(${value}, '$.attendee_emails', '$.attendee_domains', '$.granola.segments', '$.granola.attendees')
+  ELSE ${value} END`;
+
+function retrievalTextProjection(bounded, fields) {
+  const entries = Object.entries(fields).map(([alias, value]) =>
+    [alias, bounded && alias === 'authority_meta' ? retrievalMetadata(value) : value]);
+  const oversized = ([alias, value]) => retrievalOversized(alias, value);
+  const projections = entries.map(([alias, value]) => bounded
+    ? `CASE WHEN ${retrievalOversized(alias, value)} THEN NULL ELSE ${value} END AS ${alias}`
+    : value.endsWith('.' + alias) ? value : `${value} AS ${alias}`);
+  if (bounded) projections.push(`CASE WHEN ${entries.map(oversized).join(' OR ')}
+    THEN 1 ELSE 0 END AS retrieval_projection_incomplete`);
+  return projections.join(', ');
+}
+
+const retrievalHead = `(SELECT head.text FROM chunks head
+  WHERE head.doc_uid = d.doc_uid AND head.chunk_ix = 0 LIMIT 1)`;
+
+const retrievalOccurredAt = `CASE WHEN d.date_source = 'calendar:event_start' AND json_valid(d.meta)
+  THEN json_extract(d.meta, '$.start') END`;
+
+// Keep all variable-width fields behind the same binding guard, including
+// legacy identities and values extracted from JSON.
+function retrievalRecordFields(metadata) {
+  return {
+    title:metadata + '.title', authority_meta:'d.meta',
+    source:'d.source', source_kind:"COALESCE(src.kind, 'unregistered')",
+    client:metadata + '.client', category:metadata + '.category', top_folder:metadata + '.top_folder',
+    platform:metadata + '.platform', source_id:'d.source_id', entity_slug:'d.entity_slug',
+    date_source:'d.date_source', text_source:'d.text_source',
+    document_date:metadata + '.document_date', date_reliable:'d.date_reliable', text_reliable:'d.text_reliable',
+  };
+}
+
+export function retrievalCandidateProjection(bounded, documentFields = false, extra = {}) {
+  return retrievalTextProjection(bounded, {
+    chunk_uid:'c.chunk_uid', doc_uid:'c.doc_uid', text:'c.text', content_hash:'d.content_hash',
+    authority_document_head:documentFields ? 'c.text' : retrievalHead,
+    ...retrievalRecordFields(documentFields ? 'd' : 'c'),
+    ...extra,
+  });
+}
+
+export async function searchKeyword(env, query, { limit, filters = {}, access = null, scope = null, readPlan = "standard", boundThinkText = false } = {}) {
   const terms = keywordSearchTerms(query);
   if (!terms) return [];
 
@@ -626,16 +692,7 @@ export async function searchKeyword(env, query, { limit, filters = {}, access = 
   const sc = scopeSql(scope, "d", f.nextParam);
   const a = documentAccessSql(access, "c", "d", sc.nextParam);
   const projection = (score) => `
-    SELECT c.chunk_uid, c.doc_uid, c.text, d.source AS source,
-           COALESCE(src.kind, 'unregistered') AS source_kind,
-           c.title, c.document_date,
-           c.client, c.category, c.top_folder, c.platform,
-           d.source_id, d.uri, d.entity_slug, d.content_hash, d.date_source, d.date_reliable,
-           d.text_source, d.text_reliable, d.meta AS authority_meta,
-           (SELECT head.text FROM chunks head
-             WHERE head.doc_uid = d.doc_uid AND head.chunk_ix = 0 LIMIT 1) AS authority_document_head,
-           CASE WHEN d.date_source = 'calendar:event_start' AND json_valid(d.meta)
-                THEN json_extract(d.meta, '$.start') END AS occurred_at,
+    SELECT ${retrievalCandidateProjection(boundThinkText, false, {uri:'d.uri', occurred_at:retrievalOccurredAt})},
            ${score} AS score`;
   const joins = (rowid) => `
     JOIN chunks c ON c.id = ${rowid}
@@ -699,7 +756,7 @@ export async function searchKeyword(env, query, { limit, filters = {}, access = 
         const candidateCount = page[0]?._keyword_candidate_count;
         // The outer join preserves the count even if every candidate was
         // excluded. Never mistake that sentinel for an eligible chunk.
-        const results = page.filter(row => row.chunk_uid !== null).map((row) => {
+        const results = page.filter(row => row.chunk_uid !== null || row.retrieval_projection_incomplete).map((row) => {
           const { _keyword_candidate_count, _keyword_rowid, ...result } = row;
           return result;
         });
@@ -727,17 +784,32 @@ export async function searchKeyword(env, query, { limit, filters = {}, access = 
 // Metadata candidates are bounded and carry the same source, zone, exact-document,
 // visibility and supersession restrictions as keyword reads. No global names
 // directory or log of private spellings is created.
-async function nameVariantMetadata(env, { filters, access, scope }) {
+async function nameVariantMetadata(env, { filters, access, scope, boundThinkText, names }) {
   const f = filterSql(filters, "d", 1);
   const sc = scopeSql(scope, "d", f.nextParam);
   const a = documentAccessSql(access, "d", "d", sc.nextParam);
+  // Match oversized fields inside the authorized page. The bit is a recall
+  // hint only. Omitted metadata still cannot clear the sensitive-record check.
+  const fields = {doc_uid:'d.doc_uid', client:'d.client', title:'d.title', authority_meta:'d.meta'};
+  const nameMatches = boundThinkText ? names.map((_, index) => {
+    const matches = value => `(' ' || lower(${value}) || ' ') GLOB ?${a.nextParam + index}`;
+    const matchesMeta = ['sender','from','attendees','participants'].map(key =>
+      matches(`json_extract(d.meta, '$.${key}')`)).join(' OR ');
+    return `CASE
+      WHEN ${retrievalOversized('title', fields.title)} AND ${matches(fields.title)} THEN 1
+      WHEN ${retrievalOversized('client', fields.client)} AND ${matches(fields.client)} THEN 1
+      WHEN ${retrievalOversized('authority_meta', fields.authority_meta)} AND json_valid(d.meta) THEN
+        CASE WHEN ${matchesMeta} THEN 1 ELSE 0 END
+      ELSE 0 END AS name_match_${index}`;
+  }) : [];
   const run = (memoryClause) => readWithCustomApiVisibility(env, (withCurrentPointer) =>
     env.DB.prepare(`/* name-variant-metadata */
-      SELECT d.doc_uid, d.source_id, d.source, d.title, d.client, d.meta AS authority_meta
+      SELECT ${[retrievalTextProjection(boundThinkText, fields), ...nameMatches].join(', ')}
         FROM documents d WHERE d.deleted_at IS NULL
         ${f.clause}${sc.clause}${a.clause}${customApiVisibilitySql("d", withCurrentPointer)}${memoryClause}
         ORDER BY d.rowid DESC LIMIT 500`)
-      .bind(...f.params, ...sc.params, ...a.params).all());
+      .bind(...f.params, ...sc.params, ...a.params,
+        ...(boundThinkText ? names.map(name => '*[^a-z]' + name.toLowerCase() + '[^a-z]*') : [])).all());
   try { return (await run(currentMemorySql("d"))).results || []; }
   catch (error) {
     if (!await legacySchemaMayReadWithoutMemorySupersessions(env, error)) throw error;
@@ -753,20 +825,24 @@ async function hydrateNameMetadata(env, candidates, options) {
   const a = documentAccessSql(options.access, "c", "d", sc.nextParam);
   const run = memoryClause => readWithCustomApiVisibility(env, withCurrentPointer => env.DB.prepare(`
     /* name-variant-hydration */
-    SELECT c.chunk_uid,c.doc_uid,c.text,d.source,COALESCE(src.kind,'unregistered') AS source_kind,
-      d.source_id,d.title,d.client,d.entity_slug,d.category,d.top_folder,d.platform,
-      d.document_date,d.date_source,d.date_reliable,d.text_source,d.text_reliable,
-      d.meta AS authority_meta,c.text AS authority_document_head,d.content_hash
+    SELECT ${retrievalCandidateProjection(options.boundThinkText, true)}
     FROM chunks c JOIN documents d ON d.doc_uid=c.doc_uid
       LEFT JOIN sources src ON src.name=d.source
     WHERE c.chunk_ix=0 AND d.doc_uid IN (${ids.map((_, i) => `?${i + 1}`).join(',')})
       AND d.deleted_at IS NULL ${f.clause}${sc.clause}${a.clause}${customApiVisibilitySql("d", withCurrentPointer)}${memoryClause}`)
     .bind(...ids,...f.params,...sc.params,...a.params).all());
-  try { return (await run(currentMemorySql("d"))).results || []; }
+  let response;
+  try { response = await run(currentMemorySql("d")); }
   catch (error) {
     if (!await legacySchemaMayReadWithoutMemorySupersessions(env, error)) throw error;
-    return (await run("")).results || [];
+    response = await run("");
   }
+  const rows = response.results || [];
+  if (options.boundThinkText &&
+      (rows.length !== candidates.length || rows.some(row => row.retrieval_projection_incomplete))) {
+    options.onIncompleteProjection();
+  }
+  return rows;
 }
 
 /**
@@ -801,10 +877,7 @@ export async function unchunkedTaxDocumentCandidates(env, {
   const binds = entityBound ? [entitySlug, pageLimit] : [pageLimit];
   const sql = (withCurrentPointer) =>
     `/* unchunked-tax-document-candidates */
-     SELECT d.doc_uid, d.source, COALESCE(src.kind, 'unregistered') AS source_kind,
-            d.source_id, d.title, d.uri, d.document_date, d.date_source, d.date_reliable,
-            d.entity_slug, d.client, d.category, d.top_folder, d.platform,
-            d.text_source, d.text_reliable, d.meta AS authority_meta
+     SELECT ${retrievalTextProjection(true, {doc_uid:'d.doc_uid', uri:'d.uri', ...retrievalRecordFields('d')})}
        FROM documents d
        LEFT JOIN sources src ON src.name = d.source
       WHERE d.deleted_at IS NULL
@@ -818,14 +891,14 @@ export async function unchunkedTaxDocumentCandidates(env, {
   const response = await readWithCustomApiVisibility(env, execute);
   const { results } = response;
   const page = (results || []).map(assessStoredProvenance);
-  return {
-    results: page.slice(0, boundedLimit).map((row) => ({ ...row, has_chunks: false })),
-    complete: page.length <= boundedLimit,
-  };
+  const eligible = page.slice(0, boundedLimit)
+    .filter(row => !row.retrieval_projection_incomplete)
+    .map(({retrieval_projection_incomplete, ...row}) => ({...row, has_chunks:false}));
+  return { results:eligible, complete: page.length <= boundedLimit && eligible.length === page.length };
 }
 
 /** Vector search over Vectorize, hydrated and filtered in D1. */
-export async function searchVector(env, embedding, { limit, filters = {}, scope = null, timing = null } = {}) {
+export async function searchVector(env, embedding, { limit, filters = {}, scope = null, timing = null, boundThinkText = false, onIncompleteProjection } = {}) {
   const topK = Math.min(limit, VECTOR_TOPK_MAX);
   const vectorFilter = await vectorFilterFor(filters);
   const hasFilter = Object.keys(vectorFilter).length > 0;
@@ -857,11 +930,11 @@ export async function searchVector(env, embedding, { limit, filters = {}, scope 
   const ids = (res?.matches || []).map((m) => m.id);
   if (!ids.length) return [];
 
-  // A hashed id cannot be looked up in D1 directly, so those are resolved via
-  // the mapping column written at upsert time.
+  // Think resolves hashed IDs in the authorized hydration query so the
+  // variable-width chunk key never crosses a separate mapping binding.
   const hashed = ids.filter((i) => i.startsWith("h:"));
   let hashMap = new Map();
-  if (hashed.length) {
+  if (hashed.length && !boundThinkText) {
     const ph = hashed.map((_, i) => "?" + (i + 1)).join(",");
     const { results: mapped } = await env.DB.prepare(
       `SELECT chunk_uid, vector_id FROM chunks WHERE vector_id IN (${ph})`
@@ -880,23 +953,19 @@ export async function searchVector(env, embedding, { limit, filters = {}, scope 
   const results = [];
   for (let start = 0; start < resolved.length; start += hydrationBatchSize) {
     const batch = resolved.slice(start, start + hydrationBatchSize);
-    const placeholders = batch.map((_, i) => "?" + (i + 1)).join(",");
+    const slots = batch.map((_, i) => "?" + (i + 1));
+    const hashedSlots = boundThinkText ? slots.filter((_, i) => batch[i].startsWith("h:")) : [];
+    const hashedPredicate = hashedSlots.length ? `c.vector_id IN (${hashedSlots.join(",")})` : null;
+    const match = `c.chunk_uid IN (${slots.join(",")})`;
+    const extras = {uri:'d.uri', occurred_at:retrievalOccurredAt,
+      ...(hashedPredicate ? {retrieval_vector_id:`CASE WHEN ${hashedPredicate} THEN c.vector_id END`} : {})};
     const f = filterSql(filters, "c", batch.length + 1);
     const sc = scopeSql(scope, "d", f.nextParam);
     const sql = (memoryClause, withCurrentPointer = true) =>
-      `SELECT c.chunk_uid, c.doc_uid, c.text, d.source AS source,
-              COALESCE(src.kind, 'unregistered') AS source_kind,
-              c.title, c.document_date,
-              c.client, c.category, c.top_folder, c.platform,
-              d.source_id, d.uri, d.entity_slug, d.content_hash, d.date_source, d.date_reliable,
-              d.text_source, d.text_reliable, d.meta AS authority_meta,
-              (SELECT head.text FROM chunks head
-                WHERE head.doc_uid = d.doc_uid AND head.chunk_ix = 0 LIMIT 1) AS authority_document_head,
-              CASE WHEN d.date_source = 'calendar:event_start' AND json_valid(d.meta)
-                   THEN json_extract(d.meta, '$.start') END AS occurred_at
+      `SELECT ${retrievalCandidateProjection(boundThinkText, false, extras)}
        FROM chunks c JOIN documents d ON d.doc_uid = c.doc_uid
        LEFT JOIN sources src ON src.name = d.source
-       WHERE c.chunk_uid IN (${placeholders})${f.clause}${sc.clause}${customApiVisibilitySql("d", withCurrentPointer)}${memoryClause}`;
+       WHERE ${hashedPredicate ? `(${match} OR ${hashedPredicate})` : match}${f.clause}${sc.clause}${customApiVisibilitySql("d", withCurrentPointer)}${memoryClause}`;
     const run = async (memoryClause) => {
       const execute = (withCurrentPointer) => env.DB.prepare(sql(memoryClause, withCurrentPointer))
         .bind(...batch, ...f.params, ...sc.params)
@@ -914,10 +983,16 @@ export async function searchVector(env, embedding, { limit, filters = {}, scope 
     results.push(...(hydrated || []));
   }
 
-  const byUid = new Map((results || []).map((r) => [r.chunk_uid, r]));
+  if (results.some(row => row.retrieval_projection_incomplete)) onIncompleteProjection?.();
+  const byUid = new Map();
+  const byVector = new Map();
+  for (const {retrieval_vector_id: vectorId, ...row} of results) {
+    byUid.set(row.chunk_uid, row);
+    if (vectorId) byVector.set(vectorId, row);
+  }
   // A vector whose chunk is missing from D1 means the two systems have drifted.
   // Dropping it silently would hide that, so it is counted by the caller.
-  return resolved.map((id) => byUid.get(id)).filter(Boolean);
+  return resolved.map((id) => byVector.get(id) || byUid.get(id)).filter(Boolean);
 }
 
 const SEARCH_FAILURE_MESSAGES = Object.freeze({
@@ -976,7 +1051,7 @@ function warnSearchStageFailure(stage, error) {
  */
 export async function search(env, {
   query, embedding, limit = 10, filters = {}, weights = {}, rrfK = RRF_K, access = null, scope = null,
-  projectionReadiness = null, supplementalFilters = [], now = Date.now(), timing = null, readPlan = "standard",
+  projectionReadiness = null, supplementalFilters = [], now = Date.now(), timing = null, readPlan = "standard", boundThinkText = false,
 }) {
   // Refuse malformed or schema-skewed scope before the first D1 or Vectorize
   // call. If each modality caught this independently, the invalid scope could
@@ -990,6 +1065,8 @@ export async function search(env, {
   }
   for (const hint of supplementalFilters) validatedFilterDates(hint);
   const pool = RETRIEVAL_CANDIDATE_DEPTH;
+  let retrievalProjectionIncomplete = false;
+  const onIncompleteProjection = () => { retrievalProjectionIncomplete = true; };
   const fusionK = Math.min(Math.max(Number(rrfK) || RRF_K, 1), 1e3);
 
   const failedStages = new Set();
@@ -1009,7 +1086,7 @@ export async function search(env, {
   let retrievalCoverage;
   const runKeyword = plan => settleModality("keyword",
     measureQueryStage(timing, "keyword", () => searchKeyword(env, query, {
-      limit: pool, filters, access, scope, readPlan: plan,
+      limit: pool, filters, access, scope, readPlan: plan, boundThinkText,
     })));
   const keywordAttemptPromise = (async () => {
     let attempt = await runKeyword(readPlan);
@@ -1035,9 +1112,9 @@ export async function search(env, {
     Promise.all(supplementalFilters.map(async hint => {
       const [keyword, vector] = await Promise.all([
         settleModality("keyword", measureQueryStage(timing, "keyword", () =>
-          searchKeyword(env, query, { limit: pool, filters: hint, access, scope }))),
+          searchKeyword(env, query, { limit: pool, filters: hint, access, scope, boundThinkText }))),
         vectorEligible
-          ? settleModality("vector", measureQueryStage(timing, "vector", () => searchVector(env, resolvedEmbedding, { limit: pool, filters: hint, scope, timing })))
+          ? settleModality("vector", measureQueryStage(timing, "vector", () => searchVector(env, resolvedEmbedding, { limit: pool, filters: hint, scope, timing, boundThinkText, onIncompleteProjection })))
           : Promise.resolve({ attempted: false, results: [], error: null }),
       ]);
       return { keyword, vector };
@@ -1045,7 +1122,7 @@ export async function search(env, {
   const [keywordAttempt, vectorAttempt, projection, hintAttempts] = await Promise.all([
     keywordAttemptPromise,
     vectorEligible
-      ? settleModality("vector", measureQueryStage(timing, "vector", () => searchVector(env, resolvedEmbedding, { limit: pool, filters, scope, timing })))
+      ? settleModality("vector", measureQueryStage(timing, "vector", () => searchVector(env, resolvedEmbedding, { limit: pool, filters, scope, timing, boundThinkText, onIncompleteProjection })))
       : Promise.resolve({ attempted: false, results: [], error: null }),
     // Vectorize may return some old/current candidates while a newer accepted
     // changeset is still processing. Non-empty semantic results therefore do
@@ -1076,16 +1153,17 @@ export async function search(env, {
   let expansionFailed = false;
   const extraKeyword = async (text, depth = pool) => {
     const attempt = await settleModality("keyword", measureQueryStage(timing, "keyword", () =>
-      searchKeyword(env, text, { limit: depth, filters, access, scope })));
+      searchKeyword(env, text, { limit: depth, filters, access, scope, boundThinkText })));
     if (memorySupersessionIntegrityFailure(attempt.error)) throw attempt.error;
     if (attempt.error) expansionFailed = true;
+    if (attempt.results.some(row => row.retrieval_projection_incomplete)) onIncompleteProjection();
     return attempt.results;
   };
   // A corrected memory may no longer match the old label at all. Search only
   // exact verified correction edges from a bounded, authorized historical seed
   // page; never republish the suppressed predecessor as current evidence.
   if (!recovery && !keywordAttempt.error && keywordAttempt.results.length===0) {
-    try { expansionRows.push(...await discoverCorrectionSearchSeeds(env,query,{filters,access,scope})); }
+    try { expansionRows.push(...await discoverCorrectionSearchSeeds(env,query,{filters,access,scope,boundThinkText,onIncompleteProjection})); }
     catch(error) {
       if(memorySupersessionIntegrityFailure(error)) throw error;
       expansionFailed=true;
@@ -1096,7 +1174,10 @@ export async function search(env, {
     expansionRows.push(...await extraKeyword(synonyms.join(' ')));
   }
   let metadata = null;
-  for (const name of recovery || keywordAttempt.error ? [] : queryNames(query)) {
+  let metadataIncomplete = false;
+  const nameHydrationOptions = { filters, access, scope, boundThinkText, onIncompleteProjection };
+  const names = recovery || keywordAttempt.error ? [] : queryNames(query);
+  for (const [index, name] of names.entries()) {
     if ([...keywordAttempt.results, ...vectorAttempt.results].some(row => containsName(row, name))) continue;
     // A bag-of-words miss does not prove the name is absent. Try the exact
     // token separately before considering a spelling change.
@@ -1104,27 +1185,38 @@ export async function search(env, {
     if (exact.some(row => containsName(row, name))) { expansionRows.push(...exact); continue; }
     if (expansionFailed) continue;
     if (metadata === null) {
-      try { metadata = await nameVariantMetadata(env, { filters, access, scope }); }
+      try {
+        metadata = await nameVariantMetadata(env, { filters, access, scope, boundThinkText, names });
+        metadataIncomplete = metadata.some(row => row.retrieval_projection_incomplete);
+      }
       catch (error) {
         if (memorySupersessionIntegrityFailure(error)) throw error;
         expansionFailed = true; metadata = [];
       }
     }
-    const exactMetadata = metadata.filter(row => containsName(row, name));
+    retrievalProjectionIncomplete ||= metadataIncomplete;
+    const exactMetadata = metadata.filter(row => containsName(row, name) ||
+      (row.retrieval_projection_incomplete && row['name_match_' + index]));
     if (exactMetadata.length) {
-      try { expansionRows.push(...await hydrateNameMetadata(env, exactMetadata, { filters, access, scope })); }
+      try {
+        const hydrated = await hydrateNameMetadata(env, exactMetadata, nameHydrationOptions);
+        const omitted = new Set(exactMetadata.filter(row => row.retrieval_projection_incomplete).map(row => row.doc_uid));
+        expansionRows.push(...hydrated.map(row => omitted.has(row.doc_uid)
+          ? {...row, retrieval_projection_incomplete:1} : row));
+      }
       catch (error) {
         if (memorySupersessionIntegrityFailure(error)) throw error;
         expansionFailed = true;
       }
       continue;
     }
+    if (metadataIncomplete) continue;
     const variant = metadataNameVariant(name, [...metadata, ...keywordAttempt.results, ...vectorAttempt.results]);
     if (!variant) continue;
     const matched = await extraKeyword(variant.matched);
     try {
       const hydrated = await hydrateNameMetadata(env,
-        metadata.filter(row => containsName(row, variant.matched)), { filters, access, scope });
+        metadata.filter(row => containsName(row, variant.matched)), nameHydrationOptions);
       matched.push(...hydrated);
     } catch (error) {
       if (memorySupersessionIntegrityFailure(error)) throw error;
@@ -1133,6 +1225,9 @@ export async function search(env, {
     expansionRows.push(...matched.filter(row => containsName(row, variant.matched))
       .map(row => ({ ...row, query_variant: variant })));
   }
+  retrievalProjectionIncomplete ||= [keywordAttempt.results, vectorAttempt.results, expansionRows,
+    ...hintAttempts.flatMap(({keyword, vector}) => [keyword.results, vector.results])]
+    .some(rows => rows.some(row => row.retrieval_projection_incomplete));
   const finishAuthority = startQueryStage(timing, "authority_lineage");
   const kw = keywordAttempt.results.map(assessStoredProvenance);
   const expanded = expansionRows.map(assessStoredProvenance);
@@ -1339,11 +1434,13 @@ export async function search(env, {
   fused = recovery
     ? fused.map(row => ({...row,selection:{state:'unknown',reason:'bounded_recovery',newer_record:null,
         operative_record:null,checked_scope:'authorized_keyword_candidates',complete:false}}))
-    : (await discoverDocumentSuccessors(env, fused, { filters, access, scope, question:query, assess:assessStoredProvenance }));
+    : (await discoverDocumentSuccessors(env, fused, { filters, access, scope, question:query,
+      assess:assessStoredProvenance, boundThinkText, onIncompleteProjection }));
   // Title collapse sees every row (unchanged membership): the newest
   // same-title file takes its family's best slot. Linked rows are never
   // hoisted above better-ranked documents; a linked row that collapse removed
   // stays, directly after the row that took its family slot.
+  fused = await attachMicrosoftRetainedStatus(env, fused, { access, scope });
   const collapsed = collapseTitleFamilies(fused, query);
   const kept = new Set(collapsed.map(row => row.doc_uid));
   const removedLinked = fused.filter(row => row.selection?.state === 'unresolved' && !kept.has(row.doc_uid));
@@ -1377,6 +1474,7 @@ export async function search(env, {
     );
     documents.push(attachEvidenceLineage({
       ...publicRow,
+      ...calendarCancellationPresentation(row),
       ...(/^calendar:(?:event_start|all_day_start)$/.test(row.date_source || '')
         ? { record_observation:recordObservation(row) } : {}),
       source_id: publicSourceId,
@@ -1392,6 +1490,7 @@ export async function search(env, {
 
   return {
     results: documents.slice(0, limit),
+    ...(retrievalProjectionIncomplete ? { retrieval_projection_incomplete:true } : {}),
     degraded,
     degraded_reason: degradedReason,
     ...(retrievalCoverage ? { retrieval_coverage: retrievalCoverage } : {}),
@@ -7865,6 +7964,26 @@ export async function vectorReadiness(env, {
 export const PROVIDER_ORPHAN_MAX_RATIO = 0.0001;
 
 /**
+ * True when the schema-65 counter triggers are all installed and no restore is
+ * in progress, so corpus_stats follows every document and chunk change by
+ * itself. Any doubt (an older schema, an unreadable catalog, a fixture without
+ * the table) keeps the older exact recount.
+ */
+async function countersMaintainedByTriggers(env) {
+  try {
+    const row = await env.DB.prepare(
+      `SELECT (SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name IN (
+                 'corpus_counter_documents_ai', 'corpus_counter_documents_bd', 'corpus_counter_documents_au',
+                 'corpus_counter_chunks_ai', 'corpus_counter_chunks_ad', 'corpus_counter_chunks_au')) AS triggers,
+              EXISTS (SELECT 1 FROM source_original_result_family_recovery_state WHERE id = 1) AS recovery`,
+    ).bind().first();
+    return Number(row?.triggers) === 6 && Number(row?.recovery) === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Remove documents from D1 and durably queue their Vectorize cleanup.
  *
  * ORDER MATTERS, AND IT IS THE OPPOSITE OF THE INSERT ORDER.
@@ -7887,6 +8006,10 @@ export async function forget(env, {
   corpusMutationGeneration = null,
   ingestRemovalFence = null,
   dryRun = true,
+  // "Clean my Brain": remember each removed family in the same transaction as
+  // the delete, so a later full re-read cannot load it again. Null for every
+  // removal that ingest plans for itself.
+  rememberRemoval = null,
 } = {}) {
   let targets = docUids;
   if (source) {
@@ -7978,6 +8101,11 @@ export async function forget(env, {
   let removalMarker = ingestRemovalFence;
   let deletedDocuments = 0;
   let deletedChunks = 0;
+  // Schema 65 triggers keep corpus_stats exact on every row change. Recounting
+  // a whole source inside this transaction (every document, every chunk) was
+  // the cost that made one 50-document removal take ~35 s on a large Gmail
+  // Brain. Keep the recount only where those triggers are not in force.
+  const triggerMaintainedCounters = await countersMaintainedByTriggers(env);
   for (const group of groups) {
     const marks = group.map((_, i) => "?" + (i + 1)).join(",");
     const groupSet = new Set(group);
@@ -7990,8 +8118,28 @@ export async function forget(env, {
           WHERE id=1 AND instance=?1 AND generation=?2 AND nonce=?3
        ) THEN 1 ELSE json('ingest removal inventory changed') END AS verified`,
     ).bind(removalMarker.instance, removalMarker.generation, removalMarker.nonce)] : [];
+    // The record is keyed by each document's OWN base id (its uid without any
+    // "#part" suffix), computed here from the row itself: never from the family
+    // index (not yet filled on an older Brain) and never from a file family that
+    // kept siblings share. Only Gmail and Drive items are ever remembered.
+    const ledgerStatements = rememberRemoval ? [env.DB.prepare(
+      `INSERT INTO owner_removals (family_uid, source, provider_id, removed_at, run_id, batch_no, reason)
+       SELECT base, source, substr(base, length(source) + 2),
+              ?${group.length + 1}, ?${group.length + 2}, ?${group.length + 3}, ?${group.length + 4}
+         FROM (SELECT documents.source AS source,
+                      CASE WHEN instr(documents.doc_uid, '#part') > 0
+                           THEN substr(documents.doc_uid, 1, instr(documents.doc_uid, '#part') - 1)
+                           ELSE documents.doc_uid END AS base
+                 FROM documents
+                WHERE documents.doc_uid IN (${marks}) AND documents.source IN ('gmail', 'drive')
+                GROUP BY 1, 2)
+        WHERE 1
+       ON CONFLICT(family_uid) DO UPDATE SET restored_at = NULL, removed_at = excluded.removed_at,
+         run_id = excluded.run_id, batch_no = excluded.batch_no, reason = excluded.reason`,
+    ).bind(...group, queuedAt, rememberRemoval.runId, rememberRemoval.batchNo, rememberRemoval.reason)] : [];
     const receipts = await env.DB.batch([
       ...fenceStatements,
+      ...ledgerStatements,
       env.DB.prepare(
         `INSERT INTO vector_outbox (chunk_uid, vector_id, op, queued_at, attempts, last_error)
          SELECT chunk_uid, COALESCE(vector_id, chunk_uid), 'delete', ?${group.length + 1}, 0, NULL
@@ -8006,7 +8154,7 @@ export async function forget(env, {
       env.DB.prepare(
         `DELETE FROM documents WHERE doc_uid IN (${marks}) RETURNING doc_uid`,
       ).bind(...group),
-      ...groupSources.map((src) => env.DB.prepare(
+      ...(triggerMaintainedCounters ? [] : groupSources).map((src) => env.DB.prepare(
         `INSERT INTO corpus_stats (source, documents, chunks, last_ingest_at)
          SELECT ?1, COUNT(DISTINCT documents.doc_uid), COUNT(chunks.chunk_uid),
                 (SELECT last_ingest_at FROM corpus_stats WHERE source=?1)
@@ -8016,6 +8164,11 @@ export async function forget(env, {
          ON CONFLICT(source) DO UPDATE SET
            documents=excluded.documents, chunks=excluded.chunks`
       ).bind(src)),
+      // Stamp the saved nonce in the delete transaction so crash recovery can
+      // distinguish this batch's exact post-commit inventory from later writes.
+      ...(rememberRemoval?.receiptNonce ? [env.DB.prepare(
+        "UPDATE ingest_removal_generation SET nonce=?1 WHERE id=1",
+      ).bind(rememberRemoval.receiptNonce)] : []),
       ...(removalMarker ? [env.DB.prepare(
         "SELECT instance, nonce, generation FROM ingest_removal_generation WHERE id=1",
       )] : []),
@@ -8027,9 +8180,10 @@ export async function forget(env, {
       receipts.shift();
       receipts.pop();
     }
-    if (!Array.isArray(receipts) || receipts.length < 3) {
+    if (!Array.isArray(receipts) || receipts.length < 3 + ledgerStatements.length) {
       throw new Error("the forget delete receipts were incomplete");
     }
+    const first = ledgerStatements.length;
     const exactMutationCount = (receipt) => {
       const returned = Array.isArray(receipt?.results) ? receipt.results.length : null;
       const changed = drainLeaseChanges(receipt);
@@ -8038,8 +8192,8 @@ export async function forget(env, {
       // but never turn an exact positive mutation receipt into zero.
       return returned === null || (returned === 0 && changed > 0) ? changed : returned;
     };
-    deletedChunks += exactMutationCount(receipts[1]);
-    deletedDocuments += exactMutationCount(receipts[2]);
+    deletedChunks += exactMutationCount(receipts[first + 1]);
+    deletedDocuments += exactMutationCount(receipts[first + 2]);
   }
 
   // Physical vector deletion is deliberately enqueue-only here. `drainOutbox`

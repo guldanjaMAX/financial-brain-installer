@@ -324,6 +324,10 @@ globalThis.fetch = async (input, options = {}) => {
   if (url.pathname === "/client/v4/accounts") {
     return payload([{ id: accountId, name: "Packed fixture account" }]);
   }
+  if (url.pathname === "/client/v4/accounts/" + accountId + "/workers/subdomain") {
+    if (options.method !== "GET") throw new Error("fresh setup must only read the fixture's existing address");
+    return payload({ subdomain: "fixture-account" });
+  }
   if (url.pathname === "/client/v4/accounts/" + accountId + "/d1/database") {
     return payload(null, 403, false, [{ code: 1001, message: "fixture read stop" }]);
   }

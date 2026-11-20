@@ -888,14 +888,12 @@ export function sourceIdFor(calendarKey, eventId) {
 }
 
 /**
- * One event to one instruction: upsert, delete, or skip.
+ * One event to an upsert, provider cancellation observation, or skip.
  *
- * Cancelled events always become deletions rather than tombstone documents. A
- * document saying "this meeting was cancelled" would compete in retrieval with
- * the meetings that happened, which is the opposite of the point. On a first
- * full sync a deletion for something never ingested is a harmless no-op; after
- * a 410 resync it is the only mechanism that cleans up events deleted while
- * the token was dead, which is why it fires unconditionally.
+ * The historical `delete`/`deletions` shape is shared with other connectors.
+ * It records Google's explicit cancellation evidence, not removal authority.
+ * The Google Calendar command keeps stored text and marks cancellation through
+ * an exact metadata readback, including ID-only tombstones after a 410 resync.
  */
 export function buildEnvelope(event, { calendar, config } = {}) {
   const cfg = config && config.calendars ? config : normalizeConfig(config || {});

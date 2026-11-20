@@ -160,7 +160,7 @@ try {
   check("a brain that reports itself not ok is never called finished, whatever its drain says",
     notOkActive === null, JSON.stringify(notOkActive));
 
-  let storageSchemaReads = 0, storageSourceReads = 0;
+  let storageSchemaReads = 0, storageSourceReads = 0, storageFlagReads = 0;
   const storageUnavailableHealth = async () => worker.fetch(
     new Request(`https://${DOMAIN}/health`),
     {
@@ -171,6 +171,14 @@ try {
           if (/install_state/.test(sql)) {
             storageSchemaReads++;
             return { first: async () => { throw new Error("fixture schema unavailable"); } };
+          }
+          // Public health also reads the bank and answer-check flags (0.4.30).
+          // They fail like the rest of an unreadable database and are counted
+          // apart from the source-registry decision point.
+          if (/FROM bank_feed_items|FROM llm_call_log/.test(sql)) {
+            storageFlagReads++;
+            const unavailable = async () => { throw new Error("fixture health flag unavailable"); };
+            return { bind() { return this; }, all: unavailable, first: unavailable };
           }
           storageSourceReads++;
           return { all: async () => { throw new Error("fixture source registry unavailable"); } };
@@ -187,6 +195,9 @@ try {
   check("the storage-unavailable health arm reached both D1 decision points",
     storageSchemaReads === 1 && storageSourceReads === 1,
     JSON.stringify({ storageSchemaReads, storageSourceReads }));
+  check("the storage-unavailable health arm reads each public flag once and reports both unknown",
+    storageFlagReads === 2 && storageBody.bank === "unknown" && storageBody.answers === "unknown",
+    JSON.stringify({ storageFlagReads, bank: storageBody.bank, answers: storageBody.answers }));
 
   const storageAsFinished = await brain.probeExistingWorkerHealth(manifestPath, {
     http: storageUnavailableHealth,

@@ -1,3 +1,6 @@
+import { ownerEvidenceNote } from '../src/lib/owner-evidence.js';
+import { documentResponseConfidence, ownerConfidenceLine } from '../src/lib/confidence.js';
+import { assertOwnerEvidence } from '../../test/helpers/owner-evidence-contract.mjs';
 import { assertDocumentAnswer } from './helpers/document-answer-contract.mjs';
 /**
  * A scanned copy that OCR read cleanly can be the proof behind an answer, and
@@ -728,6 +731,25 @@ function beforeFinalInvitation(text, cli = false) {
   return cli ? `\n${facts}\n` : facts;
 }
 
+// Only the two native snapshots use this projection. Every source, answer,
+// date, citation, invitation and original byte remains covered by the old hash.
+function nativeSnapshotText(text, body, cli = false) {
+  const confidence = documentResponseConfidence(body);
+  assertOwnerEvidence(text, confidence);
+  const note = ownerEvidenceNote(confidence, body.answer);
+  const frozen = ownerConfidenceLine(confidence);
+  let restored;
+  if (note) {
+    assert.ok(text.includes(note), 'the full plain evidence note reached the surface');
+    restored = text.replace(note, frozen);
+  } else {
+    const marker = cli ? '\n  Sources' : '\n\nSources:';
+    assert.ok(text.includes(marker), 'the original citation block was reached');
+    restored = text.replace(marker, cli ? `\n  ${frozen}\n\n  Sources` : `\n\n${frozen}\n\nSources:`);
+  }
+  return beforeFinalInvitation(restored, cli);
+}
+
 async function askCli(body) {
   const sandbox = mkdtempSync(join(tmpdir(), "brain-scanned-ask-"));
   const printed = [];
@@ -819,7 +841,13 @@ test("the remote MCP native answer keeps its original facts and final invitation
   const text = result.content[0].text;
   assert.equal(text.includes("(scanned)"), false);
   assert.equal(text.includes(ANSWER_NOTICE), false);
-  assert.equal(digest(beforeFinalInvitation(text)), "88d75cd273cb701b8f9fa3f9ca0efc9f77eb56b6662b71fa172e221281df41f8", "native MCP ask text");
+  const snapshot = candidate => assert.equal(digest(nativeSnapshotText(candidate, body)), "88d75cd273cb701b8f9fa3f9ca0efc9f77eb56b6662b71fa172e221281df41f8", "native MCP ask text");
+  snapshot(text);
+  assert.ok(text.includes('[1]'), 'the populated citation decision was reached');
+  assert.throws(() => snapshot(text.replace('[1]', '[9]')), assert.AssertionError,
+    'a changed citation still fails the unchanged byte oracle');
+  assert.throws(() => snapshot(text + '\nConfidence: High (99%)'), assert.AssertionError,
+    'the same populated oracle rejects a visible score');
 });
 
 test("brain ask prints the notice and marks the scanned citation", async () => {
@@ -834,7 +862,13 @@ test("brain ask native output keeps its original facts and final invitation", as
   const printed = await askCli(body);
   assert.equal(printed.includes("(scanned)"), false);
   assert.equal(printed.includes(ANSWER_NOTICE), false);
-  assert.equal(digest(beforeFinalInvitation(printed, true)), "7494a92e7b6d5528eb3801495df38bf3f846a94ec1067c31417af87dcaf56c01", "native brain ask output");
+  const snapshot = candidate => assert.equal(digest(nativeSnapshotText(candidate, body, true)), "7494a92e7b6d5528eb3801495df38bf3f846a94ec1067c31417af87dcaf56c01", "native brain ask output");
+  snapshot(printed);
+  assert.ok(printed.includes('[1]'), 'the populated citation decision was reached');
+  assert.throws(() => snapshot(printed.replace('[1]', '[9]')), assert.AssertionError,
+    'a changed citation still fails the unchanged byte oracle');
+  assert.throws(() => snapshot(printed + '\nConfidence: High (99%)'), assert.AssertionError,
+    'the same populated oracle rejects a visible score');
 });
 
 test("the local MCP server carries the flag and the gap, and tells the assistant to relay it", async () => {

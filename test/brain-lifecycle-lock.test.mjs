@@ -1,12 +1,13 @@
+import { isolatedLifecycleOptions } from "./fixtures/isolated-update-schedulers.mjs";
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
 import {
   BrainLifecycleLockError,
-  acquireBrainLifecycleLock,
+  acquireBrainLifecycleLock as acquireProductLifecycleLock,
   clearBrainRecoveryFence,
   processStartIdentity,
   readBrainRecoveryFence,
@@ -15,6 +16,16 @@ import {
   writeBrainRecoveryFence,
 } from "../operations/brain-lifecycle-lock.mjs";
 import { restrictWindowsDirectoryToCurrentUser } from "../operations/current-user-file.mjs";
+
+// A native Windows run must not create account locks in the host profile.
+// All probes still enter the product acquisition function with a synthetic
+// OS-profile dependency, shared across manifest aliases and scratch homes.
+const accountHome = mkdtempSync(join(tmpdir(), "lifecycle-account-"));
+function acquireBrainLifecycleLock(options) {
+  return acquireProductLifecycleLock({ ...options,
+    lockRootOptions: { ...isolatedLifecycleOptions(accountHome).lockRootOptions,
+      windowsAccountHome: accountHome, ...options.lockRootOptions } });
+}
 
 function fixture({ machineLockRoot: sharedMachineLockRoot } = {}) {
   const root = mkdtempSync(join(tmpdir(), "daily-lock-"));
@@ -139,9 +150,10 @@ test("a confirmed dead lock is recovered only after its stale boundary", () => {
     now: () => new Date("2026-10-23T12:34:56.000Z"),
     processInstance: () => "dead-process-instance",
   });
-  const ownerPath = join(first.path, readdirSync(first.path)[0]);
   const stale = new Date("2026-10-23T12:34:56.000Z");
-  utimesSync(ownerPath, stale, stale);
+  for (const path of new Set([first.path, first.accountPath, first.legacyPath].filter(Boolean))) {
+    utimesSync(join(path, "owner.json"), stale, stale);
+  }
   let livenessChecks = 0;
   const recovered = acquireBrainLifecycleLock({
     manifestPath,
@@ -310,12 +322,15 @@ test("Windows lifecycle locks receive a private inheritable ACL before the owner
   });
   try {
     assert.equal(lock.assertOwned(), true, "the restricted Windows lock remains usable as a green control");
+    assert.ok(lock.accountPath && lock.legacyPath, "the fixture holds both additional Windows slots");
   } finally {
     lock.release();
   }
-  assert.equal(aclCalls.length, 1, "the Windows ACL decision point was reached once");
-  assert.equal(aclCalls[0].path, lock.path);
-  assert.deepEqual(aclCalls[0].entries, [], "the directory was restricted before its owner receipt was written");
+  assert.deepEqual(aclCalls.map(call => call.path),
+    [...new Set([dirname(lock.accountPath), lock.accountPath, lock.legacyPath, lock.path].filter(Boolean))],
+    "the account root and every retained lease directory reached their ACL decisions");
+  for (const call of aclCalls) assert.deepEqual(call.entries, [],
+    "each directory was restricted before an owner receipt was written");
 
   const refusedFixture = fixture();
   let aclFailureCalls = 0;
@@ -332,7 +347,7 @@ test("Windows lifecycle locks receive a private inheritable ACL before the owner
     }),
     (error) => {
       refusalDecisions += 1;
-      return error instanceof BrainLifecycleLockError && error.code === "brain_lifecycle_unsafe";
+      return error instanceof BrainLifecycleLockError && error.code === "BRAIN_LOCK_FOLDER_UNUSABLE";
     },
   );
   assert.equal(aclFailureCalls, 1, "the refusing ACL boundary was attempted");
@@ -349,7 +364,10 @@ test("Windows lifecycle locks receive a private inheritable ACL before the owner
     },
   });
   assert.equal(recovered.assertOwned(), true, "an ACL-capable retry is the green control");
-  assert.equal(recoveryAclCalls, 1);
+  assert.ok(recovered.accountPath && recovered.legacyPath, "the retry still holds account and legacy slots");
+  assert.equal(recoveryAclCalls, new Set([dirname(recovered.accountPath), recovered.accountPath,
+    recovered.legacyPath, recovered.path].filter(Boolean)).size,
+  "the retry restricts the account root and every retained lease slot");
   recovered.release();
 });
 

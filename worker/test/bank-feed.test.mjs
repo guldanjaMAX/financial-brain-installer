@@ -804,7 +804,8 @@ const refuses = (db, sql, params = []) => {
   const pageUrl = new URL("https://demo.example.workers.dev/app/connect/bank");
   const pageResponse = await handleBankFeed(env, new Request(pageUrl), pageUrl, "/app/connect/bank");
   check("the connect page itself is behind the owner session, not an admin key",
-    pageResponse.status === 401 && /Sign in first at \/app/.test(await pageResponse.text()), String(pageResponse.status));
+    pageResponse.status === 401 &&
+    /<a\b[^>]*href="\/app\?then=connect-bank"[^>]*>Sign in with a passkey<\/a>/.test(await pageResponse.text()), String(pageResponse.status));
 
   const syncUrl = new URL("https://demo.example.workers.dev/api/bank-feed/sync");
   const syncResponse = await handleBankFeed(env, new Request(syncUrl, { method: "POST", body: "{}" }), syncUrl, "/api/bank-feed/sync");

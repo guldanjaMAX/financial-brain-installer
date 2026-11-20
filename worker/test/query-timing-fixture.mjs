@@ -68,7 +68,9 @@ export function fixture({ approve = true, answerMs = 7000, verifierMs = 4000,
               return clock.operation('keyword', 1200, { results: rows }, keywordFails);
             }
             if (/FROM chunks c JOIN documents/.test(sql)) {
-              return clock.operation('hydration', 100, { results: rows });
+              const selected = /AS total_chunks/.test(sql)
+                ? rows.map(row => ({...row,total_chunks:rows.length})) : rows;
+              return clock.operation('hydration', 100, { results: selected });
             }
             return { results: [] };
           },

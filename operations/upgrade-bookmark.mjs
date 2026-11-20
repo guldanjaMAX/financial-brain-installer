@@ -159,14 +159,14 @@ export function secureMacUpgradeBookmarkPath(path, {
  * attempt gets its own immutable receipt; a retry never replaces the earlier
  * pre-migration bookmark with a snapshot of a partly migrated database.
  */
-export function saveUpgradeBookmark(record, {
+function accessUpgradeFile(record, {
   directory = join(homedir(), ".brain", "upgrade-bookmarks"),
   now = () => new Date(),
   io = fs,
   windowsAcl = secureWindowsUpgradeBookmarkPath,
   macAcl = secureMacUpgradeBookmarkPath,
   platform = process.platform,
-} = {}) {
+} = {}, { filename = `${randomUUID()}.json`, action = "write", stamp = true } = {}) {
   const sameFile = (left, right) => left.dev === right.dev && left.ino === right.ino;
   const assertDirectory = (path) => {
     const stat = io.lstatSync(path);
@@ -198,14 +198,18 @@ export function saveUpgradeBookmark(record, {
       assertDirectory(path);
     }
   };
-  for (const value of [record.account_id, record.database_id, record.bookmark, record.from_version, record.to_version]) {
-    if (typeof value !== "string" || !value.length || value !== value.trim() || /[\x00-\x1f\x7f]/.test(value)) {
-      throw new Error("invalid recovery bookmark identity");
+  directory = resolve(directory);
+  if (action === "write") ensureDirectory(directory);
+  else {
+    // A read never creates the receipt directory or modifies its ACL.
+    for (let path = directory;; path = dirname(path)) {
+      try { assertDirectory(path); } catch (error) {
+        if (error.code === "ENOENT" && path === directory && action === "read") return null;
+        throw error;
+      }
+      if (dirname(path) === path) break;
     }
   }
-  const bytes = JSON.stringify({ schema_version: 1, captured_at: now().toISOString(), ...record }) + "\n";
-  directory = resolve(directory);
-  ensureDirectory(directory);
   const directoryStat = assertDirectory(directory);
   // Native casing can differ on case-insensitive volumes. Check the identity
   // of both spellings after checking every component for actual links.
@@ -215,17 +219,50 @@ export function saveUpgradeBookmark(record, {
   if (platform !== "win32" && ((directoryStat.mode & 0o077) !== 0 || directoryStat.uid !== process.getuid())) {
     throw new Error("recovery directory must be private and owned by this user");
   }
-  if (platform === "win32") windowsAcl(directory, { directory: true });
-  if (platform === "darwin") macAcl(directory);
-  const path = join(directory, `${randomUUID()}.json`);
-  const fd = io.openSync(path, "wx", 0o600);
-  let writtenStat;
+  const verifyOnly = action !== "write";
+  if (platform === "win32") windowsAcl(directory, { directory: true, verifyOnly });
+  if (platform === "darwin") macAcl(directory, { verifyOnly });
+  const path = join(directory, filename);
   const assertReceipt = (stat) => {
-    if (!stat.isFile() || stat.nlink !== 1 ||
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 ||
         (platform !== "win32" && ((stat.mode & 0o077) !== 0 || stat.uid !== process.getuid()))) {
       throw new Error("recovery bookmark must be a private regular file");
     }
   };
+  if (verifyOnly) {
+    let fd;
+    let observed;
+    let bytes;
+    try {
+      observed = io.lstatSync(path);
+      assertReceipt(observed);
+      fd = io.openSync(path, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+      if (!sameFile(observed, io.fstatSync(fd)) || observed.size > 8 * 1024 * 1024) {
+        throw new Error("update checkpoint identity changed");
+      }
+      if (platform === "win32") windowsAcl(path, { directory: false, verifyOnly });
+      if (platform === "darwin") macAcl(path, { verifyOnly });
+      bytes = io.readFileSync(fd, "utf8");
+      if (Buffer.byteLength(bytes) !== observed.size) throw new Error("update checkpoint changed");
+    } catch (error) {
+      if (!observed && error.code === "ENOENT" && action === "read") return null;
+      throw error;
+    } finally { if (fd !== undefined) io.closeSync(fd); }
+    if (!sameFile(observed, io.lstatSync(path)) || !sameFile(directoryStat, assertDirectory(directory))) {
+      throw new Error("update checkpoint identity changed");
+    }
+    const value = JSON.parse(bytes);
+    if (action === "clear") {
+      if (bytes !== JSON.stringify(record) + "\n") throw new Error("update checkpoint changed");
+      io.unlinkSync(path);
+      syncDirectory(directory);
+    }
+    return value;
+  }
+  const envelope = stamp ? { schema_version: 1, captured_at: now().toISOString(), ...record } : record;
+  const bytes = JSON.stringify(envelope) + "\n";
+  const fd = io.openSync(path, "wx", 0o600);
+  let writtenStat;
   // Leave incomplete receipts in place for inspection; never erase recovery
   // evidence when a write, flush, or readback fails.
   try {
@@ -259,4 +296,24 @@ export function saveUpgradeBookmark(record, {
     }
   } finally { io.closeSync(readFd); }
   return path;
+}
+
+export function saveUpgradeBookmark(record, options) {
+  for (const value of [record.account_id, record.database_id, record.bookmark, record.from_version, record.to_version]) {
+    if (typeof value !== "string" || !value.length || value !== value.trim() || /[\x00-\x1f\x7f]/.test(value)) {
+      throw new Error("invalid recovery bookmark identity");
+    }
+  }
+  return accessUpgradeFile(record, options);
+}
+
+export function upgradeSelfcheckCheckpoint(binding, { home = homedir(), ...options } = {}) {
+  if (!/^[a-f0-9]{64}$/u.test(binding)) throw new Error("invalid update checkpoint binding");
+  const filename = `selfcheck-${binding}.json`;
+  const settings = { directory: join(home, ".brain", "update-selfcheck"), ...options };
+  return {
+    read: () => accessUpgradeFile(null, settings, { filename, action: "read" }),
+    claim: record => accessUpgradeFile(record, settings, { filename, stamp: false }),
+    clear: record => accessUpgradeFile(record, settings, { filename, action: "clear" }),
+  };
 }

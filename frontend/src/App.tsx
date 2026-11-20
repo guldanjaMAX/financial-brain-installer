@@ -105,6 +105,7 @@ export function App() {
   const [view, setView] = useState<View>(initialOwnerView);
   const [ready, setReady] = useState(false);
   const [authNotice, setAuthNotice] = useState<string | null>(null);
+  const [passkeyNotice, setPasskeyNotice] = useState<string | null>(null);
   const signedInRef = useRef(false);
 
   const refresh = useCallback(async () => {
@@ -114,6 +115,7 @@ export function App() {
     } catch (next) {
       const sessionEnded = signedInRef.current && next instanceof ApiError && next.status === 401;
       setMe(null);
+      setPasskeyNotice(null);
       setAuthNotice(sessionEnded
         ? SIGNED_OUT_NOTICE
         : next instanceof ApiError && next.status === 403 && typeof next.body.recovery === "string"
@@ -132,15 +134,23 @@ export function App() {
     const signedOut = () => {
       if (!signedInRef.current) return;
       setMe(null);
+      setPasskeyNotice(null);
       setAuthNotice(SIGNED_OUT_NOTICE);
     };
     window.addEventListener(OWNER_SIGNED_OUT_EVENT, signedOut);
     return () => window.removeEventListener(OWNER_SIGNED_OUT_EVENT, signedOut);
   }, []);
 
-  // Nothing until the session is known: flashing the sign-in screen at someone
-  // who is already signed in reads as being logged out.
-  if (!ready) return null;
+  // Keep the opening state neutral until the session is known so an already
+  // signed-in owner never sees a flash of the sign-in screen.
+  if (!ready) return (
+    <main className="min-h-dvh flex items-center justify-center px-4 py-8">
+      <div role="status" className="text-center">
+        <div aria-hidden="true" className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-ink text-sm font-semibold text-white">FB</div>
+        <p className="text-ink-soft">Opening your Brain…</p>
+      </div>
+    </main>
+  );
 
   if (!me?.signed_in) {
     return (
@@ -149,7 +159,11 @@ export function App() {
         inviteCode={enrollmentInvite?.code || null}
         enrollmentKind={enrollmentInvite?.kind || null}
         notice={authNotice}
-        onIn={refresh}
+        onIn={async (notice) => {
+          setPasskeyNotice(notice || null);
+          if (notice) setView("home");
+          await refresh();
+        }}
       />
     );
   }
@@ -173,19 +187,24 @@ export function App() {
         owner={owner}
         me={me}
         view={view}
-        setView={setView}
+        setView={(next) => {
+          if (next !== "home") setPasskeyNotice(null);
+          setView(next);
+        }}
+        notice={passkeyNotice}
         refresh={refresh}
       />
     </FinanceScopeProvider>
   );
 }
 
-export function OwnerWorkspace({ owner, me, view, setView, refresh }: {
+export function OwnerWorkspace({ owner, me, view, setView, refresh, notice }: {
   owner: string;
   me: Me;
   view: View;
   setView: (view: View) => void;
   refresh: () => Promise<void>;
+  notice?: string | null;
 }) {
   const { entityScopeState, scopeChoiceMade, entities } = useFinanceScope();
   const scopeGate = ownerViewScopeGate(
@@ -200,22 +219,14 @@ export function OwnerWorkspace({ owner, me, view, setView, refresh }: {
     <div className="min-h-dvh">
       <OwnerHeader owner={owner} now={view} go={setView} />
       <main className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-7 sm:py-9 pb-24">
+        {view === "home" && notice && (
+          <p role="status" className="mb-6 max-w-2xl rounded-xl border border-good-line bg-good-bg px-4 py-3 text-sm leading-relaxed text-good">{notice}</p>
+        )}
         {scopeGate ? (
           <section className="max-w-2xl" aria-labelledby="scope-required-title">
-            <p className="eyebrow">
-              {scopeGate === "entity" ? "Choose one financial entity"
-                : scopeGate === "checking" ? "Checking your financial list" : "Choose what to view"}
-            </p>
             <h1 id="scope-required-title" className="page-title">
               {scopeGate === "entity" ? guardedTitle : view === "ask" ? "Ask & Explore" : view === "documents" ? "Documents" : "Home"}
             </h1>
-            <p className="page-intro">
-              {scopeGate === "entity"
-                ? "Select one person, household, business, trust, property, or investment before opening this page. This keeps separate financial records and decisions from being combined."
-                : scopeGate === "checking"
-                  ? "The Brain is checking which parts of your finances are available before it opens this page."
-                  : "Choose one part of your finances or Whole Brain before opening this page. Nothing is combined until you make that choice."}
-            </p>
             <div className="mt-6">
               <FinanceScopeBar requireEntity={scopeGateRequiresEntity(scopeGate)} />
             </div>

@@ -36,14 +36,14 @@ try {
     json: {
       challenge: "c3ludGhldGljLWNoYWxsZW5nZQ",
       rp: { id: "127.0.0.1", name: "Synthetic Brain" },
-      user_name: "Morgan Example",
+      user_name: "Fixture Owner",
     },
   }));
 
   await page.goto(new URL("/test/browser/fixtures/passkey-gate.html", harness.origin).href);
   await harness.waitForBrowserBoot(
     page,
-    page.getByRole("heading", { name: "Morgan, your brain is ready", exact: true }),
+    page.getByRole("heading", { name: /your Brain is ready$/ }),
     "owner passkey fixture",
   );
 
@@ -114,7 +114,7 @@ try {
     documentText.includes("only the exact documents they chose")
     && documentText.includes("will not get owner controls or anything else in this Brain")
     && documentText.includes("does not make you an owner of the Brain")
-    && !documentText.includes("your brain is ready")
+    && !/your Brain is ready/i.test(documentText)
     && !documentText.includes("This verifies that you are the owner"));
   check("opening a document invitation does not invoke WebAuthn",
     await documentPage.evaluate(() => window.__passkeyPromptCalls) === 0);

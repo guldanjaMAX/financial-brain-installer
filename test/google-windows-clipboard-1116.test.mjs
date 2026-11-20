@@ -404,7 +404,7 @@ test("macOS keeps the hidden prompt and never touches the clipboard", async () =
   assert.equal(clipboard.state.clears, 0);
 });
 
-test("the Windows briefing and plan say copy, not type; macOS wording is unchanged", () => {
+test("the Windows briefing says copy, macOS says hidden entry, and JSON guidance stays complete", () => {
   const google = TECHNICIAN_STEPS.find((step) => step.id === "google");
   const windowsBriefing = renderTechnicianStepBriefing("google", { platformName: "win32" });
   assert.match(windowsBriefing, /picks each one up from the clipboard by itself/);
@@ -412,7 +412,8 @@ test("the Windows briefing and plan say copy, not type; macOS wording is unchang
   assert.doesNotMatch(windowsBriefing, /hidden terminal prompt/);
   const macBriefing = renderTechnicianStepBriefing("google", { platformName: "darwin" });
   assert.match(macBriefing, /hidden terminal prompt/);
-  assert.equal(macBriefing.includes(google.owner_guidance.owner_only), true);
+  assert.match(macBriefing, /Step 1 - You sign in.*2FA/);
+  assert.doesNotMatch(macBriefing, /The owner signs in/);
 
   const windowsPlan = technicianPlan(manifestPath, { platformName: "win32", intent: "existing_this_computer" });
   const darwinPlan = technicianPlan(manifestPath, { platformName: "darwin", intent: "existing_this_computer" });

@@ -22,9 +22,6 @@ registerHooks({ load(url, context, nextLoad) {
       '  if (unsafe) process.stderr.write("REMOVAL_CAUSE_MUTANT_DECISION\\n");\n' +
       '  return unsafe;\n}');
   }
-  if (mode === "f1" && url.endsWith("/operations/ingest-removal-plan.mjs")) {
-    replace('automatic && !canAutoApplyRemoval(reviewFacts(plan), kind, source)', 'false');
-  }
   if (mode === "f2" && url.endsWith("/operations/load-removal-review.mjs")) {
     const first = source.indexOf('  const explanation =');
     const last = source.indexOf('  return `${label}', first);

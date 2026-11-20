@@ -107,7 +107,7 @@ test("ordinary Drive changes preserve additions and retain a small removal decis
 });
 
 for (const source of ["upload", "gmail", "microsoft"]) {
-  test(`${source} ingest saves accepted work before source/family removal and exact apply`, async () => {
+  test(`${source} ingest saves accepted work and an exact owner removal plan before apply`, async () => {
     const root = realpathSync.native(mkdtempSync(join(tmpdir(), "ingest-source-plan-")));
     const manifestPath = join(root, "manifest.json");
     const manifest = {
@@ -182,7 +182,13 @@ for (const source of ["upload", "gmail", "microsoft"]) {
     try {
       const run = source === "upload" ? cmdIngestLocal : source === "microsoft" ? cmdIngestProvider : cmdIngestRemote;
       const flags = source === "upload" ? { source, path: root } : { from: source, source };
-      await assert.rejects(run(manifest, manifestPath, flags, options), { code: "SAFETY_REVIEW_REQUIRED" });
+      if (source === "gmail") {
+        const result = await run(manifest, manifestPath, flags, options);
+        assert.ok(result.pending_removals > 0, "Gmail exposes the retained owner decision without stopping new mail");
+        assert.equal(state.history_id, "next-history", "the accepted history window advances beside owner review");
+      } else {
+        await assert.rejects(run(manifest, manifestPath, flags, options), { code: "SAFETY_REVIEW_REQUIRED" });
+      }
       assert.ok(accepted > 0);
       assert.ok(store.calls.inventory > 0 && store.calls.preview > 0);
       assert.equal(store.calls.apply, 0);
@@ -259,7 +265,7 @@ test("a changed scan with OCR off preserves its old family and accepts a neighbo
 });
 
 
-test("Calendar cancellation saves an addition but requires a separate exact apply", async () => {
+test("Calendar cancellation saves an addition, marks the retained event and advances without removal", async () => {
   const store = ingestPlanStore();
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "ingest-calendar-plan-")));
   const path = join(root, "manifest.json");
@@ -269,12 +275,21 @@ test("Calendar cancellation saves an addition but requires a separate exact appl
   for (let index = 0; index < 20; index++) store.put(`calendar:item${index}`);
   let accepted = 0;
   let unreviewed = 0;
+  const marked = [], receipts = [];
   const options = {
     withSourceIngestLock: async (_input, run) => run({ assertOwned() {} }),
     resolveBaseUrl: async () => "https://fixture.invalid", resolveAdminKey: () => randomBytes(32).toString("hex"),
     getAccessToken: async () => { throw new Error("unexpected provider request"); },
     removalPlanRequest: store.request, removalPlanRuntime: () => "fixture-runtime",
     listStoredSourceFamilies: store.inventory,
+    markCalendarCancellations: async ({ source, cancellations }) => {
+      assert.equal(source, "calendar");
+      for (const item of cancellations) {
+        assert.ok(store.uids().includes(`calendar:${item.source_id}`), "the cancellation targets retained evidence");
+        marked.push(item.source_id);
+      }
+      return cancellations.length;
+    },
     loadCalendarState: () => state, saveCalendarState: (_path, next) => { state = next; },
     ingestLib: async () => ({ loadState: () => state, saveState: (_path, next) => { state = next; } }),
     googleCalendar: {
@@ -289,21 +304,21 @@ test("Calendar cancellation saves an addition but requires a separate exact appl
         return { created: 1, updated: 0, unchanged: 0, errors: [], refused: [] }; },
     },
     applyDriveRemovals: async ({ uids }) => { unreviewed++; return { applied: uids.length, pending: 0 }; },
-    postSourceReceipt: async () => ({}),
+    postSourceReceipt: async (_base, _key, receipt) => receipts.push(receipt),
   };
   try {
-    let stopped;
-    try { await cmdIngestCalendar(manifest, path, {}, options); } catch (error) { stopped = error; }
+    const result = await cmdIngestCalendar(manifest, path, {}, options);
     assert.equal(accepted, 1);
+    assert.deepEqual(marked, ["item0"], "the cancellation decision was reached");
+    assert.equal(result.cancelled, 1);
     assert.equal(unreviewed, 0, "ordinary Calendar cancellation must not call forget");
-    assert.equal(stopped?.code, "SAFETY_REVIEW_REQUIRED");
-    assert.deepEqual(state.ingest_removal_plan.targets, ["calendar:item0"]);
-    assert.equal(state.primary.sync_token, "prior");
-    await cmdIngestCalendar(manifest, path, { source: "calendar", "apply-removals": state.ingest_removal_plan.fingerprint }, options);
-    assert.equal(store.calls.apply, 1);
+    assert.equal(state.ingest_removal_plan, undefined);
+    assert.equal(store.calls.preview, 0);
+    assert.equal(store.calls.apply, 0);
     assert.ok(store.uids().includes("calendar:added"));
-    assert.equal(store.uids().includes("calendar:item0"), false);
-    assert.equal(state.primary.sync_token, "prior");
+    assert.ok(store.uids().includes("calendar:item0"), "the cancelled event stays searchable");
+    assert.equal(state.primary.sync_token, "next");
+    assert.deepEqual(receipts.map(receipt => receipt.status), ["indexing", "ready"]);
   } finally { store.db.close(); rmSync(root, { recursive: true, force: true }); }
 });
 

@@ -11,7 +11,9 @@ const migration = readFileSync(new URL("../migrations/d1/0059_document_family_in
 function fixture({ upgrade = false, path = ":memory:" } = {}) {
   const db = new DatabaseSync(path);
   for (const name of readdirSync(new URL("../migrations/d1/", import.meta.url)).filter(n => n.endsWith(".sql")).sort()) {
-    if (!upgrade || !name.startsWith("0059_")) db.exec(readFileSync(new URL(`../migrations/d1/${name}`, import.meta.url), "utf8"));
+    // 0070's reload guard sits on the 0059 table, so an upgrade fixture that
+    // withholds 0059 withholds it too; a real Brain always has both, in order.
+    if (!upgrade || !(name.startsWith("0059_") || name.startsWith("0070_"))) db.exec(readFileSync(new URL(`../migrations/d1/${name}`, import.meta.url), "utf8"));
   }
   db.exec("INSERT INTO install_state(id,client_slug,product_version,schema_version,installed_at) VALUES(1,'fixture','0.0.0',58,'2026-01-01T00:00:00Z')");
   const reads = [];

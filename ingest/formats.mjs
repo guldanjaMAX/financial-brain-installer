@@ -581,7 +581,7 @@ register(".xls", (buf, { name } = {}) => sheetsToText(buf, name), "spreadsheet",
  * disagreeing about what a message says.
  */
 export async function parseEmailMessage(buf) {
-  const mail = await new PostalMime().parse(buf);
+  const mail = await new PostalMime({ maxHeadersSize: 256 * 1024 }).parse(buf);
   const head = [
     mail.from ? `From: ${mail.from.name || ""} <${mail.from.address || ""}>`.trim() : null,
     mail.to?.length ? `To: ${mail.to.map((a) => a.address).join(", ")}` : null,

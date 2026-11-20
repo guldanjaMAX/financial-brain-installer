@@ -1,6 +1,8 @@
 node_modules/
 # Generated lane homes, fixture credentials, caches and receipts stay local.
 /.lane-scratch/
+# Offline lock-lane copies, synthetic homes and receipts stay local.
+/.l30-08*/
 /home-test/
 .env
 .env.*
@@ -34,6 +36,13 @@ eval/eval.config.local.json
 # They contain no credentials, but they are operational state rather than code.
 .brain-migration-*.json
 .brain-migration-*.json.tmp-*
+
+# Cleanup review and crash-recovery files contain private document identities.
+*.clean-plan.json
+*.clean-plan.json.*.tmp
+*.progress.json
+*.progress.json.*.tmp
+*.already-gone.txt
 
 # Connector cursors and folder indexes contain private source IDs. They are
 # machine-local operational state and must never become a tracked artifact.
@@ -129,3 +138,7 @@ machine-prep/installers/windows/handoff-windows.url
 
 # Disposable offline phase-1 probes, pinned input copies and receipts.
 /.newest-p1/
+
+# Offline confidence-presentation probes and synthetic CLI home.
+/.conf-hide-evidence/
+/home-conf-hide/

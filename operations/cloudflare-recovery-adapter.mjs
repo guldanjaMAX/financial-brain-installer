@@ -423,7 +423,7 @@ const RECOVERY_TEST_HUMAN_FIELD_GATES = Object.freeze([
 const RECOVERY_TEST_FIELD_IDENTITY = Object.freeze({
   clientSlug: "v048-field-proof",
   clientDisplayName: "Synthetic Field Gate v0.4.8",
-  productVersion: "0.4.29",
+  productVersion: "0.4.31",
   sourceResource: "brain-test-v048-field-source-recovery-gate-a48f1101",
   targetResource: "brain-test-v048-field-target-recovery-gate-a48f1102",
   sourceAdminKeySecret:
@@ -666,6 +666,10 @@ export const RECOVERY_DURABLE_TABLES = Object.freeze([
   "bank_account_coverage_intervals",
   "plaid_replacement_audit",
   "plaid_replacement_balance_evidence",
+  // Schema 70: removals the owner approved through "Clean my Brain". Restored
+  // last, after the family index it guards, so the reload guard never fires
+  // while the corpus itself is being restored.
+  "owner_removals",
 ]);
 
 /**
@@ -959,6 +963,7 @@ const SCHEMA_60_TABLES = Object.freeze([
 const SCHEMA_62_TABLES = Object.freeze(["fin_expectations"]);
 const SCHEMA_63_TABLES = Object.freeze(["bank_feed_health"]);
 const SCHEMA_65_TABLES = Object.freeze(["retained_ingest_stages", "retained_ingest_activations"]);
+const SCHEMA_70_TABLES = Object.freeze(["owner_removals"]);
 const SCHEMA_66_TABLES = Object.freeze(["plaid_item_replacements", "plaid_replacement_bindings", "plaid_replacement_events", "plaid_replacement_decisions", "plaid_replacement_aliases", "bank_account_coverage_intervals", "plaid_replacement_audit", "plaid_replacement_balance_evidence"]);
 
 const AGGREGATE_FIELDS = Object.freeze([
@@ -987,7 +992,7 @@ const AGGREGATE_FIELDS = Object.freeze([
      ...SCHEMA_53_TABLES, ...SCHEMA_55_TABLES, ...SCHEMA_56_TABLES,
      ...SCHEMA_57_TABLES, ...SCHEMA_58_TABLES, ...SCHEMA_59_TABLES,
      ...SCHEMA_60_TABLES, ...SCHEMA_62_TABLES, ...SCHEMA_63_TABLES, ...SCHEMA_65_TABLES,
-     ...SCHEMA_66_TABLES].includes(table)
+     ...SCHEMA_66_TABLES, ...SCHEMA_70_TABLES].includes(table)
       ? "SELECT 0"
       : `SELECT COUNT(*) FROM ${quoteIdentifier(table)}`,
   ]),
@@ -1632,7 +1637,7 @@ function inspectNpmPackedExecutionInventory(raw, code) {
       }
     }
     if (!packageJson || typeof packageJson !== "object" || Array.isArray(packageJson) ||
-        packageJson.name !== "brain-installer" || packageJson.version !== "0.4.29") refuse(code);
+        packageJson.name !== "brain-installer" || packageJson.version !== "0.4.31") refuse(code);
     return Object.freeze({
       name: packageJson.name,
       version: packageJson.version,
@@ -1908,7 +1913,7 @@ function inspectTestBootstrapCandidateEvidence(request, plan, pins) {
   ], code);
   if (!/^[0-9a-f]{40}$/.test(String(source.head_sha || "")) ||
       !/^[0-9a-f]{40}$/.test(String(source.tree_sha || "")) ||
-      source.package_name !== "brain-installer" || source.package_version !== "0.4.29" ||
+      source.package_name !== "brain-installer" || source.package_version !== "0.4.31" ||
       !SHA256_RE.test(String(source.package_json_sha256 || "")) ||
       !SHA256_RE.test(String(source.package_lock_sha256 || "")) ||
       source.working_tree_clean !== true || source.shallow_repository !== false ||
@@ -3139,7 +3144,7 @@ function readCompletedTestBootstrapCheckpoint(pins, plan) {
         candidateEvidence.seedVectorCount !== candidateEvidence.seedChunkCount ||
         candidateEvidence.seedReplayUnchangedDocuments !==
           DISPOSABLE_RECOVERY_SEED_DOCUMENTS ||
-        candidateEvidence.packageFilename !== "brain-installer-0.4.29.tgz" ||
+        candidateEvidence.packageFilename !== "brain-installer-0.4.31.tgz" ||
         candidateEvidence.wranglerRuntimeDirectory !==
           LOCKED_WRANGLER_RUNTIME_DIRECTORY ||
         candidateEvidence.wranglerRuntimeEntrypoint !== LOCKED_WRANGLER_ENTRYPOINT ||
@@ -4515,7 +4520,8 @@ function expectedRecoveryTables(migrations) {
     (latest >= 62 || !SCHEMA_62_TABLES.includes(table)) &&
     (latest >= 63 || !SCHEMA_63_TABLES.includes(table)) &&
     (latest >= 65 || !SCHEMA_65_TABLES.includes(table)) &&
-    (latest >= 66 || !SCHEMA_66_TABLES.includes(table)));
+    (latest >= 66 || !SCHEMA_66_TABLES.includes(table)) &&
+    (latest >= 70 || !SCHEMA_70_TABLES.includes(table)));
 }
 
 // The v0.4.8 disposal proof is a frozen campaign contract. Later product

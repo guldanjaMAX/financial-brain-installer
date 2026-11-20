@@ -8,7 +8,7 @@ import {
 } from "../lib/api";
 import { activeScopeLabel, orderedScopes } from "../lib/finance";
 import { defaultEntityScope } from "../lib/owner";
-import { Attention } from "./ui";
+import { Attention, TruthNote } from "./ui";
 import { ScopeBar } from "./ScopeBar";
 
 export type ScopeStatus = "loading" | "ready" | "not_installed" | "unavailable";
@@ -93,7 +93,7 @@ export function scopeStatusMessage(status: ScopeStatus, requireEntity: boolean):
   if (status === "loading") {
     return {
       title: "Checking your financial list",
-      detail: "This usually takes only a moment. No financial entity will be chosen for you.",
+      detail: "This usually takes only a moment.",
     };
   }
   if (status === "not_installed") {
@@ -235,13 +235,16 @@ export function FirstEntitySetup({
   };
 
   return (
-    <div className="rounded-2xl border border-amber-300 bg-amber-50 px-4 py-4 text-amber-950 sm:px-5">
-      <p className="text-[15px] font-semibold">Add your first financial entity</p>
-      <p className="mt-1.5 text-[13.5px] leading-relaxed">
-        Nothing has been guessed or combined. Enter one exact person, household, business, trust,
+    <div className="rounded-2xl border border-line bg-card px-4 py-4 text-ink sm:px-5">
+      <p className={`text-[12.5px] font-semibold ${review ? "text-good" : "text-accent"}`}>
+        {review ? "✓ STEP 1 of 2 · Name and type confirmed" : "STEP 1 of 2"}
+      </p>
+      {!review && <p className="mt-1 text-[20px] font-semibold">Add your first person or business</p>}
+      {!review && <p className="mt-1.5 text-[13.5px] leading-relaxed text-ink-soft">
+        Enter one exact person, household, business, trust,
         property, or investment so Financial Brain knows where future records belong. This does not
         import an account, decide a tax treatment, or claim that your Financial Map is complete.
-      </p>
+      </p>}
       {!review ? (
         <div className="mt-4 grid gap-3 sm:grid-cols-[minmax(0,1fr)_11rem_auto] sm:items-end">
           <label className="text-[13px] font-medium">
@@ -250,8 +253,8 @@ export function FirstEntitySetup({
               value={legalName}
               maxLength={160}
               onChange={(event) => { setLegalName(event.target.value); edit(); }}
-              className="mt-1.5 w-full rounded-lg border border-amber-400 bg-white px-3 py-2 text-[14px] text-ink outline-none focus:border-accent"
-              placeholder="For example, Rivera Household"
+              className="mt-1.5 min-h-11 w-full rounded-lg border border-line-strong bg-card px-3 py-2 text-[16px] text-ink outline-none focus:border-accent"
+              placeholder="For example, My household"
             />
           </label>
           <label className="text-[13px] font-medium">
@@ -259,7 +262,7 @@ export function FirstEntitySetup({
             <select
               value={kind}
               onChange={(event) => { setKind(event.target.value as FirstEntityKind | ""); edit(); }}
-              className="mt-1.5 w-full rounded-lg border border-amber-400 bg-white px-3 py-2 text-[14px] text-ink outline-none focus:border-accent"
+              className="mt-1.5 min-h-11 w-full rounded-lg border border-line-strong bg-card px-3 py-2 text-[16px] text-ink outline-none focus:border-accent"
             >
               <option value="" disabled>Choose one</option>
               {FIRST_ENTITY_KINDS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
@@ -268,14 +271,15 @@ export function FirstEntitySetup({
           <button
             type="button"
             onClick={prepare}
-            className="rounded-lg bg-amber-900 px-3.5 py-2 text-[13.5px] font-semibold text-white hover:brightness-95"
+            className="min-h-11 rounded-lg bg-accent px-3.5 py-2 text-[15px] font-semibold text-white hover:brightness-95"
           >
             Review
           </button>
         </div>
       ) : (
-        <div className="mt-4 rounded-xl border border-amber-400 bg-white px-4 py-4">
-          <p className="text-[13px] font-semibold uppercase tracking-wide text-ink-soft">Review before adding</p>
+        <div className="mt-4 rounded-xl border border-line bg-card px-4 py-4">
+          <p className="text-[12.5px] font-semibold text-accent">STEP 2 of 2</p>
+          <p className="mt-1 text-[20px] font-semibold">Review before adding</p>
           <p className="mt-2 text-[14px]"><strong>{review.legalName}</strong> will be added as a {kindLabel(review.kind).toLowerCase()} based only on your answer.</p>
           <p className="mt-1.5 text-[12.5px] leading-relaxed text-ink-soft">
             This creates one owner-confirmed place for records. Review it carefully. If it needs correction
@@ -287,7 +291,7 @@ export function FirstEntitySetup({
               type="button"
               disabled={busy}
               onClick={() => { void create(); }}
-              className="rounded-lg bg-accent px-3.5 py-2 text-[13.5px] font-semibold text-white disabled:opacity-50"
+              className="min-h-11 rounded-lg bg-accent px-3.5 py-2 text-[15px] font-semibold text-white disabled:opacity-50"
             >
               {busy ? "Adding" : "Add this financial entity"}
             </button>
@@ -295,7 +299,7 @@ export function FirstEntitySetup({
               type="button"
               disabled={busy}
               onClick={edit}
-              className="rounded-lg border border-line px-3.5 py-2 text-[13.5px] font-semibold text-ink disabled:opacity-50"
+              className="min-h-11 rounded-lg border border-line-strong px-3.5 py-2 text-[15px] font-semibold text-ink disabled:opacity-50"
             >
               Go back
             </button>
@@ -458,7 +462,32 @@ export function FinanceScopeBar({ unavailableMessage = true, requireEntity = fal
   requireEntity?: boolean;
 }) {
   const { entities, scope, setScope, scopeChoiceMade, status, refresh } = useFinanceScope();
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    setSlow(false);
+    if (status !== "loading") return;
+    // A normal read needs time before a manual retry is useful. Clear on
+    // completion or unmount so an old wait cannot affect the next screen.
+    const timer = setTimeout(() => setSlow(true), 10_000);
+    return () => clearTimeout(timer);
+  }, [status]);
   const statusMessage = scopeStatusMessage(status, requireEntity);
+  if (status === "loading") {
+    return unavailableMessage ? (
+      <TruthNote>
+        <p role="status"><span>{statusMessage!.title}</span>. {statusMessage!.detail}</p>
+        {slow && (
+          <button
+            type="button"
+            onClick={() => { void refresh(); }}
+            className="mt-3 min-h-11 rounded-xl border border-line-strong px-3.5 py-2 text-[15px] font-semibold text-ink"
+          >
+            Check again
+          </button>
+        )}
+      </TruthNote>
+    ) : null;
+  }
   if (statusMessage) {
     return unavailableMessage ? (
       <Attention>
@@ -467,7 +496,7 @@ export function FinanceScopeBar({ unavailableMessage = true, requireEntity = fal
         <button
           type="button"
           onClick={() => { void refresh(); }}
-          className="mt-3 rounded-xl border border-current px-3.5 py-2 text-[13.5px] font-semibold hover:bg-white/50"
+          className="mt-3 min-h-11 rounded-xl border border-current px-3.5 py-2 text-[15px] font-semibold hover:bg-white/50"
         >
           Check again
         </button>
