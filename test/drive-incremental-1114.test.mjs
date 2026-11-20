@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cmdIngestRemote, credentialScannerFingerprint, describeLoadResult } from "../brain.mjs";
 import { planDailyRefresh } from "../operations/daily-refresh-plan.mjs";
+import { runDailyRefresh } from "../operations/daily-refresh-run.mjs";
 import * as drive from "../connectors/google-drive.mjs";
 import { batchStream, splitOversized, prefetch, loadState as realLoadState, saveState as realSaveState } from "../ingest/run.mjs";
 
@@ -87,6 +88,97 @@ test("first run seeds a token without a mirror walk or inventory and preserves i
   assert.equal(h.sent.length, 0);
   assert.equal(result.seeded, true);
   assert.equal(h.receipts.at(-1).complete_sweep, false);
+});
+
+for (const decisions of [0, 2]) {
+  test(`quiet saved Drive feed is up to date with ${decisions} retained owner decisions`, async () => {
+    const targets = Array.from({ length: decisions }, (_, i) => `drive:retained-${i}`);
+    const h = harness({ state: { sync_token: "old-page", ingest_removal_plan: { targets },
+      done: Object.fromEntries(targets.map(uid => [uid, "prior-version"])) },
+      pages: { "old-page": { changes: [], newStartPageToken: "done-page" } } });
+    let output = "";
+    h.options.write = value => { output += value; };
+    const result = await h.run();
+    assert.equal(h.calls.filter(c => c.id === "changes").length, 1, "terminal feed decision reached");
+    assert.equal(result.scanned, 0);
+    assert.equal(result.created + result.updated + result.unchanged + result.failed + result.refused, 0);
+    assert.equal(result.feed_caught_up, true);
+    assert.equal(h.state.sync_token, "done-page");
+    assert.ok(h.saves.some(saved => saved.sync_token === "done-page" && !saved.drive_change_page), "advanced token was persisted");
+    assert.equal(result.complete, true, "retained decisions do not block the current changes check");
+    assert.equal(describeLoadResult(result).refreshSucceeded, true, "load reports this check as successful");
+    assert.equal(result.pending_removals, decisions);
+    for (const uid of targets) {
+      assert.equal(h.state.drive_pending_removals[uid].reason, "legacy_owner_review");
+      assert.equal(h.state.done[uid], "prior-version", "retained text checkpoint survives");
+    }
+    assert.equal(h.sent.length, 0);
+    assert.equal(h.receipts.at(-1).status, "ready");
+    assert.equal(h.receipts.at(-1).provider_check_complete, true);
+    assert.equal(h.receipts.at(-1).complete_sweep, false, "quiet check never certifies historical coverage");
+    assert.match(output, decisions ? /up to date, 2 decisions waiting/ : /up to date/);
+  });
+}
+
+test("a quiet feed with a real held file failure cannot borrow retained-decision success", async () => {
+  const h = harness({ state: { sync_token: "old-page",
+    drive_pending_removals: { "drive:retained": { id: "retained", reason: "legacy_owner_review" } },
+    drive_failures: { "drive:failed": { id: "failed", code: "download_limit", reason: "File exceeds the size limit.", retryable: false } } },
+    pages: { "old-page": { changes: [], newStartPageToken: "done-page" } } });
+  let output = "";
+  h.options.write = value => { output += value; };
+  const result = await h.run();
+  assert.equal(h.calls.filter(c => c.id === "changes").length, 1, "quiet feed was actually checked");
+  assert.equal(result.feed_caught_up, true);
+  assert.equal(result.complete, false);
+  assert.equal(result.failures, 1);
+  assert.equal(h.state.drive_failures["drive:failed"].code, "download_limit");
+  assert.equal(h.receipts.at(-1).status, "error");
+  assert.equal(h.receipts.at(-1).docs_failed, 1);
+  assert.equal(describeLoadResult(result).refreshSucceeded, false);
+  assert.doesNotMatch(output, /up to date/);
+});
+
+test("the real Drive receipt lets daily verify a quiet feed without certifying historical coverage", async () => {
+  const outcomes = [];
+  for (const fault of [false, true]) {
+    const h = harness({ state: { sync_token: "old-page", ingest_removal_plan: { targets: ["drive:retained"] },
+      ...(fault ? { drive_failures: { "drive:failed": { id: "failed", code: "download_limit", retryable: false } } } : {}) },
+      pages: { "old-page": { changes: [], newStartPageToken: "done-page" } } });
+    const prior = "2026-10-01T00:00:00.000Z";
+    let reads = 0, runs = 0;
+    const daily = await runDailyRefresh({
+      plan: { ready: true, enabled: true, identity: { id: "v1-quiet-drive" }, max_runtime_minutes: 45,
+        sources: [{ key: "google_drive", source_names: ["drive"], run_key: "google_drive",
+          class: "machine-pull", owner: "daily-task", status: "ready" }] },
+      acquireLock: () => ({ assertOwned() {}, release() {} }),
+      runSource: async () => {
+        runs++;
+        const result = await h.run();
+        const described = describeLoadResult(result);
+        return { status: described.partial ? "partial" : "complete", loaded: 1, pending_removals: result.pending_removals };
+      },
+      readFreshness: async () => {
+        reads++;
+        const receipt = h.receipts.at(-1);
+        // Project the producer fields into the durable inventory shape. No
+        // acceptance date is invented for a measured zero-document check.
+        return { drive: { kind: "drive", last_successful_run_at: prior,
+          latest_run: receipt ? { ...receipt, metrics_version: 1,
+            outcome: receipt.status === "error" ? "failed" : "empty", finished_at: receipt.completed_at } : { finished_at: prior } } };
+      },
+      now: () => new Date(stamp),
+    });
+    assert.equal(runs, 1);
+    assert.equal(reads, 2, "both durable observations and the real source execution reached daily verification");
+    assert.equal(h.calls.filter(c => c.id === "changes").length, 1);
+    assert.equal(h.saves.at(-1).sync_token, "done-page");
+    assert.equal(h.receipts.at(-1).complete_sweep, false);
+    assert.equal(daily.sources[0].freshness_advanced, false);
+    assert.equal(daily.sources[0].last_successful_run_at_after, prior);
+    outcomes.push([daily.status, daily.sources[0].check_verified, daily.sources[0].no_change]);
+  }
+  assert.deepEqual(outcomes, [["complete", true, true], ["failed", false, false]], "held file failures remain a red control");
 });
 
 test("a stale saved token and changed policy still use scoped changes and stable document identity", async () => {

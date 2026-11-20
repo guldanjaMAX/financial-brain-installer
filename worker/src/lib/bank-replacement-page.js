@@ -1,40 +1,48 @@
 /** Owner-authenticated page. Only operation ids and the short-lived Link token
  * live in session storage; financial review rows are rendered as text nodes. */
+import { OWNER_PAGE_CSS } from "./owner-page-style.js";
+
 export function replacementPage() {
   const nonce=crypto.randomUUID();
   const html=`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Recover a bank connection</title><style nonce="${nonce}">
-*{box-sizing:border-box}body{margin:0;background:#faf9f6;color:#242c29;font:17px/1.6 system-ui,sans-serif}main{max-width:850px;margin:3rem auto;padding:0 1.2rem 4rem}h1{font-size:2rem;line-height:1.2}section{background:white;border:1px solid #ddd;border-radius:12px;padding:1.2rem;margin:1rem 0}button,select,input{font:inherit;max-width:100%;padding:.6rem;margin:.4rem .4rem .4rem 0}button{background:#244f43;color:white;border:0;border-radius:6px;cursor:pointer}button:disabled{opacity:.5;cursor:wait}:focus-visible{outline:3px solid #a04e12;outline-offset:3px}label{display:block}p{overflow-wrap:anywhere}.row{border-top:1px solid #ddd;padding:.8rem 0}.note{color:#505b55}#message{padding:.6rem;background:#fff0d5}a{color:#244f43}@media(max-width:540px){main{margin:1.5rem auto}h1{font-size:1.6rem}button,select{width:100%}}
-</style></head><body><main><a href="/app">Back to your Brain</a><h1>Recover a bank connection</h1>
+${OWNER_PAGE_CSS}
+[hidden]{display:none!important}main>p{margin-top:var(--space-3)}section{margin:var(--space-4) 0}button,select,input{font:inherit;max-width:100%;margin:var(--space-2) var(--space-2) var(--space-2) 0}button{min-height:var(--control-h)}button:disabled{opacity:.5;cursor:wait}label{display:block;margin-top:var(--space-3)}.row{display:block;border-top:1px solid var(--color-line);padding:var(--space-4) 0}.note{color:var(--color-ink-soft);font-size:var(--text-sm)}#message{padding:var(--space-3) var(--space-4);border:1px solid var(--color-line);border-radius:var(--radius-control);background:var(--color-neutral-bg)}#message:empty,section:empty{display:none}.back{min-height:var(--control-h);display:inline-flex;align-items:center}#content h2{font-size:var(--text-md);margin-top:var(--space-4)}#content p+p{margin-top:var(--space-3)}@media(max-width:540px){button,select{width:100%}}
+</style></head><body><main class="task"><a class="back" href="/app">Back to your Brain</a><h1 class="h1">Recover a bank connection</h1>
 <p>Your saved accounts, transactions and older months stay available throughout recovery. Nothing is deleted.</p>
 <p class="note">The old bank permission is not revoked. Missing activity can affect recent answers; its dollar impact is unknown until reviewed.</p>
-<p id="message" role="status" aria-live="polite">Checking this saved connection.</p><section id="content"></section>
-<button id="resume">Continue this recovery</button><button id="cancel">Cancel before bank sign-in</button>
+<p id="message" role="status" aria-live="polite">Checking this saved connection.</p><p id="error-code" class="note" hidden></p><section class="card" id="content"></section>
+<button class="btn btn-secondary" id="resume" hidden>Continue this recovery</button><button class="btn btn-secondary" id="cancel" hidden>Cancel before bank sign-in</button>
 <script nonce="${nonce}">
 const $=id=>document.getElementById(id), query=new URLSearchParams(location.search), item=query.get('item_ref');
-const storageKey='bank-replacement:'+item;let op=query.get('operation_ref') || sessionStorage.getItem(storageKey),plan=null,mappings=[],choices=[],intervals=[],linkHandler=null;
-const say=text=>$('message').textContent=text;
+const storageKey='bank-replacement:'+item;let op=query.get('operation_ref') || sessionStorage.getItem(storageKey),plan=null,mappings=[],choices=[],intervals=[],linkHandler=null,primaryAction=null;
+const say=text=>{$('message').textContent=text;$('error-code').textContent='';$('error-code').hidden=true;};
+const recoveryFallback='This recovery could not be read. Reload the page once; your saved history is kept.';
+function recoveryError(data,fallback){const e=Error(typeof data?.detail==='string' && data.detail ? data.detail : fallback);e.code=typeof data?.code==='string' && data.code ? data.code : 'BANK_RECOVERY_UNAVAILABLE';return e;}
 function text(tag,value,parent=$('content')){const e=document.createElement(tag);e.textContent=value;parent.append(e);return e;}
-function button(label,fn,parent=$('content')){const e=text('button',label,parent);e.type='button';e.onclick=()=>run(fn);return e;}
-async function run(fn){for(const b of document.querySelectorAll('button'))b.disabled=true;try{await fn();}catch(e){say(e.message);}finally{for(const b of document.querySelectorAll('button'))b.disabled=false;}}
-async function post(action,body={}){const r=await fetch('/api/bank-feed/replacement/'+action,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-Brain-App':'1'},body:JSON.stringify({operation_ref:op,...body})});const data=await r.json();if(!r.ok)throw Error(data.detail);return data;}
+function button(label,fn,parent=$('content'),primary=true){const e=text('button',label,parent);e.type='button';if(primary){if(primaryAction)primaryAction.className='btn btn-secondary';primaryAction=e;}e.className=primary?'btn btn-primary':'btn btn-secondary';e.onclick=()=>run(fn);return e;}
+async function run(fn){for(const b of document.querySelectorAll('button'))b.disabled=true;try{await fn();}catch(e){say(e.message || recoveryFallback);$('error-code').textContent='Code '+(e.code || 'BANK_RECOVERY_UNAVAILABLE');$('error-code').hidden=false;}finally{for(const b of document.querySelectorAll('button'))b.disabled=false;}}
+async function read(url,options,fallback=recoveryFallback){let r,data;try{r=await fetch(url,options);data=await r.json();}catch{throw recoveryError(null,fallback);}if(!r.ok)throw recoveryError(data,fallback);return data;}
+async function post(action,body={}){return read('/api/bank-feed/replacement/'+action,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-Brain-App':'1'},body:JSON.stringify({operation_ref:op,...body})});}
 async function load(){
- $('content').replaceChildren();
+ $('content').replaceChildren();primaryAction=null;$('resume').hidden=true;$('resume').textContent='Continue this recovery';$('cancel').hidden=true;
  if(!op){plan=await post('preview',{item_ref:item});say(plan.diagnostic.detail);text('p',plan.detail);
+  $('resume').hidden=false;
   for(const a of plan.accounts)text('p',a.name+' ending '+a.last4+' · '+a.type+' · '+a.currency);
   if(plan.existing_operation){op=plan.existing_operation;sessionStorage.setItem(storageKey,op);return load();}
   if(!plan.eligible){text('p','This connection needs a different recovery check before replacement. Ask the installer to review its custody report.');return;}
   const label=text('label',''),check=document.createElement('input');check.type='checkbox';label.append(check,document.createTextNode('The original protected access has been checked and cannot be recovered. Keep this history and prepare a new bank sign-in.'));
   button('Confirm and prepare sign-in',async()=>{if(!check.checked)throw Error('Confirm the custody review before continuing.');const result=await post('approve',{item_ref:item,approve:plan.plan_hash,expires_at:plan.expires_at,confirm_unrecoverable:true});op=result.operation_ref;sessionStorage.setItem(storageKey,op);await load();});return;
  }
- const r=await fetch('/api/bank-feed/replacement/status?operation_ref='+encodeURIComponent(op),{credentials:'same-origin',headers:{'X-Brain-App':'1'}});
- if(!r.ok)throw Error('Recovery status could not be read. Keep this recovery and try again.');
- const state=await r.json();say(state.detail);text('p',state.state==='history_review' ? 'Review the same accounts and statement occurrences below.' : state.state==='active' ? 'The reviewed handover is saved.' : 'Continue this saved recovery.');
+ // A failed status read may only retry this reference, never prepare a new operation.
+ let state;try{state=await read('/api/bank-feed/replacement/status?operation_ref='+encodeURIComponent(op),{credentials:'same-origin',headers:{'X-Brain-App':'1'}},'Recovery status could not be read. Keep this recovery and try again.');}
+ catch(e){$('resume').textContent='Retry recovery status';$('resume').hidden=false;throw e;}
+ say(state.detail);text('p',state.state==='history_review' ? 'Review the same accounts and statement occurrences below.' : state.state==='active' ? 'The reviewed handover is saved.' : 'Continue this saved recovery.');$('resume').hidden=false;
  $('cancel').hidden=!['owner_approved','link_pending'].includes(state.state);
  if(['owner_approved','link_pending'].includes(state.state))button('Sign in to the bank',openLink);
  if(['candidate_staged','active'].includes(state.state))button('Fetch the next history page',async()=>{await post('stage');await load();});
  if(state.state==='history_review' || state.can_resume_review || state.open_review_count>0)await review(state.state==='rolled_back');
- if(state.published_revision>0 && state.state!=='rolled_back')button('Review rollback to the old connection',async()=>{const p=await post('rollback');text('p',p.detail);button('Confirm rollback and keep all saved activity',async()=>{await post('rollback',{approve:p.plan_hash});await load();});});
+ if(state.published_revision>0 && state.state!=='rolled_back')button('Review rollback to the old connection',async()=>{const p=await post('rollback');text('p',p.detail);button('Confirm rollback and keep all saved activity',async()=>{await post('rollback',{approve:p.plan_hash});await load();});},$('content'),false);
  if(['exchange_claimed','outcome_unknown'].includes(state.state))text('p','Keep this recovery reference. The installer must recover the same saved result; starting a new sign-in can create an untracked bank permission.');
 }
 async function sdk(){if(window.Plaid)return window.Plaid;await new Promise((resolve,reject)=>{const script=document.createElement('script');script.src='https://cdn.plaid.com/link/v2/stable/link-initialize.js';script.onload=resolve;script.onerror=()=>reject(Error('The bank sign-in screen could not load. Saved history is kept.'));document.head.append(script);});return window.Plaid;}

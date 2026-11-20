@@ -421,13 +421,12 @@ try {
       JSON.stringify({ checks: run.fetchImpl.plaidCheckCount(), replaced: run.result?.keys_replaced }));
     check("CONNECT BANK, PROVIDER ABSENT: output uses owner wording and never prints a value",
       FEED_NAMES.every((name) => !run.output.includes(name)) &&
-      /Plaid accepted both keys/.test(run.output) &&
+      /✅ Plaid keys saved to your Brain/.test(run.output) &&
       [PLAID_CLIENT_ID, PLAID_SECRET].every((value) => !run.output.includes(value)),
       "output withheld: it would be the leak being tested");
-    check("CONNECT BANK, PROVIDER ABSENT: owner card explains the return address and key custody",
-      /Plaid needs to know where to send you back/.test(run.output) &&
-      /Copy this return address into Plaid\. It is not a page to open/.test(run.output) &&
-      /https:\/\/dashboard\.plaid\.com\/team\/api/.test(run.output) &&
+    check("CONNECT BANK, PROVIDER ABSENT: one return-address line explains key custody",
+      /Plaid's return address: https:\/\/fixture-brain\.example\.workers\.dev\/app\/connect\/bank \(added in Plaid's API page\)/.test(run.output) &&
+      !/Plaid needs to know where to send you back|not a page to open/.test(run.output) &&
       /Your Brain needs your two Plaid keys: the client_id, then the Sandbox or Production secret/.test(run.output) &&
       /saved to your Brain, not to this computer/.test(run.output), run.output);
   }

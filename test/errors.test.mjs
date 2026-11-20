@@ -68,6 +68,9 @@ let observedConfigFingerprint = "";
 const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") + n + (c ? "" : "  " + String(d).slice(0, 260))); if (!c) fail++; };
 
 const strip = (s) => String(s).replace(/\x1b\[[0-9;]*m/g, "");
+// A green status line starts with ✓ (older releases printed ok, and "·" when
+// piped). The local-refused control below proves a real run prints this line.
+const GREEN_EMPTY_INGEST_SUMMARY = /^\s*(?:ok|✓)\s+0 created, 0 updated/mu;
 const journalEvents = (text) => typeof text === "string" && text.trim()
   ? text.trim().split("\n").map((line) => JSON.parse(line))
   : [];
@@ -203,8 +206,8 @@ function cli(args, env = {}, options = {}) {
 
 {
   const { successMark } = await import("../brain.mjs");
-  check("the ok status word is reserved for an interactive terminal",
-    successMark(false) === "·" && successMark(true).includes("ok"),
+  check("success is a check in both piped and interactive output",
+    successMark(false) === "✓" && strip(successMark(true)) === "✓",
     JSON.stringify({ piped: successMark(false), tty: successMark(true) }));
   const source = readFileSync(CLI, "utf8");
   check("post-deploy owner guidance goes straight to health",
@@ -458,7 +461,7 @@ for (const platform of new Set([process.platform, "win32", "darwin", "linux"])) 
   check("a known local document failure is not dressed up as an installer crash",
     !/unexpected error|This is a bug in the installer/.test(r.out), r.out.slice(-400));
   check("a failed local ingest never prints a green success summary",
-    !/ok\s+0 created, 0 updated/.test(r.out), r.out.slice(-500));
+    !GREEN_EMPTY_INGEST_SUMMARY.test(r.out), r.out.slice(-500));
   check("a failed local ingest creates a sanitized retry note",
     journalEvents(r.journal).length === 1 &&
       journalEvents(r.journal)[0]?.error_code === "INGEST_FAILED" &&
@@ -511,6 +514,8 @@ for (const platform of new Set([process.platform, "win32", "darwin", "linux"])) 
     r.code === 0 && /refused for carrying live credentials/.test(r.out) &&
       !/ingest is incomplete/.test(r.out), r.out.slice(-600));
   check("a successful policy refusal does not create an issue note", r.journal === "", r.journal);
+  check("CONTROL: a successful local ingest prints the green summary the failed-ingest guard refuses",
+    GREEN_EMPTY_INGEST_SUMMARY.test(r.out), r.out.slice(-600));
   rmSync(r.dir, { recursive: true, force: true });
 }
 

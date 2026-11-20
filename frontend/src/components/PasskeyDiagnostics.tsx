@@ -32,7 +32,7 @@ export function PasskeyDiagnostics() {
       title="Passkey checks"
       blurb="These checks show whether passkeys are set up and whether the Brain recorded a successful passkey action. The record does not identify where that action happened."
     >
-      {error && <Attention>{error}</Attention>}
+      {error && <Attention inset>{error}</Attention>}
       {!status && !error && <Empty>Reading privacy-safe passkey checks.</Empty>}
       {status && <PasskeyStatusDetails status={status} />}
     </Section>

@@ -747,7 +747,7 @@ const d1Backend = {
 
   async search(env, {
     query, limit, filters = {}, weights = {}, rrfK = 60, access = null, scope = null,
-    projectionReadiness = null, supplementalFilters = [], timing = null, readPlan = "standard",
+    projectionReadiness = null, supplementalFilters = [], timing = null, readPlan = "standard", boundThinkText = false,
   }) {
     let embedding = null;
     if (access?.kind !== "grant" && scopeIsUnrestricted(scope)) {
@@ -755,7 +755,7 @@ const d1Backend = {
     }
     const r = await d1.search(env, {
       query, embedding, limit, filters, weights, rrfK, access, scope, projectionReadiness,
-      supplementalFilters, timing, readPlan,
+      supplementalFilters, timing, readPlan, boundThinkText,
     });
     return {
       results: measureQueryStage(timing, "authority_lineage", () => r.results.map((x) => {
@@ -777,6 +777,9 @@ const d1Backend = {
           source_kind: x.source_kind || null,
           title: x.title,
           snippet: x.text,
+          ...(x.microsoft_provider_status ? { microsoft_provider_status: x.microsoft_provider_status } : {}),
+          ...(x.retrieval_projection_incomplete !== undefined
+            ? {retrieval_projection_incomplete:Boolean(x.retrieval_projection_incomplete)} : {}),
           ...(x.source_excerpts ? { source_excerpts:x.source_excerpts } : {}),
           ...(x.record_observation ? { record_observation:x.record_observation } : {}),
           uri: x.uri || null,
@@ -809,6 +812,7 @@ const d1Backend = {
           // provenance so a citation never presents a tier without its reason.
           authority: x.authority || null,
           ...(x.query_variant ? { query_variant: x.query_variant } : {}),
+          ...(x.calendar_status ? { calendar_status: x.calendar_status } : {}),
           // Closed, server-verified origin for conversational owner notes. No
           // arbitrary document metadata crosses this public boundary.
           ...(x.write_provenance ? { write_provenance: x.write_provenance } : {}),
@@ -824,6 +828,7 @@ const d1Backend = {
       degraded: r.degraded,
       degraded_reason: r.degraded_reason ?? null,
       retrieval_receipt: r.retrieval_receipt,
+      retrieval_projection_incomplete: r.retrieval_projection_incomplete,
       retrieval_coverage: r.retrieval_coverage,
       meaning_search: r.meaning_search,
       ignored_filters: r.ignored_filters,

@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
 
@@ -32,6 +32,7 @@ import {
   withBrainLifecycleLockWait,
 } from "../operations/brain-lifecycle-lock.mjs";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
+import { isolatedLifecycleOptions } from "./fixtures/isolated-update-schedulers.mjs";
 
 const fixedNow = new Date("2026-10-23T12:00:00.000Z");
 const holderStartedMs = fixedNow.getTime() - 25_000;
@@ -112,28 +113,36 @@ function fixture(label = "partner-fix-") {
     },
     safety: { daily_llm_spend_cap_usd: 5 },
   }), { mode: 0o600 });
-  return { root, home, manifestPath, machineLockRoot: join(root, "machine-locks") };
+  return { root, manifestPath, ...isolatedLifecycleOptions(home, { machineLockRoot: join(root, "machine-locks") }) };
 }
 
 function windowsTicks(epochMs) {
   return 621355968000000000n + BigInt(epochMs) * 10_000n;
 }
 
+function slotPaths(lock) {
+  return [...new Set([lock.path, lock.accountPath, lock.legacyPath].filter(Boolean))];
+}
+
 function touchOwner(lock, when) {
-  const ownerPath = join(lock.path, readdirSync(lock.path)[0]);
-  utimesSync(ownerPath, when, when);
-  return ownerPath;
+  // Windows owns multiple slots. A stale-owner probe must age every retained
+  // receipt or it tests a fresh account holder before reaching the old case.
+  for (const path of slotPaths(lock)) {
+    const ownerPath = join(path, readdirSync(path)[0]);
+    utimesSync(ownerPath, when, when);
+  }
 }
 
 function replaceOwnerReceipt(lock, { pid, processInstance }) {
-  const ownerPath = join(lock.path, readdirSync(lock.path)[0]);
-  const owner = JSON.parse(readFileSync(ownerPath, "utf8"));
-  owner.pid = pid;
-  owner.process_instance = processInstance;
-  const nextOwnerPath = join(lock.path, `owner-${pid}-${owner.token}.json`);
-  renameSync(ownerPath, nextOwnerPath);
-  writeFileSync(nextOwnerPath, JSON.stringify(owner), { mode: 0o600 });
-  return nextOwnerPath;
+  for (const path of slotPaths(lock)) {
+    const ownerPath = join(path, readdirSync(path)[0]);
+    const owner = JSON.parse(readFileSync(ownerPath, "utf8"));
+    owner.pid = pid;
+    owner.process_instance = processInstance;
+    const nextOwnerPath = join(path, `owner-${pid}-${owner.token}.json`);
+    renameSync(ownerPath, nextOwnerPath);
+    writeFileSync(nextOwnerPath, JSON.stringify(owner), { mode: 0o600 });
+  }
 }
 
 function platformIdentity(platform, startedMs) {
@@ -783,7 +792,11 @@ async function importMutant(relativePath, replacements, dependencyPaths) {
   }
   const target = join(root, relativePath);
   writeFileSync(target, source, { mode: 0o600 });
-  for (const dependencyPath of dependencyPaths) {
+  const dependencies = [...dependencyPaths,
+    ...(relativePath === "operations/brain-lifecycle-lock.mjs" ? ["operations/brain-lock-root.mjs", "support-journal.mjs"] : []),
+    ...(relativePath === "support-recovery.mjs" ? ["connectors/microsoft-week1-rules.mjs"] : [])];
+  for (const dependencyPath of new Set(dependencies)) {
+    mkdirSync(join(root, dependencyPath, ".."), { recursive: true, mode: 0o700 });
     writeFileSync(
       join(root, dependencyPath),
       readFileSync(new URL(`../${dependencyPath}`, import.meta.url)),
@@ -1084,6 +1097,7 @@ test("the restore-state-blind-disconnect-support mutant is killed", async () => 
     "operations/current-user-file.mjs",
     "operations/cloudflare-keyring-guidance.mjs",
     "operations/wrangler-runtime-contract.mjs",
+    "connectors/microsoft-week1-rules.mjs",
   ]);
   assert.throws(
     () => verifyRollbackSupportGuidance(mutant),

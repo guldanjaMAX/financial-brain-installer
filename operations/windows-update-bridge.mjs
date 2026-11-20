@@ -57,7 +57,7 @@ export function sameManifestFile(taskPath, manifestPath, { platform = process.pl
   } catch { return false; }
 }
 
-function actionBinds(entry, manifestPath) {
+function boundLoadKeys(entry, manifestPath) {
   // A substring in a comment, string, or opaque PowerShell program is not
   // execution proof. Recognize only a complete literal load invocation; an
   // unrecognized prose-generated program needs explicit supervised repair.
@@ -75,8 +75,10 @@ function actionBinds(entry, manifestPath) {
   return tokens.length === 5 &&
     (tokens[0] === "brain" || (win32.isAbsolute(tokens[0]) && /^brain\.(?:cmd|exe)$/iu.test(win32.basename(tokens[0])))) &&
     tokens[1] === "load" && sameManifestFile(tokens[2], manifestPath) && tokens[3] === "--only" &&
-    /^[a-z][a-z0-9_]*(?:,[a-z][a-z0-9_]*)*$/u.test(tokens[4]);
+    /^[a-z][a-z0-9_]*(?:,[a-z][a-z0-9_]*)*$/u.test(tokens[4]) ? tokens[4].split(",") : null;
 }
+
+const actionBinds = (entry, manifestPath) => Boolean(boundLoadKeys(entry, manifestPath));
 
 function observe(taskName, serialized) {
   const principals = singleTag(serialized, "Principals");
@@ -220,6 +222,13 @@ function validateReceipt(entry) {
   return entry;
 }
 
+function dailyBridgeSchedule(definition) {
+  const triggers = singleTag(definition, "Triggers");
+  const calendar = triggers?.match(/^\s*<CalendarTrigger>\s*([\s\S]*?)\s*<\/CalendarTrigger>\s*$/u)?.[1];
+  const fields = calendar?.match(/^<StartBoundary>([^<]+)<\/StartBoundary>\s*(?:<Enabled>(true|false)<\/Enabled>\s*)?<ScheduleByDay>\s*<DaysInterval>([1-9]\d*)<\/DaysInterval>\s*<\/ScheduleByDay>$/u);
+  return fields ? [fields[1], Number(fields[3]), fields[2] !== "false"] : null;
+}
+
 export function createWindowsUpdateBridgeGuard(options = {}) {
   const adapter = options.adapter || createNativeWindowsBridgeAdapter(options);
   const now = options.now || (() => new Date());
@@ -244,6 +253,16 @@ export function createWindowsUpdateBridgeGuard(options = {}) {
     return current;
   };
   return {
+    observe(receipts, { baseline = false } = {}) {
+      return receipts.flatMap(entry => {
+        const current = checked(entry, { absent: !baseline || ["retiring", "retired"].includes(entry.state) });
+        const enabled = baseline ? entry.prior_enabled : current?.enabled;
+        return enabled ? [{
+          schedule: current ? dailyBridgeSchedule(current.definition) : null,
+          keys: current ? boundLoadKeys(current, options.manifestPath) : [],
+        }] : [];
+      });
+    },
     inventory() {
       const inventory = adapter.inventory();
       if (!inventory.entries.length) return inventory;

@@ -159,10 +159,16 @@ export function openBrowser(url, options = {}) {
   }
 }
 
-const PAGE = (title, body) =>
-  `<!doctype html><meta charset="utf-8"><title>${title}</title>` +
-  `<body style="font:16px/1.6 system-ui;margin:12vh auto;max-width:34rem;padding:0 1.5rem;color:#1a1a1a">` +
-  `<h1 style="font-size:1.4rem">${title}</h1><p>${body}</p></body>`;
+const escapePageText = (value) => String(value).replace(/[&<>"']/g, (char) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
+const PAGE = (title, body, code = "") =>
+  `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
+  `<meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapePageText(title)}</title>` +
+  `<style>*{box-sizing:border-box}html{color-scheme:light}body{margin:0;background:#faf9f6;color:#1a1a1a;font:16px/1.55 system-ui,sans-serif}` +
+  `main{max-width:40rem;margin:0 auto;padding:48px 16px;overflow-wrap:anywhere}h1{font-size:1.5rem;line-height:1.2;margin:0 0 16px}` +
+  `p{margin:0}.code{font-size:0.875rem;color:#5c6472;margin-top:16px}</style></head>` +
+  `<body><main><h1>${escapePageText(title)}</h1><p>${escapePageText(body)}</p>` +
+  `${code ? `<p class="code">Code: ${escapePageText(code)}</p>` : ""}</main></body></html>`;
 
 /**
  * Run the consent flow. Returns { refresh_token, access_token, expires_at, scope }.
@@ -191,24 +197,26 @@ export async function authorize({ clientId, clientSecret, scopes, port = DEFAULT
         server.close();
       };
       if (err) {
-        finish(400, PAGE("Not connected", `Google returned: <code>${err}</code>. You can close this tab and try again.`));
+        finish(400, err === "access_denied"
+          ? PAGE("Not connected", "You chose Cancel on Google's page. Nothing was connected. Go back to Claude to try again.")
+          : PAGE("Not connected", "Google could not connect. Nothing was connected. Go back to Claude to try again.", err));
         reject(new Error(`Google returned "${err}"`));
         return;
       }
       // A mismatched state means this redirect did not come from the request we
       // made. Refusing it is the entire point of sending one.
       if (returnedState !== state) {
-        finish(400, PAGE("Not connected", "The response did not match the request. Nothing was connected."));
+        finish(400, PAGE("Not connected", "The response did not match the request. Nothing was connected. Go back to Claude to try again.", "state_mismatch"));
         reject(new Error("state mismatch: the redirect did not come from this authorisation request"));
         return;
       }
       const c = got.searchParams.get("code");
       if (!c) {
-        finish(400, PAGE("Not connected", "No authorisation code was returned."));
+        finish(400, PAGE("Not connected", "Google did not send a sign-in confirmation. Nothing was connected. Go back to Claude to try again.", "missing_code"));
         reject(new Error("no authorisation code in the redirect"));
         return;
       }
-      finish(200, PAGE("Connected", "You can close this tab and return to the terminal."));
+      finish(200, PAGE("✓ Google connected", "✓ Google connected. You can close this window and go back to Claude."));
       resolve(c);
     });
 
@@ -226,8 +234,6 @@ export async function authorize({ clientId, clientSecret, scopes, port = DEFAULT
     server.listen(port, "127.0.0.1", () => {
       if (open && !openBrowser(url)) {
         console.log(`\n  Could not open a browser. Open this URL yourself:\n\n  ${url}\n`);
-      } else if (open) {
-        console.log(`\n  A browser window should have opened. If not, use:\n\n  ${url}\n`);
       }
     });
 

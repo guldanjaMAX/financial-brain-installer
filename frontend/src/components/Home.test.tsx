@@ -65,6 +65,20 @@ describe("home composition", () => {
     expect(html).not.toContain("Meaning search is still counting");
   });
 
+  it("explains that questions can start during indexing without inventing a completion time", () => {
+    const html = renderToStaticMarkup(<PhaseNotice phase="indexing" status={null} />);
+    expect(html).toContain("You can ask questions now");
+    expect(html).toContain("differently worded records may not appear");
+    expect(html).not.toMatch(/\d+ minutes|\d+%/);
+  });
+
+  it("gives an empty Brain a concrete next step without claiming records were loaded", () => {
+    const html = renderToStaticMarkup(<PhaseNotice phase="empty" status={null} />);
+    expect(html).toContain("Your installer can connect your first source");
+    expect(html).toContain("has not read anything yet");
+    expect(html).not.toContain("href=\"#brain-status\"");
+  });
+
   it("renders partial diagnostics with measured records as uncertainty and a next step", () => {
     const status = {
       status: "ok",
@@ -147,7 +161,10 @@ describe("home composition", () => {
     expect(status.problems).toContain(integrityWarning);
     const phase = derivePhase(status);
     expect(phase).toBe("problems");
-    expect(phraseFor(phase, status)).toContain("your installer should look at");
+    expect(phraseFor(phase, status)).toBe("One source needs a look. See Brain status below.");
+    const html = renderToStaticMarkup(<PhaseNotice phase={phase} status={status} />);
+    expect(html).toContain('href="#brain-status"');
+    expect(renderToStaticMarkup(<SystemProblems status={status} />)).toContain('id="brain-status"');
   });
 
   it("mounts durable change history before financial reads resolve", () => {
@@ -178,14 +195,19 @@ describe("home composition", () => {
     );
     expect(html).toContain("Open This Year");
     expect(html).toContain("Open Add &amp; Review");
+    expect(html).toContain("min-w-[min(100%,15rem)] flex-1");
+    expect(html).not.toContain("flex-wrap shrink-0");
   });
 
   it("gives a brand-new owner one plain-language path to the reviewed entity form", () => {
     const html = renderToStaticMarkup(<FirstFinancialEntityPrompt onStart={() => undefined} />);
 
     expect(html).toContain("Start with one part of your finances");
-    expect(html).toContain("will not guess or combine");
-    expect(html).toContain("Add my first financial entity");
+    expect(html).not.toContain("will not guess");
+    expect(html).toContain("Add your first person or business");
+    expect(html).toContain("STEP 1 of 2");
+    expect(html).toContain("bg-card");
+    expect(html).not.toContain("bg-amber");
     expect(html).not.toContain("entity_slug");
   });
 
@@ -223,8 +245,10 @@ describe("home composition", () => {
 
     expect(documents).toContain("Unreadable copy");
     expect(documents).toContain("This copy could not be read");
-    expect(source).toContain("Source out of date");
+    expect(source).not.toMatch(/>Source out of date<\/span>/);
     expect(source).toContain("Problem");
+    expect(source.match(/rounded-full/g)).toHaveLength(1);
+    expect(source).toContain('title="Source out of date"');
   });
 });
 
@@ -288,6 +312,9 @@ describe("owner coverage text", () => {
     expect(html.match(/Jan 31, 2027/g)).toHaveLength(2);
     expect(html).not.toContain("onward");
     expect(html).toContain("outside this range remains unproven");
+    expect(html).toContain("<details");
+    expect(html).toContain(">Details</summary>");
+    expect(html).not.toMatch(/<details[^>]*\bopen(?:[ =>])/);
   });
 
   it("shows when a source last made progress", () => {

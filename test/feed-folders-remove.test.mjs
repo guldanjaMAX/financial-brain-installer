@@ -1,3 +1,4 @@
+import { isolatedLifecycleOptions } from "./fixtures/isolated-update-schedulers.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -68,7 +69,7 @@ function remove(f, source = "first", options = {}, argv = ["remove", "--source",
   return capture(() => cmdFolder(f.manifestPath, argv, {
     platform: process.platform,
     home: f.home,
-    lifecycleLockOptions: { machineLockRoot: join(f.root, 'lifecycle-locks') },
+    lifecycleLockOptions: isolatedLifecycleOptions(f.root),
     sourceIngestLockOptions: { home: f.home },
     schedulerOptions: { home: f.home, launchctl: () => { throw new Error("unexpected scheduler call"); } },
     now: () => new Date(FIXED_NOW),

@@ -1,10 +1,13 @@
 import { useEffect, useState } from "react";
 import { ApiError, api, apiGet, type Device, type Connection, type BankStatus } from "../lib/api";
 import { enroll } from "../lib/passkey";
-import { Section, Row, Note, Empty, Attention, Badge, Chip, Confirm, EditableName, ago, agoISO } from "./ui";
+import { Section, Row, Note, Empty, Attention, Badge, Confirm, EditableName, ago } from "./ui";
 import { OwnerPreferences } from "./OwnerPreferences";
 import { DocumentAccess } from "./DocumentAccess";
 import { PasskeyDiagnostics } from "./PasskeyDiagnostics";
+import { bankRowOutcome } from "../lib/bank-outcome";
+import { BANK_BUTTON, BankConnectionRow } from "./BankConnectionRow";
+export { DISCONNECT_BANK_QUESTION } from "./BankConnectionRow";
 
 const REHEARSAL_PASSKEY_NOTICE = "Adding a passkey is intentionally unavailable in this local rehearsal. No passkey will be added, and nothing will change. To add a real passkey, open Access at your Brain's normal web address.";
 
@@ -35,7 +38,6 @@ function isOwnerAccessRehearsalPage(): boolean {
 }
 
 export type BankStatusReadState = "loading" | "ready" | "unavailable";
-export const DISCONNECT_BANK_QUESTION = "Disconnect this bank? New transactions stop. Your saved history stays.";
 
 export function BankConnectionsSection({ readState, banks, busy, rehearsal = false, onDisconnect }: {
   readState: BankStatusReadState;
@@ -45,21 +47,32 @@ export function BankConnectionsSection({ readState, banks, busy, rehearsal = fal
   onDisconnect: (itemRef: string) => void;
 }) {
   const bankRows = banks?.connections || [];
+  const now = Date.now();
+  const outcomes = new Map(bankRows.map((bank) => [bank.item_ref, bankRowOutcome(bank, now)]));
+  // Keep every member of the original attention set: calmer words must never
+  // reveal Disconnect while a new bank is loading or waiting on owner choices.
   const attention = new Set((banks?.needs_attention || []).map((bank) => bank.item_ref));
   for (const bank of bankRows) {
     if ((bank.health && bank.health.state !== 'healthy') || bank.health?.overdue ||
         bank.health?.needs_sign_in || ['reauth_required','permission_revoked'].includes(bank.status) ||
-        (bank.accounts_needing_owner || 0) > 0 || bank.replacement_state==='history_review') attention.add(bank.item_ref);
+        (bank.accounts_needing_owner || 0) > 0 || bank.replacement_state==='history_review' ||
+        outcomes.get(bank.item_ref) !== 'CURRENT') attention.add(bank.item_ref);
   }
   return (
     <Section
       title="Banks"
-      blurb="Connections that can supply bank activity. Ordinary onboarding does not turn this on."
+      headerInCard
+      blurb="Banks your Brain reads transactions from. It can’t move money. Your installer sets up bank connections separately."
+      action={readState === "ready" && (banks?.configured || bankRows.length > 0) && !(rehearsal && bankRows.length > 0) ? (
+        <div className="w-full sm:w-auto">
+          <a className={`${BANK_BUTTON} border-line-strong bg-card text-ink`} href="/app/connect/bank">+ Connect a bank</a>
+        </div>
+      ) : undefined}
     >
       {readState === "loading" ? (
-        <Note>Checking bank connection status. Until this finishes, the state is unknown.</Note>
+        <Note>Checking your banks…</Note>
       ) : readState === "unavailable" ? (
-        <Attention>
+        <Attention inset>
           Bank connection status could not be read, so this page cannot say whether a bank is linked.
           This is not the same as no bank. Do not reconnect or disconnect anything here. Ask your
           installer to check the Brain and then reload Access.
@@ -71,7 +84,7 @@ export function BankConnectionsSection({ readState, banks, busy, rehearsal = fal
       ) : (
         <>
           {!banks?.configured && (
-            <Attention>Bank syncing is not configured. Ask your installer to restore the bank feed settings. Your saved bank status and history remain available below.</Attention>
+            <Attention inset>Bank syncing is not configured. Ask your installer to restore the bank feed settings. Your saved bank status and history remain available below.</Attention>
           )}
           {rehearsal && bankRows.length > 0 ? (
             <Note>
@@ -79,74 +92,19 @@ export function BankConnectionsSection({ readState, banks, busy, rehearsal = fal
               is synthetic, no real bank is connected, and no provider page will open. On a real
               approved pilot Brain, those controls appear on its normal Access page.
             </Note>
-          ) : (
-            <p className="mb-4 text-sm">
-              <a className="underline underline-offset-4" href="/app/connect/bank">
-                {bankRows.length > 0
-                  ? "Connect another bank or choose account owners"
-                  : "Connect a bank"}
-              </a>
-            </p>
-          )}
+          ) : null}
           {bankRows.length === 0 ? (
             <Empty>No bank is connected yet.</Empty>
           ) : bankRows.map((bank) => (
-            <Row key={bank.item_ref}>
-              <span className="min-w-0">
-                <span className="text-[14.5px] flex items-center gap-2 flex-wrap">
-                  {bank.institution_label || "a bank"}
-                  {attention.has(bank.item_ref) && <Chip state="PROBLEM" />}
-                </span>
-                <span className="block text-[13px] text-ink-soft mt-0.5">
-                  {bank.last_synced_at ? `Last checked ${agoISO(bank.last_synced_at)}` : "Not checked yet"}
-                  {(bank.status_line || bank.health?.needs_sign_in || ['reauth_required','permission_revoked'].includes(bank.status)) && (
-                    <span className={`block mt-0.5 break-words ${attention.has(bank.item_ref) ? 'text-amber-800' : ''}`}>
-                      {bank.health?.needs_reconnect
-                        ? 'Needs reconnect. Saved history is kept. Use Replace unreadable connection to continue.'
-                        : bank.health?.needs_sign_in || ['reauth_required','permission_revoked'].includes(bank.status)
-                        ? 'Your bank needs you to sign in again. Use Repair connection to continue.'
-                        : bank.status_line}
-                    </span>
-                  )}
-                  {(bank.accounts_needing_owner || 0) > 0 && (
-                    <span className="block text-amber-800 mt-0.5">Accounts waiting for you to choose an owner: {bank.accounts_needing_owner}. Choose an owner for each account in Access &gt; Banks to continue.</span>
-                  )}
-                  {attention.has(bank.item_ref) && (
-                    <span className="block text-amber-800 mt-0.5">
-                      {(bank.accounts_needing_owner || 0) > 0
-                        ? 'This connection is waiting for your account choices. '
-                        : bank.status_detail
-                        ? `${bank.status_detail.replace(/[.\s]+$/, "")}. `
-                        : "This connection stopped working. "}
-                      Answers about money are missing anything that has happened here since.
-                    </span>
-                  )}
-                </span>
-              </span>
-              <span className="flex items-center gap-3 flex-wrap">
-                {(bank.health?.needs_reconnect || bank.replacement_ref) && !rehearsal ? (
-                  <a className="text-sm underline underline-offset-4" href={`/app/connect/bank?mode=replace&item_ref=${encodeURIComponent(bank.item_ref)}${bank.replacement_ref ? '&operation_ref='+encodeURIComponent(bank.replacement_ref) : ''}`}>
-                    {bank.replacement_ref ? 'Continue recovery' : 'Replace unreadable connection'}
-                  </a>
-                ) : bank.status !== "removed" && (
-                  rehearsal ? (
-                    <span className="text-sm text-ink-soft" aria-disabled="true">
-                      Repair unavailable in rehearsal
-                    </span>
-                  ) : (
-                    <a className="text-sm underline underline-offset-4" href={`/app/connect/bank?mode=reauthorise&item_ref=${encodeURIComponent(bank.item_ref)}`}>
-                      Repair connection
-                    </a>
-                  )
-                )}
-                {!bank.replacement_ref && !bank.health?.needs_reconnect && !attention.has(bank.item_ref) && <Confirm
-                  label="Disconnect"
-                  question={DISCONNECT_BANK_QUESTION}
-                  disabled={busy}
-                  onConfirm={() => onDisconnect(bank.item_ref)}
-                />}
-              </span>
-            </Row>
+            <BankConnectionRow
+              key={bank.item_ref}
+              bank={bank}
+              outcome={outcomes.get(bank.item_ref)!}
+              attention={attention.has(bank.item_ref)}
+              busy={busy}
+              rehearsal={rehearsal}
+              onDisconnect={onDisconnect}
+            />
           ))}
         </>
       )}
@@ -485,7 +443,7 @@ export function Settings({ devices, connections, onChange }: {
       </Section>
 
       <details className="mt-8 rounded-2xl border border-line bg-paper/50 px-4 py-3">
-        <summary className="cursor-pointer text-[14px] font-semibold">Technical details for your installer</summary>
+        <summary className="min-h-11 cursor-pointer content-center text-[14px] font-semibold">Technical details for your installer</summary>
         <PasskeyDiagnostics />
         <Section
           title="Recovery key"

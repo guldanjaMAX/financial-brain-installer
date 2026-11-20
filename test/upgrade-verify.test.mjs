@@ -2970,7 +2970,7 @@ for (const boundary of ["open", "read"]) {
     check(
       "a failing skill warning reporter falls back safely without changing the update result",
       warningReporterResult === warningReporterUpgradeResult &&
-        /warn\s+The Brain software update is verified/i.test(renderedWarningReporterOutput) &&
+        /!\s+The Brain software update is verified/i.test(renderedWarningReporterOutput) &&
         renderedWarningReporterOutput.includes(`Do not rerun ${expectedBrainCliPrefix} update for this local guide warning.`) &&
         !renderedWarningReporterOutput.includes(sandbox) && !cloudflareTokenAvailable(),
       renderedWarningReporterOutput,
@@ -3644,6 +3644,13 @@ globalThis.fetch = async (input, init = {}) => {
     rmSync(sandbox, { recursive: true, force: true });
     check("the real packed install and reinstall sandbox is completely removed", !existsSync(sandbox));
   }
+}
+
+// Q3 also runs in the standalone light suite, without this file's packed-install gate.
+{
+  const { verifyDomainUpgradeCases } = await import("./fixtures/domain-upgrade-cases.mjs");
+  await verifyDomainUpgradeCases(cmdUpgrade);
+  check("verified update persists a missing address without changing saved or custom addresses or prompting on denial", true);
 }
 
 console.log(`\nupgrade verification: ${ran - fail}/${ran} passed`);

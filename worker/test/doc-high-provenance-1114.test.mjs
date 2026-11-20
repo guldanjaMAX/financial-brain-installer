@@ -1,3 +1,4 @@
+import { assertOwnerEvidence } from '../../test/helpers/owner-evidence-contract.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { probes as round1 } from './fixtures/doc-high-provenance-1114/probes.mjs';
@@ -46,7 +47,8 @@ function reached(result) {
   assert.ok(result.contract.provenance?.checked_records>0,'the provenance decision point was reached');
   assert.match(result.answer,/Coverage:.*Missing or counted twice:.*Estimates:.*How to check:/s);
   assert.ok(result.remote_has_prose,'remote ask retains the same answer');
-  assert.equal(result.remote_confidence,result.confidence_text.match(/Confidence: \w+ \(\d+%\)/)[0]);
+  assertOwnerEvidence(result.remote_text, { percent: result.percent, basis: result.basis, missing: result.missing });
+  assert.equal(result.remote_confidence,null,'no computed score reaches the owner');
 }
 function keepsFigure(result, probe) {
   for (const amount of probe.draft.match(/(?:[$€£]\s*)?\d[\d,]*(?:\.\d+)?%?/g) || [])
@@ -528,8 +530,8 @@ for(const first of ['## Terms\n','# Conditions\n','[record] ## Terms\n','## Term
     exclusiveConflict(body,probe);
     for(const result of [control,body]) {
       assert.ok(result.remote_text.includes(result.answer),'MCP retains the entire Worker answer and all five contract parts');
-      assert.ok(result.remote_text.includes(result.confidence_text),'MCP retains the full computed explanation and missing evidence');
-      assert.equal(result.remote_confidence,result.confidence_text.match(/Confidence: \w+ \(\d+%\)/)[0]);
+      assertOwnerEvidence(result.remote_text, { percent: result.percent, basis: result.basis, missing: result.missing });
+      assert.equal(result.remote_confidence,null,'no computed score reaches the owner');
     }
   });
 

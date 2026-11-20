@@ -1,8 +1,9 @@
 import { unknownMoneyConfidence, confidenceText } from './money-confidence.js';
+import { ownerEvidenceNote, ownerOutputText } from './owner-evidence.js';
 // This is a tool-routing boundary, not a question reader. Do not resolve bank periods,
 // inspect accounts, or ask a model before handing money work to the assistant.
 import { taxQuestionScopeAssessment } from './tax-evidence-scope.js';
-import { MONEY_CAPABILITY_TRANSITION, MONEY_ANSWER_DETAILS } from './money-query-contract.js';
+import { MONEY_CAPABILITY_TRANSITION_ANSWER, MONEY_ANSWER_DETAILS } from './money-query-contract.js';
 
 const MONEY_SUBJECT = /\b(?:money|cash(?:[ -]flow)?|balances|spend|spent|spending|expenses?|income|revenue|profits?|losses|earn(?:ed|ings)?|payments?|pay|paying|paid|subscriptions?|owe|owed|owing|debts?|loans?|mortgages?|deposits?|withdrawals?|transfers|transactions?|charges|charged|refunds?|payouts?|payroll|budgets?|checking|savings|inflows?|outflows?|receivables?|payables?|bills?|rent|salary|wages?|fees?|interest|credits?|debits?|tax(?:es)?|net worth|bank accounts?|came in|went out)\b|\b(?:my|our|current|available|account|card|bank|loan) balance\b/i;
 // Owners can ask for account amounts without using the word balance. Preserve
@@ -123,7 +124,7 @@ export function moneyQuestionHandoff(question, { moneyToolsAvailable = true, req
     confidence:{...confidence,band:confidence.level,basis:confidence.reasons}, confidence_text: confidenceText(confidence),
     mode: 'think', money_handoff: true, money_tools_available: moneyToolsAvailable,
     ...(moneyToolsAvailable ? {} : { required_agent_profile: requiredAgentProfile }),
-    answer: (moneyToolsAvailable ? MONEY_CAPABLE_HANDOFF : MONEY_CAPABILITY_TRANSITION.replaceAll('owner-assistant', requiredAgentProfile)) + '\n' + confidenceText(confidence),
+    answer: ownerOutputText((moneyToolsAvailable ? MONEY_CAPABLE_HANDOFF : MONEY_CAPABILITY_TRANSITION_ANSWER.replaceAll('owner-assistant', requiredAgentProfile)) + '\n' + ownerEvidenceNote(confidence)),
     citations: [], results: [], gaps: [],
   };
 }

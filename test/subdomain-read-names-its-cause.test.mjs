@@ -49,7 +49,7 @@ test("a read that fails for another reason says the read failed, not that the su
     (error) => {
       assert.match(String(error.message), /reading the account subdomain failed/);
       assert.match(String(error.message), /403/, "the real cause must reach the operator");
-      assert.match(String(error.message), /failure to ASK, not a missing subdomain/);
+      assert.doesNotMatch(String(error.message), /failure to ASK/);
       return true;
     },
   );

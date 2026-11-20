@@ -257,7 +257,7 @@ async function fresh(options = {}) {
   } else if (options.zeroEntities) {
     await harness.waitForBrowserBoot(
       page,
-      page.getByText("Add your first financial entity", { exact: true }),
+      page.getByText("Add your first person or business", { exact: true }),
       "zero-entity document access fixture",
     );
   } else {
@@ -294,7 +294,7 @@ try {
       && await page.getByRole("button", { name: "Create exact document access", exact: true }).isDisabled()
       && !(await page.locator("body").innerText()).includes("Another part of your finances"));
     state.releaseSnapshot();
-    await page.getByText("Choose one part of your finances to continue", { exact: true }).waitFor();
+    await page.getByText("Pick one person, household, business, trust, property, or investment below.", { exact: true }).waitFor();
     check("an unverified saved slug is discarded without a search or write",
       state.searches.length === 0
       && await page.locator("[aria-pressed='true']").count() === 0
@@ -308,7 +308,8 @@ try {
     await renderSettled(page);
     const opening = await page.locator("body").innerText();
     check("a zero-entity Brain explains the boundary and offers a first reviewed entity",
-      opening.includes("Nothing has been guessed or combined")
+      opening.includes("STEP 1 of 2")
+      && !opening.includes("Nothing has been guessed or combined")
       && opening.includes("does not import an account, decide a tax treatment")
       && opening.includes("Do not guess"));
     await page.getByLabel("Exact name").fill("Example Household");

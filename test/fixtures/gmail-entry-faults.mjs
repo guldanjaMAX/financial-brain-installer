@@ -91,7 +91,7 @@ for (const [needle, branch] of [
 add("operations/gmail-entry.mjs", "export async function processGmailEntries", "value: await read(id)", "id");
 add("operations/gmail-entry.mjs", "export async function processGmailEntries", "await processEntry(entry.id, entry.value);", "entry.id");
 add("ingest/extract.mjs", "export async function extract", "const out = await entry.fn(buf, { name, ...opts });", "globalThis.__gmailEntryIdentity", "native");
-add("ingest/formats.mjs", "export async function parseEmailMessage", "const mail = await new PostalMime().parse(buf);", "globalThis.__gmailEntryIdentity", "native");
+add("ingest/formats.mjs", "export async function parseEmailMessage", "const mail = await new PostalMime({ maxHeadersSize: 256 * 1024 }).parse(buf);", "globalThis.__gmailEntryIdentity", "native");
 add("ingest/formats.mjs", 'register(".eml", async (buf) =>', "const parsed = await parseEmailMessage(buf);", "globalThis.__gmailEntryIdentity", "native");
 brain("export async function requestIngestBatch", "return await retryTransient(async () => {", "docs[0].source_id");
 brain("export async function requestIngestBatch", "const res = await http(url, {", "docs[0].source_id");

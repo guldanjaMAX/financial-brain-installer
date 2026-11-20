@@ -11,6 +11,21 @@ Missing or invalid sessions return `401 {"error":"unauthorized","code":"session_
 A live scoped principal returns `403 {"error":"forbidden","code":"owner_required"}`.
 Unavailable authorization or storage fails closed with a stable `503` code.
 
+Public `GET /health` returns two coarse flags alongside its existing fields and
+HTTP status. `bank` is `none` when no bank link is live, `ok` when every live
+link has healthy sync evidence and the wrapping key is configured, or
+`needs_attention` when a live link lacks that evidence or key. A future sync
+timestamp or unusable required schedule also needs attention. `answers` reads
+the latest aggregate check among the last 256 model log entries. For the
+current answer and gate configuration, both checks must pass for `ok`, and
+any failure yields `needs_attention`. Untested built-in models, a different
+configuration, and missing, unrecognized or unreadable check evidence yield
+`unknown` when there is no recorded failure for the current configuration.
+Both flags are `unknown` during an upgrade pause or outside D1. The bank flag also
+returns `unknown` if more than 64 healthy links prevent a complete bounded check.
+The Worker caches these flags for 60 seconds per isolate and makes no provider
+calls to compute them. The flags carry no account details or provider messages.
+
 ## Read-only Financial Picture inventory
 
 `POST /api/fin/financial-picture` is a separate read transport used by

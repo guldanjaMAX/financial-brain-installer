@@ -64,7 +64,8 @@ test('founder confidence: complete, missing card, five-day gap, unproved dollars
   assert.match(stale.confidence.reasons.join(' '), /stale.*2025-12-20/i);
   assert.match(stale.confidence.missing.join(' '), /successful.*sync/i);
   for (const text of [MONEY_GUIDE, MONEY_ANSWER_INSTRUCTIONS]) {
-    assert.match(text, /Confidence: <level> \(<n>%\)/);
+    assert.doesNotMatch(text, /Confidence:/);
+    assert.match(text, /internal/);
     assert.match(text, /only LOWER.*never raise/i);
   }
 });
@@ -143,7 +144,7 @@ test('independent monthly oracle checks cents, currencies, lifecycle, clean feed
   assert.match(result.coverage_text, /1234.*checking.*connected/);
   assert.match(result.coverage_text, /2025-03-10.*2025-12-20/);
   assert.match(result.coverage_text, /pending|unverified/i);
-  assert.match(result.coverage_text, /Counts are not dollar amounts; see confidence for measured uncertainty amounts/);
+  assert.match(result.coverage_text, /Counts are not dollar amounts; see the evidence limits for measured uncertainty amounts/);
   assert.match(result.coverage_text, /pending row excluded: USD \$999\.99/);
   assert.equal(f.db.prepare('SELECT total_changes() AS n').get().n, before, 'populated overview reached SQL without changing the ledger');
   assert.ok(f.calls.some(sql => /mq_membership/.test(sql)), 'real clean-view classification was reached');

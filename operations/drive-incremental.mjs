@@ -62,6 +62,9 @@ export function renderDriveIncrementalStatus(state, display = String) {
   const status = driveIncrementalStatus(state);
   return [
     "Drive: incremental, add/update only",
+    ...(status.last_run?.complete && !status.error
+      ? [`Drive is up to date${status.pending_removals ? `, ${status.pending_removals} decisions waiting` : ""}.`]
+      : []),
     `Last successful change-token time: ${status.last_successful_change_token_at || "never"}`,
     `Last run: ${status.last_run?.created || 0} added, ${status.last_run?.updated || 0} updated; ${status.last_run?.feed_caught_up ? "change feed caught up" : "change feed incomplete or not yet checked"}; coverage ${status.last_run?.complete ? "checked for this window" : "incomplete"}`,
     `Pending owner removal decisions: ${status.pending_removals}`,
@@ -78,6 +81,8 @@ export async function runDriveIncremental({
   drive, getToken, state, save, sourceName, policy, processFile,
   now = Date.now, limits = {}, retryFailures = false, display = String,
   validateProgress = async () => true,
+  // "Clean my Brain": true when the owner removed this file from the Brain.
+  isOwnerRemoved = async () => false,
 }) {
   const budget = { ...DRIVE_CHANGE_LIMITS, ...limits };
   for (const [key, value] of Object.entries(budget)) {
@@ -174,6 +179,15 @@ export async function runDriveIncremental({
       folder = drive.folderPathFor(file, scope.folders);
       const excluded = drive.exclusionReason(file, folder, policy);
       if (excluded) { pending(id, "source_policy", file.name); delete state.drive_failures[uid]; result.skipped++; return; }
+      // The owner removed this file with Clean my Brain: a later edit does not
+      // bring it back. Settled like a policy skip: not downloaded, not a retry,
+      // not a removal decision (it is already gone), and the feed moves on.
+      if (await isOwnerRemoved(uid)) {
+        state.skipped[uid] = display("you removed this item with Clean my Brain (OWNER_REMOVED)");
+        delete state.drive_failures[uid];
+        result.skipped++;
+        return;
+      }
       const outcome = await processFile({ ...file, scope_root_ids: scope.rootIds }, folder, tally => {
         written = true;
         for (const key of ["created", "updated", "unchanged", "refused"]) result[key] += tally[key] || 0;
@@ -299,8 +313,12 @@ export async function runDriveIncremental({
       if (page.terminal) {
         state.drive_change_token_at = timestamp();
         result.feed_caught_up = true;
+        // Legacy reviews retain indexed text and authorize no removal. They
+        // cannot invalidate a saved current-feed check. Current family/scope
+        // holds and every real file/recovery gap still require resolution.
         result.complete = progressChecked && Object.keys(state.drive_restore_pending).length === 0 &&
-          Object.keys(state.drive_failures).length === 0 && Object.keys(state.drive_pending_removals).length === 0;
+          Object.keys(state.drive_failures).length === 0 &&
+          Object.values(state.drive_pending_removals).every(decision => decision?.reason === "legacy_owner_review");
       }
       try { save(); }
       catch (error) {
@@ -341,6 +359,7 @@ export async function driveIncrementalCommand({
   scannerOn, scannerFingerprint, ocr, batchStream, splitOversized, sendBatches,
   sanitize, refusalOf, rememberAccepted, rememberFamily, acknowledgeOcr, display, receipt,
   base, adminKey, statePath, assertOwned, flags, now, limits, write, translateFailure = (error) => error,
+  isOwnerRemoved = async () => false,
   readDriveFamily = readDriveSingleFamily, readCurrentParts = readCurrentIngestParts, request = fetch,
 }) {
   save = checkpointWriter(save);
@@ -450,7 +469,7 @@ export async function driveIncrementalCommand({
   try {
     await receipt({ source: sourceName, kind: "drive", status: "indexing", lane: "incremental", started_at: startedAt,
       detail: "Drive bounded add/update-only changes check started" });
-    result = await runDriveIncremental({ drive, getToken, state, save, sourceName, policy, processFile, now,
+    result = await runDriveIncremental({ drive, getToken, state, save, sourceName, policy, processFile, now, isOwnerRemoved,
       validateProgress:({deadlineAt,maxEntries}) => revalidateIngestProgress({
         state,source:sourceName,proofs:state.drive_accepted_parts,checkpointKey:'drive_progress_recheck',policyFingerprint,
         maxEntries,expired:() => now() >= deadlineAt,
@@ -473,7 +492,7 @@ export async function driveIncrementalCommand({
       docs_refused: Object.values(state.drive_failures || {}).filter(f => f.code === "credential_refused").length,
       docs_failed: Object.values(state.drive_failures || {}).filter(f => f.code !== "credential_refused").length,
       provider_check_complete: result.feed_caught_up === true,
-      ...(result.complete ? { detail: `Drive changes caught up; pending_owner_decisions=${result.pending_removals}; historical_backfill_unproven=1` }
+      ...(result.complete ? { detail: `Drive is up to date; pending_owner_decisions=${result.pending_removals}; historical_backfill_unproven=1` }
         : { issue_code: result.pending_removals ? "SAFETY_REVIEW_REQUIRED" : "INGEST_FAILED" }) });
     write(renderDriveIncrementalStatus(state, display));
     return result;

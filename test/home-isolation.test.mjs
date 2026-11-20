@@ -13,6 +13,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { cmdUpdate } from "../brain.mjs";
+import { isolatedUpdateSchedulerOptions } from "./fixtures/isolated-update-schedulers.mjs";
 
 test("a representative update keeps every owner-home write inside injected fixture roots", async () => {
   const sandbox = mkdtempSync(join(tmpdir(), "brain-home-isolation-"));
@@ -51,6 +52,7 @@ test("a representative update keeps every owner-home write inside injected fixtu
   const reached = { lifecycle: 0, verify: 0, upgrade: 0 };
   try {
     await cmdUpdate(manifestPath, {
+      dailyRefreshOptions: isolatedUpdateSchedulerOptions(join(sandbox, "scheduler-home")),
       withBrainLifecycleLockWait: async (_request, operation) => {
         reached.lifecycle += 1;
         return operation();

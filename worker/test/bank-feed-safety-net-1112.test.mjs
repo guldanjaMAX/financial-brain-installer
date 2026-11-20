@@ -1,3 +1,4 @@
+import { bankRowHarness } from './bank-row-harness.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -22,6 +23,15 @@ const OVERDUE = '2026-10-30T13:00:00.000Z';
 const json = (body, status=200) => new Response(JSON.stringify(body), {status});
 const dailyRequest=sync=>async(url,init)=>new URL(url).pathname==='/health' ? json({status:'ok'})
   : init.method==='GET' ? json({configured:true,connections:[]}) : sync(url,init);
+
+async function bankOutcomeHarness() {
+  const {transformSync}=await import('esbuild');
+  const {runInNewContext}=await import('node:vm');
+  const source=readFileSync(new URL('../../frontend/src/lib/bank-outcome.ts',import.meta.url),'utf8');
+  const module={exports:{}};
+  runInNewContext(transformSync(source,{loader:'ts',format:'cjs'}).code,{module,exports:module.exports});
+  return module.exports.bankRowOutcome;
+}
 
 async function connected({fixture=null,itemRef='synthetic-item',accountId='synthetic-account',mask='1234'}={}) {
   const f = fixture || await createProductFixture({env:{ BANK_FEED_PROVIDER:'plaid', BANK_FEED_ENV:'sandbox',
@@ -212,7 +222,7 @@ globalThis.fetch=async(url,options)=>{
   assert.equal(result.connections.length,3,'real CLI prints all three synthetic logins');
   assert.equal(result.connections[0].bank,'Bank 1111');
   assert.match(result.connections[0].health_line,/sign in again.*Repair connection/i);
-  assert.match(result.connections[1].health_line,/choose.*owner.*Access > Banks/i);
+  assert.match(result.connections[1].health_line,/choose.*owner.*on the Connect a bank page/i);
   assert.match(result.connections[2].health_line,/48 hours.*Wait for the next sync/i);
   assert.doesNotMatch(child.stdout,/contact support|Disconnect/i);
   assert.equal(child.stdout.includes(key),false);
@@ -315,9 +325,10 @@ test('R1B Banks renders plain health and sign-in text for the owner',async()=>{
   const end=source.indexOf('\nexport function ',start+1);
   const jsx=source.slice(start,end);
   const compiled=transformSync(jsx,{loader:'tsx',format:'cjs',jsx:'transform'}).code;
-  const element=(tag,props,...children)=>({tag,props,children});
   const module={exports:{}};
-  runInNewContext(compiled,{module,exports:module.exports,React:{createElement:element,Fragment:'fragment'},
+  runInNewContext(compiled,{module,exports:module.exports,
+    ...bankRowHarness({Date:class extends Date {static now(){return Date.parse(OVERDUE);}}}),
+    bankRowOutcome:await bankOutcomeHarness(),Date:class extends Date {static now(){return Date.parse(OVERDUE);}},
     Section:'section',Note:'note',Attention:'attention',Empty:'empty',Row:'row',Chip:'chip',Confirm:'confirm',
     agoISO:value=>value,DISCONNECT_BANK_QUESTION:'Disconnect this bank?'});
   for(const [signIn,configured] of [[true,true],[false,true],[true,false]]) {
@@ -349,8 +360,8 @@ test('R2 the app shell serves the generated Banks health UI',async()=>{
   assert.ok(APP_JS.includes('answer_contract'),'F4 completed-answer branch remains in the served bytes');
   assert.ok(APP_JS.includes('Missing:') && APP_JS.includes('Confidence:'),'F4 confidence and missing-evidence rendering remains served');
   assert.ok(APP_JS.includes('Bank syncing is not configured.'),'served missing-settings state');
-  assert.ok(APP_JS.includes('Choose an owner for each account in Access > Banks to continue.'),'served owner-choice next step');
-  assert.ok(APP_JS.includes('Your bank needs you to sign in again. Use Repair connection to continue.'));
+  assert.ok(APP_JS.includes('/app/connect/bank#accounts') && APP_JS.includes('Choose owners'),'served owner-choice next step');
+  assert.ok(APP_JS.includes('Your bank needs you to sign in again.') && APP_JS.includes('Repair connection'));
 });
 
 test('R2 CLI prerequisite has no POSIX shell or machine quiet-file default',async()=>{
@@ -821,6 +832,44 @@ test('a partial Plaid refresh cannot report healthy current data',async()=>{
     assert.equal(status.connections[0].health.last_successful_sync_at,START);
     assert.equal(status.connections[0].health.state,'error');
     assert.equal(status.connections[0].health.last_error_code,'BANK_SYNC_PARTIAL');
+  } finally {f.close();}
+});
+
+test('L2 a real partial first download stays Working while server health remains incomplete',async()=>{
+  const f=await createProductFixture({env:{BANK_FEED_PROVIDER:'plaid',BANK_FEED_ENV:'sandbox',BRAIN_TIMEZONE:'Etc/UTC',
+    BANK_FEED_CLIENT_ID:'fixture-client',BANK_FEED_SECRET:'fixture-secret',BANK_FEED_WRAPPING_KEY_V2:['v2.','A'.repeat(43)].join('')}});
+  try {
+    const sealed=await encryptAccessReference(f.env,['fixture','access'].join('-'));
+    f.raw(`INSERT INTO bank_feed_items (tenant_id,item_ref,access_ciphertext,access_iv,key_version,environment,connected_at)
+      VALUES ('primary','synthetic-first-partial',?,?,?,'sandbox',?)`,sealed.ciphertext,sealed.iv,sealed.keyVersion,START);
+    seedOwnedEntity(f,'owner-business','Owner business');
+    const calls=[];
+    const fetchImpl=async url=>{
+      const path=new URL(url).pathname;calls.push(path);
+      if(path==='/accounts/get')return json({accounts:[{account_id:'synthetic-first-account',name:'Checking',mask:'1234',
+        type:'depository',subtype:'checking',balances:{current:'100.00',iso_currency_code:'USD'}}]});
+      assert.equal(path,'/transactions/sync');
+      return json({added:[],modified:[],removed:[],next_cursor:'synthetic-first-cursor',has_more:false,
+        transactions_update_status:'INITIAL_UPDATE_COMPLETE'});
+    };
+    const held=await syncPlaidItem(f.env,'synthetic-first-partial',{fetchImpl,now:START});
+    assert.equal(held.assignment_required,true,'real owner-choice guard reached before any sync succeeds');
+    const account=f.first("SELECT account_ref FROM plaid_account_entity_assignments WHERE item_ref='synthetic-first-partial'");
+    await assignPlaidAccountEntity(f.env,{request_id:'synthetic-first-assignment',account_ref:account.account_ref,entity_slug:'owner-business'},{now:START});
+    const partial=await syncPlaidItem(f.env,'synthetic-first-partial',{fetchImpl,now:START});
+    assert.equal(partial.partial,true,'real incomplete provider window promoted');
+    assert.ok(calls.includes('/transactions/sync'),'provider decision reached');
+    const {plaidFeedStatus}=await import('../src/lib/plaid-bank-feed.js');
+    const status=await plaidFeedStatus(f.env,{now:START});
+    assert.equal(status.connections.length,1);
+    const bank=status.connections[0];
+    assert.equal(bank.last_synced_at,START,'legacy timestamp advances for a partial download');
+    assert.equal(bank.health.last_successful_sync_at,null,'no verified complete sync');
+    assert.equal(bank.health.last_error_code,'BANK_SYNC_PARTIAL');
+    assert.notEqual(bank.health.state,'healthy','server incomplete-data guard stays authoritative');
+    const outcome=await bankOutcomeHarness();
+    assert.equal(outcome(bank,Date.parse(START)),'WORKING');
+    assert.equal(outcome(bank,Date.parse(OVERDUE)),'PROBLEM','49-hour control still escalates');
   } finally {f.close();}
 });
 
@@ -1296,7 +1345,7 @@ test('R3 three stale bank logins show distinct next steps in CLI status and Bank
     assert.deepEqual(paths,[['/health','GET'],['/api/bank-feed/status','GET']]);
     const byBank=new Map(result.connections.map(bank=>[bank.bank,bank]));
     assert.match(byBank.get('Bank 1111').health_line,/sign in again.*Repair connection/i);
-    assert.match(byBank.get('Bank 2222').health_line,/choose.*owner.*Access > Banks/i);
+    assert.match(byBank.get('Bank 2222').health_line,/choose.*owner.*on the Connect a bank page/i);
     assert.match(byBank.get('Bank 3333').health_line,/48 hours.*Wait for the next sync/i);
     assert.doesNotMatch(output,/contact support|disconnect/i);
     const {transformSync}=await import('esbuild');const {runInNewContext}=await import('node:vm');
@@ -1304,7 +1353,9 @@ test('R3 three stale bank logins show distinct next steps in CLI status and Bank
     const start=source.indexOf('export function BankConnectionsSection('),end=source.indexOf('\nexport function ',start+1);
     const compiled=transformSync(source.slice(start,end),{loader:'tsx',format:'cjs',jsx:'transform'}).code;
     const module={exports:{}};
-    runInNewContext(compiled,{module,exports:module.exports,React:{createElement:(tag,props,...children)=>({tag,props,children}),Fragment:'fragment'},
+    runInNewContext(compiled,{module,exports:module.exports,
+      ...bankRowHarness({Date:class extends Date {static now(){return Date.parse(OVERDUE);}}}),
+      bankRowOutcome:await bankOutcomeHarness(),Date:class extends Date {static now(){return Date.parse(OVERDUE);}},
       Section:'section',Note:'note',Attention:'attention',Empty:'empty',Row:'row',Chip:'chip',Confirm:'confirm',agoISO:value=>value,DISCONNECT_BANK_QUESTION:'Disconnect this bank?'});
     const tree=module.exports.BankConnectionsSection({readState:'ready',banks,busy:false,onDisconnect:()=>assert.fail('repair must never disconnect')});
     const rendered=JSON.stringify(tree);
@@ -1347,7 +1398,7 @@ test('R3 ordinary status includes per-bank next steps only for an enabled feed',
       assert.deepEqual(requests,[['/health','GET'],['/api/bank-feed/status','GET']]);
       const text=lines.join('\n');
       assert.match(text,/Bank 1111[\s\S]*sign in again.*Repair connection/i);
-      assert.match(text,/Bank 2222[\s\S]*choose.*owner.*Access > Banks/i);
+      assert.match(text,/Bank 2222[\s\S]*choose.*owner.*on the Connect a bank page/i);
       assert.match(text,/Bank 3333[\s\S]*48 hours.*Wait for the next sync/i);
       assert.doesNotMatch(text,/contact support|disconnect/i);
     } else {

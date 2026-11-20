@@ -162,6 +162,11 @@ test("FAULT SWEEP green control accepts both entries without a retry", async () 
 // Discover the checkpoint count from a green real execution, then expire the
 // anchored deadline at each actual save, including saves in nested send/settle.
 // No timer or implementation-specific fixed checkpoint count drives the test.
+const deadlineReceipts = { ready: 0, error: 0 };
+test.after(() => {
+  assert.ok(deadlineReceipts.ready > 0, "a settled window at the deadline is the green receipt control");
+  assert.ok(deadlineReceipts.error > 0, "unfinished deadline windows still reach an incomplete receipt");
+});
 for (const branch of ["normal", "unchanged", "skip", "retained", "worker-failed", "retry", "scanner", "split"]) {
   test(`DEADLINE SWEEP every durable checkpoint: ${branch}`, async () => {
     let checkpoints = 0;
@@ -193,7 +198,13 @@ for (const branch of ["normal", "unchanged", "skip", "retained", "worker-failed"
       assert.ok(fired, `checkpoint ${at}/${checkpoints} reached`);
       assert.equal(first.error, null, first.error?.message);
       assert.equal(first.state.gmail_owner_removals["gmail:owner-decision"], "explicit_deletion");
-      assert.equal(first.receipt.status, "error");
+      // A deadline at the final save can follow a fully settled window.
+      // Owner review keeps coverage incomplete but no longer blocks readiness.
+      const settled = !first.state.gmail_batch_window && first.state.history_id === "next" &&
+        !Object.keys(first.state.gmail_retry || {}).length && first.receipt.docs_failed === 0 &&
+        f.ids.every(id => first.state.done[`gmail:${id}`] || first.state.skipped[`gmail:${id}`]);
+      assert.equal(first.receipt.status, settled ? "ready" : "error", `${branch} checkpoint ${at}/${checkpoints}`);
+      deadlineReceipts[first.receipt.status]++;
       assert.equal(first.receipt.complete_sweep, false);
       assert.ok(first.state.gmail_batch_window || first.state.history_id === "next" || first.state.gmail_recovery || first.state.credential_scanner_progress,
         "deadline leaves a durable window, cursor or recovery offset");

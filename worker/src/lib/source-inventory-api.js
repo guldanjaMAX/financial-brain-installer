@@ -11,7 +11,7 @@ import { backendOf, D1 } from "./store.js";
 import { ownerSessionPrincipal } from "./owner-auth.js";
 import { sourceInventory, sourceRecoveryCandidates } from "./store-d1.js";
 import { sourceInventoryScanPage, sourceFreshnessPage, missingInventoryFence } from "./source-inventory-scan.js";
-import { recoveryPlanSummary, createInventoryAccumulator } from "./source-inventory-merge.js";
+import { recoveryPlanSummary, createInventoryAccumulator, projectSourceFreshness } from "./source-inventory-merge.js";
 
 export const SOURCE_INVENTORY_PATH = "/api/admin/brain/sources";
 export const SOURCE_INVENTORY_CONTRACT_VERSION = 3;
@@ -263,7 +263,7 @@ export async function handleSourceInventoryApi(env, request) {
         const accumulator = createInventoryAccumulator();
         accumulator.add({ sources: inventory.rows, families: inventory.families, retirements: inventory.retirements });
         return respond({ contract_version: 3, kind: "source_freshness", as_of: asOf,
-          sources: freshnessRows(accumulator.finish()) });
+          sources: projectSourceFreshness(accumulator.finish()) });
       }
       return respond({ contract_version: 3, kind: mode === "freshness" ? "source_freshness_scan" : "source_inventory_scan",
         complete: inventory.complete, truncated: !inventory.complete, cursor: nextCursor,
@@ -279,7 +279,7 @@ export async function handleSourceInventoryApi(env, request) {
           try {
             const inventory = await sourceInventory(env, { now: Date.parse(asOf) });
             return respond({ contract_version: 3, kind: "source_freshness", as_of: asOf,
-              sources: freshnessRows(inventory.rows.filter(row => row.registered)) });
+              sources: projectSourceFreshness(inventory.rows.filter(row => row.registered)) });
           } catch { return respond({ error: "source freshness is unavailable", code: "source_inventory_unavailable" }, 503); }
         }
         mode = "inventory";
@@ -444,15 +444,5 @@ export async function handleSourceInventoryApi(env, request) {
     sources,
     recovery_plan_summary: recoverySummary,
     limitations: sourceInventoryLimitations(),
-  });
-}
-
-function freshnessRows(rows) {
-  return rows.map(row => {
-    const { coverage: _coverage, ...freshness } = row.freshness;
-    return { name: row.name, kind: row.kind, freshness, receipt: {
-      last_successful_run_at: row.receipt?.last_successful_run_at ?? null,
-      latest_run: row.receipt?.latest_run ?? null,
-    } };
   });
 }

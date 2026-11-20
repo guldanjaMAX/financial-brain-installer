@@ -1,3 +1,4 @@
+import { isolatedLifecycleOptions } from "./fixtures/isolated-update-schedulers.mjs";
 import assert from "node:assert/strict";
 import { generateKeyPairSync, sign, createHash, randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync, realpathSync, renameSync, readdirSync, lstatSync, rmSync, unlinkSync } from "node:fs";
@@ -29,8 +30,8 @@ function finishSyntheticSchedules(home, machineLockRoot, manifestPath, platform)
 
 function privateFixtureEnvironment(root) {
   const environment = { HOME: root, USERPROFILE: root, TMPDIR: root, TMP: root, TEMP: root,
-    BRAIN_NO_WRANGLER_LOGIN: "1" };
-  for (const name of ["PATH", "Path", "SystemRoot", "SYSTEMROOT", "WINDIR", "USERNAME", "USERDOMAIN", "ProgramData", "HOMEDRIVE", "HOMEPATH", "ComSpec", "PATHEXT"]) {
+    BRAIN_NO_WRANGLER_LOGIN: "1", ProgramData: join(root, "ProgramData"), LOCALAPPDATA: join(root, "AppData", "Local") };
+  for (const name of ["PATH", "Path", "SystemRoot", "SYSTEMROOT", "WINDIR", "USERNAME", "USERDOMAIN", "HOMEDRIVE", "HOMEPATH", "ComSpec", "PATHEXT"]) {
     if (process.env[name]) environment[name] = process.env[name];
   }
   return environment;
@@ -191,7 +192,7 @@ test("package handoff installs verified bytes and calls the ordinary update entr
   const dependencies = {
     platform: "darwin",
     runtimeRoot, temporaryRoot: root, npmCli: join(root, "npm-cli.js"),
-    lifecycleLockOptions: { machineLockRoot: join(root, "machine-locks") },
+    lifecycleLockOptions: isolatedLifecycleOptions(root, { machineLockRoot: join(root, "machine-locks") }),
     scheduleOptions: { platform: "darwin", home: root, launchctl: () => { throw new Error("host scheduler reached"); }, adapter: { read: () => ({ exists: false }) } },
     environment: { HOME: root, USERPROFILE: root, TMPDIR: root, PATH: "fixture-path", PRIVATE_AMBIENT_VALUE: "must-not-cross" },
     spawn: (command, args, options) => {
@@ -315,16 +316,16 @@ async function reviewedInstallArm(swap = false, linkedTest, adapterOptions = {})
       installPackage: request => {
         requestManifestPath = request.manifestPath;
         if (linkedTest) assert.equal(requestManifestPath, realpathSync.native(manifestPath), "real dispatcher pins the physical manifest");
-        const lifecycleLockOptions = { machineLockRoot: join(root, "machine-locks"),
-          now: () => new Date(now) };
+        const installEnvironment = { ...privateFixtureEnvironment(root), ...adapterOptions.environment };
+        const lifecycleLockOptions = isolatedLifecycleOptions(root, { machineLockRoot: join(root, "machine-locks"),
+          now: () => new Date(now), lockRootOptions: { environment: installEnvironment } });
         adapterOptions.beforeInstall?.({ manifestPath: request.manifestPath, ...lifecycleLockOptions });
         return installPrivateUpdatePackage(request, {
           platform: "darwin",
           runtimeRoot, temporaryRoot: root, npmCli: join(root, "npm-cli.js"),
           lifecycleLockOptions,
           scheduleOptions: { platform: "darwin", home: root, launchctl: () => { throw new Error("host scheduler reached"); }, adapter: { read: () => ({ exists: false }) } },
-          environment: { HOME: root, USERPROFILE: root, TMPDIR: root, BRAIN_NO_WRANGLER_LOGIN: "1",
-            ...adapterOptions.environment },
+          environment: installEnvironment,
           spawn: (_command, args, options) => {
             adapterOptions.onSpawn?.({ command: _command, args, options,
               manifestPath: request.manifestPath, ...lifecycleLockOptions });
@@ -467,7 +468,8 @@ async function privateChildArm(mutation = "unchanged", preflight = "sign-in-inco
         import { readFileSync } from "node:fs";
         import { join } from "node:path";
         const manifestPath = process.argv[1];
-        const lockOptions = { machineLockRoot: process.argv[2] };
+        const lockOptions = { machineLockRoot: process.argv[2], home: process.env.HOME,
+          lockRootOptions: { environment: process.env } };
         const observation = { adoption: 0, childAcquire: 0, busy: false, ownPid: false, boundary: false };
         const preflight = ${JSON.stringify(preflight)};
         if (preflight !== "sign-in-incomplete") Object.assign(observation, { backlog: 0, keyNames: 0 });
@@ -550,9 +552,13 @@ test("M2 handoff ACL refusal preserves the parent; takeover defeats parent clean
   const root = mkdtempSync(join(tmpdir(), "private-handoff-"));
   const manifestPath = join(root, "manifest.json");
   writeFileSync(manifestPath, JSON.stringify(manifest));
-  const options = { manifestPath, machineLockRoot: join(root, "locks"), platform: "win32",
+  const options = { manifestPath, platform: "win32",
+    // Keep the refusal at handoff staging, after account-root validation.
+    ...isolatedLifecycleOptions(root, { machineLockRoot: join(root, "locks"),
+      lockRootOptions: { restrictWindowsDirectory() {} } }),
     now: () => new Date(now), restrictWindowsDirectory() {} };
   const parent = acquireBrainLifecycleLock({ ...options, operation: "update" });
+  assert.ok(parent.accountPath && parent.legacyPath, "the injected Windows home retains both additional slots");
   let child, aclCalls = 0;
   try {
     const delegation = parent.childDelegation();
@@ -564,7 +570,8 @@ test("M2 handoff ACL refusal preserves the parent; takeover defeats parent clean
     child = adoptParentBrainLifecycleLock({ ...options, delegation, parentPid: process.pid,
       restrictWindowsDirectory() { aclCalls++; },
     });
-    assert.equal(aclCalls, 2, "the permitted ACL control reaches takeover");
+    assert.equal(aclCalls, 1 + new Set([parent.path, parent.accountPath, parent.legacyPath].filter(Boolean)).size,
+      "the permitted ACL control reaches takeover of every retained slot");
     assert.equal(parent.release(), false, "parent cleanup cannot release the child's fresh token");
     assert.equal(child.assertOwned(), true);
     let contenders = 0;
@@ -816,7 +823,9 @@ async function auditedPackageArm(arm = "success", enabled = true, audit = {}) {
         }
         renameSync(source, target);
       },
-      lifecycleLockOptions: { machineLockRoot: join(root, "locks"), now: () => new Date(now) },
+      lifecycleLockOptions: isolatedLifecycleOptions(root, { machineLockRoot: join(root, "locks"), now: () => new Date(now),
+        lockRootOptions: { environment: { ...isolatedLifecycleOptions(root).lockRootOptions.environment,
+          ProgramData: join(root, "program-data") } } }),
       environment: { HOME: root, USERPROFILE: root, USERNAME: "fixture-owner", USERDOMAIN: "FIXTURE",
         ...audit.environment, ProgramData: join(root, "program-data"), SystemRoot: "C:\\Windows", WINDIR: "C:\\Windows",
         TEMP: root, TMP: root, BRAIN_NO_WRANGLER_LOGIN: "1" },
@@ -1050,7 +1059,9 @@ async function extraTaskAudit({ enabled = true, failRestore = false, bridgeOnly 
         const adapter = key => ({ read: () => read(key), setEnabled: (_identity, enabled) => { const state = read(key); state.enabled = enabled; write(key, state); if (key === "accounting") observed.accountingPause++; }, install() { observed.accountingRestore++; throw new Error("unexpected early restore"); } });
         const bridgeAdapter = { currentSid: () => ${JSON.stringify(sid)}, inventory: () => ({ entries: [read("bridge")], ignored: 0 }), read: () => read("bridge"), setEnabled: (_name, enabled) => { const state = read("bridge"); state.enabled = enabled; write("bridge", state); observed[enabled ? "bridgeRestore" : "bridgePause"]++; } };
         try { await cmdUpdate(manifestPath, {
-          lifecycleLockOptions: { machineLockRoot: ${JSON.stringify(join(context.root, "locks"))} },
+          lifecycleLockOptions: ${JSON.stringify(isolatedLifecycleOptions(context.root, { machineLockRoot: join(context.root, "locks"),
+            lockRootOptions: { environment: { ...isolatedLifecycleOptions(context.root).lockRootOptions.environment,
+              ProgramData: join(context.root, "program-data") } } }))},
           discoverInstalledManifest: path => ({ path }), answerSetupNeedsRecovery: () => false,
           readUpdateBacklog: async () => ({ pending: 0 }), withCloudflareControl: async action => action(),
           answerKeyOptions: { cf: async () => [{ name: "ANTHROPIC_API_KEY", type: "secret_text" }] },
@@ -1161,8 +1172,8 @@ for (const [interruptedRename, exitPlatform] of interruptionCases) {
       import { renameSync, writeFileSync } from "node:fs";
       import { withBrainLifecycleLock } from ${JSON.stringify(new URL("../operations/brain-lifecycle-lock.mjs", import.meta.url).href)};
       ${ownTerminationSource(join(root, "terminated.json"))}
-      await withBrainLifecycleLock(${JSON.stringify({ manifestPath, operation: "update", machineLockRoot: join(root, "locks") })}, () => {
-      const swap = preparePrivateRuntimeSwap(${JSON.stringify({ staging, runtimeRoot, candidate, manifestPath, binding, lifecycleLockOptions: { machineLockRoot: join(root, "locks") } })});
+      await withBrainLifecycleLock(${JSON.stringify({ ...isolatedLifecycleOptions(root, { machineLockRoot: join(root, "locks") }), manifestPath, operation: "update" })}, () => {
+      const swap = preparePrivateRuntimeSwap(${JSON.stringify({ staging, runtimeRoot, candidate, manifestPath, binding, lifecycleLockOptions: isolatedLifecycleOptions(root, { machineLockRoot: join(root, "locks") }) })});
       let calls = 0;
       const rename = (source, target) => { renameSync(source, target); writeFileSync(${JSON.stringify(join(root, "reached.json"))}, JSON.stringify(++calls)); if (calls === ${interruptedRename}) loseProcess(calls); };
       swap.forward(rename);
@@ -1297,7 +1308,7 @@ test("R4 Windows forward sharing locks and saved recovery retry without widening
   const failed = await auditedPackageArm("rollback-rename-failed");
   assert.equal(failed.failure?.code, "PRIVATE_OFFER_RECOVERY"); let restores = 0;
   await recoverPrivateRuntime(join(failed.staging, "swap.json"), { platform: "win32", renameOptions: { sleep: () => {} },
-    lifecycleLockOptions: { machineLockRoot: join(failed.root, "locks") },
+    lifecycleLockOptions: isolatedLifecycleOptions(failed.root, { machineLockRoot: join(failed.root, "locks") }),
     rename: (source, target) => {
       if (source.endsWith("prior-runtime") && ++restores === 1) throw Object.assign(new Error("fixture saved recovery lock"), { code: "EACCES" });
       renameSync(source, target);
@@ -1650,10 +1661,11 @@ test("R6 a transient Windows lock on the lease handoff retries under fresh paren
   const root = mkdtempSync(join(tmpdir(), "private-handoff-r6-"));
   const manifestPath = join(root, "manifest.json");
   writeFileSync(manifestPath, JSON.stringify(manifest));
-  const options = { manifestPath, machineLockRoot: join(root, "locks"), platform: "win32",
+  const options = { manifestPath, platform: "win32", ...isolatedLifecycleOptions(root, { machineLockRoot: join(root, "locks") }),
     now: () => new Date(now), restrictWindowsDirectory() {} };
-  const handoff = (to, attempt) => to.endsWith(`${sep}owner.json`) && attempt <= 2 ? "EPERM" : null;
   const parent = acquireBrainLifecycleLock({ ...options, operation: "update" });
+  let handoffPath = join(parent.path, "owner.json");
+  const handoff = (to, attempt) => to === handoffPath && attempt <= 2 ? "EPERM" : null;
   let child, proofs = 0;
   try {
     const { calls, restore } = injectRenameFaults(t, (from, to, attempt) => handoff(to, attempt));
@@ -1661,12 +1673,18 @@ test("R6 a transient Windows lock on the lease handoff retries under fresh paren
       child = adoptParentBrainLifecycleLock({ ...options, delegation: parent.childDelegation(), parentPid: process.pid,
         isOwnerAlive: () => { proofs++; return true; } });
     } finally { restore(); }
-    assert.deepEqual(calls.filter(call => call.to.endsWith(`${sep}owner.json`)).map(call => call.code), ["EPERM", "EPERM", null]);
-    assert.equal(proofs, 4, "the parent lease is proved once, then again before each handoff attempt");
+    assert.deepEqual(calls.filter(call => call.to === handoffPath).map(call => call.code), ["EPERM", "EPERM", null]);
+    const otherSlots = [...new Set([parent.accountPath, parent.legacyPath].filter(path => path && path !== parent.path))];
+    assert.equal(otherSlots.length, 2, "the retry fixture retains distinct account and legacy transfers");
+    for (const path of otherSlots) assert.deepEqual(calls.filter(call => call.to === join(path, "owner.json")).map(call => call.code), [null],
+      "each other retained slot transfers without an injected fault");
+    assert.equal(proofs, 4 + 2 * otherSlots.length,
+      "the parent is proved before every selected-slot retry and every other slot transfer");
     assert.equal(parent.release(), false, "parent cleanup cannot release the child's fresh token");
     assert.equal(child.assertOwned(), true);
   } finally { child?.release(); parent.release(); }
   const later = acquireBrainLifecycleLock({ ...options, operation: "update" });
+  handoffPath = join(later.path, "owner.json");
   let lostChild;
   try {
     proofs = 0;

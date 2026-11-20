@@ -36,28 +36,24 @@ export function ScopeBar({
   }, [value]);
 
   return (
-    <div className="mb-6" role="group" aria-label="Financial entity selection">
+    <div className={choiceRequired ? "mb-6 rounded-2xl border border-line bg-card p-4 sm:p-5" : "mb-6"} role="group" aria-label="Financial entity selection">
       {choiceRequired && (
-        <div role="status" className="mb-4 rounded-2xl border border-amber-300 bg-amber-50 px-4 py-4 text-amber-950 sm:px-5">
-          <p className="text-[15px] font-semibold">{requireEntity ? "Choose one part of your finances to continue" : "Choose what to view"}</p>
+        <div role="status" className="mb-4 text-ink-soft">
           {requireEntity ? (
-            <p className="mt-1.5 text-[13.5px] leading-relaxed">
+            <p className="text-[14px] leading-relaxed">
               Pick one person, household, business, trust, property, or investment below.
-              Financial Brain will not choose one for you or combine separate finances into one editable view.
             </p>
           ) : (
-            <p className="mt-1.5 text-[13.5px] leading-relaxed">
+            <p className="text-[14px] leading-relaxed">
               Choose Whole Brain to include all evidence, or choose one item below to narrow the page.
-              Financial Brain will not silently choose for you.
             </p>
           )}
         </div>
       )}
       <div className="flex items-center justify-between gap-3 mb-2">
-        <span className="text-[12.5px] font-medium uppercase tracking-[0.08em] text-ink-soft">
-          {choiceRequired ? (requireEntity ? "Choose one" : "Choose a view")
-            : value === null ? "Showing" : "Selected"}
-        </span>
+        {!choiceRequired && <span className="text-[12.5px] font-medium uppercase tracking-[0.08em] text-ink-soft">
+          {value === null ? "Showing" : "Selected"}
+        </span>}
         {ordered.length >= FIND_AT && (
           <input
             type="search"
@@ -65,7 +61,7 @@ export function ScopeBar({
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Find a person or entity"
             aria-label="Find a person or financial entity"
-            className="w-44 max-w-[58vw] text-[13px] px-3 py-2 rounded-lg border border-line bg-card outline-none focus:border-accent"
+            className="min-h-11 w-44 max-w-full text-[16px] px-3 py-2 rounded-lg border border-line-strong bg-card outline-none focus:border-accent"
           />
         )}
       </div>
@@ -117,7 +113,7 @@ function ScopeChoice({ active, disabled, onClick, children }: {
       aria-pressed={active}
       disabled={disabled}
       onClick={onClick}
-      className={`shrink-0 text-[13.5px] font-medium px-3.5 py-2 rounded-xl border transition-colors disabled:opacity-60 ${
+      className={`min-h-11 max-w-full text-left break-words text-[15px] font-medium px-3.5 py-2 rounded-xl border transition-colors disabled:opacity-60 ${
         active
           ? "bg-accent text-white border-accent"
           : "bg-card text-ink-soft border-line hover:text-ink hover:border-accent"

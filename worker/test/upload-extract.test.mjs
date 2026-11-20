@@ -148,4 +148,25 @@ for (const [label, bytes, expectedCode] of [
   check("a malformed PDF is an explicit unreadable upload", error?.code === "unreadable_upload");
 }
 
-console.log(`\nupload extraction: all ${ran} checks passed`);
+
+{
+  const { extract } = await import("../../ingest/extract.mjs");
+  const { toEnvelope } = await import("../../connectors/imap.mjs");
+  const message = Buffer.from("From: Sender <sender@example.invalid>\r\n" +
+    "Subject: Synthetic mail\r\n" + "X-Fixture: ordinary\r\n".repeat(5000) + "\r\nBody");
+  const eml = await extract(message, "bounded.eml");
+  assert.equal(eml.text, null);
+  assert.match(eml.error, /header/i);
+  const archive = Buffer.concat([Buffer.from("From sender@example.invalid\n"), message]);
+  const mbox = await extract(archive, "bounded.mbox");
+  assert.equal(mbox.text, null);
+  assert.match(mbox.error, /none of the 1 message/);
+  const envelope = await toEnvelope({ uid: 1, raw: message });
+  assert.match(envelope.skip?.reason, /headers exceed the parser limit/);
+  await assert.rejects(extractOwnerUpload({}, {
+    mediaType: "message/rfc822", bytes: message, fileName: "bounded.eml",
+  }), { code: "unreadable_upload" });
+  check("mail extraction paths reject an over-budget header block", true);
+}
+
+console.log(`upload extraction: all ${ran} checks passed`);

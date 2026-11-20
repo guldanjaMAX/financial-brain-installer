@@ -600,9 +600,11 @@ section("ingest envelopes");
   check("an exception dates itself to the moved slot", excEnv.occurred_at.slice(0, 10) === "2026-06-16");
 
   const del = buildEnvelope(EVENT_CANCELLED, { calendar: CAL });
-  check("a cancelled event becomes a deletion", del.kind === "delete", del.kind);
+  check("a cancelled event reports a provider deletion observation", del.kind === "delete", del.kind);
   check("the deletion targets the same source_id the upsert used", del.source_id === allDayEnv.source_id, del.source_id);
   check("a cancelled event does NOT become a tombstone document", !("envelope" in del));
+  check("an ID-only cancellation carries explicit evidence for retained status marking",
+    del.removal_cause === "explicit_deletion" && del.event_id === EVENT_CANCELLED.id);
 
   const skip = buildEnvelope(EVENT_EMPTY, { calendar: CAL });
   check("an event with nothing to retrieve is skipped", skip.kind === "skip", skip.kind);

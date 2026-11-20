@@ -93,8 +93,10 @@ for (const profile of ["librarian", "owner-assistant"]) {
     } else {
       assert.match(initialized.instructions, /This connection cannot read bank rows/);
       assert.match(initialized.instructions, /still answer in five parts/);
-      assert.match(initialized.instructions, /Confidence: <High\|Medium\|Low> \(<n>%\)/);
-      assert.match(initialized.instructions, /below 100% says why and what is missing/);
+      assert.match(initialized.instructions, /Hide confidence labels and percentages from owners/);
+      assert.match(initialized.instructions, /Keep the tool score internal and never raise it/);
+      assert.match(initialized.instructions, /Explain thin or missing evidence in one plain sentence/);
+      assert.match(initialized.instructions, /preserve the five answer parts; an absent score remains an unassessed internal result/);
       for (const name of ['brain_money_query', 'brain_money_guide', 'brain_money_overview'])
         assert.ok(!inventory.tools.some(tool => tool.name === name), 'Librarian keeps its actual bank-read boundary');
     }

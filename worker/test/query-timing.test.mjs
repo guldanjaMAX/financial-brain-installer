@@ -1,3 +1,4 @@
+import { assertOwnerEvidence } from '../../test/helpers/owner-evidence-contract.mjs';
 import { assertDocumentAnswer } from './helpers/document-answer-contract.mjs';
 import '../../test/fixtures/cli-side-effect-tripwire.mjs';
 import assert from 'node:assert/strict';
@@ -300,7 +301,8 @@ test('remote MCP search and answer errors retain the actual backend spans', asyn
   const error = await failed.request('mcp');
   assert.equal(failed.counts.verifier, 1);
   assert.notEqual(error.body.result.isError, true);
-  assert.match(error.body.result.content[0].text, /Confidence:.*Missing:/s);
+  assertOwnerEvidence(error.body.result.content[0].text);
+  assert.match(error.body.result.content[0].text, /Missing or counted twice:|Still needed:/);
   assert.equal(error.body.result._meta.timing.outcome, 'ok');
   assert.equal(error.body.result._meta.timing.stages.verifier_llm.errors, 1);
   assert.equal(error.body.result._meta.timing.stages.evidence_gate.errors, 1);

@@ -96,7 +96,7 @@ export function Home({ onNavigate }: { onNavigate?: (destination: HomeDestinatio
         <h1 className="page-title">What deserves your attention</h1>
         <p className="page-intro">
           {needsFirstEntity
-            ? "Start by listing one exact part of your finances. Nothing will be guessed or combined."
+            ? "Start by listing one part of your finances."
             : <>Current records, visible gaps, and the evidence behind each answer for {activeLabel}.</>}
         </p>
       </header>
@@ -161,7 +161,7 @@ export function Home({ onNavigate }: { onNavigate?: (destination: HomeDestinatio
       )}
 
       {systemLoaded && (
-        <div className="mt-9 grid gap-7 lg:grid-cols-2 lg:items-start">
+        <div className="mt-9 grid gap-7 lg:grid-cols-2 lg:items-start [&>section]:mt-0">
           <SystemProblems status={status} />
           <SourceCoverage status={status} />
         </div>
@@ -174,18 +174,19 @@ export function Home({ onNavigate }: { onNavigate?: (destination: HomeDestinatio
 
 export function FirstFinancialEntityPrompt({ onStart }: { onStart?: () => void }) {
   return (
-    <div className="mt-6 max-w-3xl rounded-2xl border border-amber-300 bg-amber-50 px-4 py-4 text-amber-950 sm:px-5">
+    <div className="mt-6 max-w-3xl rounded-2xl border border-line bg-card px-4 py-4 text-ink sm:px-5">
+      <p className="mb-1 text-[12.5px] font-semibold text-accent">STEP 1 of 2</p>
       <p className="text-[15px] font-semibold">Start with one part of your finances</p>
       <p className="mt-1.5 text-[13.5px] leading-relaxed">
-        No person, household, business, trust, property, or investment has been listed yet. Financial Brain will not guess or combine them. Add one exact name, review it, and then decide what records belong to it.
+        Add one person, household, business, trust, property, or investment. You’ll review the name and type before adding it, then decide which records belong to it.
       </p>
       {onStart && (
         <button
           type="button"
           onClick={onStart}
-          className="mt-3 rounded-xl bg-accent px-4 py-2.5 text-[13.5px] font-semibold text-white hover:opacity-90"
+          className="mt-3 min-h-11 rounded-xl bg-accent px-4 py-2.5 text-[15px] font-semibold text-white hover:opacity-90"
         >
-          Add my first financial entity
+          Add your first person or business
         </button>
       )}
     </div>
@@ -282,7 +283,7 @@ export function AttentionList({ snapshot, entities, scopeName, onNavigate }: {
         </Note>
       ) : shown.map((item) => (
         <Row key={item.id}>
-          <span className="min-w-0 flex-1">
+          <span className="min-w-[min(100%,15rem)] flex-1">
             <span className="text-[14.5px] font-medium">{item.title}</span>
             <span className="block text-[13px] text-ink-soft mt-0.5">{item.detail}</span>
             {item.consequence && <NextStep>{item.consequence}</NextStep>}
@@ -292,14 +293,14 @@ export function AttentionList({ snapshot, entities, scopeName, onNavigate }: {
               <NextStep owner={item.move}>{item.move === "yours" ? "This is waiting for you." : "A person or custodian outside the brain has the next move."}</NextStep>
             ) : null}
           </span>
-          <span className="flex items-center gap-2 flex-wrap shrink-0">
+          <span className="flex items-center gap-2 flex-wrap sm:shrink-0">
             {item.issueLabel && <Badge tone="warn">{item.issueLabel}</Badge>}
             <Chip state={item.state} />
             {onNavigate && (
               <button
                 type="button"
                 onClick={() => onNavigate(item.destination)}
-                className="rounded-lg border border-line-strong bg-paper px-2.5 py-1.5 text-[12.5px] font-semibold text-ink hover:border-accent"
+                className="min-h-11 rounded-lg border border-line-strong bg-paper px-2.5 py-1.5 text-[15px] font-semibold text-ink hover:border-accent"
               >
                 {item.destination === "year" ? "Open This Year" : "Open Add & Review"}
               </button>
@@ -499,6 +500,7 @@ function Blindspots({ snapshot, status, scopeName }: {
 
 export function SystemProblems({ status }: { status: SystemStatus | null }) {
   return (
+    <div id="brain-status" className="min-w-0 scroll-mt-4">
     <Section title="Brain status" blurb="Things worth knowing and problems that need attention stay visible here.">
       {!status?.problems ? (
         <Note>The problem register could not be read. This is not an all-clear.</Note>
@@ -523,6 +525,7 @@ export function SystemProblems({ status }: { status: SystemStatus | null }) {
         );
       })}
     </Section>
+    </div>
   );
 }
 
@@ -537,7 +540,7 @@ function SourceCoverage({ status }: { status: SystemStatus | null }) {
         const zone = accessZonePresentation(source.access_zone);
         return (
         <Row key={`${source.kind}:${source.label}:${index}`}>
-          <div className="min-w-0 flex-1">
+          <div className="min-w-[min(100%,15rem)] flex-1">
             <span className="text-[14.5px] font-medium">{source.label}</span>
             <span className="block text-[13px] text-ink-soft mt-0.5">
               {source.documents.toLocaleString()} {source.documents === 1 ? "document" : "documents"}
@@ -574,7 +577,8 @@ export function SourceCoverageDetailView({
   const facts = coverageFacts(coverage);
   const caveat = coverageCaveat(label, coverage);
   return (
-    <div className="mt-3 border-t border-line pt-3">
+    <details className="mt-3 border-t border-line pt-3">
+      <summary className="min-h-11 cursor-pointer content-center text-[14px] font-medium text-accent">Details</summary>
       <dl className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-4">
         {COVERAGE_DIMENSIONS.map(({ key, label: dimensionLabel }) => {
           const presentation = coveragePresentation(coverage[key].state);
@@ -590,7 +594,7 @@ export function SourceCoverageDetailView({
       </dl>
       {facts.length > 0 && <p className="mt-2 text-[12px] leading-relaxed text-ink-soft">{facts.join(" · ")}</p>}
       {caveat && <p className="mt-2 text-[12px] leading-relaxed text-amber-900">{caveat}</p>}
-    </div>
+    </details>
   );
 }
 
@@ -610,7 +614,11 @@ export function PhaseNotice({ phase, status }: { phase: BrainPhase; status: Syst
   }
   return (
     <div className="border border-line rounded-2xl px-4 py-3.5 bg-card">
-      <p className="text-[14.5px] text-ink-soft leading-relaxed">{phraseFor(phase, status)}</p>
+      <p className="text-[14.5px] text-ink-soft leading-relaxed">
+        {phase === "problems" ? <>One source needs a look. <a href="#brain-status" className="inline-flex min-h-11 items-center text-accent underline">See Brain status below.</a></> : phraseFor(phase, status)}
+      </p>
+      {phase === "empty" && <p className="mt-2 text-[14px] text-ink-soft">Your installer can connect your first source. Once it has been read, ask a question in Explore.</p>}
+      {phase === "indexing" && <p className="mt-2 text-[14px] text-ink-soft">You can ask questions now. Meaning search is still catching up.</p>}
       {phase === "indexing" && searchLine && (
         <p className="text-[12.5px] text-ink-soft mt-2">
           {searchLine}
@@ -633,8 +641,7 @@ export function SourceChip({ state }: { state: string }) {
   if (!outcome) return null;
   const issue = sourceIssueLabel(state);
   return (
-    <span className="flex items-center gap-2 flex-wrap justify-end">
-      {issue && <Badge tone="warn">{issue}</Badge>}
+    <span className="flex items-center gap-2 flex-wrap" title={issue || undefined}>
       <Chip state={outcome} />
     </span>
   );

@@ -1,7 +1,9 @@
 import { currentPartsFixture } from './helpers/current-sync-fixture.mjs';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 let ambientAttempts = 0;
 globalThis.fetch = async () => { ambientAttempts++; throw new Error('Ambient network is forbidden'); };
@@ -12,8 +14,9 @@ const { syncMicrosoftGraph } = await import('../connectors/microsoft-graph.mjs')
 const { buildDriveRemovalPlan, DriveRemovalReviewRequired } = await import('../operations/drive-removal-plan.mjs');
 const { createIngestRemovalReview, removalDigest } = await import('../operations/ingest-removal-plan.mjs');
 const { runLoadRemovalLeg, removalReviewFacts, canAutoApplyRemoval, removalOwnerSentence } = await import('../operations/load-removal-review.mjs');
-const { batchStream, prefetch } = await import('../ingest/run.mjs');
-const { assertRemoteLimitSafe, gmailRetryMessageIds } = await import('../brain.mjs');
+const { markCalendarCancellations } = await import('../operations/calendar-cancellations.mjs');
+const ingest = await import('../ingest/run.mjs');
+const { credentialScannerFingerprint } = await import('../brain.mjs');
 const brain = readFileSync(new URL('../brain.mjs', import.meta.url), 'utf8');
 const excerpt = (start, end) => {
   const first = brain.indexOf(start);
@@ -22,16 +25,40 @@ const excerpt = (start, end) => {
   return brain.slice(first, last);
 };
 const {sourceModuleHarness} = await import('./helpers/source-module-harness.mjs');
-const cliModule = await sourceModuleHarness(new URL('../brain.mjs',import.meta.url));
-const {result:clearGmailRetry} = cliModule({gmailRetryMessageIds},'clearGmailRetry');
+// VM scripts cannot dynamically import without an experimental Node flag.
+// Resolve only this module seam to the already imported, real connector;
+// leave the command and all of its finalization branches intact.
+const sourceHarness = await sourceModuleHarness(new URL('../brain.mjs',import.meta.url), {
+  source: brain.replaceAll('await import("./connectors/gmail.mjs")', '__gmailModule'),
+});
+const NOW = Date.parse('2026-11-01T12:00:00.000Z');
+class FixtureDate extends Date {
+  constructor(...args) { super(...(args.length ? args : [NOW])); }
+  static now() { return NOW; }
+}
+const cliModule = (bindings, expression) => sourceHarness({ Date: FixtureDate, __gmailModule: gmail, ...bindings }, expression);
 const branch = (code,async=false) => cliModule({ process: { stdout: { write() {} } } },`(${async?'async ':''}function(scope){with(scope){${code}\n}})`).result;
-// Reviewed Gmail entry boundary captures prior held failures in the enclosing runner.
-const gmailBranch = branch("let gmailPreviouslyHeldFailures = 0;\nconst familyPlans = new Map(), sentFamilyParts = new Map(), acceptedFamilyParts = new Map(), rejectedFamilyParts = new Map();\n" + excerpt('    const gmail = options.gmail ??', '  } else {\n    const imap = options.imap'),true);
-const calendarRemoval = branch(excerpt('  if (result.deletions.length && !sent.errors.length && !sent.refused.length) {', '  // Provider-level partial failure is tracked per calendar'),true);
+// Calendar refresh no longer has a removal branch. Exercise the whole command
+// runner so a newly reachable review cannot hide outside a hand-picked excerpt.
+const calendarOutput = [];
+const { result: calendarRun } = cliModule({
+  info: line => calendarOutput.push(line), warn: line => calendarOutput.push(line), ok: line => calendarOutput.push(line),
+  ingestRemovalReview() { throw new Error('Calendar refresh reached removal review'); },
+}, 'cmdIngestCalendarRun');
 const { runProviderConnector } = await import('../connectors/provider-runtime.mjs');
 const providerReview = branch(`return (${excerpt('      reviewRemovals: async ({ uids, targetCauses,', '\n      },\n    });').trim().replace(/^reviewRemovals: /, '')}\n});`);
-const NOW = Date.parse('2026-11-01T12:00:00.000Z');
 const secret = randomBytes(24).toString('hex');
+const providerText = ['UNTRUSTED', 'PROVIDER', 'DETAIL'].join('_');
+const providerFailure = { error: { message: `${providerText} ${secret}` } };
+const fixtureRoot = mkdtempSync(join(tmpdir(), 'removal-cause-'));
+const manifestPath = join(fixtureRoot, 'fixture.manifest.json');
+const keyFile = join(fixtureRoot, '.brain-admin-key');
+const launchctl = join(fixtureRoot, 'launchctl-fixture');
+writeFileSync(keyFile, secret, { mode: 0o600 });
+writeFileSync(manifestPath, JSON.stringify({ client: { slug: 'fixture' }, brain: { domain: 'fixture.invalid' },
+  corpora: { gmail: { enabled: true } } }));
+writeFileSync(launchctl, '#!/bin/sh\nexit 99\n', { mode: 0o700 });
+process.on('exit', () => rmSync(fixtureRoot, { recursive: true, force: true }));
 const retainedIds = Array.from({ length: 99 }, (_, i) => `retained-${i}`);
 const targetId = 'subject-item';
 const allIds = [...retainedIds, targetId];
@@ -42,6 +69,7 @@ function removalFixture(id, kind, identities) {
   const state = { done: Object.fromEntries(identities.map(uid => [uid, 'revision-one'])), skipped: {} };
   let marker = { instance: 'fixture-instance', runtime: 'fixture-runtime', nonce: 'fixture-before', generation: 1 };
   const counters = { preview: 0, apply: 0, saved: 0, applyBoundary: 0, runs: 0, finish: 0 };
+  const previewControl = { error: null, invalid: false };
   let saved = null;
   const saveState = () => {
     if (state.ingest_removal_plan) {
@@ -59,6 +87,8 @@ function removalFixture(id, kind, identities) {
       counters[body.action]++;
       if (body.marker) assert.deepEqual(body.marker, marker);
       if (body.action === 'preview') {
+        if (previewControl.error) throw previewControl.error;
+        if (previewControl.invalid) return {};
         const targets = body.families.map(item => item.base_doc_uid).filter(uid => stored.has(uid)).sort();
         return { marker, targets, documents: targets.length, excluded_documents: 0 };
       }
@@ -69,7 +99,7 @@ function removalFixture(id, kind, identities) {
       return { documents: body.targets.length, marker };
     },
   });
-  return { stored, state, counters, saveState, review, saved: () => saved,
+  return { stored, state, counters, saveState, review, previewControl, saved: () => saved,
     finish: async plan => { counters.finish++; return review.finish({ sourcePlan: plan }); },
     apply: async flags => {
       counters.applyBoundary++;
@@ -88,6 +118,7 @@ async function exercise({ id, kind, fixture, run, expected, observations }) {
     result = await runLoadRemovalLeg({ kind, source: kind, dryRun: false,
       run: async () => { fixture.counters.runs++; return run(); }, apply: fixture.apply });
   } catch (error) { failure = error; }
+  if (failure?.code === 'ERR_ASSERTION') throw failure;
   const saved = fixture.saved();
   if (saved) {
     assert.deepEqual(Object.keys(saved.targetCauses).sort(), saved.targets);
@@ -110,14 +141,22 @@ async function exercise({ id, kind, fixture, run, expected, observations }) {
     assert.equal(fixture.counters.applyBoundary, 0);
     assert.equal(fixture.counters.runs, 1);
     assert.equal(fixture.stored.size, 100);
-    if (expected === 'held') {
-      assert.ok(failure instanceof DriveRemovalReviewRequired, `${id}: ${failure?.message || "no failure"}`);
-      assert.ok(saved?.targets.length > 0, 'the rejection reached a real nonempty saved plan');
-      assert.equal(canAutoApplyRemoval(removalReviewFacts(failure.removal_review, kind), kind, kind), false);
-    } else if (expected === 'error') assert.ok(failure, 'the provider or guard decision must throw');
-    else assert.equal(failure, null);
+    if (expected === 'held' || expected === 'reviewed') {
+      if (expected === 'reviewed') {
+        assert.ok(failure === null, 'a proved Gmail owner review never blocks the next refresh');
+        assert.ok(saved?.targets.length > 0, 'the nonblocking decision reached a nonempty saved plan');
+      } else {
+        assert.ok(failure instanceof DriveRemovalReviewRequired, `${id}: expected a proved owner review`);
+        assert.ok(saved?.targets.length > 0, 'the rejection reached a real nonempty saved plan');
+        assert.equal(canAutoApplyRemoval(removalReviewFacts(failure.removal_review, kind), kind, kind), false);
+      }
+    } else if (expected === 'error') {
+      assert.ok(failure, 'the provider or guard decision must throw');
+      assert.notEqual(failure.code, 'ERR_ASSERTION', 'a test assertion is never a provider failure');
+    } else assert.ok(failure === null, `${id}: command completes`);
   }
-  const observed = observations();
+  const observed = observations(failure);
+  if (expected === 'error' && kind === 'gmail') assert.equal(observed.commandFailureReached, true);
   assert.ok(observed.providerCalls > 0 || observed.guardRefused, 'negative outcomes must reach the intended decision');
   if (observed.witness) {
     assert.equal(observed.witness.exists, true);
@@ -138,7 +177,8 @@ async function exercise({ id, kind, fixture, run, expected, observations }) {
     ...observed };
   if (id === 'microsoft-aged-out' || id === 'microsoft-blanked') {
     assert.equal(row.heldOwnerClaimsDeletion, false);
-    assert.match(removalOwnerSentence(removalReviewFacts(failure.removal_review, kind)), armText(id));
+    if (expected === 'held') assert.match(removalOwnerSentence(removalReviewFacts(failure.removal_review, kind)), armText(id));
+    else assert.equal(failure, null, 'window aging completes without removal review');
     assert.equal(observed.tombstones, 0);
   }
   rows.push(row);
@@ -153,6 +193,7 @@ function event(id) {
 }
 
 async function calendarCase(arm, expected) {
+  calendarOutput.length = 0;
   const id = `calendar-${arm}`;
   const fixture = removalFixture(id, 'calendar', allIds.map(value =>
     `calendar:${calendar.sourceIdFor(arm === 'shared-config-removed' && value === targetId ? 'shared' : 'primary', value)}`));
@@ -161,6 +202,8 @@ async function calendarCase(arm, expected) {
   if (arm === 'window-floor') config.fullSyncSince = '2026-11-01T00:00:00Z';
   if (arm === 'event-type-scope') config.eventTypes = ['default'];
   let providerCalls = 0, itemCalls = 0, tombstones = 0, documents = 0, skipped = 0, failedCalendars = 0, authoritative = false;
+  let markingDecisions = 0, markerWrites = 0, removalCalls = 0, cursorSaves = 0;
+  const cancelledIds = new Set();
   const run = async () => {
     let page = 0;
     const result = await calendar.syncAll({ config, state: fixture.state,
@@ -169,14 +212,14 @@ async function calendarCase(arm, expected) {
         providerCalls++; page++;
         const url = new URL(input);
         if (arm === 'sibling-provider-error' && url.pathname.endsWith('/calendars/shared/events')) {
-          return Response.json({ error: { message: 'Synthetic sibling refusal' } }, { status: 403 });
+          return Response.json(providerFailure, { status: 403 });
         }
         assert.ok(url.pathname.endsWith('/calendars/primary/events'));
         if (arm === 'window-floor') assert.equal(url.searchParams.get('timeMin'), config.fullSyncSince.replace('Z', '.000Z'));
         if (['permission-403', 'shared-404', 'provider-503'].includes(arm)) {
-          return Response.json({ error: { message: 'Synthetic provider refusal' } }, { status: Number(arm.slice(-3)) });
+          return Response.json(providerFailure, { status: Number(arm.slice(-3)) });
         }
-        if (arm === 'partial-page-error' && page === 2) return Response.json({ error: { message: 'Synthetic provider refusal' } }, { status: 503 });
+        if (arm === 'partial-page-error' && page === 2) return Response.json(providerFailure, { status: 503 });
         if (arm === 'malformed-page') return Response.json({ items: {} });
         const deletionArm = ['deleted', 'partial-no-token', 'partial-page-error', 'tombstone-actor-unknown', 'sibling-provider-error'].includes(arm);
         const items = deletionArm ? [{ id: targetId, status: 'cancelled' }]
@@ -196,20 +239,60 @@ async function calendarCase(arm, expected) {
     }
     if (arm === 'partial-no-token') assert.equal(authoritative, false);
     if (['blanked', 'visibility-redacted'].includes(arm)) assert.equal(skipped, 1);
-    const scope = { result, sent: { errors: [], refused: [] }, sourceName: 'calendar', state: fixture.state,
-      m: {}, manifestPath: 'fixture/manifest.json', statePath: 'fixture/state.json',
-      base: 'https://fixture.invalid', adminKey: secret, options: {}, assertLockOwned() {},
-      saveState: fixture.saveState, buildDriveRemovalPlan,
-      listFamilies: async () => fixture.stored,
-      ingestRemovalReview: () => ({ finish: async ({ sourcePlan }) => fixture.finish(sourcePlan) }),
-      removalError: null, removalPending: 0 };
-    await calendarRemoval(scope);
-    if (scope.removalError) throw scope.removalError;
+    const receipts = [];
+    const options = {
+      launchctl,
+      resolveBaseUrl: async () => 'https://fixture.invalid', resolveAdminKey: () => readFileSync(keyFile, 'utf8'),
+      getAccessToken: async () => secret, loadCalendarState: () => fixture.state,
+      saveCalendarState: (_path, state) => { cursorSaves++; assert.deepEqual(state, result.state); },
+      googleCalendar: { syncAll: async () => result,
+        ingestEnvelopes: async ({ envelopes }) => ({ created: 0, updated: 0,
+          unchanged: envelopes.length, errors: [], refused: [] }) },
+      markCalendarCancellations: async args => { markingDecisions++; return markCalendarCancellations(args); },
+      fetchImpl: async (input, init) => {
+        const url = new URL(input);
+        if (url.pathname !== '/api/admin/brain/calendar-cancellation') {
+          removalCalls++;
+          throw new Error('Calendar refresh reached a non-marker write');
+        }
+        assert.equal(url.origin, 'https://fixture.invalid');
+        const body = JSON.parse(init.body);
+        assert.equal(body.source, 'calendar');
+        assert.ok(fixture.stored.has(`calendar:${body.source_id}`), 'marker targets a retained stored event');
+        markerWrites++; cancelledIds.add(body.source_id);
+        return Response.json({ ...body, verified: true, action: 'kept_cancelled' });
+      },
+      listStoredSourceFamilies: async () => { removalCalls++; return fixture.stored; },
+      removalPlanRequest: async () => { removalCalls++; throw new Error('Calendar removal review reached'); },
+      postSourceReceipt: async (_base, _key, receipt) => receipts.push(receipt),
+    };
+    const outcome = await calendarRun({ brain: { domain: 'fixture.invalid' }, calendar: config },
+      'fixture/manifest.json', {}, options,
+      { sourceName: 'calendar', dry: false, statePath: 'fixture/state.json', assertLockOwned() {} });
+    assert.equal(markingDecisions, 1, 'the real add-only completion decision was reached');
+    assert.equal(outcome.removed, 0);
+    assert.equal(outcome.removalPending, 0);
+    assert.equal(outcome.cancelled, result.deletions.length);
+    assert.deepEqual([...cancelledIds].sort(), result.deletions.map(item => item.source_id).sort());
+    assert.equal(markerWrites, result.deletions.length, 'cancellations are kept and marked, other arms stay unmarked');
+    assert.equal(removalCalls, 0);
+    assert.equal(fixture.counters.preview, 0);
+    assert.equal(fixture.counters.finish, 0);
+    assert.equal(fixture.state.ingest_removal_plan, undefined);
+    assert.equal(cursorSaves, 1, 'accepted cancellation markers never hold the sync position for removal');
+    assert.equal(receipts.at(-1).status, result.ok ? 'ready' : 'error');
+    const publicOutput = [...calendarOutput, JSON.stringify(receipts)].join('\n');
+    assert.equal(publicOutput.includes(secret), false, 'Calendar never prints a provider credential');
+    assert.equal(publicOutput.includes(providerText), false, 'Calendar never prints provider free text');
+    if (!result.ok) {
+      assert.ok(calendarOutput.some(line => line.includes('Code: INGEST_FAILED') && line.includes('Help: https://')));
+    }
     return { completed: result.ok };
   };
   if (arm === 'shared-config-removed') fixture.state.shared = { sync_token: 'fixture-prior-sync' };
   await exercise({ id, kind: 'calendar', fixture, run, expected,
-    observations: () => ({ providerCalls, itemCalls, tombstones, documents, skipped, failedCalendars, authoritative }) });
+    observations: () => ({ providerCalls, itemCalls, tombstones, documents, skipped, failedCalendars, authoritative,
+      markingDecisions, markerWrites, removalCalls, cursorSaves }) });
 }
 
 async function gmailCase(arm, expected) {
@@ -221,11 +304,18 @@ async function gmailCase(arm, expected) {
   const full = fullArms.has(arm);
   const since = ['full-date-floor', 'incremental-date-floor'].includes(arm) ? '2026-11-01' : null;
   let providerCalls = 0, listCalls = 0, itemCalls = 0, subjectLookups = 0, tombstones = 0, guardRefused = false;
+  let providerFailures = 0;
+  const providerRejection = status => { providerFailures++; return Response.json(providerFailure, { status }); };
   let sourcePlanCalls = 0, lastQuery = null, witnessMode = false, witnessCalls = 0, witness = null;
+  if (arm === 'preview-error') fixture.previewControl.error = new Error(providerFailure.error.message);
+  if (arm === 'preview-invalid') fixture.previewControl.invalid = true;
   // Reviewed Gmail restore proof must accompany the 99 already accepted controls.
   // The changed target is deliberately unproved so every policy arm still reads it.
   const parts = currentPartsFixture();
-  const policy = gmail.gmailPolicyFingerprint({ since });
+  const scanner = credentialScannerFingerprint(false);
+  const policy = gmail.gmailPolicyFingerprint({ since, credentialScannerFingerprint: scanner });
+  fixture.state.credential_scanner_fingerprint = scanner;
+  fixture.state.gmail_policy_fingerprint = policy;
   for (const item of retainedIds) {
     const envelope = { source_type: 'gmail', source_id: item, content: 'Synthetic accepted control.' };
     parts.accept(envelope);
@@ -241,14 +331,14 @@ async function gmailCase(arm, expected) {
     const url = new URL(input);
     const path = url.pathname;
     if (path.endsWith('/profile')) {
-      if (arm === 'full-profile-error') return Response.json({ error: { message: 'Synthetic refusal' } }, { status: 503 });
+      if (arm === 'full-profile-error') return providerRejection(503);
       return Response.json({ historyId: 'fixture-history-current' });
     }
     if (path.endsWith('/history')) {
       if (url.searchParams.get('startHistoryId') === 'fixture-history-current') return Response.json({ history: [], historyId: 'fixture-history-current' });
       if (arm === 'expired-history-label-exclusion' && url.searchParams.get('startHistoryId') !== 'fixture-history-current') return Response.json({ error: { message: 'Synthetic expired history' } }, { status: 404 });
-      if (arm === 'incremental-page-error' && url.searchParams.has('pageToken')) return Response.json({ error: { message: 'Synthetic refusal' } }, { status: 503 });
-      if (['deleted', 'incremental-page-error'].includes(arm)) {
+      if (arm === 'incremental-page-error' && url.searchParams.has('pageToken')) return providerRejection(503);
+      if (['deleted', 'preview-error', 'preview-invalid', 'incremental-page-error'].includes(arm)) {
         tombstones++;
         return Response.json({ history: [{ messagesDeleted: [{ message: { id: targetId } }] }],
           ...(arm === 'incremental-page-error' ? { nextPageToken: 'fixture-page' } : { historyId: 'fixture-history-current' }) });
@@ -259,9 +349,9 @@ async function gmailCase(arm, expected) {
       listCalls++;
       lastQuery = url.searchParams.get('q');
       if (arm === 'full-date-floor') assert.ok(lastQuery.includes('after:2026/11/01'));
-      if (['full-permission-403', 'full-provider-503'].includes(arm)) return Response.json({ error: { message: 'Synthetic refusal' } }, { status: Number(arm.slice(-3)) });
-      if (arm === 'full-page-error' && url.searchParams.has('pageToken')) return Response.json({ error: { message: 'Synthetic refusal' } }, { status: 503 });
-      if (arm === 'full-malformed-page') return Response.json({ messages: {} });
+      if (['full-permission-403', 'full-provider-503'].includes(arm)) return providerRejection(Number(arm.slice(-3)));
+      if (arm === 'full-page-error' && url.searchParams.has('pageToken')) return providerRejection(503);
+      if (arm === 'full-malformed-page') { providerFailures++; return Response.json({ messages: {} }); }
       if (arm === 'full-omitted-messages') return Response.json({ resultSizeEstimate: 99 });
       if (arm === 'full-complete-pages') return Response.json(url.searchParams.has('pageToken')
         ? { messages: [{ id: targetId }], resultSizeEstimate: 100 }
@@ -276,7 +366,7 @@ async function gmailCase(arm, expected) {
     if (!witnessMode && messageId === targetId) subjectLookups++;
     if (arm === 'item-404') return Response.json({ error: { message: 'Synthetic missing item' } }, { status: 404 });
     if (messageId !== targetId) return Response.json({ id: messageId, labelIds: ['INBOX'], internalDate: String(NOW), raw: '' });
-    if (['item-403', 'item-410', 'item-503'].includes(arm)) return Response.json({ error: { message: 'Synthetic item refusal' } }, { status: Number(arm.slice(-3)) });
+    if (['item-403', 'item-410', 'item-503'].includes(arm)) return providerRejection(Number(arm.slice(-3)));
     if (arm === 'missing-labels') return Response.json({ id: messageId });
     if (['incremental-label-exclusion', 'full-label-exclusion', 'expired-history-label-exclusion'].includes(arm)) return Response.json({ id: messageId, labelIds: ['CATEGORY_PROMOTIONS'] });
     if (['incremental-date-floor', 'full-date-floor'].includes(arm)) return Response.json({ id: messageId, labelIds: ['INBOX'], internalDate: String(NOW - 86400000) });
@@ -299,56 +389,102 @@ async function gmailCase(arm, expected) {
     messagePolicy: (token, item, input) => gmail.messagePolicy(token, item, { ...input, ...opts }),
     toEnvelope: (token, item, input) => gmail.toEnvelope(token, item, input, opts),
   };
+  const output = [], receipts = [];
+  let lockChecks = 0, finalizations = 0, completedWindows = 0, commandFailure = null;
+  if (full) fixture.state.gmail_policy_fingerprint = 'fixture-prior-policy';
+  // Run the complete command: the source branch only stages a plan. The real
+  // finalizer runs after checkpoint settlement and keeps proved reviews open
+  // without making new mail wait for an owner removal decision.
+  const { result: gmailRun } = cliModule({
+    info: line => output.push(line), warn: line => output.push(line), ok: line => output.push(line),
+    console: { log: (...args) => output.push(args.join(' ')), warn: (...args) => output.push(args.join(' ')) },
+    process: { stdout: { write: line => output.push(line) } },
+    readGmailCheckpointState: () => ({ verified: true,
+      done: Object.keys(fixture.state.done).length, skipped: Object.keys(fixture.state.skipped).length,
+      cursorPresent: Boolean(fixture.state.history_id), cursor: fixture.state.history_id || null }),
+    ingestRemovalReview: () => ({ ...fixture.review,
+      finish: async ({ sourcePlan } = {}) => {
+        finalizations++;
+        if (sourcePlan) sourcePlanCalls++;
+        return fixture.finish(sourcePlan);
+      } }),
+  }, 'cmdIngestRemote');
+  const options = {
+    gmail: adapter, readCurrentIngestParts: parts.read, ingestNowMs: () => NOW,
+    launchctl,
+    withSourceIngestLock: async (_options, task) => task({ assertOwned: () => { lockChecks++; } }),
+    resolveBaseUrl: async () => 'https://fixture.invalid', resolveAdminKey: () => readFileSync(keyFile, 'utf8'),
+    getAccessToken: async () => secret,
+    ingestLib: async () => ({ ...ingest, loadState: () => fixture.state,
+      saveState: () => fixture.saveState() }),
+    listStoredSourceFamilies: async ({ uids, singlePage }) => singlePage
+      ? { families: new Set(fixture.stored), nextCursor: null }
+      : new Set([...fixture.stored].filter(uid => !uids || uids.includes(uid))),
+    listOwnerRemovedFamilies: async () => new Set(),
+    postSourceReceipt: async (_base, _key, receipt) => receipts.push(receipt),
+    sendBatches: async () => { throw new Error('Unexpected document batch in removal-only harness'); },
+  };
   const run = async () => {
-    const limit = arm === 'full-limited' ? 99 : Infinity;
-    try { assertRemoteLimitSafe({ source: 'Gmail', limit, dryRun: false, incremental: !full }); }
-    catch (error) { guardRefused = true; throw error; }
-    const scope = { options: { gmail: adapter, readCurrentIngestParts: parts.read, ingestNowMs: () => NOW }, incremental: !full, state: fixture.state, sourceName: 'gmail',
-      getToken: async () => secret, limit, gmailFullQuery: gmail.gmailQuery({ since }), gmailSince: since,
-      gmailRetriesAtStart: new Set(), gmailHistoryMarkerMissing: 0, gmailOperationalFailure: null,
-      gmailLabelGaps: 0, gmailPendingRemovalGaps: 0, gmailMoreHistory: false, gmailWindowPaused: false, gmailPolicyChanged: full, gmailDurableRetryFailures: 0, gmailRetainedRetrySkips: 0, lane: full ? 'sweep' : 'incremental',
-      policyFingerprint: gmail.gmailPolicyFingerprint({ since }), dry: false,
-      base: 'https://fixture.invalid', adminKey: secret, GMAIL_FETCH_CONCURRENCY: 8,
-      scannerPolicyChanged: false, scannerFingerprint: 'fixture-scanner', scannerOn: false,
-      statePath: 'fixture/state.json', scanned: 0, unchanged: 0, policySkipped: 0, sourceResolvedSkipped: 0,
-      localRefused: 0, scannerProgressCanCommit: true, pendingCursor: null,
-      countedPreparationErrors: new Set(), intentionalRemovalUids: [], skips: [], tally: { failed: 0 },
-      info() {}, warn() {}, assertLockOwned() {}, saveState: fixture.saveState,
-      // Keep retry validation in the same VM realm as the extracted production branch.
-      prefetch, batchStream, buildDriveRemovalPlan,
-      listPreparedSourceFamilies: async ({ uids, singlePage }) => singlePage
-        ? { families: new Set(fixture.stored), nextCursor: null }
-        : new Set([...fixture.stored].filter(uid => !uids || uids.includes(uid))),
-      recordRemovalSafetyBaseline: ({ inventory }) => inventory.size,
-      recordAcceptedDocumentState: (state, { stateKey, hash }) => { state.done[stateKey] = hash; delete state.skipped[stateKey]; },
-      hasCredentialScannerProgress: () => false,
-      makeRemotePreparationErrorIsolator: () => error => { throw error; },
-      consumeGroup: () => { throw Error('Unexpected document batch in removal-only harness'); },
-      removalReview: { finish: async ({ sourcePlan } = {}) => { sourcePlanCalls++; return fixture.finish(sourcePlan); } },
-    };
-    // Match the reviewed daily consumer: at most 32 bounded windows, retaining
-    // an unfinished audit/window rather than hand-advancing its checkpoint.
+    let outcome;
+    // Let the real command persist every bounded window, rather than advancing
+    // its cursor by hand and omitting the final review/receipt boundary.
     for (let window = 0; window < 32; window++) {
-      scope.gmailWindowPaused = false;
       const lookupsBefore = subjectLookups;
-      await gmailBranch(scope);
-      assert.ok(subjectLookups - lookupsBefore <= 2, "each reached Gmail window bounds the current identity to metadata plus body");
-      if (!scope.gmailMoreHistory || scope.gmailLabelGaps || scope.gmailHistoryMarkerMissing) break;
-      assert.ok(scope.pendingCursor, 'a nonempty continuation reached its checkpoint');
-      if (scope.gmailWindowPaused) { scope.gmailMoreHistory = false; continue; }
-      fixture.state[scope.pendingCursor.key] = scope.pendingCursor.value;
-      Object.assign(fixture.state, scope.pendingCursor.statePatch);
-      delete fixture.state.gmail_batch_window;
-      scope.incremental = !fixture.state.gmail_recovery;
-      scope.gmailMoreHistory = false;
+      const flags = { from: 'gmail', source: 'gmail', ...(arm === 'full-limited' ? { limit: '99' } : {}) };
+      try {
+        outcome = await gmailRun({ brain: { domain: 'fixture.invalid' },
+          corpora: { gmail: { enabled: true, ...(since ? { since } : {}) } },
+          safety: { credential_scanner: { enabled: false }, ocr: { enabled: false } } },
+        manifestPath, flags, options);
+      } catch (error) {
+        commandFailure = error;
+        if (arm === 'full-limited') guardRefused = true;
+        throw error;
+      }
+      assert.ok(subjectLookups - lookupsBefore <= 2,
+        'each reached Gmail window bounds the current identity to metadata plus body');
+      completedWindows++;
+      if (!outcome.more_history || fixture.state.gmail_retry) break;
       if (window === 31) throw new Error('fixture continuation did not make progress');
     }
-    return { completed: true };
+    assert.ok(lockChecks > 0 && finalizations > 0, 'the real completion and review decisions were reached');
+    assert.equal(finalizations, completedWindows, 'every completed window reaches its finalizer');
+    assert.equal(outcome.pending_removals, Object.keys(fixture.state.gmail_owner_removals || {}).length);
+    if (expected === 'reviewed') {
+      assert.ok(sourcePlanCalls > 0, 'an exact source plan reached the real nonblocking finalizer');
+      assert.deepEqual(fixture.saved().targets, [`gmail:${targetId}`]);
+      assert.ok(fixture.saved()?.targets.length > 0);
+      assert.equal(fixture.state.history_id, 'fixture-history-current', 'owner review does not freeze the cursor');
+      assert.equal(receipts.at(-1).status, 'ready');
+      assert.equal(receipts.at(-1).complete_sweep, false, 'pending review cannot certify full coverage');
+      assert.ok(output.some(line => line.includes('kept') || line.includes('Kept')));
+    }
+    assert.ok(!output.join('\n').includes(secret), 'no credential reaches command output');
+    return outcome;
   };
   await exercise({ id, kind: 'gmail', fixture, run, expected,
-    observations: () => ({ providerCalls, listCalls, itemCalls, subjectLookups, tombstones, guardRefused, sourcePlanCalls,
+    observations: failure => ({ providerCalls, listCalls, itemCalls, subjectLookups, tombstones, guardRefused, sourcePlanCalls,
+      commandFailureReached: Boolean(commandFailure && failure === commandFailure),
       witnessCalls, witness, queryHasDateFloor: Boolean(lastQuery?.includes('after:')),
       queryExcludesLabels: Boolean(lastQuery?.includes('-category:promotions')) }) });
+  const publicOutput = [...output, commandFailure?.ownerMessage || commandFailure?.message || '', JSON.stringify(receipts)].join('\n');
+  assert.equal(publicOutput.includes(secret), false, 'no key reaches any command output or receipt');
+  assert.equal(publicOutput.includes(providerText), false, 'provider free text never reaches output or receipts');
+  if (expected === 'error') {
+    assert.ok(providerFailures > 0 || guardRefused || fixture.counters.preview > 0,
+      'the injected provider fault, limit guard or failed preview was reached');
+    assert.match(commandFailure.message, /Gmail/);
+    assert.match(commandFailure.message, /Code: [A-Z_]+/);
+    assert.match(commandFailure.message, /Help: https:\/\//);
+    assert.equal(commandFailure.ownerMessage, commandFailure.message, 'the CLI renders the fixed public message');
+    assert.equal(commandFailure.supportCode, 'INGEST_FAILED');
+    if (arm.startsWith('preview-')) {
+      assert.equal(fixture.counters.preview, 1, 'the failed authenticated preview decision was reached');
+      assert.equal(sourcePlanCalls, 1);
+      assert.equal(fixture.saved(), null, 'an unproved preview cannot create an owner approval');
+      assert.equal(receipts.at(-1).status, 'error', 'a failed preview never becomes ready');
+    }
+  }
   if (fixture.saved()) {
     const cause = ['deleted', 'item-404'].includes(arm) ? 'explicit_deletion'
       : ['incremental-label-exclusion', 'incremental-date-floor', 'full-label-exclusion', 'full-date-floor', 'expired-history-label-exclusion'].includes(arm) ? 'scope_or_filter_change' : 'unknown';
@@ -434,15 +570,16 @@ async function microsoftCase(arm, expected) {
 if (!process.argv[2] || process.argv[2] === 'calendar') for (const arm of ['deleted', 'retained', 'window-floor', 'event-type-scope', 'blanked',
   'permission-403', 'visibility-omitted', 'visibility-redacted', 'shared-404', 'shared-config-removed',
   'provider-503', 'malformed-page', 'partial-page-error', 'partial-no-token', 'tombstone-actor-unknown', 'sibling-provider-error']) {
-  await calendarCase(arm, ['deleted', 'partial-no-token', 'tombstone-actor-unknown', 'sibling-provider-error'].includes(arm) ? 'held' : 'retained');
+  await calendarCase(arm, 'retained');
 }
 if (!process.argv[2] || process.argv[2] === 'gmail') for (const [arm, expected] of [
-  ['deleted', 'held'], ['retained', 'retained'], ['full-complete-pages', 'retained'], ['item-404', 'held'],
-  ['full-label-exclusion', 'held'], ['full-date-floor', 'held'], ['full-visibility-subset', 'retained'],
-  ['full-missing-page-token', 'retained'], ['expired-history-label-exclusion', 'held'],
-  ['incremental-label-exclusion', 'held'], ['incremental-date-floor', 'held'],
+  ['deleted', 'reviewed'], ['retained', 'retained'], ['full-complete-pages', 'retained'], ['item-404', 'reviewed'],
+  ['full-label-exclusion', 'reviewed'], ['full-date-floor', 'reviewed'], ['full-visibility-subset', 'retained'],
+  ['full-missing-page-token', 'retained'], ['expired-history-label-exclusion', 'reviewed'],
+  ['incremental-label-exclusion', 'reviewed'], ['incremental-date-floor', 'reviewed'],
   ['full-empty-body', 'retained'], ['incremental-empty-body', 'retained'], ['missing-labels', 'retained'],
   ['item-403', 'error'], ['item-410', 'error'], ['item-503', 'error'],
+  ['preview-error', 'error'], ['preview-invalid', 'error'],
   ['full-limited', 'error'], ['full-page-error', 'error'], ['incremental-page-error', 'error'],
   ['full-malformed-page', 'error'], ['full-permission-403', 'error'], ['full-provider-503', 'error'],
   ['full-profile-error', 'error'], ['full-omitted-messages', 'retained'],
@@ -450,8 +587,8 @@ if (!process.argv[2] || process.argv[2] === 'gmail') for (const [arm, expected] 
 if (!process.argv[2] || process.argv[2] === 'microsoft') for (const arm of ['deleted', 'aged-out', 'blanked', 'retained',
   'changed', 'unknown-tombstone', 'expired-history', 'permission-403', 'provider-503', 'partial-page-error',
   'mail-deleted', 'mail-changed', 'mail-retained']) await microsoftCase(arm,
-  ['retained', 'mail-retained'].includes(arm) ? 'retained'
-    : ['permission-403', 'provider-503', 'partial-page-error'].includes(arm) ? 'error' : 'held');
+  arm === 'blanked' ? 'held'
+    : ['permission-403', 'provider-503', 'partial-page-error'].includes(arm) ? 'error' : 'retained');
 
 async function repeatedMicrosoftCauses(id, reasons, cause, snapshot) {
   const target = `microsoft:outlook:message:${targetId}`;
@@ -472,7 +609,15 @@ async function repeatedMicrosoftCauses(id, reasons, cause, snapshot) {
         return Response.json({ value: [{ id: targetId, '@removed': reason === undefined ? {} : { reason } }],
           '@odata.deltaLink': `${url.origin}${url.pathname}?fixture=next` });
       } });
-    assert.equal(result.deletions.length, 2, 'the real adapter must retain both observations');
+    assert.equal(result.deletions.length, 0, 'provider observations never request removal');
+    assert.equal(result.documents.length, 1, 'the adapter consolidates duplicate status observations');
+    assert.equal(result.documents[0].metadata.retained_source_id, `outlook:message:${targetId}`);
+    // The common cause-merger and exact owner-removal approval remain tested
+    // with explicit owner-requested targets, independent of adapter policy.
+    const requested = { ...result, documents: [], deletions: reasons.map(reason => ({
+      source_type: 'microsoft', source_id: `outlook:message:${targetId}`,
+      removal_cause: reason === 'deleted' ? 'explicit_deletion' : reason === 'changed' ? 'scope_or_filter_change' : 'unknown',
+    })) };
     assert.equal(result.authoritative_snapshot, false, 'the adapter fixture must use both existing delta cursors');
     const loadState = async () => ({ cursor: null, configuration_fingerprint: 'fixture-configuration' });
     const callback = providerReview({ provider: 'microsoft', sourceName: 'microsoft',
@@ -484,8 +629,8 @@ async function repeatedMicrosoftCauses(id, reasons, cause, snapshot) {
       configurationFingerprint: 'fixture-configuration', loadState, saveState() { cursorSaves++; },
       resolveAccess: async () => ({ accessToken: secret }),
       // Exercise the shared runtime's snapshot deduplication as well as the real delta result.
-      sync: async () => snapshot ? { ...result, authoritative_snapshot: true,
-        snapshot_source_ids: retainedIds.map(value => `outlook:message:${value}`) } : result,
+      sync: async () => snapshot ? { ...requested, authoritative_snapshot: true,
+        snapshot_source_ids: retainedIds.map(value => `outlook:message:${value}`) } : requested,
       base: 'https://fixture.invalid', adminKey: secret, listStoredFamilies: async () => fixture.stored,
       sendBatch: async () => { throw new Error('This removal-only fixture must not send documents'); },
       postReceipt() {}, reviewRemovals: async input => { reviews++; return callback(input); },
@@ -531,6 +676,23 @@ if (!process.argv[2] || process.argv[2] === 'microsoft') {
 // Automatic arms all preserve. A separate owner-approved exact apply is the
 // positive deletion control, so uniformly preserved rows cannot fool the harness.
 {
+  // Gmail's nonblocking finalizer no longer throws into the load auto-apply
+  // leg. Reach the shared writer guard directly with a real, fingerprinted
+  // policy plan so restoring that unsafe gate cannot survive the mutation test.
+  const control = removalFixture('automatic-policy-control', 'gmail', allIds.map(id => `gmail:${id}`));
+  const plan = buildDriveRemovalPlan({ storedFamilies: control.stored,
+    policyCandidates: [`gmail:${targetId}`], targetCauses: { [`gmail:${targetId}`]: 'scope_or_filter_change' } });
+  await assert.rejects(control.finish(plan), DriveRemovalReviewRequired);
+  assert.ok(control.counters.preview > 0 && control.saved().targets.length === 1);
+  await assert.rejects(control.review.apply(control.saved().fingerprint, undefined, { automatic: true }), /Automatic removal/);
+  assert.equal(control.counters.apply, 0);
+  assert.equal(control.stored.size, 100);
+  const approved = await control.review.apply(control.saved().fingerprint, plan.fingerprint);
+  assert.equal(approved.removed, 1, 'the same policy target can be removed with exact owner approval');
+  assert.equal(control.counters.apply, 1);
+  assert.equal(control.stored.size, 99);
+}
+{
   const control = removalFixture('owner-approved-control', 'gmail', allIds.map(id => `gmail:${id}`));
   const plan = buildDriveRemovalPlan({ storedFamilies: control.stored,
     vanishedCandidates: [`gmail:${targetId}`], targetCauses: { [`gmail:${targetId}`]: 'explicit_deletion' } });
@@ -546,3 +708,138 @@ assert.equal(ambientAttempts, 0);
 assert.ok(rows.some(row => row.planned > 0) && rows.some(row => row.planned === 0));
 if (process.argv[2] !== 'microsoft') assert.ok(rows.some(row => row.apply === 1) && rows.some(row => row.apply === 0));
 console.log(`TOTAL ${rows.length} safety probes passed; synthetic applies=${rows.reduce((n, row) => n + row.apply, 0)}`);
+
+// Keep the receipt regression in the registered removal-cause suite so both
+// test-chain inventories execute it without a separate registration.
+if (!process.argv[2] || process.argv[2] === 'gmail') {
+  const { test } = await import('node:test');
+  const { cmdIngestRemote, postSourceReceipt } = await import('../brain.mjs');
+  // Reproducible generated table: vary status, free-text location, opaque material
+  // and length independently. Canaries are built at runtime and never printed.
+  let seed = 0x1117;
+  const next = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0);
+  const shapes = ['error', 'nested', 'description', 'message', 'uri', 'ids', 'text',
+    'malformed', 'mismatch', 'read-error', 'request-error'];
+  const cases = [
+    { shape: 'accepted', providerStatus: 403, status: 200 },
+    ...Array.from({ length: 33 }, (_, index) => ({
+      shape: shapes[index % shapes.length],
+      providerStatus: [401, 403, 429, 503][next() % 4],
+      status: [400, 401, 403, 429, 503][next() % 5],
+      size: 1 + next() % 257,
+      material: next().toString(16),
+    })),
+    { shape: 'accepted', providerStatus: 503, status: 200 },
+  ];
+
+  async function runCase(arm) {
+    const root = mkdtempSync(join(tmpdir(), 'receipt-output-'));
+    const manifestPath = join(root, 'fixture.manifest.json');
+    const keyFile = join(root, '.brain-admin-key');
+    const launchctl = join(root, 'launchctl-fixture');
+    const statePath = join(root, '.brain-ingest-gmail.json');
+    const canary = randomBytes(24).toString('hex');
+    const untrusted = [canary, arm.material, 'untrusted'.repeat(arm.size || 1)].join(' ');
+    const output = [], receipts = [];
+    let providerCalls = 0, receiptCalls = 0, errorReceiptCalls = 0, acceptedReceipts = 0;
+    let lockChecks = 0, failure, parserFailures = 0;
+    const manifest = { brain: { domain: 'fixture.invalid' },
+      corpora: { gmail: { enabled: true } },
+      safety: { credential_scanner: { enabled: false }, ocr: { enabled: false } } };
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    writeFileSync(keyFile, canary, { mode: 0o600 });
+    writeFileSync(launchctl, '#!/bin/sh\nexit 99\n', { mode: 0o700 });
+    const scanner = credentialScannerFingerprint(false);
+    ingest.saveState(statePath, { version: 1, done: {}, skipped: {}, history_id: 'fixture-prior',
+      credential_scanner_fingerprint: scanner,
+      gmail_policy_fingerprint: gmail.gmailPolicyFingerprint({ credentialScannerFingerprint: scanner }) });
+    const originalLog = console.log, originalWarn = console.warn;
+    console.log = console.warn = (...args) => output.push(args.join(' '));
+    try {
+      await cmdIngestRemote(manifest, manifestPath, { from: 'gmail', source: 'gmail' }, {
+        launchctl, ingestNowMs: () => NOW, gmailBatchNow: () => new Date(NOW).toISOString(),
+        withSourceIngestLock: async (_options, task) => task({ assertOwned: () => { lockChecks++; } }),
+        resolveBaseUrl: async () => 'https://fixture.invalid',
+        resolveAdminKey: () => readFileSync(keyFile, 'utf8'),
+        getAccessToken: async () => canary,
+        gmail: { ...gmail, listHistory: (token, history, options) => gmail.listHistory(token, history, {
+          ...options, attempts: 1, sleep: async () => {}, fetchImpl: async () => {
+            providerCalls++;
+            return Response.json({ error: { message: untrusted, error_description: untrusted,
+              errors: [{ reason: untrusted }], request_id: untrusted } }, { status: arm.providerStatus });
+          },
+        }) },
+        listOwnerRemovedFamilies: async () => new Set(),
+        postSourceReceipt: async (base, key, receipt) => {
+          receipts.push(receipt);
+          try {
+            const result = await postSourceReceipt(base, key, receipt, async () => {
+              receiptCalls++;
+              const ack = { source: receipt.source, run_id: receipt.run_id, status: receipt.status };
+              if (receipt.status !== 'error') return Response.json(ack);
+              errorReceiptCalls++;
+              switch (arm.shape) {
+                case 'accepted': return Response.json(ack);
+                case 'error': return Response.json({ error: untrusted }, { status: arm.status });
+                case 'nested': return Response.json({ error: { message: untrusted } }, { status: arm.status });
+                case 'description': return Response.json({ error_description: untrusted }, { status: arm.status });
+                case 'message': return Response.json({ message: untrusted }, { status: arm.status });
+                case 'uri': return Response.json({ error_uri: `https://fixture.invalid/${canary}` }, { status: arm.status });
+                case 'ids': return Response.json({ id: untrusted, request_id: untrusted }, { status: arm.status });
+                case 'text': return new Response(untrusted, { status: arm.status });
+                case 'malformed': return new Response(`{${untrusted}`, { status: arm.status });
+                case 'mismatch': return Response.json({ ...ack, source: untrusted }, { status: 200 });
+                case 'read-error': return { ok: false, status: arm.status, text: async () => { throw new Error(untrusted); } };
+                case 'request-error': throw new Error(untrusted);
+                default: assert.fail('unknown generated shape');
+              }
+            }, { attempts: 1, sleep: async () => {} });
+            acceptedReceipts++;
+            return result;
+          } catch (error) {
+            parserFailures++;
+            throw error;
+          }
+        },
+      });
+    } catch (error) { failure = error; }
+    finally {
+      console.log = originalLog;
+      console.warn = originalWarn;
+      rmSync(root, { recursive: true, force: true });
+    }
+    // Reachability precedes confidentiality: neither early refusal nor omitted
+    // error-receipt work can make these negative assertions pass vacuously.
+    assert.equal(providerCalls, 1, 'the real provider failure was reached');
+    assert.equal(receiptCalls, 2, 'indexing and failure receipt requests were reached');
+    assert.equal(errorReceiptCalls, 1, 'the error receipt was attempted');
+    assert.ok(lockChecks > 0, 'the source ownership boundary was reached');
+    assert.equal(failure?.supportCode, 'INGEST_FAILED', 'the outer public guard was reached');
+    assert.equal(failure.ownerMessage, failure.message);
+    assert.equal(receipts.at(-1).status, 'error', 'provider failure cannot certify ready');
+    assert.equal(receipts.at(-1).walk_complete, false);
+    const warnings = output.filter(line => line.includes('error receipt could not be recorded') ||
+      line.includes('failure status could not be saved'));
+    const accepted = arm.shape === 'accepted';
+    assert.equal(parserFailures, accepted ? 0 : 1, 'real receipt parser outcome is observed');
+    assert.equal(acceptedReceipts, accepted ? 2 : 1, 'the successful receipt control differs');
+    assert.equal(warnings.length, accepted ? 0 : 1, 'failed receipt remains visible exactly once');
+    const publicText = [...output, failure.message, failure.ownerMessage, JSON.stringify(receipts)].join('\n');
+    assert.equal(publicText.includes(canary), false, 'opaque provider material stays private');
+    assert.equal(publicText.includes('untrusted'), false, 'provider free text stays private');
+    for (const warning of warnings) {
+      assert.match(warning, /Code: INGEST_FAILED\./);
+      assert.match(warning, /Help: https:\/\/financialbrain\.ai\/help\/INGEST_FAILED/);
+      assert.match(warning, /1\. .+2\. /s, 'failure gives numbered recovery steps');
+    }
+  }
+
+  for (const [index, arm] of cases.entries()) {
+    await test(`receipt output generated case ${index + 1}: ${arm.shape}`, () => runCase(arm));
+  }
+  test('generated controls differ and ambient transport stays unused', () => {
+    assert.equal(cases.filter(arm => arm.shape === 'accepted').length, 2);
+    assert.equal(new Set(cases.map(arm => arm.shape)).size, 12);
+    assert.equal(ambientAttempts, 0);
+  });
+}

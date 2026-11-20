@@ -5,13 +5,19 @@ export const custodyDigest = async value => Array.from(new Uint8Array(await cryp
 const CODES = new Set(['BANK_ACCESS_REFERENCE_UNREADABLE','BANK_ACCESS_LEGACY_KEY_UNAVAILABLE',
   'BANK_ACCESS_WRAPPING_KEY_UNAVAILABLE','BANK_ACCESS_WRAPPING_KEY_INVALID','BANK_ACCESS_WRAPPING_KEY_VERSION_UNSUPPORTED']);
 
-/** Never return plaintext, a key-derived legacy fingerprint, ciphertext or IV. */
-export async function inspectBankCustody(env, item) {
+/** Verify saved access locally, without calling a bank or modifying a receipt. */
+async function inspectBankReadability(env, item) {
   let code='BANK_ACCESS_READABLE', opens=false;
   try {
     await decryptAccessReference(env,{ciphertext:item.access_ciphertext,iv:item.access_iv,keyVersion:item.key_version});
     opens=true;
   } catch (error) { code=CODES.has(error?.code) ? error.code : 'BANK_ACCESS_CHECK_UNAVAILABLE'; }
+  return {connection_ref:item.item_ref,opens,code};
+}
+
+/** Never return plaintext, a key-derived legacy fingerprint, ciphertext or IV. */
+export async function inspectBankCustody(env, item) {
+  const {opens,code}=await inspectBankReadability(env,item);
   const proof=Number(item.key_version)===2 ? await bankAccessWrappingKeyProof(env) : null;
   return {connection_ref:item.item_ref,key_version:item.key_version,opens,code,
     key_identity:Number(item.key_version)===2 ? 'current dedicated bank wrapping key' : Number(item.key_version)===1 ?
@@ -26,10 +32,31 @@ export async function inspectBankCustody(env, item) {
       'The key configuration or diagnostic needs review before replacement. Saved history remains available.'};
 }
 
-export async function bankCustodyReport(env) {
+function bankCustodyRows(env) {
   const tenant=String(env.BANK_FEED_TENANT || 'primary');
-  const rows=(await env.DB.prepare(`SELECT tenant_id,item_ref,environment,key_version,access_ciphertext,access_iv,
-    last_synced_at,cursor FROM bank_feed_items WHERE tenant_id=? AND removed_at IS NULL ORDER BY id`).bind(tenant).all()).results;
+  return env.DB.prepare(`SELECT tenant_id,item_ref,environment,status,key_version,access_ciphertext,access_iv,
+    last_synced_at,cursor FROM bank_feed_items WHERE tenant_id=? AND removed_at IS NULL ORDER BY id`).bind(tenant).all();
+}
+
+export async function bankReadabilityForStatus(env, status) {
+  const { results } = await bankCustodyRows(env);
+  const page = new Map(status.connections.map(row => [row.item_ref, row.status]));
+  if (page.size !== status.connections.length) throw new Error("Ambiguous bank page inventory");
+  const custody = new Map(results.map(row => [row.item_ref, row]));
+  return Promise.all([...new Set([...page.keys(), ...custody.keys()])].map(async ref => {
+    const state = page.get(ref) ?? null;
+    const item = custody.get(ref);
+    if (!item || state !== item.status) {
+      return { connection_ref: ref, state, opens: false,
+        code: !item && (state === "removed" || state === "permission_revoked") ? "BANK_ACCESS_NOT_APPLICABLE" :
+          "BANK_PAGE_CUSTODY_MISMATCH" };
+    }
+    return { ...await inspectBankReadability(env, item), state };
+  }));
+}
+
+export async function bankCustodyReport(env) {
+  const rows=(await bankCustodyRows(env)).results;
   const connections=[];
   for(const row of rows) connections.push(await inspectBankCustody(env,row));
   return {read_only:true,connections,exit_code:connections.some(r=>!r.opens && r.code!=='BANK_ACCESS_REFERENCE_UNREADABLE') ? 3 :

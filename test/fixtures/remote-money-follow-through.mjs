@@ -1,3 +1,4 @@
+import { assertOwnerEvidence } from '../helpers/owner-evidence-contract.mjs';
 import assert from 'node:assert/strict';
 import { handleMcp } from '../../worker/src/lib/mcp-endpoint.js';
 import { moneyQuestionHandoff } from '../../worker/src/lib/money-handoff.js';
@@ -51,7 +52,9 @@ export async function remoteMoneyFollowThrough(question, reader) {
   assert.equal(calls, 0, 'money routing decision reached before the injected reader');
   const text = handoff.result.content.map(item => item.text).join('\n');
   for (const name of ['brain_money_overview', 'brain_money_guide', 'brain_money_query']) assert.ok(text.includes(name));
-  assert.match(text, /Confidence: Low \(0%\).*Reasons:.*Missing:/s);
+  const routed = moneyQuestionHandoff(question);
+  assert.equal(routed.confidence.percent, 0, 'routing cannot invent bank evidence');
+  assertOwnerEvidence(text, routed.confidence);
   const limited = moneyQuestionHandoff(question, { moneyToolsAvailable: false, requiredAgentProfile: 'technician' });
   assert.equal(limited.money_tools_available, false);
   assert.equal(limited.required_agent_profile, 'technician');

@@ -1,3 +1,4 @@
+import { assertOwnerEvidence } from '../../test/helpers/owner-evidence-contract.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { moneyQuestionHandoff } from '../src/lib/money-handoff.js';
@@ -91,7 +92,7 @@ async function exerciseRemote(question, expected) {
   if (expected === 'bank') {
     for (const tool of TOOL_NAMES) assert.ok(text.includes(tool), `remote handoff includes ${tool}`);
     assert.equal(thinkCalls.length, 0, 'bank handoff bypasses injected Think');
-    assert.match(text, /Confidence: Low \(0%\)/);
+    assertOwnerEvidence(text, moneyQuestionHandoff(question).confidence);
   } else {
     assert.equal(thinkCalls.length, 1, 'document decision reached injected Think exactly once');
     assert.deepEqual(thinkCalls[0], { q: question, limit: 12 }, 'document request retains its exact quoted topic');

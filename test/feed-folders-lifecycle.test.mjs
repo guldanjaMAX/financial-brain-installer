@@ -1,3 +1,4 @@
+import { isolatedLifecycleOptions } from "./fixtures/isolated-update-schedulers.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -39,7 +40,7 @@ async function capture(run) {
 function folder(f, args = ["remove", "--source", "first"], extra = {}) {
   return cmdFolder(f.path, args, {
     home: f.home,
-    lifecycleLockOptions: { machineLockRoot: f.machineLockRoot, restrictWindowsDirectory() {} },
+    lifecycleLockOptions: isolatedLifecycleOptions(f.home, { machineLockRoot: f.machineLockRoot, restrictWindowsDirectory() {} }),
     sourceIngestLockOptions: { home: f.home },
     schedulerOptions: { home: f.home, launchctl() { throw new Error("unexpected scheduler"); } },
     now: () => new Date(fixed), ...extra,
@@ -72,7 +73,8 @@ for (const action of ["add", "remove", "create-feeds", "off"]) {
     const args = action === "add" ? [action, "--path", join(f.root, "third"), "--source", "third"]
       : action === "remove" ? [action, "--source", "first"] : [action];
     let attempts = 0, reads = 0;
-    const holder = acquireBrainLifecycleLock({ manifestPath: f.path, operation: "load", machineLockRoot: f.machineLockRoot, restrictWindowsDirectory() {} });
+    const holder = acquireBrainLifecycleLock({ manifestPath: f.path, operation: "load",
+      ...isolatedLifecycleOptions(f.home, { machineLockRoot: f.machineLockRoot, restrictWindowsDirectory() {} }) });
     const before = readFileSync(f.path);
     try {
       const refused = await capture(() => folder(f, args, {
@@ -182,7 +184,7 @@ test("removal during real load planning refuses or leaves only current legs runn
   const f = fixture(), runs = [];
   let pending, reached = 0;
   const result = await capture(() => cmdLoad(f.path, {
-    lifecycleLockOptions: { machineLockRoot: f.machineLockRoot, restrictWindowsDirectory() {} },
+    lifecycleLockOptions: isolatedLifecycleOptions(f.home, { machineLockRoot: f.machineLockRoot, restrictWindowsDirectory() {} }),
     commands: { ingestLocal: async (_m, _path, flags) => { runs.push(flags.source); return { created: 0, complete: true }; } },
     log(line) { if (!reached && String(line).includes("starting")) { reached++; pending = capture(() => folder(f)); } },
   }));
@@ -202,7 +204,7 @@ test("removal during real load planning refuses or leaves only current legs runn
   if (removal.error) { assert.ifError(stopped.error); assert.equal(stopped.value.changed, true); }
   runs.length = 0;
   const control = await capture(() => cmdLoad(f.path, {
-    lifecycleLockOptions: { machineLockRoot: f.machineLockRoot, restrictWindowsDirectory() {} },
+    lifecycleLockOptions: isolatedLifecycleOptions(f.home, { machineLockRoot: f.machineLockRoot, restrictWindowsDirectory() {} }),
     commands: { ingestLocal: async (_m, _path, flags) => { runs.push(flags.source); return { created: 0, complete: true }; } }, log() {},
   }));
   assert.ifError(control.error);

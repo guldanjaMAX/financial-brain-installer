@@ -369,3 +369,20 @@ test("temporal: all-day today and an offset instant retain their actual owner da
   assertDocumentAnswer(offset.body);
   assert.match(offset.body.answer, /2031-04-08.*9:30/s, "the attributed event retains the same instant in UTC");
 });
+
+test('temporal cancellation field is consumed independently of title wording, with an upcoming green control', () => {
+  const doc = { n: 1, title: 'Owner planning meeting', snippet: 'Owner planning meeting on April 8, 2031.',
+    occurred_at: '2031-04-08T15:00:00Z', ts: '2031-04-08', date_source: 'calendar:event_start', date_reliable: true,
+    text_source: 'native', text_reliable: true, authority: { eligible: true, tier: 'T2' } };
+  const input = { question: 'What is on tomorrow?', answer: 'Owner planning meeting is on April 8, 2031 [1].',
+    evidenceGate: { supported: true, complete: true, evidence: [1] }, now: Date.parse('2031-04-07T12:00:00Z'), timeZone: 'UTC' };
+  const control = applyTemporalVeto({ ...input, docs: [doc], candidates: [doc] });
+  assert.equal(control.evidenceGate.supported, true, `dated upcoming green control: ${control.evidenceGate.reason}`);
+  const cancelled = { ...doc, calendar_status: 'cancelled' };
+  const guarded = applyTemporalVeto({ ...input, docs: [cancelled], candidates: [cancelled] });
+  assert.equal(guarded.evidenceGate.supported, false);
+  assert.equal(guarded.gap.type, 'temporal_conflict', 'cancellation reached temporal decision');
+  const undated = { ...cancelled, date_reliable: false };
+  const fallback = applyTemporalVeto({ ...input, docs: [undated], candidates: [undated] });
+  assert.equal(fallback.evidenceGate.supported, false, 'a missing reliable corpus date cannot bypass cancellation through source-text dates');
+});

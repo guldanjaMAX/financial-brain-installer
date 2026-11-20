@@ -1,3 +1,4 @@
+import { assertOwnerEvidence } from '../../test/helpers/owner-evidence-contract.mjs';
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
@@ -370,8 +371,9 @@ test("brain ask prints a safe ledger gap code and never labels a refusal high-co
     confidence: { percent: 80, band: "high", basis: ["cited ledger row"] },
     evidence_gate: { supported: true, complete: true, reason: "read from covered ledger rows" },
   });
-  assert.match(answered, /Confidence: Medium \(80%\).*Why: cited ledger row\. Missing:/,
-    "the computed percent sets the band and retains the evidence gap");
+  assertOwnerEvidence(answered);
+  assert.match(answered, /cited ledger row; Still needed: Independent verification and complete relevant source coverage/,
+    'the owner keeps the computed basis and missing evidence without the score');
 });
 
 class Element {

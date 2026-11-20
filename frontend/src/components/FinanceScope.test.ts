@@ -1,10 +1,67 @@
-import { describe, expect, it } from "vitest";
+import * as React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FinEntity } from "../lib/api";
 import {
   entityScopeState, financeScopeLabel, firstEntitySlug, matchingEntityCreateReceipt,
   retainExplicitEntityScope, savedDefaultEntityScope, savedDefaultStillApplies,
-  scopeStatusMessage,
+  scopeStatusMessage, FinanceScopeBar,
 } from "./FinanceScope";
+
+vi.mock("react", async (importOriginal) => {
+  const actual = await importOriginal<typeof React>();
+  return {
+    ...actual,
+    useContext: vi.fn(actual.useContext),
+    useState: vi.fn(actual.useState),
+    useEffect: vi.fn(actual.useEffect),
+  };
+});
+
+afterEach(() => { vi.resetAllMocks(); vi.useRealTimers(); });
+
+describe("financial list wait", () => {
+  it("renders a calm wait and offers retry only after ten seconds, then clears the timer", () => {
+    vi.useFakeTimers();
+    const refresh = vi.fn();
+    const context = { entities: [], scope: null, scopeChoiceMade: false, status: "loading", refresh };
+    vi.mocked(React.useContext).mockReturnValue(context);
+    // Capture only React's lifecycle boundary; the real component owns the
+    // timer, the loading decision and the rendered retry control.
+    let slow = false;
+    const setSlow = vi.fn((value: boolean) => { slow = value; });
+    vi.mocked(React.useState).mockImplementation((() => [slow, setSlow]) as typeof React.useState);
+    const lifecycle: { cleanup?: () => void } = {};
+    const effect = vi.mocked(React.useEffect).mockImplementation((run) => {
+      const cleanup = run();
+      lifecycle.cleanup = typeof cleanup === "function" ? cleanup : undefined;
+    });
+    const render = () => renderToStaticMarkup(React.createElement(FinanceScopeBar));
+    const initial = render();
+    expect(initial).toContain("Checking your financial list");
+    expect(initial).not.toContain("bg-act-bg");
+    expect(initial).not.toContain("Check again");
+    expect(effect).toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(1);
+    vi.advanceTimersByTime(9_999);
+    expect(setSlow).not.toHaveBeenCalledWith(true);
+    vi.advanceTimersByTime(1);
+    expect(setSlow).toHaveBeenCalledWith(true);
+    lifecycle.cleanup?.();
+    expect(render()).toContain("Check again");
+    lifecycle.cleanup?.();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it("keeps a real unavailable read actionable immediately", () => {
+    vi.mocked(React.useContext).mockReturnValue({ status: "unavailable", entities: [], refresh: vi.fn() });
+    const html = renderToStaticMarkup(React.createElement(FinanceScopeBar));
+    expect(html).toContain("could not be read just now");
+    expect(html).toContain("bg-act-bg");
+    expect(html).toContain("Check again");
+  });
+});
 
 const entities: FinEntity[] = [
   {

@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import vm from "node:vm";
 import { createProductFixture, seedOwnedEntity } from "./product-contract-fixture.mjs";
 import { FAVICON } from "../src/lib/app-page.js";
+import { OWNER_PAGE_CSS } from "../src/lib/owner-page-style.js";
 import { bankFeedOwnerErrorMessage, handleBankFeed } from "../src/lib/bank-feed.js";
 import { completePlaidLink, createPlaidLinkToken, plaidFeedStatus, syncPlaidItem } from "../src/lib/plaid-bank-feed.js";
 import { assignPlaidAccountEntity } from "../src/lib/plaid-account-entities.js";
@@ -23,7 +24,6 @@ const ENV = {
   BANK_FEED_WRAPPING_KEY_V2: `v2.${"A".repeat(43)}`,
   BRAIN_NAME: "Owner Flow Fixture Brain",
 };
-const NO_OWNER_LINE = "Add an owner first. Choose who each account belongs to.";
 
 const json = (value, status = 200) => new Response(JSON.stringify(value), {
   status, headers: { "Content-Type": "application/json" },
@@ -97,7 +97,7 @@ test("an unrelated invalid field keeps the generic retry message and its referen
   } finally { fixture.close(); }
 });
 
-test("a safe route failure without a provider code remains visible with a stable reference", async () => {
+test("a missing bank configuration remains visible with a stable reference", async () => {
   const fixture = await createProductFixture({ env: { ...ENV, BANK_FEED_CLIENT_ID: "" } });
   try {
     let providerCalls = 0;
@@ -106,13 +106,15 @@ test("a safe route failure without a provider code remains visible with a stable
       throw new Error("the provider must not be contacted without configuration");
     });
     assert.equal(status, 503);
-    assert.equal(Object.hasOwn(body, "code"), false);
+    assert.equal(body.code, "BANK_KEYS_NOT_SET");
     assert.match(body.error, /not configured/, "the configuration decision point was reached");
     assert.equal(providerCalls, 0);
     const message = bankFeedOwnerErrorMessage(body, status);
     assert.match(message, /^This step is temporarily unavailable\. Your earlier progress is safe\. Please try again\./);
-    assert.match(message, /the bank feed is not configured on this brain/);
-    assert.match(message, /Reference code: BANK_FEED_REQUEST_FAILED\.$/);
+    assert.match(body.error, /the bank feed is not configured on this brain/);
+    assert.doesNotMatch(body.error, /brain secrets/);
+    assert.doesNotMatch(message, /brain secrets/);
+    assert.match(message, /Reference code: BANK_KEYS_NOT_SET\.$/);
   } finally { fixture.close(); }
 });
 
@@ -132,6 +134,7 @@ class FakeNode {
   append(...nodes) { this.children.push(...nodes); }
   replaceChildren(...nodes) { this.children = [...nodes]; }
   get options() { return this.children.filter((node) => node.tagName === "OPTION"); }
+  querySelectorAll(tag) { return findAll(this, tag.toUpperCase()).filter((node) => node !== this); }
 }
 const textOf = (node) => [node.textContent, ...node.children.map(textOf)].filter(Boolean).join(" ");
 const findAll = (node, tag) => [...(node.tagName === tag ? [node] : []), ...node.children.flatMap((child) => findAll(child, tag))];
@@ -155,8 +158,7 @@ async function runPage(html, { entities, accounts, connections = [], onAssign = 
   const script = [...html.matchAll(/<script(?: [^>]*)?>([\s\S]*?)<\/script>/g)]
     .map((match) => match[1]).filter(Boolean);
   assert.equal(script.length, 1);
-  const ids = ["start", "status", "connections", "accounts", "account-status", "entity-create",
-    "entity-name", "entity-kind", "entity-save", "entity-status", "refresh", "entity-details"];
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
   const nodes = new Map(ids.map((id) => [id, new FakeNode(id === "entity-details" ? "details" : "div", id)]));
   const responses = {
     "/api/fin/snapshot": { entities },
@@ -189,7 +191,7 @@ async function runPage(html, { entities, accounts, connections = [], onAssign = 
         if (onAssign) await onAssign(body, assignments.length);
         const account = accounts.find((row) => row.account_ref === body.account_ref);
         assert.ok(account, "the page posted a fixture account ref");
-        account.assignment = { state: "assigned", entity_label: body.entity_slug };
+        account.assignment = { state: "assigned", entity_scope: { entity_slug: body.entity_slug }, entity_label: body.entity_slug };
         return { ok: true, status: 200, json: async () => ({ changed: true }) };
       }
       if (path === "/api/bank-feed/accounts/reassign") {
@@ -234,6 +236,7 @@ async function runPage(html, { entities, accounts, connections = [], onAssign = 
     location: { search: "", href: "https://brain.invalid/app/connect/bank" },
     URLSearchParams,
     setTimeout,
+    Date: class extends Date { static now() { return Date.parse(NOW); } },
     console,
   });
   context.window = context;
@@ -243,6 +246,21 @@ async function runPage(html, { entities, accounts, connections = [], onAssign = 
   nodes.reassignments = reassignments;
   nodes.accountLoads = () => accountLoads;
   return nodes;
+}
+
+function openMixedOwners(nodes) {
+  const radio = findAll(nodes.get("accounts"), "INPUT").find((node) => node.type === "radio" && node.value === "mixed");
+  assert.ok(radio, "the bank question offers Some of each");
+  radio.checked = true; radio.onchange();
+}
+function bankOwnerSave(nodes, slug) {
+  const select = findAll(nodes.get("accounts"), "SELECT").find((node) => node.className === "bank-owner-select");
+  assert.ok(select, "the bank owner list is present");
+  assert.equal(select.value, "", "the bank owner starts on Choose");
+  select.value = slug; select.onchange();
+  const button = findAll(nodes.get("accounts"), "BUTTON").find((node) => node.textContent === "Save accounts");
+  assert.ok(button && !button.disabled, "the reviewed bank save is reachable");
+  return button;
 }
 
 async function until(check, message) {
@@ -260,25 +278,93 @@ const unassigned = (index) => ({
   assignment: { state: "assignment_required" },
 });
 
-test("with no owner yet, the add-owner section opens and each account says to add an owner first", async () => {
+test("the bank task page carries the shared owner styles and a quiet way back", async () => {
+  const fixture = await createProductFixture({ env: ENV });
+  try {
+    const html = await pageHtml(fixture);
+    assert.ok(html.includes(OWNER_PAGE_CSS), "the rendered page includes the shared style contract");
+    assert.match(html, /<main class="task">/);
+    assert.match(html, /<a class="back" href="\/app">← Back to your Brain<\/a>\s*<h1 class="h1">/);
+  } finally { fixture.close(); }
+});
+
+test("account rows stay neutral with no coloured left border", async () => {
+  const fixture = await createProductFixture({ env: ENV });
+  try {
+    const html = await pageHtml(fixture);
+    const css = html.match(/<style>([\s\S]*?)<\/style>/)?.[1];
+    assert.ok(css && css.includes(".account"), "the actual account style decision point was rendered");
+    assert.doesNotMatch(css, /border-left(?:-color|-width)?\s*:/i);
+    assert.match(css, /\.account\s*\{[^}]*background:\s*var\(--color-card\)/);
+  } finally { fixture.close(); }
+});
+
+test("account choices share a control row and omit the repeated institution prefix", async () => {
+  const fixture = await createProductFixture({ env: ENV });
+  try {
+    const nodes = await runPage(await pageHtml(fixture), {
+      entities: [{ entity_slug: "fixture-owner", label: "Owner", kind: "person", status: "active", relationship: "owned" }],
+      accounts: [unassigned(1)],
+    });
+    openMixedOwners(nodes);
+    const [card] = findAll(nodes.get("accounts"), "ARTICLE");
+    assert.ok(card, "the editable account decision point was reached");
+    const row = card.children.find((node) => node.className.split(" ").includes("control-row"));
+    assert.ok(row, "the select and existing assign action share a control row");
+    assert.equal(findAll(row, "SELECT").length, 1);
+    assert.equal(findAll(row, "BUTTON").length, 1);
+    assert.equal(nodes.assignments.length, 0, "rendering still waits for an explicit owner action");
+    assert.doesNotMatch(textOf(card), /Synthetic Bank\./);
+    assert.ok(textOf(nodes.get("accounts")).includes("Synthetic Bank"), "the bank heading keeps the institution");
+  } finally { fixture.close(); }
+});
+
+test("normal arrival and first-sync notices use the calm wait palette", async () => {
+  const fixture = await createProductFixture({ env: ENV });
+  try {
+    const html = await pageHtml(fixture);
+    const css = html.match(/<style>([\s\S]*?)<\/style>/)?.[1];
+    assert.ok(css, "the page style block exists");
+    for (const id of ["arrival-status", "sync-status"]) {
+      assert.match(css, new RegExp("#" + id + "\\.note\\s*\\{[^}]*background:\\s*var\\(--color-wait-bg\\)"));
+    }
+  } finally { fixture.close(); }
+});
+
+test("the account status and arrival live regions each have one static home", async () => {
+  const fixture = await createProductFixture({ env: ENV });
+  try {
+    const html = await pageHtml(fixture);
+    const markup = html.split("<script")[0];
+    assert.ok(markup.includes('id="accounts"'), "the real account panel was rendered");
+    for (const id of ["account-status", "arrival-status"]) {
+      assert.equal([...markup.matchAll(new RegExp('id="' + id + '"', "g"))].length, 1);
+      assert.match(markup, new RegExp('<p id="' + id + '" role="status" aria-live="polite"'));
+    }
+  } finally { fixture.close(); }
+});
+
+test("with no owner yet, one bank question replaces repeated add-owner cards", async () => {
   const fixture = await createProductFixture({ env: ENV });
   try {
     const html = await pageHtml(fixture);
     assert.match(html, /<details id="entity-details" open>/, "the server opens the section when no owner exists");
     const nodes = await runPage(html, { entities: [], accounts: [unassigned(1), unassigned(2)] });
-    assert.equal(nodes.get("entity-details").open, true);
+    assert.equal(nodes.get("entity-details").hidden, true, "the inline bank choice replaces the generic owner form");
     const cards = findAll(nodes.get("accounts"), "ARTICLE");
     assert.equal(cards.length, 2);
     for (const card of cards) {
-      assert.ok(textOf(card).includes(NO_OWNER_LINE), textOf(card));
+      assert.ok(textOf(card).includes("Waiting for your bank choice."), textOf(card));
       assert.equal(findAll(card, "SELECT").length, 0, "no empty owner list is rendered");
       assert.equal(findAll(card, "BUTTON").length, 0, "no disabled assign button is rendered");
     }
-    assert.ok(nodes.get("account-status").textContent.includes(NO_OWNER_LINE));
+    const radios = findAll(nodes.get("accounts"), "INPUT").filter((node) => node.type === "radio");
+    assert.equal(radios.length, 3);
+    assert.ok(radios.every((node) => !node.checked));
   } finally { fixture.close(); }
 });
 
-test("once an owner exists, the section starts closed and every account offers the owner list", async () => {
+test("once an owner exists, the form stays closed and Some of each opens explicit account lists", async () => {
   const fixture = await createProductFixture({ env: ENV });
   try {
     seedOwnedEntity(fixture, "fixture-household", "Fixture Household");
@@ -289,8 +375,9 @@ test("once an owner exists, the section starts closed and every account offers t
       accounts: [unassigned(1)],
     });
     assert.equal(nodes.get("entity-details").open, false);
+    openMixedOwners(nodes);
     const [card] = findAll(nodes.get("accounts"), "ARTICLE");
-    assert.equal(textOf(card).includes(NO_OWNER_LINE), false);
+    assert.ok(textOf(card).includes("Choose who owns this account."));
     const [select] = findAll(card, "SELECT");
     assert.deepEqual(select.options.map((option) => option.value), ["", "fixture-household"]);
     assert.equal(findAll(card, "BUTTON")[0].disabled, false);
@@ -309,6 +396,7 @@ test("a second picked account queues during the first save and both choices surv
       accounts: [unassigned(1), unassigned(2)],
       onAssign: async (_body, number) => { if (number === 1) await firstPending; },
     });
+    openMixedOwners(nodes);
     const cards = findAll(nodes.get("accounts"), "ARTICLE");
     const [firstSelect] = findAll(cards[0], "SELECT");
     const [firstButton] = findAll(cards[0], "BUTTON");
@@ -358,6 +446,7 @@ test("a whole-bank choice shares the queue and never overwrites a per-account ch
         active -= 1;
       },
     });
+    openMixedOwners(nodes);
     const [firstCard] = findAll(nodes.get("accounts"), "ARTICLE");
     const [firstSelect] = findAll(firstCard, "SELECT");
     const [firstButton] = findAll(firstCard, "BUTTON");
@@ -365,12 +454,7 @@ test("a whole-bank choice shares the queue and never overwrites a per-account ch
     firstButton.onclick();
     await until(() => nodes.assignments.length === 1, "the per-account choice reached the assignment decision point");
 
-    const bankSelect = findAll(nodes.get("accounts"), "SELECT")
-      .find((node) => node.className === "bank-owner-select");
-    const bankButton = findAll(nodes.get("accounts"), "BUTTON")
-      .find((node) => node.textContent === "Assign this bank");
-    assert.ok(bankSelect && bankButton, "the whole-bank control reached its decision point");
-    bankSelect.value = "fixture-household";
+    const bankButton = bankOwnerSave(nodes, "fixture-household");
     bankButton.onclick();
     for (let tick = 0; tick < 5; tick += 1) await new Promise((resolve) => setImmediate(resolve));
     const requestsBeforeRelease = nodes.assignments.length;
@@ -399,9 +483,10 @@ test("a failed per-account save keeps its reason visible without reloading the a
     const nodes = await runPage(html, {
       entities: [{ entity_slug: "fixture-household", label: "Fixture Household", status: "active", relationship: "owned" }],
       accounts: [unassigned(1)],
-      onAssign: async () => { throw new Error(reason); },
+      onAssign: async () => { throw Object.assign(new Error(reason), { code: "bank_account_reassignment_requires_review" }); },
     });
     const initialLoads = nodes.accountLoads();
+    openMixedOwners(nodes);
     const [card] = findAll(nodes.get("accounts"), "ARTICLE");
     const [select] = findAll(card, "SELECT");
     const [button] = findAll(card, "BUTTON");
@@ -411,7 +496,7 @@ test("a failed per-account save keeps its reason visible without reloading the a
     for (let tick = 0; tick < 10; tick += 1) await new Promise((resolve) => setImmediate(resolve));
 
     assert.equal(nodes.accountLoads(), initialLoads, "a rejected save does not replace its reason with a reload summary");
-    assert.equal(nodes.get("account-status").textContent, reason);
+    assert.equal(nodes.get("account-status").textContent, reason + " Code: bank_account_reassignment_requires_review.");
     const [retryCard] = findAll(nodes.get("accounts"), "ARTICLE");
     const [retrySelect] = findAll(retryCard, "SELECT");
     const [retryButton] = findAll(retryCard, "BUTTON");
@@ -430,6 +515,7 @@ test("a single account choice still makes exactly one assignment request", async
       entities: [{ entity_slug: "fixture-household", label: "Fixture Household", status: "active", relationship: "owned" }],
       accounts: [unassigned(1)],
     });
+    openMixedOwners(nodes);
     const [card] = findAll(nodes.get("accounts"), "ARTICLE");
     const [select] = findAll(card, "SELECT");
     const [button] = findAll(card, "BUTTON");
@@ -462,6 +548,8 @@ test("an assigned account offers a reviewed move preview before one idempotent a
       ],
       accounts: [account],
     });
+    const change = findAll(nodes.get("accounts"), "BUTTON").find((node) => node.textContent === "Change one");
+    assert.ok(change, "saved assignments expose Change one"); change.onclick();
     const [card] = findAll(nodes.get("accounts"), "ARTICLE");
     const move = findAll(card, "BUTTON").find((button) => button.textContent === "Move to another owner");
     assert.ok(move, "the assigned-account move decision point is visible behind the owner session");
@@ -512,12 +600,8 @@ test("one bank action assigns all 14 unassigned accounts sequentially and reload
       },
     });
     const initialLoads = nodes.accountLoads();
-    const bankSelect = findAll(nodes.get("accounts"), "SELECT")
-      .find((node) => node.className === "bank-owner-select");
-    const bankButton = findAll(nodes.get("accounts"), "BUTTON")
-      .find((node) => node.textContent === "Assign this bank");
-    assert.ok(bankSelect && bankButton, "the 14-account bank reached the bulk-assignment decision point");
-    bankSelect.value = "fixture-household";
+    openMixedOwners(nodes);
+    const bankButton = bankOwnerSave(nodes, "fixture-household");
     bankButton.onclick();
     await until(() => nodes.assignments.length === 14, "all bank accounts reached the assignment endpoint");
     await until(() => nodes.accountLoads() === initialLoads + 1, "the bulk action performed its one final reload");
@@ -543,12 +627,8 @@ test("the whole-bank action never changes an account that already has an owner",
       entities: [{ entity_slug: "fixture-household", label: "Fixture Household", status: "active", relationship: "owned" }],
       accounts: [assigned, pending],
     });
-    const bankSelect = findAll(nodes.get("accounts"), "SELECT")
-      .find((node) => node.className === "bank-owner-select");
-    const bankButton = findAll(nodes.get("accounts"), "BUTTON")
-      .find((node) => node.textContent === "Assign this bank");
-    assert.ok(bankSelect && bankButton, "the bank with one pending account offers the bulk action");
-    bankSelect.value = "fixture-household";
+    openMixedOwners(nodes);
+    const bankButton = bankOwnerSave(nodes, "fixture-household");
     bankButton.onclick();
     await until(() => nodes.assignments.length === 1, "the unassigned control account reached the endpoint");
     assert.equal(nodes.assignments[0].account_ref, pending.account_ref);
@@ -569,16 +649,12 @@ test("a whole-bank failure keeps its reason in the account result after the fina
       entities: [{ entity_slug: "fixture-household", label: "Fixture Household", status: "active", relationship: "owned" }],
       accounts,
       onAssign: async (body) => {
-        if (body.account_ref === accounts[0].account_ref) throw new Error(reason);
+        if (body.account_ref === accounts[0].account_ref) throw Object.assign(new Error(reason), { code: "bank_account_reassignment_requires_review" });
       },
     });
     const initialLoads = nodes.accountLoads();
-    const bankSelect = findAll(nodes.get("accounts"), "SELECT")
-      .find((node) => node.className === "bank-owner-select");
-    const bankButton = findAll(nodes.get("accounts"), "BUTTON")
-      .find((node) => node.textContent === "Assign this bank");
-    assert.ok(bankSelect && bankButton, "the bank failure scenario reached the bulk-assignment decision point");
-    bankSelect.value = "fixture-household";
+    openMixedOwners(nodes);
+    const bankButton = bankOwnerSave(nodes, "fixture-household");
     bankButton.onclick();
     await until(() => nodes.assignments.length === 2, "the failed and green-control accounts both reached the endpoint");
     await until(() => nodes.accountLoads() === initialLoads + 1, "the bank action reached its final reload");
@@ -588,7 +664,7 @@ test("a whole-bank failure keeps its reason in the account result after the fina
       .find((node) => node.textContent.includes(accounts[0].masked_identifier + ": Not saved."));
     assert.ok(failureLine, "the failed account has a durable result line");
     assert.ok(failureLine.textContent.includes(reason), failureLine.textContent);
-    assert.equal(nodes.get("account-status").textContent, reason);
+    assert.equal(nodes.get("account-status").textContent, reason + " Code: bank_account_reassignment_requires_review.");
   } finally { fixture.close(); }
 });
 
@@ -617,7 +693,7 @@ test("every account load shows waiting progress per bank and for the whole page"
   } finally { fixture.close(); }
 });
 
-test("saved connection copy names pending owners and keeps the completed-history copy at zero", async () => {
+test("saved connection copy names pending owners and keeps first-sync progress calm", async () => {
   const fixture = await createProductFixture({ env: ENV });
   try {
     const html = await pageHtml(fixture);
@@ -626,13 +702,13 @@ test("saved connection copy names pending owners and keeps the completed-history
       accounts: [],
       connections: [
         { item_ref: "fixture-pending", institution_label: "Pending Bank", status: "connected", accounts_needing_owner: 2 },
-        { item_ref: "fixture-ready", institution_label: "Ready Bank", status: "connected", accounts_needing_owner: 0 },
+        { item_ref: "fixture-ready", institution_label: "Ready Bank", status: "connected", connected_at: NOW, accounts_needing_owner: 0 },
       ],
     });
     const rows = nodes.get("connections").children;
     assert.equal(rows.length, 2, "both connection-message arms were rendered");
-    assert.ok(textOf(rows[0]).includes("Connected. 2 accounts need an owner below before history can load."), textOf(rows[0]));
-    assert.ok(textOf(rows[1]).includes("Connection saved. Account history may still be loading."), textOf(rows[1]));
+    assert.ok(textOf(rows[0]).includes("△ Needs you · 2 accounts need an owner."), textOf(rows[0]));
+    assert.ok(textOf(rows[1]).includes("○ Working on it · Loading your transactions."), textOf(rows[1]));
   } finally { fixture.close(); }
 });
 
@@ -665,8 +741,9 @@ test("a signed-out connect page provides a real sign-in link back to the owner a
     const body = await response.text();
     assert.equal(response.status, 401, "the anonymous navigation reached the sign-in decision point");
     assert.match(response.headers.get("Content-Type") || "", /^text\/html/);
-    assert.match(body, /<a href="\/app">Sign in to your Brain<\/a>/);
-    assert.doesNotMatch(body, /return[_-]?to|redirect=/i, "the app has no supported return-path parameter to promise");
+    assert.match(body, /<h1[^>]*>Sign in to connect your bank<\/h1>/);
+    assert.match(body, /<a[^>]*href="\/app\?then=connect-bank">Sign in with a passkey<\/a>/);
+    assert.doesNotMatch(body, /return[_-]?to|redirect=/i, "the fixed return intent must not introduce a caller-controlled destination");
   } finally { fixture.close(); }
 });
 

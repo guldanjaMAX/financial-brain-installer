@@ -155,7 +155,7 @@ function ScopedOwnerTargets({ scope, activeLabel }: { scope: string | null; acti
   if (!scope) {
     return (
       <Section title="Your targets" blurb="Targets belong to one financial entity and never blend figures across entities.">
-        <Attention>
+        <Attention inset>
           Choose one part of your finances above to unlock its targets. Financial Brain will not guess a selection or combine targets across entities.
         </Attention>
       </Section>
@@ -165,7 +165,7 @@ function ScopedOwnerTargets({ scope, activeLabel }: { scope: string | null; acti
   const active = targets?.filter((target) => !target.archived_at) || [];
   return (
     <Section title="Your targets" blurb={`Owner-set goals for ${activeLabel}. These are preferences, not facts extracted from evidence.`}>
-      {error && <Attention>{error}</Attention>}
+      {error && <Attention inset>{error}</Attention>}
       {message && <Note>{message}</Note>}
       {targets === null && !error && <Note>Reading saved targets.</Note>}
       {targets && active.length === 0 && <Note>No active target is saved for {activeLabel}.</Note>}

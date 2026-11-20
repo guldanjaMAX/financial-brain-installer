@@ -47,12 +47,14 @@ function authentication({ expired = true, windowStatus = 0, wrongAccount = false
       }
       return ok();
     },
-    async fetchImpl(url) {
+    async fetchImpl(url, init) {
       const path = new URL(url).pathname;
       reads.push(path);
       const id = wrongAccount ? "b".repeat(32) : accountId;
       const result = path.endsWith("/accounts") ? [{ id, name: "Selected" }]
-        : path.endsWith(`/accounts/${accountId}`) ? { id, name: "Selected" } : [];
+        : path.endsWith(`/accounts/${accountId}`) ? { id, name: "Selected" }
+        : path.endsWith("/workers/subdomain") ? { subdomain: "fixture-account" } : [];
+      if (path.endsWith("/workers/subdomain")) assert.equal(init.method, "GET", "sign-in must not register an account address");
       const refused = vectorizeRefused && path.includes("/vectorize/");
       return new Response(JSON.stringify({ success: !refused, errors: [], messages: [], result,
         result_info: { page: 1, count: 1, total_count: 1, total_pages: 1 } }), { status: refused ? 403 : 200 });
@@ -101,6 +103,7 @@ test("a valid background session is the green control and opens no sign-in windo
   let actions = 0;
   await withCloudflareControlCredential(() => { actions++; }, controlOptions(h));
   assert.equal(actions, 1);
+  assert.ok(h.reads.some(path => path.endsWith("/workers/subdomain")), "the green control reads the existing address");
   assert.ok(h.reads.some(path => path.includes("/vectorize/")), "the green control reaches permission checks");
   assert.equal(h.calls.filter(call => call.command.endsWith("powershell.exe")).length, 0);
 });

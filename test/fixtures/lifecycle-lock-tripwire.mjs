@@ -23,7 +23,7 @@ export function installLifecycleLockTripwire(root) {
   } };
   fs.mkdirSync = (path, ...options) => {
     const caller = (new Error().stack ?? "").split("\n")[2] ?? "";
-    if (/[/\\]operations[/\\]brain-lifecycle-lock\.mjs:/u.test(caller)) {
+    if (/[/\\]operations[/\\]brain-(?:lifecycle-lock|lock-root)\.mjs:/u.test(caller)) {
       guard.attempts++;
       const target = resolve(path instanceof URL ? fileURLToPath(path) : String(path));
       if (!fixtures.some(fixture => inside(fixture, target) && inside(fixture, canonicalFuture(target)))) {

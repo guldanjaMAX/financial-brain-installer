@@ -1,3 +1,4 @@
+import { assertOwnerEvidence } from '../../test/helpers/owner-evidence-contract.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { answerSentences } from '../src/lib/answer-sentences.js';
@@ -18,8 +19,8 @@ async function boundaries(probe) {
   assert.ok(route.full_reads>=3,'the real SQLite whole-record reading was reached');
   assert.deepEqual(route.stages,['draft','verifier'],'both model decision points were reached');
   assert.ok(route.remote_text.includes(route.answer),'MCP retains the complete answer');
-  assert.ok(route.remote_text.includes(route.confidence_text),'MCP retains the computed explanation');
-  assert.equal(route.remote_confidence,route.confidence_text.match(/Confidence: \w+ \(\d+%\)/)[0]);
+  assertOwnerEvidence(route.remote_text, { percent: route.percent, basis: route.basis, missing: route.missing });
+  assert.equal(route.remote_confidence,null,'no computed score reaches the owner');
   for (const body of [direct,route]) {
     assert.ok(body.prose.length>0);
     assert.doesNotMatch(body.prose,/\b(?:I cannot|I can't|withheld)\b/);

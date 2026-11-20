@@ -514,6 +514,11 @@ if (SCENARIO) {
     if (!condition) fail++;
   };
   const strip = (text) => String(text).replace(/\x1b\[[0-9;]*m/g, "");
+  // Status lines start with a mark: ✓ for success and ! for a warning (older
+  // releases printed ok and warn). Each guard below has a control that proves
+  // its pattern matches a line a real run prints.
+  const GREEN_DOCUMENTS_LINE = /^\s*(?:ok|✓)\s+documents endpoint/imu;
+  const warningLine = (text) => new RegExp(String.raw`^\s*(?:warn|!)\s+${text}`, "imu");
 
   function runScenario(scenario, command, {
     adminKey = false,
@@ -630,7 +635,7 @@ if (SCENARIO) {
     missingKey.code === 1 && /no admin key.*authenticated documents endpoint/is.test(missingKey.output),
     missingKey.output);
   check("missing-key health never claims the documents endpoint passed",
-    !/ok\s+documents endpoint/i.test(missingKey.output), missingKey.output);
+    !GREEN_DOCUMENTS_LINE.test(missingKey.output), missingKey.output);
 
   const documentsDown = runScenario("health-documents-unreachable", "health", { adminKey: true });
   check("health exits nonzero when authenticated documents cannot be reached",
@@ -638,7 +643,7 @@ if (SCENARIO) {
       documentsDown.output.includes(renderCliCommands("Wait a minute and run `brain health` again")),
     documentsDown.output);
   check("an unavailable documents endpoint never prints green",
-    !/ok\s+documents endpoint/i.test(documentsDown.output), documentsDown.output);
+    !GREEN_DOCUMENTS_LINE.test(documentsDown.output), documentsDown.output);
 
   {
     const { cmdHealth } = await import("../brain.mjs");
@@ -752,7 +757,7 @@ if (SCENARIO) {
     const sourceLines = valid.logged.filter((line) => line.includes("sources:"));
     check("C1 valid source counts print exactly once without failing health",
       valid.failure === null && sourceLines.length === 1 &&
-        sourceLines[0] === "·     sources: 5 registered, 2 stale, 1 with no refresh schedule" &&
+        sourceLines[0] === "  ·    sources: 5 registered, 2 stale, 1 with no refresh schedule" &&
         valid.logged.some((line) => /vector index is query-ready/.test(line)),
       JSON.stringify({ sourceLines, failure: valid.failure?.message, logged: valid.logged }));
 
@@ -859,6 +864,8 @@ if (SCENARIO) {
   check("health still succeeds after authenticated documents are proven",
     healthy.code === 0 && /documents endpoint 200/.test(healthy.output) &&
       /vector index is query-ready/.test(healthy.output), healthy.output);
+  check("CONTROL: a healthy run prints the green documents line the missing-key and unavailable guards refuse",
+    GREEN_DOCUMENTS_LINE.test(healthy.output), healthy.output);
 
   const providerFallback = runScenario("health-answer-provider-fallback", "health", { adminKey: true });
   const providerFallbackNextStep = renderCliCommands(HEALTH_NEXT_STEP(providerFallback.manifestPath));
@@ -1057,7 +1064,7 @@ if (SCENARIO) {
     d1Down.code === 1 && /D1 is not reachable.*required database cannot be verified/is.test(d1Down.output),
     d1Down.output);
   check("unreachable D1 is never downgraded to a warning",
-    !/warn\s+D1 not reachable/i.test(d1Down.output), d1Down.output);
+    !warningLine(String.raw`D1 (?:is )?not reachable`).test(d1Down.output), d1Down.output);
 
   const noR2 = runScenario("verify-no-r2", "verify", { cloudflareToken: true });
   check("verify does not probe R2 for a manifest that has no bucket",
@@ -1071,6 +1078,8 @@ if (SCENARIO) {
       /Provision can use browser sign-in as a temporary fallback/.test(optionalWarnings.output) &&
       /D1 is reachable/.test(optionalWarnings.output) && /Workers is reachable/.test(optionalWarnings.output),
     optionalWarnings.output);
+  check("CONTROL: an optional R2 problem prints the warning mark the D1 downgrade guard refuses",
+    warningLine("R2 is not ready").test(optionalWarnings.output), optionalWarnings.output);
 
   const outputs = [
     missingKey, documentsDown, invalidDocuments, healthy,

@@ -44,7 +44,6 @@ import { connect as tlsConnect } from "node:tls";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { extract } from "../ingest/extract.mjs";
 // Side-effect import, and NOT optional. Without it the dependency-free
 // fallback .eml reader in extract.mjs runs: it cannot decode RFC 2047 subjects
 // or quoted-printable bodies, and it fails silently rather than erroring, which
@@ -1091,17 +1090,24 @@ export async function toEnvelope(message, { sourceName = SOURCE_TYPE, host = "",
     };
   }
 
-  const got = await extract(message.raw, "message.eml");
-  if (got.error || got.text == null) {
+  let parsed;
+  try { parsed = await parseEmailMessage(message.raw); }
+  catch (error) {
     return {
-      skip: { path: where, id: where, reason: got.error || "the message could not be parsed" },
+      skip: { path: where, id: where, reason: error?.code === "EMAXHEADERSIZE"
+        ? "the email headers exceed the parser limit" : "the message could not be parsed" },
       ...(headerIdentity ? { source_id: headerIdentity.id } : {}),
       retain_existing: true,
     };
   }
 
-  let parsed = {};
-  try { parsed = await parseEmailMessage(message.raw); } catch { /* the rendered text above is still good */ }
+  if (parsed.error || parsed.text == null) {
+    return {
+      skip: { path: where, id: where, reason: parsed.error || "the message could not be parsed" },
+      ...(headerIdentity ? { source_id: headerIdentity.id } : {}),
+      retain_existing: true,
+    };
+  }
 
   // INTERNALDATE is the RECEIPT time this server recorded, and it is the honest
   // document date. The Date: header is written by the sender's client and is
@@ -1117,10 +1123,10 @@ export async function toEnvelope(message, { sourceName = SOURCE_TYPE, host = "",
     occurredAt: occurredAt?.toISOString() || null,
     from: parsed.from,
     subject: parsed.subject,
-    text: got.text,
+    text: parsed.text,
   });
 
-  const q = textQuality(got.text);
+  const q = textQuality(parsed.text);
   if (!q.ok) {
     return {
       skip: { path: where, id: where, reason: q.reason, metrics: q.metrics },
@@ -1137,7 +1143,7 @@ export async function toEnvelope(message, { sourceName = SOURCE_TYPE, host = "",
       // never stored.
       source_id: identity.id,
       title: String(parsed.subject || "(no subject)").slice(0, 200),
-      content: got.text,
+      content: parsed.text,
       occurred_at: occurredAt ? occurredAt.toISOString() : null,
       // Its OWN value, not "gmail_internal". Both are a server's receipt time
       // and conflating the labels destroys the provenance distinction.

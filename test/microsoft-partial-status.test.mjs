@@ -1,3 +1,4 @@
+import { isolatedLifecycleOptions } from "./fixtures/isolated-update-schedulers.mjs";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -119,7 +120,7 @@ async function scenario(t, { accepted = 0, withheld = true, failure = null, know
     brainModule: {}, buildPlan: async () => plan, home: root, platform: "darwin", now: () => new Date(NOW),
     acquireLock: () => ({ assertOwned() {}, release() {} }), readUpdateTransaction: () => null, writeReceipt() {},
     runSource: async () => cmdLoad(manifestPath, { only: "microsoft", allowPartialRefresh: true, commands,
-      lifecycleLockOptions: { machineLockRoot: join(root, "lifecycle-locks") },
+      lifecycleLockOptions: isolatedLifecycleOptions(root),
       probes: { microsoft: async () => ({ connected: true }) }, log: line => logs.push(String(line)) }),
     readFreshness: async () => Object.fromEntries((await sourceInventory(env, { now: Date.parse(NOW) })).rows
       .map(row => [row.name, { kind: row.kind, ...row.receipt }])),
@@ -304,7 +305,7 @@ for (const kind of ["microsoft", "slack", "notion", "dropbox", "hubspot", "quick
 
 for (const reason of ["deleted", "changed", "not_found"]) {
   for (const tombstone of [false, true]) {
-    test(`calendar family retention has a nonempty scoped review control (${reason}, tombstone=${tombstone})`, async () => {
+    test(`calendar provider signals retain families without review (${reason}, tombstone=${tombstone})`, async () => {
       const ids = Array.from({ length: 39 }, (_, i) => `event-${i}`);
       const families = new Set([...ids.map(id => `mailbox:outlook:event:${id}`),
         ...Array.from({ length: 1000 }, (_, i) => `mailbox:outlook:message:prior-${i}`)]);
@@ -330,7 +331,7 @@ for (const reason of ["deleted", "changed", "not_found"]) {
             } });
           return observed;
         },
-        sendBatch: async () => assert.fail("calendar-only control submits no content"),
+        sendBatch: async ({ docs }) => ({ results: docs.map(doc => ({ source_id: doc.source_id, status: "created" })) }),
         listStoredFamilies: async () => { calls.inventories++; return families; },
         reviewRemovals: async ({ uids, storedFamilies, requiredApproval }) => {
           calls.reviews++;
@@ -343,18 +344,21 @@ for (const reason of ["deleted", "changed", "not_found"]) {
         removeDocuments: async () => { calls.removals++; assert.fail("review never applies removal"); },
         postReceipt: async (_base, _key, receipt) => { receipts.push(receipt); },
       });
-      if (tombstone) await assert.rejects(run(), { code: "provider_removal_review_required" });
-      else await run();
+      await run();
       assert.equal(calls.syncs, 1);
       assert.equal(calls.fetches, 1);
       assert.equal(families.size, 1039, "stored families remain preserved");
       assert.equal(calls.removals, 0);
-      assert.equal(calls.reviews, tombstone ? 1 : 0);
-      assert.equal(calls.inventories, tombstone ? 1 : 0);
-      assert.equal(calls.saves, tombstone ? 0 : 1);
+      assert.equal(calls.reviews, 0);
+      assert.equal(calls.inventories, 0);
+      assert.equal(calls.saves, 1);
       assert.equal(observed.removal_review_scopes[0].prior_source_ids.length, 39);
-      assert.equal(observed.deletions.length, tombstone ? 39 : 0);
-      assert.equal(receipts.at(-1).status, tombstone ? "error" : "ready");
+      assert.equal(observed.deletions.length, 0);
+      if (tombstone) {
+        assert.equal(observed.documents.length, 39, "every provider observation carries retained status evidence");
+        assert.ok(observed.documents.every(doc => doc.metadata.retained_source_id && !/confirmed deleted/i.test(doc.content)));
+      }
+      assert.equal(receipts.at(-1).status, "ready");
       if (!tombstone) {
         assert.deepEqual(saved.cursor.calendar.event_ids, [...ids].sort());
         assert.deepEqual(saved.cursor.calendar.pending_event_ids.ids, [...ids].sort());

@@ -22,6 +22,7 @@ class FakeNode {
   }
   append(...nodes) { this.children.push(...nodes); }
   replaceChildren(...nodes) { this.children = [...nodes]; this.textContent = ""; }
+  querySelectorAll(tag) { return this.children.flatMap((child) => findAll(child, tag.toUpperCase())); }
   get options() { return this.children.filter((node) => node.tagName === "OPTION"); }
 }
 const findAll = (node, tag) => [...(node.tagName === tag ? [node] : []),
@@ -81,9 +82,10 @@ async function connectedPage({ onReply = null, beforeRequest = null } = {}) {
   const scripts = [...html.matchAll(/<script(?: [^>]*)?>([\s\S]*?)<\/script>/g)]
     .map((match) => match[1]).filter(Boolean);
   assert.equal(scripts.length, 1);
-  const ids = ["start", "status", "connections", "accounts", "account-status", "entity-create",
-    "entity-name", "entity-kind", "entity-save", "entity-status", "refresh", "entity-details"];
-  const nodes = new Map(ids.map((id) => [id, new FakeNode(id === "entity-details" ? "details" : "div", id)]));
+  // Derive the fixture DOM from the generated page, including its step controls.
+  const nodes = new Map([...html.matchAll(/<([a-z][\w-]*)\b[^>]*\bid="([^"]+)"[^>]*>/gi)]
+    .map((match) => [match[2], new FakeNode(match[1], match[2])]));
+  assert.ok(nodes.has("another"), "the generated page contains the connect-another control");
   const calls = [];
   const storage = new Map();
   let uuid = 0;
@@ -113,6 +115,9 @@ async function connectedPage({ onReply = null, beforeRequest = null } = {}) {
   });
   context.window = context;
   vm.runInContext(scripts[0], context, { timeout: 1000 });
+  await until(() => button(nodes.get("accounts"), "Change one") &&
+    !vm.runInContext("connectionLoadBusy", context), "the saved-owner summary finished loading");
+  button(nodes.get("accounts"), "Change one").onclick();
   await until(() => findAll(nodes.get("accounts"), "ARTICLE").length === 1,
     "real account and financial-snapshot handlers populated the owner page");
   const card = findAll(nodes.get("accounts"), "ARTICLE")[0];

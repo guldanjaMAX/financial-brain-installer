@@ -4,6 +4,11 @@
 // ours, and both are tested here by CALLING the real functions, not by grepping
 // the source. A source assertion cannot tell a working guard from a deleted one.
 
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   chooseDbName, assertAdoptable, documentCountOf, ensureMetadataIndex, parseWranglerMetadataIndexList,
   VECTOR_METADATA_INDEXES,
@@ -17,8 +22,11 @@ import {
   resolveAdminKey, recordAcceptedDocumentState, addLocalPathAliases, recordLocalSkippedDocumentState,
   ensureCredentialScannerProgress, recordCredentialScannerProgress, hasCredentialScannerProgress,
   commitCredentialScannerProgress, safeIngestDisplay, reportSkips,
-  VALUE_FLAGS, workerBindings, optionalWorkerSecretNames,
+  VALUE_FLAGS, workerBindings, optionalWorkerSecretNames, reportAnticipatedCliFailure,
 } from "../brain.mjs";
+import { DriveRemovalReviewRequired } from "../operations/drive-removal-plan.mjs";
+import { WindowsDailyTaskRepairRequired } from "../operations/windows-update-bridge.mjs";
+import { cliTestEnvironment } from "./helpers/cli-test-environment.mjs";
 
 let fail = 0, ran = 0;
 const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") + n + (c ? "" : "  " + String(d).slice(0, 200))); if (!c) fail++; };
@@ -975,17 +983,27 @@ check("a fully accepted batch may advance its source cursor", sourceCursorCanAdv
 
 /* ---- an anticipated failure is not a crash ---- */
 {
-  const fs = await import("node:fs/promises");
-  const src = await fs.readFile(new URL("../brain.mjs", import.meta.url), "utf-8");
-  const i = src.indexOf("const reviewRequired = e instanceof DriveRemovalReviewRequired || e instanceof WindowsDailyTaskRepairRequired;");
-  check("both deliberate review types reach the anticipated failure renderer", i >= 0);
-  const block = src.slice(i, i + 1_100);
-  check("a Fatal prints on stdout, so PowerShell does not dress it up as a crash",
-    /if \(e instanceof Fatal \|\| reviewRequired\)/.test(block) &&
-      /const label = reviewRequired \? c\.yellow\("review required"\) : c\.red\("fail"\)/.test(block) &&
-      /console\.log\(`\$\{label\}/.test(block) &&
-      !/console\.error/.test(block), block.slice(0, 300));
-  check("and still exits 1, because that is the machine-readable part", /process\.exit\(1\)/.test(block));
+  const reviews = [new DriveRemovalReviewRequired("Fixture review."), new WindowsDailyTaskRepairRequired()];
+  check("both deliberate review types reach the anticipated failure renderer", reviews.every(error => {
+    const lines = [];
+    return reportAnticipatedCliFailure(error, { write: line => lines.push(line) }) &&
+      /review required/.test(lines[0]) && lines[0].includes(error.message);
+  }));
+  const home = mkdtempSync(join(tmpdir(), "brain-fatal-guard-"));
+  try {
+    const preloads = ["cli-side-effect-tripwire.mjs", "isolate-support-root.mjs", "support-journal-acl-preload.mjs"]
+      .flatMap(name => ["--import", new URL(`./fixtures/${name}`, import.meta.url).href]);
+    const result = spawnSync(process.execPath, [
+      ...preloads, fileURLToPath(new URL("../brain.mjs", import.meta.url)), "update", "--skip-selfcheck",
+    ], {
+      cwd: home, encoding: "utf8", timeout: 30_000,
+      env: cliTestEnvironment(home, { BRAIN_NO_WRANGLER_LOGIN: "1", BRAIN_TEST_USER_ROOT: home }),
+    });
+    const guidance = /doesn't take --skip-selfcheck/u;
+    check("a Fatal prints on stdout, so PowerShell does not dress it up as a crash",
+      guidance.test(result.stdout) && !guidance.test(result.stderr));
+    check("and still exits 1, because that is the machine-readable part", result.status === 1);
+  } finally { rmSync(home, { recursive: true, force: true }); }
 }
 
 

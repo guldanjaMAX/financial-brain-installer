@@ -54,6 +54,25 @@ const skipLinkCase = (name) => (reason) => {
   skippedLinkChecks++;
   console.log(`SKIP  ${name} # ${reason}`);
 };
+// FIX-P1-REMOVAL-CAUSE-1117: a failed Gmail refresh reaches the owner only as
+// the reviewed product copy. Each Gmail case below proves its boundary with
+// the boundary-call, lease and state checks that follow, not with the wording.
+const assertGmailOwnerFailure = (error, privateText = null) => {
+  assert.match(error?.message || "", /Gmail refresh did not finish/);
+  assert.equal(error?.supportCode, "INGEST_FAILED");
+  assert.match(error?.message || "", /Help: https:\/\/financialbrain\.ai\/help\/INGEST_FAILED/);
+  if (privateText !== null) {
+    assert.equal(error.message.includes(privateText), false, "the exception text stays private");
+  }
+  return true;
+};
+
+const assertGmailBusyFailure = (error) => {
+  assert.equal(error?.message,
+    "Gmail ingest is already running on this computer. Wait for it to finish, then re-run the same command.");
+  assert.equal(error?.supportCode, "INGEST_FAILED");
+  return true;
+};
 
 const fixture = () => {
   const root = mkdtempSync(join(tmpdir(), "brain-source-ingest-lock-"));
@@ -316,7 +335,7 @@ const fixture = () => {
             ingestEnvelopes: async () => { boundaryCalls++; throw new Error("writer core entered"); },
           },
         }),
-        /ingest is already running/,
+        item.sourceName === "gmail" ? (error) => assertGmailBusyFailure(error) : /ingest is already running/,
       );
       const sourceLock = sourceIngestLockPath({
         manifestPath: f.manifestPath,
@@ -525,7 +544,9 @@ const fixture = () => {
             };
           },
         }),
-        (error) => error === sentinel,
+        (error) => item.name === "gmail"
+          ? assertGmailOwnerFailure(error, sentinel.message)
+          : error === sentinel,
       );
       check(`${item.name} uses the fixed source-then-shared lock order exactly once`,
         JSON.stringify(order) === JSON.stringify(item.expected),
@@ -535,6 +556,10 @@ const fixture = () => {
     // with both leases held, instead of passing because all work stopped early.
     for (const source of ["drive", "gmail"]) {
       const order = [];
+      // Provider errors can mimic a lock code. They still take fixed public
+      // copy unless they are the exact local Fatal diagnostic.
+      const credentialError = source === "gmail"
+        ? Object.assign(new Error(sentinel.message), { code: "source_ingest_already_running" }) : sentinel;
       await assert.rejects(cmdIngestRemote(manifest, f.manifestPath, { from: source }, {
         withSourceIngestLock: async (input, run) => {
           order.push(input.sharedRecord ? `shared:${input.sharedRecord}` : `source:${input.sourceName}`);
@@ -542,8 +567,8 @@ const fixture = () => {
         },
         ingestLib: async () => ({ loadState: () => ({ version: 1, done: {}, skipped: {} }) }),
         resolveBaseUrl: async () => "https://fixture.invalid", resolveAdminKey: () => "fixture-admin-key",
-        loadGoogleTokens: () => { order.push("credential:google"); throw sentinel; },
-      }), error => error === sentinel);
+        loadGoogleTokens: () => { order.push("credential:google"); throw credentialError; },
+      }), error => source === "gmail" ? assertGmailOwnerFailure(error, sentinel.message) : error === sentinel);
       assert.deepEqual(order, [`source:${source}`, "shared:provider:google", "credential:google"]);
       check(`${source} valid-state control reaches credentials under both locks`, true);
     }
@@ -612,6 +637,7 @@ const fixture = () => {
 
     const drySentinel = new Error("fixture dry writer core reached");
     for (const sourceName of ["drive", "gmail"]) {
+      let dryStateReads = 0;
       await assert.rejects(
         cmdIngestRemote(
           manifest,
@@ -623,14 +649,19 @@ const fixture = () => {
             ingestLib: async () => ({
               batchStream: async function* () {},
               splitOversized: () => [],
-              loadState: () => { throw drySentinel; },
+              loadState: () => { dryStateReads++; throw drySentinel; },
               saveState: () => {},
               prefetch: () => [],
             }),
           },
         ),
-        (error) => error === drySentinel,
+        (error) => sourceName === "gmail"
+          ? assertGmailOwnerFailure(error, drySentinel.message)
+          : error === drySentinel,
       );
+      // The Gmail owner copy no longer names the failing step, so the count
+      // proves the strict cursor load was reached before any token loader.
+      assert.equal(dryStateReads, 1, "the dry writer core was reached");
       check(`${sourceName} dry run does not migrate the legacy Google credential`,
         dpapiCalls === 0 && readFileSync(tokenPath).equals(original));
     }
@@ -889,7 +920,7 @@ const fixture = () => {
       };
       await assert.rejects(
         item.invoke(options),
-        /ingest is already running/,
+        item.sourceName === "gmail" ? (error) => assertGmailBusyFailure(error) : /ingest is already running/,
       );
       check(`${item.sourceName} contention stops before credentials, network, or writer-core access`,
         boundaryCalls === 0, `boundary calls=${boundaryCalls}`);
@@ -919,7 +950,9 @@ const fixture = () => {
       } else {
         await assert.rejects(
           item.invoke(dryOptions, { "dry-run": true }),
-          (error) => error === drySentinel,
+          (error) => item.sourceName === "gmail"
+            ? assertGmailOwnerFailure(error, drySentinel.message)
+            : error === drySentinel,
         );
         check(`${item.sourceName} dry run remains lock-free beside a live writer`,
           dryCoreCalls === 1 && holder.assertOwned() === true && !existsSync(statePath),
@@ -1280,7 +1313,9 @@ if (process.platform !== "win32") {
     const dryOutput = `${dryResult.stdout || ""}${dryResult.stderr || ""}`.replace(/\x1b\[[0-9;]*m/g, "");
     check("a read-only Gmail dry run does not contend with the durable writer",
       dryResult.status === 1 && !/Gmail ingest is already running/.test(dryOutput) &&
-      /connect google|not connected|token/i.test(dryOutput), dryOutput.slice(-500));
+      // The reviewed refresh wrapper masks the missing-credential exception;
+      // the injected dry-run controls above prove the credential path is reached.
+      /Gmail refresh did not finish[\s\S]*Code: INGEST_FAILED[\s\S]*Help: https:\/\/financialbrain\.ai\/help\/INGEST_FAILED/.test(dryOutput), dryOutput.slice(-500));
     holder.release();
 
     const providerHolder = acquireSourceIngestLock({

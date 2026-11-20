@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { isolatedLifecycleOptions } from "./fixtures/isolated-update-schedulers.mjs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -241,12 +242,14 @@ test("daily refresh still reclaims a stale dead lifecycle owner under the existi
     home,
     // The real lock checks the host's permission model; only the runner simulates macOS.
     platform: process.platform,
-    machineLockRoot,
+    ...isolatedLifecycleOptions(home, { machineLockRoot }),
     now: () => observedAt,
   });
-  const ownerPath = join(holder.path, readdirSync(holder.path)[0]);
   const staleAt = new Date(observedAt.getTime() - 60_001);
-  utimesSync(ownerPath, staleAt, staleAt);
+  for (const path of new Set([holder.path, holder.accountPath, holder.legacyPath].filter(Boolean))) {
+    const ownerPath = join(path, readdirSync(path)[0]);
+    utimesSync(ownerPath, staleAt, staleAt);
+  }
   let acquireCalls = 0;
   let sourceCalls = 0;
   let freshnessReads = 0;
@@ -260,7 +263,7 @@ test("daily refresh still reclaims a stale dead lifecycle owner under the existi
         return acquireBrainLifecycleLock({
           ...options,
           platform: process.platform,
-          machineLockRoot,
+          ...isolatedLifecycleOptions(home, { machineLockRoot }),
           staleMs: 60_000,
           isOwnerAlive: () => false,
           now: () => observedAt,
@@ -1624,6 +1627,7 @@ test("inventory outages run eligible legs, retain holds and never claim fresh", 
       assert.equal(source.reason_code, "source_inventory_unavailable");
       assert.notEqual(result.status, "complete");
       assert.ok(!JSON.stringify(result).includes("private detail"));
+      assert.match(source.help, /06-runbook-top-ten-failures\.md#source-inventory-is-unavailable$/);
     }
   }
 });
@@ -1668,7 +1672,7 @@ test("an explicit loader refusal cannot borrow an advancing freshness receipt", 
   assert.deepEqual(outcomes, [["complete", true], ["failed", false]]);
 });
 
-for (const kind of ["microsoft", "gmail", "calendar"]) {
+for (const kind of ["drive", "microsoft", "gmail", "calendar"]) {
   test(`quiet ${kind} daily refresh requires a current completed provider check`, async () => {
     const before = "2026-10-08T12:00:00.000Z";
     const now = "2026-10-10T12:00:00.000Z";
@@ -1682,7 +1686,8 @@ for (const kind of ["microsoft", "gmail", "calendar"]) {
       ["stale", { ...quiet, started_at: before, finished_at: before }, before, "failed"],
       ["replay", quiet, now, "failed"],
       ["future", { ...quiet, finished_at: "2026-10-11T12:00:00.000Z" }, before, "failed"],
-      ["missing boundary", { ...quiet, provider_check_complete: false }, before, kind === "gmail" ? "complete" : "failed"],
+      // Legacy full Drive walks and Gmail walks use walk_complete itself.
+      ["missing boundary", { ...quiet, provider_check_complete: false }, before, ["drive", "gmail"].includes(kind) ? "complete" : "failed"],
     ];
     for (const [arm, latestRun, prior, expected] of arms) {
       let runs = 0;

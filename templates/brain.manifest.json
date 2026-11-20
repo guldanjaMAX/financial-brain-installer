@@ -20,7 +20,7 @@
     "timezone": "America/Phoenix"
   },
   "brain": {
-    "version": "0.4.29",
+    "version": "0.4.31",
     "domain": "brain.acme.com",
     "worker_name": "acme-brain"
   },
@@ -109,6 +109,7 @@
       "oauth_secret": "secret://GMAIL_OAUTH"
     },
     "calendar": {
+      "_comment": "Add-only refresh: cancelled meetings keep their stored text and are marked cancelled; the sync position advances after verified marking.",
       "enabled": false,
       "oauth_secret": "secret://GCAL_OAUTH"
     },
@@ -232,13 +233,14 @@
     "microsoft": {
       "_comment": [
         "Microsoft 365 Outlook mail and calendar plus selected OneDrive or SharePoint drives.",
-        "Outlook Calendar keeps a rolling 30-day-past and 90-day-future view.",
+        "Outlook Calendar reads a rolling 30-day-past and 90-day-future view, while retaining previously indexed history. Event original zones take precedence over client.timezone; mail uses client.timezone.",
         "Optional mail_start_at is the inclusive UTC start of unexported mail after verified digest coverage; earlier exports and citations stay readable. Null keeps full-mail sync.",
-        "With mail_start_at set, mail removals and absence-based snapshot removals are held for a separate owner-approved operation.",
-        "Independent Graph delta links carry exact message and file tombstones; calendar tombstones are limited to the saved event inventory.",
+        "Microsoft sync is add-only: provider removals and absence never delete retained history. Removal is a separate owner-requested operation.",
+        "Independent Graph delta links retain message, event and file history. Unsupported, unreadable and over-8-MiB files are counted skips; their coverage stays incomplete.",
         "Add exact drive_ids or site_ids after reviewing the tenant selection."
       ],
       "enabled": false,
+      "account": null,
       "mail_folder_ids": [
         "inbox"
       ],

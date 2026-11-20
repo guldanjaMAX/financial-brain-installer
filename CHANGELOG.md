@@ -4,6 +4,157 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.31 (2026-11-19)
+
+This update includes every 0.4.29 change listed below. Version 0.4.30 was
+never published, so its changes are here too. If you are coming from an earlier
+version, run `brain whatsnew --all` to read those notes as well.
+
+**Setup and screens you see**
+
+- **A calmer first setup in the Terminal.** `brain setup` now says "Setting up
+  your Brain", numbers each step ("STEP n of N"), gives minutes for each step
+  and a total, and marks a step done only after it is checked. Commands and
+  internal detail move behind `--details`. A setup that cannot go on keeps its
+  reason and its code, and says "Review" rather than "Create".
+- **A plainer app opening screen and passkey screen.** One message and one
+  action at a time, and a failure reads calmly instead of showing a raw error.
+- **A calmer first Home screen** that says where your Brain is in its first
+  reading.
+- **Ask answers read more calmly.** An answer shows its evidence in one
+  closed section, a temporary outage says "Try again" with a small code line,
+  and a thinking line shows while it works. Owners no longer see a confidence
+  word or percentage; an answer with missing evidence says so in plain words.
+- **Cleaner connect screens** for the answer key and for Google, and the setup
+  step that checked for a tool that may not be installed no longer names it.
+
+**Banks**
+
+- **Access > Banks is laid out as cards**, one per bank, with a calm status
+  mark and calm loading words instead of a raw status.
+- **The bank connect page shows STEP 1 to 3** with a check at each step. If you
+  are signed out, it signs you in and returns you to the same page. When bank
+  keys are not set, it explains that on a calm page instead of raw JSON. A
+  bank problem that opens in your browser shows a plain page, not raw JSON.
+- **One question per bank.** The page asks one owner question per bank and
+  saves your exceptions first.
+- **Plaid keys by Copy.** `brain connect bank --from-clipboard` (also with
+  `--replace-keys`) picks up the Plaid client ID and secret from your clipboard
+  on Mac and Windows, so you never paste a key into the Terminal. It waits for
+  two new values, clears the clipboard after each, gives up after 10 minutes,
+  and writes the pair only if Plaid accepts it.
+- **Ask more money questions in your own words.** After a bank connection
+  handover (new in 0.4.29), questions about a merchant or a spending category
+  include the recovered activity, the same way ordinary bank sync records it.
+  Periods that still have unresolved recovery activity stay below High and name
+  the dollars and dates involved. Check those stated gaps before relying on a
+  figure for those dates.
+
+**Sources and syncing**
+
+- **Clean my Brain applies the plan you reviewed.** Run `brain clean` with
+  `--preview-all`, review the exact targets and use its digest to apply.
+  The plan and restore point are tied to the same Brain. If the command is
+  interrupted just after a batch commits, rerunning checks its saved receipt
+  before continuing.
+- **Mail parsing has tighter limits** for IMAP, local mail files and uploads.
+  A message over the header budget is reported as unreadable.
+- **A refused Gmail message no longer freezes the daily refresh.** It is
+  recorded, skipped and reported once (`GMAIL_MESSAGES_REFUSED`, with a help
+  page), so Gmail keeps moving. Removal reviews stay your decision and no
+  longer stop the refresh.
+- **A quiet Drive check finishes.** When Drive has no changes, the check
+  reports "up to date" and says how many earlier review decisions it kept.
+- **Cancelled calendar events are kept.** A cancelled or removed Google
+  Calendar event keeps its saved text and is marked cancelled, and the
+  calendar position moves on.
+- **A Microsoft refresh never removes saved history.**
+- **Large source lists finish.** Reading the full list of Gmail or Drive items
+  continues across short outages instead of stopping.
+
+**Setup on Cloudflare and Windows**
+
+- **Setup handles your workers.dev address.** It reads the account's
+  workers.dev subdomain and, only during setup, registers a neutral one if none
+  exists. A failure stops with a code and a help link instead of a wrong
+  "permission" message. Browser sign-in asks for one more Cloudflare permission
+  for this; an older saved sign-in is asked for one fresh Allow.
+- **The Brain address is always saved** with the install record.
+- **Shared Windows computers.** If another Windows account owns the shared lock
+  folder, the Brain uses a private folder for your account and says so
+  (`BRAIN_LOCK_FOLDER_PER_USER`); an unusable folder stops with
+  `BRAIN_LOCK_FOLDER_UNUSABLE`. Known limit: an older version of the Brain
+  command that still uses the shared folder is not blocked by the private one.
+
+**Cleaning, answers and updates**
+
+- **Clean my Brain.** `brain clean <manifest> --list <ids-file>` previews an
+  exact, reviewed list of Gmail or Drive items and changes nothing. Add
+  `--apply` to take a restore point, print the command that undoes the whole
+  run, and remove the items in batches of 50. It can be stopped and rerun; it
+  continues where it left off. A list over 20% of your Brain is refused, and a
+  list that changed after review is refused.
+- **Removed items stay removed.** Each removal is remembered by the Brain,
+  inside the same database step as the delete. A full re-read of Gmail or
+  Drive (a history gap, a changed setting, `--reset`) or an edit to a removed
+  Drive file no longer brings it back, and it does not hold up your Gmail sync.
+  `brain clean <manifest> --restore <ids-file> --apply` lets chosen items load
+  again. Removals the Brain plans for itself are not remembered, so something
+  you restore in Gmail or Drive can still come back.
+- **Removal is fast again on a large Brain.** Taking out 50 emails no longer
+  recounts every stored email first, so a batch no longer takes about 35
+  seconds and no longer briefly makes the Brain look unavailable. The stored
+  counts are checked against the real rows at the end of a clean and repaired
+  only if they disagree.
+- **Clear errors.** Every way a clean can stop prints a code (`CLEAN_...`), the
+  database's own message with names and numbers masked, the next step, and a
+  help link. A removal that finished but whose receipt was lost is proved by a
+  read-back and the run continues. The help page is `docs/help/clean-my-brain.md`.
+- Only Gmail and Drive items can be cleaned. Ids that are not in the Brain are
+  listed in `<list>.already-gone.txt`, and a list with more than 20% of them
+  stops (`CLEAN_MANY_MISSING`) unless you add `--allow-missing`. A short
+  "storage unavailable" blip in the Brain's health check is waited out instead
+  of stopping the run. The restore hint now says what `--restore` and
+  `brain rollback` really do (rollback also undoes mail loaded since).
+- The update adds one database step (a table for the removal memory, migration
+  0070). It applies automatically after the 0.4.29 steps. To check: run `brain clean`
+  without `--apply` on a small list and read the preview before you remove
+  anything.
+- **See when bank connections or answer checks need attention.** Your Brain's
+  public health endpoint now publishes a short status for each, so a monitor
+  can spot problems. A passing gate cannot hide an answer check failure, and
+  a bank link with unusable sync timing needs attention. The flags contain no
+  bank details or provider messages.
+- **Very large documents no longer stop an answer.** Your Brain reads each
+  matching record up to a set size, so a question that finds huge files no
+  longer runs it out of memory. When a cited record was only partly read, the
+  answer says so. If the sensitive-record check could not finish for some
+  matching records, the answer says that too and uses only the records that
+  passed it.
+- **Updates check themselves.** `brain update` now reads your bank
+  connections, Worker secret names, connected sources and their last runs, the
+  daily job and the Claude connection before and after it updates, and changes
+  none of them. If one of them changed, the update stops and says what
+  changed. If a check could not run, the update says which one. Each of these
+  messages has a code that starts with `UPDATE_SELFCHECK_`.
+
+**Known limit:** the two known limits listed under 0.4.29 below (rolling back
+a partly done bank handover, and what carries over when you replace a
+transaction in a handover review) still apply. This entry supplies no release
+approval or new field evidence.
+
+### This release does NOT cover
+
+- Replacing a bank connection does not revoke the old connection's permission
+  at your bank, and it does not prove complete history for the missing-access
+  period until you compare that period with your statement.
+- Some answers say Medium or Low more often than ideal. Read the stated gaps
+  and check the cited records before relying on a figure.
+- QuickBooks direct connection is pending Intuit approval.
+- Windows x64 is the only supported Windows runtime in this release. Windows
+  ARM64 ships unproven.
+- Bank breadth ships unproven. Bank invitations stay closed.
+
 ## 0.4.29 (2026-11-16)
 
 This update includes every 0.4.28 change listed below. If you are coming from

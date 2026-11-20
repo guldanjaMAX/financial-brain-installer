@@ -256,11 +256,11 @@ test("an unregistered workers.dev subdomain explains how to register one and rer
   assert.ok(SUPPORT_ERROR_CODES.includes("CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED"));
   const recovery = supportRecovery("CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED");
   const rendered = renderCliCommands(renderSupportRecovery(recovery));
-  assert.match(rendered, /Workers & Pages/);
-  assert.match(rendered, /register a workers\.dev subdomain/i);
+  assert.match(rendered, /resume address setup/);
+  assert.match(rendered, /click Allow/);
   assert.doesNotMatch(rendered, /propagation/i);
-  assert.ok(rendered.includes(renderCliCommands("brain setup")),
-    "the rerun command must go through the command renderer");
+  assert.doesNotMatch(recovery.next_steps.join(" "), /Terminal|brain setup|brain update|brain deploy/,
+    "owner recovery steps should stay in the assistant and browser");
   const error = new Error("provider wording that may change tomorrow");
   error.code = "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED";
   assert.equal(supportErrorCode(error, { command: "setup" }), "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED");
@@ -293,3 +293,36 @@ test("one-file incomplete guidance is explainable by the real CLI and retains it
   assert.equal(supportErrorCode(error, { command: "provenance-repair" }), code);
   assert.equal(supportRecovery(code).retry, "review_first");
 });
+
+
+test("a failed workers.dev reservation keeps its stable issue and browser recovery steps", () => {
+  const code = "CLOUDFLARE_WORKERS_SUBDOMAIN_REGISTER_FAILED";
+  const error = Object.assign(new Error("fixture provider wording"), { code });
+  assert.equal(supportErrorCode(error, { command: "setup" }), code);
+  const guide = supportRecovery(code);
+  assert.equal(guide.code, code);
+  assert.match(guide.protection, /reservation may already have reached Cloudflare/);
+  assert.match(guide.next_steps.join(" "), /Workers & Pages/);
+  assert.doesNotMatch(guide.next_steps.join(" "), /Terminal|brain setup|brain deploy|brain update/);
+});
+
+test("an optional address save has a stable non-credential recovery guide", () => {
+  const code = "BRAIN_DOMAIN_NOT_SAVED";
+  assert.ok(SUPPORT_ERROR_CODES.includes(code));
+  const recovery = supportRecovery(code);
+  assert.equal(recovery.code, code);
+  assert.match(recovery.what_happened, /address/i);
+  assert.doesNotMatch(renderSupportRecovery(recovery), /paste|token|recovery key/i);
+  const error = new Error("optional address save"); error.code = code;
+  assert.equal(supportErrorCode(error, { command: "setup" }), code);
+});
+// Suggested Microsoft D4, pending founder approval. Keep the shared-app owner
+// sentence byte-identical to the proposed common Microsoft catalog contract.
+{
+  const recovery = supportRecovery("MICROSOFT_ACCOUNT_NOT_SUPPORTED");
+  assert.match(recovery.what_happened, /^Microsoft did not accept this kind of account\./);
+  assert.match(recovery.what_happened, /Outlook.com personal accounts are not supported yet\.$/);
+  for (const code of ["MICROSOFT_ACCOUNT_NOT_SUPPORTED", "MICROSOFT_FILE_SKIPPED", "MICROSOFT_DRIVE_UNAVAILABLE"]) {
+    assert.ok(supportRecovery(code).next_steps.some(step => step.endsWith(`/help/${code}`)));
+  }
+}

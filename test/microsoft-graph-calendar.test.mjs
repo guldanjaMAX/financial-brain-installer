@@ -92,7 +92,7 @@ async function runCalendarContract(syncImpl) {
   });
 
   assert.equal(calendarCalls, 1, "the calendar decision point must be reached exactly once");
-  assert.equal(result.documents.length, 1);
+  assert.equal(result.documents.length, 2);
   assert.equal(result.documents[0].source_id, "outlook:event:event-stable-1");
   assert.equal(result.documents[0].source_subtype, "outlook_calendar");
   assert.equal(result.documents[0].metadata.category, "calendar");
@@ -107,10 +107,10 @@ async function runCalendarContract(syncImpl) {
     window_start: WINDOW_START,
     window_end: WINDOW_END,
     id_type: "immutable",
-    event_ids: ["event-stable-1"],
+    event_ids: ["event-cancelled-1", "event-stable-1"],
     pending_event_ids: { version: 1, ids: [] },
   });
-  assert.equal(result.authoritative_snapshot, true);
+  assert.equal(result.authoritative_snapshot, false);
   assert.equal(result.cursor_can_advance, true);
   return { result, calendarCalls };
 }
@@ -240,9 +240,8 @@ async function runCalendarContract(syncImpl) {
   const missing = await runPendingArm("missing");
   assert.equal(missing.directCalls, 1);
   assert.equal(missing.deltaCalls, 1);
-  assert.deepEqual(missing.result.documents, []);
-  assert.deepEqual(missing.result.deletions, [{ source_type: "microsoft", source_id: `outlook:event:${eventId}`,
-    removal_cause: "explicit_deletion" }]);
+  assert.ok(missing.result.documents.some(doc => doc.metadata.retained_source_id === `outlook:event:${eventId}`));
+  assert.deepEqual(missing.result.deletions, []);
   assert.deepEqual(missing.result.proposed_cursor.calendar.pending_event_ids, { version: 1, ids: [] });
 
   const retryable = await runPendingArm("retryable");
@@ -437,7 +436,7 @@ async function runCalendarContract(syncImpl) {
     adminKey: "offline-key",
     now: () => new Date(NOW),
   });
-  check("an incomplete baseline reaches reconciliation without treating unmatched prior identity as deletion",
+  check("an incomplete baseline preserves prior identity without absence reconciliation",
     graphCalls === 2 && inventoryCalls > 0 && adapter.warnings.length === 1 &&
     adapter.cursor_can_advance === false && removalCalls === 0 && stateSaves === 0 &&
     priorEventIds.every((id) => stored.has(`microsoft:outlook:event:${id}`)));
@@ -470,9 +469,10 @@ async function runCalendarContract(syncImpl) {
       });
     },
   });
-  check("only a tombstone already in the tracked calendar view receives deletion authority",
-    decisionCalls === 1 && result.deletions.length === 1 &&
-    result.deletions[0].source_id === "outlook:event:event-known-1");
+  check("tracked and untracked provider tombstones retain qualified status without deletion authority",
+    decisionCalls === 1 && result.deletions.length === 0 && result.documents.length === 2 &&
+    result.documents.some(doc => doc.metadata.retained_source_id === "outlook:event:event-known-1") &&
+    result.documents.every(doc => !/confirmed deleted/i.test(doc.content)));
 }
 
 {
@@ -502,18 +502,15 @@ async function runCalendarContract(syncImpl) {
 
   const removed = await runPagedTerminalChange({ "@removed": { reason: "deleted" } });
   const cancelled = await runPagedTerminalChange({ isCancelled: true });
-  check("a later-page removal clears an event proven live earlier in the same completed walk",
-    removed.pageCalls === 2 && removed.result.documents.length === 0 &&
-    removed.result.deletions.length === 1 &&
-    removed.result.deletions[0].source_id === "outlook:event:event-paged-terminal" &&
-    removed.result.proposed_cursor.calendar.event_ids.length === 0 &&
-    removed.result.cursor_can_advance === true);
-  check("the same paged walk reaches cancellation handling as the green control",
-    cancelled.pageCalls === 2 && cancelled.result.documents.length === 0 &&
-    cancelled.result.deletions.length === 1 &&
-    cancelled.result.deletions[0].source_id === "outlook:event:event-paged-terminal" &&
-    cancelled.result.proposed_cursor.calendar.event_ids.length === 0 &&
-    cancelled.result.cursor_can_advance === true);
+  check("a later-page removal keeps observed text and separate provider status",
+    removed.pageCalls === 2 && removed.result.documents.length === 2 && removed.result.deletions.length === 0 &&
+    removed.result.documents.some(doc => doc.source_id === "outlook:event:event-paged-terminal") &&
+    removed.result.documents.some(doc => doc.metadata.retained_source_id === "outlook:event:event-paged-terminal") &&
+    removed.result.proposed_cursor.calendar.event_ids.length === 1 && removed.result.cursor_can_advance === true);
+  check("the cancellation control retains text and labels the meeting as cancelled",
+    cancelled.pageCalls === 2 && cancelled.result.documents.length === 2 && cancelled.result.deletions.length === 0 &&
+    cancelled.result.documents.some(doc => doc.metadata.microsoft_status === "cancelled") &&
+    cancelled.result.proposed_cursor.calendar.event_ids.length === 1 && cancelled.result.cursor_can_advance === true);
 }
 
 {
@@ -598,10 +595,10 @@ async function runCalendarContract(syncImpl) {
       return json({ value: [{ ...activeEvent, id: "immutable-id" }], "@odata.deltaLink": "https://graph.microsoft.com/immutable-delta" });
     },
   });
-  check("a legacy mutable-ID cursor takes a new immutable baseline and plans exact old-family migration",
+  check("a legacy mutable-ID cursor takes a new immutable baseline while retaining old-family history",
     calls.length === 1 && calls[0].url.includes("/me/calendarView/delta") &&
     !calls[0].url.includes("legacy-calendar-delta") && calls[0].prefer.includes('IdType="ImmutableId"') &&
-    result.deletions.some((item) => item.source_id === "outlook:event:legacy-changing-id") &&
+    result.deletions.length === 0 && result.authoritative_snapshot === false &&
     result.proposed_cursor.calendar.id_type === "immutable");
 }
 
@@ -626,6 +623,13 @@ async function runCalendarContract(syncImpl) {
       "@odata.deltaLink": "https://graph.microsoft.com/calendar-delta-removal-cap-next",
     }),
   });
+  assert.deepEqual(adapter.deletions, [], "a provider signal is not an owner removal request");
+  assert.ok(adapter.documents.some(doc => doc.metadata.retained_source_id === "outlook:event:event-cap-1"));
+  // Inject an explicit owner-requested target to keep exercising the unchanged
+  // exact-plan/approval path. Ordinary Microsoft sync no longer emits it.
+  const ownerRequested = { ...adapter, documents: [], deletions: [{ source_type: "microsoft",
+    source_id: "outlook:event:event-cap-1", removal_cause: "explicit_deletion" }],
+    removal_review_scopes: [{ ...adapter.removal_review_scopes[0], deletion_source_ids: ["outlook:event:event-cap-1"] }] };
   const stored = new Set([
     "microsoft:outlook:event:event-cap-1",
     ...Array.from({ length: 20 }, (_, index) => `microsoft:outlook:message:unrelated-${index + 1}`),
@@ -642,7 +646,7 @@ async function runCalendarContract(syncImpl) {
     runtime: () => "fixture-runtime" });
   const run = () => runProviderConnector({
     provider: "microsoft",
-    sync: async () => adapter,
+    sync: async () => ownerRequested,
     resolveAccess: async () => ({ accessToken: "offline-token", connection: {} }),
     loadState: () => ({ cursor }),
     saveState: () => { stateSaves++; },
@@ -823,12 +827,13 @@ check("the production Microsoft adapter satisfies the bounded calendar contract"
   check("calendar updates keep the stable document identity",
     result.documents.some((document) => document.source_id === "outlook:event:event-update-1" &&
       /updated/.test(document.title)));
-  check("blank cancellations and removed records target exact stable event identities",
-    result.deletions.map((item) => item.source_id).sort().join(",") ===
-      "outlook:event:event-blank-1,outlook:event:event-cancel-1,outlook:event:event-removed-1");
+  check("blank quality review stays exact while cancellations and tombstones retain status",
+    result.deletions.map((item) => item.source_id).sort().join(",") === "outlook:event:event-blank-1" &&
+    result.documents.some(doc => doc.metadata.retained_source_id === "outlook:event:event-cancel-1") &&
+    result.documents.some(doc => doc.metadata.retained_source_id === "outlook:event:event-removed-1"));
   check("the calendar inventory advances independently after update and cancellation",
     result.proposed_cursor.calendar.delta_link === "https://graph.microsoft.com/calendar-delta-next" &&
-    result.proposed_cursor.calendar.event_ids.join(",") === "event-update-1");
+    result.proposed_cursor.calendar.event_ids.join(",") === "event-cancel-1,event-removed-1,event-update-1");
   check("existing mail and drive cursor members retain their exact bytes",
     result.proposed_cursor.mail.inbox === cursor.mail.inbox &&
     result.proposed_cursor.drives.D1 === cursor.drives.D1);
@@ -863,8 +868,8 @@ check("the production Microsoft adapter satisfies the bounded calendar contract"
   });
   check("an expired calendar cursor performs one bounded baseline recovery",
     calendarCalls === 2 && result.proposed_cursor.calendar.delta_link.endsWith("calendar-delta-recovered"));
-  check("baseline recovery removes an event absent from the renewed rolling window",
-    result.deletions.length === 1 && result.deletions[0].source_id === "outlook:event:event-aged-out-1");
+  check("baseline recovery retains events absent from the renewed rolling window",
+    result.deletions.length === 0 && result.authoritative_snapshot === false);
 }
 
 {

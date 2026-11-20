@@ -13,7 +13,7 @@ whichever supported clients are present without placing a key in their config.
 
 ## Install it
 
-This package identifies itself as brain-installer 0.4.29. Its version alone does
+This package identifies itself as brain-installer 0.4.31. Its version alone does
 not establish whether it is approved for installation. Before installing or
 updating, use the current guided page at https://financialbrain.ai/install and
 match the exact approved package version, byte count and SHA-256. If the page
@@ -806,7 +806,7 @@ That one-file lane excludes OCR, removal, reconciliation, scheduling, and a
 full-source walk. Documentation of the required boundary is not implementation,
 test, package, CI, physical Windows, or live-Brain proof.
 
-Drive, Gmail, IMAP, Calendar, and local-folder refreshes may discover material that was
+Drive, Gmail, IMAP, and local-folder refreshes may discover material that was
 deleted, newly excluded, or no longer readable. Each refresh combines every
 removal reason into one authenticated plan, including obsolete parts of replaced
 files. Accepted additions and updates are saved, but no removal runs automatically.
@@ -814,11 +814,22 @@ A nonempty plan stops with counts, the source name, and one command:
 `brain ingest <manifest> --source <source> --apply-removals <fingerprint>`.
 Use the exact command printed by that run. Plans crossing the existing Drive
 100-document or 10% limit also require the printed `--approve-removals` value.
-Microsoft workload and repeated Drive absence reviews remain additional gates.
+Repeated Drive absence reviews remain an additional gate. Microsoft provider
+removal notices and calendar aging retain history without requesting removal.
+Removing that history remains a separate owner-requested operation.
 Apply refuses a changed local checkpoint, stored inventory, policy, or runtime.
 It removes only the exact approved document identities and verifies their absence.
 Then run ordinary ingestion again to complete the source refresh. A dry run
 still has no authenticated removal inventory and cannot produce this approval.
+Google Calendar refresh is add-only. Cancelled meetings keep their stored text
+and are marked cancelled in search, document readings and answers. No removal
+review is created, and a verified cancellation marker permits the sync position
+to advance. Existing Calendar removal reviews become retained observations on
+the next normal refresh. Only explicit-deletion evidence marks an event cancelled;
+window exits and unknown causes stay kept. A failed mark keeps the sync position
+for retry and reports `INGEST_FAILED` with a help link. An owner can still use a
+previously reviewed exact `--apply-removals` plan before its next normal refresh.
+
 An older CLI cannot remove families through the upgraded Brain's legacy cleanup
 route. The Brain refuses that request and tells the owner to update the CLI.
 To bound Gmail to recent mail, add `"since": "YYYY-MM-DD"` inside
@@ -882,10 +893,11 @@ Brain before rerunning Drive ingest.
 
 Gmail reads additions, deletions, and label changes from its typed history. A
 complete pass also compares the filtered mailbox snapshot with the live D1
-inventory, so a stale stored message cannot survive simply because history
-expired. Every planned Gmail removal is read back before its history cursor or
-credential-scanner version is marked complete. Scanner v5 makes local folders,
-Drive, Gmail, and IMAP recheck previously accepted documents with the corrected
+inventory, so stored messages omitted by the provider remain visible for review
+after history expires. Gmail keeps stored copies awaiting removal review and advances a
+completed source window without deleting them. Separately approved removals still
+require exact readback; retained copies do not certify a new scanner version.
+Scanner v5 makes local folders, Drive, Gmail, and IMAP recheck previously accepted documents with the corrected
 credential rules.
 If the Worker returns a recoverable failure for only some Gmail document parts,
 the adjacent private checkpoint keeps each exact logical message for retry
@@ -894,10 +906,29 @@ incremental run retries those messages even when the new Gmail history window
 is empty, and clears each retry only after acceptance or a current typed source
 decision.
 If Gmail withholds a message because it contains a credential, that message
-stays out of the Brain and the receipt keeps the count. A run whose only
-non-accepted messages are those credential refusals finishes ready. It still
+stays out of the Brain and the receipt keeps the count. The private checkpoint
+records only its identity, reason code and safety-policy binding, so the same
+immutable message is not downloaded again under that policy. A run whose only
+non-accepted messages are those credential refusals finishes ready, and its
+completed source check counts as current even if every message was refused.
+The summary prints `GMAIL_MESSAGES_REFUSED` and its
+[help link](https://financialbrain.ai/help/GMAIL_MESSAGES_REFUSED). It still
 does not claim a complete history sweep, and any storage failure, retry work,
 missing policy evidence, or other coverage gap keeps the run failed.
+Microsoft keeps moved or deleted items and cancelled meetings. Provider removal
+notices do not prove deletion; retained status says when the current location or
+schedule is unknown. Calendar times use your configured mailbox zone,
+with the supported event zone as a fallback. Mail received times use your local zone
+with the zone named. Files over 8 MiB, unsupported files and unreadable files
+become counted skips while readable items continue. Skips remain coverage gaps.
+Missing OneDrive does not discard Outlook progress. Personal Microsoft accounts
+are not supported yet; use a work or school Microsoft 365 account. These settled D1-D4
+behaviors have offline fixture evidence.
+
+If an earlier Microsoft connection has no provable account identity, a fresh
+sign-in starts a separate mailbox binding. Earlier items stay in the Brain;
+the new mailbox starts fresh cursors and cannot overwrite those items.
+
 Microsoft, Slack, Notion, Dropbox, HubSpot and QuickBooks also finish a completed
 provider check when their only omissions have a closed withholding reason.
 Credential detections remain held for review. Microsoft can additionally defer

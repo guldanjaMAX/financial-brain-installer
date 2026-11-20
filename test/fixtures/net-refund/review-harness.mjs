@@ -16,6 +16,8 @@ import { transformSync } from '../../../frontend/node_modules/rolldown/dist/util
 import * as rendering from '../../../frontend/src/lib/answer-render.js';
 import { answerText as workerText } from '../../../worker/src/lib/answer-render.js';
 import { sourceLabel } from '../../../frontend/src/lib/words.ts';
+// Ask.tsx imports this reader directly (UX-4); the VM context mirrors that import.
+import { legacyDocumentResponse } from '../../../worker/src/lib/document-answer-reading.js';
 import { cmdAsk } from '../../../brain.mjs';
 import { handleMcp } from '../../../worker/src/lib/mcp-endpoint.js';
 import { ledgerFixture, NOW } from '../../../worker/test/ledger-review-fixture.mjs';
@@ -123,7 +125,7 @@ const compiled = transformSync('Ask.tsx', source.slice(start, end).replace(/\bex
 assert.deepEqual(compiled.errors, []);
 export function app(o, question) {
   let state = 0, textCalls = 0;
-  const context = { React, Date, ...rendering, sourceLabel,
+  const context = { React, Date, ...rendering, sourceLabel, legacyDocumentResponse,
     useState: () => [[question, '', o.body, false, null, 'All accounts'][state++], () => {}],
     useFinanceScope: () => ({ activeLabel: 'All accounts', scope: null }), readAskDraft: () => '',
     FinanceScopeBar: () => null, Attention: () => null,

@@ -1,3 +1,4 @@
+import { assertOwnerEvidence } from '../../test/helpers/owner-evidence-contract.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
@@ -120,7 +121,8 @@ test('MF2: real handoff and legacy missing basis render through cmdAsk', async (
       console.log = (...parts) => lines.push(parts.join(' '));
       await cmdAsk(manifest, { ask: async () => 'How much did I spend last month?', adminKey: randomBytes(24).toString('hex'), http: async () => Response.json(body) });
     } finally { console.log = log; }
-    assert.match(lines.join('\n'), /Confidence: Low \(0%\).*Why:.*Missing:/s);
+    assertOwnerEvidence(lines.join('\n'));
+    assert.match(lines.join('\n'), /Still needed:.*money/s);
     assert.match(confidenceLine({ percent: 0 }), /Confidence: Low \(0%\).*Why:.*Missing:/);
   }
 });

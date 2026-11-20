@@ -12,7 +12,8 @@ import worker from "../worker/src/index.js";
 import { runDailyRefresh } from "../operations/daily-refresh-run.mjs";
 import { DatabaseSync } from "node:sqlite";
 import { performance } from "node:perf_hooks";
-import { forgetFamilies, searchKeyword, listSourceFamilies } from "../worker/src/lib/store-d1.js";
+import { forgetFamilies, searchKeyword, listSourceFamilies, sourceInventory } from "../worker/src/lib/store-d1.js";
+import { createProductFixture } from "../worker/test/product-contract-fixture.mjs";
 import { backfillSourceFamilyIndex } from "../worker/src/lib/source-family-index.js";
 import { keywordFixture, oldKeyword } from "../worker/test/fixtures/keyword-search.mjs";
 const json = (value, status = 200) => new Response(JSON.stringify(value), { status });
@@ -88,11 +89,16 @@ for (const slow of [true, false]) for (const present of [true, false]) {
     if (slow || present) {
       assert.equal(run.state.gmail_owner_removals?.[tail], "explicit_deletion", "absence needs exact current-run evidence");
       assert.equal(run.state.done[tail], "prior-copy");
-      assert.equal(run.receipt.status, "error");
+      // Retaining a copy is an owner decision, not missing provider work.
+      assert.equal(run.receipt.status, "ready");
+      assert.equal(run.receipt.provider_check_complete, true);
+      assert.ok(run.result.pending_removals > 0, "retained decision stays visible");
       assert.equal(run.receipt.complete_sweep, false);
     } else {
       assert.equal(run.state.gmail_owner_removals?.[tail], undefined, "proved absent control clears the decision");
       assert.equal(run.state.done[tail], undefined);
+      assert.equal(run.receipt.status, "ready", "proved-absent control completes too");
+      assert.equal(run.result.pending_removals, 0);
     }
     if (slow) {
       const calls = f.inventoryCalls.length;
@@ -106,7 +112,8 @@ for (const slow of [true, false]) for (const present of [true, false]) {
       assert.equal(restarted.state.done[tail], "prior-copy");
       assert.ok(f.stored.has("gmail:later-control"), "new history passes the retained owner decision");
       assert.equal(restarted.state.history_id, "later");
-      assert.equal(restarted.receipt.status, "error");
+      assert.equal(restarted.receipt.status, "ready");
+      assert.ok(restarted.result.pending_removals > 0);
     }
     assert.equal(f.forgotten, 0);
   }));
@@ -147,7 +154,12 @@ for (const outcome of ["policy", "deleted", "accepted"]) test(`R5 GMAIL-10: reco
   assert.equal(run.state.done[tail], "prior-copy");
   if (outcome !== "accepted") assert.equal(run.state.skipped[tail], "synthetic saved source decision");
   assert.equal(run.state.history_id, "next");
-  assert.equal(run.receipt.status, "error");
+  // The accepted arm still has an unverified accepted-document gap. Policy
+  // and deletion arms have completed provider work and keep only owner review.
+  assert.equal(run.receipt.status, outcome === "accepted" ? "error" : "ready");
+  if (outcome !== "accepted") assert.equal(run.receipt.provider_check_complete, true);
+  assert.equal(run.receipt.complete_sweep, false);
+  assert.ok(run.result.pending_removals > 0);
   assert.equal(f.forgotten, 0);
 }));
 
@@ -451,22 +463,35 @@ test("the shipped keyword candidate CTE matches exact pre-fix rows and scores on
   } finally { f.db.close(); }
 });
 
-test("a cleanup failure retains a split window for exact review without resending accepted parts", async () => fixture(async (f) => {
+test("a cleanup failure retains split proof after cursor settlement without resending accepted parts", async () => fixture(async (f) => {
   f.ids = ["multipart"]; f.content = "Ordinary synthetic correspondence. ".repeat(35000);
   f.previewFailure = true;
   const first = await f.once();
-  assert.match(first.error?.message || "", /synthetic removal preview interruption/);
+  // Provider/transport text is private; the public command exposes only its
+  // fixed product failure while the exact failed preview remains observable.
+  assert.match(first.error?.message || "", /Gmail refresh did not finish/);
+  assert.equal(first.error?.message.includes("synthetic removal preview interruption"), false);
+  assert.equal(first.error?.supportCode, "INGEST_FAILED");
+  assert.match(first.error?.message || "", /Help: https:\/\/financialbrain\.ai\/help\/INGEST_FAILED/);
   assert.ok(f.previews > 0 && f.calls.flat().length > 1, "split storage and cleanup decisions reached");
-  assert.equal(first.state.history_id, "prior");
-  assert.deepEqual(first.state.gmail_batch_window.remaining_ids, []);
+  // Direct preview now follows the durable add-only checkpoint. Its failure
+  // remains visible without turning already accepted mail into pending work.
+  assert.equal(first.receipt.status, "error");
+  assert.equal(first.state.history_id, "next");
+  assert.equal(first.state.gmail_batch_window, undefined);
   assert.ok(first.state.ingest_pending_families["gmail:multipart"].family.keep_doc_uids.length > 1);
   f.calls.length = 0; f.reads.length = 0; f.previewFailure = false;
+  f.ids = []; // The provider has no new changes after the completed marker.
   const second = await f.once();
   assert.equal(second.error, null);
   assert.equal(f.calls.length, 0, "accepted parts never resent");
   assert.equal(f.reads.length, 0);
   assert.equal(second.state.history_id, "next");
+  assert.equal(f.historyReads, 2, "the next provider check reached its completed marker");
   assert.ok(f.previews > 1, "saved exact split plan was reviewed on resume");
+  assert.equal(second.receipt.status, "ready", "successful preview control completes");
+  assert.equal(second.state.ingest_pending_families, undefined);
+  assert.equal(f.forgotten, 0);
 }));
 
 test("saved obsolete single-part reconciliation entries are pruned without querying members", async () => fixture(async (f) => {
@@ -702,51 +727,71 @@ test("GMAIL-05: a deadline inside a window preserves its unsent suffix and resum
 }));
 
 
-test("GMAIL-01/05: daily resumes a real multi-window backlog while preserving pending owner removals", async () => fixture(async f => {
+test("GMAIL-01/05: daily resumes a real multi-window backlog while preserving pending owner removals", async t => {
   const anchor = Date.parse("2026-01-01T12:00:00.000Z");
-  let elapsed = 0; let calls = 0;
-  f.options = { ingestNowMs: () => anchor + elapsed };
-  f.setState({ ...f.state(), history_id: "100" });
-  f.stored.add("gmail:deleted-control");
-  const changes = Array.from({ length: 2100 }, (_, i) => ({ message: { id: `daily-${String(i).padStart(4, "0")}` } }));
-  f.history = (_token, start, options) => listHistory(async () => "fixture", start, options);
-  f.providerFetch = async url => {
-    assert.ok(new URL(url).pathname.endsWith("/history"));
-    return json({ historyId: "900", history: [{ id: "110", messagesAdded: changes,
-      messagesDeleted: [{ message: { id: "deleted-control" } }] }] });
-  };
-  const plan = { ready: true, enabled: true, identity: { id: "fixture-daily" }, max_runtime_minutes: 1,
-    sources: [{ key: "gmail", run_key: "gmail", source_names: ["gmail"], class: "machine-pull", owner: "daily-task", status: "ready" }] };
-  const daily = () => runDailyRefresh({ plan, now: () => new Date(anchor + elapsed),
-    acquireLock: () => ({ assertOwned() {}, release() {} }),
-    runSource: async (_source, lease) => {
-      calls++;
-      const run = await f.once({ only: "gmail" }, { allowPartialRefresh: true,
-        deferGmailRemovals: true, ingestDeadlineAt: lease.deadlineAt });
-      assert.equal(run.error, null);
-      elapsed += 40000;
-      return run.result;
-    },
-    readFreshness: async () => ({ gmail: { last_successful_run_at: "2025-12-31T12:00:00.000Z" } }),
-    writeReceipt() {},
+  t.mock.timers.enable({ apis: ["Date"], now: anchor });
+  const product = await createProductFixture();
+  t.after(() => product.close());
+  await fixture(async f => {
+    let elapsed = 0; let calls = 0;
+    f.options = { ingestNowMs: () => anchor + elapsed };
+    f.setState({ ...f.state(), history_id: "100" });
+    f.stored.add("gmail:deleted-control");
+    const changes = Array.from({ length: 2100 }, (_, i) => ({ message: { id: `daily-${String(i).padStart(4, "0")}` } }));
+    f.history = (_token, start, options) => listHistory(async () => "fixture", start, options);
+    f.providerFetch = async url => {
+      assert.ok(new URL(url).pathname.endsWith("/history"));
+      return json({ historyId: "900", history: [{ id: "110", messagesAdded: changes,
+        messagesDeleted: [{ message: { id: "deleted-control" } }] }] });
+    };
+    const plan = { ready: true, enabled: true, identity: { id: "fixture-daily" }, max_runtime_minutes: 1,
+      sources: [{ key: "gmail", run_key: "gmail", source_names: ["gmail"], class: "machine-pull", owner: "daily-task", status: "ready" }] };
+    const daily = () => runDailyRefresh({ plan, now: () => new Date(anchor + elapsed),
+      acquireLock: () => ({ assertOwned() {}, release() {} }),
+      runSource: async (_source, lease) => {
+        calls++;
+        const offset = f.receipts.length;
+        const run = await f.once({ only: "gmail" }, { allowPartialRefresh: true,
+          deferGmailRemovals: true, ingestDeadlineAt: lease.deadlineAt });
+        assert.equal(run.error, null);
+        for (const receipt of f.receipts.slice(offset)) {
+          const response = await product.post("/api/admin/brain/source-receipt", receipt, { "X-Admin-Key": product.env.ADMIN_KEY });
+          assert.equal(response.status, 200, "the Worker accepts the measured run receipt");
+        }
+        elapsed += 40000;
+        t.mock.timers.tick(40000);
+        return run.result;
+      },
+      // A permanent stale timestamp cannot prove freshness now that owner
+      // decisions no longer short-circuit daily's mandatory receipt checks.
+      readFreshness: async () => {
+        const inventory = await sourceInventory(product.env, { now: anchor + elapsed });
+        return Object.fromEntries(inventory.rows.map(row => [row.name, { ...row.receipt, kind: row.kind }]));
+      },
+      writeReceipt() {},
+    });
+    const first = await daily();
+    assert.equal(first.sources[0].status, "deferred");
+    assert.equal(calls, 2);
+    assert.equal(f.stored.size, 2001);
+    assert.equal(f.state().history_id, "100");
+    const second = await daily();
+    assert.equal(calls, 3, "the next daily invocation resumes only the last window");
+    assert.equal(second.status, "complete");
+    assert.equal(second.sources[0].status, "complete");
+    assert.equal(second.sources[0].freshness_advanced, true);
+    assert.equal(second.sources[0].check_verified, true);
+    assert.ok(second.sources[0].pending_removals > 0, "daily reports the retained decision");
+    assert.equal(f.stored.size, 2101);
+    assert.equal(f.stored.has("gmail:deleted-control"), true);
+    assert.equal(f.state().gmail_owner_removals["gmail:deleted-control"], "explicit_deletion");
+    assert.equal(f.state().history_id, "900", "durable owner decision preserves deletion evidence across marker advancement");
+    assert.equal(new Set(f.reads).size, 2100);
+    assert.equal(f.reads.length, 2100, "accepted bodies not replayed across daily budgets");
+    assert.equal(f.previews, 0, "daily leaves optional removal previews for direct review");
+    assert.equal(f.forgotten, 0);
   });
-  const first = await daily();
-  assert.equal(first.sources[0].status, "deferred");
-  assert.equal(calls, 2);
-  assert.equal(f.stored.size, 2001);
-  assert.equal(f.state().history_id, "100");
-  const second = await daily();
-  assert.equal(calls, 3, "the next daily invocation resumes only the last window");
-  assert.equal(second.sources[0].status, "waiting_for_owner");
-  assert.equal(second.sources[0].freshness_advanced, false);
-  assert.equal(f.stored.size, 2101);
-  assert.equal(f.stored.has("gmail:deleted-control"), true);
-  assert.equal(f.state().gmail_owner_removals["gmail:deleted-control"], "explicit_deletion");
-  assert.equal(f.state().history_id, "900", "durable owner decision preserves deletion evidence across marker advancement");
-  assert.equal(new Set(f.reads).size, 2100);
-  assert.equal(f.reads.length, 2100, "accepted bodies not replayed across daily budgets");
-  assert.equal(f.forgotten, 0);
-}));
+});
 
 
 test("GMAIL-02: Worker validates the strict indexed capability and never falls back before readiness", async () => {
@@ -862,17 +907,31 @@ test("GMAIL-04: a scanner refusal cannot certify retained old mail while daily a
 }));
 
 
-test("GMAIL-01: daily split-family previews clear only zero-target reviews and retain a nonempty owner decision", async () => {
+test("GMAIL-01: daily retains split-family reviews and direct previews clear only zero-target decisions", async () => {
   for (const stale of [false, true]) await fixture(async f => {
     f.ids = ["multipart"]; f.content = "Ordinary synthetic correspondence. ".repeat(35000);
     f.previewTargets = stale ? ["gmail:multipart#part1of99"] : [];
     const result = await f.once({ only: "gmail" }, { deferGmailRemovals: true, allowPartialRefresh: true });
     assert.equal(result.error, null);
     assert.ok(f.calls.flat().length > 1, "actual split storage reached");
-    assert.ok(f.previews > 0, "bounded read-only family decision reached");
-    assert.equal(result.result.pending_removals, stale ? 1 : 0);
-    if (stale) assert.deepEqual(result.state.ingest_removal_plan.targets, f.previewTargets);
-    else assert.equal(result.state.ingest_pending_families, undefined);
+    assert.equal(f.previews, 0, "completed split storage reaches the daily deferral decision without a preview");
+    assert.equal(result.result.pending_removals, 1, "the saved split review stays visible before it is read");
+    assert.ok(result.state.ingest_pending_families["gmail:multipart"].family.keep_doc_uids.length > 1);
+    assert.equal(result.state.ingest_removal_plan, undefined);
+    assert.equal(result.state.history_id, "next");
+    assert.equal(result.receipt.status, "ready");
+    assert.equal(result.receipt.complete_sweep, false);
+    f.ids = [];
+    const reviewed = await f.once();
+    assert.equal(reviewed.error, null);
+    assert.ok(f.previews > 0, "direct ingest reaches the exact read-only family decision");
+    if (stale) {
+      assert.deepEqual(reviewed.state.ingest_removal_plan.targets, f.previewTargets);
+      assert.ok(reviewed.state.ingest_pending_families["gmail:multipart"]);
+    } else {
+      assert.equal(reviewed.state.ingest_removal_plan, undefined, "zero-target green control clears itself");
+      assert.equal(reviewed.state.ingest_pending_families, undefined);
+    }
     assert.equal(f.forgotten, 0);
   });
 });

@@ -30,9 +30,9 @@ const ACCOUNTS = ["- ****0001 = business checking", "- ****0002 = personal card"
 const ACCOUNT_HEADING = "## My accounts (fill in once, after the owner confirms)";
 const SAVE_HEADING = "## Financial Brain: at the end of a working session";
 const hashes = {
-  "answer-contract-v1.md": "65a3291a9867b2d246fe30a7664cf45688e900bd81e46f4868e8e3f03c5dea7d",
-  "money-rules-v3.md": "9bd9632dedb6a08f4626c967cb7335535b89d066094c6a994c89b60eb894042e",
-  "money-rules-v3-windows.md": "9bd9632dedb6a08f4626c967cb7335535b89d066094c6a994c89b60eb894042e",
+  "answer-contract-v1.md": "7a5c1c995fe52ea708f195c951cc4e4d70490bf15c84ae06fa50165afb035a2e",
+  "money-rules-v3.md": "bfea23c178e0e667c485b03b1b78f1ec1b7c79f140830a4ae9633301e4760ee3",
+  "money-rules-v3-windows.md": "bfea23c178e0e667c485b03b1b78f1ec1b7c79f140830a4ae9633301e4760ee3",
 };
 // Repeated writer/race tests exercise real filesystem checks. Native reparse
 // detection has separate refusal/control and one bounded Windows smoke test;
@@ -407,14 +407,17 @@ test("f/g: Codex-only setup writes AGENTS and names its home; dual setup is the 
   assert.equal(count(agents, "in this AGENTS.md"), 1);
   assert.equal(count(agents, "in this CLAUDE.md"), 0);
   assert.equal(existsSync(join(solo.root, "CLAUDE.md")), false);
-  assert.ok(solo.output.includes(`For Brain conversations, open Codex in this folder: ${cli.displayPathForTesting(solo.root, process.cwd())}`));
+  assert.ok(solo.output.includes(`Your Brain folder: ${cli.displayPathForTesting(solo.root, process.cwd())}`));
+  assert.equal(count(solo.output, "Open Codex in your Brain folder. The answer rules load there."), 1);
   assert.equal(count(solo.output, "This conversation is running in"), 0);
   const both = await setup(t, ["Claude Code", "Codex"], { risky: true });
   for (const file of ["CLAUDE.md", "AGENTS.md"]) assert.ok(existsSync(join(both.root, file)));
-  assert.equal(count(both.output, "This conversation is running in your Desktop folder"), 1);
-  assert.equal(count(both.output, "For Brain conversations, open Claude Code in this folder:"), 1);
+  assert.equal(count(both.output, "This conversation is running in your Desktop folder, which can be tidied away or synced. " +
+    "Open Claude Code (or Codex) in your Brain folder. The answer rules load there."), 1);
+  assert.equal(count(both.output, "Your Brain folder:"), 1);
   const safe = await setup(t, ["Claude Code", "Codex"]);
   assert.equal(count(safe.output, "This conversation is running in"), 0);
+  assert.equal(count(safe.output, "Open Claude Code (or Codex) in your Brain folder. The answer rules load there."), 1);
 });
 
 test("setup warns without failing for a damaged guide and every preserved or failed Codex write", async (t) => {
@@ -429,11 +432,11 @@ test("setup warns without failing for a damaged guide and every preserved or fai
     });
     assert.equal(writes, 1, "the Codex write decision must be reached");
     assert.match(result.output, /AGENTS\.md/);
-    assert.equal(count(result.output, "Codex owner workspace ready"), 0);
+    assert.equal(count(result.output, "Your Brain folder:"), 0);
     if (status === "preserved_damaged_section") assert.match(result.output, /nothing was changed.*My accounts.*BEGIN.*END.*rerun.*setup/is);
   }
   const good = await setup(t, ["Codex"]);
-  assert.equal(count(good.output, "Codex owner workspace ready"), 1);
+  assert.equal(count(good.output, "Your Brain folder:"), 1);
 });
 
 async function update(t, { wired = ["Codex"], risky = false, createGuide = false, folder = "Financial Brain", platform = "darwin", beforeUpdate = () => {} } = {}) {
@@ -492,6 +495,7 @@ function updateClosingBoundary({ platform = "win32", platformName, folder = "ord
   const bindings = {
     updateAttention: [guidance, guidance],
     schedulerResults: [],
+    selfcheckReport: undefined,
     options: { platform, platformName, ...(raw ? { reportUpdateFinish: message => reports.push(message) } : {}) },
     pin: { target }, PRODUCT_VERSION: "0.4.27", mailTransition: null,
     ownerSessionFolderLabel: () => "another folder",
@@ -702,7 +706,7 @@ test("i: skill insertion is exact, bounded and renders answer-setup commands on 
   const skill = readFileSync(skillPath, "utf8");
   assert.equal(count(skill, "## Answer from the Brain\n"), 1);
   const section = skill.slice(skill.indexOf("## Answer from the Brain\n"), skill.indexOf("## Credential boundary\n"));
-  assert.equal(sha(section), "ed12b02cc96402d9b565b58d4cbbaef0b2ba1cafd23b9cd05db22f752ef58f3b");
+  assert.equal(sha(section), "2afaabf3421d192af67d5a41e0f61fafafd170f21c153c653540e23e067fcc48");
   assert.ok(Buffer.byteLength(skill) <= 72 * 1024);
   for (const platform of ["darwin", "win32"]) {
     const rendering = { platform, nodePath: "C:\\Runtime\\node.exe", scriptPath: "C:\\Brain\\brain.mjs", env: {}, existsSync: () => false };
@@ -912,9 +916,9 @@ test("Claude setup names a damaged section and continues; a managed guide is the
   });
   assert.equal(writes, 1);
   assert.match(result.output, /CLAUDE\.md.*nothing was changed.*My accounts.*BEGIN.*END.*rerun setup/is);
-  assert.equal(count(result.output, "Claude Code owner workspace ready"), 0);
+  assert.equal(count(result.output, "Your Brain folder:"), 0);
   const good = await setup(t, ["Claude Code"]);
-  assert.equal(count(good.output, "Claude Code owner workspace ready"), 1);
+  assert.equal(count(good.output, "Your Brain folder:"), 1);
 });
 
 test("merge ignores exactly one trailing CR on marker lines, with a valid CRLF control", () => {
@@ -1576,9 +1580,9 @@ for (const [assistant, filename, , writer] of writers) test(`R3 review setup rep
   assert.equal(decisions, 1);
   assert.match(blocked.output, /not written/i);
   assert.ok(blocked.output.includes(cli.displayPathForTesting(recoveryPath, process.cwd())));
-  assert.doesNotMatch(blocked.output, /owner workspace ready/);
+  assert.doesNotMatch(blocked.output, /Your Brain folder:/);
   const control = await setup(t, wired, { [option]: writer });
-  assert.match(control.output, /owner workspace ready/);
+  assert.match(control.output, /Your Brain folder:/);
 });
 
 for (const arm of ["duplicate", "before-accounts", "misplaced-only", "fenced", "data-block"]) test(`R4 session boundary: ${arm}`, t => {
@@ -1845,8 +1849,13 @@ for (const storage of ["Downloads", "Library/CloudStorage", "Desktop"]) {
 
 test("S2 owner confidence preserves returned score, independent families and authority", () => {
   const text = workspace.renderOwnerRulesSection();
-  assert.ok(text.includes("Confidence: High (92%)"), "the word and percent answer contract was rendered");
-  assert.match(text, /Below 100%.*why.*missing evidence/);
+  assert.match(text, /Keep tool-computed confidence scores internal/);
+  assert.match(text, /Never add confidence labels or percentages to owner answers/);
+  assert.match(text, /When evidence is thin or missing, add one plain sentence explaining the limit without a number or scale word; otherwise add nothing/);
+  assert.match(text, /Preserve the Brain's evidence, freshness, coverage and authority limits and the five-part answer contract/);
+  assert.match(text, /Never raise a returned score/);
+  assert.match(text, /If the Brain returns no score, keep the internal zero ceiling.*missing evidence assessment.*keep the best supported answer available/);
+  assert.doesNotMatch(text, /Confidence: (?:High|Medium|Low) \(\d+%\)/);
   assert.doesNotMatch(text, /start at 100%/);
   assert.match(text, /returned confidence/i);
   assert.match(text, /independent evidence famil/i);
@@ -2051,7 +2060,7 @@ for (const platform of ["win32", "darwin", "linux"]) for (const [assistant, file
       assert.equal(count(result.output, WINDOWS_SETUP_GUIDE_NOTICE), kept ? 1 : 0);
       if (kept) {
         assertGuideKept(before);
-        assert.doesNotMatch(result.output, /add the Financial Brain safety guide manually|owner workspace ready/);
+        assert.doesNotMatch(result.output, /add the Financial Brain safety guide manually|Your Brain folder:/);
       } else {
         assert.ok(readFileSync(join(result.root, filename), "utf8").includes(BEGIN), "the real writer creates or refreshes the guide");
       }

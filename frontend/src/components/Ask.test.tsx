@@ -1,15 +1,52 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ReactElement, ReactNode } from "react";
+import { ownerThinkResponse } from "../../test/rehearsal-responses.mjs";
+const screenState = vi.hoisted(() => ({
+  enabled: false, index: 0, values: [] as unknown[], scope: null as string | null,
+}));
+vi.mock("react", async (original) => {
+  const actual = await original<typeof import("react")>();
+  return { ...actual, useState(initial: unknown) {
+    if (!screenState.enabled) return actual.useState(initial);
+    const index = screenState.index++;
+    if (!(index in screenState.values)) screenState.values[index] = typeof initial === "function" ? initial() : initial;
+    return [screenState.values[index], (value: unknown) => { screenState.values[index] = value; }];
+  } };
+});
+vi.mock("./FinanceScope", () => ({
+  useFinanceScope: () => ({ activeLabel: "Selected records", scope: screenState.scope }),
+  FinanceScopeBar: () => null,
+}));
+vi.mock("../lib/api", async (original) => ({
+  ...await original<typeof import("../lib/api")>(), api: vi.fn(),
+}));
+import { api } from "../lib/api";
 import type { Answer } from "../lib/api";
 import { moneyQuestionHandoff } from "../../../worker/src/lib/money-handoff.js";
 import {
-  ANSWER_ERROR_MESSAGES, answerText, confidenceText, nextActionText,
+  ANSWER_ERROR_MESSAGES, answerText, confidenceText, documentResponseConfidence, nextActionText,
 } from "../lib/answer-render.js";
 import { unavailableNotice } from "../lib/retrieval-status.js";
 import {
-  Trust, CitationSources, EvidenceGateReason, SCOPED_SEARCH_UNAVAILABLE, ScannedEvidenceNote,
+  Ask, Trust, CitationSources, EvidenceGateReason, SCOPED_SEARCH_UNAVAILABLE, ScannedEvidenceNote,
   citationMeta, citationTitle, evidenceGateNote, readAskDraft, writeAskDraft,
 } from "./Ask";
+
+// The owner reads the answer and its evidence note together. Deduplicated facts
+// may live in either place, but must never disappear into input metadata.
+const ownerReading = (answer: Answer) => renderToStaticMarkup(<><p>{answerText(answer)}</p><Trust answer={answer} /></>);
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-10-11T12:00:00Z"));
+  screenState.enabled = false;
+  screenState.index = 0;
+  screenState.values = [];
+  screenState.scope = null;
+  vi.mocked(api).mockReset();
+});
+afterEach(() => { screenState.enabled = false; vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe("answer messages", () => {
   it("keeps the typed owner question across a sign-in round trip", () => {
@@ -155,9 +192,10 @@ describe("citation provenance", () => {
         reason: "owner-confirmed operative mailing address as of 2026-09-01",
       },
     };
-    expect(citationMeta(citation)).toBe("Files you uploaded · T1 primary");
+    expect(citationMeta(citation)).toBe("Files you uploaded · Original record");
     const html = renderToStaticMarkup(<CitationSources citations={[citation]} />);
-    expect(html).toContain("T1 primary");
+    expect(html).toContain("Original record");
+    expect(html).not.toContain("T1 primary");
     expect(html).not.toContain("owner-confirmed operative mailing address");
   });
 
@@ -251,9 +289,265 @@ describe("explicit tax evidence action", () => {
     expect(owner).toContain("Tax amounts and filing readiness are not checked");
     expect(owner).not.toContain('disabled=""');
     expect(renderToStaticMarkup(<TaxEvidenceControl {...props} owner={false} />)).toBe("");
-    for (const patch of [{ scope: null }, { year: "" }, { busy: true }]) {
+    expect(renderToStaticMarkup(<TaxEvidenceControl {...props} scope={null} />)).toBe("");
+    for (const patch of [{ year: "" }, { busy: true }]) {
       expect(renderToStaticMarkup(<TaxEvidenceControl {...props} {...patch} />)).toContain('disabled=""');
     }
+  });
+});
+
+describe("calm Explore presentation", () => {
+  const facts = "The recorded fee is $42 for October 2026 [1].";
+  const coverage = "Coverage: Account ending 4321, October 1 through October 31, 2026.\nMissing or counted twice: A second statement.\nEstimates: Likely current, based on the dated record.\nHow to check: Open the original statement.";
+  const basis = ["One original read.", "The record has a reliable date.", "A second statement is missing.", "Independent checks are incomplete."];
+  function supported(percent = 69): Answer {
+    return { ...ownerThinkResponse("empty"), status: "ok", answer: `${facts}\n\n${coverage}`,
+      answer_contract: { version: 1, kind: "document" },
+      confidence: { percent, band: "High", basis, missing: ["A second statement."] },
+      citations: [{ n: 1, title: "Original statement", source: "drive" }],
+    } as Answer;
+  }
+  function ownerView(answer: Answer | null, busy = false) {
+    screenState.enabled = true;
+    screenState.index = 0;
+    screenState.values = ["What is the recorded fee?", "", answer, busy, null, "All finances"];
+    return renderToStaticMarkup(<Ask owner />);
+  }
+  // CONF-HIDE-1117 (founder 11-17): owners never see the confidence word or
+  // score. The internal score is unchanged and thin evidence gets one plain note.
+  const scoreLine = /Confidence\s*:|\b(?:High|Medium|Low)\s*\(?\d+%/i;
+  const plainNote = "this answer may be incomplete.";
+  function plainLow(html: string, answer: Answer) {
+    expect(html).not.toMatch(scoreLine);
+    expect(documentResponseConfidence(answer).percent, "internal score stays Low").toBeLessThan(70);
+    expect(html).toContain(plainNote);
+  }
+  function sections(html: string) {
+    const details = html.match(/<details\b[^>]*>[\s\S]*?<\/details>/g) || [];
+    expect(details, "one shared explanation was reached").toHaveLength(1);
+    expect(details[0]).toContain("Coverage and how to check");
+    expect(details[0].match(/^<details\b[^>]*>/)?.[0]).not.toMatch(/\bopen(?:=|\s|>)/);
+    return { closed: details[0], visible: html.replace(details[0], "") };
+  }
+  function button(tree: ReactNode, label: string): ReactElement<{ onClick: () => Promise<void> }> | undefined {
+    if (Array.isArray(tree)) return tree.map(child => button(child, label)).find(Boolean);
+    if (!tree || typeof tree !== "object" || !("props" in tree)) return undefined;
+    const element = tree as ReactElement<{ children?: ReactNode; onClick: () => Promise<void> }>;
+    if (element.type === "button" && element.props.children === label) return element;
+    return button(element.props.children, label);
+  }
+
+  it("keeps the answer, sources and internal Low score as a green control", () => {
+    const answer = supported(69);
+    const html = ownerView(answer);
+    expect(html).toContain(facts);
+    expect(html).toContain("Original statement");
+    plainLow(html, answer);
+    expect(documentResponseConfidence(answer).percent).toBe(69);
+    expect(html).not.toContain("Confidence: High");
+  });
+
+  it("shows one plain evidence note, with the coverage block in one closed explanation", () => {
+    const answer = supported();
+    const { visible, closed } = sections(ownerView(answer));
+    expect(visible).toContain(facts);
+    plainLow(visible, answer);
+    expect(closed).not.toMatch(scoreLine);
+    // The reasons now travel in the one plain note (CONF-HIDE), each shown once.
+    for (const reason of basis.map(text => text.replace(/\.$/, ""))) {
+      expect(visible).toContain(reason);
+      expect(closed).not.toContain(reason);
+    }
+    expect(closed).toContain(coverage);
+    expect(visible).not.toContain("Coverage:");
+    expect(closed).not.toContain("Missing: A second statement.");
+  });
+
+  it("keeps a distinct missing-evidence explanation when the body has no missing block", () => {
+    const answer = { ...supported(), answer: facts };
+    const html = ownerView(answer);
+    expect(html.match(/<details\b/g), "no empty explanation without a coverage block").toBeNull();
+    expect(html).toContain("Still needed: A second statement");
+    expect(html).not.toContain("Missing:");
+    plainLow(html, answer);
+  });
+
+  it("finds Coverage at the first line boundary even without a blank paragraph", () => {
+    const { visible, closed } = sections(ownerView({ ...supported(), answer: `${facts}\n${coverage}` }));
+    expect(visible).toContain(facts);
+    expect(closed).toContain(coverage);
+    expect(visible).not.toContain("How to check:");
+  });
+
+  it("keeps complete answer contracts despite older unavailable metadata", () => {
+    for (const status of ["coverage_incomplete", "search_unavailable", "answer_withheld"]) {
+      const answer = { ...supported(), status };
+      const html = ownerView(answer);
+      expect(html).toContain(facts);
+      expect(html).toContain(coverage);
+      plainLow(html, answer);
+      expect(documentResponseConfidence(answer).percent).toBe(69);
+    }
+  });
+
+  for (const status of ["coverage_incomplete", "search_unavailable", "answer_withheld"]) {
+    for (const readable of [true, false]) {
+      it(`preserves the ${readable ? "readable legacy answer" : "empty legacy reading"} inside the recovery layout for ${status}`, async () => {
+        const record = { n: 1, title: "Original statement", source: "drive",
+          text: "The recorded fee is $42 for October 2026.", ts: "2026-10-31" };
+        const answer = { status, answer: null, results: readable ? [record] : [],
+          citations: readable ? [{ n: record.n, title: record.title, source: record.source, ts: record.ts }] : [],
+        } as Answer;
+        ownerView(null);
+        vi.mocked(api).mockResolvedValue(answer);
+        screenState.index = 0;
+        const ask = button(Ask({ owner: true }), "Ask");
+        expect(ask, "real submit decision point").toBeDefined();
+        await ask!.props.onClick();
+        expect(api).toHaveBeenCalledTimes(1);
+        expect(api).toHaveBeenCalledWith("/api/rag/think", { q: "What is the recorded fee?", limit: 12 });
+        screenState.index = 0;
+        const html = renderToStaticMarkup(<Ask owner />);
+        const article = html.match(/<article\b[^>]*>([\s\S]*?)<\/article>/);
+        expect(article, "real answer article rendered").not.toBeNull();
+        const { visible, closed } = sections(article![1]);
+        expect(visible, "recovery branch reached").toContain(`Code: ${status}`);
+        expect(visible).toContain("Try again");
+        const action = renderToStaticMarkup(<>{nextActionText(answer)}</>);
+        expect(visible).toContain(action);
+        plainLow(visible, answer);
+        expect(closed).not.toMatch(scoreLine);
+        expect(visible).not.toContain("Confidence: High");
+        if (readable) {
+          expect(visible).toContain(record.text);
+          expect(visible).toContain("Likely relevant: As of 2026-10-31");
+          expect(visible).toContain("Original statement");
+          expect(visible).toContain("[1]");
+          expect(closed).toContain("Read 1 of 1 retrieved records");
+          expect(closed).toContain("attributed statements are not confirmation");
+        } else {
+          expect(closed).toContain("The available reading contains no readable matching statement.");
+          expect(visible).not.toContain("The available reading contains no readable matching statement.");
+          expect(visible).not.toContain("This result is provisional.");
+          expect(closed).toContain("Read 0 of 0 retrieved records");
+        }
+        for (const label of ["Coverage:", "Missing or counted twice:", "Estimates:", "How to check:"]) {
+          expect(closed).toContain(label);
+          expect(visible).not.toContain(label);
+        }
+        // Preserve every shared-renderer qualification, not just its headings.
+        for (const line of answerText(answer).split("\n").filter(Boolean)) {
+          expect(article![1]).toContain(renderToStaticMarkup(<>{line}</>));
+        }
+        expect(visible.split(action)).toHaveLength(2);
+      });
+    }
+  }
+
+  it("keeps an unverified legacy draft out of the answer while retaining attributed record evidence", () => {
+    const answer = { status: "coverage_incomplete", answer: "The recorded fee is $999 for October 2026 [1].",
+      results: [{ n: 1, title: "Original statement", source: "drive",
+        text: "The recorded fee is $42 for October 2026.", ts: "2026-10-31" }],
+      confidence: { percent: 99, band: "High" },
+    } as Answer;
+    const { visible, closed } = sections(ownerView(answer));
+    expect(visible, "recovery branch reached").toContain("Code: coverage_incomplete");
+    expect(visible).toContain("The recorded fee is $42 for October 2026.");
+    expect(visible).toContain("Likely relevant: As of 2026-10-31");
+    plainLow(visible, answer);
+    expect(visible + closed).not.toContain("$999");
+    expect(visible + closed).not.toContain("Confidence: High");
+    expect(closed).toContain("How to check:");
+  });
+
+  it("offers the reviewed outage action and retry with a separate code, with the provisional wall collapsed", () => {
+    const answer = { ...ownerThinkResponse("empty"), status: "search_unavailable",
+      gaps: [{ type: "search_unavailable" }],
+    } as Answer;
+    const html = ownerView(answer);
+    expect(html).toContain("ask again in a minute");
+    expect(html).toContain("Try again");
+    expect(html).toContain("Code: search_unavailable");
+    plainLow(html, answer);
+    expect(html).not.toContain("resolve: search_unavailable");
+    expect(html).not.toContain("Coverage gap: search_unavailable");
+    const { visible, closed } = sections(html);
+    expect(visible).not.toContain("Source coverage is incomplete. This result is provisional.");
+    expect(closed).toContain("Source coverage is incomplete. This result is provisional.");
+    expect(ownerView(supported())).not.toContain("Try again");
+  });
+
+  it("retries the submitted question even after the owner edits the draft", async () => {
+    ownerView(null);
+    vi.mocked(api).mockResolvedValue({ ...ownerThinkResponse("empty"), status: "search_unavailable" });
+    screenState.index = 0;
+    const ask = button(Ask({ owner: true }), "Ask");
+    expect(ask, "real Ask decision point").toBeDefined();
+    await ask!.props.onClick();
+    expect(api).toHaveBeenCalledTimes(1);
+    screenState.values[0] = "An edited draft for later";
+    screenState.index = 0;
+    const retry = button(Ask({ owner: true }), "Try again");
+    expect(retry, "real retry decision point").toBeDefined();
+    await retry!.props.onClick();
+    expect(api).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(api).mock.calls[1]).toEqual(vi.mocked(api).mock.calls[0]);
+  });
+
+  it("retries the exact entity request even after the selection changes", async () => {
+    screenState.scope = "fixture-entity";
+    ownerView(null);
+    vi.mocked(api).mockResolvedValue({ ...ownerThinkResponse("empty", "fixture-entity"), status: "search_unavailable" });
+    screenState.index = 0;
+    const ask = button(Ask({ owner: true }), "Ask");
+    expect(ask).toBeDefined();
+    await ask!.props.onClick();
+    expect(api).toHaveBeenCalledWith("/api/rag/think", { q: "What is the recorded fee?", limit: 12, entity_slug: "fixture-entity" });
+    screenState.scope = null;
+    screenState.index = 0;
+    const retry = button(Ask({ owner: true }), "Try again");
+    expect(retry).toBeDefined();
+    await retry!.props.onClick();
+    expect(api).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(api).mock.calls[1]).toEqual(vi.mocked(api).mock.calls[0]);
+    screenState.index = 0;
+    expect(renderToStaticMarkup(<Ask owner />)).toContain("Selected records");
+  });
+
+  it("explains the wait while thinking and stays quiet when idle", () => {
+    const line = "Reading your records. This usually takes under a minute.";
+    const busy = ownerView(null, true);
+    expect(busy).toContain("Thinking…");
+    expect(busy).toContain(line);
+    expect(ownerView(null)).not.toContain(line);
+  });
+
+  it("shows the keyboard hint only on Mac, with a phone-hidden style", () => {
+    vi.stubGlobal("navigator", { platform: "MacIntel" });
+    const mac = ownerView(null);
+    expect(mac).toMatch(/<span[^>]*class="[^"]*hidden sm:inline[^"]*"[^>]*>⌘ \+ Enter<\/span>/);
+    vi.stubGlobal("navigator", { platform: "Win32" });
+    expect(ownerView(null)).not.toContain("⌘ + Enter");
+  });
+
+  it("uses a neutral note for a healthy no-match without raising its score", () => {
+    for (const answer of [ownerThinkResponse("empty") as Answer,
+      { ...supported(5), status: "no_results", answer: "Not found in the records returned by this search." }]) {
+      const html = ownerView(answer);
+      expect(html).toContain(answer.answer || "matching record in this search");
+      plainLow(html, answer);
+      expect(documentResponseConfidence(answer).percent).toBe(5);
+      expect(html).not.toMatch(/text-red|bg-red|text-bad|bg-bad/);
+      // No chip remains (CONF-HIDE); the plain note is the neutral TruthNote.
+      expect(html).not.toMatch(/text-act|bg-act/);
+      expect(html).toMatch(/<div class="border border-line bg-card rounded-2xl[^"]*"><div class="[^"]*text-ink-soft[^"]*">[^<]*this answer may be incomplete\.<\/div>/);
+    }
+  });
+
+  it("shows the checklist only with one chosen entity, including a positive control", () => {
+    expect(ownerView(null)).not.toContain("Tax evidence checklist");
+    screenState.scope = "fixture-entity";
+    expect(ownerView(null)).toContain("Tax evidence checklist");
   });
 });
 
@@ -264,10 +558,11 @@ describe("document reading confidence", () => {
     const answer: Answer = { answer: "The documents do not answer the question.", confidence,
       results: [{ title: "Synthetic record" }, { title: "Other record" }] } as Answer;
     const html = renderToStaticMarkup(<Trust answer={answer} />);
-    expect(html).toContain("Confidence: Low (30%)");
-    expect(html).toContain("Why: the records read and checks below.");
-    expect(html).toContain("A record that states the answer.");
-    expect(html).toContain("2 retrieved records");
+    expect(html).not.toMatch(/Confidence:|\b(?:High|Medium|Low)\s*\(?\d+%/);
+    expect(documentResponseConfidence(answer).percent).toBe(30);
+    expect(html).toContain("A record that states the answer");
+    expect(documentResponseConfidence(answer).missing).toContain("A record that states the answer.");
+    expect(documentResponseConfidence(answer).basis.join(" ")).toContain("2 retrieved records");
     expect(html).not.toContain("nothing is recorded");
     expect(answerText(answer)).toContain("found 2 records in this search");
     expect(confidenceText(answer)).toMatch(/^Confidence: Low \(30%\).*Why:.*Missing:/s);
@@ -283,8 +578,10 @@ describe("document reading confidence", () => {
       const incomplete = { ...empty, status, confidence: {percent:10,band:'Low',basis:['The search did not complete.'],missing:['A complete source search.']} } as Answer;
       const html = renderToStaticMarkup(<Trust answer={incomplete} />);
       expect(html).not.toContain("80%");
-      expect(html).toContain("Confidence: Low (10%)");
-      expect(html).toContain("A completed search over the requested sources and periods.");
+      expect(html).not.toMatch(/Confidence:|\b(?:High|Medium|Low)\s*\(?\d+%/);
+      expect(documentResponseConfidence(incomplete).percent).toBe(10);
+      expect(documentResponseConfidence(incomplete).missing).toContain("A completed search over the requested sources and periods.");
+      expect(ownerReading(incomplete)).toContain("A completed search over the requested sources and periods");
       expect(html).not.toContain("nothing is recorded");
       expect(confidenceText(incomplete)).toMatch(/^Confidence: Low \(10%\).*Why:.*Missing:/s);
       expect(confidenceText(incomplete)).toContain("0 source records read");
@@ -300,31 +597,53 @@ describe("Worker document confidence contract", () => {
     for (const legacy of [false, true]) {
       if (legacy && answer.confidence) delete answer.confidence.basis;
       const html = renderToStaticMarkup(<Trust answer={answer} />);
-      expect(html).toContain('Confidence: Low (0%)');
-      expect(html).toContain('No bank rows have been read');
-      expect(html).toContain('Missing:');
+      expect(html).not.toMatch(/Confidence:|\b(?:High|Medium|Low)\s*\(?\d+%/);
+      expect(documentResponseConfidence(answer).percent).toBe(0);
+      expect(documentResponseConfidence(answer).basis?.join(' ') || documentResponseConfidence(answer).reasons?.join(' ')).toContain('No bank rows have been read');
+      expect(ownerReading(answer)).toContain('No bank rows have been read');
+      expect(ownerReading(answer)).toContain('Read the owner money overview and the requested account/date rows');
+      expect(html).toBe('', 'handoff evidence already in the answer is not repeated');
     }
-    expect(renderToStaticMarkup(<Trust answer={{answer:'The bank reading is incomplete.',confidence:{percent:0,band:'Low'}}} />)).toContain('No confidence assessment');
+    expect(renderToStaticMarkup(<Trust answer={{answer:'The bank reading is incomplete.',confidence:{percent:0,band:'Low'}}} />)).toContain('may be incomplete.');
   });
-  it("keeps the Worker score and missing evidence visible after a failed check", () => {
+  it("keeps the Worker score internal and missing evidence available after a failed check", () => {
     const answer: Answer = {
       answer: 'As of November 10, the record says the review is November 13 [1].',
+      answer_contract: { version: 1, kind: 'document' },
       confidence: {percent:10,band:'Low',basis:['The search did not complete.'],missing:['A complete source search.']},
       evidence_gate: {supported:false,complete:false,reason:'Owner link missing.'},
-    };
+    } as Answer;
     const html=renderToStaticMarkup(<Trust answer={answer} />);
-    expect(html).toContain('Confidence: Low (10%)');
-    expect(html).toContain('Missing: A complete source search.');
+    expect(html).not.toMatch(/Confidence:|\b(?:High|Medium|Low)\s*\(?\d+%/);
+    expect(documentResponseConfidence(answer).percent).toBe(10);
+    expect(documentResponseConfidence(answer).missing).toContain('A complete source search.');
+    expect(html).toContain('A complete source search');
+    expect(html).toContain('may be incomplete.');
     expect(evidenceGateNote(answer)).toBe('Why this answer is provisional: Owner link missing.');
   });
 });
 
-it.each([undefined, 0, 99])('the real trust badge scores raw incomplete evidence (%s)', percent => {
+it.each([undefined, 0, 99])('the plain caution retains internal scoring for raw incomplete evidence (%s)', percent => {
   const answer = { status: 'coverage_incomplete', answer: 'The documents do not answer the question.',
     results: [{ title: 'Candidate' }], ...(percent === undefined ? {} : { confidence: { percent, band: 'High', basis: ['legacy'] } }) } as Answer;
   const html = renderToStaticMarkup(<Trust answer={answer} />);
-  expect(html).toContain(`Confidence: Low (${percent === 0 ? 0 : 10}%)`);
+  expect(html).not.toMatch(/Confidence:|\b(?:High|Medium|Low)\s*\(?\d+%/);
+  expect(documentResponseConfidence(answer).percent).toBe(percent === 0 ? 0 : 10);
   expect(html).not.toContain('High');
-  expect(html).toContain('Why:');
-  expect(html).toContain('Missing:');
+  expect(ownerReading(answer)).toContain('A completed search over the requested sources and periods');
+  expect(documentResponseConfidence(answer).missing.length).toBeGreaterThan(0);
+});
+
+
+it("shows no extra trust panel for complete evidence while retaining its internal score", () => {
+  const answer: Answer = { answer: "The review is November 13 [1].", answer_contract: { version: 1, kind: "document" },
+    confidence: { percent: 100, band: "High", basis: ["Source and checks complete."], missing: [] } } as Answer;
+  expect(answerText(answer)).toBe(answer.answer);
+  expect(renderToStaticMarkup(<Trust answer={answer} />)).toBe("");
+  expect(documentResponseConfidence(answer).percent).toBe(100);
+  const thin = { ...answer, confidence: { percent: 10, band: "Low", basis: ["Search incomplete."], missing: ["Complete search."] } };
+  const html = renderToStaticMarkup(<Trust answer={thin} />);
+  expect(html).toContain("Search incomplete");
+  expect(html).toContain("Complete search");
+  expect(html).not.toMatch(/Confidence:|\b(?:High|Medium|Low)\s*\(?\d+%/);
 });

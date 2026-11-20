@@ -1,10 +1,39 @@
-import { createInventoryAccumulator, recoveryPlanSummary } from "../worker/src/lib/source-inventory-merge.js";
+import { createInventoryAccumulator, projectSourceFreshness, recoveryPlanSummary } from "../worker/src/lib/source-inventory-merge.js";
+
+export const SOURCE_INVENTORY_HELP_URL = new URL(
+  "../onboarding/06-runbook-top-ten-failures.md#source-inventory-is-unavailable", import.meta.url,
+).href;
 
 const failure = (code) => { throw Object.assign(new Error(code), { code }); };
 
+/** Only read requests are retried; the accepted cursor and snapshot stay fixed. */
+export async function requestInventoryPage(requestPage, payload, {
+  sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), now = Date.now,
+  deadline = now() + 600000,
+} = {}) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (now() >= deadline) failure("inventory_time_limit");
+    let response;
+    try { response = await requestPage(payload); }
+    catch (error) {
+      // Retry a classified transport interruption, never an auth, contract or
+      // local credential error. The caller owns those decision boundaries.
+      if (error?.retryable !== true || attempt === 3) throw error;
+    }
+    if (now() >= deadline) failure("inventory_time_limit");
+    const temporary = response && ([408, 425, 429].includes(response.status) || response.status >= 500);
+    if (response && (!temporary || attempt === 3)) return response;
+    if (response?.body) await response.body.cancel();
+    // D1's short resource window needs breathing room between bounded pages.
+    const delay = [1000, 3000, 10000][attempt];
+    if (now() + delay >= deadline) failure("inventory_time_limit");
+    await sleep(delay);
+  }
+}
+
 /** Transport work pages are never exposed as complete source receipts. */
 export async function collectBoundedInventory(first, requestPage, { onProgress = () => {},
-  maxPages = 1000, now = Date.now, maxDurationMs = 10 * 60 * 1000, validateRows = () => {} } = {}) {
+  maxPages = 1000, now = Date.now, maxDurationMs = 10 * 60 * 1000, validateRows = () => {}, sleep } = {}) {
   if (!Number.isSafeInteger(maxPages) || maxPages < 1 || maxPages > 1000 ||
       !Number.isFinite(maxDurationMs) || maxDurationMs <= 0 || maxDurationMs > 600000) throw new TypeError("invalid inventory bound");
   const mode = first?.kind === "source_freshness_scan" ? "freshness" : "bounded";
@@ -37,13 +66,7 @@ export async function collectBoundedInventory(first, requestPage, { onProgress =
     if (page.complete) {
       const sources = accumulator.finish();
       if (mode === "freshness") return { contract_version: 3, kind: "source_freshness", as_of: page.as_of,
-        sources: sources.map(row => {
-          const { coverage: _coverage, ...freshness } = row.freshness;
-          return { name: row.name, kind: row.kind, freshness, receipt: {
-            last_successful_run_at: row.receipt?.last_successful_run_at ?? null,
-            latest_run: row.receipt?.latest_run ?? null,
-          } };
-        }) };
+        sources: projectSourceFreshness(sources) };
       return { contract_version: 3, kind: "source_inventory", complete: true,
         total: sources.length, returned: sources.length, truncated: false, cursor: null,
         as_of: page.as_of, snapshot: { id: `sha256:${page.snapshot}`, as_of: page.as_of, stable: true, total: sources.length },
@@ -53,7 +76,9 @@ export async function collectBoundedInventory(first, requestPage, { onProgress =
     cursors.add(page.cursor);
     if (now() - started >= maxDurationMs) failure("inventory_time_limit");
     if (number === maxPages) break;
-    const response = await requestPage({ mode, ...(mode === "bounded" ? { limit: 5000 } : {}), cursor: page.cursor });
+    const response = await requestInventoryPage(requestPage,
+      { mode, ...(mode === "bounded" ? { limit: page.scan.limit } : {}), cursor: page.cursor },
+      { sleep, now, deadline: started + maxDurationMs });
     if (!response.ok) failure(response.status === 409 ? "inventory_snapshot_changed" : "source_inventory_unavailable");
     try { page = await response.json(); } catch { failure("inventory_contract_invalid"); }
   }

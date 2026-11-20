@@ -91,8 +91,9 @@ async function run(t, {
     DB: {
       exec: async () => ({}),
       prepare(sql) {
+        let docUid;
         const statement = {
-          bind() { return statement; },
+          bind(first) { docUid = first; return statement; },
           async all() {
             if (/FROM sources s/.test(sql) && /source_inventory/.test(sql)) {
               counts.coverage++;
@@ -103,7 +104,12 @@ async function run(t, {
               counts.keyword++;
               return clock.operation(1200, { results: rows });
             }
-            if (/FROM chunks c JOIN documents/.test(sql)) return clock.operation(100, { results: rows });
+            if (/FROM chunks c JOIN documents/.test(sql)) {
+              const chunks = rows.filter(row => row.doc_uid === docUid);
+              const selected = /AS total_chunks/.test(sql)
+                ? chunks.map(row => ({...row,total_chunks:chunks.length})) : rows;
+              return clock.operation(100,{results:selected});
+            }
             return { results: [] };
           },
           async first() {

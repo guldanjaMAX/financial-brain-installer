@@ -1234,6 +1234,9 @@ test("daily freshness reads receipts without visiting corpus rows", async () => 
   assert.equal(response.status, 200);
   const receipt = await response.json();
   assert.equal(receipt.kind, "source_freshness");
+  assert.ok(receipt.sources.every(row => row.source_id === row.name && typeof row.registered === "boolean" &&
+    Object.hasOwn(row.receipt, "registered_at") && Object.hasOwn(row, "connector")),
+  "the actual read-only route retained registry identity evidence");
   assert.equal(receipt.sources.length, 2, "both registered source decisions reached");
   assert.equal(receipt.sources.find((row) => row.name === "alpha").receipt.latest_run.outcome, "completed");
   assert.equal(receipt.sources.find((row) => row.name === "beta").receipt.latest_run.outcome, "failed");
@@ -1242,6 +1245,49 @@ test("daily freshness reads receipts without visiting corpus rows", async () => 
   assert.deepEqual(documentBounds, [0], "the actual SQL bind visits zero corpus rows");
   assert.equal(seen.runs, 0);
   db.close();
+});
+
+test("update compares registry identity carried by the real freshness route", async t => {
+  const { captureUpdateSelfcheck, compareUpdateSelfcheck, sourceSelfcheckRows } =
+    await import("../../operations/update-selfcheck.mjs");
+  const db = migratedDb();
+  t.after(() => db.close());
+  await addInventoryFixture(db);
+  const { env } = d1Env(db);
+  const snapshot = async () => {
+    const response = await call(env, post({ mode: "freshness" }, { "X-Admin-Key": env.ADMIN_KEY }));
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    return captureUpdateSelfcheck({
+      bank: () => [], secrets: () => [], sources: () => sourceSelfcheckRows(body, () => null),
+      daily: () => ({ present: false }), claude: () => ({ present: false }),
+    });
+  };
+  const original = await snapshot();
+  const cases = [
+    ["connector kind", "kind", "local"],
+    ["new registration", "created_at", "2026-01-02T00:00:00Z"],
+  ];
+  let seed = 0x78074658;
+  while (cases.length) {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    const [[label, column, value]] = cases.splice(seed % cases.length, 1);
+    await t.test(label, async () => {
+      assert.equal(compareUpdateSelfcheck(original, await snapshot()).status, "passed");
+      db.exec("SAVEPOINT synthetic_source_change");
+      try {
+        db.prepare(`UPDATE sources SET ${column} = ? WHERE name = 'alpha'`).run(value);
+        const after = await snapshot();
+        assert.equal(after.sources.value.length, original.sources.value.length);
+        assert.equal(after.sources.value.filter(row => row.ok).length, 1, "the completed run reached identity comparison");
+        const report = compareUpdateSelfcheck(original, after);
+        assert.equal(report.checks.find(row => row.category === "sources").code, "UPDATE_SELFCHECK_SOURCES_CHANGED");
+        assert.doesNotMatch(JSON.stringify(report), /alpha|beta/);
+      } finally {
+        db.exec("ROLLBACK TO synthetic_source_change; RELEASE synthetic_source_change");
+      }
+    });
+  }
 });
 
 test("bounded inventory shrinks dense pages and refuses a receipt-only mutation", async () => {

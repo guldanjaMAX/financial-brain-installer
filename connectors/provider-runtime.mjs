@@ -13,6 +13,7 @@ import { ingestionOutcome } from "../ingest/outcome.mjs";
 import { providerWithheldReason, sourceReceiptIssueCode } from "../worker/src/lib/source-receipt.js";
 import { restampFirstPartySourceProvenance } from "../worker/src/lib/provenance-receipt.js";
 import { credentialRefusalReason } from "../worker/src/lib/secret-scan.js";
+import { MICROSOFT_ADD_ONLY, MICROSOFT_FILE_SKIP_CODES } from "./microsoft-week1-rules.mjs";
 import { removalCause } from "../operations/removal-causes.mjs";
 
 const SAFE_SOURCE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -68,8 +69,28 @@ export function normalizeProviderResult(source, result) {
       textReliable: document.text_reliable,
     });
   });
+  if (result.status_updates !== undefined && !Array.isArray(result.status_updates)) {
+    throw new ProviderDeliveryError("invalid provider status updates", { code: "invalid_provider_identity" });
+  }
+  const statusUpdates = result.status_updates || [];
+  const liveSources = new Set(documents.map(doc => doc.source_id));
+  if (statusUpdates.length && (result.provider !== "microsoft" ||
+      new Set(statusUpdates.map(doc => doc.source_id)).size !== statusUpdates.length ||
+      statusUpdates.some(doc => !liveSources.has(doc.metadata?.retained_source_id) ||
+        doc.source_id !== `status:${doc.metadata?.retained_source_id}` ||
+        !["active", "cancelled"].includes(doc.metadata?.microsoft_status)))) {
+    throw new ProviderDeliveryError("invalid Microsoft status replacement", { code: "invalid_provider_identity" });
+  }
   const deletions = result.deletions.map((deletion) => ({ ...deletion, source_type: sourceName }));
   const deferred = normalizeDeferredCoverage(result);
+  const skipped = result.skipped_count ?? 0;
+  const skipReasons = result.skip_reasons ?? {};
+  if (!Number.isSafeInteger(skipped) || skipped < 0 || !skipReasons || typeof skipReasons !== "object" || Array.isArray(skipReasons) ||
+      Object.entries(skipReasons).some(([code, count]) => !MICROSOFT_FILE_SKIP_CODES.includes(code) || !Number.isSafeInteger(count) || count <= 0) ||
+      Object.values(skipReasons).reduce((sum, count) => sum + count, 0) !== skipped ||
+      (skipped > 0 && result.provider !== "microsoft")) {
+    throw new ProviderDeliveryError("the provider returned invalid counted-skip evidence", { code: "invalid_provider_deferred_coverage" });
+  }
   const documentIds = documents.map((document) => String(document?.source_id || ""));
   const deletionIds = deletions.map((deletion) => String(deletion?.source_id || ""));
   if (documentIds.some((id) => !id.trim()) || new Set(documentIds).size !== documentIds.length) {
@@ -109,6 +130,11 @@ export function normalizeProviderResult(source, result) {
     deletions: [...removals.values()],
     deferred_count: deferred.count,
     deferred_reason_code: deferred.reason,
+    skipped_count: skipped,
+    skip_reasons: { ...skipReasons },
+    status_updates: statusUpdates.map(doc => restampFirstPartySourceProvenance(doc, {
+      sourceType: sourceName, textSource: doc.text_source, textReliable: doc.text_reliable,
+    })),
   };
 }
 
@@ -281,11 +307,16 @@ export async function runProviderConnector({
     }));
     const adapterWalkComplete = normalized.walk_complete === true ||
       (normalized.walk_complete === undefined && normalized.outcome.kind === "completed");
+    // A proven calendar deferral does not require the optional file workload
+    // to be available. The source-wide check flag still stays false for 404.
+    const scopedCalendarCheck = normalized.provider === "microsoft" && normalized.calendar_check_complete === true;
+    const countedFileWarnings = normalized.provider === "microsoft" && normalized.warnings?.every(warning =>
+      typeof warning === "string" && /^(MICROSOFT_FILE_SKIPPED|MICROSOFT_DRIVE_UNAVAILABLE):/.test(warning));
     if (normalized.deferred_count > 0 &&
         (normalized.outcome.kind !== "completed" || !adapterWalkComplete ||
          normalized.cursor_can_advance !== true || normalized.proposed_cursor == null ||
-         normalized.provider_check_complete !== true || !Array.isArray(normalized.warnings) ||
-         normalized.warnings.length !== 0)) {
+         (normalized.provider_check_complete !== true && !scopedCalendarCheck) || !Array.isArray(normalized.warnings) ||
+         (normalized.warnings.length !== 0 && !(scopedCalendarCheck && countedFileWarnings)))) {
       throw new ProviderDeliveryError("deferred coverage requires a complete provider check and a proposed cursor", {
         code: "invalid_provider_deferred_coverage",
       });
@@ -294,6 +325,26 @@ export async function runProviderConnector({
     // old owner can reach D1, a deletion request, or the local cursor store.
     assertOwned?.();
     let storedFamiliesBefore = null;
+    const cancelledSources = new Set(normalized.provider === "microsoft" && MICROSOFT_ADD_ONLY
+      ? normalized.documents.filter(doc => doc.metadata?.workload === "outlook_calendar" && doc.metadata?.status === "cancelled")
+        .map(doc => doc.source_id) : []);
+    if (normalized.status_updates.length || cancelledSources.size) {
+      if (typeof listStoredFamilies !== "function") {
+        throw new ProviderDeliveryError("retained-status reconciliation needs authenticated family inventory", {
+          code: "provider_snapshot_reconciliation_unavailable",
+        });
+      }
+      storedFamiliesBefore = await listStoredFamilies({ base, adminKey, source: sourceName });
+      const currentIds = new Set(normalized.documents.map(doc => doc.source_id));
+      const replacements = normalized.status_updates.filter(doc =>
+        currentIds.has(doc.source_id) || storedFamiliesBefore.has(`${sourceName}:${doc.source_id}`));
+      // A cancellation may create first-seen evidence, but may never overwrite
+      // retained text. Use stored families, not the resettable provider cursor.
+      // Its separate status document still reaches normal delivery.
+      normalized = { ...normalized, documents: [...new Map([...normalized.documents, ...replacements]
+        .map(doc => [doc.source_id, doc])).values()].filter(doc =>
+          !cancelledSources.has(doc.source_id) || !storedFamiliesBefore.has(`${sourceName}:${doc.source_id}`)) };
+    }
     let snapshotNeedsRemovalReview = false;
     let requiredRemovalApproval = null;
     let removalReviewNotice = "";
@@ -422,7 +473,7 @@ export async function runProviderConnector({
         completed_at: completedAt,
       });
     }
-    const tally = normalized.deferred_count > 0 ? {
+    let tally = normalized.deferred_count > 0 ? {
       ...deliveryTally,
       deferred: normalized.deferred_count,
       refused: deliveryTally.refused + normalized.deferred_count,
@@ -432,7 +483,14 @@ export async function runProviderConnector({
         [normalized.deferred_reason_code]: normalized.deferred_count,
       },
     } : deliveryTally;
-    const filesSeen = normalized.documents.length + normalized.deletions.length + (tally.deferred || 0);
+    if (normalized.skipped_count > 0) {
+      tally = { ...tally, skipped: normalized.skipped_count,
+        refused: tally.refused + normalized.skipped_count,
+        withheld: tally.withheld + normalized.skipped_count,
+        refusal_reasons: { ...tally.refusal_reasons, ...Object.fromEntries(Object.entries(normalized.skip_reasons)
+          .map(([code, count]) => [`microsoft_file_${code}`, count])) } };
+    }
+    const filesSeen = normalized.documents.length + normalized.deletions.length + (tally.deferred || 0) + (tally.skipped || 0);
     const detail = resultDetail(normalized, tally, removal, cursorAdvanced);
     terminalEvidence = {
       files_seen: filesSeen,
@@ -472,8 +530,9 @@ export async function runProviderConnector({
       ...normalized,
       // A finished provider walk may have incomplete indexed coverage. Keep
       // that partial outcome separate from successful operational refresh.
-      outcome: tally.withheld > 0 && sourceComplete
-        ? ingestionOutcome("partial", { reason: `${tally.withheld} item(s) withheld by design` })
+      outcome: (tally.withheld > 0 || normalized.coverage_incomplete) && sourceComplete
+        ? ingestionOutcome("partial", { reason: tally.withheld > 0
+          ? `${tally.withheld} item(s) withheld by design` : "Some configured files were not checked; see the named file coverage warning." })
         : normalized.outcome,
       refresh_succeeded: deliveryComplete && sourceComplete && sourceWalkComplete && cursorAdvanced &&
         (tally.withheld === 0 || providerCheckComplete),

@@ -1,12 +1,12 @@
 import { filterThinkCandidates } from './think-candidate-policy.js';
-import { documentAccessSql, scopeSql, filterSql, keywordSearchTerms } from './store-d1.js';
+import { documentAccessSql, scopeSql, filterSql, keywordSearchTerms, retrievalCandidateProjection } from './store-d1.js';
 import { customApiVisibilitySql, readWithCustomApiVisibility } from './custom-api-visibility.js';
 import { currentMemorySql, legacySchemaMayReadWithoutMemorySupersessions, memorySupersessionIntegrityFailure } from './memory-supersession.js';
 
 // Discovery containers are hints, never proof that a clause was amended.
 // Only exact ledger edges bind a correction; titles and semantic similarity
 // cannot create a subject identity. All exported neighbors repeat authorization.
-export async function discoverDocumentSuccessors(env, rows, { filters = {}, access = null, scope = null, question = "", assess = row => row } = {}) {
+export async function discoverDocumentSuccessors(env, rows, { filters = {}, access = null, scope = null, question = "", assess = row => row, boundThinkText = false, onIncompleteProjection } = {}) {
   const ids = [...new Set(rows.map(r => r.doc_uid).filter(Boolean))].slice(0,50);
   if (!ids.length || !env.DB) return rows;
   const f = filterSql(filters, 'c', 2);
@@ -34,13 +34,10 @@ export async function discoverDocumentSuccessors(env, rows, { filters = {}, acce
         FROM documents d JOIN chunks c ON c.doc_uid=d.doc_uid
         WHERE d.doc_uid IN (SELECT value FROM json_each(?1)) AND ${boundary(pointer)}
       )
-      SELECT seed.doc_uid AS predecessor_id,
+      SELECT ${retrievalCandidateProjection(boundThinkText, true, {uri:'d.uri', predecessor_id:'seed.doc_uid'})},
         CASE WHEN ${correction} THEN 'verified_correction'
           WHEN ${thread} THEN 'same_thread_candidate' ELSE 'same_family_candidate' END AS discovery_reason,
-        c.chunk_uid,c.doc_uid,c.text,d.title,d.source,d.source_id,d.uri,d.entity_slug,d.client,
-        d.category,d.top_folder,d.platform,d.document_date,d.date_source,d.date_reliable,
-        d.text_source,d.text_reliable,d.content_hash,d.meta AS authority_meta,
-        c.text AS authority_document_head,COALESCE(src.kind,'unregistered') AS source_kind,0 AS score
+        0 AS score
       FROM seeds seed JOIN documents d ON d.doc_uid<>seed.doc_uid
       JOIN chunks c ON c.doc_uid=d.doc_uid AND c.chunk_ix=0
       LEFT JOIN sources src ON src.name=d.source
@@ -63,6 +60,7 @@ export async function discoverDocumentSuccessors(env, rows, { filters = {}, acce
         newer_record:null,operative_record:null,checked_scope:'authorized_links_and_containers',complete:false}}));
     }
   }
+  if (found.results?.some(row => row.retrieval_projection_incomplete)) onIncompleteProjection?.();
   const neighbors = filterThinkCandidates((found.results || []).map(r=>({...r,snippet:r.text})),{question}).rows;
   const output = [], seen = new Set();
   const put = row => { if(!seen.has(row.doc_uid)){seen.add(row.doc_uid);output.push(row);} };
@@ -89,7 +87,7 @@ export async function discoverDocumentSuccessors(env, rows, { filters = {}, acce
 // Old labels remain searchable only as private seeds for exact verified edges.
 // This separate bounded lane never exports the historical seed or authorizes a
 // title/subject guess. It is disabled once overload recovery is selected.
-export async function discoverCorrectionSearchSeeds(env,query,{filters={},scope=null,access=null}={}) {
+export async function discoverCorrectionSearchSeeds(env,query,{filters={},scope=null,access=null,boundThinkText=false,onIncompleteProjection}={}) {
   const terms=keywordSearchTerms(query);if(!terms)return [];
   const f=filterSql(filters,'c',2),s=scopeSql(scope,'d',f.nextParam),a=documentAccessSql(access,'c','d',s.nextParam);
   const boundary=pointer=>`d.deleted_at IS NULL${f.clause}${s.clause}${a.clause}${customApiVisibilitySql('d',pointer)}`;
@@ -102,10 +100,7 @@ export async function discoverCorrectionSearchSeeds(env,query,{filters={},scope=
         JOIN chunks c ON c.id=candidate.rowid JOIN documents d ON d.doc_uid=c.doc_uid
         WHERE ${boundary(pointer)}
       )
-      SELECT c.chunk_uid,c.doc_uid,c.text,d.title,d.source,d.source_id,d.uri,d.entity_slug,d.client,
-        d.category,d.top_folder,d.platform,d.document_date,d.date_source,d.date_reliable,
-        d.text_source,d.text_reliable,d.content_hash,d.meta AS authority_meta,
-        c.text AS authority_document_head,COALESCE(src.kind,'unregistered') AS source_kind,0 AS score
+      SELECT ${retrievalCandidateProjection(boundThinkText, true, {uri:'d.uri'})},0 AS score
       FROM authorized_predecessors seed
       JOIN memory_supersessions edge ON edge.predecessor_doc_uid=seed.doc_uid AND edge.predecessor_content_hash=seed.content_hash
       JOIN documents d ON d.doc_uid=edge.successor_doc_uid AND d.content_hash=edge.successor_content_hash
@@ -114,6 +109,7 @@ export async function discoverCorrectionSearchSeeds(env,query,{filters={},scope=
       WHERE ${boundary(pointer)}${currentMemorySql('d')}
       ORDER BY d.document_date DESC,d.doc_uid LIMIT 50`)
       .bind(terms,...f.params,...s.params,...a.params).all());
+    if (result.results?.some(row => row.retrieval_projection_incomplete)) onIncompleteProjection?.();
     return filterThinkCandidates((result.results || []).map(row=>({...row,snippet:row.text})),{question:query}).rows;
   } catch(error) {
     if(await legacySchemaMayReadWithoutMemorySupersessions(env,error))return [];

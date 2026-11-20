@@ -28,7 +28,7 @@ try {
   });
 
   await page.goto(`${origin}/app?state=zero-entities`, { waitUntil: "networkidle" });
-  await page.getByRole("button", { name: "Add my first financial entity", exact: true }).waitFor();
+  await page.getByRole("button", { name: "Add your first person or business", exact: true }).waitFor();
   const zeroEntityHome = await page.locator("body").innerText();
   assert.doesNotMatch(zeroEntityHome, /No financial record is loaded for No financial entity selected/i);
   assert.doesNotMatch(zeroEntityHome, /What changed|Shared External reviewer document access|Monthly revenue target/i);

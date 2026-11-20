@@ -1,3 +1,4 @@
+import { isolatedLifecycleOptions } from "./fixtures/isolated-update-schedulers.mjs";
 /**
  * A Worker paused on an OLDER release that the manifest still records is a
  * resumable paused generation once the owner installs a newer CLI.
@@ -382,7 +383,7 @@ async function update(brain, release, { force = false, duringAcceptance = null }
     }
     : kit.upgradeOptions;
   const run = await quietly(() => release.cli.cmdUpdate(brain.manifestPath, {
-    lifecycleLockOptions: { machineLockRoot: join(brain.sandbox, 'machine-locks') },
+    lifecycleLockOptions: isolatedLifecycleOptions(brain.sandbox, { machineLockRoot: join(brain.sandbox, 'machine-locks') }),
     discoverInstalledManifest: () => ({ path: brain.manifestPath, source: "remembered" }),
     readUpdateBacklog: release.cli.readUpdateBacklog,
     updateBacklogOptions: upgradeOptions.updateBacklogOptions,
@@ -423,7 +424,7 @@ async function rollback(brain, release) {
   const { cmdDeploy, cmdHealth, upgradeOptions } = brain.kit(release);
   return quietly(() => release.cli.cmdRollback(brain.manifestPath, BOOKMARK, {
     confirmed: true,
-    lifecycleLockOptions: { machineLockRoot: join(brain.sandbox, 'machine-locks') },
+    lifecycleLockOptions: isolatedLifecycleOptions(brain.sandbox, { machineLockRoot: join(brain.sandbox, 'machine-locks') }),
     resolveAccount: upgradeOptions.resolveAccount,
     cf: brain.cf,
     d1Query: brain.d1Query,
@@ -436,7 +437,7 @@ async function rollback(brain, release) {
 async function doctorRepair(brain, release) {
   const { upgradeOptions } = brain.kit(release);
   return quietly(() => release.cli.cmdDoctorRepair(brain.manifestPath, {
-    lifecycleLockOptions: { machineLockRoot: join(brain.sandbox, 'machine-locks') },
+    lifecycleLockOptions: isolatedLifecycleOptions(brain.sandbox, { machineLockRoot: join(brain.sandbox, 'machine-locks') }),
     confirmed: true,
     diagnoseOptions: {
       http: brain.http,
@@ -629,7 +630,7 @@ test("the documented 0.4.8 active folder updates, retires, and refuses both lega
     let remoteExpectationCalls = 0;
     const retired = await quietly(() => checkedOutCli.cmdFolder(brain.manifestPath, ["off"], {
       platform: "darwin",
-      lifecycleLockOptions: { machineLockRoot: join(brain.sandbox, 'machine-locks') },
+      lifecycleLockOptions: isolatedLifecycleOptions(brain.sandbox, { machineLockRoot: join(brain.sandbox, 'machine-locks') }),
       now: () => new Date("2026-09-28T16:36:00.000Z"),
       schedulerOptions,
       probeSourceIngestLock: () => ({ busy: false }),

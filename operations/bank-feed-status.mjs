@@ -21,7 +21,7 @@ export function projectBankStatus(body, now) {
       last_successful_sync:health.last_successful_sync_at,next_due:health.next_due_at,
       overdue:health.overdue,needs_sign_in:health.needs_sign_in,accounts_waiting_for_owner:waiting,
       needs_attention:health.state!=='healthy' || waiting>0 || status==='unknown',
-      health_line:[health.status_line,waiting>0 ? `Choose an owner for each account in Access > Banks to continue. Accounts waiting for your choice: ${waiting}.` : ''].filter(Boolean).join(' ')};
+      health_line:[health.status_line,waiting>0 ? `Choose an owner for each account on the Connect a bank page to continue. Accounts waiting for your choice: ${waiting}.` : ''].filter(Boolean).join(' ')};
   });
 }
 

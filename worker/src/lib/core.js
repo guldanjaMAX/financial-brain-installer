@@ -582,10 +582,13 @@ async function callLLMImpl(env, {
     Math.ceil(anthropicInputCharacterCount(system, messages) / 3) * timeoutRate.in +
     effectiveAnthropicMaxTokens * timeoutRate.out,
   );
-  const chargeTimeout = async (error) => {
-    if (!isAbortLike(error)) return;
-    chargeIsolate(timeoutMicros);
-    await logCall(env, { label, model: anthropicModel, status: "timeout", micros: timeoutMicros });
+  const recordTransportFailure = async (error) => {
+    if (isAbortLike(error)) {
+      chargeIsolate(timeoutMicros);
+      await logCall(env, { label, model: anthropicModel, status: "timeout", micros: timeoutMicros });
+    } else if (label === "answer-model-check") {
+      await logCall(env, { label, model: anthropicModel, status: "error", micros: 0 });
+    }
   };
   const data = await measureQueryModel(timing, timingStage, "anthropic", anthropicModel, async () => {
     let res;
@@ -611,7 +614,7 @@ async function callLLMImpl(env, {
         signal: AbortSignal.timeout(timeoutMs || 45_000),
       });
     } catch (error) {
-      await chargeTimeout(error);
+      await recordTransportFailure(error);
       throw error;
     }
 
@@ -629,7 +632,7 @@ async function callLLMImpl(env, {
     try {
       return await res.json();
     } catch (error) {
-      await chargeTimeout(error);
+      await recordTransportFailure(error);
       throw error;
     }
   });
@@ -638,10 +641,13 @@ async function callLLMImpl(env, {
   const rate = anthropicRate(data?.model || anthropicModel);
   const micros = Math.ceil(inTok * rate.in + outTok * rate.out);
   chargeIsolate(micros);
-  await logCall(env, { label, model: data?.model || anthropicModel, status: "ok", micros });
   const text = llmText(data);
+  const incomplete = data?.stop_reason === "max_tokens" || data?.stop_reason === "refusal";
+  // A model check is only healthy when it returned a readable, complete reply.
+  const status = label === "answer-model-check" && (!text.trim() || incomplete) ? "error" : "ok";
+  await logCall(env, { label, model: data?.model || anthropicModel, status, micros });
   if (!text.trim()) throw new AnthropicEmptyResponseError(data?.stop_reason);
-  if (data?.stop_reason === "max_tokens" || data?.stop_reason === "refusal") {
+  if (incomplete) {
     throw new AnthropicIncompleteResponseError(data.stop_reason);
   }
   return {

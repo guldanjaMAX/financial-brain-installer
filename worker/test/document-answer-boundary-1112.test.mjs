@@ -79,7 +79,7 @@ test('local document-read route preserves the rest of a record and requires owne
   } finally {f.close();}
 });
 
-test('owner CLI prints the Worker score even when a check failed', async () => {
+test('owner CLI keeps the Worker score internal and explains incomplete evidence when a check failed', async () => {
   const root = mkdtempSync(join(process.env.HOME,'document-cli-'));
   const manifest = join(root,'brain.manifest.json');
   writeFileSync(manifest,JSON.stringify({client:{slug:'fixture'},brain:{domain:'fixture.invalid'},infrastructure:{cloudflare:{account_id:'unused'}}}));
@@ -91,8 +91,10 @@ test('owner CLI prints the Worker score even when a check failed', async () => {
     console.log=(...parts)=>lines.push(parts.join(' '));
     await cmdAsk(manifest,{ask:async ()=>'When is the review?',adminKey:randomBytes(24).toString('hex'),http:async()=>new Response(JSON.stringify(body))});
   } finally {console.log=log;rmSync(root,{recursive:true,force:true});}
-  assert.match(lines.join('\n'),new RegExp(`Confidence: ${body.confidence.band} \\(${body.confidence.percent}%\\)`));
-  assert.match(lines.join('\n'),/Why:.*Missing:/);
+  assert.doesNotMatch(lines.join('\n'), /Confidence:|\b(?:High|Medium|Low)\s*\(?\d+%/);
+  assert.ok(body.confidence.percent < 90, 'the failed evidence check still caps the internal score');
+  assert.match(lines.join('\n'), /may be incomplete/);
+  assert.match(lines.join('\n'), /Missing or counted twice:/);
 });
 
 test('document reading screens legacy credential material with a populated readable control', async () => {

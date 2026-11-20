@@ -3,6 +3,7 @@ import { legacyDocumentResponse } from './document-answer-reading.js';
 // missing evidence and caps for failed checks, incomplete reads and search gaps.
 // Owner surfaces render the same score; model prose may only lower it.
 
+import { microsoftEvidenceStatus } from "./microsoft-retained-status.js";
 import { independentEvidenceSummary } from "./evidence-lineage.js";
 
 // Owner-facing bands use the founder's contract. Legacy engine scoring stays
@@ -235,8 +236,22 @@ export function computeAnswerConfidence({ approvedDocs = [], gaps = [], degraded
   score += adjust.delta;
   basis.push(...adjust.basis);
 
+  const providerStates = approvedDocs.map(microsoftEvidenceStatus);
+  const unknownProviderState = providerStates.some(state => ["removed_from_view", "unavailable"].includes(state));
+  const cancelledProviderState = providerStates.includes("cancelled");
+  if (unknownProviderState || cancelledProviderState) {
+    // Model wording cannot promote retained schedule evidence into a current
+    // appointment. This ceiling depends only on the cited provider state.
+    score = Math.min(score, unknownProviderState ? 69 : 89);
+    basis.push(unknownProviderState
+      ? "Microsoft's current location or schedule is unverified; missing a current provider record for the retained item"
+      : "Microsoft marks this meeting cancelled; the retained scheduled time is historical, not a current appointment");
+  }
   const percent = clamp(score, 5, 95);
-  return { percent, band: band(percent), basis };
+  return { percent, band: band(percent), basis,
+    ...((unknownProviderState || cancelledProviderState) ? { missing: [unknownProviderState
+      ? "A current Microsoft provider record establishing the retained item's location or schedule."
+      : "A current Microsoft provider record before treating the historical scheduled time as an upcoming appointment."] } : {}) };
 }
 
 /**

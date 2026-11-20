@@ -92,9 +92,10 @@ excluded from that run's historical audit. No removal authority changes.
    source receipts before claiming current coverage. Pending vector work must
    drain and exact retrieval must also be checked.
 9. Check the owner's exact retrieval path against independently known facts.
-   Every answer must answer, follow the five-part contract, show computed
-   `Confidence: High|Medium|Low (n%)`, and explain the gap and missing data
-   below 100%. Any refusal or wrong supported figure at High confidence stops
+   Every answer must answer and follow the five-part contract. Keep computed
+   scores internal and hide confidence labels and percentages from owners.
+   Thin or missing evidence gets one plain sentence without a number or scale
+   word; preserve the gap and missing data in the five answer parts. Any refusal or wrong supported figure at High confidence stops
    sign-off. Observe the next scheduled execution separately.
 
 ## Rollback

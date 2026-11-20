@@ -268,12 +268,12 @@ for (const [label, config] of [
   });
 }
 
-test("the real Calendar pipeline keeps its old cursor through apply and advances only on replay", async () => {
+test("the real Calendar pipeline retains cancellations and advances only after the marker succeeds", async () => {
   const f = fixture();
   try {
     f.state.primary = { sync_token: "fixture-prior" };
     let pulls = 0;
-    const receipts = [];
+    const receipts = [], marked = [];
     f.options.commands.ingestCalendar = (manifest, path, flags) => cmdIngestCalendar(manifest, path, flags, {
       ...f.options, getAccessToken: async () => "fixture-provider-proof",
       loadCalendarState: () => f.state,
@@ -283,11 +283,19 @@ test("the real Calendar pipeline keeps its old cursor through apply and advances
         Object.assign(f.state, value);
       },
       listStoredSourceFamilies: async () => new Set(f.store.uids()),
+      markCalendarCancellations: async ({ cancellations }) => {
+        assert.equal(f.state.primary.sync_token, "fixture-prior", "the cursor stays behind the unconfirmed marker");
+        for (const item of cancellations) {
+          assert.ok(f.store.uids().includes(`calendar:${item.source_id}`));
+          marked.push(item.source_id);
+        }
+        return cancellations.length;
+      },
       postSourceReceipt: async (_base, _key, receipt) => receipts.push(receipt),
       googleCalendar: {
         syncAll: async ({ state }) => {
           pulls++;
-          assert.equal(state.primary.sync_token, "fixture-prior", "apply cannot advance a source cursor");
+          assert.equal(state.primary.sync_token, "fixture-prior", "the provider receives the prior accepted cursor");
           return { ok: true, documents: [], deletions: [{ source_id: "item0", removal_cause: "explicit_deletion" }],
             state: { primary: { sync_token: "fixture-next" } },
             calendars: [{ ok: true, mode: "incremental", authoritative_snapshot: true }],
@@ -296,13 +304,16 @@ test("the real Calendar pipeline keeps its old cursor through apply and advances
         ingestEnvelopes: async () => ({ created: 0, updated: 0, unchanged: 1, errors: [], refused: [] }),
       },
     });
-    await assert.rejects(f.load(), error => error.code === "SAFETY_REVIEW_REQUIRED");
+    await f.load();
     assert.equal(pulls, 1);
+    assert.deepEqual(marked, ["item0"], "a real cancellation reaches the marker boundary");
     assert.equal(f.applyCalls(), 0);
     assert.equal(f.store.calls.apply, 0);
-    assert.equal(f.state.primary.sync_token, "fixture-prior");
-    assert.deepEqual(receipts.map(receipt => receipt.status), ["indexing", "error"]);
-    assert.ok(f.state.ingest_removal_plan.targets.length > 0, "exact owner decision is saved");
+    assert.equal(f.store.calls.preview, 0);
+    assert.equal(f.state.primary.sync_token, "fixture-next");
+    assert.deepEqual(receipts.map(receipt => receipt.status), ["indexing", "ready"]);
+    assert.equal(f.state.ingest_removal_plan, undefined);
+    assert.ok(f.store.uids().includes("calendar:item0"), "the cancelled event remains stored");
   } finally { f.close(); }
 });
 

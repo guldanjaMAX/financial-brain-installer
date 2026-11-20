@@ -31,13 +31,15 @@ function copyFrontend(source, target) {
       return first !== "node_modules" && first !== "dist" && !first.startsWith(".env");
     },
   });
-  // The app shares the Worker's confidence formatter. Preserve its dependency
-  // closure so this isolated build checks the same source as an ordinary build.
+  // The app shares the Worker's evidence and confidence formatters. Preserve
+  // their dependency closure so this fixture checks the ordinary build source.
   const shared = join(dirname(target), "worker", "src", "lib");
   mkdirSync(shared, { recursive: true });
-  for (const name of ["confidence.js", "evidence-lineage.js", "document-answer-reading.js", "answer-sentences.js", "quickbooks-label.js",
+  for (const name of ["owner-evidence.js", "confidence.js", "evidence-lineage.js", "document-answer-reading.js", "answer-sentences.js", "quickbooks-label.js",
     // 0.4.28 provenance reading adds this pure-JS dependency closure.
-    "document-answer-provenance.js", "document-answer-context.js", "evidence-authority.js", "query-intent.js", "tax-evidence-scope.js"]) {
+    "document-answer-provenance.js", "document-answer-context.js", "evidence-authority.js", "query-intent.js", "tax-evidence-scope.js",
+    // 0.4.30 Microsoft retained status (confidence.js) adds this closure.
+    "microsoft-retained-status.js", "grants.js", "core.js", "query-timing.js"]) {
     cpSync(join(dirname(source), "worker", "src", "lib", name), join(shared, name));
   }
 }
@@ -87,6 +89,16 @@ test("isolated frontend fixture retains shared answer rendering modules", async 
       confidence: { percent: 69, basis: ["A payment remains unmatched."], missing: ["The receiving statement."] } };
     assert.equal(render.answerText(response), response.answer);
     assert.equal(render.confidenceText(response), "Confidence: Low (69%). Why: A payment remains unmatched. Missing: The receiving statement.");
+    // The isolated fixture must exercise owner presentation and retain the
+    // internal formatter used by guards, rather than merely import successfully.
+    const before = structuredClone(response);
+    assert.equal(render.answerText({ ...response, answer: response.answer + "\nConfidence: Low (69%)" }),
+      response.answer + "\n");
+    const evidence = render.evidenceNoteText(response);
+    assert.match(evidence, /A payment remains unmatched/);
+    assert.match(evidence, /Still needed: The receiving statement/);
+    assert.doesNotMatch(evidence, /Confidence:|\b(?:High|Medium|Low)\b|\d+%/);
+    assert.deepEqual(response, before, "presentation leaves the internal score and evidence unchanged");
   } finally {
     rmSync(sandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }

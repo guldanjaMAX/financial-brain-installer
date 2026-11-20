@@ -1006,7 +1006,7 @@ try {
   ]);
   assert.match(
     successfulSetup.output,
-    /Step 6 of 6[\s\S]*Your Brain is running\. So far it holds only a small test note, so it can't answer questions about your business yet\. Next, we'll connect Google or load one folder\./,
+    /STEP 6 of 6 · your first files[\s\S]*Your Brain is running\. So far it holds only a small test note, so it can't answer questions about your business yet\. Next, we'll connect Google or load one folder\./,
   );
   assert.match(successfulSetup.output, /connected to: Codex/i);
   assert.equal(successfulSetup.output.includes(replacementKey), false);

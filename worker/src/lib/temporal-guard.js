@@ -67,8 +67,10 @@ function eventOccurrences(doc, context, anchors = []) {
   if (!eligible(doc)) return [];
   const text = `${doc.title || ""}\n${doc.snippet || ""}`;
   const calendar = /^calendar:(?:event_start|all_day_start)$/.test(doc.date_source || "");
+  // Cancellation remains authoritative even when the occurrence date is not.
+  // Do not let the source-text date fallback resurrect the retained invite.
+  if (calendar && (doc.calendar_status === "cancelled" || CANCELED.test(text))) return [];
   if (calendar && reliableDocumentTime(doc) !== null) {
-    if (CANCELED.test(text)) return [];
     // occurred_at carries the real instant when available; ts alone is the
     // citation day, not an email's future appointment or a fabricated instant.
     const occurrence = doc.occurred_at || String(doc.ts || "").slice(0, 10);
@@ -140,6 +142,12 @@ function entityAnchors(question, sentence, cited, owner) {
   const seen = [...String(question).matchAll(/\bsee(?:ing)?\s+([a-z][a-z'’.-]*(?:\s+[a-z][a-z'’.-]*){0,3}?)(?=\s+(?:next|again|on|at|for)\b|[?!,;]|$)/gi)]
     .map(match => clean(match[1])).filter(Boolean);
   if (seen.length) return seen;
+  // An agenda question can name no event at all. Its cited calendar titles
+  // supply subject tokens, while the occurrence/date checks still decide truth.
+  if (/\bwhat(?: is|'s) on (?:today|tomorrow)\b/i.test(question)) {
+    return [...new Set(cited.filter(doc => /^calendar:(?:event_start|all_day_start)$/.test(doc.date_source || ''))
+      .flatMap(doc => words(doc.title)).filter(word => !ownerWords.has(word)))];
+  }
   const explicit = queryEntityAnchors(question).map(clean).filter(Boolean);
   if (explicit.length) return explicit;
   // Unnamed "see her next" questions can bind through the named answer or its
@@ -165,7 +173,8 @@ export function applyTemporalVeto({ question, answer, evidenceGate, docs = [], c
   // possessive week modifier or "who do I see next" retains event intent.
   const eventQuestion = String(question || "").replace(PROCEDURAL_STEP, "");
   const future = !HISTORICAL_SEQUENCE.test(question || "") &&
-    (EVENT_NOUN.test(eventQuestion) && (FUTURE.test(eventQuestion) || when) ||
+    (/\bwhat(?: is|'s) on (?:today|tomorrow)\b/i.test(eventQuestion) ||
+      EVENT_NOUN.test(eventQuestion) && (FUTURE.test(eventQuestion) || when || /\b(?:today|tomorrow)\b/i.test(eventQuestion)) ||
       /\bsee(?:ing)?\b/i.test(eventQuestion) && (FUTURE.test(eventQuestion) || when) ||
       when && FUTURE.test(eventQuestion));
   // Keep ranking and specialized money/status behavior unchanged. Normalize

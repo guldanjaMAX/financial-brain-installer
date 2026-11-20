@@ -278,7 +278,7 @@ node brain.mjs connect google --scopes drive,gmail,calendar
 node brain.mjs ingest <manifest> --from calendar
 ```
 
-Later runs are incremental through Google's own sync token, same idea as Gmail's historyId. The token advances only after every event and cancellation is accepted; a failed or refused event is retried from the same Google window rather than silently skipped. A cancelled meeting is removed from your index, not left behind as a stale document. By default it reads your primary calendar; more than one calendar, or a shared one, is a manifest setting.
+Later runs are incremental through Google's own sync token, same idea as Gmail's historyId. The token advances only after every event and cancellation is accepted; a failed or refused event is retried from the same Google window rather than silently skipped. A cancelled meeting keeps its original stored text and is marked cancelled in search, readings and answers, so it is not presented as upcoming. No removal review is created. Existing pending Calendar plans become retained observations on normal refresh: explicit deletions are marked cancelled, while other causes stay kept. A failed marker readback keeps the sync position for retry and reports `INGEST_FAILED` with help. By default it reads your primary calendar; more than one calendar, or a shared one, is a manifest setting.
 
 A Calendar dry run reports the exact event count it could preview. If any declared calendar cannot be read, it prints the partial scope and exits nonzero with the reconsent or provider fix. An unread calendar is never presented as an empty one.
 

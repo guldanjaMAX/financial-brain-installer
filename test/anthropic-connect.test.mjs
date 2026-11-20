@@ -241,7 +241,7 @@ test("connect flags enforce exclusive key modes and cap bounds before work", () 
 test("next reset is the next UTC midnight", () => {
   const reset = nextUtcResetIso(new Date("2026-10-22T12:34:56.000Z"));
   assert.equal(reset, "2026-10-23T00:00:00.000Z");
-  assert.match(displayResetTime(reset, "America/Phoenix"), /America\/Phoenix/);
+  assert.equal(displayResetTime(reset, "America/Phoenix"), "5:00 PM Arizona time");
 });
 
 test("connect writes the manifest before the secret and preserves the selected cap rule", async () => {

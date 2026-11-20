@@ -5,6 +5,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { queryMoney } from '../worker/src/lib/money-query.js';
 import { moneyGuideFor, MONEY_TOOLS } from '../worker/src/lib/money-query-contract.js';
 import { handleMcp } from '../worker/src/lib/mcp-endpoint.js';
+import { documentResponseConfidence } from '../worker/src/lib/confidence.js';
 import { withFirstPartySourceProvenance } from '../worker/src/lib/provenance-receipt.js';
 
 const period = { period_from: '2026-09-01', period_to: '2026-09-30' };
@@ -237,13 +238,32 @@ test('R4 M-6: closed and future accounts do not penalize periods outside their l
   assert.ok((await f.query({},'SELECT * FROM fin_balance_snapshots')).confidence.percent<=60);
 });
 
-test('R4 M-7: remote non-answer never inherits confidence in a refusal', async () => {
+test('R4 M-7: remote missing-answer evidence keeps its internal ceiling without an owner score line', async () => {
   for (const answer of [null,'The documents do not answer this question.']) {
-    const r = await rpc({},'librarian','ask',{question:'When does the synthetic lease renew?'},{think:async()=>({answer,results:[],gaps:[],confidence:{percent:80,band:'moderate',basis:['x']}})});
-    assert.match(r.content[0].text,/Confidence: Low \((?:[0-2]?\d|30)%\)/);
-    assert.match(r.content[0].text,/Why: No record read here answers the question/);
-    assert.match(r.content[0].text,/Missing: A record that states the answer/);
+    const thought = {answer,results:[],gaps:[],confidence:{percent:80,band:'moderate',basis:['x']}};
+    const before = structuredClone(thought);
+    let calls = 0;
+    const r = await rpc({},'librarian','ask',{question:'When does the synthetic lease renew?'},{think:async()=>{ calls++; return thought; }});
+    assert.equal(calls,1,'the remote ask reached the reading and presentation decision');
+    const score = documentResponseConfidence(thought);
+    assert.equal(score.band,'Low');
+    assert.equal(score.percent,20,'the old refusal score cannot certify an answer');
+    assert.match(score.basis.join(' '),/No record read here answers the question/);
+    assert.match(score.missing.join(' '),/A record that states the answer/);
+    assert.match(r.content[0].text,/I can try a more specific search/);
+    assert.match(r.content[0].text,/No record read here answers the question/);
+    assert.match(r.content[0].text,/Still needed: A record that states the answer/);
+    assert.doesNotMatch(r.content[0].text,/Confidence:|\b(?:High|Medium|Low)\b|\d+%/);
+    assert.deepEqual(thought,before,'the renderer leaves the returned internal assessment unchanged');
   }
+  const thought = {answer:'The lease renews on October 1, 2027.',results:[],gaps:[],
+    answer_contract:{version:1,kind:'document'},confidence:{percent:95,band:'High',basis:[],missing:[]}};
+  let calls = 0;
+  const control = await rpc({},'librarian','ask',{question:'When does the synthetic lease renew?'},{think:async()=>{ calls++; return thought; }});
+  assert.equal(calls,1,'the populated green control reaches the same remote ask route');
+  assert.match(control.content[0].text,/The lease renews on October 1, 2027/);
+  assert.equal(documentResponseConfidence(thought).percent,95,'hiding owner scores cannot lower verified metadata');
+  assert.doesNotMatch(control.content[0].text,/Confidence:|\b(?:High|Medium|Low)\b|\d+%/);
 });
 
 test('R4 M-8: remote routing only names tools the profile can use', async () => {
@@ -268,8 +288,22 @@ test('R4 trivial minors: clock override, evidence, priced malformed dates, legac
   const guide = moneyGuideFor(); assert.ok(guide.split('\n').length<60);
   assert.match(guide,/Result: rows,row_count,truncated,ms,confidence,evidence/);
   assert.match(guide.split('\n').at(-1),/evidence.as_of on a query result overrides this line/);
-  const {MONEY_QUERY_ERROR_TEXT} = await import('../worker/src/lib/money-query-contract.js');
-  for (const message of Object.values(MONEY_QUERY_ERROR_TEXT)) assert.match(message,/Confidence: Low \(0%\)\. Why:.*Missing:/);
+  const {MONEY_QUERY_ERROR_TEXT,unavailableMoneyQuery} = await import('../worker/src/lib/money-query-contract.js');
+  assert.ok(Object.keys(MONEY_QUERY_ERROR_TEXT).length>=4,'the reviewed error-message decision set is populated');
+  for (const [code,message] of Object.entries(MONEY_QUERY_ERROR_TEXT)) {
+    assert.match(message,/This attempt is incomplete because the query and evidence checks did not finish/);
+    assert.doesNotMatch(message,/Confidence:|\b(?:High|Medium|Low)\b|\d+%/);
+    const partial = unavailableMoneyQuery(code);
+    assert.equal(partial.code,code);
+    assert.equal(partial.status,'partial');
+    assert.equal(partial.rows,null,'unread amounts remain unknown');
+    assert.equal(partial.confidence.level,'Low');
+    assert.equal(partial.confidence.percent,0);
+    assert.match(partial.confidence_text,/^Confidence: Low \(0%\)\nReasons: The requested money rows could not be read; their dollar impact is unknown\.\nMissing: Read the requested accounts and dates /);
+    assert.ok(partial.confidence.reasons.length && partial.confidence.missing.length);
+    assert.match(partial.confidence.reasons.join(' '),/money rows could not be read; their dollar impact is unknown/);
+    assert.match(partial.confidence.missing.join(' '),/requested accounts and dates/);
+  }
   const {ownerConfidenceLine} = await import('../worker/src/lib/confidence.js');
   assert.equal(ownerConfidenceLine({percent:20,basis:['a','b'],missing:['c']}),'Confidence: Low (20%). Why: a; b. Missing: c.');
   const slug='simplefin-'+ 'a'.repeat(32); f.account(slug,'2222');

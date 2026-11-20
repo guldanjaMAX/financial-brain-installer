@@ -2,6 +2,7 @@ import { queryMoney } from './money-query.js';
 import { accountKindReviewSql, applyAccountKindReview } from './fin-account-kinds.js';
 import { MONEY_OVERVIEW_NEXT_STEP, unavailableMoneyOverview } from './money-query-contract.js';
 import { confidenceText, unknownMoneyConfidence, limitMoneyConfidence, MONEY_ACCOUNT_HISTORY_SQL, moneyAccountStart } from './money-confidence.js';
+import { ownerEvidenceNote, ownerOutputText } from './owner-evidence.js';
 
 const unavailable = () => Object.assign(new Error('Could not read this part of the money overview.'),
   { code: 'MONEY_OVERVIEW_UNAVAILABLE' });
@@ -100,10 +101,10 @@ function coverageText(result) {
       `Confirmed complete coverage: ${a.coverage_confirmed ? `${a.covered_from} through ${a.covered_to}` : 'not established'}. ` +
       `Gaps/unverified history: ${a.gaps.length ? a.gaps.map(g => `${g.from} through ${g.to} (${g.reason})`).join('; ') : 'none within confirmed bounds'}. ` +
       `Pending not counted: ${a.pending_collection==='not_collected' ? 'not collected by this feed (amount unknown)' : a.pending_rows}; unreadable: ${a.unreadable_rows}; unconfirmed: ${a.unconfirmed_rows}; possible duplicate rows: ${a.possible_duplicate_count}; precedence duplicates removed: ${a.duplicate_rows_removed}; identity: ${a.identity_basis}. ` +
-      'Counts are not dollar amounts; see confidence for measured uncertainty amounts. Other unreadable, unconfirmed and duplicate impacts may be unknown.');
+      'Counts are not dollar amounts; see the evidence limits for measured uncertainty amounts. Other unreadable, unconfirmed and duplicate impacts may be unknown.');
   }
   for (const limitation of result.limitations) lines.push(limitation.text);
-  lines.push('Row dates are observations, not proof of complete history. Connection status does not prove a successful current sync; confidence states any missing or stale successful-sync evidence. Monthly amounts may be incomplete where coverage is unverified. Scope the answer coverage line to its actual accounts and dates. Unknown history has unknown dollar impact. Keep exact gross posted amounts exact; label uncertain classification amounts as estimates and show the uncertain rows.');
+  lines.push('Row dates are observations, not proof of complete history. Connection status does not prove a successful current sync; the evidence limits state any missing or stale successful-sync evidence. Monthly amounts may be incomplete where coverage is unverified. Scope the answer coverage line to its actual accounts and dates. Unknown history has unknown dollar impact. Keep exact gross posted amounts exact; label uncertain classification amounts as estimates and show the uncertain rows.');
   return lines.join('\n');
 }
 
@@ -226,7 +227,10 @@ export async function overviewMoney(env, { now = Date.now, timeoutMs = 10000, ..
     'The owner calendar uses a UTC fallback; the requested local dates are unverified.', 'Configure the owner time zone and verify the requested period.');
   result.confidence_text = confidenceText(result.confidence);
   result.next_step = MONEY_OVERVIEW_NEXT_STEP;
-  result.coverage_text = coverageText(result) + '\n' + result.confidence_text;
+  // Quantified uncertainty was carried after the old badge. Retain those
+  // amounts and repair evidence even though the score itself is now internal.
+  const coverage = coverageText(result);
+  result.coverage_text = ownerOutputText([coverage, ownerEvidenceNote(result.confidence, coverage)].filter(Boolean).join('\n'));
   return result;
 }
 

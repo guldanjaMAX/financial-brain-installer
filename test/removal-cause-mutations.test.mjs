@@ -3,7 +3,7 @@ import test from "node:test";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-for (const [mode, group, markers] of [["good", "gmail", 0], ["f1", "gmail", 2],
+for (const [mode, group, markers] of [["good", "gmail", 0], ["f1", "gmail", 1],
   ["good", "microsoft", 0], ["f2", "microsoft", 1]]) {
   test(`removal cause restoring control: ${mode} ${group}`, () => {
     if (process.env.BRAIN_LANE_NODE_WAIT) {
@@ -18,8 +18,11 @@ for (const [mode, group, markers] of [["good", "gmail", 0], ["f1", "gmail", 2],
     const output = `${result.stdout}\n${result.stderr}`;
     assert.equal(result.signal, null);
     assert.equal((output.match(/REMOVAL_CAUSE_MUTANT_REACHED:/g) || []).length, markers);
-    // Both bad arms must first complete the true-deletion control.
-    assert.match(output, new RegExp(`PASS ${group}-deleted:.*planned=1`));
+    // Provider tombstones stay kept for Calendar/Microsoft; Gmail retains an
+    // exact nonblocking owner plan. Each mutant must first pass its true control.
+    assert.match(output, new RegExp(group === "gmail"
+      ? "PASS gmail-deleted:.*planned=1.*apply=0.*outcome=reviewed"
+      : "PASS microsoft-deleted:.*planned=0.*apply=0.*outcome=retained"));
     if (mode === "good") {
       assert.equal(result.status, 0, output);
       assert.match(output, /TOTAL .* safety probes passed/);

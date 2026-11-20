@@ -34,7 +34,8 @@ describe("financial-entity scope choice", () => {
     );
 
     expect(html).toContain('aria-label="Financial entity selection"');
-    expect(html).toContain("Choose one part of your finances to continue");
+    expect(html).toContain("Pick one person, household, business, trust, property, or investment below");
+    expect(html).not.toContain("Choose one part of your finances to continue");
     expect(html).toContain("person, household, business, trust, property, or investment");
     expect(html).toContain("flex flex-wrap gap-2");
     expect(html).not.toContain("overflow-x-auto");
@@ -58,8 +59,12 @@ describe("financial-entity scope choice", () => {
       <ScopeBar entities={entities} value={null} choiceMade={false} onChange={vi.fn()} />,
     );
 
-    expect(html).toContain("Choose what to view");
-    expect(html).toContain("Financial Brain will not silently choose for you");
+    expect(html).toContain("Choose Whole Brain to include all evidence");
+    expect(html).not.toContain("will not silently choose");
+    expect(html).not.toContain("Choose what to view");
+    expect(html).not.toContain("Choose a view");
+    expect(html).not.toContain("bg-amber");
+    expect(html).toContain("border-line bg-card");
     expect(html).toContain("Whole Brain");
     expect(html).not.toContain('aria-pressed="true"');
   });
@@ -79,14 +84,17 @@ describe("financial-entity scope choice", () => {
       <FirstEntitySetup refresh={async () => []} select={vi.fn()} />,
     );
 
-    expect(html).toContain("Add your first financial entity");
-    expect(html).toContain("Nothing has been guessed or combined");
+    expect(html).toContain("Add your first person or business");
+    expect(html).toContain("STEP 1 of 2");
+    expect(html).not.toContain("Nothing has been guessed or combined");
     expect(html).toContain("does not import an account, decide a tax treatment, or claim that your Financial Map is complete");
     expect(html).toContain("Exact name");
     expect(html).toContain("What is it?");
     expect(html).toContain("Choose one");
     expect(html).not.toContain('value="household" selected');
     expect(html).toContain(">Review</button>");
+    expect(html).toMatch(/class="[^"]*bg-accent[^"]*">Review<\/button>/);
+    expect(html).not.toContain("bg-amber");
     expect(html).toContain("Do not guess");
   });
 });

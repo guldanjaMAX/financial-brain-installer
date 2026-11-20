@@ -73,6 +73,7 @@ export const TECHNICIAN_PREREQUISITES = Object.freeze([
 export const TECHNICIAN_STEPS = Object.freeze([
   Object.freeze({
     id: "tools",
+    minutes: 1,
     title: "Check this computer and install the owner tools",
     dashboard_url: "https://financialbrain.ai/install",
     human_boundary: "Before approval, explain that this step installs or updates the reviewed technician skill for Claude Code, and for Codex only when Codex is already present, records local bootstrap status, and may add the Brain CLI folder to PATH. The owner uses a normal, non-Administrator terminal and signs in to Claude in their browser. The technician runs Anthropic's interactive doctor with Claude Code's normal approval prompts enabled.",
@@ -88,6 +89,7 @@ export const TECHNICIAN_STEPS = Object.freeze([
   }),
   Object.freeze({
     id: "cloudflare",
+    minutes: 23,
     title: "Install the private Brain",
     dashboard_url: "https://dash.cloudflare.com/",
     human_boundary: "The owner signs in, completes 2FA, and chooses the exact account. After Cloudflare verifies it, the installer opens that account's Workers & Pages plan page for the owner's Paid confirmation. Before any resource is created, the owner approves Cloudflare's browser consent. Normal fresh setup creates no API token. Before approval, explain that setup also adds or updates the Brain MCP entry in installed AI tools and may create a new owner-workspace CLAUDE.md and AGENTS.md for Codex, with answer rules and owner-approved account labels. Use --no-connect if the owner declines those local config writes.",
@@ -103,6 +105,7 @@ export const TECHNICIAN_STEPS = Object.freeze([
   }),
   Object.freeze({
     id: "smoke",
+    minutes: 1,
     title: "Load the non-private first-install smoke document",
     dashboard_url: null,
     human_boundary: "The owner approves one fixed, public, non-customer smoke document and its tiny Workers AI embedding cost. No local file, account credential, or customer content is read.",
@@ -118,6 +121,7 @@ export const TECHNICIAN_STEPS = Object.freeze([
   }),
   Object.freeze({
     id: "anthropic",
+    minutes: 6,
     title: TECHNICIAN_ANTHROPIC_COPY.title,
     dashboard_url: ANTHROPIC_CONSOLE_URL,
     // The Console's exact navigation and privacy labels are checked live by
@@ -128,6 +132,7 @@ export const TECHNICIAN_STEPS = Object.freeze([
   }),
   Object.freeze({
     id: "google",
+    minutes: 32,
     title: "Connect Google Drive, Gmail, and Calendar",
     dashboard_url: "https://console.cloud.google.com/apis/credentials",
     human_boundary: "The owner chooses or creates the Google project and approves the OAuth consent screen in their browser.",
@@ -143,6 +148,7 @@ export const TECHNICIAN_STEPS = Object.freeze([
   }),
   Object.freeze({
     id: "zoom",
+    minutes: 10,
     title: "Connect Zoom cloud transcripts",
     dashboard_url: "https://marketplace.zoom.us/develop/create",
     human_boundary: "A Zoom admin creates a Server-to-Server OAuth app, grants the recording scope, and later saves the verified webhook subscription.",
@@ -158,6 +164,7 @@ export const TECHNICIAN_STEPS = Object.freeze([
   }),
   Object.freeze({
     id: "imap",
+    minutes: 5,
     title: "Connect an IMAP mailbox",
     dashboard_url: null,
     human_boundary: "The mailbox owner creates an app password in their provider and enters it only into the hidden terminal prompt.",
@@ -173,6 +180,7 @@ export const TECHNICIAN_STEPS = Object.freeze([
   }),
   Object.freeze({
     id: "passkey",
+    minutes: 1,
     title: "Enroll the owner passkey",
     dashboard_url: null,
     human_boundary: "The agent explains the passkey ceremony first. The owner runs the invite command in a directly controlled terminal, opens the private 15-minute link on their device, checks the final Brain hostname, chooses Create my owner passkey, and completes the device's own Face ID, Touch ID, fingerprint, security-key, or PIN prompt themselves.",
@@ -188,6 +196,7 @@ export const TECHNICIAN_STEPS = Object.freeze([
   }),
   Object.freeze({
     id: "verify",
+    minutes: 1,
     title: "Run the handoff checks",
     dashboard_url: null,
     human_boundary: "The technician reviews each result and keeps unavailable connector or passkey checks clearly marked for follow-up.",
@@ -531,7 +540,7 @@ export function technicianSetupRoute(manifest, intentValue, {
 
 export function technicianPlan(manifestPath, deps = {}) {
   if (!manifestPath || String(manifestPath).startsWith("--")) {
-    throw new Error("usage: brain technician <manifest> --intent <first_brain|existing_this_computer|existing_new_computer|resume_interrupted|unsure> [--json] [--run <step>]");
+    throw new Error("usage: brain technician <manifest> --intent <first_brain|existing_this_computer|existing_new_computer|resume_interrupted|unsure> [--json] [--run <step>] [--details]");
   }
   const manifest = readManifestSummary(manifestPath, deps);
   const platformName = deps.platformName ?? process.platform;
@@ -788,67 +797,187 @@ export function technicianDisplayCommand(
   return exactCommand(locator, [...routed, step], platformName);
 }
 
-export function renderTechnicianPlan(plan) {
-  const lines = [
-    "",
-    "Financial Brain technician setup",
-    "================================",
-    `Manifest: ${plan.manifest.path}`,
-    `Install record: ${plan.manifest.record_state.replaceAll("_", " ")}, live state not checked`,
-    `Owner route: ${plan.routing.intent.replaceAll("_", " ")}`,
-    `Routing result: ${plan.routing.status.replaceAll("_", " ")}`,
-    `Final hostname: ${plan.manifest.final_hostname || "not fixed yet"}`,
-    "",
-    "This screen prepares the visit. Each live check will add its own proof.",
-    "We will do one small action at a time and explain each page or prompt before it opens.",
-    "When browser help is available, it can handle official-page navigation and non-secret fields.",
-    "The owner takes over for login, 2FA, consent, billing, credentials, and physical passkey prompts.",
-    "Sensitive values stay in provider pages or hidden terminal prompts.",
-    "Local configuration writes are named before approval. Setup can use --no-connect when the owner wants AI-tool files left unchanged.",
-    plan.routing.owner_message,
-    plan.warning,
-    plan.coverage.bank_connections.owner_message,
-    "",
-    "Before setup can create anything:",
-    ...plan.prerequisites.map((item) => `- ${item.requirement}`),
-    "",
-  ];
-  for (const step of plan.steps) {
-    lines.push(`${step.order}. ${step.title}`);
-    if (step.state !== "not_checked") lines.push(`   State: ${step.state.replaceAll("_", " ")}`);
-    lines.push(`   What to expect: ${step.owner_guidance.before_action}`);
-    lines.push(`   ${step.human_boundary}`);
-    if (step.command) lines.push(`   Run: ${step.command}`);
-    else if (step.agent_after_owner_approval) {
-      lines.push(`   Claude runs after your approval: ${step.agent_after_owner_approval_display}`);
-    }
-    else if (step.represented_by_install_record || step.routing_stop) lines.push(`   ${step.existing_install_guidance}`);
-    else if (step.owner_only_command) lines.push(`   Owner-only direct terminal: ${step.owner_only_display}`);
-    else lines.push("   No public first-install command is available for this deferred connector ceremony.");
-    if (step.dashboard_url) lines.push(`   Dashboard: ${step.dashboard_url}`);
-    lines.push("");
+// Owner copy is separate from the agent contract. Titles, guidance, commands,
+// routing and original order in --json must remain byte-stable.
+// Cloudflare: 23 min measured; answers: 5.5 min rounded up. The remaining
+// minutes are estimates to measure on the next real install. Google includes
+// 12 min measured connection time plus 20 min for a new project and consent.
+// Bank setup is outside this plan and must not inflate today's total.
+const OWNER_STEP_COPY = Object.freeze({
+  tools: {
+    title: "Check this computer",
+    happens: "Your installer will check this computer and prepare your tools.",
+    actions: [
+      "You use your normal computer account and terminal, with at least 2 GB free space.",
+      "You approve updating the installer guide, saving local setup progress, and making the Brain command available in your terminal.",
+      "You sign in to Claude and complete 2FA if asked.",
+    ],
+  },
+  cloudflare: {
+    title: "Create your Brain on Cloudflare",
+    happens: "Your Brain will be created in your own Cloudflare account.",
+    actions: [
+      "You sign in to Cloudflare, complete 2FA, and choose the account for your Brain.",
+      "You confirm that account's Workers and Pages plan says Paid ($5/month) before anything is created.",
+      "You approve Cloudflare's consent page and the connections and new Brain guides in your installed assistant tools.",
+    ],
+  },
+  smoke: {
+    title: "Add a test note to check your Brain works",
+    happens: "Your installer will add a public test note to check that your Brain works.",
+    actions: ["You approve adding this public note and its small processing cost."],
+  },
+  anthropic: {
+    title: "Choose who writes your answers",
+    happens: "You will choose whether Claude writes your answers using your own Anthropic account.",
+    actions: [
+      "You choose Claude answers or keep the built-in model.",
+      "If you choose Claude, you sign in to the Claude Console and approve any billing.",
+      "You stop screen sharing and recording before creating a key, then click Create and Copy and keep the key window open.",
+      "You approve the installer's command, then close the key window once it succeeds.",
+    ],
+  },
+  google: {
+    title: "Connect Google Drive, Gmail, and Calendar",
+    happens: "You will prepare your Google project and approve the connection to your chosen Google sources.",
+    actions: [
+      "You sign in to Google, complete 2FA, and confirm the project and account for your Brain.",
+      "You approve the connection to the Google sources you chose.",
+      "You enter any revealed client value only in the hidden terminal prompt.",
+    ],
+  },
+  zoom: {
+    title: "Connect Zoom transcripts",
+    happens: "You will prepare a Zoom app to send your approved cloud-recording transcripts to your Brain.",
+    actions: [
+      "You sign in as your Zoom admin and complete 2FA.",
+      "You approve the app's access and enter any revealed value only in the hidden terminal prompt.",
+    ],
+  },
+  imap: {
+    title: "Connect email",
+    happens: "You will create a separate app password to connect your chosen mailbox.",
+    actions: [
+      "You sign in to your mail provider, complete 2FA, and approve creating an app password.",
+      "You enter the app password only in the hidden terminal prompt.",
+    ],
+  },
+  passkey: {
+    title: "Save your passkey",
+    happens: "Choosing Create my owner passkey opens your device's secure sign-in window.",
+    actions: [
+      "You open the private setup link on your device and check your Brain's address.",
+      "You choose Create my owner passkey and follow the device window using Face ID, fingerprint, device PIN, or screen lock.",
+      "You cancel if the address or prompt is unexpected.",
+    ],
+  },
+  verify: {
+    title: "Final checks",
+    happens: "Your installer will check your Brain, connected sources, and saved sign-in devices.",
+    actions: ["You review any remaining account or device question with your installer."],
+  },
+});
+
+function ownerStepCopy(step, platformName = process.platform) {
+  if (step.id === "cloudflare" && step.routing_stop) {
+    return {
+      title: "Review your Brain setup",
+      happens: "Your installer needs to check your saved setup before continuing.",
+      actions: ["You review the setup issue with your installer before continuing."],
+    };
   }
+  if (step.id === "cloudflare" && step.title === "Resume this Brain's saved setup") {
+    return {
+      title: "Continue your Brain setup",
+      happens: "Your installer will continue your saved setup from where it stopped.",
+      actions: ["You approve continuing this saved setup and stop if any unexpected account or sign-in request appears."],
+    };
+  }
+  if (step.id === "cloudflare" && step.represented_by_install_record) {
+    return {
+      title: "Check your existing Brain",
+      happens: "Your installer will check this computer's connection to your existing Brain before any repair or update.",
+      actions: ["You confirm this is the Brain you want to use on this computer."],
+    };
+  }
+  const copy = OWNER_STEP_COPY[step.id];
+  if (!copy) throw new Error("the technician step has no owner copy");
+  if (step.id === "google" && platformName === "win32") {
+    return { ...copy, actions: [
+      ...copy.actions.slice(0, 2),
+      "You copy the Client ID and then the Client secret on Google's page; the installer picks each one up from the clipboard by itself. Nothing is typed or pasted into the window.",
+    ] };
+  }
+  return copy;
+}
+
+function ownerSteps(steps = TECHNICIAN_STEPS) {
+  return steps.filter((step) => !DEFERRED_PUBLIC_CONNECTOR_STEPS.includes(step.id));
+}
+
+function ownerStepHeading(step, steps = TECHNICIAN_STEPS) {
+  const active = ownerSteps(steps);
+  const number = active.findIndex((candidate) => candidate.id === step.id) + 1;
+  const title = ownerStepCopy(step).title;
+  return number
+    ? `STEP ${number} of ${active.length} · ${title} · about ${step.minutes} min`
+    : `Later, with your installer: ${{ google: "Google", zoom: "Zoom", imap: "email" }[step.id]} · about ${step.minutes} min`;
+}
+
+export function renderTechnicianPlan(plan, { details = false } = {}) {
+  const steps = ownerSteps(plan.steps);
+  const minutes = steps.reduce((sum, step) => sum + step.minutes, 0);
+  const lines = ["", `Setting up your Brain · ${steps.length} steps · about ${minutes} minutes`, ""];
+  // A compact owner view must still expose a blocked route. Never make a
+  // missing or conflicting record look like approval to create a new Brain.
+  if (plan.routing.read_only_stop) {
+    lines.push(plan.routing.owner_message, `Code: ${plan.routing.issue_code}`, "");
+  }
+  for (const step of steps) lines.push(ownerStepHeading(step, plan.steps));
+  const later = plan.steps.filter((step) => DEFERRED_PUBLIC_CONNECTOR_STEPS.includes(step.id));
+  if (later.length) {
+    lines.push("", `Later, with your installer: ${later.map((step) => ({ google: "Google", zoom: "Zoom", imap: "email" })[step.id]).join(", ")}.`);
+  }
+  if (details) {
+    for (const step of steps) lines.push(renderTechnicianStepBriefing(step, { details: true }));
+  }
+  lines.push("");
   return lines.join("\n");
 }
 
-export function renderTechnicianStepBriefing(stepOrId, { platformName = process.platform } = {}) {
+export function renderTechnicianStepBriefing(stepOrId, { platformName = process.platform, details = false } = {}) {
   const step = typeof stepOrId === "string"
     ? TECHNICIAN_STEPS.find((candidate) => candidate.id === stepOrId)
     : stepOrId;
   if (!step?.owner_guidance) throw new Error("the technician step has no owner briefing");
+  const copy = ownerStepCopy(step, platformName);
   const guidance = ownerGuidanceFor(step, platformName);
-  return [
+  const lines = [
     "",
-    `Before we start: ${step.title}`,
-    "--------------------------------",
-    `What will happen: ${guidance.before_action}`,
+    ownerStepHeading(step),
+    `What happens: ${copy.happens}`,
+    "",
+    "****ACTION NEEDED****",
+    ...copy.actions.map((action, index) => `Step ${index + 1} - ${action}`),
+  ];
+  if (details && !step.routing_stop) lines.push(
+    "",
+    `More about this step: ${guidance.before_action}`,
     `Why this helps: ${guidance.why}`,
     `Smallest access: ${guidance.minimum_access}`,
     `Browser help: ${guidance.browser_help}`,
-    `Your part: ${guidance.owner_only}`,
     `Privacy: ${guidance.privacy}`,
-    "",
-  ].join("\n");
+  );
+  lines.push("");
+  return lines.join("\n");
+}
+
+export function renderTechnicianStepDone(step, steps = TECHNICIAN_STEPS) {
+  const active = ownerSteps(steps);
+  const number = active.findIndex((candidate) => candidate.id === step.id) + 1;
+  return number
+    ? `✅ STEP ${number} of ${active.length} done: ${ownerStepCopy(step).title}`
+    : `✅ ${ownerStepCopy(step).title} done`;
 }
 
 function childCommands(step, manifestPath, flags, scriptPath, routing = null) {

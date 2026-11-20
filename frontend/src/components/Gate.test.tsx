@@ -1,4 +1,5 @@
 import { renderToStaticMarkup } from "react-dom/server";
+import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../lib/api";
 import { explainCeremonyFailure } from "../lib/passkey";
@@ -6,7 +7,16 @@ import { FinanceScopeProvider } from "./FinanceScope";
 import { Gate, gatePasskeyFailure } from "./Gate";
 import { AddPasskeyContext, BankConnectionsSection, DISCONNECT_BANK_QUESTION, Settings, addPasskeyFailure } from "./Settings";
 
-afterEach(() => vi.unstubAllGlobals());
+vi.mock("react", async (importOriginal) => {
+  const original = await importOriginal<typeof import("react")>();
+  return { ...original, useState: vi.fn(original.useState) };
+});
+
+afterEach(async () => {
+  const original = await vi.importActual<typeof import("react")>("react");
+  vi.mocked(React.useState).mockImplementation(original.useState);
+  vi.unstubAllGlobals();
+});
 
 function supportedPasskeyBrowser() {
   const create = vi.fn();
@@ -17,11 +27,232 @@ function supportedPasskeyBrowser() {
   return { create, get };
 }
 
+// Exercise the component's actual click handlers and passkey client without
+// adding a DOM dependency. State slots also let the expired-invite recovery
+// button be reached through the same first failed click as in the browser.
+function signInHarness(search: string, inviteCode: string | null = null) {
+  const credentials = supportedPasskeyBrowser();
+  credentials.get.mockResolvedValue({
+    id: "fixture-credential",
+    response: {
+      authenticatorData: new Uint8Array([1]).buffer,
+      clientDataJSON: new Uint8Array([2]).buffer,
+      signature: new Uint8Array([3]).buffer,
+    },
+  });
+  const assign = vi.fn();
+  const replaceState = vi.fn();
+  const onIn = vi.fn();
+  vi.stubGlobal("location", { hostname: "brain.invalid", search, assign });
+  vi.stubGlobal("history", { replaceState });
+  const fetch = vi.fn(async (path: string) => {
+    if (path === "/auth/register/options") {
+      return Response.json({ error: "the enrollment link is invalid, expired, or already used" }, { status: 403 });
+    }
+    if (path === "/auth/login/options") {
+      return Response.json({ challenge: "Zml4dHVyZQ", rp_id: "brain.invalid" });
+    }
+    if (path === "/auth/login/verify") return Response.json({ ok: true });
+    throw new Error("unexpected fixture request");
+  });
+  vi.stubGlobal("fetch", fetch);
+
+  const states: unknown[] = [];
+  let cursor = 0;
+  const useState = ((initial: unknown) => {
+    const slot = cursor++;
+    if (!(slot in states)) states[slot] = typeof initial === "function" ? initial() : initial;
+    return [states[slot], (value: unknown) => { states[slot] = value; }];
+  }) as typeof React.useState;
+  vi.mocked(React.useState).mockImplementation(useState);
+
+  function tree() {
+    cursor = 0;
+    return Gate({ owner: "Fixture Owner", inviteCode, enrollmentKind: inviteCode ? "owner" : null, onIn });
+  }
+  function button(label: string) {
+    function find(node: React.ReactNode): React.ReactElement<{ onClick: () => Promise<void>; children: React.ReactNode }> | undefined {
+      for (const child of React.Children.toArray(node)) {
+        if (!React.isValidElement<{ onClick: () => Promise<void>; children: React.ReactNode }>(child)) continue;
+        if (child.type === "button" && child.props.children === label) return child;
+        const found = find(child.props.children);
+        if (found) return found;
+      }
+    }
+    const found = find(tree());
+    expect(found, `the real Gate must expose ${label}`).toBeDefined();
+    return found!;
+  }
+  return { ...credentials, assign, replaceState, onIn, fetch, button, html: () => renderToStaticMarkup(tree()) };
+}
+
+describe("bank page return after sign-in", () => {
+  it("returns to the fixed bank page only after sign-in verification succeeds", async () => {
+    const harness = signInHarness("?then=connect-bank");
+    let verify!: (response: Response) => void;
+    harness.fetch.mockImplementationOnce(async () => Response.json({ challenge: "Zml4dHVyZQ", rp_id: "brain.invalid" }));
+    harness.fetch.mockImplementationOnce(() => new Promise<Response>((resolve) => { verify = resolve; }));
+    const signingIn = harness.button("Continue with a passkey").props.onClick();
+    await vi.waitFor(() => expect(harness.fetch).toHaveBeenCalledWith("/auth/login/verify", expect.anything()));
+    expect(harness.get).toHaveBeenCalledOnce();
+    expect(harness.assign).not.toHaveBeenCalled();
+    expect(harness.onIn).not.toHaveBeenCalled();
+    verify(Response.json({ ok: true }));
+    await signingIn;
+    expect(harness.assign).toHaveBeenCalledExactlyOnceWith("/app/connect/bank");
+    expect(harness.onIn).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "", // Ordinary sign-in is the unchanged green control.
+    "?then=https://evil.example",
+    "?then=//evil.example",
+    "?then=/anything-else",
+    "?then=https%3A%2F%2Fevil.example",
+    "?then=%2F%2Fevil.example",
+    "?then=javascript:alert(1)",
+    "?then=connect-bank%2Fanything-else",
+  ])("keeps an ordinary or unrecognised destination on the app: %s", async (search) => {
+    const harness = signInHarness(search);
+    await harness.button("Continue with a passkey").props.onClick();
+    expect(harness.get).toHaveBeenCalledOnce();
+    expect(harness.fetch).toHaveBeenCalledWith("/auth/login/verify", expect.anything());
+    expect(harness.onIn).toHaveBeenCalledOnce();
+    expect(harness.assign).not.toHaveBeenCalled();
+  });
+
+  it("does not navigate or open the workspace when bank sign-in fails (control)", async () => {
+    const harness = signInHarness("?then=connect-bank");
+    harness.get.mockRejectedValueOnce({ name: "NotAllowedError" });
+    await harness.button("Continue with a passkey").props.onClick();
+    expect(harness.get).toHaveBeenCalledOnce();
+    expect(harness.assign).not.toHaveBeenCalled();
+    expect(harness.onIn).not.toHaveBeenCalled();
+    expect(harness.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("also returns to the bank page through Sign in instead after an expired invite", async () => {
+    const harness = signInHarness("?then=connect-bank", "fixture-invite");
+    await harness.button("Create my owner passkey").props.onClick();
+    expect(harness.fetch).toHaveBeenCalledWith("/auth/register/options", expect.anything());
+    expect(harness.assign).not.toHaveBeenCalled();
+    await harness.button("Sign in instead").props.onClick();
+    expect(harness.get).toHaveBeenCalledOnce();
+    expect(harness.fetch).toHaveBeenCalledWith("/auth/login/verify", expect.anything());
+    expect(harness.assign).toHaveBeenCalledExactlyOnceWith("/app/connect/bank");
+    expect(harness.onIn).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("calm passkey recovery", () => {
+  it("makes sign-in primary after the real expired-link decision and hides stale instructions", async () => {
+    const harness = signInHarness("", "fixture-invite");
+    expect(harness.html()).toContain("Here is what happens next"); // Green control.
+    await harness.button("Create my owner passkey").props.onClick();
+    expect(harness.fetch).toHaveBeenCalledWith("/auth/register/options", expect.anything());
+    const html = harness.html();
+    expect(html).toContain("This setup link can&#x27;t be used");
+    expect(html).toContain("ask your installer for a new link");
+    expect(html).not.toContain("Here is what happens next");
+    expect(html).not.toContain("Usually");
+    expect(html).not.toContain("Last step:");
+    expect(html).not.toContain("Passkey setup unavailable here");
+    expect(html).toMatch(/<button[^>]*bg-accent[^>]*>Sign in instead<\/button>/);
+    await harness.button("Sign in instead").props.onClick();
+    expect(harness.get).toHaveBeenCalledOnce();
+    expect(harness.onIn).toHaveBeenCalledOnce();
+  });
+
+  it.each(["create", "get"] as const)("puts a %s cancellation above the action in amber with a stable code", async (method) => {
+    const harness = signInHarness("", method === "create" ? "fixture-invite" : null);
+    harness.fetch.mockImplementationOnce(async () => Response.json(method === "create"
+      ? { challenge: "Zml4dHVyZQ", rp: { id: "brain.invalid", name: "Fixture Brain" }, user_name: "owner" }
+      : { challenge: "Zml4dHVyZQ", rp_id: "brain.invalid" }));
+    harness[method].mockRejectedValueOnce({ name: "NotAllowedError" });
+    const label = method === "create" ? "Create my owner passkey" : "Continue with a passkey";
+    await harness.button(label).props.onClick();
+    expect(harness[method]).toHaveBeenCalledOnce();
+    const html = harness.html();
+    expect(html).toMatch(/role="alert"[^>]*bg-act-bg/);
+    expect(html.indexOf('role="alert"')).toBeLessThan(html.indexOf("<button"));
+    expect(html).toContain("Code PASSKEY_CANCELLED");
+    expect(html).not.toContain("NotAllowedError");
+    expect(harness.onIn).not.toHaveBeenCalled();
+    expect(harness.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["create", "get"] as const)("also treats an empty %s prompt result as a calm cancellation", async (method) => {
+    const harness = signInHarness("", method === "create" ? "fixture-invite" : null);
+    harness.fetch.mockImplementationOnce(async () => Response.json(method === "create"
+      ? { challenge: "Zml4dHVyZQ", rp: { id: "brain.invalid", name: "Fixture Brain" }, user_name: "owner" }
+      : { challenge: "Zml4dHVyZQ", rp_id: "brain.invalid" }));
+    harness[method].mockResolvedValueOnce(null);
+    await harness.button(method === "create" ? "Create my owner passkey" : "Continue with a passkey").props.onClick();
+    expect(harness[method]).toHaveBeenCalledOnce();
+    expect(harness.html()).toContain("Code PASSKEY_CANCELLED");
+    expect(harness.html()).toMatch(/role="alert"[^>]*bg-act-bg/);
+    expect(harness.onIn).not.toHaveBeenCalled();
+    expect(harness.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers sign-in for an existing passkey without putting exception names in owner copy", async () => {
+    const harness = signInHarness("", "fixture-invite");
+    harness.fetch.mockImplementationOnce(async () => Response.json({ challenge: "Zml4dHVyZQ", rp: { id: "brain.invalid", name: "Fixture Brain" }, user_name: "owner" }));
+    harness.create.mockRejectedValueOnce({ name: "InvalidStateError" });
+    await harness.button("Create my owner passkey").props.onClick();
+    expect(harness.create).toHaveBeenCalledOnce();
+    const html = harness.html();
+    expect(html).toContain("already has an owner passkey");
+    expect(html).toContain("Code PASSKEY_ALREADY_SAVED");
+    expect(html).not.toContain("InvalidStateError");
+    await harness.button("Sign in instead").props.onClick();
+    expect(harness.onIn).toHaveBeenCalledOnce();
+  });
+
+  it.each(["SecurityError", "NotSupportedError", "AbortError"])("keeps %s as a support code rather than an exception suffix", (name) => {
+    const error = explainCeremonyFailure({ name }, "brain.invalid");
+    expect(error.message).not.toContain(name);
+    const failure = gatePasskeyFailure(error, { enrolling: false, rehearsal: false });
+    expect(failure.message).toBe(error.message);
+  });
+
+  it("offers a working copy action in an unsupported browser, and a calm fallback if copying fails", async () => {
+    const harness = signInHarness("");
+    vi.stubGlobal("window", {});
+    const writeText = vi.fn().mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("Copy unavailable"));
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    vi.stubGlobal("location", { hostname: "brain.invalid", href: "https://brain.invalid/app", search: "" });
+    const before = harness.html();
+    expect(before).toContain("This browser cannot use passkeys");
+    expect(before).toContain("bg-act-bg");
+    await harness.button("Copy this link").props.onClick();
+    expect(writeText).toHaveBeenCalledExactlyOnceWith("https://brain.invalid/app");
+    expect(harness.html()).toContain("Link copied. Open it in Safari or Chrome.");
+    await harness.button("Copy this link").props.onClick();
+    expect(writeText).toHaveBeenCalledTimes(2);
+    expect(harness.html()).toContain("Copy the link from your address bar");
+    expect(harness.html()).toContain("Code PASSKEY_COPY_UNAVAILABLE");
+    expect(harness.onIn).not.toHaveBeenCalled();
+  });
+
+  it("hands the saved-passkey notice to the app only after successful owner enrollment", async () => {
+    const harness = signInHarness("", "fixture-invite");
+    harness.fetch.mockImplementationOnce(async () => Response.json({ challenge: "Zml4dHVyZQ", rp: { id: "brain.invalid", name: "Fixture Brain" }, user_name: "owner" }));
+    harness.fetch.mockImplementationOnce(async () => Response.json({ ok: true }));
+    harness.create.mockResolvedValueOnce({ id: "fixture-credential", response: { attestationObject: new Uint8Array([1]).buffer, clientDataJSON: new Uint8Array([2]).buffer } });
+    await harness.button("Create my owner passkey").props.onClick();
+    expect(harness.create).toHaveBeenCalledOnce();
+    expect(harness.fetch).toHaveBeenCalledWith("/auth/register/verify", expect.anything());
+    expect(harness.onIn).toHaveBeenCalledExactlyOnceWith("✓ Passkey saved. Sign in with Touch ID from now on.");
+  });
+});
+
 describe("passkey ceremony context", () => {
   it("explains owner enrollment without opening a system prompt during render", () => {
     const credentials = supportedPasskeyBrowser();
     const html = renderToStaticMarkup(
-      <Gate owner="Dana Owner" inviteCode="fixture-invite" enrollmentKind="owner" onIn={() => undefined} />,
+      <Gate owner="Fixture Owner" inviteCode="fixture-invite" enrollmentKind="owner" onIn={() => undefined} />,
     );
 
     expect(credentials.create).not.toHaveBeenCalled();
@@ -42,8 +273,12 @@ describe("passkey ceremony context", () => {
       expect(html.indexOf(visible)).toBeLessThan(html.indexOf("<details"));
     }
     expect(html).toContain("Canceling the device prompt does not use it");
-    expect(html).toContain("material connected to your Brain");
-    expect(html).toContain("coverage it cannot prove");
+    expect(html).toMatch(/material connected to your Brain[\s\S]{0,100}coverage it cannot prove/);
+    expect(html).toContain("Last step: save your passkey (about 10 seconds).");
+    expect(html).toContain("STEP 1 of 1");
+    expect(html).toContain("Fixture, your Brain is ready");
+    expect(html).toContain("Fixture Owner&#x27;s Brain");
+    expect(html).not.toContain("your Claude or Codex guide");
     expect(html).not.toContain("Everything you have written");
     expect(html).toContain("biometric data and device PIN never go to Financial Brain");
     expect(html).toContain("private passkey stays with your device or passkey provider");
@@ -55,7 +290,7 @@ describe("passkey ceremony context", () => {
   it("warns what sign-in will open before the owner clicks", () => {
     const credentials = supportedPasskeyBrowser();
     const html = renderToStaticMarkup(
-      <Gate owner="Dana Owner" inviteCode={null} enrollmentKind={null} onIn={() => undefined} />,
+      <Gate owner="Fixture Owner" inviteCode={null} enrollmentKind={null} onIn={() => undefined} />,
     );
 
     expect(credentials.create).not.toHaveBeenCalled();
@@ -64,7 +299,7 @@ describe("passkey ceremony context", () => {
     expect(html).toContain("answer the system prompt yourself");
     expect(html).toContain("Continue with a passkey");
     expect(html).toContain("New computer? In the passkey window choose to use your phone, then scan the code with the phone you set up. Lost your phone? Ask for a new setup link.");
-    expect(html).not.toContain("Welcome back, Dana");
+    expect(html).not.toContain("Welcome back, Fixture");
   });
 
   it("does not show browser exception names after a canceled passkey window", () => {
@@ -73,7 +308,7 @@ describe("passkey ceremony context", () => {
       "brain.fixture.test",
       "sign_in",
     );
-    expect(failure.message).toContain("prompt was dismissed");
+    expect(failure.message).toBe("Sign-in was cancelled or no passkey was found on this device. Tap Continue with a passkey to try again.");
     expect(failure.message).not.toContain("NotAllowedError");
   });
 
@@ -82,7 +317,7 @@ describe("passkey ceremony context", () => {
     vi.stubGlobal("window", { PublicKeyCredential: class {}, innerWidth: 390 });
     const html = renderToStaticMarkup(
       <Gate
-        owner="Dana Owner"
+        owner="Fixture Owner"
         inviteCode="doc_fixture-private-invite"
         enrollmentKind="document"
         onIn={() => undefined}
@@ -106,7 +341,7 @@ describe("passkey ceremony context", () => {
       expect(html.indexOf(visible)).toBeLessThan(html.indexOf("<details"));
     }
     expect(html).toContain("does not connect your files, messages, accounts, or other device data");
-    expect(html).not.toContain("your brain is ready");
+    expect(html).not.toMatch(/your Brain is ready/i);
     expect(html).not.toContain("This verifies that you are the owner");
     expect(html.indexOf("only the exact documents they chose")).toBeLessThan(
       html.indexOf("Create my passkey for shared access"),
@@ -176,7 +411,7 @@ describe("passkey ceremony context", () => {
 
     for (const expired of expiredLinks) {
       expect(expired).toEqual({
-        message: "This setup link has expired or was already used. Links work once and expire 15 minutes after they're made. If you already made a passkey on this device, choose Sign in instead. Otherwise ask for a new link.",
+        message: "This setup link has expired or was already used. Links work once and expire 15 minutes after they're made. If you already made a passkey on this device, choose Sign in instead. Otherwise ask your installer for a new link.",
         unavailable: true,
         allowSignIn: true,
       });
@@ -197,7 +432,7 @@ describe("passkey ceremony context", () => {
     vi.stubGlobal("window", { PublicKeyCredential: class {} });
     vi.stubGlobal("location", { hostname: "127.0.0.1", search: "?state=populated" });
     const gate = renderToStaticMarkup(
-      <Gate owner="Dana Owner" inviteCode="local-rehearsal-only" enrollmentKind="owner" onIn={() => undefined} />,
+      <Gate owner="Fixture Owner" inviteCode="local-rehearsal-only" enrollmentKind="owner" onIn={() => undefined} />,
     );
     const settings = renderToStaticMarkup(
       <FinanceScopeProvider>
@@ -206,7 +441,8 @@ describe("passkey ceremony context", () => {
     );
 
     expect(gate).toContain("intentionally unavailable in this local rehearsal");
-    expect(gate).toContain("Tap the button below");
+    expect(gate).toContain("This setup link can&#x27;t be used");
+    expect(gate).not.toContain("Tap the button below");
     expect(gate).toContain("Passkey setup unavailable here");
     expect(gate).toContain("disabled");
     expect(settings).toContain("Adding a passkey is intentionally unavailable in this local rehearsal");
@@ -227,7 +463,7 @@ describe("passkey ceremony context", () => {
     for (const enrollmentKind of ["owner", "document"] as const) {
       vi.stubGlobal("location", { hostname: "fixture-brain.example", search: "" });
       const real = renderToStaticMarkup(
-        <Gate owner="Dana Owner" inviteCode="fixture-invite" enrollmentKind={enrollmentKind} onIn={() => undefined} />,
+        <Gate owner="Fixture Owner" inviteCode="fixture-invite" enrollmentKind={enrollmentKind} onIn={() => undefined} />,
       );
       expect(real).toContain("Check that this page is at <strong>fixture-brain.example</strong>.");
       expect(real).not.toContain("What happens on the real");
@@ -236,12 +472,11 @@ describe("passkey ceremony context", () => {
       for (const loopback of loopbackHosts) {
         vi.stubGlobal("location", { hostname: loopback, search: "?state=populated" });
         const rehearsal = renderToStaticMarkup(
-          <Gate owner="Dana Owner" inviteCode="local-rehearsal-only" enrollmentKind={enrollmentKind} onIn={() => undefined} />,
+          <Gate owner="Fixture Owner" inviteCode="local-rehearsal-only" enrollmentKind={enrollmentKind} onIn={() => undefined} />,
         );
-        expect(rehearsal).toContain(enrollmentKind === "document"
-          ? "What happens on the real shared-access page"
-          : "What happens on the real setup page");
-        expect(rehearsal).toContain(`Check that this page is at <strong>${address}</strong>. If the address or secure window looks unexpected, choose Cancel. Nothing is enrolled.`);
+        expect(rehearsal).toContain(address);
+        expect(rehearsal).not.toContain("Tap the button below");
+        expect(rehearsal).not.toContain("Usually takes");
         for (const host of loopbackHosts) expect(rehearsal).not.toContain(host);
         expect(rehearsal).not.toContain("fixture-brain.example");
       }
@@ -282,7 +517,7 @@ describe("passkey ceremony context", () => {
             client_id: "app",
             name: "Claude remote connector (Librarian)",
             can_write: false,
-            connected_at: Date.now(),
+            connected_at: Date.UTC(2026, 0, 1),
             last_used_at: null,
           }]}
           onChange={() => undefined}
@@ -324,7 +559,7 @@ describe("passkey ceremony context", () => {
         readState="ready"
         banks={{
           configured: true,
-          connections: [{ item_ref: "synthetic-bank", institution_label: "Example Bank", status: "healthy" }],
+          connections: [{ item_ref: "synthetic-bank", institution_label: "Example Bank", status: "connected", health: { state: "healthy" } }],
           needs_attention: [],
         }}
         busy={false}
@@ -333,7 +568,7 @@ describe("passkey ceremony context", () => {
       />,
     );
 
-    expect(loading).toContain("Until this finishes, the state is unknown");
+    expect(loading).toContain("Checking your banks…");
     expect(unavailable).toContain("cannot say whether a bank is linked");
     expect(unavailable).toContain("not the same as no bank");
     expect(unavailable).toContain("reload Access");
@@ -343,7 +578,7 @@ describe("passkey ceremony context", () => {
     expect(configuredEmpty).toContain('href="/app/connect/bank"');
     expect(rehearsalConfigured).toContain("Bank review and repair are intentionally unavailable");
     expect(rehearsalConfigured).toContain("no real bank is connected");
-    expect(rehearsalConfigured).toContain("Repair unavailable in rehearsal");
+    expect(rehearsalConfigured).not.toContain("Repair unavailable in rehearsal");
     expect(rehearsalConfigured).not.toContain("/app/connect/bank");
     expect(rehearsalConfigured).not.toContain("Repair connection");
   });
@@ -362,8 +597,10 @@ describe("passkey ceremony context", () => {
         onDisconnect={() => undefined}
       />,
     );
-    expect(waiting).toContain(`${detail} Answers about money`);
-    expect(waiting).toContain("Connect another bank or choose account owners");
+    expect(waiting).toContain("2 accounts need an owner choice before their transactions can load.");
+    expect(waiting).toContain("Choose who owns each account on the Connect a bank page.");
+    expect(waiting).toContain("Answers about money are missing anything that has happened here since the last complete bank sync.");
+    expect(waiting).toContain("+ Connect a bank");
     expect(DISCONNECT_BANK_QUESTION).toBe("Disconnect this bank? New transactions stop. Your saved history stays.");
     expect(waiting).not.toContain("page..");
   });

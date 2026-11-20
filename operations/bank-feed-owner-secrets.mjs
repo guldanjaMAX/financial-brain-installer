@@ -1,7 +1,7 @@
 /**
  * Owner-present Plaid application-credential custody for `brain connect bank`.
  *
- * The owner types their own Plaid client ID and secret at a hidden prompt, and
+ * The owner copies their Plaid client ID and secret (or uses a hidden prompt), and
  * this module writes that pair straight onto the owner's Worker only after the
  * deploy-owned wrapping key is present. Nothing is read from the environment,
  * a flag, the manifest, or a file, and nothing but secret NAMES is ever
@@ -26,6 +26,12 @@ import {
   generateBankAccessWrappingKey,
 } from "./bank-access-wrapping-key.mjs";
 import { PLAID_PROFILE } from "../worker/src/lib/bank-feed-profiles.js";
+import { createHash } from "node:crypto";
+import {
+  readCustomApiClipboard,
+  clearCustomApiClipboard,
+  flushWindowsConsoleInput,
+} from "./custom-api-clipboard.mjs";
 
 export const BANK_FEED_PROVIDER_SECRET_NAMES = Object.freeze([
   "BANK_FEED_CLIENT_ID",
@@ -305,6 +311,127 @@ const PROMPT_LABELS = Object.freeze({
 });
 
 const VALIDATION_TIMEOUT_MS = 20_000;
+const CLIPBOARD_WAIT_MS = 10 * 60_000;
+// Unconfirmed provider length. It is only a reverse-order hint, never proof of
+// valid keys: the fixed instructions and provider check remain authoritative.
+// Confirm this on the provider's Keys page in the host gate before release.
+export const PLAID_CLIPBOARD_CLIENT_ID_LENGTH = 24;
+
+function clipboardError(code, message) {
+  // Shipped help works offline; code-specific web pages are not yet proven
+  // published. Resolve from the package so no machine path is hard-coded.
+  const help = new URL("../README.md#if-something-goes-wrong", import.meta.url).href;
+  return Object.assign(new Error(`${message} Code: ${code} · Help: ${help}`), { code });
+}
+
+/**
+ * Two new Copy clicks, with no secret-bearing return value. The callback may
+ * save only the provider-validated pair; its receipt must contain names only.
+ * The initial clipboard text survives only as a digest. Native failures are
+ * deliberately replaced, since a failed command can include its clipboard text.
+ */
+export async function readPairFromClipboard({
+  environment,
+  platform = process.platform,
+  toolEnvironment = {},
+  readClipboard = () => readCustomApiClipboard({ platform, environment: toolEnvironment }),
+  clearClipboard = () => clearCustomApiClipboard({ platform, environment: toolEnvironment }),
+  flushConsoleInput = () => flushWindowsConsoleInput({ platform, environment: toolEnvironment }),
+  now = Date.now,
+  sleep = defaultSleep,
+  timeoutMs = CLIPBOARD_WAIT_MS,
+  pollMs = 1_000,
+  report = () => {},
+  validateKeys,
+  acceptPair,
+} = {}) {
+  const label = environment === "production" ? "Production" : "Sandbox";
+  const rejected = () => clipboardError("INVALID_API_KEYS",
+    `Plaid didn't accept that pair. Copy the ${label} secret.`);
+  let clientId = "";
+  let secret = "";
+  try {
+    if (!["darwin", "win32"].includes(platform)) {
+      throw clipboardError("BANK_KEYS_CLIPBOARD_UNAVAILABLE", "Clipboard pickup is unavailable on this computer.");
+    }
+    if (!["sandbox", "production"].includes(environment) ||
+        typeof validateKeys !== "function" || typeof acceptPair !== "function") {
+      throw clipboardError("BANK_KEYS_VALIDATION_FAILED", "Your Plaid keys could not be checked. Nothing was saved.");
+    }
+    const read = async () => {
+      try {
+        const value = await readClipboard();
+        if (typeof value !== "string") throw new Error("invalid clipboard response");
+        return value.trim();
+      } catch {
+        throw clipboardError("BANK_KEYS_CLIPBOARD_UNAVAILABLE", "Your clipboard could not be read. Nothing was saved.");
+      }
+    };
+    const digest = (value) => createHash("sha256").update(value).digest("hex");
+    let lastHash = digest(await read());
+    let deadline = now() + timeoutMs;
+    const step = (number, name) => {
+      report(`STEP ${number} of 2 · On Plaid's Keys page, click the copy icon next to ${name}`);
+      report(`⏱ Waiting for your Plaid key, up to 10 minutes; I give up at ${new Date(deadline).toLocaleTimeString([], {
+        hour: "2-digit", minute: "2-digit", timeZoneName: "short",
+      })}.`);
+    };
+    const nextKey = async (other = "") => {
+      while (now() < deadline) {
+        const candidate = await read();
+        const hash = digest(candidate);
+        const changed = hash !== lastHash;
+        lastHash = hash;
+        if (now() >= deadline) break;
+        if (changed && /^[a-f0-9]{20,40}$/i.test(candidate) && candidate !== other) {
+          try { await clearClipboard(); }
+          catch {
+            throw clipboardError("BANK_KEYS_CLIPBOARD_NOT_CLEARED", "Your clipboard could not be cleared. Nothing was saved.");
+          }
+          return candidate;
+        }
+        await sleep(Math.min(pollMs, Math.max(0, deadline - now())));
+      }
+      throw clipboardError("BANK_KEYS_CLIPBOARD_TIMEOUT", "No new Plaid key arrived within 10 minutes. Nothing was saved.");
+    };
+    step(1, "client_id");
+    clientId = await nextKey();
+    const firstLooksLikeClient = clientId.length === PLAID_CLIPBOARD_CLIENT_ID_LENGTH;
+    report(firstLooksLikeClient ? "✅ client_id picked up" : "✅ First key picked up");
+    step(2, `the ${label} secret`);
+    secret = await nextKey(clientId);
+    if (!firstLooksLikeClient && secret.length === PLAID_CLIPBOARD_CLIENT_ID_LENGTH) {
+      [clientId, secret] = [secret, clientId];
+    }
+    if (!firstLooksLikeClient) report("✅ client_id picked up");
+    // Only an explicit invalid-pair decision permits a retry. Network failures
+    // and unknown outcomes cannot quietly become another provider request.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try { await validateKeys({ clientId, secret }); }
+      catch (error) {
+        if (error?.code !== "INVALID_API_KEYS") {
+          throw clipboardError("BANK_KEYS_VALIDATION_FAILED", "Plaid could not confirm your keys. Nothing was saved.");
+        }
+        if (attempt === 1) throw rejected();
+        report(rejected().message);
+        secret = "";
+        deadline = now() + timeoutMs;
+        step(2, `the ${label} secret`);
+        secret = await nextKey(clientId);
+        continue;
+      }
+      return await acceptPair({ clientId, secret });
+    }
+  } finally {
+    clientId = "";
+    secret = "";
+    // Discard accidental Terminal pastes before PowerShell can execute or save
+    // them to history. This runs after the write/readback callback too.
+    if (platform === "win32") {
+      try { await flushConsoleInput(); } catch { /* Best effort, as in the Google ceremony. */ }
+    }
+  }
+}
 
 function promptFor(name, environment) {
   const scope = environment ? `the ${environment} environment` : "this environment";
@@ -407,12 +534,12 @@ export async function validatePlaidApplicationKeys({
   if (response.ok && Array.isArray(body?.institutions)) return Object.freeze({ environment, accepted: true });
   const code = typeof body?.error_code === "string" ? body.error_code.replace(/[^A-Z0-9_]/g, "").slice(0, 60) : "";
   if (code === "INVALID_API_KEYS") {
-    throw new Error(
+    throw Object.assign(new Error(
       `Plaid rejected this client_id and secret for the ${environment} environment. The likely cause: ` +
         "the secret is for a different Plaid environment (sandbox or production). " +
         `Copy the ${environment} secret from the owner's Plaid dashboard (Developers, Keys) and run the ` +
         "same command again. Nothing was written.",
-    );
+    ), { code });
   }
   throw new Error(
     `Plaid did not confirm these keys for the ${environment} environment ` +
@@ -429,8 +556,10 @@ export async function validatePlaidApplicationKeys({
  * `listSecretNames()` resolves to the Worker's secret names (read-only).
  * `putSecret(name, text)` writes one secret_text binding.
  * `readSecret(prompt)` reads one hidden value from the owner's terminal.
- * `validateKeys({ clientId, secret })` proves the typed pair with the provider
- * and throws a plain refusal; it is required whenever a pair is typed.
+ * `fromClipboard` selects the two-Copy ceremony with injected `clipboard`
+ * adapters instead. Both entry paths keep values out of their return receipt.
+ * `validateKeys({ clientId, secret })` proves either pair with the provider
+ * and throws a plain refusal; it is required whenever a pair is collected.
  */
 export async function ensureBankFeedWorkerSecrets({
   env = {},
@@ -440,6 +569,9 @@ export async function ensureBankFeedWorkerSecrets({
   validateKeys,
   environment = null,
   replaceKeys = false,
+  fromClipboard = false,
+  clipboard = {},
+  platform = process.platform,
   report = () => {},
 } = {}) {
   // Presence, not validity, is the unsafe condition, so no value is inspected
@@ -453,9 +585,19 @@ export async function ensureBankFeedWorkerSecrets({
     );
   }
 
-  const present = namesFromInventory(await listSecretNames());
+  let present;
+  try { present = namesFromInventory(await listSecretNames()); }
+  catch (error) {
+    if (!fromClipboard) throw error;
+    // Native/provider failures can contain private identifiers. Neither a
+    // failed read nor an ambiguous inventory authorizes any key pickup/write.
+    throw clipboardError("REMOTE_UNAVAILABLE", "Your Brain's bank setup could not be checked. Nothing was saved. Try again shortly.");
+  }
   const absent = BANK_FEED_OWNER_SECRET_NAMES.filter((name) => !present.has(name));
   if (!present.has(BANK_ACCESS_WRAPPING_KEY_SECRET)) {
+    if (fromClipboard) {
+      throw clipboardError("SAFETY_REVIEW_REQUIRED", "Your Brain's bank protection needs checking by your installer. Nothing was saved.");
+    }
     throw new Error(
       `this Worker has no ${BANK_ACCESS_WRAPPING_KEY_SECRET}. Run \`brain setup <manifest>\`, ` +
         "`brain update <manifest>`, or `brain deploy <manifest>` to create and verify it, then " +
@@ -470,6 +612,61 @@ export async function ensureBankFeedWorkerSecrets({
   // is missing, ask for both so a stale half can never be paired with a new one.
   const needsProvider = replaceKeys === true ||
     BANK_FEED_PROVIDER_SECRET_NAMES.some((name) => !present.has(name));
+  const save = async (writes) => {
+    // The existing adapter exposes individual secret PUTs. Both
+    // values are collected and proven before the first PUT. A partial write
+    // fails loudly and requires replacing the complete provider pair.
+    for (const [name, text] of writes) {
+      try {
+        await putSecret(name, text);
+      } catch (error) {
+        if (fromClipboard) {
+          throw clipboardError("BANK_KEYS_SAVE_FAILED", "Your Plaid keys could not be saved. Copy both keys again.");
+        }
+        const reason = String(error?.message || error);
+        const leaked = writes.some(([, value]) => reason.includes(value));
+        throw new Error(
+          `the Worker secret ${name} could not be written` +
+            (leaked ? "." : `: ${reason.slice(0, 200)}`) +
+            (replaceKeys === true
+              ? " Rerun `brain connect bank <manifest> --replace-keys` to enter both Plaid keys again."
+              : " Rerun `brain connect bank`; it rechecks the Worker and asks only for what is still missing."),
+        );
+      }
+    }
+
+    let verified;
+    try { verified = namesFromInventory(await listSecretNames()); }
+    catch (error) {
+      if (!fromClipboard) throw error;
+      throw clipboardError("BANK_KEYS_SAVE_UNCONFIRMED", "Your Plaid keys could not be confirmed. Copy both keys again.");
+    }
+    const unverified = BANK_FEED_OWNER_SECRET_NAMES.filter((name) => !verified.has(name));
+    if (unverified.length) {
+      if (fromClipboard) {
+        throw clipboardError("BANK_KEYS_SAVE_UNCONFIRMED", "Your Plaid keys could not be confirmed. Copy both keys again.");
+      }
+      throw new Error(
+        `Cloudflare did not list ${unverified.join(", ")} after the write. Do not start Plaid Link. ` +
+          "Rerun `brain connect bank`.",
+      );
+    }
+    const written = Object.freeze(writes.map(([name]) => name));
+    return Object.freeze({ written, names: BANK_FEED_OWNER_SECRET_NAMES, replaced: replaceKeys === true });
+  };
+  if (needsProvider && fromClipboard) {
+    return readPairFromClipboard({
+      ...clipboard,
+      platform,
+      toolEnvironment: env,
+      environment,
+      report,
+      validateKeys,
+      acceptPair: ({ clientId, secret }) => save([
+        ["BANK_FEED_CLIENT_ID", clientId], ["BANK_FEED_SECRET", secret],
+      ]),
+    });
+  }
   const writes = [];
   if (needsProvider) {
     report(
@@ -492,34 +689,5 @@ export async function ensureBankFeedWorkerSecrets({
     await validateKeys({ clientId: pair[0][1], secret: pair[1][1] });
     writes.push(...pair);
   }
-  // The writes are sequential PUTs with no rollback. A failure between the client_id and the
-  // secret leaves a new client_id paired with the old secret. That fails loudly: the next
-  // connection is refused as INVALID_API_KEYS, and its message names --replace-keys, which
-  // rewrites both keys.
-  for (const [name, text] of writes) {
-    try {
-      await putSecret(name, text);
-    } catch (error) {
-      const reason = String(error?.message || error);
-      const leaked = writes.some(([, value]) => reason.includes(value));
-      throw new Error(
-        `the Worker secret ${name} could not be written` +
-          (leaked ? "." : `: ${reason.slice(0, 200)}`) +
-          (replaceKeys === true
-            ? " Rerun `brain connect bank <manifest> --replace-keys` to enter both Plaid keys again."
-            : " Rerun `brain connect bank`; it rechecks the Worker and asks only for what is still missing."),
-      );
-    }
-  }
-
-  const verified = namesFromInventory(await listSecretNames());
-  const unverified = BANK_FEED_OWNER_SECRET_NAMES.filter((name) => !verified.has(name));
-  if (unverified.length) {
-    throw new Error(
-      `Cloudflare did not list ${unverified.join(", ")} after the write. Do not start Plaid Link. ` +
-        "Rerun `brain connect bank`.",
-    );
-  }
-  const written = Object.freeze(writes.map(([name]) => name));
-  return Object.freeze({ written, names: BANK_FEED_OWNER_SECRET_NAMES, replaced: replaceKeys === true });
+  return save(writes);
 }

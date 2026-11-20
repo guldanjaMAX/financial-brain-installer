@@ -1,3 +1,4 @@
+import { assertOwnerEvidence } from './helpers/owner-evidence-contract.mjs';
 import { assertDocumentAnswer } from "../worker/test/helpers/document-answer-contract.mjs";
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -67,16 +68,16 @@ test('statusless unavailable bank fallback retains bounds and the reviewed quest
   const control = { ...body, status: 'search_unavailable' };
   const green = await surfaces(t, control), outputs = await surfaces(t, body);
   const expected = REFUSAL_NEXT_ACTIONS.search_unavailable;
-  // 0.4.28 CLI retains the bank question; remote MCP also appends its reviewed Next action.
+  // Evidence notes no longer repeat the bank question from the internal score basis.
   for (const result of [green,outputs]) for (const [index,text] of result.entries()) {
-    const questions=index===0?['Which would help most?']:['Which would help most?',expected];
+    const questions=index===0?[]:[expected];
     assert.deepEqual(offers(text),questions,'exact reviewed handler questions');
     assert.ok(text.includes(separateOffers(detail).facts),'bank bounds reach the actual handler');
     assert.match(text,/incomplete.*provisional/);
     assert.match(text,/Coverage:.*Missing or counted twice:.*Estimates:.*How to check:/s);
     if(index===1) assert.equal(text.trim().split('\n').at(-1).trim(),expected,'MCP action remains final');
-    else assert.match(text.trim().split('\n').at(-1),/Confidence: Low \(10%\).*Why:.*Which would help most\?.*Missing:/,
-      'CLI retains the question inside its confidence basis, with the missing evidence explicit');
+    else assert.match(text,/Missing or counted twice:.*completed search/s, 'CLI keeps the missing evidence explicit');
+    assertOwnerEvidence(text);
   }
   for (const candidate of [body,control]) for (const [render,next] of [[workerText,nextActionText],[appText,appNextAction]]) {
     const text=[render(candidate),next(candidate)].filter(Boolean).join('\n');
@@ -85,7 +86,7 @@ test('statusless unavailable bank fallback retains bounds and the reviewed quest
     assert.match(text,/Coverage:.*Missing or counted twice:.*Estimates:.*How to check:/s);
     assert.equal(text.trim().split('\n').at(-1),expected);
   }
-  assert.deepEqual(outputs.map(text=>offers(text).length),[1,2]);
+  assert.deepEqual(outputs.map(text=>offers(text).length),[0,1]);
 });
 
 test('legacy fallback preserves explicit actions, errors and answered controls', () => {

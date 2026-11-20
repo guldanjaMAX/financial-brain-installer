@@ -21,6 +21,17 @@ const goodEnvelope = (source, id) => ({
   content: `Readable synthetic content for ${source} item ${id}`,
 });
 
+// FIX-P1-REMOVAL-CAUSE-1117: a failed Gmail refresh reaches the owner only as
+// the reviewed product copy, never the provider exception text. The receipts,
+// sends and state each test checks still prove what happened.
+function assertGmailOwnerFailure(error, privateText) {
+  assert.match(error?.message || "", /Gmail refresh did not finish/);
+  assert.equal(error?.supportCode, "INGEST_FAILED");
+  assert.match(error?.message || "", /Help: https:\/\/financialbrain\.ai\/help\/INGEST_FAILED/);
+  assert.equal(error.message.includes(privateText), false, "the exception text stays private");
+  return true;
+}
+
 async function* orderedPrefetch(items, mapper) {
   for await (const item of items) yield await mapper(item);
 }
@@ -249,12 +260,20 @@ async function runRemoteCase(source, {
     await duringRun?.({ run, prepared });
     if (expectSuccess) {
       await run;
+    } else if (systemic && source === "gmail") {
+      // The owner copy no longer carries the systemic exception itself; its
+      // error receipt still names the failed operation and provider status.
+      await assert.rejects(run, (error) => assertGmailOwnerFailure(error, systemicError.message));
+      assert.equal(receipts.at(-1)?.failure_evidence?.operation_class, "gmail_message_read");
+      assert.equal(receipts.at(-1)?.failure_evidence?.http_status, 503);
     } else if (systemic) {
       await assert.rejects(run, (error) => source === "drive"
         ? error.supportCode === "INGEST_FAILED" && error.status === 503 : error === systemicError);
     } else if (source === "drive" && !dryRun) {
       const result = await run;
       assert.equal(result.retryable_failures, 1, "the incremental entry failure was measured");
+    } else if (source === "gmail") {
+      await assert.rejects(run, (error) => assertGmailOwnerFailure(error, ordinaryError.message));
     } else {
       await assert.rejects(run, /1 stored part failed, so this ingest is incomplete/);
     }
