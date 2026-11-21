@@ -171,11 +171,15 @@ includes all retries and feed events. Ordinary runs
 also rotate through old family holds, clearing a false hold only after exact
 bounded readback of its accepted single-part identity. A real obsolete family,
 inconsistent local family plan or failed read remains held.
-Recognized file-specific ancestor unavailability and the 100-ancestor depth bound
+Recognized file-specific ancestor unavailability and exhaustion of the shared
+limit of 100 ancestor visits across all parent branches
 are visible unresolved scope skips with a source version. They settle the event
 without downloading content. Accepted text stays active. Authentication, account
-policy and unknown transport failures remain retryable page failures. Malformed
-ancestor data and cycles are visible retryable per-file gaps; they never count as safe scope skips.
+policy and unknown transport failures remain retryable page failures. A malformed
+parent edge or a cycle leaves a retryable per-file gap when no sibling path proves
+scope. An incremental check clears carried outside-scope decisions that lack an
+accepted revision or accepted part proof, including on a quiet feed. The recorded
+skip remains visible and other removal review reasons stay in place.
 The 512-chunk snapshot limit is not a request to delete or shrink accepted
 database rows. Its `owner_recovery` class needs a separately reviewed bounded
 recovery plan. Unknown per-part failure codes, contradictory retry flags, mixed transient

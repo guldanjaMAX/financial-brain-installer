@@ -1,4 +1,5 @@
 /** Bounded add/update-only Drive ingestion. Checkpoints contain metadata, never bytes. */
+import { createHash } from 'node:crypto';
 import { readCurrentIngestParts, revalidateIngestProgress } from './ingest-part-proof.mjs';
 export const DRIVE_CHANGE_LIMITS = Object.freeze({ pageSize: 50, maxPages: 2, maxFiles: 100, timeBudgetMs: 60_000 });
 
@@ -58,8 +59,15 @@ export function driveIncrementalStatus(state = {}) {
   };
 }
 
+const OUTSIDE_WATCHED_FOLDERS = "outside the watched folders";
+
 export function renderDriveIncrementalStatus(state, display = String) {
   const status = driveIncrementalStatus(state);
+  const outsideScope = new Set([
+    ...Object.keys(state.skipped || {}).filter(uid => state.skipped[uid] === OUTSIDE_WATCHED_FOLDERS),
+    ...Object.keys(state.drive_pending_removals || {})
+      .filter(uid => state.drive_pending_removals[uid].reason === "left_configured_roots"),
+  ]).size;
   return [
     "Drive: incremental, add/update only",
     ...(status.last_run?.complete && !status.error
@@ -68,6 +76,7 @@ export function renderDriveIncrementalStatus(state, display = String) {
     `Last successful change-token time: ${status.last_successful_change_token_at || "never"}`,
     `Last run: ${status.last_run?.created || 0} added, ${status.last_run?.updated || 0} updated; ${status.last_run?.feed_caught_up ? "change feed caught up" : "change feed incomplete or not yet checked"}; coverage ${status.last_run?.complete ? "checked for this window" : "incomplete"}`,
     `Pending owner removal decisions: ${status.pending_removals}`,
+    ...(outsideScope ? [`Skipped outside the watched folders: ${outsideScope}`] : []),
     `Failures: ${status.failures.length}`,
     `Skipped items: ${status.skipped_items.length} (retry and owner review gaps; later changes continue)`,
     `Database recovery entries pending: ${status.recovery_pending}`,
@@ -116,7 +125,7 @@ export async function runDriveIncremental({
     complete: false, seeded: false, pages: 0 };
   const withinBudget = () => result.scanned < budget.maxFiles && now() - started < budget.timeBudgetMs;
   const failure = (file, reason, code = "file_failed", retryable = true, details = {}) => {
-    const uid = `${sourceName}:${file.id}`;
+    const uid = details.key || `${sourceName}:${file.id}`;
     const previous = state.drive_failures[uid];
     const version = details.version || previous?.version || state.done[uid];
     // A transient retry must surface as retryable without destroying the
@@ -136,15 +145,25 @@ export async function runDriveIncremental({
   const pending = (id, reason, name = null) => {
     state.drive_pending_removals[`${sourceName}:${id}`] = { id, reason, ...(name ? { name: display(name) } : {}), observed_at: timestamp() };
   };
+  const hasRetainedCopy = (uid) => Boolean(state.done[uid] || state.drive_accepted_parts?.[uid]);
   const metadata = new Map();
+  // Identify a provider slot without retaining the malformed ID it carried.
+  const changeKey = (page, index) => `${sourceName}-change:${createHash("sha256")
+    .update(JSON.stringify([page.token, index])).digest("hex")}`;
   // This is the ONE entry boundary, shared by saved-page work and fair
   // retries. Every delegated step and synchronous decision lives inside it.
   // Feed settlement follows only a successful result or a durable visible gap.
-  const process = async (change, { recovery = false } = {}) => {
+  const process = async (change, { recovery = false, page, index } = {}) => {
     const id = change.fileId, uid = `${sourceName}:${id}`;
     let file = change.file, version, folder = '', metadataRead = false, written = false;
     result.scanned++;
     try {
+      if (change.identityFailure) {
+        failure({ id, name: id || "Unidentified Drive change" }, change.identityFailure,
+          "invalid_change_identity", false, { key: id === null ? changeKey(page, index) : uid });
+        result.skipped++;
+        return;
+      }
       if (change.removed === true || file?.trashed === true) {
         pending(id, change.removed ? "removed_or_access_lost" : "trashed", file?.name);
         delete state.drive_failures[uid];
@@ -154,7 +173,7 @@ export async function runDriveIncremental({
       file = await drive.getFileMetadata(getToken, id);
       metadataRead = true;
       if (file?.id !== id || (file.trashed !== true &&
-          (!Array.isArray(file.parents) || file.parents.length > 1))) {
+          file.parents != null && !Array.isArray(file.parents))) {
         throw new Error("Drive current file metadata is incomplete or mismatched");
       }
       if (file.trashed === true) { pending(id, "trashed", file.name); delete state.drive_failures[uid]; return; }
@@ -166,7 +185,11 @@ export async function runDriveIncremental({
         return;
       }
       if (!scope.inScope) {
-        pending(id, "left_configured_roots", file.name);
+        if (hasRetainedCopy(uid)) {
+          pending(id, "left_configured_roots", file.name);
+        }
+        state.skipped[uid] = OUTSIDE_WATCHED_FOLDERS;
+        result.skipped++;
         delete state.drive_failures[uid];
         return;
       }
@@ -175,6 +198,9 @@ export async function runDriveIncremental({
       if (file.mimeType === drive.FOLDER_MIME) {
         pending(id, "folder_change_needs_descendant_review", file.name);
         return;
+      }
+      if (scope.parentId !== undefined && file.parents.length > 1) {
+        file = { ...file, parents: [scope.parentId], scope_parent_id: scope.parentId };
       }
       folder = drive.folderPathFor(file, scope.folders);
       const excluded = drive.exclusionReason(file, folder, policy);
@@ -234,12 +260,25 @@ export async function runDriveIncremental({
       return result;
     }
     const progressChecked = await validateProgress({deadlineAt:started + budget.timeBudgetMs / 3, maxEntries:100});
+    // Older checkpoints could open this decision for a file we never accepted.
+    // Reconcile even on a quiet feed and leave other review reasons intact.
+    // Invalidated acceptance leaves a restore obligation, not proof of absence.
+    let reconciled = false;
+    for (const [uid, decision] of Object.entries(state.drive_pending_removals)) {
+      if (uid.startsWith(`${sourceName}:`) && decision.reason === "left_configured_roots" &&
+          !hasRetainedCopy(uid) && !state.drive_restore_pending[uid]) {
+        delete state.drive_pending_removals[uid];
+        reconciled = true;
+      }
+    }
+    if (reconciled) save();
     {
       // Rotate over every held identity, retaining entries and checkpointing
       // admission BEFORE a request can interrupt. A failed prefix cannot own
       // every later run. Ordinary runs also resolve old false family holds.
       const candidates = [...new Set([
-        ...Object.keys(state.drive_failures).filter(uid => retryFailures || state.drive_failures[uid].retryable === true),
+        ...Object.keys(state.drive_failures).filter(uid => state.drive_failures[uid].id !== null &&
+          (retryFailures || state.drive_failures[uid].retryable === true)),
         ...Object.keys(state.drive_pending_removals).filter(uid =>
           state.drive_pending_removals[uid].reason === 'replacement_family_needs_review'),
         ...Object.keys(state.drive_restore_pending),
@@ -289,7 +328,8 @@ export async function runDriveIncremental({
       // Older checkpoints have no exact part proof. A bare page offset never
       // certifies an accepted version, even when the family still exists.
       for (let i = 0; i < page.offset; i++) {
-        const change = page.changes[i], uid = `${sourceName}:${change.fileId}`;
+        const change = page.changes[i];
+        const uid = change.fileId === null ? changeKey(page, i) : `${sourceName}:${change.fileId}`;
         if (!change.removed && !state.skipped[uid] && !state.drive_pending_removals[uid] &&
             !state.drive_failures[uid] && !state.drive_accepted_parts?.[uid]) {
           page.offset = i; save(); break;
@@ -298,7 +338,7 @@ export async function runDriveIncremental({
       while (page.offset < page.changes.length && withinBudget()) {
         state.drive_retry_feed_pending = false;
         save();
-        await process(page.changes[page.offset]);
+        await process(page.changes[page.offset], { page, index: page.offset });
         page.offset++;
         try { save(); }
         catch (error) { page.offset--; throw error; }

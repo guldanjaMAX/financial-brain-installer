@@ -41,7 +41,7 @@ function harness(point, { globalFailure = false, enabled = true } = {}) {
     FOLDER_MIME:'folder', isPermanentFileFailure:()=>false,
     getFileMetadata:async (_get,id) => {
       current=id; prepared=false; hit('metadata'); const file=files.find(f=>f.id===id);
-      return hit('metadata-validation') ? { ...file,parents:null } : file;
+      return hit('metadata-validation') ? { ...file,parents:"reviewed" } : file;
     },
     changeScope:async () => {
       hit('scope');

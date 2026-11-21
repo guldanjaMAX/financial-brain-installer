@@ -216,7 +216,8 @@ test("removal, trash and moves become decisions while a prior mass-removal pause
 
 test("fresh ancestors override stale folder membership and preserve path exclusions", async () => {
   const outside = file("moved", "child"), included = file("control");
-  const h = harness({ state: { sync_token: "old-page", drive_folders: { child: { name: "child", parents: ["reviewed"] } } },
+  const h = harness({ state: { sync_token: "old-page", done: { "drive:moved": "prior" },
+    drive_folders: { child: { name: "child", parents: ["reviewed"] } } },
     entries: [folder("child", "elsewhere"), folder("elsewhere", "account-root")],
     pages: { "old-page": { changes: [outside, included].map((f) => ({ fileId: f.id, file: f })), newStartPageToken: "done-page" } } });
   const result = await h.run();
@@ -459,8 +460,8 @@ test("direct My Drive files are scoped without following unselected child folder
 for (const invalid of [
   { changes: [], nextPageToken: "old-page" },
   { changes: [], newStartPageToken: " spaced " },
-  { changes: [{ fileId: "wrong", file: file("other") }], newStartPageToken: "done-page" },
-  { changes: [ { fileId: "missing-metadata" } ], newStartPageToken: "done-page" },
+  { changes: [{ fileId: "wrong", file: file("other") }], nextPageToken: "next", newStartPageToken: "done-page" },
+  { changes: [ { fileId: "missing-metadata" } ], newStartPageToken: "old-page" },
 ]) test("invalid feed evidence cannot advance the checkpoint or enter the writer", async () => {
   const h = harness({ state: { sync_token: "old-page" }, pages: { "old-page": invalid } });
   await assert.rejects(h.run());
@@ -495,7 +496,8 @@ test("an empty terminal page may retain its token and still prove a no-change ch
 });
 
 test("a resumed page cannot download a file that has since moved out of scope", async () => {
-  const h = harness({ state: { sync_token: "old-page" }, entries: [file("moved", "outside"), folder("outside", "account-root")],
+  const h = harness({ state: { sync_token: "old-page", done: { "drive:moved": "prior" } },
+    entries: [file("moved", "outside"), folder("outside", "account-root")],
     pages: { "old-page": { changes: [file("moved"), file("control")].map((f) => ({ fileId: f.id, file: f })), newStartPageToken: "done-page" } } });
   const result = await h.run();
   assert.equal(result.scanned, 2, "both current scope decisions reached");

@@ -824,8 +824,10 @@ entry so loose files keep null folder metadata and remain in scope during
 absence classification. Unselected child folders never enter that index.
 The default runner rechecks current file metadata and ancestors before reading
 content. It never inventories the corpus or invokes removal planning. Removed, trashed,
-out-of-scope, policy-excluded, and changed-folder events become local owner
-decisions; they cannot block additions. It persists each exact changes page and
+policy-excluded, and changed-folder events become local owner decisions. Files
+outside scope produce a visible skip and open a removal decision only when the
+checkpoint records a retained copy. These outcomes cannot block additions.
+It persists each exact changes page and
 its settled offset before requesting the next token. Defaults are 50 events per
 page, two pages or 100 events per run, and a 60-second admission budget. An
 in-flight extraction/request finishes under its existing timeout; the budget
@@ -833,8 +835,10 @@ stops admission of the next file. Existing batch byte and statement limits apply
 Unknown current-page transport failure retains that exact page and position.
 Per-document retries and deterministic skips,
 including the 8 MiB ceiling, remain in a durable per-file failure map even after
-page settlement. Recognized file-specific ancestor denials and the 100-ancestor
-depth limit are unresolved scope skips; no bytes are read without proved scope.
+page settlement. Legacy parent branches are checked in sorted ID order with a
+shared limit of 100 ancestor visits per file. Recognized file-specific ancestor
+denials and an exhausted walk budget leave an unresolved skip when no path can
+be proved. Scope must be proved before reading content.
 Auth/account errors and unknown transport keep the page for retry. Cycles and
 malformed per-file metadata are visible retryable gaps. Ordinary runs fairly
 retry these gaps and family holds; `--reset` also admits permanent held skips,

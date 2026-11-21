@@ -4,6 +4,49 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.32 (2026-11-20)
+
+This update fixes how your Brain reads Google Drive changes and changes
+nothing else. It includes every 0.4.31 change listed below. If you are coming
+from 0.4.29 or earlier, run `brain whatsnew --all` to read those notes as well.
+
+- **Drive keeps reading when one changed file is unusual.** If one changed
+  file in your Drive had no parent folder or more than one, the whole Drive
+  check stopped and no new Drive documents loaded. Now that one file is handled
+  by itself and the rest of your Drive changes load. A file with no parent
+  folder counts as outside your watched folders, and a file in several folders
+  is read when one of them is a watched folder. A change that Google sends
+  without a usable file identity is listed as one failed item, and the check
+  moves on.
+- **Your review decisions are kept.** A waiting decision about a Drive file
+  that left your watched folders stays until the Brain can show it is safe to
+  clear, including while a restore is still waiting.
+- **Ask more money questions in your own words.** Drive documents that had
+  stopped loading load again, so answers can use them. Answers otherwise work
+  as in 0.4.31.
+- There is no new database step in this update. To check: after the next
+  daily refresh, new Drive documents appear in your Brain again, and any file
+  that could not be read is listed by itself in the Drive status.
+
+**Known limit:** two rare Drive cases are not handled yet. If Google reports a
+folder's trash flag in an unexpected form, a file in that folder can be
+counted as outside your watched folders. If restoring a Drive file was
+refused, a later run may stop showing that refusal while the restore itself
+stays waiting. The known limits listed under 0.4.31 and 0.4.29 below still
+apply. This entry supplies no release approval or new field evidence.
+
+### This release does NOT cover
+
+- Replacing a bank connection does not revoke the old connection's permission
+  at your bank, and it does not prove complete history for the missing-access
+  period until you compare that period with your statement.
+- Some answers say Medium or Low more often than ideal. Read the stated gaps
+  and check the cited records before relying on a figure.
+- QuickBooks direct connection is pending Intuit approval.
+- Windows x64 is the only supported Windows runtime in this release. Windows
+  ARM64 ships unproven.
+- Bank breadth ships unproven. Bank invitations stay closed.
+
 ## 0.4.31 (2026-11-19)
 
 This update includes every 0.4.29 change listed below. Version 0.4.30 was

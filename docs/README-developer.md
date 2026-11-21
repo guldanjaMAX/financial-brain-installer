@@ -36,7 +36,7 @@ store. Pinned Wrangler 4.131.1 cannot request Vectorize permission for that
 profile, so the read-only preflight routes that exact refusal to an explicit,
 account-scoped recovery API-token choice before any mutation.
 
-**Package identity: brain-installer 0.4.31, schema70.** Publication, supported
+**Package identity: brain-installer 0.4.32, schema70.** Publication, supported
 platforms and field acceptance are established by the reviewed evidence for
 the exact package bytes, not by this README or its version number. Before an
 install or update, match the package to the current approved guide and release
@@ -50,7 +50,7 @@ until reviewed evidence closes it; a deferred capability remains unproven.
 Earlier candidate identities and their planning records remain historical and
 must not be reused as proof for changed bytes.
 
-The 41-row release audit has 37 unresolved incidents, zero 0.4.31 deferrals, and four
+The 41-row release audit has 37 unresolved incidents, zero 0.4.32 deferrals, and four
 rows closed on reviewed evidence.
 
 Engineering changes follow [the code, test, documentation, and tracking
@@ -866,8 +866,9 @@ The flag defaults to false and must be a JSON boolean. Changing it affects futur
 change-feed events without forcing a full comparison. Root-level envelopes keep
 `folder: null` and `top_folder: null`. The complete listing retains the canonical
 My Drive root ID for absence checks without including any unselected folders.
-Turning the flag off retains existing copies; subsequently observed out-of-scope
-files become pending owner decisions. An explicit `--full-walk-review --dry-run` retains
+Turning the flag off retains existing copies. Subsequently observed out-of-scope
+files are recorded as skips, with pending owner decisions for files with
+retained-copy evidence. An explicit `--full-walk-review --dry-run` retains
 provider-only comparison. Mutating full walks are refused.
 
 `exclude_paths` matches the beginning of the resolved path, case-insensitively
@@ -914,10 +915,11 @@ Typed transient, mixed or unknown per-part writer failures become durable
 retryable gaps so later feed entries progress. Unconfirmed batch transport or
 malformed batch receipts preserve the exact page for retry.
 Skipped updates retain the old accepted text and keep coverage incomplete.
-Recognized file-specific ancestor denials and the 100-ancestor depth bound are
-unresolved scope skips; neither permits a content download. Account/auth errors,
-and unknown transport still retain the page. Cycles and malformed per-file
-ancestor metadata remain visible retryable gaps.
+Recognized file-specific ancestor denials and exhaustion of the shared limit of
+100 visits across all parent branches leave an unresolved scope skip when the
+file has no proved path. Account/auth errors and unknown transport still retain
+the page. Without a proved path, cycles and malformed per-file ancestor metadata
+remain visible retryable gaps.
 An accepted same-identity single-part update completes after the owner-only
 `POST /api/admin/brain/drive-family` readback proves the live exact base and no
 part candidate, using two indexed lookups limited to one row each in one snapshot.
