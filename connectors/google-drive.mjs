@@ -676,6 +676,8 @@ export async function startPageToken(getAccessToken, opts = {}) {
   return googlePageToken(r.startPageToken, "start", { required: true });
 }
 
+const validDriveChangeId = (id) => typeof id === "string" && id.length <= 250 && /^[\x21-\x7e]+$/.test(id);
+
 /** One bounded changes page. The consumer owns durable page settlement. */
 export async function listChangePage(getAccessToken, pageToken, { pageSize = 50, ...opts } = {}) {
   if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) {
@@ -691,20 +693,24 @@ export async function listChangePage(getAccessToken, pageToken, { pageSize = 50,
   if (!Array.isArray(page.changes) || page.changes.length > pageSize) {
     throw new DriveError("Google Drive returned an invalid bounded changes list", 200, "invalidChangeList");
   }
-  for (const change of page.changes) {
-    if (typeof change?.fileId !== "string" || !/^[\x21-\x7e]+$/.test(change.fileId) ||
-        change.fileId.length > 250 || (change.removed !== true &&
-          (!change.file || change.file.id !== change.fileId || (change.file.trashed !== true &&
-            (!Array.isArray(change.file.parents) || change.file.parents.length > 1))))) {
-      throw new DriveError("Google Drive returned an invalid change identity or metadata", 200, "invalidChangeList");
-    }
-  }
   const terminal = page.newStartPageToken != null;
   const nextToken = googlePageToken(terminal ? page.newStartPageToken : page.nextPageToken, "next changes", { required: true });
   if ((nextToken === token && (!terminal || page.changes.length > 0)) || (terminal && page.nextPageToken != null)) {
     throw new DriveError("Google Drive returned an ambiguous or repeated changes token", 200, "repeatedPageToken");
   }
-  return { changes: page.changes, nextToken, terminal };
+  // Keep each slot for durable settlement and discard untrusted metadata.
+  const changes = page.changes.map((change) => {
+    const id = change?.fileId;
+    if (!validDriveChangeId(id)) {
+      return { fileId: null, identityFailure: "Drive change has no valid printable file ID of at most 250 characters" };
+    }
+    if (change.file == null ? change.removed !== true : change.file.id !== id) {
+      return { fileId: id, identityFailure: change.file == null
+        ? "Drive change is missing file metadata" : "Drive change file ID does not match its file metadata" };
+    }
+    return change;
+  });
+  return { changes, nextToken, terminal };
 }
 
 /** Resolve current ancestors, never trusting the old full-walk index for scope. */
@@ -714,8 +720,9 @@ export async function changeScope(getAccessToken, file, {
 } = {}) {
   if (!Number.isInteger(maxDepth) || maxDepth < 1 || maxDepth > 100) throw new TypeError("Drive ancestor depth must be from 1 through 100");
   const unresolved = (code) => ({ unresolved: { code, reason: code === 'ancestor_depth_limit'
-    ? 'Scope could not be proved within 100 ancestors; accepted text is retained. Review the source scope before retrying.'
+    ? `Scope could not be proved within ${maxDepth} ancestor visits; accepted text is retained. Review the source scope before retrying.`
     : 'A required ancestor is unavailable for this file; scope is unproved and accepted text is retained. Restore ancestor access before retrying.' } });
+  const malformedAncestor = () => new DriveError("Drive ancestor metadata is incomplete or mismatched", 200, "invalidAncestor");
   const get = async (id) => {
     if (!metadata.has(id)) {
       try { metadata.set(id, await getFileMetadata(getAccessToken, id, opts)); }
@@ -730,39 +737,82 @@ export async function changeScope(getAccessToken, file, {
     }
     const value = metadata.get(id);
     if (!value?.id || (id !== "root" && value.id !== id) || value.mimeType !== FOLDER_MIME ||
-        (value.parents != null && (!Array.isArray(value.parents) || value.parents.length > 1))) {
-      throw new DriveError("Drive ancestor metadata is incomplete or mismatched", 200, "invalidAncestor");
+        (value.parents != null && !Array.isArray(value.parents))) {
+      throw malformedAncestor();
     }
     return { ...value, parents: value.parents || [] };
   };
+  if (!file.parents?.length) return { inScope: false };
   const canonicalRoot = includeMyDriveRootFiles || rootFolderIds.includes("root") ? await get("root") : null;
   if ((includeMyDriveRootFiles || rootFolderIds.includes('root')) && !canonicalRoot) return unresolved('ancestor_unavailable');
   const roots = new Set(rootFolderIds.map((id) => id === "root" ? canonicalRoot.id : id));
-  const seen = new Set([file.id]);
-  const folders = {};
-  let id = file.parents?.[0];
-  const directRootFile = includeMyDriveRootFiles && id === canonicalRoot.id && file.mimeType !== FOLDER_MIME;
-  let inScope = directRootFile;
-  const matchedRoots = [];
-  for (let depth = 0; id; depth++) {
-    if (seen.has(id)) throw new DriveError("Drive ancestor chain is cyclic", 200, "ancestorLimit");
-    if (depth >= maxDepth) return unresolved('ancestor_depth_limit');
-    seen.add(id);
-    const parent = await get(id);
-    if (!parent) return unresolved('ancestor_unavailable');
-    if (parent.trashed) return { inScope: false, folders, rootIds: [] };
-    folders[parent.id] = { name: parent.id === canonicalRoot?.id ? "" : parent.name || "", parents: parent.parents };
-    if (roots.has(id)) { inScope = true; matchedRoots.push(id); }
-    // Continue to the highest configured ancestor to preserve exclusion paths
-    // when selected roots overlap. No subtree listing or content read occurs.
-    id = parent.parents[0];
+  const path = new Map();
+  let visits = 0;
+  let unproved;
+  let invalidAncestor;
+  let invalidMetadata;
+  const walk = async (parents) => {
+    const validParents = parents.filter(validDriveChangeId);
+    // A malformed edge cannot prove absence or veto a proved sibling path.
+    if (validParents.length !== parents.length) {
+      invalidMetadata ||= malformedAncestor();
+      invalidAncestor ||= invalidMetadata;
+    }
+    // Cached visits also consume the shared budget. A graph can have far more
+    // paths than unique folders, and a cycle only invalidates its own path.
+    for (const id of [...new Set(validParents)].sort()) {
+      if (visits >= maxDepth) {
+        unproved = 'ancestor_depth_limit';
+        return null;
+      }
+      visits++;
+      if (id === file.id || path.has(id)) {
+        invalidAncestor ||= new DriveError("Drive ancestor chain is cyclic", 200, "ancestorLimit");
+        continue;
+      }
+      let parent;
+      try { parent = await get(id); }
+      catch (error) {
+        if (!(error instanceof DriveError) || error.reason !== "invalidAncestor") throw error;
+        invalidMetadata ||= error;
+        invalidAncestor ||= error;
+        continue;
+      }
+      if (!parent) { unproved ||= 'ancestor_unavailable'; continue; }
+      if (parent.trashed) continue;
+      path.set(id, parent);
+      // Prove the full branch before trimming to the highest configured root,
+      // so exclusions still see the full path between overlapping roots.
+      const scope = parent.parents.length ? await walk(parent.parents) : scopeForPath();
+      path.delete(id);
+      if (scope) return scope;
+    }
+    return null;
+  };
+  const scopeForPath = () => {
+    const ids = [...path.keys()];
+    const parentId = ids[0];
+    const rootIds = ids.filter(id => roots.has(id));
+    const directRootFile = includeMyDriveRootFiles && parentId === canonicalRoot.id && file.mimeType !== FOLDER_MIME;
+    if (!rootIds.length && !directRootFile) return null;
+    const highestRoot = rootIds.at(-1) ?? parentId;
+    const selected = ids.slice(0, ids.indexOf(highestRoot) + 1);
+    const folders = Object.fromEntries(selected.map((id, index) => {
+      const parent = path.get(id);
+      return [id, { name: parent.id === canonicalRoot?.id ? "" : parent.name || "",
+        parents: index + 1 < selected.length ? [selected[index + 1]] : [] }];
+    }));
+    return { inScope: true, folders, rootIds: rootIds.sort(), parentId };
+  };
+  const scope = await walk(file.parents);
+  if (scope) return scope;
+  if (unproved === 'ancestor_depth_limit') {
+    // A bounded walk cannot turn an observed metadata gap into a manual hold.
+    if (invalidMetadata) throw invalidMetadata;
+    return unresolved(unproved);
   }
-  if (directRootFile && !roots.has(canonicalRoot.id)) {
-    return { inScope: true, folders: { [canonicalRoot.id]: { name: "", parents: [] } }, rootIds: [] };
-  }
-  const highestRoot = matchedRoots.at(-1);
-  if (highestRoot) folders[highestRoot] = { ...folders[highestRoot], parents: [] };
-  return { inScope, folders, rootIds: matchedRoots.sort() };
+  if (invalidAncestor) throw invalidAncestor;
+  return unproved ? unresolved(unproved) : { inScope: false };
 }
 
 /**
@@ -920,6 +970,8 @@ export function driveVersion(file, folderPath = "") {
     String(file?.name || ""),
     String(file?.mimeType || ""),
     pathSegments(folderPath).join("/"),
+    // Two legacy parents can have the same path label but different custody.
+    ...(file?.scope_parent_id ? [file.scope_parent_id] : []),
   ]);
 }
 
@@ -1076,6 +1128,7 @@ export async function toEnvelope(getAccessToken, file, { sourceName = SOURCE_TYP
         extracted_as: got.how,
         drive_id: file.id,
         root_folder_ids: Array.isArray(file.scope_root_ids) ? [...file.scope_root_ids].sort() : [],
+        ...(file.scope_parent_id ? { parent_folder_id: file.scope_parent_id } : {}),
         drive_id_kind: file.mimeType === SHORTCUT_MIME ? "shortcut" : "file",
         mime: file.mimeType,
         platform: "drive",
