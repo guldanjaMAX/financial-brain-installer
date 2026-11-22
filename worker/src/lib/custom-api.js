@@ -13,7 +13,7 @@ import { backendOf, D1, storeFor } from "./store.js";
 import { ingestEnvelopeValidationError } from "./ingest-envelope.js";
 import { forget } from "./store-d1.js";
 import {
-  currentCustomApiDocumentSql, customApiOwnerMessage, customApiVersionedSourceId,
+  CUSTOM_API_CONFIG_REASONS, currentCustomApiDocumentSql, customApiRedirectMessage, customApiVersionedSourceId,
 } from "./custom-api-visibility.js";
 
 export { customApiOwnerMessage } from "./custom-api-visibility.js";
@@ -53,6 +53,7 @@ const CUSTOM_API_ISSUE_CODES = new Set([
   "INVALID_RESPONSE", "INVALID_ROW_KEY", "INPUT_REFUSED", "NETWORK_UNREACHABLE",
   "PERSISTENCE_VERIFY_FAILED", "RATE_LIMITED", "REDIRECT_REFUSED",
   "REMOTE_UNAVAILABLE", "RESPONSE_TOO_LARGE", "RUN_BUSY", "SECRET_IN_RESPONSE",
+  ...Object.keys(CUSTOM_API_CONFIG_REASONS),
 ]);
 
 const isPlainObject = (value) => value !== null && typeof value === "object" &&
@@ -223,6 +224,10 @@ export class CustomApiError extends Error {
   }
 }
 
+function configError(code, details) {
+  return new CustomApiError(code, CUSTOM_API_CONFIG_REASONS[code], details);
+}
+
 function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (value && typeof value === "object") {
@@ -241,9 +246,10 @@ function endpointUrl(config, endpoint) {
   return new URL(endpoint.path.replace(/^\//, ""), config.base_url);
 }
 
-function assertAllowedUrl(url, config, endpoint) {
+function assertAllowedUrl(url, config, endpoint, movedDirectories) {
   const base = new URL(config.base_url);
-  if (url.protocol !== "https:" || url.origin !== base.origin || !url.pathname.startsWith(base.pathname) ||
+  if (url.protocol !== "https:" || url.origin !== base.origin ||
+      (!url.pathname.startsWith(base.pathname) && !movedDirectories.some((directory) => url.pathname.startsWith(directory))) ||
       url.username || url.password || url.hash) {
     throw new CustomApiError("REDIRECT_REFUSED", "custom API paging left the configured HTTPS boundary", { endpoint: endpoint.name });
   }
@@ -291,7 +297,7 @@ async function boundedJson(response, config, endpoint) {
   }
 }
 
-function pageShape(value, currentUrl, config, endpoint) {
+function pageShape(value, currentUrl, config, endpoint, movedDirectories) {
   if (Array.isArray(value)) return { rows: value, next: null };
   if (!isPlainObject(value)) {
     throw new CustomApiError("INVALID_RESPONSE", "custom API response was neither an array nor a data envelope", { endpoint: endpoint.name });
@@ -325,7 +331,7 @@ function pageShape(value, currentUrl, config, endpoint) {
   } else {
     throw new CustomApiError("INVALID_RESPONSE", "custom API next page was not recognized", { endpoint: endpoint.name });
   }
-  assertAllowedUrl(next, config, endpoint);
+  assertAllowedUrl(next, config, endpoint, movedDirectories);
   return { rows: value.data, next };
 }
 
@@ -438,6 +444,14 @@ function rowIdentity(row, endpoint) {
   return fields.map((field) => `${field}=${JSON.stringify(row[field])}`).join("|");
 }
 
+function safeRedirectAddress(address, token) {
+  let decoded;
+  try { decoded = decodeURIComponent(address); } catch { return "[address hidden]"; }
+  return [address, decoded].some((value) =>
+    value.toLowerCase().includes(token.toLowerCase()) || scanSecrets(value).shouldRefuse)
+    ? "[address hidden]" : address;
+}
+
 async function fetchPage(url, config, endpoint, token, { fetchImpl, sleep }) {
   for (let attempt = 1; attempt <= config.retries; attempt++) {
     const controller = new AbortController();
@@ -461,11 +475,8 @@ async function fetchPage(url, config, endpoint, token, { fetchImpl, sleep }) {
     if (response.status >= 300 && response.status < 400) {
       clearTimeout(timer);
       await response.body?.cancel().catch(() => {});
-      if (response.status === 308) {
-        throw new CustomApiError("CONFIG_INVALID", "custom API endpoint path redirected permanently; use its exact canonical path", {
-          endpoint: endpoint.name,
-          status: response.status,
-        });
+      if (response.status === 301 || response.status === 308) {
+        return { redirect: true, location: response.headers.get("location"), status: response.status };
       }
       throw new CustomApiError("REDIRECT_REFUSED", "custom API redirect was refused", { endpoint: endpoint.name, status: response.status });
     }
@@ -508,27 +519,67 @@ async function fetchPage(url, config, endpoint, token, { fetchImpl, sleep }) {
 
 async function fetchEndpoint(config, endpoint, token, dependencies) {
   let url = endpointUrl(config, endpoint);
-  const visited = new Set();
+  const configuredOrigin = new URL(config.base_url).origin;
+  const pageUrls = new Set();
+  const moves = new Map();
+  const movedDirectories = [];
   const rows = [];
   const responseDigests = [];
+  let pages = 0;
   let responseBytes = 0;
   let refusedRows = 0;
   const refusalReasons = {};
   const refused = [];
   const identities = new Set();
   while (url) {
-    assertAllowedUrl(url, config, endpoint);
-    if (visited.has(url.href) || visited.size >= config.max_pages) {
+    assertAllowedUrl(url, config, endpoint, movedDirectories);
+    if (pageUrls.has(url.href) || pages >= config.max_pages) {
       throw new CustomApiError("INVALID_RESPONSE", "custom API paging repeated or exceeded its limit", { endpoint: endpoint.name });
     }
-    visited.add(url.href);
-    const page = await fetchPage(url, config, endpoint, token, dependencies);
+    pages++;
+    let page;
+    for (let hops = 0; ; hops++) {
+      pageUrls.add(url.href);
+      page = await fetchPage(url, config, endpoint, token, dependencies);
+      if (!page.redirect) break;
+      const details = { endpoint: endpoint.name, status: page.status };
+      const code = page.status === 308 ? "CONFIG_ENDPOINT_REDIRECT" : "REDIRECT_REFUSED";
+      let next;
+      try {
+        if (page.location?.trim()) {
+          next = new URL(page.location, url);
+          next.hash = "";
+        }
+      } catch { /* Refuse malformed locations below. */ }
+      if (next && (next.protocol === "http:" || next.protocol === "https:") &&
+          next.origin !== configuredOrigin) {
+        // Query strings, fragments and userinfo can contain credentials.
+        const address = safeRedirectAddress(next.origin + next.pathname, token);
+        const error = new CustomApiError(code, customApiRedirectMessage(address), details);
+        error.redirectAddress = address;
+        throw error;
+      }
+      if (!next || next.protocol !== "https:" || next.username || next.password ||
+          pageUrls.has(next.href) || hops >= 3) {
+        throw new CustomApiError(code, "custom API redirect was invalid, repeated or exceeded three hops", details);
+      }
+      const move = {
+        old_path: safeRedirectAddress(url.pathname, token),
+        new_path: safeRedirectAddress(next.pathname, token),
+      };
+      moves.set(JSON.stringify(move), move);
+      // Later pages may still link into a directory reached by an earlier move.
+      // The configured origin continues to govern every request.
+      const directory = new URL(".", next).pathname;
+      if (!movedDirectories.includes(directory)) movedDirectories.push(directory);
+      url = next;
+    }
     responseBytes += page.bytes.byteLength;
     if (responseBytes > config.max_response_bytes) {
       throw new CustomApiError("RESPONSE_TOO_LARGE", "custom API endpoint exceeded its configured byte limit across pages", { endpoint: endpoint.name });
     }
     responseDigests.push(await sha256(page.bytes));
-    const shaped = pageShape(page.value, url, config, endpoint);
+    const shaped = pageShape(page.value, url, config, endpoint, movedDirectories);
     for (const value of shaped.rows) {
       if (rows.length + refusedRows >= config.max_rows) {
         throw new CustomApiError("RESPONSE_TOO_LARGE", "custom API returned too many rows", { endpoint: endpoint.name });
@@ -569,11 +620,12 @@ async function fetchEndpoint(config, endpoint, token, dependencies) {
   return {
     rows: keyed,
     response_hash: await sha256(responseDigests.join(":")),
-    pages: visited.size,
+    pages,
     rows_received: rows.length + refusedRows,
     refused_rows: refusedRows,
     refusal_reasons: Object.freeze({ ...refusalReasons }),
     refused: Object.freeze(refused.map((item) => Object.freeze({ ...item }))),
+    endpoint_moves: [...moves.values()],
   };
 }
 
@@ -699,7 +751,7 @@ function renderTemplate(template, context) {
   return template.replace(/\{\{([a-zA-Z0-9_.]+)\}\}/g, (_match, path) => {
     const value = path.split(".").reduce((current, key) => current?.[key], context);
     if (value === undefined || value === null) {
-      throw new CustomApiError("CONFIG_INVALID", `custom API document template references unavailable ${path}`);
+      throw configError("CONFIG_TEMPLATE_FIELD_MISSING");
     }
     return String(value);
   });
@@ -937,6 +989,7 @@ export async function runCustomApiPull(rawConfig, {
       refusedRows += fetched.refused_rows;
       endpointResults.push(Object.freeze({
         name: endpoint.name,
+        ...(fetched.endpoint_moves.length ? { endpoint_moves: fetched.endpoint_moves } : {}),
         rows_received: fetched.rows_received,
         rows_accepted: fetched.rows.length,
         rows_refused: fetched.refused_rows,
@@ -959,6 +1012,7 @@ export async function runCustomApiPull(rawConfig, {
     refusedRows += fetched.refused_rows;
     endpointResults.push(Object.freeze({
       name: endpoint.name,
+      ...(fetched.endpoint_moves.length ? { endpoint_moves: fetched.endpoint_moves } : {}),
       rows_received: fetched.rows_received,
       rows_accepted: fetched.rows.length,
       rows_refused: fetched.refused_rows,
@@ -1720,21 +1774,28 @@ export function customApiD1Persistence(env, hooks = {}) {
   };
 }
 
-function configFromEnv(env) {
-  if (!env.CUSTOM_API_CONFIG) return null;
-  let parsed;
-  try { parsed = JSON.parse(env.CUSTOM_API_CONFIG); } catch {
-    throw new CustomApiError("CONFIG_INVALID", "custom API Worker configuration is not valid JSON");
+export function customApiConfigFromEnv(env) {
+  if (env.CUSTOM_API_CONFIG == null) return null;
+  try {
+    return validateCustomApiConfig(JSON.parse(env.CUSTOM_API_CONFIG));
+  } catch {
+    throw configError("CONFIG_WORKER_SETTING_INVALID");
   }
-  return validateCustomApiConfig(parsed);
 }
 
-async function setSourceState(env, config, state, { at, message = null, refusedRows = 0 } = {}) {
+export function customApiSourceNameClashes(row) {
+  return Boolean(row) && String(row.kind).trim().toLowerCase() !== "custom_api";
+}
+
+async function checkSourceName(env, config) {
+  const row = await env.DB.prepare("SELECT kind FROM sources WHERE name=?1").bind(config.source).first();
+  if (customApiSourceNameClashes(row)) throw configError("CONFIG_SOURCE_NAME_CLASH");
+}
+
+async function setSourceState(env, config, state, {
+  at, message = null, refusedRows = 0, endpointResults = [], redirectAddress = null,
+} = {}) {
   if (state === "indexing") {
-    const existing = await env.DB.prepare("SELECT kind FROM sources WHERE name=?1").bind(config.source).first();
-    if (existing && String(existing.kind).trim().toLowerCase() !== "custom_api") {
-      throw new CustomApiError("CONFIG_INVALID", "custom API source name is already owned by another source kind");
-    }
     await env.DB.prepare(
       `INSERT INTO sources (name,kind,status,created_at,expected_refresh_seconds,stale_reason)
        VALUES (?1,'custom_api','indexing',?2,?3,NULL)
@@ -1742,9 +1803,8 @@ async function setSourceState(env, config, state, { at, message = null, refusedR
        WHERE lower(trim(sources.kind))='custom_api'`
     ).bind(config.source, at, config.cadence_seconds).run();
     const claimed = await env.DB.prepare("SELECT kind FROM sources WHERE name=?1").bind(config.source).first();
-    if (String(claimed?.kind || "").trim().toLowerCase() !== "custom_api") {
-      throw new CustomApiError("CONFIG_INVALID", "custom API source identity could not be read back");
-    }
+    if (customApiSourceNameClashes(claimed)) throw configError("CONFIG_SOURCE_NAME_CLASH");
+    if (!claimed) throw configError("CONFIG_SOURCE_IDENTITY_UNVERIFIED");
     await env.DB.prepare(
       "INSERT INTO source_events (source_name,event,at,detail) VALUES (?1,'ingest',?2,'custom API pull started')"
     ).bind(config.source, at).run();
@@ -1761,9 +1821,12 @@ async function setSourceState(env, config, state, { at, message = null, refusedR
   ).bind(config.source).first();
   if (state === "ready") {
     const warning = message === "INPUT_REFUSED" && Number(refusedRows) > 0;
-    const detail = warning
+    const moves = endpointResults.flatMap((endpoint) =>
+      (endpoint.endpoint_moves || []).map((move) => ({ endpoint: endpoint.name, ...move })));
+    const summary = warning
       ? `custom API pull completed with ${Number(refusedRows)} refused row(s)`
       : "custom API pull completed";
+    const detail = moves.length ? JSON.stringify({ summary, custom_api_endpoint_moves: moves }) : summary;
     await env.DB.batch([
       env.DB.prepare(
         `UPDATE sources SET status='ready',last_ingest_at=?2,document_count=?3,
@@ -1783,6 +1846,7 @@ async function setSourceState(env, config, state, { at, message = null, refusedR
   const issueCode = CUSTOM_API_ISSUE_CODES.has(message)
     ? message
     : "INTERNAL_ERROR";
+  const detail = redirectAddress ? JSON.stringify({ issue_code: issueCode, redirect_address: redirectAddress }) : issueCode;
   await env.DB.batch([
     env.DB.prepare(
       `UPDATE sources SET status='error',expected_refresh_seconds=?2,stale_reason=?3
@@ -1790,12 +1854,16 @@ async function setSourceState(env, config, state, { at, message = null, refusedR
     ).bind(config.source, config.cadence_seconds, issueCode),
     env.DB.prepare(
       "INSERT INTO source_events (source_name,event,at,detail) VALUES (?1,'error',?2,?3)"
-    ).bind(config.source, at, issueCode),
+    ).bind(config.source, at, detail),
     env.DB.prepare(
       `UPDATE custom_api_schedule_state
           SET display_name=?2,last_issue_code=?3,last_refused_rows=?4
         WHERE source=?1`
-    ).bind(config.source, config.display_name, issueCode, Number(refusedRows) || 0),
+    // The shipped schedule table accepts only its original closed codes.
+    // The source row and event above retain the more specific reason.
+    ).bind(config.source, config.display_name,
+      Object.hasOwn(CUSTOM_API_CONFIG_REASONS, issueCode) ? "CONFIG_INVALID" : issueCode,
+      Number(refusedRows) || 0),
   ]);
 }
 
@@ -1836,21 +1904,24 @@ async function releaseRunLease(env, config, token, { successAt = null } = {}) {
 /** Shared scheduled/manual Worker entry point. */
 export async function runCustomApiWorker(env, options = {}) {
   if (backendOf(env) !== D1) {
-    throw new CustomApiError("CONFIG_INVALID", "custom API sources require the D1 backend");
+    throw configError("CONFIG_BACKEND_UNSUPPORTED");
   }
-  const config = configFromEnv(env);
+  const config = customApiConfigFromEnv(env);
   if (!config) return { status: "disabled", dry_run: options.dryRun === true };
   const token = env[config.token_secret];
   const at = (options.now ?? (() => new Date()))().toISOString();
   let lease = null;
   let sourceStarted = false;
-  if (options.dryRun !== true) {
-    lease = await acquireRunLease(env, config, { at, scheduled: options.scheduled === true });
-    if (!lease.due) return { status: "not_due", dry_run: false };
-    await setSourceState(env, config, "indexing", { at });
-    sourceStarted = true;
-  }
   try {
+    if (options.dryRun !== true) {
+      lease = await acquireRunLease(env, config, { at, scheduled: options.scheduled === true });
+      if (!lease.due) return { status: "not_due", dry_run: false };
+    }
+    await checkSourceName(env, config);
+    if (lease) {
+      await setSourceState(env, config, "indexing", { at });
+      sourceStarted = true;
+    }
     const result = await runCustomApiPull(config, {
       token,
       fetchImpl: options.fetchImpl ?? fetch,
@@ -1867,6 +1938,7 @@ export async function runCustomApiWorker(env, options = {}) {
           at: result.fetched_at,
           message: warning ? "INPUT_REFUSED" : null,
           refusedRows: result.refused_rows,
+          endpointResults: result.endpoint_results,
         });
         await releaseRunLease(env, config, lease.token, { successAt: result.fetched_at });
       } else if (result.status === "refused") {
@@ -1895,7 +1967,14 @@ export async function runCustomApiWorker(env, options = {}) {
       await setSourceState(env, config, "error", {
         at,
         message: safe.code,
+        redirectAddress: safe.redirectAddress,
       }).catch(() => {});
+    }
+    if (lease?.token && safe.code === "CONFIG_SOURCE_IDENTITY_UNVERIFIED") {
+      await env.DB.prepare(
+        `INSERT INTO source_events (source_name,event,at,detail)
+         SELECT source,'error',?3,?4 FROM custom_api_schedule_state WHERE source=?1 AND lease_token=?2`
+      ).bind(config.source, lease.token, at, safe.code).run().catch(() => {});
     }
     if (options.dryRun !== true) await releaseRunLease(env, config, lease?.token).catch(() => {});
     throw safe;

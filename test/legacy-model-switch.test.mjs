@@ -131,7 +131,8 @@ test("update deploys both switched bindings, preserves the secret name, passes r
   assert.equal(run.lines.filter((line) => line === SWITCH_LINE).length, 1, "the announcement is one plain line");
   assert.ok(run.lines.findIndex((line) => line.includes(SWITCH_LINE)) < run.lines.findIndex((line) => line.includes("Updating your Brain")));
   assert.ok(run.calls.includes("POST /api/rag/think"), "the fake answerer was exercised by real cmdTest");
-  assert.ok(run.lines.some((line) => /configured answer model matches/.test(line)));
+  assert.ok(run.lines.some((line) => line.includes("✔ The configured answer model is working")));
+  assert.ok(run.lines.every((line) => !line.includes("configured answer model matches")));
   const after = JSON.parse(readFileSync(f.manifestPath, "utf8"));
   assert.deepEqual(after, { ...f.manifest, brain: { ...f.manifest.brain, version: f.targetVersion }, retrieval: { ...f.manifest.retrieval, ...PAIR } });
 });

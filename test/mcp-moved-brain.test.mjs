@@ -379,7 +379,7 @@ test("brain assistant-repair previews a moved brain as repairable and applies it
   );
 });
 
-test("a refusal names its reason and offers a remedy that does not re-enter the reconciler", async () => {
+test("a collision names its reason and offers an explicitly approved replacement", async () => {
   const { desired, newManifest, root } = relocatedBrain({ keepOriginal: true });
   const home = nextRoot();
   const claudeConfigPath = join(home, ".claude.json");
@@ -426,18 +426,18 @@ test("a refusal names its reason and offers a remedy that does not re-enter the 
   );
   assert.match(
     run.output,
-    /Rename or remove that .* entry yourself first/i,
-    "the remedy tells the owner how to clear the persistent collision",
+    /owner's explicit approval, back up and replace only/i,
+    "the remedy asks the owner to approve replacing the exact collision",
   );
   assert.match(
     run.output,
-    /mcp-config/,
-    "the read-only manual connection command remains available",
+    /mcp-config[^\n]*--apply --replace-owner-entry/,
+    "the printed command uses the scoped replacement path",
   );
   assert.doesNotMatch(
     run.output,
-    /mcp-config[^\n]*--apply/,
-    "the printed mcp-config command carries no --apply, which would re-enter this reconciler",
+    /mcp-config[^\n]*--apply\s*$/m,
+    "a bare apply would return to the same collision",
   );
   assert.doesNotMatch(
     run.output,

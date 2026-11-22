@@ -13,7 +13,7 @@ import { renderCliCommands } from "../operations/cli-guidance.mjs";
 import { quotePosixArgument, quotePowerShellArgument } from "../operations/command-display.mjs";
 
 const fixed = new Date("2026-11-02T18:05:06.789Z");
-async function fixture(platform = process.platform === "win32" ? "win32" : "darwin") {
+async function fixture(platform = process.platform === "win32" ? "win32" : "darwin", extraSource = false) {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "daily-entry-")));
   const home = join(root, "home");
   for (const part of ["home", "first", "second"]) mkdirSync(join(root, part), { mode: 0o700 });
@@ -29,7 +29,10 @@ async function fixture(platform = process.platform === "win32" ? "win32" : "darw
   const before = await buildConfiguredDailyPlan(manifest, path, options);
   manifest.corpora.upload.folders.shift();
   writeFileSync(path, `${JSON.stringify(manifest)}\n`, { mode: 0o600 });
-  const plan = await buildConfiguredDailyPlan(manifest, path, options);
+  const configured = await buildConfiguredDailyPlan(manifest, path, options);
+  const ready = configured.sources.find(source => source.status === "ready" && source.owner === "daily-task");
+  const plan = extraSource ? { ...configured, sources: [...configured.sources,
+    { ...ready, key: "fixture-gap", source_names: ["fixture-gap"] }] } : configured;
   assert.equal(before.ready, true);
   assert.equal(plan.ready, true);
   const definitionOptions = { platform: options.platform, nodePath: process.execPath };
@@ -52,6 +55,14 @@ function subprocess(f, mode) {
   }, encoding: "utf8", timeout: 15_000 });
   return { child, events: readFileSync(events, "utf8").trim().split("\n") };
 }
+
+test("scheduled entry exits zero for a partial refresh", async () => {
+  const f = await fixture(undefined, true);
+  const { child, events } = subprocess(f, "current");
+  assert.deepEqual(events, ["schedule-read", "schedule-read", "source-run", "source-run"]);
+  assert.equal(child.status, 0, child.stderr);
+  assert.match(child.stdout, /daily refresh partial/u);
+});
 
 test("scheduled entry prints the concrete recovery command for an obsolete definition", async () => {
   const f = await fixture();

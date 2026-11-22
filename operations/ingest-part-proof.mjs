@@ -82,7 +82,7 @@ export function setPartReadbackSleepForTest(fn) { sleepMs = fn; }
  * invalidate the affected part without replaying an intact sibling.
  */
 export async function readCurrentIngestParts({ base, adminKey, source, envelopes, proof, request = fetch,
-  assertOwned, deadlineAt = Infinity, now = Date.now }) {
+  assertOwned, deadlineAt = Infinity, now = Date.now, matchCalendarRevision = false }) {
   const candidates = envelopes || proof?.parts || [];
   if (!candidates.length) return null;
   const ids = candidates.map(part => part.source_id);
@@ -97,7 +97,7 @@ export async function readCurrentIngestParts({ base, adminKey, source, envelopes
     for (let attempt = 0; ; attempt += 1) {
       response = await request(`${base}/api/admin/brain/ingest-part-proof`, {
         method:'POST', redirect:'error', headers:{'Content-Type':'application/json','X-Admin-Key':adminKey},
-        body:JSON.stringify({source,source_ids:selected}), signal:AbortSignal.timeout(Math.max(1,Math.min(30000,Math.ceil(deadlineAt-now())))),
+        body:JSON.stringify({source,source_ids:selected,...(matchCalendarRevision ? {calendar_revision:true} : {})}), signal:AbortSignal.timeout(Math.max(1,Math.min(30000,Math.ceil(deadlineAt-now())))),
       });
       assertOwned?.();
       // This readback only reads. A large Brain's database can refuse it for a
@@ -125,7 +125,11 @@ export async function readCurrentIngestParts({ base, adminKey, source, envelopes
       const candidate = candidates.find(p=>p.source_id===part.source_id);
       const expectedHash = envelopes ? createHash('sha256').update(`chunk-v1:${g.size}:${g.overlap}\0${candidate.content}`).digest('hex') : candidate.content_hash;
       const count = envelopes ? chunkText(candidate.content,g).length : candidate.chunk_count;
-      if (part.content_hash === expectedHash && part.chunk_count === count &&
+      const revision = candidate.metadata?.calendar_revision;
+      const exactCalendarRevision = !matchCalendarRevision ||
+        (typeof revision === 'string' && /^[a-f0-9]{64}$/.test(revision) &&
+          part.calendar_revision === revision && part.document_date === Date.parse(candidate.occurred_at));
+      if (exactCalendarRevision && part.content_hash === expectedHash && part.chunk_count === count &&
           (envelopes || (proof.geometry?.size === g.size && proof.geometry?.overlap === g.overlap))) confirmed.push(part);
     }
   }

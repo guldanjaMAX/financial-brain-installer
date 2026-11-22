@@ -107,7 +107,7 @@ export async function fixture(run, source = "gmail") {
           if (f.captureSaves !== false) f.saves.push(structuredClone(state));
           ingest.saveState(path, state, f.stateSaveOptions);
         } }),
-        gmail: {
+        gmail: f.options?.gmail ?? {
           currentHistoryId: async () => { f.profileReads = (f.profileReads || 0) + 1; return f.marker; },
           listHistory: async (...args) => { f.historyReads++; return f.history ? f.history(...args) : { ids: f.ids, deletedIds: [], historyId: f.marker, hasMore: f.hasMore }; },
           listMessages: async function* () { f.fullLists = (f.fullLists || 0) + 1; yield* f.ids; },

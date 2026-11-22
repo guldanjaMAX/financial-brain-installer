@@ -154,6 +154,7 @@ export async function api(getAccessToken, path, {
   maxResponseBytes = null,
   fetchImpl = fetch,
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+  deferQuota = false,
 } = {}) {
   const remaining = () => {
     const ms = deadlineAt - now();
@@ -226,6 +227,12 @@ export async function api(getAccessToken, path, {
       remaining(); return {};
     });
     const reason = body?.error?.errors?.[0]?.reason || body?.error?.status || "";
+    if (deferQuota && (res.status === 429 || (res.status === 403 &&
+        /^(?:rateLimitExceeded|userRateLimitExceeded|quotaExceeded|rate_limit_exceeded)$/i.test(reason)))) {
+      throw Object.assign(new DriveError("Google API requested a quota retry", res.status, "googleQuotaResponse"), {
+        retryAfter: res.headers?.get("Retry-After"),
+      });
+    }
     // One 401 gets a forced access-token refresh. A second 401 is not a file
     // quality problem; it is a broken connection and must abort the sync.
     const retryAuth = res.status === 401 && !authRefreshAttempted;

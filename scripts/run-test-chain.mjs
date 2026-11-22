@@ -12,6 +12,8 @@ export const RUNNER_TEST_COMMAND = "node test/test-chain-runner.test.mjs";
 // 172-command chain and order. Add to this list when you add a test; never
 // weaken the projection itself.
 export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
+  "node --test test/windows-current-launchers.test.mjs",
+  "node --test test/owner-checklist.test.mjs",
   "node --test test/brain-domain-save.test.mjs",
   "node --test test/cf-q2-fix-r1-owner.test.mjs",
   "node --test test/connect-bank-from-clipboard.test.mjs",
@@ -275,6 +277,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --test worker/test/ledger-vendor-guard-composition.test.mjs",
   "node --test worker/test/money-simplefin-questions-0421.test.mjs",
   "node --test test/gmail-batch-1114.test.mjs",
+  "node --test test/gmail-rate-limit.test.mjs",
   "node --test test/gmail-liveness-1115.test.mjs",
   "node --test test/gmail-entry-sweep.test.mjs",
   "node --test test/gmail-part-resume.test.mjs",
@@ -610,6 +613,8 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test worker/test/scanned-evidence.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
+  "node --test test/windows-current-launchers.test.mjs",
+  "node --test test/owner-checklist.test.mjs",
   "node --test test/brain-domain-save.test.mjs",
   "node --test test/cf-q2-fix-r1-owner.test.mjs",
   "node --test test/connect-bank-from-clipboard.test.mjs",
@@ -1227,6 +1232,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node --test worker/test/ledger-vendor-guard-composition.test.mjs",
   "node --test worker/test/money-simplefin-questions-0421.test.mjs",
   "node --test test/gmail-batch-1114.test.mjs",
+  "node --test test/gmail-rate-limit.test.mjs",
   "node --test test/gmail-liveness-1115.test.mjs",
   "node --test test/gmail-entry-sweep.test.mjs",
   "node --test test/gmail-part-resume.test.mjs",

@@ -107,11 +107,10 @@ try {
   }
 
   const dailyAttention = commandArms.find((arm) => arm.mode === "update-daily-attention");
+  const pausedDailyGuidance = "The old daily task is paused. Ask your installer to run brain daily on <manifest> to turn on daily updates.";
   assert.equal(dailyAttention.code, 0, "verified daily-off state with an owner action is a successful update");
-  assert.match(dailyAttention.stdout, /still needs attention/);
-  assert.ok(dailyAttention.stdout.includes(renderCliCommands(
-    "The old daily task was paused; run brain daily on <manifest> to turn on permanent daily imports.",
-  )), "the command boundary explains the pending owner decision");
+  assert.doesNotMatch(dailyAttention.stdout, /Daily update is off\./);
+  assert.equal(dailyAttention.stdout.split("\n").filter(line => line.includes(renderCliCommands(pausedDailyGuidance))).length, 1);
   assert.match(dailyAttention.stdout, /DECISION daily recovery=false enabled=false upgrades=1/);
   assert.match(dailyAttention.stdout, /DECISION bridge enabled=false pauses=1/,
     "the successful attention arm actually paused its bridge and did not silently enable it");
@@ -125,7 +124,7 @@ try {
   assert.match(windowsAttention.stdout, /DECISION daily recovery=false enabled=false upgrades=1/);
   assert.match(windowsAttention.stdout, /DECISION bridge enabled=false pauses=1/);
   const windowsGuidance = renderCliCommands(
-    "The old daily task was paused; run brain daily on <manifest> to turn on permanent daily imports.",
+    pausedDailyGuidance,
     { platform: "win32", env: { PATH: "" } },
   );
   assert.ok(windowsAttention.stdout.includes(windowsGuidance),
@@ -136,7 +135,7 @@ try {
     "the enabled-daily green control reached verified restoration and cleared recovery");
 
   // A required restore failure is intentionally no longer a success warning.
-  // It must still close readline, keep recovery, and exit nonzero without Done.
+  // It must still close readline, keep recovery, and exit nonzero.
   const failed = await runArm("update-daily-recovery-failure");
   assert.equal(failed.timedOut, false, JSON.stringify(failed));
   assert.equal(failed.code, 1, JSON.stringify(failed));
@@ -144,7 +143,7 @@ try {
   assert.match(failed.stdout, /DECISION daily recovery=true enabled=false upgrades=1 restore_attempts=[1-9]/);
   assert.match(failed.stdout + failed.stderr, /this update is incomplete: daily imports remain paused or unverified/);
   assert.match(failed.stdout + failed.stderr, /Daily recovery receipt:/);
-  assert.doesNotMatch(failed.stdout, /Done\. Your Brain/);
+  assert.doesNotMatch(failed.stdout, /^✔ Version /mu);
 
   assert.notEqual(
     control.stdout.includes("opened=true"),

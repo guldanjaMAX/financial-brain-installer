@@ -496,8 +496,35 @@ test("update still captures and continues for a current owned scheduler definiti
 test("production update proves active propagation before convergence and schedule restore", async () => {
   await withFixture(async ({ manifestPath }) => {
     const harness = productionHarness(manifestPath);
+    harness.options.activateCurrentLaunchers = ({ platform, version }) => {
+      assert.equal(platform, process.platform);
+      assert.equal(version, PRODUCT_VERSION);
+      assert.equal(harness.finish.length, 0);
+      harness.events.push("activate-launchers");
+    };
+    harness.options.upgradeOptions.cmdTest = async (_path, options) => {
+      harness.events.push("acceptance");
+      assert.equal(harness.state().enabled, false, "acceptance sees the temporary pause");
+      assert.equal(options.deferInstallVersionCheck, process.platform === "win32");
+      assert.equal(options.versionReadbackAfterAcceptance, true);
+      options.onOwnerAcceptance({
+        passed: true,
+        results: [
+          { name: "health responds", status: "pass" },
+          { name: "document boundary reading", status: "warn", detail: "below High confidence",
+            diagnostic: { confidence_percent: 81 } },
+        ],
+        sources: [{ name: "gmail", kind: "gmail", state: "unscheduled" }],
+      });
+    };
+    harness.options.readOwnerFreshness = async () => {
+      assert.equal(harness.state().enabled, true, "owner freshness is read after schedule restoration");
+      return [{ name: "gmail", kind: "gmail", state: "ok" }];
+    };
     await cmdUpdate(manifestPath, harness.options);
     harness.bookmarkWriter.assertCalled();
+    assert.equal(harness.bookmarkWriter.receipts.find(row => row.acceptance_diagnostics)
+      ?.acceptance_diagnostics[0].diagnostic.confidence_percent, 81);
     const index = (event) => harness.events.indexOf(event);
     assert.ok(index("schedule:false") < index("deploy:paused"), "native pause precedes the deployment stages");
     assert.ok(index("deploy:active") < index("health:active-cutover"));
@@ -505,9 +532,14 @@ test("production update proves active propagation before convergence and schedul
     assert.ok(index("provider-reconcile") < index("convergence"));
     assert.ok(index("convergence") < index("health:active-final"));
     assert.ok(index("health:active-final") < index("schedule:true"));
+    assert.ok(index("schedule:true") < index("activate-launchers"));
     assert.equal(harness.state().enabled, true);
     assert.equal(harness.finish.length, 1, "the green production control renders one completion message");
-    assert.match(harness.finish[0], /passed its checks/i);
+    const rows = harness.finish[0].split("\n");
+    assert.ok(rows.every(row => row.startsWith("✔ ")));
+    assert.ok(rows.includes("✔ Gmail is up to date"));
+    assert.ok(rows.some(row => /^✔ Daily update on, scheduled for /.test(row)));
+    assert.doesNotMatch(harness.finish[0], /warning|confidence|unscheduled/i);
   });
 });
 
@@ -1173,7 +1205,7 @@ test("update self-check stops when a bridge-only schedule is left disabled", asy
         }), true);
         return true;
       });
-      assert.match(lines.join("\n"), /https:\/\/financialbrain\.ai\/help\/UPDATE_SELFCHECK_DAILY_CHANGED/u);
+      assert.deepEqual(lines, ["Daily update needs attention. Ask your installer to check it."]);
       assert.ok(previewSupportJournal({ root: dirname(manifestPath) }).includes(code));
       assert.ok(db.prepare("PRAGMA table_info(fixture_records)").all().some(row => row.name === "migrated"));
       assert.deepEqual(rows(), before);
@@ -1209,7 +1241,7 @@ test("update self-check retains the original inventory across an interrupted dep
     links = [{ ref: "fixture-original-link", ok: true }];
     await cmdUpdate(manifestPath, harness.options);
     assert.equal(bankReads, 3, "recovery only observes after state");
-    assert.match(harness.finish[0], /Done.*passed its checks/);
+    assert.match(harness.finish[0], /^✔ Version /u);
   });
 });
 
@@ -1243,7 +1275,7 @@ test("update self-check permits only equivalent Windows bridge retirement", asyn
     } else {
       await cmdUpdate(manifestPath, harness.options);
       assert.equal(native.rows.has(BRIDGE_NAME), false);
-      assert.match(harness.finish[0], /Done.*passed its checks/);
+      assert.match(harness.finish[0], /^✔ Version /u);
     }
     assert.ok(harness.events.includes("health:active-final"));
     assert.ok(harness.events.includes("schedule:install"), "permanent task verification reached");
@@ -1291,7 +1323,8 @@ test("Windows pre-change refusal retries from durable restored bridge receipts",
     fail = false;
     await cmdUpdate(manifestPath, harness.options);
     assert.equal(native.rows.has(BRIDGE_NAME), false, "healthy retry is the restore control");
-    assert.match(harness.finish.at(-1), /Daily bridge 1: moved/, "the closing summary accounts for the retired native entry");
+    assert.match(harness.finish.at(-1), /^✔ Daily update on, scheduled for 9:00 AM$/mu,
+      "the owner sees the verified replacement schedule");
     assert.deepEqual(native.mutations().map(({ args }) => args.at(-1)), ["/DISABLE", "/ENABLE", "/DISABLE", BRIDGE_NAME]);
     assert.equal(bridgeArchive(manifestPath).bridge_snapshots[0].state, "retired");
   });

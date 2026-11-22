@@ -91,9 +91,11 @@ The bearer value never belongs in this file.
 }
 ```
 
-Deploy the already reviewed manifest through the install workflow. Do not add a
-trailing slash to any endpoint path. A `308` response means the path is not the
-canonical path and the pull stops with a configuration error.
+Deploy the already reviewed manifest through the install workflow. Use the
+provider's documented endpoint paths. The Brain follows up to three permanent
+redirects (`301` or `308`) on the same scheme, host, and port. The pull receipt
+and checkup name the endpoint and the paths it followed. The saved manifest
+keeps the address the owner approved.
 
 ## 0:04 to 0:07: connect the bearer key privately
 
@@ -242,9 +244,10 @@ refused, it must instead say ready with warnings and show the refusal count
 until a clean pull succeeds. An unchanged full response may write zero
 documents; the fresh successful pull is still visible.
 If freshness did not advance, leave the saved rows unchanged and inspect the
-named source error. A `401` means the dashboard refused the key. A `308` means
-the manifest endpoint path is not canonical. Never paste the provider response
-or bearer key into support material.
+named source error. A `401` means the dashboard refused the key. If the provider
+moved to another origin, verify the new address with the provider before
+changing the manifest. Temporary redirects (`302` and `307`) still stop the
+pull. Keep provider responses and bearer keys out of support material.
 
 The structured rows are reserved for a later reviewed financial-map adapter.
 This setup does not post anything to the ledger.

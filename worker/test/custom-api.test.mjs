@@ -427,12 +427,13 @@ test("401, exhausted 500, malformed, oversized, and cross-host redirect failures
     ["malformed", 200, "not-json", "INVALID_RESPONSE"],
     ["oversized", 200, "x".repeat(2048), "RESPONSE_TOO_LARGE"],
     ["redirect", 302, "", "REDIRECT_REFUSED"],
-    ["trailing-slash", 308, { error: "unknown endpoint" }, "CONFIG_INVALID"],
+    ["temporary", 307, "", "REDIRECT_REFUSED"],
+    ["trailing-slash", 308, { error: "unknown endpoint" }, "CONFIG_ENDPOINT_REDIRECT"],
   ];
   let scenario = scenarios[0];
   const mock = await mockServer((_request, response) => {
     const [name, status, body] = scenario;
-    if (name === "redirect" || name === "trailing-slash") {
+    if (name === "redirect" || name === "temporary" || name === "trailing-slash") {
       response.writeHead(status, {
         "content-type": "application/json",
         location: name === "redirect" ? "https://other.invalid/private" : "/api/sales",
@@ -517,4 +518,99 @@ test("unexpected envelope keys, duplicate row identities, and token reflection f
     );
     assert.ok(mock.calls.length > before, `${code} reached the request decision point`);
   }
+});
+
+for (const status of [301, 308]) {
+  test(`follows a same-origin ${status} and returns rows and move evidence`, async () => {
+    const raw = configuration("https://dashboard.invalid/api/");
+    raw.endpoints = raw.endpoints.slice(0, 1);
+    const persistence = memoryPersistence();
+    const calls = [];
+    const result = await runCustomApiPull(raw, {
+      token: TOKEN, persistence, dryRun: status === 308,
+      fetchImpl: async (input, options) => {
+        const url = new URL(input);
+        calls.push(url.pathname);
+        assert.ok(options.headers.Authorization === `Bearer ${TOKEN}`);
+        assert.equal(options.redirect, "manual");
+        if (url.pathname === "/api/sales") {
+          return new Response(null, { status, headers: { Location: "/v2/sales?view=current#anchor" } });
+        }
+        assert.equal(url.hash, "");
+        assert.equal(url.search, "?view=current");
+        return Response.json([{store: "Store A", period: "2026-08-01", revenue_stream: "services", net_sales: 10}]);
+      },
+    });
+    assert.deepEqual(calls, ["/api/sales", "/v2/sales"]);
+    assert.equal(result.rows.created, 1);
+    assert.deepEqual(result.endpoint_results[0].endpoint_moves, [{old_path: "/api/sales", new_path: "/v2/sales"}]);
+    assert.equal(persistence.rows.size, status === 308 ? 0 : 1);
+    assert.equal(persistence.documents.size, status === 308 ? 0 : 1);
+    assert.equal(persistence.receipts.length, status === 308 ? 0 : 1);
+    assert.equal(raw.endpoints[0].path, "/sales");
+  });
+}
+
+for (const [label, locations, expectedCalls, code] of [
+  ["cross-origin", ["https://other.invalid/new?private=value"], 1, "CONFIG_ENDPOINT_REDIRECT"],
+  ["port change", ["https://dashboard.invalid:8443/new"], 1, "CONFIG_ENDPOINT_REDIRECT"],
+  ["scheme change", ["http://dashboard.invalid/new"], 1, "CONFIG_ENDPOINT_REDIRECT"],
+  ["non-HTTP location", ["blob:https://dashboard.invalid/file"], 1, "CONFIG_ENDPOINT_REDIRECT"],
+  ["loop", ["/api/second", "/api/sales"], 2, "CONFIG_ENDPOINT_REDIRECT"],
+  ["three hops", ["/api/second", "/api/third", "/api/fourth"], 4, null],
+  ["fourth hop", ["/api/second", "/api/third", "/api/fourth", "/api/fifth"], 4, "CONFIG_ENDPOINT_REDIRECT"],
+]) {
+  test(`permanent redirect boundary handles ${label}`, async () => {
+    const raw = configuration("https://dashboard.invalid/api/");
+    raw.endpoints = raw.endpoints.slice(0, 1);
+    let calls = 0;
+    const pull = runCustomApiPull(raw, {
+      token: TOKEN, persistence: memoryPersistence(), dryRun: true,
+      fetchImpl: async (input) => {
+        assert.equal(new URL(input).origin, "https://dashboard.invalid");
+        const location = locations[calls++];
+        return location ? new Response(null, { status: 308, headers: { Location: location } }) : Response.json([]);
+      },
+    });
+    if (code) {
+      await assert.rejects(pull, (error) => {
+        assert.equal(error.code, code);
+        if (label === "cross-origin") {
+          assert.match(error.message, /https:\/\/other\.invalid\/new/);
+          assert.doesNotMatch(error.message, /private=value/);
+        }
+        return true;
+      });
+    } else {
+      const result = await pull;
+      assert.equal(result.endpoint_results[0].endpoint_moves.length, 3);
+    }
+    assert.equal(calls, expectedCalls);
+  });
+}
+
+test("pagination resolves from the effective address and follows redirects on later pages", async () => {
+  const raw = configuration("https://dashboard.invalid/api/");
+  raw.endpoints = raw.endpoints.slice(0, 1);
+  const pages = new Map([
+    ["/api/sales", new Response(null, {status: 301, headers: {Location: "/v2/sales"}})],
+    ["/v2/sales", Response.json({data: [], next: "?page=2"})],
+    ["/v2/sales?page=2", new Response(null, {status: 308, headers: {Location: "../v3/sales?page=2"}})],
+    ["/v3/sales?page=2", Response.json({data: [], next: "/v2/sales?page=3"})],
+    ["/v2/sales?page=3", Response.json([{store: "Store A", period: "2026-08-01", revenue_stream: "services", net_sales: 10}])],
+  ]);
+  const result = await runCustomApiPull(raw, {
+    token: TOKEN, persistence: memoryPersistence(), sleep: async () => {},
+    fetchImpl: async (input) => {
+      const url = new URL(input);
+      const response = pages.get(url.pathname + url.search);
+      if (!response) throw new Error("unexpected fixture address");
+      return response;
+    },
+  });
+  assert.equal(result.rows.created, 1);
+  assert.deepEqual(result.endpoint_results[0].endpoint_moves, [
+    {old_path: "/api/sales", new_path: "/v2/sales"},
+    {old_path: "/v2/sales", new_path: "/v3/sales"},
+  ]);
 });

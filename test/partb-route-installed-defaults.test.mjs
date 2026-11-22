@@ -1,18 +1,20 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import {
-  mkdirSync,
   mkdtempSync,
   realpathSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import test from "node:test";
 
-import { cmdMcpConfig, successMark } from "../brain.mjs";
+import { cmdMcpConfig, mcpRegistrationDescriptor, resumeClaudeRouteAfterCommand, successMark } from "../brain.mjs";
 import {
   CLAUDE_CODE_FULL_EXIT_CARD,
+  openPartBMcpTransport,
   PART_B_ROUTE_CONTROL,
   readCurrentUserProcessList,
 } from "../operations/answer-route-proof.mjs";
@@ -36,10 +38,16 @@ function backendTiming() {
 }
 
 async function fixture(t, label, { withServer = true } = {}) {
-  assert.ok(process.env.HOME, "the defaults test requires a scratch HOME");
-  mkdirSync(process.env.HOME, { recursive: true, mode: 0o700 });
-  const parent = realpathSync.native(process.env.HOME);
-  const root = realpathSync.native(mkdtempSync(join(parent, `${label}-`)));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), `${label}-`)));
+  if (process.platform === "win32") {
+    // Exercise the real default writer against a guide inside its scratch profile.
+    const previous = process.env.USERPROFILE;
+    process.env.USERPROFILE = root;
+    t.after(() => {
+      if (previous === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = previous;
+    });
+  }
   t.after(() => rmSync(root, { recursive: true, force: true }));
 
   const requests = [];
@@ -54,6 +62,14 @@ async function fixture(t, label, { withServer = true } = {}) {
       question: body?.q,
     }));
     response.writeHead(200, { "Content-Type": "application/json" });
+    if (request.url === "/api/admin/brain/money-query") {
+      response.end(JSON.stringify({ rows: [{ amount_cents: 125 }], row_count: 1 }));
+      return;
+    }
+    if (request.url === "/api/admin/brain/document-read") {
+      response.end(JSON.stringify({ id: body.id, text: "Synthetic document." }));
+      return;
+    }
     response.end(JSON.stringify({
       mode: "think",
       answer: "The fixed control completed. [1]",
@@ -229,4 +245,70 @@ test("installed defaults refuse one running Claude Code process without spawn or
     "the fixed refusal card was emitted once without a retry loop",
   );
   t.diagnostic("apply=1 process_queries=1 child_spawns=0 retries=0 fixed_cards=1");
+});
+
+test("approved reconnect defers proof until a later ordinary CLI run", async (t) => {
+  const state = await fixture(t, "reconnect-proof");
+  const domain = JSON.parse(readFileSync(state.manifest)).brain.domain;
+  const desired = mcpRegistrationDescriptor({ client: { slug: "fixture" } }, state.manifest, { baseUrl: domain });
+  const config = join(state.root, ".claude.json");
+  writeFileSync(config, JSON.stringify({ mcpServers: {
+    fixture: { type: desired.type, command: desired.command, args: desired.args, env: desired.env },
+  } }));
+  const applied = await captureConsole(() => cmdMcpConfig(state.manifest, {
+    flags: { apply: true, "replace-owner-entry": true },
+    wireAgents: async () => ({ wired: ["Claude Code"], failures: [], skipped: [], ownerEntryReplaced: true }),
+    processSnapshot: () => ["claude"],
+  }));
+  assert.equal(applied.error, null);
+  assert.equal(applied.value.route_readiness.reason, "claude_code_running");
+  assert.equal(state.requests.length, 0);
+  assert.equal(applied.output.filter(line => line.includes("Fully quit and reopen Claude Code")).length, 1);
+
+  // A reopened client starts the exact registered runtime. Its tool calls
+  // are independent of the deferred brain_think control.
+  const reopened = await openPartBMcpTransport(desired);
+  try {
+    const init = await reopened.request("initialize", {
+      protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fixture", version: "1" },
+    });
+    assert.equal(init.result.serverInfo.name, "fixture");
+    const list = await reopened.request("tools/list", {});
+    const names = list.result.tools.map(tool => tool.name);
+    assert.equal(names.length, 9);
+    assert.ok(names.includes("brain_money_query") && names.includes("brain_fetch"));
+    const money = await reopened.request("tools/call", {
+      name: "brain_money_query", arguments: { sql: "SELECT amount_cents FROM fin_transactions LIMIT 1" },
+    });
+    assert.equal(JSON.parse(money.result.content[0].text).rows[0].amount_cents, 125);
+    const doc = await reopened.request("tools/call", {
+      name: "brain_fetch", arguments: { id: "fixture:one" },
+    });
+    assert.equal(JSON.parse(doc.result.content[0].text).id, "fixture:one");
+  } finally {
+    await reopened.close();
+  }
+  assert.deepEqual(state.requests.map(request => request.path), [
+    "/api/admin/brain/money-query", "/api/admin/brain/document-read",
+  ]);
+
+  const options = { processSnapshot: () => [], wireOptions: { claudeConfigPath: config } };
+  assert.equal(await resumeClaudeRouteAfterCommand("daily", ["status", state.manifest], options), null);
+  const stillOpen = await resumeClaudeRouteAfterCommand("health", [state.manifest], {
+    ...options, processSnapshot: () => ["claude"],
+  });
+  assert.ok(stillOpen, "a later invocation finds the pending route proof");
+  assert.equal(stillOpen.reason, "claude_code_running");
+  assert.equal(state.requests.length, 2);
+  const registered = readFileSync(config);
+  writeFileSync(config, "{}");
+  assert.equal((await resumeClaudeRouteAfterCommand("health", [state.manifest], options)).ready, false);
+  assert.equal(state.requests.length, 2);
+  writeFileSync(config, registered);
+  const proof = await resumeClaudeRouteAfterCommand("daily", ["run", state.manifest], options);
+  assert.equal(proof.ready, true);
+  assert.deepEqual(proof.route_events, EXPECTED_EVENTS);
+  assert.equal(state.requests.length, 3);
+  assert.equal(await resumeClaudeRouteAfterCommand("health", [state.manifest], options), null);
+  assert.equal(state.requests.length, 3);
 });

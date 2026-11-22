@@ -435,6 +435,36 @@ test('part proof route requires owner authorization and returns private bounded 
   } finally {store.db.close();}
 });
 
+test("Calendar part proof rejects a restored revision at the same identity", async () => {
+  const store = ingestPlanStore();
+  const writer = storeFor(store.env);
+  const key = randomBytes(32).toString("hex");
+  const env = { ...store.env, ADMIN_KEY: key };
+  const current = {
+    source_type: "calendar", source_id: "gcal:primary:fixture", title: "Synthetic event",
+    content: "Approved budget: $120.99", occurred_at: "2026-11-01",
+    date_source: "calendar:all_day_start", date_reliable: true,
+    metadata: { calendar_revision: "a".repeat(64) },
+  };
+  const args = {
+    base: "https://fixture.invalid", adminKey: key, source: "calendar", envelopes: [current],
+    request: (url, init) => worker.fetch(new Request(url, init), env, {}),
+    matchCalendarRevision: true,
+  };
+  try {
+    await writer.ingest(env, { ...current, content: "Approved budget: $100.01", occurred_at: "2026-10-31",
+      metadata: { calendar_revision: "b".repeat(64) } });
+    assert.deepEqual((await readCurrentIngestParts(args)).parts, []);
+    // A revision-only change can leave the content hash and chunk count intact.
+    await writer.ingest(env, { ...current, metadata: { calendar_revision: "c".repeat(64) } });
+    assert.deepEqual((await readCurrentIngestParts(args)).parts, []);
+    await writer.ingest(env, { ...current, occurred_at: "2026-10-31" });
+    assert.deepEqual((await readCurrentIngestParts(args)).parts, []);
+    await writer.ingest(env, current);
+    assert.equal((await readCurrentIngestParts(args)).parts.length, 1);
+  } finally { store.db.close(); }
+});
+
 for (const losePart of [true,false]) test(`Gmail final readback: ${losePart?'lost current part stays retryable':'complete control'}`, async()=>fixture(async f=>{
   const store=ingestPlanStore(),writer=storeFor(store.env);
   f.ids=['split-entry']; f.content=content;

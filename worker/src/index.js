@@ -2661,7 +2661,7 @@ const receiptCount = (value) => {
 };
 
 const RECEIPT_COUNT_FIELDS = Object.freeze([
-  "files_seen", "docs_added", "docs_updated", "docs_unchanged",
+  "files_seen", "docs_added", "docs_updated", "docs_unchanged", "docs_resumed",
   "docs_refused", "docs_failed", "proposed_deletes",
 ]);
 
@@ -2756,9 +2756,16 @@ async function handleSourceReceipt(env, request) {
   // Both fields opt the receipt into the versioned, measured outcome shape.
   // Missing counters remain unknown rather than defaulting to a clean zero.
   const metricsVersion = Object.hasOwn(body, "docs_refused") && Object.hasOwn(body, "docs_failed") ? 1 : 0;
+  const resumed = receiptCount(body?.docs_resumed);
+  if (Object.hasOwn(body, "docs_resumed") && (requestedKind !== "calendar" || metricsVersion !== 1 ||
+      resumed > receiptCount(body.files_seen) - receiptCount(body.docs_added) -
+        receiptCount(body.docs_updated) - receiptCount(body.docs_unchanged) -
+        receiptCount(body.docs_failed) - receiptCount(body.docs_refused))) {
+    return jsonResponse({ error: "docs_resumed requires a measured Calendar receipt within files_seen" }, 400);
+  }
   // Accepted work and a certified quiet check are separate evidence. Keep
   // zero counters and prior accepted-work success; never invent an item.
-  const verifiedWork = metricsVersion !== 1 || ["docs_added", "docs_updated", "docs_unchanged"]
+  const verifiedWork = metricsVersion !== 1 || resumed > 0 || ["docs_added", "docs_updated", "docs_unchanged"]
     .some((field) => receiptCount(body?.[field]) > 0);
   // A producer's ready label cannot hide measured transient failures. Keep
   // the cheap aggregate source row and the detailed run receipt consistent.
@@ -4153,7 +4160,7 @@ export default {
                 : code === "REMOTE_UNAVAILABLE" || code === "NETWORK_UNREACHABLE" ? 503
                   : 422;
           return privateNoStore(jsonResponse({
-            error: customApiOwnerMessage(code, configuredName),
+            error: error?.redirectAddress ? error.message : customApiOwnerMessage(code, configuredName),
             code,
             retryable: error?.retryable === true,
           }, status));
@@ -4318,7 +4325,10 @@ export default {
         // contains paths and ids. Narrow it to what this caller can read.
         if (!scopeIsUnrestricted(scope) && Array.isArray(report?.sources)) {
           const allowed = new Set(await sourcesInScope(env, scope));
-          return jsonResponse({ ...report, sources: report.sources.filter((r) => allowed.has(r.source ?? r.name)) });
+          return jsonResponse({
+            ...report,
+            sources: report.sources.filter((r) => !r.setup_issue && allowed.has(r.source ?? r.name)),
+          });
         }
         return jsonResponse(report);
       }

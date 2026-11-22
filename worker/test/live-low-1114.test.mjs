@@ -2,9 +2,75 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fixture } from './helpers/clean-money-fixture.mjs';
 import { queryMoney } from '../src/lib/money-query.js';
+import { normalizeDay } from '../src/lib/money-query-budget.js';
 
 const period={period_from:'2026-10-01',period_to:'2026-10-31'};
+
+// ICU may render en-CA with slashes. Preserve real date parts and zone
+// conversion while substituting a different valid display format.
+function useSlashDateFormat(t) {
+ const dateTimeFormat = Intl.DateTimeFormat;
+ t.mock.method(Intl, 'DateTimeFormat', function (locale, options) {
+  const formatter = new dateTimeFormat(locale, options);
+  if (locale === 'en-CA' && options.day) {
+   Object.defineProperty(formatter, 'format', {
+    value: new dateTimeFormat('en-US', options).format,
+   });
+  }
+  return formatter;
+ });
+}
+
+test('the query clock exposes an ISO owner date across a UTC month boundary', async t => {
+ useSlashDateFormat(t);
+ const f = fixture(t);
+ f.env.BRAIN_TIMEZONE = 'America/Phoenix';
+ const result = await queryMoney(f.env, {sql:'SELECT 1'}, {
+  now: () => Date.parse('2026-11-01T06:30:00Z'),
+ });
+ assert.deepEqual(result.as_of, {
+  utc_date:'2026-11-01', local_date:'2026-10-31', local_today:'2026-10-31',
+  time_zone:'America/Phoenix', basis:'owner_time_zone',
+ });
+});
+
+test('offset-bearing SQL window bounds normalize to ISO owner days', t => {
+ useSlashDateFormat(t);
+ const instant = '2026-11-01T06:30:00Z';
+ assert.deepEqual(normalizeDay(instant, 'America/Phoenix'), {
+  day:'2026-10-31', reason:'timestamp_owner_date',
+ });
+ assert.deepEqual(normalizeDay(instant, 'America/Chicago'), {
+  day:'2026-11-01', reason:'timestamp_owner_date',
+ });
+});
+
 const now=()=>Date.parse('2026-11-14T18:00:00Z');
+
+test('timestamp-bound receipts use the same owner dates in the total and evidence', async t => {
+ useSlashDateFormat(t);
+ const f = fixture(t);
+ f.account('operating', {mode:'manual'});
+ f.coverage('operating', '2026-10-01', '2026-11-30');
+ f.row('october', 'operating', 50000, {day:'2026-10-31', payee:'Customer', category:'CLIENT_INCOME'});
+ f.row('november', 'operating', 170000, {day:'2026-11-01', payee:'Customer', category:'CLIENT_INCOME'});
+ const sql = "SELECT SUM(income_minor) AS cents FROM txn WHERE posted_on BETWEEN '2026-10-01' AND '2026-11-01T06:30:00Z'";
+ for (const [zone, to, cents] of [
+  ['America/Phoenix', '2026-10-31', 50000],
+  ['America/Chicago', '2026-11-01', 220000],
+ ]) {
+  f.env.BRAIN_TIMEZONE = zone;
+  for (const filter of ['', ' AND income_minor>0']) {
+   const result = await queryMoney(f.env, {sql:sql + filter}, {now});
+   assert.equal(result.rows[0].cents, cents, zone + filter);
+   assert.deepEqual(result.evidence.period, {from:'2026-10-01', to}, zone + filter);
+   assert.equal(result.confidence.period_end, to, zone + filter);
+   assert.ok(result.confidence.percent < 90, result.confidence_text);
+   assert.ok(result.confidence.caveats.some(c => c.code === 'period_adjusted'));
+  }
+ }
+});
+
 function book(t){
  const f=fixture(t);f.env.BRAIN_TIMEZONE='UTC';f.account('operating',{mode:'manual'});
  f.coverage('operating',period.period_from,period.period_to);
@@ -17,6 +83,21 @@ function book(t){
 const sql=`SELECT currency,SUM(income_minor) AS cents,COUNT(*) AS n,GROUP_CONCAT(txn_uid) AS uids FROM txn WHERE posted_on >= '2026-10-01' AND posted_on <= '2026-10-31' AND income_minor>0 GROUP BY currency`;
 const query=(f,body={})=>queryMoney(f.env,{sql,...period,...body},{now});
 function high(r,cents=597000){assert.equal(r.rows[0].cents,cents);assert.ok(r.confidence.percent>=90,r.confidence_text);assert.ok(r.confidence.reasons.length);assert.ok(r.confidence.missing.length);}
+
+test('the SQLite money snapshot preserves posting and pending totals for each covered account', async t => {
+ const f = book(t);
+ f.account('empty', {mode:'manual'});
+ f.coverage('empty', period.period_from, period.period_to);
+ f.row('outside', 'operating', 5500, {day:'2026-11-01', payee:'Customer', category:'CLIENT_INCOME'});
+ const result = await queryMoney(f.env, {
+  sql: 'SELECT account_slug,first_row,last_row,row_count,pending_stale_in_minor FROM coverage ORDER BY account_slug',
+  from: period.period_from, through: period.period_to,
+ }, {now});
+ assert.deepEqual(result.rows.map(row => ({...row})), [
+  {account_slug:'empty', first_row:null, last_row:null, row_count:0, pending_stale_in_minor:0},
+  {account_slug:'operating', first_row:'2026-10-02', last_row:'2026-10-02', row_count:3, pending_stale_in_minor:900000},
+ ]);
+});
 
 test('recorded receipt SQL infers its posted measure with counts and identifiers, without special context',async t=>{
  const f=book(t);const r=await query(f);high(r);assert.equal(r.rows[0].n,2);

@@ -1,6 +1,6 @@
 ---
 name: financial-brain-technician
-description: Guide a Financial Brain install, update, Optimize check, checkup, connector test, passkey ceremony, or owner handoff from the reviewed local CLI and test kit. Use when the owner asks Claude Code or Codex to set up, install, update, optimize, audit, check, test a connector, complete a passkey step, or hand off their Brain.
+description: Guide a Financial Brain install, update, Optimize check, checkup, connector test, passkey ceremony, or owner handoff from the reviewed local CLI and test kit. Use when the owner asks Claude Code or Codex to set up, install, update, optimize, audit, check, test a connector, complete a passkey step, or hand off their Brain. Also use to reconnect Claude.
 ---
 
 <!-- financial-brain-installer:claude-skill:v1 -->
@@ -299,8 +299,7 @@ initialization, connection status, and expected tool discovery. Do not ask a
 known-answer content question for MCP proof. If configuration or protocol
 discovery is absent, fails, is refused, or is not run, report that exact state.
 Never claim an MCP or other Optimize check ran without its actual receipt.
-Report an absent, failed, refused, or not-run MCP check as that exact state, and
-never call Optimize complete while any planned check is not run. Do not run `brain tools` during Optimize
+Never call Optimize complete while any planned check is not run. Do not run `brain tools` during Optimize
 because it writes the technician skill and local setup files, and do not run `brain mcp-config --apply`.
 
 Make zoning a normal Optimize checkpoint. Run read-only `brain zone <manifest>`
@@ -343,19 +342,13 @@ new file during the audit. Before suggesting OCR, reingest, reindex, or another
 paid operation, estimate the affected scope, likely cost, expected answer impact,
 and proof of success. Do not run it without separate approval.
 
-Never include held candidate versions or other internal release-channel details.
-Leave passkeys and enrolled devices out of Optimize for now.
-Do not run `brain devices`, ask the owner to identify a device, or send them into the owner access
-area during this audit. Passkey proof belongs in the guided install and
-onboarding ceremony. A missing skill or MCP entry is a local-computer setup gap,
-especially after a move to a new computer. Name it, then offer to repair it only
-after the report and a separate explanation and approval. Offer the detailed
-check results at the end instead of making them the default experience.
-
-Optimize must not run `brain invite`, `brain devices`, passkey enrollment,
-device review, or ask the owner to identify device labels. Those belong only in
-an explicitly requested passkey, access, or handoff ceremony, where the owner
-has context and a useful interface.
+Keep release details out of the report. Leave passkeys
+and enrolled devices out of Optimize. Do not run `brain devices`, ask for labels,
+or open owner access. Optimize must not run `brain invite`, passkey enrollment,
+or device review. Use a requested passkey, access, or handoff ceremony. A missing skill
+or MCP entry is a local setup gap, especially after a move to a new computer.
+Offer repair after the report with a separate explanation and approval.
+Offer detailed results at the end.
 
 When the owner chooses the guided Owner Financial Map interview before the
 financial completeness conclusion, use plain names instead of internal ids.
@@ -531,20 +524,13 @@ other homework.
 6. Start `brain update` as a background task, then read its output every few
    minutes until it finishes. Tell the owner: "The update is running. On a
    large Brain it can take a while; I'll keep an eye on it here. Please keep
-   this window open." Keep working in this conversation through documented
-   waits and retry-safe branches. The conservative old-invocation safety wait can run for twenty
-   minutes with unchanged counts; before its deadline that is a wait, not a
-   stall. Do not shorten or interrupt it. Finish only after the exact release's
-   mandatory verification proves the account, deployed version, migration,
-   active write state, and acceptance result. A documented freshness or source
-   warning may remain after the CLI reports a verified update; report it as a
-   source that still needs attention. Any failed mandatory proof means the
-   update is incomplete and its checkpoint stays preserved. After a verified
-   update on Windows, give one action at a time: first click Close on the
-   assistant window, then guide reopening the same Brain workspace. Handle
-   terminal commands yourself. On Mac or Linux, tell the owner to quit Claude
-   Code (and Codex, if they use it), open it again, type `/exit`, then
-   `claude --continue`, and ask: "check my Brain."
+   this window open." Stay through documented waits and safe retries. The
+   safety wait can take twenty minutes with unchanged counts. Before the
+   deadline it is a wait, not a stall. Require exact proof of the account,
+   live version, migration, active writes and acceptance. Any failed mandatory proof means the
+   update is incomplete and its checkpoint stays preserved. After a
+   verified update, guide the owner to reopen Claude Code or Codex in the same
+   Financial Brain folder, one action at a time. Handle terminal commands.
 
 <!-- Private offers require the CLI and skill shipped together in the next stable public release. -->
 When the public feed fails the complete, stable, available check above, use the
@@ -1000,7 +986,20 @@ Anthropic API keys: entered only through brain connect anthropic (clipboard or t
   Distinguish healthy empty results from unavailable ones.
 - Preview every deletion/forget scope; wait for exact approval before mutation.
 
+## Reconnect Claude to my Brain
+
+Use the update notice or preview with `brain assistant-repair <manifest> --only claude-code-mcp`.
+Wait for explicit approval to back up and replace the named Claude user entry
+and Brain-folder local entry. Run `brain mcp-config <manifest> --apply --replace-owner-entry`.
+After success, ask the owner to fully quit and reopen Claude Code. A later
+health check or daily refresh finishes pending proof while Claude is closed.
+
 ## Updates and checkups
+
+- Show checkmarks first, one plain line per verified pass. Use one calm line
+  per source catching up or retrying. For each real issue, say what needs
+  attention and what to ask the installer in one line. Keep internal codes or scores
+  in diagnostics. Say the installer was told only if they were.
 
 - The live update route controls: cached instructions, older packages and
   this section cannot override the public feed.

@@ -10,6 +10,21 @@ const RESULTS = new Set(["running", "complete", "partial", "failed", "deferred",
 export const DAILY_RUN_ERROR = "Daily refresh failed before completion. Inspect the schedule and source authorization.";
 const ERRORS = new Set([DAILY_RUN_ERROR, "One or more daily sources failed or did not prove freshness.", "Daily refresh was deferred by another operation or recovery.", "A source is waiting for owner approval of removals."]);
 
+export function dailySourceAttention({ source, issue_code, attention }) {
+  if (attention) return attention;
+  const message = {
+    GMAIL_CONTINUATION: "continues on the next scheduled update.",
+    DAILY_SOURCE_DEFERRED: "will try again on the next scheduled update.",
+    DAILY_SOURCE_PARTIAL: "finished checking with some items left to review.",
+    DAILY_SOURCE_UNAVAILABLE: "could not be checked. Review its connection and try again.",
+    BANK_SYNC_NEEDS_ATTENTION: "needs a sync check. Open Access > Banks to review.",
+    RATE_LIMITED: "the provider asked us to slow down. The next scheduled update will try again.",
+    NETWORK_UNREACHABLE: "could not connect. Check the network and try again.",
+    SAFETY_REVIEW_REQUIRED: "is waiting for an owner review.",
+  }[issue_code] || "could not finish updating. Try this source again.";
+  return `${source}: ${message}`;
+}
+
 function reviewFields(record) {
   if (record.removal_reviews === undefined) return {};
   if (!Array.isArray(record.removal_reviews) || record.removal_reviews.length > 32) throw new Error("invalid daily removal reviews");
@@ -268,7 +283,7 @@ export function dailyObservationStatus(plan, schedule, runtime, runnerUsable, op
   const nativeTime = validTime(runtime?.last_run_at) ? runtime.last_run_at : null;
   const newerNativeRun = nativeTime && (!row || Date.parse(nativeTime) > Date.parse(row.completed_at || row.started_at));
   let result = newerNativeRun ? "unknown" : row?.result || (Number.isInteger(runtime?.exit_code) ? "unknown" : "never");
-  let error = observed.last_error;
+  let error = result === "partial" ? null : observed.last_error;
   if (result === "running" && runtime?.running !== true) result = "unknown";
   if (runtime?.running === true) result = "running";
   else if (runtime?.known === false) { result = "unknown"; error = "Native daily run information could not be inspected."; }
@@ -293,12 +308,12 @@ export function dailyObservationStatus(plan, schedule, runtime, runnerUsable, op
     if (date <= now) date.setDate(date.getDate() + 1);
     next = date.toISOString();
   }
-  const sourceIssues = (observed.source_failures || []).map(({ source, issue_code, detail, ...record }) => ({
+  const latestIssues = newerNativeRun ? [] : observed.source_failures || [];
+  const sourceIssues = latestIssues.map(({ source, issue_code, detail, ...record }) => ({
     source, issue_code, detail,
     ...reviewFields({ ...record, source }),
   }));
-  const scheduleAttention = [...new Set((observed.source_failures || [])
-    .map((record) => record.attention).filter(Boolean))];
+  const scheduleAttention = [...new Set(latestIssues.map(dailySourceAttention))];
   return { log_path: observed.log_path, last_run_at: newerNativeRun ? nativeTime : row?.started_at || nativeTime,
     ...(result === "waiting_for_owner" ? { status: result, reason_code: "removal_review" } : {}),
     last_result: result, next_run_at: schedule.enabled ? next : null,
@@ -311,7 +326,7 @@ export function dailyObservationStatus(plan, schedule, runtime, runnerUsable, op
 
 export function renderDailyObservation(schedule, log) {
   log(`Last daily run: ${schedule.last_run_at || "unknown or never"}`);
-  log(`Last daily result: ${schedule.last_result === "partial" ? "partial (coverage omissions)" : schedule.last_result || "unknown"}`);
+  log(`Last daily result: ${schedule.last_result === "partial" ? "partial (some sources or items need attention)" : schedule.last_result || "unknown"}`);
   log(`Next daily run: ${schedule.next_run || "not scheduled"}`);
   log(`Last daily error: ${schedule.last_error_line || "none recorded"}`);
   for (const attention of schedule.schedule_attention || []) log(`Daily attention: ${attention}`);

@@ -1,6 +1,7 @@
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { cmdAsk } from '../brain.mjs';
 import { handleMcp } from '../worker/src/lib/mcp-endpoint.js';
@@ -42,23 +43,29 @@ async function remoteAnswer(body, profile = 'librarian', question = 'When is the
 
 // Exercise the actual CLI with synthetic input and injected I/O. Never resolve
 // a desktop credential or fall back to an ambient HTTP implementation.
+let cliRoot;
+after(() => {
+  if (cliRoot) rmSync(cliRoot, { recursive: true, force: true });
+});
 async function cliAnswer(body) {
-  const root = mkdtempSync(join(process.env.HOME, 'owner-output-'));
+  if (!cliRoot) {
+    cliRoot = mkdtempSync(join(tmpdir(), 'owner-output-'));
+    writeFileSync(join(cliRoot, 'brain.manifest.json'), JSON.stringify({
+      client: { slug: 'fixture' }, brain: { domain: 'fixture.invalid' },
+      operations: { admin_key_secret: null },
+    }));
+  }
+  const lines = [], log = console.log;
+  let calls = 0, result;
   try {
-    const manifest = join(root, 'brain.manifest.json'), keyFile = join(root, '.brain-admin-key');
-    writeFileSync(keyFile, ['fixture', 'key'].join('-'), { mode: 0o600 });
-    writeFileSync(manifest, JSON.stringify({ client: { slug: 'fixture' }, brain: { domain: 'fixture.invalid' },
-      operations: { admin_key_secret: null } }));
-    const lines = [], log = console.log;
-    let calls = 0, result;
-    try {
-      console.log = (...parts) => lines.push(parts.join(' '));
-      result = await cmdAsk(manifest, { ask: async () => 'When is the review?', adminKey: readFileSync(keyFile, 'utf8'),
-        http: async () => { calls++; return new Response(JSON.stringify(body)); } });
-    } finally { console.log = log; }
-    assert.equal(calls, 1, 'the real CLI owner-output decision was reached');
-    return { text: lines.join('\n'), result };
-  } finally { rmSync(root, { recursive: true, force: true }); }
+    console.log = (...parts) => lines.push(parts.join(' '));
+    result = await cmdAsk(join(cliRoot, 'brain.manifest.json'), {
+      ask: async () => 'When is the review?', adminKey: ['fixture', 'key'].join('-'),
+      http: async () => { calls++; return new Response(JSON.stringify(body)); },
+    });
+  } finally { console.log = log; }
+  assert.equal(calls, 1, 'the real CLI owner-output decision was reached');
+  return { text: lines.join('\n'), result };
 }
 
 test('R3 F01 compatibility ledger notes translate internal assessment wording and retain exact gaps', async () => {
@@ -112,7 +119,7 @@ test('F01 owner paths retain specific evidence reasons and missing items without
     assert.match(render.evidenceNoteText(money), /card ending 3333 has no rows after October 28/);
     assert.match(render.evidenceNoteText(money), /card statement for October 29 through October 31/);
   }
-  const root = mkdtempSync(join(process.env.HOME, 'evidence-cli-'));
+  const root = mkdtempSync(join(tmpdir(), 'evidence-cli-'));
   try {
     const manifest = join(root, 'brain.manifest.json'), keyFile = join(root, '.brain-admin-key');
     writeFileSync(keyFile, ['fixture', 'key'].join('-'), { mode: 0o600 });
@@ -173,7 +180,12 @@ test('F02 remote, local and app paths hide Markdown assessment badges and preser
 });
 
 test('owner-output guard checks server-line removal and preserves other layouts across every surface', async t => {
-  const localMcp = await sourceModuleHarness(new URL('../components/brain-mcp.mjs', import.meta.url));
+  const loadLocalMcp = await sourceModuleHarness(new URL('../components/brain-mcp.mjs', import.meta.url));
+  let localBody, localCalls;
+  const { result: localAnswer } = loadLocalMcp({
+    PROFILE: 'owner-assistant',
+    call: async () => { localCalls++; return localBody; },
+  }, '() => runTool("brain_think", {q:"When is the review?"})');
   const forbidden = /\bconfidence\b|\b(?:High|Medium|Low)\b|\d+(?:\.\d+)?\s*%/i;
   const assertOwner = (output, label) => {
     assert.ok(output?.trim(), `${label}: populated owner output reached`);
@@ -246,10 +258,10 @@ test('owner-output guard checks server-line removal and preserves other layouts 
     const original = JSON.stringify(body), internal = JSON.stringify(documentResponseConfidence(body));
     const remote = await remoteAnswer(body), cli = await cliAnswer(body);
     assert.equal(remote.calls, 1, 'the guard reached the real remote answer decision');
-    let calls = 0;
-    const local = await localMcp({ PROFILE: 'owner-assistant', call: async () => { calls++; return body; } },
-      'runTool("brain_think", {q:"When is the review?"})').result;
-    assert.equal(calls, 1, 'the guard reached the real local answer decision');
+    localBody = body;
+    localCalls = 0;
+    const local = await localAnswer();
+    assert.equal(localCalls, 1, 'the guard reached the real local answer decision');
     assert.equal(JSON.stringify(local.confidence), internal, 'local MCP retains the canonical assessment');
     if (body === incomplete) {
       assert.equal(local.search_status, 'coverage_incomplete', 'the local provisional branch was reached');
@@ -534,7 +546,7 @@ test('local MCP brain_think hides a compatibility badge and preserves the intern
 });
 
 test('CLI answers hide scores while retaining the answer, sources and internal value', async () => {
-  const root = mkdtempSync(join(process.env.HOME, 'confidence-cli-'));
+  const root = mkdtempSync(join(tmpdir(), 'confidence-cli-'));
   const manifest = join(root, 'brain.manifest.json');
   const keyFile = join(root, '.brain-admin-key');
   writeFileSync(keyFile, ['fixture', 'key'].join('-'), { mode: 0o600 });

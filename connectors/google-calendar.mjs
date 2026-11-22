@@ -87,6 +87,7 @@
  * records. It is supported, it is fingerprinted, and it will force a resync.
  */
 
+import { isDeepStrictEqual } from "node:util";
 import { fetchBrainWithAdminKey } from "../components/brain-http.mjs";
 import { withFirstPartySourceProvenance } from "../worker/src/lib/provenance-receipt.js";
 
@@ -1190,8 +1191,39 @@ export async function syncCalendar({
   result.pages = listing.pages;
   result.events_seen = listing.events.length;
 
+  // Reconcile before splitting upserts from cancellations. A stale page must
+  // never overwrite or cancel a newer revision from another page.
+  const revisions = new Map();
   for (const event of listing.events) {
     const out = buildEnvelope(event, { calendar, config: cfg });
+    const key = out.source_id ?? Symbol();
+    const updated = typeof event?.updated === "string" ? RFC3339.exec(event.updated) : null;
+    const zone = updated?.[6];
+    const timestamp = zone ? Date.parse(event.updated) : NaN;
+    if (!revisions.has(key)) {
+      revisions.set(key, { newest: out, timestamp: -Infinity, conflict: false, undated: [] });
+    }
+    const group = revisions.get(key);
+    if (!Number.isFinite(timestamp)) {
+      group.undated.push(out);
+    } else if (timestamp > group.timestamp) {
+      group.newest = out;
+      group.timestamp = timestamp;
+      group.conflict = false;
+    } else if (timestamp === group.timestamp && !isDeepStrictEqual(out, group.newest)) {
+      group.conflict = true;
+    }
+  }
+  if ([...revisions.values()].some(({ newest, conflict, undated }) =>
+    conflict || undated.some((out) => !isDeepStrictEqual(out, newest)))) {
+    const message = "Google returned conflicting event revisions without a provable order; retry the calendar sync.";
+    result.error = { message, name: "CalendarApiError", status: null, needsReconsent: false };
+    result.state.last_error = message;
+    result.state.consecutive_failures = (prev.consecutive_failures || 0) + 1;
+    if (tokenInvalidated) result.state.sync_token = null;
+    return result;
+  }
+  for (const { newest: out } of revisions.values()) {
     if (out.kind === "upsert") result.documents.push(out.envelope);
     else if (out.kind === "delete") result.deletions.push({ source_id: out.source_id, event_id: out.event_id,
       reason: out.reason, removal_cause: out.removal_cause });
@@ -1289,6 +1321,8 @@ export async function syncAll({ config = {}, state = {}, getAccessToken, fetchIm
 
 /* ----------------------------------------------------------------- ingest */
 
+export { calendarDeliveryDigest, sendCalendarWindows } from "./calendar-delivery.mjs";
+
 /**
  * POST envelopes at the brain, one at a time, reporting every outcome.
  *
@@ -1302,42 +1336,44 @@ export async function ingestEnvelopes({
   envelopes,
   fetchImpl = fetch,
   assertOwned = null,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }) {
   const out = { created: 0, updated: 0, unchanged: 0, refused: [], errors: [], total: envelopes.length };
+  const url = `${baseUrl.replace(/\/$/, "")}/api/admin/brain/ingest`;
+  const maxAttempts = 3;
   for (const envelope of envelopes) {
-    let res;
-    try {
+    const source_id = envelope.source_id;
+    let failure;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       assertOwned?.();
-      res = await fetchBrainWithAdminKey(fetchImpl, `${baseUrl.replace(/\/$/, "")}/api/admin/brain/ingest`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(envelope),
-      }, () => adminKey);
-    } catch (e) {
-      // Lease loss is a terminal writer fence, not a per-event transport
-      // failure. Continuing would let a replaced owner send later events.
-      if (e?.code === "source_ingest_lock_lost") throw e;
-      out.errors.push({ source_id: envelope.source_id, error: e.message });
-      continue;
+      try {
+        const res = await fetchBrainWithAdminKey(fetchImpl, url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(envelope),
+          signal: AbortSignal.timeout(30_000),
+        }, () => adminKey);
+        const body = await res.text().then((text) => {
+          try { return JSON.parse(text); } catch { return null; }
+        });
+        if (res.ok && ["created", "updated", "unchanged"].includes(body?.action)) {
+          out[body.action] += 1;
+          failure = null;
+          break;
+        }
+        failure = res.status === 422
+          ? { source_id, code: "INPUT_REFUSED", labels: body?.labels || [] }
+          : { source_id, code: "INGEST_FAILED", status: res.status };
+      } catch (error) {
+        if (error?.code === "source_ingest_lock_lost") throw error;
+        failure = { source_id, code: "INGEST_FAILED" };
+      }
+      if (attempt < maxAttempts) await sleep(250 * attempt);
     }
-    const text = await res.text();
-    let body = null;
-    try {
-      body = text ? JSON.parse(text) : null;
-    } catch {
-      /* reported as an error below */
+    if (failure) {
+      const failures = failure.code === "INPUT_REFUSED" ? out.refused : out.errors;
+      failures.push(failure);
     }
-    if (res.status === 422) {
-      out.refused.push({ source_id: envelope.source_id, labels: body?.labels || [], detail: body?.detail || null });
-      continue;
-    }
-    if (!res.ok) {
-      out.errors.push({ source_id: envelope.source_id, status: res.status, error: body?.error || text.slice(0, 200) });
-      continue;
-    }
-    if (body?.action === "created") out.created += 1;
-    else if (body?.action === "updated") out.updated += 1;
-    else out.unchanged += 1;
   }
   return out;
 }

@@ -1,3 +1,5 @@
+import { ownerMoneyDay } from './money-format.js';
+
 // Infer a scope only for one raw-table SELECT whose WHERE is a conjunction of
 // literal indexed bounds. Never push dates into txn: feed precedence depends
 // on history before those dates, including the other feeds for that identity.
@@ -130,9 +132,8 @@ export function normalizeDay(value,timeZone='UTC'){
     // Offset-bearing bounds describe instants. Convert them before selecting
     // posting days, or a UTC end-of-month bound can include the next local day.
     if(value.length>10 && /(?:[Zz]|[+-]\d{2}:\d{2})$/.test(value)){
-      const instant=Date.parse(value);if(!Number.isFinite(instant))return null;
-      const day=new Intl.DateTimeFormat('en-CA',{timeZone,year:'numeric',month:'2-digit',day:'2-digit'}).format(instant);
-      return {day,reason:'timestamp_owner_date'};
+      const owner=ownerMoneyDay(Date.parse(value),timeZone);
+      return owner ? {day:owner.day,reason:'timestamp_owner_date'} : null;
     }
     return {day:value.slice(0,10),reason:value.length>10?'timestamp_date_prefix':null};
   }
@@ -165,7 +166,7 @@ export function moneyQuerySelection({tokens}, {timeZone='UTC'} = {}) {
     words.some(w=>['join','union','except','intersect'].includes(w)))return null;
   const at=tokens.findIndex(t=>t.kind==='word' && t.v==='from'),table=tokens[at+1]?.v;
   if(!['txn','coverage','fin_balance_snapshots'].includes(table))return null;
-  let i=at+2;
+  let i=at+2, positiveContribution=false;
   if(tokens[i]?.v==='as')i+=2;
   else if(tokens[i]?.kind==='word' && !['where','order','group','limit'].includes(tokens[i].v))i++;
   if(tokens[i++]?.v!=='where')return null;
@@ -201,12 +202,17 @@ export function moneyQuerySelection({tokens}, {timeZone='UTC'} = {}) {
           if(start.reason){rewrites.push({start:value.start,end:value.end,text:"'"+start.day+"'"});adjustments.push({field:'sql_bound',given:value.raw,used:start.day,reason:start.reason});}
         }else return null;
       }else if(['account_slug','account_identity','account','tenant_id','side','currency','entity','direction','money_kind'].includes(column.v) && result[column.v]===undefined && op==='=' && value?.kind==='string')result[column.v]=value.raw.slice(1,-1).replaceAll("''", "'");
+      else if (!positiveContribution && ['income_minor','expense_minor'].includes(column.v)
+        && op==='>' && value?.kind==='number' && value.v==='0') positiveContribution=true;
       else return null;
     }
     if(i===tokens.length || ['group','order','having','limit','window'].includes(tokens[i]?.v))break;
     if(tokens[i++]?.v!=='and')return null;
   }
   if(Boolean(result.from)!==Boolean(result.to) || result.from>result.to)return null;
+  // Permit the posted receipt/spending recipe during date repair. Its original
+  // predicate and measure still need their own confidence certificate.
+  if (positiveContribution && !rewrites.length) return null;
   if(rewrites.length)Object.assign(result,{rewrites,adjustments});
   return result;
 }

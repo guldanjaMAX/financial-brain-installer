@@ -234,7 +234,7 @@ function databaseCooldown(env) {
 }
 
 function snapshotOf(rows) {
-  const snapshot = { rows: [], accounts: [], entities: [], pairs: [], coverage: [], counts: [], pending: [], missing: [], excluded: [], quality: [], conflicts: [], confidence_accounts: [], confidence_pending: [], confidence_unassigned: [], unreadable: [], settled: [] };
+  const snapshot = { rows: [], accounts: [], entities: [], pairs: [], coverage: [], pending: [], missing: [], excluded: [], quality: [], conflicts: [], confidence_accounts: [], confidence_pending: [], confidence_unassigned: [], unreadable: [], settled: [] };
   for (const row of rows) snapshot[row.snapshot_kind].push({...JSON.parse(row.value),...(row.value2?JSON.parse(row.value2):{})});
   return snapshot;
 }
@@ -328,9 +328,12 @@ export async function queryMoney(env, body, { timeoutMs = 10000, supportTimeoutM
     selection=moneyQuerySelection(checked,calendar);
     // The closed SQL selection (with corrected calendar bounds) is SQL's own period too.
     if(readPeriod && selection?.from)readPeriod={from:[readPeriod.from,selection.from].sort()[0],to:[readPeriod.to,selection.to].sort().at(-1)};
-    // A corrected SQL period (reversed or past-month-end bounds) is the period
-    // the rewritten SQL reads, so the scored scope uses the same bounds.
-    if(sqlScope && selection?.rewrites && selection.from){sqlScope.from=selection.from;sqlScope.to=selection.to;sqlPeriod={from:selection.from,to:selection.to};}
+    // Evidence follows the rewritten dates even when the original SQL shape
+    // cannot certify the result. A repair does not make that shape certifiable.
+    if (selection?.rewrites && selection.from) {
+      sqlPeriod = {from:selection.from,to:selection.to};
+      if (sqlScope) Object.assign(sqlScope, sqlPeriod);
+    }
     for(const rewrite of [...(selection?.rewrites||[])].sort((a,b)=>b.start-a.start)) {
       const offset=checked.tokens[0].start;
       checked.sql=checked.sql.slice(0,rewrite.start-offset)+rewrite.text+checked.sql.slice(rewrite.end-offset);
@@ -692,7 +695,7 @@ SELECT mq_result.* FROM mq_budget CROSS JOIN (SELECT * FROM (\n${sql}\n) LIMIT -
       confidence=limitMoneyConfidence(confidence,'The owner time zone is unconfigured at this recent period boundary; the UTC calendar may select a different relative period or hide the remaining part of the owner day.',
         'The owner IANA time zone and confirmation of the asked dates and completed observation through the end of that owner day.',89);
     const freshnessScope = confidenceScope || (period && usesClean ? {from:period.from,to:period.to,filters:accountSlugs?.length===1?{account_slug:accountSlugs[0]}:{}} : moneyConfidenceScope(checked));
-    const periodEnd = [period?.to,window?.through,freshnessScope?.to].filter(isoDay).sort().at(-1) ||
+    const periodEnd = [period?.to,window?.through,freshnessScope?.to,selection?.rewrites ? sqlPeriod?.to : null].filter(isoDay).sort().at(-1) ||
       (isoDay(body?.period_end)?body.period_end:null) || ownerLedgerDay(started,env.BRAIN_TIMEZONE)?.day || null;
     let freshnessGaps, freshnessFailed = false;
     try { freshnessGaps = await moneyBankFreshness(env, { read, periodEnd, now:started, scope:{...freshnessScope,accountSlugs:evidenceSlugs}, ownerDay:value=>ownerLedgerDay(value,env.BRAIN_TIMEZONE)?.day }); }

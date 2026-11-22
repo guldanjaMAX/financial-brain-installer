@@ -162,8 +162,9 @@ export function gmailLabelDecision(labelIds, { since = null, internalDate = null
   return { allowed: true, policy: false, cursor_blocking: false, reason: null };
 }
 
-export async function api(getAccessToken, path, opts = {}) {
-  return driveApi(getAccessToken, API + path, opts);
+export async function api(getAccessToken, path, { quota, ...opts } = {}) {
+  if (!quota) return driveApi(getAccessToken, API + path, opts);
+  return quota.run(() => driveApi(getAccessToken, API + path, { ...opts, deferQuota: true }), opts.deadlineAt);
 }
 
 function nextPageToken(value, lane) {

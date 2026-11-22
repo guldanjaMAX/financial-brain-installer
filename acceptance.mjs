@@ -947,13 +947,15 @@ export function workerStatusToken(json) {
 export class Acceptance {
   constructor({
     base, adminKey, manifest, expectVersion = null, fetchImpl = fetch, tolerateStaleSources = false,
-    sleepImpl = null, retrievalRetry = null,
+    sleepImpl = null, retrievalRetry = null, deferInstallVersionCheck = false, versionReadbackAfterAcceptance = false,
   }) {
     this.base = String(base).replace(/\/+$/, "");
     this.key = adminKey;
     this.m = manifest || {};
     this.fetch = fetchImpl;
     this.expectVersion = expectVersion;
+    this.deferInstallVersionCheck = deferInstallVersionCheck;
+    this.versionReadbackAfterAcceptance = versionReadbackAfterAcceptance;
     // Freshness is a fact about a SOURCE, not about the brain or a release.
     // An update runs this suite after the new code is already live, and a
     // Google grant that lapsed last week made every such update report
@@ -1007,13 +1009,14 @@ export class Acceptance {
     return name === "every source expected to refresh is current" || String(name).startsWith("freshness: ");
   }
 
-  record(tier, name, status, detail) {
+  record(tier, name, status, detail, diagnostic) {
     let downgraded = false;
     if (status === FAIL && this.tolerateStaleSources && Acceptance.isFreshnessCheck(name)) {
       status = WARN;
       downgraded = true;
     }
-    this.results.push(downgraded ? { tier, name, status, detail, downgraded } : { tier, name, status, detail });
+    this.results.push({ tier, name, status, detail, ...(downgraded ? { downgraded } : {}),
+      ...(diagnostic ? { diagnostic } : {}) });
     if (status === FAIL && this.tierFailed === null) this.tierFailed = tier;
     return status;
   }
@@ -1186,6 +1189,9 @@ export class Acceptance {
     // here, so this check and `brain sources` can never disagree about which
     // source is dead.
     const freshness = await this.get("/api/admin/brain/freshness");
+    if (freshness.ok && !freshness.json?.unavailable && Array.isArray(freshness.json?.sources)) {
+      this.sources = freshness.json.sources;
+    }
     for (const verdict of freshnessVerdicts({
       ok: freshness.ok,
       status: freshness.status,
@@ -1408,10 +1414,12 @@ export class Acceptance {
         think.json?.answer_contract?.kind === "document" &&
         [2, 3, 4].includes(think.json.answer_contract.rung);
       if (boundaryReading) {
+        const percent = think.json.confidence?.percent;
         this.record(t, "document boundary reading", WARN,
           think.json.answer_contract.rung === 4
             ? "bounded no-match or screened reading returned; no source claim to cite; document synthesis and configured answer-model execution remain unverified"
-            : "attributed source reading returned below High confidence; document synthesis and configured answer-model execution remain unverified");
+            : "attributed source reading returned below High confidence; document synthesis and configured answer-model execution remain unverified",
+          Number.isInteger(percent) && percent >= 0 && percent <= 100 ? { confidence_percent: percent } : undefined);
       }
       if (configuredAnswer && diagnostic.stage !== "response_contract" && !boundaryReading) {
         if (allWithheldCleanly) {
@@ -1584,7 +1592,8 @@ export class Acceptance {
         `live ${live ?? "unknown"}, expected ${target}`
       );
     }
-    if (live && installState.product_version && installState.product_version !== live) {
+    // Upgrade commits only after acceptance, then independently requires exact readback.
+    if (!this.deferInstallVersionCheck && !this.versionReadbackAfterAcceptance && live && installState.product_version && installState.product_version !== live) {
       this.record(
         t,
         "install state records the running version",

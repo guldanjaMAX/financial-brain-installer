@@ -36,7 +36,7 @@ store. Pinned Wrangler 4.131.1 cannot request Vectorize permission for that
 profile, so the read-only preflight routes that exact refusal to an explicit,
 account-scoped recovery API-token choice before any mutation.
 
-**Package identity: brain-installer 0.4.32, schema70.** Publication, supported
+**Package identity: brain-installer 0.4.33, schema70.** Publication, supported
 platforms and field acceptance are established by the reviewed evidence for
 the exact package bytes, not by this README or its version number. Before an
 install or update, match the package to the current approved guide and release
@@ -50,7 +50,7 @@ until reviewed evidence closes it; a deferred capability remains unproven.
 Earlier candidate identities and their planning records remain historical and
 must not be reused as proof for changed bytes.
 
-The 41-row release audit has 37 unresolved incidents, zero 0.4.32 deferrals, and four
+The 41-row release audit has 37 unresolved incidents, zero 0.4.33 deferrals, and four
 rows closed on reviewed evidence.
 
 Engineering changes follow [the code, test, documentation, and tracking
@@ -979,6 +979,22 @@ prints a stored legacy credential. Claude Desktop remains a manual config
 update; replace its entry with the locator-only JSON from `mcp-config` and
 restart it after a rotation.
 
+For a hand-made entry with the Brain's name, get the owner's explicit approval
+and run `brain mcp-config <manifest> --apply --replace-owner-entry`. This replaces
+the Claude Code user entry and retires a matching local entry for the manifest's
+folder in a single config write. It saves the original entries in an encrypted
+`*.brain-mcp-backup` file alongside `.claude.json`. The backup uses AES-256-GCM
+and HKDF-SHA256 with the current durable Brain key, an empty salt, and info
+`financial-brain/claude-entry-backup/v1`. The version 1 JSON envelope stores
+base64 IV, tag, and ciphertext. Review a needed recovery before rotating that
+key. Never print a decrypted backup or restore a legacy literal credential.
+
+After a replacement, fully quit and reopen Claude Code to load the verified
+nine-tool registration. The money tools and document fetch are available
+independently of the model-route check. If Claude is still open during
+reconnect, a subsequent `brain health` or `brain daily run` completes the
+pending check when Claude is closed.
+
 ---
 
 ## Remote sources: Google Drive, Gmail and IMAP
@@ -1025,10 +1041,14 @@ and, for scanner changes, the exact scanner progress receipt.
 The daily runner consumes up to 32 windows and checks the runtime budget between
 windows and before provider reads and retries. Metadata, policy, body parsing,
 admission, split preparation, sending and settlement share one ordered entry
-boundary. Eight read-only acquisitions may overlap. Every logical message
-dispatches its bounded parts immediately and saves acceptance before the next
-deadline check. Slow later reads cannot discard its prepared prefix. Resolved
-skips may group state writes, with a final flush at the deadline.
+boundary. Eight read-only acquisitions may overlap until a Gmail quota response
+reduces subsequent Gmail requests to one at a time for the run. If Retry-After
+or exponential backoff exceeds the remaining quota wait or daily runtime
+budget, the next run resumes the saved window or provider page.
+Every logical message dispatches its bounded parts immediately and saves
+acceptance before the next deadline check. Slow later reads cannot discard its
+prepared prefix. Resolved skips may group state writes, with a final flush at
+the deadline.
 Private `gmail_part_progress` receipts bind each accepted message part to its
 revision, index, source identity, content hash, total part count and policy.
 They save before another send or retry wait. A bounded restart skips matching
@@ -1448,6 +1468,19 @@ causes remain kept. A confirmed update in the current window supersedes an old
 cancellation observation. No preview/apply call is made during conversion, and
 no cursor advances on an unverified marker. The separate exact `--apply-removals`
 executor remains available for a previously reviewed plan before conversion.
+
+On retry, Calendar re-reads the Google
+window and resumes from local delivery checkpoints saved after each 25-event
+window. Reuse requires current D1 readback of the event revision, content and
+scheduled date. Missing, older and outstanding events are sent again, including
+when readback is unavailable. Reset replays the window. The receipt counts verified
+resumes separately from unchanged upsert responses and includes them in sweep
+and freshness evidence. When pages repeat an event, the newest provider revision
+wins. Conflicting revisions without a provable order leave that calendar's sync
+token at the previous boundary and report the conflict.
+Each failed or refused delivery gets up to three attempts in a run. Exhausted
+items keep the source incomplete with a product error code and remain eligible
+for retry on the next run.
 Its dry run returns the same common preview receipt as every other source. If
 any declared calendar cannot be read, the preview reports what it did see and
 then exits nonzero with the reconsent or provider fix instead of presenting a
@@ -1836,8 +1869,15 @@ local calendar slot. A run that failed before the runner could start may have
 an unknown start time on Mac. Native inspection failure, an interrupted
 journal entry, and absent completion evidence remain unknown, not successful.
 A missing Node binary or runner is reported as a failure. A deferred run is
-reported as deferred. A successful run with coverage omissions is recorded as
-partial without adding a process error; native failures still override it.
+reported as deferred. When a daily run verifies one source and another source
+fails, hits a provider limit, is deferred, or needs approval, the run reports
+`partial`. Successful sources retain their verified freshness. A saved Gmail
+continuation also reports `partial` and resumes on the next daily run. All
+sources completing reports `complete`, and all sources failing reports `failed`.
+Daily status, its freshness rows, and local `brain health` name sources that
+need attention. The scheduled runner exits 0 for `partial` on Windows Task
+Scheduler and macOS launchd, and exits 1 for `failed`. Native exit or signal
+failures still override the journal result.
 These are process diagnostics; source freshness remains
 a separate proof. The next clock slot is planned, not a promise that a logged
 out or powered-off machine will run.
@@ -3297,9 +3337,13 @@ verification.
 
 Claude Code remains a blocking prerequisite for fresh setup and `brain tools`.
 For plain doctor on a manifest with provisioned Cloudflare resource identities,
-a successful `codex login status` makes a missing or signed-out Claude Code
+the default output is the owner checklist. Use `brain doctor <manifest> --diagnostic`
+for detailed local and deployed check results. Update acceptance keeps its
+internal quality results in the private upgrade bookmark directory.
+
+A successful `codex login status` makes a missing or signed-out Claude Code
 result advisory so the read-only technician sequence can reach health and
-source evidence. The warning explicitly says that Claude Code was not proven.
+source evidence. Diagnostic output records that Claude Code was unverified.
 An installed but signed-out Codex does not relax the gate. If Codex is also
 unavailable or signed out, Claude remains fatal. Later health, source, and
 device failures remain nonzero and preserve the technician coordinator's

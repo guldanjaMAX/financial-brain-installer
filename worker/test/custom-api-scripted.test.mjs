@@ -307,7 +307,7 @@ test("deletion-only snapshots keep row history and stage no replacement for disa
   assert.match(persistence.documents.get("costs:2026-09-24").content, /\$12\.50/);
 });
 
-test("a 308 canonical-path redirect is a plain configuration error and is never followed", async () => {
+test("a 308 self-redirect is refused without making a second request", async () => {
   let calls = 0;
   await assert.rejects(
     runCustomApiPull(config(), {
@@ -321,8 +321,8 @@ test("a 308 canonical-path redirect is a plain configuration error and is never 
       },
     }),
     (error) => error instanceof CustomApiError &&
-      error.code === "CONFIG_INVALID" &&
-      /setup is not valid/i.test(customApiOwnerMessage(error.code, "dashboard")),
+      error.code === "CONFIG_ENDPOINT_REDIRECT" &&
+      /exact endpoint path/i.test(customApiOwnerMessage(error.code, "dashboard")),
   );
   assert.equal(calls, 1, "the 308 decision point was reached without following it");
 });

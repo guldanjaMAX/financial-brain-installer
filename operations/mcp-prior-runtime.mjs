@@ -18,6 +18,7 @@ const SEMVER = `${NUMBER}\\.${NUMBER}\\.${NUMBER}(?:-${PRERELEASE}(?:\\.${PREREL
 const SEMVER_PATTERN = new RegExp(`^${SEMVER}$`);
 const SESSION_SUFFIX = "(?:-(?:[0-9]{8}|[0-9]{4}-[0-9]{2}-[0-9]{2})(?:-[0-9]{6})?|\\.parked-[0-9a-z]+(?:[.-][0-9a-z]+)*)?";
 const INSTALLER_PREFIX = new RegExp(`^(?:\\.financial-brain|financialbrain|\\.financial-brain-v${SEMVER}|\\.financial-brain-owner-session-[0-9]{4}${SESSION_SUFFIX}/install)$`, "i");
+const WINDOWS_VERSIONED_PREFIX = new RegExp(`^financialbrain-v(${NUMBER}\\.${NUMBER}\\.${NUMBER})$`, "iu");
 
 function semverParts(value) {
   if (typeof value !== "string" || !SEMVER_PATTERN.test(value)) return null;
@@ -64,7 +65,9 @@ function priorInstallerPackageRoot(runtimePath) {
   const prefix = basename(container).toLowerCase() === "lib" ? dirname(container) : container;
   const prefixShape = basename(prefix).toLowerCase() === "install"
     ? `${basename(dirname(prefix))}/${basename(prefix)}` : basename(prefix);
-  return INSTALLER_PREFIX.test(prefixShape) ? packageRoot : null;
+  const windowsVersion = process.platform === "win32" && prefix === container
+    ? WINDOWS_VERSIONED_PREFIX.exec(prefixShape)?.[1] : null;
+  return windowsVersion || INSTALLER_PREFIX.test(prefixShape) ? { packageRoot, windowsVersion } : null;
 }
 
 function pathHasNoSymlinks(path) {
@@ -82,8 +85,9 @@ function sameOpenedFile(before, opened) {
 
 /** Read metadata only. Acceptance permits replacing this path, never running it. */
 export function recognizedPriorInstallerRuntime(runtimePath, { runningVersion, allowStructural = false } = {}) {
-  const packageRoot = priorInstallerPackageRoot(runtimePath);
-  if (!packageRoot) return false;
+  const location = priorInstallerPackageRoot(runtimePath);
+  if (!location) return false;
+  const { packageRoot, windowsVersion } = location;
   try {
     const packageRootStat = lstatSync(packageRoot);
     const runtimeStat = lstatSync(runtimePath);
@@ -116,6 +120,7 @@ export function recognizedPriorInstallerRuntime(runtimePath, { runningVersion, a
       if (bytes.length !== opened.size) return false;
       const pkg = JSON.parse(bytes.toString("utf8"));
       if (pkg?.name !== "brain-installer" || typeof pkg.version !== "string") return false;
+      if (windowsVersion && pkg.version !== windowsVersion) return false;
       if (Object.hasOwn(PRIOR_INSTALLER_MCP_RUNTIME_SHA256, pkg.version)) {
         return createHash("sha256").update(runtimeBytes).digest("hex") ===
           PRIOR_INSTALLER_MCP_RUNTIME_SHA256[pkg.version];

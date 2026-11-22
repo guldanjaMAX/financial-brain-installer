@@ -6,6 +6,7 @@ export const MONEY_TABLES = Object.freeze([
   'sync_runs', 'owner_targets', 'plaid_account_entity_assignments', 'simplefin_account_assignments',
 ]);
 import { MONEY_TABLE_COLUMNS } from './money-query-columns.js';
+import { ownerMoneyDay } from './money-format.js';
 export { MONEY_TABLE_COLUMNS } from './money-query-columns.js';
 
 export const MONEY_QUERY_ERROR_CODES = Object.freeze([
@@ -155,13 +156,10 @@ This is the full candidate set, not extra-copy dollars; use Possible duplicates 
 
 // The clock is injected for deterministic boundary tests; no database clock is used.
 export function localDateFor({ timeZone, now = Date.now() } = {}) {
-  let zone = typeof timeZone === 'string' ? timeZone.trim() : '';
-  let configured = Boolean(zone);
-  try { new Intl.DateTimeFormat('en-CA', { timeZone: zone || 'UTC' }); }
-  catch { configured = false; zone = 'UTC'; }
-  if (!zone) zone = 'UTC';
-  const date = new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
-  return {date,time_zone:zone,configured};
+  const zone = typeof timeZone === 'string' ? timeZone.trim() : '';
+  const owner = ownerMoneyDay(now, zone);
+  if (owner) return {date:owner.day,time_zone:zone,configured:true};
+  return {date:new Date(now).toISOString().slice(0,10),time_zone:'UTC',configured:false};
 }
 
 export function moneyGuideFor(options = {}) {

@@ -43,6 +43,7 @@ const branch = (code,async=false) => cliModule({ process: { stdout: { write() {}
 const calendarOutput = [];
 const { result: calendarRun } = cliModule({
   info: line => calendarOutput.push(line), warn: line => calendarOutput.push(line), ok: line => calendarOutput.push(line),
+  ingestLib: async () => ingest,
   ingestRemovalReview() { throw new Error('Calendar refresh reached removal review'); },
 }, 'cmdIngestCalendarRun');
 const { runProviderConnector } = await import('../connectors/provider-runtime.mjs');
@@ -268,7 +269,7 @@ async function calendarCase(arm, expected) {
     };
     const outcome = await calendarRun({ brain: { domain: 'fixture.invalid' }, calendar: config },
       'fixture/manifest.json', {}, options,
-      { sourceName: 'calendar', dry: false, statePath: 'fixture/state.json', assertLockOwned() {} });
+      { sourceName: 'calendar', dry: false, statePath: join(fixtureRoot, id, 'state.json'), assertLockOwned() {} });
     assert.equal(markingDecisions, 1, 'the real add-only completion decision was reached');
     assert.equal(outcome.removed, 0);
     assert.equal(outcome.removalPending, 0);
@@ -724,7 +725,9 @@ if (!process.argv[2] || process.argv[2] === 'gmail') {
     { shape: 'accepted', providerStatus: 403, status: 200 },
     ...Array.from({ length: 33 }, (_, index) => ({
       shape: shapes[index % shapes.length],
-      providerStatus: [401, 403, 429, 503][next() % 4],
+      // This probe exercises failed-run receipt handling. Gmail quota
+      // responses now reach continuation and have their own regression.
+      providerStatus: [401, 403, 502, 503][next() % 4],
       status: [400, 401, 403, 429, 503][next() % 5],
       size: 1 + next() % 257,
       material: next().toString(16),

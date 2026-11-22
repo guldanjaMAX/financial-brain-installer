@@ -2690,6 +2690,31 @@ const zeroChunkExpectedReturn = {
       !seen.binds.some((values) => values[0] === "run_invalid_count"), String(invalid.status));
 }
 
+/* ---- an interrupted Calendar catch-up can finish entirely from exact readback ---- */
+{
+  const { env, seen } = mkEnv([]);
+  const body = {
+    source: "calendar", kind: "calendar", status: "ready", run_id: "calendar_resume",
+    walk_complete: true, provider_check_complete: true, complete_sweep: true,
+    files_seen: 1, docs_added: 0, docs_updated: 0, docs_unchanged: 0,
+    docs_refused: 0, docs_failed: 0, docs_resumed: 1,
+  };
+  const post = (overrides = {}) => worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({ ...body, ...overrides }),
+  }), env, {});
+  const response = await post();
+  const bind = seen.binds.find((values) => values[0] === "calendar" && values.length === 7);
+  check("one revision-verified Calendar resume advances sweep and freshness",
+    response.status === 200 && bind?.[4] === 1 && bind?.[5] === 1 && bind?.[6] === null,
+    JSON.stringify(bind?.slice(4)));
+  for (const invalid of [{ docs_resumed: -1 }, { docs_resumed: 2 }, { docs_resumed: 0.5 },
+    { kind: "upload" }, { docs_added: 1 }, { docs_failed: undefined }]) {
+    check("Calendar resume receipt rejects invalid or unmeasured counts", (await post(invalid)).status === 400);
+  }
+}
+
 /* ---- the iMessage capture receipt reaches sources.last_complete_sweep_at ---- */
 {
   const { env, seen } = mkEnv([]);
@@ -5813,9 +5838,10 @@ async function postConfirmedSourceForget(env, source = "meeting") {
     { name: "books", kind: "drive", status: "ready", document_count: 2 },
     { name: "medical", kind: "drive", status: "error", stale_reason: "private fixture reason", document_count: 3 },
     { name: "inbox", kind: "gmail", status: "ready", document_count: 4 },
+    { name: "custom API setup", kind: "upload", status: "ready", document_count: 1 },
   ];
   const base = mkEnv([], { vectorIds: [] });
-  const env = { ...base.env, DB: {
+  const env = { ...base.env, CUSTOM_API_CONFIG: "{", DB: {
     ...base.env.DB,
     prepare(sql) {
       if (/FROM grant_credentials/.test(sql)) {
@@ -5828,7 +5854,7 @@ async function postConfirmedSourceForget(env, source = "meeting") {
       if (/SELECT name FROM sources WHERE zone IS NOT NULL AND trim\(zone\) != '' AND zone NOT IN/.test(sql)) {
         return { bind: (...binds) => ({
           async all() {
-            return { results: binds.includes("medical") ? [{ name: "books" }] : [] };
+            return { results: binds.includes("medical") ? [{ name: "books" }, { name: "custom API setup" }] : [] };
           },
           async first() { return null; },
           async run() { return { meta: { changes: 0 } }; },
@@ -5872,7 +5898,8 @@ async function postConfirmedSourceForget(env, source = "meeting") {
     diagnose.status === 403, String(diagnose.status));
   check("freshness removes excluded source names and their raw connector reasons",
     freshness.status === 200 &&
-      freshnessBody.sources?.map((row) => row.name).join(",") === "books" &&
+      freshnessBody.sources?.map((row) => row.name).join(",") === "books,custom API setup" &&
+      !freshnessBody.sources.some((row) => row.setup_issue) &&
       !JSON.stringify(freshnessBody).includes("private fixture reason"),
     JSON.stringify(freshnessBody));
 }

@@ -86,9 +86,11 @@ import {
 import { deriveSourceOriginalId, loadSourceOriginalSigningKey } from "./source-original-binding.js";
 import { sourceOriginalChunkReceiptHash } from "./source-original-chunk.js";
 import {
-  customApiLogicalSourceId, customApiOwnerMessage, customApiVisibilitySql,
+  CUSTOM_API_CONFIG_REASONS, customApiLogicalSourceId, customApiMoveMessage,
+  customApiOwnerMessage, customApiRedirectMessage, customApiVisibilitySql,
   readWithCustomApiVisibility,
 } from "./custom-api-visibility.js";
+import { customApiConfigFromEnv, customApiSourceNameClashes } from "./custom-api.js";
 import { RETRIEVAL_HINT_MAX } from "./retrieval-routing.js";
 
 const RRF_K = 60;
@@ -4093,6 +4095,35 @@ async function currentCustomApiReceipts(env, rows) {
   }
 }
 
+function customApiEventDetail(detail) {
+  if (typeof detail !== "string" || !detail.startsWith("{")) return null;
+  try { return JSON.parse(detail); } catch { return null; }
+}
+
+// Project owner-only move evidence alongside the exact source status it describes.
+const CUSTOM_API_ENDPOINT_EVENT_COLUMNS = `
+  CASE WHEN s.kind='custom_api' AND s.last_ingest_at IS NOT NULL THEN
+    (SELECT e.detail FROM source_events e
+      WHERE e.source_name=s.name AND e.event='ingest' AND e.at=s.last_ingest_at
+        AND e.documents IS NOT NULL ORDER BY e.id DESC LIMIT 1)
+  END AS custom_api_ingest_detail,
+  CASE WHEN s.kind='custom_api' AND s.stale_reason IN ('CONFIG_ENDPOINT_REDIRECT','REDIRECT_REFUSED') THEN
+    (SELECT e.detail FROM source_events e
+      WHERE e.source_name=s.name AND e.event='error' ORDER BY e.at DESC, e.id DESC LIMIT 1)
+  END AS custom_api_error_detail,`;
+
+function customApiEndpointStatus(row) {
+  const items = customApiEventDetail(row.custom_api_ingest_detail)?.custom_api_endpoint_moves;
+  const error = customApiEventDetail(row.custom_api_error_detail);
+  const moves = Array.isArray(items) && items.length && items.every((item) =>
+    typeof item?.endpoint === "string" && typeof item.old_path === "string" && typeof item.new_path === "string");
+  const address = error?.issue_code === row.stale_reason && typeof error?.redirect_address === "string";
+  return {
+    ...(moves ? { endpoint_moves: items } : {}),
+    ...(address ? { redirect_address: error.redirect_address } : {}),
+  };
+}
+
 /**
  * The source row says what the connector last reported; sync_runs says whether
  * an `indexing` report still belongs to a live attempt. Keeping this separate
@@ -4133,7 +4164,8 @@ function operationalFreshness(s, now) {
       return {
         state: "broken",
         reason: customApiOwnerMessage(
-          String(s.custom_api_issue_code || s.stale_reason).trim().toUpperCase(),
+          Object.hasOwn(CUSTOM_API_CONFIG_REASONS, s.stale_reason) ? s.stale_reason
+            : String(s.custom_api_issue_code || s.stale_reason).trim().toUpperCase(),
           s.custom_api_display_name || "custom business API",
         ),
         indexingMs,
@@ -4194,6 +4226,13 @@ export const sourceFreshnessSql = ({
     FROM (
       SELECT s.name, s.kind, s.zone, s.status, s.last_ingest_at, s.last_complete_sweep_at,
              s.expected_refresh_seconds, s.stale_reason, s.document_count,
+             ${includeUnregisteredCounts
+               ? `CASE WHEN s.kind = 'gmail' THEN (
+                   SELECT e.detail FROM source_events e
+                    WHERE e.source_name = s.name AND e.event = 'ingest'
+                    ORDER BY e.at DESC, e.id DESC LIMIT 1
+                 ) END AS gmail_ingest_detail, ${CUSTOM_API_ENDPOINT_EVENT_COLUMNS}`
+               : ""}
              ${includeCustomApiJobs
                ? `COALESCE(
                    (SELECT MIN(sr.started_at)
@@ -4228,6 +4267,7 @@ export const sourceFreshnessSql = ({
                     WHERE live_documents.source = source_inventory.source
                       AND live_documents.deleted_at IS NULL)`
                : "NULL"} AS document_count,
+             ${includeUnregisteredCounts ? "NULL AS gmail_ingest_detail, NULL AS custom_api_ingest_detail, NULL AS custom_api_error_detail," : ""}
              NULL AS indexing_started_at,
              NULL AS retired_at,
              0 AS registered
@@ -4446,6 +4486,26 @@ export async function coverageGaps(env, options = {}) {
   return (await coverageGapReport(env, options)).gaps;
 }
 
+export function sourceRefreshContinuation(source, run, failure, now) {
+  const interval = Number(source.expected_refresh_seconds) * 1000;
+  const finished = timestampMs(run?.finished_at);
+  if (!(interval > 0 && finished <= now && now - finished <= interval * 1.5)) return null;
+  if (run.error === "RATE_LIMITED" || (run.error === "INGEST_FAILED" && failure?.checkpoint_readback === "verified" &&
+      ["present_preserved", "absent_preserved"].includes(failure.cursor_preservation) &&
+      (failure.http_status === 429 || ["rate_limit_exceeded", "user_rate_limit_exceeded"].includes(failure.provider_reason)))) {
+    return "rate_limited";
+  }
+  // A previous run's continuation must never hide a newer incomplete run.
+  if (source.kind === "gmail" && !run.error && !run.refusal_reason && run.run_id &&
+      Number(run.walk_complete) === 0 && Number(run.metrics_version) === 1 &&
+      run.docs_failed === 0 && run.docs_refused === 0 &&
+      source.gmail_ingest_detail?.includes("; more_history=1; withheld_for_secrets=0 ") &&
+      source.gmail_ingest_detail.endsWith(` run_id=${run.run_id}`)) {
+    return "catching_up";
+  }
+  return null;
+}
+
 /** Per-source freshness for `brain health` and `brain sources`, not for answers. */
 export async function freshnessReport(env, { now = Date.now() } = {}) {
   let rows;
@@ -4458,13 +4518,37 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
   } catch {
     return { sources: [], unavailable: true };
   }
+  let customConfig;
+  let setupIssue;
+  try {
+    customConfig = customApiConfigFromEnv(env);
+  } catch (error) {
+    setupIssue = error.code;
+  }
+  const customSource = customConfig && rows.find((row) =>
+    row.name === customConfig.source && Number(row.registered) !== 0);
+  if (customApiSourceNameClashes(customSource)) setupIssue = "CONFIG_SOURCE_NAME_CLASH";
   const activeCustomJobs = await activeCustomApiJobStarts(env, rows);
   const customApiReceipts = await currentCustomApiReceipts(env, rows);
+  if (customConfig && !customSource) {
+    const event = await env.DB.prepare(
+      "SELECT detail FROM source_events WHERE source_name=?1 ORDER BY id DESC LIMIT 1"
+    ).bind(customConfig.source).first();
+    if (event?.detail === "CONFIG_SOURCE_IDENTITY_UNVERIFIED") setupIssue = event.detail;
+  }
+  if (setupIssue) {
+    // Setup can fail before a source is registered. Report it without assigning
+    // the failed setup or its status to a different connector's registry row.
+    rows = [...rows, {
+      name: customConfig ? `${customConfig.source} (custom API setup)` : "custom API setup",
+      kind: "custom_api", status: "error", stale_reason: setupIssue, setup_issue: true,
+    }];
+  }
   const latestRuns = new Map();
   try {
     let result;
     const currentRunSql =
-      `SELECT source,lane,started_at,finished_at,walk_complete,files_seen,
+      `SELECT run_id,source,lane,started_at,finished_at,walk_complete,files_seen,
               docs_added,docs_updated,docs_unchanged,docs_refused,docs_failed,metrics_version,
               confirmed_from,confirmed_through,target_from,target_through,refusal_reason,error,
               failure_evidence
@@ -4560,8 +4644,12 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
         const setAsideCopy = withheld && providerSetAsideOwnerCopy({ docs_withheld: withheld.count, withheld_reasons: withheld.reasons });
         reason = `ran ${new Date(last).toISOString()}${setAsideCopy ? `; ${setAsideCopy}` : ""}`;
       }
+      const redirects = customApiEndpointStatus(s);
+      if (state === "broken" && redirects?.redirect_address) reason = customApiRedirectMessage(redirects.redirect_address);
+      if (redirects?.endpoint_moves) reason = [reason, ...redirects.endpoint_moves.map(customApiMoveMessage)].filter(Boolean).join(" ");
       const report = {
         name: s.name, kind: s.kind, state,
+        ...redirects,
         // Null is a real, owner-only unassigned state for registered sources.
         // Unregistered is distinguished by `state`; ownerSystemStatus converts
         // both into explicit public states without exposing this raw slug.
@@ -4581,11 +4669,12 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
           ? null
           : Math.floor(operational.indexingMs / 3600000),
         reason,
+        ...(s.setup_issue ? { setup_issue: true } : {}),
+        ...(s.kind === "custom_api" && Object.hasOwn(CUSTOM_API_CONFIG_REASONS, s.stale_reason)
+          ? { issue_code: s.stale_reason } : {}),
         automatable,
       };
-      return {
-        ...report,
-        last_failure: latestRun?.error
+      const lastFailure = latestRun?.error
           ? parseStoredSourceFailureEvidence(latestRun.failure_evidence, {
               status: "error",
               kind: String(s.kind || "").trim().toLowerCase(),
@@ -4594,7 +4683,13 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
                 ? latestRun.docs_failed
                 : null,
             })
-          : null,
+          : null;
+      const continuation = ["ok", "stale", "broken", "review", "never_synced"].includes(state)
+        ? sourceRefreshContinuation(s, latestRun, lastFailure, now) : null;
+      return {
+        ...report,
+        last_failure: lastFailure,
+        ...(continuation ? { continuation } : {}),
         coverage: sourceCoverageFromEvidence({
           ...report,
           last_ingest_at: s.last_ingest_at || null,

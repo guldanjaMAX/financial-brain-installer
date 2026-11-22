@@ -16,6 +16,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { classifyLedgerQuestion } from "../worker/src/lib/ledger-question.js";
 import * as workspace from "../operations/claude-workspace.mjs";
 import * as cli from "../brain.mjs";
+import { ownerSelfcheckRows, ownerUpdateRows } from "../operations/owner-checklist.mjs";
 import { reviewedSkillContent } from "../operations/claude-skill.mjs";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
 import { MONEY_RULES_LINE } from "../operations/answer-setup-copy.mjs";
@@ -444,7 +445,7 @@ async function update(t, { wired = ["Codex"], risky = false, createGuide = false
   const brainFolder = join(root, folder);
   mkdirSync(brainFolder);
   const manifest = join(brainFolder, "brain.manifest.json");
-  const events = [], finish = [], messages = [], writes = [];
+  const events = [], finish = [], guidance = [], messages = [], writes = [];
   const keyFile = join(root, "fixture-admin-key");
   writeFileSync(keyFile, ["synthetic", "fixture", "only"].join("-"), { mode: 0o600 });
   writeFileSync(manifest, JSON.stringify({
@@ -473,11 +474,11 @@ async function update(t, { wired = ["Codex"], risky = false, createGuide = false
     reportAgentRefreshOk: () => {}, reportAgentRefreshInfo: () => {}, reportAgentRefreshWarning: (m) => messages.push(m),
     reportWorkspaceGuideRefreshOk: (m) => messages.push(m), reportWorkspaceGuideRefreshInfo: (m) => messages.push(m), reportWorkspaceGuideRefreshWarning: (m) => messages.push(m),
     reportSkillRefreshOk: () => {}, reportSkillRefreshWarning: (m) => messages.push(m),
-    reportUpdateFinish: (message) => finish.push(message), ...options,
+    reportUpdateFinish: message => finish.push(message), reportUpdateGuidance: message => guidance.push(message), ...options,
   });
   assert.deepEqual(result, { updated: true });
   assert.deepEqual(events, ["backlog", "verify", "upgrade", "wire"], "update reaches verified assistant reconciliation");
-  return { root: brainFolder, writes, finish, messages };
+  return { root: brainFolder, writes, finish, guidance, messages };
 }
 
 // Exercise the production composition boundary with controlled locator data.
@@ -491,12 +492,19 @@ function updateClosingBoundary({ platform = "win32", platformName, folder = "ord
   const guidance = "Use https://financialbrain.ai/update/agent.md for this session; do not rerun brain update.";
   const renderOptions = { platform: platformName ?? platform ?? process.platform, env: { PATH: "" }, nodePath: "C:\\Runtime\\node.exe", scriptPath: "C:\\Runtime\\brain.mjs" };
   const target = win32.join("C:\\Owner", folder, "brain.manifest.json");
-  const reports = [], renderCalls = [];
+  const reports = [], renderCalls = [], restart = [];
   const bindings = {
     updateAttention: [guidance, guidance],
     schedulerResults: [],
+    verifiedDailyJob: undefined,
+    acceptance: undefined,
+    afterSelfcheck: undefined,
+    ownerAgentRefreshResult: undefined,
+    ownerUpdateRows,
+    ownerSelfcheckRows,
+    printOwnerChecklist: message => reports.push(message),
     selfcheckReport: undefined,
-    options: { platform, platformName, ...(raw ? { reportUpdateFinish: message => reports.push(message) } : {}) },
+    options: { platform, platformName, reportUpdateGuidance: message => restart.push(message), ...(raw ? { reportUpdateFinish: message => reports.push(message) } : {}) },
     pin: { target }, PRODUCT_VERSION: "0.4.27", mailTransition: null,
     ownerSessionFolderLabel: () => "another folder",
     ownerBrainFolderWarning: () => locator,
@@ -510,13 +518,13 @@ function updateClosingBoundary({ platform = "win32", platformName, folder = "ord
   };
   cliModule(bindings, `(function(){${source.slice(start,end)}\n})()`);
   assert.equal(reports.length, 1, "the closing reporter was reached exactly once");
-  return { closing: reports[0], renderCalls, guidance, renderOptions, target };
+  return { closing: reports[0], restart: restart[0], renderCalls, guidance, renderOptions, target };
 }
 
 test("WIN R7 closing preserves a quoted command-shaped folder with an ordinary-folder control", () => {
   for (const folder of ["ordinary folder", "brain update archive"]) {
     const run = updateClosingBoundary({ folder });
-    assert.ok(run.closing.includes(`Set-Location -LiteralPath ${quotePowerShellArgument(win32.dirname(run.target))} -ErrorAction Stop; claude`));
+    assert.ok(run.restart.includes(`Set-Location -LiteralPath ${quotePowerShellArgument(win32.dirname(run.target))} -ErrorAction Stop; claude`));
     assert.ok(run.closing.includes(renderCliCommands(run.guidance, run.renderOptions)), "bare attention still renders");
     assert.deepEqual(run.renderCalls, [run.guidance], "only the deduplicated bare guidance reaches the renderer");
   }
@@ -570,7 +578,7 @@ test("WIN R7 real update preserves folder commands and locator prose in the defa
       infrastructure: { cloudflare: { account_id: "a".repeat(32), storage: "d1", d1_database_id: "fixture-database" } },
       credentials: { admin_key: { backend: "file", path: keyFile } },
     }));
-    const events = [], output = [];
+    const events = [], output = [], guidance = [];
     const capture = mock.method(console, "log", message => output.push(String(message)));
     try {
       const result = await cli.cmdUpdate(manifest, {
@@ -583,15 +591,15 @@ test("WIN R7 real update preserves folder commands and locator prose in the defa
         reconcileExistingOwnerAgents: null, writeClaudeWorkspaceGuideAfterUpdate: null, writeCodexWorkspaceGuideAfterUpdate: null,
         installTechnicianSkills: () => { events.push("skills"); throw new Error("fixture refresh warning"); },
         reportSkillRefreshOk: () => {}, reportSkillRefreshWarning: () => {},
+        reportUpdateGuidance: message => guidance.push(message),
       });
       assert.equal(result.status, "verified");
     } finally { capture.mock.restore(); }
     assert.deepEqual(events, ["verify", "upgrade", "skills"], "real update reaches the successful closing decision");
-    const closing = output.filter(line => line.startsWith("Done."));
+    const closing = output.filter(line => line.startsWith("✔ Version "));
     assert.equal(closing.length, 1);
-    assert.ok(closing[0].includes(`Set-Location -LiteralPath ${quotePowerShellArgument(target)} -ErrorAction Stop; claude`));
-    assert.equal(closing[0].split("\n").at(-1), `Next time, open Claude Code (or Codex) in your Financial Brain folder, ${cli.displayPathForTesting(target, process.cwd())}. This conversation runs in your Desktop folder, which can be tidied away or synced.`);
-    assert.ok(closing[0].includes(renderCliCommands("Use https://financialbrain.ai/update/agent.md for this session; do not rerun brain update.", { platform: "win32" })));
+    assert.ok(guidance[0].includes(`Set-Location -LiteralPath ${quotePowerShellArgument(target)} -ErrorAction Stop; claude`));
+    assert.ok(closing[0].includes("The technician guide could not be refreshed. Ask your installer to use https://financialbrain.ai/update/agent.md."));
   }
 });
 
@@ -606,13 +614,9 @@ test("f/g: update refresh is gated on assistant proof, skips missing AGENTS, and
   assert.equal(control.messages.filter((m) => /CLAUDE\.md refreshed/i.test(m)).length, 1);
   assert.equal(control.messages.filter((m) => /AGENTS\.md refreshed/i.test(m)).length, 1);
   const version = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
-  const unchangedClosing = `Done. Your Brain is now on version ${version} and passed its checks.\n` +
-    "One last step: quit Claude Code (and Codex, if you use it) and open it again, so it connects to the updated Brain.\n" +
-    "In Claude Code type /exit, then claude --continue.\nThen ask: check my Brain.";
-  const outsideClosing = (folder) => unchangedClosing.replace("In Claude Code type /exit, then claude --continue.",
-    `In Claude Code type /exit, then open a terminal in your Financial Brain folder and run: cd ${quotePosixArgument(folder)} && claude. For Codex, open that same folder. The answer rules load there.`);
-  assert.deepEqual(missing.finish, [outsideClosing(missing.root)]);
-  assert.deepEqual(control.finish, [outsideClosing(control.root) + `\nNext time, open Claude Code (or Codex) in your Financial Brain folder, ${cli.displayPathForTesting(control.root, process.cwd())}. This conversation runs in your Desktop folder, which can be tidied away or synced.`]);
+  assert.deepEqual(missing.finish, [`✔ Version ${version}\n✔ Codex connection verified`]);
+  assert.deepEqual(control.finish, [`✔ Version ${version}\n✔ Claude Code connection verified\n✔ Codex connection verified`]);
+  assert.match(missing.guidance[0], /answer rules load there/);
   const unverified = await update(t, { wired: [], createGuide: true });
   assert.equal(unverified.writes.length, 0);
   assert.equal(readFileSync(join(unverified.root, "AGENTS.md"), "utf8"), `${CODEX}\n# Earlier guide\n`);
@@ -982,8 +986,8 @@ test("R6 verified Codex update creates missing guide only beside managed Claude"
 
 test("R8 ordinary folders and home get the rules-loading nudge", async t => {
   const result = await update(t);
-  assert.match(result.finish[0], /cd .*Financial Brain.*&& claude/);
-  assert.match(result.finish[0], /answer rules load there/);
+  assert.match(result.guidance[0], /cd .*Financial Brain.*&& claude/);
+  assert.match(result.guidance[0], /answer rules load there/);
   assert.doesNotMatch(result.finish[0], /tidied away or synced|claude --continue/);
   const setupResult = await setup(t, ["Claude Code"]);
   assert.match(setupResult.output, /answer rules load there/);
@@ -1781,7 +1785,7 @@ for (const platform of ["darwin", "win32"]) test(`R5 literal restart and support
 }, async t => {
   const result = await update(t, { platform, folder: "Reserve $fund owner's ; folder" });
   assert.equal(result.finish.length, 1, "verified update emits restart guidance");
-  const command = result.finish[0].match(/run: (.+)\. For Codex/)[1];
+  const command = result.guidance[0].match(/run: (.+)\. For Codex/)[1];
   assert.ok(command.includes("claude"));
   if (platform === "win32") {
     assert.doesNotMatch(command, /&&|\|\|/);
@@ -1794,7 +1798,7 @@ for (const platform of ["darwin", "win32"]) test(`R5 literal restart and support
     assert.equal(child.stdout.trim(), result.root);
   }
   const control = await update(t, { platform });
-  assert.ok(control.finish[0].includes("claude"));
+  assert.ok(control.guidance[0].includes("claude"));
 });
 
 test("R5 unknown kind remains a connected account in both owner templates", async t => {
