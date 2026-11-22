@@ -331,13 +331,12 @@ test("update completion uses one authenticated bank JSON read per phase and pres
           await update();
           assert.equal(lines.length, 1);
           if (category === "legacy-healthy") {
-            assert.match(lines[0], /older Worker proved saved bank access without reporting the bank page state/);
-            assert.doesNotMatch(lines[0], /passed its checks/);
-          } else if (category !== "unavailable") assert.match(lines[0], /Done.*passed its checks/);
+            assert.match(lines[0], /Bank access needs attention/);
+            assert.doesNotMatch(lines[0], /UPDATE_SELFCHECK|older Worker/);
+          } else if (category !== "unavailable") assert.match(lines[0], /^✔ Version /u);
           else {
-            assert.match(lines[0], /Updated, but this check could not run for bank connections/);
-            assert.match(lines[0], /UPDATE_SELFCHECK_NOT_CHECKED.*HTTP 502|HTTP 502[\s\S]*UPDATE_SELFCHECK_NOT_CHECKED/);
-            assert.doesNotMatch(lines[0], /passed its checks/);
+            assert.match(lines[0], /Bank access needs attention/);
+            assert.doesNotMatch(lines[0], /UPDATE_SELFCHECK|HTTP 502/);
             assert.equal(issue[0].error_code, "UPDATE_SELFCHECK_NOT_CHECKED");
           }
         } else {
@@ -351,7 +350,7 @@ test("update completion uses one authenticated bank JSON read per phase and pres
             throw error;
           }), { supportCode: code });
           assert.equal(issue[0]?.error_code, code);
-          assert.match(failureLines.join("\n"), /The self-check only read/);
+          assert.ok(failureLines.every(line => /needs attention\. Ask your installer to check it\.$/.test(line)));
           assert.doesNotMatch(failureLines.join("\n"), /synthetic-private-account|749\.51|simulated-credential/);
           assert.doesNotMatch(lines.join("\n"), /Done\./);
           if (category === "bank") {
@@ -363,7 +362,7 @@ test("update completion uses one authenticated bank JSON read per phase and pres
             assert.equal(lines.length, 0, "no retry reported completion while the original was missing");
             bankFault = null;
             await update();
-            assert.match(lines[0], /Done.*passed its checks/);
+            assert.match(lines[0], /^✔ Version /u);
             assert.equal(calls.length, 6, "each retry reads the bank only for its after observation");
           }
         }

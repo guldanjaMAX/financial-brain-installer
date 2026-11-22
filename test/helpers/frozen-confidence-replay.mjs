@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { registerHooks } from 'node:module';
+import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -80,16 +81,16 @@ export function assertSameLevels(baseline, candidate) {
 }
 
 export function replayFrozenLevels(t) {
-  assert.ok(process.env.HOME, 'an isolated HOME is required');
   const destination = process.env.CONF_HIDE_REPLAY_RECEIPT_DIR && resolve(process.env.CONF_HIDE_REPLAY_RECEIPT_DIR);
   if (destination) {
     assert.ok(destination.startsWith(root + '/'), 'receipts stay inside the worktree');
     mkdirSync(destination, { recursive: true });
   }
-  const scratch = mkdtempSync(join(process.env.HOME, 'frozen-confidence-'));
+  const scratch = mkdtempSync(join(tmpdir(), 'frozen-confidence-'));
   t.after(() => rmSync(scratch, { recursive: true, force: true }));
-  const env = { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: scratch,
-    BRAIN_NO_WRANGLER_LOGIN: '1', BRAIN_TEST_LAUNCHCTL: process.env.BRAIN_TEST_LAUNCHCTL || join(scratch, 'launchctl'),
+  // Both arms use the same calendar and an isolated home for any CLI I/O.
+  const env = { PATH: process.env.PATH, HOME: scratch, TZ: 'UTC', LANG: 'C', LC_ALL: 'C',
+    BRAIN_NO_WRANGLER_LOGIN: '1', BRAIN_TEST_LAUNCHCTL: join(scratch, 'launchctl'),
     ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}) };
   writeFileSync(join(scratch, 'launchctl'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
   const head = join(scratch, 'head');
@@ -127,7 +128,9 @@ export function replayFrozenLevels(t) {
     const result = spawnSync(process.platform === 'win32' ? process.execPath : 'nice',
       process.platform === 'win32' ? args : ['-n', '10', process.execPath, ...args], {
       cwd: productRoot, env: { ...env, CONF_HIDE_REPLAY_ROOT: productRoot, CONF_HIDE_REPLAY_OUTPUT: output },
-      encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 900000,
+      // The archived engine can spend over 15 minutes on 483 real SQLite
+      // cases when the runner is shared. Keep a finite cap on each arm.
+      encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 30 * 60 * 1000,
     });
     assert.ifError(result.error);
     assert.ok(existsSync(output), `${arm} replay produced observations: ${result.stderr.slice(0, 300)}`);

@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import { ensureWorkersDevSubdomain, maskedSubdomainMessage } from "./operations/workers-subdomain.mjs";
 import { commitMissingDomain, saveMissingDomain } from "./operations/brain-domain-save.mjs";
+import { calendarDeliveryDigest, sendCalendarWindows } from "./connectors/calendar-delivery.mjs";
 import { markCalendarCancellations, pendingCalendarCancellations } from './operations/calendar-cancellations.mjs';
 import { processGmailEntries, gmailDeadlineError, gmailDeadlineSleep } from "./operations/gmail-entry.mjs";
+import { createGmailQuota, GMAIL_QUOTA_EXHAUSTED, GMAIL_QUOTA_PAUSE } from "./operations/gmail-quota.mjs";
 import { gmailFailureMessage } from "./operations/gmail-failure.mjs";
 import { planGmailParts, acceptGmailPart, clearGmailParts } from "./operations/gmail-part-progress.mjs";
 import { SOURCE_INVENTORY_HELP_URL } from "./operations/source-inventory-pages.mjs";
@@ -38,16 +40,19 @@ import { readCurrentIngestParts, revalidateIngestProgress } from "./operations/i
  * read it. Ordinary owner setup creates and reveals no API token.
  */
 
-import { accessSync, chmodSync, closeSync, constants as fsConstants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdtempSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync, writeSync, appendFileSync } from "node:fs";
+import { accessSync, chmodSync, closeSync, constants as fsConstants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdtempSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync, writeSync, appendFileSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { saveUpgradeBookmark, WINDOWS_UPGRADE_BOOKMARK_ACL_TIMEOUT_MS } from "./operations/upgrade-bookmark.mjs";
 import {
   bankSelfcheckRows, captureUpdateSelfcheck, equivalentDailyBridgeReplacement, previewUpdateSelfcheck, summarizeUpdateSelfcheck,
   openUpdateSelfcheck, sourceSelfcheckRows, updateSelfcheckMessage, UPDATE_SELFCHECK_RECEIPT_FAILED,
 } from "./operations/update-selfcheck.mjs";
+import {
+  acceptanceDiagnostics, ownerAcceptanceRows, ownerDailyRow, ownerDoctorRow, ownerSelfcheckRows, ownerSourceRows, ownerUpdateRows,
+} from "./operations/owner-checklist.mjs";
 import { basename, delimiter, isAbsolute, join, dirname, relative, resolve, sep, posix } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createHash, randomBytes } from "node:crypto";
+import { createCipheriv, createHash, hkdfSync, randomBytes } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { windowsUpdatePlatform, windowsUpdateStopMessage } from "./operations/windows-update-signin.mjs";
 import { discoverClaudeMcpCommand } from "./operations/claude-mcp-discovery.mjs";
@@ -98,6 +103,7 @@ import {
 } from "./operations/bank-provider-command.mjs";
 import { ingestEnvelopeValidationError } from "./worker/src/lib/ingest-envelope.js";
 import { normalizeSourceOriginalReceipt } from "./worker/src/lib/source-original-binding.js";
+import { customApiMoveMessage } from "./worker/src/lib/custom-api-visibility.js";
 import {
   acknowledgeOcrPageRequests,
   createOcrCallback,
@@ -119,7 +125,7 @@ import {
   withBrainLifecycleLock,
   withBrainLifecycleLockWait,
 } from "./operations/brain-lifecycle-lock.mjs";
-import { renderDailyObservation } from "./operations/daily-refresh-observation.mjs";
+import { dailySourceAttention, readDailyObservation, renderDailyObservation } from "./operations/daily-refresh-observation.mjs";
 import { checkUpdateAnswerKey, readUpdateAnswerKeySecretNames } from "./operations/update-key-preflight.mjs";
 import { createMigrationStatementIntentStore } from "./operations/migration-statement-intent.mjs";
 import {
@@ -137,7 +143,7 @@ import {
   validateUpdateSchedulerSnapshot,
   reserveUpdateSchedulerWriters, releaseUpdateSchedulerReservations,
 } from "./operations/update-scheduler-inventory.mjs";
-import { planDailyRefresh } from "./operations/daily-refresh-plan.mjs";
+import { dailyRefreshIdentity, dailyRefreshPrincipal, planDailyRefresh } from "./operations/daily-refresh-plan.mjs";
 import {
   clearDailyRefreshUpdateTransaction,
   installDailyRefreshSchedule,
@@ -4460,6 +4466,8 @@ export async function cmdHealth(manifestPath, {
   request = http,
   wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
   resolveKey = resolveAdminKey,
+  dailyObservationOptions = {},
+  logDailyAttention = info,
 } = {}) {
   const { m } = loadManifest(manifestPath);
   // Cloudflare is OPTIONAL here, deliberately. This command talks to the worker
@@ -4754,6 +4762,20 @@ export async function cmdHealth(manifestPath, {
       ok(`/health and authenticated inventory agree on ${boundVersion}/${boundDrainMode}`);
       ok(`documents endpoint ${docs.status}; authenticated inventory confirmed`);
       info(answerSetupLine(m));
+      if (!expectVersion && !expectDrainMode && m.operations?.daily_refresh?.enabled === true) {
+        // Local refresh coverage is advisory. Worker readiness still depends
+        // on the authenticated inventory and the vector checks below.
+        let observed;
+        try {
+          const principal = dailyObservationOptions.principal ?? dailyRefreshPrincipal(dailyObservationOptions);
+          observed = readDailyObservation(dailyRefreshIdentity(m, principal), dailyObservationOptions);
+        } catch { /* local daily diagnostics are unavailable */ }
+        if (observed?.record?.completed_at) {
+          for (const issue of observed.source_failures || []) {
+            logDailyAttention(`Daily attention: ${dailySourceAttention(issue)}`);
+          }
+        }
+      }
       if (existsSync(answerSetupJournalPath(manifestPath))) warn(HALF_RUN(manifestPath));
       if (inventory.anthropic_key_missing === true) {
         warn(HEALTH_KEY_MISSING);
@@ -7480,21 +7502,21 @@ export async function cmdUpgrade(manifestPath, options = {}) {
     }
 
     const startedAt = new Date().toISOString();
+    const bookmarkRecord = {
+      account_id: accountId, database_id: dbId, bookmark,
+      from_version: fromVersion, to_version: toVersion,
+      manifest_sha256: createHash("sha256").update(originalPin.raw).digest("hex"),
+    };
     let bookmarkReceiptPath = null;
     try {
-      const record = {
-        account_id: accountId, database_id: dbId, bookmark,
-        from_version: fromVersion, to_version: toVersion,
-        manifest_sha256: createHash("sha256").update(originalPin.raw).digest("hex"),
-      };
       bookmarkReceiptPath = persistBookmark({
-        ...record,
+        ...bookmarkRecord,
         ...(options.selfcheckBefore ? { selfcheck_before: options.selfcheckBefore } : {}),
       }, options.bookmarkOptions);
       // Preserve the original restore point. The final observation gets its
       // own receipt through the same private, verified writer.
       options.onSelfcheckReceipt?.(report => persistBookmark({
-        ...record, selfcheck: report,
+        ...bookmarkRecord, selfcheck: report,
       }, options.bookmarkOptions));
       assertStageFiles("D1 bookmark persistence");
       ok("D1 restore bookmark saved and verified in this computer's private upgrade-bookmarks folder");
@@ -7522,6 +7544,7 @@ export async function cmdUpgrade(manifestPath, options = {}) {
 
     info(`Updating your Brain from ${fromVersion} to ${toVersion}. For part of this your Brain won't accept new documents; asking questions keeps working. Keep this window open.`);
     let stage = "migration";
+    let ownerAcceptanceFailure;
     // True from pause dispatch until active mode is itself verified. A lost
     // reply cannot prove the pause was not deployed.
     // Uploading the active Worker is not enough: during propagation the paused
@@ -7753,7 +7776,19 @@ export async function cmdUpgrade(manifestPath, options = {}) {
           expectDrainMode: usesD1VectorOutbox ? "active" : null,
         }));
       await runStage("full acceptance test", () =>
-        verifyAcceptance(executionPin.target, { ...modelOptions, expectVersion: toVersion, staleSourcesAsWarnings: true }));
+        verifyAcceptance(executionPin.target, {
+          ...modelOptions, expectVersion: toVersion, staleSourcesAsWarnings: true,
+          deferInstallVersionCheck: process.platform === "win32",
+          versionReadbackAfterAcceptance: true,
+          ...(options.onOwnerAcceptance ? { onOwnerAcceptance: summary => {
+            if (!summary.passed) ownerAcceptanceFailure = ownerAcceptanceRows(summary).join("\n");
+            const checks = acceptanceDiagnostics(summary);
+            if (checks.length) persistBookmark({
+              ...bookmarkRecord, acceptance_diagnostics: checks,
+            }, options.bookmarkOptions);
+            options.onOwnerAcceptance(summary);
+          } } : {}),
+        }));
       await runStage("D1 version commit", () => queryDatabase(
         accountId,
         dbId,
@@ -7864,6 +7899,12 @@ export async function cmdUpgrade(manifestPath, options = {}) {
         );
       }
       if (heldByLocalFileLock(error)) dieWithSupportCode(failureMessage, LOCAL_FILE_LOCKED);
+      if (ownerAcceptanceFailure) {
+        const failure = new Fatal(failureMessage);
+        failure.ownerMessage = ownerAcceptanceFailure;
+        failure.ownerChecklist = true;
+        throw failure;
+      }
       die(failureMessage);
     }
     // All pinned remote stages and verified history are complete. Only now may
@@ -8159,14 +8200,15 @@ export async function cmdTest(manifestPath, options = {}) {
     }
     const dbId = m.infrastructure?.cloudflare?.d1_database_id;
     if (dbId) {
-      const st = await d1Query(acct.id, dbId, "SELECT * FROM install_state WHERE id = 1").catch(
+      const fields = options.deferInstallVersionCheck ? "schema_version, gate_version" : "*";
+      const st = await d1Query(acct.id, dbId, `SELECT ${fields} FROM install_state WHERE id = 1`).catch(
         () => null
       );
       installState = st?.results?.[0] || null;
     }
   }
   if (!base) die("could not determine a URL for this install.");
-  if (!haveCfToken) {
+  if (!haveCfToken && !options.onOwnerAcceptance) {
     info("no Cloudflare token present, so tier 5 will skip. Tiers 1 to 4 are unaffected.");
   }
 
@@ -8215,13 +8257,20 @@ export async function cmdTest(manifestPath, options = {}) {
     adminKey: key,
     manifest: m,
     expectVersion: options.expectVersion || null,
+    deferInstallVersionCheck: options.deferInstallVersionCheck,
     tolerateStaleSources: options.staleSourcesAsWarnings === true,
+    versionReadbackAfterAcceptance: options.versionReadbackAfterAcceptance === true,
   });
-  info(`acceptance suite against ${base}`);
+  if (!options.onOwnerAcceptance) info(`acceptance suite against ${base}`);
   const out = await suite.run({
     probes: m.testing?.probe_questions || [],
     installState,
   });
+  if (options.onOwnerAcceptance) {
+    options.onOwnerAcceptance({ ...out, sources: suite.sources });
+    if (!out.passed) throw new Fatal("acceptance suite FAILED");
+    return;
+  }
 
   let tier = null;
   for (const r of out.results) {
@@ -8319,6 +8368,91 @@ function reportPartBRouteReadiness(routeReadiness, options = {}) {
   diePartBRouteNotReady({ reason });
 }
 
+function runClaudeRouteProof(manifestPath, options, verifyRegistration) {
+  const routeOptions = options.routeReadinessOptions || {};
+  const guideRefresh = refreshPartBClaudeGuide(
+    manifestPath,
+    { ...options, ...routeOptions },
+    routeOptions.claudeWorkspaceOptions || {},
+  );
+  if (!["written", "verified"].includes(guideRefresh.outcome)) {
+    return { ready: false, reason: "guide_refresh_refused" };
+  }
+  const stopMcpProcess = routeOptions.stopMcpProcess ?? (
+    Object.hasOwn(options, "processSnapshot")
+      ? () => proveClaudeCodeFullyExited({ readProcessList: options.processSnapshot })
+      : proveClaudeCodeFullyExited
+  );
+  const open = routeOptions.openMcpTransport ?? openPartBMcpTransport;
+  return provePartBRouteReadiness({
+    manifestPath,
+    guideRefresh,
+    control: routeOptions.control ?? PART_B_ROUTE_CONTROL,
+  }, {
+    stopMcpProcess,
+    openMcpTransport: verifyRegistration ? (descriptor) => {
+      verifyRegistration(descriptor);
+      return open(descriptor);
+    } : open,
+  });
+}
+
+function hasPartBAnswerModels(manifest) {
+  return manifest?.retrieval?.answer_model === "claude-opus-5-5" &&
+    manifest?.retrieval?.gate_model === "claude-sonnet-5-5";
+}
+
+function claudeRoutePendingPath(manifestPath) {
+  return `${resolve(manifestPath)}.claude-route-pending`;
+}
+
+function readPendingClaudeRoute(manifestPath) {
+  const snapshot = captureAgentConfigFile(claudeRoutePendingPath(manifestPath), { allowAbsent: true });
+  if (snapshot.exists && snapshot.bytes.length !== 0) {
+    throw new Error("invalid pending Claude route proof");
+  }
+  return snapshot;
+}
+
+function deferClaudeRouteProof(manifestPath) {
+  if (readPendingClaudeRoute(manifestPath).exists) return;
+  const fd = openSync(claudeRoutePendingPath(manifestPath), "wx", 0o600);
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  if (!readPendingClaudeRoute(manifestPath).exists) throw new Error("pending Claude route proof readback failed");
+}
+
+async function resumePendingClaudeRouteProof(manifestPath, options = {}) {
+  if (typeof manifestPath !== "string" || !manifestPath || manifestPath.startsWith("-")) return null;
+  const pending = readPendingClaudeRoute(manifestPath);
+  if (!pending.exists) return null;
+  if (!hasPartBAnswerModels(loadManifest(manifestPath).m)) return null;
+  const proof = await runClaudeRouteProof(manifestPath, { ...options, reportInfo: () => {} }, (desired) => {
+    const registration = options.wireOptions || {};
+    const path = claudeUserConfigPath(registration.environment ?? process.env, registration.claudeConfigPath);
+    const config = captureAgentConfigFile(path);
+    const entries = claudeOwnerEntries(config.bytes, desired.name, dirname(desired.env.BRAIN_MANIFEST));
+    if (entries.local !== null || !mcpRegistrationIsExact(JSON.parse(entries.user), desired)) {
+      throw new Error("Claude registration changed before the pending route proof");
+    }
+  });
+  if (proof.ready && sameCapturedConfigState(pending, readPendingClaudeRoute(manifestPath))) {
+    unlinkSync(pending.path);
+  }
+  return proof;
+}
+
+export function resumeClaudeRouteAfterCommand(command, [target, next], options = {}) {
+  // Health and scheduled refresh are ordinary opportunities to finish proof.
+  // A preview or status command must stay within its read-only contract.
+  const manifestPath = command === "health" ? target :
+    command === "daily" && target === "run" ? next : null;
+  return resumePendingClaudeRouteProof(manifestPath, options);
+}
+
 /**
  * Print the config a client pastes into their own AI tools.
  *
@@ -8407,9 +8541,12 @@ function renderMcpAddCommand(head, envFlag, { name, env, command, args }, platfo
 export async function cmdMcpConfig(manifestPath, options = {}) {
   const { m } = loadManifest(manifestPath);
   const flags = options.flags ?? parseFlags(process.argv.slice(4));
-  assertKnownFlags(flags, ["manifest", "apply"], "brain mcp-config");
-  const partBManifest = m.retrieval?.answer_model === "claude-opus-5-5" &&
-    m.retrieval?.gate_model === "claude-sonnet-5-5";
+  assertKnownFlags(flags, ["manifest", "apply", "replace-owner-entry"], "brain mcp-config");
+  const replaceOwnerEntry = flags["replace-owner-entry"] === true;
+  if (Object.hasOwn(flags, "replace-owner-entry") && (!replaceOwnerEntry || flags.apply !== true)) {
+    die("--replace-owner-entry requires --apply and takes no value.");
+  }
+  const partBManifest = hasPartBAnswerModels(m);
 
   // Printing a command someone then has to copy, paste and get right is how a
   // connected brain ends up unconnected. Setup already wires both assistants at
@@ -8418,7 +8555,11 @@ export async function cmdMcpConfig(manifestPath, options = {}) {
   if (flags.apply) {
     let result;
     try {
-      result = await (options.wireAgents ?? wireAgents)(m, manifestPath, options.wireOptions || {});
+      result = await (options.wireAgents ?? wireAgents)(m, manifestPath, {
+        ...(m.brain?.domain ? { baseUrl: `https://${m.brain.domain}` } : {}),
+        ...options.wireOptions,
+        ...(replaceOwnerEntry ? { targets: ["claude-code-mcp"], replaceOwnerEntry } : {}),
+      });
     } catch (error) {
       if (partBManifest) {
         // A rejected reconciler has no trustworthy assistant result. Close the
@@ -8432,8 +8573,15 @@ export async function cmdMcpConfig(manifestPath, options = {}) {
       ok(`connected with Owner assistant access: ${result.wired.join(", ")}`);
       say("      It can read, add or correct information, check the connection, and review a financial map. It cannot activate that map, delete records, or change access.");
     }
+    if (result.ownerEntryReplaced) say("Fully quit and reopen Claude Code to load your Brain tools.");
     for (const name of result.skipped) info(`${name}: nothing to do`);
     if (result.failures.length) {
+      if (result.claudeOwnerEntryCollision && result.failures.every((failure) => failure === "Claude Code")) {
+        if (partBManifest) options.onPartBRouteDecision?.(Object.freeze({
+          ready: false, reason: "claude_apply_required",
+        }));
+        die("The Claude Code connection needs the owner's approval to replace the old link.");
+      }
       if (partBManifest) {
         // A partial reconciliation is not route proof. Decide the Part B gate
         // before any legacy assistant failure can bypass its closed status.
@@ -8457,33 +8605,21 @@ export async function cmdMcpConfig(manifestPath, options = {}) {
     }
     let routeReadiness = { ready: false, reason: "claude_apply_required" };
     if (result.wired.includes("Claude Code")) {
-      const routeOptions = options.routeReadinessOptions || {};
-      const guideRefresh = refreshPartBClaudeGuide(
-        manifestPath,
-        { ...options, ...routeOptions },
-        routeOptions.claudeWorkspaceOptions || {},
-      );
-      if (["written", "verified"].includes(guideRefresh.outcome)) {
-        // This function-call seam is intentionally unavailable to CLI flags and
-        // the environment. Tests can fix only the host snapshot while leaving
-        // the installed guide, descriptor, transport, and route defaults real.
-        const stopMcpProcess = routeOptions.stopMcpProcess ?? (
-          Object.hasOwn(options, "processSnapshot")
-            ? () => proveClaudeCodeFullyExited({ readProcessList: options.processSnapshot })
-            : proveClaudeCodeFullyExited
-        );
-        routeReadiness = await provePartBRouteReadiness({
-          manifestPath,
-          guideRefresh,
-          control: routeOptions.control ?? PART_B_ROUTE_CONTROL,
-        }, {
-          stopMcpProcess,
-          openMcpTransport: routeOptions.openMcpTransport ?? openPartBMcpTransport,
-        });
-      } else routeReadiness = { ready: false, reason: "guide_refresh_refused" };
+      routeReadiness = await resumePendingClaudeRouteProof(manifestPath, options) ??
+        await runClaudeRouteProof(manifestPath, options);
     }
     if (partBManifest) {
-      reportPartBRouteReadiness(routeReadiness, options);
+      if (replaceOwnerEntry && result.wired.includes("Claude Code") && !routeReadiness.ready) {
+        // Registration and tool discovery already passed. A model-route
+        // failure remains pending without making the owner redo reconnect.
+        try { deferClaudeRouteProof(manifestPath); }
+        catch { die("Claude Code was connected, but the pending answer-route check could not be saved."); }
+        options.onPartBRouteDecision?.(Object.freeze({
+          ready: false, reason: normalizePartBRouteReadinessReason(routeReadiness.reason),
+        }));
+      } else {
+        reportPartBRouteReadiness(routeReadiness, options);
+      }
     }
     return { ...result, route_readiness: routeReadiness };
   }
@@ -8862,7 +8998,7 @@ function localMcpRepairItem(scope, desired, options = {}) {
       destinations: [{ path: before.path, setting, action: "blocked runtime mismatch" }],
       write_set: [],
       rollback: "No write is attempted unless the packaged runtime passes first.",
-      verification: "Require protocol initialization and the exact seven-tool Owner assistant list before a new preview can be approved.",
+      verification: "Require protocol initialization and the exact nine-tool Owner assistant list before a new preview can be approved.",
       protocol_discovery_verified: false,
       state_fingerprint: stateFingerprint,
     };
@@ -8872,11 +9008,11 @@ function localMcpRepairItem(scope, desired, options = {}) {
     return {
       scope,
       status: "ready",
-      detail: `${label}'s Owner assistant entry and packaged seven-tool runtime are already exact.`,
+      detail: `${label}'s Owner assistant entry and packaged nine-tool runtime are already exact.`,
       destinations: [{ path: before.path, setting, action: "already current" }],
       write_set: [],
       rollback: "No write is needed.",
-      verification: "The exact locator, owner-assistant profile, protocol initialization, and seven-tool list passed.",
+      verification: "The exact locator, owner-assistant profile, protocol initialization, and nine-tool list passed.",
       protocol_discovery_verified: true,
       state_fingerprint: stateFingerprint,
     };
@@ -15420,17 +15556,8 @@ export async function postSourceRetirement(base, adminKey, {
 }
 
 
-/**
- * Calendar's local sync-token state, one small JSON object keyed by calendar.
- *
- * Deliberately NOT ingest/run.mjs's loadState/saveState: that pair's loader
- * resets to the local-folder shape ({version, done, skipped}) whenever the
- * loaded object has no `.done` key, which every calendar state file would
- * trip on every single run. A calendar sync token is a different shape
- * entirely (per-calendar {syncToken, paramFingerprint, ...}), so it gets its
- * own tiny, equally atomic reader/writer rather than forcing a shape it does
- * not have through a loader built for a different shape.
- */
+// Calendar sync tokens are keyed by calendar. The folder state reader
+// requires a .done map, which older Calendar snapshots do not have.
 function loadCalendarState(path) {
   if (!existsSync(path)) return {};
   try {
@@ -15441,19 +15568,6 @@ function loadCalendarState(path) {
     // of every configured calendar) costs time; refusing to run costs the
     // whole load.
     return {};
-  }
-}
-
-function saveCalendarState(path, state) {
-  mkdirSync(dirname(path), { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  try {
-    writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
-    renameSync(tmp, path);
-    chmodSync(path, 0o600);
-  } catch (error) {
-    try { rmSync(tmp, { force: true }); } catch { /* original error wins */ }
-    throw error;
   }
 }
 
@@ -15542,11 +15656,6 @@ async function cmdIngestCalendarRun(
     return postReceipt(base, adminKey, receipt, undefined, { assertOwned: assertLockOwned });
   };
   const loadState = options.loadCalendarState ?? loadCalendarState;
-  const persistState = options.saveCalendarState ?? saveCalendarState;
-  const saveState = (path, value) => {
-    assertLockOwned?.();
-    return persistState(path, value);
-  };
   const state = flags.reset ? {} : loadState(statePath);
 
   const config = m.calendar || {};
@@ -15606,6 +15715,13 @@ async function cmdIngestCalendarRun(
     };
   }
 
+  const { saveState: saveCalendarState } = await ingestLib();
+  const persistState = options.saveCalendarState ?? saveCalendarState;
+  const saveState = (path, value) => {
+    assertLockOwned?.();
+    return persistState(path, value);
+  };
+
   const runId = `sync_${randomBytes(16).toString("hex")}`;
   const startedAt = new Date().toISOString();
   await recordSourceReceipt({
@@ -15620,17 +15736,48 @@ async function cmdIngestCalendarRun(
   // `brain forget --source`, and custom `--source` names all describe the
   // same documents. Gmail, Drive, and the message commands follow this same
   // boundary rule.
-  const sourceEnvelopes = result.documents.map((envelope) =>
-    restampFirstPartySourceProvenance(envelope, {
+  const sourceEnvelopes = result.documents.map((envelope) => {
+    const stamped = restampFirstPartySourceProvenance(envelope, {
       sourceType: sourceName,
       textSource: envelope.text_source,
       textReliable: envelope.text_reliable,
-    }));
-  const sent = await ingestEnvelopes({
-    baseUrl: base,
-    adminKey,
+    });
+    // Store the revision with the document so same-ID restores can invalidate a checkpoint.
+    return { ...stamped, metadata: { ...stamped.metadata, calendar_revision: calendarDeliveryDigest(stamped) } };
+  });
+  // npm excludes AppleDouble-prefixed directories, even beneath an
+  // allowlisted product directory. Keep owner state outside package inventory.
+  const checkpointPath = join(dirname(statePath), "._brain-ingest", `${basename(statePath)}.delivery`);
+  const scope = calendarDeliveryDigest([base, config, Boolean(flags.reset), result.calendars.map(({ calendar_key }) => [
+    calendar_key, state[calendar_key]?.sync_token ?? null, state[calendar_key]?.param_fingerprint ?? null,
+  ])]);
+  const checkpoint = flags.reset ? {} : loadCalendarState(checkpointPath);
+  const sent = await sendCalendarWindows({
     envelopes: sourceEnvelopes,
-    assertOwned: assertLockOwned,
+    deletions: result.deletions,
+    scope,
+    checkpoint,
+    readStored: async (envelopes) => {
+      // A restored family can have the same ID and an older revision.
+      try {
+        const proof = await (options.readCurrentIngestParts ?? readCurrentIngestParts)({
+          base, adminKey, source: sourceName, envelopes: envelopes.map(sanitizeIngestEnvelope),
+          assertOwned: assertLockOwned, matchCalendarRevision: true, request: http,
+        });
+        return new Set(proof?.parts.map(({ source_id }) => source_id));
+      } catch (error) {
+        if (error?.code === "source_ingest_lock_lost") throw error;
+        warn("Calendar could not verify stored event revisions and will resend events from the delivery checkpoint.");
+        return new Set();
+      }
+    },
+    saveCheckpoint: (checkpoint) => {
+      assertLockOwned?.();
+      saveCalendarState(checkpointPath, checkpoint);
+    },
+    sendWindow: (envelopes) => ingestEnvelopes({
+      baseUrl: base, adminKey, envelopes, assertOwned: assertLockOwned,
+    }),
   });
 
   const removed = 0;
@@ -15662,13 +15809,19 @@ async function cmdIngestCalendarRun(
   }
 
   // Cancellation observations are accepted by exact metadata readback, never
-  // by removal approval. A failed mark or event write must replay Google's old
-  // window; otherwise a cancelled meeting could remain silently upcoming.
+  // by removal approval. Hold the cursor on a delivery or marker failure so
+  // the next run can verify completed windows and retry outstanding events.
   const deliveryIncomplete = sent.errors.length > 0 || sent.refused.length > 0 || !!cancellationError;
   if (deliveryIncomplete) {
-    if (!cancellationError) warn("Calendar sync state was not advanced because not every event was accepted. Re-running retries the same Google window.");
+    if (!cancellationError) warn("Calendar sync cursor was held. Re-running resumes saved delivery progress and retries outstanding events and cancellations.");
   } else {
     saveState(statePath, result.state);
+    if (result.calendars.every((calendar) => calendar.authoritative_snapshot === true)) {
+      assertLockOwned?.();
+      try { rmSync(checkpointPath, { force: true }); } catch {
+        warn("Calendar saved its sync cursor but could not clear the local delivery checkpoint.");
+      }
+    }
   }
 
   const walkComplete = result.ok;
@@ -15695,6 +15848,7 @@ async function cmdIngestCalendarRun(
     run_id: runId, lane: "manual", started_at: startedAt, completed_at: completedAt,
     files_seen: result.summary.events_seen,
     docs_added: sent.created, docs_updated: sent.updated, docs_unchanged: sent.unchanged,
+    docs_resumed: sent.resumed_skipped,
     docs_refused: sent.refused.length + result.summary.skipped,
     docs_failed: sent.errors.length,
     walk_complete: walkComplete,
@@ -15704,21 +15858,22 @@ async function cmdIngestCalendarRun(
       confirmed_range: { from: configuredFrom, through: null },
       target_range: { from: configuredFrom, through: null },
     } : {}),
-    detail: `calendar sync: ${sent.created} created, ${sent.updated} updated, ${sent.unchanged} unchanged, ` +
+    detail: `calendar sync: ${sent.created} created, ${sent.updated} updated, ${sent.unchanged} unchanged, ${sent.resumed_skipped} resumed, ` +
       `${sent.refused.length} refused, ${sent.errors.length} failed, ${result.summary.skipped} intentionally non-searchable, ` +
       `${cancelled} cancellation(s) kept and marked, ${removed} removed; ` +
       (completeSweep
         ? "every configured calendar completed a full traversal and returned an authoritative sync token"
         : "this run did not prove the configured history in full"),
-    ...(cancellationError ? { issue_code: "INGEST_FAILED" } : {}),
+    ...(cancellationError || sent.errors.length ? { issue_code: "INGEST_FAILED" }
+      : sent.refused.length ? { issue_code: "INPUT_REFUSED" } : {}),
     ...(finalStatus === "error" ? { error: incompleteReason || "calendar sync incomplete" } : {}),
   });
 
-  const calendarSummary = `${sent.created} created, ${sent.updated} updated, ${sent.unchanged} unchanged, ${cancelled} cancellation(s) kept and marked`;
+  const calendarSummary = `${sent.created} created, ${sent.updated} updated, ${sent.unchanged} unchanged, ${sent.resumed_skipped} resumed, ${cancelled} cancellation(s) kept and marked`;
   if (finalStatus === "ready") ok(calendarSummary);
   else if (!cancellationError) warn(`Calendar sync incomplete: ${calendarSummary}. Code: INGEST_FAILED. Help: https://github.com/guldanjaMAX/financial-brain-installer/blob/main/onboarding/06-runbook-top-ten-failures.md#calendar-cancellation-marking`);
   if (sent.refused.length) {
-    warn(`${sent.refused.length} event(s) refused by the credential gate (a live credential was pasted into an event)`);
+    warn(`${sent.refused.length} event(s) refused and will be retried on the next run`);
   }
   if (sent.errors.length) warn(`${sent.errors.length} event(s) failed to send and will be retried on the next run`);
   if (cancellationError) throw cancellationError;
@@ -17431,6 +17586,7 @@ export function describeLoadResult(result) {
         known: true,
         counts,
         more_history: result.more_history === true,
+        ...(result.gmail_quota_paused === true ? { gmail_quota_paused: true } : {}),
         pending_removals: result.pending_removals || 0,
         partial: !!(refused || excluded || incomplete),
         refused,
@@ -17665,6 +17821,7 @@ export async function cmdLoad(manifestPath, options = {}) {
     entry.legLines = legLines;
     entry.pending_removals = legResults.reduce((sum, result) => sum + (result.pending_removals || 0), 0);
     entry.more_history = legResults.some(result => result.more_history === true);
+    if (legResults.some(result => result.gmail_quota_paused === true)) entry.gmail_quota_paused = true;
     entry.counts = legResults.map((r) => r.counts).filter(Boolean);
     entry.countsKnown = legResults.length > 0 && legResults.every((r) => r.known);
     entry.documents = legResults.reduce((n, r) => n + (Number.isFinite(r.documents) ? r.documents : 0), 0);
@@ -17770,6 +17927,7 @@ export async function cmdLoad(manifestPath, options = {}) {
     failed: failedCount,
     pending_removals: entries.reduce((sum, entry) => sum + (entry.pending_removals || 0), 0),
     more_history: entries.some(entry => entry.more_history === true),
+    ...(entries.some(entry => entry.gmail_quota_paused) ? { gmail_quota_paused: true } : {}),
     removal_reviews: entries.flatMap(entry => entry.removal_reviews || []),
     auto_applied_removals: entries.flatMap(entry => entry.auto_applied_removals || []),
   };
@@ -17798,8 +17956,10 @@ export async function cmdLoad(manifestPath, options = {}) {
   // Daily refresh independently verifies each durable success timestamp. Let
   // measured file omissions reach that check without claiming a full sweep.
   const incompleteRefresh = entries.some((entry) => entry.status === "partial" && !entry.refreshSucceeded);
+  const unexpectedPartial = entries.some(entry => entry.status === "partial" && !entry.gmail_quota_paused);
   if (unavailableCount || (!dryRun && partialCount &&
-      (options.allowPartialRefresh !== true || (incompleteRefresh && !summary.more_history && !(options.deferGmailRemovals && summary.pending_removals))))) {
+      (options.allowPartialRefresh !== true ? unexpectedPartial :
+        (incompleteRefresh && !summary.more_history && !(options.deferGmailRemovals && summary.pending_removals))))) {
     const parts = [
       unavailableCount ? `${unavailableCount} unavailable` : null,
       !dryRun && partialCount ? `${partialCount} partial` : null,
@@ -18279,6 +18439,7 @@ const cmdIngestRemoteRun = async (
   let gmailOperationalFailure = null;
   let gmailMoreHistory = false;
   let gmailWindowPaused = false;
+  let gmailQuotaPaused = false;
   let imapSnapshotGaps = 0;
   const storedDriveRemovalReview = which === "drive" &&
     state.drive_removal_review?.issue_code === "SAFETY_REVIEW_REQUIRED"
@@ -19350,15 +19511,21 @@ const cmdIngestRemoteRun = async (
   } else if (which === "gmail") {
     const gmail = options.gmail ?? await import("./connectors/gmail.mjs");
     const gmailNow = options.ingestNowMs || Date.now;
+    const quota = options.gmailQuota ?? createGmailQuota({
+      now: gmailNow, sleep: options.gmailQuotaSleep, random: options.gmailQuotaRandom,
+    });
     const gmailBudgetExpired = () => {
       if (!Number.isFinite(options.ingestDeadlineAt) || gmailNow() < options.ingestDeadlineAt) return false;
       gmailWindowPaused = true; gmailMoreHistory = true; return true;
     };
     const gmailRead = async task => {
       if (gmailBudgetExpired()) return null;
-      try { return await task({ deadlineAt: options.ingestDeadlineAt, now: gmailNow }); }
+      try { return await task({ deadlineAt: options.ingestDeadlineAt, now: gmailNow, quota }); }
       catch (error) {
-        if (error?.reason !== "requestDeadline") throw error;
+        // A quota-stopped read stays pending while the entry loop settles
+        // siblings that already fetched successfully.
+        if (error?.reason === GMAIL_QUOTA_EXHAUSTED) gmailQuotaPaused = true;
+        else if (error?.reason !== "requestDeadline") throw error;
         gmailWindowPaused = true; gmailMoreHistory = true; return null;
       }
     };
@@ -20400,7 +20567,7 @@ const cmdIngestRemoteRun = async (
       for (const key of pendingCursor.deleteKeysOnScannerCommit || []) delete state[key];
     }
     saveState(statePath, state);
-  } else if (pendingCursor) {
+  } else if (pendingCursor && !gmailQuotaPaused) {
     const reason = which === "gmail" &&
       (gmailLabelGaps || gmailHistoryMarkerMissing)
       ? `${gmailLabelGaps} message(s) lacked label evidence, ${gmailHistoryMarkerMissing} pre-sweep history marker(s) were unavailable`
@@ -20502,7 +20669,8 @@ const cmdIngestRemoteRun = async (
   else ok(summary);
   if (gmailRetryBacklog) info(`${gmailRetryBacklog} held for retry; ${gmailNewRetryFailures} newly held. This ingest remains incomplete.`);
   if (which === "gmail" && state.gmail_last_batch_at) info(`Last successful Gmail batch: ${state.gmail_last_batch_at}`);
-  if (gmailMoreHistory) info("The bounded Gmail window was saved; more history remains for the next run.");
+  if (gmailQuotaPaused) info(GMAIL_QUOTA_PAUSE);
+  else if (gmailMoreHistory) info("The bounded Gmail window was saved; more history remains for the next run.");
   if (totalRefused) {
     if (which === "gmail") {
       info(gmailRefusalOwnerLine(totalRefused, !hasRemoteGap));
@@ -20595,6 +20763,7 @@ const cmdIngestRemoteRun = async (
     skipped: skips.length,
     ...(which === "gmail" ? { held_for_retry: gmailRetryBacklog,
       complete: !hasRemoteGap && !gmailMoreHistory, more_history: gmailMoreHistory,
+      ...(gmailQuotaPaused ? { gmail_quota_paused: true } : {}),
       last_batch_at: state.gmail_last_batch_at || null, pending_removals: gmailOwnerPending } : {}),
   };
   } catch (error) {
@@ -22807,7 +22976,10 @@ async function buildUpgradePauseCheck(manifestPath, options = {}) {
         "  To restore the pre-migration snapshot instead: brain doctor <manifest> --rollback",
     };
   }
-  return { name: "upgrade state", status: D_OK, detail: "accepting documents" };
+  const version = probe.body?.version;
+  return { name: "upgrade state", status: D_OK, detail: "accepting documents",
+    ...(typeof version === "string" && /^\d+\.\d+\.\d+(?:[-+][a-z0-9.-]+)?$/iu.test(version) ? { version } : {}),
+  };
 }
 
 /**
@@ -22885,6 +23057,25 @@ export function doctorClosingMessage(existingBrain, warnings) {
   return `${existingBrain ? "checkup complete" : "ready to install"}${suffix}`;
 }
 
+async function readOwnerFreshness(manifestPath, base) {
+  const url = base || await resolveBaseUrl(loadManifest(manifestPath).m);
+  const key = resolveAdminKey(manifestPath);
+  if (!key) throw new Error("The local Brain connection is unavailable.");
+  const response = await http(`${url}/api/admin/brain/freshness`, { headers: { "X-Admin-Key": key } },
+    { timeoutMs: 30_000, what: "the source check" });
+  if (!response.ok) throw new Error("Source status is unavailable.");
+  const result = await response.json();
+  if (result?.unavailable || !Array.isArray(result?.sources) || result.sources.some(source =>
+    typeof source?.name !== "string" || typeof source.kind !== "string" || typeof source.state !== "string")) {
+    throw new Error("Source status is unavailable.");
+  }
+  return result.sources;
+}
+
+function printOwnerChecklist(text) {
+  console.log(process.stdout.isTTY ? text.replace(/^✔/gmu, c.green("✔")) : text);
+}
+
 export async function cmdDoctor(manifestPath, options = {}) {
   let accountId;
   let cloudflareAuthProfile;
@@ -22901,9 +23092,20 @@ export async function cmdDoctor(manifestPath, options = {}) {
     } catch { /* doctor must work without a valid manifest */ }
   }
 
-  say(`\n  ${c.bold("brain doctor")}${accountId ? c.dim(`  account ${accountId}`) : ""}\n`);
-  info("checking your machine. The Cloudflare checks download a tool on first run,");
-  info("so the first time can take a couple of minutes. Each line appears as it finishes.\n");
+  const ownerChecklist = existingBrain && !options.diagnostic;
+  const printResult = x => {
+    if (ownerChecklist) return;
+    const mark = x.status === D_OK ? c.green("ok  ") : x.status === D_WARN ? c.yellow("warn") : c.red("FAIL");
+    console.log(`  ${mark}  ${x.name.padEnd(18)}  ${x.detail}`);
+  };
+  const printStorageError = error => {
+    if (!ownerChecklist) warn(String(error?.message || error));
+  };
+  if (!ownerChecklist) {
+    say(`\n  ${c.bold("brain doctor")}${accountId ? c.dim(`  account ${accountId}`) : ""}\n`);
+    info("checking your machine. The Cloudflare checks download a tool on first run,");
+    info("so the first time can take a couple of minutes. Each line appears as it finishes.\n");
+  }
 
   // Printed as each check completes, not collected and dumped at the end.
   // Otherwise a first run sits silent for minutes while npx fetches wrangler,
@@ -22921,16 +23123,13 @@ export async function cmdDoctor(manifestPath, options = {}) {
         options.allowCodexForExistingBrain ?? existingBrain,
       manifest: doctorManifest,
       manifestPath: manifestPath && existsSync(manifestPath) ? manifestPath : null,
-      onResult: (x) => {
-        const mark = x.status === D_OK ? c.green("ok  ") : x.status === D_WARN ? c.yellow("warn") : c.red("FAIL");
-        console.log(`  ${mark}  ${x.name.padEnd(18)}  ${x.detail}`);
-      },
+      onResult: printResult,
     });
   const checks = cloudflareAuthProfile
     ? await executeMachineChecks()
     : await runAvailableToken(executeMachineChecks, {
       accountId,
-      onStorageError: (error) => warn(String(error?.message || error)),
+      onStorageError: printStorageError,
     });
 
   // An install-state check, not a machine-readiness check: only meaningful
@@ -22939,22 +23138,17 @@ export async function cmdDoctor(manifestPath, options = {}) {
     const runDeployedChecks = async () => {
       const upgradeCheck = await (options.buildUpgradePauseCheck ?? buildUpgradePauseCheck)(manifestPath);
       checks.push(upgradeCheck);
-      const mark = upgradeCheck.status === D_OK ? c.green("ok  ") : upgradeCheck.status === D_WARN ? c.yellow("warn") : c.red("FAIL");
-      console.log(`  ${mark}  ${upgradeCheck.name.padEnd(18)}  ${upgradeCheck.detail}`);
+      printResult(upgradeCheck);
 
       const anthropicCheck = await (
         options.buildAnthropicWorkerSecretCheck ?? buildAnthropicWorkerSecretCheck
       )(manifestPath);
       checks.push(anthropicCheck);
-      const anthropicMark = anthropicCheck.status === D_OK
-        ? c.green("ok  ")
-        : anthropicCheck.status === D_WARN ? c.yellow("warn") : c.red("FAIL");
-      console.log(`  ${anthropicMark}  ${anthropicCheck.name.padEnd(18)}  ${anthropicCheck.detail}`);
+      printResult(anthropicCheck);
 
       const checksumCheck = await (options.buildChecksumDriftCheck ?? buildChecksumDriftCheck)(manifestPath);
       checks.push(checksumCheck);
-      const checksumMark = checksumCheck.status === D_OK ? c.green("ok  ") : checksumCheck.status === D_WARN ? c.yellow("warn") : c.red("FAIL");
-      console.log(`  ${checksumMark}  ${checksumCheck.name.padEnd(18)}  ${checksumCheck.detail}`);
+      printResult(checksumCheck);
 
       // Offline and cheap, so it runs here rather than at connect time. The one
       // bank-feed failure that is unrecoverable in front of a client is a return
@@ -22962,8 +23156,7 @@ export async function cmdDoctor(manifestPath, options = {}) {
       try {
         const feedCheck = (options.checkBankFeedRedirect ?? checkBankFeedRedirect)(loadManifest(manifestPath).m);
         checks.push(feedCheck);
-        const feedMark = feedCheck.status === D_OK ? c.green("ok  ") : feedCheck.status === D_WARN ? c.yellow("warn") : c.red("FAIL");
-        console.log(`  ${feedMark}  ${feedCheck.name.padEnd(18)}  ${feedCheck.detail}`);
+        printResult(feedCheck);
       } catch { /* doctor must work without a valid manifest */ }
 
       // The first-load ordering decision is still actionable before handoff,
@@ -22971,8 +23164,7 @@ export async function cmdDoctor(manifestPath, options = {}) {
       try {
         const sliceCheck = (options.checkPrioritySlice ?? checkPrioritySlice)(loadManifest(manifestPath).m);
         checks.push(sliceCheck);
-        const sliceMark = sliceCheck.status === D_OK ? c.green("ok  ") : sliceCheck.status === D_WARN ? c.yellow("warn") : c.red("FAIL");
-        console.log(`  ${sliceMark}  ${sliceCheck.name.padEnd(18)}  ${sliceCheck.detail}`);
+        printResult(sliceCheck);
       } catch { /* doctor must work without a valid manifest */ }
     };
 
@@ -23001,12 +23193,46 @@ export async function cmdDoctor(manifestPath, options = {}) {
     } else {
       await runAvailableToken(runDeployedChecks, {
         accountId,
-        onStorageError: (error) => warn(String(error?.message || error)),
+        onStorageError: printStorageError,
       });
     }
   }
 
   const s = doctorSummarize(checks);
+  if (ownerChecklist) {
+    const googleExpected = ["google_drive", "gmail", "calendar"].some(kind => doctorManifest.corpora?.[kind]?.enabled === true);
+    const checklist = checks.map(check => ownerDoctorRow(check, { googleExpected })).filter(Boolean);
+    const readers = updateSelfcheckReaders(manifestPath, doctorManifest, options);
+    const readDaily = options.readOwnerDaily ?? (IS_MAIN && ["darwin", "win32"].includes(process.platform)
+      ? async () => {
+        const job = await readers.daily();
+        if (!job.owner_verified) throw new Error("The installed daily job did not pass exact readback");
+        return job;
+      } : null);
+    const readSources = options.readOwnerFreshness ?? (IS_MAIN ? readOwnerFreshness : null);
+    const [daily, sources] = await Promise.allSettled([
+      readDaily && Promise.resolve().then(readDaily),
+      readSources && Promise.resolve().then(() => readSources(manifestPath)),
+    ]);
+    if (daily.status === "rejected") checklist.push("Daily update could not be checked. Ask your installer to check it.");
+    else if (daily.value) checklist.push(ownerDailyRow(daily.value));
+    if (sources.status === "rejected") {
+      checklist.push("Source updates could not be checked. Ask your installer to check the Brain connection.");
+    } else if (sources.value) {
+      checklist.push(...ownerSourceRows(sources.value, { dailyEnabled: daily.value?.enabled }));
+    }
+    const write = options.reportChecklist ?? printOwnerChecklist;
+    for (const row of new Set(checklist.filter(row => row.startsWith("✔ ")))) write(row);
+    const outstanding = [...new Set(checklist.filter(row => !row.startsWith("✔ ")))];
+    if (s.fatal) {
+      const error = new Fatal("The Brain checkup found a problem.");
+      error.ownerMessage = outstanding.join("\n");
+      error.ownerChecklist = true;
+      throw error;
+    }
+    for (const row of outstanding) write(row);
+    return;
+  }
   console.log("");
   const needFix = checks.filter((x) => x.status !== D_OK && x.fix);
   if (needFix.length) {
@@ -25040,6 +25266,10 @@ function codexConfigOutsideTarget(bytes, name) {
 }
 
 function configOutsideTarget(snapshot, bytes) {
+  if (snapshot.format === "claude-owner-entry") {
+    const source = claudeOwnerEntries(bytes, snapshot.name, snapshot.workspace).withoutLocal;
+    return claudeConfigOutsideTarget(Buffer.from(source), snapshot.name);
+  }
   if (snapshot.format === "claude-json") {
     return claudeConfigOutsideTarget(bytes, snapshot.name);
   }
@@ -25353,12 +25583,92 @@ function withReconciliationContext(before, desired, result) {
 }
 
 function reconcileClaudeRegistration(desired, options) {
+  if (!options.rotationOnly) {
+    const replacement = reconcileClaudeOwnerEntry(desired, options);
+    if (replacement) return replacement;
+  }
   const before = readClaudeRegistration(desired, options);
   return withReconciliationContext(
     before,
     desired,
     reconcileClaudeRegistrationFrom(before, desired, options),
   );
+}
+
+function claudeOwnerEntries(bytes, name, workspace) {
+  const source = bytes?.toString("utf8") ?? "{}";
+  if (bytes && !Buffer.from(source).equals(bytes)) throw new Error("invalid Claude config encoding");
+  const root = parseLosslessJsonStructure(source);
+  if (root.type !== "object") throw new Error("invalid Claude configuration");
+  const member = (parent, key) => {
+    if (parent && parent.type !== "object") throw new Error("invalid Claude configuration");
+    return jsonObjectMember(parent, key);
+  };
+  const user = member(member(root, "mcpServers")?.value, name);
+  const projects = member(root, "projects")?.value;
+  if (projects && projects.type !== "object") throw new Error("invalid Claude local configuration");
+  const matches = (projects?.members ?? []).filter(({ key }) =>
+    isAbsolute(key) && sameInstallerPath(key, workspace));
+  if (matches.length > 1) throw new Error("ambiguous Claude local scope");
+  const project = matches[0];
+  const local = member(member(project?.value, "mcpServers")?.value, name);
+  const raw = (entry) => entry ? source.slice(entry.valueStart, entry.valueEnd) : null;
+  return {
+    user: raw(user),
+    local: raw(local),
+    project: project?.key,
+    withoutLocal: local ? removeJsonMember(source, local) : source,
+  };
+}
+
+function reconcileClaudeOwnerEntry(desired, options) {
+  const path = claudeUserConfigPath(options.environment, options.claudeConfigPath);
+  const file = captureAgentConfigFile(path, { allowAbsent: true });
+  const workspace = dirname(desired.env.BRAIN_MANIFEST);
+  const entries = claudeOwnerEntries(file.bytes, desired.name, workspace);
+  const user = entries.user === null ? null : JSON.parse(entries.user);
+  if (entries.local === null && (entries.user === null || mcpRegistrationIsInstallerOwned(user, desired))) {
+    return null;
+  }
+  if (!options.replaceOwnerEntry) return { status: "failed", reason: "name-collision", configPath: path };
+
+  // One atomic write retires both selected scopes and installs the exact user
+  // entry. No Claude subprocess receives the old command, environment or args.
+  const snapshot = { ...file, format: "claude-owner-entry", name: desired.name, workspace };
+  snapshot.outsideTarget = configOutsideTarget(snapshot, file.bytes);
+  const directorySnapshot = captureAgentConfigDirectory(dirname(path));
+  const bytes = claudeConfigWithExactRegistration(
+    { exists: true, bytes: Buffer.from(entries.withoutLocal) }, desired,
+  );
+  const after = claudeOwnerEntries(bytes, desired.name, workspace);
+  if (after.local !== null || !mcpRegistrationIsExact(JSON.parse(after.user), desired)) {
+    throw new Error("Claude replacement did not produce the exact registration");
+  }
+
+  // A legacy entry may contain credentials even in an arbitrary field. Save
+  // the exact entries under authenticated encryption, never as plaintext.
+  const key = hkdfSync("sha256", options.durableKey, "", "financial-brain/claude-entry-backup/v1", 32);
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const payload = JSON.stringify({
+    name: desired.name, user: entries.user, local: entries.local, project: entries.project,
+  });
+  const ciphertext = Buffer.concat([cipher.update(payload, "utf8"), cipher.final()]);
+  const backup = Buffer.from(JSON.stringify({
+    version: 1, iv: iv.toString("base64"), tag: cipher.getAuthTag().toString("base64"),
+    ciphertext: ciphertext.toString("base64"),
+  }));
+  const backupPath = `${path}.${randomBytes(12).toString("hex")}.brain-mcp-backup`;
+  const fd = openSync(backupPath, "wx", 0o600);
+  try {
+    writeFileSync(fd, backup);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  if (!captureAgentConfigFile(backupPath).bytes.equals(backup)) throw new Error("Claude backup readback failed");
+  atomicReplaceAgentConfig({ snapshot, directorySnapshot }, bytes);
+  return { status: "updated", ownerEntryReplaced: true };
 }
 
 function reconcileClaudeRegistrationFrom(before, desired, options) {
@@ -25607,20 +25917,18 @@ function agentReconciliationReason(result) {
     "the registration was not reported ready.";
 }
 
-/**
- * What to do from the state the owner is actually in.
- *
- * brain mcp-config without --apply prints the configuration and changes
- * nothing, so it is the one instruction here that does not re-enter the
- * reconciler that just refused. Rerunning setup, or the same command with
- * --apply, would arrive back at this warning unchanged.
- */
-function agentReconciliationRemedy(desired, manifestPath, result) {
+/** Explain the approval path for Claude collisions and the read-only fallback. */
+function agentReconciliationRemedy(desired, manifestPath, result, { claude = false } = {}) {
   const lines = ["No literal credential was written."];
   if (result?.reason === "name-collision") {
     lines.push(result.configPath
       ? `The entry holding that name is in ${result.configPath}.`
       : "That entry is in the assistant's own configuration file.");
+    if (claude) {
+      lines.push(`With the owner's explicit approval, back up and replace only "${desired.name}" in Claude Code's user scope and this Brain folder's local scope:`);
+      lines.push(`brain mcp-config ${commandPath(displayPath(manifestPath))} --apply --replace-owner-entry`);
+      return lines;
+    }
     lines.push(`Rename or remove that "${desired.name}" entry yourself first. Nothing here will overwrite an entry it did not write.`);
   } else if (result?.previousPreserved) {
     lines.push("The previous entry was restored to exactly the bytes it had before this attempt.");
@@ -25635,9 +25943,9 @@ function agentReconciliationRemedy(desired, manifestPath, result) {
 }
 
 /** Name both addresses when a moved folder is what made the update necessary. */
-function reportRelocatedBrainFolder(label, desired, result) {
+function reportRelocatedBrainFolder(label, desired, result, reportInfo) {
   if (!result?.relocatedFrom) return;
-  info(`${label}: the brain folder moved. This registration now reads ${desired.env.BRAIN_MANIFEST}, not ${result.relocatedFrom}.`);
+  reportInfo(`${label}: the brain folder moved. This registration now reads ${desired.env.BRAIN_MANIFEST}, not ${result.relocatedFrom}.`);
 }
 
 /**
@@ -25647,6 +25955,7 @@ function reportRelocatedBrainFolder(label, desired, result) {
  * environment values. No name-only or add-exit-code shortcut is accepted.
  */
 export async function wireAgents(m, manifestPath, options = {}) {
+  const output = options.quiet ? { ok() {}, info() {}, warn() {} } : { ok, info, warn };
   const environment = options.environment ?? process.env;
   const runner = options.runCommand ?? run;
   const existingOnly = options.existingOnly === true;
@@ -25665,6 +25974,8 @@ export async function wireAgents(m, manifestPath, options = {}) {
   const wired = [];
   const skipped = [];
   const preserved = [];
+  let ownerEntryReplaced = false;
+  let claudeOwnerEntryCollision = false;
   const name = m?.client?.slug || "brain";
   const claudeCommand = claudeSelected ? discoverClaudeMcpCommand({
     environment,
@@ -25676,14 +25987,14 @@ export async function wireAgents(m, manifestPath, options = {}) {
   const codexInstalled = codexPresent && runAgentCli(runner, environment, "codex", ["--version"]).ok;
 
   if (claudeSelected && !claudeInstalled) {
-    info("Claude Code is not installed, skipping");
+    output.info("Claude Code is not installed, skipping");
     skipped.push("Claude Code");
   }
   if (codexSelected && !codexPresent) {
-    info("Codex has no existing owner configuration, skipping");
+    output.info("Codex has no existing owner configuration, skipping");
     skipped.push("Codex");
   } else if (codexSelected && !codexInstalled) {
-    info("Codex is not installed, skipping");
+    output.info("Codex is not installed, skipping");
     skipped.push("Codex");
   }
   if ((!claudeSelected || !claudeInstalled) && (!codexSelected || !codexInstalled)) {
@@ -25712,7 +26023,12 @@ export async function wireAgents(m, manifestPath, options = {}) {
           (Object.hasOwn(actual.env, "BRAIN_AGENT_PROFILE") &&
             actual.env.BRAIN_AGENT_PROFILE !== LOCAL_OWNER_AGENT_PROFILE)
         );
-        reconcileClaude = Boolean(current.entry) && !preserveForOwnerMigration &&
+        const localCollision = ownerAssistantMigrationOnly && claudeOwnerEntries(
+          captureAgentConfigFile(current.path, { allowAbsent: true }).bytes,
+          name,
+          dirname(resolve(manifestPath)),
+        ).local !== null;
+        reconcileClaude = (Boolean(current.entry) || localCollision) && !preserveForOwnerMigration &&
           (!rotationOnly || registrationNeedsCredentialMigration(current.entry, name));
         anyTarget ||= reconcileClaude;
         if (!reconcileClaude) {
@@ -25758,10 +26074,11 @@ export async function wireAgents(m, manifestPath, options = {}) {
     base = await resolveBaseUrl(m, acct).catch(() => null);
   }
   if (!base) {
-    warn("could not determine the brain URL, so AI tool registrations were not changed");
+    output.warn("could not determine the brain URL, so AI tool registrations were not changed");
     return { wired, failures: ["url"], skipped: [], preserved };
   }
 
+  let durableKey;
   try {
     const persistenceOptions = {
       platform: options.platform ?? process.platform,
@@ -25772,9 +26089,10 @@ export async function wireAgents(m, manifestPath, options = {}) {
     const makePlan = options.adminKeyPersistencePlan ?? adminKeyPersistencePlan;
     const readDurable = options.readAdminKeyDurably ?? readAdminKeyDurably;
     const plan = makePlan(manifestPath, m, persistenceOptions);
-    if (!readDurable(plan, persistenceOptions)) throw new Error("missing durable key");
+    durableKey = readDurable(plan, persistenceOptions);
+    if (!durableKey) throw new Error("missing durable key");
   } catch {
-    warn("the durable admin key could not be verified, so AI tool registrations were not changed");
+    output.warn("the durable admin key could not be verified, so AI tool registrations were not changed");
     return { wired, failures: ["durable-key"], skipped: [], preserved };
   }
 
@@ -25800,7 +26118,7 @@ export async function wireAgents(m, manifestPath, options = {}) {
     if (verifiedRuntimeShapes.has(runtimeShape)) continue;
     verifiedRuntimeShapes.add(runtimeShape);
     if (!verifyRuntime(runtimeDescriptor, { environment, ...(options.runtimeOptions || {}) })) {
-      warn(
+      output.warn(
         "the MCP server did not complete its local initialize handshake, so no AI tool registration was changed"
       );
       return { wired, failures: ["MCP runtime"], skipped, preserved };
@@ -25812,6 +26130,8 @@ export async function wireAgents(m, manifestPath, options = {}) {
     existingOnly,
     rotationOnly,
     ownerAssistantMigrationOnly,
+    replaceOwnerEntry: options.replaceOwnerEntry === true,
+    durableKey,
     runCommand: runner,
     claudeConfigPath: options.claudeConfigPath,
     codexConfigPath: options.codexConfigPath,
@@ -25824,22 +26144,24 @@ export async function wireAgents(m, manifestPath, options = {}) {
       result = { status: "failed", reason: "unsafe-config" };
     }
     if (["verified", "updated", "added"].includes(result.status)) {
-      ok(rotationOnly
+      ownerEntryReplaced = result.ownerEntryReplaced === true;
+      output.ok(rotationOnly
         ? `Claude Code: "${desired.name}" registration updated without changing its access profile`
         : ownerAssistantMigrationOnly
           ? `Claude Code: existing "${desired.name}" registration upgraded and verified with Owner assistant access`
           : `Claude Code: "${desired.name}" registered with Owner assistant access`);
-      reportRelocatedBrainFolder("Claude Code", desired, result);
+      reportRelocatedBrainFolder("Claude Code", desired, result, output.info);
       wired.push("Claude Code");
     } else if (result.status === "skipped") {
       skipped.push("Claude Code");
     } else {
-      warn(
+      claudeOwnerEntryCollision = result.reason === "name-collision";
+      output.warn(
         "Claude Code wasn't connected to your Brain automatically this time, because its settings file " +
           "couldn't be updated safely. Your Brain and your data are fine. Reason: " +
           agentReconciliationReason(result)
       );
-      for (const line of agentReconciliationRemedy(desired, manifestPath, result)) info(line);
+      for (const line of agentReconciliationRemedy(desired, manifestPath, result, { claude: true })) output.info(line);
       failures.push("Claude Code");
     }
   }
@@ -25847,26 +26169,30 @@ export async function wireAgents(m, manifestPath, options = {}) {
   if (reconcileCodex) {
     const result = reconcileCodexRegistration(codexDesired, reconcileOptions);
     if (["verified", "updated", "added"].includes(result.status)) {
-      ok(rotationOnly
+      output.ok(rotationOnly
         ? `Codex: "${desired.name}" registration updated without changing its access profile`
         : ownerAssistantMigrationOnly
           ? `Codex: existing "${desired.name}" registration upgraded and verified with Owner assistant access`
           : `Codex: "${desired.name}" registered with Owner assistant access`);
-      reportRelocatedBrainFolder("Codex", desired, result);
+      reportRelocatedBrainFolder("Codex", desired, result, output.info);
       wired.push("Codex");
     } else if (result.status === "skipped") {
       skipped.push("Codex");
     } else {
-      warn(
+      output.warn(
         `Codex's "${desired.name}" registration could not be reconciled safely: ` +
           agentReconciliationReason(result)
       );
-      for (const line of agentReconciliationRemedy(desired, manifestPath, result)) info(line);
+      for (const line of agentReconciliationRemedy(desired, manifestPath, result)) output.info(line);
       failures.push("Codex");
     }
   }
 
-  return { wired, failures, skipped, preserved };
+  return {
+    wired, failures, skipped, preserved,
+    ...(ownerEntryReplaced ? { ownerEntryReplaced } : {}),
+    ...(claudeOwnerEntryCollision ? { claudeOwnerEntryCollision } : {}),
+  };
 }
 
 
@@ -25937,6 +26263,10 @@ function crash(err) {
   const msg = renderCliCommands(err && err.message ? err.message : String(err));
   const supportEventId = recordSupportFailure(err, { unexpected: true });
   const write = (line) => console.log(line);
+  if (err?.ownerChecklist) {
+    printOwnerChecklist(err.ownerMessage);
+    process.exit(1);
+  }
   if (err?.ownerMessage) {
     write(`\n${c.red("fail")}  ${err.ownerMessage}`);
     process.exit(1);
@@ -29036,6 +29366,9 @@ export function dailyFreshnessRows(plan, inventory, schedule = null) {
   const inventoryRows = new Map((inventory?.sources || []).map((row) => [row.name, row]));
   return plan.sources.map((source) => {
     const names = source.source_names?.length ? source.source_names : [source.key];
+    const dailyAttention = schedule?.schedule_attention?.find(message =>
+      [source.key, ...names, ...(source.key === "bank_feed" ? ["bank_activity"] : [])]
+        .some(name => message.startsWith(`${name}: `)));
     const receiptRows = names.map((name) => inventoryRows.get(name === 'bank_feed' ? 'bank_activity' : name));
     const receiptTimestamps = receiptRows.map((row) => {
       const value = row?.receipt?.last_successful_run_at;
@@ -29109,6 +29442,7 @@ export function dailyFreshnessRows(plan, inventory, schedule = null) {
       last_withheld_at: receiptRows.map(row => row?.receipt?.last_withheld?.at).filter(Boolean).sort().at(-1) || null,
       docs_failed: measuredCount("docs_failed"),
       last_successful_run_at: newest,
+      ...(dailyAttention ? { daily_attention: dailyAttention } : {}),
       last_check_at: zoom?.last_check_at || receiptRows.map(row => row?.receipt?.last_check_at).filter(Boolean).sort().at(-1) || null,
       ...(zoom ? { zoom } : {}),
       next_run: folderReason || nextRun,
@@ -29139,6 +29473,7 @@ function renderDailyFreshnessRows(rows, log = console.log) {
       (!row.docs_withheld && row.last_withheld_count > 0 ? ` | last withholding: ${row.last_withheld_count} item(s) on ${row.last_withheld_at}` : "") +
       (!row.docs_withheld && ["partial", "refused", "empty"].includes(row.last_run_outcome)
         ? ` | ${row.last_run_outcome}; ${row.docs_refused ?? "unknown"} refused` : "") +
+      (row.daily_attention ? ` | ${row.daily_attention}` : "") +
       (row.current_state === "held" || (row.current_state === "skipped" && row.reason === "not connected on this machine")
         ? ` | ${row.reason}` : ""));
   }
@@ -31343,6 +31678,7 @@ export async function refreshOwnerAssistantConnectionsAfterUpdate(
   const skipped = Array.isArray(result) ? [] : (result?.skipped || []);
   const preserved = Array.isArray(result) ? [] : (result?.preserved || []);
   const failures = Array.isArray(result) ? [] : (result?.failures || []);
+  const claudeOwnerEntryCollision = result?.claudeOwnerEntryCollision === true;
 
   if (wired.length) {
     safelyReportUpdateResult(
@@ -31375,7 +31711,9 @@ export async function refreshOwnerAssistantConnectionsAfterUpdate(
       "Update did not add any missing Claude Code or Codex connection. It only changes a connection the installer already owns.",
     );
   }
-  if (failures.length) safelyReportUpdateResult(reportWarning, UPDATE_AGENT_REFRESH_WARNING);
+  if (failures.some((failure) => !claudeOwnerEntryCollision || failure !== "Claude Code")) {
+    safelyReportUpdateResult(reportWarning, UPDATE_AGENT_REFRESH_WARNING);
+  }
 
   return {
     status: failures.length ? (wired.length ? "partial" : "warning") : "ready",
@@ -31383,6 +31721,7 @@ export async function refreshOwnerAssistantConnectionsAfterUpdate(
     skipped,
     preserved,
     failures,
+    ...(claudeOwnerEntryCollision ? { claudeOwnerEntryCollision } : {}),
   };
 }
 
@@ -32881,6 +33220,7 @@ function updateSelfcheckReaders(manifestPath, manifest, options, {
         ...projectUpdateDailyJob({
           exists: status.installed, enabled: status.enabled, definition: status.state?.definition,
         }, platform),
+        owner_verified: status.verified,
         bridges: bridges ?? [],
         keys: status.verified ? readyDailySources(plan).map(source => source.run_key) : [],
       };
@@ -32946,7 +33286,15 @@ function finishUpdateSelfcheck(checkpoint, before, after, save, options, command
       `[${UPDATE_SELFCHECK_RECEIPT_FAILED}] https://financialbrain.ai/help/${UPDATE_SELFCHECK_RECEIPT_FAILED}`,
     UPDATE_SELFCHECK_RECEIPT_FAILED);
   }
-  if (stop) dieWithSupportCode(message, stop.code);
+  if (stop) {
+    const error = new Fatal(message);
+    error.supportCode = stop.code;
+    if (command === "update") {
+      error.ownerMessage = ownerSelfcheckRows(report).join("\n");
+      error.ownerChecklist = true;
+    }
+    throw error;
+  }
   if (unprovedRecovery) {
     dieWithSupportCode("Update completion stopped because the original self-check could not be reverified. " +
       "The original baseline is still saved. Restore access and retry.\n" +
@@ -33169,6 +33517,8 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
   let updatedBaseUrl = null;
   let ownerAgentPreparationFailed = false;
   let ownerAgentRefreshResult = null;
+  let acceptance;
+  let verifiedDailyJob;
   const updateAttention = [];
   const schedulerResults = [];
   // Injected upgrade implementations own their external dependencies in
@@ -33375,6 +33725,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
           ...(options.upgradeOptions || {}),
           ...(modelSwitch ? { legacyModelSwitch: true } : {}),
           ...(backlog ? { initialUpdateBacklog: backlog } : {}),
+          onOwnerAcceptance: summary => { acceptance = summary; },
           ...(selfcheck ? {
             selfcheckBefore: summarizeUpdateSelfcheck(beforeSelfcheck),
             onSelfcheckReceipt: save => { saveSelfcheck = save; },
@@ -33449,6 +33800,9 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
           dailyReconciliation = { daily_definition: "verified", source_expectations: "verified" };
           if (dailyTransactionActive) persistDailyTransaction("recovery_required");
           permanentDailyVerified = true;
+          verifiedDailyJob = projectUpdateDailyJob({
+            exists: true, enabled: true, definition: reconciled.definition,
+          }, dailyPlatform);
           verifiedDailyKeys = runnable.map(source => source.run_key);
           schedulerResults.push(schedulerUpdateRow("daily", dailySnapshot?.definition?.definition_hash === reconciled.definition?.definition_hash ? "already current" : "moved"));
           ok("Daily imports were recomputed from the updated manifest and restored after exact readback.");
@@ -33474,6 +33828,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
           );
           dailyReconciliation = { daily_definition: "verified", source_expectations: "verified" };
           if (dailyTransactionActive) persistDailyTransaction("recovery_required");
+          verifiedDailyJob = { present: Boolean(dailySnapshot?.exists), enabled: false };
           info("The updated manifest has no enabled daily machine-pull work, so its owned daily definition remains paused and was not removed.");
           schedulerResults.push(schedulerUpdateRow("daily",
             dailySnapshot?.definition?.definition_hash === dailyAuthorizedDefinition?.definition_hash ? "already current" : "moved",
@@ -33493,7 +33848,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
             bridgeGuard.retire(bridgeSnapshots, () => persistDailyTransaction("paused"));
             ok("The old daily bridge tasks paused by this update were removed after permanent daily task readback.");
           } else {
-            updateAttention.push("The old daily task was paused; run brain daily on <manifest> to turn on permanent daily imports.");
+            updateAttention.push("The old daily task is paused. Ask your installer to run brain daily on <manifest> to turn on daily updates.");
           }
         }
         for (const [index, entry] of bridgeSnapshots.entries()) {
@@ -33575,6 +33930,8 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
       if (dailyTransactionActive && !String(error.message).includes("Daily recovery receipt:")) {
         error.message += `\nDaily recovery receipt: ${dailyRefreshUpdateTransactionPath(dailyPlan.identity, dailyTransactionOptions)}`;
       }
+      const dailyOwnerAction = "Daily updates are paused. Ask your installer to finish the update.";
+      if (error.ownerChecklist && dailyTransactionActive) error.ownerMessage += `\n${dailyOwnerAction}`;
       if (bridgeGuard && bridgeSnapshots.length && !parentOwnsPackageRollback) {
         // Re-read the durable transaction, including on a fresh retry. A
         // current preflight refusal cannot undo an earlier ambiguous dispatch.
@@ -33584,10 +33941,15 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
             ?.remote_mutation_may_have_started === false;
         } catch { /* Missing or unreadable intent is never restoration proof. */ }
         if (!provenPreChange) {
-          throw new Error(
+          const paused = new Error(
             `${error.message} Daily imports stay paused until the update is retried and completes.`,
             { cause: error },
           );
+          if (error.ownerChecklist) {
+            paused.ownerChecklist = true;
+            paused.ownerMessage = error.ownerMessage;
+          }
+          throw paused;
         }
         try {
           bridgeGuard.restore(bridgeSnapshots, () => persistDailyTransaction("recovery_required"));
@@ -33614,7 +33976,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         );
       }
     }
-    if (reconcileOwnerAgents || selfcheck) {
+    if (reconcileOwnerAgents || selfcheck || acceptance) {
       try {
         updatedManifest = loadManifest(pin.target).m;
         updatedBaseUrl = await resolveUpdateAgentBaseUrl(
@@ -33623,6 +33985,16 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         );
       } catch {
         ownerAgentPreparationFailed = true;
+      }
+    }
+    if (acceptance?.sources && (manageDailyDefinition || bridgeSnapshots.length)) {
+      try {
+        acceptance = { ...acceptance, sources: await (options.readOwnerFreshness ?? readOwnerFreshness)(pin.target, updatedBaseUrl) };
+      } catch {
+        // Pre-restore source receipts cannot prove the final schedule is healthy.
+        acceptance = { ...acceptance, sources: acceptance.sources.filter(source =>
+          !["ok", "manual", "unscheduled"].includes(source.state)) };
+        updateAttention.push("Source updates could not be rechecked. Ask your installer to check the Brain connection.");
       }
     }
     if (selfcheck) {
@@ -33649,19 +34021,27 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
 
   if (reconcileOwnerAgents) {
     if (ownerAgentPreparationFailed || !updatedManifest || !updatedBaseUrl) {
-      safelyReportUpdateResult(options.reportAgentRefreshWarning ?? warn, UPDATE_AGENT_REFRESH_WARNING);
-      updateAttention.push("Run brain mcp-config <manifest> --apply to repair the local AI connection.");
+      safelyReportUpdateResult(options.reportAgentRefreshWarning ?? (() => {}), UPDATE_AGENT_REFRESH_WARNING);
+      updateAttention.push("Your AI connection could not be verified. Ask your installer to reconnect it.");
     } else {
       ownerAgentRefreshResult = await refreshOwnerAssistantConnectionsAfterUpdate(updatedManifest, pin.target, {
         reconcileExistingOwnerAgents: reconcileOwnerAgents,
-        agentOptions: options.updateAgentOptions,
+        agentOptions: { ...options.updateAgentOptions, quiet: true },
         baseUrl: updatedBaseUrl,
         reportOk: options.reportAgentRefreshOk,
-        reportInfo: options.reportAgentRefreshInfo,
-        reportWarning: options.reportAgentRefreshWarning,
+        reportInfo: options.reportAgentRefreshInfo ?? (() => {}),
+        reportWarning: options.reportAgentRefreshWarning ?? (() => {}),
       });
-      if (ownerAgentRefreshResult.status !== "ready") {
-        updateAttention.push("Run brain mcp-config <manifest> --apply to repair the local AI connection.");
+      if (ownerAgentRefreshResult.claudeOwnerEntryCollision) {
+        updateAttention.push("Claude Code could not connect because that name is already in use. Ask your installer to review the existing link and get your approval before replacing it.");
+      }
+      const assistants = ownerAgentRefreshResult.failures.filter(name =>
+        name === "Codex" || (name === "Claude Code" && !ownerAgentRefreshResult.claudeOwnerEntryCollision));
+      if (assistants.length) updateAttention.push(...assistants.map(name =>
+        `${name} could not connect to your Brain. Ask your installer to reconnect it.`));
+      else if (ownerAgentRefreshResult.status !== "ready" && (!ownerAgentRefreshResult.claudeOwnerEntryCollision ||
+        ownerAgentRefreshResult.failures.some(name => name !== "Claude Code"))) {
+        updateAttention.push("Your AI connection could not be verified. Ask your installer to reconnect it.");
       }
     }
   }
@@ -33693,10 +34073,10 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
       platformName: options.platformName ?? options.platform,
       reportOk: options.reportWorkspaceGuideRefreshOk,
       reportInfo: options.reportWorkspaceGuideRefreshInfo,
-      reportWarning: options.reportWorkspaceGuideRefreshWarning,
+      reportWarning: options.reportWorkspaceGuideRefreshWarning ?? (() => {}),
     });
     if (workspaceGuideResult?.status === "warning") {
-      updateAttention.push("Review the CLAUDE.md warning above; the Brain update itself is complete.");
+      updateAttention.push("The Claude Code workspace guide could not be refreshed. Ask your installer to check it.");
     }
   }
 
@@ -33710,10 +34090,10 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
       platformName: options.platformName ?? options.platform,
       reportOk: options.reportWorkspaceGuideRefreshOk,
       reportInfo: options.reportWorkspaceGuideRefreshInfo,
-      reportWarning: options.reportWorkspaceGuideRefreshWarning,
+      reportWarning: options.reportWorkspaceGuideRefreshWarning ?? (() => {}),
     });
     if (workspaceGuideResult?.status === "warning") {
-      updateAttention.push("Review the AGENTS.md warning above; the Brain update itself is complete.");
+      updateAttention.push("The Codex workspace guide could not be refreshed. Ask your installer to check it.");
     }
   }
 
@@ -33724,47 +34104,55 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         installTechnicianSkills: options.installTechnicianSkills,
         claudeSkillOptions: options.claudeSkillOptions,
         reportOk: options.reportSkillRefreshOk,
-        reportWarning: options.reportSkillRefreshWarning,
+        reportWarning: options.reportSkillRefreshWarning ?? (() => {}),
       })
     );
   } catch {
-    reportUpdateSkillRefreshWarning(warn);
+    reportUpdateSkillRefreshWarning(options.reportSkillRefreshWarning ?? (() => {}));
     skillRefreshResult = { status: "warning" };
   }
   if (skillRefreshResult?.status !== "ready") {
-    updateAttention.push("Use https://financialbrain.ai/update/agent.md for this session; do not rerun brain update.");
+    updateAttention.push("The technician guide could not be refreshed. Ask your installer to use https://financialbrain.ai/update/agent.md.");
+  }
+  if (options.activateCurrentLaunchers || (IS_MAIN && process.platform === "win32")) {
+    try {
+      const activateCurrentLaunchers = options.activateCurrentLaunchers ??
+        (await import("./operations/windows-current-launchers.mjs")).activateWindowsCurrentLaunchers;
+      activateCurrentLaunchers({
+        platform: process.platform, localAppData: process.env.LOCALAPPDATA,
+        scriptPath: fileURLToPath(import.meta.url), version: PRODUCT_VERSION,
+      });
+    } catch {
+      die("The Brain update passed its remote checks, but Windows could not switch the command launchers. Retry the update from the versioned installer.");
+    }
   }
   const attention = [...new Set(updateAttention)];
-  // Only these bare guidance fragments need rendering. The composed report
-  // also contains literal paths and already-quoted commands, which a second
-  // render can corrupt. Custom reporters retain their raw-message contract.
   const closingAttention = options.reportUpdateFinish == null
-    ? attention.map(message => renderCliCommands(message, {
-      platform: options.platformName ?? options.platform ?? process.platform,
-    }))
+    ? attention.map(message => renderCliCommands(message, { platform: options.platformName ?? options.platform ?? process.platform }))
     : attention;
   const sessionFolderLabel = ownerSessionFolderLabel(pin.target, options);
   const brainFolderWarning = ownerBrainFolderWarning(pin.target, options);
-  const closing = [
-    selfcheckReport?.status === "not_checked"
-      ? `Your Brain is now on version ${PRODUCT_VERSION}.\n${updateSelfcheckMessage(selfcheckReport)}`
-      : `Done. Your Brain is now on version ${PRODUCT_VERSION} and passed its checks.`,
-    ...(schedulerResults.length ? [renderUpdateSchedulerRows(schedulerResults)] : []),
-    ...(mailTransition ? [microsoftMailTransitionSummary(mailTransition)] : []),
-    ...(attention.length ? [
-      `${attention.length} ${attention.length === 1 ? "thing" : "things"} still ${attention.length === 1 ? "needs" : "need"} attention:`,
-      ...closingAttention,
-    ] : []),
-    "One last step: quit Claude Code (and Codex, if you use it) and open it again, so it connects to the updated Brain.",
-    sessionFolderLabel
+  if (options.reportUpdateGuidance) {
+    const restart = sessionFolderLabel
       ? `In Claude Code type /exit, then open a terminal in your Financial Brain folder and run: ${(options.platformName ?? options.platform ?? process.platform) === "win32" ? `Set-Location -LiteralPath ${quotePowerShellArgument(dirname(pin.target))} -ErrorAction Stop; claude` : `cd ${quotePosixArgument(dirname(pin.target))} && claude`}. For Codex, open that same folder. The answer rules load there.`
-      : "In Claude Code type /exit, then claude --continue.",
-    "Then ask: check my Brain.",
-    ...(brainFolderWarning ? [brainFolderWarning] : sessionFolderLabel && sessionFolderLabel !== "another folder" ? [
-      `Next time, open Claude Code (or Codex) in your Financial Brain folder, ${displayPath(dirname(pin.target))}. This conversation runs in ${sessionFolderLabel}, which can be tidied away or synced.`,
-    ] : []),
-  ].join("\n");
-  safelyReportUpdateResult(options.reportUpdateFinish ?? console.log, closing);
+      : "In Claude Code type /exit, then claude --continue.";
+    safelyReportUpdateResult(options.reportUpdateGuidance, restart);
+  }
+  const closing = ownerUpdateRows({
+    version: PRODUCT_VERSION,
+    acceptance,
+    daily: verifiedDailyJob,
+    bank: afterSelfcheck?.bank?.value,
+    schedulers: schedulerResults,
+    wired: ownerAgentRefreshResult?.wired,
+    attentionItems: [
+      ...closingAttention,
+      ...ownerSelfcheckRows(selfcheckReport),
+      ...(mailTransition ? [microsoftMailTransitionSummary(mailTransition)] : []),
+      ...(brainFolderWarning ? [brainFolderWarning] : []),
+    ],
+  }).join("\n");
+  safelyReportUpdateResult(options.reportUpdateFinish ?? printOwnerChecklist, closing);
   safelyReportUpdateResult(options.reportUpdateSchedulers ?? (() => {}), schedulerResults);
   return upgradeResult;
 }
@@ -33845,7 +34233,7 @@ export async function cmdUpdate(manifestPath, options = {}) {
     // with their own exact recovery guidance. Neither is an incomplete update.
     const preflightGuidance = ["AUTH_REQUIRED", "UPDATE_WAITING_FOR_INDEXING"].includes(error.code || error.supportCode) ||
       (typeof error.supportCode === "string" && error.supportCode.startsWith("UPDATE_SELFCHECK_"));
-    if (windowsUpdatePlatform(options) === "win32" && !preflightGuidance) {
+    if (windowsUpdatePlatform(options) === "win32" && !preflightGuidance && !error.ownerChecklist) {
       const supportCode = error.supportCode || error.code;
       const lockGuidance = supportCode === "BRAIN_LOCK_FOLDER_UNUSABLE" ||
         (supportCode === "UPDATE_BRAIN_BUSY" &&
@@ -33886,7 +34274,7 @@ async function dispatchRollback(manifestPath) {
 
 /** Every option `brain doctor` reads. Anything else is a typo or a flag from a
  * release this one is not. */
-const DOCTOR_FLAGS = ["repair", "rollback", "repair-checksum", "yes"];
+const DOCTOR_FLAGS = ["repair", "rollback", "repair-checksum", "diagnostic", "yes"];
 
 /**
  * `brain doctor [manifest]` with no flags stays the existing pure preflight.
@@ -33926,7 +34314,7 @@ async function dispatchDoctor(manifestPath) {
       () => cmdDoctorRepair(manifestPath, { action: rollbackRequested ? "rollback" : "repair", confirmed: flags.yes === true }),
     );
   }
-  return cmdDoctor(manifestPath);
+  return cmdDoctor(manifestPath, { diagnostic: flags.diagnostic === true });
 }
 
 /* ------------------------------------------------- brain import bank ----- */
@@ -35710,6 +36098,9 @@ export async function cmdCustomApi(manifestPath, flags = parseFlags(process.argv
   for (const endpoint of receipt.endpoint_results || []) {
     const documentAction = receipt.dry_run ? "would be written" : "written";
     info(`${endpoint.name}: ${endpoint.rows_received} row(s), ${endpoint.documents} readable document(s) ${documentAction}, ${endpoint.rows_refused} refused`);
+    for (const move of endpoint.endpoint_moves || []) {
+      info(customApiMoveMessage({ ...move, endpoint: endpoint.name }));
+    }
   }
   if (Number(receipt.refused_rows || 0) > 0) {
     warn(`Source ready with warnings: ${receipt.refused_rows} row(s) were refused and their last verified values are marked not refreshed.`);
@@ -35860,13 +36251,10 @@ const WRANGLER_SESSION_EXEMPT_COMMANDS = new Set([
   "quickbooks-run",
 ]);
 
-// Health proves the Brain over HTTPS with the admin key and must never refresh
-// or rewrite the owner's Wrangler login when it does not need one: with a saved
-// brain.domain it needs no Cloudflare access at all. Without one, the read-only
-// session lookup is the only way it finds the workers.dev address until a
-// deploy, setup or update can verify and save it, so it keeps the entry-point
-// read. An unreadable manifest keeps it too; health then refuses on its own.
-const WRANGLER_SESSION_EXEMPT_WITH_SAVED_DOMAIN = new Set(["health"]);
+// These commands can use the Brain's saved HTTPS address and durable key.
+// Legacy installs without an address still need the control-plane lookup for
+// their workers.dev subdomain.
+const WRANGLER_SESSION_EXEMPT_WITH_SAVED_DOMAIN = new Set(["health", "mcp-config"]);
 
 export function manifestHasSavedBrainDomain(manifestPath, { readFile = readFileSync } = {}) {
   if (typeof manifestPath !== "string" || !manifestPath) return false;
@@ -36038,6 +36426,8 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain mcp-config <manifest>            config to connect the client's AI tools
     brain mcp-config <manifest> --apply    connect them for real: registers the brain with
                                            Claude Code and Codex, whichever are installed
+    brain mcp-config <manifest> --apply --replace-owner-entry
+                                           back up and replace the matching old Claude Code entry
     brain assistant-repair <manifest> --only <scopes>  read-only exact local skill/MCP repair preview
     brain assistant-repair <manifest> --only <scopes> --apply --approve <plan-id>
                                            apply one approved state-bound bundle; scopes are
@@ -36087,6 +36477,7 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain update     [manifest] --force     continue past the first queued search update check;
                                            the final check before the pause still refuses queued or unreadable work
     brain upgrade    <manifest>            snapshot, migrate, deploy, verify
+    brain doctor     <manifest> --diagnostic   show detailed technical results
     brain doctor     <manifest> --repair   diagnose a brain stuck mid-upgrade (--yes to resume)
     brain doctor     <manifest> --rollback preview restore to the pre-migration bookmark (--yes performs it)
     brain doctor     <manifest> --repair-checksum  reconcile an applied migration whose file changed (--yes to apply)
@@ -36173,6 +36564,10 @@ export function reportAnticipatedCliFailure(error, { write = console.log, suppor
   // Anticipated failures use stdout so PowerShell does not wrap the owner
   // guidance in a NativeCommandError. The exit code is machine-readable.
   const supportEventId = recordSupportFailure(error, support);
+  if (error.ownerChecklist) {
+    write(error.ownerMessage);
+    return true;
+  }
   const label = reviewRequired ? c.yellow("review required") : c.red("fail");
   write(`${label}  ${renderCliCommands(error.ownerMessage || error.message)}`);
   if (!error.ownerMessage) printSupportReceipt(supportEventId, write);
@@ -36188,7 +36583,11 @@ if (IS_MAIN) {
 
   // Wrapped so a client who signed in with `wrangler login` never has to mint
   // or paste a token. Scoped to this one invocation.
-  runCliCommandWithCredentialBoundary(cliBoundaryCommand, () => commands[cmd](manifestPath), {
+  runCliCommandWithCredentialBoundary(cliBoundaryCommand, async () => {
+    const result = await commands[cmd](manifestPath);
+    try { await resumeClaudeRouteAfterCommand(cmd, process.argv.slice(3)); } catch {}
+    return result;
+  }, {
     manifestPath,
   }).finally(() => {
     // No completed command may retain terminal raw mode or an stdin listener.

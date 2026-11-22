@@ -39,6 +39,9 @@ const escapeForRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const renderedCommand = (text) => escapeForRegExp(renderCliCommands(text));
 
 const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-technician-test-")));
+// The suite's temp directory can be a sibling of the runner's scratch profile.
+// Treat this private fixture as the profile while retaining native path checks.
+const guideOwnership = { profile: sandbox };
 const manifestPath = join(sandbox, "brain.manifest.json");
 const fixtureScriptPath = resolve("/fixture/brain.mjs");
 const fixtureNodePath = resolve("/fixture/node");
@@ -391,6 +394,7 @@ test("setup can create an owner-only Claude workspace guide with locators but no
   const manifest = join(workspace, "brain.manifest.json");
   writeFileSync(manifest, "{}");
   const first = writeClaudeWorkspaceGuide(manifest, {
+    ownership: guideOwnership,
     brainCliPath: safeBrainPath,
     nodePath: safeNodePath,
   });
@@ -469,6 +473,7 @@ test("setup can create an owner-only Claude workspace guide with locators but no
   else assert.equal(statSync(first.path).mode & 0o777, 0o600);
   assert.equal(
     writeClaudeWorkspaceGuide(manifest, {
+      ownership: guideOwnership,
       brainCliPath: safeBrainPath,
       nodePath: safeNodePath,
     }).status,
@@ -484,6 +489,7 @@ test("an unrelated Claude workspace guide is preserved byte-for-byte", () => {
   writeFileSync(manifest, "{}");
   writeFileSync(target, "owner instructions\n");
   const result = writeClaudeWorkspaceGuide(manifest, {
+    ownership: guideOwnership,
     brainCliPath: "/safe/bin/brain",
     existingOnly: true,
   });
@@ -500,6 +506,7 @@ test("update refreshes only an existing installer-managed Claude workspace guide
   writeFileSync(target, `${CLAUDE_WORKSPACE_MARKER}\n# Older managed guide\n`, { mode: 0o600 });
 
   const refreshed = writeClaudeWorkspaceGuide(manifest, {
+    ownership: guideOwnership,
     brainCliPath: safeBrainPath,
     nodePath: safeNodePath,
     existingOnly: true,
@@ -517,6 +524,7 @@ test("update refreshes only an existing installer-managed Claude workspace guide
   const missingTarget = join(missingWorkspace, "CLAUDE.md");
   writeFileSync(missingManifest, "{}");
   const skipped = writeClaudeWorkspaceGuide(missingManifest, {
+    ownership: guideOwnership,
     brainCliPath: safeBrainPath,
     nodePath: safeNodePath,
     existingOnly: true,

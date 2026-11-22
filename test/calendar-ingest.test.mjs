@@ -366,7 +366,8 @@ try {
     check("a refused Calendar event withholds the sync state",
       !existsSync(join(refusedDir, ".brain-ingest-calendar.json")));
     check("a refused Calendar event marks the source receipt incomplete",
-      fakeReceipts.at(-1)?.receipt.status === "error" && /refused/.test(fakeReceipts.at(-1)?.receipt.error || ""),
+      fakeReceipts.at(-1)?.receipt.status === "error" && fakeReceipts.at(-1)?.receipt.issue_code === "INPUT_REFUSED" &&
+      /refused/.test(fakeReceipts.at(-1)?.receipt.error || ""),
       JSON.stringify(fakeReceipts.at(-1)?.receipt));
     check("a refused Calendar event remains a completed walk with a measured refusal",
       fakeReceipts.at(-1)?.receipt.walk_complete === true &&
@@ -505,6 +506,179 @@ try {
     check("the preview failure gives the exact Google reconsent action",
       renderCliCommands(threw?.message || "").includes(renderCliCommands("brain connect google --scopes drive,gmail,calendar")), threw?.message);
     check("the reconsent failure reached the token exchange", impl.calls.token.length === 1);
+  }
+
+  for (const scenario of ["partial", "interrupted", "revised", "forgotten", "restored", "older-restore", "unavailable", "one-event", "reset"]) {
+    const interrupted = scenario === "interrupted";
+    const resumeDir = join(sandbox, scenario + "-window");
+    mkdirSync(resumeDir);
+    const resumeManifest = join(resumeDir, "brain.manifest.json");
+    writeFileSync(resumeManifest, "{}\n");
+    const oneEvent = scenario === "one-event";
+    const events = Array.from({ length: oneEvent ? 1 : 26 }, (_, i) => ({
+      ...EVENT_KICKOFF, id: "synthetic-" + i, description: "Approved budget: $120.99",
+      updated: "2026-11-02T12:00:00Z", start: { date: "2026-11-01" }, end: { date: "2026-11-02" },
+    }));
+    const initialIds = [];
+    const retryIds = [];
+    const stored = new Map();
+    const run = (retry) => {
+      const items = retry ? events.toReversed() : events;
+      if (retry && scenario === "revised") {
+        items[0] = { ...items[0], summary: "Synthetic revised event" };
+      }
+      const impl = fakeGoogle({ calendar: [{ body: { items, nextSyncToken: "RESUMED" } }] });
+      return cmdIngestCalendar({}, resumeManifest, scenario === "reset" ? { reset: true } : {}, {
+        ...commonOptions(),
+        listStoredSourceFamilies: async () => new Set(stored.keys()),
+        ...(oneEvent && !retry ? { saveCalendarState: () => { throw new Error("before cursor save"); } } : {}),
+        readCurrentIngestParts: async ({ envelopes }) => {
+          if (scenario === "unavailable") throw new Error("synthetic readback unavailable");
+          const matches = envelopes.filter((envelope) => {
+            const row = stored.get(`calendar:${envelope.source_id}`);
+            return row?.metadata.calendar_revision === envelope.metadata.calendar_revision &&
+              row?.content === envelope.content && row?.occurred_at === envelope.occurred_at;
+          });
+          return { parts: matches.map(({ source_id }) => ({ source_id })) };
+        },
+        fetchImpl: impl,
+        getAccessToken: provider(impl).get,
+        googleCalendar: {
+          syncAll,
+          ingestEnvelopes: async ({ envelopes }) => {
+            const ids = envelopes.map((envelope) => envelope.source_id);
+            if (!retry && interrupted && ids.some((id) => id.endsWith("-25"))) {
+              throw Object.assign(new Error("synthetic interruption"), { code: "source_ingest_lock_lost" });
+            }
+            (retry ? retryIds : initialIds).push(...ids);
+            const errors = !retry && !interrupted && !oneEvent
+              ? ids.filter((id) => id.endsWith("-0")).map((source_id) => ({ source_id, code: "INGEST_FAILED" }))
+              : [];
+            for (const envelope of envelopes) {
+              if (!errors.some(({ source_id }) => source_id === envelope.source_id)) {
+                stored.set(`calendar:${envelope.source_id}`, envelope);
+              }
+            }
+            return { created: ids.length - errors.length, updated: 0, unchanged: 0, refused: [], errors };
+          },
+        },
+      });
+    };
+    if (oneEvent) await assert.rejects(run(false), /before cursor save/);
+    else if (interrupted) await assert.rejects(run(false), { code: "source_ingest_lock_lost" });
+    else {
+      await run(false);
+      check("partial catch-up records the product error code", fakeReceipts.at(-1).receipt.issue_code === "INGEST_FAILED");
+    }
+    const statePath = join(resumeDir, ".brain-ingest-calendar.json");
+    check("incomplete delivery keeps the provider cursor uncommitted", !existsSync(statePath));
+    if (scenario === "forgotten") stored.clear();
+    if (scenario === "restored") stored.delete("calendar:gcal:primary:synthetic-1");
+    const restoredUid = "calendar:gcal:primary:synthetic-1";
+    if (scenario === "older-restore") {
+      const current = stored.get(restoredUid);
+      stored.set(restoredUid, { ...current, occurred_at: "2026-10-31",
+        content: current.content.replaceAll("2026-11-01", "2026-10-31").replace("$120.99", "$100.01"),
+        metadata: { ...current.metadata, updated: "2026-11-01T12:00:00Z" } });
+    }
+    const resumed = await run(true);
+    const expected = interrupted ? "25" : "0";
+    const alreadySent = interrupted ? 25 : 26;
+    if (oneEvent) {
+      check("one-event catch-up reports one verified resume and commits a complete sweep",
+        retryIds.length === 0 && fakeReceipts.at(-1).receipt.docs_resumed === 1 &&
+        fakeReceipts.at(-1).receipt.complete_sweep === true);
+    } else if (scenario === "older-restore") {
+      check("same-family restore replays the November 1 revision and its approved $120.99 budget",
+        retryIds.length === 2 && retryIds[0].endsWith("-1") && retryIds[1].endsWith("-0") &&
+        stored.get(restoredUid)?.occurred_at === "2026-11-01" &&
+        stored.get(restoredUid)?.content.includes("$120.99"));
+    } else if (scenario === "revised") {
+      check("a changed revision is re-sent even when the previously accepted revision was checkpointed",
+        retryIds.length === 2 && retryIds[0].endsWith("-25") && retryIds[1].endsWith("-0"));
+    } else if (scenario === "forgotten" || scenario === "unavailable" || scenario === "reset") {
+      check(`${scenario} catch-up redelivers all events`, retryIds.length === 26 && stored.size === 26);
+    } else if (scenario === "restored") {
+      check("a partially restored source replays the missing acknowledged family",
+        retryIds.length === 2 && retryIds[0].endsWith("-1") && retryIds[1].endsWith("-0") && stored.size === 26);
+    } else {
+      check(interrupted ? "stopped catch-up resumes at the next saved window" : "partial catch-up resends just the failed item",
+        initialIds.length === alreadySent && retryIds.length === 1 && retryIds[0].endsWith("-" + expected));
+    }
+    const expectedResumed = { partial: 25, interrupted: 25, revised: 24, forgotten: 0, restored: 24, "older-restore": 24, unavailable: 0, "one-event": 1, reset: 0 };
+    check(`${scenario} receipt separates resumed skips from server unchanged results`,
+      resumed.sent.unchanged === 0 && resumed.sent.resumed_skipped === expectedResumed[scenario] &&
+      fakeReceipts.at(-1).receipt.docs_unchanged === 0 &&
+      fakeReceipts.at(-1).receipt.detail.includes(`${expectedResumed[scenario]} resumed`));
+    check("resumed delivery commits the terminal provider cursor",
+      JSON.parse(readFileSync(statePath, "utf8")).primary.sync_token === "RESUMED");
+  }
+
+  {
+    const impl = fakeGoogle({ calendar: [
+      { body: { items: [EVENT_KICKOFF], nextPageToken: "NEXT" } },
+      { body: { items: [{ ...EVENT_KICKOFF, summary: "Synthetic newest event", updated: "2026-11-02T12:00:00Z" }], nextSyncToken: "DONE" } },
+    ] });
+    const delivered = [];
+    let finished;
+    try {
+      finished = await cmdIngestCalendar({}, manifestPath, { source: "duplicate-calendar" }, {
+        ...commonOptions(),
+        fetchImpl: impl,
+        getAccessToken: provider(impl).get,
+        googleCalendar: {
+          syncAll,
+          ingestEnvelopes: async ({ envelopes }) => {
+            delivered.push(...envelopes);
+            return { created: 0, updated: 0, unchanged: 0, refused: [], errors: [
+              { source_id: envelopes[0].source_id, code: "INGEST_FAILED" },
+            ] };
+          },
+        },
+      });
+    } catch (error) {
+      check("duplicate failed event reaches the final error receipt", false, error.message);
+    }
+    if (finished) {
+      check("duplicate failed event reaches the final error receipt",
+        delivered.length === 1 && delivered[0].title.includes("Synthetic newest event") &&
+        fakeReceipts.at(-1).receipt.status === "error" && fakeReceipts.at(-1).receipt.docs_failed === 1);
+    }
+  }
+
+  for (const order of ["newer-first", "older-first", "ambiguous", "missing-revision", "older-cancellation"]) {
+    const ambiguous = order === "ambiguous" || order === "missing-revision";
+    const older = { ...EVENT_KICKOFF, description: "Approved budget: $100.01",
+      updated: order === "missing-revision" ? undefined : "2026-11-01T12:00:00Z",
+      ...(order === "older-cancellation" ? { status: "cancelled" } : {}),
+    };
+    const newer = { ...EVENT_KICKOFF, description: "Approved budget: $120.99",
+      updated: order === "ambiguous" ? older.updated : "2026-11-02T12:00:00Z" };
+    const [first, second] = order === "older-first" ? [older, newer] : [newer, older];
+    const source = `calendar-${order}`;
+    const impl = fakeGoogle({ calendar: [
+      { body: { items: [first], nextPageToken: "NEXT" } },
+      { body: { items: [second], nextSyncToken: "DUPLICATE_DONE" } },
+    ] });
+    const delivered = [];
+    const outcome = await cmdIngestCalendar({}, manifestPath, { source }, {
+      ...commonOptions(), fetchImpl: impl, getAccessToken: provider(impl).get,
+      googleCalendar: { syncAll, ingestEnvelopes: async ({ envelopes }) => {
+        delivered.push(...envelopes);
+        return { created: envelopes.length, updated: 0, unchanged: 0, refused: [], errors: [] };
+      } },
+    });
+    const saved = join(sandbox, `.brain-ingest-${source}.json`);
+    if (ambiguous) {
+      check("unordered conflicting revisions hold the cursor and report ambiguity",
+        delivered.length === 0 && !outcome.result.calendars[0].state.sync_token &&
+        /conflicting event revisions/.test(outcome.result.calendars[0].error?.message ?? "") &&
+        fakeReceipts.at(-1).receipt.status === "error");
+    } else {
+      check(`newest Calendar revision wins with ${order}`,
+        delivered.length === 1 && delivered[0].content.includes("$120.99") && outcome.result.deletions.length === 0 &&
+        JSON.parse(readFileSync(saved, "utf8")).primary.sync_token === "DUPLICATE_DONE");
+    }
   }
 
   console.log(fail ? `\n${fail} FAILURES` : `\ncalendar-ingest: all ${ran} tests passed`);

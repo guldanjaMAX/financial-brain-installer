@@ -196,7 +196,7 @@ macTest("real update moves a stale drain and accepts a current drain control", a
       assert.deepEqual(f.loaded.get(old.service)?.args, expected.programArguments);
       const row = f.reports.flat().find(row => row.kind === "whatsapp-drain");
       assert.equal(row?.state, stale ? "moved" : "already current");
-      assert.match(f.finish.join("\n"), /WhatsApp drain: (moved|already current)/);
+      assert.match(f.finish.join("\n"), /WhatsApp drain schedule verified/);
     } finally { f.close(); }
   }
 });

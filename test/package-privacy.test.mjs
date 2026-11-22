@@ -430,6 +430,7 @@ const expected = [
   "connectors/imessage.mjs",
   "connectors/iphone-backup.mjs",
   "connectors/google-auth.mjs",
+  "connectors/calendar-delivery.mjs",
   "connectors/google-calendar.mjs",
   // Calendar cancellations are a metadata overlay that keeps the stored record;
   // the CLI side calls the owner's own Brain with the admin key it already
@@ -578,6 +579,7 @@ const expected = [
   "operations/daily-refresh-scheduler.mjs",
   "operations/windows-task-contract.mjs",
   "operations/windows-update-bridge.mjs",
+  "operations/windows-current-launchers.mjs",
   // Current-user sign-in console: fixed helper, non-secret profile argv,
   // allowlisted environment, no captured output, no manifest or token handoff.
   "operations/windows-update-signin.mjs",
@@ -987,6 +989,7 @@ const expected = [
   "operations/drive-scheduler.mjs",
   "operations/update-scheduler-inventory.mjs",
   "operations/update-selfcheck.mjs",
+  "operations/owner-checklist.mjs",
   "operations/folder-retirement.mjs",
   "operations/folder-scheduler.mjs",
   "operations/imessage-scheduler.mjs",
@@ -1201,6 +1204,7 @@ const expected = [
   "operations/gmail-batch-window.mjs",
   "operations/gmail-entry.mjs",
   "operations/gmail-part-progress.mjs",
+  "operations/gmail-quota.mjs",
   "operations/rollback-cutover.mjs",
   "operations/rollback-writer-proof.mjs",
   "worker/src/lib/drive-family.js",
@@ -1379,6 +1383,26 @@ let packedSkillInstallFailed = false;
 let packedBundleFailure = bundleMetadataFailure;
 const packageProbeDirectory = SCAN_ONLY ? null : mkdtempSync(join(tmpdir(), "brain-package-probe-"));
 if (packageProbeDirectory) try {
+  // An allowlisted directory bypasses the root Git ignore rules in npm's
+  // packer. Exercise the actual files entries with inert checkpoint canaries.
+  const checkpointProbe = join(packageProbeDirectory, "calendar-checkpoint");
+  mkdirSync(join(checkpointProbe, "connectors", "._brain-ingest"), { recursive: true });
+  writeFileSync(join(checkpointProbe, "package.json"), JSON.stringify({
+    name: "synthetic-checkpoint-probe", version: "1.0.0", files: packageJson.files,
+  }));
+  writeFileSync(join(checkpointProbe, ".gitignore"), readFileSync(join(ROOT, ".gitignore")));
+  const canary = "connectors/._brain-ingest/.brain-ingest-calendar.json.delivery";
+  const control = "connectors/synthetic-control.mjs";
+  for (const path of [canary, canary + ".tmp-fixture", control]) writeFileSync(join(checkpointProbe, path), "");
+  const preview = spawnSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], {
+    cwd: checkpointProbe, encoding: "utf8", shell: process.platform === "win32", timeout: 60_000,
+  });
+  if (preview.status !== 0) throw new Error("Calendar checkpoint pack probe did not complete");
+  const probeFiles = JSON.parse(preview.stdout)[0].files.map(({ path }) => path);
+  if (!probeFiles.includes(control) || probeFiles.some((path) => path.startsWith(canary))) {
+    throw new Error("Calendar checkpoint pack probe did not exclude private state");
+  }
+
   const actualPack = spawnSync(
     "npm",
     ["pack", "--json", "--ignore-scripts", "--pack-destination", packageProbeDirectory],

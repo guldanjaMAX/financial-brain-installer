@@ -420,9 +420,14 @@ coverage incomplete and prevent scanner certification of retained old content.
 The daily consumer drains at most 32 Gmail windows under its runtime budget.
 One ordered per-message boundary observes metadata, policy, download,
 extraction, admission, split preparation, send, retry and family settlement.
-Read-only acquisition still overlaps up to eight messages. Each logical
-message flushes its own bounded parts and saves accepted state before the next
-deadline check, so later slow reads cannot discard an unsent healthy prefix.
+Read-only acquisition overlaps up to eight messages until Gmail signals a
+quota limit. A run-wide queue lets in-flight reads settle and serializes later
+Gmail requests across windows. Quota waits honor Retry-After and exponential
+backoff with jitter within a two-minute cumulative wait and the run deadline.
+Exhausting that budget defers the source with its remaining work checkpointed.
+Each logical message flushes its own bounded parts and saves accepted state
+before the next deadline check, so later slow reads cannot discard an unsent
+healthy prefix.
 Each validated accepted part also saves an exact message/revision/index/content
 hash receipt in private `gmail_part_progress` state before another dispatch or
 finalization retry wait. Restart regenerates and scans the logical message,
@@ -912,7 +917,7 @@ procedure is [Drive incremental recovery](drive-incremental-recovery.md).
 | Local folders, including an Obsidian vault | Built through `--path`; Obsidian is file ingest, not a separate connector |
 | Google Drive | Built, bounded incremental add/update-only, owner removal decisions, schedulable on macOS; new runner awaits field proof |
 | Gmail | Built with cursor safety; full real-account production validation remains a field gate |
-| Google Calendar | Built and wired through `brain ingest --from calendar`; row and receipt namespaces match; cancellations keep text and mark status without removal review, and event failure, refusal, or an unconfirmed marker withholds the Google sync token; real-account validation remains a field gate |
+| Google Calendar | Built and wired through `brain ingest --from calendar`; row and receipt namespaces match; cancellations keep text and mark status without removal review, local delivery checkpoints reuse accepted revisions after exact D1 readback, and event failure, refusal, unordered revisions, or an unconfirmed marker withholds the affected Google sync token; real-account validation remains a field gate |
 | Local watched folder | Built through the ordinary resumable folder ingest path and schedulable on macOS; multi-cycle field proof remains open |
 | iMessage | Built for incremental local capture on macOS; real-user database and long-lived scheduler proof remain field gates |
 | WhatsApp | Safe per-chat export ingest is built. Unofficial paired-device live capture is opt-in, violates WhatsApp's Terms of Service, and is not real-account proven. Meta's official WhatsApp Business Platform connector is not built. |

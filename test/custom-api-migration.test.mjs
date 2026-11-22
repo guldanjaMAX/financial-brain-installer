@@ -793,6 +793,37 @@ test("first-pull refusal creates no snapshot and leaves an owner-visible refusal
   assert.equal(source.stale_reason, "INPUT_REFUSED");
 });
 
+test("a followed move survives D1 job continuation and reaches source freshness", async (t) => {
+  const database = setupDatabase();
+  t.after(() => database.close());
+  const DB = countedD1(database);
+  const setting = JSON.stringify(compactConfig());
+  const env = { STORAGE: "d1", DB, CUSTOM_API_TOKEN_STORE_DASHBOARD: TOKEN, CUSTOM_API_CONFIG: setting };
+  const calls = [];
+  const result = await settleWorker(env, {
+    now: () => AT,
+    persistence: customApiD1Persistence(env, { ingestDocument: documentWriter(DB) }),
+    fetchImpl: async (input) => {
+      const { pathname } = new URL(input);
+      calls.push(pathname);
+      if (pathname === "/api/sales") {
+        return new Response(null, { status: 308, headers: { Location: "/v2/sales" } });
+      }
+      return Response.json([{ store: "Store 1", period: "2026-09-01", revenue_stream: "services", net_sales: 10 }]);
+    },
+  });
+  assert.deepEqual(calls, ["/api/sales", "/v2/sales"]);
+  assert.equal(result.saved, true);
+  assert.equal(result.rows.created, 1);
+  const move = { old_path: "/api/sales", new_path: "/v2/sales" };
+  assert.deepEqual(result.endpoint_results[0].endpoint_moves, [move]);
+  const { sources: [source] } = await freshnessReport(env, { now: AT.getTime() });
+  assert.equal(source.state, "ok");
+  assert.deepEqual(source.endpoint_moves, [{ endpoint: "sales", ...move }]);
+  assert.match(source.reason, /sales moved from \/api\/sales to \/v2\/sales\. The Brain followed it/);
+  assert.equal(env.CUSTOM_API_CONFIG, setting);
+});
+
 test("a partial refusal is marked in the document and source until a clean pull clears it", async (t) => {
   const database = setupDatabase();
   t.after(() => database.close());

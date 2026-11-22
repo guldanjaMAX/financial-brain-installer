@@ -52,6 +52,20 @@ const okVectors = async () => ({
 });
 const deps = { health: okHealth, diagnose: okDiagnose, freshness: okFresh, vectorReadiness: okVectors };
 
+{
+  const s = await ownerSystemStatus({}, {
+    ...deps,
+    freshness: async () => ({ sources: [{
+      kind: "custom_api", state: "broken", zone: null,
+      issue_code: "CONFIG_SOURCE_NAME_CLASH",
+      reason: "Another source type already uses the custom API source name.",
+    }] }),
+  });
+  check("owner status preserves the fixed custom API setup code and message",
+    s.sources[0].issue_code === "CONFIG_SOURCE_NAME_CLASH" &&
+    s.sources[0].reason === "Another source type already uses the custom API source name.");
+}
+
 /* --------------------------------------------------------------- happy path */
 {
   const s = await ownerSystemStatus({}, deps);

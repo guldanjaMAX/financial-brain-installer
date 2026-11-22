@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import { createDecipheriv, hkdfSync, randomBytes } from "node:crypto";
 import {
-  copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync,
+  copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync,
   realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { mcpRegistrationDescriptor, mcpRegistrationIsExact,
-  mcpRegistrationIsInstallerOwned, wireAgents } from "../brain.mjs";
+  mcpRegistrationIsInstallerOwned, refreshOwnerAssistantConnectionsAfterUpdate, wireAgents } from "../brain.mjs";
 
 const runningVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url))).version;
 const historicalBytes = readFileSync(new URL("./fixtures/published-v0.4.0-brain-mcp.mjs", import.meta.url));
@@ -31,7 +31,8 @@ function entryFromArgs(args, flag) {
 
 async function exercise({ prefix = ".financial-brain-owner-session-0420/install", version = "0.4.20",
   packageName = "brain-installer", target = "claude", historical = false, layout = "lib",
-  change = () => {}, pathChange = () => {}, failAdd = false, mismatch = false } = {}, check) {
+  change = () => {}, pathChange = () => {}, failAdd = false, mismatch = false,
+  replaceOwnerEntry = false } = {}, check) {
   const home = realpathSync(mkdtempSync(join(tmpdir(), "mcp-prior-")));
   const manifestPath = join(home, "brain.manifest.json");
   const keyPath = join(home, ".brain-admin-key");
@@ -81,6 +82,7 @@ async function exercise({ prefix = ".financial-brain-owner-session-0420/install"
     assert.equal(statSync(runtime).isFile(), true);
     const owned = mcpRegistrationIsInstallerOwned(entry, desired);
     const result = await wireAgents(manifest, manifestPath, {
+      replaceOwnerEntry,
       environment: { HOME: home, PATH: "/usr/bin:/bin", BRAIN_NO_WRANGLER_LOGIN: "1" },
       targets: [target === "claude" ? "claude-code-mcp" : "codex-mcp"],
       baseUrl: "https://fixture.invalid", claudeConfigPath: configPath, codexConfigPath: configPath,
@@ -163,6 +165,14 @@ for (const [prefix, version] of [
   test(`prior ${prefix} runtime migrates to the current descriptor`, () => exercise({ prefix, version }, accepted));
 }
 
+test("a Windows versioned install is replaced by the current MCP launcher", {
+  skip: process.platform !== "win32",
+}, () => exercise({ prefix: "FinancialBrain-v0.4.22", version: "0.4.22", layout: "" }, accepted));
+
+test("a Windows versioned install requires the package version to match the prefix", {
+  skip: process.platform !== "win32",
+}, () => exercise({ prefix: "FinancialBrain-v0.4.22", version: "0.4.21", layout: "" }, refused));
+
 for (const prefix of [".financial-brain", "financialbrain", ".financial-brain-v0.4.22-rc.1+kit.2",
   ".financial-brain-owner-session-0420.parked-review/install",
   ".financial-brain-owner-session-0420-20261101/install"]) {
@@ -242,3 +252,90 @@ for (const target of ["claude", "codex"]) {
     assert.match(run.output, /previous entry was restored/);
   }));
 }
+
+test("approved Claude reconnect keeps the installer-owned update path", () =>
+  exercise({ replaceOwnerEntry: true }, (run) => {
+    accepted(run);
+    assert.equal(run.result.ownerEntryReplaced, undefined);
+  }));
+
+test("approved Claude replacement backs up both scopes and is idempotent", async () => {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "mcp-owner-entry-")));
+  const manifestPath = join(home, "brain.manifest.json");
+  const configPath = join(home, ".claude.json");
+  const legacy = { type: "stdio", command: "old-fixture", args: [], env: { MARKER: "synthetic-private-marker" } };
+  const other = { type: "stdio", command: "other-fixture" };
+  const project = home.split("\\").join("/");
+  const initial = {
+    mcpServers: { "fixture-brain": legacy, other },
+    projects: { [project]: { mcpServers: { "fixture-brain": legacy, other } },
+      "/elsewhere": { mcpServers: { "fixture-brain": other } } },
+  };
+  const output = [];
+  const log = console.log;
+  console.log = (...args) => output.push(args.join(" "));
+  try {
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    writeFileSync(configPath, JSON.stringify(initial));
+    const options = {
+      environment: { HOME: home }, claudeConfigPath: configPath,
+      targets: ["claude-code-mcp"], baseUrl: "https://fixture.invalid",
+      adminKeyPersistencePlan: () => ({}), readAdminKeyDurably: () => "synthetic-durable-value",
+      runCommand(_command, args) {
+        assert.equal(args[0], "--version", "replacement must not send old values to Claude");
+        return { ok: true };
+      },
+    };
+    const ordinary = await wireAgents(manifest, manifestPath, options);
+    assert.deepEqual(ordinary.failures, ["Claude Code"]);
+    assert.deepEqual(JSON.parse(readFileSync(configPath)), initial);
+    output.length = 0;
+    const update = await refreshOwnerAssistantConnectionsAfterUpdate(manifest, manifestPath, {
+      agentOptions: options,
+      reportWarning: (message) => output.push(message),
+    });
+    assert.equal(update.status, "warning");
+    assert.equal(update.claudeOwnerEntryCollision, true);
+    assert.match(output.join("\n"), /owner's explicit approval[\s\S]*--apply --replace-owner-entry/);
+    assert.deepEqual(JSON.parse(readFileSync(configPath)), initial);
+    writeFileSync(configPath, JSON.stringify({ ...initial, mcpServers: { other } }));
+    const localOnly = await wireAgents(manifest, manifestPath, options);
+    assert.equal(localOnly.claudeOwnerEntryCollision, true);
+    assert.deepEqual(JSON.parse(readFileSync(configPath)).mcpServers, { other });
+    writeFileSync(configPath, JSON.stringify(initial));
+    const result = await wireAgents(manifest, manifestPath, { ...options, replaceOwnerEntry: true });
+    assert.deepEqual(result.wired, ["Claude Code"]);
+    assert.equal(result.ownerEntryReplaced, true);
+    const bytes = readFileSync(configPath);
+    const current = JSON.parse(bytes);
+    assert.deepEqual(current.projects[project].mcpServers, { other });
+    assert.deepEqual(current.projects["/elsewhere"], initial.projects["/elsewhere"]);
+    assert.deepEqual(current.mcpServers.other, other);
+    const desired = mcpRegistrationDescriptor(manifest, manifestPath, { baseUrl: options.baseUrl });
+    assert.ok(mcpRegistrationIsExact(current.mcpServers["fixture-brain"], desired));
+    const names = readdirSync(home).filter(name => name.endsWith(".brain-mcp-backup"));
+    assert.equal(names.length, 1);
+    const backupText = readFileSync(join(home, names[0]), "utf8");
+    assert.doesNotMatch(backupText, /synthetic-private-marker/);
+    const backup = JSON.parse(backupText);
+    assert.equal(backup.version, 1);
+    const key = hkdfSync("sha256", "synthetic-durable-value", "", "financial-brain/claude-entry-backup/v1", 32);
+    const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(backup.iv, "base64"));
+    decipher.setAuthTag(Buffer.from(backup.tag, "base64"));
+    const saved = JSON.parse(Buffer.concat([
+      decipher.update(Buffer.from(backup.ciphertext, "base64")), decipher.final(),
+    ]));
+    assert.deepEqual(saved, {
+      name: "fixture-brain", project, user: JSON.stringify(legacy), local: JSON.stringify(legacy),
+    });
+    const second = await wireAgents(manifest, manifestPath, { ...options, replaceOwnerEntry: true });
+    assert.deepEqual(second.wired, ["Claude Code"]);
+    assert.equal(second.ownerEntryReplaced, undefined);
+    assert.deepEqual(readFileSync(configPath), bytes);
+    assert.deepEqual(readdirSync(home).filter(name => name.endsWith(".brain-mcp-backup")), names);
+    assert.doesNotMatch(output.join("\n"), /synthetic-private-marker/);
+  } finally {
+    console.log = log;
+    rmSync(home, { recursive: true, force: true });
+  }
+});

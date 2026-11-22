@@ -15,8 +15,26 @@ export function currentCustomApiDocumentSql(alias = "d") {
   ))`;
 }
 
+export const CUSTOM_API_CONFIG_REASONS = Object.freeze({
+  CONFIG_ENDPOINT_REDIRECT: "Use the exact endpoint path because the custom API returned a permanent redirect.",
+  CONFIG_TEMPLATE_FIELD_MISSING: "A custom API document template requires a field that the pull did not supply.",
+  CONFIG_WORKER_SETTING_INVALID: "The custom API Worker setting is invalid and needs to be redeployed.",
+  CONFIG_SOURCE_NAME_CLASH: "Another source type already uses the custom API source name.",
+  CONFIG_SOURCE_IDENTITY_UNVERIFIED: "The Brain could not verify that the custom API source was registered.",
+  CONFIG_BACKEND_UNSUPPORTED: "The custom API source requires the D1 storage backend.",
+});
+
+export function customApiMoveMessage({ endpoint, old_path, new_path }) {
+  return `${endpoint} moved from ${old_path} to ${new_path}. The Brain followed it.`;
+}
+
+export function customApiRedirectMessage(address) {
+  return `The custom API moved to ${address}. Review the new address before changing the setting.`;
+}
+
 /** Render a closed custom-source issue code only at an owner-facing boundary. */
 export function customApiOwnerMessage(code, displayName = "custom business API") {
+  if (Object.hasOwn(CUSTOM_API_CONFIG_REASONS, code)) return CUSTOM_API_CONFIG_REASONS[code];
   const name = String(displayName || "custom business API").replace(/\s+/g, " ").trim().slice(0, 80) || "custom business API";
   if (code === "AUTH_REQUIRED") return `The ${name} refused the key. Ask its developer to check it.`;
   if (code === "RATE_LIMITED") return `The ${name} asked the Brain to wait. It will try again on the next scheduled pull.`;

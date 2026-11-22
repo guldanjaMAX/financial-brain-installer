@@ -48,6 +48,7 @@ eval/eval.config.local.json
 # machine-local operational state and must never become a tracked artifact.
 .brain-ingest-*.json
 .brain-ingest-*.json.tmp-*
+._brain-ingest/
 
 # Exact curated inventories, target locators and coverage receipts are private
 # instance state. Only the generic operation that reads them is product source.
@@ -142,3 +143,7 @@ machine-prep/installers/windows/handoff-windows.url
 # Offline confidence-presentation probes and synthetic CLI home.
 /.conf-hide-evidence/
 /home-conf-hide/
+
+# Private Claude reconnect backups and pending route proof markers.
+*.brain-mcp-backup
+*.claude-route-pending

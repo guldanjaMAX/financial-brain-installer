@@ -5,9 +5,10 @@ import { join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { dailyRefreshIdentity, dailyRefreshPrincipal } from "./daily-refresh-plan.mjs";
-import { appendDailySourceFailure, observeDailyRun } from "./daily-refresh-observation.mjs";
+import { appendDailySourceFailure, dailySourceAttention, observeDailyRun } from "./daily-refresh-observation.mjs";
 import { acquireBrainLifecycleLock } from "./brain-lifecycle-lock.mjs";
 import { DriveRemovalReviewRequired } from "./drive-removal-plan.mjs";
+import { createGmailQuota, GMAIL_QUOTA_PAUSE } from "./gmail-quota.mjs";
 import { removalReviewFacts, removalOwnerSentence } from "./load-removal-review.mjs";
 import { SUPPORT_ERROR_CODES } from "../support-journal.mjs";
 import { renderCliCommands } from "./cli-guidance.mjs";
@@ -392,6 +393,7 @@ export async function runDailyRefresh({
           windows++;
           lock.assertOwned();
         } while (source.key === "gmail" && runResult?.more_history === true &&
+          runResult.gmail_quota_paused !== true &&
           windows < 32 && Date.parse(timestamp(now)) < deadlineAt);
         if (source.key === "gmail" && runResult?.more_history === true) {
           const receipt = Object.freeze({ schema_version: 1, kind: "daily_refresh_source",
@@ -399,7 +401,8 @@ export async function runDailyRefresh({
             status: "deferred", started_at: sourceStartedAt, completed_at: timestamp(now),
             freshness_advanced: false, more_history: true, windows_completed: windows,
             reason_code: "gmail_continuation_budget", retry_policy: "next_scheduled_daily_run",
-            reason: "Bounded Gmail progress was saved; the next scheduled daily run resumes its checkpoint." });
+            reason: runResult.gmail_quota_paused ? GMAIL_QUOTA_PAUSE :
+              "Bounded Gmail progress was saved; the next scheduled daily run resumes its checkpoint." });
           sourceResults.push(receipt);
           await writeReceipt(receipt);
           continue;
@@ -535,7 +538,8 @@ export async function runDailyRefresh({
         const detail = safeDiagnosticText(error.auto_apply_error?.message || error?.message || error);
         const removalReview = issueCode === "SAFETY_REVIEW_REQUIRED"
           ? safeRemovalReview(error, safeSource) : null;
-        if (removalReview) attentionEntries.push(removalReview.attention);
+        attentionEntries.push(dailySourceAttention({ source: safeSource, issue_code: issueCode,
+          attention: removalReview?.attention }));
         const receipt = Object.freeze({
           schema_version: 1,
           kind: "daily_refresh_source",
@@ -563,7 +567,26 @@ export async function runDailyRefresh({
         });
       }
     }
-    const status = sourceResults.length === 0 || sourceResults.some((entry) => !["complete", "partial", "held", "waiting_for_owner"].includes(entry.status) &&
+    // Journal source gaps that produced a receipt without throwing. Use bounded
+    // owner copy here, since loader and inventory details may contain private data.
+    for (const entry of sourceResults) {
+      if (entry.issue_code || ["complete", "held"].includes(entry.status)) continue;
+      const issue = {
+        source: safeDiagnosticText(entry.source, 128),
+        issue_code: entry.more_history ? "GMAIL_CONTINUATION"
+          : entry.reason_code === "bank_sync_needs_attention" ? "BANK_SYNC_NEEDS_ATTENTION" : {
+          deferred: "DAILY_SOURCE_DEFERRED", partial: "DAILY_SOURCE_PARTIAL",
+          skipped: "DAILY_SOURCE_UNAVAILABLE", unavailable: "DAILY_SOURCE_UNAVAILABLE",
+        }[entry.status] || "DAILY_SOURCE_INCOMPLETE",
+      };
+      const attention = dailySourceAttention(issue);
+      attentionEntries.push(attention);
+      await writeFailureLog({ ...issue, observed_at: entry.completed_at, detail: attention.slice(0, 200) });
+    }
+    const mixedCoverage = sourceResults.some(entry => entry.status === "complete" || entry.check_verified) &&
+      sourceResults.some(entry => entry.status !== "complete");
+    const status = mixedCoverage ? "partial"
+      : sourceResults.length === 0 || sourceResults.some((entry) => !["complete", "partial", "held", "waiting_for_owner"].includes(entry.status) &&
       !(entry.status === "deferred" && entry.more_history === true)) ? "failed"
       : sourceResults.some(entry => entry.status === "waiting_for_owner") ? "waiting_for_owner"
       : sourceResults.some((entry) => ["partial", "held", "deferred"].includes(entry.status)) ? "partial" : "complete";
@@ -694,6 +717,7 @@ async function executeDailyRefreshCli(path, m, options, observationStarted) {
       flags: { json: true },
       silent: true,
     })));
+    const gmailQuota = createGmailQuota();
     const result = await runDailyRefresh({
       plan,
       validatePlan: async () => {
@@ -715,6 +739,7 @@ async function executeDailyRefreshCli(path, m, options, observationStarted) {
         allowPartialRefresh: true,
         deferGmailRemovals: true,
         ingestDeadlineAt: lease.deadlineAt,
+        gmailQuota,
         assertOwned: lease.assertOwned,
       })),
       runBankFeed: options.runBankFeed ?? (() => brain.refreshDailyBankFeed(path)),

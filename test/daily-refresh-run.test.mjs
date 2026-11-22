@@ -65,6 +65,93 @@ test("daily refresh runs ready owned legs sequentially and requires freshness to
   assert.ok(receipts.some((receipt) => receipt.source === "drive"), "per-source receipt was written");
 });
 
+for (const problem of ["failed", "rate-limited", "review", "Gmail continuation", "budget"]) {
+  test(`mixed daily coverage names the source needing attention (${problem})`, async (t) => {
+    const { dailyObservationStatus, renderDailyObservation } = await import("../operations/daily-refresh-observation.mjs");
+    const { cmdHealth, dailyFreshnessRows } = await import("../brain.mjs");
+    const { dailyRefreshIdentity } = await import("../operations/daily-refresh-plan.mjs");
+    const home = mkdtempSync(join(tmpdir(), "daily-mixed-"));
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+    const manifestPath = join(home, "brain.manifest.json");
+    const manifest = { brain: { domain: "fixture.invalid" }, operations: { daily_refresh: { enabled: true } } };
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    const source = (key) => ({ ...plan.sources[0], key, source_names: [key] });
+    const mixed = { ...plan, manifest_path: manifestPath, identity: dailyRefreshIdentity(manifest, "tester"),
+      sources: ["calendar", "drive", "gmail"].map(source) };
+    const start = Date.parse("2026-11-21T12:00:00Z");
+    let clock = start;
+    const calls = [];
+    const inventory = () => Object.fromEntries(calls.filter(key => key !== "gmail").map(key =>
+      [key, { last_successful_run_at: new Date(start).toISOString() }]));
+    const options = { home, platform: "darwin", principal: "tester", now: () => new Date(clock) };
+    const result = await runDailyRefreshCli(manifestPath, {
+      ...options, brainModule: {}, buildPlan: async () => mixed, readUpdateTransaction: () => null, silent: true,
+      acquireLock: () => ({ assertOwned() {}, release() {} }),
+      readFreshness: async () => inventory(),
+      runSource: async ({ key }, { deadlineAt }) => {
+        assert.equal(deadlineAt, start + 45 * 60_000);
+        calls.push(key);
+        if (key === "drive" && problem === "budget") clock = deadlineAt;
+        if (key !== "gmail") return { status: "complete" };
+        if (problem === "Gmail continuation") return { more_history: true };
+        if (problem === "review") throw new DriveRemovalReviewRequired("Synthetic removal review");
+        throw new Error(problem === "rate-limited" ? "429" : "Synthetic failure");
+      },
+    });
+    assert.equal(result.status, "partial");
+    for (const row of result.sources.slice(0, 2)) {
+      assert.equal(row.status, "complete");
+      assert.equal(row.freshness_advanced, true);
+      assert.equal(row.last_successful_run_at_after, new Date(start).toISOString());
+    }
+    assert.equal(result.sources[2].freshness_advanced, false);
+    assert.equal(calls.filter(key => key === "gmail").length,
+      problem === "Gmail continuation" ? 32 : problem === "budget" ? 0 : 1);
+    const schedule = dailyObservationStatus(mixed, { enabled: true }, { exit_code: 0 }, true, options);
+    assert.equal(schedule.last_result, "partial");
+    assert.equal(schedule.last_error_line, null);
+    const lines = [];
+    renderDailyObservation(schedule, line => lines.push(line));
+    assert.ok(lines.some(line => /Daily attention: gmail: /u.test(line)));
+    const healthLines = [];
+    await cmdHealth(manifestPath, {
+      reachOnly: true, resolveKey: () => "fixture-admin-label", dailyObservationOptions: options,
+      logDailyAttention: line => healthLines.push(line),
+      request: async url => Response.json(new URL(url).pathname === "/health"
+        ? { version: "fixture", ok: true, status: "ok", vector_drain_mode: "active",
+          accepting_documents: true, vector_writer_protocol: "lease-v1" }
+        : { version: "fixture", backend: "d1", vector_drain_mode: "active", rows: [] }),
+    });
+    assert.ok(healthLines.some(line => /Daily attention: gmail: /u.test(line)));
+    const rows = dailyFreshnessRows(mixed, { sources: Object.entries(inventory()).map(([name, receipt]) =>
+      ({ name, receipt, freshness: { state: "ok" } })) }, schedule);
+    assert.equal(rows[0].current_state, "ok");
+    assert.equal(rows[0].last_successful_run_at, new Date(start).toISOString());
+    assert.match(rows[2].daily_attention, /gmail: /u);
+  });
+}
+
+test("daily coverage stays complete for all successful sources and failed for all failed sources", async () => {
+  const keys = ["calendar", "drive", "gmail"];
+  for (const expected of ["complete", "failed"]) {
+    const completed = [];
+    const result = await runDailyRefresh({
+      plan: { ...plan, sources: keys.map(key => ({ ...plan.sources[0], key })) },
+      acquireLock: () => ({ assertOwned() {}, release() {} }),
+      runSource: async ({ key }) => {
+        completed.push(key);
+        if (expected === "failed") throw new Error("Synthetic source failure");
+        return { status: "complete" };
+      },
+      readFreshness: async () => Object.fromEntries(completed.map(key =>
+        [key, { last_successful_run_at: "2026-11-21T12:00:00Z" }])),
+    });
+    assert.deepEqual(completed, keys);
+    assert.equal(result.status, expected);
+    assert.deepEqual(result.sources.map(row => row.status), keys.map(() => expected));
+  }
+});
+
 test("macOS daily refresh waits for a live lifecycle holder, then acquires and runs", async () => {
   const receipts = [];
   let acquireCalls = 0;
@@ -850,7 +937,8 @@ test("complete and partial source receipts stay byte-identical while the daily r
       started_at: observedAt,
       completed_at: observedAt,
       lock_wait_ms: 0,
-      schedule_attention: [],
+      schedule_attention: status === "partial"
+        ? ["drive: finished checking with some items left to review."] : [],
       sources: [source],
     }];
   };
@@ -1501,7 +1589,7 @@ for (const platform of ["darwin", "win32"]) {
         assert.equal(observed.record.error, "One or more daily sources failed or did not prove freshness.");
         assert.ok(lines.includes(`Last daily error: ${observed.record.error}`));
       }
-      assert.ok(lines.includes(`Last daily result: ${status === "partial" ? "partial (coverage omissions)" : expected}`));
+      assert.ok(lines.includes(`Last daily result: ${status === "partial" ? "partial (some sources or items need attention)" : expected}`));
       const failedProcess = dailyObservationStatus(plan, { enabled: false }, { known: true, exit_code: 5 }, true, options);
       assert.equal(failedProcess.last_result, "failed", "a native process failure still overrides any journal result");
       assert.equal(failedProcess.last_error_line, "Daily process exited with code 5.");

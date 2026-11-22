@@ -69,7 +69,7 @@ export function cleanMoneyCtes(window = null, frozenMembership = false) {
   return `mq_base_accounts AS MATERIALIZED (
   -- Masks and kinds describe accounts; only a current owner-approved link
   -- authorizes suppressing another account's overlapping rows.
-  SELECT a.*,${accountKindReviewSql('a')} AS account_kind_review_json,e.kind AS entity_kind,e.relationship,e.basis_state AS entity_basis,
+  SELECT a.*,e.kind AS entity_kind,e.relationship,e.basis_state AS entity_basis,
     CASE WHEN e.kind IN ('person','household') THEN 'personal'
       WHEN e.kind IN ('business','property') THEN 'business' ELSE 'unassigned' END AS side,
     json_array(a.tenant_id,'account',a.account_slug) AS base_identity
@@ -77,19 +77,18 @@ export function cleanMoneyCtes(window = null, frozenMembership = false) {
     AND e.entity_slug=a.entity_slug AND e.superseded_by_id IS NULL
   WHERE a.superseded_by_id IS NULL
 ), mq_links AS MATERIALIZED (
-  SELECT l.tenant_id,l.manual_account_slug,l.live_account_slug,v.base_identity AS account_identity
-  FROM fin_account_links l JOIN mq_base_accounts m ON m.tenant_id=l.tenant_id AND m.account_slug=l.manual_account_slug
-  JOIN mq_base_accounts v ON v.tenant_id=l.tenant_id AND v.account_slug=l.live_account_slug
+  SELECT l.tenant_id,l.manual_account_slug,l.live_account_slug,json_array(v.tenant_id,'account',v.account_slug) AS account_identity
+  FROM fin_account_links l JOIN fin_accounts m ON m.tenant_id=l.tenant_id AND m.account_slug=l.manual_account_slug
+  JOIN fin_accounts v ON v.tenant_id=l.tenant_id AND v.account_slug=l.live_account_slug
+  JOIN fin_entities e ON e.tenant_id=m.tenant_id AND e.entity_slug=m.entity_slug AND e.superseded_by_id IS NULL
   WHERE l.unlinked_at IS NULL AND m.feed_mode='manual' AND v.feed_mode='live'
+    AND m.superseded_by_id IS NULL AND v.superseded_by_id IS NULL
     AND m.basis_state='confirmed' AND v.basis_state='confirmed'
-    AND m.relationship='owned' AND v.relationship='owned' AND m.entity_basis='confirmed' AND v.entity_basis='confirmed'
+    AND e.relationship='owned' AND e.basis_state='confirmed'
     AND m.currency=v.currency AND m.entity_slug=v.entity_slug AND m.balance_role=v.balance_role
     AND l.identity_json=json_array(${snapshot('m')},${snapshot('v')})
 ), mq_accounts AS MATERIALIZED (
-  SELECT a.*,COALESCE(l.account_identity,
-    CASE WHEN EXISTS(SELECT 1 FROM fin_account_links stale WHERE stale.tenant_id=a.tenant_id AND stale.unlinked_at IS NULL
-      AND (stale.manual_account_slug=a.account_slug OR stale.live_account_slug=a.account_slug))
-      THEN json_array(a.tenant_id,'account',a.account_slug) ELSE a.base_identity END) AS account_identity,
+  SELECT a.*,COALESCE(l.account_identity,a.base_identity) AS account_identity,
     CASE WHEN l.account_identity IS NOT NULL THEN 'owner_link'
       WHEN EXISTS(SELECT 1 FROM fin_account_links stale WHERE stale.tenant_id=a.tenant_id AND stale.unlinked_at IS NULL
         AND (stale.manual_account_slug=a.account_slug OR stale.live_account_slug=a.account_slug)) THEN 'stale_link'
@@ -97,13 +96,16 @@ export function cleanMoneyCtes(window = null, frozenMembership = false) {
   FROM mq_base_accounts a LEFT JOIN mq_links l ON l.tenant_id=a.tenant_id
     AND (l.manual_account_slug=a.account_slug OR l.live_account_slug=a.account_slug)
 ), mq_posted AS MATERIALIZED (
-  SELECT t.*,a.account_identity FROM fin_transactions t JOIN mq_accounts a
+  SELECT t.*,a.account_identity,a.mask AS account,a.label AS account_label,
+    a.institution,a.account_kind,a.basis_state AS account_basis,a.entity_slug AS entity,a.relationship,a.entity_basis,a.side,a.identity_basis,
+    a.opened_on,a.closed_on,a.status AS account_status,a.feed_mode
+  FROM fin_transactions t JOIN mq_accounts a
     ON a.tenant_id=t.tenant_id AND a.account_slug=t.account_slug
   WHERE t.removed_at IS NULL AND t.superseded_by_id IS NULL AND t.pending=0
 ), mq_pending AS MATERIALIZED (
-  SELECT t.* FROM fin_transactions t JOIN mq_accounts a
+  SELECT t.* FROM fin_transactions t JOIN fin_accounts a
     ON a.tenant_id=t.tenant_id AND a.account_slug=t.account_slug
-  WHERE t.removed_at IS NULL AND t.superseded_by_id IS NULL AND t.pending=1
+  WHERE a.superseded_by_id IS NULL AND t.removed_at IS NULL AND t.superseded_by_id IS NULL AND t.pending=1
     AND NOT EXISTS(SELECT 1 FROM main.fin_transactions p WHERE p.removed_at IS NULL AND p.superseded_by_id IS NULL AND p.pending=0 AND p.tenant_id=t.tenant_id AND p.account_slug=t.account_slug
       AND p.source_provider IS t.source_provider AND t.external_id IS NOT NULL
       AND p.pending_transaction_id=t.external_id)
@@ -120,53 +122,53 @@ export function cleanMoneyCtes(window = null, frozenMembership = false) {
 ), mq_ranges AS MATERIALIZED (
   SELECT a.tenant_id,a.account_slug,a.account_identity,a.feed_mode,
     CASE WHEN ${validCoverage} THEN c.covered_from ELSE h.first_posted END AS first_posted,
-    CASE WHEN ${validCoverage} THEN c.covered_to ELSE h.last_posted END AS last_posted
+    CASE WHEN ${validCoverage} THEN c.covered_to ELSE h.last_posted END AS last_posted,
+    COALESCE((${validCoverage}),0) AS verified
   FROM mq_accounts a LEFT JOIN mq_history h ON h.tenant_id=a.tenant_id AND h.account_slug=a.account_slug
   LEFT JOIN fin_account_coverage c ON c.tenant_id=a.tenant_id AND c.account_slug=a.account_slug AND c.superseded_by_id IS NULL
   GROUP BY a.tenant_id,a.account_slug
-), mq_duplicate_groups AS MATERIALIZED (
-  -- Count account identities once per candidate key. A correlated peer scan
-  -- otherwise revisits every identical posting when all rows share an account.
-  SELECT tenant_id,posted_on,amount_minor,direction,currency,count(DISTINCT account_slug) AS accounts
-  FROM mq_posted GROUP BY tenant_id,posted_on,amount_minor,direction,currency
+), mq_duplicate_rows AS MATERIALIZED (
+  -- Distinct nonempty account groups have different min/max slugs. One scan
+  -- also avoids expanding the posting CTE twice when compiling coverage.
+  SELECT tenant_id,account_slug,posted_on,
+    min(account_slug) OVER duplicates <> max(account_slug) OVER duplicates AS possible_duplicate
+  FROM mq_posted
+  WHERE posted_on IS NOT NULL AND amount_minor IS NOT NULL AND direction IS NOT NULL AND currency IS NOT NULL
+  WINDOW duplicates AS (PARTITION BY tenant_id,posted_on,amount_minor,direction,currency)
 ), mq_decisions AS MATERIALIZED (
-  SELECT t.*, EXISTS (
-      SELECT 1 FROM mq_ranges other WHERE other.account_identity=t.account_identity
-        AND other.account_slug<>t.account_slug AND t.posted_on BETWEEN other.first_posted AND other.last_posted
-        AND (other.feed_mode='live' AND own.feed_mode<>'live'
+  -- Both flags use the same overlapping peers. Expanding that account-range
+  -- lookup twice for each snapshot branch can exceed SQLite's cursor limit.
+  SELECT t.*,own.first_posted AS effective_from,own.last_posted AS effective_to,own.verified AS coverage_verified,
+    (SELECT json_object('source_duplicate',COALESCE(max(other.feed_mode='live' AND own.feed_mode<>'live'
           OR other.feed_mode=own.feed_mode AND (other.first_posted>own.first_posted
-            OR other.first_posted=own.first_posted AND other.account_slug<own.account_slug))
-    ) AS source_duplicate
+            OR other.first_posted=own.first_posted AND other.account_slug<own.account_slug)),0),
+        'manual_peer',COALESCE(max(other.feed_mode<>'live'),0))
+      FROM mq_ranges other WHERE other.account_identity=t.account_identity
+        AND other.account_slug<>t.account_slug AND t.posted_on BETWEEN other.first_posted AND other.last_posted
+    ) AS precedence
   FROM mq_posted t JOIN mq_ranges own ON own.tenant_id=t.tenant_id AND own.account_slug=t.account_slug
 ), mq_row_status AS MATERIALIZED (
   -- Keep the dollars behind every lifecycle/coverage refusal. A smaller clean
   -- total is not evidence that those posted rows had no financial impact.
-  SELECT t.*,CASE WHEN t.source_duplicate=1 THEN 'duplicate_feed'
-    WHEN a.opened_on IS NOT NULL AND t.posted_on<a.opened_on THEN 'before_opened'
-    WHEN a.closed_on IS NOT NULL AND t.posted_on>a.closed_on THEN 'after_closed'
-    WHEN a.status='closed' AND a.closed_on IS NULL THEN 'closed_without_date'
-    WHEN a.feed_mode='live' AND t.posted_on NOT BETWEEN own.first_posted AND own.last_posted THEN 'outside_confirmed_coverage'
-    END AS reason
-  FROM mq_decisions t JOIN mq_ranges own ON own.tenant_id=t.tenant_id AND own.account_slug=t.account_slug
-  JOIN mq_accounts a ON a.tenant_id=t.tenant_id AND a.account_slug=t.account_slug
+  SELECT t.*,CASE WHEN json_extract(t.precedence,'$.source_duplicate')=1 THEN 'duplicate_feed'
+    WHEN t.opened_on IS NOT NULL AND t.posted_on<t.opened_on THEN 'before_opened'
+    WHEN t.closed_on IS NOT NULL AND t.posted_on>t.closed_on THEN 'after_closed'
+    WHEN t.account_status='closed' AND t.closed_on IS NULL THEN 'closed_without_date'
+    WHEN t.feed_mode='live' AND t.posted_on NOT BETWEEN t.effective_from AND t.effective_to THEN 'outside_confirmed_coverage'
+    END AS reason,
+    CASE WHEN json_extract(t.precedence,'$.source_duplicate')=0 AND
+      (t.feed_mode<>'live' OR t.identity_basis<>'owner_link' OR t.posted_on BETWEEN t.effective_from AND t.effective_to
+        OR json_extract(t.precedence,'$.manual_peer')=0)
+    THEN 1 ELSE 0 END AS kept
+  FROM mq_decisions t
   WHERE t.amount_minor IS NOT NULL AND t.direction IS NOT NULL AND date(t.posted_on,'+0 days')=t.posted_on
 ), mq_kept AS MATERIALIZED (
-  SELECT t.* FROM mq_decisions t JOIN mq_ranges own ON own.tenant_id=t.tenant_id AND own.account_slug=t.account_slug
-  JOIN mq_accounts a ON a.tenant_id=t.tenant_id AND a.account_slug=t.account_slug
-  WHERE t.source_duplicate=0 AND t.amount_minor IS NOT NULL AND t.direction IS NOT NULL AND date(t.posted_on,'+0 days')=t.posted_on
-    AND (a.feed_mode<>'live' OR a.identity_basis<>'owner_link' OR t.posted_on BETWEEN own.first_posted AND own.last_posted
-      OR NOT EXISTS (SELECT 1 FROM mq_ranges other WHERE other.account_identity=t.account_identity
-        AND other.account_slug<>t.account_slug AND other.feed_mode<>'live' AND t.posted_on BETWEEN other.first_posted AND other.last_posted))
-), mq_excluded AS MATERIALIZED (
-  SELECT s.* FROM mq_row_status s WHERE reason IS NOT NULL AND NOT EXISTS(SELECT 1 FROM mq_kept k WHERE k.id=s.id)
-), mq_conflicts AS MATERIALIZED (
-  SELECT s.* FROM mq_row_status s WHERE reason IS NOT NULL AND EXISTS(SELECT 1 FROM mq_kept k WHERE k.id=s.id)
+  SELECT * FROM mq_row_status WHERE kept
 ), mq_rows AS MATERIALIZED (
-  SELECT t.*,${moneyMinorSql('t.amount_minor', 't.currency')} AS amount,a.mask AS account,a.label AS account_label,
-    a.institution,a.account_kind,a.basis_state AS account_basis,a.entity_slug AS entity,a.relationship,a.entity_basis,a.side,a.identity_basis,
-    CASE WHEN a.feed_mode='live' THEN COALESCE(t.source_provider,'live') ELSE 'import' END AS feed_kind,
+  SELECT t.*,${moneyMinorSql('t.amount_minor', 't.currency')} AS amount,
+    CASE WHEN t.feed_mode='live' THEN COALESCE(t.source_provider,'live') ELSE 'import' END AS feed_kind,
     ${memoSql('t.description')} AS memo
-  FROM mq_kept t JOIN mq_accounts a ON a.tenant_id=t.tenant_id AND a.account_slug=t.account_slug
+  FROM mq_kept t
 ), mq_out AS MATERIALIZED (SELECT * FROM mq_rows WHERE direction='outflow'),
 mq_in AS MATERIALIZED (SELECT * FROM mq_rows WHERE direction='inflow'), mq_candidates AS (
   SELECT o.id AS out_id,i.id AS in_id,o.tenant_id,o.amount_minor,o.currency,
@@ -211,6 +213,26 @@ mq_in AS MATERIALIZED (SELECT * FROM mq_rows WHERE direction='inflow'), mq_candi
   SELECT id,max(proved=0) AS possible_transfer,
     max(CASE WHEN proved=1 THEN evidence END) AS transfer_basis
   FROM mq_pair_ends GROUP BY id
+), mq_coverage_rows AS MATERIALIZED (
+  SELECT t.tenant_id,t.account_slug,
+    min(CASE WHEN ${within('t')} THEN t.posted_on END) AS first_row,
+    max(CASE WHEN ${within('t')} THEN t.posted_on END) AS last_row,
+    count(CASE WHEN ${within('t')} THEN 1 END) AS row_count,
+    count(CASE WHEN t.posted_on<t.opened_on OR t.posted_on>t.closed_on OR t.account_status='closed' AND t.closed_on IS NULL
+      OR t.coverage_verified AND t.posted_on NOT BETWEEN t.effective_from AND t.effective_to THEN 1 END) AS rows_outside_account_dates
+  FROM mq_kept t GROUP BY t.tenant_id,t.account_slug
+), mq_coverage_pending AS MATERIALIZED (
+  SELECT tenant_id,account_slug,count(*) AS pending_rows,min(posted_on) AS pending_oldest_on,
+    sum(CASE WHEN direction='inflow' THEN amount_minor END) AS pending_in_minor,
+    sum(CASE WHEN direction='outflow' THEN amount_minor END) AS pending_out_minor
+  FROM mq_pending GROUP BY tenant_id,account_slug
+), mq_coverage_excluded AS MATERIALIZED (
+  SELECT t.tenant_id,t.account_slug,
+    count(CASE WHEN t.reason='duplicate_feed' AND ${within('t')} THEN 1 END) AS duplicate_rows_removed,
+    count(CASE WHEN t.reason<>'duplicate_feed' THEN 1 END) AS excluded_rows,
+    sum(CASE WHEN t.reason<>'duplicate_feed' AND t.direction='inflow' THEN t.amount_minor END) AS excluded_inflow_minor,
+    sum(CASE WHEN t.reason<>'duplicate_feed' AND t.direction='outflow' THEN t.amount_minor END) AS excluded_outflow_minor
+  FROM mq_row_status t WHERE t.reason IS NOT NULL AND NOT t.kept GROUP BY t.tenant_id,t.account_slug
 ), mq_tagged AS MATERIALIZED (
   SELECT t.*,
     COALESCE(${membership('money_kind')},'ordinary') AS movement_kind,
@@ -248,39 +270,31 @@ mq_in AS MATERIALIZED (SELECT * FROM mq_rows WHERE direction='inflow'), mq_candi
       WHEN EXISTS(SELECT 1 FROM plaid_account_entity_assignments p WHERE p.tenant_id=a.tenant_id AND p.account_ref=a.external_ref) THEN 'plaid'
       ELSE COALESCE((SELECT t.source_provider FROM mq_posted t WHERE t.tenant_id=a.tenant_id
         AND t.account_slug=a.account_slug AND t.source_provider IS NOT NULL LIMIT 1),'live') END AS feed_kind,
-    (SELECT MIN(t.posted_on) FROM txn t WHERE t.tenant_id=a.tenant_id AND t.account_slug=a.account_slug) AS first_row,
-    (SELECT MAX(t.posted_on) FROM txn t WHERE t.tenant_id=a.tenant_id AND t.account_slug=a.account_slug) AS last_row,
-    (SELECT count(*) FROM txn t WHERE t.tenant_id=a.tenant_id AND t.account_slug=a.account_slug) AS row_count,
+    r.first_row,r.last_row,COALESCE(r.row_count,0) AS row_count,
     COALESCE(h.raw_row_count,0) AS raw_row_count,
-    (SELECT count(*) FROM mq_decisions t WHERE t.tenant_id=a.tenant_id AND t.account_slug=a.account_slug
-      AND ${within('t')} AND t.source_duplicate=1 AND t.amount_minor IS NOT NULL AND t.direction IS NOT NULL
-      AND date(t.posted_on,'+0 days')=t.posted_on) AS duplicate_rows_removed,
-    (SELECT count(*) FROM mq_posted t JOIN mq_duplicate_groups g
-      ON g.tenant_id=t.tenant_id AND g.posted_on=t.posted_on AND g.amount_minor=t.amount_minor
-      AND g.direction=t.direction AND g.currency=t.currency AND g.accounts>1
-      WHERE t.tenant_id=a.tenant_id AND t.account_slug=a.account_slug AND ${within('t')}) AS possible_duplicate_count,
+    COALESCE(x.duplicate_rows_removed,0) AS duplicate_rows_removed,
+    (SELECT count(*) FROM mq_duplicate_rows t WHERE t.tenant_id=a.tenant_id AND t.account_slug=a.account_slug
+      AND t.possible_duplicate AND ${within('t')}) AS possible_duplicate_count,
     COALESCE(h.unreadable_rows,0) AS unreadable_rows,COALESCE(h.unconfirmed_rows,0) AS unconfirmed_rows,
-    (SELECT count(*) FROM mq_kept t WHERE t.tenant_id=a.tenant_id AND t.account_slug=a.account_slug AND
-      (t.posted_on<a.opened_on OR t.posted_on>a.closed_on OR a.status='closed' AND a.closed_on IS NULL
-        OR (${validCoverage} AND t.posted_on NOT BETWEEN c.covered_from AND c.covered_to))) AS rows_outside_account_dates,
-    (SELECT count(*) FROM mq_pending p WHERE p.tenant_id=a.tenant_id AND p.account_slug=a.account_slug) AS pending_rows,
-    (SELECT COALESCE(SUM(p.amount_minor),0) FROM mq_pending p WHERE p.tenant_id=a.tenant_id AND p.account_slug=a.account_slug AND p.direction='inflow') AS pending_in_minor,
-    (SELECT COALESCE(SUM(p.amount_minor),0) FROM mq_pending p WHERE p.tenant_id=a.tenant_id AND p.account_slug=a.account_slug AND p.direction='outflow') AS pending_out_minor,
-    (SELECT MIN(p.posted_on) FROM mq_pending p WHERE p.tenant_id=a.tenant_id AND p.account_slug=a.account_slug) AS pending_oldest_on,
+    COALESCE(r.rows_outside_account_dates,0) AS rows_outside_account_dates,
+    COALESCE(pending.pending_rows,0) AS pending_rows,COALESCE(pending.pending_in_minor,0) AS pending_in_minor,
+    COALESCE(pending.pending_out_minor,0) AS pending_out_minor,pending.pending_oldest_on,
     NULL AS last_sync,'unavailable_private_connection_state' AS sync_basis,
     (SELECT MAX(observed_at) FROM (
       SELECT p.last_seen_at AS observed_at FROM plaid_account_entity_assignments p WHERE p.tenant_id=a.tenant_id AND p.account_ref=a.external_ref
       UNION ALL SELECT s.last_seen_at FROM simplefin_account_assignments s WHERE s.tenant_id=a.tenant_id AND s.account_ref=a.external_ref)) AS last_observed_at,
     COALESCE((${validCoverage}),0) AS coverage_verified,
-    (SELECT count(*) FROM mq_excluded t WHERE t.tenant_id=a.tenant_id AND t.account_slug=a.account_slug AND t.reason<>'duplicate_feed') AS excluded_rows,
-    (SELECT COALESCE(sum(t.amount_minor),0) FROM mq_excluded t WHERE t.tenant_id=a.tenant_id AND t.account_slug=a.account_slug AND t.reason<>'duplicate_feed' AND t.direction='inflow') AS excluded_inflow_minor,
-    (SELECT COALESCE(sum(t.amount_minor),0) FROM mq_excluded t WHERE t.tenant_id=a.tenant_id AND t.account_slug=a.account_slug AND t.reason<>'duplicate_feed' AND t.direction='outflow') AS excluded_outflow_minor,
+    COALESCE(x.excluded_rows,0) AS excluded_rows,COALESCE(x.excluded_inflow_minor,0) AS excluded_inflow_minor,
+    COALESCE(x.excluded_outflow_minor,0) AS excluded_outflow_minor,
     c.computed_at AS coverage_computed_at,c.basis_state AS coverage_basis_state,c.coverage_status,
     ${historyCoverageStartSql('a','h.first_posted',validCoverage)} AS covered_from,c.covered_to,
     'recorded' AS pending_collection,0 AS pending_stale_rows,0 AS pending_stale_in_minor,0 AS pending_stale_out_minor,0 AS history_gap_days,
     ${window ? `'${window.from}'` : 'NULL'} AS window_from,${window ? `'${window.through}'` : 'NULL'} AS window_through,
     h.first_posted AS history_first_row,h.last_posted AS history_last_row
   FROM mq_accounts a LEFT JOIN mq_history h ON h.tenant_id=a.tenant_id AND h.account_slug=a.account_slug
+  LEFT JOIN mq_coverage_rows r ON r.tenant_id=a.tenant_id AND r.account_slug=a.account_slug
+  LEFT JOIN mq_coverage_pending pending ON pending.tenant_id=a.tenant_id AND pending.account_slug=a.account_slug
+  LEFT JOIN mq_coverage_excluded x ON x.tenant_id=a.tenant_id AND x.account_slug=a.account_slug
   LEFT JOIN fin_account_coverage c ON c.tenant_id=a.tenant_id
     AND c.account_slug=a.account_slug AND c.superseded_by_id IS NULL
 )`;
@@ -318,14 +332,14 @@ const snapshotRows = (kind, table, fields) => {
 // Each record stays a separate result row; aggregating a whole corpus into one
 // JSON cell would exceed native row/transport limits before the scan budget.
 const snapshotSelections = [snapshotRows('rows','mq_rows',ROW_FIELDS),
-  snapshotRows('accounts','mq_accounts',ACCOUNT_FIELDS),
+  snapshotRows('accounts',`(SELECT a.*,${accountKindReviewSql('a')} AS account_kind_review_json FROM mq_accounts a)`,ACCOUNT_FIELDS),
   snapshotRows('entities','(SELECT tenant_id,legal_name,display_label,kind FROM fin_entities WHERE superseded_by_id IS NULL)',
     ['tenant_id','legal_name','display_label','kind']),
   snapshotRows('pairs','mq_pairs_all',PAIR_FIELDS),
   snapshotRows('coverage','coverage',COVERAGE_FIELDS),
-  snapshotRows('unreadable',`(SELECT t.id,t.tenant_id,t.account_slug,a.mask AS account,t.posted_on,t.amount_minor,t.direction,t.currency,a.side,a.entity_slug AS entity,a.account_identity,
+  snapshotRows('unreadable',`(SELECT t.id,t.tenant_id,t.account_slug,t.account,t.posted_on,t.amount_minor,t.direction,t.currency,t.side,t.entity,t.account_identity,
     CASE WHEN date(substr(t.posted_on,1,10),'+0 days')=substr(t.posted_on,1,10) THEN substr(t.posted_on,1,10) END AS readable_day
-    FROM mq_posted t JOIN mq_accounts a ON a.tenant_id=t.tenant_id AND a.account_slug=t.account_slug
+    FROM mq_posted t
     WHERE t.amount_minor IS NULL OR t.direction IS NULL OR date(t.posted_on,'+0 days') IS NOT t.posted_on OR t.posted_on IS NULL)`,
     ['id','tenant_id','account_slug','account','posted_on','amount_minor','direction','currency','side','entity','account_identity','readable_day']),
   snapshotRows('settled',`(SELECT t.tenant_id,t.account_slug,a.mask AS account,t.posted_on AS pending_on,p.posted_on,t.amount_minor,t.direction,t.currency,a.side,a.entity_slug AS entity,a.account_identity
@@ -336,8 +350,7 @@ const snapshotSelections = [snapshotRows('rows','mq_rows',ROW_FIELDS),
     ['tenant_id','account_slug','account','pending_on','posted_on','amount_minor','direction','currency','side','entity','account_identity']),
   snapshotRows('pending','mq_pending',['id','tenant_id','account_slug','posted_on','amount_minor','direction','currency']),
   `SELECT 'quality' AS snapshot_kind,json_object('tenant_id',tenant_id,'account_slug',account_slug,'posted_on',posted_on,'currency',currency,'direction',direction,'amount_minor',sum(amount_minor),'unreadable_rows',count(*)) AS value,NULL AS value2 FROM mq_posted WHERE amount_minor IS NULL OR direction IS NULL OR date(posted_on,'+0 days') IS NOT posted_on OR posted_on IS NULL GROUP BY tenant_id,account_slug,posted_on,currency,direction`,
-  ...['excluded','conflicts'].map(kind => `SELECT '${kind}' AS snapshot_kind,json_object('tenant_id',tenant_id,'account_slug',account_slug,'posted_on',posted_on,'currency',currency,'direction',direction,'reason',reason,'row_count',count(*),'amount_minor',sum(amount_minor)) AS value,NULL AS value2 FROM mq_${kind} WHERE reason IS NOT NULL GROUP BY tenant_id,account_slug,posted_on,currency,direction,reason`),
-  "SELECT 'counts' AS snapshot_kind,json_object('pairs',(SELECT count(*) FROM mq_pairs_all)) AS value,NULL AS value2"];
+  `SELECT CASE WHEN kept THEN 'conflicts' ELSE 'excluded' END AS snapshot_kind,json_object('tenant_id',tenant_id,'account_slug',account_slug,'posted_on',posted_on,'currency',currency,'direction',direction,'reason',reason,'row_count',count(*),'amount_minor',sum(amount_minor)) AS value,NULL AS value2 FROM mq_row_status WHERE reason IS NOT NULL GROUP BY tenant_id,account_slug,posted_on,currency,direction,reason,kept`];
 // D1 limits each compound chain to five terms, including this fixed inventory.
 export const CLEAN_MONEY_SNAPSHOT_SQL = Array.from({length:Math.ceil(snapshotSelections.length/5)},(_,index) =>
   'SELECT * FROM (' + snapshotSelections.slice(index*5,index*5+5).join(' UNION ALL ') + ')').join(' UNION ALL ');

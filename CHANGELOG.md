@@ -4,6 +4,39 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.33 (2026-11-21)
+
+- **Gmail picks up on the next daily run after a Google rate limit.** Your Brain
+  slows its requests and saves its place so the import can continue later.
+- **A daily run with mixed results shows as partial.** The daily summary names
+  the source that needs attention and keeps the work that completed.
+- **Calendar picks up where it stopped.** An interrupted import resumes from
+  its saved position.
+- **The store dashboard names the reason when a check fails.** Use the reason
+  shown beside the affected store to see what needs attention.
+- **Windows checkups and the daily update use the current tools.** After an
+  update, the Windows launcher uses the verified version so checkups stop
+  reporting a tool that only appeared to be out of date.
+- **Reconnect Claude's money tools from your owner entry.** Open the owner entry
+  and follow its reconnection step if Claude needs access again.
+- **Checkups end with a short checklist.** A check mark means your Brain
+  verified that the check passed. The checklist shows what still needs attention.
+- **Ask more money questions in your own words.** The automated checks for
+  hosted money answers now verify date ranges using the owner's day and
+  check the stored ledger evidence.
+
+### This release does NOT cover
+
+- Replacing a bank connection does not revoke the old connection's permission
+  at your bank, and it does not prove complete history for the missing-access
+  period until you compare that period with your statement.
+- Some answers say Medium or Low more often than ideal. Read the stated gaps
+  and check the cited records before relying on a figure.
+- QuickBooks direct connection is pending Intuit approval.
+- Windows x64 is the only supported Windows runtime in this release. Windows
+  ARM64 ships unproven.
+- Bank breadth ships unproven. Bank invitations stay closed.
+
 ## 0.4.32 (2026-11-20)
 
 This update fixes how your Brain reads Google Drive changes and changes

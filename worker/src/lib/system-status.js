@@ -31,6 +31,7 @@
  */
 
 import { settleMeaningSearch, sourceCoverageFromEvidence } from "./source-coverage.js";
+import { CUSTOM_API_CONFIG_REASONS } from "./custom-api-visibility.js";
 
 /** Slug to something a person can read. The slug is never rendered. */
 const SOURCE_LABELS = {
@@ -283,6 +284,8 @@ export async function ownerSystemStatus(env, deps) {
       documents: Number(s.documents || 0),
       days_since_ingest: s.days_since_ingest ?? null,
       reason: s.reason ?? null,
+      ...(s.kind === "custom_api" && Object.hasOwn(CUSTOM_API_CONFIG_REASONS, s.issue_code)
+        ? { issue_code: s.issue_code } : {}),
       automatable: !!s.automatable,
       coverage: ownerCoverageFor(s, vectors),
       ...(zonesAvailable ? { access_zone: ownerAccessZone(s) } : {}),

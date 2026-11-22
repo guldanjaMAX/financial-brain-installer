@@ -8,12 +8,13 @@
 import assert from "node:assert/strict";
 import { Acceptance } from "../acceptance.mjs";
 
-function suiteWith({ liveVersion, manifestVersion, expectVersion }) {
+function suiteWith({ liveVersion, manifestVersion, expectVersion, deferInstallVersionCheck }) {
   return new Acceptance({
     base: "https://example.invalid",
     adminKey: "k",
     manifest: { brain: { version: manifestVersion } },
     expectVersion,
+    deferInstallVersionCheck,
     fetchImpl: async (url) => {
       const path = new URL(String(url)).pathname;
       const body = path === "/health" ? { ok: true, version: liveVersion } : { ok: true, rows: [] };
@@ -55,6 +56,22 @@ const find = (suite, name) => suite.results.find((r) => r.name === name);
   const v = find(suite, "deployed version matches the manifest");
   assert.ok(v && v.status === "pass", `manifest-as-target must pass on a live match: ${v?.status} ${v?.detail}`);
   assert.equal(find(suite, "install state records the running version"), undefined, "no stale-state warning when it matches");
+}
+
+// Upgrade checks the live release before committing, and its D1 readback
+// checks the recorded version after the commit.
+{
+  const suite = suiteWith({
+    liveVersion: "0.3.4", manifestVersion: "0.2.0", expectVersion: "0.3.4",
+    deferInstallVersionCheck: true,
+  });
+  await suite.tierReach();
+  await suite.tierOperations({
+    schema_version: 22, gate_version: 2,
+    get product_version() { throw new Error("acceptance read the version before the commit"); },
+  });
+  assert.equal(find(suite, "deployed version matches the manifest").status, "pass");
+  assert.equal(find(suite, "schema is migrated").status, "pass");
 }
 
 console.log("acceptance version: the live Worker version is what gets certified");

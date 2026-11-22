@@ -23,7 +23,8 @@ export async function handleIngestPartProof(env, request) {
     for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
     body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
   } catch { return invalid(); }
-  if (!body || Object.keys(body).sort().join(',') !== 'source,source_ids' ||
+  const calendarRevision = body?.calendar_revision === true;
+  if (!body || Object.keys(body).sort().join(',') !== (calendarRevision ? 'calendar_revision,source,source_ids' : 'source,source_ids') ||
       typeof body.source !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(body.source) ||
       !Array.isArray(body.source_ids) || body.source_ids.length < 1 || body.source_ids.length > 50 ||
       body.source_ids.some(id => typeof id !== 'string' || !id || id.length > 500 || /[\u0000-\u001f]/.test(id)) ||
@@ -33,6 +34,7 @@ export async function handleIngestPartProof(env, request) {
   const [marker, rows] = await env.DB.batch([
     env.DB.prepare('SELECT instance,nonce,generation FROM ingest_removal_generation WHERE id=1'),
     env.DB.prepare(`SELECT d.source_id,d.content_hash,
+      ${calendarRevision ? "d.document_date, json_extract(d.meta, '$.calendar_revision') AS calendar_revision," : ""}
       (SELECT json_object('n',count(*),'distinct_n',count(DISTINCT chunk_ix),'first',min(chunk_ix),'last',max(chunk_ix))
        FROM (SELECT c.chunk_ix FROM chunks c WHERE c.doc_uid=d.doc_uid${activeChunkSql('c','d')} ORDER BY c.chunk_ix LIMIT 513)) AS chunk_range
       FROM json_each(?1) j JOIN documents d ON d.doc_uid=?2 || ':' || j.value
@@ -48,7 +50,10 @@ export async function handleIngestPartProof(env, request) {
     const range = JSON.parse(row.chunk_range);
     if (/^[a-f0-9]{64}$/.test(row.content_hash) && range.n > 0 && range.n <= 512 &&
         range.distinct_n === range.n && range.first === 0 && range.last === range.n - 1) {
-      parts.push({source_id:row.source_id,content_hash:row.content_hash,chunk_count:range.n});
+      parts.push({source_id:row.source_id,content_hash:row.content_hash,chunk_count:range.n,
+        ...(calendarRevision && /^[a-f0-9]{64}$/.test(row.calendar_revision) ? {
+          calendar_revision:row.calendar_revision,document_date:row.document_date,
+        } : {})});
     }
   }
   return reply({ source:body.source, database, geometry:chunkGeometry(env), parts });

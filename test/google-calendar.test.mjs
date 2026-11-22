@@ -889,8 +889,8 @@ section("posting envelopes at the brain");
       redirect: init.redirect,
     });
     const n = seen.length;
-    if (n === 2) return mkRes({ status: 422, body: { error: "refused", labels: ["anthropic_key"], detail: "Rotate them." } });
-    return mkRes({ status: 200, body: { brain_doc_id: n, action: n === 3 ? "unchanged" : "created", embedded: true } });
+    if (n >= 2 && n <= 4) return mkRes({ status: 422, body: { error: "refused", labels: ["anthropic_key"], detail: "Rotate them." } });
+    return mkRes({ status: 200, body: { brain_doc_id: n, action: n === 5 ? "unchanged" : "created", embedded: true } });
   };
   const envs = [EVENT_KICKOFF, EVENT_RECURRING_MASTER, EVENT_ALLDAY].map((e) => buildEnvelope(e, { calendar: CAL }).envelope);
   const out = await ingestEnvelopes({ baseUrl: "https://brain.acme.com/", adminKey: "k", envelopes: envs, fetchImpl: impl });
@@ -898,9 +898,31 @@ section("posting envelopes at the brain");
   check("it posts to the ingest route", seen[0].url === "https://brain.acme.com/api/admin/brain/ingest", seen[0].url);
   check("it sends the admin key", seen[0].key === "k");
   check("it refuses redirects before posting the admin key", seen[0].redirect === "error");
-  check("a 422 refusal does NOT abort the batch", seen.length === 3, String(seen.length));
-  check("the refusal is reported with its labels", out.refused.length === 1 && out.refused[0].labels[0] === "anthropic_key");
+  check("a 422 refusal gets three attempts and does not abort the batch", seen.length === 5, String(seen.length));
+  check("the refusal is reported with its labels", out.refused.length === 1 && out.refused[0].labels[0] === "anthropic_key" && out.refused[0].code === "INPUT_REFUSED");
   check("created and unchanged are counted separately", out.created === 1 && out.unchanged === 1, JSON.stringify(out));
+}
+
+{
+  const attempts = new Map();
+  const envelopes = ["failed", "recoverable", "later"].map((source_id) => ({ source_id }));
+  const out = await ingestEnvelopes({
+    baseUrl: "https://fixture.invalid",
+    adminKey: "fixture",
+    envelopes,
+    fetchImpl: async (_url, init) => {
+      const { source_id } = JSON.parse(init.body);
+      const count = (attempts.get(source_id) || 0) + 1;
+      attempts.set(source_id, count);
+      if (source_id === "failed") return { ok: true, text: async () => { throw new Error("synthetic body failure"); } };
+      if (source_id === "recoverable" && count < 3) return mkRes({ status: 503 });
+      return mkRes({ body: { action: "created" } });
+    },
+  });
+  check("response-body failures are bounded, coded and do not stop later events",
+    attempts.get("failed") === 3 && out.errors.length === 1 && out.errors[0].code === "INGEST_FAILED");
+  check("a transient write failure can recover within the bounded retries",
+    attempts.get("recoverable") === 3 && out.created === 2);
 }
 
 /* ------------------------------------------------------------------ done */

@@ -5,7 +5,8 @@
 // The marker-equality and quote-binding guards stay as they were.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { answerResponseContractDiagnostic } from '../acceptance.mjs';
+import { Acceptance, answerResponseContractDiagnostic } from '../acceptance.mjs';
+import { acceptanceDiagnostics, ownerAcceptanceRows } from '../operations/owner-checklist.mjs';
 import { finalizeDocumentAnswer } from '../worker/src/lib/document-answer.js';
 import { ownerConfidenceLine } from '../worker/src/lib/confidence.js';
 
@@ -32,6 +33,20 @@ const withProse = (payload, edit) => {
   const at = payload.answer.indexOf('\n\nCoverage:');
   return { ...payload, answer: edit(payload.answer.slice(0, at)) + payload.answer.slice(at) };
 };
+
+test('a bounded document reading retains numeric confidence only in the diagnostics', async () => {
+  const sourceRows = [row(1, 'The vendor renews on 2026-12-01.')];
+  const payload = payloadFor(sourceRows);
+  const suite = new Acceptance({
+    base: 'https://brain.example.invalid', adminKey: 'fixture-admin-key',
+    fetchImpl: async url => Response.json(url.endsWith('/think') ? payload : { results: sourceRows }),
+  });
+  await suite.tierRetrieval(['When does the vendor renew?']);
+  const summary = suite.summary();
+  const diagnostic = acceptanceDiagnostics(summary).find(check => check.name === 'document boundary reading');
+  assert.equal(diagnostic?.diagnostic?.confidence_percent, payload.confidence.percent);
+  assert.doesNotMatch(ownerAcceptanceRows(summary).join('\n'), /below High|confidence|document boundary reading/i);
+});
 
 test('acceptance passes a 12-record reading whose source text and title contain bracketed digits', () => {
   const results = Array.from({ length: 12 }, (_, i) => i === 0

@@ -95,6 +95,9 @@ function writePriorInstallerRuntime(parent) {
 }
 
 try {
+  const reconnect = reviewedSkillContent().split("## Reconnect Claude to my Brain")[1]?.split("\n## ")[0];
+  assert.match(reconnect ?? "", /Wait for explicit approval[\s\S]*mcp-config <manifest> --apply --replace-owner-entry[\s\S]*fully quit and reopen Claude/);
+
   assert.deepEqual(
     parseLocalAssistantRepairScopes("codex-mcp,technician-skill"),
     ["technician-skill", "codex-mcp"],
@@ -410,6 +413,10 @@ try {
   assert.equal(readFileSync(codexConfigPath, "utf8"), codexSentinel);
   assert.equal(calls.length, 0, "injected read-only assistant presence avoids every CLI call during preview");
   assert.equal(durableReads, 0, "preview never opens the durable admin-key store");
+  const mismatchedRuntime = await buildLocalAssistantRepairPlan(
+    manifestPath, ["claude-code-mcp"], { mcpOptions: { ...mcpOptions, verifyRuntime: () => false } },
+  );
+  assert.match(mismatchedRuntime.items[0].verification, /exact nine-tool Owner assistant list/);
 
   const configuredCodexHome = join(sandbox, "configured-codex-preview");
   const configuredCodexRoot = join(configuredCodexHome, ".codex");
@@ -528,6 +535,10 @@ try {
     mcpOptions,
   }));
   assert.equal(mcpApplied.value.results[0].status, "repaired");
+  const readyRuntime = await buildLocalAssistantRepairPlan(manifestPath, ["claude-code-mcp"], { mcpOptions });
+  assert.equal(readyRuntime.items[0].status, "ready");
+  assert.match(readyRuntime.items[0].detail, /nine-tool runtime/);
+  assert.match(readyRuntime.items[0].verification, /nine-tool list/);
   assert.equal(durableReads, 1, "the durable key is checked only inside the approved apply");
   assert.equal(readFileSync(codexConfigPath, "utf8"), codexSentinel, "unselected Codex config is byte-identical");
   const claudeConfig = readFileSync(claudeConfigPath, "utf8");

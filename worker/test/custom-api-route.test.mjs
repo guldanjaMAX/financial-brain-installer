@@ -42,14 +42,22 @@ function env() {
   };
 }
 
-test("admin-only dry run executes in the Worker, fetches the declared host, and performs no D1 write", async () => {
+test("admin-only dry run follows a permanent move and performs no D1 write", async () => {
   const original = globalThis.fetch;
-  let fetches = 0;
-  let authorized = false;
+  const requested = [];
+  let writes = 0;
+  const settings = env();
+  const prepare = settings.DB.prepare;
+  settings.DB.prepare = () => ({
+    ...prepare(),
+    async run() { writes++; },
+  });
   globalThis.fetch = async (input, init) => {
-    fetches++;
-    authorized = String(input) === "https://dashboard.invalid/api/sales" &&
-      new Headers(init.headers).get("Authorization") === `Bearer ${TOKEN}`;
+    requested.push(String(input));
+    assert.ok(new Headers(init.headers).get("Authorization") === `Bearer ${TOKEN}`);
+    if (requested.length === 1) {
+      return new Response(null, { status: 308, headers: { Location: "/new/sales" } });
+    }
     return new Response(JSON.stringify({ data: [{ store: "Store A", period: "2026-08-01", net_sales: 10 }] }), {
       headers: { "content-type": "application/json" },
     });
@@ -59,7 +67,7 @@ test("admin-only dry run executes in the Worker, fetches the declared host, and 
       method: "POST",
       headers: { "X-Admin-Key": "fixture-admin-key", "Content-Type": "application/json" },
       body: JSON.stringify({ dry_run: true }),
-    }), env(), { waitUntil() {} });
+    }), settings, { waitUntil() {} });
     const body = await response.json();
     assert.equal(response.status, 200, JSON.stringify(body));
     assert.equal(body.status, "completed");
@@ -67,8 +75,9 @@ test("admin-only dry run executes in the Worker, fetches the declared host, and 
     assert.deepEqual(body.endpoint_results.map(({ name, rows_received, rows_refused, documents }) => ({
       name, rows_received, rows_refused, documents,
     })), [{ name: "sales", rows_received: 1, rows_refused: 0, documents: 1 }]);
-    assert.equal(fetches, 1, "the route reached the configured fetch decision point");
-    assert.equal(authorized, true);
+    assert.deepEqual(requested, ["https://dashboard.invalid/api/sales", "https://dashboard.invalid/new/sales"]);
+    assert.deepEqual(body.endpoint_results[0].endpoint_moves, [{old_path: "/api/sales", new_path: "/new/sales"}]);
+    assert.equal(writes, 0);
     assert.equal(JSON.stringify(body).includes(TOKEN), false);
   } finally {
     globalThis.fetch = original;
@@ -291,4 +300,52 @@ test("a monthly answer document carries more than eight stores through the real 
   for (let index = 0; index < 12; index++) {
     assert.match(answerPrompt, new RegExp(`Store ${index}(?:\\s|\\|)`), `answer prompt includes store ${index}`);
   }
+});
+test("manual runs return fixed configuration reasons without including request details", async (t) => {
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; });
+  async function check(settings, code, error, dryRun = true) {
+    const response = await worker.fetch(new Request(`https://brain.invalid${CUSTOM_API_RUN_PATH}`, {
+      method: "POST",
+      headers: { "X-Admin-Key": "fixture-admin-key", "Content-Type": "application/json" },
+      body: JSON.stringify({ dry_run: dryRun }),
+    }), settings, { waitUntil() {} });
+    assert.equal(response.status, 422);
+    assert.deepEqual(await response.json(), { code, error, retryable: false });
+  }
+
+  let fetches = 0;
+  globalThis.fetch = async () => {
+    fetches++;
+    return new Response(null, { status: 308, headers: { Location: "https://redirect.invalid/private" } });
+  };
+  const redirect = env();
+  const redirectConfig = JSON.parse(redirect.CUSTOM_API_CONFIG);
+  redirectConfig.display_name = "https://dashboard.invalid/private";
+  redirect.CUSTOM_API_CONFIG = JSON.stringify(redirectConfig);
+  await check(redirect, "CONFIG_ENDPOINT_REDIRECT",
+    "The custom API moved to https://redirect.invalid/private. Review the new address before changing the setting.");
+  assert.equal(fetches, 1);
+
+  globalThis.fetch = async () => Response.json([{ store: "Store A", period: "2026-08-01", net_sales: 10 }]);
+  const missingField = env();
+  const config = JSON.parse(missingField.CUSTOM_API_CONFIG);
+  config.endpoints[0].document.body_template = "{{missing_fixture_field}}";
+  missingField.CUSTOM_API_CONFIG = JSON.stringify(config);
+  await check(missingField, "CONFIG_TEMPLATE_FIELD_MISSING",
+    "A custom API document template requires a field that the pull did not supply.");
+
+  globalThis.fetch = async () => { assert.fail("invalid setup must stop before fetching"); };
+  for (const setting of ["{", "{}", JSON.stringify({ ...config, unexpected_setting: true })]) {
+    await check({ ...env(), CUSTOM_API_CONFIG: setting }, "CONFIG_WORKER_SETTING_INVALID",
+      "The custom API Worker setting is invalid and needs to be redeployed.");
+  }
+
+  const clash = env();
+  clash.DB.prepare = (sql) => {
+    assert.match(sql, /SELECT kind FROM sources/);
+    return { bind() { return this; }, async first() { return { kind: "upload" }; } };
+  };
+  await check(clash, "CONFIG_SOURCE_NAME_CLASH",
+    "Another source type already uses the custom API source name.");
 });
