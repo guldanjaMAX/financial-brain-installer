@@ -424,7 +424,7 @@ const wrapperPath = join(sandbox, "wrangler-owner-wrapper");
 const goldenPath = join(sandbox, "brain.golden.json");
 const fieldPreparationDirectory = join(sandbox, "private-v048-field-preparation");
 const fieldReceiptPath = join(fieldPreparationDirectory, "field-prepare-receipt.json");
-const fieldPackagePath = join(fieldPreparationDirectory, "brain-installer-0.4.33.tgz");
+const fieldPackagePath = join(fieldPreparationDirectory, "brain-installer-0.4.34.tgz");
 const fieldSourcePreflightReceiptPath = join(
   fieldPreparationDirectory,
   DISPOSABLE_RECOVERY_SOURCE_PREFLIGHT_RECEIPT_NAME,
@@ -537,7 +537,7 @@ const syntheticFieldSourceManifest = {
   ...structuredClone(sourceManifest),
   client: { slug: "v048-field-proof", display_name: "Synthetic Field Gate v0.4.8" },
   brain: {
-    version: "0.4.33",
+    version: "0.4.34",
     worker_name: syntheticFieldSourceResource,
     domain: `${syntheticFieldSourceResource}.fixture.workers.dev`,
   },
@@ -612,7 +612,7 @@ function npmPackageFixture(destination) {
   assert.equal(packed.status, 0, "focused recovery test must build its exact local npm package");
   const metadata = JSON.parse(packed.stdout);
   assert.equal(metadata.length, 1);
-  assert.equal(metadata[0].filename, "brain-installer-0.4.33.tgz");
+  assert.equal(metadata[0].filename, "brain-installer-0.4.34.tgz");
   assert.equal(metadata[0].entryCount, metadata[0].files.length);
   return Object.freeze({
     bytes: readFileSync(join(destination, metadata[0].filename)),
@@ -769,13 +769,13 @@ function fullFieldPreparationReceipt(candidateSha, packageBytes, packageFileCoun
       head_sha: candidateSha,
       tree_sha: "b".repeat(40),
       package_name: "brain-installer",
-      package_version: "0.4.33",
+      package_version: "0.4.34",
       package_alignment: {
         aligned: true,
         package_lock_name: "brain-installer",
-        package_lock_version: "0.4.33",
+        package_lock_version: "0.4.34",
         package_lock_root_name: "brain-installer",
-        package_lock_root_version: "0.4.33",
+        package_lock_root_version: "0.4.34",
       },
       package_json_sha256: hash(readFileSync(join(process.cwd(), "package.json"))),
       package_lock_sha256: hash(readFileSync(join(process.cwd(), "package-lock.json"))),
@@ -786,7 +786,7 @@ function fullFieldPreparationReceipt(candidateSha, packageBytes, packageFileCoun
       end_clean: true,
     },
     package: {
-      filename: "brain-installer-0.4.33.tgz",
+      filename: "brain-installer-0.4.34.tgz",
       bytes: packageBytes.length,
       sha256: hash(packageBytes),
       identity_scheme: UPDATE_RUNTIME_IDENTITY_SCHEME,
@@ -1469,7 +1469,7 @@ function fullDisposableSeedReceipt(binding, {
       independently_verified_empty: true,
     },
     d1: {
-      worker_version: "0.4.33",
+      worker_version: "0.4.34",
       documents: DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
       chunks,
       fts: chunks,
@@ -5261,7 +5261,7 @@ try {
   );
   const mismatchedRuntimePackagePath = join(
     mismatchedRuntimeDirectory,
-    "brain-installer-0.4.33.tgz",
+    "brain-installer-0.4.34.tgz",
   );
   mkdirSync(mismatchedRuntimeDirectory, { mode: 0o700 });
   if (process.platform !== "win32") chmodSync(mismatchedRuntimeDirectory, 0o700);
@@ -5305,7 +5305,7 @@ try {
   );
   const omittedRuntimePackagePath = join(
     omittedRuntimeDirectory,
-    "brain-installer-0.4.33.tgz",
+    "brain-installer-0.4.34.tgz",
   );
   mkdirSync(omittedRuntimeDirectory, { mode: 0o700 });
   if (process.platform !== "win32") chmodSync(omittedRuntimeDirectory, 0o700);
@@ -5376,7 +5376,7 @@ try {
   // field-preparation receipt. A copied approval cannot authorize a later run.
   const replayReceiptDirectory = join(sandbox, "private-v048-field-preparation-replay");
   const replayReceiptPath = join(replayReceiptDirectory, "field-prepare-receipt.json");
-  const replayPackagePath = join(replayReceiptDirectory, "brain-installer-0.4.33.tgz");
+  const replayPackagePath = join(replayReceiptDirectory, "brain-installer-0.4.34.tgz");
   const replaySourcePreflightReceiptPath = join(
     replayReceiptDirectory,
     DISPOSABLE_RECOVERY_SOURCE_PREFLIGHT_RECEIPT_NAME,

@@ -117,7 +117,9 @@ const txnFields='tenant_id account_slug statement_uid posted_on amount_minor dir
 // figures below High at the caller, never to a refusal or an invented zero.
 // Bound ledger visits before filtering: a sparse statement in a large feed
 // must not scan the entire history before the fallback can retain its figure.
-export async function readBalanceRecomputeSnapshot(read) {
+export async function readBalanceRecomputeSnapshot(read, minorUnitEvidenceSql = '') {
+  // Nest the optional receipt inside the transaction arm to keep D1's
+  // five-term compound limit at the outer level.
   const records=await read(`WITH mq_rb AS MATERIALIZED (SELECT * FROM main.fin_balance_snapshots LIMIT 10001),
     mq_rs AS MATERIALIZED (SELECT * FROM main.fin_statements LIMIT 10001),
     mq_rc AS MATERIALIZED (SELECT * FROM main.fin_account_coverage WHERE superseded_by_id IS NULL LIMIT 1001),
@@ -129,9 +131,17 @@ export async function readBalanceRecomputeSnapshot(read) {
     UNION ALL SELECT 'statements',${objectSql('s',fields.fin_statements)} FROM mq_rs s
     UNION ALL SELECT 'accounts',json_set(${objectSql('a',fields.fin_accounts)},'$.account_kind_review_json',a.account_kind_review_json) FROM mq_ra a
     UNION ALL SELECT 'coverage',${objectSql('c',fields.fin_account_coverage)} FROM mq_rc c
-    UNION ALL SELECT 'transactions',${objectSql('t',txnFields)} FROM mq_rt t`);
+    UNION ALL SELECT evidence.kind,evidence.value FROM (
+      SELECT 'transactions' AS kind,${objectSql('t',txnFields)} AS value FROM mq_rt t
+      ${minorUnitEvidenceSql ? `UNION ALL SELECT 'simplefin_minor_units',(${minorUnitEvidenceSql})` : ''}
+    ) AS evidence`);
   const data={balances:[],statements:[],accounts:[],transactions:[],coverage:[]};
+  let minorUnits;
   for(const row of records) {
+    if(row.kind==='simplefin_minor_units') {
+      minorUnits=JSON.parse(row.value);
+      continue;
+    }
     if(!Object.hasOwn(data,row.kind) || typeof row.value!=='string')throw Error('Balance arithmetic snapshot unavailable');
     data[row.kind].push(JSON.parse(row.value));
   }
@@ -152,7 +162,7 @@ export async function readBalanceRecomputeSnapshot(read) {
     return recomputeImportedBalance(accounts.get(key(b)) || {},b,ss,
       ss.flatMap(s=>transactions.get(JSON.stringify([s.tenant_id,s.account_slug,s.statement_uid])) || []),data.coverage);
   });
-  return data;
+  return minorUnitEvidenceSql ? {...data,minorUnits} : data;
 }
 
 function frozenCte(name,columns,rows,binds) {

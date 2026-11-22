@@ -32,6 +32,18 @@ const PART_B_ROLES = Object.freeze({
   verifier_llm: Object.freeze({ provider: 'anthropic', model: 'claude-sonnet-5-5' }),
 });
 
+export function partBRouteTimingShowsFailure(timing) {
+  const attempts = timing?.backend;
+  if (!Array.isArray(attempts)) return false;
+  if (attempts.length > 1 || timing.stages?.mcp_backend?.calls > 1) return true;
+  const [backend] = attempts;
+  if (!backend) return false;
+  if (backend.route !== 'think' || backend.outcome === 'error') return true;
+  return Array.isArray(backend.models) && Object.entries(PART_B_ROLES).some(([stage, expected]) =>
+    backend.models.some(model => model?.stage === stage &&
+      (model.provider !== expected.provider || model.id !== expected.model || model.errors > 0)));
+}
+
 // Project the operator-visible receipt only from the finished local envelope
 // and its already validated backend projection. The answer body, identifiers,
 // durations, host, paths and resource names never enter this shape.

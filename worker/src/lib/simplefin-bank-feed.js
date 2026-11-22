@@ -1,6 +1,8 @@
 import { bankAttemptStatement, bankSuccessStatement, bankErrorStatement, bankHealthMap, reconcileBankFeedHealth } from './bank-feed-health.js';
 import { accountKindReviewSql, applyAccountKindReview } from "./fin-account-kinds.js";
 import { balanceRoleFor, prepareBankExportImport } from "./fin-import.js";
+import { FINANCIAL_CURRENCY_EXPONENTS } from "./financial-money.js";
+import { SIMPLEFIN_EXACT_MINOR_MARK } from "./simplefin-minor-unit-evidence.js";
 import { SIMPLEFIN_POSTED_HISTORY_REVISION } from "./bank-feed-profiles.js";
 import { simpleFinCoverageStatements, simpleFinCoverageSummaryStatement } from "./simplefin-ledger.js";
 import { simpleFinTransactionInventory, simpleFinRestoreStatements, simpleFinReconciliationPlan, simpleFinPromotionIntent } from "./simplefin-reconciliation.js";
@@ -15,6 +17,9 @@ import {
 const PROVIDER = "simplefin";
 const BACKFILL_DAYS = 730;
 const WINDOW_DAYS = 90;
+const RANGE_ADVISORY = "Requested date range exceeds recommended range of 45 days. In the future, this may be capped.";
+const PROVIDER_ISSUE_LIMIT = 25;
+const UNREADABLE_ISSUE = "SimpleFIN reported an issue without readable details.";
 const DEFAULT_REQUESTS_PER_RUN = 3;
 const DAILY_REQUEST_LIMIT = 24;
 // This evidence version proves exclusive full-day requests and posted-only
@@ -282,34 +287,49 @@ function accessReferenceFragments(accessUrl) {
   return [...fragments].filter(Boolean).sort((left, right) => right.length - left.length);
 }
 
-function safeErrlist(value, { accessUrl = null } = {}) {
-  if (!Array.isArray(value)) throw new SimpleFinError("simplefin_response_invalid", 502);
-  const secretFragments = accessReferenceFragments(accessUrl);
-  const unreadable = "SimpleFIN reported an issue without readable details.";
-  return value.slice(0, 25).map((entry) => {
-    let safe = typeof entry === "string" ? entry
-      : entry && !Array.isArray(entry) && typeof entry === "object"
-        ? typeof entry.msg === "string" ? entry.msg : typeof entry.text === "string" ? entry.text : unreadable
-        : unreadable;
-    // Older pulls stringified provider objects before persistence. The lost
-    // fields cannot be reconstructed, so every durable canonical artifact and
-    // any comma-joined sibling fail closed to the honest bounded fallback.
-    if (safe.includes("[object Object]")) safe = unreadable;
-    for (const fragment of secretFragments) {
-      safe = safe.replaceAll(fragment, "[access reference removed]");
-    }
-    safe = safe
-      .replace(/https?:\/\/\S+/gi, "[provider address removed]")
-      .replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[provider reference removed]")
-      .replace(/[\r\n\t]+/g, " ")
-      .trim()
-      .slice(0, 240);
-    return safe || unreadable;
-  })
-    .filter(Boolean);
+function isRangeAdvisory(entry) {
+  if (typeof entry === "string") return entry === RANGE_ADVISORY;
+  if (entry?.code !== "gen.api") return false;
+  const messages = ["msg", "text"].filter(key => Object.hasOwn(entry, key));
+  return messages.length > 0 && messages.every(key => entry[key] === RANGE_ADVISORY);
 }
 
-function validatePayload(payload, { accessUrl = null } = {}) {
+function safeIssueText(entry, secretFragments) {
+  let safe = typeof entry === "string" ? entry
+    : entry?.msg === RANGE_ADVISORY && typeof entry.text === "string" ? entry.text
+    : typeof entry?.msg === "string" ? entry.msg
+      : typeof entry?.text === "string" ? entry.text : UNREADABLE_ISSUE;
+  // Older pulls stringified provider objects. Their fields cannot be recovered.
+  if (safe.includes("[object Object]")) safe = UNREADABLE_ISSUE;
+  for (const fragment of secretFragments) {
+    safe = safe.replaceAll(fragment, "[access reference removed]");
+  }
+  return safe
+    .replace(/https?:\/\/\S+/gi, "[provider address removed]")
+    .replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[provider reference removed]")
+    .replace(/[\r\n\t]+/g, " ")
+    .trim()
+    .slice(0, 240) || UNREADABLE_ISSUE;
+}
+
+function boundedProviderIssues(lists, isAdvisory, secretFragments = []) {
+  const blocking = new Set();
+  const advisory = new Set();
+  for (const list of lists) {
+    if (!Array.isArray(list)) throw new SimpleFinError("simplefin_response_invalid", 502);
+    for (const entry of list) {
+      // Classify raw evidence before redaction or whitespace normalization.
+      const group = isAdvisory(entry) ? advisory : blocking;
+      if (group.size < PROVIDER_ISSUE_LIMIT) group.add(safeIssueText(entry, secretFragments));
+    }
+  }
+  return [
+    ...[...blocking].map(text => ({ kind: "blocking", text })),
+    ...[...advisory].filter(text => !blocking.has(text)).map(text => ({ kind: "advisory", text })),
+  ].slice(0, PROVIDER_ISSUE_LIMIT);
+}
+
+function validatePayload(payload, { accessUrl = null, omitRangeAdvisory = false } = {}) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload) || !Array.isArray(payload.accounts)) {
     throw new SimpleFinError("simplefin_response_invalid", 502);
   }
@@ -320,20 +340,24 @@ function validatePayload(payload, { accessUrl = null } = {}) {
         !account.id || account.id.length > 512 ||
         (account.conn_id !== undefined && (typeof account.conn_id !== 'string' || !account.conn_id || account.conn_id.length > 512)) ||
         (account.transactions !== undefined && !Array.isArray(account.transactions)) ||
-        !/^[A-Z]{3}$/.test(account.currency || "") ||
+        typeof account.currency !== "string" || !/^[A-Z]{3}$/.test(account.currency) ||
         account["balance-date"] == null || !Number.isSafeInteger(account["balance-date"]) ||
         !epochDay(account["balance-date"])) {
       throw new SimpleFinError("simplefin_response_invalid", 502);
     }
+    if (!Object.hasOwn(FINANCIAL_CURRENCY_EXPONENTS, account.currency)) {
+      throw new SimpleFinError("simplefin_currency_unsupported", 502);
+    }
     transactions += (account.transactions || []).length;
     if (transactions > 10_000) throw new SimpleFinError("simplefin_response_too_large", 502);
   }
+  // Both the current list and the deprecated list can carry blocking issues.
+  const providerIssues = boundedProviderIssues([payload.errlist ?? [], payload.errors ?? []],
+    entry => omitRangeAdvisory && isRangeAdvisory(entry), accessReferenceFragments(accessUrl));
   return {
     accounts: payload.accounts,
-    // Bridge warnings can still arrive in the deprecated string list. Neither
-    // a current empty errlist nor an unreadable object may hide that warning.
-    errlist: [...safeErrlist(payload.errlist ?? [], { accessUrl }),
-      ...safeErrlist(payload.errors ?? [], { accessUrl })].slice(0, 25),
+    providerIssues,
+    errlist: providerIssues.filter(issue => issue.kind === "blocking").map(issue => issue.text),
   };
 }
 
@@ -430,7 +454,9 @@ async function stageResponse(env, {
   stamp,
   revision,
 }) {
-  const validated = validatePayload(payload, { accessUrl });
+  // The exact recommendation does not report truncation. Keep it visible in
+  // connection status while only blocking receipt promotion on actual issues.
+  const validated = validatePayload(payload, { accessUrl, omitRangeAdvisory: true });
   const window = { item_ref: itemRef, window_start: windowStart, window_end: windowEnd, revision };
   const statements = [];
   const accountIds = new Set();
@@ -450,8 +476,7 @@ async function stageResponse(env, {
     // An approved legacy binding keeps every ledger reference and kind review.
     const storageKey = existing?.provider_account_id ?? identityKey;
     const transactionIds = new Set();
-    const currency = /^[A-Z]{3}$/.test(String(account.currency || "").toUpperCase())
-      ? String(account.currency).toUpperCase() : "USD";
+    const currency = account.currency;
     const ref = existing?.account_ref ?? await accountRef(tenantId, itemRef, identityKey);
     const occupied = await env.DB.prepare(`SELECT connection_id,source_account_id,account_ref FROM simplefin_account_assignments
       WHERE tenant_id=? AND item_ref=? AND provider_account_id=?`).bind(tenantId,itemRef,storageKey).first();
@@ -559,14 +584,16 @@ async function stageResponse(env, {
         WHERE tenant_id=? AND item_ref=? AND window_start=? AND window_end=? AND staging_revision=?`,
     ).bind(revision, JSON.stringify(validated.errlist), stamp, tenantId, itemRef, windowStart, windowEnd, revision),
   ], true);
-  return { accounts: validated.accounts.length, transactions: transactionCount, errlist: validated.errlist };
+  return {
+    accounts: validated.accounts.length, transactions: transactionCount,
+    providerIssues: validated.providerIssues, blockingIssueCount: validated.errlist.length,
+  };
 }
 
-function exactMinor(value, currency) {
+function exactMinor(value, exponent) {
   if (value === null || value === undefined) return null;
   const match = /^([+-]?)(\d+)(?:\.(\d+))?$/.exec(String(value).trim());
   if (!match) return null;
-  const exponent = currency === "JPY" || currency === "KRW" ? 0 : 2;
   const fraction = match[3] || "";
   if (fraction.length > exponent && /[1-9]/.test(fraction.slice(exponent))) return null;
   const digits = `${match[2]}${fraction.slice(0, exponent).padEnd(exponent, "0")}`;
@@ -642,12 +669,17 @@ async function promoteWindow(env, tenantId, window, stamp) {
     ).bind(
       tenantId, window.item_ref, window.window_start, window.window_end, account.provider_account_id, window.revision,
     ).all());
-    const currency = account.currency || "USD";
-    const currentMinor = exactMinor(account.balance_decimal, currency);
-    const availableMinor = exactMinor(account.available_decimal, currency);
+    const currency = account.currency;
+    const exponent = FINANCIAL_CURRENCY_EXPONENTS[currency];
+    // A staged receipt may predate the provider currency validation.
+    if (!Object.hasOwn(FINANCIAL_CURRENCY_EXPONENTS, currency)) {
+      throw new SimpleFinError("simplefin_currency_unsupported", 502);
+    }
+    const currentMinor = exactMinor(account.balance_decimal, exponent);
+    const availableMinor = exactMinor(account.available_decimal, exponent);
     const accountKind = namedAccountKind(account.account_label, currentMinor);
     const mapped = transactionRows.map((row) => {
-      const rawMinor = exactMinor(row.amount_decimal, currency);
+      const rawMinor = exactMinor(row.amount_decimal, exponent);
       // An occurrence timestamp does not establish the date of posting.
       const postedOn = epochDay(row.posted_epoch);
       const unread = rawMinor === null
@@ -680,7 +712,7 @@ async function promoteWindow(env, tenantId, window, stamp) {
       signConvention: "simplefin_negative_amount_is_outflow",
       establishedBy: "SimpleFIN Bridge reports signed account deltas; negative leaves the account",
       sourceDocUid: null,
-      sourceLabel: feedScopeKey(window.item_ref),
+      sourceLabel: feedScopeKey(window.item_ref) + (exponent === 3 ? SIMPLEFIN_EXACT_MINOR_MARK : ""),
       accounts: [{
         accountKey: accountKey(account.account_ref),
         institution: account.institution_label || "SimpleFIN Bridge",
@@ -1076,7 +1108,7 @@ async function pullWindow(env, connection, item, {
     if (error instanceof SimpleFinError) throw error;
     throw new SimpleFinError("simplefin_pull_unavailable", 502);
   }
-  const staged = await stageResponse(env, {
+  const { blockingIssueCount, providerIssues, ...staged } = await stageResponse(env, {
     tenantId,
     itemRef: item.item_ref,
     windowStart: window.start,
@@ -1086,18 +1118,18 @@ async function pullWindow(env, connection, item, {
     stamp,
     revision,
   });
-  const partial = staged.errlist.length > 0;
+  const partial = blockingIssueCount > 0;
   await env.DB.batch([
     env.DB.prepare(
       `UPDATE simplefin_connections SET last_errlist_json=?,last_pull_partial=?,updated_at=?
         WHERE tenant_id=? AND item_ref=?`,
-    ).bind(JSON.stringify(staged.errlist), partial ? 1 : 0, stamp, tenantId, item.item_ref),
+    ).bind(JSON.stringify(providerIssues), partial ? 1 : 0, stamp, tenantId, item.item_ref),
     env.DB.prepare(
       `UPDATE bank_feed_items SET last_synced_at=?,status='connected',status_detail=?,last_error_at=NULL
         WHERE tenant_id=? AND item_ref=?`,
     ).bind(
       stamp,
-      partial ? `SimpleFIN reported ${staged.errlist.length} issue(s); the history cursor was not advanced.` : null,
+      partial ? `SimpleFIN reported ${blockingIssueCount} issue(s); the history cursor was not advanced.` : null,
       tenantId,
       item.item_ref,
     ),
@@ -1117,7 +1149,7 @@ async function pullWindow(env, connection, item, {
   } else if (partial || !verified) {
     await bankErrorStatement(env,tenantId,item.item_ref,stamp,'BANK_SYNC_PARTIAL').run();
   }
-  return { ...window, ...staged, partial };
+  return { ...window, ...staged, errlist: providerIssues.map(issue => issue.text), partial };
 }
 
 /** Run a bounded history slice, plus at most one current pull on a daily wake. */
@@ -1188,9 +1220,11 @@ export async function runSimpleFinMaintenance(env, {
         env.DB.prepare(
           `UPDATE bank_feed_items SET status=CASE WHEN ?='simplefin_login_required' THEN 'reauth_required' ELSE 'error' END,status_detail=?,last_error_at=?
             WHERE tenant_id=? AND item_ref=?`,
-        ).bind(code, code === "simplefin_login_required" ? "Your bank needs you to sign in again." : code === "simplefin_pending_response_unsupported"
-          ? "SimpleFIN returned pending items in a posted-only response. This pull was refused; completed history will be retried."
-          : "SimpleFIN could not be read on the last attempt.", stamp, tenantId, connection.item_ref),
+        ).bind(code, {
+          simplefin_login_required: "Your bank needs you to sign in again.",
+          simplefin_pending_response_unsupported: "SimpleFIN returned pending items in a posted-only response. This pull was refused; completed history will be retried.",
+          simplefin_currency_unsupported: "SimpleFIN returned a currency that this Brain does not support. The pull did not advance history.",
+        }[code] ?? "SimpleFIN could not be read on the last attempt.", stamp, tenantId, connection.item_ref),
         env.DB.prepare(
           `UPDATE simplefin_connections SET next_pull_at=?,updated_at=? WHERE tenant_id=? AND item_ref=?`,
         ).bind(tomorrow(stamp), stamp, tenantId, connection.item_ref),
@@ -1306,8 +1340,16 @@ export async function simpleFinFeedStatus(env, {now=null}={}) {
       WHERE i.tenant_id=? AND i.removed_at IS NULL ORDER BY i.connected_at`,
   ).bind(tenantId).all());
   const connections = rows.map((row) => {
-    let errors = [];
-    try { errors = safeErrlist(JSON.parse(row.last_errlist_json || "[]")); } catch { errors = ["SimpleFIN status could not be read safely."]; }
+    let issues;
+    try {
+      // A legacy string has lost its provider code and redaction provenance.
+      // Only the exact advisory on a non-partial legacy pull is recognizable.
+      issues = boundedProviderIssues([JSON.parse(row.last_errlist_json || "[]")], entry =>
+        entry?.kind === "advisory" && typeof entry.text === "string" ||
+        row.last_pull_partial !== 1 && typeof entry === "string" && isRangeAdvisory(entry));
+    } catch {
+      issues = [{ kind: "blocking", text: "SimpleFIN status could not be read safely." }];
+    }
     return {
       item_ref: row.item_ref,
       institution_label: row.institution_label || "SimpleFIN Bridge",
@@ -1319,7 +1361,8 @@ export async function simpleFinFeedStatus(env, {now=null}={}) {
       health:health.get(row.item_ref),
       status_line:health.get(row.item_ref)?.status_line,
       next_pull_at: row.next_pull_at,
-      provider_errors: errors,
+      provider_errors: issues.map(issue => issue.text),
+      provider_issues: issues,
       accounts_needing_owner: Number(row.accounts_needing_owner || 0),
       request_budget: { day: row.request_day || null, used: Number(row.requests_today || 0), limit: DAILY_REQUEST_LIMIT },
       history: {
@@ -1338,7 +1381,8 @@ export async function simpleFinFeedStatus(env, {now=null}={}) {
     environment: "production",
     connections,
     needs_attention: connections.filter((row) =>
-      row.health?.state !== "healthy" || row.status !== "connected" || row.provider_errors.length > 0 || row.accounts_needing_owner > 0),
+      row.health?.state !== "healthy" || row.status !== "connected" || row.accounts_needing_owner > 0 ||
+      row.provider_issues.some(issue => issue.kind === "blocking")),
   };
 }
 
@@ -1410,7 +1454,7 @@ function reviewAccounts(accounts){const root=byId("reviews");root.replaceChildre
 const fromLabel=node("label","Bank history from"),from=node("input"),toLabel=node("label"," through"),to=node("input");from.type=to.type="date";fromLabel.append(from);toLabel.append(to);const checkLabel=node("label"," I compared the full bank history for these dates and the saved ledger agrees."),check=node("input");check.type="checkbox";check.style.width="auto";checkLabel.prepend(check);const button=node("button","Preview bank dates"),detail=node("p",null,"note");button.type="button";let plan=null;const reset=()=>{plan=null;button.textContent="Preview bank dates";detail.textContent=""};from.onchange=to.onchange=reset;button.onclick=async()=>{try{const base={action:"coverage",account_ref:account.account_ref,from:from.value,to:to.value};if(!plan){plan=await post("/api/bank-feed/simplefin/review",{...base,dry_run:true});if(plan.blocked){detail.textContent="These dates are not ready. Finish the pull and resolve unread or uncertain transactions first.";plan=null;return}detail.textContent=plan.transaction_count+" saved transactions for "+plan.from+" through "+plan.to+". Compare the complete bank list before confirming.";button.textContent="Confirm compared bank dates"}else{if(!check.checked){detail.textContent="Compare the full bank history and check the confirmation first.";return}await post("/api/bank-feed/simplefin/review",{...base,dry_run:false,approve:plan.plan_hash,confirm_source_comparison:true});byId("review-status").textContent="Bank dates confirmed. You can ask covered-period questions.";await loadAccounts()}}catch{detail.textContent="The bank-date review changed or could not be verified. Preview again.";plan=null}};card.append(node("p",account.coverage&&account.coverage.status==="complete"?"Reviewed bank dates: "+account.coverage.from+" through "+account.coverage.to:"Bank history needs a date review."),fromLabel,toLabel,checkLabel,button,detail);root.append(card)}}
 
 async function loadAccounts(){const status=byId("account-status");try{const values=await Promise.all([get("/api/bank-feed/accounts"),entities()]);const data=values[0],owners=values[1];reviewAccounts(data.accounts||[]);const root=byId("accounts");root.replaceChildren();if(!owners.length)byId("entity-details").open=true;for(const account of data.accounts||[]){const card=node("article",null,"account");card.append(node("h3",account.masked_identifier||"Bank account"));card.append(node("p",account.institution_label||"SimpleFIN Bridge","note"));if(account.assignment&&account.assignment.state==="assigned"){card.append(node("p","Assigned to "+(account.assignment.entity_label||"the selected owner")+"."))}else if(!owners.length){card.append(node("p","Add an owner first, then choose where this account belongs.","note"))}else{const row=node("div",null,"assign"),select=node("select"),button=node("button","Assign account");select.append(node("option","Choose an owner"));select.options[0].value="";for(const owner of owners){const option=node("option",owner.label||owner.legal_name||owner.entity_slug);option.value=owner.entity_slug;select.append(option)}button.type="button";button.onclick=async()=>{if(!select.value){status.textContent="Choose an owner first.";return}button.disabled=true;try{await post("/api/bank-feed/accounts/assign",{request_id:crypto.randomUUID(),account_ref:account.account_ref,entity_slug:select.value});await loadAccounts();await loadConnections()}catch(error){status.textContent="Could not save that choice. Reference code: "+error.code}finally{button.disabled=false}};row.append(select,button);card.append(row)}root.append(card)}const missing=data.summary&&Number(data.summary.assignment_required||0);status.textContent=!data.accounts||!data.accounts.length?"No accounts have arrived yet. The scheduled pull may take a few minutes.":missing?missing+" account(s) still need an owner choice.":"Every discovered account has an owner choice."}catch(error){status.textContent="The account list is unavailable. Reference code: "+error.code;status.className="err"}}
-async function loadConnections(){const root=byId("connections");try{const data=await get("/api/bank-feed/status");root.replaceChildren();if(!data.connections||!data.connections.length){root.append(node("p","No SimpleFIN connection is saved yet."));return}for(const connection of data.connections){const card=node("div",null,"account");card.append(node("h3",connection.institution_label||"SimpleFIN Bridge"));card.append(node("p",connection.last_synced_at?"Last pull: "+connection.last_synced_at:"Waiting for the first scheduled pull."));for(const message of connection.provider_errors||[])card.append(node("p",providerMessage(message),"err"));if(connection.accounts_needing_owner)card.append(node("p",connection.accounts_needing_owner+" account(s) need an owner choice.","note"));card.append(node("p","Provider requests today: "+connection.request_budget.used+" of "+connection.request_budget.limit+".","note"));root.append(card)}}catch(error){root.replaceChildren(node("p","Connection status is unavailable. Reference code: "+error.code,"err"))}}
+async function loadConnections(){const root=byId("connections");try{const data=await get("/api/bank-feed/status");root.replaceChildren();if(!data.connections||!data.connections.length){root.append(node("p","No SimpleFIN connection is saved yet."));return}for(const connection of data.connections){const card=node("div",null,"account");card.append(node("h3",connection.institution_label||"SimpleFIN Bridge"));card.append(node("p",connection.last_synced_at?"Last pull: "+connection.last_synced_at:"Waiting for the first scheduled pull."));if((connection.status==="error"||connection.status==="reauth_required")&&connection.status_detail)card.append(node("p",connection.status_detail,"err"));for(const issue of connection.provider_issues||connection.provider_errors||[])card.append(node("p",providerMessage(issue),issue.kind==="advisory"?"note":"err"));if(connection.accounts_needing_owner)card.append(node("p",connection.accounts_needing_owner+" account(s) need an owner choice.","note"));card.append(node("p","Provider requests today: "+connection.request_budget.used+" of "+connection.request_budget.limit+".","note"));root.append(card)}}catch(error){root.replaceChildren(node("p","Connection status is unavailable. Reference code: "+error.code,"err"))}}
 byId("claim").onsubmit=async(event)=>{event.preventDefault();const field=byId("token"),button=byId("claim-button"),status=byId("claim-status");button.disabled=true;status.textContent="Claiming this one-time token…";try{await post("/api/bank-feed/simplefin/claim",{request_id:crypto.randomUUID(),setup_token:field.value});field.value="";status.textContent="Connection saved and encrypted. The scheduled pull will discover accounts.";status.className="ok";await loadConnections()}catch(error){field.value="";status.textContent=error.code==="simplefin_claim_outcome_unknown"?"The one-time claim may have succeeded, but the result could not be confirmed. Do not retry this token. Create a new Setup Token in SimpleFIN Bridge after reviewing saved connections.":"The connection was not claimed. Reference code: "+error.code;status.className="err"}finally{button.disabled=false}};
 byId("entity-create").onsubmit=async(event)=>{event.preventDefault();const name=byId("entity-name").value.trim(),status=byId("entity-status");if(!name)return;const stem=name.normalize("NFKD").toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"").slice(0,45)||"entity";try{await post("/api/owner/entities/create",{request_id:crypto.randomUUID(),entity_slug:stem+"-"+crypto.randomUUID().slice(0,8),legal_name:name,kind:byId("entity-kind").value});byId("entity-name").value="";status.textContent="Saved.";await loadAccounts()}catch(error){status.textContent="Could not save that owner. Reference code: "+error.code}};
 byId("refresh").onclick=()=>{loadAccounts();loadConnections()};loadAccounts();loadConnections();

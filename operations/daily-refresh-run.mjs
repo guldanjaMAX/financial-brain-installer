@@ -376,6 +376,7 @@ export async function runDailyRefresh({
           started_at: sourceStartedAt,
           completed_at: sourceStartedAt,
           freshness_advanced: false,
+          reason_code: "daily_runtime_budget",
           reason: `the ${runtimeMinutes}-minute daily runtime budget was exhausted before this source started`,
         });
         sourceResults.push(receipt);
@@ -387,22 +388,35 @@ export async function runDailyRefresh({
       let outcome = "complete";
       let reason = null;
       try {
+        const isGmail = source.key === "gmail";
+        const isDrive = !isGmail && source.run_key === "google_drive";
         let windows = 0;
         do {
           runResult = await runSource(source, { assertOwned: lock.assertOwned, deadlineAt });
           windows++;
           lock.assertOwned();
-        } while (source.key === "gmail" && runResult?.more_history === true &&
-          runResult.gmail_quota_paused !== true &&
-          windows < 32 && Date.parse(timestamp(now)) < deadlineAt);
-        if (source.key === "gmail" && runResult?.more_history === true) {
+        } while ((isDrive || (isGmail && runResult?.gmail_quota_paused !== true && windows < 32)) && runResult?.more_history === true &&
+          Date.parse(timestamp(now)) < deadlineAt);
+        if (isDrive && runResult?.review_required === true) {
+          const receipt = Object.freeze({ schema_version: 1, kind: "daily_refresh_source",
+            identity: plan.identity.id, source: source.source_names?.[0] || source.key,
+            status: "waiting_for_owner", started_at: sourceStartedAt, completed_at: timestamp(now),
+            freshness_advanced: false, reason_code: "drive_owner_review", issue_code: "SAFETY_REVIEW_REQUIRED",
+            ...(runResult.more_history === true ? { more_history: true } : {}),
+            reason: "Google Drive needs your review." });
+          sourceResults.push(receipt);
+          await writeReceipt(receipt);
+          continue;
+        }
+        if ((isDrive || isGmail) && runResult?.more_history === true) {
           const receipt = Object.freeze({ schema_version: 1, kind: "daily_refresh_source",
             identity: plan.identity.id, source: source.source_names?.[0] || source.key,
             status: "deferred", started_at: sourceStartedAt, completed_at: timestamp(now),
             freshness_advanced: false, more_history: true, windows_completed: windows,
-            reason_code: "gmail_continuation_budget", retry_policy: "next_scheduled_daily_run",
-            reason: runResult.gmail_quota_paused ? GMAIL_QUOTA_PAUSE :
-              "Bounded Gmail progress was saved; the next scheduled daily run resumes its checkpoint." });
+            reason_code: isDrive ? "drive_continuation_budget" : "gmail_continuation_budget",
+            retry_policy: "next_scheduled_daily_run",
+            reason: isGmail && runResult.gmail_quota_paused ? GMAIL_QUOTA_PAUSE :
+              `Bounded ${isDrive ? "Drive" : "Gmail"} progress was saved; the next scheduled daily run resumes its checkpoint.` });
           sourceResults.push(receipt);
           await writeReceipt(receipt);
           continue;
@@ -438,7 +452,7 @@ export async function runDailyRefresh({
           return executionComplete && (runResult?.loaded > 0 || runResult?.status === "complete") &&
             check !== null && Date.parse(row.latest_run.started_at) >= Date.parse(sourceStartedAt) &&
             Date.parse(check) <= Date.parse(checkedAt) && (!prior || Date.parse(check) > Date.parse(prior)) &&
-            beforeBySource[name] === afterBySource[name];
+            (beforeBySource[name] === afterBySource[name] || (isDrive && windows > 1));
         });
         const withheldBySource = Object.keys(afterBySource).map((name) => {
           const row = afterInventory?.[name];
@@ -513,7 +527,7 @@ export async function runDailyRefresh({
             help: SOURCE_INVENTORY_HELP_URL,
           } : {}),
           check_verified: checkVerified,
-          no_change: checkVerified && noChangeBySource.every(Boolean),
+          no_change: checkVerified && !freshness.advanced && noChangeBySource.every(Boolean),
           last_check_at_before: Object.keys(beforeBySource).map(name => baseline?.[name]?.last_check_at || beforeBySource[name])
             .filter(Boolean).sort().at(-1) || null,
           last_check_at_after: checkVerified ? Object.keys(afterBySource).map((name, index) =>
@@ -570,24 +584,29 @@ export async function runDailyRefresh({
     // Journal source gaps that produced a receipt without throwing. Use bounded
     // owner copy here, since loader and inventory details may contain private data.
     for (const entry of sourceResults) {
-      if (entry.issue_code || ["complete", "held"].includes(entry.status)) continue;
+      if ((entry.issue_code && entry.reason_code !== "drive_owner_review") || ["complete", "held"].includes(entry.status)) continue;
       const issue = {
         source: safeDiagnosticText(entry.source, 128),
-        issue_code: entry.more_history ? "GMAIL_CONTINUATION"
+        issue_code: entry.issue_code || (entry.reason_code === "gmail_continuation_budget" ? "GMAIL_CONTINUATION"
           : entry.reason_code === "bank_sync_needs_attention" ? "BANK_SYNC_NEEDS_ATTENTION" : {
           deferred: "DAILY_SOURCE_DEFERRED", partial: "DAILY_SOURCE_PARTIAL",
           skipped: "DAILY_SOURCE_UNAVAILABLE", unavailable: "DAILY_SOURCE_UNAVAILABLE",
-        }[entry.status] || "DAILY_SOURCE_INCOMPLETE",
+        }[entry.status] || "DAILY_SOURCE_INCOMPLETE"),
       };
-      const attention = dailySourceAttention(issue);
+      const attention = dailySourceAttention({ ...issue,
+        attention: entry.reason_code === "drive_owner_review" ? entry.reason : undefined });
       attentionEntries.push(attention);
-      await writeFailureLog({ ...issue, observed_at: entry.completed_at, detail: attention.slice(0, 200) });
+      await writeFailureLog({ ...issue, observed_at: entry.completed_at, detail: attention.slice(0, 200),
+        ...(entry.reason_code === "drive_owner_review" ? { attention } : {}) });
     }
     const mixedCoverage = sourceResults.some(entry => entry.status === "complete" || entry.check_verified) &&
       sourceResults.some(entry => entry.status !== "complete");
+    const driveResumes = sourceResults.some(entry => entry.more_history === true &&
+      ["drive_continuation_budget", "drive_owner_review"].includes(entry.reason_code));
     const status = mixedCoverage ? "partial"
       : sourceResults.length === 0 || sourceResults.some((entry) => !["complete", "partial", "held", "waiting_for_owner"].includes(entry.status) &&
-      !(entry.status === "deferred" && entry.more_history === true)) ? "failed"
+      !(entry.status === "deferred" && (entry.more_history === true ||
+        (driveResumes && entry.reason_code === "daily_runtime_budget")))) ? "failed"
       : sourceResults.some(entry => entry.status === "waiting_for_owner") ? "waiting_for_owner"
       : sourceResults.some((entry) => ["partial", "held", "deferred"].includes(entry.status)) ? "partial" : "complete";
     const result = Object.freeze({
@@ -595,7 +614,10 @@ export async function runDailyRefresh({
       kind: "daily_refresh",
       identity: plan.identity.id,
       status,
-      ...(status === "waiting_for_owner" ? { reason_code: "removal_review" } : {}),
+      ...(status === "waiting_for_owner" ? {
+        reason_code: sourceResults.some(entry => entry.status === "waiting_for_owner" && entry.reason_code === "removal_review")
+          ? "removal_review" : "drive_owner_review",
+      } : {}),
       started_at: startedAt,
       completed_at: timestamp(now),
       lock_wait_ms: lockWaitMs,

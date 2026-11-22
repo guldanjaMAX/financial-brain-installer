@@ -20,7 +20,7 @@
     "timezone": "America/Phoenix"
   },
   "brain": {
-    "version": "0.4.33",
+    "version": "0.4.34",
     "domain": "brain.acme.com",
     "worker_name": "acme-brain"
   },

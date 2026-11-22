@@ -13,6 +13,7 @@ import { cleanMoneyCtes, CLEAN_MONEY_VIEWS, CLEAN_MONEY_SNAPSHOT_SQL, classified
 export { CLEAN_MONEY_CTES, CLEAN_MONEY_VIEWS } from './clean-money.js';
 import { moneyConfidenceSnapshotSql, moneyConfidenceScope, confidenceAmountsSql,
   scoreMoneyConfidence, unknownMoneyConfidence, confidenceText, paymentEvidenceConfidence, limitMoneyConfidence } from './money-confidence.js';
+import { SIMPLEFIN_MINOR_UNIT_SNAPSHOT_SQL, SIMPLEFIN_MINOR_UNIT_UNAVAILABLE, describeSimpleFinMinorUnitGaps, simpleFinMinorUnitEvidenceSql } from './simplefin-minor-unit-evidence.js';
 import { moneySqlConfidence, moneySqlUsesClock } from './money-confidence.js';
 import { moneyQueryConfidence, moneyQueryEvidence, readsRepaymentMeasure, repaymentUncertainty } from './money-query-confidence.js';
 import { loanProceedsConfidence } from './money-loan-proceeds-confidence.js';
@@ -234,7 +235,7 @@ function databaseCooldown(env) {
 }
 
 function snapshotOf(rows) {
-  const snapshot = { rows: [], accounts: [], entities: [], pairs: [], coverage: [], pending: [], missing: [], excluded: [], quality: [], conflicts: [], confidence_accounts: [], confidence_pending: [], confidence_unassigned: [], unreadable: [], settled: [] };
+  const snapshot = { rows: [], accounts: [], entities: [], pairs: [], coverage: [], pending: [], missing: [], excluded: [], quality: [], conflicts: [], confidence_accounts: [], confidence_pending: [], confidence_unassigned: [], unreadable: [], settled: [], simplefin_minor_units: [] };
   for (const row of rows) snapshot[row.snapshot_kind].push({...JSON.parse(row.value),...(row.value2?JSON.parse(row.value2):{})});
   return snapshot;
 }
@@ -243,7 +244,7 @@ function sameFinancialSnapshot(left, right) {
   // Compare complete records, order independently, never log or persist them.
   // A second read may certify old amounts only when all their evidence agrees.
   const canonical = rows => JSON.stringify(rows.map(row => JSON.stringify(row)).sort());
-  return ['rows', 'accounts', 'entities', 'pairs', 'coverage', 'pending', 'quality', 'excluded', 'conflicts', 'unreadable', 'settled'].every(kind => canonical(left[kind] ?? []) === canonical(right[kind] ?? []));
+  return ['rows', 'accounts', 'entities', 'pairs', 'coverage', 'pending', 'quality', 'excluded', 'conflicts', 'unreadable', 'settled', 'simplefin_minor_units'].every(kind => canonical(left[kind] ?? []) === canonical(right[kind] ?? []));
 }
 
 export async function queryMoney(env, body, { timeoutMs = 10000, supportTimeoutMs = 2000, maxScanRows = 10000, maxLoopWork = 20_000_000, now = Date.now, execute, confidenceScope, maxSnapshotRows = 100000, maxBinds = 90, cooldown = databaseCooldown(env), pendingQuestion, onHeadlineProof } = {}) {
@@ -367,6 +368,20 @@ export async function queryMoney(env, body, { timeoutMs = 10000, supportTimeoutM
     const documentCtes = present => [...checked.references].filter(name=>documentViews.has(name)).map(name=>name==='document_index' ?
       `document_index AS MATERIALIZED (SELECT d.doc_uid,d.source,d.title,d.uri,d.document_date,d.date_source,d.date_reliable,d.client,d.category,d.ingested_at FROM main.documents d WHERE d.deleted_at IS NULL${customApiVisibilitySql('d',present)})` :
       'document_sources AS MATERIALIZED (SELECT name,kind,status,created_at,last_ingest_at,document_count,last_complete_sweep_at,stale_reason FROM main.sources)').join(',');
+    const readsBalances = checked.references.has('fin_balance_snapshots');
+    let amountMinorUnitGaps = [], minorUnitCheckUnavailable = false;
+    // A JSON array alone is not a receipt: null or incomplete entries must
+    // reach the same retry boundary as a failed optional projection.
+    const minorUnitEvidence = rows => {
+      if (!Array.isArray(rows) || rows.length > 21 || rows.some(row =>
+        !row || !['transactions','balance observations'].includes(row.kind) ||
+        typeof row.currency !== 'string' || !/^[A-Z]{3}$/.test(row.currency) ||
+        typeof row.account !== 'string' || !row.account.trim() ||
+        !isoDay(row.first_day) || !isoDay(row.last_day) || row.first_day > row.last_day ||
+        !Number.isSafeInteger(row.row_count) || row.row_count < 1))
+        throw Error('SimpleFIN minor-unit receipt unavailable');
+      return rows;
+    };
     let ctes = '';
     let snapshot, decisions, baseSnapshotSql;
     const binds = [];
@@ -409,7 +424,7 @@ export async function queryMoney(env, body, { timeoutMs = 10000, supportTimeoutM
         const omitted=partial?` UNION ALL SELECT 'missing',json_object('currency',currency,'direction',direction,'n',count(*),'minor',SUM(amount_minor),'first',MIN(posted_on),'last',MAX(posted_on)),NULL
           FROM (${input.base}) WHERE pending=0 ${window?`AND posted_on BETWEEN '${(readPeriod||scored||{from:window.from}).from}' AND '${(readPeriod||scored||{to:window.through}).to}'`:''} AND id NOT IN (SELECT id FROM (${input.base} ORDER BY id LIMIT ${limit})) GROUP BY currency,direction`:'';
         baseSnapshotSql=`WITH ${input.ctes},mq_membership(${membershipFields.join(',')}) AS (SELECT ${membershipFields.map(()=>'NULL').join(',')} WHERE 0),${cleanMoneyCtes(window)},mq_read_guard AS MATERIALIZED (${budgetGuard}),mq_pair_guard AS MATERIALIZED (${pairGuard})
-SELECT mq_snapshot.* FROM mq_read_guard CROSS JOIN mq_pair_guard CROSS JOIN (${CLEAN_MONEY_SNAPSHOT_SQL}${omitted}) AS mq_snapshot WHERE mq_read_guard.ok AND mq_pair_guard.ok`;
+SELECT mq_snapshot.* FROM mq_read_guard CROSS JOIN mq_pair_guard CROSS JOIN (${CLEAN_MONEY_SNAPSHOT_SQL}${omitted} UNION ALL ${SIMPLEFIN_MINOR_UNIT_SNAPSHOT_SQL}) AS mq_snapshot WHERE mq_read_guard.ok AND mq_pair_guard.ok`;
         snapshot=snapshotOf(await read(baseSnapshotSql));snapshot.partial=partial;snapshot.readFrom=window?.scanFrom ?? null;
         decisions=moneyMembershipDecisions(snapshot);
         binds.length=0;
@@ -447,18 +462,44 @@ SELECT mq_snapshot.* FROM mq_read_guard CROSS JOIN mq_pair_guard CROSS JOIN (${C
     if(work>maxLoopWork)throw error('MONEY_QUERY_TOO_HEAVY',null,Math.round(work),maxLoopWork);
     let accountReviewsUnavailable=false,balanceRecomputeUnavailable=false,balanceRead;
     let balanceReadCtes='';
-    const balanceBaseBinds=binds.length;
     if(checked.references.has('fin_balance_snapshots') || checked.references.has('fin_statements')) {
       const beforeBinds=binds.length;
       try {
-        balanceRead=await readBalanceRecomputeSnapshot(read);
+        let receiptReadFailed=false;
+        const readWithReceipt = async sql => {
+          let records;
+          try { records=await read(sql); }
+          catch (failure) {receiptReadFailed=true;throw failure;}
+          try {
+            const receipt=records.find(row=>row.kind==='simplefin_minor_units');
+            minorUnitEvidence(JSON.parse(receipt?.value));
+            return records;
+          } catch {
+            // The arithmetic rows already belong to one successful frozen
+            // read. Drop only the unusable diagnostic: another ledger read
+            // could fail or race, losing a proved correction to a stale cell.
+            minorUnitCheckUnavailable=true;
+            return records.filter(row=>row.kind!=='simplefin_minor_units');
+          }
+        };
+        try {
+          balanceRead=await readBalanceRecomputeSnapshot(readsBalances ? readWithReceipt : read, readsBalances ? simpleFinMinorUnitEvidenceSql(true) : '');
+        } catch (failure) {
+          // Core snapshot bounds and arithmetic validation are not receipt
+          // failures. Do not double their bounded ledger visits on a retry.
+          if(!receiptReadFailed)throw failure;
+          // Only a failed SQL read needs another bounded arithmetic read
+          // without the optional receipt; successful rows are retained above.
+          minorUnitCheckUnavailable=true;
+          balanceRead=await readBalanceRecomputeSnapshot(read);
+        }
         balanceReadCtes=balanceRecomputeCtes(balanceRead,binds);
         if(binds.length>maxBinds)throw Error('Balance snapshot bind bound exceeded');
       } catch {
         binds.length=beforeBinds;balanceRead=undefined;balanceReadCtes='';balanceRecomputeUnavailable=true;
       }
     }
-    const run = async (present, accountFilter = '', currency = null) => {
+    const run = async (present, accountFilter = '', currency = null, checkMinorUnits = true, retried = false) => {
     let executionGuard=budgetGuard;
     if(workGuards.length) {
       const guards=[budgetGuard,...workGuards.map(g=>typeof g==='function'?g(present):g)].filter(Boolean);
@@ -467,32 +508,92 @@ SELECT mq_snapshot.* FROM mq_read_guard CROSS JOIN mq_pair_guard CROSS JOIN (${C
     const balanceCurrencyCte = balanceRead || currency ? `fin_balance_snapshots AS MATERIALIZED (SELECT * FROM ${balanceRead?'mq_balance_observations':'main.fin_balance_snapshots'}${currency?` WHERE currency='${currency}'`:''})` : '';
     const accountsCte = checked.references.has('fin_accounts') && !accountReviewsUnavailable ? (balanceRead?
       `fin_accounts AS MATERIALIZED (SELECT a.* FROM mq_balance_accounts a ${accountFilter})`:moneyAccountsCte(accountFilter)) : '';
-    const allCtes = [ctes,documentCtes(present),balanceReadCtes,accountsCte,balanceCurrencyCte, balanceRead && checked.references.has('fin_statements')?'fin_statements AS MATERIALIZED (SELECT * FROM mq_balance_statements)':''].filter(Boolean).join(',');
+    // The sole retry can reduce temporary projection allocation without
+    // revisiting the ledger: these private JSON CTEs still use the identical
+    // frozen records and binds, with all caller execution guards unchanged.
+    const frozenBalanceCtes = retried ? balanceReadCtes.replaceAll(' AS MATERIALIZED (',' AS NOT MATERIALIZED (') : balanceReadCtes;
+    const allCtes = [ctes,documentCtes(present),frozenBalanceCtes,accountsCte,balanceCurrencyCte, balanceRead && checked.references.has('fin_statements')?'fin_statements AS MATERIALIZED (SELECT * FROM mq_balance_statements)':''].filter(Boolean).join(',');
     const sql = !allCtes ? checked.sql : `WITH ${allCtes} SELECT * FROM (\n${checked.sql}\n)`;
     // CROSS JOIN fixes the guard before the caller input. An outer WHERE alone
     // can evaluate only after SQLite has already aggregated an oversized input.
     // LIMIT -1 is an optimizer fence: the guard join must preserve caller ORDER BY.
     const guarded = !executionGuard ? sql : `WITH mq_budget AS MATERIALIZED (${executionGuard})
 SELECT mq_result.* FROM mq_budget CROSS JOIN (SELECT * FROM (\n${sql}\n) LIMIT -1) AS mq_result WHERE mq_budget.ok`;
-    try { return await read(`SELECT * FROM (\n${guarded}\n) LIMIT ${cap + 1}`, binds); }
-    catch (failure) {
-      // Request-local projection limits must not turn a readable stored amount
-      // into an error. Retry once without that projection and lower confidence.
-      if(balanceRead) {
-        balanceRead=undefined;balanceReadCtes='';binds.length=balanceBaseBinds;balanceRecomputeUnavailable=true;
-        return run(present,accountFilter,currency);
+    const amountSql = `SELECT * FROM (\n${guarded}\n) LIMIT ${cap + 1}`;
+    const rawBalances = readsBalances && !balanceRead;
+    const includeEvidence = checkMinorUnits && (readsRaw || rawBalances);
+    let evidenceColumn = 'mq_private_minor_units';
+    while (checked.sql.toLowerCase().includes(evidenceColumn)) evidenceColumn += '_';
+    try {
+      // Bind evidence to the amount read. Only the first row carries the
+      // private receipt, so large paginated results do not repeat it.
+      const result = await read(includeEvidence ?
+        `SELECT * FROM (
+          SELECT mq_amount.*, CASE WHEN row_number() OVER ()=1 THEN
+          (${simpleFinMinorUnitEvidenceSql(rawBalances)}) END AS ${evidenceColumn}
+          FROM (\n${amountSql}\n) AS mq_amount
+        )` : amountSql, binds);
+      let evidence = [];
+      if (includeEvidence && result.length) {
+        try { evidence = minorUnitEvidence(JSON.parse(result[0][evidenceColumn])); }
+        catch {
+          // These guarded amount rows are already frozen and readable. A bad
+          // optional receipt cannot justify another read that may fail or race.
+          minorUnitCheckUnavailable=true;
+        }
       }
-      // Older or incomplete storage must still supply its readable source
-      // figures. Missing review evidence can lower confidence, never erase them.
+      amountMinorUnitGaps = [...describeSimpleFinMinorUnitGaps([
+        ...(readsBalances ? balanceRead?.minorUnits || [] : []), ...evidence,
+      ]), ...(minorUnitCheckUnavailable || !checkMinorUnits ? [SIMPLEFIN_MINOR_UNIT_UNAVAILABLE] : [])];
+      if (includeEvidence) for (const row of result) delete row[evidenceColumn];
+      return result;
+    }
+    catch (failure) {
+      // All final-read fallbacks share one retry, including older-schema
+      // compatibility. Persistent failures cannot chain independent retries.
+      if(retried)throw failure;
+      // Older storage can lack optional account reviews independently of the
+      // minor-unit receipt. Keep that existing compatibility retry available.
       if (!accountReviewsUnavailable && checked.references.has('fin_accounts') &&
           /no such table: (?:main\.)?fin_account_kind_reviews\b/i.test(String(failure?.message))) {
         accountReviewsUnavailable=true;
-        return run(present,accountFilter,currency);
+        // Spend the single retry on the amount, without an optional receipt
+        // that could otherwise demand a third read on older storage.
+        if(includeEvidence)minorUnitCheckUnavailable=true;
+        return run(present,accountFilter,currency,includeEvidence?false:checkMinorUnits,true);
+      }
+      // The same amount SQL, binds, frozen balances and all execution guards
+      // survive this retry. A real guard failure fails again without evidence;
+      // it is never interpreted as permission to run an unguarded amount.
+      if(includeEvidence) {
+        minorUnitCheckUnavailable=true;
+        // A receipt error can mask an older optional schema. Resolve that
+        // dependency before spending the single guarded amount retry, without
+        // scanning the ledger or discarding owner reviews that still exist.
+        if(accountsCte && !balanceRead && !accountReviewsUnavailable) {
+          try {
+            const tables=await read("SELECT 1 AS present FROM main.sqlite_master WHERE type='table' AND name='fin_account_kind_reviews' LIMIT 1");
+            if(!tables.length)accountReviewsUnavailable=true;
+          } catch { /* Unproved absence cannot bypass existing owner reviews. */ }
+        }
+        return run(present,accountFilter,currency,false,true);
+      }
+      // Failure of the guarded amount-only retry is final. Dropping the
+      // corrected snapshot here could retry a guard failure against stale cells.
+      if(!checkMinorUnits)throw failure;
+      // A completed snapshot already proved its corrections. A later SQL
+      // projection failure may add an evidence gap, never replace those facts
+      // with a stored closing cell the same snapshot disproved. Retry only the
+      // final projection, retaining the frozen records, binds and guards.
+      if(balanceRead) {
+        minorUnitCheckUnavailable=true;
+        return run(present,accountFilter,currency,false,true);
       }
       throw failure;
     }
     };
     const rows = checked.references.has('document_index') ? await readWithCustomApiVisibility(env,run,{probe:false}) : await run(false);
+    const minorUnitGaps = amountMinorUnitGaps;
     const kept=[];let chars=0;
     for(const row of rows.slice(0,cap)) {
       const size=JSON.stringify(row).length;
@@ -704,6 +805,12 @@ SELECT mq_result.* FROM mq_budget CROSS JOIN (SELECT * FROM (\n${sql}\n) LIMIT -
       freshnessGaps = [{reason:'Bank connection freshness could not be verified.',missing:'A successful connection health read and bank activity through the asked period.'}];
     }
     for (const gap of freshnessGaps) confidence = limitMoneyConfidence(confidence, gap.reason, gap.missing, freshnessFailed ? 0 : 69);
+    const historicalMinorUnits = (snapshot?.simplefin_minor_units || [])
+      .filter(row => !sqlScope?.filters.currency || row.currency === sqlScope.filters.currency);
+    // An unavailable receipt is not proof of bad conversion. Keep the existing
+    // arithmetic score below High; actually unconfirmed amounts retain 69%.
+    for (const gap of [...minorUnitGaps,...describeSimpleFinMinorUnitGaps(historicalMinorUnits)])
+      confidence=limitMoneyConfidence(confidence,gap.reason,gap.missing,gap===SIMPLEFIN_MINOR_UNIT_UNAVAILABLE?89:69);
     if (!confidenceScope) confidence = { ...confidence, period_end:periodEnd, may_only_lower:true,
       line:confidenceText(confidence).split('\n')[0] };
     if (!confidenceScope || snapshot && decisions) {

@@ -93,7 +93,11 @@ for (const problem of ["failed", "rate-limited", "review", "Gmail continuation",
         calls.push(key);
         if (key === "drive" && problem === "budget") clock = deadlineAt;
         if (key !== "gmail") return { status: "complete" };
-        if (problem === "Gmail continuation") return { more_history: true };
+        if (problem === "Gmail continuation") {
+          assert.ok(calls.filter(sourceKey => sourceKey === "gmail").length <= 32,
+            "Gmail continuation must stop even when the clock has not advanced");
+          return { more_history: true };
+        }
         if (problem === "review") throw new DriveRemovalReviewRequired("Synthetic removal review");
         throw new Error(problem === "rate-limited" ? "429" : "Synthetic failure");
       },

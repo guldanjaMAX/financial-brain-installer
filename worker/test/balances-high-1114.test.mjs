@@ -639,13 +639,15 @@ test('read-time statement evidence bounds visited ledger rows before filtering u
   answer(result,800000);lower(result,/assessment|arithmetic/);
 });
 
-test('read-time projection execution failure retries the readable stored figure below High',async t=>{
+test('read-time projection execution failure simplifies frozen arithmetic below High',async t=>{
   const b=book(t);completeLegacyImport(b,csv,{name:'statement.csv',format:'csv',accountHint:hint},{closing:800000,opening:500000});
   const green=await b.q(W.cash(D),day(D));answer(green,400000);corrected(green);
   const original=b.env.DB.prepare;let reached=0;
   b.env.DB.prepare=sql=>{if(sql.includes('mq_balance_observations AS MATERIALIZED') && sql.includes('mq_result')){reached++;throw Error('synthetic projection execution limit');}return original(sql);};
-  const result=await b.q(W.cash(D),day(D));assert.ok(reached>0,'the caller projection execution boundary was reached');
-  answer(result,800000);lower(result,/assessment|arithmetic/);
+  const result=await b.q(W.cash(D),day(D));assert.equal(reached,1,'materialized projection failure was reached once before simplification');
+  answer(result,400000);corrected(result);
+  assert.match(result.confidence_text,/SimpleFIN minor-unit evidence could not be checked/);
+  assert.ok(result.confidence.missing.length>0);
 });
 
 test('read-time correct OFX retains a balance-only account alongside an active statement',async t=>{

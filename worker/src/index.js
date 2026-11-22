@@ -148,7 +148,7 @@ import { readOwnerDocumentPage } from "./lib/mcp-endpoint.js";
 import { handleMcp } from "./lib/mcp-endpoint.js";
 import {
   isSourceKindConflict, normalizeSourceFailureEvidence, normalizeSourceReceiptIssueCode, parseProviderWithheldReason,
-  resolveSourceKind, sourceReceiptOwnerMessage, providerNoChangeCheckAt,
+  resolveSourceKind, sourceReceiptOwnerMessage, providerNoChangeCheckAt, DRIVE_CHECKPOINT_PENDING,
 } from "./lib/source-receipt.js";
 import {
   beginOwnerNoteWrite, completeOwnerNoteWrite, failOwnerNoteWrite, OwnerNoteLifecycleError,
@@ -2770,6 +2770,15 @@ async function handleSourceReceipt(env, request) {
   // A producer's ready label cannot hide measured transient failures. Keep
   // the cheap aggregate source row and the detailed run receipt consistent.
   if (status === "ready" && receiptCount(body?.docs_failed) > 0) status = "error";
+  const checkpointPending = body?.checkpoint_pending === true;
+  if (Object.hasOwn(body, "checkpoint_pending") && (
+    !checkpointPending || requestedKind !== "drive" || lane !== "incremental" || status !== "ready" ||
+    body.docs_failed !== 0 || body.docs_refused !== 0 ||
+    body.walk_complete !== false || body.complete_sweep !== false || body.provider_check_complete !== false ||
+    body.refusal_reason || body.issue_code
+  )) {
+    return jsonResponse({ error: "checkpoint_pending requires a clean, incomplete Drive incremental receipt" }, 400);
+  }
   if (body?.failure_evidence != null && !requestedKind) {
     return jsonResponse({ error: "kind is required when failure_evidence is supplied" }, 400);
   }
@@ -2820,9 +2829,10 @@ async function handleSourceReceipt(env, request) {
         `INSERT INTO sources (name,kind,status,created_at,stale_reason)
          VALUES (?1,?2,'indexing',?3,NULL)
          ON CONFLICT(name) DO UPDATE SET
-           status='indexing', stale_reason=NULL
+           status='indexing',
+           stale_reason=CASE WHEN sources.stale_reason=?4 THEN sources.stale_reason ELSE NULL END
          WHERE sources.kind=excluded.kind`
-      ).bind(source, kind, startedAt),
+      ).bind(source, kind, startedAt, DRIVE_CHECKPOINT_PENDING),
       // A later attempt proves an older unfinished attempt is no longer live.
       // Close it as superseded so it cannot poison freshness forever.
       env.DB.prepare(
@@ -2915,9 +2925,10 @@ async function handleSourceReceipt(env, request) {
          last_complete_sweep_at=CASE WHEN ?5 = 1 THEN excluded.last_ingest_at ELSE sources.last_complete_sweep_at END
        WHERE sources.kind=excluded.kind`
     ).bind(source, kind, completedAt, documents, completeSweep ? 1 : 0,
-      // A completed policy-only check read the source even when it accepted no
-      // documents. Keep accepted-work and complete-history dates separate.
-      verifiedWork || quietCheck || withheldCheck ? 1 : 0, verifiedWork || quietCheck || withheldCheck ? null : "NO_VERIFIED_WORK"));
+      // Keep the prior completed check while the checkpoint is pending.
+      // Accepted work is still recorded in sync_runs below.
+      !checkpointPending && (verifiedWork || quietCheck || withheldCheck) ? 1 : 0,
+      checkpointPending ? DRIVE_CHECKPOINT_PENDING : verifiedWork || quietCheck || withheldCheck ? null : "NO_VERIFIED_WORK"));
   } else {
     // A failed attempt does not become the last successful ingest. Advancing
     // last_ingest_at here would make a broken daily sync look current for the

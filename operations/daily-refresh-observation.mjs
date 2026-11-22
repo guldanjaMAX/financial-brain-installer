@@ -8,7 +8,8 @@ import { removalReviewFacts, removalOwnerSentence } from "./load-removal-review.
 export const DAILY_LOG_MAX_BYTES = 64 * 1024;
 const RESULTS = new Set(["running", "complete", "partial", "failed", "deferred", "waiting_for_owner"]);
 export const DAILY_RUN_ERROR = "Daily refresh failed before completion. Inspect the schedule and source authorization.";
-const ERRORS = new Set([DAILY_RUN_ERROR, "One or more daily sources failed or did not prove freshness.", "Daily refresh was deferred by another operation or recovery.", "A source is waiting for owner approval of removals."]);
+const OWNER_REVIEW = "A source needs your review.";
+const ERRORS = new Set([DAILY_RUN_ERROR, "One or more daily sources failed or did not prove freshness.", "Daily refresh was deferred by another operation or recovery.", "A source is waiting for owner approval of removals.", OWNER_REVIEW]);
 
 export function dailySourceAttention({ source, issue_code, attention }) {
   if (attention) return attention;
@@ -248,7 +249,7 @@ export function readDailyObservation(identity, options = {}) {
     return {
       ...paths,
       record: records.at(-1) || null,
-      last_error: records.findLast((row) => row.error)?.error || null,
+      last_error: records.findLast((row) => row.error && row.error !== OWNER_REVIEW)?.error || null,
       ...(sourceFailures.length ? { source_failures: sourceFailures } : {}),
     };
   } catch {
@@ -267,7 +268,7 @@ export async function observeDailyRun(identity, run, options = {}) {
     write(identity, { started_at, completed_at: now().toISOString(), result: status,
       // Verified partial coverage is an outcome, not a process failure.
       error: status === "complete" || status === "partial" ? null : status === "waiting_for_owner"
-        ? "A source is waiting for owner approval of removals." : status === "deferred"
+        ? (result.reason_code === "drive_owner_review" ? OWNER_REVIEW : "A source is waiting for owner approval of removals.") : status === "deferred"
         ? "Daily refresh was deferred by another operation or recovery."
         : "One or more daily sources failed or did not prove freshness." }, options);
     return result;
@@ -315,7 +316,7 @@ export function dailyObservationStatus(plan, schedule, runtime, runnerUsable, op
   }));
   const scheduleAttention = [...new Set(latestIssues.map(dailySourceAttention))];
   return { log_path: observed.log_path, last_run_at: newerNativeRun ? nativeTime : row?.started_at || nativeTime,
-    ...(result === "waiting_for_owner" ? { status: result, reason_code: "removal_review" } : {}),
+    ...(result === "waiting_for_owner" ? { status: result, reason_code: row?.error === OWNER_REVIEW ? "drive_owner_review" : "removal_review" } : {}),
     last_result: result, next_run_at: schedule.enabled ? next : null,
     next_run: !schedule.enabled ? "not scheduled" : next || (schedule.plan_matches_registered_definition
       ? `${plan.cron} ${plan.timezone} (planned)` : "unknown (schedule needs repair)"),
@@ -325,10 +326,13 @@ export function dailyObservationStatus(plan, schedule, runtime, runnerUsable, op
 }
 
 export function renderDailyObservation(schedule, log) {
+  const driveReview = schedule.last_result === "waiting_for_owner" && schedule.reason_code === "drive_owner_review";
   log(`Last daily run: ${schedule.last_run_at || "unknown or never"}`);
-  log(`Last daily result: ${schedule.last_result === "partial" ? "partial (some sources or items need attention)" : schedule.last_result || "unknown"}`);
+  const result = driveReview ? "needs your review" : schedule.last_result === "partial"
+    ? "partial (some sources or items need attention)" : schedule.last_result || "unknown";
+  log(`Last daily result: ${result}`);
   log(`Next daily run: ${schedule.next_run || "not scheduled"}`);
-  log(`Last daily error: ${schedule.last_error_line || "none recorded"}`);
+  if (!driveReview) log(`Last daily error: ${schedule.last_error_line || "none recorded"}`);
   for (const attention of schedule.schedule_attention || []) log(`Daily attention: ${attention}`);
   for (const issue of schedule.source_issues || []) {
     log(`Daily source issue: ${issue.source} | ${issue.issue_code} | ${issue.detail}`);
